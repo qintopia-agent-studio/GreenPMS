@@ -1,0 +1,744 @@
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
+import type { AuthPrincipal, RoomStatusBoardDto } from "@qintopia/contracts";
+import { confirmCommandPreview, createCommandPreview } from "../../packages/db/src/commands/service.ts";
+import { createDatabase } from "../../packages/db/src/database.ts";
+import { getOrderView } from "../../packages/db/src/orders.ts";
+import {
+  prepareStage7Acceptance,
+  stage7ReadOnlyOperator,
+  type Stage7AcceptanceFixture
+} from "./setup-stage7-acceptance.ts";
+
+const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
+  ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
+const propertyId = "prop_qintopia_demo";
+const operator = { username: "operator", password: "demo-pass-2026" };
+const externalOperator: AuthPrincipal = {
+  subjectId: "subject_demo_agent",
+  credentialId: "token_demo_write",
+  credentialType: "TOKEN",
+  displayName: "Demo Agent",
+  propertyAccess: new Map([[propertyId, "WRITE"]])
+};
+const fixtureDayOffset = 365;
+let fixture: Stage7AcceptanceFixture;
+
+function isDesktopProject(testInfo: TestInfo): boolean {
+  return testInfo.project.name === "desktop" || process.env.ROOM_STATUS_E2E_PROJECT === "desktop";
+}
+
+function isMobileProject(testInfo: TestInfo): boolean {
+  return testInfo.project.name === "mobile" || process.env.ROOM_STATUS_E2E_PROJECT === "mobile";
+}
+
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function roomStatusResponse(page: Page) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === `/api/v1/properties/${propertyId}/room-status`
+      && response.status() === 200;
+  });
+}
+
+function orderResponse(page: Page, orderId: string) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === `/api/v1/orders/${orderId}`
+      && response.status() === 200;
+  }, { timeout: 15_000 });
+}
+
+function roomCell(page: Page, unitId: string, serviceDate: string): Locator {
+  return page.locator(
+    `[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${serviceDate}"]`
+  );
+}
+
+function roomRow(page: Page, unitId: string): Locator {
+  return page.locator(`[data-room-status-row="${unitId}"]`);
+}
+
+function orderContext(page: Page, orderId: string): Locator {
+  return page.locator(".room-status-order-context").filter({
+    has: page.getByRole("heading", { name: `订单 ${orderId}`, exact: true })
+  });
+}
+
+async function login(
+  page: Page,
+  credentials: { username: string; password: string } = operator
+): Promise<RoomStatusBoardDto> {
+  await page.goto(process.env.ROOM_STATUS_E2E_BASE_URL ?? "/");
+  await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("login-username").fill(credentials.username);
+  await page.getByTestId("login-password").fill(credentials.password);
+  const responsePromise = roomStatusResponse(page);
+  await page.getByTestId("login-submit").click();
+  const response = await responsePromise;
+  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  await expect(page.getByRole("grid")).toBeVisible();
+  return response.json() as Promise<RoomStatusBoardDto>;
+}
+
+async function loginMobile(
+  page: Page,
+  credentials: { username: string; password: string } = operator
+): Promise<RoomStatusBoardDto> {
+  await page.goto(process.env.ROOM_STATUS_E2E_BASE_URL ?? "/");
+  await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("login-username").fill(credentials.username);
+  await page.getByTestId("login-password").fill(credentials.password);
+  const responsePromise = roomStatusResponse(page);
+  await page.getByTestId("login-submit").click();
+  const response = await responsePromise;
+  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  await expect(page.locator(".room-status-mobile")).toBeVisible();
+  return response.json() as Promise<RoomStatusBoardDto>;
+}
+
+async function showFixtureRange(page: Page, options: { clipped?: boolean; nights?: number } = {}): Promise<void> {
+  const rangeStart = options.clipped ? addDays(fixture.dates.arrivalDate, 1) : fixture.dates.arrivalDate;
+  const rangeEnd = options.nights
+    ? addDays(rangeStart, options.nights)
+    : options.clipped
+      ? addDays(fixture.dates.departureDate, -1)
+      : addDays(fixture.dates.departureDate, 2);
+
+  const departureResponse = roomStatusResponse(page);
+  await page.getByTestId("departure-date").fill(rangeEnd);
+  await departureResponse;
+  const arrivalResponse = roomStatusResponse(page);
+  await page.getByTestId("arrival-date").fill(rangeStart);
+  await arrivalResponse;
+  const boardRange = page.getByTestId("room-status-board-range");
+  if (await boardRange.count()) await expect(boardRange).toHaveAttribute("data-range-arrival", rangeStart);
+  else await expect(page.getByTestId("arrival-date")).toHaveValue(rangeStart);
+}
+
+async function selectOccupiedCell(page: Page, unitId: string, serviceDate: string, orderId: string): Promise<Locator> {
+  const selectedOrderResponse = orderResponse(page, orderId);
+  await roomCell(page, unitId, serviceDate).click();
+  await selectedOrderResponse;
+  const context = orderContext(page, orderId);
+  await expect(context).toBeVisible();
+  return context;
+}
+
+async function closeOrderContext(context: Locator): Promise<void> {
+  await context.getByRole("button", { name: "关闭订单上下文", exact: true }).click();
+  await expect(context).toBeHidden();
+}
+
+test.beforeAll(async ({}, workerInfo) => {
+  fixture = await prepareStage7Acceptance(e2eDatabaseUrl, {
+    reset: false,
+    dayOffset: fixtureDayOffset + (workerInfo.project.name === "mobile" ? 30 : 0)
+  });
+});
+
+test("whole-room cells open the exact order and adjacent same-nickname orders never merge", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 order context coverage");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  await showFixtureRange(page);
+
+  const wholeRoomContext = await selectOccupiedCell(
+    page,
+    fixture.wholeRoom.roomId,
+    fixture.dates.arrivalDate,
+    fixture.wholeRoom.orderId
+  );
+  await expect(wholeRoomContext).toContainText("小川");
+  await expect(wholeRoomContext).toContainText("阿宁");
+  for (let offset = 0; offset < 5; offset += 1) {
+    await expect(roomCell(page, fixture.wholeRoom.roomId, addDays(fixture.dates.arrivalDate, offset)))
+      .toHaveClass(/is-stay-selected/);
+  }
+  await closeOrderContext(wholeRoomContext);
+
+  const [first, second] = fixture.adjacentSameNickname;
+  const firstContext = await selectOccupiedCell(page, first!.roomId, fixture.dates.arrivalDate, first!.orderId);
+  await expect(firstContext).toContainText("小满");
+  await expect(roomCell(page, first!.roomId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, second!.roomId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
+  await closeOrderContext(firstContext);
+
+  const secondContext = await selectOccupiedCell(page, second!.roomId, fixture.dates.arrivalDate, second!.orderId);
+  await expect(secondContext).toContainText("小满");
+  await expect(roomCell(page, second!.roomId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, first!.roomId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
+  await expect(page.getByRole("heading", { name: `订单 ${first!.orderId}`, exact: true })).toHaveCount(0);
+});
+
+test("split-bed parent refuses to guess while each expanded bed opens its own order", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 split-bed ambiguity coverage");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  await showFixtureRange(page);
+
+  const parentCell = roomCell(page, fixture.splitBed.roomId, fixture.dates.arrivalDate);
+  await parentCell.click();
+  await expect(parentCell).toHaveAttribute("data-bed-occupancy-ratio", "2/4");
+  await expect(page.locator(".room-status-order-context")).toHaveCount(0);
+  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
+  await expect(page.getByText("该房间格汇总床位占用，不能代表一张订单。请展开房间并选择具体床位。", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("member-search")).toHaveCount(0);
+  await expect(page.getByTestId("create-order")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /报价/ })).toHaveCount(0);
+
+  const expandButton = roomRow(page, fixture.splitBed.roomId).getByRole("button", { name: /^展开.*床位$/ });
+  await expandButton.click();
+  await expect(roomRow(page, fixture.splitBed.bedAId)).toBeVisible();
+  for (let offset = 0; offset < 5; offset += 1) {
+    const serviceDate = addDays(fixture.dates.arrivalDate, offset);
+    await expect(roomCell(page, fixture.splitBed.bedAId, serviceDate)).toContainText("山峰");
+    await expect(roomCell(page, fixture.splitBed.bedAId, serviceDate)).not.toContainText("小满");
+    await expect(roomCell(page, fixture.splitBed.bedBId, serviceDate)).toContainText("小满");
+    await expect(roomCell(page, fixture.splitBed.bedBId, serviceDate)).not.toContainText("山峰");
+  }
+  const bedAContext = await selectOccupiedCell(
+    page,
+    fixture.splitBed.bedAId,
+    fixture.dates.arrivalDate,
+    fixture.splitBed.bedAOrderId
+  );
+  await expect(bedAContext).toContainText("山峰");
+  await expect(roomCell(page, fixture.splitBed.bedAId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, fixture.splitBed.bedBId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
+  await closeOrderContext(bedAContext);
+
+  const bedBContext = await selectOccupiedCell(
+    page,
+    fixture.splitBed.bedBId,
+    fixture.dates.arrivalDate,
+    fixture.splitBed.bedBOrderId
+  );
+  await expect(bedBContext).toContainText("小满");
+  await expect(roomCell(page, fixture.splitBed.bedBId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, fixture.splitBed.bedAId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
+});
+
+test("one Stay stays highlighted across extension, move, rows, and a clipped date window", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 stable Stay identity coverage");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  await showFixtureRange(page, { clipped: true });
+
+  const visibleOldRoomDate = addDays(fixture.dates.arrivalDate, 1);
+  const context = await selectOccupiedCell(
+    page,
+    fixture.movedStay.fromRoomId,
+    visibleOldRoomDate,
+    fixture.movedStay.orderId
+  );
+  await expect(context).toContainText(`订单 ${fixture.movedStay.orderId}`);
+  await expect(context).toContainText("B01");
+  await expect(context).toContainText("B02");
+  await expect(context).toContainText(fixture.dates.arrivalDate);
+  await expect(context).toContainText(fixture.dates.departureDate);
+
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, visibleOldRoomDate)).toHaveClass(/is-stay-selected/);
+  for (let offset = 2; offset < 4; offset += 1) {
+    await expect(roomCell(page, fixture.movedStay.toRoomId, addDays(fixture.dates.arrivalDate, offset)))
+      .toHaveClass(/is-stay-selected/);
+  }
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, fixture.dates.moveDate)).not.toHaveClass(/is-stay-selected/);
+});
+
+test("READ order context keeps navigation but exposes no business write entry", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 READ authorization coverage");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const board = await login(page, stage7ReadOnlyOperator);
+  expect(board.accessLevel).toBe("READ");
+  await showFixtureRange(page);
+
+  const context = await selectOccupiedCell(
+    page,
+    fixture.wholeRoom.roomId,
+    fixture.dates.arrivalDate,
+    fixture.wholeRoom.orderId
+  );
+  await expect(context).toContainText("只读");
+  await expect(context.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
+  await expect(context.getByRole("button", { name: "更正资料", exact: true })).toHaveCount(0);
+  await expect(context.getByRole("button", {
+    name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款/
+  })).toHaveCount(0);
+});
+
+test("external collection and full refund refresh amounts and refund availability without a room-status revision bump", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 external money refresh coverage");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  await showFixtureRange(page);
+
+  const context = await selectOccupiedCell(
+    page,
+    fixture.wholeRoom.roomId,
+    fixture.dates.arrivalDate,
+    fixture.wholeRoom.orderId
+  );
+  const transactionReference = `STAGE7-EXTERNAL-COLLECTION-${crypto.randomUUID()}`;
+  const collectionKey = `stage7-external-collection-${crypto.randomUUID()}`;
+  const db = createDatabase(e2eDatabaseUrl);
+  try {
+    const before = await getOrderView(db, fixture.wholeRoom.orderId, "WRITE");
+    const collectionPreview = await createCommandPreview(db, externalOperator, {
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId,
+        orderId: fixture.wholeRoom.orderId,
+        amountMinor: 1_234,
+        method: "CASH",
+        transactionReference,
+        note: "阶段七外部收款刷新"
+      }
+    }, { idempotencyKey: `${collectionKey}-preview`, correlationId: collectionKey });
+    const collection = await confirmCommandPreview(db, externalOperator, collectionPreview.preview.previewId, {
+      propertyId,
+      commandType: "RECORD_COLLECTION",
+      confirmation: true,
+      expectedEffectHash: collectionPreview.preview.effectHash,
+      reason: { code: "EXTERNAL_COLLECTION", note: "另一位操作员记录收款" }
+    }, { idempotencyKey: `${collectionKey}-confirm`, correlationId: collectionKey });
+    expect(collection).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+
+    const refreshedBoard = roomStatusResponse(page);
+    const refreshedOrder = orderResponse(page, fixture.wholeRoom.orderId);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await Promise.all([refreshedBoard, refreshedOrder]);
+    await expect(context).toContainText(transactionReference);
+    await expect(context.getByRole("button", { name: "记录退款", exact: true })).toBeVisible();
+
+    const refundReference = `STAGE7-EXTERNAL-REFUND-${crypto.randomUUID()}`;
+    const refundKey = `stage7-external-refund-${crypto.randomUUID()}`;
+    const refundPreview = await createCommandPreview(db, externalOperator, {
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId,
+        orderId: fixture.wholeRoom.orderId,
+        amountMinor: 1_234,
+        referencesFactId: collection.factRefs[0]!,
+        method: "CASH",
+        transactionReference: refundReference,
+        note: "阶段七外部全额退款刷新"
+      }
+    }, { idempotencyKey: `${refundKey}-preview`, correlationId: refundKey });
+    const refund = await confirmCommandPreview(db, externalOperator, refundPreview.preview.previewId, {
+      propertyId,
+      commandType: "RECORD_REFUND",
+      confirmation: true,
+      expectedEffectHash: refundPreview.preview.effectHash,
+      reason: { code: "EXTERNAL_REFUND", note: "另一位操作员记录全额退款" }
+    }, { idempotencyKey: `${refundKey}-confirm`, correlationId: refundKey });
+    expect(refund).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+
+    const refundBoard = roomStatusResponse(page);
+    const refundOrder = orderResponse(page, fixture.wholeRoom.orderId);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await Promise.all([refundBoard, refundOrder]);
+    await expect(context).toContainText(refundReference);
+    await expect(context.getByRole("button", { name: "记录退款", exact: true })).toHaveCount(0);
+    expect((await getOrderView(db, fixture.wholeRoom.orderId, "WRITE")).collectionFacts.length)
+      .toBe(before.collectionFacts.length + 2);
+  } finally {
+    await db.destroy();
+  }
+});
+
+test("occupant correction Preview and Confirm refresh both order context and room-status nickname", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 correction workflow coverage");
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  await showFixtureRange(page);
+
+  const db = createDatabase(e2eDatabaseUrl);
+  const originalOccupant = await db.selectFrom("order_occupants")
+    .select(["full_name", "nickname", "phone", "document_number"])
+    .where("id", "=", fixture.wholeRoom.primaryOccupantId)
+    .executeTakeFirstOrThrow();
+  const memberBefore = await db.selectFrom("members").selectAll().orderBy("id").execute();
+  await db.destroy();
+
+  const context = await selectOccupiedCell(
+    page,
+    fixture.wholeRoom.roomId,
+    fixture.dates.arrivalDate,
+    fixture.wholeRoom.orderId
+  );
+  await context.getByRole("button", { name: "更正资料", exact: true }).first().click();
+  const correctionDialog = page.getByRole("dialog", { name: "更正住宿人资料", exact: true });
+  await expect(correctionDialog).toBeVisible();
+  await page.getByTestId("occupant-correction-nickname").fill("小河");
+  await page.getByTestId("occupant-correction-full-name").fill("阶段七更正后住客");
+  await page.getByTestId("occupant-correction-phone").fill("13900000007");
+  await page.getByTestId("occupant-correction-document-number").fill("STAGE7-CORRECTED-001");
+  await page.getByTestId("occupant-correction-reason").fill("人工验收：修正录入错误");
+  await correctionDialog.getByRole("button", { name: "继续核对更正", exact: true }).click();
+
+  await page.getByTestId("create-command-preview").click();
+  await expect(page.getByTestId("command-effect")).toContainText("小河");
+  await expect(page.getByTestId("command-effect")).toContainText("阶段七更正后住客");
+  await expect(page.getByTestId("reason-note")).toHaveValue("人工验收：修正录入错误");
+
+  const refreshedBoard = roomStatusResponse(page);
+  const refreshedOrder = orderResponse(page, fixture.wholeRoom.orderId);
+  await page.getByTestId("confirm-command").click();
+  const receipt = page.getByTestId("command-receipt");
+  await expect(receipt).toContainText("业务写入已提交");
+  await expect(receipt).toContainText("EXECUTED");
+  await Promise.all([refreshedBoard, refreshedOrder]);
+  await page.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(receipt).toBeHidden();
+
+  const refreshedContext = orderContext(page, fixture.wholeRoom.orderId);
+  await expect(refreshedContext).toContainText("小河");
+  await expect(refreshedContext).toContainText("阶段七更正后住客");
+  await expect(refreshedContext).toContainText("人工验收：修正录入错误");
+  await expect(roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate)
+    .locator(".room-status-direct-occupants")).toContainText("小河");
+
+  const verificationDb = createDatabase(e2eDatabaseUrl);
+  try {
+    const immutableOriginal = await verificationDb.selectFrom("order_occupants")
+      .select(["full_name", "nickname", "phone", "document_number"])
+      .where("id", "=", fixture.wholeRoom.primaryOccupantId)
+      .executeTakeFirstOrThrow();
+    expect(immutableOriginal).toEqual(originalOccupant);
+    const correction = await verificationDb.selectFrom("order_occupant_corrections")
+      .select(["corrected_full_name", "corrected_nickname", "corrected_phone", "corrected_document_number", "reason_note"])
+      .where("occupant_id", "=", fixture.wholeRoom.primaryOccupantId)
+      .executeTakeFirstOrThrow();
+    expect(correction).toEqual({
+      corrected_full_name: "阶段七更正后住客",
+      corrected_nickname: "小河",
+      corrected_phone: "13900000007",
+      corrected_document_number: "STAGE7-CORRECTED-001",
+      reason_note: "人工验收：修正录入错误"
+    });
+    expect(await verificationDb.selectFrom("members").selectAll().orderBy("id").execute()).toEqual(memberBefore);
+  } finally {
+    await verificationDb.destroy();
+  }
+});
+
+test("an external occupant correction refreshes the open context and its non-segment amendment remains locatable", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 external revision coverage");
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  await showFixtureRange(page);
+
+  await roomRow(page, fixture.splitBed.roomId).getByRole("button", { name: /^展开.*床位$/ }).click();
+  const context = await selectOccupiedCell(
+    page,
+    fixture.splitBed.bedBId,
+    fixture.dates.arrivalDate,
+    fixture.splitBed.bedBOrderId
+  );
+  await expect(context).toContainText("小满");
+  await context.getByRole("button", { name: "更正资料", exact: true }).click();
+  const staleDialog = page.getByRole("dialog", { name: "更正住宿人资料", exact: true });
+  await page.getByTestId("occupant-correction-nickname").fill("旧表单昵称");
+  await page.getByTestId("occupant-correction-reason").fill("该表单应因外部更正而失效");
+
+  const db = createDatabase(e2eDatabaseUrl);
+  try {
+    const current = await getOrderView(db, fixture.splitBed.bedBOrderId, "WRITE");
+    const occupant = current.occupants[0]!;
+    const key = `stage7-external-correction-${crypto.randomUUID()}`;
+    const prepared = await createCommandPreview(db, externalOperator, {
+      commandType: "CORRECT_ORDER_OCCUPANT",
+      input: {
+        propertyId,
+        orderId: fixture.splitBed.bedBOrderId,
+        occupantId: occupant.id,
+        expectedPriorSnapshot: {
+          fullName: occupant.fullName,
+          nickname: occupant.nickname,
+          phone: occupant.phone,
+          documentNumber: occupant.documentNumber
+        },
+        correctedSnapshot: {
+          fullName: occupant.fullName,
+          nickname: "秋实",
+          phone: occupant.phone,
+          documentNumber: occupant.documentNumber
+        }
+      }
+    }, { idempotencyKey: `${key}-preview`, correlationId: key });
+    const receipt = await confirmCommandPreview(db, externalOperator, prepared.preview.previewId, {
+      propertyId,
+      commandType: "CORRECT_ORDER_OCCUPANT",
+      confirmation: true,
+      expectedEffectHash: prepared.preview.effectHash,
+      reason: { code: "EXTERNAL_DATA_CORRECTION", note: "另一位操作员核对后更正" }
+    }, { idempotencyKey: `${key}-confirm`, correlationId: key });
+    expect(receipt).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+  } finally {
+    await db.destroy();
+  }
+
+  const refreshedBoard = roomStatusResponse(page);
+  const refreshedOrder = orderResponse(page, fixture.splitBed.bedBOrderId);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await Promise.all([refreshedBoard, refreshedOrder]);
+  await expect(context).toContainText("秋实");
+  await expect(roomCell(page, fixture.splitBed.bedBId, fixture.dates.arrivalDate)).toHaveAccessibleName(/秋实/);
+  await expect(staleDialog).toBeHidden();
+  await expect(page.getByRole("alert").filter({ hasText: "原更正表单已关闭" })).toBeVisible();
+
+  const correctionAmendment = context.locator(".room-status-order-corrections > li")
+    .filter({ hasText: "更正住宿人资料" })
+    .filter({ hasText: "另一位操作员核对后更正" });
+  await expect(correctionAmendment).toContainText("操作人：Demo Agent");
+  await correctionAmendment.getByRole("button", { name: "定位这次变更", exact: true }).click();
+  await expect(roomCell(page, fixture.splitBed.bedBId, fixture.dates.arrivalDate)).toBeFocused();
+  await expect(roomCell(page, fixture.splitBed.bedBId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
+});
+
+test("adaptive date columns stay fixed while desktop context collapses and large screens show more days", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 adaptive date geometry coverage");
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await login(page);
+  await showFixtureRange(page, { nights: 14 });
+
+  const drawer = page.locator("dialog.modal-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(page.getByTestId("date-window-mode-auto")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".room-status-date-header")).toHaveCount(10);
+
+  await drawer.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(drawer).toBeHidden();
+  const expandedRange = roomStatusResponse(page);
+  await page.getByTestId("date-window-mode-21").click();
+  await expandedRange;
+  await expect(page.getByTestId("departure-date")).toHaveValue(addDays(fixture.dates.arrivalDate, 21));
+  await expect(page.locator(".room-status-date-header")).toHaveCount(21);
+  await page.getByTestId("date-window-mode-auto").click();
+  await expect(page.locator(".room-status-date-header")).toHaveCount(10);
+  const reopenSelection = page.getByRole("button", { name: "打开选中对象上下文", exact: true });
+  await expect(reopenSelection).toBeVisible();
+  await reopenSelection.click();
+  await expect(drawer).toBeVisible();
+
+  const trigger = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
+  const widthBeforeOrder = await trigger.evaluate((element) => element.getBoundingClientRect().width);
+  expect(widthBeforeOrder).toBeCloseTo(94, 0);
+
+  const context = await selectOccupiedCell(
+    page,
+    fixture.wholeRoom.roomId,
+    fixture.dates.arrivalDate,
+    fixture.wholeRoom.orderId
+  );
+  await expect(drawer).toBeVisible();
+  await expect(page.locator(".room-status-date-header")).toHaveCount(10);
+  expect(await trigger.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(widthBeforeOrder, 1);
+
+  await closeOrderContext(context);
+  await expect(page.getByRole("button", { name: "打开订单上下文", exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await expect.poll(() => page.locator(".room-status-date-header").count()).toBeGreaterThan(10);
+  const largeAutoCount = await page.locator(".room-status-date-header").count();
+  expect(largeAutoCount).toBeLessThanOrEqual(21);
+  expect(await trigger.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(widthBeforeOrder, 1);
+
+  await page.getByTestId("date-window-mode-14").click();
+  await expect(page.locator(".room-status-date-header")).toHaveCount(14);
+  await page.getByTestId("date-window-mode-auto").click();
+  await expect(page.locator(".room-status-date-header")).toHaveCount(largeAutoCount);
+});
+
+test("desktop drawer geometry, Escape focus, and full-order return preserve room-status context", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 responsive context coverage");
+  test.setTimeout(120_000);
+  const viewports = [
+    { width: 1280, height: 720 },
+    { width: 1366, height: 768 },
+    { width: 1440, height: 800 }
+  ];
+  let scrollRefreshChecked = false;
+
+  await page.setViewportSize(viewports[0]!);
+  await login(page);
+  await showFixtureRange(page);
+
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    const trigger = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
+    await expect(trigger).toBeVisible();
+    const context = await selectOccupiedCell(
+      page,
+      fixture.wholeRoom.roomId,
+      fixture.dates.arrivalDate,
+      fixture.wholeRoom.orderId
+    );
+    const workspaceWidth = await page.locator(".room-status-workspace").evaluate((element) => element.getBoundingClientRect().width);
+    const drawer = page.locator("dialog.modal-drawer");
+    if (viewport.width <= 1366 || workspaceWidth < 1240) await expect(drawer).toBeVisible();
+    else await expect(drawer).toHaveCount(0);
+
+    const geometry = await page.evaluate(() => {
+      const scroll = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+      const grid = document.querySelector<HTMLElement>("[role='grid']");
+      if (!scroll || !grid) return null;
+      const scrollBox = scroll.getBoundingClientRect();
+      const visibleRows = [...grid.querySelectorAll<HTMLElement>("[data-room-status-row]")]
+        .filter((row) => {
+          const box = row.getBoundingClientRect();
+          return box.bottom > scrollBox.top && box.top < scrollBox.bottom;
+        }).length;
+      return {
+        clientWidth: document.documentElement.clientWidth,
+        clientHeight: document.documentElement.clientHeight,
+        scrollWidth: document.documentElement.scrollWidth,
+        visibleRows,
+        drawerBox: document.querySelector<HTMLElement>("dialog.modal-drawer")?.getBoundingClientRect().toJSON() ?? null
+      };
+    });
+    expect(geometry).not.toBeNull();
+    expect(geometry!.scrollWidth).toBeLessThanOrEqual(geometry!.clientWidth + 1);
+    expect(geometry!.visibleRows).toBeGreaterThanOrEqual(4);
+
+    if (await drawer.count()) {
+      expect(geometry!.drawerBox).not.toBeNull();
+      expect(geometry!.drawerBox!.top).toBeCloseTo(0, 0);
+      expect(geometry!.drawerBox!.right).toBeCloseTo(geometry!.clientWidth, 0);
+      expect(geometry!.drawerBox!.bottom).toBeCloseTo(geometry!.clientHeight, 0);
+      if (!scrollRefreshChecked) {
+        scrollRefreshChecked = true;
+        const drawerBody = drawer.locator(".modal-body");
+        const scrollBeforeRefresh = await drawerBody.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          return element.scrollTop;
+        });
+        expect(scrollBeforeRefresh).toBeGreaterThan(0);
+        const refreshedBoard = roomStatusResponse(page);
+        const refreshedOrder = orderResponse(page, fixture.wholeRoom.orderId);
+        await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+        await Promise.all([refreshedBoard, refreshedOrder]);
+        await expect(context).toBeVisible();
+        expect(await drawerBody.evaluate((element) => element.scrollTop)).toBe(scrollBeforeRefresh);
+      }
+      await page.keyboard.press("Escape");
+      await expect(drawer).toBeHidden();
+      await expect(trigger).toBeFocused();
+    } else {
+      await closeOrderContext(context);
+    }
+  }
+
+  const expandButton = roomRow(page, fixture.splitBed.roomId).getByRole("button", { name: /^展开.*床位$/ });
+  await expandButton.click();
+  const triggerDate = addDays(fixture.dates.arrivalDate, 1);
+  const bedCell = roomCell(page, fixture.splitBed.bedAId, triggerDate);
+  const context = await selectOccupiedCell(
+    page,
+    fixture.splitBed.bedAId,
+    triggerDate,
+    fixture.splitBed.bedAOrderId
+  );
+  await context.getByRole("button", { name: "查看完整订单", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/orders/${fixture.splitBed.bedAOrderId}$`));
+  await expect(page.getByText(fixture.splitBed.bedAOrderId, { exact: true })).toBeVisible();
+
+  const returnedBoard = roomStatusResponse(page);
+  await page.getByRole("link", { name: "返回房态", exact: true }).click();
+  await returnedBoard;
+  await expect(page.getByTestId("arrival-date")).toHaveValue(fixture.dates.arrivalDate);
+  await expect(roomRow(page, fixture.splitBed.bedAId)).toBeVisible();
+  await expect(roomRow(page, fixture.splitBed.roomId).getByRole("button", { name: /^收起.*床位$/ })).toBeVisible();
+  await expect(bedCell).toHaveClass(/is-stay-selected/);
+  await expect(bedCell).toBeFocused();
+  await expect(orderContext(page, fixture.splitBed.bedAOrderId)).toBeVisible();
+});
+
+test("375px mobile occupancy opens and closes the order context, then returns from the full order", async ({ page }, testInfo) => {
+  test.skip(!isMobileProject(testInfo), "mobile-only Stage 7 order context coverage");
+  await page.setViewportSize({ width: 375, height: 812 });
+  await loginMobile(page);
+  await showFixtureRange(page);
+
+  const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
+  const trigger = occupancy.getByRole("button", { name: "打开订单上下文", exact: true });
+  const selectedOrderResponse = orderResponse(page, fixture.wholeRoom.orderId);
+  await trigger.click();
+  await selectedOrderResponse;
+  const context = orderContext(page, fixture.wholeRoom.orderId);
+  await expect(context).toBeVisible();
+  await expect(context).toContainText("小川");
+  await expect(context).toContainText("阿宁");
+
+  await page.keyboard.press("Escape");
+  await expect(context).toBeHidden();
+
+  await trigger.click();
+  await expect(context).toBeVisible();
+  await context.getByRole("button", { name: "查看完整订单", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/orders/${fixture.wholeRoom.orderId}$`));
+  await expect(page.getByText(fixture.wholeRoom.orderId, { exact: true })).toBeVisible();
+
+  const returnedBoard = roomStatusResponse(page);
+  await page.getByRole("link", { name: "返回房态", exact: true }).click();
+  await returnedBoard;
+  await expect(page.getByTestId("arrival-date")).toHaveValue(fixture.dates.arrivalDate);
+  await expect(orderContext(page, fixture.wholeRoom.orderId)).toBeVisible();
+});
+
+test("375px mobile split-bed summary keeps the parent neutral and opens each exact bed order", async ({ page }, testInfo) => {
+  test.skip(!isMobileProject(testInfo), "mobile-only Stage 7 split-bed order context coverage");
+  await page.setViewportSize({ width: 375, height: 812 });
+  await loginMobile(page);
+  await showFixtureRange(page);
+
+  const occupancies = page.locator(".room-status-mobile-occupancies li");
+  const parent = occupancies.filter({ hasText: "2/4" }).filter({ hasText: "山峰" }).first();
+  await expect(parent).toBeVisible();
+  await expect(parent.getByRole("button", { name: "打开订单上下文", exact: true })).toHaveCount(0);
+
+  const bedA = occupancies.filter({ hasText: "1人" }).filter({ hasText: "山峰" }).first();
+  const selectedOrderResponse = orderResponse(page, fixture.splitBed.bedAOrderId);
+  await bedA.getByRole("button", { name: "打开订单上下文", exact: true }).click();
+  await selectedOrderResponse;
+  const context = orderContext(page, fixture.splitBed.bedAOrderId);
+  await expect(context).toBeVisible();
+  await expect(context).toContainText("山峰");
+  await expect(page.getByRole("heading", { name: `订单 ${fixture.splitBed.bedBOrderId}`, exact: true })).toHaveCount(0);
+});
+
+test("320px READ mobile context exposes navigation but no correction or business action", async ({ page }, testInfo) => {
+  test.skip(!isMobileProject(testInfo), "mobile-only Stage 7 READ authorization coverage");
+  await page.setViewportSize({ width: 320, height: 720 });
+  const board = await loginMobile(page, stage7ReadOnlyOperator);
+  expect(board.accessLevel).toBe("READ");
+  await showFixtureRange(page);
+
+  const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
+  const selectedOrderResponse = orderResponse(page, fixture.wholeRoom.orderId);
+  await occupancy.getByRole("button", { name: "打开订单上下文", exact: true }).click();
+  await selectedOrderResponse;
+  const context = orderContext(page, fixture.wholeRoom.orderId);
+  await expect(context).toBeVisible();
+  await expect(context).toContainText("只读");
+  await expect(context.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
+  await expect(context.getByRole("button", { name: "更正资料", exact: true })).toHaveCount(0);
+  await expect(context.getByRole("button", {
+    name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款/
+  })).toHaveCount(0);
+  const geometry = await page.evaluate(() => ({
+    bodyOverflow: getComputedStyle(document.body).overflow,
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth
+  }));
+  expect(geometry.bodyOverflow).toBe("hidden");
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+});

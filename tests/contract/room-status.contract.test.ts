@@ -56,7 +56,7 @@ function shiftLocalDate(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-async function placeInternalUse(options: {
+async function lockMaintenance(options: {
   inventoryUnitId: string;
   arrivalDate: string;
   departureDate: string;
@@ -69,7 +69,7 @@ async function placeInternalUse(options: {
     url: "/api/v1/command-previews",
     headers: previewHeaders,
     payload: {
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: options.inventoryUnitId,
@@ -82,7 +82,7 @@ async function placeInternalUse(options: {
   expect(previewResponse.statusCode, previewResponse.body).toBe(200);
   const preview = previewResponse.json().preview;
   expect(preview).toMatchObject({
-    commandType: "PLACE_INTERNAL_USE",
+    commandType: "LOCK_MAINTENANCE",
     effect: {
       arrivalDate: options.arrivalDate,
       departureDate: options.departureDate,
@@ -97,10 +97,10 @@ async function placeInternalUse(options: {
     headers: confirmHeaders,
     payload: {
       propertyId: demo.propertyId,
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       confirmation: true,
       expectedEffectHash: preview.effectHash,
-      reason: { code: "CONTRACT", note: "Confirm internal use through shared command protocol" }
+      reason: { code: "CONTRACT", note: "Confirm maintenance through shared command protocol" }
     }
   };
   const confirmed = await app.inject(request);
@@ -173,14 +173,20 @@ describe("RoomStatus Query and Command API contract", () => {
       const properties = variant.properties as Record<string, JsonSchema>;
       return [(((properties.commandType!.enum as string[])[0])!), variant];
     }));
-    const internalUseInput = (variants.get("PLACE_INTERNAL_USE")!.properties as Record<string, JsonSchema>).input!;
-    expect(Object.keys((internalUseInput.properties as object)).sort())
-      .toEqual(["arrivalDate", "departureDate", "inventoryUnitId", "propertyId", "reason"]);
+    expect(variants.has("PLACE_INTERNAL_USE")).toBe(false);
+    expect(variants.has("RELEASE_INTERNAL_USE")).toBe(false);
+    expect(roomStatusStatuses).not.toContain("INTERNAL_USE");
+    expect(roomStatusSourceKinds).not.toContain("INTERNAL_USE");
+    expect(roomStatusActionCodes).not.toContain("PLACE_INTERNAL_USE");
+    expect(roomStatusActionCodes).not.toContain("RELEASE_INTERNAL_USE");
+    expect(JSON.stringify(responseSchema)).not.toContain('"INTERNAL_USE"');
+    expect(JSON.stringify(responseSchema)).not.toContain('"PLACE_INTERNAL_USE"');
+    expect(JSON.stringify(responseSchema)).not.toContain('"RELEASE_INTERNAL_USE"');
     const maintenanceInput = (variants.get("LOCK_MAINTENANCE")!.properties as Record<string, JsonSchema>).input!;
     expect(Object.keys((maintenanceInput.properties as object)).sort())
       .toEqual(["arrivalDate", "departureDate", "inventoryUnitId", "propertyId", "reason"]);
-    expect(Object.keys(((variants.get("RELEASE_INTERNAL_USE")!.properties as Record<string, JsonSchema>).input!.properties as object)).sort())
-      .toEqual(["internalUseBlockId", "propertyId"]);
+    expect(Object.keys(((variants.get("RELEASE_MAINTENANCE")!.properties as Record<string, JsonSchema>).input!.properties as object)).sort())
+      .toEqual(["maintenanceLockId", "propertyId"]);
     expect(Object.keys(((variants.get("COMPLETE_CLEANING")!.properties as Record<string, JsonSchema>).input!.properties as object)).sort())
       .toEqual(["cleaningTaskId", "propertyId"]);
   });
@@ -243,21 +249,21 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(baselineResponse.statusCode, baselineResponse.body).toBe(200);
     const businessDate = baselineResponse.json().businessDate as string;
     const businessDateEnd = shiftLocalDate(businessDate, 1);
-    const placed = await placeInternalUse({
+    const placed = await lockMaintenance({
       inventoryUnitId: demo.bedAId,
       arrivalDate: "2028-11-01",
       departureDate: "2028-11-03",
-      reason: "Contract future internal use",
-      prefix: "room-status-place-future"
+      reason: "Contract future maintenance",
+      prefix: "room-status-maintenance-future"
     });
-    const todayPlaced = await placeInternalUse({
+    const todayPlaced = await lockMaintenance({
       inventoryUnitId: demo.bedAId,
       arrivalDate: businessDate,
       departureDate: businessDateEnd,
-      reason: "Contract business-date exception",
-      prefix: "room-status-place-today"
+      reason: "Contract business-date maintenance",
+      prefix: "room-status-maintenance-today"
     });
-    expect(await db.selectFrom("internal_use_blocks").select("id").execute()).toHaveLength(2);
+    expect(await db.selectFrom("maintenance_locks").select("id").execute()).toHaveLength(2);
 
     const agentResponse = await app.inject({
       method: "GET",
@@ -275,11 +281,11 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(Date.parse(agentBoard.freshUntil) - Date.parse(agentBoard.asOf)).toBe(5_000);
     const room = agentBoard.rooms.find((item: { id: string }) => item.id === demo.roomId);
     const bed = room.children.find((item: { id: string }) => item.id === demo.bedAId);
-    expect(room.days[0]).toMatchObject({ status: "INTERNAL_USE", available: false });
+    expect(room.days[0]).toMatchObject({ status: "MAINTENANCE", available: false });
     expect(bed.intervals[0]).toMatchObject({
       actualInventoryUnitId: demo.bedAId,
       displayInventoryUnitId: demo.bedAId,
-      sourceKind: "INTERNAL_USE",
+      sourceKind: "MAINTENANCE",
       primaryOccupantLabel: null,
       startDate: "2028-11-01",
       endDate: "2028-11-03",
@@ -292,15 +298,15 @@ describe("RoomStatus Query and Command API contract", () => {
         claimIds: [expect.any(String), expect.any(String)],
         startDate: "2028-11-01",
         endDate: "2028-11-03",
-        sourceReference: expect.objectContaining({ type: "BLOCK", id: placed.result.internalUseBlockId })
+        sourceReference: expect.objectContaining({ type: "BLOCK", id: placed.result.maintenanceLockId })
       })]
     });
     expect(bed.intervals[0].allowedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "RELEASE_INTERNAL_USE", enabled: true, requiresFullInterval: true })
+      expect.objectContaining({ code: "RELEASE_MAINTENANCE", enabled: true, requiresFullInterval: true })
     ]));
     expect(bed.intervals[0].references).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "CLAIM" }),
-      expect.objectContaining({ type: "BLOCK", id: placed.result.internalUseBlockId }),
+      expect.objectContaining({ type: "BLOCK", id: placed.result.maintenanceLockId }),
       expect.objectContaining({ type: "RECEIPT", id: placed.receiptId })
     ]));
     expect(bed.intervals[0].history).toEqual(expect.arrayContaining([
@@ -309,7 +315,7 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(agentBoard.operationalTasks).toEqual(expect.arrayContaining([
       expect.objectContaining({
         taskKind: "EXCEPTION",
-        sourceKind: "INTERNAL_USE",
+        sourceKind: "MAINTENANCE",
         actualInventoryUnitId: demo.bedAId,
         businessDate,
         startDate: businessDate,
@@ -322,12 +328,12 @@ describe("RoomStatus Query and Command API contract", () => {
           claimIds: [expect.any(String)],
           startDate: businessDate,
           endDate: businessDateEnd,
-          sourceReference: expect.objectContaining({ type: "BLOCK", id: todayPlaced.result.internalUseBlockId })
+          sourceReference: expect.objectContaining({ type: "BLOCK", id: todayPlaced.result.maintenanceLockId })
         })],
-        references: expect.arrayContaining([expect.objectContaining({ type: "BLOCK", id: todayPlaced.result.internalUseBlockId })])
+        references: expect.arrayContaining([expect.objectContaining({ type: "BLOCK", id: todayPlaced.result.maintenanceLockId })])
       })
     ]));
-    expect(agentBoard.operationalTasks.some((task: { references: Array<{ type: string; id: string }> }) => task.references.some((item) => item.type === "BLOCK" && item.id === placed.result.internalUseBlockId))).toBe(false);
+    expect(agentBoard.operationalTasks.some((task: { references: Array<{ type: string; id: string }> }) => task.references.some((item) => item.type === "BLOCK" && item.id === placed.result.maintenanceLockId))).toBe(false);
 
     const receiptCountBeforePartialQuery = await db.selectFrom("command_receipts").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow();
     const partialResponse = await app.inject({
@@ -338,7 +344,7 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(partialResponse.statusCode, partialResponse.body).toBe(200);
     const partialRoom = partialResponse.json().rooms.find((item: { id: string }) => item.id === demo.roomId);
     const partialBed = partialRoom.children.find((item: { id: string }) => item.id === demo.bedAId);
-    const partialInterval = partialBed.intervals.find((item: { references: Array<{ type: string; id: string }> }) => item.references.some((reference) => reference.type === "BLOCK" && reference.id === placed.result.internalUseBlockId));
+    const partialInterval = partialBed.intervals.find((item: { references: Array<{ type: string; id: string }> }) => item.references.some((reference) => reference.type === "BLOCK" && reference.id === placed.result.maintenanceLockId));
     expect(partialInterval).toMatchObject({
       startDate: "2028-11-02",
       endDate: "2028-11-03",
@@ -346,16 +352,17 @@ describe("RoomStatus Query and Command API contract", () => {
       sourceEndDate: "2028-11-03",
       allowedActions: expect.arrayContaining([
         expect.objectContaining({
-          code: "RELEASE_INTERNAL_USE",
-          enabled: false,
+          code: "RELEASE_MAINTENANCE",
+          enabled: true,
+          disabledReason: null,
           requiresFullInterval: true,
-          targetReference: expect.objectContaining({ type: "BLOCK", id: placed.result.internalUseBlockId })
+          targetReference: expect.objectContaining({ type: "BLOCK", id: placed.result.maintenanceLockId })
         })
       ])
     });
     expect(await db.selectFrom("command_receipts").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow())
       .toEqual(receiptCountBeforePartialQuery);
-    expect(await db.selectFrom("internal_use_blocks").select("status").where("id", "=", placed.result.internalUseBlockId).executeTakeFirstOrThrow())
+    expect(await db.selectFrom("maintenance_locks").select("status").where("id", "=", placed.result.maintenanceLockId).executeTakeFirstOrThrow())
       .toEqual({ status: "ACTIVE" });
 
     const readResponse = await app.inject({

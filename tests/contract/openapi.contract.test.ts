@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
-import { commandTypes, recoverableCommandTypes } from "@qintopia/contracts";
+import { commandTypes, historicalRecoverableCommandTypes } from "@qintopia/contracts";
 import { newId, newOpaqueSecret, stableHash } from "@qintopia/domain";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { importQintopia2026ReferenceCatalog, type Database } from "@qintopia/db";
@@ -35,7 +35,8 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     required: ["propertyId", "membershipOrderId"],
     properties: ["propertyId", "membershipOrderId"]
   },
-  CREATE_ORDER: { required: ["propertyId", "quoteId", "primaryGuest"], properties: ["propertyId", "quoteId", "primaryGuest", "bookingChannelCode", "channelOrderReference", "freeStayReason"] },
+  CREATE_ORDER: { required: ["propertyId", "quoteId", "primaryGuest"], properties: ["propertyId", "quoteId", "primaryGuest", "additionalGuests", "bookingChannelCode", "channelOrderReference", "freeStayReason"] },
+  CORRECT_ORDER_OCCUPANT: { required: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"], properties: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"] },
   EXTEND_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
   SHORTEN_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
   MOVE_UNIT: { required: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"], properties: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"] },
@@ -44,8 +45,6 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
   MARK_NO_SHOW: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   LOCK_MAINTENANCE: { required: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"], properties: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"] },
   RELEASE_MAINTENANCE: { required: ["propertyId", "maintenanceLockId"], properties: ["propertyId", "maintenanceLockId"] },
-  PLACE_INTERNAL_USE: { required: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"], properties: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"] },
-  RELEASE_INTERNAL_USE: { required: ["propertyId", "internalUseBlockId"], properties: ["propertyId", "internalUseBlockId"] },
   COMPLETE_CLEANING: { required: ["propertyId", "cleaningTaskId"], properties: ["propertyId", "cleaningTaskId"] },
   RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method", "transactionReference"], properties: ["propertyId", "orderId", "amountMinor", "method", "transactionReference", "note"] },
   RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference", "note"] },
@@ -183,7 +182,7 @@ describe("OpenAPI 3.1 command contract", () => {
     const recoveryCommandType = document.paths["/api/v1/command-results"].get.parameters
       .find((parameter: { name: string }) => parameter.name === "commandType").schema;
     expect(recoveryCommandType.anyOf.map((variant: { enum: string[] }) => variant.enum[0]).sort())
-      .toEqual([...recoverableCommandTypes].sort());
+      .toEqual([...historicalRecoverableCommandTypes].sort());
     const commandSchema = document.paths["/api/v1/command-previews"].post.requestBody.content["application/json"].schema;
     expect(commandSchema.anyOf).toHaveLength(commandTypes.length);
     const variants = new Map<string, JsonSchema>(commandSchema.anyOf.map((variant: JsonSchema) => {
@@ -192,6 +191,10 @@ describe("OpenAPI 3.1 command contract", () => {
     }));
     expect([...variants.keys()].sort()).toEqual([...commandTypes].sort());
     expect(variants.has("CREATE_QUOTE")).toBe(false);
+    expect(commandTypes).not.toContain("PLACE_INTERNAL_USE");
+    expect(commandTypes).not.toContain("RELEASE_INTERNAL_USE");
+    expect(variants.has("PLACE_INTERNAL_USE")).toBe(false);
+    expect(variants.has("RELEASE_INTERNAL_USE")).toBe(false);
     for (const commandType of commandTypes) {
       const variant = variants.get(commandType)!;
       const input = (variant.properties as Record<string, JsonSchema>).input!;
@@ -210,6 +213,8 @@ describe("OpenAPI 3.1 command contract", () => {
       maxLength: 200,
       pattern: "\\S"
     });
+    const additionalGuest = (((createInput.properties as Record<string, JsonSchema>).additionalGuests!.items as JsonSchema));
+    expect(additionalGuest).toMatchObject({ additionalProperties: false, required: ["fullName", "nickname"] });
     const createChannel = ((createInput.properties as Record<string, JsonSchema>).bookingChannelCode)!;
     const createChannelVariants = createChannel.anyOf as Array<{ enum: string[] }>;
     expect(createChannelVariants.map((variant) => variant.enum[0])).toEqual(["YOUMUDAO", "CTRIP", "MEITUAN", "WECOM"]);
@@ -224,6 +229,8 @@ describe("OpenAPI 3.1 command contract", () => {
     const effectGuest = (createEffect.properties as Record<string, JsonSchema>).primaryGuest!;
     expect(effectGuest.required).toEqual(["fullName"]);
     expect(JSON.stringify((effectGuest.properties as Record<string, JsonSchema>).nickname)).toContain('"type":"null"');
+    expect((createEffect.properties as Record<string, JsonSchema>)).toHaveProperty("occupants");
+    expect((createEffect.properties as Record<string, JsonSchema>)).toHaveProperty("occupancyCapacity");
     const createMemberInput = (variants.get("CREATE_MEMBER")!.properties as Record<string, JsonSchema>).input!;
     expect((createMemberInput.properties as Record<string, JsonSchema>).identityCardNumber).toMatchObject({ minLength: 1, maxLength: 200 });
     expect(createMemberInput.properties).not.toHaveProperty("validFrom");
@@ -248,6 +255,96 @@ describe("OpenAPI 3.1 command contract", () => {
       maximum: Number.MAX_SAFE_INTEGER,
       multipleOf: 100
     });
+  });
+
+  it("keeps deferred command history readable without accepting it as a write command", async () => {
+    const legacyPreview = {
+      previewId: "preview_legacy_internal",
+      commandType: "RELEASE_INTERNAL_USE",
+      effectHash: "a".repeat(64),
+      effect: {
+        internalUseBlockId: "block_legacy_internal",
+        inventoryUnitId: "unit_legacy_internal",
+        arrivalDate: "2026-07-24",
+        departureDate: "2026-07-25",
+        reason: "Preserved historical record",
+        fromStatus: "ACTIVE",
+        toStatus: "RELEASED"
+      },
+      expiresAt: "2026-07-24T12:00:00.000Z"
+    };
+    const commandId = "command_legacy_internal";
+    const receiptId = "receipt_legacy_internal";
+    await database.transaction().execute(async (trx) => {
+      await trx.insertInto("command_executions").values({
+        id: commandId,
+        subject_id: demo.agentSubjectId,
+        credential_id: "token_demo_write",
+        property_id: demo.propertyId,
+        command_type: "PREVIEW:RELEASE_INTERNAL_USE",
+        idempotency_key: "legacy-internal-read",
+        request_hash: "b".repeat(64),
+        correlation_id: "legacy-internal-read",
+        state: "APPLIED",
+        completed_at: new Date("2026-07-24T11:30:00.000Z")
+      }).execute();
+      await trx.insertInto("command_previews").values({
+        id: legacyPreview.previewId,
+        subject_id: demo.agentSubjectId,
+        property_id: demo.propertyId,
+        command_type: legacyPreview.commandType,
+        normalized_input: { propertyId: demo.propertyId, internalUseBlockId: "block_legacy_internal" },
+        input_hash: "b".repeat(64),
+        effect: legacyPreview.effect,
+        effect_hash: legacyPreview.effectHash,
+        basis_versions: {},
+        expires_at: new Date(legacyPreview.expiresAt),
+        status: "USED",
+        used_at: new Date("2026-07-24T11:30:00.000Z")
+      }).execute();
+      await trx.insertInto("command_receipts").values({
+        id: receiptId,
+        command_id: commandId,
+        execution_status: "EXECUTED",
+        business_committed: true,
+        result: { preview: legacyPreview },
+        error: null,
+        resource_refs: JSON.stringify([legacyPreview.previewId]),
+        fact_refs: JSON.stringify([]),
+        committed_at: new Date("2026-07-24T11:30:00.000Z")
+      }).execute();
+    });
+
+    const previewResponse = await app.inject({
+      method: "GET",
+      url: `/api/v1/command-previews/${legacyPreview.previewId}`,
+      headers: { authorization: `Bearer ${demo.writeToken}` }
+    });
+    expect(previewResponse.statusCode).toBe(200);
+    expect(previewResponse.json()).toMatchObject({ command_type: "RELEASE_INTERNAL_USE", effect: legacyPreview.effect });
+    const receiptResponse = await app.inject({
+      method: "GET",
+      url: `/api/v1/receipts/${receiptId}`,
+      headers: { authorization: `Bearer ${demo.writeToken}` }
+    });
+    expect(receiptResponse.statusCode).toBe(200);
+    expect(receiptResponse.json()).toMatchObject({ result: { preview: legacyPreview } });
+
+    const rejectedWrite = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: {
+        authorization: `Bearer ${demo.writeToken}`,
+        "content-type": "application/json",
+        "idempotency-key": "legacy-internal-write-rejected",
+        "x-correlation-id": "legacy-internal-write-rejected"
+      },
+      payload: {
+        commandType: "RELEASE_INTERNAL_USE",
+        input: { propertyId: demo.propertyId, internalUseBlockId: "block_legacy_internal" }
+      }
+    });
+    expect(rejectedWrite.statusCode).toBe(400);
   });
 
   it("rejects missing or blank guest nicknames at the HTTP contract without creating an order", async () => {
@@ -607,7 +704,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(Object.keys(occupancyProperties).sort()).toEqual(["occupants", "occupiedBedCount", "serviceDate", "totalBedCount"]);
     const occupantProperties = ((occupancyProperties.occupants!.items as JsonSchema).properties) as Record<string, JsonSchema>;
     expect(Object.keys(occupantProperties).sort()).toEqual([
-      "inventoryUnitCode", "inventoryUnitId", "primaryOccupantLabel", "sourceReference"
+      "inventoryUnitCode", "inventoryUnitId", "occupantId", "primaryOccupantLabel", "sourceReference"
     ]);
     expect((occupantProperties.sourceReference!.properties as Record<string, JsonSchema>).type).toMatchObject({ enum: ["ORDER"] });
     const confirmConflictSchema = document.paths["/api/v1/command-previews/{previewId}/confirm"].post.responses["409"].content["application/json"].schema;

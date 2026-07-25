@@ -47,6 +47,23 @@ function roomPricingProduct(roomTypeKey: string, saleMode: "INDEPENDENT_ROOM" | 
   return saleMode === "INDEPENDENT_ROOM" ? `${roomTypeKey}_room` : `${roomTypeKey}_whole_room`;
 }
 
+const roomOccupancyCapacities: Readonly<Record<string, number>> = {
+  private_bath_standard: 2,
+  private_bath_king: 2,
+  private_bath_single: 1,
+  private_bath_suite: 2,
+  shared_bath_standard: 2,
+  shared_bath_single: 1,
+  shared_bath_double: 2,
+  shared_bath_quad: 4
+};
+
+function roomOccupancyCapacity(roomTypeKey: string): number {
+  const capacity = roomOccupancyCapacities[roomTypeKey];
+  if (capacity === undefined) throw new Error(`Unknown room type occupancy capacity: ${roomTypeKey}`);
+  return capacity;
+}
+
 export async function buildQintopia2026OperationalCatalogRows(propertyId = demo.propertyId) {
   const snapshot = await loadBundledQintopia2026Catalog();
   const categoryNames = new Map(snapshot.inventory.categories.map((category) => [category.roomTypeKey, category.sourceName]));
@@ -64,7 +81,8 @@ export async function buildQintopia2026OperationalCatalogRows(propertyId = demo.
     pricing_product_code: roomPricingProduct(room.roomTypeKey, room.saleMode),
     inventory_basis: room.saleMode === "INDEPENDENT_ROOM" ? "INDEPENDENT" as const : "WHOLE_ROOM_COMBINATION" as const,
     code_provenance: room.codeProvenance,
-    physical_bed_count: room.physicalBedCount
+    physical_bed_count: room.physicalBedCount,
+    occupancy_capacity: roomOccupancyCapacity(room.roomTypeKey)
   }));
   const beds = snapshot.inventory.rooms.flatMap((room) => room.saleMode === "BED_WITH_WHOLE_ROOM_COMBINATION"
     ? (room.physicalBedCodes ?? []).map((bedCode) => ({
@@ -81,7 +99,8 @@ export async function buildQintopia2026OperationalCatalogRows(propertyId = demo.
       pricing_product_code: `${room.roomTypeKey}_bed`,
       inventory_basis: "INDEPENDENT" as const,
       code_provenance: room.codeProvenance,
-      physical_bed_count: null
+      physical_bed_count: null,
+      occupancy_capacity: 1
     }))
     : []);
   return { snapshot, rooms, beds };
@@ -107,9 +126,23 @@ function publicPricingPolicyRow(snapshot: Awaited<ReturnType<typeof loadBundledQ
 
 export async function seedDemo(db: Kysely<Database>, options: { includeProtocolFixturePolicy?: boolean } = {}): Promise<void> {
   const catalog = await buildQintopia2026OperationalCatalogRows();
+  const occupancyColumn = await sql<{ present: boolean }>`
+    select exists (
+      select 1 from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = 'inventory_units'
+        and column_name = 'occupancy_capacity'
+    ) as present
+  `.execute(db);
+  const inventoryRows = occupancyColumn.rows[0]?.present
+    ? { rooms: catalog.rooms, beds: catalog.beds }
+    : {
+        rooms: catalog.rooms.map(({ occupancy_capacity: _discarded, ...room }) => room),
+        beds: catalog.beds.map(({ occupancy_capacity: _discarded, ...bed }) => bed)
+      };
   await db.insertInto("properties").values({ id: demo.propertyId, code: "QTP-SH", name: "QinTopia", timezone: "Asia/Shanghai", currency: "CNY" }).onConflict((oc) => oc.column("id").doNothing()).execute();
-  await db.insertInto("inventory_units").values(catalog.rooms).onConflict((oc) => oc.column("id").doNothing()).execute();
-  await db.insertInto("inventory_units").values(catalog.beds).onConflict((oc) => oc.column("id").doNothing()).execute();
+  await db.insertInto("inventory_units").values(inventoryRows.rooms).onConflict((oc) => oc.column("id").doNothing()).execute();
+  await db.insertInto("inventory_units").values(inventoryRows.beds).onConflict((oc) => oc.column("id").doNothing()).execute();
   const pricingPolicies: Insertable<Database["pricing_policy_versions"]>[] = [
     { id: demo.freePolicyId, property_id: demo.propertyId, code: "FREE", version: 1, stay_type: "FREE", calculation_kind: "FREE", nightly_rate_minor: 0, currency: "CNY", status: "PUBLISHED" },
     publicPricingPolicyRow(catalog.snapshot)

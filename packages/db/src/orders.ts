@@ -1,5 +1,12 @@
 import { sql, type Transaction } from "kysely";
-import { DomainError, type CoverageItemDto } from "@qintopia/contracts";
+import {
+  DomainError,
+  orderActionCodes,
+  type AccessLevel,
+  type CoverageItemDto,
+  type OrderAllowedActionDto,
+  type OrderActionCode
+} from "@qintopia/contracts";
 import { amountSummary, enumerateServiceDates, newId, type CoverageCandidate } from "@qintopia/domain";
 import type { DbExecutor } from "./inventory.ts";
 import type { Database } from "./schema.ts";
@@ -106,21 +113,148 @@ export async function orderAmountSummary(db: DbExecutor, context: OrderContext) 
   return amountSummary(context.revision.currency, context.revision.currentContractAmountMinor, facts.map((fact) => fact.net_effect_minor));
 }
 
-export async function getOrderView(db: DbExecutor, orderId: string) {
+export function orderAllowedActions(
+  accessLevel: AccessLevel,
+  status: string,
+  hasRefundableCollection: boolean
+): OrderAllowedActionDto[] {
+  if (accessLevel === "READ") return [];
+  const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
+    CORRECT_ORDER_OCCUPANT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
+    CHECK_IN: ["RESERVED"],
+    CHECK_OUT: ["CHECKED_IN"],
+    SHORTEN_STAY: ["RESERVED", "CHECKED_IN"],
+    EXTEND_STAY: ["RESERVED", "CHECKED_IN"],
+    MOVE_UNIT: ["RESERVED", "CHECKED_IN"],
+    REPRICE_ORDER: ["RESERVED", "CHECKED_IN"],
+    CANCEL_ORDER: ["RESERVED"],
+    MARK_NO_SHOW: ["RESERVED"],
+    RECORD_COLLECTION: ["RESERVED", "CHECKED_IN", "CHECKED_OUT"],
+    RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]
+  };
+  return orderActionCodes.map((code) => {
+    const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
+    const enabled = statusAllows && (code !== "RECORD_REFUND" || hasRefundableCollection);
+    return {
+      code,
+      enabled,
+      disabledReason: enabled
+        ? null
+        : code === "RECORD_REFUND" && statusAllows
+          ? "NO_REFUNDABLE_COLLECTION"
+          : "ORDER_STATE_NOT_ALLOWED"
+    };
+  });
+}
+
+function hasRefundableCollection(facts: Array<{
+  fact_id: string;
+  fact_type: string;
+  amount_minor: number;
+  references_fact_id: string | null;
+  reverses_fact_id: string | null;
+}>): boolean {
+  const reversed = new Set(facts.filter((fact) => fact.fact_type === "REVERSAL" && fact.reverses_fact_id)
+    .map((fact) => fact.reverses_fact_id!));
+  const activeRefunded = new Map<string, number>();
+  for (const fact of facts) {
+    if (fact.fact_type !== "REFUND" || !fact.references_fact_id || reversed.has(fact.fact_id)) continue;
+    activeRefunded.set(fact.references_fact_id, (activeRefunded.get(fact.references_fact_id) ?? 0) + fact.amount_minor);
+  }
+  return facts.some((fact) => fact.fact_type === "COLLECTION"
+    && !reversed.has(fact.fact_id)
+    && (activeRefunded.get(fact.fact_id) ?? 0) < fact.amount_minor);
+}
+
+export async function getOrderView(db: DbExecutor, orderId: string, accessLevel: AccessLevel = "WRITE") {
   const context = await loadOrderContext(db, orderId);
-  const [segments, amendments, revisions, coverage, facts] = await Promise.all([
+  const [occupantRows, correctionRows, segments, amendments, revisions, coverage, facts] = await Promise.all([
+    db.selectFrom("order_occupants").selectAll().where("order_id", "=", orderId).orderBy("ordinal").execute(),
+    db.selectFrom("order_occupant_corrections")
+      .innerJoin("subjects", "subjects.id", "order_occupant_corrections.actor_subject_id")
+      .selectAll("order_occupant_corrections")
+      .select("subjects.display_name as actor_display_name")
+      .where("order_occupant_corrections.order_id", "=", orderId)
+      .orderBy("order_occupant_corrections.created_at")
+      .orderBy("order_occupant_corrections.id")
+      .execute(),
     db.selectFrom("stay_segments").selectAll().where("stay_id", "=", context.stay.id).orderBy("sequence").execute(),
-    db.selectFrom("amendments").selectAll().where("order_id", "=", orderId).orderBy("sequence").execute(),
+    db.selectFrom("amendments")
+      .leftJoin("command_executions", "command_executions.id", "amendments.command_id")
+      .leftJoin("subjects", "subjects.id", "command_executions.subject_id")
+      .selectAll("amendments")
+      .select([
+        "command_executions.subject_id as actor_subject_id",
+        "subjects.display_name as actor_display_name"
+      ])
+      .where("amendments.order_id", "=", orderId)
+      .orderBy("amendments.sequence")
+      .execute(),
     db.selectFrom("pricing_revisions").selectAll().where("order_id", "=", orderId).orderBy("revision_no").execute(),
     db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("service_date").execute(),
-    db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).orderBy("created_at").execute()
+    db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).orderBy("created_at").orderBy("fact_id").execute()
   ]);
+  const latestByOccupant = new Map<string, (typeof correctionRows)[number]>();
+  for (const correction of correctionRows) {
+    const current = latestByOccupant.get(correction.occupant_id);
+    if (!current || correction.sequence > current.sequence) latestByOccupant.set(correction.occupant_id, correction);
+  }
+  const snapshot = (correction: (typeof correctionRows)[number], prefix: "prior" | "corrected") => ({
+    fullName: correction[`${prefix}_full_name`],
+    nickname: correction[`${prefix}_nickname`],
+    phone: correction[`${prefix}_phone`],
+    documentNumber: correction[`${prefix}_document_number`]
+  });
   return {
+    accessLevel,
+    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts)),
     order: context.order,
+    occupants: occupantRows.map((occupant) => {
+      const correction = latestByOccupant.get(occupant.id);
+      return {
+        id: occupant.id,
+        orderId: occupant.order_id,
+        ordinal: occupant.ordinal,
+        role: occupant.role,
+        fullName: correction?.corrected_full_name ?? occupant.full_name,
+        nickname: correction?.corrected_nickname ?? occupant.nickname,
+        phone: correction ? correction.corrected_phone : occupant.phone,
+        documentNumber: correction ? correction.corrected_document_number : occupant.document_number,
+        createdAt: occupant.created_at instanceof Date ? occupant.created_at.toISOString() : new Date(occupant.created_at).toISOString()
+      };
+    }),
+    occupantCorrections: correctionRows.map((correction) => ({
+      id: correction.id,
+      orderId: correction.order_id,
+      occupantId: correction.occupant_id,
+      sequence: correction.sequence,
+      priorSnapshot: snapshot(correction, "prior"),
+      correctedSnapshot: snapshot(correction, "corrected"),
+      reason: { code: correction.reason_code, note: correction.reason_note },
+      actor: { subjectId: correction.actor_subject_id, displayName: correction.actor_display_name },
+      amendmentId: correction.amendment_id,
+      commandId: correction.created_by_command_id,
+      createdAt: correction.created_at instanceof Date ? correction.created_at.toISOString() : new Date(correction.created_at).toISOString()
+    })),
     stay: context.stay,
     currentSegment: context.currentSegment,
     segments,
-    amendments,
+    amendments: amendments.map((amendment) => ({
+      id: amendment.id,
+      order_id: amendment.order_id,
+      sequence: amendment.sequence,
+      amendment_type: amendment.amendment_type,
+      reason_code: amendment.reason_code,
+      reason_note: amendment.reason_note,
+      prior_version: amendment.prior_version,
+      new_version: amendment.new_version,
+      payload: amendment.payload,
+      command_id: amendment.command_id,
+      actor: amendment.actor_subject_id && amendment.actor_display_name
+        ? { subjectId: amendment.actor_subject_id, displayName: amendment.actor_display_name }
+        : null,
+      created_at: amendment.created_at
+    })),
     pricingRevisions: revisions.map((revision) => ({
       ...revision,
       policy_base_amount_minor: revision.current_contract_amount_minor - revision.manual_adjustment_minor

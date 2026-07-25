@@ -1,9 +1,26 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, Check, ChevronRight, Clock3, Copy, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { Link } from "react-router-dom";
-import { commandTypes, type CommandType, type MoneyDto } from "@qintopia/contracts";
+import {
+  commandTypes,
+  historicalRecoverableCommandTypes,
+  type CommandType,
+  type HistoricalCommandType,
+  type HistoricalRecoverableCommandType,
+  type MoneyDto
+} from "@qintopia/contracts";
 import { api, ApiError } from "./api";
 import type { ClientCommandMetadata, CommandRequest, PreviewDto, ReceiptDto } from "./types";
+
+type ExecutableCommandType = (typeof commandTypes)[number];
+
+function isExecutableCommandType(commandType: HistoricalCommandType): commandType is ExecutableCommandType {
+  return (commandTypes as readonly string[]).includes(commandType);
+}
+
+function isHistoricalRecoverableCommandType(commandType: unknown): commandType is HistoricalRecoverableCommandType {
+  return typeof commandType === "string" && (historicalRecoverableCommandTypes as readonly string[]).includes(commandType);
+}
 
 export function formatMoney(value: MoneyDto | undefined): string {
   if (!value) return "-";
@@ -111,22 +128,43 @@ interface ModalProps {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
-  size?: "default" | "wide" | "mobile-fullscreen";
+  size?: "default" | "wide" | "drawer" | "mobile-fullscreen";
   closeDisabled?: boolean;
+  modal?: boolean;
 }
 
-export function Modal({ title, onClose, children, footer, size = "default", closeDisabled = false }: ModalProps) {
+export function Modal({ title, onClose, children, footer, size = "default", closeDisabled = false, modal = true }: ModalProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (dialog && !dialog.open) dialog.showModal();
-    return () => previousFocus?.focus();
-  }, []);
+    if (modal && dialog && !dialog.open) dialog.showModal();
+    return () => {
+      if (modal) previousFocus?.focus();
+    };
+  }, [modal]);
+
+  useEffect(() => {
+    if (modal) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || closeDisabled || !dialogRef.current?.open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => document.removeEventListener("keydown", closeOnEscape, true);
+  }, [closeDisabled, modal, onClose]);
 
   function trapFocus(event: KeyboardEvent<HTMLDialogElement>) {
+    if (!modal && event.key === "Escape") {
+      event.preventDefault();
+      if (!closeDisabled) onClose();
+      return;
+    }
+    if (!modal) return;
     if (event.key !== "Tab") return;
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -156,6 +194,7 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
     <dialog
       className={`modal modal-${size}`}
       ref={dialogRef}
+      open={modal ? undefined : true}
       tabIndex={-1}
       aria-labelledby={titleId}
       onKeyDown={trapFocus}
@@ -183,6 +222,43 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export interface OccupantSummaryItem {
+  key: string;
+  roleLabel: string;
+  nickname: string;
+  fullName: string;
+}
+
+export function occupantSummaryItems(value: unknown): OccupantSummaryItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate, index) => {
+    if (!isRecord(candidate)) return [];
+    const ordinal = typeof candidate.ordinal === "number" ? candidate.ordinal : index + 1;
+    return [{
+      key: typeof candidate.id === "string" ? candidate.id : `occupant-${ordinal}-${index}`,
+      roleLabel: candidate.role === "PRIMARY" ? "主要 / 联系人" : `同行人 ${Math.max(1, ordinal - 1)}`,
+      nickname: guestNicknameLabel(candidate),
+      fullName: typeof candidate.fullName === "string" && candidate.fullName.trim() ? candidate.fullName : "-"
+    }];
+  });
+}
+
+function OccupantSummary({ value }: { value: unknown }) {
+  const occupants = occupantSummaryItems(value);
+  if (!occupants.length) return null;
+  return (
+    <ol className="occupant-summary-list">
+      {occupants.map((occupant) => (
+        <li key={occupant.key}>
+          <span>{occupant.roleLabel}</span>
+          <strong>{occupant.nickname}</strong>
+          <small>{occupant.fullName}</small>
+        </li>
+      ))}
+    </ol>
+  );
 }
 
 function moneyFrom(value: unknown): MoneyDto | undefined {
@@ -255,6 +331,7 @@ function EffectSummary({ preview }: { preview: PreviewDto }) {
   const fromUnit = isRecord(effect.fromInventoryUnit) ? effect.fromInventoryUnit : undefined;
   const toUnit = isRecord(effect.toInventoryUnit) ? effect.toInventoryUnit : undefined;
   const guest = isRecord(effect.primaryGuest) ? effect.primaryGuest : undefined;
+  const occupants = occupantSummaryItems(effect.occupants);
   const member = isRecord(effect.member) ? effect.member : undefined;
   const submittedProfile = isRecord(effect.submittedProfile) ? effect.submittedProfile : undefined;
   const memberContract = isRecord(effect.contract) ? effect.contract : undefined;
@@ -346,7 +423,7 @@ function EffectSummary({ preview }: { preview: PreviewDto }) {
       <section className="effect-section" aria-labelledby="member-stay-summary-heading">
         <h3 id="member-stay-summary-heading">请核对会员住宿</h3>
         <dl className="difference-grid">
-          {guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
+          {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
           {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
           {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
           {totalNights !== undefined ? <><dt>总住宿晚数</dt><dd>{totalNights} 晚</dd></> : null}
@@ -369,7 +446,7 @@ function EffectSummary({ preview }: { preview: PreviewDto }) {
       <section className="effect-section" aria-labelledby="effect-difference-heading">
         <h3 id="effect-difference-heading">服务端变更差异</h3>
         <dl className="difference-grid">
-          {guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
+          {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
           {member ? <><dt>会员档案动作</dt><dd>{scalar(effect.operation)}</dd><dt>会员姓名 / 身份证</dt><dd>{scalar(member.fullName)} · <code>{scalar(member.identityCardNumber)}</code></dd><dt>手机号 / 微信号</dt><dd>{scalar(member.phone)} · {scalar(member.wechat)}</dd></> : null}
           {submittedProfile && effect.profileMatch === false ? <><dt>申请资料差异</dt><dd>申请资料与现有档案不一致；本命令保留现有档案，仅关联申请记录。</dd></> : null}
           {memberContract ? <><dt>会员合同动作</dt><dd>{scalar(memberContract.operation)}</dd><dt>合同周期</dt><dd>{scalar(memberContract.validFrom)} 至 {scalar(memberContract.validUntil)}</dd></> : null}
@@ -429,10 +506,28 @@ function copyText(value: string) {
   void navigator.clipboard?.writeText(value);
 }
 
-function ReceiptPanel({ receipt, onNavigateToResource, businessCommand }: { receipt: ReceiptDto; onNavigateToResource?: () => void; businessCommand?: CommandType }) {
+export function lodgingReceiptCopy(committed: boolean, memberStay: boolean): { heading: string; description: string } {
+  if (memberStay) {
+    return committed
+      ? { heading: "会员住宿订单已创建", description: "住宿日期、库存和会员权益覆盖已按核对结果记录。" }
+      : { heading: "会员住宿订单未创建", description: "本次操作没有写入住宿订单或会员权益变动。" };
+  }
+  return committed
+    ? { heading: "住宿订单已创建", description: "住宿日期、库存和住宿人名单已按核对结果记录。" }
+    : { heading: "住宿订单未创建", description: "本次操作没有写入住宿订单。" };
+}
+
+function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false }: {
+  receipt: ReceiptDto;
+  onNavigateToResource?: () => void;
+  businessCommand?: CommandType;
+  commandType?: CommandType;
+  memberStay?: boolean;
+}) {
   const result = isRecord(receipt.result) ? receipt.result : undefined;
   const orderId = result && typeof result.orderId === "string" ? result.orderId : undefined;
   const primaryGuest = result && isRecord(result.primaryGuest) ? result.primaryGuest : undefined;
+  const occupants = occupantSummaryItems(result?.occupants);
   const hasBookingChannel = Boolean(result && Object.hasOwn(result, "bookingChannelCode"));
   const bookingChannelCode = result && typeof result.bookingChannelCode === "string" ? result.bookingChannelCode : null;
   const channelOrderReference = result && typeof result.channelOrderReference === "string" ? result.channelOrderReference : null;
@@ -482,16 +577,18 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand }: { rece
       {receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
     </section>;
   }
-  if (businessCommand === "CREATE_ORDER") {
+  if (memberStay || commandType === "CREATE_ORDER") {
+    const copy = lodgingReceiptCopy(committed, memberStay);
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
       <div className="receipt-title-row">
         <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
         <div>
-          <h3 id="receipt-heading">{committed ? "会员住宿订单已创建" : "会员住宿订单未创建"}</h3>
-          <p>{committed ? "住宿日期、库存和会员权益覆盖已按核对结果记录。" : "本次操作没有写入住宿订单或会员权益变动。"}</p>
+          <h3 id="receipt-heading">{copy.heading}</h3>
+          <p>{copy.description}</p>
         </div>
       </div>
       {receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+      {occupants.length && committed ? <div className="receipt-occupants"><strong>{occupants.length} 位住宿人</strong><OccupantSummary value={result?.occupants} /></div> : null}
       {orderId && committed ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
     </section>;
   }
@@ -511,7 +608,7 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand }: { rece
         <dt>Correlation ID</dt><dd><code>{receipt.correlationId || "-"}</code></dd>
         <dt>资源引用</dt><dd className="code-list">{receipt.resourceRefs.length ? receipt.resourceRefs.map((ref) => <code key={ref}>{ref}</code>) : "-"}</dd>
         <dt>事实引用</dt><dd className="code-list">{receipt.factRefs.length ? receipt.factRefs.map((ref) => <code key={ref}>{ref}</code>) : "-"}</dd>
-        {primaryGuest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(primaryGuest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(primaryGuest.fullName)}</dd></> : null}
+        {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={result?.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : primaryGuest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(primaryGuest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(primaryGuest.fullName)}</dd></> : null}
         {hasBookingChannel ? <><dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd><dt>渠道订单号</dt><dd><code>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</code></dd></> : null}
         {hasTransactionReference && result ? <><dt>外部交易单号</dt><dd><code>{receiptTransactionReferenceLabel(result)}</code></dd></> : null}
         {memberId ? <><dt>Member ID</dt><dd><code>{memberId}</code></dd><dt>Member Contract ID</dt><dd><code>{memberContractId ?? "未选择"}</code></dd><dt>外部申请引用</dt><dd><code>{memberExternalReferenceId ?? "未关联"}</code></dd></> : null}
@@ -553,7 +650,7 @@ export interface PersistedCommandRecovery {
   subjectId: string;
   scopeId: string;
   propertyId: string;
-  commandType: CommandType;
+  commandType: HistoricalCommandType;
   confirmationKey: string;
   targetRefs: string[];
   presentation?: "MEMBER_STAY";
@@ -584,6 +681,11 @@ const COMMAND_RECOVERY_STORAGE_PREFIX = "qintopia.command-recovery.v1";
 const persistableCommandTypes = new Set<CommandType>(commandTypes.filter((commandType) => (
   commandType !== "ISSUE_TOKEN" && commandType !== "ROTATE_TOKEN" && commandType !== "REVOKE_TOKEN"
 )));
+const readableRecoveryCommandTypes = new Set<HistoricalCommandType>([
+  ...persistableCommandTypes,
+  "PLACE_INTERNAL_USE",
+  "RELEASE_INTERNAL_USE"
+]);
 const recoveryReferenceKeys = [
   "orderId",
   "memberId",
@@ -605,6 +707,10 @@ function recoveryTargetRefs(input: Record<string, unknown>): string[] {
 
 function isPersistableCommandType(value: unknown): value is CommandType {
   return typeof value === "string" && persistableCommandTypes.has(value as CommandType);
+}
+
+function isReadableRecoveryCommandType(value: unknown): value is HistoricalCommandType {
+  return typeof value === "string" && readableRecoveryCommandTypes.has(value as HistoricalCommandType);
 }
 
 export function isTerminalCommandRecovery(value: PersistedCommandRecoveryState): value is "EXECUTED" | "NOT_EXECUTED" {
@@ -658,7 +764,7 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || value.scopeId !== scopeId
     || typeof value.propertyId !== "string"
     || !value.propertyId
-    || !isPersistableCommandType(value.commandType)
+    || !isReadableRecoveryCommandType(value.commandType)
     || typeof value.confirmationKey !== "string"
     || !value.confirmationKey
     || !Array.isArray(value.targetRefs)
@@ -915,12 +1021,13 @@ export function CommandDialog({
   const [receipt, setReceipt] = useState<ReceiptDto | undefined>(initialReceipt);
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
+  const executableCommandType = isExecutableCommandType(request.commandType) ? request.commandType : undefined;
   const memberProfile = request.commandType === "CREATE_MEMBER";
-  const membershipBusiness = membershipBusinessCommands.has(request.commandType);
+  const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const businessFacing = memberProfile || membershipBusiness || memberLodging;
-  const [reasonCode, setReasonCode] = useState(memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : memberLodging ? "CREATE_MEMBER_STAY" : "OPERATOR_CONFIRMED");
-  const [reasonNote, setReasonNote] = useState(memberProfile ? "创建会员档案" : membershipBusiness ? membershipCommandLabel(request.commandType) : memberLodging ? "创建会员住宿订单" : "");
+  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : memberLodging ? "CREATE_MEMBER_STAY" : "OPERATOR_CONFIRMED"));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : memberLodging ? "创建会员住宿订单" : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
   const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && !initialReceipt));
   const [failedNotExecuted, setFailedNotExecuted] = useState(false);
@@ -950,6 +1057,10 @@ export function CommandDialog({
 
   async function loadPreview(metadata = previewMetadata) {
     if (writeBlocked) return;
+    if (!isExecutableCommandType(request.commandType)) {
+      setError(new Error("该历史操作只支持查询原结果"));
+      return;
+    }
     setBusy(true);
     setError(undefined);
     setFailedNotExecuted(false);
@@ -990,6 +1101,10 @@ export function CommandDialog({
 
   async function confirm() {
     if (!preview || !reasonCode.trim() || !reasonNote.trim() || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
+    if (!isExecutableCommandType(request.commandType)) {
+      setError(new Error("该历史操作不能重新确认"));
+      return;
+    }
     const propertyId = request.input.propertyId;
     if (typeof propertyId !== "string" || !propertyId) {
       setError(new Error("Command property scope is missing"));
@@ -1043,6 +1158,10 @@ export function CommandDialog({
 
   async function recover() {
     if (!confirmationKey) return;
+    if (!isHistoricalRecoverableCommandType(request.commandType)) {
+      setError(new Error("该操作无法查询历史结果"));
+      return;
+    }
     const propertyId = request.input.propertyId;
     if (typeof propertyId !== "string" || !propertyId) {
       setError(new Error("Command property scope is missing"));
@@ -1088,7 +1207,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness ? `确认${membershipCommandLabel(request.commandType)}` : memberLodging ? "确认创建会员住宿订单" : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : `确认提交：${request.title}`}
           </button> : null}
         </>
       }
@@ -1140,7 +1259,13 @@ export function CommandDialog({
           <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
         </div>
       ) : null}
-      {receipt ? <ReceiptPanel receipt={receipt} onNavigateToResource={onClose} {...(businessFacing ? { businessCommand: request.commandType } : {})} /> : null}
+      {receipt ? <ReceiptPanel
+        receipt={receipt}
+        onNavigateToResource={onClose}
+        memberStay={memberLodging}
+        {...(executableCommandType ? { commandType: executableCommandType } : {})}
+        {...(businessFacing && executableCommandType ? { businessCommand: executableCommandType } : {})}
+      /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
           <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>

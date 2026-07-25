@@ -21,9 +21,15 @@ async function confirmCommand(page: Page, reason: string, expectedFactTexts: str
   await confirmButton.click();
   const receipt = page.getByTestId("command-receipt");
   await expect(receipt).toBeVisible();
-  await expect(receipt).toContainText("EXECUTED");
-  await expect(receipt).toContainText("业务写入已提交");
-  for (const text of expectedFactTexts) await expect(receipt).toContainText(text);
+  const businessOrderReceipt = receipt.getByRole("heading", { name: /^(会员)?住宿订单已创建$/ });
+  if (await businessOrderReceipt.count()) {
+    await expect(businessOrderReceipt).toBeVisible();
+    await expect(receipt).not.toContainText(/EXECUTED|Receipt|业务写入已提交/);
+  } else {
+    await expect(receipt).toContainText("EXECUTED");
+    await expect(receipt).toContainText("业务写入已提交");
+    for (const text of expectedFactTexts) await expect(receipt).toContainText(text);
+  }
 }
 
 async function closeReceipt(page: Page) {
@@ -44,13 +50,16 @@ async function selectRoomStatusRange(
   await page.getByTestId("departure-date").fill(departureDate);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   if ((page.viewportSize()?.width ?? 0) < 576) {
-    const mobileCreate = page.getByRole("button", { name: "新建住宿或库存 Block", exact: true });
+    const mobileCreate = page.getByRole("button", { name: "新建住宿或锁房", exact: true });
     await expect(mobileCreate).toBeVisible();
     await mobileCreate.click();
-    await expect(page.getByRole("dialog", { name: "新建住宿或库存 Block" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "新建住宿或锁房" })).toBeVisible();
   }
   const unitSelect = page.getByTestId("room-status-unit-select");
-  const unitId = `unit_room_${unitCode.toLowerCase()}`;
+  const generatedCode = /^([DE])(0[1-5])$/.exec(unitCode);
+  const unitId = generatedCode
+    ? `unit_room_${generatedCode[1]!.toLowerCase()}_gen_${generatedCode[2]}`
+    : `unit_room_${unitCode.toLowerCase()}`;
   await unitSelect.selectOption(unitId);
   await expect(unitSelect).toHaveValue(unitId);
   await page.getByLabel("入住日期", { exact: true }).fill(arrivalDate);
@@ -74,6 +83,7 @@ async function chooseDatesAndUnit(
 }
 
 async function createOrder(page: Page, options: {
+  stayMode: "MEMBER" | "NORMAL" | "FREE";
   unitCode: string;
   guest: string;
   nickname?: string;
@@ -86,21 +96,30 @@ async function createOrder(page: Page, options: {
   freeStayReason?: string;
   bookingChannelCode?: "YOUMUDAO" | "CTRIP" | "MEITUAN" | "WECOM";
   channelOrderReference?: string;
+  additionalGuests?: Array<{
+    fullName: string;
+    nickname: string;
+    phone?: string;
+    documentNumber?: string;
+  }>;
 }) {
   const memberIdentityCardNumber = options.memberIdentityCardNumber
     ?? (options.transientMember ? "DEMO-ID-310000199001010001" : undefined);
+  if (options.stayMode === "MEMBER") expect(memberIdentityCardNumber).toBeTruthy();
+  else expect(memberIdentityCardNumber).toBeUndefined();
   await chooseDatesAndUnit(
     page,
     options.unitCode,
     options.departureDate,
     options.arrivalDate,
-    memberIdentityCardNumber ? "NORMAL" : "FREE"
+    options.stayMode === "FREE" ? "FREE" : "NORMAL"
   );
-  if (memberIdentityCardNumber) {
+  if (options.stayMode === "MEMBER") {
+    const memberIdentity = memberIdentityCardNumber!;
     await page.getByTestId("use-member-entitlement").check();
-    await page.getByTestId("member-search").fill(memberIdentityCardNumber);
+    await page.getByTestId("member-search").fill(memberIdentity);
     const memberSelect = page.getByTestId("member-profile-select");
-    const memberOption = memberSelect.locator("option").filter({ hasText: memberIdentityCardNumber });
+    const memberOption = memberSelect.locator("option").filter({ hasText: memberIdentity });
     await expect(memberOption).toHaveCount(1);
     const selectedMemberId = await memberOption.getAttribute("value");
     expect(selectedMemberId).toBeTruthy();
@@ -115,25 +134,54 @@ async function createOrder(page: Page, options: {
     await expect(quoteResult.locator(".quote-amounts")).toContainText(options.expectedQuoteAmount);
   }
   await page.getByTestId("primary-guest-name").fill(options.guest);
-  if (!memberIdentityCardNumber) {
+  if (options.stayMode === "FREE") {
     await page.getByTestId("free-stay-reason").fill(options.freeStayReason ?? `Automated FREE stay fixture: ${options.guest}`);
   }
-  const bookingChannelCode = options.bookingChannelCode ?? "YOUMUDAO";
-  const channelSelect = page.getByTestId("booking-channel-code");
-  await expect(channelSelect).toHaveValue("");
-  await expect(page.getByTestId("create-order")).toBeDisabled();
-  await channelSelect.selectOption(bookingChannelCode);
-  if (bookingChannelCode === "WECOM") {
-    await expect(page.getByTestId("channel-order-reference")).toHaveCount(0);
+  const expectedFacts = [options.nickname ?? options.guest];
+  if (options.stayMode === "NORMAL") {
+    const bookingChannelCode = options.bookingChannelCode ?? "YOUMUDAO";
+    const channelSelect = page.getByTestId("booking-channel-code");
+    await expect(channelSelect).toHaveValue("");
+    await expect(page.getByTestId("create-order")).toBeDisabled();
+    await channelSelect.selectOption(bookingChannelCode);
+    const channelLabel = { YOUMUDAO: "游牧岛", CTRIP: "携程", MEITUAN: "美团", WECOM: "企业微信" }[bookingChannelCode];
+    expectedFacts.push(channelLabel);
+    if (bookingChannelCode === "WECOM") {
+      await expect(page.getByTestId("channel-order-reference")).toHaveCount(0);
+      expectedFacts.push("不适用");
+    } else {
+      const channelOrderReference = options.channelOrderReference ?? `TEST-E2E-ORDER-${options.guest.replaceAll(" ", "-")}`;
+      await page.getByTestId("channel-order-reference").fill(channelOrderReference);
+      expectedFacts.push(channelOrderReference);
+    }
   } else {
-    await page.getByTestId("channel-order-reference").fill(options.channelOrderReference ?? `TEST-E2E-ORDER-${options.guest.replaceAll(" ", "-")}`);
+    await expect(page.getByTestId("booking-channel-code")).toHaveCount(0);
   }
   const nickname = options.nickname ?? options.guest;
-  await expect(page.getByTestId("create-order")).toBeDisabled();
+  if (options.stayMode !== "MEMBER") await expect(page.getByTestId("create-order")).toBeDisabled();
   await page.getByTestId("primary-guest-nickname").fill(nickname);
+  await expect(page.getByTestId("primary-guest-name")).toHaveAttribute("maxlength", "200");
+  for (const [index, guest] of (options.additionalGuests ?? []).entries()) {
+    await page.getByTestId("add-additional-guest").click();
+    await expect(page.getByTestId(`additional-guest-${index}-name`)).toHaveAttribute("maxlength", "200");
+    await page.getByTestId(`additional-guest-${index}-nickname`).fill(guest.nickname);
+    await page.getByTestId(`additional-guest-${index}-name`).fill(guest.fullName);
+    if (guest.phone) await page.getByTestId(`additional-guest-${index}-phone`).fill(guest.phone);
+    if (guest.documentNumber) await page.getByTestId(`additional-guest-${index}-document`).fill(guest.documentNumber);
+    expectedFacts.push(guest.nickname);
+  }
   await page.getByTestId("create-order").click();
-  const channelLabel = { YOUMUDAO: "游牧岛", CTRIP: "携程", MEITUAN: "美团", WECOM: "企业微信" }[bookingChannelCode];
-  await confirmCommand(page, `Create ${options.guest}`, [nickname, channelLabel, bookingChannelCode === "WECOM" ? "不适用" : options.channelOrderReference ?? `TEST-E2E-ORDER-${options.guest.replaceAll(" ", "-")}`]);
+  if (options.stayMode === "MEMBER") {
+    const effect = page.getByTestId("command-effect");
+    await expect(effect).toBeVisible({ timeout: 15_000 });
+    for (const text of expectedFacts) await expect(effect).toContainText(text);
+    const confirmButton = page.getByTestId("confirm-command");
+    await expect(confirmButton).toBeEnabled({ timeout: 15_000 });
+    await confirmButton.click();
+    await expect(page.getByTestId("command-receipt")).toContainText("会员住宿订单已创建");
+    return;
+  }
+  await confirmCommand(page, `Create ${options.guest}`, expectedFacts);
 }
 
 async function openFactFormAndSubmit(
@@ -417,25 +465,25 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await login(page);
   await assertNoA11yViolations(page);
   await createOrder(page, {
+    stayMode: "MEMBER",
     unitCode: "D01",
     guest: "E2E Member Guest",
     nickname: "风铃",
     departureDate: "2026-07-24",
     transientMember: true,
     expectedCoverageNights: 2,
-    expectedQuoteAmount: "¥130",
-    bookingChannelCode: "CTRIP",
-    channelOrderReference: "TEST-E2E-CTRIP-001"
+    expectedQuoteAmount: "¥130"
   });
   const quoteReceipt = page.getByTestId("command-receipt");
-  await expect(quoteReceipt).toContainText("order_");
-  await expect(quoteReceipt).toContainText("风铃");
+  await expect(quoteReceipt).toContainText("会员住宿订单已创建");
+  await expect(quoteReceipt).not.toContainText("order_");
   await page.getByRole("link", { name: /查看订单/ }).click();
   await expect(page).toHaveURL(/\/orders\/order_[^/?#]+$/, { timeout: 15_000 });
   await expect(page.getByText("正在载入订单详情", { exact: true })).toBeHidden({ timeout: 15_000 });
   await expect(page.getByRole("heading", { name: "风铃" })).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("携程", { exact: true })).toBeVisible();
-  await expect(page.getByText("TEST-E2E-CTRIP-001", { exact: true })).toBeVisible();
+  const stayRegion = page.getByRole("region", { name: "Stay" });
+  await expect(stayRegion.getByText("住宿来源", { exact: true })).toBeVisible();
+  await expect(stayRegion.getByText("会员权益", { exact: true })).toBeVisible();
   await expect(page.getByTestId("order-amounts")).toContainText("¥130.00");
   const coverageRegion = page.getByRole("region", { name: "会员覆盖" });
   await expect(coverageRegion.getByRole("columnheader", { name: "Coverage ID" })).toBeVisible();
@@ -528,10 +576,79 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await page.screenshot({ path: testInfo.outputPath("desktop-order.png"), fullPage: true });
 });
 
+test("desktop whole-room order records every occupant and room status exposes nicknames only", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop-only whole-room occupant journey");
+  const createOrderBodies: Record<string, unknown>[] = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    try {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      if (new URL(request.url()).pathname === "/api/v1/command-previews" && body.commandType === "CREATE_ORDER") {
+        createOrderBodies.push(body);
+      }
+    } catch {
+      // Request parsing is asserted by the endpoint; this observer captures the successful browser path.
+    }
+  });
+  await login(page);
+  await createOrder(page, {
+    stayMode: "NORMAL",
+    unitCode: "A03",
+    guest: "大床房主要入住人",
+    nickname: "山峰",
+    arrivalDate: "2026-10-01",
+    departureDate: "2026-10-03",
+    bookingChannelCode: "WECOM",
+    additionalGuests: [{
+      fullName: "大床房同行真实姓名",
+      nickname: "小满",
+      phone: "13800138000",
+      documentNumber: "E2E-DOCUMENT-SECRET"
+    }]
+  });
+  await expect.poll(() => createOrderBodies.length).toBe(1);
+  expect((createOrderBodies[0]!.input as Record<string, unknown>).additionalGuests).toEqual([{
+    fullName: "大床房同行真实姓名",
+    nickname: "小满",
+    phone: "13800138000",
+    documentNumber: "E2E-DOCUMENT-SECRET"
+  }]);
+
+  await page.getByRole("link", { name: /查看订单/ }).click();
+  await expect(page).toHaveURL(/\/orders\/order_[^/?#]+$/, { timeout: 15_000 });
+  await expect(page.getByTestId("order-occupant")).toHaveCount(2);
+  const occupants = page.getByRole("region", { name: "住宿人", exact: true });
+  await expect(occupants).toContainText("山峰");
+  await expect(occupants).toContainText("小满");
+  await expect(occupants).toContainText("大床房主要入住人");
+  await expect(occupants).toContainText("大床房同行真实姓名");
+  await expect(occupants).toContainText("13800138000");
+  await expect(occupants).toContainText("E2E-DOCUMENT-SECRET");
+
+  await page.getByRole("link", { name: "房态", exact: true }).click();
+  await page.getByTestId("arrival-date").fill("2026-10-01");
+  await page.getByTestId("departure-date").fill("2026-10-04");
+  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
+  const cell = page.locator('[data-room-status-cell="true"][data-unit-id="unit_room_a03"][data-service-date="2026-10-01"]');
+  await expect(cell).toContainText("山峰、小满");
+  await expect(cell).toContainText("2人");
+  await expect(page.locator('[data-room-status-row="unit_room_a03"] .room-status-interval').filter({ hasText: /山峰|小满/ })).toHaveCount(0);
+  const accessibleText = `${await cell.getAttribute("aria-label") ?? ""} ${await cell.getAttribute("title") ?? ""}`;
+  expect(accessibleText).toContain("山峰");
+  expect(accessibleText).toContain("小满");
+  expect(accessibleText).not.toContain("大床房主要入住人");
+  expect(accessibleText).not.toContain("大床房同行真实姓名");
+  expect(accessibleText).not.toContain("13800138000");
+  expect(accessibleText).not.toContain("E2E-DOCUMENT-SECRET");
+  await assertNoPageOverflow(page);
+  await page.screenshot({ path: testInfo.outputPath("desktop-whole-room-occupants.png"), fullPage: true });
+
+});
+
 test("mobile today fulfillment journey", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name !== "mobile", "mobile-only journey");
   await login(page);
-  await createOrder(page, { unitCode: "102", guest: "Mobile Guest", departureDate: "2026-07-22", bookingChannelCode: "WECOM" });
+  await createOrder(page, { stayMode: "NORMAL", unitCode: "102", guest: "Mobile Guest", departureDate: "2026-07-22", bookingChannelCode: "WECOM" });
   await closeReceipt(page);
   await page.getByRole("link", { name: "移动履约" }).click();
   await page.getByLabel("营业日期").fill("2026-07-21");
@@ -554,7 +671,7 @@ test("desktop stay changes and exception commands remain operable through Web", 
   test.skip(testInfo.project.name !== "desktop", "desktop-only command coverage");
   await login(page);
 
-  await createOrder(page, { unitCode: "101", guest: "E2E Change Guest", arrivalDate: "2026-09-10", departureDate: "2026-09-12", bookingChannelCode: "MEITUAN", channelOrderReference: "TEST-E2E-MEITUAN-001" });
+  await createOrder(page, { stayMode: "NORMAL", unitCode: "101", guest: "E2E Change Guest", arrivalDate: "2026-09-10", departureDate: "2026-09-12", bookingChannelCode: "MEITUAN", channelOrderReference: "TEST-E2E-MEITUAN-001" });
   await page.getByRole("link", { name: /查看订单/ }).click();
   await page.getByRole("button", { name: "续住", exact: true }).click();
   await page.getByTestId("new-departure-date").fill("2026-09-13");
@@ -570,7 +687,7 @@ test("desktop stay changes and exception commands remain operable through Web", 
   await expect(page.locator(".order-unit")).toContainText("102 · 102 · 四人间（公卫）");
 
   await page.goto("/");
-  await createOrder(page, { unitCode: "101", guest: "E2E Cancel Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "YOUMUDAO", channelOrderReference: "TEST-E2E-YOUMUDAO-001" });
+  await createOrder(page, { stayMode: "NORMAL", unitCode: "101", guest: "E2E Cancel Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "YOUMUDAO", channelOrderReference: "TEST-E2E-YOUMUDAO-001" });
   await page.getByRole("link", { name: /查看订单/ }).click();
   await page.getByRole("button", { name: "取消订单" }).click();
   await confirmCommand(page, "Cancel and release inventory");
@@ -578,7 +695,7 @@ test("desktop stay changes and exception commands remain operable through Web", 
   await expect(page.locator(".order-title-row").getByText("CANCELLED", { exact: true })).toBeVisible();
 
   await page.goto("/");
-  await createOrder(page, { unitCode: "102", guest: "E2E No Show Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "WECOM" });
+  await createOrder(page, { stayMode: "NORMAL", unitCode: "102", guest: "E2E No Show Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "WECOM" });
   await page.getByRole("link", { name: /查看订单/ }).click();
   await page.getByRole("button", { name: "标记未到" }).click();
   await confirmCommand(page, "Mark no-show and release inventory");
@@ -862,6 +979,7 @@ test("desktop order command recovery survives close refresh and navigation witho
   test.skip(testInfo.project.name !== "desktop", "desktop-only order command recovery");
   await login(page);
   await createOrder(page, {
+    stayMode: "NORMAL",
     unitCode: "104",
     guest: "E2E Recovery Guest",
     arrivalDate: "2028-02-01",
@@ -1341,7 +1459,7 @@ test("maintenance lock can be listed and released", async ({ page }, testInfo: T
   await closeReceipt(page);
 
   const roomRow = page.locator(`[data-room-status-row="${unitId}"]`);
-  const maintenanceInterval = roomRow.getByRole("button", { name: /Maintenance lock，维修锁房/ }).first();
+  const maintenanceInterval = roomRow.getByRole("button", { name: /维修\/锁房，/ }).first();
   await expect(maintenanceInterval).toBeVisible();
   await maintenanceInterval.click();
   const sourceSection = page.locator("section.room-status-context-section").filter({

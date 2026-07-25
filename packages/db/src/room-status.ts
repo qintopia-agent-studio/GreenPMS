@@ -18,6 +18,7 @@ import {
   type RoomStatusIntervalDto,
   type RoomStatusOperationalTaskDto,
   type RoomStatusOperationalTaskKind,
+  type RoomStatusOccupantDto,
   type RoomStatusReferenceDto,
   type RoomStatusSourceKind,
   type RoomStatusStatus,
@@ -42,6 +43,7 @@ interface ProjectionEvent {
   status: RoomStatusStatus;
   label: string;
   primaryOccupantLabel: string | null;
+  occupants?: RoomStatusOccupantDto[];
   reason: string | null;
   blocking: boolean;
   current: boolean;
@@ -110,9 +112,37 @@ function primaryOccupantLabel(snapshot: unknown): string | null {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
   const guest = snapshot as Record<string, unknown>;
   const nickname = guest.nickname;
-  if (typeof nickname === "string" && nickname.trim()) return nickname.trim();
-  const fullName = guest.fullName;
-  return typeof fullName === "string" && fullName.trim() ? fullName.trim() : null;
+  return typeof nickname === "string" && nickname.trim() ? nickname.trim() : null;
+}
+
+async function loadProjectedOccupants(
+  trx: RoomStatusTransaction,
+  orderIds: readonly string[]
+): Promise<Map<string, RoomStatusOccupantDto[]>> {
+  if (orderIds.length === 0) return new Map();
+  const [rows, corrections] = await Promise.all([
+    trx.selectFrom("order_occupants")
+      .select(["id", "order_id", "nickname", "ordinal"])
+      .where("order_id", "in", [...orderIds])
+      .orderBy("order_id")
+      .orderBy("ordinal")
+      .execute(),
+    trx.selectFrom("order_occupant_corrections")
+      .select(["occupant_id", "corrected_nickname", "sequence"])
+      .where("order_id", "in", [...orderIds])
+      .orderBy("occupant_id")
+      .orderBy("sequence")
+      .execute()
+  ]);
+  const latestNickname = new Map<string, string>();
+  for (const correction of corrections) latestNickname.set(correction.occupant_id, correction.corrected_nickname);
+  const byOrder = new Map<string, RoomStatusOccupantDto[]>();
+  for (const row of rows) {
+    const occupants = byOrder.get(row.order_id) ?? [];
+    occupants.push({ occupantId: row.id, nickname: latestNickname.get(row.id) ?? row.nickname });
+    byOrder.set(row.order_id, occupants);
+  }
+  return byOrder;
 }
 
 function validatePageValue(value: number | undefined, fallback: number, field: string, maximum?: number): number {
@@ -190,7 +220,6 @@ function createActions(unit: RoomStatusUnitDto, accessLevel: AccessLevel): RoomS
   return [
     action("CREATE_ORDER", target),
     action("CREATE_FREE_STAY", target),
-    action("PLACE_INTERNAL_USE", target),
     action("LOCK_MAINTENANCE", target)
   ];
 }
@@ -203,13 +232,13 @@ function eventActions(event: ProjectionEvent, accessLevel: AccessLevel): RoomSta
   }
   if (accessLevel !== "WRITE" || !event.current || !event.targetReference) return [];
   if (event.sourceKind === "MAINTENANCE") return [action("RELEASE_MAINTENANCE", event.targetReference, true)];
-  if (event.sourceKind === "INTERNAL_USE") return [action("RELEASE_INTERNAL_USE", event.targetReference, true)];
   if (event.sourceKind === "CLEANING") return [action("COMPLETE_CLEANING", event.targetReference)];
   return [];
 }
 
 function intervalActions(event: ProjectionEvent, accessLevel: AccessLevel, startDate: string, endDate: string): RoomStatusActionDto[] {
   return eventActions(event, accessLevel).map((candidate) => candidate.requiresFullInterval
+    && candidate.code !== "RELEASE_MAINTENANCE"
     && (startDate !== event.sourceStartDate || endDate !== event.sourceEndDate)
     ? {
         ...candidate,
@@ -302,6 +331,8 @@ function operationalTaskFromSeed(
     sourceKind: event.sourceKind,
     label: event.label,
     primaryOccupantLabel: event.primaryOccupantLabel,
+    occupantCount: event.occupants?.length ?? 0,
+    occupants: event.occupants ?? [],
     reason: event.reason,
     claimIds: event.claimId ? [event.claimId] : [],
     references: uniqueReferences(event.references),
@@ -465,6 +496,8 @@ function buildIntervals(
       sourceKind: builder.event.sourceKind,
       label: builder.event.label,
       primaryOccupantLabel: builder.event.primaryOccupantLabel,
+      occupantCount: builder.event.occupants?.length ?? 0,
+      occupants: builder.event.occupants ?? [],
       reason: builder.event.reason,
       claimIds: [...new Set(builder.claimIds)],
       references: uniqueReferences(builder.references),
@@ -527,7 +560,9 @@ function buildBedOccupancies(
     for (const serviceDate of dates) {
       const dayEvents = eventsByRoomAndDate.get(`${room.id}:${serviceDate}`) ?? [];
       const childEvents = dayEvents.filter((event) => childIds.has(event.actualInventoryUnitId));
-      const hasAmbiguousUnknownFact = dayEvents.some((event) => event.blocking && event.status === "UNKNOWN");
+      const hasAmbiguousUnknownFact = dayEvents.some((event) => event.blocking
+        && event.status === "UNKNOWN"
+        && event.sourceKind !== "UNIT_UNSELLABLE");
       const parentLodgingEvents = dayEvents.filter((event) => event.actualInventoryUnitId === room.id
         && event.blocking
         && (event.sourceKind === "ORDER" || event.sourceKind === "FREE_STAY")
@@ -559,14 +594,16 @@ function buildBedOccupancies(
       let invalidReference = false;
       const occupants = [...eventsByBed.entries()].map(([inventoryUnitId, [event]]) => {
         const unit = unitsById.get(inventoryUnitId)!;
+        const projectedOccupant = event!.occupants?.[0];
         const sourceReference = event!.references.find(
           (item): item is RoomStatusReferenceDto & { type: "ORDER" } => item.type === "ORDER"
         );
-        if (!sourceReference) invalidReference = true;
-        return sourceReference ? {
+        if (!sourceReference || !projectedOccupant || event!.occupants?.length !== 1) invalidReference = true;
+        return sourceReference && projectedOccupant ? {
+          occupantId: projectedOccupant.occupantId,
           inventoryUnitId,
           inventoryUnitCode: unit.code,
-          primaryOccupantLabel: event!.primaryOccupantLabel,
+          primaryOccupantLabel: projectedOccupant.nickname,
           sourceReference
         } : null;
       }).filter((occupant): occupant is NonNullable<typeof occupant> => occupant !== null)
@@ -599,7 +636,7 @@ function dayStatus(intervals: RoomStatusIntervalDto[], unitActive: boolean): Roo
   if (!unitActive) return "UNAVAILABLE";
   const current = intervals.filter((interval) => interval.blocking || interval.sourceKind === "CLEANING");
   if (current.some((interval) => interval.status === "UNKNOWN")) return "UNKNOWN";
-  const priority: RoomStatusStatus[] = ["UNAVAILABLE", "IN_HOUSE", "RESERVED", "MAINTENANCE", "INTERNAL_USE", "CLEANING"];
+  const priority: RoomStatusStatus[] = ["UNAVAILABLE", "IN_HOUSE", "RESERVED", "MAINTENANCE", "CLEANING"];
   return priority.find((status) => current.some((interval) => interval.status === status)) ?? "AVAILABLE";
 }
 
@@ -834,6 +871,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .orderBy("order.id")
       .orderBy("segment.sequence")
       .execute();
+    const operationalOccupantsByOrder = await loadProjectedOccupants(trx, operationalOrderIds);
 
     const operationalOrderGroups = new Map<string, typeof operationalOrderRows>();
     for (const row of operationalOrderRows) {
@@ -853,12 +891,12 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       if (order.order_status === "RESERVED" && order.order_arrival_date === businessDate) taskKind = "ARRIVAL";
       else if (order.order_status === "RESERVED" && order.order_arrival_date < businessDate) {
         taskKind = "EXCEPTION";
-        exceptionReason = `计划到店日 ${order.order_arrival_date} 已早于营业日 ${businessDate}，订单仍处于 RESERVED`;
+        exceptionReason = `计划到店日 ${order.order_arrival_date} 已早于营业日 ${businessDate}，订单仍处于已预订`;
       }
       else if (order.order_status === "CHECKED_IN" && order.order_departure_date === businessDate) taskKind = "DEPARTURE";
       else if (order.order_status === "CHECKED_IN" && order.order_departure_date < businessDate) {
         taskKind = "EXCEPTION";
-        exceptionReason = `计划退房日 ${order.order_departure_date} 已早于营业日 ${businessDate}，订单仍处于 CHECKED_IN`;
+        exceptionReason = `计划退房日 ${order.order_departure_date} 已早于营业日 ${businessDate}，订单仍处于在住`;
       }
       else if (order.order_status === "CHECKED_IN" && order.order_arrival_date <= businessDate && businessDate < order.order_departure_date) taskKind = "IN_HOUSE";
       if (!taskKind) continue;
@@ -866,7 +904,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         || order.order_status === "CHECKED_IN" && order.stay_status === "IN_HOUSE";
       if (!lifecycleConsistent) {
         taskKind = "EXCEPTION";
-        exceptionReason = `订单状态 ${order.order_status} 与 Stay 状态 ${order.stay_status} 不一致`;
+        exceptionReason = "订单状态与住宿状态不一致";
         inconsistentOperationalLifecycle = true;
       }
       const segment = [...rows].reverse().find((row) => row.segment_arrival_date <= businessDate && businessDate < row.segment_departure_date)
@@ -878,7 +916,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       const missingCurrentClaim = dateCoveredByOrder && !claimId;
       if (missingCurrentClaim) {
         taskKind = "EXCEPTION";
-        exceptionReason = `营业日 ${businessDate} 的住宿订单库存 Claim 缺失`;
+        exceptionReason = `营业日 ${businessDate} 的住宿订单占用记录缺失`;
         missingOperationalClaim = true;
       }
       blocking = inHouseAtOrPastDeparture || dateCoveredByOrder;
@@ -888,6 +926,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       const taskReason = exceptionReason && freeStayReason
         ? `${exceptionReason}；免费入住原因：${freeStayReason}`
         : exceptionReason ?? freeStayReason;
+      const projectedOccupants = operationalOccupantsByOrder.get(order.order_id) ?? [];
       const taskEvent: ProjectionEvent = {
         actualInventoryUnitId: segment.inventory_unit_id,
         roomId: segment.parent_room_id ?? segment.inventory_unit_id,
@@ -898,7 +937,10 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         sourceKind,
         status: missingCurrentClaim || !lifecycleConsistent ? "UNKNOWN" : order.order_status === "RESERVED" ? "RESERVED" : "IN_HOUSE",
         label: `${sourceKind === "FREE_STAY" ? "免费入住" : "订单"} ${order.order_id}`,
-        primaryOccupantLabel: lifecycleConsistent ? primaryOccupantLabel(order.primary_guest_snapshot) : null,
+        primaryOccupantLabel: lifecycleConsistent && !missingCurrentClaim
+          ? projectedOccupants[0]?.nickname ?? primaryOccupantLabel(order.primary_guest_snapshot)
+          : null,
+        occupants: lifecycleConsistent && !missingCurrentClaim ? projectedOccupants : [],
         reason: taskReason,
         blocking,
         current: true,
@@ -1021,6 +1063,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         roomTypeCode: room.room_type_code,
         pricingProductCode: room.pricing_product_code,
         capacity: room.physical_bed_count ?? Math.max(children.length, 1),
+        occupancyCapacity: room.occupancy_capacity,
         childUnitIds: children.map((bed) => bed.id),
         children: [],
         bedOccupancies: [],
@@ -1045,6 +1088,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           roomTypeCode: bed.room_type_code,
           pricingProductCode: bed.pricing_product_code,
           capacity: 1,
+          occupancyCapacity: bed.occupancy_capacity,
           childUnitIds: [],
           children: [],
           bedOccupancies: [],
@@ -1097,6 +1141,15 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       ]))
       .orderBy("claim.service_date")
       .orderBy("claim.id")
+      .execute();
+
+    const deferredUnavailableRows = await trx.selectFrom("internal_use_blocks")
+      .select(["id", "inventory_unit_id", "room_id", "arrival_date", "departure_date", "status", "created_at"])
+      .where("property_id", "=", options.propertyId)
+      .where("status", "=", "ACTIVE")
+      .where("arrival_date", "<", options.departureDate)
+      .where("departure_date", ">", options.arrivalDate)
+      .orderBy("id")
       .execute();
 
     const activeOrderIds = [...new Set(claimRows.flatMap((row) => row.source_type === "ORDER_SEGMENT"
@@ -1217,13 +1270,14 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       rows.push(amendment);
       amendmentsByOrder.set(amendment.order_id, rows);
     }
+    const occupantsByOrder = await loadProjectedOccupants(trx, orderIdsForHistory);
 
     const events: ProjectionEvent[] = [...syntheticOccupancyEvents];
     let partial = missingOperationalClaim || inconsistentOperationalLifecycle || operationalOrdersTruncated || inactiveUnitsTruncated;
     for (const row of claimRows) {
       const claimRef = reference("CLAIM", row.claim_id, `Claim ${row.claim_id}`);
       const fallbackHistory: RoomStatusHistoryDto = {
-        action: row.source_type,
+        action: row.source_type === "INTERNAL_USE" ? "LEGACY_UNAVAILABLE" : row.source_type,
         actorId: null,
         source: "UNKNOWN",
         occurredAt: iso(row.created_at),
@@ -1270,7 +1324,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         const stayRef = reference("STAY", row.stay_id!, `Stay ${row.stay_id}`);
         const sourceKind: RoomStatusSourceKind = row.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
         const status: RoomStatusStatus = historicalCompleted || row.order_status === "CHECKED_IN" ? "IN_HOUSE" : "RESERVED";
-        const occupantLabel = primaryOccupantLabel(row.primary_guest_snapshot);
+        const projectedOccupants = occupantsByOrder.get(row.order_id!) ?? [];
+        const occupantLabel = projectedOccupants[0]?.nickname ?? primaryOccupantLabel(row.primary_guest_snapshot);
         const projectedRun = row.active
           ? activeOrderRunByClaimId.get(row.claim_id)
           : historicalCompleted ? completedOrderRunByClaimId.get(row.claim_id) : undefined;
@@ -1286,6 +1341,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           status: activeLifecycleConsistent ? status : "UNKNOWN",
           label: `${sourceKind === "FREE_STAY" ? "免费入住" : "订单"} ${row.order_id}`,
           primaryOccupantLabel: activeLifecycleConsistent ? occupantLabel : null,
+          occupants: activeLifecycleConsistent ? projectedOccupants : [],
           reason: activeLifecycleConsistent
             ? sourceKind === "FREE_STAY" ? row.free_stay_reason : null
             : `订单状态 ${row.order_status} 与 Stay 状态 ${row.stay_status} 不一致`,
@@ -1364,11 +1420,11 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceStartDate: row.service_date,
           sourceEndDate: dateAfter(row.service_date),
           sourceKey: `unknown:${row.claim_id}`,
-          sourceKind: "INTERNAL_USE",
+          sourceKind: "UNIT_UNSELLABLE",
           status: "UNKNOWN",
-          label: "Unresolved internal-use claim",
+          label: "Unresolved unavailable inventory claim",
           primaryOccupantLabel: null,
-          reason: "The internal-use Block source could not be resolved",
+          reason: "A legacy unavailable inventory source could not be resolved",
           blocking: true,
           current: true,
           blockingFactKind: "CLAIM",
@@ -1380,30 +1436,74 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         });
         continue;
       }
-      const blockRef = reference("BLOCK", row.internal_id, `Internal use ${row.internal_id}`);
       const invalidActiveReleased = row.internal_status !== "ACTIVE";
       if (invalidActiveReleased) partial = true;
+      const unavailableUnit = unitsById.get(row.inventory_unit_id);
+      const unavailableUnitRef = reference("INVENTORY_UNIT", row.inventory_unit_id, unavailableUnit?.name ?? row.inventory_unit_id);
       events.push({
         actualInventoryUnitId: row.inventory_unit_id,
         roomId: row.room_id,
         serviceDate: row.service_date,
         sourceStartDate: row.internal_arrival_date!,
         sourceEndDate: row.internal_departure_date!,
-        sourceKey: `internal:${row.internal_id}`,
-        sourceKind: "INTERNAL_USE",
-        status: invalidActiveReleased ? "UNKNOWN" : "INTERNAL_USE",
-        label: invalidActiveReleased ? "Inconsistent internal use" : "Internal use",
+        sourceKey: `legacy-unavailable:${row.internal_id}`,
+        sourceKind: "UNIT_UNSELLABLE",
+        status: "UNKNOWN",
+        label: invalidActiveReleased ? "Inconsistent unavailable inventory history" : "Legacy unavailable inventory history",
         primaryOccupantLabel: null,
-        reason: row.internal_reason,
+        reason: null,
         blocking: row.active,
         current: row.active,
-        blockingFactKind: row.active ? "CLAIM" : null,
-        claimId: row.claim_id,
-        references: [claimRef, blockRef],
+        blockingFactKind: row.active ? "UNIT_UNSELLABLE" : null,
+        claimId: null,
+        references: [unavailableUnitRef],
         histories: [fallbackHistory],
-        commandIds: [row.internal_created_command_id, row.internal_released_command_id].filter((id): id is string => Boolean(id)),
-        targetReference: blockRef
+        commandIds: [],
+        targetReference: null
       });
+    }
+
+    const activeDeferredClaimDates = new Set(claimRows.flatMap((row) => (
+      row.source_type === "INTERNAL_USE" && row.active
+        ? [`${row.source_id}:${row.inventory_unit_id}:${row.service_date}`]
+        : []
+    )));
+    for (const block of deferredUnavailableRows) {
+      const unit = unitsById.get(block.inventory_unit_id);
+      const unitRef = reference("INVENTORY_UNIT", block.inventory_unit_id, unit?.name ?? block.inventory_unit_id);
+      for (const serviceDate of dates) {
+        if (serviceDate < block.arrival_date || serviceDate >= block.departure_date) continue;
+        if (activeDeferredClaimDates.has(`${block.id}:${block.inventory_unit_id}:${serviceDate}`)) continue;
+        events.push({
+          actualInventoryUnitId: block.inventory_unit_id,
+          roomId: block.room_id,
+          serviceDate,
+          sourceStartDate: block.arrival_date,
+          sourceEndDate: block.departure_date,
+          sourceKey: `legacy-unavailable:${block.id}`,
+          sourceKind: "UNIT_UNSELLABLE",
+          status: "UNKNOWN",
+          label: "Legacy unavailable inventory history",
+          primaryOccupantLabel: null,
+          reason: null,
+          blocking: true,
+          current: true,
+          blockingFactKind: "UNIT_UNSELLABLE",
+          claimId: null,
+          references: [unitRef],
+          histories: [{
+            action: "LEGACY_UNAVAILABLE",
+            actorId: null,
+            source: "UNKNOWN",
+            occurredAt: iso(block.created_at),
+            commandId: null,
+            receiptId: null,
+            correlationId: null
+          }],
+          commandIds: [],
+          targetReference: null
+        });
+      }
     }
 
     const cleaningCandidates = await trx.selectFrom("cleaning_tasks")

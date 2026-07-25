@@ -311,6 +311,49 @@
   gap: 8px;
 }
 
+.room-status-window-mode-control {
+  display: inline-flex;
+  height: 32px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.room-status-window-mode-control > button {
+  width: 40px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.room-status-window-mode-control > button:first-child {
+  width: 46px;
+}
+
+.room-status-window-mode-control > button:last-child {
+  border-right: 0;
+}
+
+.room-status-window-mode-control > button[aria-pressed="true"] {
+  background: var(--brand-soft);
+  color: var(--brand-hover);
+}
+
+.room-status-window-mode-control > button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 .room-status-touch-selection-toggle {
   display: none;
 }
@@ -402,7 +445,7 @@
 .room-status-date-header-track,
 .room-status-day-track {
   display: grid;
-  grid-template-columns: repeat(var(--room-status-date-count), minmax(var(--room-status-date-width), 1fr));
+  grid-template-columns: repeat(var(--room-status-date-count), var(--room-status-date-width));
   min-width: calc(var(--room-status-date-count) * var(--room-status-date-width));
 }
 
@@ -432,7 +475,6 @@
 }
 
 .room-status-grid-row {
-  height: var(--room-status-row-height);
   min-height: var(--room-status-row-height);
 }
 
@@ -443,7 +485,7 @@
 .room-status-resource-cell {
   z-index: 4;
   display: flex;
-  height: var(--room-status-row-height);
+  height: auto;
   min-width: 0;
   min-height: var(--room-status-row-height);
   align-items: stretch;
@@ -515,14 +557,14 @@
 
 .room-status-day-track {
   position: relative;
-  height: var(--room-status-row-height);
+  height: auto;
   min-height: var(--room-status-row-height);
 }
 
 .room-status-day-cell {
   position: relative;
   display: flex;
-  height: var(--room-status-row-height);
+  height: auto;
   min-width: 0;
   min-height: var(--room-status-row-height);
   align-items: flex-end;
@@ -642,13 +684,7 @@
 }
 
 .room-status-bed-occupancy {
-  position: absolute;
-  z-index: 6;
-  right: 4px;
-  bottom: 5px;
   min-width: 30px;
-  padding-left: 3px;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
   color: var(--text);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
@@ -658,21 +694,66 @@
   pointer-events: none;
 }
 
-.room-status-bed-occupants {
-  position: absolute;
-  z-index: 6;
-  right: 38px;
-  bottom: 4px;
-  left: 4px;
-  overflow: hidden;
+.room-status-bed-occupants,
+.room-status-direct-occupants {
+  z-index: 2;
+  display: grid;
+  grid-row: 2;
+  width: 100%;
+  min-width: 0;
+  gap: 1px;
   color: var(--text);
   font-size: 11px;
   font-weight: 680;
-  line-height: 20px;
+  line-height: 1.25;
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   pointer-events: none;
+}
+
+.room-status-bed-occupants > span,
+.room-status-direct-occupants > span {
+  min-width: 0;
+  line-break: strict;
+  overflow-wrap: anywhere;
+}
+
+.room-status-day-cell.has-bed-occupancy,
+.room-status-day-cell.has-direct-lodging {
+  display: grid;
+  grid-template-rows: calc(4px + var(--room-status-interval-lanes) * 25px) minmax(0, auto) 20px;
+  gap: 3px;
+  align-items: start;
+  justify-items: stretch;
+  padding: 0 4px 4px;
+}
+
+.room-status-bed-occupancy-summary,
+.room-status-direct-occupancy-summary {
+  z-index: 2;
+  display: flex;
+  grid-row: 3;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.room-status-direct-count {
+  min-width: 28px;
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
+  text-align: right;
+}
+
+.room-status-bed-state {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 680;
 }
 
 .room-status-bed-occupancy-tooltip {
@@ -1092,6 +1173,82 @@
   justify-content: space-between;
 }
 
+.room-status-order-occupants,
+.room-status-order-segments,
+.room-status-order-corrections {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.room-status-order-occupants > li,
+.room-status-order-segments > li,
+.room-status-order-corrections > li {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+
+.room-status-order-occupants > li:last-child,
+.room-status-order-segments > li:last-child,
+.room-status-order-corrections > li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.room-status-order-occupants > li > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.room-status-order-occupants span,
+.room-status-order-occupants small,
+.room-status-order-segments span,
+.room-status-order-segments small,
+.room-status-order-corrections span,
+.room-status-order-corrections small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.room-status-order-occupants .room-status-text-button {
+  width: fit-content;
+  min-height: 30px;
+  gap: 5px;
+}
+
+.room-status-order-context .room-status-context-actions > .room-status-button {
+  width: 100%;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.room-status-context-header-actions,
+.room-status-order-context-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-status-workspace.is-context-overlay {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.room-status-context-reopen {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 20;
+  box-shadow: var(--shadow-dialog);
+}
+
 .room-status-context-actions small {
   color: var(--muted);
 }
@@ -1161,6 +1318,16 @@
   }
 }
 
+@media (min-width: 1200px) and (max-width: 1399px) {
+  .room-status-filter-row {
+    grid-template-columns: minmax(210px, 1.5fr) repeat(3, minmax(120px, 1fr));
+  }
+
+  .room-status-filter-summary {
+    grid-column: span 2;
+  }
+}
+
 @media (max-width: 1199px) {
   .room-status-toolbar-primary {
     grid-template-columns: minmax(140px, 0.7fr) minmax(460px, 2fr);
@@ -1205,7 +1372,7 @@
   }
 }
 
-@media (max-width: 575px) {
+@media (max-width: 575px), (max-width: 767px) and (max-height: 500px) {
   .room-status-grid-section,
   .room-status-desktop-workspace > .room-status-grid-section {
     display: none;
@@ -1290,6 +1457,63 @@
     background: var(--surface-muted);
   }
 
+  .room-status-mobile-occupancies {
+    border-top: 1px solid var(--border);
+    padding: 12px;
+    background: var(--surface-muted);
+  }
+
+  .room-status-mobile-occupancies h3 {
+    margin: 0 0 8px;
+    font-size: 15px;
+  }
+
+  .room-status-mobile-occupancies ul {
+    display: grid;
+    gap: 8px;
+  }
+
+  .room-status-mobile-occupancies li {
+    display: grid;
+    gap: 6px;
+    border-left: 3px solid var(--brand);
+    padding: 8px 10px;
+    background: var(--surface);
+  }
+
+  .room-status-mobile-occupancy-heading {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .room-status-mobile-occupancy-heading strong,
+  .room-status-mobile-occupancy-heading span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .room-status-mobile-occupancy-heading span {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .room-status-mobile-occupant-list {
+    display: grid;
+    gap: 3px;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .room-status-mobile-occupant-list > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
   .room-status-mobile-tabs button {
     display: grid;
     min-height: 52px;
@@ -1368,6 +1592,12 @@
   .room-status-mobile-task-open > small {
     color: var(--muted);
     font-size: 12px;
+  }
+
+  .room-status-mobile-task-open > span:not(.room-status-mobile-task-title) {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 
   .room-status-mobile-task-warning {

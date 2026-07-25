@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   Ban,
   BedDouble,
-  Briefcase,
   CalendarClock,
   CheckCircle2,
   CircleHelp,
@@ -13,11 +12,74 @@ import {
 } from "lucide-react";
 import type {
   RoomStatusActionCode,
+  RoomStatusBedOccupancyDto,
   RoomStatusBlockingFactKind,
+  RoomStatusIntervalDto,
   RoomStatusSourceKind,
   RoomStatusStatus,
   RoomStatusUnitDto
 } from "@qintopia/contracts";
+
+type OccupantLabelSource = Pick<RoomStatusBedOccupancyDto["occupants"][number], "primaryOccupantLabel">;
+type IntervalBusinessLabelSource = Pick<RoomStatusIntervalDto,
+  "sourceKind" | "status" | "label" | "primaryOccupantLabel" | "occupantCount"> & {
+    occupants: readonly RoomStatusIntervalDto["occupants"][number][];
+  };
+
+export function roomStatusBedOccupantLabel(occupant: OccupantLabelSource): string {
+  return occupant.primaryOccupantLabel?.trim() || "历史未记录";
+}
+
+export function roomStatusBedOccupantLabels(occupants: readonly OccupantLabelSource[]): string[] {
+  return occupants.map(roomStatusBedOccupantLabel);
+}
+
+export function roomStatusOccupantLabelLines(labels: readonly string[]): string[] {
+  const lines: string[] = [];
+  for (let index = 0; index < labels.length; index += 2) {
+    lines.push(labels.slice(index, index + 2).join("、"));
+  }
+  return lines;
+}
+
+export function roomStatusIntervalOccupantLabels(interval: { occupants: readonly RoomStatusIntervalDto["occupants"][number][] }): string[] {
+  return interval.occupants.map((occupant) => occupant.nickname?.trim() || "历史未记录");
+}
+
+export function roomStatusIntervalBusinessLabel(interval: IntervalBusinessLabelSource): string {
+  if (interval.status === "UNKNOWN") return "状态未知";
+  if (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY") {
+    const labels = roomStatusIntervalOccupantLabels(interval);
+    const fallback = interval.primaryOccupantLabel?.trim() || "历史未记录";
+    return `${labels.length ? labels.join("、") : fallback} · ${interval.occupantCount}人`;
+  }
+  return interval.label;
+}
+
+type IntervalGridUnitSource = Pick<RoomStatusUnitDto, "id" | "kind" | "code"> & {
+  children: readonly Pick<RoomStatusUnitDto, "id" | "kind" | "code">[];
+};
+type IntervalGridLabelSource = Pick<RoomStatusIntervalDto,
+  "sourceKind" | "status" | "actualInventoryUnitId" | "label" | "primaryOccupantLabel" | "occupantCount"> & {
+    occupants: readonly RoomStatusIntervalDto["occupants"][number][];
+  };
+
+function roomStatusBedShortCode(code: string): string {
+  return code.split("-").at(-1)?.trim() || code;
+}
+
+export function roomStatusIntervalGridLabel(
+  interval: IntervalGridLabelSource,
+  displayUnit: IntervalGridUnitSource
+): string {
+  if (interval.sourceKind !== "MAINTENANCE" || interval.status !== "MAINTENANCE") {
+    return roomStatusIntervalBusinessLabel(interval);
+  }
+  if (displayUnit.kind !== "ROOM") return "维修/锁房";
+  const bed = displayUnit.children.find((candidate) => candidate.kind === "BED"
+    && candidate.id === interval.actualInventoryUnitId);
+  return bed ? `${roomStatusBedShortCode(bed.code)} 维修/锁房` : "维修/锁房";
+}
 
 type StatusIcon = ComponentType<SVGProps<SVGSVGElement> & { size?: string | number }>;
 
@@ -32,7 +94,6 @@ export const roomStatusPresentation: Record<RoomStatusStatus, RoomStatusPresenta
   IN_HOUSE: { label: "在住", Icon: BedDouble },
   CLEANING: { label: "待清洁", Icon: Sparkles },
   MAINTENANCE: { label: "维修 / 锁房", Icon: Wrench },
-  INTERNAL_USE: { label: "内部占用", Icon: Briefcase },
   UNAVAILABLE: { label: "不可售", Icon: Ban },
   STALE: { label: "数据陈旧", Icon: RefreshCw },
   UNKNOWN: { label: "状态未知", Icon: CircleHelp }
@@ -42,7 +103,6 @@ export const roomStatusSourceLabels: Record<RoomStatusSourceKind, string> = {
   ORDER: "正常订单",
   FREE_STAY: "免费入住",
   MAINTENANCE: "维修锁房",
-  INTERNAL_USE: "内部占用",
   CLEANING: "清洁任务",
   UNIT_UNSELLABLE: "库存不可售"
 };
@@ -57,11 +117,9 @@ export const roomStatusBlockingFactLabels: Record<RoomStatusBlockingFactKind, st
 export const roomStatusActionLabels: Record<RoomStatusActionCode, string> = {
   CREATE_ORDER: "创建正常住宿订单",
   CREATE_FREE_STAY: "创建免费入住",
-  PLACE_INTERNAL_USE: "放置内部占用",
   LOCK_MAINTENANCE: "放置维修锁房",
   OPEN_ORDER: "打开订单",
   RELEASE_MAINTENANCE: "释放维修锁房",
-  RELEASE_INTERNAL_USE: "释放内部占用",
   COMPLETE_CLEANING: "完成清洁"
 };
 
@@ -105,7 +163,11 @@ export function roomStatusSaleCapabilityLabel(unit: RoomStatusSalesPresentationU
 export function roomStatusRowSalesLabel(unit: RoomStatusSalesPresentationUnit): string {
   if (unit.salesMode === "UNAVAILABLE") return "不可售";
   if (unit.kind === "BED") return "单床销售";
-  return unit.salesMode === "BED_SPLIT" ? "支持整房及单床销售" : "整房销售";
+  return unit.salesMode === "BED_SPLIT" ? "整房/单床" : "整房销售";
+}
+
+export function roomStatusOccupancyCapacity(unit: Pick<RoomStatusUnitDto, "occupancyCapacity">): number {
+  return unit.occupancyCapacity;
 }
 
 export function formatRoomStatusDate(value: string): string {
@@ -148,7 +210,7 @@ export function RoomStatusWarning({ children }: { children: string }) {
   );
 }
 
-const mobileMediaQuery = "(max-width: 575px)";
+const mobileMediaQuery = "(max-width: 575px), (max-width: 767px) and (max-height: 500px)";
 
 function subscribeToMobileViewport(onStoreChange: () => void): () => void {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => undefined;

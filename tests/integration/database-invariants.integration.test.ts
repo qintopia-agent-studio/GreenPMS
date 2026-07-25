@@ -656,13 +656,19 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       .toEqual({ fact_id: result.factIds[0], coverage_id: coverage.id, entry_type: "RELEASE" });
   });
 
-  it("requires the current member-stay migrations for readiness", async () => {
+  it("requires every current operational migration for readiness", async () => {
     expect(await databaseReady(db)).toBe(true);
-    await db.deleteFrom("schema_migrations").where("name", "=", "019_member_stay_booking_channel_rules.sql").execute();
-    try {
-      expect(await databaseReady(db)).toBe(false);
-    } finally {
-      await db.insertInto("schema_migrations").values({ name: "019_member_stay_booking_channel_rules.sql" }).execute();
+    for (const migrationName of [
+      "019_member_stay_booking_channel_rules.sql",
+      "020_whole_room_occupants.sql",
+      "021_defer_internal_use.sql"
+    ]) {
+      await db.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
+      try {
+        expect(await databaseReady(db), migrationName).toBe(false);
+      } finally {
+        await db.insertInto("schema_migrations").values({ name: migrationName }).execute();
+      }
     }
     expect(await databaseReady(db)).toBe(true);
   });

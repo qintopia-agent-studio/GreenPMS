@@ -10,7 +10,10 @@ import {
   moveRoomStatusFocus,
   parseRoomStatusRestoration,
   reconcileRoomStatusRestoration,
+  roomStatusAutoVisibleDays,
   roomStatusFactFingerprint,
+  roomStatusCellBelongsToStay,
+  roomStatusOrderIdentityForDate,
   roomStatusViewReducer,
   selectionFromCells,
   selectionFromInputs,
@@ -25,6 +28,7 @@ const orderReference = {
   label: "Order order_bed",
   href: "/orders/order_bed"
 };
+const stayReference = { type: "STAY" as const, id: "stay_bed", label: "Stay stay_bed", href: null };
 
 const day = (serviceDate: string, status: RoomStatusDayDto["status"] = "AVAILABLE"): RoomStatusDayDto => ({
   serviceDate,
@@ -49,6 +53,7 @@ function unit(overrides: Partial<RoomStatusUnitDto> = {}): RoomStatusUnitDto {
     roomTypeCode: "PUBLIC_FOUR_BED",
     pricingProductCode: "PUBLIC_FOUR_BED_WHOLE_ROOM",
     capacity: 4,
+    occupancyCapacity: 4,
     childUnitIds: [],
     children: [],
     bedOccupancies: [],
@@ -76,9 +81,11 @@ function lodgingInterval(overrides: Partial<RoomStatusIntervalDto> = {}): RoomSt
     blocking: true,
     label: "order_bed",
     primaryOccupantLabel: "山风",
+    occupantCount: 1,
+    occupants: [{ occupantId: "occupant_bed", nickname: "山风" }],
     reason: null,
     claimIds: [],
-    references: [orderReference],
+    references: [orderReference, stayReference],
     conflicts: [],
     history: [],
     allowedActions: [],
@@ -87,7 +94,7 @@ function lodgingInterval(overrides: Partial<RoomStatusIntervalDto> = {}): RoomSt
 }
 
 describe("RoomStatus grid intervals", () => {
-  it("replaces active child-bed lodging with occupancy while retaining real whole-room and unresolved intervals", () => {
+  it("replaces represented active lodging while retaining unresolved and block intervals", () => {
     const childBed = lodgingInterval();
     const wholeRoom = lodgingInterval({
       id: "interval_whole_room_order",
@@ -103,6 +110,7 @@ describe("RoomStatus grid intervals", () => {
         occupiedBedCount: 1,
         totalBedCount: 4,
         occupants: [{
+          occupantId: "occupant_bed",
           inventoryUnitId: "unit_bed_101_a",
           inventoryUnitCode: "101-A",
           primaryOccupantLabel: "山风",
@@ -113,7 +121,6 @@ describe("RoomStatus grid intervals", () => {
     }), ["2026-07-20"]);
 
     expect(rendered.map((interval) => interval.id)).toEqual([
-      "interval_whole_room_order",
       "interval_unknown",
       "interval_maintenance"
     ]);
@@ -124,10 +131,75 @@ describe("RoomStatus grid intervals", () => {
     }), ["2026-07-20"]);
     expect(aggregationMissing.map((interval) => interval.id)).toEqual([
       "interval_bed_order",
-      "interval_whole_room_order",
       "interval_unknown",
       "interval_maintenance"
     ]);
+
+    const missingWholeRoomOccupants = intervalsRenderedOnRoomStatusGrid(unit({
+      intervals: [wholeRoom, lodgingInterval({
+        id: "interval_whole_room_without_occupants",
+        actualInventoryUnitId: "unit_room_101",
+        occupants: [],
+        occupantCount: 0
+      })]
+    }), ["2026-07-20"]);
+    expect(missingWholeRoomOccupants.map((interval) => interval.id)).toEqual([
+      "interval_whole_room_without_occupants"
+    ]);
+  });
+
+  it("hides typed lodging bars on concrete room and bed rows", () => {
+    const room = unit({
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101" })]
+    });
+    const bed = unit({
+      id: "unit_bed_101_a",
+      roomId: "unit_room_101",
+      parentRoomId: "unit_room_101",
+      kind: "BED",
+      salesMode: "BED_SPLIT",
+      intervals: [lodgingInterval({ displayInventoryUnitId: "unit_bed_101_a" })]
+    });
+    expect(intervalsRenderedOnRoomStatusGrid(room)).toEqual([]);
+    expect(intervalsRenderedOnRoomStatusGrid(bed)).toEqual([]);
+  });
+});
+
+describe("RoomStatus stable order selection", () => {
+  it("resolves only concrete room or bed rows and highlights every matching Stay segment", () => {
+    const wholeRoom = unit({
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101" })]
+    });
+    const identity = roomStatusOrderIdentityForDate(wholeRoom, "2026-07-20");
+    expect(identity).toMatchObject({ orderId: "order_bed", stayId: "stay_bed" });
+    expect(roomStatusCellBelongsToStay(wholeRoom, "2026-07-20", "stay_bed")).toBe(true);
+    expect(roomStatusCellBelongsToStay(wholeRoom, "2026-07-21", "stay_bed")).toBe(false);
+    expect(roomStatusOrderIdentityForDate(unit({ intervals: [lodgingInterval()] }), "2026-07-20")).toBeNull();
+
+    const mixedModeWholeRoomSale = unit({
+      salesMode: "BED_SPLIT",
+      intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101" })]
+    });
+    expect(roomStatusOrderIdentityForDate(mixedModeWholeRoomSale, "2026-07-20")).toMatchObject({
+      orderId: "order_bed",
+      stayId: "stay_bed",
+      unitId: "unit_room_101"
+    });
+  });
+
+  it("fails closed when a concrete cell contains more than one stable order identity", () => {
+    const first = lodgingInterval({ actualInventoryUnitId: "unit_room_101" });
+    const second = lodgingInterval({
+      id: "interval_other",
+      actualInventoryUnitId: "unit_room_101",
+      references: [
+        { ...orderReference, id: "order_other", href: "/orders/order_other" },
+        { ...stayReference, id: "stay_other" }
+      ]
+    });
+    expect(roomStatusOrderIdentityForDate(unit({ salesMode: "WHOLE_ROOM", intervals: [first, second] }), "2026-07-20")).toBeNull();
   });
 });
 
@@ -146,6 +218,30 @@ describe("RoomStatus date window", () => {
     expect(dateWindowStartForFocus(dates, 0, 14, dates[14]!)).toBe(1);
     expect(dateWindowStartForFocus(dates, 20, 14, dates[19]!)).toBe(19);
     expect(dateWindowStartForFocus(dates, 76, 14, dates[89]!)).toBe(76);
+  });
+
+  it("calculates an adaptive 7-to-21 day window from the actual board width", () => {
+    expect(roomStatusAutoVisibleDays(700)).toBe(7);
+    expect(roomStatusAutoVisibleDays(1_170)).toBe(10);
+    expect(roomStatusAutoVisibleDays(1_600)).toBe(14);
+    expect(roomStatusAutoVisibleDays(2_200)).toBe(20);
+    expect(roomStatusAutoVisibleDays(4_000)).toBe(21);
+  });
+
+  it("switches between automatic and explicit date-window sizes", () => {
+    const automatic = roomStatusViewReducer(createRoomStatusViewState(), {
+      type: "SET_DATE_WINDOW_MODE",
+      mode: "AUTO",
+      autoSize: 10,
+      totalDates: dates.length
+    });
+    expect(automatic).toMatchObject({ dateWindowMode: "AUTO", dateWindowSize: 10 });
+    expect(roomStatusViewReducer(automatic, {
+      type: "SET_DATE_WINDOW_MODE",
+      mode: "21",
+      autoSize: 10,
+      totalDates: dates.length
+    })).toMatchObject({ dateWindowMode: "21", dateWindowSize: 21 });
   });
 });
 
@@ -299,6 +395,31 @@ describe("RoomStatus restoration", () => {
     };
     const serialized = serializeRoomStatusRestoration(snapshot);
     expect(parseRoomStatusRestoration(serialized, snapshot.propertyId)).toEqual(snapshot);
+    const legacySnapshot = JSON.parse(serialized) as { state: Record<string, unknown> };
+    delete legacySnapshot.state.dateWindowMode;
+    expect(parseRoomStatusRestoration(JSON.stringify(legacySnapshot), snapshot.propertyId)?.state.dateWindowMode).toBe("AUTO");
+    const fullStaySelection = {
+      ...snapshot,
+      state: createRoomStatusViewState({
+        focusedCell: { unitId: "unit_bed_101_a", serviceDate: "2026-07-21" },
+        selection: {
+          unitId: "unit_bed_101_a",
+          anchorDate: "2026-07-21",
+          focusDate: "2026-07-21",
+          arrivalDate: "2026-07-20",
+          departureDate: "2026-07-24"
+        }
+      })
+    };
+    expect(parseRoomStatusRestoration(serializeRoomStatusRestoration(fullStaySelection), snapshot.propertyId))
+      .toEqual(fullStaySelection);
+    expect(parseRoomStatusRestoration(JSON.stringify({
+      ...fullStaySelection,
+      state: {
+        ...fullStaySelection.state,
+        selection: { ...fullStaySelection.state.selection!, focusDate: "2026-07-24" }
+      }
+    }), snapshot.propertyId)).toBeUndefined();
     expect(parseRoomStatusRestoration(serialized, "property_other")).toBeUndefined();
     expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-07-20" } }), snapshot.propertyId)).toBeUndefined();
     expect(parseRoomStatusRestoration(JSON.stringify({
@@ -421,7 +542,7 @@ describe("RoomStatus restoration", () => {
     expect(result.state.selection).toEqual(state.selection);
   });
 
-  it("rejects internally inconsistent serialized selections", () => {
+  it("rejects serialized selections whose active cell falls outside the selected Stay range", () => {
     const valid = {
       version: 1 as const,
       propertyId: "property_qintopia",
@@ -438,7 +559,13 @@ describe("RoomStatus restoration", () => {
         }
       })
     };
-    expect(parseRoomStatusRestoration(JSON.stringify(valid), valid.propertyId)).toBeUndefined();
+    expect(parseRoomStatusRestoration(JSON.stringify({
+      ...valid,
+      state: {
+        ...valid.state,
+        selection: { ...valid.state.selection!, focusDate: "2026-07-30" }
+      }
+    }), valid.propertyId)).toBeUndefined();
     expect(parseRoomStatusRestoration(JSON.stringify({ ...valid, factFingerprint: 42 }), valid.propertyId)).toBeUndefined();
   });
 });

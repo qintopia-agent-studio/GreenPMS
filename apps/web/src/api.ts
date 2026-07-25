@@ -1,4 +1,4 @@
-import type { CommandEnvelope, CommandReason, CommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
+import type { CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
 import type {
   AvailabilityDto,
   ClientCommandMetadata,
@@ -11,7 +11,7 @@ import type {
   OrderRowDto,
   OrderViewDto,
   PrincipalDto,
-  RecoverableCommandType,
+  HistoricalRecoverableCommandType,
   TokenDto
 } from "./types";
 
@@ -186,8 +186,8 @@ export const api = {
     },
     body: JSON.stringify({ propertyId, commandType, confirmation: true, expectedEffectHash: effectHash, reason })
   }, true),
-  recoveryKey: (commandType: CommandType) => `web-confirm-${commandType.toLowerCase()}-${crypto.randomUUID()}`,
-  commandResult: (propertyId: string, commandType: RecoverableCommandType, idempotencyKey: string) => {
+  recoveryKey: (commandType: HistoricalCommandType) => `web-confirm-${commandType.toLowerCase()}-${crypto.randomUUID()}`,
+  commandResult: (propertyId: string, commandType: HistoricalRecoverableCommandType, idempotencyKey: string) => {
     const query = new URLSearchParams({ propertyId, commandType, idempotencyKey });
     return request<Partial<ReceiptDto> & Pick<ReceiptDto, "executionStatus" | "businessCommitted">>(`/api/v1/command-results?${query.toString()}`)
       .then((result) => ({

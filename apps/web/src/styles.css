@@ -1779,12 +1779,63 @@ thead .sticky-column {
   margin-left: auto;
 }
 
-.guest-section h3 {
+.guest-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
-.guest-section .button {
+.guest-section-heading span,
+.guest-entry legend span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.guest-entry {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  padding: 12px 0 0;
+}
+
+.guest-entry + .guest-entry {
   margin-top: 14px;
+}
+
+.guest-entry legend {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 0 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.guest-entry legend .icon-button {
+  width: 30px;
+  min-height: 30px;
+}
+
+.guest-section > .button {
+  margin-top: 14px;
+}
+
+.guest-add-button {
+  width: 100%;
+}
+
+.guest-order-fields {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
 }
 
 .modal {
@@ -1803,6 +1854,28 @@ thead .sticky-column {
 
 .modal-wide {
   width: min(94vw, 780px);
+}
+
+.modal-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 40;
+  width: min(100vw, 440px);
+  height: 100dvh;
+  max-height: none;
+  margin: 0 0 0 auto;
+  border-block: 0;
+  border-right: 0;
+  border-radius: 0;
+}
+
+.modal-drawer .modal-shell {
+  height: 100dvh;
+  max-height: none;
+}
+
+body:has(.modal-mobile-fullscreen[open]) {
+  overflow: hidden;
 }
 
 .modal::backdrop {
@@ -1998,6 +2071,33 @@ pre {
   font-weight: 650;
 }
 
+.occupant-summary-list {
+  display: grid;
+  width: 100%;
+  gap: 5px;
+}
+
+.occupant-summary-list li {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(90px, auto) minmax(80px, 0.7fr) minmax(100px, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.occupant-summary-list span,
+.occupant-summary-list small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.occupant-summary-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .preview-amounts {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   border: 1px solid var(--border);
@@ -2055,6 +2155,14 @@ pre {
   padding: 10px;
   border-top: 1px solid rgba(163, 54, 54, 0.25);
   border-bottom: 1px solid rgba(163, 54, 54, 0.25);
+}
+
+.receipt-occupants {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border-top: 1px solid rgba(83, 97, 89, 0.22);
+  padding-top: 12px;
 }
 
 .receipt-grid {
@@ -2387,6 +2495,36 @@ pre {
 .detail-list dd {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.order-occupant-list {
+  display: grid;
+}
+
+.order-occupant-list > li + li {
+  border-top: 1px solid var(--border-strong);
+}
+
+.order-occupant-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--surface-muted);
+}
+
+.order-occupant-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.order-occupant-heading span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .full-detail {
@@ -2897,6 +3035,11 @@ pre {
   .difference-grid,
   .difference-row {
     grid-template-columns: minmax(105px, 0.42fr) minmax(0, 1fr);
+  }
+
+  .occupant-summary-list li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
 
   .receipt-grid {

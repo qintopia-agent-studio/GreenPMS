@@ -854,6 +854,59 @@ describe("PostgreSQL core operations", () => {
     expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(0);
   });
 
+  it("links each money fact to the pricing revision active when the fact was recorded", async () => {
+    const created = await createOrder(demo.roomId, "money-revision-link");
+    const orderId = created.result!.orderId as string;
+    const initialRevisionId = (await getOrderView(db, orderId)).order.current_revision_id!;
+    await previewAndConfirm({
+      commandType: "RECORD_COLLECTION",
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "CASH", transactionReference: "TEST-TXN-BEFORE-REPRICE", note: "before repricing" }
+    }, "money-before-reprice");
+    await previewAndConfirm({
+      commandType: "REPRICE_ORDER",
+      input: { propertyId: demo.propertyId, orderId, targetCurrentContractAmountMinor: 35_000 }
+    }, "money-reprice");
+    const repricedRevisionId = (await getOrderView(db, orderId)).order.current_revision_id!;
+    expect(repricedRevisionId).not.toBe(initialRevisionId);
+    await previewAndConfirm({
+      commandType: "RECORD_COLLECTION",
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 6_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-AFTER-REPRICE", note: "after repricing" }
+    }, "money-after-reprice");
+
+    const facts = (await getOrderView(db, orderId)).collectionFacts;
+    expect(facts.map((fact) => ({ reference: fact.transaction_reference, revisionId: fact.pricing_revision_id }))).toEqual([
+      { reference: "TEST-TXN-BEFORE-REPRICE", revisionId: initialRevisionId },
+      { reference: "TEST-TXN-AFTER-REPRICE", revisionId: repricedRevisionId }
+    ]);
+
+    await expect(sql`
+      INSERT INTO collection_facts (
+        fact_id, order_id, fact_type, amount_minor, net_effect_minor, currency,
+        references_fact_id, reverses_fact_id, method, note, transaction_reference,
+        pricing_revision_id, command_id
+      ) VALUES (
+        'fact_missing_pricing_revision', ${orderId}, 'COLLECTION', 1, 1, 'CNY',
+        NULL, NULL, 'CASH', 'must reject missing revision', 'TEST-TXN-MISSING-REVISION',
+        NULL, 'command_missing_pricing_revision'
+      )
+    `.execute(db)).rejects.toMatchObject({ code: "23502", column: "pricing_revision_id" });
+
+    const otherCreated = await createOrder(demo.secondRoomId, "money-cross-order-revision");
+    const otherOrderId = otherCreated.result!.orderId as string;
+    const otherRevisionId = (await getOrderView(db, otherOrderId)).order.current_revision_id!;
+    await expect(sql`
+      INSERT INTO collection_facts (
+        fact_id, order_id, fact_type, amount_minor, net_effect_minor, currency,
+        references_fact_id, reverses_fact_id, method, note, transaction_reference,
+        pricing_revision_id, command_id
+      ) VALUES (
+        'fact_cross_order_pricing_revision', ${orderId}, 'COLLECTION', 1, 1, 'CNY',
+        NULL, NULL, 'CASH', 'must reject cross-order revision', 'TEST-TXN-CROSS-ORDER-REVISION',
+        ${otherRevisionId}, 'command_cross_order_pricing_revision'
+      )
+    `.execute(db)).rejects.toMatchObject({ constraint: "collection_facts_pricing_revision_order_fk" });
+  });
+
   it("uses the shared inventory path for maintenance and releases cancellation/no-show claims", async () => {
     const locked = await previewAndConfirm({
       commandType: "LOCK_MAINTENANCE",

@@ -70,7 +70,7 @@ async function chooseD01(page: Page, arrival: string, departure: string) {
   await page.getByTestId("departure-date").fill(departure);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   if ((page.viewportSize()?.width ?? 0) < 576) {
-    await page.getByRole("button", { name: "新建住宿或库存 Block", exact: true }).click();
+    await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
   }
   const unitSelect = page.getByTestId("room-status-unit-select");
   const d01Id = "unit_room_d_gen_01";
@@ -174,6 +174,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
     phone: "13923000999",
     documentNumber: "2C-STAY-SNAPSHOT-EDITED"
   });
+  expect(memberStayInput.additionalGuests).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath("member-stay-confirm-step2c.png"), fullPage: true });
   await page.getByTestId("confirm-command").click();
   await expect(page.getByTestId("command-receipt")).toContainText("会员住宿订单已创建");

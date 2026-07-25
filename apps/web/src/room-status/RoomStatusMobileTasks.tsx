@@ -18,12 +18,17 @@ import { Modal } from "../ui";
 import {
   formatRoomStatusDate,
   formatRoomStatusDateTime,
+  roomStatusBedOccupantLabels,
   roomStatusActionLabels,
+  roomStatusIntervalBusinessLabel,
+  roomStatusOccupantLabelLines,
+  roomStatusPresentation,
   roomStatusSourceLabels,
   roomStatusUnitLabel,
   RoomStatusMark,
   useRoomStatusMobileViewport
 } from "./roomStatusPresentation";
+import { roomStatusOrderIdentityForInterval, type RoomStatusOrderIdentity } from "./roomStatusState";
 
 export type RoomStatusMobileTab = "ARRIVALS" | "IN_HOUSE" | "DEPARTURES" | "EXCEPTIONS";
 
@@ -53,6 +58,7 @@ export interface RoomStatusMobileTasksProps {
   onCreate: () => void;
   onOpenReference: (reference: RoomStatusOperationalTaskDto["references"][number]) => void;
   onOpenReceipt: (receiptId: string) => void;
+  onOpenOrderContext: (identity: RoomStatusOrderIdentity, serviceDate: string) => void;
   onAction: (action: RoomStatusActionDto, task: RoomStatusOperationalTaskDto, unit: RoomStatusUnitDto | null) => void;
 }
 
@@ -77,6 +83,84 @@ function flattenUnitMap(board: RoomStatusBoardDto): Map<string, RoomStatusUnitDt
   return new Map(board.rooms.flatMap((room) => [room, ...room.children]).map((unit) => [unit.id, unit]));
 }
 
+export interface MobileBedOccupancySummary {
+  key: string;
+  kind: "BED_SPLIT" | "BED_ORDER" | "WHOLE_ROOM";
+  room: RoomStatusUnitDto;
+  serviceDate: string;
+  ratio: string;
+  status: RoomStatusUnitDto["days"][number]["status"];
+  occupantLabels: string[];
+  orderIdentity: RoomStatusOrderIdentity | null;
+}
+
+export function mobileBedOccupancySummaries(board: RoomStatusBoardDto): MobileBedOccupancySummary[] {
+  return board.rooms.flatMap((room) => room.bedOccupancies.flatMap((occupancy) => {
+    const parent: MobileBedOccupancySummary = {
+      key: `beds:${room.id}:${occupancy.serviceDate}`,
+      kind: "BED_SPLIT",
+      room,
+      serviceDate: occupancy.serviceDate,
+      ratio: `${occupancy.occupiedBedCount}/${occupancy.totalBedCount}`,
+      status: room.days.find((day) => day.serviceDate === occupancy.serviceDate)?.status ?? "UNKNOWN",
+      occupantLabels: roomStatusBedOccupantLabels(occupancy.occupants),
+      orderIdentity: null
+    };
+    const exactBedOrders = occupancy.occupants.flatMap((occupant): MobileBedOccupancySummary[] => {
+      const bed = room.children?.find((child) => child.id === occupant.inventoryUnitId);
+      if (!bed) return [];
+      const identities = bed.intervals.flatMap((interval) => {
+        if (interval.startDate > occupancy.serviceDate || occupancy.serviceDate >= interval.endDate) return [];
+        const identity = roomStatusOrderIdentityForInterval(interval);
+        return identity?.orderId === occupant.sourceReference.id ? [identity] : [];
+      });
+      const stableOrders = new Set(identities.map((identity) => `${identity.orderId}:${identity.stayId}`));
+      if (stableOrders.size !== 1) return [];
+      return [{
+        key: `bed-order:${bed.id}:${occupancy.serviceDate}:${identities[0]!.orderId}`,
+        kind: "BED_ORDER",
+        room: bed,
+        serviceDate: occupancy.serviceDate,
+        ratio: "1人",
+        status: bed.days.find((day) => day.serviceDate === occupancy.serviceDate)?.status ?? "UNKNOWN",
+        occupantLabels: [occupant.primaryOccupantLabel?.trim() || "历史未记录"],
+        orderIdentity: identities[0]!
+      }];
+    });
+    return [parent, ...exactBedOrders];
+  }));
+}
+
+export function mobileWholeRoomOccupancySummaries(board: RoomStatusBoardDto): MobileBedOccupancySummary[] {
+  return board.rooms.flatMap((room) => room.intervals.flatMap((interval) => {
+    const wholeRoomLodging = interval.actualInventoryUnitId === room.id
+      && interval.status !== "UNKNOWN"
+      && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+      && interval.occupantCount > 0;
+    if (!wholeRoomLodging) return [];
+    return board.dates
+      .filter((serviceDate) => interval.startDate <= serviceDate && serviceDate < interval.endDate)
+      .map((serviceDate) => ({
+        key: `whole-room:${interval.id}:${serviceDate}`,
+        kind: "WHOLE_ROOM" as const,
+        room,
+        serviceDate,
+        ratio: `${interval.occupantCount}人`,
+        status: room.days.find((day) => day.serviceDate === serviceDate)?.status ?? interval.status,
+        occupantLabels: interval.occupants.map((occupant) => occupant.nickname?.trim() || "历史未记录"),
+        orderIdentity: roomStatusOrderIdentityForInterval(interval)
+      }));
+  }));
+}
+
+export function mobileLodgingOccupancySummaries(board: RoomStatusBoardDto): MobileBedOccupancySummary[] {
+  return [...mobileBedOccupancySummaries(board), ...mobileWholeRoomOccupancySummaries(board)];
+}
+
+export function mobileLodgingOccupantSummary(interval: RoomStatusOperationalTaskDto): string {
+  return roomStatusIntervalBusinessLabel(interval);
+}
+
 export function executableTaskAction(
   task: RoomStatusOperationalTaskDto | null,
   unit: RoomStatusUnitDto | null
@@ -88,9 +172,8 @@ export function executableTaskAction(
     if (action.code === "COMPLETE_CLEANING") {
       return task.sourceKind === "CLEANING" && action.targetReference?.type === "OPERATIONS";
     }
-    if (action.code === "RELEASE_INTERNAL_USE" || action.code === "RELEASE_MAINTENANCE") {
-      const expectedSource = action.code === "RELEASE_INTERNAL_USE" ? "INTERNAL_USE" : "MAINTENANCE";
-      return task.sourceKind === expectedSource
+    if (action.code === "RELEASE_MAINTENANCE") {
+      return task.sourceKind === "MAINTENANCE"
         && task.blocking
         && action.targetReference?.type === "BLOCK"
         && (!action.requiresFullInterval || task.sourceStartDate < task.sourceEndDate);
@@ -110,6 +193,7 @@ export function RoomStatusMobileTasks({
   onCreate,
   onOpenReference,
   onOpenReceipt,
+  onOpenOrderContext,
   onAction
 }: RoomStatusMobileTasksProps) {
   const isMobile = useRoomStatusMobileViewport();
@@ -120,6 +204,7 @@ export function RoomStatusMobileTasks({
   const handledFocusRequest = useRef(0);
   const [detailIntervalId, setDetailIntervalId] = useState<string | null>(null);
   const unitMap = useMemo(() => flattenUnitMap(board), [board]);
+  const lodgingOccupancySummaries = useMemo(() => mobileLodgingOccupancySummaries(board), [board]);
   const intervalMap = useMemo(() => {
     const map = new Map<string, RoomStatusOperationalTaskDto>();
     for (const group of [groups.arrivals, groups.inHouse, groups.departures, groups.exceptions]) {
@@ -134,6 +219,7 @@ export function RoomStatusMobileTasks({
     ? unitMap.get(detailInterval.displayInventoryUnitId) ?? unitMap.get(detailInterval.actualInventoryUnitId) ?? null
     : null;
   const detailAction = executableTaskAction(detailInterval, detailUnit);
+  const detailLodging = detailInterval?.sourceKind === "ORDER" || detailInterval?.sourceKind === "FREE_STAY";
 
   useEffect(() => {
     if (!focusRequest
@@ -182,7 +268,7 @@ export function RoomStatusMobileTasks({
         <div className="room-status-mobile-header-actions">
           <small>{formatRoomStatusDateTime(board.asOf)} · revision {board.revision}</small>
           {canCreate ? (
-            <button type="button" className="room-status-button" aria-label="新建住宿或库存 Block" onClick={onCreate}>
+            <button type="button" className="room-status-button" aria-label="新建住宿或锁房" onClick={onCreate}>
               <Plus aria-hidden="true" size={17} />新建
             </button>
           ) : null}
@@ -215,6 +301,32 @@ export function RoomStatusMobileTasks({
             </button>
           </div>
         </nav>
+      ) : null}
+
+      {lodgingOccupancySummaries.length ? (
+        <section className="room-status-mobile-occupancies" aria-label="住宿人" role="region">
+          <h3>当前日期范围住宿人</h3>
+          <ul>
+            {lodgingOccupancySummaries.map((summary) => (
+              <li key={summary.key}>
+                <div className="room-status-mobile-occupancy-heading">
+                  <strong>{roomStatusUnitLabel(summary.room)}</strong>
+                  <span>{formatRoomStatusDate(summary.serviceDate)} · {summary.ratio} · {roomStatusPresentation[summary.status].label}</span>
+                </div>
+                <div className="room-status-mobile-occupant-list">
+                  {roomStatusOccupantLabelLines(summary.occupantLabels).map((line, index) => (
+                    <span
+                      data-mobile-bed-occupant-line={summary.kind === "BED_SPLIT" || summary.kind === "BED_ORDER" ? true : undefined}
+                      data-mobile-whole-room-occupant-line={summary.kind === "WHOLE_ROOM" ? true : undefined}
+                      key={`${summary.key}:${index}`}
+                    >{line}</span>
+                  ))}
+                </div>
+                {summary.orderIdentity ? <button type="button" className="room-status-text-button" onClick={() => onOpenOrderContext(summary.orderIdentity!, summary.serviceDate)}>打开订单上下文<ArrowRight aria-hidden="true" size={16} /></button> : null}
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
 
       <div className="room-status-mobile-tabs" role="tablist" aria-label="房态任务分类">
@@ -252,6 +364,8 @@ export function RoomStatusMobileTasks({
             {tasks.map((interval) => {
               const unit = unitMap.get(interval.displayInventoryUnitId) ?? unitMap.get(interval.actualInventoryUnitId) ?? null;
               const primaryAction = executableTaskAction(interval, unit);
+              const lodging = interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY";
+              const businessLabel = mobileLodgingOccupantSummary(interval);
               return (
                 <li key={interval.id}>
                   <button
@@ -268,11 +382,11 @@ export function RoomStatusMobileTasks({
                       <strong>{unit ? roomStatusUnitLabel(unit) : interval.displayInventoryUnitId}</strong>
                       <RoomStatusMark status={interval.status} compact />
                     </span>
-                    {interval.primaryOccupantLabel ? <span>主要居住人 · {interval.primaryOccupantLabel}</span> : null}
-                    <span>{interval.label}</span>
+                    {lodging ? <span>住宿人 · {businessLabel}</span> : null}
+                    {!lodging ? <span>{interval.label}</span> : null}
                     <small>来源完整区间 {formatRoomStatusDate(interval.sourceStartDate)}至{formatRoomStatusDate(interval.sourceEndDate)} · {roomStatusSourceLabels[interval.sourceKind]}</small>
                     {!unit ? <small className="room-status-mobile-task-warning">库存单元未包含在当前查询页，保留稳定 ID。</small> : null}
-                    {interval.conflicts.length ? <small className="room-status-mobile-task-warning">{interval.conflicts.length} 个日期占用</small> : null}
+                    {!lodging && interval.conflicts.length ? <small className="room-status-mobile-task-warning">{interval.conflicts.length} 个日期占用</small> : null}
                   </button>
                   {primaryAction ? (
                     <button type="button" className="room-status-button room-status-mobile-primary-action" onClick={() => onAction(primaryAction, interval, unit)}>
@@ -322,8 +436,7 @@ export function RoomStatusMobileTasks({
           <div className="room-status-mobile-detail">
             <div className="room-status-mobile-detail-summary">
               <RoomStatusMark status={detailInterval.status} />
-              <strong>{detailInterval.label}</strong>
-              {detailInterval.primaryOccupantLabel ? <span>主要居住人 · {detailInterval.primaryOccupantLabel}</span> : null}
+              <strong>{detailLodging ? `住宿人 · ${mobileLodgingOccupantSummary(detailInterval)}` : roomStatusIntervalBusinessLabel(detailInterval)}</strong>
               <span>{roomStatusSourceLabels[detailInterval.sourceKind]}</span>
             </div>
             <section aria-labelledby={`${tabsId}-detail-range`}>
@@ -333,11 +446,11 @@ export function RoomStatusMobileTasks({
                 <dt>营业日期</dt><dd><code>{detailInterval.businessDate}</code></dd>
                 <dt>任务显示区间</dt><dd><code>[{detailInterval.startDate}, {detailInterval.endDate})</code></dd>
                 <dt>来源完整区间</dt><dd><code>[{detailInterval.sourceStartDate}, {detailInterval.sourceEndDate})</code></dd>
-                <dt>显示库存 ID</dt><dd><code>{detailInterval.displayInventoryUnitId}</code></dd>
-                <dt>实际库存 ID</dt><dd><code>{detailInterval.actualInventoryUnitId}</code></dd>
+                {!detailLodging ? <><dt>显示库存 ID</dt><dd><code>{detailInterval.displayInventoryUnitId}</code></dd></> : null}
+                {!detailLodging ? <><dt>实际库存 ID</dt><dd><code>{detailInterval.actualInventoryUnitId}</code></dd></> : null}
               </dl>
             </section>
-            <section aria-labelledby={`${tabsId}-detail-source`}>
+            {!detailLodging ? <section aria-labelledby={`${tabsId}-detail-source`}>
               <h3 id={`${tabsId}-detail-source`}><Blocks aria-hidden="true" size={18} />来源事实</h3>
               <dl>
                 <dt>区间 ID</dt><dd><code>{detailInterval.id}</code></dd>
@@ -361,8 +474,17 @@ export function RoomStatusMobileTasks({
                   ))}
                 </ul>
               ) : null}
-            </section>
-            {detailInterval.history.length ? (
+            </section> : (
+              <section aria-labelledby={`${tabsId}-detail-source`}>
+                <h3 id={`${tabsId}-detail-source`}><CalendarCheck2 aria-hidden="true" size={18} />住宿信息</h3>
+                <dl>
+                  <dt>住宿状态</dt><dd>{roomStatusPresentation[detailInterval.status].label}</dd>
+                  <dt>住宿来源</dt><dd>{roomStatusSourceLabels[detailInterval.sourceKind]}</dd>
+                  <dt>说明</dt><dd>{detailInterval.reason ?? "无额外说明"}</dd>
+                </dl>
+              </section>
+            )}
+            {!detailLodging && detailInterval.history.length ? (
               <section aria-labelledby={`${tabsId}-detail-history`}>
                 <h3 id={`${tabsId}-detail-history`}><Clock3 aria-hidden="true" size={18} />事实历史</h3>
                 <ol className="room-status-mobile-detail-history">

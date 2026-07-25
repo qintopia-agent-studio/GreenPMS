@@ -110,7 +110,7 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
     for (let index = 0; index < 200; index += 10) {
       const suffix = index.toString().padStart(3, "0");
       const reason = `E2E performance typed source ${arrivalDate} ${suffix}`;
-      const existing = await db.selectFrom("internal_use_blocks")
+      const existing = await db.selectFrom("maintenance_locks")
         .select("id")
         .where("property_id", "=", performancePropertyId)
         .where("reason", "=", reason)
@@ -119,7 +119,7 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
       const sourceStart = addDays(arrivalDate, index % 20);
       const sourceEnd = addDays(sourceStart, 21);
       const preview = await createCommandPreview(db, principal, {
-        commandType: "PLACE_INTERNAL_USE",
+        commandType: "LOCK_MAINTENANCE",
         input: {
           propertyId: performancePropertyId,
           inventoryUnitId: `unit_e2e_room_status_performance_${suffix}`,
@@ -133,7 +133,7 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
       });
       await confirmCommandPreview(db, principal, preview.preview.previewId, {
         propertyId: performancePropertyId,
-        commandType: "PLACE_INTERNAL_USE",
+        commandType: "LOCK_MAINTENANCE",
         confirmation: true,
         expectedEffectHash: preview.preview.effectHash,
         reason: {
@@ -225,8 +225,8 @@ test("200 real inventory units by 90 nights become keyboard-interactive within t
   const board = JSON.parse(responseBody.toString("utf8")) as RoomStatusBoardDto;
   expect(board.dates).toHaveLength(90);
   expect(board.rooms.reduce((count, room) => count + 1 + room.children.length, 0)).toBe(roomStatusPageSize);
-  expect(board.rooms.flatMap((room) => room.intervals).filter((interval) => interval.sourceKind === "INTERNAL_USE").length).toBeGreaterThanOrEqual(5);
-  await expect(grid.locator(".room-status-interval-internal-use")).toHaveCount(5);
+  expect(board.rooms.flatMap((room) => room.intervals).filter((interval) => interval.sourceKind === "MAINTENANCE").length).toBeGreaterThanOrEqual(5);
+  await expect(grid.locator(".room-status-interval-maintenance")).toHaveCount(5);
   expect(board.page).toMatchObject({ index: 0, size: roomStatusPageSize, totalRooms: 200, totalPages: 4 });
   expect(responseBody.byteLength).toBeLessThanOrEqual(2_100_000);
   expect(response.headers()["content-encoding"]).toMatch(/^(br|gzip|zstd)$/);
@@ -246,6 +246,57 @@ test("200 real inventory units by 90 nights become keyboard-interactive within t
   expect(filteredBoard.filterOptions.capacities).toContain(1);
   await expect(grid.locator("[data-room-status-row]")).toHaveCount(1);
   await expect(page.getByText("1 间房", { exact: true })).toBeVisible();
+});
+
+test("restoration scans server pages until the previously selected room is visible again", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop cross-page restoration coverage");
+  test.setTimeout(120_000);
+  const arrivalDate = todayInTimeZone("Asia/Shanghai");
+  const departureDate = addDays(arrivalDate, 14);
+  const targetUnitId = "unit_e2e_room_status_performance_175";
+  await preparePerformanceProperty(arrivalDate);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+
+  await page.evaluate(({ key, value }) => window.sessionStorage.setItem(key, value), {
+    key: `qintopia.room-status-view.v1:${operatorSubjectId}:${performancePropertyId}`,
+    value: serializeRoomStatusRestoration({
+      version: 1,
+      propertyId: performancePropertyId,
+      range: { arrivalDate, departureDate },
+      revision: "0",
+      savedAt: new Date().toISOString(),
+      state: createRoomStatusViewState({
+        roomPageIndex: 0,
+        focusedCell: { unitId: targetUnitId, serviceDate: arrivalDate },
+        selection: {
+          unitId: targetUnitId,
+          anchorDate: arrivalDate,
+          focusDate: arrivalDate,
+          arrivalDate,
+          departureDate: addDays(arrivalDate, 1)
+        }
+      })
+    })
+  });
+
+  const finalPageResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === `/api/v1/properties/${performancePropertyId}/room-status`
+      && url.searchParams.get("page") === "3"
+      && response.status() === 200;
+  });
+  await page.getByTestId("property-select").selectOption(performancePropertyId);
+  await finalPageResponse;
+
+  await expect(page.getByText("当前第 4 / 4 页，共 200 间房", { exact: true })).toBeVisible();
+  const targetCell = page.locator(
+    `[data-room-status-cell="true"][data-unit-id="${targetUnitId}"][data-service-date="${arrivalDate}"]`
+  );
+  await expect(targetCell).toBeVisible();
+  await expect(targetCell).toHaveAttribute("aria-selected", "true");
+  await expect(targetCell).toBeFocused();
 });
 
 test("mobile operators can page through every room in a property larger than one server page", async ({ page }, testInfo) => {
@@ -282,7 +333,7 @@ test("mobile operators can page through every room in a property larger than one
   await expect(pager).toContainText("房源第 2 / 4 页，共 200 间");
   await page.screenshot({ path: testInfo.outputPath("room-status-mobile-pagination-200-rooms.png"), fullPage: true });
 
-  await page.getByRole("button", { name: "新建住宿或库存 Block" }).click();
+  await page.getByRole("button", { name: "新建住宿或锁房" }).click();
   const unitSelect = page.getByTestId("room-status-unit-select");
   await expect(unitSelect.locator("option")).toHaveCount(roomStatusPageSize + 1);
   await expect(unitSelect.locator("option[value='unit_e2e_room_status_performance_050']")).toHaveCount(1);

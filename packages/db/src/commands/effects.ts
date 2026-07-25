@@ -509,7 +509,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     }, { membershipOrderVersion: order.version, paymentFactsHash: paymentState.hash, validFrom });
   }
 
-  if (commandType === "LOCK_MAINTENANCE" || commandType === "PLACE_INTERNAL_USE") {
+  if (commandType === "LOCK_MAINTENANCE") {
     const arrivalDate = requireString(input, "arrivalDate");
     const departureDate = requireString(input, "departureDate");
     enumerateServiceDates(arrivalDate, departureDate);
@@ -529,6 +529,21 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       ...(phone ? { phone } : {}),
       ...(documentNumber ? { documentNumber } : {})
     };
+    const additionalGuestInputs = input.additionalGuests ?? [];
+    if (!Array.isArray(additionalGuestInputs)) {
+      throw new DomainError("VALIDATION_ERROR", "additionalGuests must be an array");
+    }
+    const additionalGuests = additionalGuestInputs.map((value, index) => {
+      const submitted = requireObject(value, `additionalGuests[${index}]`);
+      const additionalPhone = optionalString(submitted, "phone");
+      const additionalDocumentNumber = optionalString(submitted, "documentNumber");
+      return {
+        fullName: requireString(submitted, "fullName"),
+        nickname: requireString(submitted, "nickname"),
+        ...(additionalPhone ? { phone: additionalPhone } : {}),
+        ...(additionalDocumentNumber ? { documentNumber: additionalDocumentNumber } : {})
+      };
+    });
     const quote = await loadStoredQuote(db, quoteId);
     if (quote.propertyId !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Quote belongs to another property", 403);
     const memberStay = Boolean(quote.memberId || quote.memberContractId);
@@ -544,6 +559,25 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       throw new DomainError("VALIDATION_ERROR", "freeStayReason is only allowed for FREE stays");
     }
     const unit = await loadInventoryUnit(db, propertyId, quote.inventoryUnitId);
+    const guestSnapshots = [guest, ...additionalGuests];
+    if (guestSnapshots.length > unit.occupancyCapacity) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        `${unit.code} 最多登记 ${unit.occupancyCapacity} 位住宿人，本次提交了 ${guestSnapshots.length} 位`
+      );
+    }
+    const frozenOccupantIds = input._occupantIds;
+    if (!Array.isArray(frozenOccupantIds) || frozenOccupantIds.length !== guestSnapshots.length
+      || frozenOccupantIds.some((id) => typeof id !== "string" || !id.trim())
+      || new Set(frozenOccupantIds).size !== frozenOccupantIds.length) {
+      throw new DomainError("VALIDATION_ERROR", "CREATE_ORDER requires a stable occupant ID for every submitted guest");
+    }
+    const occupants = guestSnapshots.map((snapshot, index) => ({
+      id: frozenOccupantIds[index] as string,
+      ordinal: index + 1,
+      role: index === 0 ? "PRIMARY" as const : "ADDITIONAL" as const,
+      ...snapshot
+    }));
     const fingerprint = await inventoryFingerprint(db, propertyId, unit.id, quote.arrivalDate, quote.departureDate);
     if (fingerprint.length > 0) throw new DomainError("INVENTORY_CONFLICT", "Quoted inventory is no longer available", 409);
     const pricing = await priceSingleUnit(db, {
@@ -560,6 +594,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const effect = {
       quoteId,
       primaryGuest: guest,
+      occupants,
+      occupancyCapacity: unit.occupancyCapacity,
       bookingChannelCode,
       channelOrderReference,
       freeStayReason,
@@ -572,7 +608,12 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       memberContractId: quote.memberContractId ?? null,
       pricing
     };
-    return finalize(propertyId, effect, { quoteInputHash: quote.inputHash, inventory: fingerprint, membership: await memberBasis(db, quote.memberContractId ?? null, quote.memberId) });
+    return finalize(propertyId, effect, {
+      quoteInputHash: quote.inputHash,
+      inventory: fingerprint,
+      occupancyCapacity: unit.occupancyCapacity,
+      membership: await memberBasis(db, quote.memberContractId ?? null, quote.memberId)
+    });
   }
 
   if (commandType === "LOCK_MAINTENANCE") {
@@ -591,37 +632,42 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const lock = await db.selectFrom("maintenance_locks").selectAll().where("id", "=", maintenanceLockId).where("property_id", "=", propertyId).executeTakeFirst();
     if (!lock) throw new DomainError("NOT_FOUND", "Maintenance lock not found", 404);
     if (lock.status !== "ACTIVE") throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Maintenance lock is already released", 409);
-    return finalize(propertyId, { maintenanceLockId, inventoryUnitId: lock.inventory_unit_id, arrivalDate: lock.arrival_date, departureDate: lock.departure_date }, { maintenanceVersion: lock.version, status: lock.status });
-  }
-
-  if (commandType === "PLACE_INTERNAL_USE") {
-    const unitId = requireString(input, "inventoryUnitId");
-    const arrivalDate = requireString(input, "arrivalDate");
-    const departureDate = requireString(input, "departureDate");
-    const reason = requireString(input, "reason");
-    const unit = await loadInventoryUnit(db, propertyId, unitId);
-    const fingerprint = await inventoryFingerprint(db, propertyId, unitId, arrivalDate, departureDate);
-    if (fingerprint.length > 0) throw new DomainError("INVENTORY_CONFLICT", "Inventory cannot be placed into internal use", 409);
-    return finalize(propertyId, { inventoryUnit: unit, arrivalDate, departureDate, reason }, { inventory: fingerprint });
-  }
-
-  if (commandType === "RELEASE_INTERNAL_USE") {
-    const internalUseBlockId = requireString(input, "internalUseBlockId");
-    const block = await db.selectFrom("internal_use_blocks").selectAll()
-      .where("id", "=", internalUseBlockId)
+    const expectedDates = enumerateServiceDates(lock.arrival_date, lock.departure_date);
+    const claims = await db.selectFrom("inventory_claims")
+      .select(["id", "property_id", "room_id", "inventory_unit_id", "service_date", "active", "released_at"])
+      .where("source_type", "=", "MAINTENANCE")
+      .where("source_id", "=", maintenanceLockId)
+      .orderBy("service_date")
+      .orderBy("id")
+      .execute();
+    const expectedRoom = await db.selectFrom("inventory_units")
+      .select(["id", "kind", "parent_room_id"])
+      .where("id", "=", lock.inventory_unit_id)
       .where("property_id", "=", propertyId)
       .executeTakeFirst();
-    if (!block) throw new DomainError("NOT_FOUND", "Internal-use Block not found", 404);
-    if (block.status !== "ACTIVE") throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Internal-use Block is already released", 409);
-    return finalize(propertyId, {
-      internalUseBlockId,
-      inventoryUnitId: block.inventory_unit_id,
-      arrivalDate: block.arrival_date,
-      departureDate: block.departure_date,
-      reason: block.reason,
-      fromStatus: block.status,
-      toStatus: "RELEASED"
-    }, { blockVersion: block.version, status: block.status });
+    const expectedRoomId = expectedRoom?.kind === "ROOM" ? expectedRoom.id : expectedRoom?.parent_room_id;
+    const completeClaimSet = Boolean(expectedRoomId)
+      && claims.length === expectedDates.length
+      && claims.every((claim, index) => (
+        claim.property_id === propertyId
+        && claim.room_id === expectedRoomId
+        && claim.inventory_unit_id === lock.inventory_unit_id
+        && claim.service_date === expectedDates[index]
+        && claim.active
+        && claim.released_at === null
+      ));
+    if (!completeClaimSet) {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Maintenance lock Claim set is incomplete or already partially released", 409);
+    }
+    return finalize(
+      propertyId,
+      { maintenanceLockId, inventoryUnitId: lock.inventory_unit_id, arrivalDate: lock.arrival_date, departureDate: lock.departure_date },
+      {
+        maintenanceVersion: lock.version,
+        status: lock.status,
+        maintenanceClaims: claims.map((claim) => `${claim.service_date}:${claim.id}:ACTIVE`)
+      }
+    );
   }
 
   if (commandType === "COMPLETE_CLEANING") {
@@ -828,6 +874,83 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     membership: await memberBasis(db, context.order.member_contract_id, context.order.member_id)
   };
 
+  if (commandType === "CORRECT_ORDER_OCCUPANT") {
+    const occupantId = requireString(input, "occupantId");
+    const occupant = await db.selectFrom("order_occupants")
+      .selectAll()
+      .where("id", "=", occupantId)
+      .where("order_id", "=", orderId)
+      .executeTakeFirst();
+    if (!occupant) throw new DomainError("NOT_FOUND", "Order occupant not found", 404);
+    const latest = await db.selectFrom("order_occupant_corrections")
+      .selectAll()
+      .where("occupant_id", "=", occupantId)
+      .orderBy("sequence", "desc")
+      .executeTakeFirst();
+    const before = latest ? {
+      fullName: latest.corrected_full_name,
+      nickname: latest.corrected_nickname,
+      phone: latest.corrected_phone,
+      documentNumber: latest.corrected_document_number
+    } : {
+      fullName: occupant.full_name,
+      nickname: occupant.nickname,
+      phone: occupant.phone,
+      documentNumber: occupant.document_number
+    };
+    const expectedInput = requireObject(input.expectedPriorSnapshot, "expectedPriorSnapshot");
+    const expectedNullableField = (field: "fullName" | "nickname" | "phone" | "documentNumber", maximum: number): string | null => {
+      if (!Object.hasOwn(expectedInput, field)) throw new DomainError("VALIDATION_ERROR", `expectedPriorSnapshot.${field} is required`);
+      if (expectedInput[field] === null) return null;
+      const value = requireString(expectedInput, field);
+      if (value.length > maximum) throw new DomainError("VALIDATION_ERROR", `expectedPriorSnapshot.${field} is too long`);
+      return value;
+    };
+    const expectedPriorSnapshot = {
+      fullName: expectedNullableField("fullName", 200),
+      nickname: expectedNullableField("nickname", 200),
+      phone: expectedNullableField("phone", 80),
+      documentNumber: expectedNullableField("documentNumber", 120)
+    };
+    if (stableHash(expectedPriorSnapshot) !== stableHash(before)) {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Order occupant details changed; reload before correcting", 409);
+    }
+    const submitted = requireObject(input.correctedSnapshot, "correctedSnapshot");
+    const nullableField = (field: "phone" | "documentNumber", maximum: number): string | null => {
+      if (!Object.hasOwn(submitted, field)) throw new DomainError("VALIDATION_ERROR", `correctedSnapshot.${field} is required`);
+      if (submitted[field] === null) return null;
+      const value = requireString(submitted, field);
+      if (value.length > maximum) throw new DomainError("VALIDATION_ERROR", `correctedSnapshot.${field} is too long`);
+      return value;
+    };
+    const after = {
+      fullName: requireString(submitted, "fullName"),
+      nickname: requireString(submitted, "nickname"),
+      phone: nullableField("phone", 80),
+      documentNumber: nullableField("documentNumber", 120)
+    };
+    if (after.fullName.length > 200 || after.nickname.length > 200) {
+      throw new DomainError("VALIDATION_ERROR", "Corrected occupant name is too long");
+    }
+    if (stableHash(before) === stableHash(after)) {
+      throw new DomainError("VALIDATION_ERROR", "Corrected occupant snapshot must change at least one field");
+    }
+    return finalize(propertyId, {
+      operation: "CORRECT_ORDER_OCCUPANT",
+      orderId,
+      occupantId,
+      ordinal: occupant.ordinal,
+      role: occupant.role,
+      before,
+      after
+    }, {
+      ...baseBasis,
+      latestCorrectionId: latest?.id ?? null,
+      correctionSequence: (latest?.sequence ?? 0) + 1,
+      occupantSnapshot: before
+    });
+  }
+
   if (commandType === "SHORTEN_STAY") {
     assertOrderMutable(context.order.status);
     const newDepartureDate = requireString(input, "newDepartureDate");
@@ -884,6 +1007,20 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const currentUnit = await loadInventoryUnit(db, propertyId, effectiveUnitId);
     const newUnit = await loadInventoryUnit(db, propertyId, newInventoryUnitId);
     if (currentUnit.id === newUnit.id) throw new DomainError("VALIDATION_ERROR", "New inventory unit must differ from the current unit");
+    const occupantCountRow = await db.selectFrom("order_occupants")
+      .select(({ fn }) => fn.countAll<string>().as("count"))
+      .where("order_id", "=", orderId)
+      .executeTakeFirstOrThrow();
+    const occupantCount = Number(occupantCountRow.count);
+    if (!Number.isSafeInteger(occupantCount) || occupantCount < 1) {
+      throw new DomainError("INTERNAL_ERROR", "Order has no valid frozen occupant list", 500);
+    }
+    if (occupantCount > newUnit.occupancyCapacity) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        `${newUnit.code} 最多登记 ${newUnit.occupancyCapacity} 位住宿人，当前订单有 ${occupantCount} 位`
+      );
+    }
     if ((context.order.member_id || context.order.member_contract_id)
       && (currentUnit.kind !== newUnit.kind || currentUnit.roomTypeCode !== newUnit.roomTypeCode)) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "会员住宿只能更换到同一会员产品适用的房型", 409);
@@ -897,7 +1034,22 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       stayType: context.order.stay_type as StayType, policyVersionId: context.order.pricing_policy_version_id,
       timeline: stayTimeline, manualAdjustmentMinor: 0
     });
-    return finalize(propertyId, { orderId, fromInventoryUnit: currentUnit, toInventoryUnit: newUnit, effectiveDate, stayTimeline, pricing }, { ...baseBasis, stayTimeline: currentTimeline, inventory: fingerprint });
+    return finalize(propertyId, {
+      orderId,
+      fromInventoryUnit: currentUnit,
+      toInventoryUnit: newUnit,
+      effectiveDate,
+      occupantCount,
+      occupancyCapacity: newUnit.occupancyCapacity,
+      stayTimeline,
+      pricing
+    }, {
+      ...baseBasis,
+      stayTimeline: currentTimeline,
+      inventory: fingerprint,
+      occupantCount,
+      destinationOccupancyCapacity: newUnit.occupancyCapacity
+    });
   }
 
   if (commandType === "REPRICE_ORDER") {
@@ -1101,6 +1253,7 @@ export function projectCommandEffectForRead(commandType: string, effect: Record<
     return {
       ...effect,
       primaryGuest: projectPrimaryGuestForRead(effect.primaryGuest),
+      ...(Object.hasOwn(effect, "occupants") ? { occupants: effect.occupants } : {}),
       bookingChannelCode: Object.hasOwn(effect, "bookingChannelCode") ? effect.bookingChannelCode : null,
       channelOrderReference: Object.hasOwn(effect, "channelOrderReference") ? effect.channelOrderReference : null,
       freeStayReason: Object.hasOwn(effect, "freeStayReason") ? effect.freeStayReason : null,

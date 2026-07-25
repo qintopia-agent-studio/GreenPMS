@@ -17,7 +17,7 @@ import {
   type CreateQuoteCommandInputDto,
   type InventoryUnitKind,
   type RoomStatusBoardQueryDto,
-  type RecoverableCommandType
+  type HistoricalRecoverableCommandType
 } from "@qintopia/contracts";
 import { stableHash } from "@qintopia/domain";
 import {
@@ -69,7 +69,7 @@ import {
   QuoteCommandResponseSchema,
   ReferenceCatalogResponseSchema,
   ReceiptSchema,
-  RecoverableCommandTypeSchema,
+  HistoricalRecoverableCommandTypeSchema,
   RoomStatusBoardSchema,
   RoomStatusQuerySchema,
   StoredPreviewResponseSchema,
@@ -374,9 +374,11 @@ export async function buildServer(db: Kysely<Database>) {
 
   app.get("/api/v1/orders/:id", { schema: { tags: ["queries"], params: IdParams, response: { 200: OrderDetailResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
-    const view = await getOrderView(db, (request.params as { id: string }).id);
-    requireScopedResourceAccess(principal, view.order.property_id);
-    return view;
+    const orderId = (request.params as { id: string }).id;
+    const order = await db.selectFrom("orders").select("property_id").where("id", "=", orderId).executeTakeFirst();
+    if (!order) throw new DomainError("NOT_FOUND", "Order not found", 404);
+    requireScopedResourceAccess(principal, order.property_id);
+    return getOrderView(db, orderId, principal.propertyAccess.get(order.property_id)!);
   });
 
   app.get("/api/v1/members", { schema: { tags: ["queries"], querystring: MembersQuerySchema, response: { 200: MembersListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
@@ -512,10 +514,10 @@ export async function buildServer(db: Kysely<Database>) {
     return getCommand(db, principal, (request.params as { id: string }).id);
   });
   app.get("/api/v1/command-results", {
-    schema: { tags: ["receipts"], querystring: Type.Object({ propertyId: Id, commandType: RecoverableCommandTypeSchema, idempotencyKey: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }), response: { 200: CommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["receipts"], querystring: Type.Object({ propertyId: Id, commandType: HistoricalRecoverableCommandTypeSchema, idempotencyKey: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }), response: { 200: CommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
     const principal = await requirePrincipal(db, request);
-    const query = request.query as { propertyId: string; commandType: RecoverableCommandType; idempotencyKey: string };
+    const query = request.query as { propertyId: string; commandType: HistoricalRecoverableCommandType; idempotencyKey: string };
     return findCommandResult(db, principal, query.propertyId, query.commandType, query.idempotencyKey);
   });
 

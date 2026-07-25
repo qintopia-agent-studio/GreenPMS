@@ -218,7 +218,6 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     const rowBoxDuring = await sourceRow.boundingBox();
     expect(rowBoxDuring?.y).toBe(rowBoxBefore!.y);
     expect(rowBoxDuring?.height).toBe(rowBoxBefore!.height);
-    await page.screenshot({ path: testInfo.outputPath("stage-1-drag-locked-to-source-row.png"), fullPage: true });
 
     await page.mouse.up();
     await expect(sourceRow).not.toHaveClass(/is-drag-source-row/);
@@ -228,6 +227,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     expect(rowBoxAfter?.y).toBe(rowBoxBefore!.y);
     expect(rowBoxAfter?.height).toBe(rowBoxBefore!.height);
     await expect(page.getByTestId("quote-result")).toContainText("4 晚", { timeout: 15_000 });
+    await page.screenshot({ path: testInfo.outputPath("stage-1-drag-locked-to-source-row.png"), fullPage: true });
 
     await startCell.hover({ position: { x: startBox!.width / 2, y: startBox!.height - 8 } });
     await page.mouse.down();

@@ -35,8 +35,15 @@ export interface UnknownCommandResult {
   correlationId?: string;
 }
 
+type ExecutableCommandType = (typeof commandTypes)[number];
+
+function isExecutableCommandType(commandType: CommandType): commandType is ExecutableCommandType {
+  return (commandTypes as readonly string[]).includes(commandType);
+}
+
 const roomStatusVisibleCommands = new Set<CommandType>([
   "CREATE_ORDER",
+  "CORRECT_ORDER_OCCUPANT",
   "SHORTEN_STAY",
   "EXTEND_STAY",
   "MOVE_UNIT",
@@ -48,8 +55,6 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "CHECK_OUT",
   "LOCK_MAINTENANCE",
   "RELEASE_MAINTENANCE",
-  "PLACE_INTERNAL_USE",
-  "RELEASE_INTERNAL_USE",
   "COMPLETE_CLEANING"
 ]);
 
@@ -206,9 +211,24 @@ function normalizeCommandEnvelope(envelope: CommandEnvelope): CommandEnvelope {
       const value = normalizedGuest[field];
       if (typeof value === "string") normalizedGuest[field] = value.trim();
     }
+    const additionalGuests = Array.isArray(envelope.input.additionalGuests)
+      ? envelope.input.additionalGuests.map((guest) => {
+        if (!guest || typeof guest !== "object" || Array.isArray(guest)) return guest;
+        const normalized = { ...(guest as Record<string, unknown>) };
+        for (const field of ["fullName", "nickname", "phone", "documentNumber"] as const) {
+          const value = normalized[field];
+          if (typeof value === "string") normalized[field] = value.trim();
+        }
+        return normalized;
+      })
+      : envelope.input.additionalGuests;
     return {
       commandType: envelope.commandType,
-      input: { ...envelope.input, primaryGuest: normalizedGuest }
+      input: {
+        ...envelope.input,
+        primaryGuest: normalizedGuest,
+        ...(additionalGuests !== undefined ? { additionalGuests } : {})
+      }
     };
   }
   if (envelope.commandType === "CREATE_MEMBER") {
@@ -239,6 +259,15 @@ function normalizeCommandEnvelope(envelope: CommandEnvelope): CommandEnvelope {
   }
   const { tokenSecret: _discardedSecret, ...safeInput } = envelope.input;
   return { commandType: envelope.commandType, input: { ...safeInput, tokenSecretHash: sha256(value) } };
+}
+
+function freezeCreateOrderOccupantIds(commandType: CommandType, input: Record<string, unknown>): Record<string, unknown> {
+  if (commandType !== "CREATE_ORDER") return input;
+  const additionalCount = Array.isArray(input.additionalGuests) ? input.additionalGuests.length : 0;
+  return {
+    ...input,
+    _occupantIds: Array.from({ length: additionalCount + 1 }, () => newId("occupant"))
+  };
 }
 
 function executionLockKey(subjectId: string, propertyId: string, commandType: string, idempotencyKey: string): string {
@@ -346,6 +375,7 @@ function projectReceiptResultForRead(commandType: string, result: Record<string,
     return {
       ...result,
       primaryGuest: Object.hasOwn(result, "primaryGuest") ? projectPrimaryGuestForRead(result.primaryGuest) : null,
+      ...(Object.hasOwn(result, "occupants") ? { occupants: result.occupants } : {}),
       bookingChannelCode: Object.hasOwn(result, "bookingChannelCode") ? result.bookingChannelCode : null,
       channelOrderReference: Object.hasOwn(result, "channelOrderReference") ? result.channelOrderReference : null,
       freeStayReason: Object.hasOwn(result, "freeStayReason") ? result.freeStayReason : null
@@ -529,7 +559,7 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
   correlationId: string | undefined;
 }): Promise<{ preview: PreviewDto; receipt: ReceiptDto }> {
   const headers = assertWriteMetadata(metadata.idempotencyKey, metadata.correlationId);
-  if (!commandTypes.includes(envelope.commandType)) throw new DomainError("VALIDATION_ERROR", "Unsupported command type");
+  if (!isExecutableCommandType(envelope.commandType)) throw new DomainError("VALIDATION_ERROR", "Unsupported command type");
   const normalizedEnvelope = normalizeCommandEnvelope(envelope);
   const executionType = `PREVIEW:${normalizedEnvelope.commandType}`;
   const requestHash = stableHash(normalizedEnvelope);
@@ -558,7 +588,8 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
   const commandLockKey = executionLockKey(principal.subjectId, requestedPropertyId, executionType, headers.idempotencyKey);
 
   return withExecutionLock(db, commandLockKey, (lockedDb) => lockedDb.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
-    const built = await buildCommandEffect(trx, normalizedEnvelope.commandType, normalizedEnvelope.input);
+    const frozenInput = freezeCreateOrderOccupantIds(normalizedEnvelope.commandType, normalizedEnvelope.input);
+    const built = await buildCommandEffect(trx, normalizedEnvelope.commandType, frozenInput);
     await assertTokenExpiryCeiling(trx, principal, normalizedEnvelope.commandType, built.effect);
     const access = principal.propertyAccess.get(built.propertyId);
     if (access !== "WRITE") throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
@@ -581,7 +612,7 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
     const preview: PreviewDto = { previewId, commandType: normalizedEnvelope.commandType, effectHash: built.effectHash, effect: built.effect, expiresAt: expiresAt.toISOString() };
     await trx.insertInto("command_previews").values({
       id: previewId, subject_id: principal.subjectId, property_id: built.propertyId, command_type: normalizedEnvelope.commandType,
-      normalized_input: normalizedEnvelope.input, input_hash: stableHash(normalizedEnvelope.input), effect: built.effect,
+      normalized_input: frozenInput, input_hash: stableHash(normalizedEnvelope.input), effect: built.effect,
       effect_hash: built.effectHash, basis_versions: built.basisVersions, expires_at: expiresAt, status: "OPEN", used_at: null
     }).execute();
     const receiptId = newId("receipt");
@@ -664,7 +695,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
   correlationId: string | undefined;
 }): Promise<ReceiptDto> {
   const headers = assertWriteMetadata(metadata.idempotencyKey, metadata.correlationId);
-  if (!commandTypes.includes(confirmation.commandType)) throw new DomainError("VALIDATION_ERROR", "Unsupported command type");
+  if (!isExecutableCommandType(confirmation.commandType)) throw new DomainError("VALIDATION_ERROR", "Unsupported command type");
   if (!confirmation.propertyId?.trim()) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
   if (confirmation.confirmation !== true) throw new DomainError("CONFIRMATION_REQUIRED", "Explicit confirmation is required");
   if (!confirmation.expectedEffectHash?.trim()) throw new DomainError("CONFIRMATION_MISMATCH", "expectedEffectHash is required");
@@ -749,6 +780,8 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
             "REFUND_LIMIT_EXCEEDED"
           ].includes(error.code)
             || (isTokenLifecycleCommand(commandType) && error.code === "VALIDATION_ERROR")
+            || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
+            || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
             throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });
           }

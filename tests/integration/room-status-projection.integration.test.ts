@@ -105,6 +105,47 @@ async function board(options: {
   });
 }
 
+async function lodgingBusinessFactCounts() {
+  const [
+    orders,
+    stays,
+    quotes,
+    pricingRevisions,
+    coverageItems,
+    membershipOrders,
+    membershipPayments,
+    memberContracts,
+    entitlementLots,
+    entitlementLedger,
+    collections
+  ] = await Promise.all([
+    db.selectFrom("orders").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("stays").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("quotes").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("pricing_revisions").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("coverage_items").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("membership_orders").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("membership_payment_facts").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("member_contracts").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("entitlement_lots").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("entitlement_ledger").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("collection_facts").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow()
+  ]);
+  return {
+    orders: orders.count,
+    stays: stays.count,
+    quotes: quotes.count,
+    pricingRevisions: pricingRevisions.count,
+    coverageItems: coverageItems.count,
+    membershipOrders: membershipOrders.count,
+    membershipPayments: membershipPayments.count,
+    memberContracts: memberContracts.count,
+    entitlementLots: entitlementLots.count,
+    entitlementLedger: entitlementLedger.count,
+    collections: collections.count
+  };
+}
+
 function shiftLocalDate(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
@@ -126,8 +167,9 @@ async function createOrder(options: {
   departureDate: string;
   prefix: string;
   stayType?: "TRANSIENT" | "FREE";
-  freeStayReason?: string;
-  memberContractId?: string;
+    freeStayReason?: string;
+    memberContractId?: string;
+    nickname?: string;
 }) {
   const stayType = options.stayType ?? "TRANSIENT";
   const quote = await createQuote(db, {
@@ -144,7 +186,7 @@ async function createOrder(options: {
     input: {
       propertyId: demo.propertyId,
       quoteId: quote.quoteId,
-      primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: `RS ${options.prefix}` },
+      primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: options.nickname ?? `RS ${options.prefix}` },
       ...(!options.memberContractId ? {
         bookingChannelCode: "YOUMUDAO",
         channelOrderReference: `ROOM-STATUS-${options.prefix}`
@@ -171,6 +213,15 @@ describe("PostgreSQL room-status projection", () => {
       prefix: "occupancy-order"
     });
     const normalOrderId = normal.result!.orderId as string;
+    const sameNicknameFree = await createOrder({
+      unitId: demo.bedDId,
+      arrivalDate: "2029-02-01",
+      departureDate: "2029-02-03",
+      prefix: "occupancy-same-nickname-free",
+      nickname: "RS occupancy-order",
+      stayType: "FREE"
+    });
+    const sameNicknameFreeOrderId = sameNicknameFree.result!.orderId as string;
     const cleaningSource = await createOrder({
       unitId: demo.bedCId,
       arrivalDate: "2029-02-01",
@@ -198,7 +249,7 @@ describe("PostgreSQL room-status projection", () => {
       completed_at: null
     }).execute();
     await execute({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: demo.bedBId,
@@ -215,28 +266,67 @@ describe("PostgreSQL room-status projection", () => {
     expect(parent.bedOccupancies).toEqual([
       {
         serviceDate: "2029-02-01",
-        occupiedBedCount: 1,
+        occupiedBedCount: 2,
         totalBedCount: 4,
-        occupants: [{
-          inventoryUnitId: demo.bedAId,
-          inventoryUnitCode: "101-A",
-          primaryOccupantLabel: "RS occupancy-order",
-          sourceReference: expect.objectContaining({ type: "ORDER", id: normalOrderId })
-        }]
+        occupants: [
+          {
+            occupantId: expect.any(String),
+            inventoryUnitId: demo.bedAId,
+            inventoryUnitCode: "101-A",
+            primaryOccupantLabel: "RS occupancy-order",
+            sourceReference: expect.objectContaining({ type: "ORDER", id: normalOrderId })
+          },
+          {
+            occupantId: expect.any(String),
+            inventoryUnitId: demo.bedDId,
+            inventoryUnitCode: "101-D",
+            primaryOccupantLabel: "RS occupancy-order",
+            sourceReference: expect.objectContaining({ type: "ORDER", id: sameNicknameFreeOrderId })
+          }
+        ]
       },
       {
         serviceDate: "2029-02-02",
-        occupiedBedCount: 1,
+        occupiedBedCount: 2,
         totalBedCount: 4,
-        occupants: [{
-          inventoryUnitId: demo.bedAId,
-          inventoryUnitCode: "101-A",
-          primaryOccupantLabel: "RS occupancy-order",
-          sourceReference: expect.objectContaining({ type: "ORDER", id: normalOrderId })
-        }]
+        occupants: [
+          {
+            occupantId: expect.any(String),
+            inventoryUnitId: demo.bedAId,
+            inventoryUnitCode: "101-A",
+            primaryOccupantLabel: "RS occupancy-order",
+            sourceReference: expect.objectContaining({ type: "ORDER", id: normalOrderId })
+          },
+          {
+            occupantId: expect.any(String),
+            inventoryUnitId: demo.bedDId,
+            inventoryUnitCode: "101-D",
+            primaryOccupantLabel: "RS occupancy-order",
+            sourceReference: expect.objectContaining({ type: "ORDER", id: sameNicknameFreeOrderId })
+          }
+        ]
       }
     ]);
     expect(parent.children.every((child) => child.bedOccupancies.length === 0)).toBe(true);
+
+    const historicalNickname = await createOrder({
+      unitId: demo.bedAId,
+      arrivalDate: "2029-02-22",
+      departureDate: "2029-02-23",
+      prefix: "occupancy-historical-missing-nickname"
+    });
+    await sql`alter table orders disable trigger orders_protect_identity`.execute(db);
+    try {
+      await db.updateTable("orders")
+        .set({ primary_guest_snapshot: { fullName: "Historical Legal Name" } })
+        .where("id", "=", historicalNickname.result!.orderId as string)
+        .execute();
+    } finally {
+      await sql`alter table orders enable trigger orders_protect_identity`.execute(db);
+    }
+    const historicalParent = unitIn(await board({ arrivalDate: "2029-02-22", departureDate: "2029-02-23" }), demo.roomId);
+    expect(historicalParent.bedOccupancies[0]!.occupants[0]!.primaryOccupantLabel)
+      .toBe("RS occupancy-historical-missing-nickname");
 
     const roomOnly = await board({
       arrivalDate: "2029-02-01",
@@ -488,12 +578,13 @@ describe("PostgreSQL room-status projection", () => {
     expect(unitIn(incompleteCatalog, incompleteRoomId).bedOccupancies).toEqual([]);
   });
 
-  it("projects inherited bed conflicts, complete internal-use release, stale Preview zero-write, and monotonic revision", async () => {
+  it("projects inherited bed conflicts, complete maintenance release, stale Preview zero-write, and monotonic revision", async () => {
     const initial = await board({ arrivalDate: "2028-08-01", departureDate: "2028-08-06" });
     expect(initial.revision).toBe("0");
+    const businessFactsBefore = await lodgingBusinessFactCounts();
 
     const placed = await prepare({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: demo.bedAId,
@@ -501,19 +592,20 @@ describe("PostgreSQL room-status projection", () => {
         departureDate: "2028-08-03",
         reason: "Staff operational use"
       }
-    }, "internal-place");
+    }, "maintenance-place");
     expect(placed.preview.effect).toMatchObject({
       arrivalDate: "2028-08-01",
       departureDate: "2028-08-03",
       reason: "Staff operational use"
     });
-    const confirmation = await confirmPrepared(placed, "internal-place");
-    const blockId = confirmation.receipt.result!.internalUseBlockId as string;
+    const confirmation = await confirmPrepared(placed, "maintenance-place");
+    const blockId = confirmation.receipt.result!.maintenanceLockId as string;
     expect(confirmation.receipt.resourceRefs).toContain(blockId);
     expect(confirmation.receipt.factRefs).toHaveLength(2);
+    expect(await lodgingBusinessFactCounts()).toEqual(businessFactsBefore);
     const claimsByDate = await db.selectFrom("inventory_claims")
       .select(["id", "service_date"])
-      .where("source_type", "=", "INTERNAL_USE")
+      .where("source_type", "=", "MAINTENANCE")
       .where("source_id", "=", blockId)
       .orderBy("service_date")
       .execute();
@@ -523,13 +615,13 @@ describe("PostgreSQL room-status projection", () => {
     const parent = unitIn(occupied, demo.roomId);
     const bedA = unitIn(occupied, demo.bedAId);
     const bedB = unitIn(occupied, demo.bedBId);
-    expect(parent.days[0]).toMatchObject({ status: "INTERNAL_USE", available: false });
-    expect(bedA.days[0]).toMatchObject({ status: "INTERNAL_USE", available: false });
+    expect(parent.days[0]).toMatchObject({ status: "MAINTENANCE", available: false });
+    expect(bedA.days[0]).toMatchObject({ status: "MAINTENANCE", available: false });
     expect(bedB.days[0]).toMatchObject({ status: "AVAILABLE", available: true });
     expect(parent.conflicts[0]).toMatchObject({
       requestedInventoryUnitId: demo.roomId,
       actualInventoryUnitId: demo.bedAId,
-      sourceKind: "INTERNAL_USE",
+      sourceKind: "MAINTENANCE",
       startDate: "2028-08-01",
       endDate: "2028-08-03",
       blocking: true
@@ -561,7 +653,7 @@ describe("PostgreSQL room-status projection", () => {
     expect(oneBedParent.childUnitIds).toEqual([demo.bedAId, demo.bedBId, demo.bedCId, demo.bedDId]);
     expect(oneBedParent.children.map((child) => child.id)).toEqual([demo.bedAId]);
     expect(bedA.intervals[0]!.allowedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "RELEASE_INTERNAL_USE", enabled: true, requiresFullInterval: true })
+      expect.objectContaining({ code: "RELEASE_MAINTENANCE", enabled: true, requiresFullInterval: true })
     ]));
     expect(bedA.intervals[0]).toMatchObject({
       startDate: "2028-08-01",
@@ -578,20 +670,20 @@ describe("PostgreSQL room-status projection", () => {
       confirmation.confirmMetadata
     );
     expect(replay).toEqual(confirmation.receipt);
-    expect(await db.selectFrom("internal_use_blocks").select("id").execute()).toHaveLength(1);
+    expect(await db.selectFrom("maintenance_locks").select("id").execute()).toHaveLength(1);
     expect((await board({ arrivalDate: "2028-08-01", departureDate: "2028-08-06" })).revision).toBe("1");
 
     await execute({
-      commandType: "RELEASE_INTERNAL_USE",
-      input: { propertyId: demo.propertyId, internalUseBlockId: blockId }
-    }, "internal-release");
+      commandType: "RELEASE_MAINTENANCE",
+      input: { propertyId: demo.propertyId, maintenanceLockId: blockId }
+    }, "maintenance-release");
     const released = await board({ arrivalDate: "2028-08-01", departureDate: "2028-08-06" });
     expect(released.revision).toBe("2");
     expect(unitIn(released, demo.bedAId).days[0]).toMatchObject({ status: "AVAILABLE", available: true });
-    expect(unitIn(released, demo.bedAId).intervals.some((interval) => interval.sourceKind === "INTERNAL_USE")).toBe(false);
+    expect(unitIn(released, demo.bedAId).intervals.some((interval) => interval.sourceKind === "MAINTENANCE")).toBe(false);
 
     const stale = await prepare({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: demo.bedAId,
@@ -599,7 +691,7 @@ describe("PostgreSQL room-status projection", () => {
         departureDate: "2028-08-06",
         reason: "Preview that will become stale"
       }
-    }, "internal-stale");
+    }, "maintenance-stale");
     await execute({
       commandType: "LOCK_MAINTENANCE",
       input: {
@@ -610,10 +702,10 @@ describe("PostgreSQL room-status projection", () => {
         reason: "Competing whole-room maintenance"
       }
     }, "maintenance-wins");
-    const staleReceipt = (await confirmPrepared(stale, "internal-stale-confirm")).receipt;
+    const staleReceipt = (await confirmPrepared(stale, "maintenance-stale-confirm")).receipt;
     expect(staleReceipt).toMatchObject({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
     expect(staleReceipt.error).toMatchObject({ code: "PREVIEW_STALE" });
-    expect(await db.selectFrom("internal_use_blocks").select("id").where("reason", "=", "Preview that will become stale").execute()).toHaveLength(0);
+    expect(await db.selectFrom("maintenance_locks").select("id").where("reason", "=", "Preview that will become stale").execute()).toHaveLength(0);
     expect((await board({ arrivalDate: "2028-08-01", departureDate: "2028-08-06" })).revision).toBe("3");
   });
 
@@ -875,7 +967,7 @@ describe("PostgreSQL room-status projection", () => {
       status: "RESERVED",
       available: false,
       blocking: true,
-      reason: `计划到店日 ${yesterday} 已早于营业日 ${businessDate}，订单仍处于 RESERVED`,
+      reason: `计划到店日 ${yesterday} 已早于营业日 ${businessDate}，订单仍处于已预订`,
       references: expect.arrayContaining([
         expect.objectContaining({ type: "ORDER", id: overdueArrivalOrderId }),
         expect.objectContaining({ type: "STAY" }),
@@ -893,7 +985,7 @@ describe("PostgreSQL room-status projection", () => {
       status: "IN_HOUSE",
       available: false,
       blocking: true,
-      reason: `计划退房日 ${yesterday} 已早于营业日 ${businessDate}，订单仍处于 CHECKED_IN`,
+      reason: `计划退房日 ${yesterday} 已早于营业日 ${businessDate}，订单仍处于在住`,
       references: expect.arrayContaining([
         expect.objectContaining({ type: "ORDER", id: overdueDepartureOrderId }),
         expect.objectContaining({ type: "STAY" }),
@@ -1052,7 +1144,7 @@ describe("PostgreSQL room-status projection", () => {
       taskKind: "EXCEPTION",
       status: "UNKNOWN",
       blocking: true,
-      reason: `营业日 ${businessDate} 的住宿订单库存 Claim 缺失`,
+      reason: `营业日 ${businessDate} 的住宿订单占用记录缺失`,
       claimIds: [],
       conflicts: [expect.objectContaining({
         blockingFactKind: "LODGING_ORDER",
@@ -1099,7 +1191,7 @@ describe("PostgreSQL room-status projection", () => {
       .executeTakeFirstOrThrow();
 
     const todayBlock = await execute({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: lastRoom.id,
@@ -1108,9 +1200,9 @@ describe("PostgreSQL room-status projection", () => {
         reason: "Today's paginated exception"
       }
     }, "today-exception");
-    const todayBlockId = todayBlock.result!.internalUseBlockId as string;
+    const todayBlockId = todayBlock.result!.maintenanceLockId as string;
     const futureBlock = await execute({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: lastRoom.id,
@@ -1119,7 +1211,7 @@ describe("PostgreSQL room-status projection", () => {
         reason: "Future Block must not become today's exception"
       }
     }, "future-exception");
-    const futureBlockId = futureBlock.result!.internalUseBlockId as string;
+    const futureBlockId = futureBlock.result!.maintenanceLockId as string;
 
     const outsideWindowAndPage = await board({
       arrivalDate: awayStart,
@@ -1137,8 +1229,8 @@ describe("PostgreSQL room-status projection", () => {
       endDate: tomorrow,
       sourceStartDate: businessDate,
       sourceEndDate: tomorrow,
-      sourceKind: "INTERNAL_USE",
-        status: "INTERNAL_USE",
+      sourceKind: "MAINTENANCE",
+        status: "MAINTENANCE",
         blocking: true,
         conflicts: [expect.objectContaining({
           blockingFactKind: "CLAIM",
@@ -1150,15 +1242,15 @@ describe("PostgreSQL room-status projection", () => {
     expect(outsideWindowAndPage.operationalTasks.some((task) => task.references.some((item) => item.type === "BLOCK" && item.id === futureBlockId))).toBe(false);
 
     await execute({
-      commandType: "RELEASE_INTERNAL_USE",
-      input: { propertyId: demo.propertyId, internalUseBlockId: todayBlockId }
+      commandType: "RELEASE_MAINTENANCE",
+      input: { propertyId: demo.propertyId, maintenanceLockId: todayBlockId }
     }, "today-exception-release");
     const afterRelease = await board({ arrivalDate: awayStart, departureDate: awayEnd, page: 0, pageSize: 1 });
     expect(afterRelease.operationalTasks.some((task) => task.references.some((item) => item.type === "BLOCK" && item.id === todayBlockId))).toBe(false);
     expect(afterRelease.operationalTasks.some((task) => task.references.some((item) => item.type === "BLOCK" && item.id === futureBlockId))).toBe(false);
-    expect(await db.selectFrom("internal_use_blocks").select("status").where("id", "=", todayBlockId).executeTakeFirstOrThrow())
+    expect(await db.selectFrom("maintenance_locks").select("status").where("id", "=", todayBlockId).executeTakeFirstOrThrow())
       .toEqual({ status: "RELEASED" });
-    expect(await db.selectFrom("inventory_claims").select("id").where("source_type", "=", "INTERNAL_USE").where("source_id", "=", todayBlockId).where("active", "=", true).execute())
+    expect(await db.selectFrom("inventory_claims").select("id").where("source_type", "=", "MAINTENANCE").where("source_id", "=", todayBlockId).where("active", "=", true).execute())
       .toHaveLength(0);
   });
 
@@ -1211,14 +1303,14 @@ describe("PostgreSQL room-status projection", () => {
     }
   });
 
-  it("publishes a cross-window Block as view-only while preserving the complete source range and zero writes", async () => {
+  it("publishes a cross-window Block as safely releasable while preserving the complete source range and zero writes", async () => {
     const baseline = await board({ arrivalDate: "2030-04-01", departureDate: "2030-04-02" });
     const fullStart = shiftLocalDate(baseline.businessDate, 40);
     const fullEnd = shiftLocalDate(baseline.businessDate, 45);
     const visibleStart = shiftLocalDate(fullStart, 1);
     const visibleEnd = shiftLocalDate(fullEnd, -1);
     const placed = await execute({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: demo.bedAId,
@@ -1227,7 +1319,7 @@ describe("PostgreSQL room-status projection", () => {
         reason: "Cross-window complete Block"
       }
     }, "cross-window-place");
-    const blockId = placed.result!.internalUseBlockId as string;
+    const blockId = placed.result!.maintenanceLockId as string;
     const receiptCountBefore = await db.selectFrom("command_receipts").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow();
 
     const partial = await board({ arrivalDate: visibleStart, departureDate: visibleEnd });
@@ -1237,15 +1329,15 @@ describe("PostgreSQL room-status projection", () => {
       endDate: visibleEnd,
       sourceStartDate: fullStart,
       sourceEndDate: fullEnd,
-      sourceKind: "INTERNAL_USE",
+      sourceKind: "MAINTENANCE",
       blocking: true
     });
     expect(interval?.allowedActions).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        code: "RELEASE_INTERNAL_USE",
-        enabled: false,
+        code: "RELEASE_MAINTENANCE",
+        enabled: true,
         requiresFullInterval: true,
-        disabledReason: expect.stringContaining(`[${fullStart}, ${fullEnd})`),
+        disabledReason: null,
         targetReference: expect.objectContaining({ type: "BLOCK", id: blockId })
       })
     ]));
@@ -1254,18 +1346,18 @@ describe("PostgreSQL room-status projection", () => {
         ...unit.allowedActions,
         ...unit.intervals.flatMap((item) => item.allowedActions)
       ])
-      .filter((candidate) => candidate.code === "RELEASE_INTERNAL_USE" && candidate.targetReference?.id === blockId);
+      .filter((candidate) => candidate.code === "RELEASE_MAINTENANCE" && candidate.targetReference?.id === blockId);
     expect(releaseActions.length).toBeGreaterThan(0);
-    expect(releaseActions.every((candidate) => candidate.enabled === false && candidate.requiresFullInterval)).toBe(true);
+    expect(releaseActions.every((candidate) => candidate.enabled === true && candidate.requiresFullInterval)).toBe(true);
 
     const full = await board({ arrivalDate: fullStart, departureDate: fullEnd });
     expect(unitIn(full, demo.bedAId).intervals.find((candidate) => candidate.references.some((item) => item.id === blockId))?.allowedActions)
-      .toEqual(expect.arrayContaining([expect.objectContaining({ code: "RELEASE_INTERNAL_USE", enabled: true, requiresFullInterval: true })]));
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: "RELEASE_MAINTENANCE", enabled: true, requiresFullInterval: true })]));
     expect(await db.selectFrom("command_receipts").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow())
       .toEqual(receiptCountBefore);
-    expect(await db.selectFrom("internal_use_blocks").select("status").where("id", "=", blockId).executeTakeFirstOrThrow())
+    expect(await db.selectFrom("maintenance_locks").select("status").where("id", "=", blockId).executeTakeFirstOrThrow())
       .toEqual({ status: "ACTIVE" });
-    expect(await db.selectFrom("inventory_claims").select("id").where("source_type", "=", "INTERNAL_USE").where("source_id", "=", blockId).where("active", "=", true).execute())
+    expect(await db.selectFrom("inventory_claims").select("id").where("source_type", "=", "MAINTENANCE").where("source_id", "=", blockId).where("active", "=", true).execute())
       .toHaveLength(5);
   });
 
@@ -1628,7 +1720,8 @@ describe("PostgreSQL room-status projection", () => {
         pricing_product_code: null,
         inventory_basis: "INDEPENDENT" as const,
         code_provenance: "PMS_GENERATED" as const,
-        physical_bed_count: target ? 4 : 1
+        physical_bed_count: target ? 4 : 1,
+        occupancy_capacity: target ? 4 : 1
       };
     })).execute();
     await execute({
@@ -1861,23 +1954,23 @@ describe("PostgreSQL room-status projection", () => {
 
   it("rolls back Block, Claims, and revision when the durable Receipt cannot commit", async () => {
     await sql.raw(`
-      CREATE OR REPLACE FUNCTION fail_internal_use_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      CREATE OR REPLACE FUNCTION fail_maintenance_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
         IF NEW.business_committed IS TRUE AND EXISTS (
           SELECT 1 FROM command_executions
-          WHERE id = NEW.command_id AND command_type = 'PLACE_INTERNAL_USE'
+          WHERE id = NEW.command_id AND command_type = 'LOCK_MAINTENANCE'
         ) THEN
-          RAISE EXCEPTION 'forced internal-use receipt failure';
+          RAISE EXCEPTION 'forced maintenance receipt failure';
         END IF;
         RETURN NEW;
       END $$;
-      CREATE TRIGGER fail_internal_use_receipt_before_insert
+      CREATE TRIGGER fail_maintenance_receipt_before_insert
       BEFORE INSERT ON command_receipts
-      FOR EACH ROW EXECUTE FUNCTION fail_internal_use_receipt();
+      FOR EACH ROW EXECUTE FUNCTION fail_maintenance_receipt();
     `).execute(db);
     try {
       const prepared = await prepare({
-        commandType: "PLACE_INTERNAL_USE",
+        commandType: "LOCK_MAINTENANCE",
         input: {
           propertyId: demo.propertyId,
           inventoryUnitId: demo.bedAId,
@@ -1885,20 +1978,20 @@ describe("PostgreSQL room-status projection", () => {
           departureDate: "2029-05-03",
           reason: "Rollback acceptance"
         }
-      }, "internal-rollback");
-      const receipt = (await confirmPrepared(prepared, "internal-rollback")).receipt;
+      }, "maintenance-rollback");
+      const receipt = (await confirmPrepared(prepared, "maintenance-rollback")).receipt;
       expect(receipt).toMatchObject({
         executionStatus: "NOT_EXECUTED",
         businessCommitted: false,
         error: { code: "COMMAND_INTERRUPTED" }
       });
-      expect(await db.selectFrom("internal_use_blocks").select("id").execute()).toHaveLength(0);
-      expect(await db.selectFrom("inventory_claims").select("id").where("source_type", "=", "INTERNAL_USE").execute()).toHaveLength(0);
+      expect(await db.selectFrom("maintenance_locks").select("id").execute()).toHaveLength(0);
+      expect(await db.selectFrom("inventory_claims").select("id").where("source_type", "=", "MAINTENANCE").execute()).toHaveLength(0);
       expect((await board({ arrivalDate: "2029-05-01", departureDate: "2029-05-03" })).revision).toBe("0");
     } finally {
       await sql.raw(`
-        DROP TRIGGER IF EXISTS fail_internal_use_receipt_before_insert ON command_receipts;
-        DROP FUNCTION IF EXISTS fail_internal_use_receipt();
+        DROP TRIGGER IF EXISTS fail_maintenance_receipt_before_insert ON command_receipts;
+        DROP FUNCTION IF EXISTS fail_maintenance_receipt();
       `).execute(db);
     }
   });
@@ -1997,23 +2090,23 @@ describe("PostgreSQL room-status projection", () => {
     }
   });
 
-  it("keeps the 90-night query window separate from domain-valid long maintenance and internal-use Blocks", async () => {
+  it("keeps the 90-night query window separate from domain-valid long maintenance Blocks", async () => {
     const blockStart = "2032-01-01";
     const longBlockNights = ROOM_STATUS_MAX_QUERY_NIGHTS + 30;
     const blockEnd = shiftLocalDate(blockStart, longBlockNights);
     const queryEnd = shiftLocalDate(blockStart, ROOM_STATUS_MAX_QUERY_NIGHTS);
     const accepted = await prepare({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: demo.bedAId,
         arrivalDate: blockStart,
         departureDate: blockEnd,
-        reason: "Domain-valid internal-use Block longer than one query window"
+        reason: "Domain-valid maintenance Block longer than one query window"
       }
     }, "long-block-preview");
     const placed = (await confirmPrepared(accepted, "long-block-confirm")).receipt;
-    const blockId = placed.result!.internalUseBlockId as string;
+    const blockId = placed.result!.maintenanceLockId as string;
     expect(placed.factRefs).toHaveLength(longBlockNights);
 
     const queryWindow = await board({ arrivalDate: blockStart, departureDate: queryEnd });
@@ -2026,15 +2119,15 @@ describe("PostgreSQL room-status projection", () => {
       sourceEndDate: blockEnd
     });
     expect(interval?.allowedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "RELEASE_INTERNAL_USE", enabled: false, requiresFullInterval: true })
+      expect.objectContaining({ code: "RELEASE_MAINTENANCE", enabled: true, requiresFullInterval: true })
     ]));
 
     await execute({
-      commandType: "RELEASE_INTERNAL_USE",
-      input: { propertyId: demo.propertyId, internalUseBlockId: blockId }
+      commandType: "RELEASE_MAINTENANCE",
+      input: { propertyId: demo.propertyId, maintenanceLockId: blockId }
     }, "long-block-release");
     expect(await db.selectFrom("inventory_claims").select("id")
-      .where("source_type", "=", "INTERNAL_USE").where("source_id", "=", blockId).where("active", "=", true).execute())
+      .where("source_type", "=", "MAINTENANCE").where("source_id", "=", blockId).where("active", "=", true).execute())
       .toHaveLength(0);
 
     const maintenance = await execute({
@@ -2059,9 +2152,52 @@ describe("PostgreSQL room-status projection", () => {
     }, "long-maintenance-release");
   });
 
+  it("rejects deferred internal-use commands and direct database writes", async () => {
+    await expect(prepare({
+      commandType: "PLACE_INTERNAL_USE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: demo.bedAId,
+        arrivalDate: "2029-06-01",
+        departureDate: "2029-06-02",
+        reason: "Deferred internal use"
+      }
+    } as unknown as CommandEnvelope, "deferred-internal-use")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+    await expect(db.insertInto("internal_use_blocks").values({
+      id: "block_deferred_internal_use",
+      property_id: demo.propertyId,
+      inventory_unit_id: demo.bedAId,
+      room_id: demo.roomId,
+      arrival_date: "2029-06-01",
+      departure_date: "2029-06-02",
+      reason: "Deferred internal use",
+      status: "ACTIVE",
+      version: 1,
+      created_by_command_id: "command_deferred_internal_use",
+      released_by_command_id: null,
+      released_at: null
+    }).execute()).rejects.toMatchObject({ constraint: "internal_use_deferred" });
+
+    await expect(db.insertInto("inventory_claims").values({
+      id: "claim_deferred_internal_use",
+      property_id: demo.propertyId,
+      room_id: demo.roomId,
+      inventory_unit_id: demo.bedAId,
+      service_date: "2029-06-01",
+      source_type: "INTERNAL_USE",
+      source_id: "block_deferred_internal_use",
+      active: true,
+      released_at: null
+    }).execute()).rejects.toMatchObject({ constraint: "internal_use_deferred" });
+
+    expect(await db.selectFrom("internal_use_blocks").select("id").execute()).toHaveLength(0);
+    expect(await db.selectFrom("inventory_claims").select("id").where("source_type", "=", "INTERNAL_USE").execute()).toHaveLength(0);
+  });
+
   it("rejects direct Block release with active Claims plus Claim and cleaning identity corruption in PostgreSQL", async () => {
     const placed = await execute({
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       input: {
         propertyId: demo.propertyId,
         inventoryUnitId: demo.bedAId,
@@ -2069,41 +2205,44 @@ describe("PostgreSQL room-status projection", () => {
         departureDate: "2029-06-02",
         reason: "Immutable source acceptance"
       }
-    }, "immutable-internal");
-    const blockId = placed.result!.internalUseBlockId as string;
+    }, "immutable-maintenance-primary");
+    const blockId = placed.result!.maintenanceLockId as string;
     const claimId = placed.factRefs[0]!;
-    await expect(db.updateTable("internal_use_blocks").set({
+    await expect(db.updateTable("maintenance_locks").set({
       status: "RELEASED",
       version: 2,
       released_by_command_id: placed.commandId,
       released_at: new Date()
     }).where("id", "=", blockId).execute())
-      .rejects.toMatchObject({ constraint: "internal_use_blocks_active_claims_released" });
-    await expect(db.updateTable("internal_use_blocks").set({ reason: "Mutated reason" }).where("id", "=", blockId).execute())
+      .rejects.toMatchObject({ constraint: "maintenance_locks_active_claims_released" });
+    await expect(db.updateTable("maintenance_locks").set({ reason: "Mutated reason" }).where("id", "=", blockId).execute())
       .rejects.toMatchObject({ code: "55000" });
     await expect(db.updateTable("inventory_claims").set({ inventory_unit_id: demo.bedBId }).where("id", "=", claimId).execute())
       .rejects.toMatchObject({ code: "55000" });
+    await expect(db.updateTable("inventory_claims").set({ active: false, released_at: new Date() }).where("id", "=", claimId).execute())
+      .rejects.toMatchObject({ constraint: "maintenance_claims_complete_release" });
     await expect(db.insertInto("inventory_claims").values({
-      id: "claim_mismatched_internal_source",
+      id: "claim_mismatched_maintenance_source",
       property_id: demo.propertyId,
       room_id: demo.roomId,
       inventory_unit_id: demo.bedBId,
       service_date: "2029-06-01",
-      source_type: "INTERNAL_USE",
+      source_type: "MAINTENANCE",
       source_id: blockId,
       active: true,
       released_at: null
     }).execute()).rejects.toMatchObject({ constraint: "inventory_claims_typed_source_integrity" });
-    await expect(db.deleteFrom("internal_use_blocks").where("id", "=", blockId).execute())
+    await expect(db.deleteFrom("maintenance_locks").where("id", "=", blockId).execute())
       .rejects.toMatchObject({ code: "55000" });
     await expect(db.deleteFrom("inventory_claims").where("id", "=", claimId).execute())
       .rejects.toMatchObject({ code: "55000" });
-    await execute({
-      commandType: "RELEASE_INTERNAL_USE",
-      input: { propertyId: demo.propertyId, internalUseBlockId: blockId }
-    }, "immutable-internal-release");
+    const release = await execute({
+      commandType: "RELEASE_MAINTENANCE",
+      input: { propertyId: demo.propertyId, maintenanceLockId: blockId }
+    }, "immutable-maintenance-primary-release");
+    expect(release.factRefs).toEqual([claimId]);
     expect(await db.selectFrom("inventory_claims").select("id")
-      .where("source_type", "=", "INTERNAL_USE").where("source_id", "=", blockId).where("active", "=", true).execute())
+      .where("source_type", "=", "MAINTENANCE").where("source_id", "=", blockId).where("active", "=", true).execute())
       .toHaveLength(0);
 
     const maintenance = await execute({

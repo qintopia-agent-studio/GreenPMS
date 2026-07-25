@@ -50,6 +50,7 @@ function validBoard(): RoomStatusBoardDto {
       roomTypeCode: "VALIDATION",
       pricingProductCode: "VALIDATION",
       capacity: 1,
+      occupancyCapacity: 2,
       childUnitIds: [],
       children: [],
       bedOccupancies: [],
@@ -67,7 +68,7 @@ function validBoard(): RoomStatusBoardDto {
   };
 }
 
-function internalUseInterval(overrides: Partial<RoomStatusIntervalDto> = {}): RoomStatusIntervalDto {
+function maintenanceInterval(overrides: Partial<RoomStatusIntervalDto> = {}): RoomStatusIntervalDto {
   const blockReference = { type: "BLOCK" as const, id: "block_validation", label: "Validation block", href: null };
   const claimReference = { type: "CLAIM" as const, id: "claim_validation", label: "Validation claim", href: null };
   return {
@@ -79,12 +80,14 @@ function internalUseInterval(overrides: Partial<RoomStatusIntervalDto> = {}): Ro
     endDate: "2028-01-02",
     sourceStartDate: "2028-01-01",
     sourceEndDate: "2028-01-02",
-    status: "INTERNAL_USE",
+    status: "MAINTENANCE",
     available: false,
     blocking: true,
-    sourceKind: "INTERNAL_USE",
-    label: "Internal use",
+    sourceKind: "MAINTENANCE",
+    label: "Maintenance lock",
     primaryOccupantLabel: null,
+    occupantCount: 0,
+    occupants: [],
     reason: "Validation",
     claimIds: [claimReference.id],
     references: [claimReference, blockReference],
@@ -98,14 +101,14 @@ function internalUseInterval(overrides: Partial<RoomStatusIntervalDto> = {}): Ro
       roomId: "unit_validation",
       startDate: "2028-01-01",
       endDate: "2028-01-02",
-      sourceKind: "INTERNAL_USE",
+      sourceKind: "MAINTENANCE",
       sourceReference: blockReference,
       reason: "Validation",
       blocking: true
     }],
     history: [],
     allowedActions: [{
-      code: "RELEASE_INTERNAL_USE",
+      code: "RELEASE_MAINTENANCE",
       enabled: true,
       disabledReason: null,
       requiresFullInterval: true,
@@ -124,14 +127,14 @@ function dayConflict(interval: RoomStatusIntervalDto): RoomStatusConflictDto {
   };
 }
 
-function boardWithInternalUse(): RoomStatusBoardDto {
+function boardWithMaintenance(): RoomStatusBoardDto {
   const board = validBoard();
-  const interval = internalUseInterval();
+  const interval = maintenanceInterval();
   const room = board.rooms[0]!;
   room.intervals = [interval];
   room.days = [{
     serviceDate: "2028-01-01",
-    status: "INTERNAL_USE",
+    status: "MAINTENANCE",
     available: false,
     intervalIds: [interval.id],
     conflicts: [dayConflict(interval)]
@@ -160,6 +163,8 @@ function splitBedLodgingInterval(displayInventoryUnitId: string, actualInventory
     sourceKind: "ORDER",
     label: "Split-bed order",
     primaryOccupantLabel: "Validation nickname",
+    occupantCount: 1,
+    occupants: [{ occupantId: "occupant_split_validation", nickname: "Validation nickname" }],
     reason: null,
     claimIds: [claimReference.id],
     references: [claimReference, orderReference, stayReference],
@@ -204,6 +209,7 @@ function boardWithSplitBedLodging(): RoomStatusBoardDto {
     code: "V01-A",
     name: "Validation bed A",
     capacity: 1,
+    occupancyCapacity: 1,
     salesMode: "BED_SPLIT" as const,
     childUnitIds: [],
     children: [],
@@ -227,6 +233,7 @@ function boardWithSplitBedLodging(): RoomStatusBoardDto {
     occupiedBedCount: 1,
     totalBedCount: 1,
     occupants: [{
+      occupantId: "occupant_split_validation",
       inventoryUnitId: childId,
       inventoryUnitCode: child.code,
       primaryOccupantLabel: parentInterval.primaryOccupantLabel,
@@ -258,6 +265,24 @@ function boardWithSplitBedLodging(): RoomStatusBoardDto {
   return board;
 }
 
+function boardWithWholeRoomLodging(): RoomStatusBoardDto {
+  const board = validBoard();
+  const room = board.rooms[0]!;
+  const interval = splitBedLodgingInterval(room.id, room.id);
+  room.days = [{
+    serviceDate: "2028-01-01",
+    status: "RESERVED",
+    available: false,
+    intervalIds: [interval.id],
+    conflicts: [dayConflict(interval)]
+  }];
+  room.intervals = [interval];
+  room.conflicts = interval.conflicts;
+  room.allowedActions = interval.allowedActions;
+  board.filterOptions.statuses = ["RESERVED"];
+  return board;
+}
+
 function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomStatusOperationalTaskDto {
   const claimReference = { type: "CLAIM" as const, id: "claim_order_validation", label: "Order claim", href: null };
   const orderReference = { type: "ORDER" as const, id: "order_validation", label: "Order", href: "/orders/order_validation" };
@@ -284,6 +309,8 @@ function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomSt
     sourceKind: "ORDER",
     label: "Order exception",
     primaryOccupantLabel: null,
+    occupantCount: status === "UNKNOWN" ? 0 : 1,
+    occupants: status === "UNKNOWN" ? [] : [{ occupantId: "occupant_order_validation", nickname: null }],
     reason: "Validation",
     claimIds: claimBacked ? [claimReference.id] : [],
     references: claimBacked ? [claimReference, orderReference, stayReference, inventoryReference] : [orderReference, stayReference, inventoryReference],
@@ -388,7 +415,7 @@ describe("assertRoomStatusBoard", () => {
     delete missingBedOccupancies.rooms[0]!.bedOccupancies;
     expect(() => assertRoomStatusBoard(missingBedOccupancies, expected)).toThrow(/bedOccupancies/);
 
-    const missingClaimIds = boardWithInternalUse() as unknown as {
+    const missingClaimIds = boardWithMaintenance() as unknown as {
       rooms: Array<{ intervals: Array<{ conflicts: Array<Record<string, unknown>> }> }>;
     };
     delete missingClaimIds.rooms[0]!.intervals[0]!.conflicts[0]!.claimIds;
@@ -416,12 +443,14 @@ describe("assertRoomStatusBoard", () => {
       endDate: "2028-01-02",
       sourceStartDate: "2028-01-01",
       sourceEndDate: "2028-01-02",
-      status: "INTERNAL_USE",
+      status: "MAINTENANCE",
       available: false,
       blocking: true,
-      sourceKind: "INTERNAL_USE",
-      label: "Internal use",
+      sourceKind: "MAINTENANCE",
+      label: "Maintenance lock",
       primaryOccupantLabel: null,
+      occupantCount: 0,
+      occupants: [],
       reason: "Validation",
       claimIds: ["claim_validation"],
       references: [],
@@ -432,6 +461,43 @@ describe("assertRoomStatusBoard", () => {
     const rawInterval = missingOccupantField.rooms[0]!.intervals[0] as unknown as Record<string, unknown>;
     delete rawInterval.primaryOccupantLabel;
     expect(() => assertRoomStatusBoard(missingOccupantField, expected)).toThrow(/primaryOccupantLabel/);
+  });
+
+  it("rejects personal details embedded in a room-status occupant summary", () => {
+    const board = validBoard();
+    const task = orderExceptionTask("RESERVED");
+    task.occupants = [{
+      occupantId: "occupant_order_validation",
+      nickname: "山风",
+      fullName: "不应进入房态",
+      phone: "13800000000"
+    } as never];
+    task.primaryOccupantLabel = "山风";
+    board.operationalTasks = [task];
+
+    expect(() => assertRoomStatusBoard(board, expected)).toThrow(/不允许的字段.*fullName.*phone/);
+  });
+
+  it("rejects lodging occupants above the actual whole-room or bed capacity", () => {
+    const wholeRoom = boardWithWholeRoomLodging();
+    const wholeRoomInterval = wholeRoom.rooms[0]!.intervals[0]!;
+    wholeRoomInterval.occupantCount = 3;
+    wholeRoomInterval.occupants = [
+      { occupantId: "occupant_whole_1", nickname: "山风" },
+      { occupantId: "occupant_whole_2", nickname: "小满" },
+      { occupantId: "occupant_whole_3", nickname: "北辰" }
+    ];
+    wholeRoomInterval.primaryOccupantLabel = "山风";
+    expect(() => assertRoomStatusBoard(wholeRoom, expected)).toThrow(/不能超过实际库存单元住宿容量 2/);
+
+    const splitBed = boardWithSplitBedLodging();
+    const childInterval = splitBed.rooms[0]!.children[0]!.intervals[0]!;
+    childInterval.occupantCount = 2;
+    childInterval.occupants = [
+      { occupantId: "occupant_split_validation", nickname: "Validation nickname" },
+      { occupantId: "occupant_split_extra", nickname: "Extra nickname" }
+    ];
+    expect(() => assertRoomStatusBoard(splitBed, expected)).toThrow(/不能超过实际库存单元住宿容量 1/);
   });
 
   it("rejects fail-open unknown, blocking, and mismatched row facts", () => {
@@ -445,13 +511,13 @@ describe("assertRoomStatusBoard", () => {
 
     const blockingInterval = validBoard();
     blockingInterval.rooms[0]!.intervals.push({
-      ...internalUseInterval({ id: "interval_fail_open" }),
+      ...maintenanceInterval({ id: "interval_fail_open" }),
       available: true,
     });
     expect(() => assertRoomStatusBoard(blockingInterval, expected)).toThrow(/阻断区间和冲突事实/);
 
     const wrongRow = validBoard();
-    const wrongRowInterval = internalUseInterval({
+    const wrongRowInterval = maintenanceInterval({
       id: "interval_wrong_row",
       displayInventoryUnitId: "unit_other"
     });
@@ -488,6 +554,8 @@ describe("assertRoomStatusBoard", () => {
       sourceKind: "ORDER",
       label: "Order departure",
       primaryOccupantLabel: "Validation guest",
+      occupantCount: 1,
+      occupants: [{ occupantId: "occupant_departure_validation", nickname: "Validation guest" }],
       reason: null,
       claimIds: [],
       references: [
@@ -540,10 +608,30 @@ describe("assertRoomStatusBoard", () => {
     }
   });
 
-  it("accepts UNKNOWN and service-defined overdue order/free-stay exception tasks", () => {
+  it("accepts fail-closed UNKNOWN and service-defined overdue order/free-stay exception tasks", () => {
     const validUnknown = validBoard();
     validUnknown.operationalTasks = [orderExceptionTask("UNKNOWN")];
     expect(() => assertRoomStatusBoard(validUnknown, expected)).not.toThrow();
+
+    const unknownWithOccupant = orderExceptionTask("UNKNOWN");
+    unknownWithOccupant.occupantCount = 1;
+    unknownWithOccupant.occupants = [{ occupantId: "occupant_order_validation", nickname: "不应公开" }];
+    const invalidUnknownOccupant = validBoard();
+    invalidUnknownOccupant.operationalTasks = [unknownWithOccupant];
+    expect(() => assertRoomStatusBoard(invalidUnknownOccupant, expected)).toThrow(/UNKNOWN 区间必须隐藏住宿人/);
+
+    const unknownWithPrimaryLabel = orderExceptionTask("UNKNOWN");
+    unknownWithPrimaryLabel.primaryOccupantLabel = "不应公开";
+    const invalidUnknownLabel = validBoard();
+    invalidUnknownLabel.operationalTasks = [unknownWithPrimaryLabel];
+    expect(() => assertRoomStatusBoard(invalidUnknownLabel, expected)).toThrow(/UNKNOWN 区间不能公开主住宿人标签/);
+
+    const displayableWithoutOccupant = orderExceptionTask("RESERVED");
+    displayableWithoutOccupant.occupantCount = 0;
+    displayableWithoutOccupant.occupants = [];
+    const invalidDisplayableLodging = validBoard();
+    invalidDisplayableLodging.operationalTasks = [displayableWithoutOccupant];
+    expect(() => assertRoomStatusBoard(invalidDisplayableLodging, expected)).toThrow(/可展示住宿来源必须包含至少一位住宿人/);
 
     const missingClaim = orderExceptionTask("UNKNOWN");
     missingClaim.claimIds = [];
@@ -628,17 +716,17 @@ describe("assertRoomStatusBoard", () => {
   });
 
   it("requires visible intervals to be contained by complete source boundaries", () => {
-    const outsideSource = boardWithInternalUse();
+    const outsideSource = boardWithMaintenance();
     outsideSource.rooms[0]!.intervals[0]!.sourceStartDate = "2028-01-02";
     expect(() => assertRoomStatusBoard(outsideSource, expected)).toThrow(/来源完整半开区间/);
 
-    const clippedRelease = boardWithInternalUse();
+    const clippedRelease = boardWithMaintenance();
     const interval = clippedRelease.rooms[0]!.intervals[0]!;
     interval.sourceStartDate = "2027-12-31";
     interval.sourceEndDate = "2028-01-03";
-    expect(() => assertRoomStatusBoard(clippedRelease, expected)).toThrow(/不能启用完整释放动作/);
+    expect(() => assertRoomStatusBoard(clippedRelease, expected)).not.toThrow();
 
-    const disabledRelease = boardWithInternalUse();
+    const disabledRelease = boardWithMaintenance();
     const disabledInterval = disabledRelease.rooms[0]!.intervals[0]!;
     disabledInterval.sourceStartDate = "2027-12-31";
     disabledInterval.sourceEndDate = "2028-01-03";
@@ -652,15 +740,15 @@ describe("assertRoomStatusBoard", () => {
   });
 
   it("rejects day facts that diverge from their covering blocking intervals", () => {
-    const missingInterval = boardWithInternalUse();
+    const missingInterval = boardWithMaintenance();
     missingInterval.rooms[0]!.days[0]!.intervalIds = [];
     expect(() => assertRoomStatusBoard(missingInterval, expected)).toThrow(/覆盖该营业日的全部区间/);
 
-    const failOpenAvailability = boardWithInternalUse();
+    const failOpenAvailability = boardWithMaintenance();
     failOpenAvailability.rooms[0]!.days[0]!.available = true;
     expect(() => assertRoomStatusBoard(failOpenAvailability, expected)).toThrow(/blocking\/UNKNOWN/);
 
-    const mismatchedConflict = boardWithInternalUse();
+    const mismatchedConflict = boardWithMaintenance();
     mismatchedConflict.rooms[0]!.days[0]!.conflicts[0] = {
       ...mismatchedConflict.rooms[0]!.days[0]!.conflicts[0]!,
       claimId: "claim_other",
@@ -683,7 +771,7 @@ describe("assertRoomStatusBoard", () => {
     unsafeHref.rooms[0]!.allowedActions[0]!.targetReference!.href = "javascript:alert(1)";
     expect(() => assertRoomStatusBoard(unsafeHref, expected)).toThrow(/可信内部路径/);
 
-    const unrelatedBlock = boardWithInternalUse();
+    const unrelatedBlock = boardWithMaintenance();
     unrelatedBlock.rooms[0]!.intervals[0]!.allowedActions[0]!.targetReference = {
       type: "BLOCK",
       id: "block_other",

@@ -176,6 +176,7 @@ describe.sequential("Receipt permanent references for member entitlement facts",
         created.receipt.result!.stayId as string,
         created.receipt.result!.segmentId as string,
         created.receipt.result!.pricingRevisionId as string,
+        ...((created.receipt.result!.occupants as Array<{ id: string }>).map((occupant) => occupant.id)),
         ...coverageIds
       ]
     });

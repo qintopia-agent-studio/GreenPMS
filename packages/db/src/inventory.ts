@@ -19,6 +19,7 @@ export interface InventoryUnitRecord {
   inventoryBasis: "INDEPENDENT" | "WHOLE_ROOM_COMBINATION" | null;
   codeProvenance: "SOURCE_EXPLICIT" | "USER_CONFIRMED_RENAMED" | "PMS_GENERATED" | null;
   physicalBedCount: number | null;
+  occupancyCapacity: number;
 }
 
 export interface AvailabilityNight {
@@ -39,6 +40,39 @@ interface OverdueStayBlocker {
   inventoryUnitId: string;
   roomId: string;
   serviceDate: string;
+}
+
+interface DeferredUnavailableBlocker {
+  id: string;
+  inventoryUnitId: string;
+  roomId: string;
+  arrivalDate: string;
+  departureDate: string;
+}
+
+async function loadDeferredUnavailableBlockers(
+  db: DbExecutor,
+  propertyId: string,
+  dates: readonly string[]
+): Promise<DeferredUnavailableBlocker[]> {
+  if (dates.length === 0) return [];
+  const firstDate = [...dates].sort()[0]!;
+  const lastDate = [...dates].sort().at(-1)!;
+  const rows = await db.selectFrom("internal_use_blocks")
+    .select(["id", "inventory_unit_id", "room_id", "arrival_date", "departure_date"])
+    .where("property_id", "=", propertyId)
+    .where("status", "=", "ACTIVE")
+    .where("arrival_date", "<=", lastDate)
+    .where("departure_date", ">", firstDate)
+    .orderBy("id")
+    .execute();
+  return rows.map((row) => ({
+    id: row.id,
+    inventoryUnitId: row.inventory_unit_id,
+    roomId: row.room_id,
+    arrivalDate: row.arrival_date,
+    departureDate: row.departure_date
+  }));
 }
 
 async function loadOverdueStayBlockers(
@@ -93,9 +127,17 @@ function blockerAffectsUnit(blocker: OverdueStayBlocker, unit: Pick<InventoryUni
     && (unit.kind === "ROOM" || blocker.inventoryUnitId === blocker.roomId || blocker.inventoryUnitId === unit.id);
 }
 
+function deferredUnavailableBlockerAffectsUnit(
+  blocker: DeferredUnavailableBlocker,
+  unit: Pick<InventoryUnitRecord, "id" | "kind" | "roomId">
+): boolean {
+  return blocker.roomId === unit.roomId
+    && (unit.kind === "ROOM" || blocker.inventoryUnitId === blocker.roomId || blocker.inventoryUnitId === unit.id);
+}
+
 async function loadInventoryUnitRecord(db: DbExecutor, propertyId: string, unitId: string, requireActive: boolean): Promise<InventoryUnitRecord> {
   let query = db.selectFrom("inventory_units")
-    .select(["id", "property_id", "kind", "parent_room_id", "code", "name", "catalog_version", "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance", "physical_bed_count"])
+    .select(["id", "property_id", "kind", "parent_room_id", "code", "name", "catalog_version", "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance", "physical_bed_count", "occupancy_capacity"])
     .where("id", "=", unitId)
     .where("property_id", "=", propertyId);
   if (requireActive) query = query.where("active", "=", true);
@@ -114,7 +156,8 @@ async function loadInventoryUnitRecord(db: DbExecutor, propertyId: string, unitI
     pricingProductCode: row.pricing_product_code,
     inventoryBasis: row.inventory_basis,
     codeProvenance: row.code_provenance,
-    physicalBedCount: row.physical_bed_count
+    physicalBedCount: row.physical_bed_count,
+    occupancyCapacity: row.occupancy_capacity
   };
 }
 
@@ -129,7 +172,7 @@ export async function loadInventoryUnitIncludingInactive(db: DbExecutor, propert
 export async function listAvailability(db: DbExecutor, propertyId: string, arrivalDate: string, departureDate: string, kind?: InventoryUnitKind): Promise<UnitAvailability[]> {
   const dates = enumerateServiceDates(arrivalDate, departureDate);
   let query = db.selectFrom("inventory_units")
-    .select(["id", "property_id", "kind", "parent_room_id", "code", "name", "catalog_version", "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance", "physical_bed_count"])
+    .select(["id", "property_id", "kind", "parent_room_id", "code", "name", "catalog_version", "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance", "physical_bed_count", "occupancy_capacity"])
     .where("property_id", "=", propertyId)
     .where("active", "=", true);
   if (kind) query = query.where("kind", "=", kind);
@@ -142,6 +185,7 @@ export async function listAvailability(db: DbExecutor, propertyId: string, arriv
     .where("service_date", "<", departureDate)
     .execute();
   const overdueStayBlockers = await loadOverdueStayBlockers(db, propertyId, dates);
+  const deferredUnavailableBlockers = await loadDeferredUnavailableBlockers(db, propertyId, dates);
 
   return units.map((unit) => {
     const roomId = unit.kind === "ROOM" ? unit.id : unit.parent_room_id!;
@@ -154,9 +198,14 @@ export async function listAvailability(db: DbExecutor, propertyId: string, arriv
         kind: unit.kind,
         roomId
       }));
+      const blockingDeferredUnavailable = deferredUnavailableBlockers.filter((blocker) => (
+        blocker.arrivalDate <= serviceDate
+        && serviceDate < blocker.departureDate
+        && deferredUnavailableBlockerAffectsUnit(blocker, { id: unit.id, kind: unit.kind, roomId })
+      ));
       return {
         serviceDate,
-        available: blocking.length === 0 && blockingStays.length === 0,
+        available: blocking.length === 0 && blockingStays.length === 0 && blockingDeferredUnavailable.length === 0,
         blockingClaimIds: blocking.map((claim) => claim.id)
       };
     });
@@ -174,6 +223,7 @@ export async function listAvailability(db: DbExecutor, propertyId: string, arriv
       inventoryBasis: unit.inventory_basis,
       codeProvenance: unit.code_provenance,
       physicalBedCount: unit.physical_bed_count,
+      occupancyCapacity: unit.occupancy_capacity,
       nights,
       available: nights.every((night) => night.available)
     };
@@ -198,7 +248,12 @@ export async function inventoryFingerprint(db: DbExecutor, propertyId: string, u
   const stayFingerprint = (await loadOverdueStayBlockers(db, propertyId, dates))
     .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && blockerAffectsUnit(blocker, unit))
     .map((blocker) => `${blocker.serviceDate}:OVERDUE_STAY:${blocker.inventoryUnitId}:${blocker.stayId}`);
-  return [...claimFingerprint, ...stayFingerprint];
+  const deferredUnavailableFingerprint = (await loadDeferredUnavailableBlockers(db, propertyId, dates))
+    .filter((blocker) => deferredUnavailableBlockerAffectsUnit(blocker, unit))
+    .flatMap((blocker) => dates
+      .filter((serviceDate) => blocker.arrivalDate <= serviceDate && serviceDate < blocker.departureDate)
+      .map((serviceDate) => `${serviceDate}:LEGACY_UNAVAILABLE:${blocker.inventoryUnitId}:${blocker.id}`));
+  return [...claimFingerprint, ...stayFingerprint, ...deferredUnavailableFingerprint];
 }
 
 export async function lockRoomDays(trx: Transaction<Database>, roomDates: Array<{ roomId: string; serviceDate: string }>): Promise<void> {
@@ -229,10 +284,18 @@ export async function lockUnitDates(trx: Transaction<Database>, propertyId: stri
 export async function assertUnitAvailable(trx: Transaction<Database>, unit: InventoryUnitRecord, dates: string[], excludeSourceIds: string[] = []): Promise<void> {
   const overdueStayBlockers = (await loadOverdueStayBlockers(trx, unit.propertyId, dates))
     .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && blockerAffectsUnit(blocker, unit));
+  const deferredUnavailableBlockers = (await loadDeferredUnavailableBlockers(trx, unit.propertyId, dates))
+    .filter((blocker) => !excludeSourceIds.includes(blocker.id) && deferredUnavailableBlockerAffectsUnit(blocker, unit));
   for (const serviceDate of dates) {
     const blockingStay = overdueStayBlockers.find((blocker) => blocker.serviceDate === serviceDate);
     if (blockingStay) {
       throw new DomainError("INVENTORY_CONFLICT", `An in-house Stay is overdue on ${serviceDate}`, 409);
+    }
+    const blockingDeferredUnavailable = deferredUnavailableBlockers.find((blocker) => (
+      blocker.arrivalDate <= serviceDate && serviceDate < blocker.departureDate
+    ));
+    if (blockingDeferredUnavailable) {
+      throw new DomainError("INVENTORY_CONFLICT", `Inventory is unavailable on ${serviceDate}`, 409);
     }
     const roomDay = await trx.selectFrom("inventory_room_days")
       .select("whole_claim_id")

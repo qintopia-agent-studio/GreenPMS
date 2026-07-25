@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
-import { FilePlus2, RefreshCw, X } from "lucide-react";
+import { FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import type {
+  CreateOrderAdditionalGuestInputDto,
   CreateOrderPrimaryGuestInputDto,
   RoomStatusActionDto,
   RoomStatusBoardDto,
@@ -19,11 +20,13 @@ import type {
   CommandRequest,
   MemberContractDto,
   MemberDto,
+  OrderViewDto,
   PricingPolicyVersionDto,
   QuoteDto,
   ReceiptDto,
   StayType
 } from "../types";
+import { OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import {
   CommandDialog,
   type CommandDialogProgress,
@@ -42,16 +45,21 @@ import {
 import {
   assertRoomStatusBoard,
   createRoomStatusViewState,
+  dateWindowStartForFocus,
   filterRoomStatusRooms,
   hasActiveRoomStatusFilters,
   isIsoLocalDate,
   parseRoomStatusRestoration,
   reconcileRoomStatusRestoration,
+  roomStatusAutoVisibleDays,
   roomStatusFactFingerprint,
+  roomStatusOrderIdentityForDate,
+  roomStatusOrderIdentityForInterval,
   roomStatusUnitLabel,
   RoomStatusContext,
   RoomStatusGrid,
   RoomStatusMobileTasks,
+  RoomStatusOrderContext,
   RoomStatusToolbar,
   roomStatusViewReducer,
   selectionFromCells,
@@ -60,6 +68,8 @@ import {
   type RoomStatusMobileGroups,
   type RoomStatusMobileFocusRequest,
   type RoomStatusMobileTab,
+  type RoomStatusOrderIdentity,
+  type RoomStatusDateWindowMode,
   type RoomStatusRange,
   type RoomStatusRestorationSnapshot,
   type RoomStatusSelection,
@@ -72,6 +82,10 @@ const bookingChannelLabels: Record<BookingChannelCode, string> = {
   MEITUAN: "美团",
   WECOM: "企业微信"
 };
+
+export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boolean): "INLINE" | "DRAWER" {
+  return !isMobile && (workspaceWidth === 0 || workspaceWidth >= 1240) ? "INLINE" : "DRAWER";
+}
 
 export function bookingChannelRequiredForStay(useMemberEntitlement: boolean): boolean {
   return !useMemberEntitlement;
@@ -362,11 +376,68 @@ interface InventoryActionUnit {
   code: string;
   name: string;
   buildingCode: string | null;
+  occupancyCapacity: number;
   available: boolean;
 }
 
 function unitName(unit: InventoryActionUnit | undefined) {
   return unit ? roomStatusUnitLabel(unit) : "未选择库存单元";
+}
+
+export interface GuestFormValue {
+  fullName: string;
+  nickname: string;
+  phone: string;
+  documentNumber: string;
+}
+
+export const GUEST_FULL_NAME_MAX_LENGTH = 200;
+
+interface AdditionalGuestDraft extends GuestFormValue {
+  key: number;
+}
+
+export function guestFormComplete(guest: GuestFormValue): boolean {
+  return Boolean(guest.fullName.trim() && guest.nickname.trim());
+}
+
+export function guestFormInput(guest: GuestFormValue): CreateOrderAdditionalGuestInputDto {
+  const input: CreateOrderAdditionalGuestInputDto = {
+    fullName: guest.fullName.trim(),
+    nickname: guest.nickname.trim()
+  };
+  if (guest.phone.trim()) input.phone = guest.phone.trim();
+  if (guest.documentNumber.trim()) input.documentNumber = guest.documentNumber.trim();
+  return input;
+}
+
+export function applyMemberSelectionToGuestForms<T extends GuestFormValue>(
+  additionalGuests: T[],
+  member: Pick<MemberDto, "full_name" | "phone" | "identity_card_number">
+): { primaryGuest: GuestFormValue; additionalGuests: T[] } {
+  return {
+    primaryGuest: {
+      fullName: member.full_name,
+      nickname: member.full_name,
+      phone: member.phone,
+      documentNumber: member.identity_card_number
+    },
+    additionalGuests
+  };
+}
+
+export function createOrderGuestInputs(
+  primaryGuest: GuestFormValue,
+  additionalGuests: readonly GuestFormValue[]
+): { primaryGuest: CreateOrderPrimaryGuestInputDto; additionalGuests: CreateOrderAdditionalGuestInputDto[] } {
+  return {
+    primaryGuest: guestFormInput(primaryGuest),
+    additionalGuests: additionalGuests.map(guestFormInput)
+  };
+}
+
+export function canAddGuest(occupancyCapacity: number, additionalGuestCount: number): boolean {
+  return 1 + additionalGuestCount < occupancyCapacity;
 }
 
 export function roomStatusBlockDraftWithinSelection(
@@ -430,54 +501,6 @@ function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, onC
   );
 }
 
-function InternalUseDialog({ unit, arrivalDate, departureDate, writeBlocked, onClose, onSubmit }: {
-  unit: InventoryActionUnit;
-  arrivalDate: string;
-  departureDate: string;
-  writeBlocked: boolean;
-  onClose: () => void;
-  onSubmit: (request: CommandRequest) => boolean;
-}) {
-  const { propertyId } = useWorkspace();
-  const [from, setFrom] = useState(arrivalDate);
-  const [to, setTo] = useState(departureDate);
-  const [reason, setReason] = useState("");
-  const [validationError, setValidationError] = useState<Error>();
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!roomStatusBlockDraftWithinSelection(from, to, arrivalDate, departureDate)) {
-      setValidationError(new Error(`内部占用日期必须位于已验证选区 [${arrivalDate}, ${departureDate}) 内，且至少包含一晚。`));
-      return;
-    }
-    setValidationError(undefined);
-    onSubmit({
-      commandType: "PLACE_INTERNAL_USE",
-      title: `放置内部占用 · ${unit.code}`,
-      description: "服务端将重新校验整房与子床位互斥，并以完整半开区间创建内部占用 Block。",
-      input: { propertyId, inventoryUnitId: unit.id, arrivalDate: from, departureDate: to, reason }
-    });
-  }
-
-  return (
-    <Modal title={`内部占用 · ${unitName(unit)}`} onClose={onClose} footer={null}>
-      <form className="modal-form" onSubmit={submit}>
-        <InlineError
-          error={writeBlocked ? new Error("当前房态已陈旧、正在刷新、权限已收窄或命令恢复尚未收口。日期和原因草稿仍保留，重新取得可写房态后再继续。") : undefined}
-          title="草稿已保留，写入已暂停"
-        />
-        <InlineError error={validationError} title="内部占用日期未通过房态校验" />
-        <div className="form-grid form-grid-two">
-          <label>开始日期<input type="date" value={from} min={arrivalDate} max={addLocalDateDays(departureDate, -1)} onChange={(event) => { setFrom(event.target.value); setValidationError(undefined); }} required /></label>
-          <label>结束日期<input type="date" value={to} min={isIsoLocalDate(from) ? addLocalDateDays(from, 1) : arrivalDate} max={departureDate} onChange={(event) => { setTo(event.target.value); setValidationError(undefined); }} required /></label>
-          <label className="span-two">内部占用原因<textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} /></label>
-        </div>
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked}>继续生成 Preview</button></div>
-      </form>
-    </Modal>
-  );
-}
-
 function QuoteWorkbench({
   unit,
   arrivalDate,
@@ -521,6 +544,7 @@ function QuoteWorkbench({
   const [guestNickname, setGuestNickname] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [guestDocument, setGuestDocument] = useState("");
+  const [additionalGuests, setAdditionalGuests] = useState<AdditionalGuestDraft[]>([]);
   const [bookingChannelCode, setBookingChannelCode] = useState<BookingChannelCode | "">("");
   const [channelOrderReference, setChannelOrderReference] = useState("");
   const [freeStayReason, setFreeStayReason] = useState("");
@@ -528,6 +552,7 @@ function QuoteWorkbench({
   const [error, setError] = useState<unknown>();
   const latestQuoteSignature = useRef("");
   const settledQuoteSignature = useRef("");
+  const nextAdditionalGuestKey = useRef(0);
   const quoteRequestGuardRef = useRef<QuoteRequestGuard | null>(null);
   if (!quoteRequestGuardRef.current) quoteRequestGuardRef.current = new QuoteRequestGuard(quoteRecoveryScope);
   const quoteRequestGuard = quoteRequestGuardRef.current;
@@ -562,6 +587,7 @@ function QuoteWorkbench({
     setGuestNickname("");
     setGuestPhone("");
     setGuestDocument("");
+    setAdditionalGuests([]);
     setBookingChannelCode("");
     setChannelOrderReference("");
     setFreeStayReason("");
@@ -587,6 +613,7 @@ function QuoteWorkbench({
     setGuestNickname("");
     setGuestPhone("");
     setGuestDocument("");
+    setAdditionalGuests([]);
     setBookingChannelCode("");
     setChannelOrderReference("");
     setFreeStayReason("");
@@ -774,24 +801,49 @@ function QuoteWorkbench({
     return () => window.clearTimeout(timeout);
   }, [currentQuoteSignature, quoteCommandsBlocked]);
 
+  const primaryGuestForm: GuestFormValue = {
+    fullName: guestName,
+    nickname: guestNickname,
+    phone: guestPhone,
+    documentNumber: guestDocument
+  };
+  const guestsComplete = guestFormComplete(primaryGuestForm) && additionalGuests.every(guestFormComplete);
+  const guestCount = 1 + additionalGuests.length;
+
+  function addAdditionalGuest() {
+    if (!unit || !canAddGuest(unit.occupancyCapacity, additionalGuests.length)) return;
+    nextAdditionalGuestKey.current += 1;
+    setAdditionalGuests((current) => [...current, {
+      key: nextAdditionalGuestKey.current,
+      fullName: "",
+      nickname: "",
+      phone: "",
+      documentNumber: ""
+    }]);
+  }
+
+  function updateAdditionalGuest(key: number, field: keyof GuestFormValue, value: string) {
+    setAdditionalGuests((current) => current.map((guest) => guest.key === key ? { ...guest, [field]: value } : guest));
+  }
+
+  function removeAdditionalGuest(key: number) {
+    setAdditionalGuests((current) => current.filter((guest) => guest.key !== key));
+  }
+
   function createOrder() {
     const channelRequired = bookingChannelRequiredForStay(useMemberEntitlement);
-    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestName.trim() || !guestNickname.trim() || (channelRequired && !bookingChannelCode) || (quote.stayType === "FREE" && !freeStayReason.trim())) return;
-    const primaryGuest: CreateOrderPrimaryGuestInputDto = {
-      fullName: guestName.trim(),
-      nickname: guestNickname.trim()
-    };
-    if (guestPhone.trim()) primaryGuest.phone = guestPhone.trim();
-    if (guestDocument.trim()) primaryGuest.documentNumber = guestDocument.trim();
+    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestsComplete || guestCount > (unit?.occupancyCapacity ?? 0) || (channelRequired && !bookingChannelCode) || (quote.stayType === "FREE" && !freeStayReason.trim())) return;
+    const guestInputs = createOrderGuestInputs(primaryGuestForm, additionalGuests);
     onCommand({
       commandType: "CREATE_ORDER",
       title: "创建订单",
-      description: "确认主要居住人快照、锁定计价政策版本、库存及会员覆盖差异。",
+      description: "确认住宿人名单、锁定计价政策版本、库存及会员覆盖差异。",
       ...(useMemberEntitlement ? { presentation: "MEMBER_STAY" as const } : {}),
       input: {
         propertyId,
         quoteId: quote.quoteId,
-        primaryGuest,
+        primaryGuest: guestInputs.primaryGuest,
+        additionalGuests: guestInputs.additionalGuests,
         ...(!useMemberEntitlement && bookingChannelCode ? {
           bookingChannelCode,
           channelOrderReference: bookingChannelCode === "WECOM" ? null : channelOrderReference.trim() || null
@@ -850,10 +902,12 @@ function QuoteWorkbench({
                     setMemberId(selectedMemberId);
                     const selectedMember = memberProfiles.find((member) => member.id === selectedMemberId);
                     if (!selectedMember) return;
-                    setGuestNickname(selectedMember.full_name);
-                    setGuestName(selectedMember.full_name);
-                    setGuestPhone(selectedMember.phone);
-                    setGuestDocument(selectedMember.identity_card_number);
+                    const nextGuests = applyMemberSelectionToGuestForms(additionalGuests, selectedMember);
+                    setGuestNickname(nextGuests.primaryGuest.nickname);
+                    setGuestName(nextGuests.primaryGuest.fullName);
+                    setGuestPhone(nextGuests.primaryGuest.phone);
+                    setGuestDocument(nextGuests.primaryGuest.documentNumber);
+                    setAdditionalGuests(nextGuests.additionalGuests);
                   }}
                   disabled={busy || quoteRecoveryRead.kind !== "ABSENT"}
                   data-testid="member-profile-select"
@@ -892,12 +946,39 @@ function QuoteWorkbench({
                 );
               })()}
               <section className="guest-section" aria-labelledby="guest-heading">
-                <h3 id="guest-heading">主要居住人快照</h3>
-                <div className="form-grid">
-                  <label>昵称<input value={guestNickname} onChange={(event) => setGuestNickname(event.target.value)} required maxLength={200} data-testid="primary-guest-nickname" /></label>
-                  <label>姓名<input value={guestName} onChange={(event) => setGuestName(event.target.value)} required maxLength={160} data-testid="primary-guest-name" /></label>
-                  <label>联系电话<input value={guestPhone} onChange={(event) => setGuestPhone(event.target.value)} inputMode="tel" maxLength={80} /></label>
-                  <label>证件号码<input value={guestDocument} onChange={(event) => setGuestDocument(event.target.value)} maxLength={120} /></label>
+                <div className="guest-section-heading">
+                  <h3 id="guest-heading">住宿人</h3>
+                  <span>{guestCount} / {unit.occupancyCapacity} 人</span>
+                </div>
+                <fieldset className="guest-entry" data-testid="primary-guest-entry">
+                  <legend>主要入住人 <span>主要 / 联系人</span></legend>
+                  <div className="form-grid">
+                    <label>昵称<input value={guestNickname} onChange={(event) => setGuestNickname(event.target.value)} required maxLength={200} data-testid="primary-guest-nickname" /></label>
+                    <label>姓名<input value={guestName} onChange={(event) => setGuestName(event.target.value)} required maxLength={GUEST_FULL_NAME_MAX_LENGTH} data-testid="primary-guest-name" /></label>
+                    <label>联系电话<input value={guestPhone} onChange={(event) => setGuestPhone(event.target.value)} inputMode="tel" maxLength={80} data-testid="primary-guest-phone" /></label>
+                    <label>证件号码<input value={guestDocument} onChange={(event) => setGuestDocument(event.target.value)} maxLength={120} data-testid="primary-guest-document" /></label>
+                  </div>
+                </fieldset>
+                {additionalGuests.map((guest, index) => (
+                  <fieldset className="guest-entry" key={guest.key} data-testid="additional-guest-entry">
+                    <legend>
+                      同行人 {index + 1}
+                      <button className="icon-button" type="button" onClick={() => removeAdditionalGuest(guest.key)} aria-label={`删除同行人 ${index + 1}`} title="删除同行人">
+                        <Trash2 aria-hidden="true" size={16} />
+                      </button>
+                    </legend>
+                    <div className="form-grid">
+                      <label>昵称<input value={guest.nickname} onChange={(event) => updateAdditionalGuest(guest.key, "nickname", event.target.value)} required maxLength={200} data-testid={`additional-guest-${index}-nickname`} /></label>
+                      <label>姓名<input value={guest.fullName} onChange={(event) => updateAdditionalGuest(guest.key, "fullName", event.target.value)} required maxLength={GUEST_FULL_NAME_MAX_LENGTH} data-testid={`additional-guest-${index}-name`} /></label>
+                      <label>联系电话<input value={guest.phone} onChange={(event) => updateAdditionalGuest(guest.key, "phone", event.target.value)} inputMode="tel" maxLength={80} data-testid={`additional-guest-${index}-phone`} /></label>
+                      <label>证件号码<input value={guest.documentNumber} onChange={(event) => updateAdditionalGuest(guest.key, "documentNumber", event.target.value)} maxLength={120} data-testid={`additional-guest-${index}-document`} /></label>
+                    </div>
+                  </fieldset>
+                ))}
+                <button className="button button-secondary guest-add-button" type="button" onClick={addAdditionalGuest} disabled={!canAddGuest(unit.occupancyCapacity, additionalGuests.length)} data-testid="add-additional-guest">
+                  <UserPlus aria-hidden="true" size={17} />添加同行人
+                </button>
+                <div className="form-grid guest-order-fields">
                   {!useMemberEntitlement ? <label>订单来源渠道
                     <select
                       value={bookingChannelCode}
@@ -915,7 +996,7 @@ function QuoteWorkbench({
                   {!useMemberEntitlement && bookingChannelCode && bookingChannelCode !== "WECOM" ? <label>渠道订单号（可选）<input value={channelOrderReference} onChange={(event) => setChannelOrderReference(event.target.value)} maxLength={200} data-testid="channel-order-reference" /></label> : null}
                   {quote.stayType === "FREE" ? <label className="span-two">免费入住原因<textarea rows={3} value={freeStayReason} onChange={(event) => setFreeStayReason(event.target.value)} required maxLength={1000} data-testid="free-stay-reason" /></label> : null}
                 </div>
-                <button className="button button-primary full-width" type="button" onClick={createOrder} disabled={quoteCommandsBlocked || !quoteIsCurrent || !guestName.trim() || !guestNickname.trim() || (bookingChannelRequiredForStay(useMemberEntitlement) && !bookingChannelCode) || (quote.stayType === "FREE" && !freeStayReason.trim())} data-testid="create-order">
+                <button className="button button-primary full-width" type="button" onClick={createOrder} disabled={quoteCommandsBlocked || !quoteIsCurrent || !guestsComplete || guestCount > unit.occupancyCapacity || (bookingChannelRequiredForStay(useMemberEntitlement) && !bookingChannelCode) || (quote.stayType === "FREE" && !freeStayReason.trim())} data-testid="create-order">
                   <FilePlus2 aria-hidden="true" size={17} />核对并创建订单
                 </button>
               </section>
@@ -931,7 +1012,7 @@ const ROOM_STATUS_PAGE_SIZE = 50;
 const ROOM_STATUS_POLL_MS = 4_000;
 const ROOM_STATUS_QUERY_TIMEOUT_MS = 15_000;
 const ROOM_STATUS_RESTORATION_PREFIX = "qintopia.room-status-view.v1";
-const selectionActionCodes = new Set(["CREATE_ORDER", "CREATE_FREE_STAY", "PLACE_INTERNAL_USE", "LOCK_MAINTENANCE"]);
+const selectionActionCodes = new Set(["CREATE_ORDER", "CREATE_FREE_STAY", "LOCK_MAINTENANCE"]);
 
 interface RoomStatusQuoteTarget {
   unitId: string;
@@ -985,7 +1066,7 @@ function roomStatusRestorationKey(subjectId: string, propertyId: string): string
 
 function defaultRoomStatusRange(timeZone: string): RoomStatusRange {
   const today = localDateInTimeZone(timeZone);
-  return { arrivalDate: today, departureDate: addLocalDateDays(today, 14) };
+  return { arrivalDate: today, departureDate: addLocalDateDays(today, 21) };
 }
 
 function rangeNights(range: RoomStatusRange): number {
@@ -1089,7 +1170,9 @@ function intervalActions(interval: RoomStatusIntervalDto | null, selection: Room
     && selection.unitId === interval.displayInventoryUnitId
     && selection.arrivalDate === interval.sourceStartDate
     && selection.departureDate === interval.sourceEndDate);
-  return interval.allowedActions.map((action) => action.requiresFullInterval && !fullIntervalSelected
+  return interval.allowedActions.map((action) => action.requiresFullInterval
+    && action.code !== "RELEASE_MAINTENANCE"
+    && !fullIntervalSelected
     ? {
         ...action,
         enabled: false,
@@ -1099,7 +1182,15 @@ function intervalActions(interval: RoomStatusIntervalDto | null, selection: Room
 }
 
 function actionUnit(unit: RoomStatusUnitDto, available: boolean): InventoryActionUnit {
-  return { id: unit.id, kind: unit.kind, code: unit.code, name: unit.name, buildingCode: unit.buildingCode, available };
+  return {
+    id: unit.id,
+    kind: unit.kind,
+    code: unit.code,
+    name: unit.name,
+    buildingCode: unit.buildingCode,
+    occupancyCapacity: unit.occupancyCapacity,
+    available
+  };
 }
 
 function buildMobileGroups(board: RoomStatusBoardDto): RoomStatusMobileGroups {
@@ -1118,6 +1209,7 @@ export function InventoryPage() {
   const { meta, principal, propertyId } = useWorkspace();
   const property = meta.properties.find((item) => item.id === propertyId);
   const propertyTimezone = property?.timezone ?? "UTC";
+  const orderPrincipalScope = `${principal.subjectId}:${principal.credentialType}:${principal.propertyAccess[propertyId] ?? "NONE"}`;
   const initialRestoration = useRef(readRoomStatusRestoration(principal.subjectId, propertyId));
   const [range, setRange] = useState<RoomStatusRange>(() => initialRestoration.current?.range ?? defaultRoomStatusRange(propertyTimezone));
   const [viewState, dispatchView] = useReducer(
@@ -1134,8 +1226,11 @@ export function InventoryPage() {
   const queryAttemptGuard = queryAttemptGuardRef.current;
   const permissionDeniedRef = useRef(false);
   const pendingRestoration = useRef<RoomStatusRestorationSnapshot | undefined>(initialRestoration.current);
+  const orderRestorationAttempted = useRef(false);
   const restorationPageAdjusted = useRef(false);
+  const restorationPagesVisited = useRef(new Set<number>());
   const previousPropertyId = useRef(propertyId);
+  const previousSubjectId = useRef(principal.subjectId);
   const [initializedPropertyId, setInitializedPropertyId] = useState(propertyId);
   const [queryPhase, setQueryPhase] = useState<"LOADING" | "RANGE_LOADING" | "READY" | "REFRESHING" | "ERROR" | "PERMISSION_DENIED">("LOADING");
   const [queryError, setQueryError] = useState<unknown>();
@@ -1154,8 +1249,20 @@ export function InventoryPage() {
   const [selectedUnitId, setSelectedUnitId] = useState<string>();
   const [selectedDayDate, setSelectedDayDate] = useState<string>();
   const [selectedIntervalId, setSelectedIntervalId] = useState<string>();
+  const [selectedOrderIdentity, setSelectedOrderIdentity] = useState<RoomStatusOrderIdentity>();
+  const [selectedOrderView, setSelectedOrderView] = useState<OrderViewDto>();
+  const [selectedOrderLoadedScope, setSelectedOrderLoadedScope] = useState<string>();
+  const [selectedOrderLoading, setSelectedOrderLoading] = useState(false);
+  const [selectedOrderError, setSelectedOrderError] = useState<unknown>();
+  const [selectedCorrectionOccupantId, setSelectedCorrectionOccupantId] = useState<string>();
+  const [selectedCorrectionRevision, setSelectedCorrectionRevision] = useState<string>();
+  const [orderContextOpen, setOrderContextOpen] = useState(false);
+  const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(false);
+  const [orderRefreshToken, setOrderRefreshToken] = useState(0);
+  const [selectedOrderCommandScope, setSelectedOrderCommandScope] = useState<string>();
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  const [boardColumnWidth, setBoardColumnWidth] = useState(0);
   const [maintenanceTarget, setMaintenanceTarget] = useState<InventoryActionUnit>();
-  const [internalUseTarget, setInternalUseTarget] = useState<InventoryActionUnit>();
   const [quoteTarget, setQuoteTarget] = useState<RoomStatusQuoteTarget>();
   const [mobileTab, setMobileTab] = useState<RoomStatusMobileTab>("ARRIVALS");
   const [mobileCreateOpen, setMobileCreateOpen] = useState(false);
@@ -1164,6 +1271,8 @@ export function InventoryPage() {
   const [focusRequestToken, setFocusRequestToken] = useState(0);
   const [filterFocusRequestToken, setFilterFocusRequestToken] = useState(0);
   const quoteSectionRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const boardColumnRef = useRef<HTMLDivElement>(null);
   const commandPhaseRef = useRef<RoomStatusCommandPhase>("IDLE");
   const commandAttemptGuardRef = useRef<RoomStatusCommandAttemptGuard | null>(null);
   if (!commandAttemptGuardRef.current) commandAttemptGuardRef.current = new RoomStatusCommandAttemptGuard();
@@ -1181,6 +1290,72 @@ export function InventoryPage() {
   useEffect(() => {
     boardRef.current = board;
   }, [board]);
+
+  useEffect(() => {
+    const element = workspaceRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => setWorkspaceWidth(entry?.contentRect.width ?? 0));
+    observer.observe(element);
+    setWorkspaceWidth(element.getBoundingClientRect().width);
+    return () => observer.disconnect();
+  }, [boardQueryKey]);
+
+  useEffect(() => {
+    const element = boardColumnRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => setBoardColumnWidth(entry?.contentRect.width ?? 0));
+    observer.observe(element);
+    setBoardColumnWidth(element.getBoundingClientRect().width);
+    return () => observer.disconnect();
+  }, [boardQueryKey]);
+
+  useEffect(() => {
+    if (!selectedOrderIdentity) {
+      setSelectedOrderView(undefined);
+      setSelectedOrderLoadedScope(undefined);
+      setSelectedOrderError(undefined);
+      setSelectedOrderLoading(false);
+      return;
+    }
+    let current = true;
+    setSelectedOrderLoading(true);
+    setSelectedOrderError(undefined);
+    api.order(selectedOrderIdentity.orderId)
+      .then((response) => {
+        if (!current) return;
+        if (response.order.property_id !== propertyId || response.stay.id !== selectedOrderIdentity.stayId) {
+          throw new Error("订单上下文与当前房态的稳定引用不一致，已停止显示");
+        }
+        setSelectedOrderView(response);
+        setSelectedOrderLoadedScope(orderPrincipalScope);
+      })
+      .catch((nextError) => {
+        if (!current) return;
+        setSelectedOrderView(undefined);
+        setSelectedOrderError(nextError);
+      })
+      .finally(() => current && setSelectedOrderLoading(false));
+    return () => { current = false; };
+  }, [board?.revision, orderPrincipalScope, orderRefreshToken, propertyId, refreshToken, selectedOrderIdentity]);
+
+  useEffect(() => {
+    if (command?.commandType !== "CORRECT_ORDER_OCCUPANT" || selectedOrderCommandScope === orderPrincipalScope) return;
+    commandAttemptGuard.invalidate();
+    commandPhaseRef.current = "IDLE";
+    commandRevisionRef.current = undefined;
+    setCommand(undefined);
+    setSelectedOrderCommandScope(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setRecoveryDialogOpen(false);
+  }, [command, orderPrincipalScope, selectedOrderCommandScope]);
+
+  useEffect(() => {
+    if (!selectedCorrectionOccupantId || !selectedCorrectionRevision || !board) return;
+    if (board.revision === selectedCorrectionRevision) return;
+    setSelectedCorrectionOccupantId(undefined);
+    setSelectedCorrectionRevision(undefined);
+    setActionError(new Error("订单资料已被其他操作刷新。为避免覆盖新值，原更正表单已关闭；请重新打开后核对。"));
+  }, [board?.revision, selectedCorrectionOccupantId, selectedCorrectionRevision]);
 
   const boardMatchesCurrentProperty = Boolean(board && board.propertyId === propertyId);
   const currentBoardQueryKey = roomStatusQueryKey(roomStatusQuery(range, viewState.roomPageIndex, viewState.filters));
@@ -1222,11 +1397,15 @@ export function InventoryPage() {
   }, [propertyId]);
 
   useEffect(() => {
-    if (previousPropertyId.current === propertyId) return;
+    if (previousPropertyId.current === propertyId && previousSubjectId.current === principal.subjectId) return;
     previousPropertyId.current = propertyId;
+    previousSubjectId.current = principal.subjectId;
     permissionDeniedRef.current = false;
     const restored = readRoomStatusRestoration(principal.subjectId, propertyId);
+    initialRestoration.current = restored;
     pendingRestoration.current = restored;
+    orderRestorationAttempted.current = false;
+    restorationPagesVisited.current.clear();
     setRange(restored?.range ?? defaultRoomStatusRange(propertyTimezone));
     dispatchView({ type: "RESTORE", state: restored?.state ?? createRoomStatusViewState() });
     setBoard(undefined);
@@ -1236,9 +1415,15 @@ export function InventoryPage() {
     setSelectedUnitId(undefined);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedOrderView(undefined);
+    setSelectedOrderLoadedScope(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setSelectedOrderCommandScope(undefined);
+    setOrderContextOpen(false);
+    setDesktopContextCollapsed(false);
     setQuoteTarget(undefined);
     setMaintenanceTarget(undefined);
-    setInternalUseTarget(undefined);
     setMobileCreateOpen(false);
     setMobileFocusRequest(undefined);
     pendingMobileTaskFocus.current = undefined;
@@ -1306,6 +1491,27 @@ export function InventoryPage() {
           dispatchView({ type: "SET_ROOM_PAGE", index: pageIndex, totalPages: response.page.totalPages });
           return;
         }
+        const restoredSelection = restored?.state.selection;
+        if (restoredSelection && !findRoomStatusUnit(response, restoredSelection.unitId) && response.page.totalPages > 1) {
+          restorationPagesVisited.current.add(response.page.index);
+          const nextPage = Array.from({ length: response.page.totalPages }, (_, index) => index)
+            .find((index) => !restorationPagesVisited.current.has(index));
+          if (nextPage !== undefined) {
+            restorationPageAdjusted.current = true;
+            pendingRestoration.current = {
+              ...restored,
+              state: { ...restored.state, roomPageIndex: nextPage }
+            };
+            setBoard(undefined);
+            boardRef.current = undefined;
+            setBoardQueryKey(undefined);
+            boardQueryKeyRef.current = undefined;
+            setQueryPhase("LOADING");
+            dispatchView({ type: "SET_ROOM_PAGE", index: nextPage, totalPages: response.page.totalPages });
+            return;
+          }
+        }
+        restorationPagesVisited.current.clear();
         setBoard(response);
         boardRef.current = response;
         setBoardQueryKey(requestQueryKey);
@@ -1319,6 +1525,7 @@ export function InventoryPage() {
         }
         if (restored) {
           pendingRestoration.current = undefined;
+          restorationPagesVisited.current.clear();
           const pageAdjusted = restorationPageAdjusted.current;
           restorationPageAdjusted.current = false;
           const resolution = reconcileRoomStatusRestoration(response.rooms, response.dates, {
@@ -1365,9 +1572,15 @@ export function InventoryPage() {
           setSelectedUnitId(undefined);
           setSelectedDayDate(undefined);
           setSelectedIntervalId(undefined);
+          setSelectedOrderIdentity(undefined);
+          setSelectedOrderView(undefined);
+          setSelectedOrderLoadedScope(undefined);
+          setSelectedCorrectionOccupantId(undefined);
+          setSelectedOrderCommandScope(undefined);
+          setOrderContextOpen(false);
+          setDesktopContextCollapsed(false);
           setQuoteTarget(undefined);
           setMaintenanceTarget(undefined);
-          setInternalUseTarget(undefined);
           setMobileCreateOpen(false);
           commandPhaseRef.current = "IDLE";
           commandAttemptGuard.invalidate();
@@ -1395,6 +1608,7 @@ export function InventoryPage() {
     };
   }, [
     initializedPropertyId,
+    orderPrincipalScope,
     propertyId,
     range.arrivalDate,
     range.departureDate,
@@ -1485,6 +1699,113 @@ export function InventoryPage() {
   const contextActions = projectionWritable || Boolean(command)
     ? candidateContextActions
     : candidateContextActions.filter((action) => action.code === "OPEN_ORDER");
+  const useInlineOrderContext = roomStatusOrderContextMode(workspaceWidth, isMobile) === "INLINE";
+  const authorizedSelectedOrderView = selectedOrderLoadedScope === orderPrincipalScope ? selectedOrderView : undefined;
+  const selectedCorrectionOccupant = authorizedSelectedOrderView?.occupants.find((occupant) => occupant.id === selectedCorrectionOccupantId);
+
+  useEffect(() => {
+    if (!renderedBoard || viewState.dateWindowMode !== "AUTO") return;
+    const autoSize = roomStatusAutoVisibleDays(boardColumnWidth);
+    if (autoSize === viewState.dateWindowSize) return;
+    dispatchView({
+      type: "SET_DATE_WINDOW_MODE",
+      mode: "AUTO",
+      autoSize,
+      totalDates: renderedBoard.dates.length
+    });
+  }, [boardColumnWidth, renderedBoard, viewState.dateWindowMode, viewState.dateWindowSize]);
+
+  useEffect(() => {
+    if (orderRestorationAttempted.current || !initialRestoration.current || !renderedBoard) return;
+    orderRestorationAttempted.current = true;
+    const restoredSelection = viewState.selection;
+    if (!restoredSelection) return;
+    const restoredUnit = findRoomStatusUnit(renderedBoard, restoredSelection.unitId);
+    const identity = restoredUnit ? roomStatusOrderIdentityForDate(restoredUnit, restoredSelection.arrivalDate) : null;
+    if (!identity) return;
+    setSelectedUnitId(restoredUnit?.id);
+    setSelectedDayDate(restoredSelection.arrivalDate);
+    setSelectedIntervalId(identity.intervalId);
+    setSelectedOrderIdentity(identity);
+    setOrderContextOpen(true);
+    setDesktopContextCollapsed(false);
+    setFocusRequestToken((value) => value + 1);
+  }, [renderedBoard, viewState.selection]);
+
+  useEffect(() => {
+    if (!selectedOrderIdentity || !renderedBoard) return;
+    const identityOutsideCurrentRange = selectedOrderIdentity.departureDate <= renderedBoard.range.arrivalDate
+      || selectedOrderIdentity.arrivalDate >= renderedBoard.range.departureDate;
+    if (identityOutsideCurrentRange) return;
+    const stayStillProjected = renderedBoard.rooms
+      .flatMap((room) => [room, ...room.children])
+      .some((unit) => unit.intervals.some((interval) => interval.references.some(
+        (reference) => reference.type === "STAY" && reference.id === selectedOrderIdentity.stayId
+      )));
+    if (stayStillProjected) return;
+    let current = true;
+    const findMovedStay = async () => {
+      for (let pageIndex = 0; pageIndex < renderedBoard.page.totalPages; pageIndex += 1) {
+        if (pageIndex === renderedBoard.page.index) continue;
+        const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, viewState.filters));
+        if (!current) return;
+        assertRoomStatusBoard(response, { propertyId, range, pageIndex });
+        for (const unit of response.rooms.flatMap((room) => [room, ...room.children])) {
+          const interval = unit.intervals.find((candidate) => candidate.references.some(
+            (reference) => reference.type === "STAY" && reference.id === selectedOrderIdentity.stayId
+          ));
+          const identity = interval ? roomStatusOrderIdentityForInterval(interval) : null;
+          if (!identity || identity.orderId !== selectedOrderIdentity.orderId) continue;
+          const triggerDate = selectedDayDate && identity.arrivalDate <= selectedDayDate && selectedDayDate < identity.departureDate
+            ? selectedDayDate
+            : identity.arrivalDate;
+          const parentRoomId = meta.inventoryUnits.find((candidate) => candidate.id === unit.id)?.parent_room_id;
+          if (parentRoomId && !viewState.expandedRoomIds.includes(parentRoomId)) {
+            dispatchView({ type: "TOGGLE_ROOM", roomId: parentRoomId });
+          }
+          dispatchView({ type: "SET_ROOM_PAGE", index: pageIndex, totalPages: response.page.totalPages });
+          dispatchView({
+            type: "SET_SELECTION",
+            selection: {
+              unitId: identity.unitId,
+              anchorDate: triggerDate,
+              focusDate: triggerDate,
+              arrivalDate: identity.arrivalDate,
+              departureDate: identity.departureDate
+            }
+          });
+          setSelectedUnitId(identity.unitId);
+          setSelectedDayDate(triggerDate);
+          setSelectedIntervalId(identity.intervalId);
+          setSelectedOrderIdentity(identity);
+          setReturnNotice("房态 revision 已变化，住宿已移动到其他房源页；已保留订单上下文并定位到最新分段。");
+          return;
+        }
+      }
+      if (!current) return;
+      setSelectedOrderIdentity(undefined);
+      setSelectedOrderView(undefined);
+      setSelectedCorrectionOccupantId(undefined);
+      setOrderContextOpen(false);
+      setReturnNotice("原先选中的住宿已不在最新房态投影中，订单上下文已安全关闭。请按最新房态重新选择。");
+    };
+    void findMovedStay().catch((error: unknown) => {
+      if (!current) return;
+      setActionError(error);
+      setReturnNotice("房态 revision 已变化，但暂时无法核对该住宿是否移动到其他房源页；订单上下文保持打开，请刷新后重试。");
+    });
+    return () => { current = false; };
+  }, [
+    meta.inventoryUnits,
+    propertyId,
+    range.arrivalDate,
+    range.departureDate,
+    renderedBoard,
+    selectedDayDate,
+    selectedOrderIdentity,
+    viewState.expandedRoomIds,
+    viewState.filters
+  ]);
   const policies = meta.pricingPolicyVersions.filter((policy) => policy.property_id === propertyId && policy.status === "PUBLISHED");
   const filterOptions = renderedBoard?.filterOptions ?? {
     roomTypeCodes: [],
@@ -1511,9 +1832,12 @@ export function InventoryPage() {
     setSelectedUnitId(undefined);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedOrderView(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setOrderContextOpen(false);
     setQuoteTarget(undefined);
     setMaintenanceTarget(undefined);
-    setInternalUseTarget(undefined);
     setMobileCreateOpen(false);
     setActionError(undefined);
     setQuoteRecoveryOutcome(undefined);
@@ -1577,6 +1901,31 @@ export function InventoryPage() {
     clearTransientRoomStatusContext();
   }
 
+  function changeDateWindowMode(mode: RoomStatusDateWindowMode) {
+    const autoSize = roomStatusAutoVisibleDays(boardColumnWidth);
+    const requestedSize = mode === "AUTO" ? autoSize : Number(mode);
+    const totalDates = renderedBoard?.dates.length ?? rangeNights(range);
+    if (requestedSize > totalDates) {
+      applyRange({
+        arrivalDate: range.arrivalDate,
+        departureDate: addLocalDateDays(range.arrivalDate, requestedSize)
+      });
+      dispatchView({
+        type: "SET_DATE_WINDOW_MODE",
+        mode,
+        autoSize,
+        totalDates: requestedSize
+      });
+      return;
+    }
+    dispatchView({
+      type: "SET_DATE_WINDOW_MODE",
+      mode,
+      autoSize,
+      totalDates
+    });
+  }
+
   function persistViewNow() {
     if (!board || !boardMatchesCurrentQuery) return;
     writeRoomStatusRestoration(principal.subjectId, {
@@ -1592,21 +1941,84 @@ export function InventoryPage() {
 
   function inspectUnit(unit: RoomStatusUnitDto) {
     setQuoteRecoveryOutcome(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setOrderContextOpen(false);
     setSelectedUnitId(unit.id);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
   }
 
+  function selectOrderContextIdentity(identity: RoomStatusOrderIdentity, serviceDate?: string) {
+    const sameOrder = selectedOrderIdentity?.orderId === identity.orderId
+      && selectedOrderIdentity.stayId === identity.stayId;
+    setActionError(undefined);
+    setSelectedUnitId(identity.unitId);
+    setSelectedDayDate(serviceDate);
+    setSelectedIntervalId(identity.intervalId);
+    setSelectedOrderIdentity(identity);
+    if (!sameOrder) setSelectedOrderView(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setQuoteTarget(undefined);
+    setOrderContextOpen(true);
+    setDesktopContextCollapsed(false);
+    const requestedTriggerDate = serviceDate && identity.arrivalDate <= serviceDate && serviceDate < identity.departureDate
+      ? serviceDate
+      : identity.arrivalDate;
+    const visibleArrivalDate = identity.arrivalDate < range.arrivalDate ? range.arrivalDate : identity.arrivalDate;
+    const visibleDepartureDate = identity.departureDate > range.departureDate ? range.departureDate : identity.departureDate;
+    if (visibleArrivalDate >= visibleDepartureDate) {
+      dispatchView({ type: "SET_SELECTION", selection: null });
+      return;
+    }
+    const triggerDate = requestedTriggerDate < visibleArrivalDate
+      ? visibleArrivalDate
+      : requestedTriggerDate >= visibleDepartureDate
+        ? addLocalDateDays(visibleDepartureDate, -1)
+        : requestedTriggerDate;
+    dispatchView({
+      type: "SET_SELECTION",
+      selection: {
+        unitId: identity.unitId,
+        anchorDate: triggerDate,
+        focusDate: triggerDate,
+        arrivalDate: visibleArrivalDate,
+        departureDate: visibleDepartureDate
+      }
+    });
+  }
+
   function inspectDay(unit: RoomStatusUnitDto, day: RoomStatusDayDto | null) {
     setQuoteRecoveryOutcome(undefined);
+    setActionError(undefined);
     setSelectedUnitId(unit.id);
-    if (day) selectRange(selectionFromCells(unit.id, day.serviceDate, day.serviceDate));
-    setSelectedDayDate(day?.serviceDate);
-    setSelectedIntervalId(undefined);
+    const orderIdentity = day ? roomStatusOrderIdentityForDate(unit, day.serviceDate) : null;
+    if (orderIdentity) {
+      selectOrderContextIdentity(orderIdentity, day?.serviceDate);
+    } else if (day && !day.available) {
+      setSelectedOrderIdentity(undefined);
+      setSelectedOrderView(undefined);
+      setSelectedCorrectionOccupantId(undefined);
+      setOrderContextOpen(false);
+      setQuoteTarget(undefined);
+      dispatchView({ type: "SET_SELECTION", selection: selectionFromCells(unit.id, day.serviceDate, day.serviceDate) });
+      setActionError(new Error(unit.kind === "ROOM" && unit.salesMode === "BED_SPLIT"
+        ? "该房间格汇总床位占用，不能代表一张订单。请展开房间并选择具体床位。"
+        : "当前占用缺少唯一、稳定的订单引用，未打开订单或新建住宿流程。请刷新后重新核对。"));
+    } else if (day) {
+      selectRange(selectionFromCells(unit.id, day.serviceDate, day.serviceDate));
+    }
+    if (!orderIdentity) {
+      setSelectedDayDate(day?.serviceDate);
+      setSelectedIntervalId(undefined);
+    }
   }
 
   function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto) {
     setQuoteRecoveryOutcome(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setOrderContextOpen(false);
     setSelectedUnitId(unit.id);
     selectRange({
       unitId: unit.id,
@@ -1621,6 +2033,10 @@ export function InventoryPage() {
 
   function selectRange(selection: RoomStatusSelection | null) {
     setQuoteRecoveryOutcome(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedOrderView(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setOrderContextOpen(false);
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
       setSelectedUnitId(selection.unitId);
@@ -1640,8 +2056,97 @@ export function InventoryPage() {
   function openReference(reference: { href: string | null }) {
     if (!reference.href) return;
     persistViewNow();
-    if (reference.href.startsWith("/orders/")) navigate(reference.href);
+    if (reference.href.startsWith("/orders/")) navigate(reference.href, { state: { fromRoomStatus: true } });
     else window.open(reference.href, "_blank", "noopener,noreferrer");
+  }
+
+  function openSelectedOrder(actionCode?: string) {
+    if (!selectedOrderIdentity) return;
+    persistViewNow();
+    const query = actionCode ? `?action=${encodeURIComponent(actionCode)}` : "";
+    navigate(`/orders/${encodeURIComponent(selectedOrderIdentity.orderId)}${query}`, {
+      state: { fromRoomStatus: true }
+    });
+  }
+
+  function closeSelectedOrderContext() {
+    setSelectedCorrectionOccupantId(undefined);
+    setOrderContextOpen(false);
+    setDesktopContextCollapsed(true);
+    setFocusRequestToken((value) => value + 1);
+  }
+
+  function closeDesktopContext() {
+    setDesktopContextCollapsed(true);
+    if (selectedOrderIdentity) setOrderContextOpen(false);
+    setFocusRequestToken((value) => value + 1);
+  }
+
+  function reopenDesktopContext() {
+    setDesktopContextCollapsed(false);
+    if (selectedOrderIdentity) setOrderContextOpen(true);
+  }
+
+  async function locateOrderRange(target: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) {
+    if (!renderedBoard) return;
+    const visibleArrivalDate = target.arrivalDate < range.arrivalDate ? range.arrivalDate : target.arrivalDate;
+    const visibleDepartureDate = target.departureDate > range.departureDate ? range.departureDate : target.departureDate;
+    if (visibleArrivalDate >= visibleDepartureDate) {
+      setActionError(new Error(`该次变更位于当前日期范围之外（${target.arrivalDate} 至 ${target.departureDate}）。请先调整房态日期范围后再定位。`));
+      return;
+    }
+    let targetPage = findRoomStatusUnit(renderedBoard, target.inventoryUnitId)
+      ? renderedBoard.page.index
+      : undefined;
+    try {
+      if (targetPage === undefined) {
+        for (let pageIndex = 0; pageIndex < renderedBoard.page.totalPages; pageIndex += 1) {
+          if (pageIndex === renderedBoard.page.index) continue;
+          const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, viewState.filters));
+          assertRoomStatusBoard(response, { propertyId, range, pageIndex });
+          if (findRoomStatusUnit(response, target.inventoryUnitId)) {
+            targetPage = pageIndex;
+            break;
+          }
+        }
+      }
+      if (targetPage === undefined) {
+        setActionError(new Error("该次变更对应的房源不在当前筛选结果中，未制造不可见选区。请清除筛选后重试定位。"));
+        return;
+      }
+      if (targetPage !== renderedBoard.page.index) {
+        dispatchView({ type: "SET_ROOM_PAGE", index: targetPage, totalPages: renderedBoard.page.totalPages });
+      }
+      const segmentUnit = meta.inventoryUnits.find((unit) => unit.id === target.inventoryUnitId);
+      if (segmentUnit?.parent_room_id && !viewState.expandedRoomIds.includes(segmentUnit.parent_room_id)) {
+        dispatchView({ type: "TOGGLE_ROOM", roomId: segmentUnit.parent_room_id });
+      }
+      dispatchView({
+        type: "SET_SELECTION",
+        selection: {
+          unitId: target.inventoryUnitId,
+          anchorDate: visibleArrivalDate,
+          focusDate: visibleArrivalDate,
+          arrivalDate: visibleArrivalDate,
+          departureDate: visibleDepartureDate
+        }
+      });
+      dispatchView({ type: "SET_FOCUS", focus: { unitId: target.inventoryUnitId, serviceDate: visibleArrivalDate } });
+      dispatchView({
+        type: "SET_DATE_WINDOW",
+        start: dateWindowStartForFocus(renderedBoard.dates, viewState.dateWindowStart, viewState.dateWindowSize, visibleArrivalDate),
+        totalDates: renderedBoard.dates.length
+      });
+      setSelectedUnitId(target.inventoryUnitId);
+      setSelectedDayDate(visibleArrivalDate);
+      if (!useInlineOrderContext) {
+        setOrderContextOpen(false);
+        setDesktopContextCollapsed(true);
+      }
+      setFocusRequestToken((value) => value + 1);
+    } catch (error) {
+      setActionError(error);
+    }
   }
 
   function startCommand(request: CommandRequest): boolean {
@@ -1678,7 +2183,7 @@ export function InventoryPage() {
       return false;
     }
     const selection = selectionOverride ?? viewState.selection;
-    if (action.code === "CREATE_ORDER" || action.code === "CREATE_FREE_STAY" || action.code === "PLACE_INTERNAL_USE" || action.code === "LOCK_MAINTENANCE") {
+    if (action.code === "CREATE_ORDER" || action.code === "CREATE_FREE_STAY" || action.code === "LOCK_MAINTENANCE") {
       if (!actionSelectedUnit || !selection || selection.unitId !== actionSelectedUnit.id) {
         setActionError(new Error("请选择一个完整的房源与半开日期区间"));
         return false;
@@ -1693,8 +2198,6 @@ export function InventoryPage() {
           initialStayType: action.code === "CREATE_FREE_STAY" ? "FREE" : "TRANSIENT"
         });
         requestAnimationFrame(() => quoteSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
-      } else if (action.code === "PLACE_INTERNAL_USE") {
-        setInternalUseTarget(unit);
       } else {
         setMaintenanceTarget(unit);
       }
@@ -1712,13 +2215,6 @@ export function InventoryPage() {
         title: `释放维修锁 · ${unitLabel}`,
         description: "服务端将重新校验完整维修 Block 版本，确认后释放全部对应 Claim。",
         input: { propertyId, maintenanceLockId: targetId }
-      });
-    } else if (action.code === "RELEASE_INTERNAL_USE") {
-      return startCommand({
-        commandType: "RELEASE_INTERNAL_USE",
-        title: `释放内部占用 · ${unitLabel}`,
-        description: "服务端只接受完整、当前有效的内部占用 Block，并在确认时重新校验。",
-        input: { propertyId, internalUseBlockId: targetId }
       });
     } else if (action.code === "COMPLETE_CLEANING") {
       return startCommand({
@@ -1760,6 +2256,7 @@ export function InventoryPage() {
     commandPhaseRef.current = "IDLE";
     commandRevisionRef.current = undefined;
     setCommand(undefined);
+    setSelectedOrderCommandScope(undefined);
     setRecoveryDialogOpen(false);
     if (refreshAfterClose) {
       if (pendingMobileTaskFocus.current) {
@@ -1797,6 +2294,7 @@ export function InventoryPage() {
     refreshedReceiptIdRef.current = receipt.receiptId;
     commandPhaseRef.current = "SETTLED";
     setRefreshToken((value) => value + 1);
+    if (selectedOrderIdentity) setOrderRefreshToken((value) => value + 1);
   }
 
   const roomStatusToolbar = renderedBoard ? (
@@ -1823,6 +2321,66 @@ export function InventoryPage() {
       onClearFilters={clearFilters}
       onRefresh={() => setRefreshToken((value) => value + 1)}
     />
+  ) : null;
+
+  const selectedOrderContext = selectedOrderIdentity ? (
+    authorizedSelectedOrderView ? (
+      <RoomStatusOrderContext
+        view={authorizedSelectedOrderView}
+        units={meta.inventoryUnits}
+        loading={selectedOrderLoading}
+        writeBlocked={commandsBlocked || authorizedSelectedOrderView.accessLevel !== "WRITE"}
+        onClose={closeSelectedOrderContext}
+        onOpenOrder={openSelectedOrder}
+        onCorrectOccupant={(occupant) => {
+          setSelectedCorrectionOccupantId(occupant.id);
+          setSelectedCorrectionRevision(board?.revision);
+        }}
+        onLocateRange={(target) => { void locateOrderRange(target); }}
+      />
+    ) : (
+      <aside className="room-status-context room-status-order-context" aria-label="订单上下文">
+        <header className="room-status-context-header"><div><span>选中对象上下文</span><h2>订单上下文</h2></div><button type="button" className="room-status-icon-button" onClick={closeSelectedOrderContext} aria-label="关闭订单上下文" title="关闭订单上下文"><X aria-hidden="true" size={17} /></button></header>
+        {selectedOrderLoading || !selectedOrderError ? <LoadingBlock label="正在载入权威订单上下文" /> : <InlineError error={selectedOrderError} title="订单上下文不可用" />}
+      </aside>
+    )
+  ) : null;
+
+  const desktopSelectionContext = renderedBoard ? (
+    <>
+      <RoomStatusContext
+        board={renderedBoard}
+        selectedUnit={selectedUnit}
+        selectedDay={selectedDay}
+        selectedInterval={selectedInterval}
+        relatedIntervals={relatedIntervals}
+        selection={viewState.selection}
+        conflicts={contextConflicts}
+        allowedActions={contextActions}
+        onSelectedUnitChange={inspectUnit}
+        onSelectionChange={selectRange}
+        onOpenReference={openReference}
+        onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
+        onAction={handleAction}
+        {...(useInlineOrderContext ? { onClose: closeDesktopContext } : {})}
+      />
+      {showQuoteWorkbench ? (
+        <div className="room-status-quote-section" ref={quoteSectionRef}>
+          <QuoteWorkbench
+            unit={quoteActionUnit}
+            arrivalDate={quoteTarget?.arrivalDate ?? range.arrivalDate}
+            departureDate={quoteTarget?.departureDate ?? range.departureDate}
+            policies={policies}
+            {...(quoteTarget ? { initialStayType: quoteTarget.initialStayType } : {})}
+            commandsBlocked={commandsBlocked}
+            resetToken={quoteResetToken}
+            onClose={() => setQuoteTarget(undefined)}
+            onRecoveryOutcome={setQuoteRecoveryOutcome}
+            onCommand={startCommand}
+          />
+        </div>
+      ) : null}
+    </>
   ) : null;
 
   return (
@@ -1862,19 +2420,22 @@ export function InventoryPage() {
           ) : null}
 
           <div
-            className="room-status-workspace"
+            ref={workspaceRef}
+            className={`room-status-workspace${!isMobile && (desktopContextCollapsed || !useInlineOrderContext) ? " is-context-overlay" : ""}`}
             aria-busy={rangeLoading}
             inert={rangeLoading && !filteredViewHasNoRooms}
           >
-            <div className="room-status-board-column">
+            <div className="room-status-board-column" ref={boardColumnRef}>
               <RoomStatusGrid
                 board={renderedBoard}
                 filters={viewState.filters}
                 expandedRoomIds={viewState.expandedRoomIds}
                 focusedCell={viewState.focusedCell}
                 selection={viewState.selection}
+                selectedStayId={selectedOrderIdentity?.stayId ?? null}
                 dateWindowStart={viewState.dateWindowStart}
                 dateWindowSize={viewState.dateWindowSize}
+                dateWindowMode={viewState.dateWindowMode}
                 todayDate={todayDate}
                 initialScrollAnchor={viewState.scrollAnchor}
                 restoreFocus={Boolean(returnNotice)}
@@ -1884,6 +2445,7 @@ export function InventoryPage() {
                 onSelectionChange={selectRange}
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}
                 onDateWindowChange={(start) => changeDateWindow(start, renderedBoard.dates.length)}
+                onDateWindowModeChange={changeDateWindowMode}
                 onInspectUnit={inspectUnit}
                 onInspectDay={inspectDay}
                 onInspectInterval={inspectInterval}
@@ -1901,9 +2463,15 @@ export function InventoryPage() {
                 onCreate={() => setMobileCreateOpen(true)}
                 onOpenReference={openReference}
                 onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
+                onOpenOrderContext={selectOrderContextIdentity}
                 onAction={(action, task, unit) => {
                   if (action.code === "OPEN_ORDER") {
-                    handleAction(action);
+                    const identity = roomStatusOrderIdentityForInterval(task);
+                    if (!identity) {
+                      setActionError(new Error("当前移动任务缺少唯一、稳定的订单引用，未打开订单。请刷新后重新核对。"));
+                      return;
+                    }
+                    selectOrderContextIdentity(identity, task.businessDate);
                     return;
                   }
                   pendingMobileTaskFocus.current = {
@@ -1922,46 +2490,39 @@ export function InventoryPage() {
                 }}
               />
             </div>
-            {!isMobile ? <div className="room-status-side-column"><RoomStatusContext
-                board={renderedBoard}
-                selectedUnit={selectedUnit}
-                selectedDay={selectedDay}
-                selectedInterval={selectedInterval}
-                relatedIntervals={relatedIntervals}
-                selection={viewState.selection}
-                conflicts={contextConflicts}
-                allowedActions={contextActions}
-                onSelectedUnitChange={(unit) => {
-                  inspectUnit(unit);
-                }}
-                onSelectionChange={selectRange}
-                onOpenReference={openReference}
-                onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
-                onAction={handleAction}
-              />
-              {showQuoteWorkbench ? (
-                <div className="room-status-quote-section" ref={quoteSectionRef}>
-                  <QuoteWorkbench
-                    unit={quoteActionUnit}
-                    arrivalDate={quoteTarget?.arrivalDate ?? range.arrivalDate}
-                    departureDate={quoteTarget?.departureDate ?? range.departureDate}
-                    policies={policies}
-                    {...(quoteTarget ? { initialStayType: quoteTarget.initialStayType } : {})}
-                    commandsBlocked={commandsBlocked}
-                    resetToken={quoteResetToken}
-                    onClose={() => setQuoteTarget(undefined)}
-                    onRecoveryOutcome={setQuoteRecoveryOutcome}
-                    onCommand={startCommand}
-                  />
-                </div>
-              ) : null}
+            {!isMobile && !desktopContextCollapsed && useInlineOrderContext && (!selectedOrderIdentity || orderContextOpen) ? <div className="room-status-side-column">
+              {selectedOrderIdentity ? selectedOrderContext : desktopSelectionContext}
             </div> : null}
           </div>
+
+          {!isMobile && !desktopContextCollapsed && !useInlineOrderContext && (!selectedOrderIdentity || orderContextOpen) ? (
+            <Modal
+              title={selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
+              size="drawer"
+              modal={false}
+              onClose={closeDesktopContext}
+              footer={null}
+            >
+              {selectedOrderIdentity ? selectedOrderContext : desktopSelectionContext}
+            </Modal>
+          ) : null}
+
+          {isMobile && selectedOrderIdentity && orderContextOpen ? (
+            <Modal title="订单上下文" size="mobile-fullscreen" modal onClose={closeSelectedOrderContext} footer={null}>
+              {selectedOrderContext}
+            </Modal>
+          ) : null}
+
+          {!isMobile && desktopContextCollapsed ? (
+            <button type="button" className="button button-primary room-status-context-reopen" onClick={reopenDesktopContext}>
+              <PanelRightOpen aria-hidden="true" size={17} />打开{selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
+            </button>
+          ) : null}
 
           {isMobile ? roomStatusToolbar : null}
 
           {isMobile && mobileCreateOpen ? (
-            <Modal title="新建住宿或库存 Block" size="mobile-fullscreen" onClose={() => setMobileCreateOpen(false)} footer={null}>
+            <Modal title="新建住宿或锁房" size="mobile-fullscreen" onClose={() => setMobileCreateOpen(false)} footer={null}>
               <RoomStatusContext
                 board={renderedBoard}
                 selectedUnit={selectedUnit}
@@ -2004,8 +2565,23 @@ export function InventoryPage() {
       )}
 
       {maintenanceTarget && viewState.selection ? <MaintenanceDialog unit={maintenanceTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} onClose={() => setMaintenanceTarget(undefined)} onSubmit={(request) => { const started = startCommand(request); if (started) setMaintenanceTarget(undefined); return started; }} /> : null}
-      {internalUseTarget && viewState.selection ? <InternalUseDialog unit={internalUseTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} onClose={() => setInternalUseTarget(undefined)} onSubmit={(request) => { const started = startCommand(request); if (started) setInternalUseTarget(undefined); return started; }} /> : null}
-      {command ? <CommandDialog
+      {authorizedSelectedOrderView && selectedCorrectionOccupant ? <OrderOccupantCorrectionDialog
+        view={authorizedSelectedOrderView}
+        occupant={selectedCorrectionOccupant}
+        onClose={() => {
+          setSelectedCorrectionOccupantId(undefined);
+          setSelectedCorrectionRevision(undefined);
+        }}
+        onSubmit={(request) => {
+          if (commandsBlocked) return;
+          setSelectedCorrectionOccupantId(undefined);
+          setSelectedCorrectionRevision(undefined);
+          setRecoveryDialogOpen(false);
+          setSelectedOrderCommandScope(orderPrincipalScope);
+          startCommand(request);
+        }}
+      /> : null}
+      {command && (command.commandType !== "CORRECT_ORDER_OCCUPANT" || selectedOrderCommandScope === orderPrincipalScope) ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}-${commandAttemptId}` : `new-room-status-command-${commandAttemptId}`}
         request={command}
         onClose={closeCommandDialog}

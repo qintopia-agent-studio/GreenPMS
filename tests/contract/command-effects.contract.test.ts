@@ -20,17 +20,16 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   RECORD_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "payment", "productName", "status", "totals"],
   CORRECT_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "original", "originalPaymentFactId", "productName", "replacement", "status", "totals"],
   ACTIVATE_MEMBERSHIP_ORDER: ["agreedPrice", "entitlementUnitKind", "entitlementUnits", "fromStatus", "memberName", "membershipOrderId", "operation", "paymentDifference", "paymentTotal", "productName", "toStatus", "validFrom", "validUntil"],
-  CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "pricing", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
+  CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
+  CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
   EXTEND_STAY: ["after", "before", "inventoryUnitId", "orderId"],
   SHORTEN_STAY: ["after", "before", "inventoryUnitId", "orderId"],
-  MOVE_UNIT: ["effectiveDate", "fromInventoryUnit", "orderId", "pricing", "stayTimeline", "toInventoryUnit"],
+  MOVE_UNIT: ["effectiveDate", "fromInventoryUnit", "occupancyCapacity", "occupantCount", "orderId", "pricing", "stayTimeline", "toInventoryUnit"],
   REPRICE_ORDER: ["before", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
   CANCEL_ORDER: ["currentContractAmount", "entitlementTransition", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
   MARK_NO_SHOW: ["currentContractAmount", "entitlementTransition", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
   LOCK_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnit", "reason"],
   RELEASE_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnitId", "maintenanceLockId"],
-  PLACE_INTERNAL_USE: ["arrivalDate", "departureDate", "inventoryUnit", "reason"],
-  RELEASE_INTERNAL_USE: ["arrivalDate", "departureDate", "fromStatus", "internalUseBlockId", "inventoryUnitId", "reason", "toStatus"],
   COMPLETE_CLEANING: ["cleaningTaskId", "fromStatus", "inventoryUnitId", "orderId", "roomId", "serviceDate", "stayId", "toStatus"],
   RECORD_COLLECTION: ["amountMinor", "currency", "method", "note", "orderId", "transactionReference"],
   RECORD_REFUND: ["amountMinor", "currency", "method", "note", "orderId", "referencesFactId", "transactionReference"],
@@ -214,19 +213,6 @@ describe("Command effect HTTP contract", () => {
       maintenanceLockId: maintenanceResult.maintenanceLockId
     });
 
-    const internalUse = await capture("PLACE_INTERNAL_USE", {
-      propertyId: demo.propertyId,
-      inventoryUnitId: demo.secondRoomId,
-      arrivalDate: "2028-03-10",
-      departureDate: "2028-03-12",
-      reason: "Effect contract internal use"
-    });
-    const internalUseResult = await confirm(internalUse);
-    await capture("RELEASE_INTERNAL_USE", {
-      propertyId: demo.propertyId,
-      internalUseBlockId: internalUseResult.internalUseBlockId
-    });
-
     await capture("ADD_MEMBER_ENTITLEMENT_LOT", {
       propertyId: demo.propertyId,
       memberContractId: demo.memberContractId,
@@ -313,9 +299,45 @@ describe("Command effect HTTP contract", () => {
       phone: "+86-138-0000-0000",
       documentNumber: "EFFECT-CONTRACT-001"
     });
+    expect(createOrder.effect).toMatchObject({
+      occupancyCapacity: 4,
+      occupants: [{
+        id: expect.stringMatching(/^occupant_/),
+        ordinal: 1,
+        role: "PRIMARY",
+        fullName: "Effect Contract Guest",
+        nickname: "Effect Guest"
+      }]
+    });
     const createOrderResult = await confirm(createOrder);
     expect(createOrderResult.primaryGuest).toEqual(createOrder.effect.primaryGuest);
+    expect(createOrderResult.occupants).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: (createOrder.effect.occupants as Array<{ id: string }>)[0]!.id,
+        ordinal: 1,
+        role: "PRIMARY",
+        fullName: "Effect Contract Guest",
+        nickname: "Effect Guest"
+      })
+    ]));
     const orderId = createOrderResult.orderId as string;
+    await capture("CORRECT_ORDER_OCCUPANT", {
+      propertyId: demo.propertyId,
+      orderId,
+      occupantId: (createOrderResult.occupants as Array<{ id: string }>)[0]!.id,
+      expectedPriorSnapshot: {
+        fullName: "Effect Contract Guest",
+        nickname: "Effect Guest",
+        phone: "+86-138-0000-0000",
+        documentNumber: "EFFECT-CONTRACT-001"
+      },
+      correctedSnapshot: {
+        fullName: "Effect Contract Guest Corrected",
+        nickname: "Effect Guest 2",
+        phone: "+86-138-0000-0001",
+        documentNumber: "EFFECT-CONTRACT-002"
+      }
+    });
 
     await capture("SHORTEN_STAY", {
       propertyId: demo.propertyId,

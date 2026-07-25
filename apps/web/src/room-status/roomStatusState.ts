@@ -8,6 +8,9 @@ import {
 
 export const MAX_VISIBLE_DAYS = 31;
 export const DEFAULT_VISIBLE_DAYS = 14;
+export const AUTO_VISIBLE_DAYS_MIN = 7;
+export const AUTO_VISIBLE_DAYS_MAX = 21;
+export type RoomStatusDateWindowMode = "AUTO" | "7" | "14" | "21";
 
 export type RoomStatusKindFilter = "ALL" | RoomStatusUnitDto["kind"];
 export type RoomStatusSalesModeFilter = "ALL" | RoomStatusUnitDto["salesMode"];
@@ -47,6 +50,7 @@ export interface RoomStatusViewState {
   roomPageIndex: number;
   dateWindowStart: number;
   dateWindowSize: number;
+  dateWindowMode: RoomStatusDateWindowMode;
   focusedCell: RoomStatusCellFocus | null;
   selection: RoomStatusSelection | null;
   scrollAnchor: RoomStatusScrollAnchor;
@@ -58,6 +62,7 @@ export type RoomStatusViewAction =
   | { type: "TOGGLE_ROOM"; roomId: string }
   | { type: "SET_ROOM_PAGE"; index: number; totalPages: number }
   | { type: "SET_DATE_WINDOW"; start: number; size?: number; totalDates: number }
+  | { type: "SET_DATE_WINDOW_MODE"; mode: RoomStatusDateWindowMode; autoSize: number; totalDates: number }
   | { type: "SHIFT_DATE_WINDOW"; direction: -1 | 1; totalDates: number }
   | { type: "SET_FOCUS"; focus: RoomStatusCellFocus | null }
   | { type: "MOVE_FOCUS"; unitIds: string[]; dates: string[]; rowDelta: number; columnDelta: number; extendSelection: boolean }
@@ -71,20 +76,82 @@ export interface FilteredRoomStatusRoom {
   children: RoomStatusUnitDto[];
 }
 
+export interface RoomStatusOrderIdentity {
+  orderId: string;
+  stayId: string;
+  intervalId: string;
+  unitId: string;
+  arrivalDate: string;
+  departureDate: string;
+}
+
+function stableReferenceId(interval: RoomStatusIntervalDto, type: "ORDER" | "STAY"): string | null {
+  const ids = [...new Set(interval.references.filter((reference) => reference.type === type).map((reference) => reference.id))];
+  return ids.length === 1 ? ids[0]! : null;
+}
+
+export function roomStatusOrderIdentityForInterval(interval: RoomStatusIntervalDto): RoomStatusOrderIdentity | null {
+  if ((interval.sourceKind !== "ORDER" && interval.sourceKind !== "FREE_STAY")
+    || (interval.status !== "RESERVED" && interval.status !== "IN_HOUSE")) return null;
+  const orderId = stableReferenceId(interval, "ORDER");
+  const stayId = stableReferenceId(interval, "STAY");
+  return orderId && stayId ? {
+    orderId,
+    stayId,
+    intervalId: interval.id,
+    unitId: interval.actualInventoryUnitId,
+    arrivalDate: interval.startDate,
+    departureDate: interval.endDate
+  } : null;
+}
+
+export function roomStatusOrderIdentityForDate(
+  unit: RoomStatusUnitDto,
+  serviceDate: string
+): RoomStatusOrderIdentity | null {
+  const matches = unit.intervals.filter((interval) => (
+    interval.actualInventoryUnitId === unit.id
+    && interval.startDate <= serviceDate
+    && serviceDate < interval.endDate
+    && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+    && (interval.status === "RESERVED" || interval.status === "IN_HOUSE")
+  )).flatMap((interval) => roomStatusOrderIdentityForInterval(interval) ?? []);
+  const identities = new Set(matches.map((match) => `${match.orderId}:${match.stayId}`));
+  return identities.size === 1 ? matches[0]! : null;
+}
+
+export function roomStatusCellBelongsToStay(
+  unit: RoomStatusUnitDto,
+  serviceDate: string,
+  stayId: string
+): boolean {
+  return unit.intervals.some((interval) => (
+    interval.actualInventoryUnitId === unit.id
+    && interval.startDate <= serviceDate
+    && serviceDate < interval.endDate
+    && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+    && interval.references.some((reference) => reference.type === "STAY" && reference.id === stayId)
+  ));
+}
+
 export function intervalsRenderedOnRoomStatusGrid(
   unit: RoomStatusUnitDto,
   serviceDates: readonly string[] = unit.days.map((day) => day.serviceDate)
 ): readonly RoomStatusIntervalDto[] {
-  if (unit.kind !== "ROOM" || unit.salesMode !== "BED_SPLIT") return unit.intervals;
   const occupancyByDate = new Map(unit.bedOccupancies.map((occupancy) => [occupancy.serviceDate, occupancy]));
   return unit.intervals.filter((interval) => {
-    const activeChildLodging = interval.actualInventoryUnitId !== unit.id
-      && interval.blocking
+    const activeLodging = interval.blocking
       && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
       && (interval.status === "RESERVED" || interval.status === "IN_HOUSE");
-    if (!activeChildLodging) return true;
+    if (!activeLodging) return true;
+    if (interval.occupantCount > 0 && interval.actualInventoryUnitId === unit.id) return false;
+    if (unit.kind !== "ROOM") return true;
     const coveredDates = serviceDates.filter((serviceDate) => interval.startDate <= serviceDate && serviceDate < interval.endDate);
     if (coveredDates.length === 0) return true;
+    if (interval.actualInventoryUnitId === unit.id) {
+      return interval.occupantCount <= 0;
+    }
+    if (unit.salesMode !== "BED_SPLIT") return true;
     const orderReferenceIds = new Set(interval.references
       .filter((reference) => reference.type === "ORDER")
       .map((reference) => reference.id));
@@ -236,11 +303,18 @@ export function createRoomStatusViewState(overrides: Partial<RoomStatusViewState
     roomPageIndex: 0,
     dateWindowStart: 0,
     dateWindowSize: DEFAULT_VISIBLE_DAYS,
+    dateWindowMode: "AUTO",
     focusedCell: null,
     selection: null,
     scrollAnchor: { unitId: null, left: 0, top: 0 },
     ...overrides
   };
+}
+
+export function roomStatusAutoVisibleDays(boardWidth: number): number {
+  if (!Number.isFinite(boardWidth) || boardWidth <= 0) return DEFAULT_VISIBLE_DAYS;
+  const availableDateWidth = Math.max(0, boardWidth - 218 - 12);
+  return Math.min(AUTO_VISIBLE_DAYS_MAX, Math.max(AUTO_VISIBLE_DAYS_MIN, Math.floor(availableDateWidth / 94)));
 }
 
 export function isIsoLocalDate(value: string): boolean {
@@ -399,8 +473,10 @@ function selectionIsVisible(
   visibleDates: ReadonlySet<string>
 ): boolean {
   if (!visibleUnitIds.has(selection.unitId)) return false;
-  const normalized = selectionFromCells(selection.unitId, selection.anchorDate, selection.focusDate);
-  if (normalized.arrivalDate !== selection.arrivalDate || normalized.departureDate !== selection.departureDate) return false;
+  if (selection.anchorDate < selection.arrivalDate
+    || selection.anchorDate >= selection.departureDate
+    || selection.focusDate < selection.arrivalDate
+    || selection.focusDate >= selection.departureDate) return false;
   const nightCount = (Date.parse(`${selection.departureDate}T00:00:00Z`)
     - Date.parse(`${selection.arrivalDate}T00:00:00Z`)) / 86_400_000;
   return Number.isSafeInteger(nightCount)
@@ -574,6 +650,16 @@ export function roomStatusViewReducer(state: RoomStatusViewState, action: RoomSt
     const size = Math.min(MAX_VISIBLE_DAYS, Math.max(1, Math.trunc(action.size ?? state.dateWindowSize)));
     return { ...state, dateWindowSize: size, dateWindowStart: clampDateWindowStart(action.totalDates, action.start, size) };
   }
+  if (action.type === "SET_DATE_WINDOW_MODE") {
+    const requestedSize = action.mode === "AUTO" ? action.autoSize : Number(action.mode);
+    const size = Math.min(MAX_VISIBLE_DAYS, Math.max(1, Math.trunc(requestedSize)));
+    return {
+      ...state,
+      dateWindowMode: action.mode,
+      dateWindowSize: size,
+      dateWindowStart: clampDateWindowStart(action.totalDates, state.dateWindowStart, size)
+    };
+  }
   if (action.type === "SHIFT_DATE_WINDOW") {
     return { ...state, dateWindowStart: shiftDateWindowStart(action.totalDates, state.dateWindowStart, state.dateWindowSize, action.direction) };
   }
@@ -657,8 +743,14 @@ function validSelection(value: unknown): value is RoomStatusSelection | null {
     && isIsoLocalDate(selection.departureDate)
     && selection.departureDate > selection.arrivalDate;
   if (!structurallyValid) return false;
-  const normalized = selectionFromCells(selection.unitId as string, selection.anchorDate as string, selection.focusDate as string);
-  return normalized.arrivalDate === selection.arrivalDate && normalized.departureDate === selection.departureDate;
+  const anchorDate = selection.anchorDate as string;
+  const focusDate = selection.focusDate as string;
+  const arrivalDate = selection.arrivalDate as string;
+  const departureDate = selection.departureDate as string;
+  return anchorDate >= arrivalDate
+    && anchorDate < departureDate
+    && focusDate >= arrivalDate
+    && focusDate < departureDate;
 }
 
 function validViewState(value: unknown): value is RoomStatusViewState {
@@ -678,6 +770,7 @@ function validViewState(value: unknown): value is RoomStatusViewState {
     && Number.isSafeInteger(state.dateWindowSize)
     && state.dateWindowSize >= 1
     && state.dateWindowSize <= MAX_VISIBLE_DAYS
+    && (state.dateWindowMode === "AUTO" || state.dateWindowMode === "7" || state.dateWindowMode === "14" || state.dateWindowMode === "21")
     && validFocus(state.focusedCell)
     && validSelection(state.selection)
     && Boolean(anchor)
@@ -709,6 +802,10 @@ export function parseRoomStatusRestoration(serialized: string, expectedPropertyI
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const snapshot = value as Record<string, unknown>;
+  if (snapshot.state && typeof snapshot.state === "object" && !Array.isArray(snapshot.state)) {
+    const state = snapshot.state as Record<string, unknown>;
+    if (state.dateWindowMode === undefined) snapshot.state = { ...state, dateWindowMode: "AUTO" };
+  }
   const range = snapshot.range;
   if (snapshot.version !== 1
     || snapshot.propertyId !== expectedPropertyId

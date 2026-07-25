@@ -19,7 +19,6 @@ const statusLabels = {
   IN_HOUSE: "在住",
   CLEANING: "待清洁",
   MAINTENANCE: "维修 / 锁房",
-  INTERNAL_USE: "内部占用",
   UNAVAILABLE: "不可售",
   STALE: "数据陈旧",
   UNKNOWN: "状态未知"

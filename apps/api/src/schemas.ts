@@ -4,6 +4,8 @@ import {
   commandTypes,
   errorCauseCodes,
   errorCodes,
+  historicalRecoverableCommandTypes,
+  orderActionCodes,
   ROOM_STATUS_MAX_QUERY_NIGHTS,
   ROOM_STATUS_OPERATIONAL_TASK_LIMIT,
   recoverableCommandTypes,
@@ -45,6 +47,14 @@ export const StayTypeSchema = Type.Union(stayTypes.map((stayType) => Type.Litera
 export const BookingChannelCodeSchema = Type.Union(bookingChannelCodes.map((code) => Type.Literal(code)));
 export const CommandTypeSchema = Type.Union(commandTypes.map((commandType) => Type.Literal(commandType)));
 export const RecoverableCommandTypeSchema = Type.Union(recoverableCommandTypes.map((commandType) => Type.Literal(commandType)));
+export const HistoricalCommandTypeSchema = Type.Union([
+  CommandTypeSchema,
+  Type.Literal("PLACE_INTERNAL_USE"),
+  Type.Literal("RELEASE_INTERNAL_USE")
+]);
+export const HistoricalRecoverableCommandTypeSchema = Type.Union(
+  historicalRecoverableCommandTypes.map((commandType) => Type.Literal(commandType))
+);
 export const OrderStatusSchema = Type.Union([
   Type.Literal("RESERVED"), Type.Literal("CHECKED_IN"), Type.Literal("CHECKED_OUT"),
   Type.Literal("CANCELLED"), Type.Literal("NO_SHOW")
@@ -151,6 +161,38 @@ const PrimaryGuestSnapshotSchema = strictObject({
   phone: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
   documentNumber: Type.Optional(Type.String({ minLength: 1, maxLength: 120 }))
 });
+const CommandEffectOrderOccupantSchema = strictObject({
+  id: Id,
+  ordinal: Type.Integer({ minimum: 1 }),
+  role: Type.Union([Type.Literal("PRIMARY"), Type.Literal("ADDITIONAL")]),
+  fullName: Type.String({ minLength: 1, maxLength: 200 }),
+  nickname: Nickname,
+  phone: Type.Optional(nullable(Type.String({ minLength: 1, maxLength: 80 }))),
+  documentNumber: Type.Optional(nullable(Type.String({ minLength: 1, maxLength: 120 })))
+});
+const OrderOccupantSchema = strictObject({
+  id: Id,
+  orderId: Id,
+  ordinal: Type.Integer({ minimum: 1 }),
+  role: Type.Union([Type.Literal("PRIMARY"), Type.Literal("ADDITIONAL")]),
+  fullName: nullable(Type.String({ minLength: 1, maxLength: 200 })),
+  nickname: nullable(Nickname),
+  phone: nullable(Type.String({ minLength: 1, maxLength: 80 })),
+  documentNumber: nullable(Type.String({ minLength: 1, maxLength: 120 })),
+  createdAt: DateTime
+});
+const OrderOccupantPriorSnapshotSchema = strictObject({
+  fullName: nullable(Type.String({ minLength: 1, maxLength: 200 })),
+  nickname: nullable(Nickname),
+  phone: nullable(Type.String({ minLength: 1, maxLength: 80 })),
+  documentNumber: nullable(Type.String({ minLength: 1, maxLength: 120 }))
+});
+const OrderOccupantCorrectedSnapshotSchema = strictObject({
+  fullName: Type.String({ minLength: 1, maxLength: 200 }),
+  nickname: Nickname,
+  phone: nullable(Type.String({ minLength: 1, maxLength: 80 })),
+  documentNumber: nullable(Type.String({ minLength: 1, maxLength: 120 }))
+});
 const PropertyInput = { propertyId: Id };
 const OrderInput = { ...PropertyInput, orderId: Id };
 
@@ -210,9 +252,16 @@ export const CommandEnvelopeSchema = Type.Union([
     ...PropertyInput,
     quoteId: Id,
     primaryGuest: PrimaryGuestInputSchema,
+    additionalGuests: Type.Optional(Type.Array(PrimaryGuestInputSchema, { maxItems: 999 })),
     bookingChannelCode: Type.Optional(BookingChannelCodeSchema),
     channelOrderReference: Type.Optional(nullable(ShortText)),
     freeStayReason: Type.Optional(Note)
+  })),
+  commandEnvelope("CORRECT_ORDER_OCCUPANT", strictObject({
+    ...OrderInput,
+    occupantId: Id,
+    expectedPriorSnapshot: OrderOccupantPriorSnapshotSchema,
+    correctedSnapshot: OrderOccupantCorrectedSnapshotSchema
   })),
   commandEnvelope("EXTEND_STAY", strictObject({ ...OrderInput, newDepartureDate: LocalDate })),
   commandEnvelope("SHORTEN_STAY", strictObject({ ...OrderInput, newDepartureDate: LocalDate })),
@@ -222,8 +271,6 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("MARK_NO_SHOW", strictObject(OrderInput)),
   commandEnvelope("LOCK_MAINTENANCE", strictObject({ ...PropertyInput, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note })),
   commandEnvelope("RELEASE_MAINTENANCE", strictObject({ ...PropertyInput, maintenanceLockId: Id })),
-  commandEnvelope("PLACE_INTERNAL_USE", strictObject({ ...PropertyInput, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note })),
-  commandEnvelope("RELEASE_INTERNAL_USE", strictObject({ ...PropertyInput, internalUseBlockId: Id })),
   commandEnvelope("COMPLETE_CLEANING", strictObject({ ...PropertyInput, cleaningTaskId: Id })),
   commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, amountMinor: PositiveAmount, method: ShortText, transactionReference: ShortText, note: Type.Optional(OptionalNote) })),
   commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: ShortText, note: Type.Optional(OptionalNote) })),
@@ -285,7 +332,8 @@ const InventoryUnitRecordSchema = strictObject({
   pricingProductCode: nullable(ShortText),
   inventoryBasis: nullable(Type.Union([Type.Literal("INDEPENDENT"), Type.Literal("WHOLE_ROOM_COMBINATION")])),
   codeProvenance: nullable(Type.Union([Type.Literal("SOURCE_EXPLICIT"), Type.Literal("USER_CONFIRMED_RENAMED"), Type.Literal("PMS_GENERATED")])),
-  physicalBedCount: nullable(Type.Integer({ minimum: 1, maximum: 4 }))
+  physicalBedCount: nullable(Type.Integer({ minimum: 1, maximum: 4 })),
+  occupancyCapacity: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 }))
 });
 const PricingResultSchema = strictObject({
   coverageSet: Type.Array(CoverageItem),
@@ -394,6 +442,8 @@ export const CommandEffectSchema = Type.Union([
   strictObject({
     quoteId: Id,
     primaryGuest: PrimaryGuestSnapshotSchema,
+    occupants: Type.Optional(Type.Array(CommandEffectOrderOccupantSchema, { minItems: 1, maxItems: 1000 })),
+    occupancyCapacity: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
     bookingChannelCode: nullable(BookingChannelCodeSchema),
     channelOrderReference: nullable(ShortText),
     freeStayReason: nullable(Note),
@@ -405,6 +455,15 @@ export const CommandEffectSchema = Type.Union([
     memberId: nullable(Id),
     memberContractId: nullable(Id),
     pricing: PricingResultSchema
+  }),
+  strictObject({
+    operation: Type.Literal("CORRECT_ORDER_OCCUPANT"),
+    orderId: Id,
+    occupantId: Id,
+    ordinal: Type.Integer({ minimum: 1 }),
+    role: Type.Union([Type.Literal("PRIMARY"), Type.Literal("ADDITIONAL")]),
+    before: OrderOccupantPriorSnapshotSchema,
+    after: OrderOccupantCorrectedSnapshotSchema
   }),
   strictObject({ inventoryUnit: InventoryUnitRecordSchema, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note }),
   strictObject({ maintenanceLockId: Id, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate }),
@@ -467,6 +526,8 @@ export const CommandEffectSchema = Type.Union([
     fromInventoryUnit: InventoryUnitRecordSchema,
     toInventoryUnit: InventoryUnitRecordSchema,
     effectiveDate: LocalDate,
+    occupantCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+    occupancyCapacity: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
     stayTimeline: StayTimelineSchema,
     pricing: PricingResultSchema
   }),
@@ -513,7 +574,7 @@ export const CommandEffectSchema = Type.Union([
 
 export const PreviewSchema = strictObject({
   previewId: Id,
-  commandType: CommandTypeSchema,
+  commandType: HistoricalCommandTypeSchema,
   effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
   effect: CommandEffectSchema,
   expiresAt: DateTime
@@ -525,9 +586,17 @@ const CreateOrderResultSchema = strictObject({
   segmentId: Id,
   pricingRevisionId: Id,
   primaryGuest: nullable(PrimaryGuestSnapshotSchema),
+  occupants: Type.Optional(Type.Array(OrderOccupantSchema, { minItems: 1, maxItems: 1000 })),
   bookingChannelCode: nullable(BookingChannelCodeSchema),
   channelOrderReference: nullable(ShortText),
   freeStayReason: nullable(Note)
+});
+const CorrectOrderOccupantResultSchema = strictObject({
+  orderId: Id,
+  occupantId: Id,
+  correctionId: Id,
+  amendmentId: Id,
+  occupant: OrderOccupantCorrectedSnapshotSchema
 });
 const CreateMemberResultSchema = strictObject({
   memberId: Id,
@@ -638,6 +707,7 @@ export const ExecutedCommandResultSchema = Type.Union([
   MembershipPaymentCorrectedResultSchema,
   MembershipOrderActivatedResultSchema,
   CreateOrderResultSchema,
+  CorrectOrderOccupantResultSchema,
   MaintenanceLockResultSchema,
   MaintenanceReleaseResultSchema,
   InternalUsePlacementResultSchema,
@@ -700,6 +770,7 @@ export const AvailabilityUnitSchema = strictObject({
   inventoryBasis: nullable(Type.Union([Type.Literal("INDEPENDENT"), Type.Literal("WHOLE_ROOM_COMBINATION")])),
   codeProvenance: nullable(Type.Union([Type.Literal("SOURCE_EXPLICIT"), Type.Literal("USER_CONFIRMED_RENAMED"), Type.Literal("PMS_GENERATED")])),
   physicalBedCount: nullable(Type.Integer({ minimum: 1, maximum: 4 })),
+  occupancyCapacity: Type.Integer({ minimum: 1, maximum: 1000 }),
   nights: Type.Array(strictObject({
     serviceDate: LocalDate,
     available: Type.Boolean(),
@@ -768,6 +839,10 @@ export const RoomStatusConflictSchema = strictObject({
   reason: RoomStatusDisplayText,
   blocking: Type.Literal(true)
 });
+export const RoomStatusOccupantSchema = strictObject({
+  occupantId: Id,
+  nickname: nullable(RoomStatusDisplayText)
+});
 export const RoomStatusIntervalSchema = strictObject({
   id: Id,
   displayInventoryUnitId: Id,
@@ -783,6 +858,8 @@ export const RoomStatusIntervalSchema = strictObject({
   sourceKind: RoomStatusSourceKindSchema,
   label: RoomStatusDisplayText,
   primaryOccupantLabel: nullable(ShortText),
+  occupantCount: Type.Integer({ minimum: 0, maximum: 1000 }),
+  occupants: Type.Array(RoomStatusOccupantSchema, { maxItems: 1000 }),
   reason: nullable(RoomStatusDisplayText),
   claimIds: Type.Array(Id),
   references: Type.Array(RoomStatusReferenceSchema),
@@ -807,6 +884,8 @@ export const RoomStatusOperationalTaskSchema = strictObject({
   sourceKind: RoomStatusSourceKindSchema,
   label: RoomStatusDisplayText,
   primaryOccupantLabel: nullable(ShortText),
+  occupantCount: Type.Integer({ minimum: 0, maximum: 1000 }),
+  occupants: Type.Array(RoomStatusOccupantSchema, { maxItems: 1000 }),
   reason: nullable(RoomStatusDisplayText),
   claimIds: Type.Array(Id),
   references: Type.Array(RoomStatusReferenceSchema),
@@ -822,6 +901,7 @@ export const RoomStatusDaySchema = strictObject({
   conflicts: Type.Array(RoomStatusConflictSchema)
 });
 export const RoomStatusBedOccupantSchema = strictObject({
+  occupantId: Id,
   inventoryUnitId: Id,
   inventoryUnitCode: RoomStatusDisplayText,
   primaryOccupantLabel: nullable(ShortText),
@@ -850,6 +930,7 @@ const RoomStatusUnitBase = {
   roomTypeCode: nullable(ShortText),
   pricingProductCode: nullable(ShortText),
   capacity: Type.Integer({ minimum: 1 }),
+  occupancyCapacity: Type.Integer({ minimum: 1, maximum: 1000 }),
   childUnitIds: Type.Array(Id),
   bedOccupancies: Type.Array(RoomStatusBedOccupancySchema),
   days: Type.Array(RoomStatusDaySchema),
@@ -918,7 +999,9 @@ const InventoryUnitRowSchema = strictObject({
   room_type_code: nullable(ShortText), pricing_product_code: nullable(ShortText),
   inventory_basis: nullable(Type.Union([Type.Literal("INDEPENDENT"), Type.Literal("WHOLE_ROOM_COMBINATION")])),
   code_provenance: nullable(Type.Union([Type.Literal("SOURCE_EXPLICIT"), Type.Literal("USER_CONFIRMED_RENAMED"), Type.Literal("PMS_GENERATED")])),
-  physical_bed_count: nullable(Type.Integer({ minimum: 1, maximum: 4 })), created_at: DateTime
+  physical_bed_count: nullable(Type.Integer({ minimum: 1, maximum: 4 })),
+  occupancy_capacity: Type.Integer({ minimum: 1, maximum: 1000 }),
+  created_at: DateTime
 });
 const PricingPolicyRowSchema = strictObject({
   id: Id, property_id: Id, code: ShortText, version: Type.Integer({ minimum: 1 }), stay_type: nullable(StayTypeSchema),
@@ -1110,6 +1193,7 @@ const CreateOrderAmendmentPayloadSchema = strictObject({
   arrivalDate: LocalDate,
   departureDate: LocalDate,
   primaryGuest: Type.Optional(PrimaryGuestSnapshotSchema),
+  occupants: Type.Optional(Type.Array(CommandEffectOrderOccupantSchema, { minItems: 1, maxItems: 1000 })),
   bookingChannelCode: Type.Optional(nullable(BookingChannelCodeSchema)),
   channelOrderReference: Type.Optional(nullable(ShortText)),
   freeStayReason: Type.Optional(nullable(Note))
@@ -1118,7 +1202,10 @@ const AmendmentRowSchema = strictObject({
   id: Id, order_id: Id, sequence: Type.Integer({ minimum: 1 }), amendment_type: CommandTypeSchema,
   reason_code: Type.String({ minLength: 1, maxLength: 80 }), reason_note: Note,
   prior_version: Type.Integer({ minimum: 0 }), new_version: Type.Integer({ minimum: 1 }),
-  payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema]), created_at: DateTime
+  payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema]),
+  command_id: nullable(Id),
+  actor: nullable(strictObject({ subjectId: Id, displayName: ShortText })),
+  created_at: DateTime
 });
 const PricingRevisionRowSchema = strictObject({
   id: Id, order_id: Id, revision_no: Type.Integer({ minimum: 1 }), amendment_id: Id, policy_version_id: Id,
@@ -1137,11 +1224,31 @@ export const CollectionFactRowSchema = strictObject({
   fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
   amount_minor: PositiveAmount, net_effect_minor: SafeInteger,
   currency: Type.String({ minLength: 3, maxLength: 3 }), references_fact_id: nullable(Id), reverses_fact_id: nullable(Id),
-  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), command_id: Id, created_at: DateTime
+  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), pricing_revision_id: Id, command_id: Id, created_at: DateTime
 });
 
 export const OrderDetailResponseSchema = strictObject({
+  accessLevel: AccessLevelSchema,
+  allowedActions: Type.Array(strictObject({
+    code: Type.Union(orderActionCodes.map((code) => Type.Literal(code))),
+    enabled: Type.Boolean(),
+    disabledReason: nullable(ShortText)
+  })),
   order: OrderRowSchema,
+  occupants: Type.Array(OrderOccupantSchema, { minItems: 1, maxItems: 1000 }),
+  occupantCorrections: Type.Array(strictObject({
+    id: Id,
+    orderId: Id,
+    occupantId: Id,
+    sequence: Type.Integer({ minimum: 1 }),
+    priorSnapshot: OrderOccupantPriorSnapshotSchema,
+    correctedSnapshot: OrderOccupantCorrectedSnapshotSchema,
+    reason: strictObject({ code: ShortText, note: Note }),
+    actor: strictObject({ subjectId: Id, displayName: ShortText }),
+    amendmentId: Id,
+    commandId: Id,
+    createdAt: DateTime
+  })),
   stay: strictObject({ id: Id, status: Type.Union([
     Type.Literal("PLANNED"), Type.Literal("IN_HOUSE"), Type.Literal("COMPLETED"),
     Type.Literal("CANCELLED"), Type.Literal("NO_SHOW")
@@ -1324,7 +1431,7 @@ export const AuditResponseSchema = strictObject({
 export const StoredPreviewResponseSchema = strictObject({
   id: Id,
   property_id: Id,
-  command_type: CommandTypeSchema,
+  command_type: HistoricalCommandTypeSchema,
   input_hash: Type.String({ minLength: 64, maxLength: 64 }),
   effect: CommandEffectSchema,
   effect_hash: Type.String({ minLength: 64, maxLength: 64 }),

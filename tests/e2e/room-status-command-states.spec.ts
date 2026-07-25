@@ -9,7 +9,7 @@ const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
 const propertyId = "prop_qintopia_demo";
 const operator = { username: "operator", password: "demo-pass-2026" };
 
-interface InternalUseCandidate {
+interface MaintenanceCandidate {
   unitId: string;
   arrivalDate: string;
   departureDate: string;
@@ -80,12 +80,12 @@ async function login(page: Page): Promise<RoomStatusBoardDto> {
   return response.json() as Promise<RoomStatusBoardDto>;
 }
 
-function findInternalUseCandidate(board: RoomStatusBoardDto): InternalUseCandidate {
+function findMaintenanceCandidate(board: RoomStatusBoardDto): MaintenanceCandidate {
   for (const room of board.rooms) {
-    const canPlaceInternalUse = room.allowedActions.some((action) => (
-      action.code === "PLACE_INTERNAL_USE" && action.enabled
+    const canLockMaintenance = room.allowedActions.some((action) => (
+      action.code === "LOCK_MAINTENANCE" && action.enabled
     ));
-    if (!canPlaceInternalUse || room.intervals.some((interval) => interval.sourceKind === "INTERNAL_USE")) continue;
+    if (!canLockMaintenance || room.intervals.some((interval) => interval.sourceKind === "MAINTENANCE")) continue;
     const day = room.days.find((candidate) => candidate.available && candidate.conflicts.length === 0);
     if (day) {
       return {
@@ -95,17 +95,17 @@ function findInternalUseCandidate(board: RoomStatusBoardDto): InternalUseCandida
       };
     }
   }
-  throw new Error("The shared E2E database has no available room for a one-night internal-use command");
+  throw new Error("The shared E2E database has no available room for a one-night maintenance command");
 }
 
-async function openInternalUseCommand(page: Page, candidate: InternalUseCandidate, businessReason: string) {
+async function openMaintenanceCommand(page: Page, candidate: MaintenanceCandidate, businessReason: string) {
   const unitSelect = page.getByTestId("room-status-unit-select");
   await expect(unitSelect).toHaveAccessibleName("房间或床位");
   await unitSelect.selectOption(candidate.unitId);
   await page.getByLabel("入住日期", { exact: true }).fill(candidate.arrivalDate);
   await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
-  await page.getByRole("button", { name: "放置内部占用", exact: true }).click();
-  await page.getByLabel("内部占用原因").fill(businessReason);
+  await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
+  await page.getByLabel("维修原因").fill(businessReason);
   await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
 }
@@ -119,7 +119,7 @@ async function createPreview(page: Page, trigger: Locator) {
   await trigger.click();
   const response = await responsePromise;
   const body = await response.json() as PreviewResponseBody;
-  expect(body.preview.commandType).toBe("PLACE_INTERNAL_USE");
+  expect(body.preview.commandType).toBe("LOCK_MAINTENANCE");
   return {
     preview: body.preview,
     idempotencyKey: response.request().headers()["idempotency-key"] ?? ""
@@ -134,7 +134,7 @@ async function readCommandRecoveries(page: Page): Promise<PersistedRecoverySnaps
     .map((key) => JSON.parse(sessionStorage.getItem(key) ?? "null") as PersistedRecoverySnapshot));
 }
 
-async function releaseInternalUseForCleanup(page: Page, internalUseBlockId: string) {
+async function releaseMaintenanceForCleanup(page: Page, maintenanceLockId: string) {
   const nonce = randomUUID();
   const previewResponse = await page.request.post("/api/v1/command-previews", {
     headers: {
@@ -142,8 +142,8 @@ async function releaseInternalUseForCleanup(page: Page, internalUseBlockId: stri
       "X-Correlation-ID": `e2e-cleanup-preview-${nonce}`
     },
     data: {
-      commandType: "RELEASE_INTERNAL_USE",
-      input: { propertyId, internalUseBlockId }
+      commandType: "RELEASE_MAINTENANCE",
+      input: { propertyId, maintenanceLockId }
     }
   });
   if (!previewResponse.ok()) throw new Error(`Cleanup Preview failed: ${previewResponse.status()} ${await previewResponse.text()}`);
@@ -155,10 +155,10 @@ async function releaseInternalUseForCleanup(page: Page, internalUseBlockId: stri
     },
     data: {
       propertyId,
-      commandType: "RELEASE_INTERNAL_USE",
+      commandType: "RELEASE_MAINTENANCE",
       confirmation: true,
       expectedEffectHash: prepared.preview.effectHash,
-      reason: { code: "E2E_CLEANUP", note: "Release an internal-use Block left by an interrupted E2E assertion" }
+      reason: { code: "E2E_CLEANUP", note: "Release a maintenance lock left by an interrupted E2E assertion" }
     }
   });
   if (!confirmResponse.ok()) throw new Error(`Cleanup Confirm failed: ${confirmResponse.status()} ${await confirmResponse.text()}`);
@@ -171,7 +171,7 @@ async function releaseInternalUseForCleanup(page: Page, internalUseBlockId: stri
 async function blockCountForReason(reason: string): Promise<number> {
   const db = createDatabase(e2eDatabaseUrl);
   try {
-    const row = await db.selectFrom("internal_use_blocks")
+    const row = await db.selectFrom("maintenance_locks")
       .select(({ fn }) => fn.countAll<number>().as("count"))
       .where("property_id", "=", propertyId)
       .where("reason", "=", reason)
@@ -202,13 +202,13 @@ async function finishReceipt(page: Page, waitForRefresh = false) {
   if (refresh) await refresh;
 }
 
-test("desktop expired PLACE_INTERNAL_USE Preview fails closed and regeneration writes no Block", async ({ page }, testInfo) => {
+test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration writes no lock", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only room-status Preview expiry coverage");
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 900 });
 
   const board = await login(page);
-  const candidate = findInternalUseCandidate(board);
+  const candidate = findMaintenanceCandidate(board);
   const businessReason = `E2E expired room-status Preview ${randomUUID()}`;
   expect(await blockCountForReason(businessReason)).toBe(0);
 
@@ -220,12 +220,12 @@ test("desktop expired PLACE_INTERNAL_USE Preview fails closed and regeneration w
       expect(response.status()).toBe(200);
       const body = await response.json() as PreviewResponseBody;
       expect(body.preview.previewId).toMatch(/^preview_/);
-      expect(body.preview.commandType).toBe("PLACE_INTERNAL_USE");
+      expect(body.preview.commandType).toBe("LOCK_MAINTENANCE");
       expect(body.receipt.receiptId).toMatch(/^receipt_/);
       const stored = await db.updateTable("command_previews")
         .set({ expires_at: sql<Date>`clock_timestamp() + interval '2 seconds'` })
         .where("id", "=", body.preview.previewId)
-        .where("command_type", "=", "PLACE_INTERNAL_USE")
+        .where("command_type", "=", "LOCK_MAINTENANCE")
         .returning("expires_at")
         .executeTakeFirstOrThrow();
       const preview = { ...body.preview, expiresAt: new Date(stored.expires_at).toISOString() };
@@ -235,10 +235,10 @@ test("desktop expired PLACE_INTERNAL_USE Preview fails closed and regeneration w
       });
     }, { times: 1 });
 
-    await openInternalUseCommand(page, candidate, businessReason);
+    await openMaintenanceCommand(page, candidate, businessReason);
     const first = await createPreview(page, page.getByTestId("create-command-preview"));
     expect(first.preview.previewId).toMatch(/^preview_/);
-    expect(first.idempotencyKey).toMatch(/^web-preview-place_internal_use-/);
+    expect(first.idempotencyKey).toMatch(/^web-preview-lock_maintenance-/);
     expect(first.preview.effect).toMatchObject({
       inventoryUnit: { id: candidate.unitId },
       arrivalDate: candidate.arrivalDate,
@@ -253,7 +253,7 @@ test("desktop expired PLACE_INTERNAL_USE Preview fails closed and regeneration w
     const regenerate = page.getByTestId("regenerate-command-preview");
     await expect(regenerate).toBeVisible();
 
-    const staleConfirmationKey = `e2e-confirm-expired-place-internal-use-${randomUUID()}`;
+    const staleConfirmationKey = `e2e-confirm-expired-lock-maintenance-${randomUUID()}`;
     const staleResponse = await page.request.post(`/api/v1/command-previews/${first.preview.previewId}/confirm`, {
       headers: {
         "Idempotency-Key": staleConfirmationKey,
@@ -261,7 +261,7 @@ test("desktop expired PLACE_INTERNAL_USE Preview fails closed and regeneration w
       },
       data: {
         propertyId,
-        commandType: "PLACE_INTERNAL_USE",
+        commandType: "LOCK_MAINTENANCE",
         confirmation: true,
         expectedEffectHash: first.preview.effectHash,
         reason: { code: "E2E_EXPIRED", note: "The endpoint must reject the same Preview hidden by the UI guard" }
@@ -282,7 +282,7 @@ test("desktop expired PLACE_INTERNAL_USE Preview fails closed and regeneration w
     const second = await createPreview(page, regenerate);
     expect(second.preview.previewId).toMatch(/^preview_/);
     expect(second.preview.previewId).not.toBe(first.preview.previewId);
-    expect(second.idempotencyKey).toMatch(/^web-preview-place_internal_use-/);
+    expect(second.idempotencyKey).toMatch(/^web-preview-lock_maintenance-/);
     expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
     expect(second.preview.effect).toMatchObject({
       inventoryUnit: { id: candidate.unitId },
@@ -314,26 +314,26 @@ test("desktop expired PLACE_INTERNAL_USE Preview fails closed and regeneration w
   }
 });
 
-test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves one committed Block", async ({ page }, testInfo) => {
+test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one committed lock", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only room-status Confirm recovery coverage");
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 900 });
 
   const board = await login(page);
-  const candidate = findInternalUseCandidate(board);
+  const candidate = findMaintenanceCandidate(board);
   const businessReason = `E2E lost room-status Confirm response ${randomUUID()}`;
   const db = createDatabase(e2eDatabaseUrl);
   let primaryError: unknown;
   try {
-    expect(await db.selectFrom("internal_use_blocks")
+    expect(await db.selectFrom("maintenance_locks")
       .select("id")
       .where("reason", "=", businessReason)
       .execute()).toHaveLength(0);
 
-    await openInternalUseCommand(page, candidate, businessReason);
+    await openMaintenanceCommand(page, candidate, businessReason);
     const prepared = await createPreview(page, page.getByTestId("create-command-preview"));
     await expect(page.getByTestId("command-effect")).toContainText(businessReason);
-    await page.getByTestId("reason-note").fill("Recover the committed PLACE_INTERNAL_USE command without retrying it");
+    await page.getByTestId("reason-note").fill("Recover the committed LOCK_MAINTENANCE command without retrying it");
 
     let originalConfirmationKey = "";
     let confirmPostCount = 0;
@@ -352,21 +352,21 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
     await expect(page.getByText("执行状态需要恢复查询", { exact: true })).toBeVisible();
     await expect(page.getByTestId("confirm-command")).toHaveCount(0);
     await expect(page.getByTestId("regenerate-command-preview")).toHaveCount(0);
-    expect(originalConfirmationKey).toMatch(/^web-confirm-place_internal_use-/);
+    expect(originalConfirmationKey).toMatch(/^web-confirm-lock_maintenance-/);
     expect(confirmPostCount).toBe(1);
 
     const persistedBeforeClose = await readCommandRecoveries(page);
     expect(persistedBeforeClose).toHaveLength(1);
     expect(persistedBeforeClose[0]).toMatchObject({
       state: "UNKNOWN",
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       confirmationKey: originalConfirmationKey,
       targetRefs: [`inventoryUnitId=${candidate.unitId}`]
     });
 
     await page.getByRole("button", { name: "取消", exact: true }).click();
     let recovery = page.getByTestId("inventory-command-recovery");
-    await expect(recovery).toContainText("PLACE_INTERNAL_USE");
+    await expect(recovery).toContainText("LOCK_MAINTENANCE");
     await expect(recovery).toContainText("UNKNOWN");
     await expect(recovery).toContainText(originalConfirmationKey);
 
@@ -378,7 +378,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
     await expect(recovery).toContainText(originalConfirmationKey);
     expect(await readCommandRecoveries(page)).toEqual([expect.objectContaining({
       state: "UNKNOWN",
-      commandType: "PLACE_INTERNAL_USE",
+      commandType: "LOCK_MAINTENANCE",
       confirmationKey: originalConfirmationKey
     })]);
     expect(confirmPostCount).toBe(1);
@@ -390,7 +390,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
       const url = new URL(request.url());
       if (url.pathname === "/api/v1/command-results"
         && url.searchParams.get("propertyId") === propertyId
-        && url.searchParams.get("commandType") === "PLACE_INTERNAL_USE"
+        && url.searchParams.get("commandType") === "LOCK_MAINTENANCE"
         && url.searchParams.get("idempotencyKey") === originalConfirmationKey) recoveryQueryCount += 1;
     });
     const recoveryResponsePromise = page.waitForResponse((response) => {
@@ -398,7 +398,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
       const url = new URL(response.url());
       return url.pathname === "/api/v1/command-results"
         && url.searchParams.get("propertyId") === propertyId
-        && url.searchParams.get("commandType") === "PLACE_INTERNAL_USE"
+        && url.searchParams.get("commandType") === "LOCK_MAINTENANCE"
         && url.searchParams.get("idempotencyKey") === originalConfirmationKey;
     });
     await page.getByRole("button", { name: "查询命令结果", exact: true }).click();
@@ -410,7 +410,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
       businessCommitted: true
     });
     expect(recoveredBody.resourceRefs).toHaveLength(1);
-    expect(recoveredBody.resourceRefs[0]).toMatch(/^block_/);
+    expect(recoveredBody.resourceRefs[0]).toMatch(/^maint_/);
     expect(recoveryQueryCount).toBe(1);
 
     const recoveredReceipt = page.getByTestId("command-receipt");
@@ -421,7 +421,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
     await expect(recoveredReceipt).toContainText("EXECUTED");
     const receiptIdCode = recoveredReceipt.locator("code").filter({ hasText: /^receipt_/ });
     const commandIdCode = recoveredReceipt.locator("code").filter({ hasText: /^command_/ });
-    const blockIdCode = recoveredReceipt.locator("code").filter({ hasText: /^block_/ });
+    const blockIdCode = recoveredReceipt.locator("code").filter({ hasText: /^maint_/ });
     await expect(receiptIdCode).toHaveCount(1);
     await expect(commandIdCode).toHaveCount(1);
     await expect(blockIdCode).toHaveCount(1);
@@ -431,7 +431,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
     expect(receiptId).toBe(recoveredBody.receiptId);
     expect(commandId).toBe(recoveredBody.commandId);
     expect(blockId).toBe(recoveredBody.resourceRefs[0]);
-    expect(blockId).toMatch(/^block_/);
+    expect(blockId).toMatch(/^maint_/);
     expect(confirmPostCount).toBe(1);
 
     const committed = await db.selectFrom("command_executions")
@@ -444,7 +444,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
         "command_receipts.business_committed"
       ])
       .where("command_executions.property_id", "=", propertyId)
-      .where("command_executions.command_type", "=", "PLACE_INTERNAL_USE")
+      .where("command_executions.command_type", "=", "LOCK_MAINTENANCE")
       .where("command_executions.idempotency_key", "=", originalConfirmationKey)
       .execute();
     expect(committed).toHaveLength(1);
@@ -456,7 +456,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
       business_committed: true
     });
 
-    const blocks = await db.selectFrom("internal_use_blocks")
+    const blocks = await db.selectFrom("maintenance_locks")
       .select(["id", "inventory_unit_id", "arrival_date", "departure_date", "reason", "status", "created_by_command_id"])
       .where("property_id", "=", propertyId)
       .where("reason", "=", businessReason)
@@ -472,7 +472,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
     }]);
     const activeClaims = await db.selectFrom("inventory_claims")
       .select("id")
-      .where("source_type", "=", "INTERNAL_USE")
+      .where("source_type", "=", "MAINTENANCE")
       .where("source_id", "=", blockId!)
       .where("active", "=", true)
       .execute();
@@ -485,26 +485,26 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
       (_, index) => sessionStorage.key(index)
     ).filter((key) => key?.startsWith("qintopia.command-recovery.v1:")).length)).toBe(0);
 
-    const interval = page.locator(`[data-room-status-row="${candidate.unitId}"] .room-status-interval-internal-use`);
+    const interval = page.locator(`[data-room-status-row="${candidate.unitId}"] .room-status-interval-maintenance`);
     await expect(interval).toHaveCount(1);
     await interval.click();
     await expect(page.locator("section.room-status-context-section").filter({
       has: page.getByRole("heading", { name: "来源事实" })
     })).toContainText(businessReason);
     await page.locator(".room-status-context-actions")
-      .getByRole("button", { name: "释放内部占用", exact: true })
+      .getByRole("button", { name: "释放维修锁房", exact: true })
       .click();
-    const releaseReceipt = await previewAndConfirm(page, "Release the recovered E2E internal-use Block", [
+    const releaseReceipt = await previewAndConfirm(page, "Release the recovered E2E maintenance lock", [
       blockId!,
-      businessReason,
-      "ACTIVE",
-      "RELEASED"
+      candidate.arrivalDate,
+      candidate.departureDate,
+      "RELEASE_MAINTENANCE"
     ]);
     await expect(releaseReceipt.locator("code").filter({ hasText: blockId! })).toHaveCount(1);
     await finishReceipt(page, true);
     await expect(interval).toHaveCount(0);
 
-    const released = await db.selectFrom("internal_use_blocks")
+    const released = await db.selectFrom("maintenance_locks")
       .select(["status", "released_by_command_id", "released_at"])
       .where("id", "=", blockId!)
       .executeTakeFirstOrThrow();
@@ -513,7 +513,7 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
     expect(released.released_at).not.toBeNull();
     const remainingClaims = await db.selectFrom("inventory_claims")
       .select("id")
-      .where("source_type", "=", "INTERNAL_USE")
+      .where("source_type", "=", "MAINTENANCE")
       .where("source_id", "=", blockId!)
       .where("active", "=", true)
       .execute();
@@ -526,14 +526,14 @@ test("desktop PLACE_INTERNAL_USE recovery keeps the original key and resolves on
   } finally {
     let cleanupError: unknown;
     try {
-      const activeBlocks = await db.selectFrom("internal_use_blocks")
+      const activeBlocks = await db.selectFrom("maintenance_locks")
         .select("id")
         .where("property_id", "=", propertyId)
         .where("reason", "=", businessReason)
         .where("status", "=", "ACTIVE")
         .execute();
-      for (const block of activeBlocks) await releaseInternalUseForCleanup(page, block.id);
-      const remainingActiveBlocks = await db.selectFrom("internal_use_blocks")
+      for (const block of activeBlocks) await releaseMaintenanceForCleanup(page, block.id);
+      const remainingActiveBlocks = await db.selectFrom("maintenance_locks")
         .select("id")
         .where("property_id", "=", propertyId)
         .where("reason", "=", businessReason)

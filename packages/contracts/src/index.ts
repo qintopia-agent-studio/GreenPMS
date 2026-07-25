@@ -18,6 +18,7 @@ export const commandTypes = [
   "CORRECT_MEMBERSHIP_PAYMENT",
   "ACTIVATE_MEMBERSHIP_ORDER",
   "CREATE_ORDER",
+  "CORRECT_ORDER_OCCUPANT",
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
@@ -26,8 +27,6 @@ export const commandTypes = [
   "MARK_NO_SHOW",
   "LOCK_MAINTENANCE",
   "RELEASE_MAINTENANCE",
-  "PLACE_INTERNAL_USE",
-  "RELEASE_INTERNAL_USE",
   "COMPLETE_CLEANING",
   "RECORD_COLLECTION",
   "RECORD_REFUND",
@@ -43,12 +42,20 @@ export const commandTypes = [
   "ROTATE_TOKEN",
   "REVOKE_TOKEN"
 ] as const;
+export type DeferredCommandType = "PLACE_INTERNAL_USE" | "RELEASE_INTERNAL_USE";
 export type CommandType = (typeof commandTypes)[number];
+export type HistoricalCommandType = CommandType | DeferredCommandType;
 
 export const directCommandTypes = ["CREATE_QUOTE"] as const;
 export type DirectCommandType = (typeof directCommandTypes)[number];
 export const recoverableCommandTypes = [...directCommandTypes, ...commandTypes] as const;
 export type RecoverableCommandType = (typeof recoverableCommandTypes)[number];
+export const historicalRecoverableCommandTypes = [
+  ...recoverableCommandTypes,
+  "PLACE_INTERNAL_USE",
+  "RELEASE_INTERNAL_USE"
+] as const;
+export type HistoricalRecoverableCommandType = (typeof historicalRecoverableCommandTypes)[number];
 
 export const errorCodes = [
   "AUTHENTICATION_REQUIRED",
@@ -290,7 +297,6 @@ export const roomStatusStatuses = [
   "IN_HOUSE",
   "CLEANING",
   "MAINTENANCE",
-  "INTERNAL_USE",
   "UNAVAILABLE",
   "STALE",
   "UNKNOWN"
@@ -303,11 +309,9 @@ export const ROOM_STATUS_OPERATIONAL_TASK_LIMIT = 500;
 export const roomStatusActionCodes = [
   "CREATE_ORDER",
   "CREATE_FREE_STAY",
-  "PLACE_INTERNAL_USE",
   "LOCK_MAINTENANCE",
   "OPEN_ORDER",
   "RELEASE_MAINTENANCE",
-  "RELEASE_INTERNAL_USE",
   "COMPLETE_CLEANING"
 ] as const;
 export type RoomStatusActionCode = (typeof roomStatusActionCodes)[number];
@@ -316,7 +320,6 @@ export const roomStatusSourceKinds = [
   "ORDER",
   "FREE_STAY",
   "MAINTENANCE",
-  "INTERNAL_USE",
   "CLEANING",
   "UNIT_UNSELLABLE"
 ] as const;
@@ -392,6 +395,8 @@ export interface RoomStatusIntervalDto {
   sourceKind: RoomStatusSourceKind;
   label: string;
   primaryOccupantLabel: string | null;
+  occupantCount: number;
+  occupants: RoomStatusOccupantDto[];
   reason: string | null;
   claimIds: string[];
   references: RoomStatusReferenceDto[];
@@ -400,12 +405,18 @@ export interface RoomStatusIntervalDto {
   allowedActions: RoomStatusActionDto[];
 }
 
+export interface RoomStatusOccupantDto {
+  occupantId: string;
+  nickname: string | null;
+}
+
 export interface RoomStatusOperationalTaskDto extends RoomStatusIntervalDto {
   taskKind: RoomStatusOperationalTaskKind;
   businessDate: string;
 }
 
 export interface RoomStatusBedOccupantDto {
+  occupantId: string;
   inventoryUnitId: string;
   inventoryUnitCode: string;
   primaryOccupantLabel: string | null;
@@ -433,6 +444,7 @@ export interface RoomStatusUnitDto {
   roomTypeCode: string | null;
   pricingProductCode: string | null;
   capacity: number;
+  occupancyCapacity: number;
   childUnitIds: string[];
   children: RoomStatusUnitDto[];
   bedOccupancies: RoomStatusBedOccupancyDto[];
@@ -485,19 +497,6 @@ export interface RoomStatusBoardDto {
   };
   operationalTasks: RoomStatusOperationalTaskDto[];
   rooms: RoomStatusUnitDto[];
-}
-
-export interface PlaceInternalUseInput {
-  propertyId: string;
-  inventoryUnitId: string;
-  arrivalDate: string;
-  departureDate: string;
-  reason: string;
-}
-
-export interface ReleaseInternalUseInput {
-  propertyId: string;
-  internalUseBlockId: string;
 }
 
 export interface CompleteCleaningInput {
@@ -570,12 +569,76 @@ export interface CreateOrderPrimaryGuestInputDto extends PrimaryGuestSnapshotDto
   nickname: string;
 }
 
+export type CreateOrderAdditionalGuestInputDto = CreateOrderPrimaryGuestInputDto;
+
+export interface OrderOccupantDto {
+  id: string;
+  orderId: string;
+  ordinal: number;
+  role: "PRIMARY" | "ADDITIONAL";
+  fullName: string | null;
+  nickname: string | null;
+  phone: string | null;
+  documentNumber: string | null;
+  createdAt: string;
+}
+
+export interface OrderOccupantSnapshotDto {
+  fullName: string | null;
+  nickname: string | null;
+  phone: string | null;
+  documentNumber: string | null;
+}
+
+export const orderActionCodes = [
+  "CORRECT_ORDER_OCCUPANT",
+  "CHECK_IN",
+  "CHECK_OUT",
+  "SHORTEN_STAY",
+  "EXTEND_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "CANCEL_ORDER",
+  "MARK_NO_SHOW",
+  "RECORD_COLLECTION",
+  "RECORD_REFUND"
+] as const;
+export type OrderActionCode = (typeof orderActionCodes)[number];
+
+export interface OrderAllowedActionDto {
+  code: OrderActionCode;
+  enabled: boolean;
+  disabledReason: string | null;
+}
+
+export interface CorrectOrderOccupantInputDto {
+  propertyId: string;
+  orderId: string;
+  occupantId: string;
+  expectedPriorSnapshot: OrderOccupantSnapshotDto;
+  correctedSnapshot: {
+    fullName: string;
+    nickname: string;
+    phone: string | null;
+    documentNumber: string | null;
+  };
+}
+
+export interface CorrectOrderOccupantResultDto {
+  orderId: string;
+  occupantId: string;
+  correctionId: string;
+  amendmentId: string;
+  occupant: CorrectOrderOccupantInputDto["correctedSnapshot"];
+}
+
 export interface CreateOrderResultDto {
   orderId: string;
   stayId: string;
   segmentId: string;
   pricingRevisionId: string;
   primaryGuest: PrimaryGuestSnapshotDto | null;
+  occupants?: OrderOccupantDto[];
   bookingChannelCode: BookingChannelCode | null;
   channelOrderReference: string | null;
   freeStayReason: string | null;

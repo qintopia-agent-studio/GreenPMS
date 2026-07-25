@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { CommandRequest } from "../types";
+import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
+import { buildOrderOccupantCorrectionRequest } from "../components/OrderOccupantCorrectionDialog";
+import {
+  enabledOrderActionCodes,
+  occupantSnapshotEntries,
+  orderDetailBackTarget,
+  orderViewMatchesPrincipalScope,
+  orderedOrderOccupants,
+  primaryOrderOccupant,
+  remainingRefundableMinor,
+  requestedOrderAction
+} from "./OrderDetailPage";
 import {
   clearPersistedCommandRecovery,
   commandRecoveryStorageKey,
@@ -7,7 +18,8 @@ import {
   recoveryCommandRequest,
   savePersistedCommandRecovery,
   transitionPersistedCommandRecovery,
-  type CommandDialogProgress
+  type CommandDialogProgress,
+  type PersistedCommandRecovery
 } from "../ui";
 
 class MemoryStorage {
@@ -25,6 +37,148 @@ class MemoryStorage {
     this.values.delete(key);
   }
 }
+
+describe("order occupant presentation", () => {
+  const occupants = [{
+    id: "occupant_additional",
+    orderId: "order_occupants",
+    ordinal: 2,
+    role: "ADDITIONAL" as const,
+    fullName: "同行人姓名",
+    nickname: "同名住客",
+    phone: null,
+    documentNumber: "DOC-2",
+    createdAt: "2026-07-24T09:00:00.000Z"
+  }, {
+    id: "occupant_primary",
+    orderId: "order_occupants",
+    ordinal: 1,
+    role: "PRIMARY" as const,
+    fullName: "主要人姓名",
+    nickname: "同名住客",
+    phone: "13800000000",
+    documentNumber: null,
+    createdAt: "2026-07-24T09:00:00.000Z"
+  }];
+
+  it("keeps stable ordinal order without deduplicating equal nicknames", () => {
+    expect(orderedOrderOccupants(occupants).map((occupant) => [occupant.id, occupant.nickname])).toEqual([
+      ["occupant_primary", "同名住客"],
+      ["occupant_additional", "同名住客"]
+    ]);
+    expect(primaryOrderOccupant(occupants)?.id).toBe("occupant_primary");
+  });
+
+  it("shows the complete authorized snapshot and marks a historical missing nickname", () => {
+    expect(occupantSnapshotEntries({ ...occupants[1]!, nickname: null })).toEqual([
+      ["昵称", "历史未记录"],
+      ["姓名", "主要人姓名"],
+      ["联系电话", "13800000000"],
+      ["证件号码", "-"]
+    ]);
+  });
+
+  it("builds an append-only occupant correction request with a required reason", () => {
+    const view = {
+      order: { id: "order_occupants", property_id: "property_qintopia" }
+    } as OrderViewDto;
+    expect(buildOrderOccupantCorrectionRequest(view, occupants[0]!, {
+      nickname: " 小满 ",
+      fullName: " 满小满 ",
+      phone: " ",
+      documentNumber: " DOC-NEW ",
+      reason: " 前台录入错误 "
+    })).toEqual({
+      commandType: "CORRECT_ORDER_OCCUPANT",
+      title: "更正住宿人资料",
+      description: "服务端将校验订单、住宿人与当前资料版本，并追加不可变更正记录。",
+      input: {
+        propertyId: "property_qintopia",
+        orderId: "order_occupants",
+        occupantId: "occupant_additional",
+        expectedPriorSnapshot: {
+          nickname: "同名住客",
+          fullName: "同行人姓名",
+          phone: null,
+          documentNumber: "DOC-2"
+        },
+        correctedSnapshot: {
+          nickname: "小满",
+          fullName: "满小满",
+          phone: null,
+          documentNumber: "DOC-NEW"
+        }
+      },
+      initialReason: { code: "CORRECT_ORDER_OCCUPANT", note: "前台录入错误" }
+    });
+
+    expect(() => buildOrderOccupantCorrectionRequest(view, occupants[0]!, {
+      nickname: "小满",
+      fullName: "满小满",
+      phone: "",
+      documentNumber: "",
+      reason: "  "
+    })).toThrow("必须填写更正原因");
+  });
+});
+
+describe("server-authoritative order actions", () => {
+  const actions = [{ code: "CHECK_IN" as const, enabled: true, disabledReason: null }, {
+    code: "CANCEL_ORDER" as const,
+    enabled: false,
+    disabledReason: "ORDER_STATE_NOT_ALLOWED"
+  }, { code: "CORRECT_ORDER_OCCUPANT" as const, enabled: true, disabledReason: null }];
+
+  it("exposes only enabled server-provided actions and leaves READ with no writes", () => {
+    expect(enabledOrderActionCodes(actions)).toEqual(["CHECK_IN", "CORRECT_ORDER_OCCUPANT"]);
+    expect(enabledOrderActionCodes([])).toEqual([]);
+  });
+
+  it("accepts an action query only when that exact action is enabled", () => {
+    expect(requestedOrderAction("?action=CHECK_IN", actions)).toBe("CHECK_IN");
+    expect(requestedOrderAction("?action=CANCEL_ORDER", actions)).toBeUndefined();
+    expect(requestedOrderAction("?action=REPRICE_ORDER", actions)).toBeUndefined();
+  });
+
+  it("returns to room status only for explicit room-status navigation state", () => {
+    expect(orderDetailBackTarget({ fromRoomStatus: true })).toBe("/");
+    expect(orderDetailBackTarget({ source: "room-status" })).toBe("/");
+    expect(orderDetailBackTarget({ returnTo: "/" })).toBe("/");
+    expect(orderDetailBackTarget(undefined)).toBe("/orders");
+    expect(orderDetailBackTarget({ returnTo: "/members" })).toBe("/orders");
+  });
+
+  it("fails closed while the loaded order belongs to an earlier principal scope", () => {
+    expect(orderViewMatchesPrincipalScope("operator:SESSION:WRITE", "viewer:TOKEN:READ")).toBe(false);
+    expect(orderViewMatchesPrincipalScope("viewer:TOKEN:READ", "viewer:TOKEN:READ")).toBe(true);
+  });
+
+  it("offers per-fact refund only for an active collection with remaining value", () => {
+    const fact = (values: Partial<CollectionFactDto> & Pick<CollectionFactDto, "fact_id" | "fact_type" | "amount_minor">): CollectionFactDto => ({
+      order_id: "order_refund",
+      net_effect_minor: values.amount_minor,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "CASH",
+      note: "",
+      transaction_reference: "REF",
+      pricing_revision_id: "revision_refund",
+      command_id: `command_${values.fact_id}`,
+      created_at: "2026-07-25T00:00:00.000Z",
+      ...values
+    });
+    const collection = fact({ fact_id: "collection", fact_type: "COLLECTION", amount_minor: 10_000 });
+    const partialRefund = fact({ fact_id: "refund_partial", fact_type: "REFUND", amount_minor: 4_000, references_fact_id: collection.fact_id });
+    expect(remainingRefundableMinor([collection, partialRefund], collection)).toBe(6_000);
+
+    const finalRefund = fact({ fact_id: "refund_final", fact_type: "REFUND", amount_minor: 6_000, references_fact_id: collection.fact_id });
+    expect(remainingRefundableMinor([collection, partialRefund, finalRefund], collection)).toBe(0);
+
+    const reversal = fact({ fact_id: "reversal", fact_type: "REVERSAL", amount_minor: 4_000, reverses_fact_id: partialRefund.fact_id });
+    expect(remainingRefundableMinor([collection, partialRefund, finalRefund, reversal], collection)).toBe(4_000);
+  });
+});
 
 const context = {
   subjectId: "subject_operator",
@@ -209,6 +363,40 @@ describe("shared Web command recovery persistence", () => {
     expect(recovery).toMatchObject({ commandType: "CREATE_ORDER", presentation: "MEMBER_STAY" });
     expect(recoveryCommandRequest(recovery)).toMatchObject({ commandType: "CREATE_ORDER", presentation: "MEMBER_STAY", input: { propertyId: "property_qintopia" } });
     expect(JSON.stringify(recovery)).not.toContain("不应持久化");
+  });
+
+  it("reads a pre-upgrade deferred recovery only as an original-result query", () => {
+    const storage = new MemoryStorage();
+    const key = commandRecoveryStorageKey(context.subjectId, context.scopeId);
+    const historicalRecovery = {
+      version: 1,
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      propertyId: "property_qintopia",
+      commandType: "PLACE_INTERNAL_USE",
+      confirmationKey: "web-confirm-historical-internal",
+      targetRefs: ["internalUseBlockId=block_historical"],
+      state: "UNKNOWN",
+      updatedAt: "2026-07-19T09:00:00.000Z"
+    } satisfies PersistedCommandRecovery;
+    storage.setItem(key, JSON.stringify(historicalRecovery));
+
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toEqual({
+      kind: "VALID",
+      recovery: historicalRecovery
+    });
+    expect(recoveryCommandRequest(historicalRecovery)).toMatchObject({
+      commandType: "PLACE_INTERNAL_USE",
+      input: { propertyId: "property_qintopia" }
+    });
+    expect(transitionPersistedCommandRecovery(undefined, {
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      request: recoveryCommandRequest(historicalRecovery)
+    }, { ...confirming, confirmationKey: historicalRecovery.confirmationKey })).toEqual({
+      accepted: false,
+      recovery: undefined
+    });
   });
 
   it("reports storage failure so Confirm can fail closed before sending", () => {

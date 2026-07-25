@@ -12,7 +12,7 @@ import {
   type ConfirmRequest,
   type Database
 } from "@qintopia/db";
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 import { sha256 } from "@qintopia/domain";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
@@ -397,53 +397,116 @@ describe.sequential("booking channels and external transaction references on Pos
   });
 
   it("enforces the new-write rules for direct database inserts and keeps order channel identity immutable", async () => {
-    const directOrder = (
+    const completeDirectOrder = async (
+      trx: Transaction<Database>,
+      id: string,
+      arrivalDate: string,
+      departureDate: string,
+      snapshot: { fullName: string; nickname: string }
+    ) => {
+      const commandId = `command_${id}`;
+      await trx.insertInto("command_executions").values({
+        id: commandId,
+        subject_id: demo.agentSubjectId,
+        credential_id: "token_demo_write",
+        property_id: demo.propertyId,
+        command_type: "CREATE_ORDER",
+        idempotency_key: `direct-${id}`,
+        request_hash: "d".repeat(64),
+        correlation_id: `direct-${id}`,
+        state: "APPLIED",
+        completed_at: new Date()
+      }).execute();
+      await trx.insertInto("order_occupants").values({
+        id: `occupant_${id}`,
+        order_id: id,
+        ordinal: 1,
+        role: "PRIMARY",
+        full_name: snapshot.fullName,
+        nickname: snapshot.nickname,
+        phone: null,
+        document_number: null,
+        created_by_command_id: commandId
+      }).execute();
+      await trx.insertInto("stays").values({ id: `stay_${id}`, order_id: id, status: "PLANNED" }).execute();
+      await trx.insertInto("amendments").values({
+        id: `amend_${id}`,
+        order_id: id,
+        sequence: 1,
+        amendment_type: "CREATE_ORDER",
+        reason_code: "DIRECT_DATABASE_GUARD",
+        reason_note: "Direct database guard fixture",
+        prior_version: 0,
+        new_version: 1,
+        payload: {},
+        command_id: commandId
+      }).execute();
+      await trx.insertInto("stay_segments").values({
+        id: `segment_${id}`,
+        stay_id: `stay_${id}`,
+        sequence: 1,
+        inventory_unit_id: demo.secondRoomId,
+        arrival_date: arrivalDate,
+        departure_date: departureDate,
+        segment_type: "INITIAL",
+        supersedes_segment_id: null,
+        amendment_id: `amend_${id}`
+      }).execute();
+    };
+    const directOrder = async (
       id: string,
       bookingChannelCode: BookingChannelCode | null,
       channelOrderReference: string | null,
       primaryGuestSnapshot: unknown = { fullName: "Direct database guard probe", nickname: "Direct Guard" }
-    ) => db.insertInto("orders").values({
-      id,
-      property_id: demo.propertyId,
-      status: "RESERVED",
-      stay_type: "FREE",
-      arrival_date: "2029-01-01",
-      departure_date: "2029-01-02",
-      primary_guest_snapshot: primaryGuestSnapshot,
-      booking_channel_code: bookingChannelCode,
-      channel_order_reference: channelOrderReference,
-      free_stay_reason: "Direct database guard fixture",
-      pricing_policy_version_id: demo.freePolicyId,
-      member_contract_id: null,
-      current_revision_id: null,
-      version: 1
-    }).execute();
+    ) => db.transaction().execute(async (trx) => {
+      await trx.insertInto("orders").values({
+        id,
+        property_id: demo.propertyId,
+        status: "RESERVED",
+        stay_type: "FREE",
+        arrival_date: "2029-01-01",
+        departure_date: "2029-01-02",
+        primary_guest_snapshot: primaryGuestSnapshot,
+        booking_channel_code: bookingChannelCode,
+        channel_order_reference: channelOrderReference,
+        free_stay_reason: "Direct database guard fixture",
+        pricing_policy_version_id: demo.freePolicyId,
+        member_contract_id: null,
+        current_revision_id: null,
+        version: 1
+      }).execute();
+      if (primaryGuestSnapshot && typeof primaryGuestSnapshot === "object" && !Array.isArray(primaryGuestSnapshot)) {
+        await completeDirectOrder(trx, id, "2029-01-01", "2029-01-02", primaryGuestSnapshot as { fullName: string; nickname: string });
+      }
+    });
 
     await expect(directOrder("order_direct_missing_channel", null, null)).rejects.toMatchObject({ constraint: "orders_new_booking_channel_required" });
     await expect(directOrder("order_direct_wecom_reference", "WECOM", "MUST-NOT-PERSIST")).rejects.toMatchObject({ constraint: "orders_wecom_has_no_channel_order_reference" });
-    const directMemberOrder = (id: string, bookingChannelCode: BookingChannelCode | null) => db.insertInto("orders").values({
-      id,
-      property_id: demo.propertyId,
-      status: "RESERVED",
-      stay_type: "TRANSIENT",
-      arrival_date: "2029-01-03",
-      departure_date: "2029-01-04",
-      primary_guest_snapshot: { fullName: "Direct member database guard probe", nickname: "Member Guard" },
-      booking_channel_code: bookingChannelCode,
-      channel_order_reference: null,
-      free_stay_reason: null,
-      pricing_policy_version_id: demo.transientPolicyId,
-      member_id: demo.memberId,
-      member_contract_id: demo.memberContractId,
-      current_revision_id: null,
-      version: 1
-    }).execute();
+    const directMemberOrder = (id: string, bookingChannelCode: BookingChannelCode | null) => db.transaction().execute(async (trx) => {
+      const snapshot = { fullName: "Direct member database guard probe", nickname: "Member Guard" };
+      await trx.insertInto("orders").values({
+        id,
+        property_id: demo.propertyId,
+        status: "RESERVED",
+        stay_type: "TRANSIENT",
+        arrival_date: "2029-01-03",
+        departure_date: "2029-01-04",
+        primary_guest_snapshot: snapshot,
+        booking_channel_code: bookingChannelCode,
+        channel_order_reference: null,
+        free_stay_reason: null,
+        pricing_policy_version_id: demo.transientPolicyId,
+        member_id: demo.memberId,
+        member_contract_id: demo.memberContractId,
+        current_revision_id: null,
+        version: 1
+      }).execute();
+      await completeDirectOrder(trx, id, "2029-01-03", "2029-01-04", snapshot);
+    });
     await directMemberOrder("order_direct_member_without_channel", null);
     await expect(directMemberOrder("order_direct_member_with_channel", "WECOM")).rejects.toMatchObject({ constraint: "orders_member_booking_channel_null" });
-    await db.deleteFrom("orders").where("id", "=", "order_direct_member_without_channel").execute();
     await directOrder("order_direct_blank_reference", "CTRIP", " \t\n ");
     expect(await db.selectFrom("orders").select("channel_order_reference").where("id", "=", "order_direct_blank_reference").executeTakeFirstOrThrow()).toEqual({ channel_order_reference: null });
-    await db.deleteFrom("orders").where("id", "=", "order_direct_blank_reference").execute();
 
     const orderCountBeforeNicknameRejections = await db.selectFrom("orders")
       .select(({ fn }) => fn.countAll<number>().as("count"))
@@ -494,12 +557,13 @@ describe.sequential("booking channels and external transaction references on Pos
       .executeTakeFirstOrThrow()).toEqual({
       primary_guest_snapshot: { fullName: "Direct padded nickname probe", nickname: "Direct Guard" }
     });
-    await db.deleteFrom("orders").where("id", "=", "order_direct_padded_nickname").execute();
 
     const created = await createChannelOrder({ code: "CTRIP", channelOrderReference: "TEST-IMMUTABLE-CHANNEL", day: 12, prefix: "immutable-channel" });
     const orderId = created.receipt.result!.orderId as string;
     const secondOrder = await createChannelOrder({ code: "MEITUAN", channelOrderReference: "TEST-REFUND-OTHER-ORDER", day: 14, prefix: "refund-other-order" });
     const secondOrderId = secondOrder.receipt.result!.orderId as string;
+    const pricingRevisionId = (await getOrderView(db, orderId)).order.current_revision_id!;
+    const secondPricingRevisionId = (await getOrderView(db, secondOrderId)).order.current_revision_id!;
     await expect(db.updateTable("orders").set({ booking_channel_code: "MEITUAN" }).where("id", "=", orderId).execute()).rejects.toThrow(/booking channel.*immutable/);
     await expect(db.updateTable("orders").set({ channel_order_reference: "CHANGED" }).where("id", "=", orderId).execute()).rejects.toThrow(/booking channel.*immutable/);
 
@@ -511,6 +575,7 @@ describe.sequential("booking channels and external transaction references on Pos
       reverses_fact_id: null,
       method: "CASH",
       note: "Direct fact guard probe",
+      pricing_revision_id: pricingRevisionId,
       command_id: "command_direct_fact_guard"
     };
     await expect(db.insertInto("collection_facts").values({
@@ -627,6 +692,7 @@ describe.sequential("booking channels and external transaction references on Pos
       ...baseFact,
       fact_id: "fact_direct_refund_cross_order",
       order_id: secondOrderId,
+      pricing_revision_id: secondPricingRevisionId,
       fact_type: "REFUND",
       net_effect_minor: -10,
       amount_minor: 10,
@@ -683,6 +749,7 @@ describe.sequential("booking channels and external transaction references on Pos
       ...baseFact,
       fact_id: "fact_direct_reversal_cross_order",
       order_id: secondOrderId,
+      pricing_revision_id: secondPricingRevisionId,
       fact_type: "REVERSAL",
       amount_minor: 70,
       net_effect_minor: -70,
@@ -721,7 +788,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 018, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 023, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -870,6 +937,18 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration019 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/019_member_stay_booking_channel_rules.sql"), "utf8");
         await client.query(migration019);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('019_member_stay_booking_channel_rules.sql')");
+        const migration020 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/020_whole_room_occupants.sql"), "utf8");
+        await client.query(migration020);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('020_whole_room_occupants.sql')");
+        const migration021 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/021_defer_internal_use.sql"), "utf8");
+        await client.query(migration021);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('021_defer_internal_use.sql')");
+        const migration022 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/022_order_occupant_corrections.sql"), "utf8");
+        await client.query(migration022);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('022_order_occupant_corrections.sql')");
+        const migration023 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/023_collection_fact_pricing_revision.sql"), "utf8");
+        await client.query(migration023);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('023_collection_fact_pricing_revision.sql')");
       } finally {
         await client.end();
       }
@@ -887,6 +966,26 @@ describe.sequential("booking channels and external transaction references on Pos
         {
           id: "order_historical_nulls",
           primary_guest_snapshot: { fullName: "Historical Null Guest" }
+        }
+      ]);
+      expect(await historicalDb.selectFrom("order_occupants")
+        .select(["order_id", "ordinal", "role", "full_name", "nickname"])
+        .where("order_id", "in", ["order_historical_nulls", "order_historical_explicit_null"])
+        .orderBy("order_id")
+        .execute()).toEqual([
+        {
+          order_id: "order_historical_explicit_null",
+          ordinal: 1,
+          role: "PRIMARY",
+          full_name: "Historical Explicit Null Guest",
+          nickname: null
+        },
+        {
+          order_id: "order_historical_nulls",
+          ordinal: 1,
+          role: "PRIMARY",
+          full_name: "Historical Null Guest",
+          nickname: null
         }
       ]);
       const historicalMemberIdentities = await historicalDb.selectFrom("orders")
@@ -935,7 +1034,8 @@ describe.sequential("booking channels and external transaction references on Pos
           "pricing_product_code",
           "inventory_basis",
           "code_provenance",
-          "physical_bed_count"
+          "physical_bed_count",
+          "occupancy_capacity"
         ])
         .where("id", "in", [demo.roomId, demo.secondRoomId, demo.bedAId, demo.bedBId])
         .orderBy("id")
@@ -950,6 +1050,7 @@ describe.sequential("booking channels and external transaction references on Pos
           inventory_basis: "WHOLE_ROOM_COMBINATION",
           code_provenance: "SOURCE_EXPLICIT",
           physical_bed_count: 4
+          , occupancy_capacity: 4
         },
         {
           id: demo.bedAId,
@@ -960,6 +1061,7 @@ describe.sequential("booking channels and external transaction references on Pos
           inventory_basis: "INDEPENDENT",
           code_provenance: "SOURCE_EXPLICIT",
           physical_bed_count: null
+          , occupancy_capacity: 1
         },
         {
           id: demo.bedBId,
@@ -970,6 +1072,7 @@ describe.sequential("booking channels and external transaction references on Pos
           inventory_basis: "INDEPENDENT",
           code_provenance: "SOURCE_EXPLICIT",
           physical_bed_count: null
+          , occupancy_capacity: 1
         },
         {
           id: demo.secondRoomId,
@@ -980,6 +1083,7 @@ describe.sequential("booking channels and external transaction references on Pos
           inventory_basis: "WHOLE_ROOM_COMBINATION",
           code_provenance: "SOURCE_EXPLICIT",
           physical_bed_count: 4
+          , occupancy_capacity: 4
         }
       ]);
 

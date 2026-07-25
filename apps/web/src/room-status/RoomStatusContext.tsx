@@ -5,7 +5,8 @@ import {
   CalendarRange,
   Clock3,
   Layers3,
-  ShieldAlert
+  ShieldAlert,
+  X
 } from "lucide-react";
 import type {
   RoomStatusActionDto,
@@ -21,6 +22,8 @@ import {
   formatRoomStatusDate,
   formatRoomStatusDateTime,
   roomStatusActionLabels,
+  roomStatusIntervalBusinessLabel,
+  roomStatusOccupancyCapacity,
   roomStatusSaleCapabilityLabel,
   roomStatusSelectedSaleLabel,
   roomStatusSourceLabels,
@@ -43,6 +46,7 @@ export interface RoomStatusContextProps {
   onOpenReference: (reference: RoomStatusReferenceDto) => void;
   onOpenReceipt: (receiptId: string) => void;
   onAction: (action: RoomStatusActionDto) => void;
+  onClose?: () => void;
 }
 
 interface SelectionDraft {
@@ -90,7 +94,8 @@ export function RoomStatusContext({
   onSelectionChange,
   onOpenReference,
   onOpenReceipt,
-  onAction
+  onAction,
+  onClose
 }: RoomStatusContextProps) {
   const units = useMemo(() => flattenUnits(board.rooms), [board.rooms]);
   const dateErrorId = useId();
@@ -153,7 +158,10 @@ export function RoomStatusContext({
           <span>选中对象上下文</span>
           <h2 id="room-status-context-heading">{contextTitle}</h2>
         </div>
-        {status ? <RoomStatusMark status={status} /> : null}
+        <div className="room-status-context-header-actions">
+          {status ? <RoomStatusMark status={status} /> : null}
+          {onClose ? <button type="button" className="room-status-icon-button" onClick={onClose} aria-label="关闭选中对象上下文" title="关闭选中对象上下文"><X aria-hidden="true" size={17} /></button> : null}
+        </div>
       </header>
 
       <section className="room-status-selection-editor" aria-labelledby="room-status-selection-heading">
@@ -216,7 +224,7 @@ export function RoomStatusContext({
             <dt>粒度</dt><dd>{selectedUnit.kind === "ROOM" ? "房间" : "床位"}</dd>
             <dt>当前选择</dt><dd>{roomStatusSelectedSaleLabel(selectedUnit)}</dd>
             <dt>房间可售方式</dt><dd>{roomStatusSaleCapabilityLabel(selectedUnit)}</dd>
-            <dt>容纳人数</dt><dd>{selectedUnit.capacity}</dd>
+            <dt>容纳人数</dt><dd>{roomStatusOccupancyCapacity(selectedUnit)}</dd>
           </dl>
         </section>
       ) : null}
@@ -229,7 +237,7 @@ export function RoomStatusContext({
           </div>
           <dl className="room-status-context-facts">
             <dt>业务类型</dt><dd>{roomStatusSourceLabels[selectedInterval.sourceKind]}</dd>
-            <dt>主要居住人</dt><dd>{selectedInterval.primaryOccupantLabel ?? "不适用"}</dd>
+            <dt>住宿人</dt><dd>{selectedInterval.sourceKind === "ORDER" || selectedInterval.sourceKind === "FREE_STAY" ? roomStatusIntervalBusinessLabel(selectedInterval) : "不适用"}</dd>
             <dt>住宿日期</dt><dd>{formatRoomStatusDate(selectedInterval.sourceStartDate)}至{formatRoomStatusDate(selectedInterval.sourceEndDate)}</dd>
             <dt>原因</dt><dd>{selectedInterval.reason ?? "未提供原因"}</dd>
           </dl>

@@ -1,12 +1,17 @@
 import type {
+  AccessLevel,
   AmountSummaryDto,
   BookingChannelCode,
   CommandType,
+  CommandReason,
   CreateQuoteCommandResponseDto,
   PreviewDto,
   QuoteDto,
   ReceiptDto,
-  RecoverableCommandType,
+  HistoricalCommandType,
+  HistoricalRecoverableCommandType,
+  OrderAllowedActionDto,
+  OrderOccupantSnapshotDto,
   StayType
 } from "@qintopia/contracts";
 
@@ -89,6 +94,7 @@ export interface InventoryUnitDto {
   inventory_basis: "INDEPENDENT" | "WHOLE_ROOM_COMBINATION" | null;
   code_provenance: "SOURCE_EXPLICIT" | "USER_CONFIRMED_RENAMED" | "PMS_GENERATED" | null;
   physical_bed_count: number | null;
+  occupancy_capacity: number;
 }
 
 export interface PricingPolicyVersionDto {
@@ -286,6 +292,7 @@ export interface UnitAvailabilityDto {
   inventoryBasis: "INDEPENDENT" | "WHOLE_ROOM_COMBINATION" | null;
   codeProvenance: "SOURCE_EXPLICIT" | "USER_CONFIRMED_RENAMED" | "PMS_GENERATED" | null;
   physicalBedCount: number | null;
+  occupancyCapacity: number;
   nights: AvailabilityNightDto[];
   available: boolean;
 }
@@ -351,6 +358,8 @@ export interface AmendmentDto {
   prior_version: number;
   new_version: number;
   payload: unknown;
+  command_id: string | null;
+  actor: { subjectId: string; displayName: string } | null;
   created_at: string;
 }
 
@@ -397,12 +406,39 @@ export interface CollectionFactDto {
   method: string;
   note: string;
   transaction_reference: string | null;
+  pricing_revision_id: string;
   command_id: string;
   created_at: string;
 }
 
 export interface OrderViewDto {
+  accessLevel: AccessLevel;
+  allowedActions: OrderAllowedActionDto[];
   order: OrderRowDto;
+  occupants: Array<{
+    id: string;
+    orderId: string;
+    ordinal: number;
+    role: "PRIMARY" | "ADDITIONAL";
+    fullName: string | null;
+    nickname: string | null;
+    phone: string | null;
+    documentNumber: string | null;
+    createdAt: string;
+  }>;
+  occupantCorrections: Array<{
+    id: string;
+    orderId: string;
+    occupantId: string;
+    sequence: number;
+    priorSnapshot: OrderOccupantSnapshotDto;
+    correctedSnapshot: OrderOccupantSnapshotDto;
+    reason: { code: string; note: string };
+    actor: { subjectId: string; displayName: string };
+    amendmentId: string;
+    commandId: string;
+    createdAt: string;
+  }>;
   stay: { id: string; status: string };
   currentSegment: {
     id: string;
@@ -425,21 +461,27 @@ export interface CommandPreviewResponse {
 }
 
 export interface CommandRequest {
-  commandType: CommandType;
+  commandType: HistoricalCommandType;
   input: Record<string, unknown>;
   title: string;
   description: string;
   presentation?: "MEMBER_STAY";
+  initialReason?: CommandReason;
 }
 
 export type {
+  AccessLevel,
   AmountSummaryDto,
   BookingChannelCode,
   CommandType,
+  CommandReason,
   CreateQuoteCommandResponseDto,
   PreviewDto,
   QuoteDto,
+  OrderAllowedActionDto,
+  OrderOccupantSnapshotDto,
   ReceiptDto,
-  RecoverableCommandType,
+  HistoricalCommandType,
+  HistoricalRecoverableCommandType,
   StayType
 };

@@ -149,7 +149,7 @@ async function finishReceipt(page: Page): Promise<void> {
 
 function findFiveNightDragCandidate(board: RoomStatusBoardDto) {
   for (const room of board.rooms) {
-    if (!room.allowedActions.some((action) => action.code === "PLACE_INTERNAL_USE" && action.enabled)) continue;
+    if (!room.allowedActions.some((action) => action.code === "LOCK_MAINTENANCE" && action.enabled)) continue;
     for (let index = 0; index <= board.dates.length - 5; index += 1) {
       const dates = board.dates.slice(index, index + 5);
       if (dates.every((date) => {
@@ -171,18 +171,18 @@ function findFiveNightDragCandidate(board: RoomStatusBoardDto) {
 
 function findWritableNight(board: RoomStatusBoardDto) {
   for (const room of board.rooms) {
-    if (!room.allowedActions.some((action) => action.code === "PLACE_INTERNAL_USE" && action.enabled)) continue;
+    if (!room.allowedActions.some((action) => action.code === "LOCK_MAINTENANCE" && action.enabled)) continue;
     const day = room.days.find((candidate) => candidate.available
       && candidate.conflicts.length === 0
       && candidate.intervalIds.length === 0);
     if (day) return { unitId: room.id, arrivalDate: day.serviceDate, departureDate: addDays(day.serviceDate, 1) };
   }
-  throw new Error("No room has an available night for the internal-use draft");
+  throw new Error("No room has an available night for the maintenance draft");
 }
 
 function findLastWritableNight(board: RoomStatusBoardDto) {
   for (const room of [...board.rooms].reverse()) {
-    if (!room.allowedActions.some((action) => action.code === "PLACE_INTERNAL_USE" && action.enabled)) continue;
+    if (!room.allowedActions.some((action) => action.code === "LOCK_MAINTENANCE" && action.enabled)) continue;
     const day = [...room.days].reverse().find((candidate) => candidate.available && candidate.conflicts.length === 0);
     if (day) return { unitId: room.id, serviceDate: day.serviceDate };
   }
@@ -354,7 +354,7 @@ test("a short 200 percent reflow keeps critical controls reachable outside inten
   });
   const page = await zoomContext.newPage();
   try {
-    const board = await login(page);
+    await login(page);
     expect(await page.evaluate(() => ({
       width: window.innerWidth,
       height: window.innerHeight,
@@ -372,7 +372,8 @@ test("a short 200 percent reflow keeps critical controls reachable outside inten
       compactShell: true,
       tabletRoomStatus: true
     });
-    await expect(page.getByRole("grid")).toBeVisible();
+    await expect(page.getByRole("grid")).toHaveCount(0);
+    await expect(page.locator(".room-status-mobile")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(721);
 
     const search = page.getByLabel("搜索房间或床位", { exact: true });
@@ -395,22 +396,15 @@ test("a short 200 percent reflow keeps critical controls reachable outside inten
     }
     await page.screenshot({ path: testInfo.outputPath("room-status-200-percent-short-toolbar-viewport.png") });
 
-    const candidate = findWritableNight(board);
-    const cell = roomCell(page, candidate.unitId, candidate.arrivalDate);
-    await expect(cell).toBeVisible({ timeout: 5_000 });
-    await page.keyboard.press("Tab");
-    await cell.focus();
-    await expect(cell).toBeFocused();
-    expect(await cell.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
-    await expectFullyHitTestable(cell, "200 percent focused room-status cell");
-
-    await cell.click();
-    const createNormalStay = page.getByRole("button", { name: "创建正常住宿订单", exact: true });
-    await expect(createNormalStay).toBeEnabled();
-    await page.getByTestId("room-status-unit-select").focus();
-    await tabTo(page, createNormalStay, "200 percent keyboard context selection action", 24);
-    expect(await createNormalStay.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
-    await expectFullyHitTestable(createNormalStay, "200 percent context selection action");
+    const mobileCreate = page.getByRole("button", { name: "新建住宿或锁房", exact: true });
+    await page.locator("#main-content").focus();
+    await tabTo(page, mobileCreate, "200 percent mobile create action", 30);
+    expect(await mobileCreate.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+    await expectFullyHitTestable(mobileCreate, "200 percent mobile create action");
+    await mobileCreate.click();
+    const createDialog = page.getByRole("dialog", { name: "新建住宿或锁房", exact: true });
+    await expect(createDialog).toBeVisible();
+    await createDialog.getByRole("button", { name: "关闭", exact: true }).click();
     const activeNavigation = page.locator(".mobile-navigation").getByRole("link", { name: "房态", exact: true });
     await expectFullyHitTestable(activeNavigation, "200 percent fixed room-status navigation");
     await page.screenshot({ path: testInfo.outputPath("room-status-200-percent-short-context-viewport.png") });
@@ -432,14 +426,14 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
     await page.getByTestId("room-status-unit-select").selectOption(candidate.unitId);
     await page.getByLabel("入住日期", { exact: true }).fill(candidate.blockStart);
     await page.getByLabel("退房日期", { exact: true }).fill(candidate.blockEnd);
-    await page.getByRole("button", { name: "放置内部占用", exact: true }).click();
-    await page.getByLabel("内部占用原因").fill(businessReason);
+    await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
+    await page.getByLabel("维修原因").fill(businessReason);
     await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
     const placementReceipt = await previewAndConfirm(page, "Create a typed Block for interval-overlay drag evidence");
-    await expect(placementReceipt.locator("code").filter({ hasText: /^block_/ })).toHaveCount(1);
+    await expect(placementReceipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
     await finishReceipt(page);
 
-    const interval = row.locator(".room-status-interval-internal-use");
+    const interval = row.locator(".room-status-interval-maintenance");
     const startCell = roomCell(page, candidate.unitId, candidate.dragStart);
     const endCell = roomCell(page, candidate.unitId, candidate.dragEnd);
     await expect(interval).toHaveCount(1);
@@ -460,7 +454,7 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
     expect(boxes.end).not.toBeNull();
     const pointerY = boxes.interval!.y + boxes.interval!.height / 2;
     const overlayHit = await page.evaluate(({ x, y }) => (
-      document.elementFromPoint(x, y)?.closest(".room-status-interval")?.classList.contains("room-status-interval-internal-use") ?? false
+      document.elementFromPoint(x, y)?.closest(".room-status-interval")?.classList.contains("room-status-interval-maintenance") ?? false
     ), { x: boxes.interval!.x + boxes.interval!.width / 2, y: pointerY });
     expect(overlayHit, "the pointer path must cross the actual interval button, not a bare date cell").toBe(true);
 
@@ -479,12 +473,12 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
     await expectFullyHitTestable(endCell, "drag selection end cell");
     await page.screenshot({ path: testInfo.outputPath("mouse-drag-crosses-interval-overlay.png") });
   } finally {
-    const interval = row.locator(".room-status-interval-internal-use");
+    const interval = row.locator(".room-status-interval-maintenance");
     if (await interval.count() === 1) {
       await interval.click();
-      await page.locator(".room-status-context-actions").getByRole("button", { name: "释放内部占用", exact: true }).click();
+      await page.locator(".room-status-context-actions").getByRole("button", { name: "释放维修锁房", exact: true }).click();
       const releaseReceipt = await previewAndConfirm(page, "Release the typed Block after interval-overlay drag evidence");
-      await expect(releaseReceipt.locator("code").filter({ hasText: /^block_/ })).toHaveCount(1);
+      await expect(releaseReceipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
       await finishReceipt(page);
       await expect(interval).toHaveCount(0);
     }
@@ -506,9 +500,9 @@ test("Block drafts cannot leave the server-validated room-status selection", asy
   await page.getByTestId("room-status-unit-select").selectOption(candidate.unitId);
   await page.getByLabel("入住日期", { exact: true }).fill(candidate.arrivalDate);
   await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
-  await page.getByRole("button", { name: "放置内部占用", exact: true }).click();
+  await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
 
-  const dialog = page.getByRole("dialog", { name: /^内部占用 ·/ });
+  const dialog = page.getByRole("dialog", { name: /^维修锁房 ·/ });
   const from = dialog.getByLabel("开始日期");
   const to = dialog.getByLabel("结束日期");
   await expect(from).toHaveAttribute("min", candidate.arrivalDate);
@@ -517,14 +511,14 @@ test("Block drafts cannot leave the server-validated room-status selection", asy
   await expect(to).toHaveAttribute("max", candidate.departureDate);
 
   await from.fill(addDays(candidate.arrivalDate, -1));
-  await dialog.getByLabel("内部占用原因").fill(`Out-of-window draft ${randomUUID()}`);
+  await dialog.getByLabel("维修原因").fill(`Out-of-window draft ${randomUUID()}`);
   expect(await from.evaluate((element: HTMLInputElement) => element.validity.valid)).toBe(false);
   await dialog.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
   await expect(dialog).toBeVisible();
   expect(previewRequestCount).toBe(0);
 });
 
-test("an internal-use draft survives stale query conditions at 320px and resumes after fresh room status returns", async ({ page }, testInfo: TestInfo) => {
+test("a maintenance draft survives stale query conditions at 320px and resumes after fresh room status returns", async ({ page }, testInfo: TestInfo) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const board = await login(page);
@@ -534,17 +528,17 @@ test("an internal-use draft survives stale query conditions at 320px and resumes
   await page.getByTestId("room-status-unit-select").selectOption(candidate.unitId);
   await page.getByLabel("入住日期", { exact: true }).fill(candidate.arrivalDate);
   await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
-  await page.getByRole("button", { name: "放置内部占用", exact: true }).click();
+  await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
 
-  let dialog = page.getByRole("dialog", { name: /^内部占用 ·/ });
+  let dialog = page.getByRole("dialog", { name: /^维修锁房 ·/ });
   const businessReason = `Preserved at 320px ${randomUUID()}`;
-  const reason = dialog.getByLabel("内部占用原因");
+  const reason = dialog.getByLabel("维修原因");
   const submit = dialog.getByRole("button", { name: "继续生成 Preview", exact: true });
   await reason.fill(businessReason);
   await expect(submit).toBeEnabled();
 
   await page.setViewportSize({ width: 320, height: 700 });
-  dialog = page.getByRole("dialog", { name: /^内部占用 ·/ });
+  dialog = page.getByRole("dialog", { name: /^维修锁房 ·/ });
   await expect(dialog).toBeVisible();
   await expect(reason).toHaveValue(businessReason);
 
@@ -645,9 +639,7 @@ test("an internal-use draft survives stale query conditions at 320px and resumes
     expect(await submit.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
     await expectFullyHitTestable(submit, "320px resumed Preview action");
     await page.keyboard.press("Enter");
-    await expect(dialog).toBeHidden();
-
-    const commandDialog = page.getByRole("dialog", { name: /^放置内部占用 ·/ });
+    const commandDialog = page.getByRole("dialog").filter({ has: page.getByTestId("create-command-preview") });
     await expect(commandDialog).toBeVisible();
     const previewButton = page.getByTestId("create-command-preview");
     await tabTo(page, previewButton, "320px server Preview action");

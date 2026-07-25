@@ -33,23 +33,20 @@ const taskKinds = new Set<string>(roomStatusOperationalTaskKinds);
 const referenceTypes = new Set(["CLAIM", "ORDER", "STAY", "OPERATIONS", "BLOCK", "INVENTORY_UNIT", "RECEIPT"]);
 const historySources = new Set(["WEB_SESSION", "API_TOKEN", "SYSTEM", "UNKNOWN"]);
 const writeActionCodes = new Set<string>(roomStatusActionCodes.filter((code) => code !== "OPEN_ORDER"));
-const createActionCodes = new Set<RoomStatusActionCode>(["CREATE_ORDER", "CREATE_FREE_STAY", "PLACE_INTERNAL_USE", "LOCK_MAINTENANCE"]);
-const fullIntervalActionCodes = new Set<RoomStatusActionCode>(["RELEASE_MAINTENANCE", "RELEASE_INTERNAL_USE"]);
+const createActionCodes = new Set<RoomStatusActionCode>(["CREATE_ORDER", "CREATE_FREE_STAY", "LOCK_MAINTENANCE"]);
+const fullIntervalActionCodes = new Set<RoomStatusActionCode>(["RELEASE_MAINTENANCE"]);
 const actionTargetTypes: Record<RoomStatusActionCode, RoomStatusReferenceDto["type"]> = {
   CREATE_ORDER: "INVENTORY_UNIT",
   CREATE_FREE_STAY: "INVENTORY_UNIT",
-  PLACE_INTERNAL_USE: "INVENTORY_UNIT",
   LOCK_MAINTENANCE: "INVENTORY_UNIT",
   OPEN_ORDER: "ORDER",
   RELEASE_MAINTENANCE: "BLOCK",
-  RELEASE_INTERNAL_USE: "BLOCK",
   COMPLETE_CLEANING: "OPERATIONS"
 };
 const sourceActionCodes: Record<RoomStatusSourceKind, ReadonlySet<RoomStatusActionCode>> = {
   ORDER: new Set(["OPEN_ORDER"]),
   FREE_STAY: new Set(["OPEN_ORDER"]),
   MAINTENANCE: new Set(["RELEASE_MAINTENANCE"]),
-  INTERNAL_USE: new Set(["RELEASE_INTERNAL_USE"]),
   CLEANING: new Set(["COMPLETE_CLEANING"]),
   UNIT_UNSELLABLE: new Set()
 };
@@ -57,7 +54,6 @@ const sourceReferenceTypes: Record<RoomStatusSourceKind, RoomStatusReferenceDto[
   ORDER: "ORDER",
   FREE_STAY: "ORDER",
   MAINTENANCE: "BLOCK",
-  INTERNAL_USE: "BLOCK",
   CLEANING: "OPERATIONS",
   UNIT_UNSELLABLE: "INVENTORY_UNIT"
 };
@@ -90,6 +86,11 @@ function boolean(value: unknown, path: string): boolean {
 function integer(value: unknown, path: string, minimum = 0): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) fail(path, `必须是大于等于 ${minimum} 的安全整数`);
   return value;
+}
+
+function onlyKeys(item: UnknownRecord, allowedKeys: readonly string[], path: string): void {
+  const unexpected = Object.keys(item).filter((key) => !allowedKeys.includes(key));
+  if (unexpected.length) fail(path, `包含不允许的字段 ${unexpected.join(", ")}`);
 }
 
 function localDate(value: unknown, path: string): string {
@@ -178,21 +179,13 @@ function assertIntervalActionContext(
   action: RoomStatusActionDto,
   path: string,
   sourceKind: RoomStatusSourceKind,
-  references: readonly RoomStatusReferenceDto[],
-  startDate: string,
-  endDate: string,
-  sourceStartDate: string,
-  sourceEndDate: string
+  references: readonly RoomStatusReferenceDto[]
 ): void {
   if (createActionCodes.has(action.code) || !sourceActionCodes[sourceKind].has(action.code)) {
     fail(`${path}.code`, "与区间 typed source 不一致");
   }
   if (!references.some((reference) => referenceKey(reference) === referenceKey(action.targetReference!))) {
     fail(`${path}.targetReference`, "不属于该区间公开的稳定来源引用");
-  }
-  if (action.requiresFullInterval && action.enabled
-    && (startDate !== sourceStartDate || endDate !== sourceEndDate)) {
-    fail(path, "来源完整区间未全部显示时不能启用完整释放动作");
   }
 }
 
@@ -295,6 +288,32 @@ function assertInterval(
   const sourceKind = sourceKindValue as RoomStatusSourceKind;
   string(item.label, `${path}.label`);
   if (item.primaryOccupantLabel !== null) string(item.primaryOccupantLabel, `${path}.primaryOccupantLabel`);
+  const occupantCount = integer(item.occupantCount, `${path}.occupantCount`);
+  const occupants = array(item.occupants, `${path}.occupants`);
+  if (occupants.length !== occupantCount) fail(`${path}.occupants`, "必须与住宿人数逐一对应");
+  const occupantIds = new Set<string>();
+  occupants.forEach((occupantValue, index) => {
+    const occupantPath = `${path}.occupants[${index}]`;
+    const occupant = record(occupantValue, occupantPath);
+    onlyKeys(occupant, ["occupantId", "nickname"], occupantPath);
+    const occupantId = string(occupant.occupantId, `${occupantPath}.occupantId`)!;
+    if (occupantIds.has(occupantId)) fail(`${occupantPath}.occupantId`, "同一区间不能重复住宿人");
+    occupantIds.add(occupantId);
+    if (occupant.nickname !== null) string(occupant.nickname, `${occupantPath}.nickname`);
+  });
+  const lodging = sourceKind === "ORDER" || sourceKind === "FREE_STAY";
+  const displayableLodging = lodging && status !== "UNKNOWN";
+  if (status === "UNKNOWN" && occupantCount !== 0) {
+    fail(`${path}.occupantCount`, "UNKNOWN 区间必须隐藏住宿人");
+  }
+  if (status === "UNKNOWN" && item.primaryOccupantLabel !== null) {
+    fail(`${path}.primaryOccupantLabel`, "UNKNOWN 区间不能公开主住宿人标签");
+  }
+  if (displayableLodging && occupantCount < 1) fail(`${path}.occupantCount`, "可展示住宿来源必须包含至少一位住宿人");
+  if (!lodging && occupantCount !== 0) fail(`${path}.occupantCount`, "非住宿来源不能包含住宿人");
+  if (displayableLodging && occupants[0] && (occupants[0] as UnknownRecord).nickname !== item.primaryOccupantLabel) {
+    fail(`${path}.primaryOccupantLabel`, "必须与第一位住宿人昵称一致");
+  }
   if (item.reason !== null) string(item.reason, `${path}.reason`);
   const claimIds = array(item.claimIds, `${path}.claimIds`).map((id, index) => string(id, `${path}.claimIds[${index}]`)!);
   if (new Set(claimIds).size !== claimIds.length) fail(`${path}.claimIds`, "不能包含重复 Claim ID");
@@ -342,11 +361,7 @@ function assertInterval(
     action,
     `${path}.allowedActions[${index}]`,
     sourceKind,
-    typedReferences,
-    startDate,
-    endDate,
-    sourceStartDate,
-    sourceEndDate
+    typedReferences
   ));
   if (available !== !blocking || (typedConflicts.length > 0 && available)) fail(`${path}.available`, "必须与阻断区间和冲突事实一致");
   if ((status === "UNKNOWN" || status === "STALE" || status === "UNAVAILABLE")
@@ -449,6 +464,8 @@ function assertUnit(
     if (item[key] !== null) string(item[key], `${path}.${key}`);
   }
   integer(item.capacity, `${path}.capacity`, 1);
+  const occupancyCapacity = integer(item.occupancyCapacity, `${path}.occupancyCapacity`, 1);
+  if (kind === "BED" && occupancyCapacity !== 1) fail(`${path}.occupancyCapacity`, "床位住宿容量必须为 1");
   const childUnitIds = array(item.childUnitIds, `${path}.childUnitIds`).map((childId, index) => string(childId, `${path}.childUnitIds[${index}]`)!);
   const intervals = array(item.intervals, `${path}.intervals`);
   intervals.forEach((interval, index) => {
@@ -460,6 +477,16 @@ function assertUnit(
     if (projected.displayInventoryUnitId !== id || projected.roomId !== roomId
       || (projected.actualInventoryUnitId !== id && !inheritedFromChild && !inheritedFromRoom)) {
       fail(intervalPath, "与所属库存行或父子互斥关系不一致");
+    }
+    const lodging = projected.sourceKind === "ORDER" || projected.sourceKind === "FREE_STAY";
+    const projectedCapacity = projected.actualInventoryUnitId === id
+      ? occupancyCapacity
+      : inheritedFromChild
+        ? 1
+        : null;
+    if (lodging && projected.status !== "UNKNOWN" && projectedCapacity !== null
+      && projected.occupantCount > projectedCapacity) {
+      fail(`${intervalPath}.occupantCount`, `不能超过实际库存单元住宿容量 ${projectedCapacity}`);
     }
   });
   const typedIntervals = intervals as RoomStatusIntervalDto[];
@@ -489,6 +516,8 @@ function assertUnit(
     occupants.forEach((occupantValue, occupantIndex) => {
       const occupantPath = `${occupancyPath}.occupants[${occupantIndex}]`;
       const occupant = record(occupantValue, occupantPath);
+      onlyKeys(occupant, ["occupantId", "inventoryUnitId", "inventoryUnitCode", "primaryOccupantLabel", "sourceReference"], occupantPath);
+      const occupantId = string(occupant.occupantId, `${occupantPath}.occupantId`)!;
       const inventoryUnitId = string(occupant.inventoryUnitId, `${occupantPath}.inventoryUnitId`)!;
       if (inventoryUnitId === id || occupantUnitIds.has(inventoryUnitId)) {
         fail(`${occupantPath}.inventoryUnitId`, "必须引用唯一真实子床，不能把整房订单扩成床位");
@@ -507,6 +536,9 @@ function assertUnit(
         && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
         && interval.references.some((reference) => referenceKey(reference) === referenceKey(sourceReference)));
       if (backingIntervals.length !== 1) fail(occupantPath, "必须精确对应一个当天有效的床位住宿来源");
+      if (!backingIntervals[0]!.occupants.some((candidate) => candidate.occupantId === occupantId)) {
+        fail(`${occupantPath}.occupantId`, "必须对应来源区间中的真实住宿人");
+      }
       if (backingIntervals[0]!.primaryOccupantLabel !== occupant.primaryOccupantLabel) {
         fail(`${occupantPath}.primaryOccupantLabel`, "必须与来源 interval 的居住人快照一致");
       }

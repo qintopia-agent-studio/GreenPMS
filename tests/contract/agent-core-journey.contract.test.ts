@@ -13,6 +13,9 @@ const agentJourneyDatabaseUrl = process.env.AGENT_JOURNEY_CONTRACT_DATABASE_URL
 const foreignSubjectId = "subject_agent_journey_foreign";
 const foreignTokenId = "token_agent_journey_foreign";
 const foreignToken = "qtp_agent_journey_foreign_2026";
+const outOfScopeSubjectId = "subject_agent_journey_out_of_scope";
+const outOfScopeTokenId = "token_agent_journey_out_of_scope";
+const outOfScopeToken = "qtp_agent_journey_out_of_scope_2026";
 const memberRoomId = "unit_room_d_gen_01";
 
 type PreviewDto = {
@@ -214,6 +217,27 @@ beforeAll(async () => {
     rotated_from_id: null,
     replaced_by_id: null
   }).execute();
+  await db.insertInto("subjects").values({
+    id: outOfScopeSubjectId,
+    username: "agent-journey-out-of-scope",
+    display_name: "Out Of Scope Journey Subject",
+    password_salt: "agent-journey-out-of-scope",
+    password_hash: "not-used-by-this-token-test",
+    status: "ACTIVE",
+    auth_version: 1
+  }).execute();
+  await db.insertInto("api_tokens").values({
+    id: outOfScopeTokenId,
+    subject_id: outOfScopeSubjectId,
+    label: "Out-of-scope read Token",
+    secret_hash: sha256(outOfScopeToken),
+    access_ceiling: "READ",
+    property_scope: demo.propertyId,
+    expires_at: "2030-01-01T00:00:00.000Z",
+    revoked_at: null,
+    rotated_from_id: null,
+    replaced_by_id: null
+  }).execute();
   app = await buildServer(db);
   app.addHook("onRequest", async (request) => {
     if (
@@ -353,17 +377,38 @@ describe("scoped agent HTTP core journey", () => {
     }, "create-order");
     expect(created.preview.effect).toMatchObject({
       primaryGuest: { fullName: "Scoped Agent Journey Guest", nickname: "Scoped Guest" },
+      occupants: [{
+        id: expect.stringMatching(/^occupant_/),
+        ordinal: 1,
+        role: "PRIMARY",
+        fullName: "Scoped Agent Journey Guest",
+        nickname: "Scoped Guest",
+        phone: "13800000000",
+        documentNumber: "AGENT-HTTP-2028"
+      }],
+      occupancyCapacity: 1,
       bookingChannelCode: null,
       channelOrderReference: null
     });
+    const occupantId = (created.preview.effect.occupants as Array<{ id: string }>)[0]!.id;
     expect(created.receipt.result).toMatchObject({
       primaryGuest: { fullName: "Scoped Agent Journey Guest", nickname: "Scoped Guest" },
+      occupants: [{
+        id: occupantId,
+        orderId: expect.stringMatching(/^order_/),
+        ordinal: 1,
+        role: "PRIMARY",
+        fullName: "Scoped Agent Journey Guest",
+        nickname: "Scoped Guest",
+        phone: "13800000000",
+        documentNumber: "AGENT-HTTP-2028"
+      }],
       bookingChannelCode: null,
       channelOrderReference: null
     });
     const orderId = created.receipt.result?.orderId as string;
     expect(orderId).toMatch(/^order_/);
-    expect(created.receipt.resourceRefs).toContain(orderId);
+    expect(created.receipt.resourceRefs).toEqual(expect.arrayContaining([orderId, occupantId]));
 
     const createdOrderResponse = await app.inject({
       method: "GET",
@@ -372,6 +417,26 @@ describe("scoped agent HTTP core journey", () => {
     });
     expect(createdOrderResponse.statusCode, createdOrderResponse.body).toBe(200);
     const createdOrder = createdOrderResponse.json();
+    expect(createdOrder.occupants).toEqual([{
+      id: occupantId,
+      orderId,
+      ordinal: 1,
+      role: "PRIMARY",
+      fullName: "Scoped Agent Journey Guest",
+      nickname: "Scoped Guest",
+      phone: "13800000000",
+      documentNumber: "AGENT-HTTP-2028",
+      createdAt: expect.any(String)
+    }]);
+    const hiddenOrder = await app.inject({
+      method: "GET",
+      url: `/api/v1/orders/${orderId}`,
+      headers: { authorization: `Bearer ${outOfScopeToken}` }
+    });
+    expect([403, 404]).toContain(hiddenOrder.statusCode);
+    expect(hiddenOrder.body).not.toContain("Scoped Agent Journey Guest");
+    expect(hiddenOrder.body).not.toContain("13800000000");
+    expect(hiddenOrder.body).not.toContain("AGENT-HTTP-2028");
     const heldCoverage = createdOrder.coverageSet.filter((item: { status: string }) => item.status === "HELD");
     expect(heldCoverage).toHaveLength(2);
     expect(created.receipt.resourceRefs).toEqual(expect.arrayContaining(heldCoverage.map((item: { id: string }) => item.id)));

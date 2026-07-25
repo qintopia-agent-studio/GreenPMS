@@ -3,15 +3,22 @@ import {
   QuoteRequestGuard,
   RoomStatusCommandAttemptGuard,
   RoomStatusQueryAttemptGuard,
+  GUEST_FULL_NAME_MAX_LENGTH,
+  applyMemberSelectionToGuestForms,
   bookingChannelRequiredForStay,
+  canAddGuest,
+  createOrderGuestInputs,
   paidStayTypeForDates,
   eligibleMemberProfiles,
   effectiveQuoteMemberId,
+  guestFormComplete,
+  guestFormInput,
   membershipCoverageSummary,
   quotePricingSummary,
   staffQuoteError,
   quoteRecoveryStorageKey,
   readQuoteCommandRecovery,
+  roomStatusOrderContextMode,
   roomStatusBlockDraftWithinSelection,
   saveQuoteCommandRecovery
 } from "./InventoryPage";
@@ -64,6 +71,61 @@ const pending = {
 } as const;
 
 describe("CREATE_QUOTE request lifecycle", () => {
+  it("matches the API's 200-character full-name limit for primary and additional guests", () => {
+    expect(GUEST_FULL_NAME_MAX_LENGTH).toBe(200);
+  });
+
+  it("normalizes complete occupant drafts without inventing optional personal data", () => {
+    expect(guestFormComplete({ fullName: " 同行人甲 ", nickname: " 小满 ", phone: " ", documentNumber: " DOC-2 " })).toBe(true);
+    expect(guestFormInput({ fullName: " 同行人甲 ", nickname: " 小满 ", phone: " ", documentNumber: " DOC-2 " })).toEqual({
+      fullName: "同行人甲",
+      nickname: "小满",
+      documentNumber: "DOC-2"
+    });
+    expect(guestFormComplete({ fullName: "同行人甲", nickname: " ", phone: "", documentNumber: "" })).toBe(false);
+  });
+
+  it("only permits companions below the authoritative occupancy capacity", () => {
+    expect(canAddGuest(1, 0)).toBe(false);
+    expect(canAddGuest(2, 0)).toBe(true);
+    expect(canAddGuest(2, 1)).toBe(false);
+    expect(canAddGuest(4, 2)).toBe(true);
+    expect(canAddGuest(4, 3)).toBe(false);
+  });
+
+  it("prefills only the member primary guest and preserves companions through member reselection and quote refresh", () => {
+    const member = {
+      full_name: "会员主档姓名",
+      phone: "13900000001",
+      identity_card_number: "MEMBER-ID-001"
+    };
+    const companions = [{
+      fullName: "同行人姓名",
+      nickname: "小满",
+      phone: "13900000002",
+      documentNumber: "COMPANION-ID-002"
+    }];
+
+    const selected = applyMemberSelectionToGuestForms(companions, member);
+    const refreshed = applyMemberSelectionToGuestForms(selected.additionalGuests, member);
+    expect(refreshed.primaryGuest).toEqual({
+      fullName: "会员主档姓名",
+      nickname: "会员主档姓名",
+      phone: "13900000001",
+      documentNumber: "MEMBER-ID-001"
+    });
+    expect(refreshed.additionalGuests).toBe(companions);
+    expect(createOrderGuestInputs(refreshed.primaryGuest, refreshed.additionalGuests)).toEqual({
+      primaryGuest: refreshed.primaryGuest,
+      additionalGuests: companions
+    });
+    expect(member).toEqual({
+      full_name: "会员主档姓名",
+      phone: "13900000001",
+      identity_card_number: "MEMBER-ID-001"
+    });
+  });
+
   it("requires a booking channel only for non-member stays", () => {
     expect(bookingChannelRequiredForStay(false)).toBe(true);
     expect(bookingChannelRequiredForStay(true)).toBe(false);
@@ -199,6 +261,15 @@ describe("CREATE_QUOTE request lifecycle", () => {
     const remountedGuard = new QuoteRequestGuard(scope);
     remountedGuard.mount();
     expect(remountedGuard.isActive(remountedGuard.begin(scope))).toBe(true);
+  });
+});
+
+describe("Room-status order context layout", () => {
+  it("uses measured workspace width instead of viewport assumptions", () => {
+    expect(roomStatusOrderContextMode(0, false)).toBe("INLINE");
+    expect(roomStatusOrderContextMode(1239, false)).toBe("DRAWER");
+    expect(roomStatusOrderContextMode(1240, false)).toBe("INLINE");
+    expect(roomStatusOrderContextMode(1600, true)).toBe("DRAWER");
   });
 });
 
