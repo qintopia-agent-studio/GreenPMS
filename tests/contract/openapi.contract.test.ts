@@ -35,7 +35,14 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     required: ["propertyId", "membershipOrderId"],
     properties: ["propertyId", "membershipOrderId"]
   },
-  CREATE_ORDER: { required: ["propertyId", "quoteId", "primaryGuest"], properties: ["propertyId", "quoteId", "primaryGuest", "additionalGuests", "bookingChannelCode", "channelOrderReference", "freeStayReason", "freeStayCategoryCode"] },
+  CREATE_ORDER: {
+    required: ["propertyId", "quoteId", "primaryGuest"],
+    properties: [
+      "propertyId", "quoteId", "primaryGuest", "additionalGuests", "bookingChannelCode", "channelOrderReference",
+      "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason",
+      "freeStayReason", "freeStayCategoryCode"
+    ]
+  },
   CORRECT_ORDER_OCCUPANT: { required: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"], properties: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"] },
   EXTEND_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
   SHORTEN_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
@@ -126,7 +133,15 @@ describe("OpenAPI 3.1 command contract", () => {
         authorization: `Bearer ${token}`, "content-type": "application/json",
         "idempotency-key": `contract-confirm-${commandSequence}`, "x-correlation-id": `contract-${commandSequence}`
       },
-      payload: { propertyId: input.propertyId, commandType, confirmation: true, expectedEffectHash: preview.effectHash, reason: { code: "CONTRACT_TEST", note: "Token lifecycle contract" } }
+      payload: {
+        propertyId: input.propertyId,
+        commandType,
+        confirmation: true,
+        expectedEffectHash: preview.effectHash,
+        reason: commandType === "CREATE_ORDER"
+          ? { code: "CREATE_STANDARD_ORDER", note: "" }
+          : { code: "CONTRACT_TEST", note: "Token lifecycle contract" }
+      }
     });
     expect(confirmResponse.statusCode).toBe(200);
     return confirmResponse.json();
@@ -219,6 +234,22 @@ describe("OpenAPI 3.1 command contract", () => {
     const createChannelVariants = createChannel.anyOf as Array<{ enum: string[] }>;
     expect(createChannelVariants.map((variant) => variant.enum[0])).toEqual(["YOUMUDAO", "CTRIP", "MEITUAN", "WECOM"]);
     expect(JSON.stringify((createInput.properties as Record<string, JsonSchema>).channelOrderReference)).toContain('"type":"null"');
+    expect((createInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
+      type: "integer",
+      minimum: 0,
+      maximum: 2_147_483_600,
+      multipleOf: 100
+    });
+    expect((createInput.properties as Record<string, JsonSchema>).channelPriceDifferenceReason).toMatchObject({
+      type: "string",
+      minLength: 1,
+      maxLength: 1000
+    });
+    expect((createInput.properties as Record<string, JsonSchema>).manualPriceAdjustmentReason).toMatchObject({
+      type: "string",
+      minLength: 1,
+      maxLength: 1000
+    });
     expect((createInput.properties as Record<string, JsonSchema>).freeStayReason).toMatchObject({ minLength: 1, maxLength: 1000 });
     const createFreeStayCategory = ((createInput.properties as Record<string, JsonSchema>).freeStayCategoryCode)!;
     const createFreeStayCategoryVariants = createFreeStayCategory.anyOf as Array<{ enum: string[] }>;
@@ -234,6 +265,18 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(JSON.stringify((effectGuest.properties as Record<string, JsonSchema>).nickname)).toContain('"type":"null"');
     expect((createEffect.properties as Record<string, JsonSchema>)).toHaveProperty("occupants");
     expect((createEffect.properties as Record<string, JsonSchema>)).toHaveProperty("occupancyCapacity");
+    const createPricingDecision = (createEffect.properties as Record<string, JsonSchema>).pricingDecision!;
+    expect(createPricingDecision).toMatchObject({
+      additionalProperties: false,
+      required: [
+        "pricingBasis", "policyBaseAmount", "targetCurrentContractAmount", "differenceFromPolicy", "manualAdjustmentMinor",
+        "differenceExceedsThreshold", "reason"
+      ]
+    });
+    expect(Object.keys(createPricingDecision.properties as Record<string, JsonSchema>).sort()).toEqual([
+      "differenceExceedsThreshold", "differenceFromPolicy", "manualAdjustmentMinor", "policyBaseAmount", "pricingBasis", "reason",
+      "targetCurrentContractAmount"
+    ]);
     const createMemberInput = (variants.get("CREATE_MEMBER")!.properties as Record<string, JsonSchema>).input!;
     expect((createMemberInput.properties as Record<string, JsonSchema>).identityCardNumber).toMatchObject({ minLength: 1, maxLength: 200 });
     expect(createMemberInput.properties).not.toHaveProperty("validFrom");
@@ -455,7 +498,11 @@ describe("OpenAPI 3.1 command contract", () => {
       }
     });
     expect(quoteResponse.statusCode, quoteResponse.body).toBe(200);
-    const quoteId = quoteResponse.json().quote.quoteId as string;
+    const historicalQuote = quoteResponse.json().quote as {
+      quoteId: string;
+      currentContractAmount: { minorUnits: number };
+    };
+    const quoteId = historicalQuote.quoteId;
     const historicalKey = "contract-historical-nickname-preview";
     const preparedResponse = await app.inject({
       method: "POST",
@@ -473,7 +520,8 @@ describe("OpenAPI 3.1 command contract", () => {
           quoteId,
           primaryGuest: { fullName: "Historical Replay Guest", nickname: "Historical Replay" },
           bookingChannelCode: "WECOM",
-          channelOrderReference: null
+          channelOrderReference: null,
+          targetCurrentContractAmountMinor: historicalQuote.currentContractAmount.minorUnits
         }
       }
     });
@@ -671,6 +719,8 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(JSON.stringify(receiptSchema)).toContain("bookingChannelCode");
     expect(JSON.stringify(receiptSchema)).toContain("channelOrderReference");
     expect(JSON.stringify(receiptSchema)).toContain("transactionReference");
+    expect(JSON.stringify(receiptSchema)).toContain("pricingDecision");
+    expect(JSON.stringify(receiptSchema)).toContain("pricingPolicyVersionId");
 
     for (const [path, pathItem] of Object.entries(document.paths) as Array<[string, Record<string, unknown>]>) {
       if (!path.startsWith("/api/v1/")) continue;
@@ -707,6 +757,13 @@ describe("OpenAPI 3.1 command contract", () => {
     }
     const orderDetailSchema = document.paths["/api/v1/orders/{id}"].get.responses["200"].content["application/json"].schema as JsonSchema;
     expect(orderDetailSchema.required).toContain("fulfillment");
+    const pricingRevisionSchema = (((orderDetailSchema.properties as Record<string, JsonSchema>).pricingRevisions!.items) as JsonSchema);
+    expect(pricingRevisionSchema.required).toEqual(expect.arrayContaining([
+      "policy_version_id", "policy_base_amount_minor", "pricing_basis", "manual_adjustment_minor",
+      "current_contract_amount_minor", "difference_from_policy_minor", "reason"
+    ]));
+    expect(pricingRevisionSchema.properties).not.toHaveProperty("channel_contract_amount_minor");
+    expect(pricingRevisionSchema.properties).not.toHaveProperty("channel_settlement_amount_minor");
     const fulfillmentSchema = (orderDetailSchema.properties as Record<string, JsonSchema>).fulfillment!;
     expect(fulfillmentSchema.additionalProperties).toBe(false);
     expect(Object.keys(fulfillmentSchema.properties as Record<string, JsonSchema>).sort()).toEqual(["checkIn", "checkOut"]);
@@ -1085,7 +1142,8 @@ describe("OpenAPI 3.1 command contract", () => {
       quoteId: quoteResponse.json().quote.quoteId,
       primaryGuest: { fullName: "Contract View Guest", nickname: "Contract Guest", phone: "13800000000", documentNumber: "DOC-CONTRACT-1" },
       bookingChannelCode: "CTRIP",
-      channelOrderReference: "TEST-CONTRACT-ORDER-1"
+      channelOrderReference: "TEST-CONTRACT-ORDER-1",
+      targetCurrentContractAmountMinor: quoteResponse.json().quote.currentContractAmount.minorUnits
     });
     expect(created.result.primaryGuest).toEqual({
       fullName: "Contract View Guest",

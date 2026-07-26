@@ -40,7 +40,9 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
     commandType: envelope.commandType,
     confirmation: true,
     expectedEffectHash: preview.preview.effectHash,
-    reason: { code: "DATABASE_INVARIANT", note: `Database invariant acceptance for ${prefix}` }
+    reason: envelope.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "DATABASE_INVARIANT", note: `Database invariant acceptance for ${prefix}` }
   }, metadata(`${prefix}-confirm`));
 }
 
@@ -62,7 +64,8 @@ async function createOrder(prefix: string, options: { member?: boolean; arrival?
       primaryGuest: { fullName: `Invariant Guest ${prefix}`, nickname: `Invariant ${prefix}` },
       ...(!options.member ? {
         bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `TEST-INVARIANT-ORDER-${prefix}`
+        channelOrderReference: `TEST-INVARIANT-ORDER-${prefix}`,
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
       } : {})
     }
   }, prefix);

@@ -38,7 +38,9 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
     commandType: envelope.commandType,
     confirmation: true,
     expectedEffectHash: preview.preview.effectHash,
-    reason: { code: "REAL_PRICING_ACCEPTANCE", note: `Confirmed database pricing fact: ${prefix}` }
+    reason: envelope.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "REAL_PRICING_ACCEPTANCE", note: `Confirmed database pricing fact: ${prefix}` }
   }, metadata(`${prefix}-confirm`));
 }
 
@@ -67,7 +69,8 @@ async function createOrder(options: {
       primaryGuest: { fullName: `Pricing Guest ${options.prefix}`, nickname: `Pricing ${options.prefix}` },
       ...(stayType !== "FREE" ? {
         bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `REAL-PRICE-${options.prefix}`
+        channelOrderReference: `REAL-PRICE-${options.prefix}`,
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
       } : {}),
       ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Confirmed complimentary stay", freeStayCategoryCode: "VOLUNTEER" } : {})
     }

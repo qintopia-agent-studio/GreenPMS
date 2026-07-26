@@ -42,7 +42,9 @@ async function execute(
     commandType,
     confirmation: true,
     expectedEffectHash: prepared.preview.effectHash,
-    reason: { code: "STAGE6_ACCEPTANCE", note: "Prepare the isolated stage 6 manual acceptance dataset" }
+    reason: commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "STAGE6_ACCEPTANCE", note: "Prepare the isolated stage 6 manual acceptance dataset" }
   }, {
     idempotencyKey: `${key}-confirm`,
     correlationId: key
@@ -85,7 +87,11 @@ async function createStay(db: Kysely<Database>, options: {
     quoteId: quote.quoteId,
     primaryGuest: { fullName: `阶段六${options.nickname}`, nickname: options.nickname },
     additionalGuests: [],
-    ...(options.stayType !== "FREE" ? { bookingChannelCode: "WECOM", channelOrderReference: null } : {}),
+    ...(options.stayType !== "FREE" ? {
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+    } : {}),
     ...(options.stayType === "FREE" ? { freeStayReason: "阶段 6 免费入住名称对照", freeStayCategoryCode: "RECEPTION" } : {})
   }, options.key);
   const orderId = receipt.result?.orderId;

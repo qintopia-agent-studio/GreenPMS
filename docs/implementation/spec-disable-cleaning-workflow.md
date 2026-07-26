@@ -2,7 +2,7 @@
 title: 'QinTopia PMS 当前版本暂停清洁任务流程'
 type: 'feature'
 created: '2026-07-26'
-status: 'awaiting-user-acceptance'
+status: 'accepted'
 review_loop_iteration: 1
 baseline_commit: '33dc6075b0db9e7d084acc8764c49e2d355581bb'
 context:
@@ -85,7 +85,7 @@ context:
 
 ## Human Acceptance
 
-等待用户按当前范围验收。未收到“4.1 通过”或最终“第 4 步通过”前，不标记完成、不提交 Git、不进入 4.2。
+用户已于 2026-07-26 明确回复“4.1 通过”，本规格随 4.1 进入独立 Git 提交收尾。该通过不代表第 4 步整体通过；在最终“第 4 步通过”前 Goal 保持 active。
 
 ## Suggested Review Order
 

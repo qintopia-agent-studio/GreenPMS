@@ -11,6 +11,15 @@ export type StayType = (typeof stayTypes)[number];
 export const bookingChannelCodes = ["YOUMUDAO", "CTRIP", "MEITUAN", "WECOM"] as const;
 export type BookingChannelCode = (typeof bookingChannelCodes)[number];
 
+export const createOrderPricingBasisCodes = [
+  "POLICY",
+  "CHANNEL_CONTRACT",
+  "MANUAL_ADJUSTMENT",
+  "MEMBER_ENTITLEMENT",
+  "FREE"
+] as const;
+export type CreateOrderPricingBasis = (typeof createOrderPricingBasisCodes)[number];
+
 export const freeStayCategoryCodes = ["VOLUNTEER", "RECEPTION"] as const;
 export type FreeStayCategoryCode = (typeof freeStayCategoryCodes)[number];
 
@@ -578,6 +587,30 @@ export interface CreateOrderPrimaryGuestInputDto extends PrimaryGuestSnapshotDto
 
 export type CreateOrderAdditionalGuestInputDto = CreateOrderPrimaryGuestInputDto;
 
+export interface CreateOrderInputDto {
+  propertyId: string;
+  quoteId: string;
+  primaryGuest: CreateOrderPrimaryGuestInputDto;
+  additionalGuests?: CreateOrderAdditionalGuestInputDto[];
+  bookingChannelCode?: BookingChannelCode;
+  channelOrderReference?: string | null;
+  targetCurrentContractAmountMinor?: number;
+  channelPriceDifferenceReason?: string;
+  manualPriceAdjustmentReason?: string;
+  freeStayReason?: string;
+  freeStayCategoryCode?: FreeStayCategoryCode;
+}
+
+export interface CreateOrderPricingDecisionDto {
+  pricingBasis: CreateOrderPricingBasis;
+  policyBaseAmountMinor: number;
+  currentContractAmountMinor: number;
+  differenceFromPolicyMinor: number;
+  manualAdjustmentMinor: number;
+  differenceExceedsThreshold: boolean;
+  reason: CommandReason;
+}
+
 export interface OrderOccupantDto {
   id: string;
   orderId: string;
@@ -662,12 +695,22 @@ export interface CreateOrderResultDto {
   stayId: string;
   segmentId: string;
   pricingRevisionId: string;
+  pricingPolicyVersionId: string;
   primaryGuest: PrimaryGuestSnapshotDto | null;
   occupants?: OrderOccupantDto[];
   bookingChannelCode: BookingChannelCode | null;
   channelOrderReference: string | null;
   freeStayReason: string | null;
   freeStayCategoryCode: FreeStayCategoryCode | null;
+  pricingDecision?: {
+    pricingBasis: CreateOrderPricingBasis;
+    policyBaseAmount: MoneyDto;
+    targetCurrentContractAmount: MoneyDto;
+    differenceFromPolicy: MoneyDto;
+    manualAdjustmentMinor: number;
+    differenceExceedsThreshold: boolean;
+    reason: CommandReason;
+  };
 }
 
 export interface CreateMemberInput {

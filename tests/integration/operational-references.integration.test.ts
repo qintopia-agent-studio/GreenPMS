@@ -74,7 +74,8 @@ async function createChannelOrder(options: {
       quoteId: quote.quoteId,
       primaryGuest: { fullName: `Channel Guest ${options.code}`, nickname: `Channel ${options.code}` },
       bookingChannelCode: options.code,
-      channelOrderReference: options.channelOrderReference
+      channelOrderReference: options.channelOrderReference,
+      targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
     }
   }, metadata(`${options.prefix}-preview`));
   const expectedReference = options.channelOrderReference?.trim() || null;
@@ -87,7 +88,7 @@ async function createChannelOrder(options: {
     commandType: "CREATE_ORDER",
     confirmation: true,
     expectedEffectHash: preview.preview.effectHash,
-    reason: { code: "CHANNEL_TEST", note: `Confirm ${options.code} channel order` }
+    reason: { code: "CREATE_STANDARD_ORDER", note: "" }
   };
   const confirmMetadata = metadata(`${options.prefix}-confirm`);
   const receipt = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, confirmMetadata);
@@ -815,7 +816,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 024, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 025, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -979,6 +980,9 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration024 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/024_free_stay_category_code.sql"), "utf8");
         await client.query(migration024);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('024_free_stay_category_code.sql')");
+        const migration025 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/025_channel_order_atomic_pricing.sql"), "utf8");
+        await client.query(migration025);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('025_channel_order_atomic_pricing.sql')");
       } finally {
         await client.end();
       }

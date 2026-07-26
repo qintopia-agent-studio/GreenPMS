@@ -35,7 +35,9 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
     commandType: envelope.commandType,
     confirmation: true,
     expectedEffectHash: preview.preview.effectHash,
-    reason: { code: "AUTOMATED_ACCEPTANCE", note: "Database integration acceptance" }
+    reason: envelope.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "AUTOMATED_ACCEPTANCE", note: "Database integration acceptance" }
   }, metadata(`${prefix}-confirm`));
 }
 
@@ -62,7 +64,8 @@ async function createOrder(unitId: string, prefix: string, options: { member?: b
       primaryGuest: { fullName: `Guest ${prefix}`, nickname: `Guest ${prefix}` },
       ...(!options.member && options.stayType !== "FREE" ? {
         bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `TEST-ORDER-${prefix}`
+        channelOrderReference: `TEST-ORDER-${prefix}`,
+        targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits
       } : {}),
       ...(options.stayType === "FREE" ? { freeStayReason: `Automated FREE stay fixture: ${prefix}`, freeStayCategoryCode: "VOLUNTEER" } : {})
     }
@@ -116,7 +119,8 @@ describe("PostgreSQL core operations", () => {
           quoteId: priced.quoteId,
           primaryGuest,
           bookingChannelCode: "WECOM",
-          channelOrderReference: null
+          channelOrderReference: null,
+          targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits
         }
       }, metadata(`nickname-${label}`))).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "nickname is required" });
     }
@@ -183,6 +187,7 @@ describe("PostgreSQL core operations", () => {
           propertyId: demo.propertyId,
           quoteId: target.quoteId,
           primaryGuest: { fullName: `Free Category ${label}`, nickname: `Free Category ${label}` },
+          ...(isTransient ? { targetCurrentContractAmountMinor: target.currentContractAmount.minorUnits } : {}),
           ...fields
         }
       }, metadata(`free-category-${label}`))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
@@ -223,7 +228,8 @@ describe("PostgreSQL core operations", () => {
         quoteId: priced.quoteId,
         primaryGuest: { fullName: "  林晓  ", nickname: "  小林  " },
         bookingChannelCode: "WECOM",
-        channelOrderReference: null
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits
       }
     }, previewMetadata);
     expect(prepared.preview.effect.primaryGuest).toEqual({ fullName: "林晓", nickname: "小林" });
@@ -240,7 +246,8 @@ describe("PostgreSQL core operations", () => {
         quoteId: priced.quoteId,
         primaryGuest: { fullName: "林晓", nickname: "小林" },
         bookingChannelCode: "WECOM",
-        channelOrderReference: null
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits
       }
     }, previewMetadata);
     expect(replay.receipt.receiptId).toBe(prepared.receipt.receiptId);
@@ -251,7 +258,7 @@ describe("PostgreSQL core operations", () => {
       commandType: "CREATE_ORDER",
       confirmation: true,
       expectedEffectHash: prepared.preview.effectHash,
-      reason: { code: "NICKNAME_TRACE", note: "Verify immutable guest nickname trace" }
+      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
     }, metadata("nickname-trace-confirm"));
     expect(receipt.result?.primaryGuest).toEqual({ fullName: "林晓", nickname: "小林" });
 
@@ -427,8 +434,8 @@ describe("PostgreSQL core operations", () => {
       createCommandPreview(db, principal, { commandType: "CREATE_ORDER", input: { propertyId: demo.propertyId, quoteId: bedQuote.quoteId, primaryGuest: { fullName: "Bed Guest", nickname: "Bed Guest" }, freeStayReason: "Bed mutex fixture", freeStayCategoryCode: "VOLUNTEER" } }, metadata("bed-preview"))
     ]);
     const [roomResult, bedResult] = await Promise.all([
-      confirmCommandPreview(db, principal, roomPreview.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: roomPreview.preview.effectHash, reason: { code: "TEST", note: "race" } }, metadata("room-confirm")),
-      confirmCommandPreview(db, principal, bedPreview.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: bedPreview.preview.effectHash, reason: { code: "TEST", note: "race" } }, metadata("bed-confirm"))
+      confirmCommandPreview(db, principal, roomPreview.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: roomPreview.preview.effectHash, reason: { code: "CREATE_STANDARD_ORDER", note: "" } }, metadata("room-confirm")),
+      confirmCommandPreview(db, principal, bedPreview.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: bedPreview.preview.effectHash, reason: { code: "CREATE_STANDARD_ORDER", note: "" } }, metadata("bed-confirm"))
     ]);
     expect([roomResult.businessCommitted, bedResult.businessCommitted].filter(Boolean)).toHaveLength(1);
     const availability = await listAvailability(db, demo.propertyId, "2026-07-21", "2026-07-24");
@@ -455,7 +462,7 @@ describe("PostgreSQL core operations", () => {
       confirmCommandPreview(db, principal, createPreview.preview.previewId, {
         propertyId: demo.propertyId, commandType: "CREATE_ORDER",
         confirmation: true, expectedEffectHash: createPreview.preview.effectHash,
-        reason: { code: "LOCK_ORDER_TEST", note: "Create order concurrently" }
+        reason: { code: "CREATE_STANDARD_ORDER", note: "" }
       }, metadata("lock-order-create-confirm")),
       confirmCommandPreview(db, principal, adjustPreview.preview.previewId, {
         propertyId: demo.propertyId, commandType: "ADJUST_MEMBER_ENTITLEMENT",
@@ -474,7 +481,7 @@ describe("PostgreSQL core operations", () => {
     const stale = await createCommandPreview(db, principal, { commandType: "CREATE_ORDER", input: { propertyId: demo.propertyId, quoteId: firstQuote.quoteId, primaryGuest: { fullName: "Stale Guest", nickname: "Stale Guest" }, freeStayReason: "Stale Preview fixture", freeStayCategoryCode: "VOLUNTEER" } }, metadata("stale-preview"));
     await createOrder(demo.secondRoomId, "winner", { stayType: "FREE" });
     const countBefore = await db.selectFrom("orders").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow();
-    const rejected = await confirmCommandPreview(db, principal, stale.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: stale.preview.effectHash, reason: { code: "TEST", note: "stale" } }, metadata("stale-confirm"));
+    const rejected = await confirmCommandPreview(db, principal, stale.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: stale.preview.effectHash, reason: { code: "CREATE_STANDARD_ORDER", note: "" } }, metadata("stale-confirm"));
     const countAfter = await db.selectFrom("orders").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow();
     expect(rejected.businessCommitted).toBe(false);
     expect(rejected.error?.code).toBe("PREVIEW_STALE");
@@ -521,7 +528,7 @@ describe("PostgreSQL core operations", () => {
     const priced = await quote(demo.roomId, { stayType: "FREE" });
     const preview = await createCommandPreview(db, principal, { commandType: "CREATE_ORDER", input: { propertyId: demo.propertyId, quoteId: priced.quoteId, primaryGuest: { fullName: "Rollback Guest", nickname: "Rollback Guest" }, freeStayReason: "Transaction rollback fixture", freeStayCategoryCode: "VOLUNTEER" } }, metadata("rollback-preview"));
     await sql.raw("CREATE OR REPLACE FUNCTION fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced receipt failure'; END $$; CREATE TRIGGER force_receipt_failure BEFORE INSERT ON command_receipts FOR EACH ROW EXECUTE FUNCTION fail_receipt()").execute(db);
-    await expect(confirmCommandPreview(db, principal, preview.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: preview.preview.effectHash, reason: { code: "TEST", note: "rollback" } }, metadata("rollback-confirm"))).rejects.toThrow(/forced receipt failure/);
+    await expect(confirmCommandPreview(db, principal, preview.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: preview.preview.effectHash, reason: { code: "CREATE_STANDARD_ORDER", note: "" } }, metadata("rollback-confirm"))).rejects.toThrow(/forced receipt failure/);
     const orders = await db.selectFrom("orders").select("id").execute();
     const claims = await db.selectFrom("inventory_claims").select("id").execute();
     expect(orders).toHaveLength(0);
@@ -1145,12 +1152,12 @@ describe("PostgreSQL core operations", () => {
       commandType: "CREATE_ORDER" as const,
       confirmation: true as const,
       expectedEffectHash: preview.preview.effectHash,
-      reason: { code: "RECOVERY_TEST", note: "stable replay" }
+      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
     };
     const first = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, { idempotencyKey: "recovery-confirm", correlationId: "recovery" });
     const replay = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, { idempotencyKey: "recovery-confirm", correlationId: "recovery" });
     expect(replay.receiptId).toBe(first.receiptId);
-    await expect(confirmCommandPreview(db, principal, preview.preview.previewId, { ...confirmation, reason: { code: "RECOVERY_TEST", note: "different request" } }, { idempotencyKey: "recovery-confirm", correlationId: "recovery" })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+    await expect(confirmCommandPreview(db, principal, preview.preview.previewId, { ...confirmation, expectedEffectHash: `${confirmation.expectedEffectHash}-different` }, { idempotencyKey: "recovery-confirm", correlationId: "recovery" })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
     expect(await findCommandResult(db, principal, demo.propertyId, "CREATE_ORDER", "recovery-confirm")).toMatchObject({ executionStatus: "EXECUTED", receiptId: first.receiptId });
     expect(await findCommandResult(db, principal, demo.propertyId, "CREATE_ORDER", "never-executed")).toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
 

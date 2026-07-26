@@ -83,7 +83,9 @@ async function confirmPreview(token: string, preview: PreviewBody["preview"], pr
     commandType: preview.commandType,
     confirmation: true,
     expectedEffectHash: preview.effectHash,
-    reason: { code: "SECURITY_CONTRACT", note: `Security contract confirmation for ${prefix}` }
+    reason: preview.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "SECURITY_CONTRACT", note: `Security contract confirmation for ${prefix}` }
   };
   const url = `/api/v1/command-previews/${preview.previewId}/confirm`;
   const response = await app.inject({ method: "POST", url, headers, payload });
@@ -428,7 +430,8 @@ describe("HTTP security contract", () => {
       quoteId: quote.json().quote.quoteId,
       primaryGuest: { fullName: "Security Recovery Guest", nickname: "Security Recovery" },
       bookingChannelCode: "WECOM",
-      channelOrderReference: null
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: quote.json().quote.currentContractAmount.minorUnits
     }, "recovery-order");
     const firstReceipt = flow.confirmation.body;
     const replay = await app.inject({
@@ -712,7 +715,8 @@ describe("HTTP security contract", () => {
         quoteId: quote.json().quote.quoteId,
         primaryGuest: { fullName: `Cross-property probe ${options.propertyId}`, nickname: `Cross ${options.propertyId}` },
         bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `TEST-SECURITY-ORDER-${options.prefix}`
+        channelOrderReference: `TEST-SECURITY-ORDER-${options.prefix}`,
+        targetCurrentContractAmountMinor: quote.json().quote.currentContractAmount.minorUnits
       }, options.prefix);
       return created.confirmation.body.result?.orderId as string;
     };
@@ -1109,7 +1113,8 @@ describe("HTTP security contract", () => {
       quoteId: quote.json().quote.quoteId,
       primaryGuest: { fullName: "Timeline Contract Guest", nickname: "Timeline Guest" },
       bookingChannelCode: "CTRIP",
-      channelOrderReference: "TEST-SECURITY-ORDER-TIMELINE"
+      channelOrderReference: "TEST-SECURITY-ORDER-TIMELINE",
+      targetCurrentContractAmountMinor: quote.json().quote.currentContractAmount.minorUnits
     }, "timeline-order");
     const orderId = created.confirmation.body.result?.orderId as string;
     const previews = await Promise.all([
@@ -1166,7 +1171,8 @@ describe("HTTP security contract", () => {
       quoteId: quote.json().quote.quoteId,
       primaryGuest: { fullName: "Internal Error Contract Guest", nickname: "Internal Error" },
       bookingChannelCode: "MEITUAN",
-      channelOrderReference: "TEST-SECURITY-ORDER-INTERNAL-ERROR"
+      channelOrderReference: "TEST-SECURITY-ORDER-INTERNAL-ERROR",
+      targetCurrentContractAmountMinor: quote.json().quote.currentContractAmount.minorUnits
     }, "internal-error-order");
     const orderId = created.confirmation.body.result?.orderId as string;
     await db.updateTable("inventory_claims").set({ active: false, released_at: new Date() })

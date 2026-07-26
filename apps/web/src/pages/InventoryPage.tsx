@@ -92,6 +92,54 @@ export function bookingChannelRequiredForStay(useMemberEntitlement: boolean, sta
   return !useMemberEntitlement && stayType !== "FREE";
 }
 
+export function parseYuanAmountToMinor(value: string): number | undefined {
+  const normalized = value.trim();
+  const match = /^(\d+)(?:\.00)?$/.exec(normalized);
+  if (!match) return undefined;
+  const minor = BigInt(match[1]!) * 100n;
+  return minor <= 2_147_483_600n ? Number(minor) : undefined;
+}
+
+export function formatMinorForYuanInput(minorUnits: number): string {
+  return String(minorUnits / 100);
+}
+
+export function createOrderPricingDraft(input: {
+  bookingChannelCode: BookingChannelCode | "";
+  channelOrderReference: string;
+  targetAmountYuan: string;
+  policyBaseAmountMinor: number;
+  channelPriceDifferenceReason: string;
+  manualPriceAdjustmentReason: string;
+}) {
+  const targetCurrentContractAmountMinor = parseYuanAmountToMinor(input.targetAmountYuan);
+  const externalChannel = input.bookingChannelCode !== "" && input.bookingChannelCode !== "WECOM";
+  const differenceFromPolicyMinor = targetCurrentContractAmountMinor === undefined
+    ? undefined
+    : targetCurrentContractAmountMinor - input.policyBaseAmountMinor;
+  const channelReasonRequired = externalChannel
+    && differenceFromPolicyMinor !== undefined
+    && (() => {
+      const difference = BigInt(differenceFromPolicyMinor);
+      const absoluteDifference = difference < 0n ? -difference : difference;
+      return absoluteDifference * 100n > BigInt(input.policyBaseAmountMinor) * 15n;
+    })();
+  const manualReasonRequired = input.bookingChannelCode === "WECOM"
+    && differenceFromPolicyMinor !== undefined
+    && differenceFromPolicyMinor !== 0;
+  return {
+    targetCurrentContractAmountMinor,
+    differenceFromPolicyMinor,
+    channelReasonRequired,
+    manualReasonRequired,
+    complete: Boolean(input.bookingChannelCode)
+      && targetCurrentContractAmountMinor !== undefined
+      && (!externalChannel || Boolean(input.channelOrderReference.trim()))
+      && (!channelReasonRequired || Boolean(input.channelPriceDifferenceReason.trim()))
+      && (!manualReasonRequired || Boolean(input.manualPriceAdjustmentReason.trim()))
+  };
+}
+
 export const freeStayCategoryLabels: Record<string, string> = {
   VOLUNTEER: "义工",
   RECEPTION: "接待"
@@ -553,6 +601,9 @@ function QuoteWorkbench({
   const [additionalGuests, setAdditionalGuests] = useState<AdditionalGuestDraft[]>([]);
   const [bookingChannelCode, setBookingChannelCode] = useState<BookingChannelCode | "">("");
   const [channelOrderReference, setChannelOrderReference] = useState("");
+  const [targetContractAmountYuan, setTargetContractAmountYuan] = useState("");
+  const [channelPriceDifferenceReason, setChannelPriceDifferenceReason] = useState("");
+  const [manualPriceAdjustmentReason, setManualPriceAdjustmentReason] = useState("");
   const [freeStayReason, setFreeStayReason] = useState("");
   const [freeStayCategoryCode, setFreeStayCategoryCode] = useState<"VOLUNTEER" | "RECEPTION" | "">("");
   const [busy, setBusy] = useState(false);
@@ -597,6 +648,9 @@ function QuoteWorkbench({
     setAdditionalGuests([]);
     setBookingChannelCode("");
     setChannelOrderReference("");
+    setTargetContractAmountYuan("");
+    setChannelPriceDifferenceReason("");
+    setManualPriceAdjustmentReason("");
     setFreeStayReason("");
     setFreeStayCategoryCode("");
     setUseMemberEntitlement(false);
@@ -624,6 +678,9 @@ function QuoteWorkbench({
     setAdditionalGuests([]);
     setBookingChannelCode("");
     setChannelOrderReference("");
+    setTargetContractAmountYuan("");
+    setChannelPriceDifferenceReason("");
+    setManualPriceAdjustmentReason("");
     setFreeStayReason("");
     setFreeStayCategoryCode("");
     setError(undefined);
@@ -637,6 +694,9 @@ function QuoteWorkbench({
     if (!useMemberEntitlement) return;
     setBookingChannelCode("");
     setChannelOrderReference("");
+    setTargetContractAmountYuan("");
+    setChannelPriceDifferenceReason("");
+    setManualPriceAdjustmentReason("");
   }, [useMemberEntitlement]);
 
   const memberProfiles = eligibleMemberProfiles(meta.members, meta.memberContracts, propertyId, memberSearch);
@@ -818,6 +878,16 @@ function QuoteWorkbench({
   };
   const guestsComplete = guestFormComplete(primaryGuestForm) && additionalGuests.every(guestFormComplete);
   const guestCount = 1 + additionalGuests.length;
+  const paidPricingDraft = quote && !useMemberEntitlement && quote.stayType !== "FREE"
+    ? createOrderPricingDraft({
+        bookingChannelCode,
+        channelOrderReference,
+        targetAmountYuan: targetContractAmountYuan,
+        policyBaseAmountMinor: quote.currentContractAmount.minorUnits,
+        channelPriceDifferenceReason,
+        manualPriceAdjustmentReason
+      })
+    : undefined;
 
   function addAdditionalGuest() {
     if (!unit || !canAddGuest(unit.occupancyCapacity, additionalGuests.length)) return;
@@ -841,12 +911,13 @@ function QuoteWorkbench({
 
   function createOrder() {
     const channelRequired = bookingChannelRequiredForStay(useMemberEntitlement, quote?.stayType);
-    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestsComplete || guestCount > (unit?.occupancyCapacity ?? 0) || (channelRequired && !bookingChannelCode) || (bookingChannelCode && bookingChannelCode !== "WECOM" && !channelOrderReference.trim()) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))) return;
+    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestsComplete || guestCount > (unit?.occupancyCapacity ?? 0) || (channelRequired && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))) return;
     const guestInputs = createOrderGuestInputs(primaryGuestForm, additionalGuests);
     onCommand({
       commandType: "CREATE_ORDER",
       title: "创建订单",
       description: "确认住宿人名单、锁定计价政策版本、库存及会员覆盖差异。",
+      initialReason: { code: "CREATE_STANDARD_ORDER", note: "" },
       ...(useMemberEntitlement ? { presentation: "MEMBER_STAY" as const } : {}),
       input: {
         propertyId,
@@ -855,7 +926,10 @@ function QuoteWorkbench({
         additionalGuests: guestInputs.additionalGuests,
         ...(!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode ? {
           bookingChannelCode,
-          channelOrderReference: bookingChannelCode === "WECOM" ? null : channelOrderReference.trim() || null
+          channelOrderReference: bookingChannelCode === "WECOM" ? null : channelOrderReference.trim(),
+          targetCurrentContractAmountMinor: paidPricingDraft!.targetCurrentContractAmountMinor,
+          ...(paidPricingDraft!.channelReasonRequired ? { channelPriceDifferenceReason: channelPriceDifferenceReason.trim() } : {}),
+          ...(paidPricingDraft!.manualReasonRequired ? { manualPriceAdjustmentReason: manualPriceAdjustmentReason.trim() } : {})
         } : {}),
         ...(quote.stayType === "FREE" ? { freeStayReason: freeStayReason.trim(), freeStayCategoryCode } : {})
       }
@@ -949,7 +1023,7 @@ function QuoteWorkbench({
                 </> : <>
                   <div><span>住宿晚数</span><strong>{summary.nights} 晚</strong></div>
                   <div><span>计价依据</span><strong>{summary.pricingBasis}</strong></div>
-                  <div><span>住宿金额</span><strong>{formatMoney(summary.amount)}</strong></div>
+                  <div><span>{quote.stayType === "FREE" ? "住宿金额" : "政策基础金额"}</span><strong>{formatMoney(summary.amount)}</strong></div>
                 </>}
               </div>
                 );
@@ -994,7 +1068,10 @@ function QuoteWorkbench({
                       onChange={(event) => {
                         const code = event.target.value as BookingChannelCode | "";
                         setBookingChannelCode(code);
-                        if (code === "WECOM") setChannelOrderReference("");
+                        setChannelOrderReference("");
+                        setTargetContractAmountYuan(code === "WECOM" ? formatMinorForYuanInput(quote.currentContractAmount.minorUnits) : "");
+                        setChannelPriceDifferenceReason("");
+                        setManualPriceAdjustmentReason("");
                       }}
                       data-testid="booking-channel-code"
                     >
@@ -1003,6 +1080,29 @@ function QuoteWorkbench({
                     </select>
                   </label> : null}
                   {!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode && bookingChannelCode !== "WECOM" ? <label>渠道订单号（必填）<input value={channelOrderReference} onChange={(event) => setChannelOrderReference(event.target.value)} maxLength={200} required data-testid="channel-order-reference" /></label> : null}
+                  {!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode ? <>
+                    <label>{bookingChannelCode === "WECOM" ? "本单金额" : "本单渠道应结金额（必填）"}
+                      <input
+                        value={targetContractAmountYuan}
+                        onChange={(event) => setTargetContractAmountYuan(event.target.value)}
+                        inputMode="numeric"
+                        placeholder="0"
+                        pattern="[0-9]+(?:\\.00)?"
+                        required
+                        data-testid="target-contract-amount"
+                      />
+                    </label>
+                    {paidPricingDraft?.differenceFromPolicyMinor !== undefined ? <div className="span-two inline-summary" data-testid="create-order-price-difference">
+                      <span>政策基础金额 {formatMoney(quote.currentContractAmount)}</span>
+                      <strong>差异 {formatMoney({ currency: quote.currentContractAmount.currency, minorUnits: paidPricingDraft.differenceFromPolicyMinor })}</strong>
+                    </div> : null}
+                    {paidPricingDraft?.channelReasonRequired ? <label className="span-two">渠道价格差异说明
+                      <textarea value={channelPriceDifferenceReason} onChange={(event) => setChannelPriceDifferenceReason(event.target.value)} required maxLength={1000} rows={2} data-testid="channel-price-difference-reason" />
+                    </label> : null}
+                    {paidPricingDraft?.manualReasonRequired ? <label className="span-two">人工调价原因
+                      <textarea value={manualPriceAdjustmentReason} onChange={(event) => setManualPriceAdjustmentReason(event.target.value)} required maxLength={1000} rows={2} data-testid="manual-price-adjustment-reason" />
+                    </label> : null}
+                  </> : null}
                   {quote.stayType === "FREE" ? <>
                     <label>免费入住类型
                       <select value={freeStayCategoryCode} onChange={(event) => setFreeStayCategoryCode(event.target.value as "VOLUNTEER" | "RECEPTION")} data-testid="free-stay-category-code">
@@ -1013,7 +1113,7 @@ function QuoteWorkbench({
                     <label className="span-two">免费入住原因<textarea rows={3} value={freeStayReason} onChange={(event) => setFreeStayReason(event.target.value)} required maxLength={1000} data-testid="free-stay-reason" /></label>
                   </> : null}
                 </div>
-                <button className="button button-primary full-width" type="button" onClick={createOrder} disabled={quoteCommandsBlocked || !quoteIsCurrent || !guestsComplete || guestCount > unit.occupancyCapacity || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !bookingChannelCode) || (bookingChannelCode && bookingChannelCode !== "WECOM" && !channelOrderReference.trim()) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid="create-order">
+                <button className="button button-primary full-width" type="button" onClick={createOrder} disabled={quoteCommandsBlocked || !quoteIsCurrent || !guestsComplete || guestCount > unit.occupancyCapacity || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid="create-order">
                   <FilePlus2 aria-hidden="true" size={17} />核对并创建订单
                 </button>
               </section>

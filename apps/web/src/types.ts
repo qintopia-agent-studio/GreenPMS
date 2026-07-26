@@ -376,8 +376,11 @@ export interface PricingRevisionDto {
   coverage_set: unknown;
   cash_lines: unknown;
   policy_base_amount_minor: number;
+  pricing_basis: "POLICY" | "CHANNEL_CONTRACT" | "MANUAL_ADJUSTMENT" | "MEMBER_ENTITLEMENT" | "FREE";
   manual_adjustment_minor: number;
   current_contract_amount_minor: number;
+  difference_from_policy_minor: number;
+  reason: { code: string; note: string };
   currency: string;
   created_at: string;
 }

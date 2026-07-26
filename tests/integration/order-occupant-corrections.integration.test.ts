@@ -62,7 +62,8 @@ async function createTwoPersonOrder() {
       primaryGuest: { fullName: "张小满", nickname: "小满", phone: "13800000001", documentNumber: "DOC-1" },
       additionalGuests: [{ fullName: "李山风", nickname: "山风" }],
       bookingChannelCode: "YOUMUDAO",
-      channelOrderReference: "CORRECTION-FIXTURE"
+      channelOrderReference: "CORRECTION-FIXTURE",
+      targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
     }
   }, metadata("create-preview"));
   const receipt = await confirmCommandPreview(db, writePrincipal, preview.preview.previewId, {
@@ -70,7 +71,7 @@ async function createTwoPersonOrder() {
     commandType: "CREATE_ORDER",
     confirmation: true,
     expectedEffectHash: preview.preview.effectHash,
-    reason: { code: "CREATE_STANDARD_ORDER", note: "Create correction fixture" }
+    reason: { code: "CREATE_STANDARD_ORDER", note: "" }
   }, metadata("create-confirm"));
   return {
     unitId: unit.id,

@@ -8,12 +8,15 @@ import {
   bookingChannelRequiredForStay,
   canAddGuest,
   createOrderGuestInputs,
+  createOrderPricingDraft,
   paidStayTypeForDates,
   eligibleMemberProfiles,
   effectiveQuoteMemberId,
   guestFormComplete,
   guestFormInput,
+  formatMinorForYuanInput,
   membershipCoverageSummary,
+  parseYuanAmountToMinor,
   quotePricingSummary,
   staffQuoteError,
   quoteRecoveryStorageKey,
@@ -132,6 +135,56 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(bookingChannelRequiredForStay(false, "FREE")).toBe(false);
     expect(bookingChannelRequiredForStay(false, "TRANSIENT")).toBe(true);
     expect(bookingChannelRequiredForStay(true, "TRANSIENT")).toBe(false);
+  });
+
+  it("parses whole-yuan CNY input exactly without accepting jiao, fen, or oversized values", () => {
+    expect(parseYuanAmountToMinor("850")).toBe(85_000);
+    expect(parseYuanAmountToMinor("850.00")).toBe(85_000);
+    expect(parseYuanAmountToMinor("850.5")).toBeUndefined();
+    expect(parseYuanAmountToMinor("850.05")).toBeUndefined();
+    expect(parseYuanAmountToMinor("850.005")).toBeUndefined();
+    expect(parseYuanAmountToMinor("-1")).toBeUndefined();
+    expect(parseYuanAmountToMinor("21474836")).toBe(2_147_483_600);
+    expect(parseYuanAmountToMinor("21474837")).toBeUndefined();
+    expect(formatMinorForYuanInput(85_000)).toBe("850");
+  });
+
+  it("requires explicit external channel amount and only asks for a reason above 15 percent", () => {
+    const base = {
+      bookingChannelCode: "CTRIP" as const,
+      channelOrderReference: "CTRIP-WEB-001",
+      policyBaseAmountMinor: 100_000,
+      channelPriceDifferenceReason: "",
+      manualPriceAdjustmentReason: ""
+    };
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "" })).toMatchObject({ complete: false });
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "850.00" })).toMatchObject({
+      targetCurrentContractAmountMinor: 85_000,
+      differenceFromPolicyMinor: -15_000,
+      channelReasonRequired: false,
+      complete: true
+    });
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "840.00" })).toMatchObject({
+      channelReasonRequired: true,
+      complete: false
+    });
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "840.00", channelPriceDifferenceReason: "平台活动" })).toMatchObject({
+      channelReasonRequired: true,
+      complete: true
+    });
+  });
+
+  it("defaults WECOM semantics to policy price and requires a reason only for a manual deviation", () => {
+    const base = {
+      bookingChannelCode: "WECOM" as const,
+      channelOrderReference: "",
+      policyBaseAmountMinor: 100_000,
+      channelPriceDifferenceReason: "",
+      manualPriceAdjustmentReason: ""
+    };
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "1000.00" })).toMatchObject({ manualReasonRequired: false, complete: true });
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "950.00" })).toMatchObject({ manualReasonRequired: true, complete: false });
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "950.00", manualPriceAdjustmentReason: "协议优惠" })).toMatchObject({ manualReasonRequired: true, complete: true });
   });
 
   it("only keeps a selected member while it remains visible in the current property", () => {

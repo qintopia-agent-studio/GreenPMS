@@ -415,6 +415,7 @@ function EffectSummary({ preview, fulfillment = false }: { preview: PreviewDto; 
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
   const pricing = pricingFromEffect(effect);
+  const createPricingDecision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
   const inventoryUnit = isRecord(effect.inventoryUnit) ? effect.inventoryUnit : undefined;
   const fromUnit = isRecord(effect.fromInventoryUnit) ? effect.fromInventoryUnit : undefined;
   const toUnit = isRecord(effect.toInventoryUnit) ? effect.toInventoryUnit : undefined;
@@ -425,9 +426,15 @@ function EffectSummary({ preview, fulfillment = false }: { preview: PreviewDto; 
   const memberContract = isRecord(effect.contract) ? effect.contract : undefined;
   const externalReference = isRecord(effect.externalReference) ? effect.externalReference : undefined;
   const entitlementTransition = isRecord(effect.entitlementTransition) ? effect.entitlementTransition : undefined;
-  const policyBaseAmount = moneyFrom(effect.policyBaseAmount);
-  const targetCurrentContractAmount = moneyFrom(effect.targetCurrentContractAmount);
-  const manualAdjustmentMinor = typeof effect.manualAdjustmentMinor === "number" ? effect.manualAdjustmentMinor : undefined;
+  const pricingDecision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
+  const pricingReason = pricingDecision && isRecord(pricingDecision.reason) ? pricingDecision.reason : undefined;
+  const pricingBasis = pricingDecision && typeof pricingDecision.pricingBasis === "string" ? pricingDecision.pricingBasis : undefined;
+  const policyBaseAmount = moneyFrom(pricingDecision?.policyBaseAmount ?? effect.policyBaseAmount);
+  const targetCurrentContractAmount = moneyFrom(pricingDecision?.targetCurrentContractAmount ?? effect.targetCurrentContractAmount);
+  const differenceFromPolicy = moneyFrom(pricingDecision?.differenceFromPolicy);
+  const manualAdjustmentMinor = typeof pricingDecision?.manualAdjustmentMinor === "number"
+    ? pricingDecision.manualAdjustmentMinor
+    : typeof effect.manualAdjustmentMinor === "number" ? effect.manualAdjustmentMinor : undefined;
   const coverage = pricing && Array.isArray(pricing.coverageSet) ? pricing.coverageSet : [];
   const cashLines = pricing && Array.isArray(pricing.cashLines) ? pricing.cashLines : [];
   const hasBookingChannel = Object.hasOwn(effect, "bookingChannelCode");
@@ -566,6 +573,65 @@ function EffectSummary({ preview, fulfillment = false }: { preview: PreviewDto; 
     </div>;
   }
 
+  if (preview.commandType === "CREATE_ORDER" && bookingChannelCode) {
+    const channelContract = pricingBasis === "CHANNEL_CONTRACT";
+    const manualAdjustment = pricingBasis === "MANUAL_ADJUSTMENT";
+    return <div className="effect-summary membership-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="paid-stay-summary-heading">
+        <h3 id="paid-stay-summary-heading">请核对住宿订单</h3>
+        <dl className="difference-grid">
+          {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
+          {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
+          <dt>订单来源渠道</dt><dd>{bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode}</dd>
+          <dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? "未填写"}</dd>
+          {policyBaseAmount ? <><dt>政策基础金额</dt><dd data-testid="preview-policy-base-amount">{formatMoney(policyBaseAmount)}</dd></> : null}
+          {targetCurrentContractAmount ? <><dt>{channelContract ? "本单渠道应结金额" : "订单合同金额"}</dt><dd data-testid="preview-target-contract-amount"><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd></> : null}
+          {differenceFromPolicy && differenceFromPolicy.minorUnits !== 0 ? <><dt>{channelContract ? "渠道合同价差" : "人工调价差额"}</dt><dd data-testid={manualAdjustment ? "preview-manual-adjustment" : "preview-channel-contract-difference"}>{formatMoney(differenceFromPolicy)}</dd></> : null}
+          {pricingReason && typeof pricingReason.note === "string" && pricingReason.note ? <><dt>{channelContract ? "渠道价格差异说明" : "人工调价原因"}</dt><dd>{pricingReason.note}</dd></> : null}
+        </dl>
+        <p className="muted compact">确认后，订单合同金额与首条计价记录将在同一事务中写入。</p>
+      </section>
+    </div>;
+  }
+
+  if (preview.commandType === "CREATE_ORDER") {
+    const policyBase = createPricingDecision ? moneyFrom(createPricingDecision.policyBaseAmount) : pricing ? moneyFrom(pricing.cashRemainder) : undefined;
+    const targetAmount = createPricingDecision ? moneyFrom(createPricingDecision.targetCurrentContractAmount) : pricing ? moneyFrom(pricing.currentContractAmount) : undefined;
+    const difference = createPricingDecision ? moneyFrom(createPricingDecision.differenceFromPolicy) : undefined;
+    const pricingReason = createPricingDecision && isRecord(createPricingDecision.reason) ? createPricingDecision.reason : undefined;
+    const pricingBasis = createPricingDecision?.pricingBasis;
+    const pricingBasisLabel = pricingBasis === "CHANNEL_CONTRACT"
+      ? "渠道合同价"
+      : pricingBasis === "MANUAL_ADJUSTMENT"
+        ? "人工调价"
+        : pricingBasis === "FREE"
+          ? "免费入住"
+          : "政策价";
+    return <div className="effect-summary lodging-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="create-order-summary-heading">
+        <h3 id="create-order-summary-heading">请核对{isFreeStay ? "免费住宿" : "住宿订单"}</h3>
+        <dl className="difference-grid">
+          {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>住客昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要住客姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
+          {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
+          {isFreeStay ? <>
+            <dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd>
+            <dt>免费入住原因</dt><dd>{freeStayReason ?? "历史未记录"}</dd>
+          </> : <>
+            <dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd>
+            <dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? "未填写"}</dd>
+          </>}
+          <dt>计价依据</dt><dd>{pricingBasisLabel}</dd>
+          {policyBase ? <><dt>政策基础金额</dt><dd>{formatMoney(policyBase)}</dd></> : null}
+          {targetAmount ? <><dt>{pricingBasis === "CHANNEL_CONTRACT" ? "本单渠道应结金额" : "订单合同金额"}</dt><dd><strong>{formatMoney(targetAmount)}</strong></dd></> : null}
+          {difference ? <><dt>与政策价差异</dt><dd>{formatMoney(difference)}</dd></> : null}
+          {pricingReason && typeof pricingReason.note === "string" && pricingReason.note ? <><dt>{pricingBasis === "CHANNEL_CONTRACT" ? "渠道价格差异说明" : "人工调价原因"}</dt><dd>{pricingReason.note}</dd></> : null}
+        </dl>
+      </section>
+    </div>;
+  }
+
   return (
     <div className="effect-summary" data-testid="command-effect">
       <div className="preview-meta">
@@ -669,9 +735,12 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
   const memberId = result && typeof result.memberId === "string" ? result.memberId : undefined;
   const memberContractId = result && typeof result.memberContractId === "string" ? result.memberContractId : undefined;
   const memberExternalReferenceId = result && typeof result.memberExternalReferenceId === "string" ? result.memberExternalReferenceId : undefined;
-  const policyBaseAmount = result ? moneyFrom(result.policyBaseAmount) : undefined;
-  const targetCurrentContractAmount = result ? moneyFrom(result.targetCurrentContractAmount) : undefined;
-  const manualAdjustmentMinor = result && typeof result.manualAdjustmentMinor === "number" ? result.manualAdjustmentMinor : undefined;
+  const pricingDecision = result && isRecord(result.pricingDecision) ? result.pricingDecision : undefined;
+  const policyBaseAmount = result ? moneyFrom(pricingDecision?.policyBaseAmount ?? result.policyBaseAmount) : undefined;
+  const targetCurrentContractAmount = result ? moneyFrom(pricingDecision?.targetCurrentContractAmount ?? result.targetCurrentContractAmount) : undefined;
+  const manualAdjustmentMinor = typeof pricingDecision?.manualAdjustmentMinor === "number"
+    ? pricingDecision.manualAdjustmentMinor
+    : result && typeof result.manualAdjustmentMinor === "number" ? result.manualAdjustmentMinor : undefined;
   const committed = receipt.businessCommitted;
   if (businessCommand && fulfillmentBusinessCommands.has(businessCommand)) {
     const entitlementTransition = result && isRecord(result.entitlementTransition) ? result.entitlementTransition : undefined;
@@ -756,6 +825,10 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
       </div>
       {receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
       {occupants.length && committed ? <div className="receipt-occupants"><strong>{occupants.length} 位住宿人</strong><OccupantSummary value={result?.occupants} /></div> : null}
+      {!memberStay && committed && policyBaseAmount && targetCurrentContractAmount ? <dl className="receipt-grid">
+        <dt>政策基础金额</dt><dd data-testid="receipt-policy-base-amount">{formatMoney(policyBaseAmount)}</dd>
+        <dt>{pricingDecision?.pricingBasis === "CHANNEL_CONTRACT" ? "本单渠道应结金额" : "订单合同金额"}</dt><dd data-testid="receipt-target-contract-amount"><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd>
+      </dl> : null}
       {orderId && committed ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
     </section>;
   }
@@ -1212,11 +1285,12 @@ export function CommandDialog({
   const executableCommandType = isExecutableCommandType(request.commandType) ? request.commandType : undefined;
   const memberProfile = request.commandType === "CREATE_MEMBER";
   const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
+  const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
-  const businessFacing = memberProfile || membershipBusiness || memberLodging || fulfillment;
-  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : memberLodging ? "CREATE_MEMBER_STAY" : fulfillment && executableCommandType ? executableCommandType : "OPERATOR_CONFIRMED"));
-  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : memberLodging ? "创建会员住宿订单" : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : ""));
+  const businessFacing = memberProfile || membershipBusiness || createOrderBusiness || fulfillment;
+  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : fulfillment && executableCommandType ? executableCommandType : "OPERATOR_CONFIRMED"));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
   const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && !initialReceipt));
   const [failedNotExecuted, setFailedNotExecuted] = useState(false);
@@ -1229,7 +1303,7 @@ export function CommandDialog({
   const previewExpired = Boolean(preview && (!Number.isFinite(previewExpiry) || expiryClock >= previewExpiry));
   const canConfirm = Boolean(preview
     && reasonCode.trim()
-    && reasonNote.trim()
+    && (createOrderBusiness || reasonNote.trim())
     && !busy
     && !writeBlocked
     && !previewExpired
@@ -1290,7 +1364,7 @@ export function CommandDialog({
   }
 
   async function confirm() {
-    if (!preview || !reasonCode.trim() || !reasonNote.trim() || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
+    if (!preview || !reasonCode.trim() || (!createOrderBusiness && !reasonNote.trim()) || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
     if (!isExecutableCommandType(request.commandType)) {
       setError(new Error("该历史操作不能重新确认"));
       return;
@@ -1397,7 +1471,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }
@@ -1422,7 +1496,7 @@ export function CommandDialog({
       />
       {!preview && !receipt ? (
         <div className="command-pending">
-          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">
@@ -1460,7 +1534,7 @@ export function CommandDialog({
           data-command-state="duplicate-returned-original-receipt"
         >
           <strong>{businessFacing ? "已找到原操作结果" : "已返回原 Receipt"}</strong>
-          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
+          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
         </div>
       ) : null}
       {receipt ? <ReceiptPanel
@@ -1472,9 +1546,9 @@ export function CommandDialog({
       /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
-          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
+          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recover()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : fulfillment ? "查询操作结果" : "查询命令结果"}
+            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : "查询命令结果"}
           </button>
         </div>
       ) : null}

@@ -69,7 +69,9 @@ async function execute(db: Kysely<Database>, commandType: CommandType, input: Re
     commandType,
     confirmation: true,
     expectedEffectHash: prepared.preview.effectHash,
-    reason: { code: "STAGE8_ACCEPTANCE", note: "准备第 4 步 4.1 独立人工验收数据" }
+    reason: commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "STAGE8_ACCEPTANCE", note: "准备第 4 步 4.1 独立人工验收数据" }
   }, { idempotencyKey: `${key}-confirm`, correlationId: key });
   if (!receipt.businessCommitted) throw new Error(`${key} failed: ${receipt.error?.code ?? receipt.executionStatus}`);
   return receipt;
@@ -109,7 +111,11 @@ async function createStay(db: Kysely<Database>, options: {
       phone: "13800008008",
       documentNumber: `STAGE8-${options.key}`
     },
-    ...(!options.memberId && stayType !== "FREE" ? { bookingChannelCode: "WECOM", channelOrderReference: null } : {}),
+    ...(!options.memberId && stayType !== "FREE" ? {
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+    } : {}),
     ...(stayType === "FREE" ? { freeStayReason: "阶段 8 免费住宿履约验收", freeStayCategoryCode: "RECEPTION" } : {})
   }, `${options.key}-create-stay`);
   const orderId = receipt.result?.orderId;

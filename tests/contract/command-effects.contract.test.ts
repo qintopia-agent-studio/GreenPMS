@@ -20,7 +20,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   RECORD_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "payment", "productName", "status", "totals"],
   CORRECT_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "original", "originalPaymentFactId", "productName", "replacement", "status", "totals"],
   ACTIVATE_MEMBERSHIP_ORDER: ["agreedPrice", "entitlementUnitKind", "entitlementUnits", "fromStatus", "memberName", "membershipOrderId", "operation", "paymentDifference", "paymentTotal", "productName", "toStatus", "validFrom", "validUntil"],
-  CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayCategoryCode", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
+  CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayCategoryCode", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingDecision", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
   EXTEND_STAY: ["after", "before", "inventoryUnitId", "orderId"],
   SHORTEN_STAY: ["after", "before", "inventoryUnitId", "orderId"],
@@ -98,7 +98,9 @@ async function confirm(preview: Preview): Promise<Record<string, unknown>> {
       commandType: preview.commandType,
       confirmation: true,
       expectedEffectHash: preview.effectHash,
-      reason: { code: "EFFECT_CONTRACT", note: `Prepare state for ${preview.commandType} effect coverage` }
+      reason: preview.commandType === "CREATE_ORDER"
+        ? { code: "CREATE_STANDARD_ORDER", note: "" }
+        : { code: "EFFECT_CONTRACT", note: `Prepare state for ${preview.commandType} effect coverage` }
     }
   });
   expect(response.statusCode, `${preview.commandType}: ${response.body}`).toBe(200);
@@ -127,7 +129,7 @@ async function quote(options: {
     }
   });
   expect(response.statusCode, response.body).toBe(200);
-  return (response.json() as { quote: { quoteId: string } }).quote;
+  return (response.json() as { quote: { quoteId: string; currentContractAmount: { minorUnits: number } } }).quote;
 }
 
 beforeAll(async () => {
@@ -281,7 +283,7 @@ describe("Command effect HTTP contract", () => {
       tokenId: "token_demo_read"
     });
 
-    const priced = await quote();
+    const priced = await quote({ arrivalDate: "2028-04-10", departureDate: "2028-04-14" });
     const createOrder = await capture("CREATE_ORDER", {
       propertyId: demo.propertyId,
       quoteId: priced.quoteId,
@@ -292,7 +294,8 @@ describe("Command effect HTTP contract", () => {
         documentNumber: "EFFECT-CONTRACT-001"
       },
       bookingChannelCode: "CTRIP",
-      channelOrderReference: "TEST-EFFECT-ORDER-001"
+      channelOrderReference: "TEST-EFFECT-ORDER-001",
+      targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits
     });
     expect(createOrder.effect.primaryGuest).toEqual({
       fullName: "Effect Contract Guest",
@@ -308,10 +311,22 @@ describe("Command effect HTTP contract", () => {
         role: "PRIMARY",
         fullName: "Effect Contract Guest",
         nickname: "Effect Guest"
-      }]
+      }],
+      pricingDecision: {
+        pricingBasis: "CHANNEL_CONTRACT",
+        policyBaseAmount: priced.currentContractAmount,
+        differenceFromPolicy: { currency: "CNY", minorUnits: 0 },
+        manualAdjustmentMinor: 0,
+        differenceExceedsThreshold: false,
+        reason: { code: "CREATE_ORDER_CHANNEL_CONTRACT", note: "" }
+      }
     });
     const createOrderResult = await confirm(createOrder);
     expect(createOrderResult.primaryGuest).toEqual(createOrder.effect.primaryGuest);
+    expect(createOrderResult).toMatchObject({
+      pricingPolicyVersionId: demo.transientPolicyId,
+      pricingDecision: createOrder.effect.pricingDecision
+    });
     expect(createOrderResult.occupants).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: (createOrder.effect.occupants as Array<{ id: string }>)[0]!.id,
@@ -343,18 +358,18 @@ describe("Command effect HTTP contract", () => {
     await capture("SHORTEN_STAY", {
       propertyId: demo.propertyId,
       orderId,
-      newDepartureDate: shiftLocalDate(propertyToday, 3)
+      newDepartureDate: "2028-04-13"
     });
     await capture("EXTEND_STAY", {
       propertyId: demo.propertyId,
       orderId,
-      newDepartureDate: shiftLocalDate(propertyToday, 5)
+      newDepartureDate: "2028-04-15"
     });
     await capture("MOVE_UNIT", {
       propertyId: demo.propertyId,
       orderId,
       newInventoryUnitId: demo.secondRoomId,
-      effectiveDate: shiftLocalDate(propertyToday, 2)
+      effectiveDate: "2028-04-12"
     });
     await capture("REPRICE_ORDER", {
       propertyId: demo.propertyId,
@@ -406,7 +421,20 @@ describe("Command effect HTTP contract", () => {
       note: "Effect contract reversal"
     });
 
-    const checkIn = await capture("CHECK_IN", { propertyId: demo.propertyId, orderId });
+    const checkInPriced = await quote({
+      arrivalDate: propertyToday,
+      departureDate: shiftLocalDate(propertyToday, 1)
+    });
+    const checkInOrder = await capture("CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: checkInPriced.quoteId,
+      primaryGuest: { fullName: "Effect Contract Check-in Guest", nickname: "Effect Check-in" },
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: checkInPriced.currentContractAmount.minorUnits
+    });
+    const checkInOrderId = (await confirm(checkInOrder)).orderId as string;
+    const checkIn = await capture("CHECK_IN", { propertyId: demo.propertyId, orderId: checkInOrderId });
     expect(checkIn.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     await confirm(checkIn);
     const checkoutPriced = await quote({
@@ -419,7 +447,8 @@ describe("Command effect HTTP contract", () => {
       quoteId: checkoutPriced.quoteId,
       primaryGuest: { fullName: "Effect Contract Checkout Guest", nickname: "Effect Checkout" },
       bookingChannelCode: "WECOM",
-      channelOrderReference: null
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: checkoutPriced.currentContractAmount.minorUnits
     });
     const checkoutOrderId = (await confirm(checkoutOrder)).orderId as string;
     await db.updateTable("orders").set({ status: "CHECKED_IN" }).where("id", "=", checkoutOrderId).execute();

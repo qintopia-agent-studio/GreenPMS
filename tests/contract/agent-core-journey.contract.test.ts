@@ -129,10 +129,12 @@ async function runCommand(
   expect(previewReplay.json()).toEqual(previewBody);
 
   const confirmIdempotencyKey = `${prefix}-confirm`;
-  const reason = {
-    code: "AGENT_HTTP_ACCEPTANCE",
-    note: `Confirm ${commandType} for the scoped agent HTTP journey`
-  };
+  const reason = commandType === "CREATE_ORDER"
+    ? { code: "CREATE_STANDARD_ORDER", note: "" }
+    : {
+        code: "AGENT_HTTP_ACCEPTANCE",
+        note: `Confirm ${commandType} for the scoped agent HTTP journey`
+      };
   const confirmRequest = {
     method: "POST" as const,
     url: `/api/v1/command-previews/${previewBody.preview.previewId}/confirm`,
@@ -399,7 +401,17 @@ describe("scoped agent HTTP core journey", () => {
       }],
       occupancyCapacity: 1,
       bookingChannelCode: null,
-      channelOrderReference: null
+      channelOrderReference: null,
+      pricingPolicyVersionId: demo.transientPolicyId,
+      pricingDecision: {
+        pricingBasis: "MEMBER_ENTITLEMENT",
+        policyBaseAmount: quote.currentContractAmount,
+        targetCurrentContractAmount: quote.currentContractAmount,
+        differenceFromPolicy: { currency: "CNY", minorUnits: 0 },
+        manualAdjustmentMinor: 0,
+        differenceExceedsThreshold: false,
+        reason: { code: "CREATE_ORDER_MEMBER", note: "" }
+      }
     });
     const occupantId = (created.preview.effect.occupants as Array<{ id: string }>)[0]!.id;
     expect(created.receipt.result).toMatchObject({
@@ -415,7 +427,9 @@ describe("scoped agent HTTP core journey", () => {
         documentNumber: "AGENT-HTTP-2028"
       }],
       bookingChannelCode: null,
-      channelOrderReference: null
+      channelOrderReference: null,
+      pricingPolicyVersionId: demo.transientPolicyId,
+      pricingDecision: created.preview.effect.pricingDecision
     });
     const orderId = created.receipt.result?.orderId as string;
     expect(orderId).toMatch(/^order_/);

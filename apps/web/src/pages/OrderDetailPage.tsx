@@ -572,7 +572,33 @@ export function OrderDetailPage() {
 
       <section className="detail-section full-detail"><div className="section-title-row"><h2 id="segments-heading">住宿分段</h2><span>{view.segments.length}</span></div><div className="table-region" role="region" aria-label="住宿分段" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">库存单元</th><th scope="col">周期</th><th scope="col">类型</th><th scope="col">Segment ID</th></tr></thead><tbody>{view.segments.map((segment) => { const unit = unitMap.get(segment.inventory_unit_id); return <tr key={segment.id}><td>{segment.sequence}</td><th scope="row">{unit ? `${unit.code} · ${unit.name}` : segment.inventory_unit_id}</th><td>{formatDate(segment.arrival_date)} 至 {formatDate(segment.departure_date)}</td><td>{segment.segment_type}</td><td><code>{segment.id}</code></td></tr>; })}</tbody></table></div></section>
 
-      <section className="detail-section full-detail" aria-labelledby="revisions-heading"><div className="section-title-row"><h2 id="revisions-heading">Pricing revisions</h2><span>{view.pricingRevisions.length}</span></div><div className="table-region" role="region" aria-label="计价修订" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">Revision</th><th scope="col">锁定政策</th><th scope="col">周期</th><th scope="col">Coverage</th><th scope="col">政策基础报价</th><th scope="col">人工调价差额</th><th scope="col">指定最终总价</th><th scope="col">明细</th></tr></thead><tbody>{view.pricingRevisions.map((revision) => <tr key={revision.id}><th scope="row">#{revision.revision_no}<code>{revision.id}</code></th><td><code>{revision.policy_version_id}</code></td><td>{formatDate(revision.arrival_date)} 至 {formatDate(revision.departure_date)}</td><td>{countArray(revision.coverage_set)}</td><td>{formatMinor(revision.policy_base_amount_minor, revision.currency)}</td><td>{formatMinor(revision.manual_adjustment_minor, revision.currency)}</td><td><strong>{formatMinor(revision.current_contract_amount_minor, revision.currency)}</strong></td><td><JsonDetails label="查看" value={{ coverageSet: revision.coverage_set, cashLines: revision.cash_lines, policyBaseAmountMinor: revision.policy_base_amount_minor, manualAdjustmentMinor: revision.manual_adjustment_minor, targetCurrentContractAmountMinor: revision.current_contract_amount_minor }} /></td></tr>)}</tbody></table></div></section>
+      <section className="detail-section full-detail" aria-labelledby="revisions-heading">
+        <div className="section-title-row"><h2 id="revisions-heading">计价记录</h2><span>{view.pricingRevisions.length}</span></div>
+        <div className="table-region" role="region" aria-label="计价修订" tabIndex={0}>
+          <table className="data-table compact-table">
+            <thead><tr><th scope="col">序号</th><th scope="col">锁定政策</th><th scope="col">周期</th><th scope="col">权益覆盖</th><th scope="col">政策基础金额</th><th scope="col">价格差额</th><th scope="col">订单合同金额</th><th scope="col">价格性质与说明</th></tr></thead>
+            <tbody>{view.pricingRevisions.map((revision) => {
+              const basisLabel = revision.pricing_basis === "CHANNEL_CONTRACT"
+                ? "渠道合同价"
+                : revision.pricing_basis === "MANUAL_ADJUSTMENT"
+                  ? "人工调价"
+                  : revision.pricing_basis === "MEMBER_ENTITLEMENT"
+                    ? "会员权益计价"
+                    : revision.pricing_basis === "FREE" ? "免费入住" : "政策价";
+              return <tr key={revision.id}>
+                <th scope="row">#{revision.revision_no}<code>{revision.id}</code></th>
+                <td><code>{revision.policy_version_id}</code></td>
+                <td>{formatDate(revision.arrival_date)} 至 {formatDate(revision.departure_date)}</td>
+                <td>{countArray(revision.coverage_set)}</td>
+                <td>{formatMinor(revision.policy_base_amount_minor, revision.currency)}</td>
+                <td><span>{revision.pricing_basis === "CHANNEL_CONTRACT" ? "渠道合同价差" : revision.pricing_basis === "MANUAL_ADJUSTMENT" ? "人工调价差额" : "与政策价差额"}</span><strong>{formatMinor(revision.difference_from_policy_minor, revision.currency)}</strong></td>
+                <td><strong>{formatMinor(revision.current_contract_amount_minor, revision.currency)}</strong></td>
+                <td><strong>{basisLabel}</strong><small>{revision.reason.note || "无需说明"}</small></td>
+              </tr>;
+            })}</tbody>
+          </table>
+        </div>
+      </section>
 
       <section className="detail-section full-detail" aria-labelledby="coverage-table-heading"><div className="section-title-row"><h2 id="coverage-table-heading">会员权益覆盖</h2><span>{view.coverageSet.length}</span></div>{view.coverageSet.length ? <div className="table-region" role="region" aria-label="会员覆盖" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">服务日期</th><th scope="col">住宿位置</th><th scope="col">权益类型</th><th scope="col">状态</th></tr></thead><tbody>{view.coverageSet.map((coverage) => <tr key={coverage.id}><td>{coverage.service_date}</td><td>{unitMap.get(coverage.inventory_unit_id)?.code ?? "房源"}</td><td>{coverage.unit_kind === "ROOM_NIGHT" ? "间夜" : "床夜"}</td><td><StatusBadge value={coverage.status} label={businessStatusLabel(coverage.status)} /></td></tr>)}</tbody></table></div> : <EmptyState title="没有会员覆盖" detail="此订单未使用会员住宿权益。" />}</section>
 

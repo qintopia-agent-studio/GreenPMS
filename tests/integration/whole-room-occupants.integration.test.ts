@@ -61,7 +61,8 @@ async function quotedCreateOrderInput(unitId: string, arrivalDate: string, depar
       documentNumber: "PRIMARY-DOC"
     },
     bookingChannelCode: "YOUMUDAO",
-    channelOrderReference: "WHOLE-ROOM-OCCUPANTS"
+    channelOrderReference: "WHOLE-ROOM-OCCUPANTS",
+    targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
   } satisfies CommandEnvelope["input"];
 }
 
@@ -81,7 +82,7 @@ async function createTwoOccupantOrder(unitId: string, arrivalDate: string, depar
     commandType: "CREATE_ORDER",
     confirmation: true,
     expectedEffectHash: prepared.preview.effectHash,
-    reason: { code: "CREATE_STANDARD_ORDER", note: `Create ${prefix} order` }
+    reason: { code: "CREATE_STANDARD_ORDER", note: "" }
   }, metadata(`${prefix}-confirm`));
   return { prepared, receipt };
 }
@@ -132,7 +133,7 @@ describe("whole-room occupants", () => {
       commandType: "CREATE_ORDER" as const,
       confirmation: true as const,
       expectedEffectHash: prepared.preview.effectHash,
-      reason: { code: "CREATE_STANDARD_ORDER", note: "Create the tested whole-room order" }
+      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
     };
     const concurrent = await Promise.allSettled([
       confirmCommandPreview(db, principal, prepared.preview.previewId, confirmation, confirmMetadata),
@@ -295,7 +296,7 @@ describe("whole-room occupants", () => {
         commandType: "CREATE_ORDER",
         confirmation: true,
         expectedEffectHash: prepared.preview.effectHash,
-        reason: { code: "CREATE_STANDARD_ORDER", note: "Confirm the tested capacity change" }
+        reason: { code: "CREATE_STANDARD_ORDER", note: "" }
       }, metadata("capacity-stale-confirm"));
       expect(receipt).toMatchObject({
         executionStatus: "NOT_EXECUTED",

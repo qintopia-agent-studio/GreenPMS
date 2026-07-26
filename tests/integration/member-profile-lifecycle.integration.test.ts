@@ -50,7 +50,9 @@ async function confirm(envelope: CommandEnvelope, prefix: string): Promise<Recei
     commandType: envelope.commandType,
     confirmation: true,
     expectedEffectHash: created.preview.effectHash,
-    reason: { code: "MEMBER_LIFECYCLE_TEST", note: `Confirm ${prefix}` }
+    reason: envelope.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "MEMBER_LIFECYCLE_TEST", note: `Confirm ${prefix}` }
   }, metadata(`${prefix}-confirm`));
 }
 

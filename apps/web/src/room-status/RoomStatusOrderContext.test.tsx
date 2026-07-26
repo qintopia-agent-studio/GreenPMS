@@ -87,8 +87,11 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       coverage_set: [],
       cash_lines: [],
       policy_base_amount_minor: 60000,
+      pricing_basis: "POLICY",
       manual_adjustment_minor: 0,
       current_contract_amount_minor: 60000,
+      difference_from_policy_minor: 0,
+      reason: { code: "CREATE_ORDER_POLICY_PRICE", note: "" },
       currency: "CNY",
       created_at: "2026-07-25T10:00:00.000Z"
     }],

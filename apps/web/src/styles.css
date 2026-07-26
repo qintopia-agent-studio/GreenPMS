@@ -1838,6 +1838,20 @@ thead .sticky-column {
   padding-top: 14px;
 }
 
+.inline-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.inline-summary strong {
+  color: var(--text);
+}
+
 .modal {
   width: min(94vw, 620px);
   max-width: none;

@@ -2,6 +2,7 @@ import { Type, type TObject, type TProperties } from "@sinclair/typebox";
 import {
   bookingChannelCodes,
   commandTypes,
+  createOrderPricingBasisCodes,
   errorCauseCodes,
   errorCodes,
   freeStayCategoryCodes,
@@ -108,6 +109,10 @@ export const AmountSummarySchema = strictObject({
 export const CommandReasonSchema = strictObject({
   code: Type.String({ minLength: 1, maxLength: 80 }),
   note: Note
+});
+const RecordedCommandReasonSchema = strictObject({
+  code: Type.String({ minLength: 1, maxLength: 80 }),
+  note: OptionalNote
 });
 
 const ErrorDetailsSchema = Type.Union([
@@ -260,6 +265,13 @@ export const CommandEnvelopeSchema = Type.Union([
     additionalGuests: Type.Optional(Type.Array(PrimaryGuestInputSchema, { maxItems: 999 })),
     bookingChannelCode: Type.Optional(BookingChannelCodeSchema),
     channelOrderReference: Type.Optional(nullable(ShortText)),
+    targetCurrentContractAmountMinor: Type.Optional(Type.Integer({
+      minimum: 0,
+      maximum: 2_147_483_600,
+      multipleOf: 100
+    })),
+    channelPriceDifferenceReason: Type.Optional(Note),
+    manualPriceAdjustmentReason: Type.Optional(Note),
     freeStayReason: Type.Optional(Note),
     freeStayCategoryCode: Type.Optional(FreeStayCategoryCodeSchema)
   })),
@@ -317,13 +329,25 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("REVOKE_TOKEN", strictObject({ ...PropertyInput, tokenId: Id }))
 ]);
 
-export const ConfirmSchema = strictObject({
+const ConfirmBaseProperties = {
   propertyId: Id,
-  commandType: CommandTypeSchema,
   confirmation: Type.Literal(true),
-  expectedEffectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
-  reason: CommandReasonSchema
-});
+  expectedEffectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+};
+export const ConfirmSchema = Type.Union([
+  strictObject({
+    ...ConfirmBaseProperties,
+    commandType: Type.Literal("CREATE_ORDER"),
+    reason: strictObject({ code: Type.Literal("CREATE_STANDARD_ORDER"), note: Type.Literal("") })
+  }),
+  strictObject({
+    ...ConfirmBaseProperties,
+    commandType: Type.Union(commandTypes
+      .filter((commandType) => commandType !== "CREATE_ORDER")
+      .map((commandType) => Type.Literal(commandType))),
+    reason: CommandReasonSchema
+  })
+]);
 
 const InventoryUnitRecordSchema = strictObject({
   id: Id,
@@ -346,6 +370,15 @@ const PricingResultSchema = strictObject({
   cashLines: Type.Array(CashLine),
   cashRemainder: Money,
   currentContractAmount: Money
+});
+const CreateOrderPricingDecisionSchema = strictObject({
+  pricingBasis: Type.Union(createOrderPricingBasisCodes.map((code) => Type.Literal(code))),
+  policyBaseAmount: Money,
+  targetCurrentContractAmount: Money,
+  differenceFromPolicy: Money,
+  manualAdjustmentMinor: SafeInteger,
+  differenceExceedsThreshold: Type.Boolean(),
+  reason: RecordedCommandReasonSchema
 });
 export const QuoteSchema = strictObject({
   quoteId: Id,
@@ -461,6 +494,7 @@ export const CommandEffectSchema = Type.Union([
     pricingPolicyVersionId: Id,
     memberId: nullable(Id),
     memberContractId: nullable(Id),
+    pricingDecision: Type.Optional(CreateOrderPricingDecisionSchema),
     pricing: PricingResultSchema
   }),
   strictObject({
@@ -596,12 +630,14 @@ const CreateOrderResultSchema = strictObject({
   stayId: Id,
   segmentId: Id,
   pricingRevisionId: Id,
+  pricingPolicyVersionId: Type.Optional(Id),
   primaryGuest: nullable(PrimaryGuestSnapshotSchema),
   occupants: Type.Optional(Type.Array(OrderOccupantSchema, { minItems: 1, maxItems: 1000 })),
   bookingChannelCode: nullable(BookingChannelCodeSchema),
   channelOrderReference: nullable(ShortText),
   freeStayReason: nullable(Note),
-  freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema)
+  freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema),
+  pricingDecision: Type.Optional(CreateOrderPricingDecisionSchema)
 });
 const CorrectOrderOccupantResultSchema = strictObject({
   orderId: Id,
@@ -1215,11 +1251,12 @@ const CreateOrderAmendmentPayloadSchema = strictObject({
   bookingChannelCode: Type.Optional(nullable(BookingChannelCodeSchema)),
   channelOrderReference: Type.Optional(nullable(ShortText)),
   freeStayReason: Type.Optional(nullable(Note)),
-  freeStayCategoryCode: Type.Optional(nullable(FreeStayCategoryCodeSchema))
+  freeStayCategoryCode: Type.Optional(nullable(FreeStayCategoryCodeSchema)),
+  pricingDecision: Type.Optional(CreateOrderPricingDecisionSchema)
 });
 const AmendmentRowSchema = strictObject({
   id: Id, order_id: Id, sequence: Type.Integer({ minimum: 1 }), amendment_type: CommandTypeSchema,
-  reason_code: Type.String({ minLength: 1, maxLength: 80 }), reason_note: Note,
+  reason_code: Type.String({ minLength: 1, maxLength: 80 }), reason_note: OptionalNote,
   prior_version: Type.Integer({ minimum: 0 }), new_version: Type.Integer({ minimum: 1 }),
   payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema]),
   command_id: nullable(Id),
@@ -1229,7 +1266,12 @@ const AmendmentRowSchema = strictObject({
 const PricingRevisionRowSchema = strictObject({
   id: Id, order_id: Id, revision_no: Type.Integer({ minimum: 1 }), amendment_id: Id, policy_version_id: Id,
   arrival_date: LocalDate, departure_date: LocalDate, coverage_set: Type.Array(CoverageItem), cash_lines: Type.Array(CashLine),
-  policy_base_amount_minor: SafeInteger, manual_adjustment_minor: SafeInteger, current_contract_amount_minor: SafeInteger,
+  policy_base_amount_minor: SafeInteger,
+  pricing_basis: Type.Union(createOrderPricingBasisCodes.map((code) => Type.Literal(code))),
+  manual_adjustment_minor: SafeInteger,
+  current_contract_amount_minor: SafeInteger,
+  difference_from_policy_minor: SafeInteger,
+  reason: RecordedCommandReasonSchema,
   currency: Type.String({ minLength: 3, maxLength: 3 }), created_at: DateTime
 });
 const CoverageRowSchema = strictObject({
@@ -1474,7 +1516,7 @@ export const AuditResponseSchema = strictObject({
   entries: Type.Array(strictObject({
     id: Id, subject_id: Id, credential_id: Id, action: Type.String({ minLength: 1, maxLength: 200 }),
     decision: Type.Union([Type.Literal("ALLOWED"), Type.Literal("DENIED")]), command_id: nullable(Id),
-    correlation_id: Type.String({ minLength: 1, maxLength: 160 }), reason: nullable(CommandReasonSchema),
+    correlation_id: Type.String({ minLength: 1, maxLength: 160 }), reason: nullable(RecordedCommandReasonSchema),
     target_refs: Type.Array(Id), metadata: AuditMetadataSchema, created_at: DateTime
   }))
 });

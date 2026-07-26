@@ -97,6 +97,9 @@ async function createOrder(page: Page, options: {
   freeStayCategoryCode?: "VOLUNTEER" | "RECEPTION";
   bookingChannelCode?: "YOUMUDAO" | "CTRIP" | "MEITUAN" | "WECOM";
   channelOrderReference?: string;
+  targetContractAmountYuan?: string;
+  channelPriceDifferenceReason?: string;
+  manualPriceAdjustmentReason?: string;
   additionalGuests?: Array<{
     fullName: string;
     nickname: string;
@@ -161,6 +164,18 @@ async function createOrder(page: Page, options: {
       await page.getByTestId("channel-order-reference").fill(channelOrderReference);
       expectedFacts.push(channelOrderReference);
     }
+    const policyAmount = (await quoteResult.getByText("政策基础金额", { exact: true }).locator("..").locator("strong").innerText())
+      .replace(/[¥,]/g, "")
+      .replace(/\.00$/, "");
+    await page.getByTestId("target-contract-amount").fill(options.targetContractAmountYuan ?? policyAmount);
+    if (options.channelPriceDifferenceReason) {
+      await page.getByTestId("channel-price-difference-reason").fill(options.channelPriceDifferenceReason);
+      expectedFacts.push(options.channelPriceDifferenceReason);
+    }
+    if (options.manualPriceAdjustmentReason) {
+      await page.getByTestId("manual-price-adjustment-reason").fill(options.manualPriceAdjustmentReason);
+      expectedFacts.push(options.manualPriceAdjustmentReason);
+    }
   } else {
     await expect(page.getByTestId("booking-channel-code")).toHaveCount(0);
   }
@@ -178,17 +193,15 @@ async function createOrder(page: Page, options: {
     expectedFacts.push(guest.nickname);
   }
   await page.getByTestId("create-order").click();
-  if (options.stayMode === "MEMBER") {
-    const effect = page.getByTestId("command-effect");
-    await expect(effect).toBeVisible({ timeout: 15_000 });
-    for (const text of expectedFacts) await expect(effect).toContainText(text);
-    const confirmButton = page.getByTestId("confirm-command");
-    await expect(confirmButton).toBeEnabled({ timeout: 15_000 });
-    await confirmButton.click();
-    await expect(page.getByTestId("command-receipt")).toContainText("会员住宿订单已创建");
-    return;
-  }
-  await confirmCommand(page, `Create ${options.guest}`, expectedFacts);
+  const effect = page.getByTestId("command-effect");
+  await expect(effect).toBeVisible({ timeout: 15_000 });
+  for (const text of expectedFacts) await expect(effect).toContainText(text);
+  await expect(page.getByTestId("reason-code")).toHaveCount(0);
+  await expect(page.getByTestId("reason-note")).toHaveCount(0);
+  const confirmButton = page.getByTestId("confirm-command");
+  await expect(confirmButton).toBeEnabled({ timeout: 15_000 });
+  await confirmButton.click();
+  await expect(page.getByTestId("command-receipt")).toContainText(options.stayMode === "MEMBER" ? "会员住宿订单已创建" : "住宿订单已创建");
 }
 
 async function openFactFormAndSubmit(

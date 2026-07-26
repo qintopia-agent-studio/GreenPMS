@@ -48,7 +48,9 @@ async function confirm(envelope: CommandEnvelope, prefix: string): Promise<Recei
     commandType: envelope.commandType,
     confirmation: true,
     expectedEffectHash: prepared.preview.effectHash,
-    reason: { code: "STEP_2C_ACCEPTANCE", note: `确认 ${prefix}` }
+    reason: envelope.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "STEP_2C_ACCEPTANCE", note: `确认 ${prefix}` }
   }, metadata(`${prefix}-confirm`));
 }
 
@@ -337,6 +339,14 @@ describe("step 2C member balances and stays", () => {
     expect(new Set(coverage.map((item) => item.contract_id))).toEqual(new Set([replenished.contractId]));
     expect(new Set(coverage.map((item) => item.lot_id))).toEqual(new Set([replenished.lotId]));
     expect(await db.selectFrom("entitlement_ledger").select("entry_type").where("order_id", "=", orderId).execute()).toEqual([{ entry_type: "HOLD" }, { entry_type: "HOLD" }]);
+    expect(await db.selectFrom("pricing_revisions")
+      .select("pricing_basis")
+      .where("order_id", "=", orderId)
+      .orderBy("revision_no")
+      .execute()).toEqual([
+      { pricing_basis: "MEMBER_ENTITLEMENT" },
+      { pricing_basis: "MEMBER_ENTITLEMENT" }
+    ]);
   });
 
   it("serializes two stays competing for the final member night", async () => {
@@ -364,7 +374,7 @@ describe("step 2C member balances and stays", () => {
       commandType: "CREATE_ORDER",
       confirmation: true,
       expectedEffectHash: prepared.preview.effectHash,
-      reason: { code: "STEP_2C_CONCURRENCY", note: label }
+      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
     }, metadata(`${label}-confirm`));
     const results = await Promise.all([confirmation(previewA, "last-night-a"), confirmation(previewB, "last-night-b")]);
     expect(results.filter((result) => result.businessCommitted)).toHaveLength(1);

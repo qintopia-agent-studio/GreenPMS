@@ -44,17 +44,21 @@ async function createOccupiedFixture(request: APIRequestContext) {
     }
   });
   expect(quote.ok(), await quote.text()).toBe(true);
-  const quoteId = (await quote.json()).quote.quoteId as string;
+  const quoteBody = (await quote.json()).quote as {
+    quoteId: string;
+    currentContractAmount: { minorUnits: number };
+  };
   const preview = await request.post("/api/v1/command-previews", {
     headers: await commandHeaders("fixture-preview"),
     data: {
       commandType: "CREATE_ORDER",
       input: {
         propertyId: "prop_qintopia_demo",
-        quoteId,
+        quoteId: quoteBody.quoteId,
         primaryGuest: { fullName: "阶段一冲突夹具", nickname: "冲突夹具" },
         bookingChannelCode: "WECOM",
-        channelOrderReference: null
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: quoteBody.currentContractAmount.minorUnits
       }
     }
   });
@@ -67,7 +71,7 @@ async function createOccupiedFixture(request: APIRequestContext) {
       commandType: "CREATE_ORDER",
       confirmation: true,
       expectedEffectHash: previewBody.effectHash,
-      reason: { code: "CREATE_STANDARD_ORDER", note: "阶段一占用冲突夹具" }
+      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
     }
   });
   expect(confirm.ok(), await confirm.text()).toBe(true);

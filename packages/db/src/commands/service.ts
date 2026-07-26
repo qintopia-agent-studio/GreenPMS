@@ -701,7 +701,17 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
   if (!confirmation.propertyId?.trim()) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
   if (confirmation.confirmation !== true) throw new DomainError("CONFIRMATION_REQUIRED", "Explicit confirmation is required");
   if (!confirmation.expectedEffectHash?.trim()) throw new DomainError("CONFIRMATION_MISMATCH", "expectedEffectHash is required");
-  if (!confirmation.reason?.code?.trim() || !confirmation.reason.note?.trim()) throw new DomainError("REASON_REQUIRED", "A structured reason is required");
+  if (!confirmation.reason?.code?.trim()
+    || (confirmation.commandType !== "CREATE_ORDER" && !confirmation.reason.note?.trim())) {
+    throw new DomainError("REASON_REQUIRED", "A structured reason is required");
+  }
+  if (confirmation.commandType === "CREATE_ORDER"
+    && (confirmation.reason.code !== "CREATE_STANDARD_ORDER" || confirmation.reason.note !== "")) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER with an empty note"
+    );
+  }
   const requestHash = stableHash({ previewId, confirmation });
   const propertyId = confirmation.propertyId.trim();
   const commandType = confirmation.commandType;

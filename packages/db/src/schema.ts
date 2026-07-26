@@ -1,5 +1,5 @@
 import type { ColumnType } from "kysely";
-import type { BookingChannelCode } from "@qintopia/contracts";
+import type { BookingChannelCode, CreateOrderPricingBasis } from "@qintopia/contracts";
 
 type Timestamp = ColumnType<Date, Date | string, Date | string>;
 type GeneratedTimestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -36,7 +36,7 @@ export interface Database {
   stays: { id: string; order_id: string; status: string; created_at: GeneratedTimestamp };
   stay_segments: { id: string; stay_id: string; sequence: number; inventory_unit_id: string; arrival_date: string; departure_date: string; segment_type: string; supersedes_segment_id: string | null; amendment_id: string; created_at: GeneratedTimestamp };
   amendments: { id: string; order_id: string; sequence: number; amendment_type: string; reason_code: string; reason_note: string; prior_version: number; new_version: number; payload: Json; command_id: NullableInsert<string>; created_at: GeneratedTimestamp };
-  pricing_revisions: { id: string; order_id: string; revision_no: number; amendment_id: string; policy_version_id: string; arrival_date: string; departure_date: string; coverage_set: Json; cash_lines: Json; manual_adjustment_minor: number; current_contract_amount_minor: number; currency: string; created_at: GeneratedTimestamp };
+  pricing_revisions: { id: string; order_id: string; revision_no: number; amendment_id: string; policy_version_id: string; arrival_date: string; departure_date: string; coverage_set: Json; cash_lines: Json; policy_base_amount_minor: ColumnType<number, number | undefined, number>; pricing_basis: ColumnType<CreateOrderPricingBasis, CreateOrderPricingBasis | undefined, CreateOrderPricingBasis>; manual_adjustment_minor: number; current_contract_amount_minor: number; currency: string; created_at: GeneratedTimestamp };
   coverage_items: { id: string; order_id: string; contract_id: string; lot_id: string; inventory_unit_id: string; service_date: string; unit_kind: string; status: "HELD" | "CONSUMED" | "RELEASED"; held_by_revision_id: string; created_at: GeneratedTimestamp; updated_at: GeneratedTimestamp };
   inventory_room_days: { room_id: string; service_date: string; whole_claim_id: string | null; version: number; updated_at: GeneratedTimestamp };
   inventory_bed_days: { room_id: string; bed_id: string; service_date: string; bed_claim_id: string | null; version: number; updated_at: GeneratedTimestamp };

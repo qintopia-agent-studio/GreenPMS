@@ -50,7 +50,9 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
     commandType: envelope.commandType,
     confirmation: true,
     expectedEffectHash: preview.preview.effectHash,
-    reason: { code: "RECEIPT_REFERENCE_TEST", note: `Verify permanent references for ${prefix}` }
+    reason: envelope.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "RECEIPT_REFERENCE_TEST", note: `Verify permanent references for ${prefix}` }
   }, metadata(`${prefix}-confirm`));
 }
 

@@ -117,10 +117,12 @@ async function execute(
     commandType,
     confirmation: true,
     expectedEffectHash: prepared.preview.effectHash,
-    reason: {
-      code: "STAGE7_ACCEPTANCE",
-      note: "Prepare the isolated stage 6 and stage 7 combined acceptance dataset"
-    }
+    reason: commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : {
+          code: "STAGE7_ACCEPTANCE",
+          note: "Prepare the isolated stage 6 and stage 7 combined acceptance dataset"
+        }
   }, {
     idempotencyKey: `${key}-confirm`,
     correlationId: key
@@ -174,7 +176,11 @@ async function createStay(db: Kysely<Database>, options: {
       documentNumber: `STAGE7-${options.key}`
     },
     additionalGuests: options.additionalGuests ?? [],
-    ...(stayType !== "FREE" ? { bookingChannelCode: "WECOM", channelOrderReference: null } : {}),
+    ...(stayType !== "FREE" ? {
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+    } : {}),
     ...(stayType === "FREE" ? { freeStayReason: "阶段 6/7 合并人工验收免费住宿", freeStayCategoryCode: "RECEPTION" } : {})
   }, options.key);
   const orderId = receipt.result?.orderId;

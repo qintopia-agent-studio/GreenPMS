@@ -1,5 +1,13 @@
 import { sql, type Transaction } from "kysely";
-import { currentReleaseFeatures, DomainError, type CommandReason, type CommandType, type CoverageItemDto } from "@qintopia/contracts";
+import {
+  createOrderPricingBasisCodes,
+  currentReleaseFeatures,
+  DomainError,
+  type CommandReason,
+  type CommandType,
+  type CoverageItemDto,
+  type CreateOrderPricingBasis
+} from "@qintopia/contracts";
 import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, validateBookingChannel } from "@qintopia/domain";
 import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims } from "../inventory.ts";
 import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, lockOrder, reconcileCoverage, releaseCoverage, type StayTimelineItem } from "../orders.ts";
@@ -45,19 +53,52 @@ function moneyMinor(value: unknown, field: string): { currency: string; minorUni
   return { currency, minorUnits: money.minorUnits as number };
 }
 
-function pricingSnapshot(effect: Record<string, unknown>) {
+function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
+  stayType: string;
+  memberId: string | null;
+  memberContractId: string | null;
+}) {
   const pricing = pricingObject(effect);
   const coverageSet = pricing.coverageSet;
   const cashLines = pricing.cashLines;
   if (!Array.isArray(coverageSet) || !Array.isArray(cashLines)) throw new DomainError("INTERNAL_ERROR", "Pricing effect is invalid", 500);
   const contract = moneyMinor(pricing.currentContractAmount, "currentContractAmount");
   const cashRemainder = moneyMinor(pricing.cashRemainder, "cashRemainder");
+  const decision = effect.pricingDecision ? requireObject(effect.pricingDecision, "pricingDecision") : undefined;
+  const policyBase = decision ? moneyMinor(decision.policyBaseAmount, "policyBaseAmount") : cashRemainder;
+  const pricingBasisValue = decision?.pricingBasis;
+  const categoricalBasis = orderIdentity?.stayType === "FREE"
+    ? "FREE"
+    : orderIdentity?.memberId || orderIdentity?.memberContractId
+      ? "MEMBER_ENTITLEMENT"
+      : undefined;
+  const pricingBasis = pricingBasisValue === undefined
+    ? categoricalBasis ?? (contract.minorUnits === cashRemainder.minorUnits ? "POLICY" : "MANUAL_ADJUSTMENT")
+    : createOrderPricingBasisCodes.includes(pricingBasisValue as CreateOrderPricingBasis)
+      ? pricingBasisValue as CreateOrderPricingBasis
+      : undefined;
+  if (!pricingBasis) throw new DomainError("INTERNAL_ERROR", "Create order pricing basis is invalid", 500);
+  if (policyBase.currency !== contract.currency) throw new DomainError("INTERNAL_ERROR", "Pricing currencies do not match", 500);
+  const manualAdjustmentMinor = decision?.manualAdjustmentMinor;
+  if (manualAdjustmentMinor !== undefined && !Number.isInteger(manualAdjustmentMinor)) {
+    throw new DomainError("INTERNAL_ERROR", "Create order manual adjustment is invalid", 500);
+  }
+  const reasonValue = decision?.reason;
+  const reason = reasonValue === undefined ? undefined : requireObject(reasonValue, "reason");
+  const reasonCode = reason === undefined ? undefined : requireString(reason, "code");
+  const reasonNoteValue = reason?.note;
+  if (reasonNoteValue !== undefined && typeof reasonNoteValue !== "string") {
+    throw new DomainError("INTERNAL_ERROR", "Create order pricing reason note is invalid", 500);
+  }
   return {
     coverageSet: coverageSet as CoverageItemDto[],
     cashLines,
+    policyBaseAmountMinor: policyBase.minorUnits,
+    pricingBasis,
     currentContractAmountMinor: contract.minorUnits,
-    manualAdjustmentMinor: contract.minorUnits - cashRemainder.minorUnits,
-    currency: contract.currency
+    manualAdjustmentMinor: manualAdjustmentMinor as number | undefined ?? contract.minorUnits - cashRemainder.minorUnits,
+    currency: contract.currency,
+    ...(reasonCode ? { reason: { code: reasonCode, note: reasonNoteValue as string ?? "" } } : {})
   };
 }
 
@@ -243,6 +284,8 @@ async function insertRevision(trx: Transaction<Database>, options: {
     departure_date: options.departureDate,
     coverage_set: JSON.stringify(options.pricing.coverageSet),
     cash_lines: JSON.stringify(options.pricing.cashLines),
+    policy_base_amount_minor: options.pricing.policyBaseAmountMinor,
+    pricing_basis: options.pricing.pricingBasis,
     manual_adjustment_minor: options.pricing.manualAdjustmentMinor,
     current_contract_amount_minor: options.pricing.currentContractAmountMinor,
     currency: options.pricing.currency
@@ -571,7 +614,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     await trx.insertInto("amendments").values({
       id: amendmentId, order_id: orderId, sequence: 1, amendment_type: "CREATE_ORDER",
       reason_code: options.reason.code, reason_note: options.reason.note, prior_version: 0, new_version: 1,
-      payload: { quoteId: effect.quoteId, inventoryUnitId: unitId, arrivalDate, departureDate, primaryGuest, occupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode },
+      payload: { quoteId: effect.quoteId, inventoryUnitId: unitId, arrivalDate, departureDate, primaryGuest, occupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode, pricingDecision: effect.pricingDecision },
       command_id: options.commandId
     }).execute();
     await trx.insertInto("stay_segments").values({
@@ -589,7 +632,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       await bumpMembershipForCoverage(trx, memberContractId, pricing.coverageSet);
     }
     return {
-      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode },
+      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode, pricingPolicyVersionId: policyVersionId, pricingDecision: effect.pricingDecision },
       resourceRefs: [orderId, stayId, segmentId, revisionId, ...persistedOccupants.map((occupant) => occupant.id), ...coverageRefs.coverageIds],
       factRefs: coverageRefs.factIds
     };
@@ -854,7 +897,11 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       commandId: options.commandId
     });
     const segmentId = newId("segment");
-    const pricing = pricingSnapshot(effect);
+    const pricing = pricingSnapshot(effect, {
+      stayType: context.order.stay_type,
+      memberId: context.order.member_id,
+      memberContractId: context.order.member_contract_id
+    });
     const stayTimeline = stayTimelineFromEffect(effect);
     const currentTail = trailingTimelineRun(stayTimeline);
     const unitId = currentTail.inventoryUnitId;
@@ -925,7 +972,11 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       reasonCode: options.reason.code, reasonNote: options.reason.note, priorVersion: context.order.version, payload: effect,
       commandId: options.commandId
     });
-    const pricing = pricingSnapshot(effect);
+    const pricing = pricingSnapshot(effect, {
+      stayType: context.order.stay_type,
+      memberId: context.order.member_id,
+      memberContractId: context.order.member_contract_id
+    });
     const revisionId = await insertRevision(trx, {
       orderId, revisionNo: context.revision.revisionNo + 1, amendmentId,
       policyVersionId: context.order.pricing_policy_version_id,
@@ -1018,6 +1069,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         pricing: {
           coverageSet,
           cashLines,
+          policyBaseAmountMinor: 0,
+          pricingBasis: "FREE",
           manualAdjustmentMinor: 0,
           currentContractAmountMinor: 0,
           currency: prior.currency

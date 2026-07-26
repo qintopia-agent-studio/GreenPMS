@@ -39,6 +39,30 @@ export interface StayTimelineItem {
   inventoryUnitId: string;
 }
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function pricingReasonFromAmendment(amendment: {
+  amendment_type: string;
+  reason_code: string;
+  reason_note: string;
+  payload: unknown;
+} | undefined): { code: string; note: string } {
+  if (!amendment) return { code: "HISTORICAL", note: "" };
+  if (amendment.amendment_type === "CREATE_ORDER") {
+    const payload = recordValue(amendment.payload);
+    const decision = recordValue(payload?.pricingDecision);
+    const reason = recordValue(decision?.reason);
+    if (typeof reason?.code === "string" && typeof reason.note === "string") {
+      return { code: reason.code, note: reason.note };
+    }
+  }
+  return { code: amendment.reason_code, note: amendment.reason_note };
+}
+
 async function selectOrder(db: DbExecutor, orderId: string) {
   const row = await db.selectFrom("orders").selectAll().where("id", "=", orderId).executeTakeFirst();
   if (!row) throw new DomainError("NOT_FOUND", "Order not found", 404);
@@ -364,6 +388,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       .execute() : Promise.resolve([])
   ]);
   const latestByOccupant = new Map<string, (typeof correctionRows)[number]>();
+  const amendmentById = new Map(amendments.map((amendment) => [amendment.id, amendment]));
   for (const correction of correctionRows) {
     const current = latestByOccupant.get(correction.occupant_id);
     if (!current || correction.sequence > current.sequence) latestByOccupant.set(correction.occupant_id, correction);
@@ -434,7 +459,8 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     })),
     pricingRevisions: revisions.map((revision) => ({
       ...revision,
-      policy_base_amount_minor: revision.current_contract_amount_minor - revision.manual_adjustment_minor
+      difference_from_policy_minor: revision.current_contract_amount_minor - revision.policy_base_amount_minor,
+      reason: pricingReasonFromAmendment(amendmentById.get(revision.amendment_id))
     })),
     coverageSet: coverage,
     collectionFacts: facts,

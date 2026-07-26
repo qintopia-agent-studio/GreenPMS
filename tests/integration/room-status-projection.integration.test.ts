@@ -64,7 +64,9 @@ async function confirmPrepared(
     commandType: prepared.preview.commandType,
     confirmation: true as const,
     expectedEffectHash: prepared.preview.effectHash,
-    reason: { code: "ROOM_STATUS_ACCEPTANCE", note: `Room-status acceptance for ${prefix}` }
+    reason: prepared.preview.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "ROOM_STATUS_ACCEPTANCE", note: `Room-status acceptance for ${prefix}` }
   };
   const receipt = await confirmCommandPreview(db, writePrincipal, prepared.preview.previewId, confirmation, confirmMetadata);
   return { receipt, confirmation, confirmMetadata };
@@ -189,7 +191,8 @@ async function createOrder(options: {
       primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: options.nickname ?? `RS ${options.prefix}` },
       ...(!options.memberContractId && stayType !== "FREE" ? {
         bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `ROOM-STATUS-${options.prefix}`
+        channelOrderReference: `ROOM-STATUS-${options.prefix}`,
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
       } : {}),
       ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Volunteer accommodation", freeStayCategoryCode: "RECEPTION" } : {})
     }

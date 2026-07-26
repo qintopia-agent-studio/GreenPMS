@@ -3,6 +3,7 @@ import { currentReleaseFeatures, DomainError, freeStayCategoryCodes, type Comman
 import {
   calculatePricing,
   calculateDurationTimelinePricing,
+  createOrderPricingDecision,
   enumerateServiceDates,
   parseLocalDate,
   requireTransactionReference,
@@ -592,7 +593,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     }));
     const fingerprint = await inventoryFingerprint(db, propertyId, unit.id, quote.arrivalDate, quote.departureDate);
     if (fingerprint.length > 0) throw new DomainError("INVENTORY_CONFLICT", "Quoted inventory is no longer available", 409);
-    const pricing = await priceSingleUnit(db, {
+    const policyPricing = await priceSingleUnit(db, {
       propertyId,
       memberId: quote.memberId ?? null,
       memberContractId: quote.memberContractId ?? null,
@@ -603,6 +604,28 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       policyVersionId: quote.pricingPolicyVersionId,
       manualAdjustmentMinor: 0
     });
+    const pricingDecision = createOrderPricingDecision({
+      bookingChannelCode,
+      stayType: quote.stayType,
+      memberStay,
+      policyBaseAmountMinor: policyPricing.currentContractAmount.minorUnits,
+      targetCurrentContractAmountMinor: input.targetCurrentContractAmountMinor,
+      channelPriceDifferenceReason: input.channelPriceDifferenceReason,
+      manualPriceAdjustmentReason: input.manualPriceAdjustmentReason
+    });
+    const pricing = {
+      ...policyPricing,
+      currentContractAmount: money(policyPricing.currentContractAmount.currency, pricingDecision.currentContractAmountMinor)
+    };
+    const pricingDecisionEffect = {
+      pricingBasis: pricingDecision.pricingBasis,
+      policyBaseAmount: money(pricing.currentContractAmount.currency, pricingDecision.policyBaseAmountMinor),
+      targetCurrentContractAmount: money(pricing.currentContractAmount.currency, pricingDecision.currentContractAmountMinor),
+      differenceFromPolicy: money(pricing.currentContractAmount.currency, pricingDecision.differenceFromPolicyMinor),
+      manualAdjustmentMinor: pricingDecision.manualAdjustmentMinor,
+      differenceExceedsThreshold: pricingDecision.differenceExceedsThreshold,
+      reason: pricingDecision.reason
+    };
     const effect = {
       quoteId,
       primaryGuest: guest,
@@ -619,6 +642,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       pricingPolicyVersionId: quote.pricingPolicyVersionId,
       memberId: quote.memberId ?? null,
       memberContractId: quote.memberContractId ?? null,
+      pricingDecision: pricingDecisionEffect,
       pricing
     };
     return finalize(propertyId, effect, {
