@@ -11,6 +11,13 @@ export type StayType = (typeof stayTypes)[number];
 export const bookingChannelCodes = ["YOUMUDAO", "CTRIP", "MEITUAN", "WECOM"] as const;
 export type BookingChannelCode = (typeof bookingChannelCodes)[number];
 
+export const freeStayCategoryCodes = ["VOLUNTEER", "RECEPTION"] as const;
+export type FreeStayCategoryCode = (typeof freeStayCategoryCodes)[number];
+
+export const currentReleaseFeatures = {
+  cleaningWorkflow: false
+} as const;
+
 export const commandTypes = [
   "CREATE_MEMBER",
   "CREATE_MEMBERSHIP_ORDER",
@@ -611,6 +618,24 @@ export interface OrderAllowedActionDto {
   disabledReason: string | null;
 }
 
+export const fulfillmentRecordingModes = ["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"] as const;
+export type FulfillmentRecordingMode = (typeof fulfillmentRecordingModes)[number];
+
+export interface OrderFulfillmentRecordDto {
+  type: "CHECK_IN" | "CHECK_OUT";
+  plannedBusinessDate: string;
+  recordedBusinessDate: string | null;
+  recordingMode: FulfillmentRecordingMode;
+  recordedAt: string;
+  actor: { subjectId: string; displayName: string } | null;
+  reason: { code: string; note: string };
+}
+
+export interface OrderFulfillmentProjectionDto {
+  checkIn: OrderFulfillmentRecordDto | null;
+  checkOut: OrderFulfillmentRecordDto | null;
+}
+
 export interface CorrectOrderOccupantInputDto {
   propertyId: string;
   orderId: string;
@@ -642,6 +667,7 @@ export interface CreateOrderResultDto {
   bookingChannelCode: BookingChannelCode | null;
   channelOrderReference: string | null;
   freeStayReason: string | null;
+  freeStayCategoryCode: FreeStayCategoryCode | null;
 }
 
 export interface CreateMemberInput {

@@ -3,6 +3,7 @@ import { AlertCircle, Check, ChevronRight, Clock3, Copy, LoaderCircle, RefreshCw
 import { Link } from "react-router-dom";
 import {
   commandTypes,
+  currentReleaseFeatures,
   historicalRecoverableCommandTypes,
   type CommandType,
   type HistoricalCommandType,
@@ -80,9 +81,28 @@ export function errorMessage(error: unknown): string {
   return "请求失败，请稍后重试";
 }
 
-export function StatusBadge({ value }: { value: string }) {
+export function StatusBadge({ value, label }: { value: string; label?: string }) {
   const normalized = value.toLowerCase().replaceAll("_", "-");
-  return <span className={`status-badge status-${normalized}`}>{value.replaceAll("_", " ")}</span>;
+  return <span className={`status-badge status-${normalized}`}>{label ?? value.replaceAll("_", " ")}</span>;
+}
+
+const businessStatusLabels: Record<string, string> = {
+  RESERVED: "已预订",
+  PLANNED: "已预订",
+  CHECKED_IN: "在住",
+  IN_HOUSE: "在住",
+  CHECKED_OUT: "已退房",
+  COMPLETED: "已完成",
+  CANCELLED: "已取消",
+  NO_SHOW: "未到",
+  PENDING: "待清洁",
+  HELD: "已冻结",
+  CONSUMED: "已核销",
+  RELEASED: "已释放"
+};
+
+export function businessStatusLabel(value: string): string {
+  return businessStatusLabels[value] ?? value;
 }
 
 export function InlineError({ error, title = "操作未完成", hideTechnicalDetails = false }: {
@@ -273,6 +293,65 @@ const membershipBusinessCommands = new Set<CommandType>([
   "ACTIVATE_MEMBERSHIP_ORDER",
   "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
 ]);
+const fulfillmentBusinessCommands = new Set<CommandType>(["CHECK_IN", "CHECK_OUT", "COMPLETE_CLEANING"]);
+const fulfillmentTransitions: Partial<Record<CommandType, readonly [string, string]>> = {
+  CHECK_IN: ["RESERVED", "CHECKED_IN"],
+  CHECK_OUT: ["CHECKED_IN", "CHECKED_OUT"],
+  COMPLETE_CLEANING: ["PENDING", "COMPLETED"]
+};
+
+function isFulfillmentBusinessCommand(value: unknown): value is CommandType {
+  return typeof value === "string" && fulfillmentBusinessCommands.has(value as CommandType);
+}
+
+export function fulfillmentTransitionIsExpected(commandType: CommandType, effect: Record<string, unknown>): boolean {
+  const expected = fulfillmentTransitions[commandType];
+  if (!expected || effect.fromStatus !== expected[0] || effect.toStatus !== expected[1]) return false;
+  if (commandType === "COMPLETE_CLEANING") return true;
+  if (typeof effect.businessDate !== "string" || typeof effect.effectiveDate !== "string") return false;
+  if (commandType === "CHECK_IN") {
+    return effect.recordingMode === "ON_SCHEDULE" && effect.businessDate === effect.effectiveDate;
+  }
+  if (commandType === "CHECK_OUT") {
+    return effect.recordingMode === "ON_SCHEDULE"
+      ? effect.businessDate === effect.effectiveDate
+      : effect.recordingMode === "LATE_RECORDED" && effect.businessDate > effect.effectiveDate;
+  }
+  return false;
+}
+
+function fulfillmentCommandLabel(commandType: CommandType): string {
+  if (commandType === "CHECK_IN") return "办理入住";
+  if (commandType === "CHECK_OUT") return "办理退房";
+  if (commandType === "COMPLETE_CLEANING") return "完成清洁";
+  return "履约操作";
+}
+
+export function fulfillmentReceiptCopy(
+  commandType: CommandType,
+  committed: boolean,
+  consumedCoverageCount = 0,
+  timing?: { effectiveDate: string; recordedBusinessDate: string; recordingMode: "ON_SCHEDULE" | "LATE_RECORDED" }
+): { heading: string; description: string } {
+  const label = fulfillmentCommandLabel(commandType);
+  if (!committed) return { heading: `${label}未完成`, description: "本次操作没有改变住宿记录。" };
+  if (commandType === "CHECK_IN") return {
+    heading: "办理入住已完成",
+    description: consumedCoverageCount > 0
+      ? `住宿状态已更新为在住；本次核销 ${consumedCoverageCount} 晚已冻结的会员权益。`
+      : "住宿状态已更新为在住；本次不涉及会员权益。"
+  };
+  if (commandType === "CHECK_OUT") return {
+    heading: timing?.recordingMode === "LATE_RECORDED" ? "迟录退房已完成" : "办理退房已完成",
+    description: timing?.recordingMode === "LATE_RECORDED"
+      ? `退房按原计划退房日 ${formatDate(timing.effectiveDate)} 生效，于 ${formatDate(timing.recordedBusinessDate)} 营业日迟录；订单金额保持不变，住宿库存已释放。`
+      : "住宿状态已更新为已退房，后续库存已按当前住宿事实释放。"
+  };
+  return {
+    heading: "清洁已完成",
+    description: "清洁任务已更新为已完成，住宿历史保持不变。"
+  };
+}
 
 function membershipCommandLabel(commandType: CommandType): string {
   if (commandType === "CREATE_MEMBERSHIP_ORDER") return "创建会员订单";
@@ -303,6 +382,15 @@ const bookingChannelLabels: Record<string, string> = {
   WECOM: "企业微信"
 };
 
+const freeStayCategoryLabels: Record<string, string> = {
+  VOLUNTEER: "义工",
+  RECEPTION: "接待"
+};
+
+export function freeStayCategoryLabel(code: unknown): string {
+  return typeof code === "string" && code.trim() ? freeStayCategoryLabels[code] ?? code : "历史未记录";
+}
+
 function pricingFromEffect(effect: Record<string, unknown>): Record<string, unknown> | undefined {
   if (isRecord(effect.pricing)) return effect.pricing;
   if (isRecord(effect.after) && isRecord(effect.after.pricing)) return effect.after.pricing;
@@ -322,7 +410,7 @@ export function receiptTransactionReferenceLabel(result: Record<string, unknown>
   return typeof result.transactionReference === "string" ? result.transactionReference : "历史未记录";
 }
 
-function EffectSummary({ preview }: { preview: PreviewDto }) {
+function EffectSummary({ preview, fulfillment = false }: { preview: PreviewDto; fulfillment?: boolean }) {
   const effect = preview.effect;
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
@@ -346,6 +434,48 @@ function EffectSummary({ preview }: { preview: PreviewDto }) {
   const bookingChannelCode = typeof effect.bookingChannelCode === "string" ? effect.bookingChannelCode : null;
   const channelOrderReference = typeof effect.channelOrderReference === "string" ? effect.channelOrderReference : null;
   const hasTransactionReference = Object.hasOwn(effect, "transactionReference");
+  const isFreeStay = effect.stayType === "FREE";
+  const freeStayCategoryCode = typeof effect.freeStayCategoryCode === "string" ? effect.freeStayCategoryCode : null;
+  const freeStayReason = typeof effect.freeStayReason === "string" ? effect.freeStayReason : null;
+
+  if (fulfillment) {
+    if (!fulfillmentTransitionIsExpected(preview.commandType, effect)) {
+      return <div className="effect-summary fulfillment-command-summary" data-testid="command-effect">
+        <section className="effect-section" aria-labelledby="fulfillment-command-summary-heading">
+          <h3 id="fulfillment-command-summary-heading">无法核对本次履约操作</h3>
+          <p>服务端返回的状态变化与当前操作不一致，不能确认。请关闭后刷新订单状态。</p>
+        </section>
+      </div>;
+    }
+    const coverageCount = entitlementTransition && typeof entitlementTransition.coverageCount === "number"
+      ? entitlementTransition.coverageCount
+      : 0;
+    return <div className="effect-summary fulfillment-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="fulfillment-command-summary-heading">
+        <h3 id="fulfillment-command-summary-heading">请核对{fulfillmentCommandLabel(preview.commandType)}</h3>
+        <dl className="difference-grid">
+          {preview.commandType === "CHECK_IN" ? <>
+            <dt>住宿状态</dt><dd>{businessStatusLabel(String(effect.fromStatus))} <ChevronRight aria-label="变更为" size={15} /> <strong>{businessStatusLabel(String(effect.toStatus))}</strong></dd>
+            <dt>会员权益</dt><dd>{coverageCount > 0 ? `本次核销 ${coverageCount} 晚已冻结权益` : "本次不涉及会员权益"}</dd>
+          </> : null}
+          {preview.commandType === "CHECK_OUT" ? <>
+            <dt>住宿状态</dt><dd>{businessStatusLabel(String(effect.fromStatus))} <ChevronRight aria-label="变更为" size={15} /> <strong>{businessStatusLabel(String(effect.toStatus))}</strong></dd>
+            <dt>办理方式</dt><dd><strong>{effect.recordingMode === "LATE_RECORDED" ? "迟录退房" : "按计划办理退房"}</strong></dd>
+            <dt>计划退房日</dt><dd>{formatDate(String(effect.effectiveDate))}</dd>
+            <dt>办理营业日</dt><dd>{formatDate(String(effect.businessDate))}</dd>
+            <dt>库存安排</dt><dd><strong>退房后释放后续住宿库存</strong></dd>
+            <dt>订单金额</dt><dd>保持不变</dd>
+            <dt>会员权益</dt><dd>退房不重复核销</dd>
+          </> : null}
+          {currentReleaseFeatures.cleaningWorkflow && preview.commandType === "COMPLETE_CLEANING" ? <>
+            <dt>清洁状态</dt><dd>{businessStatusLabel(String(effect.fromStatus))} <ChevronRight aria-label="变更为" size={15} /> <strong>{businessStatusLabel(String(effect.toStatus))}</strong></dd>
+            {typeof effect.serviceDate === "string" ? <><dt>清洁日期</dt><dd>{formatDate(effect.serviceDate)}</dd></> : null}
+            <dt>住宿历史</dt><dd>保持不变</dd>
+          </> : null}
+        </dl>
+      </section>
+    </div>;
+  }
 
   if (preview.commandType === "CREATE_MEMBER" && member) {
     return <div className="effect-summary member-create-summary" data-testid="command-effect">
@@ -451,8 +581,9 @@ function EffectSummary({ preview }: { preview: PreviewDto }) {
           {submittedProfile && effect.profileMatch === false ? <><dt>申请资料差异</dt><dd>申请资料与现有档案不一致；本命令保留现有档案，仅关联申请记录。</dd></> : null}
           {memberContract ? <><dt>会员合同动作</dt><dd>{scalar(memberContract.operation)}</dd><dt>合同周期</dt><dd>{scalar(memberContract.validFrom)} 至 {scalar(memberContract.validUntil)}</dd></> : null}
           {externalReference ? <><dt>外部申请关联</dt><dd>{scalar(externalReference.operation)} · {scalar(externalReference.provider)} · <code>{scalar(externalReference.externalRecordId)}</code></dd></> : null}
-          {hasBookingChannel ? <><dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd></> : null}
-          {hasBookingChannel ? <><dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</dd></> : null}
+          {hasBookingChannel && !isFreeStay ? <><dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd></> : null}
+          {hasBookingChannel && !isFreeStay ? <><dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</dd></> : null}
+          {isFreeStay ? <><dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd><dt>免费入住原因</dt><dd>{freeStayReason ?? "历史未记录"}</dd></> : null}
           {inventoryUnit ? <><dt>库存单元</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
           {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>生效区间</dt><dd><code>[{effect.arrivalDate}, {effect.departureDate})</code></dd></> : null}
           {typeof effect.serviceDate === "string" ? <><dt>营业日期</dt><dd>{effect.serviceDate}</dd></> : null}
@@ -532,6 +663,9 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
   const bookingChannelCode = result && typeof result.bookingChannelCode === "string" ? result.bookingChannelCode : null;
   const channelOrderReference = result && typeof result.channelOrderReference === "string" ? result.channelOrderReference : null;
   const hasTransactionReference = Boolean(result && Object.hasOwn(result, "transactionReference"));
+  const freeStayCategoryCode = result && typeof result.freeStayCategoryCode === "string" ? result.freeStayCategoryCode : null;
+  const freeStayReason = result && typeof result.freeStayReason === "string" ? result.freeStayReason : null;
+  const isFreeStay = Boolean(freeStayCategoryCode || freeStayReason);
   const memberId = result && typeof result.memberId === "string" ? result.memberId : undefined;
   const memberContractId = result && typeof result.memberContractId === "string" ? result.memberContractId : undefined;
   const memberExternalReferenceId = result && typeof result.memberExternalReferenceId === "string" ? result.memberExternalReferenceId : undefined;
@@ -539,6 +673,39 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
   const targetCurrentContractAmount = result ? moneyFrom(result.targetCurrentContractAmount) : undefined;
   const manualAdjustmentMinor = result && typeof result.manualAdjustmentMinor === "number" ? result.manualAdjustmentMinor : undefined;
   const committed = receipt.businessCommitted;
+  if (businessCommand && fulfillmentBusinessCommands.has(businessCommand)) {
+    const entitlementTransition = result && isRecord(result.entitlementTransition) ? result.entitlementTransition : undefined;
+    const consumedCoverageCount = entitlementTransition && typeof entitlementTransition.coverageCount === "number" ? entitlementTransition.coverageCount : 0;
+    const timingValue = result && isRecord(result.fulfillmentTiming) ? result.fulfillmentTiming : undefined;
+    const fulfillmentTiming = timingValue
+      && typeof timingValue.effectiveDate === "string"
+      && typeof timingValue.recordedBusinessDate === "string"
+      && (timingValue.recordingMode === "ON_SCHEDULE" || timingValue.recordingMode === "LATE_RECORDED")
+      ? {
+        effectiveDate: timingValue.effectiveDate,
+        recordedBusinessDate: timingValue.recordedBusinessDate,
+        recordingMode: timingValue.recordingMode === "ON_SCHEDULE" ? "ON_SCHEDULE" as const : "LATE_RECORDED" as const
+      }
+      : undefined;
+    const copy = fulfillmentReceiptCopy(businessCommand, committed, consumedCoverageCount, fulfillmentTiming);
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{copy.heading}</h3>
+          <p>{copy.description}</p>
+        </div>
+      </div>
+      {receipt.error ? <div className="receipt-error"><p>{receipt.error.code === "AUTHENTICATION_REQUIRED"
+        || receipt.error.code === "INSUFFICIENT_ACCESS"
+        || receipt.error.code === "RESOURCE_SCOPE_DENIED"
+        || receipt.error.code === "SUBJECT_DISABLED"
+        ? "当前账号无权完成这项操作，本次没有写入。"
+        : receipt.error.code === "PREVIEW_STALE" || receipt.error.code === "INVALID_ORDER_STATE" || receipt.error.code === "AGGREGATE_VERSION_CONFLICT"
+          ? "当前业务状态已经变化，本次没有写入。请刷新后重新核对。"
+          : "本次操作未完成，住宿和清洁记录没有变化。"}</p></div> : null}
+    </section>;
+  }
   if (businessCommand === "CREATE_MEMBER") {
     const memberErrorMessage = receipt.error?.code === "PREVIEW_STALE"
       ? "会员资料已发生变化，请关闭后重新核对。"
@@ -609,7 +776,8 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
         <dt>资源引用</dt><dd className="code-list">{receipt.resourceRefs.length ? receipt.resourceRefs.map((ref) => <code key={ref}>{ref}</code>) : "-"}</dd>
         <dt>事实引用</dt><dd className="code-list">{receipt.factRefs.length ? receipt.factRefs.map((ref) => <code key={ref}>{ref}</code>) : "-"}</dd>
         {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={result?.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : primaryGuest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(primaryGuest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(primaryGuest.fullName)}</dd></> : null}
-        {hasBookingChannel ? <><dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd><dt>渠道订单号</dt><dd><code>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</code></dd></> : null}
+        {hasBookingChannel && !isFreeStay ? <><dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd><dt>渠道订单号</dt><dd><code>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</code></dd></> : null}
+        {isFreeStay ? <><dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd><dt>免费入住原因</dt><dd>{freeStayReason ?? "历史未记录"}</dd></> : null}
         {hasTransactionReference && result ? <><dt>外部交易单号</dt><dd><code>{receiptTransactionReferenceLabel(result)}</code></dd></> : null}
         {memberId ? <><dt>Member ID</dt><dd><code>{memberId}</code></dd><dt>Member Contract ID</dt><dd><code>{memberContractId ?? "未选择"}</code></dd><dt>外部申请引用</dt><dd><code>{memberExternalReferenceId ?? "未关联"}</code></dd></> : null}
         {policyBaseAmount ? <><dt>政策基础报价</dt><dd data-testid="receipt-policy-base-amount">{formatMoney(policyBaseAmount)}</dd></> : null}
@@ -653,7 +821,7 @@ export interface PersistedCommandRecovery {
   commandType: HistoricalCommandType;
   confirmationKey: string;
   targetRefs: string[];
-  presentation?: "MEMBER_STAY";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT";
   state: PersistedCommandRecoveryState;
   receipt?: ReceiptDto;
   updatedAt: string;
@@ -769,7 +937,9 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || !value.confirmationKey
     || !Array.isArray(value.targetRefs)
     || !value.targetRefs.every((item) => typeof item === "string")
-    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY")
+    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT")
+    || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
+    || (value.presentation === "FULFILLMENT" && !isFulfillmentBusinessCommand(value.commandType))
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
     || typeof value.updatedAt !== "string") {
     return { kind: "CORRUPT", error: new Error("本地命令恢复记录版本或结构无效；无法确认原命令是否执行，已暂停本物业写命令") };
@@ -852,10 +1022,20 @@ export function transitionPersistedCommandRecovery(
 
 export function recoveryCommandRequest(recovery: PersistedCommandRecovery): CommandRequest {
   const memberStay = recovery.presentation === "MEMBER_STAY";
+  const fulfillment = recovery.presentation === "FULFILLMENT";
+  const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
   return {
     commandType: recovery.commandType,
-    title: memberStay ? "恢复会员住宿结果" : `${recovery.commandType} · 原命令恢复`,
-    description: memberStay ? "系统只查询原住宿办理结果，不会重复创建订单或冻结会员权益。" : "仅使用已保存的原幂等键查询服务端命令结果，不会发起新的业务写入。",
+    title: memberStay
+      ? "恢复会员住宿结果"
+      : fulfillment && commandType
+        ? `恢复${fulfillmentCommandLabel(commandType)}结果`
+        : `${recovery.commandType} · 原命令恢复`,
+    description: memberStay
+      ? "系统只查询原住宿办理结果，不会重复创建订单或冻结会员权益。"
+      : fulfillment
+        ? "系统只查询刚才的操作结果，不会重复办理。"
+        : "仅使用已保存的原幂等键查询服务端命令结果，不会发起新的业务写入。",
     ...(recovery.presentation ? { presentation: recovery.presentation } : {}),
     input: { propertyId: recovery.propertyId }
   };
@@ -962,16 +1142,20 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
 }) {
   const resolved = isTerminalCommandRecovery(recovery.state);
   const memberStay = recovery.presentation === "MEMBER_STAY";
-  const businessMode = businessFacing || memberStay;
+  const fulfillment = recovery.presentation === "FULFILLMENT";
+  const businessMode = businessFacing || memberStay || fulfillment;
   const memberRegistration = businessMode && recovery.commandType === "CREATE_MEMBER";
+  const fulfillmentLabel = isExecutableCommandType(recovery.commandType) ? fulfillmentCommandLabel(recovery.commandType) : "履约操作";
   return (
-    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
+    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
       <div>
         <strong>{businessMode
           ? memberRegistration
             ? (resolved ? "原建档结果已确认" : "会员建档结果需要恢复查询")
             : memberStay
               ? (resolved ? "原会员住宿结果已确认" : "会员住宿结果需要恢复查询")
+              : fulfillment
+                ? (resolved ? `原${fulfillmentLabel}结果已确认` : `${fulfillmentLabel}结果需要恢复查询`)
               : (resolved ? "原会员操作结果已确认" : "会员操作结果需要恢复查询")
           : (resolved ? "原命令结果已确认" : "原命令执行状态需要恢复查询")}</strong>
         {!businessMode ? <>
@@ -985,6 +1169,8 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
             ? (resolved ? "查看并关闭原建档结果后，可继续新建会员。" : "新的会员建档已暂停，请先恢复查询原结果。")
             : memberStay
               ? (resolved ? "查看并关闭原住宿结果后，可继续办理住宿。" : "新的会员住宿已暂停，请先恢复查询原结果。")
+              : fulfillment
+                ? (resolved ? `查看并关闭原${fulfillmentLabel}结果后，可继续操作。` : `新的${fulfillmentLabel}操作已暂停，请先查询刚才的结果。`)
               : (resolved ? "查看并关闭原操作结果后，可继续处理会员业务。" : "新的会员操作已暂停，请先恢复查询原结果。")
           : (resolved ? "查看并关闭 Receipt 后恢复新的业务写入。" : "新的业务写入已暂停，必须继续查询原命令。")}</p>
       </div>
@@ -994,6 +1180,8 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
             ? (resolved ? "查看建档结果" : "恢复建档结果")
             : memberStay
               ? (resolved ? "查看住宿结果" : "恢复住宿结果")
+              : fulfillment
+                ? (resolved ? `查看${fulfillmentLabel}结果` : `查询${fulfillmentLabel}结果`)
               : (resolved ? "查看会员操作结果" : "恢复会员操作结果")
           : (resolved ? "查看已确认结果" : "恢复原命令")}
       </button>
@@ -1025,9 +1213,10 @@ export function CommandDialog({
   const memberProfile = request.commandType === "CREATE_MEMBER";
   const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
-  const businessFacing = memberProfile || membershipBusiness || memberLodging;
-  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : memberLodging ? "CREATE_MEMBER_STAY" : "OPERATOR_CONFIRMED"));
-  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : memberLodging ? "创建会员住宿订单" : ""));
+  const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
+  const businessFacing = memberProfile || membershipBusiness || memberLodging || fulfillment;
+  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : memberLodging ? "CREATE_MEMBER_STAY" : fulfillment && executableCommandType ? executableCommandType : "OPERATOR_CONFIRMED"));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : memberLodging ? "创建会员住宿订单" : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
   const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && !initialReceipt));
   const [failedNotExecuted, setFailedNotExecuted] = useState(false);
@@ -1045,7 +1234,8 @@ export function CommandDialog({
     && !writeBlocked
     && !previewExpired
     && !networkUncertain
-    && !confirmationKey);
+    && !confirmationKey
+    && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));
   const currentKey = useMemo(() => confirmationKey ?? api.recoveryKey(request.commandType), [confirmationKey, request.commandType]);
 
   useEffect(() => {
@@ -1207,7 +1397,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }
@@ -1215,7 +1405,13 @@ export function CommandDialog({
       <p className="command-description">{request.description}</p>
       <div aria-live="polite" className="sr-status">{busy ? "正在处理" : receipt ? (receipt.businessCommitted ? "操作已完成" : "操作未完成") : ""}</div>
       <InlineError
-        error={error}
+        error={fulfillment && error ? new Error(networkUncertain
+          ? "暂时无法确认本次操作结果。请使用下方按钮查询刚才的结果，系统不会重复办理。"
+          : error instanceof ApiError && (error.status === 401 || error.status === 403)
+            ? "当前账号无权完成这项操作，本次没有写入。"
+            : error instanceof ApiError && (error.status === 409 || error.code === "PREVIEW_STALE" || error.code === "INVALID_ORDER_STATE")
+              ? "当前业务状态已经变化，本次没有写入。请刷新后重新核对。"
+              : "暂时无法载入本次操作信息，请稍后重试。") : error}
         title={failedNotExecuted ? "操作未执行" : "操作处理失败"}
         hideTechnicalDetails={businessFacing}
       />
@@ -1226,7 +1422,7 @@ export function CommandDialog({
       />
       {!preview && !receipt ? (
         <div className="command-pending">
-          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">
@@ -1238,12 +1434,20 @@ export function CommandDialog({
       ) : null}
       {preview && !receipt ? (
         <>
-          <EffectSummary preview={preview} />
+          <EffectSummary preview={preview} fulfillment={fulfillment} />
           {!businessFacing ? <section className="reason-section" aria-labelledby="reason-heading">
             <h3 id="reason-heading">确认原因</h3>
             <div className="form-grid form-grid-two">
               <label>原因代码<input value={reasonCode} onChange={(event) => setReasonCode(event.target.value)} required maxLength={80} data-testid="reason-code" /></label>
               <label className="span-two">原因说明<textarea value={reasonNote} onChange={(event) => setReasonNote(event.target.value)} required maxLength={1000} rows={3} placeholder="记录本次人工确认依据" data-testid="reason-note" /></label>
+            </div>
+          </section> : null}
+          {fulfillment ? <section className="reason-section" aria-labelledby="fulfillment-reason-heading">
+            <h3 id="fulfillment-reason-heading">办理原因</h3>
+            <div className="form-grid">
+              <label className="span-two">填写后会记录在本次变更历史中
+                <textarea value={reasonNote} onChange={(event) => setReasonNote(event.target.value)} required maxLength={1000} rows={2} placeholder="例如：客人临时调整行程，提前退房" data-testid="reason-note" />
+              </label>
             </div>
           </section> : null}
         </>
@@ -1256,7 +1460,7 @@ export function CommandDialog({
           data-command-state="duplicate-returned-original-receipt"
         >
           <strong>{businessFacing ? "已找到原操作结果" : "已返回原 Receipt"}</strong>
-          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
+          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
         </div>
       ) : null}
       {receipt ? <ReceiptPanel
@@ -1268,9 +1472,9 @@ export function CommandDialog({
       /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
-          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
+          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recover()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : "查询命令结果"}
+            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : fulfillment ? "查询操作结果" : "查询命令结果"}
           </button>
         </div>
       ) : null}

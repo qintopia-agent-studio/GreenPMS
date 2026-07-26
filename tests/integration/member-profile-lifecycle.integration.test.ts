@@ -6,6 +6,7 @@ import {
   getMemberView,
   getOrderView,
   listMemberSummaries,
+  propertyLocalToday,
   type Database
 } from "@qintopia/db";
 import { sql, type Kysely } from "kysely";
@@ -26,6 +27,12 @@ const principal: AuthPrincipal = {
 
 let db: Kysely<Database>;
 let sequence = 0;
+
+function shiftDate(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 function metadata(prefix: string) {
   sequence += 1;
@@ -66,6 +73,16 @@ async function createMemberOrder(prefix: string, arrivalDate: string, departureD
     }
   }, `${prefix}-create-order`);
   return receipt.result!.orderId as string;
+}
+
+async function fulfillmentDatePair() {
+  await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
+  const arrivalDate = await propertyLocalToday(db, demo.propertyId);
+  await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
+  const departureDate = await propertyLocalToday(db, demo.propertyId);
+  expect(departureDate > arrivalDate).toBe(true);
+  await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
+  return { arrivalDate, departureDate };
 }
 
 beforeEach(async () => {
@@ -286,9 +303,14 @@ describe("member profile registration and directory", () => {
 
 describe("check-in entitlement consumption lifecycle", () => {
   it("consumes HELD coverage at CHECK_IN and CHECK_OUT does not consume it again", async () => {
-    const orderId = await createMemberOrder("check-in-consume", "2028-06-01", "2028-06-03");
+    const { arrivalDate, departureDate } = await fulfillmentDatePair();
+    const orderId = await createMemberOrder("check-in-consume", arrivalDate, departureDate);
+    const coverageCount = (await getOrderView(db, orderId)).coverageSet.length;
     const checkedInPreview = await preview({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "check-in-consume");
-    expect(checkedInPreview.preview.effect).toMatchObject({ entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: 2 } });
+    expect(checkedInPreview.preview.effect).toMatchObject({
+      businessDate: arrivalDate,
+      entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount }
+    });
     const checkedIn = await confirmCommandPreview(db, principal, checkedInPreview.preview.previewId, {
       propertyId: demo.propertyId,
       commandType: "CHECK_IN",
@@ -296,20 +318,23 @@ describe("check-in entitlement consumption lifecycle", () => {
       expectedEffectHash: checkedInPreview.preview.effectHash,
       reason: { code: "CHECKED_IN", note: "Consume held member entitlement on arrival" }
     }, metadata("check-in-consume-confirm"));
-    expect(checkedIn.factRefs).toHaveLength(2);
-    expect((await getOrderView(db, orderId)).coverageSet.map((coverage) => coverage.status)).toEqual(["CONSUMED", "CONSUMED"]);
+    expect(checkedIn.factRefs).toHaveLength(coverageCount);
+    expect((await getOrderView(db, orderId)).coverageSet.every((coverage) => coverage.status === "CONSUMED")).toBe(true);
 
+    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
     const checkedOut = await confirm({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, "check-out-no-repeat");
     expect(checkedOut.factRefs).toEqual([]);
-    expect(await db.selectFrom("entitlement_ledger").select("fact_id").where("order_id", "=", orderId).where("entry_type", "=", "CONSUME").execute()).toHaveLength(2);
+    expect(await db.selectFrom("entitlement_ledger").select("fact_id").where("order_id", "=", orderId).where("entry_type", "=", "CONSUME").execute()).toHaveLength(coverageCount);
+    expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
   });
 
   it("never restores consumed nights when an in-house member stay is shortened", async () => {
-    const orderId = await createMemberOrder("shorten-consumed", "2028-07-01", "2028-07-03");
+    const arrivalDate = await propertyLocalToday(db, demo.propertyId);
+    const orderId = await createMemberOrder("shorten-consumed", arrivalDate, shiftDate(arrivalDate, 2));
     await confirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "shorten-consumed-check-in");
     const shortened = await confirm({
       commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2028-07-02" }
+      input: { propertyId: demo.propertyId, orderId, newDepartureDate: shiftDate(arrivalDate, 1) }
     }, "shorten-consumed-command");
     expect(shortened.factRefs).toEqual([]);
     const coverage = (await getOrderView(db, orderId)).coverageSet;
@@ -319,12 +344,13 @@ describe("check-in entitlement consumption lifecycle", () => {
   });
 
   it("keeps consumed coverage identity on a same-kind in-house move", async () => {
-    const orderId = await createMemberOrder("move-consumed", "2028-08-01", "2028-08-03");
+    const arrivalDate = await propertyLocalToday(db, demo.propertyId);
+    const orderId = await createMemberOrder("move-consumed", arrivalDate, shiftDate(arrivalDate, 2));
     await confirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "move-consumed-check-in");
     const before = await getOrderView(db, orderId);
     const moved = await confirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2028-08-02" }
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: shiftDate(arrivalDate, 1) }
     }, "move-consumed-command");
     expect(moved.factRefs).toEqual([]);
     const after = await getOrderView(db, orderId);
@@ -334,7 +360,8 @@ describe("check-in entitlement consumption lifecycle", () => {
   });
 
   it("immediately consumes newly covered nights added to an in-house order", async () => {
-    const orderId = await createMemberOrder("refresh-in-house", "2028-09-01", "2028-09-04");
+    const arrivalDate = await propertyLocalToday(db, demo.propertyId);
+    const orderId = await createMemberOrder("refresh-in-house", arrivalDate, shiftDate(arrivalDate, 3));
     await confirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "refresh-in-house-check-in");
     expect((await getOrderView(db, orderId)).coverageSet).toHaveLength(2);
     await confirm({

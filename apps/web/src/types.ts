@@ -11,6 +11,7 @@ import type {
   HistoricalCommandType,
   HistoricalRecoverableCommandType,
   OrderAllowedActionDto,
+  OrderFulfillmentProjectionDto,
   OrderOccupantSnapshotDto,
   StayType
 } from "@qintopia/contracts";
@@ -326,6 +327,7 @@ export interface OrderRowDto {
   booking_channel_code: BookingChannelCode | null;
   channel_order_reference: string | null;
   free_stay_reason: string | null;
+  free_stay_category_code: "VOLUNTEER" | "RECEPTION" | null;
   pricing_policy_version_id: string;
   member_id: string | null;
   member_contract_id: string | null;
@@ -411,6 +413,17 @@ export interface CollectionFactDto {
   created_at: string;
 }
 
+export interface CleaningTaskSummaryDto {
+  id: string;
+  inventoryUnitId: string;
+  serviceDate: string;
+  status: "PENDING" | "COMPLETED";
+  createdAt: string;
+  completedAt: string | null;
+  createdBy: { subjectId: string; displayName: string } | null;
+  completedBy: { subjectId: string; displayName: string } | null;
+}
+
 export interface OrderViewDto {
   accessLevel: AccessLevel;
   allowedActions: OrderAllowedActionDto[];
@@ -448,10 +461,12 @@ export interface OrderViewDto {
     departureDate: string;
   };
   segments: StaySegmentDto[];
+  fulfillment: OrderFulfillmentProjectionDto;
   amendments: AmendmentDto[];
   pricingRevisions: PricingRevisionDto[];
   coverageSet: CoverageRowDto[];
   collectionFacts: CollectionFactDto[];
+  cleaningTasks: CleaningTaskSummaryDto[];
   amounts: AmountSummaryDto;
 }
 
@@ -465,7 +480,7 @@ export interface CommandRequest {
   input: Record<string, unknown>;
   title: string;
   description: string;
-  presentation?: "MEMBER_STAY";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT";
   initialReason?: CommandReason;
 }
 

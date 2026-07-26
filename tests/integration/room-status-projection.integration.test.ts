@@ -14,8 +14,8 @@ import {
 } from "@qintopia/contracts";
 import {
   confirmCommandPreview,
-  createDatabase,
   createCommandPreview,
+  getOrderView,
   getRoomStatusBoard,
   listAvailability,
   propertyLocalToday,
@@ -187,13 +187,48 @@ async function createOrder(options: {
       propertyId: demo.propertyId,
       quoteId: quote.quoteId,
       primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: options.nickname ?? `RS ${options.prefix}` },
-      ...(!options.memberContractId ? {
+      ...(!options.memberContractId && stayType !== "FREE" ? {
         bookingChannelCode: "YOUMUDAO",
         channelOrderReference: `ROOM-STATUS-${options.prefix}`
       } : {}),
-      ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Volunteer accommodation" } : {})
+      ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Volunteer accommodation", freeStayCategoryCode: "RECEPTION" } : {})
     }
   }, `${options.prefix}-create`);
+}
+
+async function markOrderInHouseFixture(orderId: string) {
+  await db.updateTable("orders").set({ status: "CHECKED_IN" }).where("id", "=", orderId).execute();
+  await db.updateTable("stays").set({ status: "IN_HOUSE" }).where("order_id", "=", orderId).execute();
+}
+
+async function orderFulfillmentState(orderId: string) {
+  const segmentIds = (await db.selectFrom("stay_segments as segment")
+    .innerJoin("stays as stay", "stay.id", "segment.stay_id")
+    .select("segment.id")
+    .where("stay.order_id", "=", orderId)
+    .orderBy("segment.id")
+    .execute()).map((segment) => segment.id);
+  return Promise.all([
+    db.selectFrom("orders").select(["status", "version", "current_revision_id"]).where("id", "=", orderId).executeTakeFirstOrThrow(),
+    db.selectFrom("stays").select("status").where("order_id", "=", orderId).executeTakeFirstOrThrow(),
+    db.selectFrom("amendments").select(["id", "amendment_type", "payload"]).where("order_id", "=", orderId).orderBy("sequence").execute(),
+    db.selectFrom("pricing_revisions").select("id").where("order_id", "=", orderId).orderBy("revision_no").execute(),
+    db.selectFrom("inventory_claims").select(["id", "active", "released_at"]).where("source_id", "in", segmentIds).orderBy("id").execute(),
+    db.selectFrom("coverage_items").select(["id", "status"]).where("order_id", "=", orderId).orderBy("id").execute(),
+    db.selectFrom("entitlement_ledger").select("fact_id").where("order_id", "=", orderId).orderBy("fact_id").execute(),
+    db.selectFrom("collection_facts").select("fact_id").where("order_id", "=", orderId).orderBy("fact_id").execute(),
+    db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).orderBy("id").execute()
+  ]);
+}
+
+async function distinctBusinessDatesAcrossTimezones() {
+  await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
+  const arrivalDate = await propertyLocalToday(db, demo.propertyId);
+  await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
+  const departureDate = await propertyLocalToday(db, demo.propertyId);
+  expect(departureDate > arrivalDate).toBe(true);
+  await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
+  return { arrivalDate, departureDate };
 }
 
 beforeEach(async () => {
@@ -262,7 +297,8 @@ describe("PostgreSQL room-status projection", () => {
     const occupied = await board({ arrivalDate: "2029-02-01", departureDate: "2029-02-03" });
     const parent = unitIn(occupied, demo.roomId);
     expect(unitIn(occupied, demo.bedCId).days.find((day) => day.serviceDate === "2029-02-02"))
-      .toMatchObject({ status: "CLEANING", available: true });
+      .toMatchObject({ status: "AVAILABLE", available: true });
+    expect(unitIn(occupied, demo.bedCId).intervals.some((interval) => interval.sourceKind === "CLEANING")).toBe(false);
     expect(parent.bedOccupancies).toEqual([
       {
         serviceDate: "2029-02-01",
@@ -740,7 +776,7 @@ describe("PostgreSQL room-status projection", () => {
       prefix: "task-in-house"
     });
     const inHouseOrderId = inHouse.result!.orderId as string;
-    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: inHouseOrderId } }, "task-in-house-check-in");
+    await markOrderInHouseFixture(inHouseOrderId);
 
     const departure = await createOrder({
       unitId: rooms[2]!.id,
@@ -749,7 +785,7 @@ describe("PostgreSQL room-status projection", () => {
       prefix: "task-departure"
     });
     const departureOrderId = departure.result!.orderId as string;
-    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: departureOrderId } }, "task-departure-check-in");
+    await markOrderInHouseFixture(departureOrderId);
 
     const moved = await createOrder({
       unitId: rooms[3]!.id,
@@ -758,7 +794,7 @@ describe("PostgreSQL room-status projection", () => {
       prefix: "task-move"
     });
     const movedOrderId = moved.result!.orderId as string;
-    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: movedOrderId } }, "task-move-check-in");
+    await markOrderInHouseFixture(movedOrderId);
     await execute({
       commandType: "MOVE_UNIT",
       input: {
@@ -784,28 +820,7 @@ describe("PostgreSQL room-status projection", () => {
       prefix: "task-overdue-departure"
     });
     const overdueDepartureOrderId = overdueDeparture.result!.orderId as string;
-    const competingQuote = await createQuote(db, {
-      propertyId: demo.propertyId,
-      inventoryUnitId: rooms[6]!.id,
-      stayType: "TRANSIENT",
-      arrivalDate: businessDate,
-      departureDate: tomorrow,
-      pricingPolicyVersionId: demo.transientPolicyId
-    });
-    const competingPreview = await prepare({
-      commandType: "CREATE_ORDER",
-      input: {
-        propertyId: demo.propertyId,
-        quoteId: competingQuote.quoteId,
-        primaryGuest: { fullName: "Must not overlap an overdue in-house Stay", nickname: "Overdue Guest" },
-        bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: "ROOM-STATUS-OVERDUE-COMPETING"
-      }
-    }, "task-overdue-competing-order");
-    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: overdueDepartureOrderId } }, "task-overdue-departure-check-in");
-    const competingReceipt = (await confirmPrepared(competingPreview, "task-overdue-competing-confirm")).receipt;
-    expect(competingReceipt).toMatchObject({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
-    expect(competingReceipt.error).toMatchObject({ code: "PREVIEW_STALE" });
+    await markOrderInHouseFixture(overdueDepartureOrderId);
 
     const cancelled = await createOrder({
       unitId: rooms[7]!.id,
@@ -815,31 +830,6 @@ describe("PostgreSQL room-status projection", () => {
     });
     const cancelledOrderId = cancelled.result!.orderId as string;
     await execute({ commandType: "CANCEL_ORDER", input: { propertyId: demo.propertyId, orderId: cancelledOrderId } }, "task-overdue-cancelled-close");
-
-    const displacedOverdue = await createOrder({
-      unitId: rooms[7]!.id,
-      arrivalDate: twoDaysAgo,
-      departureDate: yesterday,
-      prefix: "task-overdue-displaced"
-    });
-    const displacedOverdueOrderId = displacedOverdue.result!.orderId as string;
-    const displacedCheckIn = await prepare({
-      commandType: "CHECK_IN",
-      input: { propertyId: demo.propertyId, orderId: displacedOverdueOrderId }
-    }, "task-overdue-displaced-check-in");
-    await createOrder({
-      unitId: rooms[7]!.id,
-      arrivalDate: businessDate,
-      departureDate: tomorrow,
-      prefix: "task-overdue-displacing-order"
-    });
-    const displacedReceipt = (await confirmPrepared(displacedCheckIn, "task-overdue-displaced-confirm")).receipt;
-    expect(displacedReceipt).toMatchObject({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
-    expect(displacedReceipt.error).toMatchObject({
-      code: "PREVIEW_STALE",
-      details: { causeCode: "INVENTORY_CONFLICT" }
-    });
-    expect((await db.selectFrom("orders").select("status").where("id", "=", displacedOverdueOrderId).executeTakeFirstOrThrow()).status).toBe("RESERVED");
 
     const noShow = await createOrder({
       unitId: rooms[8]!.id,
@@ -983,61 +973,30 @@ describe("PostgreSQL room-status projection", () => {
       sourceStartDate: twoDaysAgo,
       sourceEndDate: yesterday,
       status: "IN_HOUSE",
-      available: false,
-      blocking: true,
+      available: true,
+      blocking: false,
       reason: `计划退房日 ${yesterday} 已早于营业日 ${businessDate}，订单仍处于在住`,
       references: expect.arrayContaining([
         expect.objectContaining({ type: "ORDER", id: overdueDepartureOrderId }),
         expect.objectContaining({ type: "STAY" }),
         expect.objectContaining({ type: "INVENTORY_UNIT", id: rooms[6]!.id })
       ]),
-      conflicts: [expect.objectContaining({
-        blockingFactKind: "OVERDUE_IN_HOUSE",
-        claimId: null,
-        claimIds: [],
-        startDate: businessDate,
-        endDate: tomorrow,
-        sourceKind: "ORDER",
-        sourceReference: expect.objectContaining({ type: "ORDER", id: overdueDepartureOrderId })
-      })]
+      claimIds: [],
+      conflicts: [],
+      allowedActions: expect.arrayContaining([expect.objectContaining({ code: "OPEN_ORDER", enabled: true })])
     });
-    const todayBoard = await board({ arrivalDate: businessDate, departureDate: tomorrow, pageSize: 200 });
+    const future = shiftLocalDate(businessDate, 3);
+    const todayBoard = await board({ arrivalDate: businessDate, departureDate: future, pageSize: 200 });
     const overdueUnit = unitIn(todayBoard, rooms[6]!.id);
-    expect(overdueUnit.days[0]).toMatchObject({ serviceDate: businessDate, status: "IN_HOUSE", available: false });
-    expect(overdueUnit.intervals).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        startDate: businessDate,
-        endDate: tomorrow,
-        sourceStartDate: businessDate,
-        sourceEndDate: tomorrow,
-        status: "IN_HOUSE",
-        blocking: true,
-        sourceKind: "ORDER",
-        references: expect.arrayContaining([
-          expect.objectContaining({ type: "ORDER", id: overdueDepartureOrderId }),
-          expect.objectContaining({ type: "STAY" })
-        ]),
-        conflicts: [expect.objectContaining({
-          blockingFactKind: "OVERDUE_IN_HOUSE",
-          claimId: null,
-          claimIds: [],
-          startDate: businessDate,
-          endDate: tomorrow,
-          sourceReference: expect.objectContaining({ type: "ORDER", id: overdueDepartureOrderId })
-        })],
-        allowedActions: expect.arrayContaining([expect.objectContaining({ code: "OPEN_ORDER" })])
-      })
+    expect(overdueUnit.days).toHaveLength(3);
+    expect(overdueUnit.days).toEqual(expect.arrayContaining([
+      expect.objectContaining({ serviceDate: businessDate, status: "AVAILABLE", available: true, conflicts: [] }),
+      expect.objectContaining({ serviceDate: tomorrow, status: "AVAILABLE", available: true, conflicts: [] })
     ]));
-    expect(overdueUnit.days[0]!.conflicts).toEqual([
-      expect.objectContaining({
-        blockingFactKind: "OVERDUE_IN_HOUSE",
-        claimId: null,
-        claimIds: [],
-        startDate: businessDate,
-        endDate: tomorrow
-      })
-    ]);
-    expect(overdueUnit.allowedActions.some((action) => action.code.startsWith("CREATE_"))).toBe(false);
+    expect(overdueUnit.intervals.some((interval) => interval.references
+      .some((reference) => reference.type === "ORDER" && reference.id === overdueDepartureOrderId))).toBe(false);
+    expect(overdueUnit.conflicts.some((conflict) => conflict.blockingFactKind === "OVERDUE_IN_HOUSE")).toBe(false);
+    expect(overdueUnit.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled)).toBe(true);
 
     const departureUnit = unitIn(todayBoard, rooms[2]!.id);
     expect(departureUnit.days[0]).toMatchObject({ serviceDate: businessDate, status: "IN_HOUSE", available: false });
@@ -1060,7 +1019,7 @@ describe("PostgreSQL room-status projection", () => {
     const availability = await listAvailability(db, demo.propertyId, businessDate, tomorrow, "ROOM");
     expect(availability.find((unit) => unit.id === rooms[6]!.id)?.nights[0]).toMatchObject({
       serviceDate: businessDate,
-      available: false,
+      available: true,
       blockingClaimIds: []
     });
     expect(availability.find((unit) => unit.id === rooms[2]!.id)?.nights[0]).toMatchObject({
@@ -1085,7 +1044,11 @@ describe("PostgreSQL room-status projection", () => {
       arrivalDate: businessDate,
       departureDate: tomorrow,
       pricingPolicyVersionId: demo.transientPolicyId
-    })).rejects.toMatchObject({ code: "INVENTORY_CONFLICT" });
+    })).resolves.toMatchObject({
+      inventoryUnitId: rooms[6]!.id,
+      arrivalDate: businessDate,
+      departureDate: tomorrow
+    });
     expect(taskForOrder(cancelledOrderId)).toBeUndefined();
     expect(taskForOrder(noShowOrderId)).toBeUndefined();
     expect(taskForOrder(overdueFreeStayOrderId)).toMatchObject({
@@ -1362,10 +1325,11 @@ describe("PostgreSQL room-status projection", () => {
   });
 
   it("projects confirmed shortening and extension from the current Claim timeline with amendment Receipts", async () => {
-    const arrivalDate = "2029-02-01";
-    const originalDepartureDate = "2029-02-05";
-    const shortenedDepartureDate = "2029-02-03";
-    const extendedDepartureDate = "2029-02-06";
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftLocalDate(businessDate, -5);
+    const originalDepartureDate = shiftLocalDate(businessDate, -1);
+    const shortenedDepartureDate = shiftLocalDate(businessDate, -3);
+    const extendedDepartureDate = businessDate;
     const created = await createOrder({
       unitId: demo.secondRoomId,
       arrivalDate,
@@ -1453,67 +1417,52 @@ describe("PostgreSQL room-status projection", () => {
         endDate: shiftLocalDate(activeClaims[index]!.service_date, 1)
       });
     }
-
-    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "authoritative-stay-check-in");
-    const checkedOut = await execute({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, "authoritative-stay-check-out");
-    const afterCheckout = await board({ arrivalDate, departureDate: shiftLocalDate(extendedDepartureDate, 1) });
-    const completedIntervals = unitIn(afterCheckout, demo.secondRoomId).intervals
-      .filter((interval) => interval.sourceKind === "ORDER"
-        && interval.references.some((item) => item.type === "ORDER" && item.id === orderId));
-    expect(completedIntervals).toHaveLength(1);
-    expect(completedIntervals[0]).toMatchObject({
-      startDate: arrivalDate,
-      endDate: extendedDepartureDate,
-      sourceStartDate: arrivalDate,
-      sourceEndDate: extendedDepartureDate,
-      actualInventoryUnitId: demo.secondRoomId,
-      sourceKind: "ORDER",
-      status: "IN_HOUSE",
-      blocking: false,
-      available: true,
-      claimIds: activeClaims.map((claim) => claim.id)
-    });
-    expect(completedIntervals[0]!.history).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "SHORTEN_STAY", receiptId: shortened.receiptId }),
-      expect.objectContaining({ action: "EXTEND_STAY", receiptId: extended.receiptId }),
-      expect.objectContaining({ action: "CHECK_OUT", receiptId: checkedOut.receiptId })
-    ]));
   });
 
-  it("creates exactly one nonblocking cleaning task on checkout and retains only completed Stay history", async () => {
+  it("checks out atomically without creating or projecting cleaning tasks", async () => {
+    const { arrivalDate, departureDate: businessDate } = await distinctBusinessDatesAcrossTimezones();
     const created = await createOrder({
       unitId: demo.secondRoomId,
-      arrivalDate: "2028-08-10",
-      departureDate: "2028-08-12",
+      arrivalDate,
+      departureDate: businessDate,
       prefix: "cleaning"
     });
     const orderId = created.result!.orderId as string;
-    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "cleaning-check-in");
+    const checkIn = await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "cleaning-check-in");
+    expect(checkIn.result).toMatchObject({ orderId });
+    const checkInAmendment = await db.selectFrom("amendments").select("payload")
+      .where("order_id", "=", orderId).where("amendment_type", "=", "CHECK_IN").executeTakeFirstOrThrow();
+    expect(checkInAmendment.payload).toMatchObject({ businessDate: arrivalDate });
+    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
+    expect((await getOrderView(db, orderId)).allowedActions.find((action) => action.code === "CHECK_OUT"))
+      .toEqual({ code: "CHECK_OUT", enabled: true, disabledReason: null });
     const checkoutPrepared = await prepare({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, "cleaning-check-out");
-    expect(checkoutPrepared.preview.effect).toMatchObject({
-      cleaningTask: { inventoryUnitId: demo.secondRoomId, serviceDate: "2028-08-12", status: "PENDING" }
-    });
+    expect(checkoutPrepared.preview.effect).not.toHaveProperty("cleaningTask");
     const checkout = await confirmPrepared(checkoutPrepared, "cleaning-check-out");
-    const cleaningTaskId = checkout.receipt.result!.cleaningTaskId as string;
-    expect(checkout.receipt.resourceRefs).toContain(cleaningTaskId);
-    expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(1);
+    expect(checkout.receipt.result).not.toHaveProperty("cleaningTaskId");
+    expect(checkout.receipt.resourceRefs.some((reference) => reference.startsWith("cleaning_"))).toBe(false);
+    expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
+    expect((await getOrderView(db, orderId)).cleaningTasks).toEqual([]);
+    const checkoutAmendment = await db.selectFrom("amendments").select("payload")
+      .where("order_id", "=", orderId).where("amendment_type", "=", "CHECK_OUT").executeTakeFirstOrThrow();
+    expect(checkoutAmendment.payload).toMatchObject({ businessDate });
 
-    const afterCheckout = await board({ arrivalDate: "2028-08-10", departureDate: "2028-08-13" });
+    const afterCheckout = await board({ arrivalDate, departureDate: shiftLocalDate(businessDate, 1) });
     expect(afterCheckout.revision).toBe("3");
     const room = unitIn(afterCheckout, demo.secondRoomId);
     const historical = room.intervals.find((interval) => interval.sourceKind === "ORDER");
     expect(historical).toMatchObject({
       status: "IN_HOUSE",
-      startDate: "2028-08-10",
-      endDate: "2028-08-12",
+      startDate: arrivalDate,
+      endDate: businessDate,
       available: true,
       blocking: false
     });
-    const departureDay = room.days.find((day) => day.serviceDate === "2028-08-12")!;
-    expect(departureDay).toMatchObject({ status: "CLEANING", available: true, conflicts: [] });
-    expect(room.intervals.find((interval) => interval.sourceKind === "CLEANING")?.allowedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "COMPLETE_CLEANING", enabled: true })
-    ]));
+    const departureDay = room.days.find((day) => day.serviceDate === businessDate)!;
+    expect(departureDay).toMatchObject({ status: "AVAILABLE", available: true, conflicts: [] });
+    expect(room.intervals.some((interval) => interval.sourceKind === "CLEANING")).toBe(false);
+    expect(afterCheckout.operationalTasks.flatMap((task) => task.allowedActions)
+      .some((action) => action.code === "COMPLETE_CLEANING")).toBe(false);
     expect(room.allowedActions).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "CREATE_ORDER", enabled: true })
     ]));
@@ -1526,18 +1475,29 @@ describe("PostgreSQL room-status projection", () => {
       checkout.confirmMetadata
     );
     expect(replay).toEqual(checkout.receipt);
-    expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(1);
-    expect((await board({ arrivalDate: "2028-08-10", departureDate: "2028-08-13" })).revision).toBe("3");
+    expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
+    expect((await board({ arrivalDate, departureDate: shiftLocalDate(businessDate, 1) })).revision).toBe("3");
 
-    await execute({
-      commandType: "COMPLETE_CLEANING",
-      input: { propertyId: demo.propertyId, cleaningTaskId }
-    }, "cleaning-complete");
-    const completed = await board({ arrivalDate: "2028-08-10", departureDate: "2028-08-13" });
-    expect(completed.revision).toBe("4");
-    expect(unitIn(completed, demo.secondRoomId).days.find((day) => day.serviceDate === "2028-08-12"))
-      .toMatchObject({ status: "AVAILABLE", available: true });
-    expect(unitIn(completed, demo.secondRoomId).intervals.some((interval) => interval.sourceKind === "CLEANING")).toBe(false);
+    const stateAfterCheckout = await Promise.all([
+      db.selectFrom("orders").select(["status", "version"]).where("id", "=", orderId).executeTakeFirstOrThrow(),
+      db.selectFrom("inventory_claims").select(["id", "active", "released_at"])
+        .where("source_id", "=", created.result!.segmentId as string).orderBy("id").execute(),
+      db.selectFrom("amendments").select(["id", "sequence", "amendment_type"]).where("order_id", "=", orderId).orderBy("sequence").execute(),
+      db.selectFrom("command_receipts").select("id").orderBy("id").execute(),
+      db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()
+    ]);
+    await expect(prepare({
+      commandType: "CHECK_OUT",
+      input: { propertyId: demo.propertyId, orderId }
+    }, "cleaning-check-out-duplicate-new-key")).rejects.toMatchObject({ code: "INVALID_ORDER_STATE" });
+    expect(await Promise.all([
+      db.selectFrom("orders").select(["status", "version"]).where("id", "=", orderId).executeTakeFirstOrThrow(),
+      db.selectFrom("inventory_claims").select(["id", "active", "released_at"])
+        .where("source_id", "=", created.result!.segmentId as string).orderBy("id").execute(),
+      db.selectFrom("amendments").select(["id", "sequence", "amendment_type"]).where("order_id", "=", orderId).orderBy("sequence").execute(),
+      db.selectFrom("command_receipts").select("id").orderBy("id").execute(),
+      db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()
+    ])).toEqual(stateAfterCheckout);
 
     const cancelled = await createOrder({
       unitId: demo.roomId,
@@ -1551,39 +1511,244 @@ describe("PostgreSQL room-status projection", () => {
     expect(unitIn(cancelledBoard, demo.roomId).intervals.some((interval) => interval.references.some((item) => item.id === cancelledOrderId))).toBe(false);
   });
 
-  it("uses the property-local confirmation date for early and overdue checkout cleaning", async () => {
-    const businessDate = await propertyLocalToday(db, demo.propertyId);
-    const cases = [
-      {
-        prefix: "early-cleaning-date",
-        unitId: demo.roomId,
-        arrivalDate: shiftLocalDate(businessDate, -1),
-        departureDate: shiftLocalDate(businessDate, 2)
-      },
-      {
-        prefix: "overdue-cleaning-date",
-        unitId: demo.secondRoomId,
-        arrivalDate: shiftLocalDate(businessDate, -4),
-        departureDate: shiftLocalDate(businessDate, -2)
-      }
-    ];
-
-    for (const testCase of cases) {
-      const created = await createOrder(testCase);
-      const orderId = created.result!.orderId as string;
-      await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, `${testCase.prefix}-check-in`);
-      const prepared = await prepare({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, `${testCase.prefix}-check-out`);
-      expect(prepared.preview.effect).toMatchObject({
-        cleaningTask: { inventoryUnitId: testCase.unitId, serviceDate: businessDate, status: "PENDING" }
-      });
-      const checkedOut = (await confirmPrepared(prepared, `${testCase.prefix}-check-out`)).receipt;
-      expect(await db.selectFrom("cleaning_tasks").select(["service_date", "inventory_unit_id"])
-        .where("id", "=", checkedOut.result!.cleaningTaskId as string).executeTakeFirstOrThrow())
-        .toEqual({ service_date: businessDate, inventory_unit_id: testCase.unitId });
-    }
+  it("checks out a free stay without creating a cleaning task", async () => {
+    const { arrivalDate, departureDate: businessDate } = await distinctBusinessDatesAcrossTimezones();
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate,
+      departureDate: businessDate,
+      prefix: "free-checkout-no-cleaning",
+      stayType: "FREE"
+    });
+    const orderId = created.result!.orderId as string;
+    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "free-checkout-no-cleaning-check-in");
+    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
+    const checkedOut = await execute({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, "free-checkout-no-cleaning-check-out");
+    expect(checkedOut.result).not.toHaveProperty("cleaningTaskId");
+    const checkedOutView = await getOrderView(db, orderId);
+    expect(checkedOutView.order.status).toBe("CHECKED_OUT");
+    expect(checkedOutView.fulfillment).toMatchObject({
+      checkIn: { plannedBusinessDate: arrivalDate, recordedBusinessDate: arrivalDate, recordingMode: "ON_SCHEDULE" },
+      checkOut: { plannedBusinessDate: businessDate, recordedBusinessDate: businessDate, recordingMode: "ON_SCHEDULE" }
+    });
+    expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
   });
 
-  it("keeps an unfinished prior-day cleaning task as a completable exception without rendering it in the current grid", async () => {
+  it("enforces arrival and early-checkout gates while recording overdue check-out against the planned departure date", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const futureArrivalDate = shiftLocalDate(businessDate, 1);
+    const futureDepartureDate = shiftLocalDate(businessDate, 3);
+    const future = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: futureArrivalDate,
+      departureDate: futureDepartureDate,
+      prefix: "future-fulfillment-blocked"
+    });
+    const futureOrderId = future.result!.orderId as string;
+
+    expect((await getOrderView(db, futureOrderId)).allowedActions.find((action) => action.code === "CHECK_IN"))
+      .toEqual({ code: "CHECK_IN", enabled: false, disabledReason: "ARRIVAL_DATE_NOT_REACHED" });
+    const futureBefore = await orderFulfillmentState(futureOrderId);
+    await expect(prepare({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId: futureOrderId }
+    }, "future-check-in-rejected")).rejects.toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "未到计划入住日，不能办理普通入住",
+      details: { businessDate, arrivalDate: futureArrivalDate }
+    });
+    expect(await orderFulfillmentState(futureOrderId)).toEqual(futureBefore);
+
+    const overdueCheckout = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: shiftLocalDate(businessDate, -2),
+      departureDate: shiftLocalDate(businessDate, -1),
+      prefix: "overdue-checkout-blocked"
+    });
+    const overdueArrivalDate = shiftLocalDate(businessDate, -1);
+    const overdueArrival = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: overdueArrivalDate,
+      departureDate: shiftLocalDate(businessDate, 1),
+      prefix: "overdue-arrival-blocked"
+    });
+    const overdueArrivalOrderId = overdueArrival.result!.orderId as string;
+    expect((await getOrderView(db, overdueArrivalOrderId)).allowedActions.find((action) => action.code === "CHECK_IN"))
+      .toEqual({ code: "CHECK_IN", enabled: false, disabledReason: "ARRIVAL_DATE_PASSED" });
+    const overdueArrivalBefore = await orderFulfillmentState(overdueArrivalOrderId);
+    await expect(prepare({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId: overdueArrivalOrderId }
+    }, "overdue-check-in-rejected")).rejects.toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "已超过计划入住日，不能办理普通入住",
+      details: { businessDate, arrivalDate: overdueArrivalDate }
+    });
+    expect(await orderFulfillmentState(overdueArrivalOrderId)).toEqual(overdueArrivalBefore);
+
+    const earlyDepartureDate = shiftLocalDate(businessDate, 1);
+    const earlyCheckout = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate: earlyDepartureDate,
+      prefix: "early-checkout-blocked"
+    });
+    const earlyCheckoutOrderId = earlyCheckout.result!.orderId as string;
+    const checkInPrepared = await prepare({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId: earlyCheckoutOrderId }
+    }, "planned-date-check-in");
+    expect(checkInPrepared.preview.effect).toMatchObject({ businessDate });
+    await confirmPrepared(checkInPrepared, "planned-date-check-in");
+    expect((await db.selectFrom("amendments").select("payload")
+      .where("order_id", "=", earlyCheckoutOrderId).where("amendment_type", "=", "CHECK_IN")
+      .executeTakeFirstOrThrow()).payload).toMatchObject({ businessDate });
+    expect((await getOrderView(db, earlyCheckoutOrderId)).allowedActions.find((action) => action.code === "CHECK_OUT"))
+      .toEqual({ code: "CHECK_OUT", enabled: false, disabledReason: "DEPARTURE_DATE_NOT_REACHED" });
+    const earlyCheckoutBefore = await orderFulfillmentState(earlyCheckoutOrderId);
+    const earlyProtocolBefore = await Promise.all([
+      db.selectFrom("command_previews").select("id").orderBy("id").execute(),
+      db.selectFrom("command_executions").select("id").orderBy("id").execute(),
+      db.selectFrom("command_receipts").select("id").orderBy("id").execute(),
+      db.selectFrom("audit_entries").select("id").orderBy("id").execute(),
+      db.selectFrom("room_status_revisions").select(["property_id", "revision"]).orderBy("property_id").execute()
+    ]);
+    await expect(prepare({
+      commandType: "SHORTEN_STAY",
+      input: { propertyId: demo.propertyId, orderId: earlyCheckoutOrderId, newDepartureDate: businessDate }
+    }, "early-check-out-shorten-bypass-rejected")).rejects.toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "当前版本暂不支持通过缩短住宿办理提前退房",
+      details: { businessDate, departureDate: earlyDepartureDate }
+    });
+    expect(await orderFulfillmentState(earlyCheckoutOrderId)).toEqual(earlyCheckoutBefore);
+    expect(await Promise.all([
+      db.selectFrom("command_previews").select("id").orderBy("id").execute(),
+      db.selectFrom("command_executions").select("id").orderBy("id").execute(),
+      db.selectFrom("command_receipts").select("id").orderBy("id").execute(),
+      db.selectFrom("audit_entries").select("id").orderBy("id").execute(),
+      db.selectFrom("room_status_revisions").select(["property_id", "revision"]).orderBy("property_id").execute()
+    ])).toEqual(earlyProtocolBefore);
+    await expect(prepare({
+      commandType: "CHECK_OUT",
+      input: { propertyId: demo.propertyId, orderId: earlyCheckoutOrderId }
+    }, "early-check-out-rejected")).rejects.toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "未到计划退房日，不能办理普通退房；当前版本暂不支持提前退房",
+      details: { businessDate, departureDate: earlyDepartureDate }
+    });
+    expect(await orderFulfillmentState(earlyCheckoutOrderId)).toEqual(earlyCheckoutBefore);
+    expect(await Promise.all([
+      db.selectFrom("command_previews").select("id").orderBy("id").execute(),
+      db.selectFrom("command_executions").select("id").orderBy("id").execute(),
+      db.selectFrom("command_receipts").select("id").orderBy("id").execute(),
+      db.selectFrom("audit_entries").select("id").orderBy("id").execute(),
+      db.selectFrom("room_status_revisions").select(["property_id", "revision"]).orderBy("property_id").execute()
+    ])).toEqual(earlyProtocolBefore);
+
+    const overdueCheckoutOrderId = overdueCheckout.result!.orderId as string;
+    await markOrderInHouseFixture(overdueCheckoutOrderId);
+    expect((await getOrderView(db, overdueCheckoutOrderId)).allowedActions.find((action) => action.code === "CHECK_OUT"))
+      .toEqual({ code: "CHECK_OUT", enabled: true, disabledReason: null });
+    const overdueCheckoutBefore = await orderFulfillmentState(overdueCheckoutOrderId);
+    const overdueAmountsBefore = (await getOrderView(db, overdueCheckoutOrderId)).amounts;
+    const overduePrepared = await prepare({
+      commandType: "CHECK_OUT",
+      input: { propertyId: demo.propertyId, orderId: overdueCheckoutOrderId }
+    }, "overdue-check-out-late-recorded");
+    expect(overduePrepared.preview.effect).toMatchObject({
+      businessDate,
+      effectiveDate: shiftLocalDate(businessDate, -1),
+      recordingMode: "LATE_RECORDED"
+    });
+    const confirmed = await confirmPrepared(overduePrepared, "overdue-check-out-late-recorded");
+    expect(confirmed.receipt.result).toMatchObject({
+      fulfillmentTiming: {
+        effectiveDate: shiftLocalDate(businessDate, -1),
+        recordedBusinessDate: businessDate,
+        recordingMode: "LATE_RECORDED"
+      }
+    });
+    const replay = await confirmPrepared(
+      overduePrepared,
+      "overdue-check-out-late-recorded",
+      confirmed.confirmMetadata
+    );
+    expect(replay.receipt.receiptId).toBe(confirmed.receipt.receiptId);
+
+    const overdueCheckoutAfter = await orderFulfillmentState(overdueCheckoutOrderId);
+    expect(overdueCheckoutAfter[0]).toMatchObject({
+      status: "CHECKED_OUT",
+      version: overdueCheckoutBefore[0].version + 1,
+      current_revision_id: overdueCheckoutBefore[0].current_revision_id
+    });
+    expect(overdueCheckoutAfter[1]).toEqual({ status: "COMPLETED" });
+    expect(overdueCheckoutAfter[2]).toHaveLength(overdueCheckoutBefore[2].length + 1);
+    expect(overdueCheckoutAfter[2].at(-1)).toMatchObject({
+      amendment_type: "CHECK_OUT",
+      payload: { businessDate }
+    });
+    expect(overdueCheckoutAfter[3]).toEqual(overdueCheckoutBefore[3]);
+    expect(overdueCheckoutAfter[4]).toHaveLength(overdueCheckoutBefore[4].length);
+    expect(overdueCheckoutAfter[4].every((claim) => claim.active === false && claim.released_at !== null)).toBe(true);
+    expect(overdueCheckoutAfter[5]).toEqual(overdueCheckoutBefore[5]);
+    expect(overdueCheckoutAfter[6]).toEqual(overdueCheckoutBefore[6]);
+    expect(overdueCheckoutAfter[7]).toEqual(overdueCheckoutBefore[7]);
+    expect(overdueCheckoutAfter[8]).toEqual([]);
+
+    const overdueView = await getOrderView(db, overdueCheckoutOrderId);
+    expect(overdueView.order).toMatchObject({
+      arrival_date: shiftLocalDate(businessDate, -2),
+      departure_date: shiftLocalDate(businessDate, -1)
+    });
+    expect(overdueView.amounts).toEqual(overdueAmountsBefore);
+    expect(overdueView.fulfillment.checkOut).toMatchObject({
+      type: "CHECK_OUT",
+      plannedBusinessDate: shiftLocalDate(businessDate, -1),
+      recordedBusinessDate: businessDate,
+      recordingMode: "LATE_RECORDED",
+      actor: { subjectId: demo.agentSubjectId, displayName: "Demo Agent" }
+    });
+  });
+
+  it("keeps the in-house operational task after shortening before check-in on the business date", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = businessDate;
+    const departureDate = shiftLocalDate(businessDate, 2);
+    const shortenedDepartureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate,
+      departureDate,
+      prefix: "shorten-before-check-in"
+    });
+    const orderId = created.result!.orderId as string;
+    await execute({
+      commandType: "SHORTEN_STAY",
+      input: { propertyId: demo.propertyId, orderId, newDepartureDate: shortenedDepartureDate }
+    }, "shorten-before-check-in-shorten");
+    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "shorten-before-check-in-check-in");
+
+    const result = await board({ arrivalDate, departureDate });
+    const tasks = result.operationalTasks.filter((task) => task.references
+      .some((item) => item.type === "ORDER" && item.id === orderId));
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      taskKind: "IN_HOUSE",
+      businessDate,
+      status: "IN_HOUSE",
+      actualInventoryUnitId: demo.secondRoomId,
+      blocking: true,
+      reason: null
+    });
+    const room = unitIn(result, demo.secondRoomId);
+    expect(room.days.find((day) => day.serviceDate === businessDate))
+      .toMatchObject({ status: "IN_HOUSE", available: false });
+    expect(room.days.find((day) => day.serviceDate === shortenedDepartureDate))
+      .toMatchObject({ status: "AVAILABLE", available: true });
+  });
+
+  it("keeps prior-day and current-day cleaning rows unchanged while hiding and disabling the workflow", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const priorDate = shiftLocalDate(businessDate, -1);
     const created = await createOrder({
@@ -1613,28 +1778,156 @@ describe("PostgreSQL room-status projection", () => {
       completed_by_command_id: null,
       completed_at: null
     }).execute();
-
-    const current = await board({ arrivalDate: businessDate, departureDate: shiftLocalDate(businessDate, 1) });
-    const task = current.operationalTasks.find((candidate) => candidate.references
-      .some((reference) => reference.type === "OPERATIONS" && reference.id === cleaningTaskId));
-    expect(task).toMatchObject({
-      taskKind: "EXCEPTION",
-      businessDate,
-      startDate: priorDate,
-      endDate: businessDate,
-      sourceKind: "CLEANING"
+    const currentCreated = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: priorDate,
+      departureDate: businessDate,
+      prefix: "current-day-cleaning"
     });
-    expect(task?.allowedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "COMPLETE_CLEANING", enabled: true })
-    ]));
-    expect(unitIn(current, demo.secondRoomId).intervals.some((interval) => interval.sourceKind === "CLEANING")).toBe(false);
+    const currentOrderId = currentCreated.result!.orderId as string;
+    const currentCancelled = await execute({
+      commandType: "CANCEL_ORDER",
+      input: { propertyId: demo.propertyId, orderId: currentOrderId }
+    }, "current-day-cleaning-cancel");
+    const currentCleaningTaskId = "cleaning_pending_current_business_date";
+    await db.insertInto("cleaning_tasks").values({
+      id: currentCleaningTaskId,
+      property_id: demo.propertyId,
+      order_id: currentOrderId,
+      stay_id: currentCreated.result!.stayId as string,
+      inventory_unit_id: demo.roomId,
+      room_id: demo.roomId,
+      service_date: businessDate,
+      status: "PENDING",
+      version: 1,
+      created_by_command_id: currentCancelled.commandId,
+      completed_by_command_id: null,
+      completed_at: null
+    }).execute();
 
-    await execute({
+    const historicalRow = await db.selectFrom("cleaning_tasks").selectAll().where("id", "=", cleaningTaskId).executeTakeFirstOrThrow();
+    const currentDayRow = await db.selectFrom("cleaning_tasks").selectAll().where("id", "=", currentCleaningTaskId).executeTakeFirstOrThrow();
+    const receiptsBefore = await db.selectFrom("command_receipts").select("id").execute();
+    const current = await board({ arrivalDate: businessDate, departureDate: shiftLocalDate(businessDate, 1) });
+    expect(current.projectionState).toBe("READY");
+    expect(current.operationalTasks.some((candidate) => candidate.references
+      .some((reference) => reference.type === "OPERATIONS" && [cleaningTaskId, currentCleaningTaskId].includes(reference.id)))).toBe(false);
+    expect(unitIn(current, demo.secondRoomId).intervals.some((interval) => interval.sourceKind === "CLEANING")).toBe(false);
+    expect((await getOrderView(db, orderId)).cleaningTasks).toEqual([]);
+    expect((await getOrderView(db, currentOrderId)).cleaningTasks).toEqual([]);
+
+    await expect(prepare({
       commandType: "COMPLETE_CLEANING",
       input: { propertyId: demo.propertyId, cleaningTaskId }
-    }, "overnight-cleaning-complete");
-    expect((await board({ arrivalDate: businessDate, departureDate: shiftLocalDate(businessDate, 1) })).operationalTasks
-      .some((candidate) => candidate.references.some((reference) => reference.id === cleaningTaskId))).toBe(false);
+    }, "overnight-cleaning-disabled")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Cleaning workflow is disabled in this release"
+    });
+    expect(await db.selectFrom("cleaning_tasks").selectAll().where("id", "=", cleaningTaskId).executeTakeFirstOrThrow())
+      .toEqual(historicalRow);
+    expect(await db.selectFrom("cleaning_tasks").selectAll().where("id", "=", currentCleaningTaskId).executeTakeFirstOrThrow())
+      .toEqual(currentDayRow);
+    expect(await db.selectFrom("command_receipts").select("id").execute()).toEqual(receiptsBefore);
+
+    const historicalPreviewId = "preview_historical_cleaning_open";
+    const historicalEffectHash = "a".repeat(64);
+    await db.insertInto("command_previews").values({
+      id: historicalPreviewId,
+      subject_id: writePrincipal.subjectId,
+      property_id: demo.propertyId,
+      command_type: "COMPLETE_CLEANING",
+      normalized_input: { propertyId: demo.propertyId, cleaningTaskId },
+      input_hash: "b".repeat(64),
+      effect: {
+        cleaningTaskId,
+        orderId,
+        stayId: created.result!.stayId as string,
+        inventoryUnitId: demo.secondRoomId,
+        roomId: demo.secondRoomId,
+        serviceDate: priorDate,
+        fromStatus: "PENDING",
+        toStatus: "COMPLETED"
+      },
+      effect_hash: historicalEffectHash,
+      basis_versions: { cleaningTaskVersion: 1, status: "PENDING" },
+      expires_at: new Date(Date.now() + 60_000),
+      status: "OPEN",
+      used_at: null
+    }).execute();
+    const artifactsBeforeConfirm = await Promise.all([
+      db.selectFrom("command_executions").select("id").execute(),
+      db.selectFrom("command_receipts").select("id").execute(),
+      db.selectFrom("audit_entries").select("id").execute()
+    ]);
+    await expect(confirmCommandPreview(db, writePrincipal, historicalPreviewId, {
+      propertyId: demo.propertyId,
+      commandType: "COMPLETE_CLEANING",
+      confirmation: true,
+      expectedEffectHash: historicalEffectHash,
+      reason: { code: "HISTORICAL_CLEANING_DISABLED", note: "确认停用版本不执行旧清洁预览" }
+    }, metadata("historical-cleaning-confirm"))).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Cleaning workflow is disabled in this release"
+    });
+    expect(await Promise.all([
+      db.selectFrom("command_executions").select("id").execute(),
+      db.selectFrom("command_receipts").select("id").execute(),
+      db.selectFrom("audit_entries").select("id").execute()
+    ])).toEqual(artifactsBeforeConfirm);
+    expect(await db.selectFrom("command_previews").select(["status", "used_at"])
+      .where("id", "=", historicalPreviewId).executeTakeFirstOrThrow())
+      .toEqual({ status: "OPEN", used_at: null });
+    expect(await db.selectFrom("cleaning_tasks").selectAll().where("id", "=", cleaningTaskId).executeTakeFirstOrThrow())
+      .toEqual(historicalRow);
+
+    const missingTaskPreviewId = "preview_historical_cleaning_missing_task";
+    const missingTaskEffectHash = "c".repeat(64);
+    await db.insertInto("command_previews").values({
+      id: missingTaskPreviewId,
+      subject_id: writePrincipal.subjectId,
+      property_id: demo.propertyId,
+      command_type: "COMPLETE_CLEANING",
+      normalized_input: { propertyId: demo.propertyId, cleaningTaskId: "cleaning_missing" },
+      input_hash: "d".repeat(64),
+      effect: {
+        cleaningTaskId: "cleaning_missing",
+        orderId,
+        stayId: created.result!.stayId as string,
+        inventoryUnitId: demo.secondRoomId,
+        roomId: demo.secondRoomId,
+        serviceDate: priorDate,
+        fromStatus: "PENDING",
+        toStatus: "COMPLETED"
+      },
+      effect_hash: missingTaskEffectHash,
+      basis_versions: { cleaningTaskVersion: 1, status: "PENDING" },
+      expires_at: new Date(Date.now() + 60_000),
+      status: "OPEN",
+      used_at: null
+    }).execute();
+    const artifactsBeforeMissingTaskConfirm = await Promise.all([
+      db.selectFrom("command_executions").select("id").execute(),
+      db.selectFrom("command_receipts").select("id").execute(),
+      db.selectFrom("audit_entries").select("id").execute()
+    ]);
+    await expect(confirmCommandPreview(db, writePrincipal, missingTaskPreviewId, {
+      propertyId: demo.propertyId,
+      commandType: "COMPLETE_CLEANING",
+      confirmation: true,
+      expectedEffectHash: missingTaskEffectHash,
+      reason: { code: "HISTORICAL_CLEANING_DISABLED", note: "不存在任务的旧预检也统一按停用处理" }
+    }, metadata("historical-cleaning-missing-task-confirm"))).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Cleaning workflow is disabled in this release"
+    });
+    expect(await Promise.all([
+      db.selectFrom("command_executions").select("id").execute(),
+      db.selectFrom("command_receipts").select("id").execute(),
+      db.selectFrom("audit_entries").select("id").execute()
+    ])).toEqual(artifactsBeforeMissingTaskConfirm);
+    expect(await db.selectFrom("command_previews").select(["status", "used_at"])
+      .where("id", "=", missingTaskPreviewId).executeTakeFirstOrThrow())
+      .toEqual({ status: "OPEN", used_at: null });
   });
 
   it("separates FREE_STAY from Order, limits READ actions, and fails closed for inactive or unresolved units", async () => {
@@ -1996,100 +2289,6 @@ describe("PostgreSQL room-status projection", () => {
     }
   });
 
-  it("serializes an expired whole-room CHECK_IN against a current-business-date bed booking with one atomic winner", async () => {
-    const businessDate = await propertyLocalToday(db, demo.propertyId);
-    const expiredOrder = await createOrder({
-      unitId: demo.roomId,
-      arrivalDate: shiftLocalDate(businessDate, -1),
-      departureDate: businessDate,
-      prefix: "expired-check-in-race"
-    });
-    const expiredOrderId = expiredOrder.result!.orderId as string;
-    const currentQuote = await createQuote(db, {
-      propertyId: demo.propertyId,
-      inventoryUnitId: demo.bedAId,
-      stayType: "TRANSIENT",
-      arrivalDate: businessDate,
-      departureDate: shiftLocalDate(businessDate, 1),
-      pricingPolicyVersionId: demo.transientPolicyId
-    });
-    const currentBooking = await prepare({
-      commandType: "CREATE_ORDER",
-      input: {
-        propertyId: demo.propertyId,
-        quoteId: currentQuote.quoteId,
-        primaryGuest: { fullName: "Current business-date booking", nickname: "Current Booking" },
-        bookingChannelCode: "CTRIP",
-        channelOrderReference: "CHECK-IN-RACE-CURRENT"
-      }
-    }, "expired-race-current-booking");
-    const expiredCheckIn = await prepare({
-      commandType: "CHECK_IN",
-      input: { propertyId: demo.propertyId, orderId: expiredOrderId }
-    }, "expired-race-check-in");
-    const checkInBasis = (await db.selectFrom("command_previews").select("basis_versions")
-      .where("id", "=", expiredCheckIn.preview.previewId).executeTakeFirstOrThrow()).basis_versions;
-    expect(checkInBasis).toMatchObject({
-      checkInInventory: { businessDate, expiredReservation: true, fingerprint: [] }
-    });
-    const orderCountBefore = Number((await db.selectFrom("orders")
-      .select(({ fn }) => fn.countAll<string>().as("count"))
-      .executeTakeFirstOrThrow()).count);
-    const concurrentDb = createDatabase(databaseUrl);
-    try {
-      const [bookingReceipt, checkInReceipt] = await Promise.all([
-        confirmCommandPreview(db, writePrincipal, currentBooking.preview.previewId, {
-          propertyId: demo.propertyId,
-          commandType: "CREATE_ORDER",
-          confirmation: true,
-          expectedEffectHash: currentBooking.preview.effectHash,
-          reason: { code: "CHECK_IN_RACE", note: "Confirm the current-date bed booking" }
-        }, metadata("expired-race-booking-confirm")),
-        confirmCommandPreview(concurrentDb, writePrincipal, expiredCheckIn.preview.previewId, {
-          propertyId: demo.propertyId,
-          commandType: "CHECK_IN",
-          confirmation: true,
-          expectedEffectHash: expiredCheckIn.preview.effectHash,
-          reason: { code: "CHECK_IN_RACE", note: "Confirm the expired whole-room arrival" }
-        }, metadata("expired-race-check-in-confirm"))
-      ]);
-
-      const receipts = [bookingReceipt, checkInReceipt];
-      expect(receipts.filter((receipt) => receipt.businessCommitted)).toHaveLength(1);
-      const rejected = receipts.find((receipt) => !receipt.businessCommitted)!;
-      expect(["PREVIEW_STALE", "INVENTORY_CONFLICT"]).toContain(rejected.error?.code);
-      const expiredStatus = (await db.selectFrom("orders").select("status").where("id", "=", expiredOrderId).executeTakeFirstOrThrow()).status;
-      const checkInAmendments = await db.selectFrom("amendments").select("id")
-        .where("order_id", "=", expiredOrderId).where("amendment_type", "=", "CHECK_IN").execute();
-      const orderCountAfter = Number((await db.selectFrom("orders")
-        .select(({ fn }) => fn.countAll<string>().as("count"))
-        .executeTakeFirstOrThrow()).count);
-
-      if (checkInReceipt.businessCommitted) {
-        expect(expiredStatus).toBe("CHECKED_IN");
-        expect(checkInAmendments).toHaveLength(1);
-        expect(orderCountAfter).toBe(orderCountBefore);
-        expect(bookingReceipt.result).toBeNull();
-      } else {
-        expect(expiredStatus).toBe("RESERVED");
-        expect(checkInAmendments).toHaveLength(0);
-        expect(orderCountAfter).toBe(orderCountBefore + 1);
-        expect(bookingReceipt.result?.orderId).toEqual(expect.any(String));
-      }
-
-      const currentAvailability = (await listAvailability(
-        db,
-        demo.propertyId,
-        businessDate,
-        shiftLocalDate(businessDate, 1),
-        "ROOM"
-      )).find((unit) => unit.id === demo.roomId)!;
-      expect(currentAvailability.nights[0]).toMatchObject({ available: false });
-    } finally {
-      await concurrentDb.destroy();
-    }
-  });
-
   it("keeps the 90-night query window separate from domain-valid long maintenance Blocks", async () => {
     const blockStart = "2032-01-01";
     const longBlockNights = ROOM_STATUS_MAX_QUERY_NIGHTS + 30;
@@ -2273,16 +2472,32 @@ describe("PostgreSQL room-status projection", () => {
       .where("source_type", "=", "MAINTENANCE").where("source_id", "=", maintenanceLockId).where("active", "=", true).execute())
       .toHaveLength(0);
 
+    const { arrivalDate, departureDate: businessDate } = await distinctBusinessDatesAcrossTimezones();
     const order = await createOrder({
       unitId: demo.secondRoomId,
-      arrivalDate: "2029-06-10",
-      departureDate: "2029-06-11",
+      arrivalDate,
+      departureDate: businessDate,
       prefix: "immutable-cleaning"
     });
     const orderId = order.result!.orderId as string;
     await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "immutable-cleaning-checkin");
+    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
     const checkout = await execute({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, "immutable-cleaning-checkout");
-    const cleaningTaskId = checkout.result!.cleaningTaskId as string;
+    const cleaningTaskId = "cleaning_immutable_historical";
+    await db.insertInto("cleaning_tasks").values({
+      id: cleaningTaskId,
+      property_id: demo.propertyId,
+      order_id: orderId,
+      stay_id: order.result!.stayId as string,
+      inventory_unit_id: demo.secondRoomId,
+      room_id: demo.secondRoomId,
+      service_date: businessDate,
+      status: "PENDING",
+      version: 1,
+      created_by_command_id: checkout.commandId,
+      completed_by_command_id: null,
+      completed_at: null
+    }).execute();
     await expect(db.updateTable("cleaning_tasks").set({ service_date: "2029-06-12" }).where("id", "=", cleaningTaskId).execute())
       .rejects.toMatchObject({ code: "55000" });
     await expect(db.deleteFrom("cleaning_tasks").where("id", "=", cleaningTaskId).execute())

@@ -1,5 +1,6 @@
 import { sql, type Kysely, type Transaction } from "kysely";
 import {
+  currentReleaseFeatures,
   DomainError,
   inventoryUnitKinds,
   ROOM_STATUS_MAX_QUERY_NIGHTS,
@@ -851,7 +852,10 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .innerJoin("stays as stay", "stay.order_id", "order.id")
       .innerJoin("stay_segments as segment", "segment.stay_id", "stay.id")
       .leftJoin("inventory_claims as operational_claim", (join) => join
-        .onRef("operational_claim.source_id", "=", "segment.id")
+        .on((expression) => expression("operational_claim.source_id", "in", expression
+          .selectFrom("stay_segments as claim_segment")
+          .select("claim_segment.id")
+          .whereRef("claim_segment.stay_id", "=", "segment.stay_id")))
         .on("operational_claim.source_type", "=", "ORDER_SEGMENT")
         .on("operational_claim.service_date", "=", businessDate)
         .on("operational_claim.active", "=", true))
@@ -909,8 +913,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       }
       const segment = [...rows].reverse().find((row) => row.segment_arrival_date <= businessDate && businessDate < row.segment_departure_date)
         ?? rows.at(-1)!;
-      const overdueInHouse = order.order_status === "CHECKED_IN" && order.order_departure_date < businessDate;
-      const inHouseAtOrPastDeparture = order.order_status === "CHECKED_IN" && order.order_departure_date <= businessDate;
+      const departureDayInHouse = order.order_status === "CHECKED_IN" && order.order_departure_date === businessDate;
       const dateCoveredByOrder = order.order_arrival_date <= businessDate && businessDate < order.order_departure_date;
       const claimId = segment.operational_claim_id;
       const missingCurrentClaim = dateCoveredByOrder && !claimId;
@@ -919,7 +922,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         exceptionReason = `营业日 ${businessDate} 的住宿订单占用记录缺失`;
         missingOperationalClaim = true;
       }
-      blocking = inHouseAtOrPastDeparture || dateCoveredByOrder;
+      blocking = departureDayInHouse || dateCoveredByOrder;
       const orderRef = reference("ORDER", order.order_id, `Order ${order.order_id}`, `/orders/${order.order_id}`);
       const sourceKind: RoomStatusSourceKind = order.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
       const freeStayReason = sourceKind === "FREE_STAY" ? order.free_stay_reason : null;
@@ -944,9 +947,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         reason: taskReason,
         blocking,
         current: true,
-        blockingFactKind: overdueInHouse
-          ? "OVERDUE_IN_HOUSE"
-          : claimId
+        blockingFactKind: claimId
             ? "CLAIM"
             : blocking
               ? "LODGING_ORDER"
@@ -980,13 +981,13 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           event: taskEvent
         });
       }
-      if (inHouseAtOrPastDeparture) {
+      if (departureDayInHouse) {
         syntheticOccupancyEvents.push({
           ...taskEvent,
           sourceStartDate: businessDate,
           sourceEndDate: dateAfter(businessDate),
-          sourceKey: `${overdueInHouse ? "overdue-stay" : "departure-day-in-house"}:${order.order_id}:${businessDate}`,
-          blockingFactKind: overdueInHouse ? "OVERDUE_IN_HOUSE" : "LODGING_ORDER",
+          sourceKey: `departure-day-in-house:${order.order_id}:${businessDate}`,
+          blockingFactKind: "LODGING_ORDER",
           claimId: null,
           references: taskEvent.references.filter((item) => item.type !== "CLAIM")
         });
@@ -1199,6 +1200,29 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
 
     const completedOrderIds = [...new Set(claimRows.flatMap((row) => row.source_type === "ORDER_SEGMENT"
       && !row.active && row.stay_status === "COMPLETED" && row.order_id ? [row.order_id] : []))];
+    const checkoutAmendments = completedOrderIds.length === 0 ? [] : await trx
+      .selectFrom("amendments")
+      .leftJoin("cleaning_tasks", "cleaning_tasks.order_id", "amendments.order_id")
+      .select([
+        "amendments.order_id", "amendments.payload", "amendments.created_at", "amendments.sequence",
+        "cleaning_tasks.service_date as legacy_cleaning_service_date"
+      ])
+      .where("amendments.order_id", "in", completedOrderIds)
+      .where("amendments.amendment_type", "=", "CHECK_OUT")
+      .orderBy("amendments.order_id")
+      .orderBy("amendments.sequence", "desc")
+      .execute();
+    const checkoutBusinessDateByOrder = new Map<string, string>();
+    for (const amendment of checkoutAmendments) {
+      if (checkoutBusinessDateByOrder.has(amendment.order_id)) continue;
+      const payload = amendment.payload && typeof amendment.payload === "object" && !Array.isArray(amendment.payload)
+        ? amendment.payload as Record<string, unknown>
+        : {};
+      const persistedBusinessDate = typeof payload.businessDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(payload.businessDate)
+        ? payload.businessDate
+        : amendment.legacy_cleaning_service_date ?? iso(amendment.created_at).slice(0, 10);
+      checkoutBusinessDateByOrder.set(amendment.order_id, persistedBusinessDate);
+    }
     const completedOrderClaimCandidates = completedOrderIds.length === 0 ? [] : await trx
       .selectFrom("inventory_claims as claim")
       .innerJoin("stay_segments as segment", (join) => join
@@ -1212,14 +1236,19 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .where("claim.property_id", "=", options.propertyId)
       .where("claim.active", "=", false)
       .where("stay.status", "=", "COMPLETED")
+      .where("claim.service_date", "<", businessDate)
       .where("stay.order_id", "in", completedOrderIds)
       .orderBy("stay.order_id")
       .orderBy("claim.service_date")
       .orderBy("claim.created_at")
       .orderBy("claim.id")
       .execute();
+    const completedElapsedClaimCandidates = completedOrderClaimCandidates.filter((row) => {
+      const checkoutBusinessDate = checkoutBusinessDateByOrder.get(row.order_id) ?? businessDate;
+      return row.service_date < checkoutBusinessDate;
+    });
     const completedLatestByOrderDate = new Map<string, typeof completedOrderClaimCandidates[number]>();
-    for (const row of completedOrderClaimCandidates) {
+    for (const row of completedElapsedClaimCandidates) {
       const key = `${row.order_id}:${row.service_date}`;
       const previous = completedLatestByOrderDate.get(key);
       if (!previous || iso(row.created_at) > iso(previous.created_at)
@@ -1506,7 +1535,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       }
     }
 
-    const cleaningCandidates = await trx.selectFrom("cleaning_tasks")
+    const cleaningCandidates = currentReleaseFeatures.cleaningWorkflow ? await trx.selectFrom("cleaning_tasks")
       .selectAll()
       .where("property_id", "=", options.propertyId)
       .where((expression) => expression.or([
@@ -1520,7 +1549,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .orderBy("service_date")
       .orderBy("id")
       .limit(ROOM_STATUS_OPERATIONAL_TASK_LIMIT + 1)
-      .execute();
+      .execute() : [];
     const cleaningRowsTruncated = cleaningCandidates.length > ROOM_STATUS_OPERATIONAL_TASK_LIMIT;
     if (cleaningRowsTruncated) partial = true;
     const cleaningRows = cleaningCandidates.slice(0, ROOM_STATUS_OPERATIONAL_TASK_LIMIT);

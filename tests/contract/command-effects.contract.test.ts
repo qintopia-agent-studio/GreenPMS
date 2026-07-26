@@ -20,22 +20,22 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   RECORD_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "payment", "productName", "status", "totals"],
   CORRECT_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "original", "originalPaymentFactId", "productName", "replacement", "status", "totals"],
   ACTIVATE_MEMBERSHIP_ORDER: ["agreedPrice", "entitlementUnitKind", "entitlementUnits", "fromStatus", "memberName", "membershipOrderId", "operation", "paymentDifference", "paymentTotal", "productName", "toStatus", "validFrom", "validUntil"],
-  CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
+  CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayCategoryCode", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
   EXTEND_STAY: ["after", "before", "inventoryUnitId", "orderId"],
   SHORTEN_STAY: ["after", "before", "inventoryUnitId", "orderId"],
   MOVE_UNIT: ["effectiveDate", "fromInventoryUnit", "occupancyCapacity", "occupantCount", "orderId", "pricing", "stayTimeline", "toInventoryUnit"],
   REPRICE_ORDER: ["before", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
-  CANCEL_ORDER: ["currentContractAmount", "entitlementTransition", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
-  MARK_NO_SHOW: ["currentContractAmount", "entitlementTransition", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
+  CANCEL_ORDER: ["currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
+  MARK_NO_SHOW: ["currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
   LOCK_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnit", "reason"],
   RELEASE_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnitId", "maintenanceLockId"],
   COMPLETE_CLEANING: ["cleaningTaskId", "fromStatus", "inventoryUnitId", "orderId", "roomId", "serviceDate", "stayId", "toStatus"],
   RECORD_COLLECTION: ["amountMinor", "currency", "method", "note", "orderId", "transactionReference"],
   RECORD_REFUND: ["amountMinor", "currency", "method", "note", "orderId", "referencesFactId", "transactionReference"],
   REVERSE_FACT: ["amountMinor", "currency", "netEffectMinor", "note", "orderId", "reversesFactId"],
-  CHECK_IN: ["entitlementTransition", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
-  CHECK_OUT: ["amounts", "cleaningTask", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
+  CHECK_IN: ["businessDate", "effectiveDate", "entitlementTransition", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
+  CHECK_OUT: ["amounts", "businessDate", "effectiveDate", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
   REFRESH_MEMBER_COVERAGE: ["before", "inventoryUnitId", "orderId", "pricing", "stayTimeline"],
   ADD_MEMBER_ENTITLEMENT_LOT: ["contractId", "expiresOn", "unitKind", "units"],
   ADJUST_MEMBER_ENTITLEMENT: ["adjustmentReason", "availableAfter", "availableBefore", "contractId", "entitlementLotId", "quantityDelta", "unitKind"],
@@ -111,6 +111,7 @@ async function quote(options: {
   inventoryUnitId?: string;
   memberId?: string;
 } = {}) {
+  const propertyToday = todayInTimeZone("Asia/Shanghai");
   const response = await app.inject({
     method: "POST",
     url: "/api/v1/quotes",
@@ -119,8 +120,8 @@ async function quote(options: {
       propertyId: demo.propertyId,
       inventoryUnitId: options.inventoryUnitId ?? demo.roomId,
       stayType: "TRANSIENT",
-      arrivalDate: options.arrivalDate ?? "2028-04-10",
-      departureDate: options.departureDate ?? "2028-04-14",
+      arrivalDate: options.arrivalDate ?? propertyToday,
+      departureDate: options.departureDate ?? shiftLocalDate(propertyToday, 4),
       pricingPolicyVersionId: demo.transientPolicyId,
       ...(options.memberId ? { memberId: options.memberId } : {})
     }
@@ -158,6 +159,7 @@ describe("Command effect HTTP contract", () => {
   });
 
   it("serializes and validates the real Preview effect for every command type", async () => {
+    const propertyToday = todayInTimeZone("Asia/Shanghai");
     const covered = new Set<CommandType>();
     const capture = async (commandType: CommandType, input: Record<string, unknown>) => {
       const preview = await requestPreview(commandType, input);
@@ -234,7 +236,6 @@ describe("Command effect HTTP contract", () => {
       adjustmentReason: "Effect contract target-balance correction"
     });
 
-    const propertyToday = todayInTimeZone("Asia/Shanghai");
     const expiredOn = shiftLocalDate(propertyToday, -1);
     const expiryContractId = "member_contract_effect_expiry";
     const expiredLotId = "entitlement_lot_effect_expiry";
@@ -342,18 +343,18 @@ describe("Command effect HTTP contract", () => {
     await capture("SHORTEN_STAY", {
       propertyId: demo.propertyId,
       orderId,
-      newDepartureDate: "2028-04-13"
+      newDepartureDate: shiftLocalDate(propertyToday, 3)
     });
     await capture("EXTEND_STAY", {
       propertyId: demo.propertyId,
       orderId,
-      newDepartureDate: "2028-04-15"
+      newDepartureDate: shiftLocalDate(propertyToday, 5)
     });
     await capture("MOVE_UNIT", {
       propertyId: demo.propertyId,
       orderId,
       newInventoryUnitId: demo.secondRoomId,
-      effectiveDate: "2028-04-12"
+      effectiveDate: shiftLocalDate(propertyToday, 2)
     });
     await capture("REPRICE_ORDER", {
       propertyId: demo.propertyId,
@@ -406,10 +407,54 @@ describe("Command effect HTTP contract", () => {
     });
 
     const checkIn = await capture("CHECK_IN", { propertyId: demo.propertyId, orderId });
+    expect(checkIn.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     await confirm(checkIn);
-    const checkOut = await capture("CHECK_OUT", { propertyId: demo.propertyId, orderId });
+    const checkoutPriced = await quote({
+      arrivalDate: shiftLocalDate(propertyToday, -1),
+      departureDate: propertyToday,
+      inventoryUnitId: demo.secondRoomId
+    });
+    const checkoutOrder = await capture("CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: checkoutPriced.quoteId,
+      primaryGuest: { fullName: "Effect Contract Checkout Guest", nickname: "Effect Checkout" },
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null
+    });
+    const checkoutOrderId = (await confirm(checkoutOrder)).orderId as string;
+    await db.updateTable("orders").set({ status: "CHECKED_IN" }).where("id", "=", checkoutOrderId).execute();
+    await db.updateTable("stays").set({ status: "IN_HOUSE" }).where("order_id", "=", checkoutOrderId).execute();
+    const checkOut = await capture("CHECK_OUT", { propertyId: demo.propertyId, orderId: checkoutOrderId });
+    expect(checkOut.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     const checkOutResult = await confirm(checkOut);
-    await capture("COMPLETE_CLEANING", { propertyId: demo.propertyId, cleaningTaskId: checkOutResult.cleaningTaskId });
+    expect(checkOutResult).not.toHaveProperty("cleaningTaskId");
+    const disabledCleaning = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: headers("effect-complete-cleaning-disabled"),
+      payload: {
+        commandType: "COMPLETE_CLEANING",
+        input: { propertyId: demo.propertyId, cleaningTaskId: "cleaning_historical" }
+      }
+    });
+    expect(disabledCleaning.statusCode, disabledCleaning.body).toBe(409);
+    expect(disabledCleaning.json()).toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Cleaning workflow is disabled in this release"
+    });
+    const historicalCleaningEffect = {
+      cleaningTaskId: "cleaning_historical",
+      orderId,
+      stayId: "stay_historical",
+      inventoryUnitId: demo.roomId,
+      roomId: demo.roomId,
+      serviceDate: "2026-07-26",
+      fromStatus: "PENDING",
+      toStatus: "COMPLETED"
+    };
+    expect(Value.Check(CommandEffectSchema, historicalCleaningEffect)).toBe(true);
+    expect(Object.keys(historicalCleaningEffect).sort()).toEqual(expectedEffectKeys.COMPLETE_CLEANING);
+    covered.add("COMPLETE_CLEANING");
 
     expect([...covered].sort()).toEqual([...commandTypes].sort());
   }, 120_000);

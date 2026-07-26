@@ -4,6 +4,8 @@ import {
   commandTypes,
   errorCauseCodes,
   errorCodes,
+  freeStayCategoryCodes,
+  fulfillmentRecordingModes,
   historicalRecoverableCommandTypes,
   orderActionCodes,
   ROOM_STATUS_MAX_QUERY_NIGHTS,
@@ -45,6 +47,7 @@ export const InventoryUnitKindSchema = Type.Union([Type.Literal("ROOM"), Type.Li
 export const EntitlementUnitKindSchema = Type.Union([Type.Literal("ROOM_NIGHT"), Type.Literal("BED_NIGHT")]);
 export const StayTypeSchema = Type.Union(stayTypes.map((stayType) => Type.Literal(stayType)));
 export const BookingChannelCodeSchema = Type.Union(bookingChannelCodes.map((code) => Type.Literal(code)));
+export const FreeStayCategoryCodeSchema = Type.Union(freeStayCategoryCodes.map((code) => Type.Literal(code)));
 export const CommandTypeSchema = Type.Union(commandTypes.map((commandType) => Type.Literal(commandType)));
 export const RecoverableCommandTypeSchema = Type.Union(recoverableCommandTypes.map((commandType) => Type.Literal(commandType)));
 export const HistoricalCommandTypeSchema = Type.Union([
@@ -117,6 +120,8 @@ const ErrorDetailsSchema = Type.Union([
   }),
   strictObject({ causeCode: Type.Union(errorCauseCodes.map((code) => Type.Literal(code))) }),
   strictObject({ expiresOn: LocalDate, asOfDate: LocalDate }),
+  strictObject({ businessDate: LocalDate, arrivalDate: LocalDate }),
+  strictObject({ businessDate: LocalDate, departureDate: LocalDate }),
   strictObject({ remainingAvailable: SafeInteger }),
   strictObject({ expirationFactId: Id }),
   strictObject({ reversalFactId: Id }),
@@ -255,7 +260,8 @@ export const CommandEnvelopeSchema = Type.Union([
     additionalGuests: Type.Optional(Type.Array(PrimaryGuestInputSchema, { maxItems: 999 })),
     bookingChannelCode: Type.Optional(BookingChannelCodeSchema),
     channelOrderReference: Type.Optional(nullable(ShortText)),
-    freeStayReason: Type.Optional(Note)
+    freeStayReason: Type.Optional(Note),
+    freeStayCategoryCode: Type.Optional(FreeStayCategoryCodeSchema)
   })),
   commandEnvelope("CORRECT_ORDER_OCCUPANT", strictObject({
     ...OrderInput,
@@ -447,6 +453,7 @@ export const CommandEffectSchema = Type.Union([
     bookingChannelCode: nullable(BookingChannelCodeSchema),
     channelOrderReference: nullable(ShortText),
     freeStayReason: nullable(Note),
+    freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema),
     inventoryUnit: InventoryUnitRecordSchema,
     stayType: StayTypeSchema,
     arrivalDate: LocalDate,
@@ -556,7 +563,11 @@ export const CommandEffectSchema = Type.Union([
     fromStatus: OrderStatusSchema,
     toStatus: OrderStatusSchema,
     inventoryUnitId: Id,
+    businessDate: Type.Optional(LocalDate),
+    effectiveDate: Type.Optional(LocalDate),
+    recordingMode: Type.Optional(Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])),
     freeStayReason: Type.Optional(nullable(Note)),
+    freeStayCategoryCode: Type.Optional(nullable(FreeStayCategoryCodeSchema)),
     currentContractAmount: Type.Optional(Money),
     amounts: Type.Optional(AmountSummarySchema),
     cleaningTask: Type.Optional(strictObject({
@@ -589,7 +600,8 @@ const CreateOrderResultSchema = strictObject({
   occupants: Type.Optional(Type.Array(OrderOccupantSchema, { minItems: 1, maxItems: 1000 })),
   bookingChannelCode: nullable(BookingChannelCodeSchema),
   channelOrderReference: nullable(ShortText),
-  freeStayReason: nullable(Note)
+  freeStayReason: nullable(Note),
+  freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema)
 });
 const CorrectOrderOccupantResultSchema = strictObject({
   orderId: Id,
@@ -665,6 +677,11 @@ const OrderStatusResultSchema = strictObject({
   status: OrderStatusSchema,
   pricingRevisionId: Type.Optional(Id),
   cleaningTaskId: Type.Optional(Id),
+  fulfillmentTiming: Type.Optional(strictObject({
+    effectiveDate: LocalDate,
+    recordedBusinessDate: LocalDate,
+    recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
+  })),
   entitlementTransition: Type.Optional(strictObject({
     from: Type.Literal("HELD"),
     to: Type.Union([Type.Literal("CONSUMED"), Type.Literal("RELEASED")]),
@@ -1172,6 +1189,7 @@ export const OrderRowSchema = strictObject({
   booking_channel_code: nullable(BookingChannelCodeSchema),
   channel_order_reference: nullable(ShortText),
   free_stay_reason: nullable(Note),
+  free_stay_category_code: nullable(FreeStayCategoryCodeSchema),
   pricing_policy_version_id: Id,
   member_id: nullable(Id),
   member_contract_id: nullable(Id),
@@ -1196,7 +1214,8 @@ const CreateOrderAmendmentPayloadSchema = strictObject({
   occupants: Type.Optional(Type.Array(CommandEffectOrderOccupantSchema, { minItems: 1, maxItems: 1000 })),
   bookingChannelCode: Type.Optional(nullable(BookingChannelCodeSchema)),
   channelOrderReference: Type.Optional(nullable(ShortText)),
-  freeStayReason: Type.Optional(nullable(Note))
+  freeStayReason: Type.Optional(nullable(Note)),
+  freeStayCategoryCode: Type.Optional(nullable(FreeStayCategoryCodeSchema))
 });
 const AmendmentRowSchema = strictObject({
   id: Id, order_id: Id, sequence: Type.Integer({ minimum: 1 }), amendment_type: CommandTypeSchema,
@@ -1218,6 +1237,36 @@ const CoverageRowSchema = strictObject({
   unit_kind: EntitlementUnitKindSchema,
   status: Type.Union([Type.Literal("HELD"), Type.Literal("CONSUMED"), Type.Literal("RELEASED")]),
   held_by_revision_id: Id, created_at: DateTime, updated_at: DateTime
+});
+const CleaningTaskSummarySchema = strictObject({
+  id: Id,
+  inventoryUnitId: Id,
+  serviceDate: LocalDate,
+  status: Type.Union([Type.Literal("PENDING"), Type.Literal("COMPLETED")]),
+  createdAt: DateTime,
+  completedAt: nullable(DateTime),
+  createdBy: nullable(strictObject({ subjectId: Id, displayName: ShortText })),
+  completedBy: nullable(strictObject({ subjectId: Id, displayName: ShortText }))
+});
+const OrderFulfillmentRecordProperties = {
+  plannedBusinessDate: LocalDate,
+  recordedBusinessDate: nullable(LocalDate),
+  recordingMode: Type.Union(fulfillmentRecordingModes.map((mode) => Type.Literal(mode))),
+  recordedAt: DateTime,
+  actor: nullable(strictObject({ subjectId: Id, displayName: ShortText })),
+  reason: strictObject({ code: ShortText, note: Note })
+};
+const CheckInFulfillmentRecordSchema = strictObject({
+  type: Type.Literal("CHECK_IN"),
+  ...OrderFulfillmentRecordProperties
+});
+const CheckOutFulfillmentRecordSchema = strictObject({
+  type: Type.Literal("CHECK_OUT"),
+  ...OrderFulfillmentRecordProperties
+});
+const OrderFulfillmentProjectionSchema = strictObject({
+  checkIn: nullable(CheckInFulfillmentRecordSchema),
+  checkOut: nullable(CheckOutFulfillmentRecordSchema)
 });
 export const CollectionFactRowSchema = strictObject({
   fact_id: Id, order_id: Id,
@@ -1255,10 +1304,12 @@ export const OrderDetailResponseSchema = strictObject({
   ]) }),
   currentSegment: strictObject({ id: Id, sequence: Type.Integer({ minimum: 1 }), inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate }),
   segments: Type.Array(StaySegmentRowSchema),
+  fulfillment: OrderFulfillmentProjectionSchema,
   amendments: Type.Array(AmendmentRowSchema),
   pricingRevisions: Type.Array(PricingRevisionRowSchema),
   coverageSet: Type.Array(CoverageRowSchema),
   collectionFacts: Type.Array(CollectionFactRowSchema),
+  cleaningTasks: Type.Array(CleaningTaskSummarySchema),
   amounts: AmountSummarySchema
 });
 

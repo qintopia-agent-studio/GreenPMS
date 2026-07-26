@@ -3,6 +3,7 @@ import type { AuthPrincipal, CommandEnvelope, ReceiptDto } from "@qintopia/contr
 import {
   confirmCommandPreview,
   createCommandPreview,
+  propertyLocalToday,
   type Database
 } from "@qintopia/db";
 import type { Kysely } from "kysely";
@@ -27,6 +28,12 @@ const expiringLotId = "lot_receipt_references_expiring";
 
 let db: Kysely<Database>;
 let sequence = 0;
+
+function shiftDate(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 function metadata(prefix: string) {
   sequence += 1;
@@ -73,6 +80,16 @@ async function createMemberOrder(prefix: string, arrivalDate: string, departureD
     .orderBy("service_date")
     .execute();
   return { receipt, orderId, coverage };
+}
+
+async function fulfillmentDatePair() {
+  await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
+  const arrivalDate = await propertyLocalToday(db, demo.propertyId);
+  await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
+  const departureDate = await propertyLocalToday(db, demo.propertyId);
+  expect(departureDate > arrivalDate).toBe(true);
+  await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
+  return { arrivalDate, departureDate };
 }
 
 function sorted(values: readonly string[]): string[] {
@@ -194,7 +211,8 @@ describe.sequential("Receipt permanent references for member entitlement facts",
   });
 
   it("ties CONSUME facts and coverage resources to the CHECK_IN command exactly once", async () => {
-    const created = await createMemberOrder("consume", "2028-04-01", "2028-04-03");
+    const { arrivalDate, departureDate } = await fulfillmentDatePair();
+    const created = await createMemberOrder("consume", arrivalDate, departureDate);
     const coverageIds = created.coverage.map((item) => item.id);
     const checkedIn = await previewAndConfirm({
       commandType: "CHECK_IN",
@@ -203,11 +221,12 @@ describe.sequential("Receipt permanent references for member entitlement facts",
 
     await expectExactLedgerReferences({
       receipt: checkedIn,
-      entryTypes: ["CONSUME", "CONSUME"],
+      entryTypes: created.coverage.map(() => "CONSUME" as const),
       coverageResourceIds: coverageIds,
       resourceRefs: [created.orderId, checkedIn.result!.amendmentId as string, ...coverageIds]
     });
 
+    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
     const checkedOut = await previewAndConfirm({
       commandType: "CHECK_OUT",
       input: { propertyId: demo.propertyId, orderId: created.orderId }

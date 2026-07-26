@@ -9,6 +9,7 @@ import { localDateInTimeZone } from "../dates";
 import {
   CommandDialog,
   CommandRecoveryBar,
+  businessStatusLabel,
   EmptyState,
   formatDate,
   guestName,
@@ -79,9 +80,10 @@ export function TodayPage() {
     setCommand({
       commandType,
       title,
+      presentation: "FULFILLMENT",
       description: commandType === "CHECK_IN"
-        ? "服务端 Preview 将显示本次入住核销的 HELD 会员权益；Confirm 与订单状态变更在同一事务提交。"
-        : "退房只完成履约并释放库存，不重复核销已在入住时转为 CONSUMED 的会员权益。",
+        ? "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。"
+        : "核对后将住宿状态更新为已退房并释放后续住宿库存；退房不会重复核销会员权益。",
       input: { propertyId, orderId: order.id }
     });
   }
@@ -109,7 +111,7 @@ export function TodayPage() {
   return (
     <div className="today-page">
       <header className="page-heading page-heading-actions">
-        <div><p className="eyebrow">Mobile operations</p><h1>今日履约</h1><p>{formatDate(businessDate)}</p></div>
+        <div><p className="eyebrow">前台日常</p><h1>今日履约</h1><p>{formatDate(businessDate)}</p></div>
         <div className="today-date"><CalendarDays aria-hidden="true" size={17} /><label><span className="sr-only">营业日期</span><input type="date" value={businessDate} onChange={(event) => { dateEdited.current = true; setBusinessDate(event.target.value); }} /></label><button className="icon-button" type="button" onClick={() => setRefreshToken((value) => value + 1)} aria-label="刷新今日履约" title="刷新"><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={18} /></button></div>
       </header>
       <InlineError error={recoveryError} title="恢复记录未收口" />
@@ -124,7 +126,7 @@ export function TodayPage() {
           <article className="queue-row" key={order.id}>
             <div className="queue-icon" aria-hidden="true">{tab === "EXCEPTIONS" ? <AlertTriangle size={19} /> : tab === "DEPARTURES" ? <LogOut size={19} /> : tab === "ARRIVALS" ? <LogIn size={19} /> : <DoorOpen size={19} />}</div>
             <div className="queue-primary"><strong>{guestName(order.primary_guest_snapshot)}</strong><code>{order.id}</code><span>{formatDate(order.arrival_date)} 至 {formatDate(order.departure_date)}</span></div>
-            <StatusBadge value={order.status} />
+            <StatusBadge value={order.status} label={businessStatusLabel(order.status)} />
             <div className="queue-actions">
               {tab === "ARRIVALS" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_IN", "办理入住")} disabled={commandsBlocked}><LogIn aria-hidden="true" size={17} />入住</button> : null}
               {tab === "DEPARTURES" || tab === "IN_HOUSE" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_OUT", "办理退房")} disabled={commandsBlocked}><LogOut aria-hidden="true" size={17} />退房</button> : null}

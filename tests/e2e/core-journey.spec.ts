@@ -94,6 +94,7 @@ async function createOrder(page: Page, options: {
   expectedCoverageNights?: number;
   expectedQuoteAmount?: string;
   freeStayReason?: string;
+  freeStayCategoryCode?: "VOLUNTEER" | "RECEPTION";
   bookingChannelCode?: "YOUMUDAO" | "CTRIP" | "MEITUAN" | "WECOM";
   channelOrderReference?: string;
   additionalGuests?: Array<{
@@ -135,9 +136,15 @@ async function createOrder(page: Page, options: {
   }
   await page.getByTestId("primary-guest-name").fill(options.guest);
   if (options.stayMode === "FREE") {
+    const categorySelect = page.getByTestId("free-stay-category-code");
+    await expect(categorySelect).toHaveValue("");
+    await categorySelect.selectOption(options.freeStayCategoryCode ?? "RECEPTION");
     await page.getByTestId("free-stay-reason").fill(options.freeStayReason ?? `Automated FREE stay fixture: ${options.guest}`);
   }
   const expectedFacts = [options.nickname ?? options.guest];
+  if (options.stayMode === "FREE") {
+    expectedFacts.push({ VOLUNTEER: "义工", RECEPTION: "接待" }[options.freeStayCategoryCode ?? "RECEPTION"]);
+  }
   if (options.stayMode === "NORMAL") {
     const bookingChannelCode = options.bookingChannelCode ?? "YOUMUDAO";
     const channelSelect = page.getByTestId("booking-channel-code");

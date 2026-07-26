@@ -82,9 +82,8 @@ async function createStay(db: Kysely<Database>, options: {
     quoteId: quote.quoteId,
     primaryGuest: { fullName: options.fullName, nickname: options.nickname },
     additionalGuests: options.additionalGuests ?? [],
-    bookingChannelCode: "WECOM",
-    channelOrderReference: null,
-    ...(options.stayType === "FREE" ? { freeStayReason: "阶段 5 免费住宿显示对照" } : {})
+    ...(options.stayType !== "FREE" ? { bookingChannelCode: "WECOM", channelOrderReference: null } : {}),
+    ...(options.stayType === "FREE" ? { freeStayReason: "阶段 5 免费住宿显示对照", freeStayCategoryCode: "RECEPTION" } : {})
   }, options.key);
   const orderId = receipt.result?.orderId;
   if (typeof orderId !== "string") throw new Error(`${options.key} did not create an order`);

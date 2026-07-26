@@ -1,14 +1,18 @@
-import { sql, type Transaction } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 import {
+  currentReleaseFeatures,
   DomainError,
   orderActionCodes,
   type AccessLevel,
   type CoverageItemDto,
+  type OrderFulfillmentProjectionDto,
+  type OrderFulfillmentRecordDto,
   type OrderAllowedActionDto,
   type OrderActionCode
 } from "@qintopia/contracts";
-import { amountSummary, enumerateServiceDates, newId, type CoverageCandidate } from "@qintopia/domain";
+import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
 import type { DbExecutor } from "./inventory.ts";
+import { propertyLocalToday } from "./members.ts";
 import type { Database } from "./schema.ts";
 
 export interface OrderContext {
@@ -116,7 +120,8 @@ export async function orderAmountSummary(db: DbExecutor, context: OrderContext) 
 export function orderAllowedActions(
   accessLevel: AccessLevel,
   status: string,
-  hasRefundableCollection: boolean
+  hasRefundableCollection: boolean,
+  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string }
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
@@ -134,17 +139,159 @@ export function orderAllowedActions(
   };
   return orderActionCodes.map((code) => {
     const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
-    const enabled = statusAllows && (code !== "RECORD_REFUND" || hasRefundableCollection);
+    let fulfillmentDisabledReason: string | null = null;
+    if (fulfillmentDates && statusAllows) {
+      if (code === "CHECK_IN") {
+        if (fulfillmentDates.businessDate < fulfillmentDates.arrivalDate) {
+          fulfillmentDisabledReason = "ARRIVAL_DATE_NOT_REACHED";
+        } else if (fulfillmentDates.businessDate > fulfillmentDates.arrivalDate) {
+          fulfillmentDisabledReason = "ARRIVAL_DATE_PASSED";
+        }
+      } else if (code === "CHECK_OUT") {
+        if (fulfillmentDates.businessDate < fulfillmentDates.departureDate) {
+          fulfillmentDisabledReason = "DEPARTURE_DATE_NOT_REACHED";
+        }
+      }
+    }
+    const enabled = statusAllows
+      && fulfillmentDisabledReason === null
+      && (code !== "RECORD_REFUND" || hasRefundableCollection);
     return {
       code,
       enabled,
       disabledReason: enabled
         ? null
-        : code === "RECORD_REFUND" && statusAllows
+        : fulfillmentDisabledReason ?? (code === "RECORD_REFUND" && statusAllows
           ? "NO_REFUNDABLE_COLLECTION"
-          : "ORDER_STATE_NOT_ALLOWED"
+          : "ORDER_STATE_NOT_ALLOWED")
     };
   });
+}
+
+interface FulfillmentAmendmentRow {
+  sequence: number;
+  amendment_type: string;
+  payload: unknown;
+  reason_code: string;
+  reason_note: string;
+  actor_subject_id: string | null;
+  actor_display_name: string | null;
+  created_at: Date | string;
+}
+
+function fulfillmentPayload(amendment: FulfillmentAmendmentRow): Record<string, unknown> {
+  if (!amendment.payload || typeof amendment.payload !== "object" || Array.isArray(amendment.payload)) {
+    throw new DomainError("INTERNAL_ERROR", "履约记录的办理营业日期损坏", 500, false, {
+      amendmentSequence: amendment.sequence,
+      amendmentType: amendment.amendment_type
+    });
+  }
+  return amendment.payload as Record<string, unknown>;
+}
+
+function validFulfillmentDate(value: unknown, amendment: FulfillmentAmendmentRow): string {
+  if (typeof value !== "string") {
+    throw new DomainError("INTERNAL_ERROR", "履约记录的办理营业日期损坏", 500, false, {
+      amendmentSequence: amendment.sequence,
+      amendmentType: amendment.amendment_type
+    });
+  }
+  try {
+    parseLocalDate(value);
+  } catch {
+    throw new DomainError("INTERNAL_ERROR", "履约记录的办理营业日期损坏", 500, false, {
+      amendmentSequence: amendment.sequence,
+      amendmentType: amendment.amendment_type
+    });
+  }
+  return value;
+}
+
+function historicalRecordedBusinessDate(amendment: FulfillmentAmendmentRow, payload: Record<string, unknown>): string | null {
+  if (!("businessDate" in payload) || payload.businessDate === undefined) return null;
+  return validFulfillmentDate(payload.businessDate, amendment);
+}
+
+function recordedAt(amendment: FulfillmentAmendmentRow): string {
+  const value = amendment.created_at instanceof Date ? amendment.created_at : new Date(amendment.created_at);
+  if (Number.isNaN(value.getTime())) {
+    throw new DomainError("INTERNAL_ERROR", "履约记录的记录时间损坏", 500, false, {
+      amendmentSequence: amendment.sequence,
+      amendmentType: amendment.amendment_type
+    });
+  }
+  return value.toISOString();
+}
+
+function fulfillmentRecord(
+  amendment: FulfillmentAmendmentRow | undefined,
+  type: "CHECK_IN" | "CHECK_OUT",
+  plannedBusinessDate: string
+): OrderFulfillmentRecordDto | null {
+  if (!amendment) return null;
+  const payload = fulfillmentPayload(amendment);
+  const hasImmutableTiming = "effectiveDate" in payload || "recordingMode" in payload;
+  let effectiveDate = plannedBusinessDate;
+  let recordedDate: string | null;
+  let recordingMode: OrderFulfillmentRecordDto["recordingMode"];
+  if (hasImmutableTiming) {
+    if (!("effectiveDate" in payload) || !("recordingMode" in payload) || !("businessDate" in payload)) {
+      throw new DomainError("INTERNAL_ERROR", "履约记录的办理营业日期损坏", 500, false, {
+        amendmentSequence: amendment.sequence,
+        amendmentType: amendment.amendment_type
+      });
+    }
+    effectiveDate = validFulfillmentDate(payload.effectiveDate, amendment);
+    recordedDate = validFulfillmentDate(payload.businessDate, amendment);
+    if (payload.recordingMode !== "ON_SCHEDULE" && payload.recordingMode !== "LATE_RECORDED") {
+      throw new DomainError("INTERNAL_ERROR", "履约记录的办理营业日期损坏", 500);
+    }
+    const timingMatches = type === "CHECK_IN"
+      ? payload.recordingMode === "ON_SCHEDULE" && recordedDate === effectiveDate
+      : payload.recordingMode === "ON_SCHEDULE"
+        ? recordedDate === effectiveDate
+        : recordedDate > effectiveDate;
+    if (!timingMatches) throw new DomainError("INTERNAL_ERROR", "履约记录的办理营业日期损坏", 500);
+    recordingMode = payload.recordingMode;
+  } else {
+    recordedDate = historicalRecordedBusinessDate(amendment, payload);
+    recordingMode = recordedDate === plannedBusinessDate
+      ? "ON_SCHEDULE"
+      : type === "CHECK_OUT" && recordedDate !== null && recordedDate > plannedBusinessDate
+        ? "LATE_RECORDED"
+        : "LEGACY_UNCLASSIFIED";
+  }
+  const hasActorId = Boolean(amendment.actor_subject_id);
+  const hasActorName = Boolean(amendment.actor_display_name);
+  if (hasActorId !== hasActorName) throw new DomainError("INTERNAL_ERROR", "履约记录的操作人信息损坏", 500);
+  return {
+    type,
+    plannedBusinessDate: effectiveDate,
+    recordedBusinessDate: recordedDate,
+    recordingMode,
+    recordedAt: recordedAt(amendment),
+    actor: amendment.actor_subject_id && amendment.actor_display_name
+      ? { subjectId: amendment.actor_subject_id, displayName: amendment.actor_display_name }
+      : null,
+    reason: { code: amendment.reason_code, note: amendment.reason_note }
+  };
+}
+
+export function projectOrderFulfillment(
+  amendments: readonly FulfillmentAmendmentRow[],
+  dates: { arrivalDate: string; departureDate: string }
+): OrderFulfillmentProjectionDto {
+  parseLocalDate(dates.arrivalDate);
+  parseLocalDate(dates.departureDate);
+  const checkIns = amendments.filter((amendment) => amendment.amendment_type === "CHECK_IN");
+  const checkOuts = amendments.filter((amendment) => amendment.amendment_type === "CHECK_OUT");
+  if (checkIns.length > 1 || checkOuts.length > 1) {
+    throw new DomainError("INTERNAL_ERROR", "订单履约记录存在重复状态事实", 500);
+  }
+  return {
+    checkIn: fulfillmentRecord(checkIns[0], "CHECK_IN", dates.arrivalDate),
+    checkOut: fulfillmentRecord(checkOuts[0], "CHECK_OUT", dates.departureDate)
+  };
 }
 
 function hasRefundableCollection(facts: Array<{
@@ -166,9 +313,10 @@ function hasRefundableCollection(facts: Array<{
     && (activeRefunded.get(fact.fact_id) ?? 0) < fact.amount_minor);
 }
 
-export async function getOrderView(db: DbExecutor, orderId: string, accessLevel: AccessLevel = "WRITE") {
+async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel) {
   const context = await loadOrderContext(db, orderId);
-  const [occupantRows, correctionRows, segments, amendments, revisions, coverage, facts] = await Promise.all([
+  const [businessDate, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, cleaningTasks] = await Promise.all([
+    propertyLocalToday(db, context.order.property_id),
     db.selectFrom("order_occupants").selectAll().where("order_id", "=", orderId).orderBy("ordinal").execute(),
     db.selectFrom("order_occupant_corrections")
       .innerJoin("subjects", "subjects.id", "order_occupant_corrections.actor_subject_id")
@@ -192,7 +340,28 @@ export async function getOrderView(db: DbExecutor, orderId: string, accessLevel:
       .execute(),
     db.selectFrom("pricing_revisions").selectAll().where("order_id", "=", orderId).orderBy("revision_no").execute(),
     db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("service_date").execute(),
-    db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).orderBy("created_at").orderBy("fact_id").execute()
+    db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).orderBy("created_at").orderBy("fact_id").execute(),
+    currentReleaseFeatures.cleaningWorkflow ? db.selectFrom("cleaning_tasks as task")
+      .leftJoin("command_executions as created_command", "created_command.id", "task.created_by_command_id")
+      .leftJoin("subjects as created_subject", "created_subject.id", "created_command.subject_id")
+      .leftJoin("command_executions as completed_command", "completed_command.id", "task.completed_by_command_id")
+      .leftJoin("subjects as completed_subject", "completed_subject.id", "completed_command.subject_id")
+      .select([
+        "task.id",
+        "task.inventory_unit_id",
+        "task.service_date",
+        "task.status",
+        "task.created_at",
+        "task.completed_at",
+        "created_command.subject_id as created_subject_id",
+        "created_subject.display_name as created_subject_name",
+        "completed_command.subject_id as completed_subject_id",
+        "completed_subject.display_name as completed_subject_name"
+      ])
+      .where("task.order_id", "=", orderId)
+      .orderBy("task.service_date")
+      .orderBy("task.created_at")
+      .execute() : Promise.resolve([])
   ]);
   const latestByOccupant = new Map<string, (typeof correctionRows)[number]>();
   for (const correction of correctionRows) {
@@ -207,7 +376,11 @@ export async function getOrderView(db: DbExecutor, orderId: string, accessLevel:
   });
   return {
     accessLevel,
-    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts)),
+    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
+      businessDate,
+      arrivalDate: context.order.arrival_date,
+      departureDate: context.order.departure_date
+    }),
     order: context.order,
     occupants: occupantRows.map((occupant) => {
       const correction = latestByOccupant.get(occupant.id);
@@ -239,6 +412,10 @@ export async function getOrderView(db: DbExecutor, orderId: string, accessLevel:
     stay: context.stay,
     currentSegment: context.currentSegment,
     segments,
+    fulfillment: projectOrderFulfillment(amendments, {
+      arrivalDate: context.order.arrival_date,
+      departureDate: context.order.departure_date
+    }),
     amendments: amendments.map((amendment) => ({
       id: amendment.id,
       order_id: amendment.order_id,
@@ -261,8 +438,29 @@ export async function getOrderView(db: DbExecutor, orderId: string, accessLevel:
     })),
     coverageSet: coverage,
     collectionFacts: facts,
+    cleaningTasks: cleaningTasks.map((task) => ({
+      id: task.id,
+      inventoryUnitId: task.inventory_unit_id,
+      serviceDate: task.service_date,
+      status: task.status,
+      createdAt: task.created_at instanceof Date ? task.created_at.toISOString() : new Date(task.created_at).toISOString(),
+      completedAt: task.completed_at
+        ? task.completed_at instanceof Date ? task.completed_at.toISOString() : new Date(task.completed_at).toISOString()
+        : null,
+      createdBy: task.created_subject_id && task.created_subject_name
+        ? { subjectId: task.created_subject_id, displayName: task.created_subject_name }
+        : null,
+      completedBy: task.completed_subject_id && task.completed_subject_name
+        ? { subjectId: task.completed_subject_id, displayName: task.completed_subject_name }
+        : null
+    })),
     amounts: await orderAmountSummary(db, context)
   };
+}
+
+export async function getOrderView(db: Kysely<Database>, orderId: string, accessLevel: AccessLevel = "WRITE") {
+  return db.transaction().setIsolationLevel("repeatable read")
+    .execute((trx) => getOrderViewSnapshot(trx, orderId, accessLevel));
 }
 
 export async function activeCoverageCandidates(db: DbExecutor, orderId: string, dates?: string[]): Promise<CoverageCandidate[]> {

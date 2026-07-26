@@ -370,7 +370,8 @@ async function createFreeStayForToday(page: Page, options: {
   await expect(page.getByTestId("free-stay-reason")).toBeVisible();
   await page.getByTestId("primary-guest-name").fill(options.guest);
   await page.getByTestId("free-stay-reason").fill(`Room-status OPEN_ORDER fixture: ${options.guest}`);
-  await page.getByTestId("booking-channel-code").selectOption("WECOM");
+  await expect(page.getByTestId("booking-channel-code")).toHaveCount(0);
+  await page.getByTestId("free-stay-category-code").selectOption("RECEPTION");
   const createOrder = page.getByTestId("create-order");
   await expect(createOrder).toBeDisabled();
   await expect(page.getByTestId("command-effect")).toHaveCount(0);
@@ -379,7 +380,7 @@ async function createFreeStayForToday(page: Page, options: {
   const receipt = await previewAndConfirm(page, `Create room-status OPEN_ORDER fixture ${options.guest}`, [
     options.guest,
     options.nickname,
-    "企业微信"
+    "接待"
   ]);
   const orderLink = receipt.getByRole("link", { name: /查看订单/ });
   await expect(orderLink).toBeVisible();

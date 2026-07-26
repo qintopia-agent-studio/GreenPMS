@@ -2431,6 +2431,13 @@ pre {
   flex: none;
 }
 
+.action-band-content {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 8px;
+}
+
 .action-band p {
   color: var(--muted);
   font-size: 11px;
@@ -2444,6 +2451,36 @@ pre {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.fulfillment-date-notice {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  border: 1px solid #d7bd91;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.fulfillment-date-notice > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.fulfillment-date-notice strong,
+.fulfillment-date-notice span {
+  overflow-wrap: anywhere;
+}
+
+.fulfillment-date-notice span {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .action-separator {
@@ -2717,6 +2754,10 @@ pre {
 
   .action-toolbar {
     justify-content: flex-start;
+  }
+
+  .action-band-content {
+    width: 100%;
   }
 }
 

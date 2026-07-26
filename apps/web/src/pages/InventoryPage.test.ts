@@ -129,6 +129,9 @@ describe("CREATE_QUOTE request lifecycle", () => {
   it("requires a booking channel only for non-member stays", () => {
     expect(bookingChannelRequiredForStay(false)).toBe(true);
     expect(bookingChannelRequiredForStay(true)).toBe(false);
+    expect(bookingChannelRequiredForStay(false, "FREE")).toBe(false);
+    expect(bookingChannelRequiredForStay(false, "TRANSIENT")).toBe(true);
+    expect(bookingChannelRequiredForStay(true, "TRANSIENT")).toBe(false);
   });
 
   it("only keeps a selected member while it remains visible in the current property", () => {

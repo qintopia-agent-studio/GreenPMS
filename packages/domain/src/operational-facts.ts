@@ -23,8 +23,12 @@ export function validateBookingChannel(
 ): { bookingChannelCode: BookingChannelCode; channelOrderReference: string | null } {
   const bookingChannelCode = parseBookingChannelCode(bookingChannelCodeValue);
   const channelOrderReference = normalizeChannelOrderReference(channelOrderReferenceValue);
-  if (bookingChannelCode === "WECOM" && channelOrderReference !== null) {
-    throw new DomainError("VALIDATION_ERROR", "channelOrderReference must be null for WECOM orders");
+  if (bookingChannelCode === "WECOM") {
+    if (channelOrderReference !== null) {
+      throw new DomainError("VALIDATION_ERROR", "channelOrderReference must be null for WECOM orders");
+    }
+  } else if (channelOrderReference === null) {
+    throw new DomainError("VALIDATION_ERROR", `channelOrderReference is required for ${bookingChannelCode} orders`);
   }
   return { bookingChannelCode, channelOrderReference };
 }

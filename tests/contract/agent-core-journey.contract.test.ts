@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { sql, type Kysely } from "kysely";
 import type { CommandType } from "@qintopia/contracts";
-import { sha256 } from "@qintopia/domain";
+import { parseLocalDate, sha256, todayInTimeZone } from "@qintopia/domain";
 import type { Database } from "@qintopia/db";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -55,6 +55,12 @@ let app: FastifyInstance;
 let db: Kysely<Database>;
 let reportActiveOwnerConfirmObserved: (() => void) | undefined;
 const originalLogLevel = process.env.LOG_LEVEL;
+
+function shiftLocalDate(value: string, days: number): string {
+  const date = parseLocalDate(value);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 function authHeaders(token: string) {
   return { authorization: `Bearer ${token}`, "content-type": "application/json" };
@@ -259,6 +265,11 @@ afterAll(async () => {
 
 describe("scoped agent HTTP core journey", () => {
   it("executes the member stay journey and preserves authorization, idempotency, audit, and recovery contracts", async () => {
+    const arrivalDate = todayInTimeZone("Asia/Shanghai");
+    const secondServiceDate = shiftLocalDate(arrivalDate, 1);
+    const finalServiceDate = shiftLocalDate(arrivalDate, 2);
+    const originalDepartureDate = shiftLocalDate(arrivalDate, 3);
+    const shortenedDepartureDate = finalServiceDate;
     const me = await app.inject({
       method: "GET",
       url: "/api/v1/me",
@@ -274,7 +285,7 @@ describe("scoped agent HTTP core journey", () => {
 
     const availability = await app.inject({
       method: "GET",
-      url: `/api/v1/properties/${demo.propertyId}/availability?arrivalDate=2028-04-10&departureDate=2028-04-13&unitKind=ROOM`,
+      url: `/api/v1/properties/${demo.propertyId}/availability?arrivalDate=${arrivalDate}&departureDate=${originalDepartureDate}&unitKind=ROOM`,
       headers: { authorization: `Bearer ${demo.readToken}` }
     });
     expect(availability.statusCode, availability.body).toBe(200);
@@ -295,8 +306,8 @@ describe("scoped agent HTTP core journey", () => {
         input: {
           propertyId: demo.propertyId,
           inventoryUnitId: demo.secondRoomId,
-          arrivalDate: "2028-04-10",
-          departureDate: "2028-04-11",
+          arrivalDate,
+          departureDate: secondServiceDate,
           reason: "READ Token boundary acceptance"
         }
       }
@@ -320,8 +331,8 @@ describe("scoped agent HTTP core journey", () => {
         propertyId: demo.propertyId,
         inventoryUnitId: memberRoomId,
         stayType: "TRANSIENT",
-        arrivalDate: "2028-04-10",
-        departureDate: "2028-04-13",
+        arrivalDate,
+        departureDate: originalDepartureDate,
         pricingPolicyVersionId: demo.transientPolicyId,
         memberId: demo.memberId
       }
@@ -345,14 +356,14 @@ describe("scoped agent HTTP core journey", () => {
       memberContractId: demo.memberContractId,
       pricingPolicyVersionId: demo.transientPolicyId,
       coverageSet: [
-        { serviceDate: "2028-04-10", inventoryUnitId: memberRoomId, unitKind: "ROOM_NIGHT", entitlementLotId: demo.roomLotId },
-        { serviceDate: "2028-04-11", inventoryUnitId: memberRoomId, unitKind: "ROOM_NIGHT", entitlementLotId: demo.roomLotId }
+        { serviceDate: arrivalDate, inventoryUnitId: memberRoomId, unitKind: "ROOM_NIGHT", entitlementLotId: demo.roomLotId },
+        { serviceDate: secondServiceDate, inventoryUnitId: memberRoomId, unitKind: "ROOM_NIGHT", entitlementLotId: demo.roomLotId }
       ],
       cashRemainder: { currency: "CNY", minorUnits: 12_000 },
       currentContractAmount: { currency: "CNY", minorUnits: 12_000 }
     });
     expect(quote.cashLines).toEqual([
-      expect.objectContaining({ serviceDate: "2028-04-12", amount: { currency: "CNY", minorUnits: 12_000 } })
+      expect.objectContaining({ serviceDate: finalServiceDate, amount: { currency: "CNY", minorUnits: 12_000 } })
     ]);
     const quoteReplay = await app.inject(quoteRequest);
     expect(quoteReplay.statusCode, quoteReplay.body).toBe(200);
@@ -482,7 +493,7 @@ describe("scoped agent HTTP core journey", () => {
     const shortened = await runCommand(demo.writeToken, "SHORTEN_STAY", {
       propertyId: demo.propertyId,
       orderId,
-      newDepartureDate: "2028-04-12"
+      newDepartureDate: shortenedDepartureDate
     }, "shorten-stay");
     expect(shortened.receipt.result).toMatchObject({ orderId, pricingRevisionId: expect.any(String) });
 
@@ -519,10 +530,23 @@ describe("scoped agent HTTP core journey", () => {
       propertyId: demo.propertyId,
       orderId
     }, "check-in");
-    const checkedOut = await runCommand(demo.writeToken, "CHECK_OUT", {
-      propertyId: demo.propertyId,
-      orderId
-    }, "check-out");
+    expect(checkedIn.preview.effect).toMatchObject({ businessDate: arrivalDate });
+    const earlyCheckout = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: {
+        ...authHeaders(demo.writeToken),
+        "idempotency-key": "agent-journey-early-checkout-preview",
+        "x-correlation-id": "agent-journey-early-checkout"
+      },
+      payload: { commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }
+    });
+    expect(earlyCheckout.statusCode, earlyCheckout.body).toBe(409);
+    expect(earlyCheckout.json()).toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "未到计划退房日，不能办理普通退房；当前版本暂不支持提前退房",
+      details: { businessDate: arrivalDate, departureDate: shortenedDepartureDate }
+    });
 
     const finalOrderResponse = await app.inject({
       method: "GET",
@@ -533,12 +557,28 @@ describe("scoped agent HTTP core journey", () => {
     const finalOrder = finalOrderResponse.json();
     expect(finalOrder.order).toMatchObject({
       id: orderId,
-      status: "CHECKED_OUT",
-      departure_date: "2028-04-12",
+      status: "CHECKED_IN",
+      departure_date: shortenedDepartureDate,
       pricing_policy_version_id: demo.transientPolicyId,
       member_contract_id: demo.memberContractId
     });
-    expect(finalOrder.stay.status).toBe("COMPLETED");
+    expect(finalOrder.stay.status).toBe("IN_HOUSE");
+    expect(finalOrder.allowedActions).toEqual(expect.arrayContaining([{
+      code: "CHECK_OUT",
+      enabled: false,
+      disabledReason: "DEPARTURE_DATE_NOT_REACHED"
+    }]));
+    expect(finalOrder.amendments.find((amendment: { amendment_type: string }) => amendment.amendment_type === "CHECK_IN")?.payload)
+      .toMatchObject({ businessDate: arrivalDate });
+    expect(finalOrder.fulfillment).toMatchObject({
+      checkIn: {
+        type: "CHECK_IN",
+        plannedBusinessDate: arrivalDate,
+        recordedBusinessDate: arrivalDate,
+        recordingMode: "ON_SCHEDULE"
+      },
+      checkOut: null
+    });
     expect(finalOrder.pricingRevisions).toHaveLength(2);
     expect(finalOrder.pricingRevisions.every((revision: { policy_version_id: string }) => (
       revision.policy_version_id === demo.transientPolicyId
@@ -551,20 +591,20 @@ describe("scoped agent HTTP core journey", () => {
     });
     expect(finalOrder.coverageSet).toHaveLength(2);
     expect(finalOrder.coverageSet.every((item: { status: string }) => item.status === "CONSUMED")).toBe(true);
+    expect(finalOrder.cleaningTasks).toEqual([]);
 
-    const memberAfterCheckout = await app.inject({
+    const memberAfterCheckIn = await app.inject({
       method: "GET",
       url: `/api/v1/members/${demo.memberId}?propertyId=${demo.propertyId}`,
       headers: { authorization: `Bearer ${demo.writeToken}` }
     });
-    expect(memberAfterCheckout.statusCode, memberAfterCheckout.body).toBe(200);
-    const consumeFacts = memberAfterCheckout.json().ledger.filter((entry: { order_id: string | null; entry_type: string }) => (
+    expect(memberAfterCheckIn.statusCode, memberAfterCheckIn.body).toBe(200);
+    const consumeFacts = memberAfterCheckIn.json().ledger.filter((entry: { order_id: string | null; entry_type: string }) => (
       entry.order_id === orderId && entry.entry_type === "CONSUME"
     ));
     expect(consumeFacts).toHaveLength(2);
     expect(checkedIn.receipt.resourceRefs).toEqual(expect.arrayContaining(finalOrder.coverageSet.map((item: { id: string }) => item.id)));
     expect(checkedIn.receipt.factRefs).toEqual(expect.arrayContaining(consumeFacts.map((entry: { fact_id: string }) => entry.fact_id)));
-    expect(checkedOut.receipt.factRefs).toEqual([]);
 
     for (const url of [
       `/api/v1/receipts/${created.receipt.receiptId}`,

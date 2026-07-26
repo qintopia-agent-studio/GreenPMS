@@ -277,15 +277,17 @@ describe("step 2C member balances and stays", () => {
 
   it("holds on reservation, consumes on check-in, and releases only HELD coverage before arrival", async () => {
     const today = await propertyLocalToday(db, demo.propertyId);
-    const arrival = shiftDate(today, 20);
-    const departure = shiftDate(arrival, 2);
+    const checkedInArrival = today;
+    const checkedInDeparture = shiftDate(checkedInArrival, 2);
+    const cancelledArrival = shiftDate(today, 20);
+    const cancelledDeparture = shiftDate(cancelledArrival, 2);
     const d01 = await unitId("D01");
     const d02 = await unitId("D02");
 
     const checkedInMember = "member_step2c_checked_in";
     await createMember(checkedInMember);
     const checkedInMembership = await activateProduct(checkedInMember, products.sharedSingle, "checked-in");
-    const checkedInQuote = await memberQuote(checkedInMember, d01, arrival, departure);
+    const checkedInQuote = await memberQuote(checkedInMember, d01, checkedInArrival, checkedInDeparture);
     const checkedIn = await createStay(checkedInQuote.quoteId, "checked-in");
     const checkedInOrderId = checkedIn.result!.orderId as string;
     expect(await db.selectFrom("orders").select(["member_id", "booking_channel_code", "channel_order_reference"]).where("id", "=", checkedInOrderId).executeTakeFirstOrThrow()).toEqual({
@@ -301,7 +303,7 @@ describe("step 2C member balances and stays", () => {
     const cancelledMember = "member_step2c_cancelled";
     await createMember(cancelledMember);
     const cancelledMembership = await activateProduct(cancelledMember, products.sharedSingle, "cancelled");
-    const cancelledQuote = await memberQuote(cancelledMember, d02, arrival, departure);
+    const cancelledQuote = await memberQuote(cancelledMember, d02, cancelledArrival, cancelledDeparture);
     const cancelled = await createStay(cancelledQuote.quoteId, "cancelled");
     const cancelledOrderId = cancelled.result!.orderId as string;
     await confirm({ commandType: "CANCEL_ORDER", input: { propertyId: demo.propertyId, orderId: cancelledOrderId } }, "cancel-before-arrival");

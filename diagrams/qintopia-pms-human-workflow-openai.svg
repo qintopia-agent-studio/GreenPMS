@@ -144,7 +144,7 @@
     <text x="92" y="626" class="input-head">人工填写</text>
     <text x="92" y="650" class="required">住客姓名 *　订单来源渠道 *</text>
     <text x="92" y="672" class="micro">联系电话、证件号码（可选）</text>
-    <text x="92" y="694" class="micro">渠道订单号（可选；WECOM 必须为空）</text>
+    <text x="92" y="694" class="micro">渠道订单号（非 WECOM 必填；WECOM 必须为空）</text>
     <text x="92" y="716" class="required">FREE：免费入住原因 *</text>
   </g>
   <g id="node-human-order" data-graph-role="node" data-node-id="human-order" data-semantic-role="human-action" data-graph-bounds="512,600,944,728">

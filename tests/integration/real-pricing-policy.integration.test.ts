@@ -65,9 +65,11 @@ async function createOrder(options: {
       propertyId: demo.propertyId,
       quoteId: quote.quoteId,
       primaryGuest: { fullName: `Pricing Guest ${options.prefix}`, nickname: `Pricing ${options.prefix}` },
-      bookingChannelCode: "YOUMUDAO",
-      channelOrderReference: `REAL-PRICE-${options.prefix}`,
-      ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Confirmed complimentary stay" } : {})
+      ...(stayType !== "FREE" ? {
+        bookingChannelCode: "YOUMUDAO",
+        channelOrderReference: `REAL-PRICE-${options.prefix}`
+      } : {}),
+      ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Confirmed complimentary stay", freeStayCategoryCode: "VOLUNTEER" } : {})
     }
   }, `${options.prefix}-create`);
   return { quote, orderId: receipt.result!.orderId as string };

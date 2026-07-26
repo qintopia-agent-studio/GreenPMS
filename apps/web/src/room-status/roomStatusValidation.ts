@@ -332,6 +332,9 @@ function assertInterval(
   const conflicts = array(item.conflicts, `${path}.conflicts`);
   conflicts.forEach((conflict, index) => assertConflict(conflict, `${path}.conflicts[${index}]`));
   const typedConflicts = conflicts as RoomStatusConflictDto[];
+  if (typedConflicts.some((conflict) => conflict.blockingFactKind === "OVERDUE_IN_HOUSE")) {
+    fail(`${path}.conflicts`, "不能用逾期在住事实自动延长当前或未来房态");
+  }
   const intervalShape = {
     displayInventoryUnitId: item.displayInventoryUnitId as string,
     actualInventoryUnitId: item.actualInventoryUnitId as string,
@@ -410,10 +413,21 @@ function assertOperationalTask(
       return;
     }
     if (lodging && item.status === "IN_HOUSE") {
-      if (!(endDate < businessDate && item.blocking === true && item.available === false
-        && conflicts[0]?.blockingFactKind === "OVERDUE_IN_HOUSE"
-        && typeof item.reason === "string" && item.reason.length > 0)) {
-        fail(path, "逾期未退异常必须早于营业日期、保持阻断并说明原因");
+      const claimIds = item.claimIds as string[];
+      const references = item.references as RoomStatusReferenceDto[];
+      const actions = item.allowedActions as RoomStatusActionDto[];
+      if (!(endDate < businessDate
+        && item.blocking === false
+        && item.available === true
+        && conflicts.length === 0
+        && claimIds.length === 0
+        && !references.some((reference) => reference.type === "CLAIM")
+        && actions.length === 1
+        && actions[0]?.code === "OPEN_ORDER"
+        && actions[0].enabled
+        && typeof item.reason === "string"
+        && item.reason.length > 0)) {
+        fail(path, "逾期未退异常必须早于营业日期、非阻断、无当前 Claim，并提供可打开订单的原因");
       }
       return;
     }

@@ -14,7 +14,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
     order: {
       id: "order_stage7",
       property_id: "property_qintopia",
-      status: "CONFIRMED",
+      status: "RESERVED",
       stay_type: "TRANSIENT",
       arrival_date: "2026-07-25",
       departure_date: "2026-07-28",
@@ -22,6 +22,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       booking_channel_code: "WECOM",
       channel_order_reference: null,
       free_stay_reason: null,
+      free_stay_category_code: null,
       pricing_policy_version_id: "policy_v1",
       member_id: null,
       member_contract_id: null,
@@ -54,12 +55,13 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       commandId: "command_2",
       createdAt: "2026-07-25T10:00:00.000Z"
     }],
-    stay: { id: "stay_stage7", status: "RESERVED" },
+    stay: { id: "stay_stage7", status: "PLANNED" },
     currentSegment: { id: "segment_2", sequence: 2, inventoryUnitId: "room_102", arrivalDate: "2026-07-27", departureDate: "2026-07-28" },
     segments: [
       { id: "segment_1", stay_id: "stay_stage7", sequence: 1, inventory_unit_id: "room_101", arrival_date: "2026-07-25", departure_date: "2026-07-27", segment_type: "INITIAL", supersedes_segment_id: null, amendment_id: "amendment_1", created_at: "2026-07-24T10:00:00.000Z" },
       { id: "segment_2", stay_id: "stay_stage7", sequence: 2, inventory_unit_id: "room_102", arrival_date: "2026-07-27", departure_date: "2026-07-28", segment_type: "MOVE", supersedes_segment_id: "segment_1", amendment_id: "amendment_2", created_at: "2026-07-25T10:00:00.000Z" }
     ],
+    fulfillment: { checkIn: null, checkOut: null },
     amendments: [{
       id: "amendment_2",
       order_id: "order_stage7",
@@ -107,6 +109,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       command_id: "command_2",
       created_at: "2026-07-25T10:00:00.000Z"
     }],
+    cleaningTasks: [],
     amounts: {
       currentContractAmount: { currency: "CNY", minorUnits: 60000 },
       netRecordedCollection: { currency: "CNY", minorUnits: 30000 },
@@ -169,5 +172,32 @@ describe("RoomStatusOrderContext", () => {
     />);
     expect(html).toContain("会员权益 · 1 房晚 · 1 床晚");
     expect(html).not.toContain("2 房晚");
+  });
+
+  it("hides historical cleaning tasks while the current release keeps the workflow disabled", () => {
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...orderView().order, status: "CHECKED_OUT" },
+        stay: { ...orderView().stay, status: "COMPLETED" },
+        cleaningTasks: [{
+          id: "cleaning_internal",
+          inventoryUnitId: "room_102",
+          serviceDate: "2026-07-28",
+          status: "COMPLETED",
+          createdAt: "2026-07-28T10:00:00.000Z",
+          completedAt: "2026-07-28T11:00:00.000Z",
+          createdBy: { subjectId: "operator", displayName: "前台操作员" },
+          completedBy: { subjectId: "housekeeper", displayName: "清洁员" }
+        }]
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toContain("已退房");
+    expect(html).not.toContain("清洁任务");
+    expect(html).not.toContain("清洁员");
+    expect(html).not.toMatch(/CHECKED_OUT|COMPLETED|cleaning_internal/);
   });
 });

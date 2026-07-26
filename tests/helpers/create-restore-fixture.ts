@@ -55,13 +55,29 @@ export async function createRestoreFixture(reference: string): Promise<void> {
       name: "Restore verification room",
       active: true
     }).execute();
+    const policyId = newId("policy");
+    await db.insertInto("pricing_policy_versions").values({
+      id: policyId,
+      property_id: demo.propertyId,
+      code: `RESTORE-FIXTURE-${policyId}`,
+      version: 1,
+      stay_type: "TRANSIENT",
+      calculation_kind: "FLAT_NIGHTLY",
+      nightly_rate_minor: 10_000,
+      product_anchor_rates_minor: null,
+      effective_from: null,
+      effective_until: null,
+      rounding_rule: null,
+      currency: "CNY",
+      status: "PUBLISHED"
+    }).execute();
     const quote = await executeQuoteCommand(db, principal, {
       propertyId: demo.propertyId,
       inventoryUnitId,
-      stayType: "FREE",
+      stayType: "TRANSIENT",
       arrivalDate: "2099-01-10",
       departureDate: "2099-01-12",
-      pricingPolicyVersionId: demo.freePolicyId
+      pricingPolicyVersionId: policyId
     }, {
       idempotencyKey: `${reference}-quote`,
       correlationId: reference
@@ -71,8 +87,7 @@ export async function createRestoreFixture(reference: string): Promise<void> {
       quoteId: quote.quote.quoteId,
       primaryGuest: { fullName: "Restore Verification Guest", nickname: "Restore Guest", documentNumber: reference },
       bookingChannelCode: "CTRIP",
-      channelOrderReference: reference,
-      freeStayReason: "Backup and restore verification fixture"
+      channelOrderReference: reference
     }, `${reference}-create-order`);
     const orderId = created.result?.orderId;
     if (typeof orderId !== "string") throw new Error("Restore fixture CREATE_ORDER returned no orderId");

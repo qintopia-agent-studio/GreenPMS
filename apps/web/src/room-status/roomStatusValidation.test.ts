@@ -304,8 +304,8 @@ function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomSt
     sourceStartDate: startDate,
     sourceEndDate: endDate,
     status,
-    available: false,
-    blocking: true,
+    available: overdueDeparture,
+    blocking: !overdueDeparture,
     sourceKind: "ORDER",
     label: "Order exception",
     primaryOccupantLabel: null,
@@ -314,7 +314,7 @@ function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomSt
     reason: "Validation",
     claimIds: claimBacked ? [claimReference.id] : [],
     references: claimBacked ? [claimReference, orderReference, stayReference, inventoryReference] : [orderReference, stayReference, inventoryReference],
-    conflicts: [{
+    conflicts: overdueDeparture ? [] : [{
       id: "conflict_order_validation",
       blockingFactKind: overdueDeparture ? "OVERDUE_IN_HOUSE" : "CLAIM",
       claimId: claimBacked ? claimReference.id : null,
@@ -343,6 +343,7 @@ function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomSt
 function normalLodgingTask(taskKind: "ARRIVAL" | "IN_HOUSE" | "DEPARTURE"): RoomStatusOperationalTaskDto {
   const claimReference = { type: "CLAIM" as const, id: "claim_order_validation", label: "Order claim", href: null };
   const task = orderExceptionTask(taskKind === "ARRIVAL" ? "RESERVED" : "IN_HOUSE");
+  const orderReference = task.references.find((reference) => reference.type === "ORDER")!;
   task.id = `task_order_${taskKind.toLowerCase()}`;
   task.taskKind = taskKind;
   task.reason = null;
@@ -356,24 +357,40 @@ function normalLodgingTask(taskKind: "ARRIVAL" | "IN_HOUSE" | "DEPARTURE"): Room
     task.claimIds = [];
     task.references = task.references.filter((reference) => reference.type !== "CLAIM");
     task.conflicts = [{
-      ...task.conflicts[0]!,
+      id: "conflict_order_departure",
       blockingFactKind: "LODGING_ORDER",
       claimId: null,
       claimIds: [],
+      requestedInventoryUnitId: task.displayInventoryUnitId,
+      actualInventoryUnitId: task.actualInventoryUnitId,
+      roomId: task.roomId,
       startDate: "2028-01-01",
-      endDate: "2028-01-02"
+      endDate: "2028-01-02",
+      sourceKind: "ORDER",
+      sourceReference: orderReference,
+      reason: "Validation",
+      blocking: true
     }];
     return task;
   }
+  task.available = false;
+  task.blocking = true;
   task.claimIds = [claimReference.id];
   if (!task.references.some((reference) => reference.type === "CLAIM")) task.references.unshift(claimReference);
   task.conflicts = [{
-    ...task.conflicts[0]!,
+    id: `conflict_order_${taskKind.toLowerCase()}`,
     blockingFactKind: "CLAIM",
     claimId: claimReference.id,
     claimIds: [claimReference.id],
+    requestedInventoryUnitId: task.displayInventoryUnitId,
+    actualInventoryUnitId: task.actualInventoryUnitId,
+    roomId: task.roomId,
     startDate: "2028-01-01",
-    endDate: "2028-01-02"
+    endDate: "2028-01-02",
+    sourceKind: "ORDER",
+    sourceReference: orderReference,
+    reason: "Validation",
+    blocking: true
   }];
   return task;
 }
@@ -590,7 +607,7 @@ describe("assertRoomStatusBoard", () => {
     inHouse.claimIds = [];
     inHouse.references = inHouse.references.filter((reference) => reference.type !== "CLAIM");
     misclassified.operationalTasks = [inHouse];
-    expect(() => assertRoomStatusBoard(misclassified, expected)).toThrow(/真实 Claim/);
+    expect(() => assertRoomStatusBoard(misclassified, expected)).toThrow(/真实 Claim|自动延长/);
 
     for (const taskKind of ["ARRIVAL", "IN_HOUSE"] as const) {
       const orderOnly = normalLodgingTask(taskKind);
@@ -701,13 +718,43 @@ describe("assertRoomStatusBoard", () => {
     }];
     expect(() => assertRoomStatusBoard(notOverdueArrival, expected)).toThrow(/逾期未到异常/);
 
-    const failOpenOverdueDeparture = validBoard();
-    failOpenOverdueDeparture.operationalTasks = [{
+    const oldBlockingOverdueDeparture = validBoard();
+    oldBlockingOverdueDeparture.operationalTasks = [{
       ...orderExceptionTask("IN_HOUSE"),
-      blocking: false,
-      available: true
+      blocking: true,
+      available: false,
+      conflicts: [{
+        id: "conflict_old_overdue_departure",
+        blockingFactKind: "OVERDUE_IN_HOUSE",
+        claimId: null,
+        claimIds: [],
+        requestedInventoryUnitId: "unit_validation",
+        actualInventoryUnitId: "unit_validation",
+        roomId: "unit_validation",
+        startDate: "2028-01-01",
+        endDate: "2028-01-02",
+        sourceKind: "ORDER",
+        sourceReference: { type: "ORDER", id: "order_validation", label: "Order", href: "/orders/order_validation" },
+        reason: "Old synthetic occupancy",
+        blocking: true
+      }]
     }];
-    expect(() => assertRoomStatusBoard(failOpenOverdueDeparture, expected)).toThrow(/非阻断区间|逾期未退异常/);
+    expect(() => assertRoomStatusBoard(oldBlockingOverdueDeparture, expected)).toThrow(/逾期未退异常|自动延长/);
+
+    const missingOverdueReason = validBoard();
+    missingOverdueReason.operationalTasks = [{
+      ...orderExceptionTask("IN_HOUSE"),
+      reason: null
+    }];
+    expect(() => assertRoomStatusBoard(missingOverdueReason, expected)).toThrow(/逾期未退异常/);
+
+    const notHistoricalOverdueDeparture = validBoard();
+    notHistoricalOverdueDeparture.operationalTasks = [{
+      ...orderExceptionTask("IN_HOUSE"),
+      endDate: "2028-01-01",
+      sourceEndDate: "2028-01-01"
+    }];
+    expect(() => assertRoomStatusBoard(notHistoricalOverdueDeparture, expected)).toThrow(/逾期未退异常/);
 
     const missingTaskConflict = validBoard();
     missingTaskConflict.operationalTasks = [orderExceptionTask("UNKNOWN")];

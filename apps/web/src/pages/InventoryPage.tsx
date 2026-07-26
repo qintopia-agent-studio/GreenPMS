@@ -12,6 +12,7 @@ import type {
   RoomStatusIntervalDto,
   RoomStatusUnitDto
 } from "@qintopia/contracts";
+import { currentReleaseFeatures } from "@qintopia/contracts";
 import { api, ApiError, type ClientCommandMetadata } from "../api";
 import { addLocalDateDays, localDateInTimeZone } from "../dates";
 import { useWorkspace } from "../session";
@@ -87,9 +88,14 @@ export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boo
   return !isMobile && (workspaceWidth === 0 || workspaceWidth >= 1240) ? "INLINE" : "DRAWER";
 }
 
-export function bookingChannelRequiredForStay(useMemberEntitlement: boolean): boolean {
-  return !useMemberEntitlement;
+export function bookingChannelRequiredForStay(useMemberEntitlement: boolean, stayType?: string): boolean {
+  return !useMemberEntitlement && stayType !== "FREE";
 }
+
+export const freeStayCategoryLabels: Record<string, string> = {
+  VOLUNTEER: "义工",
+  RECEPTION: "接待"
+};
 
 interface QuoteCommandInput {
   propertyId: string;
@@ -333,7 +339,7 @@ export function quotePricingSummary(quote: QuoteDto): {
   const anchor = stayTotal?.lineKind === "STAY_TOTAL" ? stayTotal.pricingBandAnchorNights : 1;
   return {
     nights,
-    pricingBasis: anchor === 1 ? "按临住价格" : `按 ${anchor} 夜价格档`,
+    pricingBasis: quote.stayType === "FREE" ? "免费入住" : anchor === 1 ? "按临住价格" : `按 ${anchor} 夜价格档`,
     amount: quote.currentContractAmount
   };
 }
@@ -548,6 +554,7 @@ function QuoteWorkbench({
   const [bookingChannelCode, setBookingChannelCode] = useState<BookingChannelCode | "">("");
   const [channelOrderReference, setChannelOrderReference] = useState("");
   const [freeStayReason, setFreeStayReason] = useState("");
+  const [freeStayCategoryCode, setFreeStayCategoryCode] = useState<"VOLUNTEER" | "RECEPTION" | "">("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
   const latestQuoteSignature = useRef("");
@@ -591,6 +598,7 @@ function QuoteWorkbench({
     setBookingChannelCode("");
     setChannelOrderReference("");
     setFreeStayReason("");
+    setFreeStayCategoryCode("");
     setUseMemberEntitlement(false);
     setMemberId("");
     setMemberSearch("");
@@ -617,6 +625,7 @@ function QuoteWorkbench({
     setBookingChannelCode("");
     setChannelOrderReference("");
     setFreeStayReason("");
+    setFreeStayCategoryCode("");
     setError(undefined);
   }, [unit?.id, arrivalDate, departureDate, stayType, policyId]);
 
@@ -831,8 +840,8 @@ function QuoteWorkbench({
   }
 
   function createOrder() {
-    const channelRequired = bookingChannelRequiredForStay(useMemberEntitlement);
-    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestsComplete || guestCount > (unit?.occupancyCapacity ?? 0) || (channelRequired && !bookingChannelCode) || (quote.stayType === "FREE" && !freeStayReason.trim())) return;
+    const channelRequired = bookingChannelRequiredForStay(useMemberEntitlement, quote?.stayType);
+    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestsComplete || guestCount > (unit?.occupancyCapacity ?? 0) || (channelRequired && !bookingChannelCode) || (bookingChannelCode && bookingChannelCode !== "WECOM" && !channelOrderReference.trim()) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))) return;
     const guestInputs = createOrderGuestInputs(primaryGuestForm, additionalGuests);
     onCommand({
       commandType: "CREATE_ORDER",
@@ -844,11 +853,11 @@ function QuoteWorkbench({
         quoteId: quote.quoteId,
         primaryGuest: guestInputs.primaryGuest,
         additionalGuests: guestInputs.additionalGuests,
-        ...(!useMemberEntitlement && bookingChannelCode ? {
+        ...(!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode ? {
           bookingChannelCode,
           channelOrderReference: bookingChannelCode === "WECOM" ? null : channelOrderReference.trim() || null
         } : {}),
-        ...(quote.stayType === "FREE" ? { freeStayReason: freeStayReason.trim() } : {})
+        ...(quote.stayType === "FREE" ? { freeStayReason: freeStayReason.trim(), freeStayCategoryCode } : {})
       }
     });
   }
@@ -979,7 +988,7 @@ function QuoteWorkbench({
                   <UserPlus aria-hidden="true" size={17} />添加同行人
                 </button>
                 <div className="form-grid guest-order-fields">
-                  {!useMemberEntitlement ? <label>订单来源渠道
+                  {!useMemberEntitlement && quote.stayType !== "FREE" ? <label>订单来源渠道
                     <select
                       value={bookingChannelCode}
                       onChange={(event) => {
@@ -993,10 +1002,18 @@ function QuoteWorkbench({
                       {Object.entries(bookingChannelLabels).map(([code, label]) => <option key={code} value={code}>{label}</option>)}
                     </select>
                   </label> : null}
-                  {!useMemberEntitlement && bookingChannelCode && bookingChannelCode !== "WECOM" ? <label>渠道订单号（可选）<input value={channelOrderReference} onChange={(event) => setChannelOrderReference(event.target.value)} maxLength={200} data-testid="channel-order-reference" /></label> : null}
-                  {quote.stayType === "FREE" ? <label className="span-two">免费入住原因<textarea rows={3} value={freeStayReason} onChange={(event) => setFreeStayReason(event.target.value)} required maxLength={1000} data-testid="free-stay-reason" /></label> : null}
+                  {!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode && bookingChannelCode !== "WECOM" ? <label>渠道订单号（必填）<input value={channelOrderReference} onChange={(event) => setChannelOrderReference(event.target.value)} maxLength={200} required data-testid="channel-order-reference" /></label> : null}
+                  {quote.stayType === "FREE" ? <>
+                    <label>免费入住类型
+                      <select value={freeStayCategoryCode} onChange={(event) => setFreeStayCategoryCode(event.target.value as "VOLUNTEER" | "RECEPTION")} data-testid="free-stay-category-code">
+                        <option value="">请选择类型</option>
+                        {Object.entries(freeStayCategoryLabels).map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+                      </select>
+                    </label>
+                    <label className="span-two">免费入住原因<textarea rows={3} value={freeStayReason} onChange={(event) => setFreeStayReason(event.target.value)} required maxLength={1000} data-testid="free-stay-reason" /></label>
+                  </> : null}
                 </div>
-                <button className="button button-primary full-width" type="button" onClick={createOrder} disabled={quoteCommandsBlocked || !quoteIsCurrent || !guestsComplete || guestCount > unit.occupancyCapacity || (bookingChannelRequiredForStay(useMemberEntitlement) && !bookingChannelCode) || (quote.stayType === "FREE" && !freeStayReason.trim())} data-testid="create-order">
+                <button className="button button-primary full-width" type="button" onClick={createOrder} disabled={quoteCommandsBlocked || !quoteIsCurrent || !guestsComplete || guestCount > unit.occupancyCapacity || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !bookingChannelCode) || (bookingChannelCode && bookingChannelCode !== "WECOM" && !channelOrderReference.trim()) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid="create-order">
                   <FilePlus2 aria-hidden="true" size={17} />核对并创建订单
                 </button>
               </section>
@@ -2216,11 +2233,12 @@ export function InventoryPage() {
         description: "服务端将重新校验完整维修 Block 版本，确认后释放全部对应 Claim。",
         input: { propertyId, maintenanceLockId: targetId }
       });
-    } else if (action.code === "COMPLETE_CLEANING") {
+    } else if (currentReleaseFeatures.cleaningWorkflow && action.code === "COMPLETE_CLEANING") {
       return startCommand({
         commandType: "COMPLETE_CLEANING",
         title: `完成清洁 · ${unitLabel}`,
-        description: "确认后将当前清洁任务追加为已完成；夜间库存 Claim 不会因此被改写。",
+        description: "核对后将当前清洁任务更新为已完成；住宿历史和既有库存事实保持不变。",
+        presentation: "FULFILLMENT",
         input: { propertyId, cleaningTaskId: targetId }
       });
     }
@@ -2386,7 +2404,7 @@ export function InventoryPage() {
   return (
     <div className="inventory-page room-status-page">
       <header className="page-heading page-heading-actions">
-        <div><p className="eyebrow">Room status</p><h1>房态与可售</h1><p>房间、床位、订单、Stay 与 Operations 的统一运营视图</p></div>
+        <div><p className="eyebrow">房态总览</p><h1>房态与可售</h1><p>房间、床位与订单的统一运营视图</p></div>
         <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={queryBusy}>
           <RefreshCw className={queryBusy ? "spin" : ""} aria-hidden="true" size={17} />刷新
         </button>
@@ -2397,7 +2415,7 @@ export function InventoryPage() {
       <InlineError error={restorationError} title="房态位置未保存" />
       <InlineError error={actionError} title="动作未开始" />
       <InlineError error={quoteRecoveryOutcome} title="报价恢复结果" />
-      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={commandRecovery.pending.presentation === "MEMBER_STAY"} /> : null}
+      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={commandRecovery.pending.presentation === "MEMBER_STAY" || commandRecovery.pending.presentation === "FULFILLMENT"} /> : null}
       {returnNotice ? <div className="room-status-return-notice" role="status">{returnNotice}</div> : null}
       {boardStale ? <div className="room-status-stale-notice" role="alert">当前房态已陈旧或刷新失败。页面保留最后一次来源事实，但所有依赖新鲜度的写动作已暂停。</div> : null}
       {queryError ? <InlineError error={queryError} title={board ? "房态刷新失败" : "无法查询房态"} /> : null}

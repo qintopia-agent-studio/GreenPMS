@@ -42,7 +42,8 @@ export async function databaseReady(db: Kysely<Database>): Promise<boolean> {
       && applied.has("020_whole_room_occupants.sql")
       && applied.has("021_defer_internal_use.sql")
       && applied.has("022_order_occupant_corrections.sql")
-      && applied.has("023_collection_fact_pricing_revision.sql");
+      && applied.has("023_collection_fact_pricing_revision.sql")
+      && applied.has("024_free_stay_category_code.sql");
   } catch {
     return false;
   }

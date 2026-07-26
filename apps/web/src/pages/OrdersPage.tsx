@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useWorkspace } from "../session";
 import type { OrderRowDto } from "../types";
-import { EmptyState, formatDate, guestName, guestSearchText, InlineError, LoadingBlock, StatusBadge } from "../ui";
+import { businessStatusLabel, EmptyState, formatDate, guestName, guestSearchText, InlineError, LoadingBlock, StatusBadge } from "../ui";
 
 export function OrdersPage() {
   const { propertyId } = useWorkspace();
@@ -39,12 +39,12 @@ export function OrdersPage() {
   return (
     <div className="orders-page">
       <header className="page-heading page-heading-actions">
-        <div><p className="eyebrow">Orders</p><h1>订单</h1><p>住宿履约与经营事实</p></div>
+        <div><p className="eyebrow">订单管理</p><h1>订单</h1><p>查询住宿订单、收款与履约进度</p></div>
         <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={17} />刷新</button>
       </header>
       <section className="list-toolbar" aria-label="订单筛选">
         <label className="search-control"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索订单</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="订单 ID、昵称或姓名" /></label>
-        <label>状态<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="ALL">全部状态</option>{statusOptions.map((option) => <option key={option} value={option}>{option.replaceAll("_", " ")}</option>)}</select></label>
+        <label>状态<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="ALL">全部状态</option>{statusOptions.map((option) => <option key={option} value={option}>{businessStatusLabel(option)}</option>)}</select></label>
         <span className="result-count">{visibleOrders.length} / {orders.length}</span>
       </section>
       <InlineError error={error} title="无法载入订单" />
@@ -55,7 +55,7 @@ export function OrdersPage() {
             <tbody>{visibleOrders.map((order) => (
               <tr key={order.id}>
                 <th scope="row"><Link className="primary-cell-link" to={`/orders/${encodeURIComponent(order.id)}`}><strong>{guestName(order.primary_guest_snapshot)}</strong><code>{order.id}</code></Link></th>
-                <td><StatusBadge value={order.status} /></td>
+                <td><StatusBadge value={order.status} label={businessStatusLabel(order.status)} /></td>
                 <td>{order.stay_type}</td>
                 <td><span className="date-range">{formatDate(order.arrival_date)}<span>至</span>{formatDate(order.departure_date)}</span></td>
                 <td><code>{order.pricing_policy_version_id}</code></td>

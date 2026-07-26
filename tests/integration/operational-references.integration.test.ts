@@ -62,10 +62,10 @@ async function createChannelOrder(options: {
   const quote = await createQuote(db, {
     propertyId: demo.propertyId,
     inventoryUnitId: demo.roomId,
-    stayType: "FREE",
+    stayType: "TRANSIENT",
     arrivalDate: `2028-12-${day}`,
     departureDate: `2028-12-${nextDay}`,
-    pricingPolicyVersionId: demo.freePolicyId
+    pricingPolicyVersionId: demo.transientPolicyId
   });
   const preview = await createCommandPreview(db, principal, {
     commandType: "CREATE_ORDER",
@@ -74,8 +74,7 @@ async function createChannelOrder(options: {
       quoteId: quote.quoteId,
       primaryGuest: { fullName: `Channel Guest ${options.code}`, nickname: `Channel ${options.code}` },
       bookingChannelCode: options.code,
-      channelOrderReference: options.channelOrderReference,
-      freeStayReason: `Channel contract fixture: ${options.code}`
+      channelOrderReference: options.channelOrderReference
     }
   }, metadata(`${options.prefix}-preview`));
   const expectedReference = options.channelOrderReference?.trim() || null;
@@ -238,7 +237,7 @@ describe.sequential("booking channels and external transaction references on Pos
   it("persists all four stable booking channels through Preview, Receipt, amendment, and Query", async () => {
     const cases: Array<{ code: BookingChannelCode; reference: string | null; day: number }> = [
       { code: "YOUMUDAO", reference: "  TEST-CHANNEL-YOUMUDAO  ", day: 1 },
-      { code: "CTRIP", reference: null, day: 3 },
+      { code: "CTRIP", reference: "TEST-CHANNEL-CTRIP", day: 3 },
       { code: "MEITUAN", reference: "TEST-CHANNEL-MEITUAN", day: 5 },
       { code: "WECOM", reference: null, day: 7 }
     ];
@@ -277,10 +276,10 @@ describe.sequential("booking channels and external transaction references on Pos
     const quote = await createQuote(db, {
       propertyId: demo.propertyId,
       inventoryUnitId: demo.roomId,
-      stayType: "FREE",
+      stayType: "TRANSIENT",
       arrivalDate: "2028-12-20",
       departureDate: "2028-12-21",
-      pricingPolicyVersionId: demo.freePolicyId
+      pricingPolicyVersionId: demo.transientPolicyId
     });
     const before = await orderArtifactCounts();
     for (const fields of [
@@ -294,7 +293,6 @@ describe.sequential("booking channels and external transaction references on Pos
           propertyId: demo.propertyId,
           quoteId: quote.quoteId,
           primaryGuest: { fullName: "Rejected channel command", nickname: "Rejected Channel" },
-          freeStayReason: "Invalid channel rejection fixture",
           ...fields
         }
       }, metadata("invalid-order-channel"))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
@@ -463,14 +461,14 @@ describe.sequential("booking channels and external transaction references on Pos
         id,
         property_id: demo.propertyId,
         status: "RESERVED",
-        stay_type: "FREE",
+        stay_type: "TRANSIENT",
         arrival_date: "2029-01-01",
         departure_date: "2029-01-02",
         primary_guest_snapshot: primaryGuestSnapshot,
         booking_channel_code: bookingChannelCode,
         channel_order_reference: channelOrderReference,
-        free_stay_reason: "Direct database guard fixture",
-        pricing_policy_version_id: demo.freePolicyId,
+        free_stay_reason: null,
+        pricing_policy_version_id: demo.transientPolicyId,
         member_contract_id: null,
         current_revision_id: null,
         version: 1
@@ -505,8 +503,37 @@ describe.sequential("booking channels and external transaction references on Pos
     });
     await directMemberOrder("order_direct_member_without_channel", null);
     await expect(directMemberOrder("order_direct_member_with_channel", "WECOM")).rejects.toMatchObject({ constraint: "orders_member_booking_channel_null" });
-    await directOrder("order_direct_blank_reference", "CTRIP", " \t\n ");
-    expect(await db.selectFrom("orders").select("channel_order_reference").where("id", "=", "order_direct_blank_reference").executeTakeFirstOrThrow()).toEqual({ channel_order_reference: null });
+    const directFreeOrder = (id: string, bookingChannelCode: BookingChannelCode | null, freeStayCategoryCode: string | null = "VOLUNTEER") => db.transaction().execute(async (trx) => {
+      const snapshot = { fullName: "Direct free database guard probe", nickname: "Free Guard" };
+      await trx.insertInto("orders").values({
+        id,
+        property_id: demo.propertyId,
+        status: "RESERVED",
+        stay_type: "FREE",
+        arrival_date: "2029-01-05",
+        departure_date: "2029-01-06",
+        primary_guest_snapshot: snapshot,
+        booking_channel_code: bookingChannelCode,
+        channel_order_reference: null,
+        free_stay_reason: "Direct free database guard fixture",
+        free_stay_category_code: freeStayCategoryCode,
+        pricing_policy_version_id: demo.freePolicyId,
+        member_contract_id: null,
+        current_revision_id: null,
+        version: 1
+      }).execute();
+      await completeDirectOrder(trx, id, "2029-01-05", "2029-01-06", snapshot);
+    });
+    await directFreeOrder("order_direct_free_without_channel", null);
+    await expect(directFreeOrder("order_direct_free_with_channel", "WECOM")).rejects.toMatchObject({ constraint: "orders_free_stay_booking_channel_null" });
+    await expect(directFreeOrder("order_direct_free_missing_category", null, null)).rejects.toMatchObject({ constraint: "orders_new_free_stay_category_required" });
+    await expect(directFreeOrder("order_direct_free_invalid_category", null, "SPONSORED")).rejects.toMatchObject({ constraint: "orders_free_stay_category_code_check" });
+    await expect(db.updateTable("orders")
+      .set({ free_stay_category_code: "RECEPTION" })
+      .where("id", "=", "order_direct_free_without_channel")
+      .execute()).rejects.toMatchObject({ code: "55000" });
+    await expect(directOrder("order_direct_blank_reference", "CTRIP", " \t\n "))
+      .rejects.toMatchObject({ constraint: "orders_new_channel_order_reference_required" });
 
     const orderCountBeforeNicknameRejections = await db.selectFrom("orders")
       .select(({ fn }) => fn.countAll<number>().as("count"))
@@ -514,31 +541,31 @@ describe.sequential("booking channels and external transaction references on Pos
     await expect(directOrder(
       "order_direct_missing_nickname",
       "CTRIP",
-      null,
+      "DIRECT-MISSING-NICKNAME",
       { fullName: "Direct missing nickname probe" }
     )).rejects.toMatchObject({ constraint: "orders_new_primary_guest_nickname_required" });
     await expect(directOrder(
       "order_direct_null_nickname",
       "CTRIP",
-      null,
+      "DIRECT-NULL-NICKNAME",
       { fullName: "Direct null nickname probe", nickname: null }
     )).rejects.toMatchObject({ constraint: "orders_new_primary_guest_nickname_required" });
     await expect(directOrder(
       "order_direct_blank_nickname",
       "CTRIP",
-      null,
+      "DIRECT-BLANK-NICKNAME",
       { fullName: "Direct blank nickname probe", nickname: " \t\n " }
     )).rejects.toMatchObject({ constraint: "orders_new_primary_guest_nickname_required" });
     await expect(directOrder(
       "order_direct_oversized_nickname",
       "CTRIP",
-      null,
+      "DIRECT-OVERSIZED-NICKNAME",
       { fullName: "Direct oversized nickname probe", nickname: "N".repeat(201) }
     )).rejects.toMatchObject({ constraint: "orders_new_primary_guest_nickname_length" });
     await expect(directOrder(
       "order_direct_non_object_guest_snapshot",
       "CTRIP",
-      null,
+      "DIRECT-NON-OBJECT-GUEST",
       sql<unknown>`'[]'::jsonb`
     )).rejects.toMatchObject({ constraint: "orders_new_primary_guest_snapshot_object" });
     const orderCountAfterNicknameRejections = await db.selectFrom("orders")
@@ -548,7 +575,7 @@ describe.sequential("booking channels and external transaction references on Pos
     await directOrder(
       "order_direct_padded_nickname",
       "CTRIP",
-      null,
+      "DIRECT-PADDED-NICKNAME",
       { fullName: "Direct padded nickname probe", nickname: " \t Direct Guard \n " }
     );
     expect(await db.selectFrom("orders")
@@ -788,7 +815,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 023, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 024, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -949,6 +976,9 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration023 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/023_collection_fact_pricing_revision.sql"), "utf8");
         await client.query(migration023);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('023_collection_fact_pricing_revision.sql')");
+        const migration024 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/024_free_stay_category_code.sql"), "utf8");
+        await client.query(migration024);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('024_free_stay_category_code.sql')");
       } finally {
         await client.end();
       }
@@ -1012,9 +1042,10 @@ describe.sequential("booking channels and external transaction references on Pos
         arrival_date: "2029-02-05",
         departure_date: "2029-02-06",
         primary_guest_snapshot: { fullName: "Post-migration missing nickname probe" },
-        booking_channel_code: "CTRIP",
+        booking_channel_code: null,
         channel_order_reference: null,
         free_stay_reason: "Post-migration nickname guard fixture",
+        free_stay_category_code: "VOLUNTEER",
         pricing_policy_version_id: demo.freePolicyId,
         member_contract_id: null,
         current_revision_id: null,
@@ -1139,7 +1170,7 @@ describe.sequential("booking channels and external transaction references on Pos
         });
         expect(detail.statusCode, detail.body).toBe(200);
         expect(detail.json()).toMatchObject({
-          order: { booking_channel_code: null, channel_order_reference: null },
+          order: { booking_channel_code: null, channel_order_reference: null, free_stay_category_code: null },
           collectionFacts: [{ transaction_reference: null }]
         });
         expect(Object.hasOwn(detail.json().order.primary_guest_snapshot, "nickname")).toBe(false);

@@ -1,6 +1,7 @@
-import { ArrowRight, CalendarRange, Clock3, Crosshair, FilePenLine, ReceiptText, Users, X } from "lucide-react";
+import { ArrowRight, CalendarRange, Clock3, Crosshair, FilePenLine, ReceiptText, Sparkles, Users, X } from "lucide-react";
+import { currentReleaseFeatures } from "@qintopia/contracts";
 import type { InventoryUnitDto, OrderViewDto } from "../types";
-import { formatDate, formatDateTime, formatMoney, StatusBadge } from "../ui";
+import { businessStatusLabel, formatDate, formatDateTime, formatMoney, StatusBadge } from "../ui";
 
 type OrderOccupant = OrderViewDto["occupants"][number];
 
@@ -145,7 +146,7 @@ export function RoomStatusOrderContext({
           <h2 id="room-status-order-context-heading">订单 {view.order.id}</h2>
         </div>
         <div className="room-status-order-context-header-actions">
-          <StatusBadge value={view.order.status} />
+          <StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} />
           {onClose ? <button type="button" className="room-status-icon-button" onClick={onClose} aria-label="关闭订单上下文" title="关闭订单上下文"><X aria-hidden="true" size={17} /></button> : null}
         </div>
       </header>
@@ -162,6 +163,18 @@ export function RoomStatusOrderContext({
           <dt>资金记录</dt><dd>{view.collectionFacts.length} 笔</dd>
         </dl>
       </section>
+
+      {currentReleaseFeatures.cleaningWorkflow && view.cleaningTasks.length ? <section className="room-status-context-section" aria-labelledby="room-status-order-cleaning-heading">
+        <div className="room-status-context-section-heading"><Sparkles aria-hidden="true" size={17} /><h3 id="room-status-order-cleaning-heading">清洁任务</h3></div>
+        <ol className="room-status-order-corrections">{view.cleaningTasks.map((task) => {
+          const unit = unitMap.get(task.inventoryUnitId);
+          return <li key={task.id}>
+            <strong>{unit ? `${unit.code} ${unit.name}` : "退房房源"} · {businessStatusLabel(task.status)}</strong>
+            <span>清洁日期：{formatDate(task.serviceDate)}</span>
+            <small>{task.status === "COMPLETED" ? `完成：${task.completedBy?.displayName ?? "系统记录"} · ${formatDateTime(task.completedAt ?? undefined)}` : `生成：${task.createdBy?.displayName ?? "系统记录"} · ${formatDateTime(task.createdAt)}`}</small>
+          </li>;
+        })}</ol>
+      </section> : null}
 
       <section className="room-status-context-section" aria-labelledby="room-status-order-occupants-heading">
         <div className="room-status-context-section-heading"><Users aria-hidden="true" size={17} /><h3 id="room-status-order-occupants-heading">住宿人</h3></div>

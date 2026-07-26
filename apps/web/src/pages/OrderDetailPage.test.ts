@@ -3,8 +3,10 @@ import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
 import { buildOrderOccupantCorrectionRequest } from "../components/OrderOccupantCorrectionDialog";
 import {
   enabledOrderActionCodes,
+  fulfillmentResultLabel,
   occupantSnapshotEntries,
   orderDetailBackTarget,
+  orderFulfillmentNotice,
   orderViewMatchesPrincipalScope,
   orderedOrderOccupants,
   primaryOrderOccupant,
@@ -21,6 +23,89 @@ import {
   type CommandDialogProgress,
   type PersistedCommandRecovery
 } from "../ui";
+
+describe("fulfillment result presentation", () => {
+  const base = {
+    plannedBusinessDate: "2026-07-25",
+    recordedBusinessDate: "2026-07-25",
+    recordedAt: "2026-07-25T10:00:00.000Z",
+    actor: { subjectId: "operator", displayName: "前台操作员" },
+    reason: { code: "FRONT_DESK", note: "正常办理" }
+  } as const;
+
+  it("uses operator language for on-time and late-recorded fulfillment", () => {
+    expect(fulfillmentResultLabel({ ...base, type: "CHECK_IN", recordingMode: "ON_SCHEDULE" })).toBe("按计划办理入住");
+    expect(fulfillmentResultLabel({ ...base, type: "CHECK_OUT", recordingMode: "ON_SCHEDULE" })).toBe("按计划办理退房");
+    expect(fulfillmentResultLabel({
+      ...base,
+      type: "CHECK_OUT",
+      recordedBusinessDate: "2026-07-26",
+      recordingMode: "LATE_RECORDED"
+    })).toBe("迟录退房");
+  });
+
+  it("does not pretend an incomplete historical record is on time", () => {
+    expect(fulfillmentResultLabel({
+      ...base,
+      type: "CHECK_OUT",
+      recordedBusinessDate: null,
+      recordingMode: "LEGACY_UNCLASSIFIED"
+    })).toBe("历史记录未分类");
+  });
+
+  it("explains why early check-out is unavailable without directing operators into a non-atomic shortcut", () => {
+    const notice = orderFulfillmentNotice([{
+      code: "CHECK_OUT",
+      enabled: false,
+      disabledReason: "DEPARTURE_DATE_NOT_REACHED"
+    }]);
+    expect(notice).toMatchObject({
+      action: "CHECK_OUT",
+      title: "暂不能办理退房"
+    });
+    expect(notice?.body).toContain("当前版本暂不办理提前退房");
+    expect(notice?.body).not.toContain("请先缩短");
+    expect(orderFulfillmentNotice([{
+      code: "CHECK_OUT",
+      enabled: true,
+      disabledReason: null
+    }])).toBeUndefined();
+  });
+
+  it("explains future and overdue check-in gates without implying either operation was completed", () => {
+    expect(orderFulfillmentNotice([{
+      code: "CHECK_IN",
+      enabled: false,
+      disabledReason: "ARRIVAL_DATE_NOT_REACHED"
+    }])).toMatchObject({
+      action: "CHECK_IN",
+      title: "暂不能办理入住",
+      body: expect.stringContaining("不能提前办理入住")
+    });
+    expect(orderFulfillmentNotice([{
+      code: "CHECK_IN",
+      enabled: false,
+      disabledReason: "ARRIVAL_DATE_PASSED"
+    }])).toMatchObject({
+      action: "CHECK_IN",
+      title: "暂不能办理入住",
+      body: expect.stringContaining("不能按普通入住补办")
+    });
+    expect(orderFulfillmentNotice([{
+      code: "CHECK_IN",
+      enabled: true,
+      disabledReason: null
+    }])).toBeUndefined();
+  });
+
+  it("does not invent an operator notice for unrelated disabled reasons", () => {
+    expect(orderFulfillmentNotice([{
+      code: "CHECK_IN",
+      enabled: false,
+      disabledReason: "ORDER_STATE_INVALID"
+    }])).toBeUndefined();
+  });
+});
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
@@ -363,6 +448,49 @@ describe("shared Web command recovery persistence", () => {
     expect(recovery).toMatchObject({ commandType: "CREATE_ORDER", presentation: "MEMBER_STAY" });
     expect(recoveryCommandRequest(recovery)).toMatchObject({ commandType: "CREATE_ORDER", presentation: "MEMBER_STAY", input: { propertyId: "property_qintopia" } });
     expect(JSON.stringify(recovery)).not.toContain("不应持久化");
+  });
+
+  it("retains fulfillment presentation while hiding the order target from the recovery dialog", () => {
+    const request = {
+      commandType: "CHECK_OUT",
+      title: "办理退房",
+      description: "核对后办理退房",
+      presentation: "FULFILLMENT",
+      input: { propertyId: "property_qintopia", orderId: "order_internal_target" }
+    } satisfies CommandRequest;
+    const recovery = transitionPersistedCommandRecovery(undefined, {
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      request
+    }, { ...confirming, confirmationKey: "web-confirm-check-out" }).recovery!;
+
+    expect(recovery).toMatchObject({ commandType: "CHECK_OUT", presentation: "FULFILLMENT" });
+    expect(recoveryCommandRequest(recovery)).toMatchObject({
+      commandType: "CHECK_OUT",
+      presentation: "FULFILLMENT",
+      title: "恢复办理退房结果",
+      input: { propertyId: "property_qintopia" }
+    });
+    expect(JSON.stringify(recoveryCommandRequest(recovery))).not.toMatch(/order_internal_target|Receipt|Command|CHECKED_OUT/);
+  });
+
+  it("rejects a damaged recovery record that pairs fulfillment presentation with another command", () => {
+    const storage = new MemoryStorage();
+    const key = commandRecoveryStorageKey(context.subjectId, context.scopeId);
+    storage.setItem(key, JSON.stringify({
+      version: 1,
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      propertyId: "property_qintopia",
+      commandType: "CANCEL_ORDER",
+      confirmationKey: "web-confirm-damaged-fulfillment",
+      targetRefs: ["orderId=order_internal_target"],
+      presentation: "FULFILLMENT",
+      state: "UNKNOWN",
+      updatedAt: "2026-07-25T10:00:00.000Z"
+    }));
+
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toMatchObject({ kind: "CORRUPT" });
   });
 
   it("reads a pre-upgrade deferred recovery only as an original-result query", () => {

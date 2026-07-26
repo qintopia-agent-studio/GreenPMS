@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRightLeft,
   CalendarMinus2,
@@ -8,12 +9,19 @@ import {
   LogIn,
   LogOut,
   Pencil,
+  Sparkles,
   Undo2,
   UserX,
   XCircle
 } from "lucide-react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import type { CommandType, OrderActionCode, OrderAllowedActionDto } from "@qintopia/contracts";
+import {
+  currentReleaseFeatures,
+  type CommandType,
+  type OrderActionCode,
+  type OrderAllowedActionDto,
+  type OrderFulfillmentRecordDto
+} from "@qintopia/contracts";
 import { api } from "../api";
 import { OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { useWorkspace } from "../session";
@@ -21,6 +29,7 @@ import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
 import {
   CommandDialog,
   CommandRecoveryBar,
+  businessStatusLabel,
   EmptyState,
   formatDate,
   formatDateTime,
@@ -77,6 +86,39 @@ export function enabledOrderActionCodes(actions: readonly OrderAllowedActionDto[
   return actions.filter((action) => action.enabled).map((action) => action.code);
 }
 
+export interface OrderFulfillmentNotice {
+  action: "CHECK_IN" | "CHECK_OUT";
+  title: string;
+  body: string;
+}
+
+export function orderFulfillmentNotice(actions: readonly OrderAllowedActionDto[]): OrderFulfillmentNotice | undefined {
+  const checkIn = actions.find((action) => action.code === "CHECK_IN");
+  if (checkIn?.disabledReason === "ARRIVAL_DATE_NOT_REACHED") {
+    return {
+      action: "CHECK_IN",
+      title: "暂不能办理入住",
+      body: "尚未到计划到店日。当前版本不能提前办理入住；请在计划到店日办理，订单和库存保持不变。"
+    };
+  }
+  if (checkIn?.disabledReason === "ARRIVAL_DATE_PASSED") {
+    return {
+      action: "CHECK_IN",
+      title: "暂不能办理入住",
+      body: "已超过计划到店日。当前版本不能按普通入住补办；请等待后续的改期、未到或补办入住流程，订单和库存保持不变。"
+    };
+  }
+  const checkout = actions.find((action) => action.code === "CHECK_OUT");
+  if (checkout?.disabledReason === "DEPARTURE_DATE_NOT_REACHED") {
+    return {
+      action: "CHECK_OUT",
+      title: "暂不能办理退房",
+      body: "尚未到计划退房日。当前版本暂不办理提前退房；订单日期、金额、库存和会员权益保持不变。提前退房将在后续流程中统一核对离店原因、住宿缩短、重新计价和退款参考额。"
+    };
+  }
+  return undefined;
+}
+
 export function orderDetailBackTarget(state: unknown): "/" | "/orders" {
   if (!state || typeof state !== "object") return "/orders";
   const source = state as Record<string, unknown>;
@@ -122,6 +164,34 @@ export function occupantSnapshotEntries(snapshot: Pick<OrderOccupant, "nickname"
       : snapshot[key] ?? "-"
   ]);
   return canonical;
+}
+
+export function fulfillmentResultLabel(record: OrderFulfillmentRecordDto): string {
+  if (record.recordingMode === "LEGACY_UNCLASSIFIED") return "历史记录未分类";
+  if (record.recordingMode === "LATE_RECORDED") return "迟录退房";
+  return record.type === "CHECK_IN" ? "按计划办理入住" : "按计划办理退房";
+}
+
+function FulfillmentResult({ type, record }: {
+  type: "CHECK_IN" | "CHECK_OUT";
+  record: OrderFulfillmentRecordDto | null;
+}) {
+  const isCheckIn = type === "CHECK_IN";
+  return (
+    <article data-testid={isCheckIn ? "check-in-result" : "check-out-result"}>
+      <div>
+        <strong>{isCheckIn ? "入住结果" : "退房结果"}</strong>
+        <span>{record ? fulfillmentResultLabel(record) : isCheckIn ? "未办理入住" : "未办理退房"}</span>
+      </div>
+      {record ? <dl className="detail-list">
+        <div><dt>{isCheckIn ? "计划入住日" : "计划退房日"}</dt><dd>{formatDate(record.plannedBusinessDate)}</dd></div>
+        <div><dt>办理营业日</dt><dd>{record.recordedBusinessDate ? formatDate(record.recordedBusinessDate) : "历史未记录"}</dd></div>
+        <div><dt>记录时间</dt><dd>{formatDateTime(record.recordedAt)}</dd></div>
+        <div><dt>操作人</dt><dd>{record.actor?.displayName ?? "历史未记录"}</dd></div>
+        <div><dt>办理原因</dt><dd>{record.reason.note}</dd></div>
+      </dl> : null}
+    </article>
+  );
 }
 
 function ActionFormDialog({ action, view, initialFactId, onClose, onSubmit }: {
@@ -279,10 +349,12 @@ export function OrderDetailPage() {
   const [refreshToken, setRefreshToken] = useState(0);
   const [refreshNotice, setRefreshNotice] = useState<string>();
   const viewRef = useRef<OrderViewDto | undefined>(undefined);
+  const focusedActionKeyRef = useRef<string | undefined>(undefined);
 
   const pendingRecovery = commandRecovery.pending;
   const orderActionsBlocked = commandRecovery.blocked;
   const enabledActions = useMemo(() => new Set(enabledOrderActionCodes(view?.allowedActions ?? [])), [view]);
+  const fulfillmentNotice = useMemo(() => orderFulfillmentNotice(view?.allowedActions ?? []), [view]);
   const requestedAction = useMemo(() => requestedOrderAction(location.search, view?.allowedActions ?? []), [location.search, view]);
   const backTarget = orderDetailBackTarget(location.state);
 
@@ -342,13 +414,17 @@ export function OrderDetailPage() {
 
   useEffect(() => {
     if (!requestedAction) return;
+    const focusKey = `${orderId}:${requestedAction}`;
+    if (focusedActionKeyRef.current === focusKey) return;
     const frame = window.requestAnimationFrame(() => {
       const target = document.querySelector<HTMLElement>(`[data-order-action="${requestedAction}"]`);
-      target?.scrollIntoView({ block: "center", inline: "nearest" });
-      target?.focus({ preventScroll: true });
+      if (!target) return;
+      target.scrollIntoView({ block: "center", inline: "nearest" });
+      target.focus({ preventScroll: true });
+      focusedActionKeyRef.current = focusKey;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [requestedAction, view]);
+  }, [orderId, requestedAction, view]);
 
   const unitMap = useMemo(() => new Map(meta.inventoryUnits.map((unit) => [unit.id, unit])), [meta.inventoryUnits]);
 
@@ -361,7 +437,13 @@ export function OrderDetailPage() {
   function directCommand(commandType: CommandType, title: string, description: string) {
     if (!view || orderActionsBlocked || !enabledActions.has(commandType as OrderActionCode)) return;
     setRecoveryDialogOpen(false);
-    setCommand({ commandType, title, description, input: { propertyId: view.order.property_id, orderId: view.order.id } });
+    setCommand({
+      commandType,
+      title,
+      description,
+      ...((commandType === "CHECK_IN" || commandType === "CHECK_OUT") ? { presentation: "FULFILLMENT" as const } : {}),
+      input: { propertyId: view.order.property_id, orderId: view.order.id }
+    });
   }
 
   function openRecoveryDialog() {
@@ -395,7 +477,7 @@ export function OrderDetailPage() {
     <div className="order-detail-page">
       <Link className="back-link" to={backTarget} state={backTarget === "/" ? location.state : undefined}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link>
       <header className="order-heading">
-        <div><div className="order-title-row"><h1>{guestName(primaryOccupant ? { nickname: primaryOccupant.nickname, fullName: primaryOccupant.fullName } : view.order.primary_guest_snapshot)}</h1><StatusBadge value={view.order.status} /></div><code>{view.order.id}</code></div>
+        <div><div className="order-title-row"><h1>{guestName(primaryOccupant ? { nickname: primaryOccupant.nickname, fullName: primaryOccupant.fullName } : view.order.primary_guest_snapshot)}</h1><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div><code>{view.order.id}</code></div>
         <div className="order-unit"><span>当前库存</span><strong>{currentUnit ? `${currentUnit.code} · ${currentUnit.name}` : view.currentSegment.inventoryUnitId}</strong></div>
       </header>
 
@@ -411,20 +493,28 @@ export function OrderDetailPage() {
       {pendingRecovery ? <CommandRecoveryBar recovery={pendingRecovery} onOpen={openRecoveryDialog} testId="order-command-recovery" /> : null}
 
       <section className="action-band" aria-labelledby="order-actions-heading">
-        <div><h2 id="order-actions-heading">订单操作</h2><p>所有写入均经过 Preview / Confirm</p></div>
-        <div className="action-toolbar">
-          {enabledActions.has("RECORD_COLLECTION") ? <button className="button button-secondary" type="button" onClick={() => openForm("RECORD_COLLECTION")} disabled={orderActionsBlocked} data-testid="record-collection" data-order-action="RECORD_COLLECTION"><CircleDollarSign aria-hidden="true" size={17} />收款</button> : null}
-          {enabledActions.has("RECORD_REFUND") ? <button className="button button-secondary" type="button" onClick={() => openForm("RECORD_REFUND")} disabled={orderActionsBlocked} data-order-action="RECORD_REFUND"><Undo2 aria-hidden="true" size={17} />退款</button> : null}
-          {enabledActions.has("SHORTEN_STAY") ? <button className="button button-secondary" type="button" onClick={() => openForm("SHORTEN_STAY")} disabled={orderActionsBlocked} data-order-action="SHORTEN_STAY"><CalendarMinus2 aria-hidden="true" size={17} />缩短</button> : null}
-          {enabledActions.has("EXTEND_STAY") ? <button className="button button-secondary" type="button" onClick={() => openForm("EXTEND_STAY")} disabled={orderActionsBlocked} data-order-action="EXTEND_STAY"><CalendarPlus2 aria-hidden="true" size={17} />续住</button> : null}
-          {enabledActions.has("MOVE_UNIT") ? <button className="button button-secondary" type="button" onClick={() => openForm("MOVE_UNIT")} disabled={orderActionsBlocked} data-order-action="MOVE_UNIT"><ArrowRightLeft aria-hidden="true" size={17} />换房</button> : null}
-          {enabledActions.has("REPRICE_ORDER") ? <button className="button button-secondary" type="button" onClick={() => openForm("REPRICE_ORDER")} disabled={orderActionsBlocked} data-testid="reprice-order" data-order-action="REPRICE_ORDER"><CircleDollarSign aria-hidden="true" size={17} />调整金额</button> : null}
-          {enabledActions.has("CHECK_IN") ? <button className="button button-primary" type="button" onClick={() => directCommand("CHECK_IN", "办理入住", "服务端将重新校验订单状态，并把该订单仍冻结的会员权益核销为 CONSUMED。") } disabled={orderActionsBlocked} data-testid="check-in" data-order-action="CHECK_IN"><LogIn aria-hidden="true" size={17} />入住</button> : null}
-          {enabledActions.has("CHECK_OUT") ? <button className="button button-primary" type="button" onClick={() => directCommand("CHECK_OUT", "办理退房", "服务端将重新校验订单状态、完成住宿履约并释放库存；退房不会重复核销会员权益。") } disabled={orderActionsBlocked} data-testid="check-out" data-order-action="CHECK_OUT"><LogOut aria-hidden="true" size={17} />退房</button> : null}
-          {enabledActions.has("CANCEL_ORDER") || enabledActions.has("MARK_NO_SHOW") ? <div className="action-separator" aria-hidden="true" /> : null}
-          {enabledActions.has("CANCEL_ORDER") ? <button className="icon-button danger-icon" type="button" onClick={() => directCommand("CANCEL_ORDER", "取消订单", "确认取消订单并释放服务端库存与会员覆盖。") } disabled={orderActionsBlocked} aria-label="取消订单" title="取消订单" data-order-action="CANCEL_ORDER"><XCircle aria-hidden="true" size={18} /></button> : null}
-          {enabledActions.has("MARK_NO_SHOW") ? <button className="icon-button danger-icon" type="button" onClick={() => directCommand("MARK_NO_SHOW", "标记未到", "确认标记未到并释放服务端库存与会员覆盖。") } disabled={orderActionsBlocked} aria-label="标记未到" title="标记未到" data-order-action="MARK_NO_SHOW"><UserX aria-hidden="true" size={18} /></button> : null}
-          {enabledActions.size === 0 ? <span>当前没有可执行操作</span> : enabledActions.size === 1 && enabledActions.has("CORRECT_ORDER_OCCUPANT") ? <span>请在下方住宿人条目中更正资料</span> : null}
+        <div><h2 id="order-actions-heading">订单操作</h2><p>系统会在提交前重新核对当前业务状态</p></div>
+        <div className="action-band-content">
+          {fulfillmentNotice ? (
+            <div className="fulfillment-date-notice" role="alert" data-testid="fulfillment-date-notice" data-action={fulfillmentNotice.action}>
+              <AlertTriangle aria-hidden="true" size={18} />
+              <div><strong>{fulfillmentNotice.title}</strong><span>{fulfillmentNotice.body}</span></div>
+            </div>
+          ) : null}
+          <div className="action-toolbar">
+            {enabledActions.has("RECORD_COLLECTION") ? <button className="button button-secondary" type="button" onClick={() => openForm("RECORD_COLLECTION")} disabled={orderActionsBlocked} data-testid="record-collection" data-order-action="RECORD_COLLECTION"><CircleDollarSign aria-hidden="true" size={17} />收款</button> : null}
+            {enabledActions.has("RECORD_REFUND") ? <button className="button button-secondary" type="button" onClick={() => openForm("RECORD_REFUND")} disabled={orderActionsBlocked} data-order-action="RECORD_REFUND"><Undo2 aria-hidden="true" size={17} />退款</button> : null}
+            {enabledActions.has("SHORTEN_STAY") ? <button className="button button-secondary" type="button" onClick={() => openForm("SHORTEN_STAY")} disabled={orderActionsBlocked} data-order-action="SHORTEN_STAY"><CalendarMinus2 aria-hidden="true" size={17} />缩短</button> : null}
+            {enabledActions.has("EXTEND_STAY") ? <button className="button button-secondary" type="button" onClick={() => openForm("EXTEND_STAY")} disabled={orderActionsBlocked} data-order-action="EXTEND_STAY"><CalendarPlus2 aria-hidden="true" size={17} />续住</button> : null}
+            {enabledActions.has("MOVE_UNIT") ? <button className="button button-secondary" type="button" onClick={() => openForm("MOVE_UNIT")} disabled={orderActionsBlocked} data-order-action="MOVE_UNIT"><ArrowRightLeft aria-hidden="true" size={17} />换房</button> : null}
+            {enabledActions.has("REPRICE_ORDER") ? <button className="button button-secondary" type="button" onClick={() => openForm("REPRICE_ORDER")} disabled={orderActionsBlocked} data-testid="reprice-order" data-order-action="REPRICE_ORDER"><CircleDollarSign aria-hidden="true" size={17} />调整金额</button> : null}
+            {enabledActions.has("CHECK_IN") ? <button className="button button-primary" type="button" onClick={() => directCommand("CHECK_IN", "办理入住", "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。") } disabled={orderActionsBlocked} data-testid="check-in" data-order-action="CHECK_IN"><LogIn aria-hidden="true" size={17} />入住</button> : null}
+            {enabledActions.has("CHECK_OUT") ? <button className="button button-primary" type="button" onClick={() => directCommand("CHECK_OUT", "办理退房", "核对后将住宿状态更新为已退房并释放后续住宿库存；退房不会重复核销会员权益。") } disabled={orderActionsBlocked} data-testid="check-out" data-order-action="CHECK_OUT"><LogOut aria-hidden="true" size={17} />退房</button> : null}
+            {enabledActions.has("CANCEL_ORDER") || enabledActions.has("MARK_NO_SHOW") ? <div className="action-separator" aria-hidden="true" /> : null}
+            {enabledActions.has("CANCEL_ORDER") ? <button className="icon-button danger-icon" type="button" onClick={() => directCommand("CANCEL_ORDER", "取消订单", "确认取消订单并释放服务端库存与会员覆盖。") } disabled={orderActionsBlocked} aria-label="取消订单" title="取消订单" data-order-action="CANCEL_ORDER"><XCircle aria-hidden="true" size={18} /></button> : null}
+            {enabledActions.has("MARK_NO_SHOW") ? <button className="icon-button danger-icon" type="button" onClick={() => directCommand("MARK_NO_SHOW", "标记未到", "确认标记未到并释放服务端库存与会员覆盖。") } disabled={orderActionsBlocked} aria-label="标记未到" title="标记未到" data-order-action="MARK_NO_SHOW"><UserX aria-hidden="true" size={18} /></button> : null}
+            {enabledActions.size === 0 ? <span>当前没有可执行操作</span> : enabledActions.size === 1 && enabledActions.has("CORRECT_ORDER_OCCUPANT") ? <span>请在下方住宿人条目中更正资料</span> : null}
+          </div>
         </div>
       </section>
 
@@ -443,8 +533,28 @@ export function OrderDetailPage() {
             ))}
           </ol>
         </section>
-        <section className="detail-section" aria-labelledby="stay-heading"><div className="section-title-row"><h2 id="stay-heading">Stay</h2><StatusBadge value={view.stay.status} /></div><dl className="detail-list"><div><dt>Stay ID</dt><dd><code>{view.stay.id}</code></dd></div><div><dt>住宿周期</dt><dd>{formatDate(view.order.arrival_date)} 至 {formatDate(view.order.departure_date)}</dd></div><div><dt>住宿类型</dt><dd>{view.order.stay_type}</dd></div>{view.order.stay_type === "FREE" ? <div><dt>免费入住原因</dt><dd>{view.order.free_stay_reason}</dd></div> : null}{view.order.member_id || view.order.member_contract_id ? <div><dt>住宿来源</dt><dd>会员权益</dd></div> : <><div><dt>订单来源渠道</dt><dd>{view.order.booking_channel_code ? bookingChannelLabels[view.order.booking_channel_code] : "历史未记录"}</dd></div><div><dt>渠道订单号</dt><dd><code>{view.order.booking_channel_code === "WECOM" ? "不适用" : view.order.channel_order_reference ?? (view.order.booking_channel_code ? "未填写" : "历史未记录")}</code></dd></div></>}<div><dt>政策版本</dt><dd><code>{view.order.pricing_policy_version_id}</code></dd></div><div><dt>会员合同</dt><dd><code>{view.order.member_contract_id ?? "-"}</code></dd></div></dl></section>
+        <section className="detail-section" aria-labelledby="stay-heading"><div className="section-title-row"><h2 id="stay-heading">住宿状态</h2><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div><dl className="detail-list"><div><dt>住宿周期</dt><dd>{formatDate(view.order.arrival_date)} 至 {formatDate(view.order.departure_date)}</dd></div><div><dt>住宿类型</dt><dd>{view.order.stay_type === "FREE" ? "免费住宿" : view.order.member_id || view.order.member_contract_id ? "会员住宿" : "普通住宿"}</dd></div>{view.order.stay_type === "FREE" ? <><div><dt>免费入住类型</dt><dd>{view.order.free_stay_category_code === "VOLUNTEER" ? "义工" : view.order.free_stay_category_code === "RECEPTION" ? "接待" : "历史未记录"}</dd></div><div><dt>免费入住原因</dt><dd>{view.order.free_stay_reason}</dd></div></> : view.order.member_id || view.order.member_contract_id ? <div><dt>住宿来源</dt><dd>会员权益</dd></div> : <><div><dt>订单来源渠道</dt><dd>{view.order.booking_channel_code ? bookingChannelLabels[view.order.booking_channel_code] : "历史未记录"}</dd></div><div><dt>渠道订单号</dt><dd><code>{view.order.booking_channel_code === "WECOM" ? "不适用" : view.order.channel_order_reference ?? (view.order.booking_channel_code ? "未填写" : "历史未记录")}</code></dd></div></>}</dl></section>
       </div>
+
+      <section className="detail-section full-detail" aria-labelledby="fulfillment-heading" data-testid="order-fulfillment">
+        <div className="section-title-row"><h2 id="fulfillment-heading">入住与退房结果</h2></div>
+        <div className="amendment-list">
+          <FulfillmentResult type="CHECK_IN" record={view.fulfillment.checkIn} />
+          <FulfillmentResult type="CHECK_OUT" record={view.fulfillment.checkOut} />
+        </div>
+      </section>
+
+      {currentReleaseFeatures.cleaningWorkflow && view.cleaningTasks.length ? <section className="detail-section full-detail" aria-labelledby="cleaning-heading" data-testid="order-cleaning-tasks">
+        <div className="section-title-row"><h2 id="cleaning-heading"><Sparkles aria-hidden="true" size={18} />清洁任务</h2><span>{view.cleaningTasks.length}</span></div>
+        <ol className="amendment-list">{view.cleaningTasks.map((task) => {
+          const unit = unitMap.get(task.inventoryUnitId);
+          return <li key={task.id} data-testid="order-cleaning-task">
+            <div><strong>{unit ? `${unit.code} · ${unit.name}` : "退房房源"}</strong><StatusBadge value={task.status} label={businessStatusLabel(task.status)} /></div>
+            <div><span>清洁日期：{formatDate(task.serviceDate)}</span><small>生成：{task.createdBy?.displayName ?? "系统记录"} · {formatDateTime(task.createdAt)}</small></div>
+            {task.status === "COMPLETED" ? <div><span>清洁已完成</span><small>{task.completedBy?.displayName ?? "系统记录"} · {formatDateTime(task.completedAt ?? undefined)}</small></div> : <p>等待工作人员完成清洁。</p>}
+          </li>;
+        })}</ol>
+      </section> : null}
 
       <section className="detail-section full-detail" aria-labelledby="occupant-corrections-heading">
         <div className="section-title-row"><h2 id="occupant-corrections-heading">住宿人资料更正记录</h2><span>{view.occupantCorrections.length}</span></div>
@@ -464,7 +574,7 @@ export function OrderDetailPage() {
 
       <section className="detail-section full-detail" aria-labelledby="revisions-heading"><div className="section-title-row"><h2 id="revisions-heading">Pricing revisions</h2><span>{view.pricingRevisions.length}</span></div><div className="table-region" role="region" aria-label="计价修订" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">Revision</th><th scope="col">锁定政策</th><th scope="col">周期</th><th scope="col">Coverage</th><th scope="col">政策基础报价</th><th scope="col">人工调价差额</th><th scope="col">指定最终总价</th><th scope="col">明细</th></tr></thead><tbody>{view.pricingRevisions.map((revision) => <tr key={revision.id}><th scope="row">#{revision.revision_no}<code>{revision.id}</code></th><td><code>{revision.policy_version_id}</code></td><td>{formatDate(revision.arrival_date)} 至 {formatDate(revision.departure_date)}</td><td>{countArray(revision.coverage_set)}</td><td>{formatMinor(revision.policy_base_amount_minor, revision.currency)}</td><td>{formatMinor(revision.manual_adjustment_minor, revision.currency)}</td><td><strong>{formatMinor(revision.current_contract_amount_minor, revision.currency)}</strong></td><td><JsonDetails label="查看" value={{ coverageSet: revision.coverage_set, cashLines: revision.cash_lines, policyBaseAmountMinor: revision.policy_base_amount_minor, manualAdjustmentMinor: revision.manual_adjustment_minor, targetCurrentContractAmountMinor: revision.current_contract_amount_minor }} /></td></tr>)}</tbody></table></div></section>
 
-      <section className="detail-section full-detail" aria-labelledby="coverage-table-heading"><div className="section-title-row"><h2 id="coverage-table-heading">Coverage set</h2><span>{view.coverageSet.length}</span></div>{view.coverageSet.length ? <div className="table-region" role="region" aria-label="会员覆盖" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">服务日期</th><th scope="col">库存单元</th><th scope="col">权益类型</th><th scope="col">Lot</th><th scope="col">状态</th><th scope="col">Coverage ID</th></tr></thead><tbody>{view.coverageSet.map((coverage) => <tr key={coverage.id}><td>{coverage.service_date}</td><td>{unitMap.get(coverage.inventory_unit_id)?.code ?? coverage.inventory_unit_id}</td><td>{coverage.unit_kind}</td><td><code>{coverage.lot_id}</code></td><td><StatusBadge value={coverage.status} /></td><td><code>{coverage.id}</code></td></tr>)}</tbody></table></div> : <EmptyState title="没有会员覆盖" detail="此订单未使用 ROOM_NIGHT 或 BED_NIGHT 权益。" />}</section>
+      <section className="detail-section full-detail" aria-labelledby="coverage-table-heading"><div className="section-title-row"><h2 id="coverage-table-heading">会员权益覆盖</h2><span>{view.coverageSet.length}</span></div>{view.coverageSet.length ? <div className="table-region" role="region" aria-label="会员覆盖" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">服务日期</th><th scope="col">住宿位置</th><th scope="col">权益类型</th><th scope="col">状态</th></tr></thead><tbody>{view.coverageSet.map((coverage) => <tr key={coverage.id}><td>{coverage.service_date}</td><td>{unitMap.get(coverage.inventory_unit_id)?.code ?? "房源"}</td><td>{coverage.unit_kind === "ROOM_NIGHT" ? "间夜" : "床夜"}</td><td><StatusBadge value={coverage.status} label={businessStatusLabel(coverage.status)} /></td></tr>)}</tbody></table></div> : <EmptyState title="没有会员覆盖" detail="此订单未使用会员住宿权益。" />}</section>
 
       <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销事实</h2><span>{view.collectionFacts.length}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款事实" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">Fact ID</th><th scope="col">类型</th><th scope="col">事实金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">引用 / 冲销</th><th scope="col">方式与备注</th><th scope="col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact) => <tr key={fact.fact_id}><th scope="row"><code>{fact.fact_id}</code><small>{formatDateTime(fact.created_at)}</small></th><td><StatusBadge value={fact.fact_type} /></td><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td><code>{fact.transaction_reference ?? (fact.fact_type === "REVERSAL" ? "-" : "历史未记录")}</code></td><td><code>{fact.references_fact_id ?? fact.reverses_fact_id ?? "-"}</code></td><td><strong>{fact.method}</strong><small>{fact.note || "-"}</small></td><td><FactActions fact={fact} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款事实" detail="使用订单操作记录第一笔独立收款。" />}</section>
 

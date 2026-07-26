@@ -1,6 +1,6 @@
 import { sql, type Transaction } from "kysely";
-import { DomainError, type CommandReason, type CommandType, type CoverageItemDto } from "@qintopia/contracts";
-import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, todayInTimeZone, validateBookingChannel } from "@qintopia/domain";
+import { currentReleaseFeatures, DomainError, type CommandReason, type CommandType, type CoverageItemDto } from "@qintopia/contracts";
+import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, validateBookingChannel } from "@qintopia/domain";
 import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims } from "../inventory.ts";
 import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, lockOrder, reconcileCoverage, releaseCoverage, type StayTimelineItem } from "../orders.ts";
 import { loadStoredQuote, lockEntitlementLots } from "../pricing-service.ts";
@@ -531,14 +531,19 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     if (memberStay && (effect.bookingChannelCode !== null || effect.channelOrderReference !== null)) {
       throw new DomainError("VALIDATION_ERROR", "会员住宿不得写入订单来源渠道或渠道订单号");
     }
-    const { bookingChannelCode, channelOrderReference } = memberStay
+    if (stayType === "FREE" && (effect.bookingChannelCode !== null || effect.channelOrderReference !== null)) {
+      throw new DomainError("VALIDATION_ERROR", "免费入住不得写入订单来源渠道或渠道订单号");
+    }
+    const { bookingChannelCode, channelOrderReference } = memberStay || stayType === "FREE"
       ? { bookingChannelCode: null, channelOrderReference: null }
       : validateBookingChannel(effect.bookingChannelCode, effect.channelOrderReference);
     const freeStayReason = stayType === "FREE" ? requireString(effect, "freeStayReason") : null;
+    const freeStayCategoryCode = stayType === "FREE" ? requireString(effect, "freeStayCategoryCode") : null;
     await trx.insertInto("orders").values({
       id: orderId, property_id: propertyId, status: "RESERVED", stay_type: stayType,
       arrival_date: arrivalDate, departure_date: departureDate, primary_guest_snapshot: primaryGuest,
       booking_channel_code: bookingChannelCode, channel_order_reference: channelOrderReference, free_stay_reason: freeStayReason,
+      free_stay_category_code: freeStayCategoryCode,
       pricing_policy_version_id: policyVersionId, member_id: memberId, member_contract_id: memberContractId, current_revision_id: null, version: 1
     }).execute();
     const occupantCreatedAt = new Date();
@@ -566,7 +571,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     await trx.insertInto("amendments").values({
       id: amendmentId, order_id: orderId, sequence: 1, amendment_type: "CREATE_ORDER",
       reason_code: options.reason.code, reason_note: options.reason.note, prior_version: 0, new_version: 1,
-      payload: { quoteId: effect.quoteId, inventoryUnitId: unitId, arrivalDate, departureDate, primaryGuest, occupants, bookingChannelCode, channelOrderReference, freeStayReason },
+      payload: { quoteId: effect.quoteId, inventoryUnitId: unitId, arrivalDate, departureDate, primaryGuest, occupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode },
       command_id: options.commandId
     }).execute();
     await trx.insertInto("stay_segments").values({
@@ -584,7 +589,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       await bumpMembershipForCoverage(trx, memberContractId, pricing.coverageSet);
     }
     return {
-      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason },
+      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode },
       resourceRefs: [orderId, stayId, segmentId, revisionId, ...persistedOccupants.map((occupant) => occupant.id), ...coverageRefs.coverageIds],
       factRefs: coverageRefs.factIds
     };
@@ -630,6 +635,9 @@ export async function applyCommand(trx: Transaction<Database>, options: {
   }
 
   if (options.commandType === "COMPLETE_CLEANING") {
+    if (!currentReleaseFeatures.cleaningWorkflow) {
+      throw new DomainError("VALIDATION_ERROR", "Cleaning workflow is disabled in this release", 409);
+    }
     const cleaningTaskId = requireString(effect, "cleaningTaskId");
     const updated = await trx.updateTable("cleaning_tasks").set({
       status: "COMPLETED",
@@ -1017,46 +1025,31 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       });
     }
     if (options.commandType === "CHECK_IN") {
-      const property = await trx.selectFrom("properties")
-        .select("timezone")
-        .where("id", "=", propertyId)
-        .executeTakeFirstOrThrow();
-      const clock = await sql<{ as_of: Date }>`select transaction_timestamp() as as_of`.execute(trx);
-      const businessDate = todayInTimeZone(property.timezone, clock.rows[0]!.as_of);
-      if (context.order.departure_date <= businessDate) {
-        const nextBusinessDate = new Date(parseLocalDate(businessDate).getTime() + 86_400_000).toISOString().slice(0, 10);
-        const unit = await lockUnitDates(
-          trx,
-          propertyId,
-          context.currentSegment.inventoryUnitId,
-          businessDate,
-          nextBusinessDate
-        );
-        await assertUnitAvailable(trx, unit, [businessDate], context.segmentIds);
-      }
       coverageRefs = await consumeCoverage(trx, orderId, options.commandId);
     }
     if (options.commandType === "CHECK_OUT") {
       await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds);
-      const cleaningTask = nestedObject(effect, "cleaningTask");
-      const inventoryUnitId = requireString(cleaningTask, "inventoryUnitId");
-      const serviceDate = requireString(cleaningTask, "serviceDate");
-      const unit = await loadInventoryUnitIncludingInactive(trx, propertyId, inventoryUnitId);
-      cleaningTaskId = newId("cleaning");
-      await trx.insertInto("cleaning_tasks").values({
-        id: cleaningTaskId,
-        property_id: propertyId,
-        order_id: orderId,
-        stay_id: context.stay.id,
-        inventory_unit_id: inventoryUnitId,
-        room_id: unit.roomId,
-        service_date: serviceDate,
-        status: "PENDING",
-        version: 1,
-        created_by_command_id: options.commandId,
-        completed_by_command_id: null,
-        completed_at: null
-      }).execute();
+      if (currentReleaseFeatures.cleaningWorkflow) {
+        const cleaningTask = nestedObject(effect, "cleaningTask");
+        const inventoryUnitId = requireString(cleaningTask, "inventoryUnitId");
+        const serviceDate = requireString(cleaningTask, "serviceDate");
+        const unit = await loadInventoryUnitIncludingInactive(trx, propertyId, inventoryUnitId);
+        cleaningTaskId = newId("cleaning");
+        await trx.insertInto("cleaning_tasks").values({
+          id: cleaningTaskId,
+          property_id: propertyId,
+          order_id: orderId,
+          stay_id: context.stay.id,
+          inventory_unit_id: inventoryUnitId,
+          room_id: unit.roomId,
+          service_date: serviceDate,
+          status: "PENDING",
+          version: 1,
+          created_by_command_id: options.commandId,
+          completed_by_command_id: null,
+          completed_at: null
+        }).execute();
+      }
     }
     if (options.commandType === "CANCEL_ORDER" || options.commandType === "MARK_NO_SHOW") {
       coverageRefs = await releaseCoverage(trx, orderId, options.commandId);
@@ -1082,6 +1075,13 @@ export async function applyCommand(trx: Transaction<Database>, options: {
           }
         } : {}),
         ...(statusPricingRevisionId ? { pricingRevisionId: statusPricingRevisionId } : {}),
+        ...((options.commandType === "CHECK_IN" || options.commandType === "CHECK_OUT") ? {
+          fulfillmentTiming: {
+            effectiveDate: requireString(effect, "effectiveDate"),
+            recordedBusinessDate: requireString(effect, "businessDate"),
+            recordingMode: requireString(effect, "recordingMode")
+          }
+        } : {}),
         ...(cleaningTaskId ? { cleaningTaskId } : {})
       },
       resourceRefs: [orderId, amendmentId, ...(statusPricingRevisionId ? [statusPricingRevisionId] : []), ...(cleaningTaskId ? [cleaningTaskId] : []), ...coverageRefs.coverageIds],

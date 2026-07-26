@@ -366,7 +366,7 @@ export function TokensPage() {
   return (
     <div className="tokens-page">
       <header className="page-heading page-heading-actions">
-        <div><p className="eyebrow">External clients</p><h1>Token 生命周期</h1><p>当前主体的物业范围 Token、权限上限与轮换链</p></div>
+        <div><p className="eyebrow">外部系统接入</p><h1>Token 生命周期</h1><p>当前主体的物业范围 Token、权限上限与轮换链</p></div>
         <div className="token-page-actions"><button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={17} />刷新</button><button className="button button-primary" type="button" onClick={() => setSecretAction({ operation: "ISSUE" })} disabled={!canWrite || loading || Boolean(error) || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}><KeyRound aria-hidden="true" size={17} />签发 Token</button></div>
       </header>
 

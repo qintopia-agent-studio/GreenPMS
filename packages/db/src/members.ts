@@ -15,9 +15,12 @@ export function localDateInTimeZone(timeZone: string, instant = new Date()): str
 }
 
 export async function propertyLocalToday(db: DbExecutor, propertyId: string): Promise<string> {
-  const property = await db.selectFrom("properties").select("timezone").where("id", "=", propertyId).executeTakeFirst();
+  const property = await db.selectFrom("properties")
+    .select(["timezone", sql<Date>`transaction_timestamp()`.as("as_of")])
+    .where("id", "=", propertyId)
+    .executeTakeFirst();
   if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
-  return localDateInTimeZone(property.timezone);
+  return localDateInTimeZone(property.timezone, new Date(property.as_of));
 }
 
 export async function getMemberView(db: DbExecutor, propertyId: string, memberId: string) {

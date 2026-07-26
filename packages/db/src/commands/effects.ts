@@ -1,5 +1,5 @@
 import { sql } from "kysely";
-import { DomainError, type CommandType, type CoverageItemDto, type InventoryUnitKind, type StayType } from "@qintopia/contracts";
+import { currentReleaseFeatures, DomainError, freeStayCategoryCodes, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType } from "@qintopia/contracts";
 import {
   calculatePricing,
   calculateDurationTimelinePricing,
@@ -547,16 +547,28 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const quote = await loadStoredQuote(db, quoteId);
     if (quote.propertyId !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Quote belongs to another property", 403);
     const memberStay = Boolean(quote.memberId || quote.memberContractId);
-    if (memberStay && ((input.bookingChannelCode !== undefined && input.bookingChannelCode !== null)
-      || (input.channelOrderReference !== undefined && input.channelOrderReference !== null && input.channelOrderReference !== ""))) {
+    const freeStay = quote.stayType === "FREE";
+    const channelSubmitted = (input.bookingChannelCode !== undefined && input.bookingChannelCode !== null)
+      || (input.channelOrderReference !== undefined && input.channelOrderReference !== null && input.channelOrderReference !== "");
+    if (memberStay && channelSubmitted) {
       throw new DomainError("VALIDATION_ERROR", "会员住宿不应填写订单来源渠道或渠道订单号");
     }
-    const { bookingChannelCode, channelOrderReference } = memberStay
+    if (freeStay && channelSubmitted) {
+      throw new DomainError("VALIDATION_ERROR", "免费入住不应填写订单来源渠道或渠道订单号");
+    }
+    const { bookingChannelCode, channelOrderReference } = memberStay || freeStay
       ? { bookingChannelCode: null, channelOrderReference: null }
       : validateBookingChannel(input.bookingChannelCode, input.channelOrderReference);
-    const freeStayReason = quote.stayType === "FREE" ? requireString(input, "freeStayReason") : null;
-    if (quote.stayType !== "FREE" && input.freeStayReason !== undefined && input.freeStayReason !== null) {
+    const freeStayReason = freeStay ? requireString(input, "freeStayReason") : null;
+    if (!freeStay && input.freeStayReason !== undefined && input.freeStayReason !== null) {
       throw new DomainError("VALIDATION_ERROR", "freeStayReason is only allowed for FREE stays");
+    }
+    const freeStayCategoryCode = freeStay ? requireString(input, "freeStayCategoryCode") : null;
+    if (!freeStay && input.freeStayCategoryCode !== undefined && input.freeStayCategoryCode !== null) {
+      throw new DomainError("VALIDATION_ERROR", "freeStayCategoryCode is only allowed for FREE stays");
+    }
+    if (freeStay && !freeStayCategoryCodes.includes(freeStayCategoryCode as FreeStayCategoryCode)) {
+      throw new DomainError("VALIDATION_ERROR", "免费入住类型必须是义工或接待");
     }
     const unit = await loadInventoryUnit(db, propertyId, quote.inventoryUnitId);
     const guestSnapshots = [guest, ...additionalGuests];
@@ -599,6 +611,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       bookingChannelCode,
       channelOrderReference,
       freeStayReason,
+      freeStayCategoryCode,
       inventoryUnit: unit,
       stayType: quote.stayType,
       arrivalDate: quote.arrivalDate,
@@ -671,6 +684,9 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   }
 
   if (commandType === "COMPLETE_CLEANING") {
+    if (!currentReleaseFeatures.cleaningWorkflow) {
+      throw new DomainError("VALIDATION_ERROR", "Cleaning workflow is disabled in this release", 409);
+    }
     const cleaningTaskId = requireString(input, "cleaningTaskId");
     const task = await db.selectFrom("cleaning_tasks").selectAll()
       .where("id", "=", cleaningTaskId)
@@ -954,6 +970,15 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   if (commandType === "SHORTEN_STAY") {
     assertOrderMutable(context.order.status);
     const newDepartureDate = requireString(input, "newDepartureDate");
+    if (context.order.status === "CHECKED_IN") {
+      const businessDate = await propertyLocalToday(db, propertyId);
+      if (newDepartureDate <= businessDate) {
+        throw new DomainError("INVALID_ORDER_STATE", "当前版本暂不支持通过缩短住宿办理提前退房", 409, false, {
+          businessDate,
+          departureDate: context.order.departure_date
+        });
+      }
+    }
     const dates = enumerateServiceDates(context.order.arrival_date, newDepartureDate);
     if (newDepartureDate >= context.order.departure_date) throw new DomainError("VALIDATION_ERROR", "New departure must shorten the stay");
     const currentTimeline = await loadActiveStayTimeline(db, context);
@@ -1147,23 +1172,17 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   if (commandType === "CHECK_IN") {
     if (context.order.status !== "RESERVED") throw new DomainError("INVALID_ORDER_STATE", "Only a reserved order can check in", 409);
     const businessDate = await propertyLocalToday(db, propertyId);
-    const expiredReservation = context.order.departure_date <= businessDate;
-    const currentBusinessDateInventory = expiredReservation
-      ? await inventoryFingerprint(
-        db,
-        propertyId,
-        context.currentSegment.inventoryUnitId,
+    if (businessDate < context.order.arrival_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "未到计划入住日，不能办理普通入住", 409, false, {
         businessDate,
-        nextServiceDate(businessDate),
-        context.segmentIds
-      )
-      : [];
-    if (currentBusinessDateInventory.length > 0) {
-      throw new DomainError(
-        "INVENTORY_CONFLICT",
-        `Expired reservation inventory is unavailable on the current business date ${businessDate}`,
-        409
-      );
+        arrivalDate: context.order.arrival_date
+      });
+    }
+    if (businessDate > context.order.arrival_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "已超过计划入住日，不能办理普通入住", 409, false, {
+        businessDate,
+        arrivalDate: context.order.arrival_date
+      });
     }
     const heldCoverage = await db.selectFrom("coverage_items").select("id")
       .where("order_id", "=", orderId).where("status", "=", "HELD").orderBy("id").execute();
@@ -1172,42 +1191,53 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       fromStatus: context.order.status,
       toStatus: "CHECKED_IN",
       inventoryUnitId: context.currentSegment.inventoryUnitId,
+      businessDate,
+      effectiveDate: businessDate,
+      recordingMode: "ON_SCHEDULE",
       entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: heldCoverage.length }
     }, {
       ...baseBasis,
       heldCoverageIds: heldCoverage.map((coverage) => coverage.id),
-      checkInInventory: { businessDate, expiredReservation, fingerprint: currentBusinessDateInventory }
+      businessDate
     });
   }
 
   if (commandType === "CHECK_OUT") {
     if (context.order.status !== "CHECKED_IN") throw new DomainError("INVALID_ORDER_STATE", "Only an in-house order can check out", 409);
+    const businessDate = await propertyLocalToday(db, propertyId);
+    if (businessDate < context.order.departure_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "未到计划退房日，不能办理普通退房；当前版本暂不支持提前退房", 409, false, {
+        businessDate,
+        departureDate: context.order.departure_date
+      });
+    }
     const heldCoverage = await db.selectFrom("coverage_items").select("id")
       .where("order_id", "=", orderId).where("status", "=", "HELD").orderBy("id").execute();
     if (heldCoverage.length > 0) throw new DomainError("ENTITLEMENT_CONFLICT", "In-house member coverage must be consumed before check-out", 409);
-    const existingCleaningTask = await db.selectFrom("cleaning_tasks").select(["id", "status"])
-      .where("order_id", "=", orderId).executeTakeFirst();
-    if (existingCleaningTask) {
-      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Check-out already has a cleaning task", 409, false, {
-        cleaningTaskId: existingCleaningTask.id,
-        status: existingCleaningTask.status
-      });
+    if (currentReleaseFeatures.cleaningWorkflow) {
+      const existingCleaningTask = await db.selectFrom("cleaning_tasks").select(["id", "status"])
+        .where("order_id", "=", orderId).executeTakeFirst();
+      if (existingCleaningTask) {
+        throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Check-out already has a cleaning task", 409, false, {
+          cleaningTaskId: existingCleaningTask.id,
+          status: existingCleaningTask.status
+        });
+      }
     }
-    const businessDate = await propertyLocalToday(db, propertyId);
-    const cleaningServiceDate = businessDate < context.currentSegment.arrivalDate
-      ? context.order.departure_date
-      : businessDate;
     return finalize(propertyId, {
       orderId,
       fromStatus: context.order.status,
       toStatus: "CHECKED_OUT",
       inventoryUnitId: context.currentSegment.inventoryUnitId,
+      businessDate,
+      effectiveDate: context.order.departure_date,
+      recordingMode: businessDate === context.order.departure_date ? "ON_SCHEDULE" : "LATE_RECORDED",
       amounts: await orderAmountSummary(db, context),
-      cleaningTask: {
+      ...(currentReleaseFeatures.cleaningWorkflow ? { cleaningTask: {
         inventoryUnitId: context.currentSegment.inventoryUnitId,
-        serviceDate: cleaningServiceDate,
+        serviceDate: businessDate,
         status: "PENDING"
-      }
+      } } : {})
     }, { ...baseBasis, heldCoverageIds: [], cleaningTask: null, businessDate });
   }
 
@@ -1221,6 +1251,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       toStatus: commandType === "CANCEL_ORDER" ? "CANCELLED" : "NO_SHOW",
       inventoryUnitId: context.currentSegment.inventoryUnitId,
       freeStayReason: context.order.free_stay_reason,
+      freeStayCategoryCode: context.order.free_stay_category_code,
       currentContractAmount: { currency: context.revision.currency, minorUnits: context.revision.currentContractAmountMinor },
       entitlementTransition: { from: "HELD", to: "RELEASED", coverageCount: heldCoverage.length }
     }, { ...baseBasis, heldCoverageIds: heldCoverage.map((coverage) => coverage.id) });
@@ -1257,6 +1288,7 @@ export function projectCommandEffectForRead(commandType: string, effect: Record<
       bookingChannelCode: Object.hasOwn(effect, "bookingChannelCode") ? effect.bookingChannelCode : null,
       channelOrderReference: Object.hasOwn(effect, "channelOrderReference") ? effect.channelOrderReference : null,
       freeStayReason: Object.hasOwn(effect, "freeStayReason") ? effect.freeStayReason : null,
+      freeStayCategoryCode: Object.hasOwn(effect, "freeStayCategoryCode") ? effect.freeStayCategoryCode : null,
       memberId: Object.hasOwn(effect, "memberId") ? effect.memberId : null
     };
   }

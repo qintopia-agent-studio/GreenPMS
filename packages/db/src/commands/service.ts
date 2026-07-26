@@ -1,5 +1,6 @@
 import { sql, type Kysely, type Transaction } from "kysely";
 import {
+  currentReleaseFeatures,
   DomainError,
   commandTypes,
   type AuthPrincipal,
@@ -378,7 +379,8 @@ function projectReceiptResultForRead(commandType: string, result: Record<string,
       ...(Object.hasOwn(result, "occupants") ? { occupants: result.occupants } : {}),
       bookingChannelCode: Object.hasOwn(result, "bookingChannelCode") ? result.bookingChannelCode : null,
       channelOrderReference: Object.hasOwn(result, "channelOrderReference") ? result.channelOrderReference : null,
-      freeStayReason: Object.hasOwn(result, "freeStayReason") ? result.freeStayReason : null
+      freeStayReason: Object.hasOwn(result, "freeStayReason") ? result.freeStayReason : null,
+      freeStayCategoryCode: Object.hasOwn(result, "freeStayCategoryCode") ? result.freeStayCategoryCode : null
     };
   }
   if (commandType === "RECORD_COLLECTION" || commandType === "RECORD_REFUND" || commandType === "REVERSE_FACT") {
@@ -720,6 +722,10 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         });
         if (replay) return replay;
 
+        if (commandType === "COMPLETE_CLEANING" && !currentReleaseFeatures.cleaningWorkflow) {
+          throw new DomainError("VALIDATION_ERROR", "Cleaning workflow is disabled in this release", 409);
+        }
+
         const inserted = await trx.insertInto("command_executions").values({
           id: newId("command"),
           subject_id: principal.subjectId,
@@ -832,6 +838,12 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
       // A Preview outside this subject's namespace is not a command attempt and
       // must not create an artifact that can be used as an existence oracle.
       if (error instanceof DomainError && error.code === "PREVIEW_NOT_FOUND") throw error;
+      // Preserve exact replays of historical receipts, but do not create a new
+      // rejected command artifact for an open cleaning Preview while disabled.
+      if (error instanceof DomainError
+        && commandType === "COMPLETE_CLEANING"
+        && !currentReleaseFeatures.cleaningWorkflow
+        && error.code === "VALIDATION_ERROR") throw error;
       const rejectionError = error instanceof DomainError
         ? error
         : new DomainError(

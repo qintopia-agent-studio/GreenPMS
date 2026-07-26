@@ -33,7 +33,7 @@ export interface UnitAvailability extends InventoryUnitRecord {
   available: boolean;
 }
 
-interface OverdueStayBlocker {
+interface DepartureDayStayBlocker {
   orderId: string;
   stayId: string;
   segmentId: string;
@@ -75,11 +75,11 @@ async function loadDeferredUnavailableBlockers(
   }));
 }
 
-async function loadOverdueStayBlockers(
+async function loadDepartureDayStayBlockers(
   db: DbExecutor,
   propertyId: string,
   dates: readonly string[]
-): Promise<OverdueStayBlocker[]> {
+): Promise<DepartureDayStayBlocker[]> {
   if (dates.length === 0) return [];
   const property = await db.selectFrom("properties").select("timezone").where("id", "=", propertyId).executeTakeFirst();
   if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
@@ -90,7 +90,7 @@ async function loadOverdueStayBlockers(
   const orderRows = await db.selectFrom("orders")
     .select(["id", "status"])
     .where("property_id", "=", propertyId)
-    .where("departure_date", "<=", businessDate)
+    .where("departure_date", "=", businessDate)
     .where("status", "=", "CHECKED_IN")
     .orderBy("id")
     .execute();
@@ -122,7 +122,7 @@ async function loadOverdueStayBlockers(
   }));
 }
 
-function blockerAffectsUnit(blocker: OverdueStayBlocker, unit: Pick<InventoryUnitRecord, "id" | "kind" | "roomId">): boolean {
+function departureDayBlockerAffectsUnit(blocker: DepartureDayStayBlocker, unit: Pick<InventoryUnitRecord, "id" | "kind" | "roomId">): boolean {
   return blocker.roomId === unit.roomId
     && (unit.kind === "ROOM" || blocker.inventoryUnitId === blocker.roomId || blocker.inventoryUnitId === unit.id);
 }
@@ -184,7 +184,7 @@ export async function listAvailability(db: DbExecutor, propertyId: string, arriv
     .where("service_date", ">=", arrivalDate)
     .where("service_date", "<", departureDate)
     .execute();
-  const overdueStayBlockers = await loadOverdueStayBlockers(db, propertyId, dates);
+  const departureDayStayBlockers = await loadDepartureDayStayBlockers(db, propertyId, dates);
   const deferredUnavailableBlockers = await loadDeferredUnavailableBlockers(db, propertyId, dates);
 
   return units.map((unit) => {
@@ -193,7 +193,7 @@ export async function listAvailability(db: DbExecutor, propertyId: string, arriv
       const blocking = claims.filter((claim) => claim.service_date === serviceDate && claim.room_id === roomId && (
         unit.kind === "ROOM" || claim.inventory_unit_id === roomId || claim.inventory_unit_id === unit.id
       ));
-      const blockingStays = overdueStayBlockers.filter((blocker) => blocker.serviceDate === serviceDate && blockerAffectsUnit(blocker, {
+      const blockingStays = departureDayStayBlockers.filter((blocker) => blocker.serviceDate === serviceDate && departureDayBlockerAffectsUnit(blocker, {
         id: unit.id,
         kind: unit.kind,
         roomId
@@ -245,9 +245,9 @@ export async function inventoryFingerprint(db: DbExecutor, propertyId: string, u
   const claimFingerprint = claims
     .filter((claim) => unit.kind === "ROOM" || claim.inventory_unit_id === unit.roomId || claim.inventory_unit_id === unit.id)
     .map((claim) => `${claim.service_date}:${claim.inventory_unit_id}:${claim.id}`);
-  const stayFingerprint = (await loadOverdueStayBlockers(db, propertyId, dates))
-    .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && blockerAffectsUnit(blocker, unit))
-    .map((blocker) => `${blocker.serviceDate}:OVERDUE_STAY:${blocker.inventoryUnitId}:${blocker.stayId}`);
+  const stayFingerprint = (await loadDepartureDayStayBlockers(db, propertyId, dates))
+    .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && departureDayBlockerAffectsUnit(blocker, unit))
+    .map((blocker) => `${blocker.serviceDate}:DEPARTURE_DAY_STAY:${blocker.inventoryUnitId}:${blocker.stayId}`);
   const deferredUnavailableFingerprint = (await loadDeferredUnavailableBlockers(db, propertyId, dates))
     .filter((blocker) => deferredUnavailableBlockerAffectsUnit(blocker, unit))
     .flatMap((blocker) => dates
@@ -282,14 +282,14 @@ export async function lockUnitDates(trx: Transaction<Database>, propertyId: stri
 }
 
 export async function assertUnitAvailable(trx: Transaction<Database>, unit: InventoryUnitRecord, dates: string[], excludeSourceIds: string[] = []): Promise<void> {
-  const overdueStayBlockers = (await loadOverdueStayBlockers(trx, unit.propertyId, dates))
-    .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && blockerAffectsUnit(blocker, unit));
+  const departureDayStayBlockers = (await loadDepartureDayStayBlockers(trx, unit.propertyId, dates))
+    .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && departureDayBlockerAffectsUnit(blocker, unit));
   const deferredUnavailableBlockers = (await loadDeferredUnavailableBlockers(trx, unit.propertyId, dates))
     .filter((blocker) => !excludeSourceIds.includes(blocker.id) && deferredUnavailableBlockerAffectsUnit(blocker, unit));
   for (const serviceDate of dates) {
-    const blockingStay = overdueStayBlockers.find((blocker) => blocker.serviceDate === serviceDate);
+    const blockingStay = departureDayStayBlockers.find((blocker) => blocker.serviceDate === serviceDate);
     if (blockingStay) {
-      throw new DomainError("INVENTORY_CONFLICT", `An in-house Stay is overdue on ${serviceDate}`, 409);
+      throw new DomainError("INVENTORY_CONFLICT", `An in-house Stay is awaiting departure on ${serviceDate}`, 409);
     }
     const blockingDeferredUnavailable = deferredUnavailableBlockers.find((blocker) => (
       blocker.arrivalDate <= serviceDate && serviceDate < blocker.departureDate

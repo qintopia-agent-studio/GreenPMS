@@ -174,9 +174,8 @@ async function createStay(db: Kysely<Database>, options: {
       documentNumber: `STAGE7-${options.key}`
     },
     additionalGuests: options.additionalGuests ?? [],
-    bookingChannelCode: "WECOM",
-    channelOrderReference: null,
-    ...(stayType === "FREE" ? { freeStayReason: "阶段 6/7 合并人工验收免费住宿" } : {})
+    ...(stayType !== "FREE" ? { bookingChannelCode: "WECOM", channelOrderReference: null } : {}),
+    ...(stayType === "FREE" ? { freeStayReason: "阶段 6/7 合并人工验收免费住宿", freeStayCategoryCode: "RECEPTION" } : {})
   }, options.key);
   const orderId = receipt.result?.orderId;
   const stayId = receipt.result?.stayId;

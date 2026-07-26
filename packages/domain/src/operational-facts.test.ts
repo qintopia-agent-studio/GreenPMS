@@ -29,6 +29,12 @@ describe("operational fact identifiers", () => {
     expect(() => validateBookingChannel("WECOM", "wx-123")).toThrow(/must be null for WECOM/);
   });
 
+  it.each(["YOUMUDAO", "CTRIP", "MEITUAN"] as const)("requires channel order reference for %s orders", (code) => {
+    expect(validateBookingChannel(code, `  ${code.toLowerCase()}-123  `)).toEqual({ bookingChannelCode: code, channelOrderReference: `${code.toLowerCase()}-123` });
+    expect(() => validateBookingChannel(code, null)).toThrow(/channelOrderReference is required/);
+    expect(() => validateBookingChannel(code, "   ")).toThrow(/channelOrderReference is required/);
+  });
+
   it("normalizes and requires a real transaction reference", () => {
     expect(requireTransactionReference("  txn-123  ")).toBe("txn-123");
     expect(() => requireTransactionReference(undefined)).toThrow(/transactionReference is required/);

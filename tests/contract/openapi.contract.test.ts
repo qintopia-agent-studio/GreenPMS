@@ -35,7 +35,7 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     required: ["propertyId", "membershipOrderId"],
     properties: ["propertyId", "membershipOrderId"]
   },
-  CREATE_ORDER: { required: ["propertyId", "quoteId", "primaryGuest"], properties: ["propertyId", "quoteId", "primaryGuest", "additionalGuests", "bookingChannelCode", "channelOrderReference", "freeStayReason"] },
+  CREATE_ORDER: { required: ["propertyId", "quoteId", "primaryGuest"], properties: ["propertyId", "quoteId", "primaryGuest", "additionalGuests", "bookingChannelCode", "channelOrderReference", "freeStayReason", "freeStayCategoryCode"] },
   CORRECT_ORDER_OCCUPANT: { required: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"], properties: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"] },
   EXTEND_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
   SHORTEN_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
@@ -220,6 +220,9 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(createChannelVariants.map((variant) => variant.enum[0])).toEqual(["YOUMUDAO", "CTRIP", "MEITUAN", "WECOM"]);
     expect(JSON.stringify((createInput.properties as Record<string, JsonSchema>).channelOrderReference)).toContain('"type":"null"');
     expect((createInput.properties as Record<string, JsonSchema>).freeStayReason).toMatchObject({ minLength: 1, maxLength: 1000 });
+    const createFreeStayCategory = ((createInput.properties as Record<string, JsonSchema>).freeStayCategoryCode)!;
+    const createFreeStayCategoryVariants = createFreeStayCategory.anyOf as Array<{ enum: string[] }>;
+    expect(createFreeStayCategoryVariants.map((variant) => variant.enum[0])).toEqual(["VOLUNTEER", "RECEPTION"]);
     const previewSchema = document.paths["/api/v1/command-previews"].post.responses["200"].content["application/json"].schema;
     const previewProperties = (previewSchema.properties as Record<string, JsonSchema>).preview!.properties as Record<string, JsonSchema>;
     const createEffect = (previewProperties.effect!.anyOf as JsonSchema[]).find((variant) => {
@@ -657,7 +660,12 @@ describe("OpenAPI 3.1 command contract", () => {
 
     const errorSchema = document.paths["/api/v1/quotes"].post.responses["400"].content["application/json"].schema;
     expect(errorSchema.additionalProperties).toBe(false);
-    expect(errorSchema.properties.details.anyOf).toHaveLength(14);
+    const detailVariants = errorSchema.properties.details.anyOf as Array<{ required?: string[] }>;
+    expect(detailVariants).toHaveLength(16);
+    expect(detailVariants.some((variant) => variant.required?.includes("businessDate")
+      && variant.required.includes("arrivalDate"))).toBe(true);
+    expect(detailVariants.some((variant) => variant.required?.includes("businessDate")
+      && variant.required.includes("departureDate"))).toBe(true);
     const receiptSchema = document.paths["/api/v1/receipts/{id}"].get.responses["200"].content["application/json"].schema;
     expect(JSON.stringify(receiptSchema)).not.toContain("tokenSecret");
     expect(JSON.stringify(receiptSchema)).toContain("bookingChannelCode");
@@ -696,6 +704,25 @@ describe("OpenAPI 3.1 command contract", () => {
     for (const [path, method] of coreResponses) {
       const schema = document.paths[path][method].responses["200"].content["application/json"].schema;
       expect(arbitraryRecordLocations(schema), `${method.toUpperCase()} ${path}`).toEqual([]);
+    }
+    const orderDetailSchema = document.paths["/api/v1/orders/{id}"].get.responses["200"].content["application/json"].schema as JsonSchema;
+    expect(orderDetailSchema.required).toContain("fulfillment");
+    const fulfillmentSchema = (orderDetailSchema.properties as Record<string, JsonSchema>).fulfillment!;
+    expect(fulfillmentSchema.additionalProperties).toBe(false);
+    expect(Object.keys(fulfillmentSchema.properties as Record<string, JsonSchema>).sort()).toEqual(["checkIn", "checkOut"]);
+    for (const [slot, type] of [["checkIn", "CHECK_IN"], ["checkOut", "CHECK_OUT"]] as const) {
+      const slotSchema = (fulfillmentSchema.properties as Record<string, JsonSchema>)[slot]!;
+      const recordSchema = (slotSchema.anyOf as JsonSchema[]).find((variant) => variant.type === "object")!;
+      expect(recordSchema.additionalProperties).toBe(false);
+      expect(recordSchema.required).toEqual(expect.arrayContaining([
+        "type", "plannedBusinessDate", "recordedBusinessDate", "recordingMode", "recordedAt", "actor", "reason"
+      ]));
+      const properties = recordSchema.properties as Record<string, JsonSchema>;
+      expect(properties.type).toMatchObject({ enum: [type] });
+      const modeJson = JSON.stringify(properties.recordingMode);
+      expect(modeJson).toContain("ON_SCHEDULE");
+      expect(modeJson).toContain("LATE_RECORDED");
+      expect(modeJson).toContain("LEGACY_UNCLASSIFIED");
     }
     const roomStatusSchema = document.paths["/api/v1/properties/{id}/room-status"].get.responses["200"].content["application/json"].schema;
     const roomProperties = (((roomStatusSchema.properties as Record<string, JsonSchema>).rooms!.items as JsonSchema).properties) as Record<string, JsonSchema>;
@@ -1081,7 +1108,8 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(detail.json()).toMatchObject({
       order: { id: orderId, primary_guest_snapshot: { fullName: "Contract View Guest", nickname: "Contract Guest" }, booking_channel_code: "CTRIP", channel_order_reference: "TEST-CONTRACT-ORDER-1" },
       stay: { status: "PLANNED" },
-      pricingRevisions: [{ revision_no: 1 }]
+      pricingRevisions: [{ revision_no: 1 }],
+      cleaningTasks: []
     });
     const collection = await command(demo.writeToken, "RECORD_COLLECTION", {
       propertyId: demo.propertyId, orderId, amountMinor: 6_000, method: "CASH", transactionReference: "TEST-CONTRACT-TXN-COLLECTION-1", note: "Contract fact"
