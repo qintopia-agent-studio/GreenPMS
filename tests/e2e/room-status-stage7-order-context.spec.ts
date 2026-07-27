@@ -459,20 +459,20 @@ test("occupant correction Preview and Confirm refresh both order context and roo
   await page.getByTestId("occupant-correction-reason").fill("人工验收：修正录入错误");
   await correctionDialog.getByRole("button", { name: "继续核对更正", exact: true }).click();
 
-  await page.getByTestId("create-command-preview").click();
-  await expect(page.getByTestId("command-effect")).toContainText("小河");
-  await expect(page.getByTestId("command-effect")).toContainText("阶段七更正后住客");
-  await expect(page.getByTestId("reason-note")).toHaveValue("人工验收：修正录入错误");
+  const correctionEffect = page.getByTestId("command-effect");
+  await expect(correctionEffect).toBeVisible({ timeout: 15_000 });
+  await expect(correctionEffect).toContainText("小河");
+  await expect(correctionEffect).toContainText("阶段七更正后住客");
+  await expect(correctionEffect).toContainText("人工验收：修正录入错误");
+  await expect(page.getByTestId("reason-note")).toHaveCount(0);
 
   const refreshedBoard = roomStatusResponse(page);
   const refreshedOrder = orderResponse(page, fixture.wholeRoom.orderId);
   await page.getByTestId("confirm-command").click();
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("业务写入已提交");
-  await expect(receipt).toContainText("EXECUTED");
   await Promise.all([refreshedBoard, refreshedOrder]);
-  await page.getByRole("button", { name: "完成", exact: true }).click();
-  await expect(receipt).toBeHidden();
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿人资料已更正，订单信息已刷新");
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
 
   const refreshedContext = orderContext(page, fixture.wholeRoom.orderId);
   await expect(refreshedContext).toContainText("小河");

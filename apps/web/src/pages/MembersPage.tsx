@@ -5,6 +5,8 @@ import { useWorkspace } from "../session";
 import type { CommandRequest, MemberContractDto, MemberSummaryDto, MemberViewDto, MembershipOrderSummaryDto, MembershipPaymentFactDto, MembershipProductDto } from "../types";
 import {
   CommandDialog,
+  type CommandDialogCloseContext,
+  CommandResultNotice,
   CommandRecoveryBar,
   EmptyState,
   formatDate,
@@ -72,15 +74,16 @@ function productScopeLabel(product: Pick<MembershipProductDto, "code">): string 
   return "公卫四人间单床";
 }
 
-function CreateMemberDialog({ propertyId, onClose, onSubmit }: {
+function CreateMemberDialog({ propertyId, draft, onClose, onSubmit }: {
   propertyId: string;
+  draft?: CommandRequest;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
-  const [fullName, setFullName] = useState("");
-  const [identityCardNumber, setIdentityCardNumber] = useState("");
-  const [phone, setPhone] = useState("");
-  const [wechat, setWechat] = useState("");
+  const [fullName, setFullName] = useState(() => typeof draft?.input.fullName === "string" ? draft.input.fullName : "");
+  const [identityCardNumber, setIdentityCardNumber] = useState(() => typeof draft?.input.identityCardNumber === "string" ? draft.input.identityCardNumber : "");
+  const [phone, setPhone] = useState(() => typeof draft?.input.phone === "string" ? draft.input.phone : "");
+  const [wechat, setWechat] = useState(() => typeof draft?.input.wechat === "string" ? draft.input.wechat : "");
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -114,17 +117,18 @@ function CreateMemberDialog({ propertyId, onClose, onSubmit }: {
   </Modal>;
 }
 
-function CreateMembershipOrderDialog({ propertyId, member, products, onClose, onSubmit }: {
+function CreateMembershipOrderDialog({ propertyId, member, products, draft, onClose, onSubmit }: {
   propertyId: string;
   member: MemberViewDto["member"];
   products: MembershipProductDto[];
+  draft?: CommandRequest;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
-  const [productId, setProductId] = useState(products[0]?.id ?? "");
+  const [productId, setProductId] = useState(() => typeof draft?.input.membershipProductId === "string" ? draft.input.membershipProductId : products[0]?.id ?? "");
   const selectedProduct = products.find((product) => product.id === productId) ?? products[0];
-  const [agreedPriceYuan, setAgreedPriceYuan] = useState(() => selectedProduct ? String(selectedProduct.list_price_minor / 100) : "");
-  const [adjustmentReason, setAdjustmentReason] = useState("");
+  const [agreedPriceYuan, setAgreedPriceYuan] = useState(() => typeof draft?.input.agreedPriceMinor === "number" ? String(draft.input.agreedPriceMinor / 100) : selectedProduct ? String(selectedProduct.list_price_minor / 100) : "");
+  const [adjustmentReason, setAdjustmentReason] = useState(() => typeof draft?.input.priceAdjustmentReason === "string" ? draft.input.priceAdjustmentReason : "");
   const [validationError, setValidationError] = useState<string>();
 
   function selectProduct(nextId: string) {
@@ -182,16 +186,19 @@ function CreateMembershipOrderDialog({ propertyId, member, products, onClose, on
   </Modal>;
 }
 
-function MembershipPaymentDialog({ propertyId, summary, correction, onClose, onSubmit }: {
+function MembershipPaymentDialog({ propertyId, summary, correction, draft, onClose, onSubmit }: {
   propertyId: string;
   summary: MembershipOrderSummaryDto;
   correction?: MembershipPaymentFactDto;
+  draft?: CommandRequest;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
-  const [amountYuan, setAmountYuan] = useState(correction ? String(correction.amount_minor / 100) : "");
-  const [transactionReference, setTransactionReference] = useState(correction?.transaction_reference ?? "");
-  const [note, setNote] = useState("");
+  const draftAmount = draft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? draft.input.correctedAmountMinor : draft?.input.amountMinor;
+  const draftReference = draft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? draft.input.correctedTransactionReference : draft?.input.transactionReference;
+  const [amountYuan, setAmountYuan] = useState(() => typeof draftAmount === "number" ? String(draftAmount / 100) : correction ? String(correction.amount_minor / 100) : "");
+  const [transactionReference, setTransactionReference] = useState(() => typeof draftReference === "string" ? draftReference : correction?.transaction_reference ?? "");
+  const [note, setNote] = useState(() => typeof draft?.input.note === "string" ? draft.input.note : "");
   const [validationError, setValidationError] = useState<string>();
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -296,15 +303,16 @@ export function ledgerEntryDisplayQuantity(
   };
 }
 
-function CorrectEntitlementBalanceDialog({ propertyId, lot, currentBalance, onClose, onSubmit }: {
+function CorrectEntitlementBalanceDialog({ propertyId, lot, currentBalance, draft, onClose, onSubmit }: {
   propertyId: string;
   lot: MemberViewDto["lots"][number];
   currentBalance: number;
+  draft?: CommandRequest;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
-  const [targetBalance, setTargetBalance] = useState(String(currentBalance));
-  const [reason, setReason] = useState("");
+  const [targetBalance, setTargetBalance] = useState(() => typeof draft?.input.targetAvailableBalance === "number" ? String(draft.input.targetAvailableBalance) : String(currentBalance));
+  const [reason, setReason] = useState(() => typeof draft?.input.adjustmentReason === "string" ? draft.input.adjustmentReason : "");
   const [validationError, setValidationError] = useState<string>();
   const unit = lot.unit_kind === "ROOM_NIGHT" ? "间夜" : "床夜";
 
@@ -498,7 +506,9 @@ export function MembersPage() {
   const [correctingPayment, setCorrectingPayment] = useState<{ summary: MembershipOrderSummaryDto; fact: MembershipPaymentFactDto }>();
   const [correctingEntitlement, setCorrectingEntitlement] = useState<{ lot: MemberViewDto["lots"][number]; currentBalance: number }>();
   const [command, setCommand] = useState<CommandRequest>();
+  const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+  const [commandNotice, setCommandNotice] = useState<string>();
   const commandsBlocked = commandRecovery.blocked;
 
   useEffect(() => {
@@ -508,8 +518,10 @@ export function MembersPage() {
     setCorrectingPayment(undefined);
     setCorrectingEntitlement(undefined);
     setCommand(undefined);
+    setCommandDraft(undefined);
     setRecoveryDialogOpen(false);
     setRecoveryError(undefined);
+    setCommandNotice(undefined);
     setSelectedMemberId("");
   }, [propertyId]);
 
@@ -570,6 +582,7 @@ export function MembersPage() {
   function startCommand(request: CommandRequest) {
     if (commandsBlocked) return;
     setRecoveryDialogOpen(false);
+    setCommandDraft(undefined);
     setCommand(request);
   }
 
@@ -592,17 +605,47 @@ export function MembersPage() {
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
 
-  function closeCommandDialog() {
-    let refreshAfterClose = false;
-    if (commandRecovery.pending && isTerminalCommandRecovery(commandRecovery.pending.state)) {
-      refreshAfterClose = commandRecovery.pending.receipt?.businessCommitted === true;
-      if (refreshAfterClose && commandRecovery.pending.receipt) applyCommittedReceipt(commandRecovery.pending.receipt);
+  function closeCommandDialog(context?: CommandDialogCloseContext) {
+    let refreshAfterClose = context?.receipt.businessCommitted === true;
+    if (context || (commandRecovery.pending && isTerminalCommandRecovery(commandRecovery.pending.state))) {
+      refreshAfterClose ||= commandRecovery.pending?.state === "EXECUTED";
+      if (context?.receipt.businessCommitted) applyCommittedReceipt(context.receipt);
       if (commandRecovery.clearResolved()) setRecoveryError(undefined);
       else setRecoveryError(new Error("无法清除已完成操作的本地恢复记录；为避免重复建档，写入继续暂停"));
     }
     setCommand(undefined);
     setRecoveryDialogOpen(false);
     if (refreshAfterClose) refresh();
+  }
+
+  function returnCommandToEdit(request: CommandRequest) {
+    setCommandDraft(request);
+    if (request.commandType === "CREATE_MEMBER") {
+      setCreatingMember(true);
+      return;
+    }
+    if (!member) return;
+    if (request.commandType === "CREATE_MEMBERSHIP_ORDER") {
+      setCreatingMembershipOrder(true);
+      return;
+    }
+    const membershipOrderId = request.input.membershipOrderId;
+    const summary = typeof membershipOrderId === "string"
+      ? member.membershipOrders.find((candidate) => candidate.order.id === membershipOrderId)
+      : undefined;
+    if (!summary) return;
+    if (request.commandType === "RECORD_MEMBERSHIP_PAYMENT") {
+      setPaymentOrder(summary);
+    } else if (request.commandType === "CORRECT_MEMBERSHIP_PAYMENT") {
+      const originalFactId = request.input.originalPaymentFactId;
+      const fact = typeof originalFactId === "string" ? summary.paymentFacts.find((candidate) => candidate.fact_id === originalFactId) : undefined;
+      if (fact) setCorrectingPayment({ summary, fact });
+    } else if (request.commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE") {
+      const lotId = request.input.entitlementLotId;
+      const lot = typeof lotId === "string" ? member.lots.find((candidate) => candidate.id === lotId) : undefined;
+      const currentBalance = request.input.expectedAvailableBalance;
+      if (lot && typeof currentBalance === "number") setCorrectingEntitlement({ lot, currentBalance });
+    }
   }
 
   return <div className="members-page">
@@ -614,6 +657,7 @@ export function MembersPage() {
 
     <InlineError error={recoveryError} title="恢复记录未完成" />
     <InlineError error={commandRecovery.error} title="本地操作恢复记录不可用" />
+    <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
     {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="member-command-recovery" businessFacing /> : null}
 
     <form className="member-search" role="search" aria-label="搜索会员" onSubmit={search}>
@@ -644,28 +688,39 @@ export function MembersPage() {
       </div> : null}
     </div>}
 
-    {creatingMember ? <CreateMemberDialog propertyId={propertyId} onClose={() => setCreatingMember(false)} onSubmit={(request) => { if (commandsBlocked) return; setCreatingMember(false); startCommand(request); }} /> : null}
-    {creatingMembershipOrder && member ? <CreateMembershipOrderDialog propertyId={propertyId} member={member.member} products={member.membershipProducts} onClose={() => setCreatingMembershipOrder(false)} onSubmit={submitBusinessCommand} /> : null}
-    {paymentOrder ? <MembershipPaymentDialog propertyId={propertyId} summary={paymentOrder} onClose={() => setPaymentOrder(undefined)} onSubmit={submitBusinessCommand} /> : null}
-    {correctingPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={correctingPayment.summary} correction={correctingPayment.fact} onClose={() => setCorrectingPayment(undefined)} onSubmit={submitBusinessCommand} /> : null}
-    {correctingEntitlement ? <CorrectEntitlementBalanceDialog propertyId={propertyId} lot={correctingEntitlement.lot} currentBalance={correctingEntitlement.currentBalance} onClose={() => setCorrectingEntitlement(undefined)} onSubmit={(request) => { setCorrectingEntitlement(undefined); submitBusinessCommand(request); }} /> : null}
+    {creatingMember ? <CreateMemberDialog propertyId={propertyId} {...(commandDraft?.commandType === "CREATE_MEMBER" ? { draft: commandDraft } : {})} onClose={() => { setCreatingMember(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (commandsBlocked) return; setCreatingMember(false); startCommand(request); }} /> : null}
+    {creatingMembershipOrder && member ? <CreateMembershipOrderDialog propertyId={propertyId} member={member.member} products={member.membershipProducts} {...(commandDraft?.commandType === "CREATE_MEMBERSHIP_ORDER" ? { draft: commandDraft } : {})} onClose={() => { setCreatingMembershipOrder(false); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
+    {paymentOrder ? <MembershipPaymentDialog propertyId={propertyId} summary={paymentOrder} {...(commandDraft?.commandType === "RECORD_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setPaymentOrder(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
+    {correctingPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={correctingPayment.summary} correction={correctingPayment.fact} {...(commandDraft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingPayment(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
+    {correctingEntitlement ? <CorrectEntitlementBalanceDialog propertyId={propertyId} lot={correctingEntitlement.lot} currentBalance={correctingEntitlement.currentBalance} {...(commandDraft?.commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingEntitlement(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { setCorrectingEntitlement(undefined); submitBusinessCommand(request); }} /> : null}
     {command ? <CommandDialog
       key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}` : "new-member-command"}
       request={command}
       onClose={closeCommandDialog}
       {...(recoveryDialogOpen && commandRecovery.pending ? {
-        initialConfirmationKey: commandRecovery.pending.confirmationKey,
-        ...(commandRecovery.pending.receipt ? { initialReceipt: commandRecovery.pending.receipt } : {})
+        initialConfirmationKey: commandRecovery.pending.confirmationKey
       } : {})}
-      onCommitted={(receipt) => {
+      onCommitted={async (receipt) => {
+        const clearSearch = shouldClearMemberSearchAfterCommit(command.commandType);
+        const nextMemberId = receipt.result && typeof receipt.result.memberId === "string"
+          ? receipt.result.memberId
+          : currentMemberId || undefined;
+        const [listResponse, memberResponse] = await Promise.all([
+          api.members(propertyId, clearSearch ? undefined : searchQuery || undefined),
+          nextMemberId ? api.member(nextMemberId, propertyId) : Promise.resolve(undefined)
+        ]);
+        setMembers(listResponse.members);
+        if (memberResponse) setMember(memberResponse);
         applyCommittedReceipt(receipt);
-        if (shouldClearMemberSearchAfterCommit(command.commandType)) {
+        if (clearSearch) {
           setSearchInput("");
           setSearchQuery("");
         }
-        setRefreshToken((value) => value + 1);
       }}
       onProgress={(progress) => commandRecovery.track(command, progress)}
+      onBusinessSuccess={(message) => setCommandNotice(message)}
+      onBusinessNotExecuted={(message) => setCommandNotice(message)}
+      onReturnToEdit={returnCommandToEdit}
     /> : null}
   </div>;
 }

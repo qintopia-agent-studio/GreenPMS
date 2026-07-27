@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
-import { buildOrderOccupantCorrectionRequest } from "../components/OrderOccupantCorrectionDialog";
+import { buildOrderOccupantCorrectionRequest, correctionDraftMatchesOccupant, restoredOptionalCorrectionValue } from "../components/OrderOccupantCorrectionDialog";
 import {
   enabledOrderActionCodes,
   fulfillmentResultLabel,
@@ -205,6 +205,24 @@ describe("order occupant presentation", () => {
       reason: "  "
     })).toThrow("必须填写更正原因");
   });
+
+  it("keeps explicit null fields empty and binds a draft to the exact order occupant", () => {
+    expect(restoredOptionalCorrectionValue(null, "13800000000")).toBe("");
+    expect(restoredOptionalCorrectionValue(undefined, "13800000000")).toBe("13800000000");
+    const draft = {
+      commandType: "CORRECT_ORDER_OCCUPANT",
+      title: "更正住宿人资料",
+      description: "test",
+      input: {
+        propertyId: "property_qintopia",
+        orderId: "order_occupants",
+        occupantId: "occupant_primary"
+      }
+    } satisfies CommandRequest;
+    expect(correctionDraftMatchesOccupant(draft, "order_occupants", "occupant_primary")).toBe(true);
+    expect(correctionDraftMatchesOccupant(draft, "order_other", "occupant_primary")).toBe(false);
+    expect(correctionDraftMatchesOccupant(draft, "order_occupants", "occupant_additional")).toBe(false);
+  });
 });
 
 describe("server-authoritative order actions", () => {
@@ -325,7 +343,7 @@ describe("shared Web command recovery persistence", () => {
     expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toEqual({ kind: "VALID", recovery: transition.recovery });
   });
 
-  it("keeps the original key through UNKNOWN and persists the terminal Receipt", () => {
+  it("keeps the original key through UNKNOWN and persists terminal identity without the Receipt", () => {
     const storage = new MemoryStorage();
     const started = transitionPersistedCommandRecovery(undefined, context, confirming).recovery!;
     const unknown = transitionPersistedCommandRecovery(started, context, {
@@ -341,10 +359,16 @@ describe("shared Web command recovery persistence", () => {
     expect(unknown).toMatchObject({ state: "UNKNOWN", confirmationKey: confirming.confirmationKey });
     expect(resolved).toMatchObject({
       state: "EXECUTED",
-      confirmationKey: confirming.confirmationKey,
-      receipt: { commandId: "command_recovery", receiptId: "receipt_recovery" }
+      confirmationKey: confirming.confirmationKey
     });
     expect(savePersistedCommandRecovery(storage, resolved)).toBe(true);
+    const serialized = storage.getItem(commandRecoveryStorageKey(context.subjectId, context.scopeId));
+    expect(serialized).not.toContain("receipt");
+    expect(serialized).not.toContain("transactionReference");
+    expect(serialized).not.toContain("WX-BUSINESS-REFERENCE-001");
+    expect(serialized).not.toContain("result");
+    expect(serialized).not.toContain("resourceRefs");
+    expect(serialized).not.toContain("factRefs");
     expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toEqual({ kind: "VALID", recovery: resolved });
   });
 
@@ -491,6 +515,34 @@ describe("shared Web command recovery persistence", () => {
     }));
 
     expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toMatchObject({ kind: "CORRUPT" });
+  });
+
+  it("rejects any recovery record that embeds a terminal Receipt", () => {
+    const storage = new MemoryStorage();
+    const key = commandRecoveryStorageKey(context.subjectId, context.scopeId);
+    const base = {
+      version: 1,
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      propertyId: "property_qintopia",
+      commandType: "LOCK_MAINTENANCE",
+      confirmationKey: "web-confirm-lock",
+      targetRefs: ["inventoryUnitId=unit_101"],
+      updatedAt: "2026-07-27T10:00:00.000Z"
+    };
+    storage.setItem(key, JSON.stringify({
+      ...base,
+      state: "EXECUTED",
+      receipt
+    }));
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId).kind).toBe("CORRUPT");
+
+    storage.setItem(key, JSON.stringify({
+      ...base,
+      state: "NOT_EXECUTED",
+      receipt: { ...receipt, executionStatus: "NOT_EXECUTED", businessCommitted: false }
+    }));
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId).kind).toBe("CORRUPT");
   });
 
   it("reads a pre-upgrade deferred recovery only as an original-result query", () => {

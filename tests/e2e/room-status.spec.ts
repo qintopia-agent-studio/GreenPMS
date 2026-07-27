@@ -292,33 +292,30 @@ async function assertFocusedCellAboveMobileNavigation(page: Page) {
 
 async function keyboardPreviewAndConfirm(
   page: Page,
-  reason: string,
   expectedEffect: readonly string[],
   onBeforeConfirm?: () => void
 ) {
-  const previewButton = page.getByTestId("create-command-preview");
-  await tabTo(page, previewButton, "生成服务端预览按钮");
-  await page.keyboard.press("Enter");
   const effect = page.getByTestId("command-effect");
   await expect(effect).toBeVisible({ timeout: commandUiWaitMs });
   for (const value of expectedEffect) await expect(effect).toContainText(value, { timeout: commandUiWaitMs });
 
-  const reasonNote = page.getByTestId("reason-note");
-  await tabTo(page, reasonNote, "确认原因说明");
-  await page.keyboard.type(reason);
+  await expect(page.getByTestId("reason-note")).toHaveCount(0);
   const confirmButton = page.getByTestId("confirm-command");
   await expect(confirmButton).toBeEnabled();
-  await tabTo(page, confirmButton, "高风险确认按钮");
+  await tabTo(page, confirmButton, "业务确认按钮");
+  const confirmedPromise = page.waitForResponse((response) => response.request().method() === "POST"
+    && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(new URL(response.url()).pathname)
+    && response.status() === 200);
   onBeforeConfirm?.();
   await page.keyboard.press("Enter");
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("业务写入已提交", { timeout: commandUiWaitMs });
-  await expect(receipt).toContainText("EXECUTED", { timeout: commandUiWaitMs });
+  const receipt = await (await confirmedPromise).json() as { resourceRefs: string[]; result?: { orderId?: string } };
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: commandUiWaitMs });
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
+  await expect(page.getByTestId("command-result-notice")).toBeVisible();
   return receipt;
 }
 
-async function previewAndConfirm(page: Page, reason: string, expectedEffect: readonly string[]) {
-  await page.getByTestId("create-command-preview").click();
+async function previewAndConfirm(page: Page, expectedEffect: readonly string[]) {
   const effect = page.getByTestId("command-effect");
   await expect(effect).toBeVisible({ timeout: commandUiWaitMs });
   for (const value of expectedEffect) await expect(effect).toContainText(value, { timeout: commandUiWaitMs });
@@ -328,25 +325,17 @@ async function previewAndConfirm(page: Page, reason: string, expectedEffect: rea
       expect(parseFloat(await formControls.nth(index).evaluate((element) => getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(16);
     }
   }
-  await expect(page.getByTestId("confirm-command")).toBeDisabled();
-  await page.getByTestId("reason-note").fill(reason);
+  await expect(page.getByTestId("reason-note")).toHaveCount(0);
+  await expect(page.getByTestId("confirm-command")).toBeEnabled();
+  const confirmedPromise = page.waitForResponse((response) => response.request().method() === "POST"
+    && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(new URL(response.url()).pathname)
+    && response.status() === 200);
   await page.getByTestId("confirm-command").click();
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toBeVisible({ timeout: commandUiWaitMs });
-  const businessOrderReceipt = receipt.getByRole("heading", { name: /^(会员)?住宿订单已创建$/ });
-  if (await businessOrderReceipt.count()) {
-    await expect(businessOrderReceipt).toBeVisible();
-    await expect(receipt).not.toContainText(/EXECUTED|Receipt|业务写入已提交/);
-  } else {
-    await expect(receipt).toContainText("业务写入已提交", { timeout: commandUiWaitMs });
-    await expect(receipt).toContainText("EXECUTED", { timeout: commandUiWaitMs });
-  }
-  return receipt;
-}
-
-async function finishReceipt(page: Page) {
-  await page.getByRole("button", { name: "完成", exact: true }).click();
+  const receipt = await (await confirmedPromise).json() as { resourceRefs: string[]; result?: { orderId?: string } };
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: commandUiWaitMs });
   await expect(page.getByTestId("command-receipt")).toBeHidden();
+  await expect(page.getByTestId("command-result-notice")).toBeVisible();
+  return receipt;
 }
 
 async function createFreeStayForToday(page: Page, options: {
@@ -377,19 +366,13 @@ async function createFreeStayForToday(page: Page, options: {
   await expect(page.getByTestId("command-effect")).toHaveCount(0);
   await page.getByTestId("primary-guest-nickname").fill(options.nickname);
   await createOrder.click();
-  const receipt = await previewAndConfirm(page, `Create room-status OPEN_ORDER fixture ${options.guest}`, [
+  const receipt = await previewAndConfirm(page, [
     options.guest,
     options.nickname,
     "接待"
   ]);
-  const orderLink = receipt.getByRole("link", { name: /查看订单/ });
-  await expect(orderLink).toBeVisible();
-  const orderHref = await orderLink.getAttribute("href");
-  const orderId = orderHref?.match(/^\/orders\/(order_[^/?#]+)$/)?.[1];
+  const orderId = receipt.result?.orderId;
   expect(orderId).toBeTruthy();
-  const refreshedBoard = roomStatusResponse(page);
-  await finishReceipt(page);
-  await refreshedBoard;
   return orderId!;
 }
 
@@ -404,7 +387,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   const { board } = await login(page);
   const gridRegion = await expectDesktopGrid(page);
   const observerContext = await browser.newContext({
-    baseURL: process.env.ROOM_STATUS_E2E_BASE_URL ?? "http://127.0.0.1:4173",
+    baseURL: process.env.ROOM_STATUS_E2E_BASE_URL ?? `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? "4173"}`,
     viewport: { width: 1024, height: 768 }
   });
   const observerPage = await observerContext.newPage();
@@ -458,14 +441,13 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   const maintenanceReason = page.getByLabel("维修原因");
   await tabTo(page, maintenanceReason, "维修原因");
   await page.keyboard.type(businessReason);
-  const continueButton = page.getByRole("button", { name: "继续生成 Preview", exact: true });
-  await tabTo(page, continueButton, "继续生成 Preview 按钮");
+  const continueButton = page.getByRole("button", { name: "继续核对", exact: true });
+  await tabTo(page, continueButton, "继续核对按钮");
   await page.keyboard.press("Enter");
   let propagationStartedAt = 0;
   let propagatedResponse: ReturnType<Page["waitForResponse"]> | undefined;
-  const receipt = await keyboardPreviewAndConfirm(page, "Confirm the E2E maintenance block", [
+  const receipt = await keyboardPreviewAndConfirm(page, [
     "104-A",
-    `[${arrivalDate}, ${departureDate})`,
     businessReason
   ], () => {
     propagationStartedAt = performance.now();
@@ -477,7 +459,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
         .some((unit) => unit.intervals.some((interval) => interval.reason === businessReason));
     });
   });
-  await expect(receipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
+  expect(receipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
   expect(propagatedResponse).toBeDefined();
   const observerResponse = await propagatedResponse!;
   const observerBoard = await observerResponse.json() as RoomStatusBoardDto;
@@ -485,13 +467,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   expect(performance.now() - propagationStartedAt, "second workbench revision visibility").toBeLessThanOrEqual(5_000);
   const bedAInterval = roomRow(page, bedAId).locator(".room-status-interval-maintenance");
   const parentInterval = roomRow(page, roomId).locator(".room-status-interval-maintenance");
-  await expect(receipt).toBeVisible();
-  await expect(bedAInterval, "the committing workbench refreshes while its Receipt remains open").toBeVisible();
+  await expect(bedAInterval, "the committing workbench refreshes after the command closes").toBeVisible();
   await expect(parentInterval).toBeVisible();
-  const finishButton = page.getByRole("button", { name: "完成", exact: true });
-  await tabTo(page, finishButton, "Receipt 完成按钮");
-  await page.keyboard.press("Enter");
-  await expect(receipt).toBeHidden();
   await expect(bedAStart).toBeFocused();
   expect(await bedAStart.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
 
@@ -513,7 +490,9 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(relatedSources).toContainText("住宿日期");
   await expect(relatedSources).not.toContainText(/MAINTENANCE|unit_room_|Block|Receipt/);
 
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
   await bedAInterval.click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   const sourceSection = page.locator("section.room-status-context-section").filter({
     has: page.getByRole("heading", { name: "来源事实" })
   });
@@ -529,21 +508,21 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(conflictSection).not.toContainText(/unit_room_|Block|Claim|conflict/i);
   await page.screenshot({ path: testInfo.outputPath("room-status-desktop-typed-source-active.png"), fullPage: true });
 
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
   const bedBStart = roomCell(page, bedBId, arrivalDate);
   await bedBStart.focus();
   await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   await actionRegion.getByRole("button", { name: "放置维修锁房", exact: true }).click();
   const siblingReason = `E2E sibling bed block ${arrivalDate}`;
   await page.getByLabel("维修原因").fill(siblingReason);
-  await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
-  const siblingReceipt = await previewAndConfirm(page, "Confirm simultaneous sibling-bed occupancy", [
+  await page.getByRole("button", { name: "继续核对", exact: true }).click();
+  const siblingReceipt = await previewAndConfirm(page, [
     "104-B",
-    `[${arrivalDate}, ${departureDate})`,
     siblingReason
   ]);
-  await expect(siblingReceipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
-  await finishReceipt(page);
+  expect(siblingReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
 
   const bedBInterval = roomRow(page, bedBId).locator(".room-status-interval-maintenance");
   await expect(bedAInterval).toBeVisible();
@@ -551,10 +530,12 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(roomCell(page, bedAId, arrivalDate)).toHaveAccessibleName(/维修.*当前不可安排/);
   await expect(roomCell(page, bedBId, arrivalDate)).toHaveAccessibleName(/维修.*当前不可安排/);
 
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
   const parentStart = roomCell(page, roomId, arrivalDate);
   await parentStart.focus();
   await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   await expect(conflictSection.locator(".room-status-conflict-list > li")).toHaveCount(2);
   await expect(conflictSection).toContainText("已有住宿，不能重复安排");
   await expect(conflictSection).not.toContainText(/unit_room_|Block|Claim|conflict/i);
@@ -565,36 +546,37 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(page.getByTestId("confirm-command")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("room-status-desktop-blocking-conflict.png"), fullPage: true });
 
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
   await bedBStart.focus();
   await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
   await bedBInterval.click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
-  const siblingReleaseReceipt = await previewAndConfirm(page, "Release the sibling-bed E2E maintenance interval", [
-    "RELEASE_MAINTENANCE",
-    `[${arrivalDate}, ${departureDate})`
+  const siblingReleaseReceipt = await previewAndConfirm(page, [
+    "完整释放这条维修锁房"
   ]);
-  await expect(siblingReleaseReceipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
-  await finishReceipt(page);
+  expect(siblingReleaseReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
   await expect(bedBInterval).toHaveCount(0);
   await expect(bedAInterval).toBeVisible();
 
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
   await bedAStart.focus();
   await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
   await bedAInterval.click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
-  const releaseReceipt = await previewAndConfirm(page, "Release the first E2E maintenance interval", [
-    "RELEASE_MAINTENANCE",
-    `[${arrivalDate}, ${departureDate})`
+  const releaseReceipt = await previewAndConfirm(page, [
+    "完整释放这条维修锁房"
   ]);
-  await expect(releaseReceipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
-  await finishReceipt(page);
+  expect(releaseReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
   await expect(bedAInterval).toHaveCount(0);
   await expect(parentInterval).toHaveCount(0);
   await expect(roomCell(page, roomId, arrivalDate)).toHaveAccessibleName(/可售.*可以安排/);
   await expect(roomCell(page, bedAId, arrivalDate)).toHaveAccessibleName(/可售.*可以安排/);
 
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
   const search = page.getByLabel("搜索房间或床位");
   await search.fill("104");
   await expect(page.getByText("1 间房", { exact: true })).toBeVisible();
@@ -633,7 +615,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(roomRow(page, roomId).getByRole("button", { name: /^展开.*床位$/ })).toBeVisible();
   await expect(roomRow(page, bedBId)).toHaveCount(0);
   await expect(page.locator("[data-room-status-cell='true'][aria-selected='true']")).toHaveCount(0);
-  await expect(roomCell(page, roomId, board.dates[0]!)).toBeFocused();
+  await expect(roomRow(page, roomId).locator("[data-room-status-cell='true']").first()).toBeFocused();
   await observerContext.close();
 });
 
@@ -1096,12 +1078,10 @@ test("a real delayed 403 clears the board, command draft, restoration and stable
     await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
     const businessReason = `Permission revocation draft ${candidate!.id}`;
     await page.getByLabel("维修原因").fill(businessReason);
-    await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
-    await page.getByTestId("create-command-preview").click();
-    await expect(page.getByTestId("command-effect")).toContainText(businessReason);
-    const confirmationDraft = "This reason must disappear after the real 403";
-    await page.getByTestId("reason-note").fill(confirmationDraft);
-    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.getByRole("button", { name: "继续核对", exact: true }).click();
+    await expect(page.getByTestId("command-effect")).toContainText(businessReason, { timeout: 15_000 });
+    await expect(page.getByTestId("reason-note")).toHaveCount(0);
+    await expect(page.locator("dialog.modal-wide")).toBeVisible();
 
     const deniedResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
@@ -1124,7 +1104,6 @@ test("a real delayed 403 clears the board, command draft, restoration and stable
     await expect(page.getByTestId("inventory-command-recovery")).toHaveCount(0);
     await expect(page.locator(".room-status-return-notice")).toHaveCount(0);
     await expect(page.getByText(businessReason, { exact: false })).toHaveCount(0);
-    await expect(page.getByText(confirmationDraft, { exact: false })).toHaveCount(0);
     await expect(page.getByText(candidate!.id, { exact: false })).toHaveCount(0);
     expect(await page.evaluate(() => Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
       .some((key) => key?.startsWith("qintopia.room-status-view.v1:")))).toBe(false);
@@ -1156,18 +1135,17 @@ test("a real WRITE to READ downgrade invalidates an open Preview without hiding 
     await page.getByLabel("退房日期", { exact: true }).fill(addDays(serviceDate, 1));
     await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
     await page.getByLabel("维修原因").fill(businessReason);
-    await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
     const previewResponsePromise = page.waitForResponse((response) => (
       response.request().method() === "POST"
       && new URL(response.url()).pathname === "/api/v1/command-previews"
       && response.status() === 200
     ));
-    await page.getByTestId("create-command-preview").click();
+    await page.getByRole("button", { name: "继续核对", exact: true }).click();
     const previewResponse = await previewResponsePromise;
     const prepared = await previewResponse.json() as {
       preview: { previewId: string; effectHash: string };
     };
-    await page.getByTestId("reason-note").fill("The narrowed READ grant must invalidate this open Preview");
+    await expect(page.getByTestId("reason-note")).toHaveCount(0);
     await expect(page.getByTestId("confirm-command")).toBeEnabled();
 
     await setPrincipalPropertyAccess(revocationOperator.username, "READ");
@@ -1183,7 +1161,7 @@ test("a real WRITE to READ downgrade invalidates an open Preview without hiding 
 
     await expect(page.getByRole("grid")).toBeVisible();
     await expect(page.getByText(`${revocationOperator.displayName} · READ`, { exact: true })).toBeVisible();
-    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.locator("dialog.modal-wide")).toBeVisible();
     await expect(page.getByRole("alert").filter({ hasText: "写入已暂停" })).toBeVisible();
     await expect(page.getByTestId("confirm-command")).toBeDisabled();
     await expect(page.locator(".room-status-context-actions").getByRole("button", { name: /创建|放置|释放|完成清洁/ })).toHaveCount(0);
@@ -1214,7 +1192,7 @@ test("a real WRITE to READ downgrade invalidates an open Preview without hiding 
     } finally {
       await db.destroy();
     }
-    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await page.getByRole("button", { name: "返回修改", exact: true }).click();
   } finally {
     await setPrincipalPropertyAccess(revocationOperator.username, "WRITE");
   }
@@ -1372,6 +1350,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await page.setViewportSize({ width: 768, height: 1024 });
   const { board } = await login(page);
   await expectDesktopGrid(page);
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
 
   let touchCandidate: { unitId: string; startDate: string; endDate: string } | undefined;
   for (const room of board.rooms) {
@@ -1424,6 +1403,9 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
       buttons: 0
     }));
   });
+  const reopenTouchContext = page.getByRole("button", { name: "打开选中对象上下文", exact: true });
+  await reopenTouchContext.focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(touchCandidate!.startDate);
   await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(addDays(touchCandidate!.endDate, 1));
   await expect(page.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
@@ -1447,9 +1429,8 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
   const businessReason = `E2E mobile exception ${arrivalDate}`;
   await page.getByLabel("维修原因").fill(businessReason);
-  await page.getByRole("button", { name: "继续生成 Preview" }).click();
-  await previewAndConfirm(page, "Confirm the mobile task fixture", ["205", businessReason]);
-  await finishReceipt(page);
+  await page.getByRole("button", { name: "继续核对" }).click();
+  await previewAndConfirm(page, ["205", businessReason]);
 
   const guest = `Room Status Arrival ${today}`;
   const orderDepartureDate = addDays(today, 2);
@@ -1473,12 +1454,13 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     departureDate: orderDepartureDate
   });
   await makeReservedOrderOverdue(overdueOrderId, today);
+  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
   const overdueRefresh = roomStatusResponse(page);
   await page.getByRole("button", { name: "刷新房态", exact: true }).click();
   await overdueRefresh;
 
-  const shiftedArrivalDate = addDays(today, 14);
-  const shiftedDepartureDate = addDays(today, 28);
+  const shiftedArrivalDate = board.range.departureDate;
+  const shiftedDepartureDate = addDays(shiftedArrivalDate, board.dates.length);
   const shiftedResponse = roomStatusResponse(page, {
     arrivalDate: shiftedArrivalDate,
     departureDate: shiftedDepartureDate
@@ -1599,11 +1581,9 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await page.screenshot({ path: testInfo.outputPath("room-status-mobile-reflow-320.png"), fullPage: true });
 
   await task.getByRole("button", { name: "释放维修锁房", exact: true }).click();
-  await previewAndConfirm(page, "Release the mobile task fixture", [
-    "RELEASE_MAINTENANCE",
-    `[${arrivalDate}, ${departureDate})`
+  await previewAndConfirm(page, [
+    "完整释放这条维修锁房"
   ]);
-  await finishReceipt(page);
   await expect(task).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => {
     const active = document.activeElement;

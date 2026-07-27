@@ -125,20 +125,23 @@ async function createOrderAndOpenDetail(page: Page, options: {
   await expect(page.getByTestId("reason-code")).toHaveCount(0);
   await expect(page.getByTestId("reason-note")).toHaveCount(0);
 
-  const confirmationRequestPromise = page.waitForRequest((request) =>
-    request.method() === "POST" && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(requestPath(request))
+  const confirmationResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(requestPath(response.request()))
+      && response.status() === 200
   );
   await page.getByTestId("confirm-command").click();
-  const confirmationBody = (await confirmationRequestPromise).postDataJSON() as {
+  const confirmationResponse = await confirmationResponsePromise;
+  const confirmationBody = confirmationResponse.request().postDataJSON() as {
     reason: { code: string; note: string };
   };
   expect(confirmationBody.reason).toEqual({ code: "CREATE_STANDARD_ORDER", note: "" });
-
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("住宿订单已创建", { timeout: 15_000 });
-  await expect(page.getByTestId("receipt-policy-base-amount")).toHaveText(money(options.expectedPolicyBaseMinor));
-  await expect(page.getByTestId("receipt-target-contract-amount")).toHaveText(money(options.expectedTargetMinor));
-  await receipt.getByRole("link", { name: /查看订单/ }).click();
+  const receipt = await confirmationResponse.json() as { result?: { orderId?: string } };
+  expect(receipt.result?.orderId).toMatch(/^order_/);
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿订单已创建，页面已刷新");
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
+  await page.goto(`/orders/${encodeURIComponent(receipt.result!.orderId!)}`);
   await expect(page).toHaveURL(/\/orders\/order_[^/?#]+$/, { timeout: 15_000 });
   await expect(page.getByText("正在载入订单详情", { exact: true })).toBeHidden({ timeout: 15_000 });
 

@@ -27,9 +27,11 @@ import type {
   ReceiptDto,
   StayType
 } from "../types";
-import { OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
+import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import {
   CommandDialog,
+  type CommandDialogCloseContext,
+  CommandResultNotice,
   type CommandDialogProgress,
   type CommandRecoveryStorage,
   CommandRecoveryBar,
@@ -511,18 +513,19 @@ export function roomStatusBlockDraftWithinSelection(
     && to <= selectionDepartureDate;
 }
 
-function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, onClose, onSubmit }: {
+function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, draft, onClose, onSubmit }: {
   unit: InventoryActionUnit;
   arrivalDate: string;
   departureDate: string;
   writeBlocked: boolean;
+  draft?: CommandRequest;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => boolean;
 }) {
   const { propertyId } = useWorkspace();
-  const [from, setFrom] = useState(arrivalDate);
-  const [to, setTo] = useState(departureDate);
-  const [reason, setReason] = useState("");
+  const [from, setFrom] = useState(() => typeof draft?.input.arrivalDate === "string" ? draft.input.arrivalDate : arrivalDate);
+  const [to, setTo] = useState(() => typeof draft?.input.departureDate === "string" ? draft.input.departureDate : departureDate);
+  const [reason, setReason] = useState(() => typeof draft?.input.reason === "string" ? draft.input.reason : "");
   const [validationError, setValidationError] = useState<Error>();
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -535,8 +538,9 @@ function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, onC
     onSubmit({
       commandType: "LOCK_MAINTENANCE",
       title: `维修锁房 · ${unit.code}`,
-      description: "服务端将重新校验整房与子床位互斥后生成维修锁房 Preview。",
-      input: { propertyId, inventoryUnitId: unit.id, arrivalDate: from, departureDate: to, reason }
+      description: "系统将重新核对房源、日期和维修原因，确认后设置维修锁房。",
+      input: { propertyId, inventoryUnitId: unit.id, arrivalDate: from, departureDate: to, reason },
+      initialReason: { code: "LOCK_MAINTENANCE", note: reason.trim() }
     });
   }
 
@@ -553,7 +557,7 @@ function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, onC
           <label>结束日期<input type="date" value={to} min={isIsoLocalDate(from) ? addLocalDateDays(from, 1) : arrivalDate} max={departureDate} onChange={(event) => { setTo(event.target.value); setValidationError(undefined); }} required /></label>
           <label className="span-two">维修原因<textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} /></label>
         </div>
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked}>继续生成 Preview</button></div>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked}>继续核对</button></div>
       </form>
     </Modal>
   );
@@ -1368,9 +1372,11 @@ export function InventoryPage() {
   const [refreshToken, setRefreshToken] = useState(0);
   const [quoteResetToken, setQuoteResetToken] = useState(0);
   const [command, setCommand] = useState<CommandRequest>();
+  const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [commandAttemptId, setCommandAttemptId] = useState(0);
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [recoveryError, setRecoveryError] = useState<unknown>();
+  const [commandNotice, setCommandNotice] = useState<string>();
   const [selectedUnitId, setSelectedUnitId] = useState<string>();
   const [selectedDayDate, setSelectedDayDate] = useState<string>();
   const [selectedIntervalId, setSelectedIntervalId] = useState<string>();
@@ -1469,6 +1475,7 @@ export function InventoryPage() {
     commandPhaseRef.current = "IDLE";
     commandRevisionRef.current = undefined;
     setCommand(undefined);
+    setCommandDraft(undefined);
     setSelectedOrderCommandScope(undefined);
     setSelectedCorrectionOccupantId(undefined);
     setRecoveryDialogOpen(false);
@@ -1560,6 +1567,7 @@ export function InventoryPage() {
     setCommand(undefined);
     setQueryError(undefined);
     setReturnNotice(undefined);
+    setCommandNotice(undefined);
     setActionError(undefined);
     setQuoteRecoveryOutcome(undefined);
     setInitializedPropertyId(propertyId);
@@ -2465,6 +2473,7 @@ export function InventoryPage() {
     setCommandContextInvalidated(false);
     setRecoveryDialogOpen(false);
     setActionError(undefined);
+    setCommandDraft(undefined);
     setCommand(request);
     return true;
   }
@@ -2517,7 +2526,7 @@ export function InventoryPage() {
       return startCommand({
         commandType: "RELEASE_MAINTENANCE",
         title: `释放维修锁 · ${unitLabel}`,
-        description: "服务端将重新校验完整维修 Block 版本，确认后释放全部对应 Claim。",
+        description: "系统将重新核对完整维修锁房，确认后释放对应日期的房源库存。",
         input: { propertyId, maintenanceLockId: targetId }
       });
     } else if (currentReleaseFeatures.cleaningWorkflow && action.code === "COMPLETE_CLEANING") {
@@ -2543,14 +2552,13 @@ export function InventoryPage() {
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
 
-  function closeCommandDialog() {
-    let refreshAfterClose = false;
+  function closeCommandDialog(context?: CommandDialogCloseContext) {
+    let refreshAfterClose = context?.receipt.businessCommitted === true;
     const pendingAtClose = commandRecovery.pending;
-    const terminalAtClose = Boolean(pendingAtClose && isTerminalCommandRecovery(pendingAtClose.state));
-    if (pendingAtClose && terminalAtClose) {
-      const receipt = pendingAtClose.receipt;
-      refreshAfterClose = receipt?.businessCommitted === true;
-      if (refreshAfterClose && pendingAtClose.commandType === "CREATE_ORDER") {
+    const terminalAtClose = Boolean(context || (pendingAtClose && isTerminalCommandRecovery(pendingAtClose.state)));
+    if (terminalAtClose) {
+      refreshAfterClose ||= pendingAtClose?.state === "EXECUTED";
+      if (refreshAfterClose && (pendingAtClose?.commandType === "CREATE_ORDER" || command?.commandType === "CREATE_ORDER")) {
         setQuoteResetToken((value) => value + 1);
         setQuoteTarget(undefined);
       }
@@ -2594,12 +2602,40 @@ export function InventoryPage() {
     return commandRecovery.track(request, progress);
   }
 
-  function refreshCommittedRoomStatus(receipt: ReceiptDto) {
+  function returnCommandToEdit(request: CommandRequest) {
+    setCommandDraft(request);
+    if (request.commandType === "CORRECT_ORDER_OCCUPANT") {
+      const occupantId = request.input.occupantId;
+      if (typeof occupantId === "string" && authorizedSelectedOrderView?.occupants.some((occupant) => occupant.id === occupantId)) {
+        setSelectedCorrectionOccupantId(occupantId);
+        setSelectedCorrectionRevision(boardRef.current?.revision);
+      }
+    }
+  }
+
+  async function refreshCommittedRoomStatus(receipt: ReceiptDto) {
     if (!receipt.businessCommitted || refreshedReceiptIdRef.current === receipt.receiptId) return;
-    refreshedReceiptIdRef.current = receipt.receiptId;
     commandPhaseRef.current = "SETTLED";
-    setRefreshToken((value) => value + 1);
-    if (selectedOrderIdentity) setOrderRefreshToken((value) => value + 1);
+    const query = roomStatusQuery(range, viewState.roomPageIndex, viewState.filters);
+    const response = await api.roomStatus(propertyId, query);
+    assertRoomStatusBoard(response, { propertyId, range, pageIndex: viewState.roomPageIndex });
+    setBoard(response);
+    boardRef.current = response;
+    const queryKey = roomStatusQueryKey(query);
+    setBoardQueryKey(queryKey);
+    boardQueryKeyRef.current = queryKey;
+    setQueryError(undefined);
+    setQueryPhase("READY");
+    setClock(Date.now());
+    if (selectedOrderIdentity) {
+      const orderResponse = await api.order(selectedOrderIdentity.orderId);
+      if (orderResponse.order.property_id !== propertyId || orderResponse.stay.id !== selectedOrderIdentity.stayId) {
+        throw new Error("刷新后的订单上下文与当前房态引用不一致");
+      }
+      setSelectedOrderView(orderResponse);
+      setSelectedOrderLoadedScope(orderPrincipalScope);
+    }
+    refreshedReceiptIdRef.current = receipt.receiptId;
   }
 
   const roomStatusToolbar = renderedBoard ? (
@@ -2638,6 +2674,7 @@ export function InventoryPage() {
         onClose={closeSelectedOrderContext}
         onOpenOrder={openSelectedOrder}
         onCorrectOccupant={(occupant) => {
+          setCommandDraft(undefined);
           setSelectedCorrectionOccupantId(occupant.id);
           setSelectedCorrectionRevision(board?.revision);
         }}
@@ -2699,6 +2736,7 @@ export function InventoryPage() {
 
       {queryPhase !== "PERMISSION_DENIED" ? <InlineError error={recoveryError} title="恢复记录未收口" /> : null}
       {queryPhase !== "PERMISSION_DENIED" ? <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" /> : null}
+      <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       <InlineError error={restorationError} title="房态位置未保存" />
       <InlineError error={actionError} title="动作未开始" />
       <InlineError error={quoteRecoveryOutcome} title="报价恢复结果" />
@@ -2869,13 +2907,17 @@ export function InventoryPage() {
         </>
       )}
 
-      {maintenanceTarget && viewState.selection ? <MaintenanceDialog unit={maintenanceTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} onClose={() => setMaintenanceTarget(undefined)} onSubmit={(request) => { const started = startCommand(request); if (started) setMaintenanceTarget(undefined); return started; }} /> : null}
+      {maintenanceTarget && viewState.selection && !command ? <MaintenanceDialog unit={maintenanceTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} {...(commandDraft?.commandType === "LOCK_MAINTENANCE" ? { draft: commandDraft } : {})} onClose={() => { setMaintenanceTarget(undefined); setCommandDraft(undefined); }} onSubmit={startCommand} /> : null}
       {authorizedSelectedOrderView && selectedCorrectionOccupant ? <OrderOccupantCorrectionDialog
         view={authorizedSelectedOrderView}
         occupant={selectedCorrectionOccupant}
+        {...(correctionDraftMatchesOccupant(commandDraft, authorizedSelectedOrderView.order.id, selectedCorrectionOccupant.id)
+          ? { draft: commandDraft }
+          : {})}
         onClose={() => {
           setSelectedCorrectionOccupantId(undefined);
           setSelectedCorrectionRevision(undefined);
+          setCommandDraft(undefined);
         }}
         onSubmit={(request) => {
           if (commandsBlocked) return;
@@ -2893,9 +2935,15 @@ export function InventoryPage() {
         writeBlocked={!recoveryDialogOpen && (commandsBlocked || commandContextInvalidated)}
         writeBlockedReason="房态权限、查询范围、数据新鲜度或操作恢复状态已经变化。请关闭后刷新，再重新核对本次操作。"
         onCommitted={refreshCommittedRoomStatus}
+        onBusinessSuccess={(message) => {
+          setCommandNotice(message);
+          setCommandDraft(undefined);
+          if (command.commandType === "LOCK_MAINTENANCE") setMaintenanceTarget(undefined);
+        }}
+        onBusinessNotExecuted={(message) => setCommandNotice(message)}
+        onReturnToEdit={returnCommandToEdit}
         {...(recoveryDialogOpen && commandRecovery.pending ? {
-          initialConfirmationKey: commandRecovery.pending.confirmationKey,
-          ...(commandRecovery.pending.receipt ? { initialReceipt: commandRecovery.pending.receipt } : {})
+          initialConfirmationKey: commandRecovery.pending.confirmationKey
         } : {})}
         onProgress={(progress) => trackCommandProgress(command, progress, commandAttemptId)}
       /> : null}

@@ -23,11 +23,13 @@ import {
   type OrderFulfillmentRecordDto
 } from "@qintopia/contracts";
 import { api } from "../api";
-import { OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
+import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { useWorkspace } from "../session";
 import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
 import {
   CommandDialog,
+  type CommandDialogCloseContext,
+  CommandResultNotice,
   CommandRecoveryBar,
   businessStatusLabel,
   EmptyState,
@@ -194,10 +196,11 @@ function FulfillmentResult({ type, record }: {
   );
 }
 
-function ActionFormDialog({ action, view, initialFactId, onClose, onSubmit }: {
+function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmit }: {
   action: FormAction;
   view: OrderViewDto;
   initialFactId?: string;
+  draft?: CommandRequest;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
@@ -226,7 +229,10 @@ function ActionFormDialog({ action, view, initialFactId, onClose, onSubmit }: {
   const [newDepartureDate, setNewDepartureDate] = useState(action === "SHORTEN_STAY" ? shiftDate(view.order.departure_date, -1) : shiftDate(view.order.departure_date, 1));
   const [newUnitId, setNewUnitId] = useState(moveCandidates[0]?.id ?? "");
   const [effectiveDate, setEffectiveDate] = useState(view.order.arrival_date);
-  const [targetContractYuan, setTargetContractYuan] = useState(String(view.amounts.currentContractAmount.minorUnits / 100));
+  const [targetContractYuan, setTargetContractYuan] = useState(() => typeof draft?.input.targetCurrentContractAmountMinor === "number"
+    ? String(draft.input.targetCurrentContractAmountMinor / 100)
+    : String(view.amounts.currentContractAmount.minorUnits / 100));
+  const [repriceReason, setRepriceReason] = useState(draft?.initialReason?.note ?? "");
   const [validationError, setValidationError] = useState<unknown>();
 
   useEffect(() => {
@@ -271,10 +277,20 @@ function ActionFormDialog({ action, view, initialFactId, onClose, onSubmit }: {
         setValidationError(new Error("指定最终总价必须是大于或等于零的整元金额"));
         return;
       }
+      if (!repriceReason.trim()) {
+        setValidationError(new Error("必须填写订单金额更正原因"));
+        return;
+      }
       Object.assign(base, { targetCurrentContractAmountMinor });
       description = "服务端将按锁定政策重新计算基础金额，并把本次指定总价记录为独立计价修订。";
     }
-    onSubmit({ commandType: action, title: formTitles[action], description, input: base });
+    onSubmit({
+      commandType: action,
+      title: formTitles[action],
+      description,
+      input: base,
+      ...(action === "REPRICE_ORDER" ? { initialReason: { code: "REPRICE_ORDER", note: repriceReason.trim() } } : {})
+    });
   }
 
   return (
@@ -304,9 +320,10 @@ function ActionFormDialog({ action, view, initialFactId, onClose, onSubmit }: {
         {action === "REPRICE_ORDER" ? (
           <div className="form-grid">
             <label>指定最终总价（元）<input type="number" min="0" step="1" value={targetContractYuan} onChange={(event) => { setTargetContractYuan(event.target.value); setValidationError(undefined); }} required inputMode="numeric" data-testid="reprice-target-yuan" /></label>
+            <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary">继续生成 Preview</button></div>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary">{action === "REPRICE_ORDER" ? "继续核对" : "继续生成 Preview"}</button></div>
       </form>
     </Modal>
   );
@@ -345,9 +362,11 @@ export function OrderDetailPage() {
   const [correctingOccupant, setCorrectingOccupant] = useState<OrderOccupant>();
   const [initialFactId, setInitialFactId] = useState<string>();
   const [command, setCommand] = useState<CommandRequest>();
+  const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
   const [refreshNotice, setRefreshNotice] = useState<string>();
+  const [commandNotice, setCommandNotice] = useState<string>();
   const viewRef = useRef<OrderViewDto | undefined>(undefined);
   const focusedActionKeyRef = useRef<string | undefined>(undefined);
 
@@ -364,9 +383,11 @@ export function OrderDetailPage() {
     setCorrectingOccupant(undefined);
     setInitialFactId(undefined);
     setCommand(undefined);
+    setCommandDraft(undefined);
     setLoadedPrincipalOrderScope(undefined);
     setRecoveryDialogOpen(false);
     setRefreshNotice(undefined);
+    setCommandNotice(undefined);
   }, [orderId, principalOrderScope, recoveryScope]);
 
   useEffect(() => {
@@ -432,6 +453,7 @@ export function OrderDetailPage() {
     if (orderActionsBlocked || !enabledActions.has(action)) return;
     setInitialFactId(factId);
     setFormAction(action);
+    setCommandDraft(undefined);
   }
 
   function directCommand(commandType: CommandType, title: string, description: string) {
@@ -452,8 +474,8 @@ export function OrderDetailPage() {
     setCommand(recoveryCommandRequest(pendingRecovery));
   }
 
-  function closeCommandDialog() {
-    if (pendingRecovery && isTerminalCommandRecovery(pendingRecovery.state)) {
+  function closeCommandDialog(context?: CommandDialogCloseContext) {
+    if (context || (pendingRecovery && isTerminalCommandRecovery(pendingRecovery.state))) {
       if (commandRecovery.clearResolved()) {
         setRecoveryError(undefined);
       } else {
@@ -463,6 +485,19 @@ export function OrderDetailPage() {
     setCommand(undefined);
     setRecoveryDialogOpen(false);
     setRefreshToken((value) => value + 1);
+  }
+
+  function returnCommandToEdit(request: CommandRequest) {
+    setCommandDraft(request);
+    if (request.commandType === "REPRICE_ORDER") {
+      setFormAction("REPRICE_ORDER");
+      return;
+    }
+    if (request.commandType === "CORRECT_ORDER_OCCUPANT") {
+      const occupantId = request.input.occupantId;
+      const occupant = typeof occupantId === "string" ? viewRef.current?.occupants.find((item) => item.id === occupantId) : undefined;
+      if (occupant) setCorrectingOccupant(occupant);
+    }
   }
 
   if (loading) return <LoadingBlock label="正在载入订单详情" />;
@@ -489,6 +524,7 @@ export function OrderDetailPage() {
 
       <InlineError error={recoveryError} title="恢复记录未收口" />
       <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" />
+      <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       {refreshNotice ? <div className="room-status-return-notice" role="alert">{refreshNotice}</div> : null}
       {pendingRecovery ? <CommandRecoveryBar recovery={pendingRecovery} onOpen={openRecoveryDialog} testId="order-command-recovery" /> : null}
 
@@ -606,15 +642,24 @@ export function OrderDetailPage() {
 
       <section className="detail-section full-detail" aria-labelledby="amendments-heading"><div className="section-title-row"><h2 id="amendments-heading">Amendments</h2><span>{view.amendments.length}</span></div><div className="amendment-list">{view.amendments.map((amendment) => <article key={amendment.id}><div><strong>#{amendment.sequence} · {amendment.amendment_type}</strong><code>{amendment.id}</code></div><div><span>{amendment.reason_code}</span><p>{amendment.reason_note}</p></div><div><span>v{amendment.prior_version} → v{amendment.new_version}</span><JsonDetails label="payload" value={amendment.payload} /></div></article>)}</div></section>
 
-      {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
-      {correctingOccupant ? <OrderOccupantCorrectionDialog view={view} occupant={correctingOccupant} onClose={() => setCorrectingOccupant(undefined)} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("CORRECT_ORDER_OCCUPANT")) return; setCorrectingOccupant(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
+      {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
+      {correctingOccupant ? <OrderOccupantCorrectionDialog view={view} occupant={correctingOccupant} {...(correctionDraftMatchesOccupant(commandDraft, view.order.id, correctingOccupant.id) ? { draft: commandDraft } : {})} onClose={() => { setCorrectingOccupant(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("CORRECT_ORDER_OCCUPANT")) return; setCorrectingOccupant(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {command ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${pendingRecovery?.confirmationKey ?? "missing"}` : "new-order-command"}
         request={command}
         onClose={closeCommandDialog}
+        onCommitted={async () => {
+          if (!orderId) throw new Error("当前订单引用缺失，无法刷新订单详情");
+          const response = await api.order(orderId);
+          setView(response);
+          setLoadedPrincipalOrderScope(principalOrderScope);
+          viewRef.current = response;
+        }}
+        onBusinessSuccess={(message) => setCommandNotice(message)}
+        onBusinessNotExecuted={(message) => setCommandNotice(message)}
+        onReturnToEdit={returnCommandToEdit}
         {...(recoveryDialogOpen && pendingRecovery ? {
-          initialConfirmationKey: pendingRecovery.confirmationKey,
-          ...(pendingRecovery.receipt ? { initialReceipt: pendingRecovery.receipt } : {})
+          initialConfirmationKey: pendingRecovery.confirmationKey
         } : {})}
         onProgress={(progress) => commandRecovery.track(command, progress)}
       /> : null}

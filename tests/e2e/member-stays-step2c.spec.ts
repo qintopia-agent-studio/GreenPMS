@@ -1,8 +1,15 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { todayInTimeZone } from "@qintopia/domain";
 import { createDatabase } from "../../packages/db/src/database.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
 const e2ePropertyId = "prop_qintopia_demo";
+
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 async function seedMember(testInfo: TestInfo) {
   const suffix = testInfo.project.name;
@@ -65,7 +72,7 @@ async function login(page: Page) {
   await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
 }
 
-async function chooseD01(page: Page, arrival: string, departure: string) {
+async function chooseAvailableSharedBathSingle(page: Page, arrival: string, departure: string) {
   await page.getByTestId("arrival-date").fill(arrival);
   await page.getByTestId("departure-date").fill(departure);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
@@ -73,9 +80,15 @@ async function chooseD01(page: Page, arrival: string, departure: string) {
     await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
   }
   const unitSelect = page.getByTestId("room-status-unit-select");
-  const d01Id = "unit_room_d_gen_01";
-  await expect(unitSelect.locator(`option[value="${d01Id}"]`)).toContainText("D01");
-  await unitSelect.selectOption(d01Id);
+  const availabilityResponse = await page.request.get(`/api/v1/properties/${e2ePropertyId}/availability?arrivalDate=${arrival}&departureDate=${departure}&unitKind=ROOM`);
+  expect(availabilityResponse.ok()).toBe(true);
+  const availability = await availabilityResponse.json() as {
+    units: Array<{ id: string; code: string; roomTypeCode: string | null; available: boolean }>;
+  };
+  const availableUnit = availability.units.find((unit) => unit.available && unit.roomTypeCode === "shared_bath_single");
+  expect(availableUnit, "需要一间三晚连续可售的公卫单人间").toBeDefined();
+  await expect(unitSelect.locator(`option[value="${availableUnit!.id}"]`)).toContainText(availableUnit!.code);
+  await unitSelect.selectOption(availableUnit!.id);
   await page.getByLabel("入住日期", { exact: true }).fill(arrival);
   await page.getByLabel("退房日期", { exact: true }).fill(departure);
   await page.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
@@ -119,10 +132,9 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(effect).toContainText("本次变动-2");
   await expect(effect).not.toContainText("entitlementLotId");
   await page.getByTestId("confirm-command").click();
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("更正会员余额已完成");
-  await expect(receipt).not.toContainText("Receipt ID");
-  await page.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText("会员余额已更正，权益记录已刷新");
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
   await expect(balance).toContainText("1 间夜");
   const ledger = page.getByTestId("member-ledger-history");
   await expect(ledger).toContainText("余额更正");
@@ -131,9 +143,9 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(ledger).toContainText("2C 浏览器验收调整为 1 间夜");
 
   await page.getByRole("link", { name: "房态", exact: true }).click();
-  const arrival = testInfo.project.name === "desktop" ? "2026-10-01" : "2026-10-05";
-  const departure = testInfo.project.name === "desktop" ? "2026-10-04" : "2026-10-08";
-  await chooseD01(page, arrival, departure);
+  const arrival = todayInTimeZone("Asia/Shanghai");
+  const departure = addDays(arrival, 3);
+  await chooseAvailableSharedBathSingle(page, arrival, departure);
   await expect(page.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => quoteBodies.some((body) => body.arrivalDate === arrival
     && body.departureDate === departure
@@ -176,13 +188,16 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   });
   expect(memberStayInput.additionalGuests).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath("member-stay-confirm-step2c.png"), fullPage: true });
+  const createOrderResponse = page.waitForResponse((response) => response.request().method() === "POST"
+    && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(new URL(response.url()).pathname)
+    && response.status() === 200);
   await page.getByTestId("confirm-command").click();
-  await expect(page.getByTestId("command-receipt")).toContainText("会员住宿订单已创建");
-  await expect(page.getByTestId("command-receipt")).not.toContainText("Receipt");
-  await expect(page.getByTestId("command-receipt")).not.toContainText("Command");
-  await expect(page.getByTestId("command-receipt")).not.toContainText("内部 ID");
-  await expect(page.getByTestId("command-receipt")).not.toContainText(/(?:order|quote|member|contract|receipt|command)_/i);
-  await page.getByRole("link", { name: "查看订单", exact: true }).click();
+  const createOrderReceipt = await createOrderResponse.then((response) => response.json()) as { result?: { orderId?: string } };
+  expect(createOrderReceipt.result?.orderId).toMatch(/^order_/);
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿订单已创建，页面已刷新");
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
+  await page.goto(`/orders/${encodeURIComponent(createOrderReceipt.result!.orderId!)}`);
   await expect(page.getByText("住宿来源", { exact: true })).toBeVisible();
   await expect(page.getByText("会员权益", { exact: true })).toBeVisible();
   await expect(page.getByText("订单来源渠道", { exact: true })).toHaveCount(0);
@@ -192,11 +207,20 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await page.getByLabel("营业日期", { exact: true }).fill(arrival);
   const arrivalRow = page.locator("article.queue-row").filter({ hasText: "2C住客" });
   await arrivalRow.getByRole("button", { name: "入住", exact: true }).click();
-  await page.getByTestId("create-command-preview").click();
+  await expect(page.getByTestId("reason-note")).toBeVisible({ timeout: 15_000 });
   await page.getByTestId("reason-note").fill("2C 浏览器验收入住核销");
+  await page.getByTestId("command-return-to-edit").click();
+  await expect(page.getByTestId("reason-note")).toHaveValue("2C 浏览器验收入住核销");
+  const refreshedCheckInPreview = page.waitForResponse((response) => response.request().method() === "POST"
+    && new URL(response.url()).pathname === "/api/v1/command-previews"
+    && response.status() === 200);
+  await page.getByRole("button", { name: "继续核对", exact: true }).click();
+  await refreshedCheckInPreview;
+  await expect(page.getByTestId("reason-note")).toHaveValue("2C 浏览器验收入住核销");
   await page.getByTestId("confirm-command").click();
-  await expect(page.getByTestId("command-receipt")).toContainText("业务写入已提交");
-  await page.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText("办理入住已完成，住宿状态已刷新");
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
 
   await page.getByRole("link", { name: "会员", exact: true }).click();
   await page.getByTestId("member-search-query").fill(fixture.identity);

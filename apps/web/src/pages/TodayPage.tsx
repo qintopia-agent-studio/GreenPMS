@@ -8,6 +8,8 @@ import type { CommandRequest, OrderRowDto } from "../types";
 import { localDateInTimeZone } from "../dates";
 import {
   CommandDialog,
+  type CommandDialogCloseContext,
+  CommandResultNotice,
   CommandRecoveryBar,
   businessStatusLabel,
   EmptyState,
@@ -45,6 +47,7 @@ export function TodayPage() {
   const [refreshToken, setRefreshToken] = useState(0);
   const [command, setCommand] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+  const [commandNotice, setCommandNotice] = useState<string>();
   const commandsBlocked = commandRecovery.blocked;
 
   useEffect(() => {
@@ -53,6 +56,7 @@ export function TodayPage() {
     setCommand(undefined);
     setRecoveryDialogOpen(false);
     setRecoveryError(undefined);
+    setCommandNotice(undefined);
     if (!dateEdited.current) setBusinessDate(localDateInTimeZone(propertyTimezone));
   }, [propertyId, propertyTimezone]);
 
@@ -94,10 +98,10 @@ export function TodayPage() {
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
 
-  function closeCommandDialog() {
-    let refreshAfterClose = false;
-    if (commandRecovery.pending && isTerminalCommandRecovery(commandRecovery.pending.state)) {
-      refreshAfterClose = commandRecovery.pending.receipt?.businessCommitted === true;
+  function closeCommandDialog(context?: CommandDialogCloseContext) {
+    let refreshAfterClose = context?.receipt.businessCommitted === true;
+    if (context || (commandRecovery.pending && isTerminalCommandRecovery(commandRecovery.pending.state))) {
+      refreshAfterClose ||= commandRecovery.pending?.state === "EXECUTED";
       if (commandRecovery.clearResolved()) setRecoveryError(undefined);
       else setRecoveryError(new Error("无法清除已收口的本地恢复记录；为避免重复履约，写命令继续保持暂停"));
     }
@@ -116,6 +120,7 @@ export function TodayPage() {
       </header>
       <InlineError error={recoveryError} title="恢复记录未收口" />
       <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" />
+      <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
       <div className="today-tabs" role="tablist" aria-label="今日履约分类">
         {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong>{buckets[item.id].length}</strong></button>)}
@@ -140,10 +145,15 @@ export function TodayPage() {
         request={command}
         onClose={closeCommandDialog}
         {...(recoveryDialogOpen && commandRecovery.pending ? {
-          initialConfirmationKey: commandRecovery.pending.confirmationKey,
-          ...(commandRecovery.pending.receipt ? { initialReceipt: commandRecovery.pending.receipt } : {})
+          initialConfirmationKey: commandRecovery.pending.confirmationKey
         } : {})}
         onProgress={(progress) => commandRecovery.track(command, progress)}
+        onCommitted={async () => {
+          const response = await api.orders(propertyId);
+          setOrders(response.orders);
+        }}
+        onBusinessSuccess={(message) => setCommandNotice(message)}
+        onBusinessNotExecuted={(message) => setCommandNotice(message)}
       /> : null}
     </div>
   );

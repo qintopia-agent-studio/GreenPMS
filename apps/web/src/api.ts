@@ -166,10 +166,11 @@ export const api = {
     const query = new URLSearchParams({ propertyId });
     return request<{ tokens: TokenDto[] }>(`/api/v1/tokens?${query.toString()}`);
   },
-  preview: (envelope: CommandEnvelope, metadata: ClientCommandMetadata) => request<CommandPreviewResponse>("/api/v1/command-previews", {
+  preview: (envelope: CommandEnvelope, metadata: ClientCommandMetadata, signal?: AbortSignal) => request<CommandPreviewResponse>("/api/v1/command-previews", {
     method: "POST",
     headers: metadataHeaders(metadata),
-    body: JSON.stringify(envelope)
+    body: JSON.stringify(envelope),
+    ...(signal ? { signal } : {})
   }),
   confirm: (
     previewId: string,
@@ -177,19 +178,21 @@ export const api = {
     commandType: CommandType,
     effectHash: string,
     reason: CommandReason,
-    idempotencyKey: string
+    idempotencyKey: string,
+    signal?: AbortSignal
   ) => request<ReceiptDto>(`/api/v1/command-previews/${encodeURIComponent(previewId)}/confirm`, {
     method: "POST",
     headers: {
       "Idempotency-Key": idempotencyKey,
       "X-Correlation-ID": `web-confirm-${crypto.randomUUID()}`
     },
-    body: JSON.stringify({ propertyId, commandType, confirmation: true, expectedEffectHash: effectHash, reason })
+    body: JSON.stringify({ propertyId, commandType, confirmation: true, expectedEffectHash: effectHash, reason }),
+    ...(signal ? { signal } : {})
   }, true),
   recoveryKey: (commandType: HistoricalCommandType) => `web-confirm-${commandType.toLowerCase()}-${crypto.randomUUID()}`,
-  commandResult: (propertyId: string, commandType: HistoricalRecoverableCommandType, idempotencyKey: string) => {
+  commandResult: (propertyId: string, commandType: HistoricalRecoverableCommandType, idempotencyKey: string, signal?: AbortSignal) => {
     const query = new URLSearchParams({ propertyId, commandType, idempotencyKey });
-    return request<Partial<ReceiptDto> & Pick<ReceiptDto, "executionStatus" | "businessCommitted">>(`/api/v1/command-results?${query.toString()}`)
+    return request<Partial<ReceiptDto> & Pick<ReceiptDto, "executionStatus" | "businessCommitted">>(`/api/v1/command-results?${query.toString()}`, signal ? { signal } : {})
       .then((result) => ({
         receiptId: result.receiptId ?? "",
         commandId: result.commandId ?? "",

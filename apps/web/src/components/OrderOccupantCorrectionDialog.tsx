@@ -9,6 +9,7 @@ export interface OrderOccupantCorrectionDialogProps {
   occupant: OrderOccupant;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
+  draft?: CommandRequest;
 }
 
 export interface OrderOccupantCorrectionValues {
@@ -22,6 +23,16 @@ export interface OrderOccupantCorrectionValues {
 function optionalTrimmed(value: string): string | null {
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+export function restoredOptionalCorrectionValue(value: unknown, fallback: string | null): string {
+  return value === null ? "" : typeof value === "string" ? value : fallback ?? "";
+}
+
+export function correctionDraftMatchesOccupant(draft: CommandRequest | undefined, orderId: string, occupantId: string): draft is CommandRequest {
+  return draft?.commandType === "CORRECT_ORDER_OCCUPANT"
+    && draft.input.orderId === orderId
+    && draft.input.occupantId === occupantId;
 }
 
 export function buildOrderOccupantCorrectionRequest(
@@ -64,13 +75,16 @@ export function buildOrderOccupantCorrectionRequest(
   };
 }
 
-export function OrderOccupantCorrectionDialog({ view, occupant, onClose, onSubmit }: OrderOccupantCorrectionDialogProps) {
+export function OrderOccupantCorrectionDialog({ view, occupant, onClose, onSubmit, draft }: OrderOccupantCorrectionDialogProps) {
   const [baselineOccupant] = useState(() => occupant);
-  const [nickname, setNickname] = useState(occupant.nickname ?? "");
-  const [fullName, setFullName] = useState(occupant.fullName ?? "");
-  const [phone, setPhone] = useState(occupant.phone ?? "");
-  const [documentNumber, setDocumentNumber] = useState(occupant.documentNumber ?? "");
-  const [reason, setReason] = useState("");
+  const corrected = draft?.input.correctedSnapshot && typeof draft.input.correctedSnapshot === "object"
+    ? draft.input.correctedSnapshot as Record<string, unknown>
+    : undefined;
+  const [nickname, setNickname] = useState(() => typeof corrected?.nickname === "string" ? corrected.nickname : occupant.nickname ?? "");
+  const [fullName, setFullName] = useState(() => typeof corrected?.fullName === "string" ? corrected.fullName : occupant.fullName ?? "");
+  const [phone, setPhone] = useState(() => restoredOptionalCorrectionValue(corrected?.phone, occupant.phone));
+  const [documentNumber, setDocumentNumber] = useState(() => restoredOptionalCorrectionValue(corrected?.documentNumber, occupant.documentNumber));
+  const [reason, setReason] = useState(draft?.initialReason?.note ?? "");
   const [validationError, setValidationError] = useState<unknown>();
 
   function submit(event: FormEvent<HTMLFormElement>) {

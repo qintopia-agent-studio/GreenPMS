@@ -2237,6 +2237,56 @@ pre {
   font-size: 12px;
 }
 
+.command-result-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #b5d4bf;
+  border-radius: 6px;
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.command-result-notice span {
+  flex: 1;
+  color: var(--text);
+}
+
+.command-result-notice .icon-button {
+  width: 30px;
+  height: 30px;
+}
+
+.command-result-notice.is-warning {
+  border-color: #d7bd91;
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.command-shell-review-heading {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+
+.command-shell-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+
+.command-shell-progress p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .list-toolbar {
   align-items: center;
 }

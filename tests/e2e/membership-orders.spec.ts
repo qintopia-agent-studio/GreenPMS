@@ -17,11 +17,9 @@ async function confirmMembershipCommand(page: Page, expectedEffect: string[], ex
   const confirm = page.getByTestId("confirm-command");
   await expect(confirm).toBeEnabled();
   await confirm.click();
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toBeVisible({ timeout: 15_000 });
-  await expect(receipt).toContainText(expectedReceipt);
-  await page.getByRole("button", { name: "完成", exact: true }).click();
-  await expect(receipt).toBeHidden();
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText(expectedReceipt);
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
   await expect(page.getByText("正在载入会员列表", { exact: true })).toBeHidden({ timeout: 15_000 });
   await expect(page.getByText("正在载入会员档案", { exact: true })).toBeHidden({ timeout: 15_000 });
 }
@@ -31,7 +29,7 @@ async function recordPayment(page: Page, amountYuan: string, reference: string) 
   await page.getByTestId("membership-payment-yuan").fill(amountYuan);
   await page.getByTestId("membership-payment-reference").fill(reference);
   await page.getByRole("button", { name: "核对收款信息", exact: true }).click();
-  await confirmMembershipCommand(page, [reference, `¥${Number(amountYuan).toLocaleString("en-US", { minimumFractionDigits: 2 })}`], "登记企微收款已完成");
+  await confirmMembershipCommand(page, [reference, `¥${Number(amountYuan).toLocaleString("en-US", { minimumFractionDigits: 2 })}`], "企微收款已登记");
 }
 
 function nextYear(date: string): string {
@@ -88,7 +86,7 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   await expect(adjustmentReason).toBeFocused();
   await adjustmentReason.fill("2B 自动化验收调价");
   await page.getByRole("button", { name: "核对会员订单", exact: true }).click();
-  await confirmMembershipCommand(page, ["公卫单人间会员", "¥1,620.00", "¥1,600.00", "2B 自动化验收调价"], "创建会员订单已完成");
+  await confirmMembershipCommand(page, ["公卫单人间会员", "¥1,620.00", "¥1,600.00", "2B 自动化验收调价"], "会员订单已创建");
 
   const order = page.getByTestId("membership-order-item").filter({ hasText: "2B 自动化验收调价" });
   await expect(order).toContainText("待生效");
@@ -100,7 +98,7 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   await order.getByTestId("activate-membership-order").click();
   const activationDialog = page.getByRole("dialog", { name: "生效会员订单" });
   await expect(activationDialog.getByRole("alert")).toContainText("会员订单至少登记一笔有效企微收款后才能生效", { timeout: 15_000 });
-  await activationDialog.getByRole("button", { name: "取消", exact: true }).click();
+  await activationDialog.getByRole("button", { name: "返回修改", exact: true }).click();
   await expect(order).toContainText("待生效");
   await expect(order.getByTestId("membership-activation-summary")).toHaveCount(0);
 
@@ -119,7 +117,7 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   await page.getByTestId("membership-payment-yuan").fill("700");
   await page.getByTestId("membership-payment-reference").fill(correctedReference);
   await page.getByRole("button", { name: "核对更正内容", exact: true }).click();
-  await confirmMembershipCommand(page, [firstReference, correctedReference, "¥600.00", "¥700.00"], "更正企微收款已完成");
+  await confirmMembershipCommand(page, [firstReference, correctedReference, "¥600.00", "¥700.00"], "企微收款已更正");
 
   await expect(order).toContainText("冲销原收款");
   await expect(order).toContainText("更正后收款");

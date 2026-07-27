@@ -93,13 +93,11 @@ async function fulfill(page: Page, action: "入住" | "退房", options: {
     await expect(dialog.getByText("刚才的操作结果需要查询", { exact: true })).toBeVisible();
     await expect(dialog).not.toContainText(forbiddenProtocol);
     await dialog.getByRole("button", { name: "查询操作结果", exact: true }).click();
-    await expect(dialog.getByTestId("command-recovered-original")).toContainText("没有重复办理");
   }
-  const result = dialog.getByTestId("command-receipt");
-  await expect(result).toContainText(options.lateRecorded ? "迟录退房已完成" : `办理${action}已完成`);
-  await expect(result).not.toContainText(forbiddenProtocol);
-  await dialog.getByRole("button", { name: "完成", exact: true }).click();
-  await expect(dialog).toBeHidden();
+  await expect(dialog).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText(`办理${action}已完成，住宿状态已刷新`);
+  await expect(page.getByTestId("command-result-notice")).not.toContainText(forbiddenProtocol);
+  await expect(page.getByTestId("command-receipt")).toBeHidden();
   await expect(page.getByText("正在载入订单详情", { exact: true })).toBeHidden({ timeout: 15_000 });
 }
 
@@ -181,7 +179,7 @@ test("阶段 8 4.1 从房态入住后返回仍定位并选中完整 Stay", async
   await page.getByRole("link", { name: "返回房态", exact: true }).click();
   await returned;
   await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
-  await expect(page.getByText(/房态 revision 已变化|已重新校验返回位置/)).toBeVisible();
+  await expect(page.getByText(/房态 revision 已变化|已重新校验返回位置|订单处理完成，已按最新房态恢复原住宿选择/)).toBeVisible();
   for (const date of [fixture.arrivalDate, addDays(fixture.arrivalDate, 1)]) {
     await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.restoration.unitId}"][data-service-date="${date}"]`)).toHaveClass(/is-stay-selected/);
   }

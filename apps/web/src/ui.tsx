@@ -11,6 +11,17 @@ import {
   type MoneyDto
 } from "@qintopia/contracts";
 import { api, ApiError } from "./api";
+import {
+  commandShellLabel,
+  commandShellNotExecutedMessage,
+  commandShellRefreshFailedMessage,
+  commandShellSuccessMessage,
+  initialCommandShellState,
+  isU1CommandType,
+  transitionCommandShell,
+  type CommandShellEvent,
+  type U1CommandType
+} from "./command-shell/commandShellState";
 import type { ClientCommandMetadata, CommandRequest, PreviewDto, ReceiptDto } from "./types";
 
 type ExecutableCommandType = (typeof commandTypes)[number];
@@ -81,6 +92,24 @@ export function errorMessage(error: unknown): string {
   return "请求失败，请稍后重试";
 }
 
+function businessErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (/[\u3400-\u9fff]/.test(error.message) && !/Preview|Confirm|Receipt|Command|effectHash|idempoten/i.test(error.message)) {
+      return error.message;
+    }
+    if (error.status === 401 || error.status === 403) return "当前账号无权完成这项操作，本次没有写入。";
+    if (error.status === 409 || error.code === "PREVIEW_STALE" || error.code === "INVALID_ORDER_STATE") {
+      return "当前业务状态已经变化，本次没有写入。请刷新后重新核对。";
+    }
+    if (error.status >= 500 || error.retryable) return "服务暂时不可用，当前结果尚未确认。请按页面提示查询原操作结果。";
+    return "本次操作未完成，服务端没有接受这次提交。请返回修改后重新核对。";
+  }
+  if (error instanceof Error && /[\u3400-\u9fff]/.test(error.message) && !/Preview|Confirm|Receipt|Command|effectHash|idempoten/i.test(error.message)) {
+    return error.message;
+  }
+  return "本次操作未完成，请返回修改后重新核对。";
+}
+
 export function StatusBadge({ value, label }: { value: string; label?: string }) {
   const normalized = value.toLowerCase().replaceAll("_", "-");
   return <span className={`status-badge status-${normalized}`}>{label ?? value.replaceAll("_", " ")}</span>;
@@ -112,7 +141,7 @@ export function InlineError({ error, title = "操作未完成", hideTechnicalDet
 }) {
   if (!error) return null;
   const apiError = error instanceof ApiError ? error : undefined;
-  const message = hideTechnicalDetails && error instanceof Error ? error.message : errorMessage(error);
+  const message = hideTechnicalDetails ? businessErrorMessage(error) : errorMessage(error);
   return (
     <div className="inline-error" role="alert" tabIndex={-1}>
       <AlertCircle aria-hidden="true" size={18} />
@@ -143,6 +172,20 @@ export function LoadingBlock({ label = "正在加载" }: { label?: string }) {
   );
 }
 
+export function CommandResultNotice({ message, onDismiss }: { message: string | undefined; onDismiss: () => void }) {
+  if (!message) return null;
+  const warning = message.includes("未写入") || message.includes("未执行") || message.includes("刷新失败");
+  return (
+    <div className={`command-result-notice${warning ? " is-warning" : ""}`} role="status" aria-live="polite" tabIndex={-1} data-testid="command-result-notice">
+      {warning ? <AlertCircle aria-hidden="true" size={18} /> : <Check aria-hidden="true" size={18} />}
+      <span>{message}</span>
+      <button type="button" className="icon-button" onClick={onDismiss} aria-label="关闭操作结果提示" title="关闭">
+        <X aria-hidden="true" size={16} />
+      </button>
+    </div>
+  );
+}
+
 interface ModalProps {
   title: string;
   onClose: () => void;
@@ -162,25 +205,35 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (modal && dialog && !dialog.open) dialog.showModal();
     return () => {
-      if (modal) previousFocus?.focus();
+      if (!modal) return;
+      if (previousFocus?.isConnected) previousFocus.focus();
+      else {
+        const fallback = document.querySelector<HTMLElement>("[data-testid='command-result-notice'], main h1, h1");
+        if (fallback) {
+          if (!fallback.hasAttribute("tabindex")) fallback.setAttribute("tabindex", "-1");
+          fallback.focus();
+        }
+      }
     };
   }, [modal]);
 
   useEffect(() => {
-    if (modal) return;
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || closeDisabled || !dialogRef.current?.open) return;
+      const openDialogs = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")];
+      if (openDialogs.at(-1) !== dialogRef.current) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();
     };
     document.addEventListener("keydown", closeOnEscape, true);
     return () => document.removeEventListener("keydown", closeOnEscape, true);
-  }, [closeDisabled, modal, onClose]);
+  }, [closeDisabled, onClose]);
 
   function trapFocus(event: KeyboardEvent<HTMLDialogElement>) {
-    if (!modal && event.key === "Escape") {
+    if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       if (!closeDisabled) onClose();
       return;
     }
@@ -398,11 +451,185 @@ function pricingFromEffect(effect: Record<string, unknown>): Record<string, unkn
 }
 
 function localDateNightCount(arrivalDate: unknown, departureDate: unknown): number | undefined {
-  if (typeof arrivalDate !== "string" || typeof departureDate !== "string") return undefined;
-  const arrival = Date.parse(`${arrivalDate}T00:00:00Z`);
-  const departure = Date.parse(`${departureDate}T00:00:00Z`);
-  if (!Number.isFinite(arrival) || !Number.isFinite(departure) || departure <= arrival) return undefined;
+  const arrival = localDateEpoch(arrivalDate);
+  const departure = localDateEpoch(departureDate);
+  if (arrival === undefined || departure === undefined || departure <= arrival) return undefined;
   return Math.round((departure - arrival) / 86_400_000);
+}
+
+function nonblankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+type EvidenceMoney = { minorUnits: number; currency: string };
+
+function hasMoney(value: unknown): value is EvidenceMoney {
+  return isRecord(value)
+    && Number.isSafeInteger(value.minorUnits)
+    && typeof value.currency === "string"
+    && /^[A-Z]{3}$/.test(value.currency);
+}
+
+function moneyMatches(left: unknown, right: unknown): boolean {
+  if (!hasMoney(left) || !hasMoney(right)) return false;
+  return left.minorUnits === right.minorUnits && left.currency === right.currency;
+}
+
+function localDateEpoch(value: unknown): number | undefined {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const epoch = Date.parse(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(epoch) || new Date(epoch).toISOString().slice(0, 10) !== value) return undefined;
+  return epoch;
+}
+
+function repriceStayTimeline(value: unknown): Array<{ serviceDate: string; inventoryUnitId: string }> | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const timeline: Array<{ serviceDate: string; inventoryUnitId: string }> = [];
+  let previousEpoch: number | undefined;
+  for (const item of value) {
+    if (!isRecord(item) || !nonblankString(item.serviceDate) || !nonblankString(item.inventoryUnitId)) return undefined;
+    const epoch = localDateEpoch(item.serviceDate);
+    if (epoch === undefined || (previousEpoch !== undefined && epoch !== previousEpoch + 86_400_000)) return undefined;
+    timeline.push({ serviceDate: item.serviceDate, inventoryUnitId: item.inventoryUnitId });
+    previousEpoch = epoch;
+  }
+  return timeline;
+}
+
+function pricingCoverageHasEvidence(value: unknown, timelineByDate: Map<string, string>): boolean {
+  return Array.isArray(value) && value.every((item) => isRecord(item)
+    && nonblankString(item.serviceDate)
+    && nonblankString(item.inventoryUnitId)
+    && timelineByDate.get(item.serviceDate) === item.inventoryUnitId
+    && (item.unitKind === "ROOM_NIGHT" || item.unitKind === "BED_NIGHT")
+    && nonblankString(item.entitlementLotId));
+}
+
+function pricingCashLineHasEvidence(value: unknown, currency: string, timelineByDate: Map<string, string>): boolean {
+  if (!isRecord(value) || !hasMoney(value.amount) || value.amount.currency !== currency
+    || !nonblankString(value.inventoryUnitId) || !nonblankString(value.description)) return false;
+  if (value.lineKind === "STAY_TOTAL") {
+    if (localDateNightCount(value.arrivalDate, value.departureDate) === undefined
+      || (value.pricingBandAnchorNights !== 1 && value.pricingBandAnchorNights !== 7
+        && value.pricingBandAnchorNights !== 14 && value.pricingBandAnchorNights !== 30)
+      || !Array.isArray(value.calculationSegments)
+      || value.calculationSegments.length === 0) return false;
+    return value.calculationSegments.every((segment) => isRecord(segment)
+      && nonblankString(segment.inventoryUnitId)
+      && nonblankString(segment.pricingProductCode)
+      && localDateNightCount(segment.arrivalDate, segment.departureDate) !== undefined
+      && Number.isSafeInteger(segment.nights)
+      && Number(segment.nights) > 0
+      && Number.isSafeInteger(segment.anchorAmountMinor)
+      && Number(segment.anchorAmountMinor) > 0
+      && Number.isSafeInteger(segment.numeratorMinor)
+      && Number(segment.numeratorMinor) > 0
+      && (segment.denominator === 1 || segment.denominator === 7
+        || segment.denominator === 14 || segment.denominator === 30));
+  }
+  return (value.lineKind === undefined || value.lineKind === "NIGHT")
+    && nonblankString(value.serviceDate)
+    && timelineByDate.get(value.serviceDate) === value.inventoryUnitId;
+}
+
+export function u1PreviewHasBusinessEvidence(
+  commandType: U1CommandType,
+  effect: Record<string, unknown>,
+  input: Record<string, unknown> = {}
+): boolean {
+  const inventoryUnit = isRecord(effect.inventoryUnit) ? effect.inventoryUnit : undefined;
+  const pricingDecision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
+  const pricing = isRecord(effect.pricing) ? effect.pricing : undefined;
+  const member = isRecord(effect.member) ? effect.member : undefined;
+  const hasStayIdentity = (isRecord(effect.primaryGuest) && nonblankString(effect.primaryGuest.nickname))
+    || (Array.isArray(effect.occupants) && effect.occupants.length > 0);
+  switch (commandType) {
+    case "CREATE_ORDER":
+      return Boolean(inventoryUnit
+        && nonblankString(inventoryUnit.code)
+        && nonblankString(effect.arrivalDate)
+        && nonblankString(effect.departureDate)
+        && hasStayIdentity
+        && (effect.stayType === "FREE"
+          ? nonblankString(effect.freeStayCategoryCode) && nonblankString(effect.freeStayReason)
+          : (pricingDecision && hasMoney(pricingDecision.policyBaseAmount) && hasMoney(pricingDecision.targetCurrentContractAmount))
+            || (pricing && (hasMoney(pricing.currentContractAmount) || hasMoney(pricing.cashRemainder)))));
+    case "CREATE_MEMBER":
+      return Boolean(member
+        && nonblankString(member.fullName)
+        && nonblankString(member.identityCardNumber)
+        && nonblankString(member.phone)
+        && nonblankString(member.wechat));
+    case "CREATE_MEMBERSHIP_ORDER":
+      return Boolean(member && isRecord(effect.product) && isRecord(effect.pricing));
+    case "RECORD_MEMBERSHIP_PAYMENT":
+      return isRecord(effect.payment) && isRecord(effect.totals);
+    case "CORRECT_MEMBERSHIP_PAYMENT":
+      return isRecord(effect.original) && isRecord(effect.replacement) && isRecord(effect.totals);
+    case "ACTIVATE_MEMBERSHIP_ORDER":
+      return nonblankString(effect.memberName)
+        && nonblankString(effect.productName)
+        && nonblankString(effect.validFrom)
+        && nonblankString(effect.validUntil)
+        && typeof effect.entitlementUnits === "number"
+        && hasMoney(effect.paymentTotal)
+        && hasMoney(effect.agreedPrice);
+    case "CORRECT_MEMBER_ENTITLEMENT_BALANCE":
+      return typeof effect.availableBefore === "number"
+        && typeof effect.availableAfter === "number"
+        && typeof effect.quantityDelta === "number"
+        && nonblankString(effect.unitKind)
+        && nonblankString(effect.adjustmentReason);
+    case "LOCK_MAINTENANCE":
+      return Boolean(inventoryUnit
+        && nonblankString(inventoryUnit.code)
+        && nonblankString(effect.arrivalDate)
+        && nonblankString(effect.departureDate)
+        && nonblankString(effect.reason));
+    case "RELEASE_MAINTENANCE":
+      return Boolean(nonblankString(effect.maintenanceLockId)
+        && effect.maintenanceLockId === input.maintenanceLockId
+        && nonblankString(effect.inventoryUnitId)
+        && localDateNightCount(effect.arrivalDate, effect.departureDate) !== undefined);
+    case "CORRECT_ORDER_OCCUPANT":
+      return isRecord(effect.before) && isRecord(effect.after);
+    case "REPRICE_ORDER":
+      {
+        const policyBaseAmount = effect.policyBaseAmount;
+        const targetAmount = effect.targetCurrentContractAmount;
+        const currentContractAmount = pricing?.currentContractAmount;
+        const before = isRecord(effect.before) ? effect.before : undefined;
+        const timeline = repriceStayTimeline(effect.stayTimeline);
+        if (!nonblankString(effect.orderId)
+          || effect.orderId !== input.orderId
+          || !nonblankString(effect.inventoryUnitId)
+          || !pricing
+          || !timeline
+          || timeline.at(-1)?.inventoryUnitId !== effect.inventoryUnitId
+          || !before
+          || !hasMoney(before.currentContractAmount)
+          || !hasMoney(policyBaseAmount)
+          || policyBaseAmount.minorUnits < 0
+          || !hasMoney(targetAmount)
+          || targetAmount.minorUnits < 0
+          || targetAmount.minorUnits % 100 !== 0
+          || targetAmount.minorUnits !== input.targetCurrentContractAmountMinor
+          || !moneyMatches(currentContractAmount, targetAmount)
+          || before.currentContractAmount.currency !== targetAmount.currency
+          || policyBaseAmount.currency !== targetAmount.currency
+          || !hasMoney(pricing.cashRemainder)
+          || pricing.cashRemainder.currency !== targetAmount.currency
+          || !Number.isSafeInteger(effect.manualAdjustmentMinor)
+          || effect.manualAdjustmentMinor !== targetAmount.minorUnits - policyBaseAmount.minorUnits) return false;
+        const timelineByDate = new Map(timeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
+        return pricingCoverageHasEvidence(pricing.coverageSet, timelineByDate)
+          && Array.isArray(pricing.cashLines)
+          && pricing.cashLines.every((line) => pricingCashLineHasEvidence(line, targetAmount.currency, timelineByDate));
+      }
+    case "CHECK_IN":
+    case "CHECK_OUT":
+      return fulfillmentTransitionIsExpected(commandType, effect);
+  }
 }
 
 export function receiptTransactionReferenceLabel(result: Record<string, unknown>): string {
@@ -410,7 +637,7 @@ export function receiptTransactionReferenceLabel(result: Record<string, unknown>
   return typeof result.transactionReference === "string" ? result.transactionReference : "历史未记录";
 }
 
-function EffectSummary({ preview, fulfillment = false }: { preview: PreviewDto; fulfillment?: boolean }) {
+function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: U1CommandType; reasonNote?: string; commandTitle?: string }) {
   const effect = preview.effect;
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
@@ -632,6 +859,60 @@ function EffectSummary({ preview, fulfillment = false }: { preview: PreviewDto; 
     </div>;
   }
 
+  if (businessCommand === "LOCK_MAINTENANCE" || businessCommand === "RELEASE_MAINTENANCE") {
+    return <div className="effect-summary maintenance-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="maintenance-command-summary-heading">
+        <h3 id="maintenance-command-summary-heading">请核对{commandShellLabel(businessCommand)}</h3>
+        <dl className="difference-grid">
+          {inventoryUnit ? <><dt>房源</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
+          {businessCommand === "LOCK_MAINTENANCE" ? <>
+            <dt>维修原因</dt><dd>{scalar(effect.reason)}</dd>
+            <dt>房态变化</dt><dd><strong>该区间将设为维修锁房</strong></dd>
+          </> : <>
+            <dt>目标房源</dt><dd><strong>{commandTitle ?? scalar(effect.inventoryUnitId)}</strong></dd>
+            <dt>房源记录</dt><dd>{scalar(effect.inventoryUnitId)}</dd>
+            <dt>维修锁房记录</dt><dd>{scalar(effect.maintenanceLockId)}</dd>
+            <dt>释放范围</dt><dd><strong>完整释放这条维修锁房及对应库存占用</strong></dd>
+            <dt>历史记录</dt><dd>保留</dd>
+          </>}
+        </dl>
+      </section>
+    </div>;
+  }
+
+  if (businessCommand === "CORRECT_ORDER_OCCUPANT") {
+    const fieldLabels: Record<string, string> = { nickname: "昵称", fullName: "姓名", phone: "联系电话", documentNumber: "证件号码" };
+    return <div className="effect-summary occupant-correction-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="occupant-correction-summary-heading">
+        <h3 id="occupant-correction-summary-heading">请核对住宿人资料更正</h3>
+        <dl className="difference-grid">
+          {before && after ? Object.keys(fieldLabels).flatMap((key) => {
+            if (before[key] === after[key]) return [];
+            return [<div className="difference-row" key={key}><dt>{fieldLabels[key]}</dt><dd>{scalar(before[key])} <ChevronRight aria-label="更正为" size={15} /> <strong>{scalar(after[key])}</strong></dd></div>];
+          }) : null}
+          <dt>更正原因</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+          <dt>记录方式</dt><dd>保留原资料并追加更正历史</dd>
+        </dl>
+      </section>
+    </div>;
+  }
+
+  if (businessCommand === "REPRICE_ORDER") {
+    return <div className="effect-summary reprice-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="reprice-command-summary-heading">
+        <h3 id="reprice-command-summary-heading">请核对订单金额调整</h3>
+        <dl className="difference-grid">
+          {policyBaseAmount ? <><dt>政策基础金额</dt><dd>{formatMoney(policyBaseAmount)}</dd></> : null}
+          {targetCurrentContractAmount ? <><dt>调整后订单金额</dt><dd><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd></> : null}
+          {manualAdjustmentMinor !== undefined ? <><dt>与政策基础金额差额</dt><dd>{formatMinor(manualAdjustmentMinor, policyBaseAmount?.currency ?? targetCurrentContractAmount?.currency ?? "CNY")}</dd></> : null}
+          <dt>调价原因</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+          <dt>记录方式</dt><dd>追加新的计价记录，保留原金额</dd>
+        </dl>
+      </section>
+    </div>;
+  }
+
   return (
     <div className="effect-summary" data-testid="command-effect">
       <div className="preview-meta">
@@ -832,6 +1113,19 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
       {orderId && committed ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
     </section>;
   }
+  if (businessCommand && isU1CommandType(businessCommand)) {
+    const label = commandShellLabel(businessCommand);
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{committed ? `${label}已完成` : `${label}未执行`}</h3>
+          <p>{committed ? commandShellSuccessMessage(businessCommand) : commandShellNotExecutedMessage(businessCommand)}</p>
+        </div>
+      </div>
+      {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+    </section>;
+  }
   return (
     <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
       <div className="receipt-title-row">
@@ -864,14 +1158,42 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
 
 interface CommandDialogProps {
   request: CommandRequest;
-  onClose: () => void;
-  onCommitted?: (receipt: ReceiptDto) => void;
+  onClose: (context?: CommandDialogCloseContext) => void;
+  onCommitted?: (receipt: ReceiptDto) => void | Promise<void>;
+  onBusinessSuccess?: (message: string, receipt: ReceiptDto) => void;
+  onBusinessNotExecuted?: (message: string) => void;
+  onReturnToEdit?: (request: CommandRequest) => void;
   initialPreviewMetadata?: ClientCommandMetadata;
   initialConfirmationKey?: string;
   initialReceipt?: ReceiptDto;
   writeBlocked?: boolean;
   writeBlockedReason?: string;
   onProgress?: (progress: CommandDialogProgress) => boolean | void;
+}
+
+export interface CommandDialogCloseContext {
+  receipt: ReceiptDto;
+}
+
+export async function notifyKnownCommittedCommand(input: {
+  commandType: U1CommandType;
+  receipt: ReceiptDto;
+  onCommitted?: (receipt: ReceiptDto) => void | Promise<void>;
+  onBusinessSuccess?: (message: string, receipt: ReceiptDto) => void;
+}): Promise<"REFRESHED" | "REFRESH_FAILED"> {
+  let outcome: "REFRESHED" | "REFRESH_FAILED" = "REFRESHED";
+  try {
+    await input.onCommitted?.(input.receipt);
+  } catch {
+    outcome = "REFRESH_FAILED";
+  }
+  input.onBusinessSuccess?.(
+    outcome === "REFRESHED"
+      ? commandShellSuccessMessage(input.commandType)
+      : commandShellRefreshFailedMessage(input.commandType),
+    input.receipt
+  );
+  return outcome;
 }
 
 export type CommandDialogProgress =
@@ -896,7 +1218,6 @@ export interface PersistedCommandRecovery {
   targetRefs: string[];
   presentation?: "MEMBER_STAY" | "FULFILLMENT";
   state: PersistedCommandRecoveryState;
-  receipt?: ReceiptDto;
   updatedAt: string;
 }
 
@@ -958,17 +1279,11 @@ export function isTerminalCommandRecovery(value: PersistedCommandRecoveryState):
   return value === "EXECUTED" || value === "NOT_EXECUTED";
 }
 
-function isTerminalReceipt(value: unknown): value is ReceiptDto {
+export function receiptExecutionSemanticsAreCoherent(value: unknown): boolean {
   if (!isRecord(value)) return false;
-  return (value.executionStatus === "EXECUTED" || value.executionStatus === "NOT_EXECUTED")
-    && typeof value.businessCommitted === "boolean"
-    && typeof value.receiptId === "string"
-    && typeof value.commandId === "string"
-    && typeof value.correlationId === "string"
-    && Array.isArray(value.resourceRefs)
-    && value.resourceRefs.every((item) => typeof item === "string")
-    && Array.isArray(value.factRefs)
-    && value.factRefs.every((item) => typeof item === "string");
+  return (value.executionStatus === "EXECUTED" && value.businessCommitted === true)
+    || (value.executionStatus === "NOT_EXECUTED" && value.businessCommitted === false)
+    || (value.executionStatus === "UNKNOWN" && value.businessCommitted === false);
 }
 
 function browserSessionStorage(): { kind: "AVAILABLE"; storage: CommandRecoveryStorage } | { kind: "READ_ERROR"; error: Error } {
@@ -1017,10 +1332,8 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || typeof value.updatedAt !== "string") {
     return { kind: "CORRUPT", error: new Error("本地命令恢复记录版本或结构无效；无法确认原命令是否执行，已暂停本物业写命令") };
   }
-  const state = value.state;
-  if ((isTerminalCommandRecovery(state) && !isTerminalReceipt(value.receipt))
-    || (!isTerminalCommandRecovery(state) && value.receipt !== undefined)) {
-    return { kind: "CORRUPT", error: new Error("本地命令恢复记录的执行状态与 Receipt 不一致；已暂停本物业写命令") };
+  if (Object.hasOwn(value, "receipt")) {
+    return { kind: "CORRUPT", error: new Error("本地命令恢复记录包含不应持久化的业务结果；已暂停本物业写命令") };
   }
   return { kind: "VALID", recovery: value as unknown as PersistedCommandRecovery };
 }
@@ -1089,7 +1402,7 @@ export function transitionPersistedCommandRecovery(
   }
   return {
     accepted: true,
-    recovery: { ...current, state: progress.receipt.executionStatus, receipt: progress.receipt, updatedAt }
+    recovery: { ...current, state: progress.receipt.executionStatus, updatedAt }
   };
 }
 
@@ -1097,17 +1410,22 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const memberStay = recovery.presentation === "MEMBER_STAY";
   const fulfillment = recovery.presentation === "FULFILLMENT";
   const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
+  const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
   return {
     commandType: recovery.commandType,
     title: memberStay
       ? "恢复会员住宿结果"
       : fulfillment && commandType
         ? `恢复${fulfillmentCommandLabel(commandType)}结果`
+        : u1CommandType
+          ? `查询${commandShellLabel(u1CommandType)}结果`
         : `${recovery.commandType} · 原命令恢复`,
     description: memberStay
       ? "系统只查询原住宿办理结果，不会重复创建订单或冻结会员权益。"
       : fulfillment
         ? "系统只查询刚才的操作结果，不会重复办理。"
+        : u1CommandType
+          ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : "仅使用已保存的原幂等键查询服务端命令结果，不会发起新的业务写入。",
     ...(recovery.presentation ? { presentation: recovery.presentation } : {}),
     input: { propertyId: recovery.propertyId }
@@ -1127,6 +1445,7 @@ export function usePersistentCommandRecovery({ subjectId, scopeId }: { subjectId
         : access;
     return { storageScope, read };
   });
+  const [operationError, setOperationError] = useState<Error>();
 
   function setActiveSnapshot(read: CommandRecoveryReadResult): void {
     if (activeStorageScopeRef.current === storageScope) setSnapshot({ storageScope, read });
@@ -1140,12 +1459,13 @@ export function usePersistentCommandRecovery({ subjectId, scopeId }: { subjectId
         ? readPersistedCommandRecovery(access.storage, subjectId, scopeId)
         : access;
     setActiveSnapshot(read);
+    setOperationError(undefined);
   }, [scopeId, storageScope, subjectId]);
 
   const ready = snapshot.storageScope === storageScope;
   const read = ready ? snapshot.read : { kind: "READ_ERROR", error: new Error("正在核对本地命令恢复记录") } as const;
   const pending = read.kind === "VALID" ? read.recovery : undefined;
-  const error = read.kind === "CORRUPT" || read.kind === "READ_ERROR" ? read.error : undefined;
+  const error = operationError ?? (read.kind === "CORRUPT" || read.kind === "READ_ERROR" ? read.error : undefined);
   const blocked = !ready || read.kind !== "ABSENT";
 
   function track(request: CommandRequest, progress: CommandDialogProgress): boolean {
@@ -1197,9 +1517,10 @@ export function usePersistentCommandRecovery({ subjectId, scopeId }: { subjectId
       return false;
     }
     if (!clearPersistedCommandRecovery(access.storage, subjectId, scopeId)) {
-      setActiveSnapshot({ kind: "READ_ERROR", error: new Error("无法清除已收口的本地命令恢复记录；写入口继续暂停") });
+      setOperationError(new Error("无法清除已收口的本地命令恢复记录；写入口继续暂停，可再次打开原结果重试收口"));
       return false;
     }
+    setOperationError(undefined);
     setActiveSnapshot({ kind: "ABSENT" });
     return true;
   }
@@ -1216,11 +1537,13 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
   const resolved = isTerminalCommandRecovery(recovery.state);
   const memberStay = recovery.presentation === "MEMBER_STAY";
   const fulfillment = recovery.presentation === "FULFILLMENT";
-  const businessMode = businessFacing || memberStay || fulfillment;
+  const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
+  const businessMode = businessFacing || memberStay || fulfillment || Boolean(u1CommandType);
   const memberRegistration = businessMode && recovery.commandType === "CREATE_MEMBER";
   const fulfillmentLabel = isExecutableCommandType(recovery.commandType) ? fulfillmentCommandLabel(recovery.commandType) : "履约操作";
+  const u1Label = u1CommandType ? commandShellLabel(u1CommandType) : undefined;
   return (
-    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
+    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
       <div>
         <strong>{businessMode
           ? memberRegistration
@@ -1229,13 +1552,14 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
               ? (resolved ? "原会员住宿结果已确认" : "会员住宿结果需要恢复查询")
               : fulfillment
                 ? (resolved ? `原${fulfillmentLabel}结果已确认` : `${fulfillmentLabel}结果需要恢复查询`)
+                : u1Label
+                  ? (resolved ? `${u1Label}结果已确认` : `${u1Label}结果需要恢复查询`)
               : (resolved ? "原会员操作结果已确认" : "会员操作结果需要恢复查询")
           : (resolved ? "原命令结果已确认" : "原命令执行状态需要恢复查询")}</strong>
         {!businessMode ? <>
           <p><code>{recovery.commandType}</code> · {recovery.state} · Property <code>{recovery.propertyId}</code></p>
           {recovery.targetRefs.length ? <p>业务目标 {recovery.targetRefs.map((reference) => <code key={reference}>{reference}</code>)}</p> : null}
           <p>原幂等键 <code>{recovery.confirmationKey}</code></p>
-          {recovery.receipt ? <p>Command <code>{recovery.receipt.commandId || "-"}</code> · Receipt <code>{recovery.receipt.receiptId || "-"}</code></p> : null}
         </> : null}
         <p>{businessMode
           ? memberRegistration
@@ -1244,6 +1568,8 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
               ? (resolved ? "查看并关闭原住宿结果后，可继续办理住宿。" : "新的会员住宿已暂停，请先恢复查询原结果。")
               : fulfillment
                 ? (resolved ? `查看并关闭原${fulfillmentLabel}结果后，可继续操作。` : `新的${fulfillmentLabel}操作已暂停，请先查询刚才的结果。`)
+                : u1Label
+                  ? (resolved ? `${u1Label}结果已经确认，打开后将刷新当前页面。` : `新的${u1Label}已暂停，请先查询刚才的结果。`)
               : (resolved ? "查看并关闭原操作结果后，可继续处理会员业务。" : "新的会员操作已暂停，请先恢复查询原结果。")
           : (resolved ? "查看并关闭 Receipt 后恢复新的业务写入。" : "新的业务写入已暂停，必须继续查询原命令。")}</p>
       </div>
@@ -1255,6 +1581,8 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
               ? (resolved ? "查看住宿结果" : "恢复住宿结果")
               : fulfillment
                 ? (resolved ? `查看${fulfillmentLabel}结果` : `查询${fulfillmentLabel}结果`)
+                : u1Label
+                  ? (resolved ? `刷新${u1Label}结果` : `查询${u1Label}结果`)
               : (resolved ? "查看会员操作结果" : "恢复会员操作结果")
           : (resolved ? "查看已确认结果" : "恢复原命令")}
       </button>
@@ -1271,6 +1599,9 @@ export function CommandDialog({
   request,
   onClose,
   onCommitted,
+  onBusinessSuccess,
+  onBusinessNotExecuted,
+  onReturnToEdit,
   initialPreviewMetadata,
   initialConfirmationKey,
   initialReceipt,
@@ -1283,21 +1614,65 @@ export function CommandDialog({
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const executableCommandType = isExecutableCommandType(request.commandType) ? request.commandType : undefined;
+  const u1CommandType = isU1CommandType(request.commandType) ? request.commandType : undefined;
   const memberProfile = request.commandType === "CREATE_MEMBER";
   const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
-  const businessFacing = memberProfile || membershipBusiness || createOrderBusiness || fulfillment;
+  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment;
   const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : fulfillment && executableCommandType ? executableCommandType : "OPERATOR_CONFIRMED"));
-  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : ""));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
+  const recoveryOnlyRequest = Boolean(initialConfirmationKey);
   const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && !initialReceipt));
-  const [failedNotExecuted, setFailedNotExecuted] = useState(false);
+  const [failedNotExecuted, setFailedNotExecuted] = useState(Boolean(initialReceipt && initialReceipt.executionStatus === "NOT_EXECUTED"));
   const [returnedOriginalReceipt, setReturnedOriginalReceipt] = useState(Boolean(initialReceipt));
   const [expiryClock, setExpiryClock] = useState(() => Date.now());
   const [previewMetadata, setPreviewMetadata] = useState<ClientCommandMetadata>(() => initialPreviewMetadata ?? api.commandMetadata(`preview-${request.commandType.toLowerCase()}`));
   const automaticPreviewStarted = useRef(false);
+  const shellAttemptIdRef = useRef(1);
+  const [shellState, setShellState] = useState(() => initialCommandShellState({
+    attemptId: shellAttemptIdRef.current,
+    ...(initialConfirmationKey ? { confirmationKey: initialConfirmationKey } : {}),
+    succeeded: initialReceipt?.businessCommitted === true,
+    notExecuted: Boolean(initialReceipt && initialReceipt.executionStatus !== "UNKNOWN" && !initialReceipt.businessCommitted)
+  }));
+  const requestLeaseRef = useRef<{ id: number; controller?: AbortController }>({ id: 0 });
+  const successFinalizedRef = useRef(false);
+  const reviewHeadingRef = useRef<HTMLHeadingElement>(null);
+  const expiryErrorRef = useRef<HTMLDivElement>(null);
+  const notExecutedMessage = u1CommandType
+    ? recoveryOnlyRequest
+      ? `${commandShellLabel(u1CommandType)}未写入；原操作已安全收口，可以关闭后重新发起。`
+      : commandShellNotExecutedMessage(u1CommandType)
+    : "本次操作未执行。";
+
+  function applyShellEvent(event: CommandShellEvent): boolean {
+    let accepted = false;
+    setShellState((current) => {
+      const transition = transitionCommandShell(current, event);
+      accepted = transition.accepted;
+      return transition.state;
+    });
+    return accepted;
+  }
+
+  function beginRequestLease(): { id: number; controller: AbortController } {
+    requestLeaseRef.current.controller?.abort();
+    const next = { id: requestLeaseRef.current.id + 1, controller: new AbortController() };
+    requestLeaseRef.current = next;
+    return next;
+  }
+
+  function leaseIsActive(lease: { id: number; controller: AbortController }): boolean {
+    return requestLeaseRef.current.id === lease.id && !lease.controller.signal.aborted;
+  }
+
+  useEffect(() => () => {
+    requestLeaseRef.current.controller?.abort();
+    requestLeaseRef.current = { id: requestLeaseRef.current.id + 1 };
+  }, []);
 
   const previewExpiry = preview ? Date.parse(preview.expiresAt) : Number.POSITIVE_INFINITY;
   const previewExpired = Boolean(preview && (!Number.isFinite(previewExpiry) || expiryClock >= previewExpiry));
@@ -1309,6 +1684,7 @@ export function CommandDialog({
     && !previewExpired
     && !networkUncertain
     && !confirmationKey
+    && (!u1CommandType || u1PreviewHasBusinessEvidence(u1CommandType, preview.effect, request.input))
     && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));
   const currentKey = useMemo(() => confirmationKey ?? api.recoveryKey(request.commandType), [confirmationKey, request.commandType]);
 
@@ -1319,6 +1695,17 @@ export function CommandDialog({
     return () => window.clearTimeout(timer);
   }, [preview, previewExpiry, receipt]);
 
+  useEffect(() => {
+    if (!u1CommandType || !previewExpired || shellState.phase !== "READY_TO_CONFIRM") return;
+    applyShellEvent({ type: "PREVIEW_EXPIRED", attemptId: shellAttemptIdRef.current });
+  }, [previewExpired, shellState.phase, u1CommandType]);
+
+  useEffect(() => {
+    if (!u1CommandType) return;
+    if (shellState.phase === "READY_TO_CONFIRM") reviewHeadingRef.current?.focus();
+    if (shellState.phase === "PREVIEW_EXPIRED") expiryErrorRef.current?.focus();
+  }, [shellState.phase, u1CommandType]);
+
   async function loadPreview(metadata = previewMetadata) {
     if (writeBlocked) return;
     if (!isExecutableCommandType(request.commandType)) {
@@ -1328,21 +1715,27 @@ export function CommandDialog({
     setBusy(true);
     setError(undefined);
     setFailedNotExecuted(false);
+    if (u1CommandType) applyShellEvent({ type: "PREVIEW_STARTED", attemptId: shellAttemptIdRef.current });
     onProgress?.({ state: "PREVIEWING", previewMetadata: metadata });
+    const lease = beginRequestLease();
     try {
-      const response = await api.preview({ commandType: request.commandType, input: request.input }, metadata);
+      const response = await api.preview({ commandType: request.commandType, input: request.input }, metadata, lease.controller.signal);
+      if (!leaseIsActive(lease)) return;
       setPreview(response.preview);
       setReceipt(undefined);
       setExpiryClock(Date.now());
+      if (u1CommandType) applyShellEvent({ type: "PREVIEW_READY", attemptId: shellAttemptIdRef.current, previewId: response.preview.previewId });
       onProgress?.({ state: "PREVIEWED", previewId: response.preview.previewId, previewMetadata: metadata });
     } catch (nextError) {
+      if (!leaseIsActive(lease) || (nextError instanceof DOMException && nextError.name === "AbortError")) return;
       setError(nextError);
       const uncertain = !(nextError instanceof ApiError)
         || nextError.status >= 500
         || nextError.code === "COMMAND_STATUS_UNKNOWN";
       onProgress?.({ state: uncertain ? "PREVIEW_UNKNOWN" : "PREVIEW_FAILED", previewMetadata: metadata });
+      if (u1CommandType) applyShellEvent({ type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current });
     } finally {
-      setBusy(false);
+      if (leaseIsActive(lease)) setBusy(false);
     }
   }
 
@@ -1363,6 +1756,62 @@ export function CommandDialog({
     void loadPreview(metadata);
   }
 
+  function returnToEdit() {
+    if (busy && shellState.phase === "CONFIRMING") return;
+    requestLeaseRef.current.controller?.abort();
+    if (u1CommandType && fulfillment) {
+      const nextAttemptId = shellAttemptIdRef.current + 1;
+      shellAttemptIdRef.current = nextAttemptId;
+      setPreview(undefined);
+      setReceipt(undefined);
+      setError(undefined);
+      setConfirmationKey(undefined);
+      setNetworkUncertain(false);
+      setFailedNotExecuted(false);
+      setShellState({ phase: "EDITING", attemptId: nextAttemptId });
+      return;
+    }
+    if (u1CommandType) applyShellEvent({ type: "RETURN_TO_EDIT", attemptId: shellAttemptIdRef.current });
+    const draftRequest: CommandRequest = {
+      ...request,
+      initialReason: { code: reasonCode.trim(), note: reasonNote }
+    };
+    onClose();
+    onReturnToEdit?.(draftRequest);
+  }
+
+  function closeCommandDialog() {
+    if (u1CommandType
+      && !networkUncertain
+      && !recoveryOnlyRequest
+      && (shellState.phase === "READY_TO_CONFIRM" || shellState.phase === "PREVIEW_EXPIRED" || shellState.phase === "NOT_EXECUTED")) {
+      returnToEdit();
+      return;
+    }
+    onClose();
+  }
+
+  async function finalizeCommitted(receiptValue: ReceiptDto) {
+    if (successFinalizedRef.current) return;
+    successFinalizedRef.current = true;
+    if (u1CommandType) {
+      await notifyKnownCommittedCommand({
+        commandType: u1CommandType,
+        receipt: receiptValue,
+        ...(onCommitted ? { onCommitted } : {}),
+        ...(onBusinessSuccess ? { onBusinessSuccess } : {})
+      });
+      onClose({ receipt: receiptValue });
+    } else {
+      await onCommitted?.(receiptValue);
+    }
+  }
+
+  useEffect(() => {
+    if (!initialReceipt?.businessCommitted || !u1CommandType) return;
+    void finalizeCommitted(initialReceipt);
+  }, []);
+
   async function confirm() {
     if (!preview || !reasonCode.trim() || (!createOrderBusiness && !reasonNote.trim()) || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
     if (!isExecutableCommandType(request.commandType)) {
@@ -1371,7 +1820,7 @@ export function CommandDialog({
     }
     const propertyId = request.input.propertyId;
     if (typeof propertyId !== "string" || !propertyId) {
-      setError(new Error("Command property scope is missing"));
+      setError(new Error(businessFacing ? "当前门店范围缺失，本次操作未发送。" : "Command property scope is missing"));
       return;
     }
     const key = currentKey;
@@ -1387,21 +1836,22 @@ export function CommandDialog({
         setBusy(false);
         return;
       }
+      if (u1CommandType) applyShellEvent({ type: "CONFIRM_STARTED", attemptId: shellAttemptIdRef.current, confirmationKey: key });
     } catch (progressError) {
       setError(progressError);
       setBusy(false);
       return;
     }
+    const lease = beginRequestLease();
+    let result: ReceiptDto;
     try {
-      const result = await api.confirm(preview.previewId, propertyId, request.commandType, preview.effectHash, {
+      result = await api.confirm(preview.previewId, propertyId, request.commandType, preview.effectHash, {
         code: reasonCode.trim(),
         note: reasonNote.trim()
-      }, key);
-      setReceipt(result);
-      setReturnedOriginalReceipt(false);
-      onProgress?.({ state: "RESOLVED", confirmationKey: key, receipt: result });
-      if (result.businessCommitted) onCommitted?.(result);
+      }, key, lease.controller.signal);
+      if (!leaseIsActive(lease)) return;
     } catch (nextError) {
+      if (!leaseIsActive(lease) || (nextError instanceof DOMException && nextError.name === "AbortError")) return;
       setError(nextError);
       const uncertain = !(nextError instanceof ApiError)
         || nextError.status >= 500
@@ -1411,12 +1861,50 @@ export function CommandDialog({
       onProgress?.(uncertain
         ? { state: "UNKNOWN", confirmationKey: key }
         : { state: "FAILED_NOT_EXECUTED", confirmationKey: key });
+      if (u1CommandType) applyShellEvent(uncertain
+        ? { type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key }
+        : { type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current, confirmationKey: key });
       if (!uncertain) {
         setPreview(undefined);
         setConfirmationKey(undefined);
+        if (u1CommandType) onBusinessNotExecuted?.(commandShellNotExecutedMessage(u1CommandType));
+      }
+      if (leaseIsActive(lease)) setBusy(false);
+      return;
+    }
+
+    try {
+      if (!receiptExecutionSemanticsAreCoherent(result)) {
+        setReceipt(undefined);
+        setError(new Error("服务端返回的操作结果无法核对；系统将只查询原操作结果，不会重复提交。"));
+        setNetworkUncertain(true);
+        onProgress?.({ state: "UNKNOWN", confirmationKey: key });
+        if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key });
+        return;
+      }
+      if (result.executionStatus === "UNKNOWN") {
+        setReceipt(undefined);
+        setReturnedOriginalReceipt(false);
+        setNetworkUncertain(true);
+        onProgress?.({ state: "UNKNOWN", confirmationKey: key });
+        if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key });
+        return;
+      }
+      if (!u1CommandType) setReceipt(result);
+      setReturnedOriginalReceipt(false);
+      onProgress?.({ state: "RESOLVED", confirmationKey: key, receipt: result });
+      if (u1CommandType) {
+        applyShellEvent(result.businessCommitted
+          ? { type: "SUCCEEDED", attemptId: shellAttemptIdRef.current, confirmationKey: key }
+          : { type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current, confirmationKey: key });
+      }
+      if (result.businessCommitted) await finalizeCommitted(result);
+      else if (u1CommandType) {
+        setFailedNotExecuted(true);
+        onBusinessNotExecuted?.(notExecutedMessage);
       }
     } finally {
-      setBusy(false);
+      if (leaseIsActive(lease)) setBusy(false);
     }
   }
 
@@ -1428,44 +1916,81 @@ export function CommandDialog({
     }
     const propertyId = request.input.propertyId;
     if (typeof propertyId !== "string" || !propertyId) {
-      setError(new Error("Command property scope is missing"));
+      setError(new Error(businessFacing ? "当前门店范围缺失，无法查询原操作结果。" : "Command property scope is missing"));
       return;
     }
     setBusy(true);
     setError(undefined);
+    const lease = beginRequestLease();
+    let result: ReceiptDto;
     try {
-      const result = await api.commandResult(propertyId, request.commandType, confirmationKey);
+      result = await api.commandResult(propertyId, request.commandType, confirmationKey, lease.controller.signal);
+      if (!leaseIsActive(lease)) return;
+    } catch (nextError) {
+      if (!leaseIsActive(lease) || (nextError instanceof DOMException && nextError.name === "AbortError")) return;
+      setError(nextError);
+      setNetworkUncertain(true);
+      onProgress?.({ state: "UNKNOWN", confirmationKey });
+      if (leaseIsActive(lease)) setBusy(false);
+      return;
+    }
+
+    try {
+      if (!receiptExecutionSemanticsAreCoherent(result)) {
+        setReceipt(undefined);
+        setError(new Error("服务端返回的操作结果无法核对；请继续查询原操作结果。"));
+        setNetworkUncertain(true);
+        onProgress?.({ state: "UNKNOWN", confirmationKey });
+        if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey });
+        return;
+      }
       setNetworkUncertain(result.executionStatus === "UNKNOWN");
       if (result.executionStatus === "UNKNOWN") {
         setReceipt(undefined);
         setReturnedOriginalReceipt(false);
         onProgress?.({ state: "UNKNOWN", confirmationKey });
+        if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey });
       } else {
-        setReceipt(result);
+        if (!u1CommandType) setReceipt(result);
         setReturnedOriginalReceipt(true);
+        if (u1CommandType && !result.businessCommitted) setFailedNotExecuted(true);
         onProgress?.({ state: "RESOLVED", confirmationKey, receipt: result });
+        if (u1CommandType) applyShellEvent(result.businessCommitted
+          ? { type: "SUCCEEDED", attemptId: shellAttemptIdRef.current, confirmationKey }
+          : { type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current, confirmationKey });
       }
-      if (result.businessCommitted) onCommitted?.(result);
-    } catch (nextError) {
-      setError(nextError);
-      setNetworkUncertain(true);
-      onProgress?.({ state: "UNKNOWN", confirmationKey });
+      if (result.businessCommitted) await finalizeCommitted(result);
+      else if (result.executionStatus !== "UNKNOWN" && u1CommandType) onBusinessNotExecuted?.(notExecutedMessage);
     } finally {
-      setBusy(false);
+      if (leaseIsActive(lease)) setBusy(false);
     }
   }
 
   return (
     <Modal
       title={request.title}
-      onClose={onClose}
+      onClose={closeCommandDialog}
       size="wide"
-      closeDisabled={busy}
+      closeDisabled={busy && (!u1CommandType || shellState.phase === "CONFIRMING")}
       footer={
         <>
-          <button className="button button-secondary" type="button" onClick={onClose} disabled={busy}>{receipt ? "完成" : "取消"}</button>
-          {!preview && !receipt && !networkUncertain && (!businessFacing || Boolean(error)) ? <button className="button button-primary" type="button" onClick={() => void loadPreview()} disabled={busy || writeBlocked} data-testid="create-command-preview">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : null}{businessFacing ? "重新载入核对信息" : "生成服务端预览"}
+          <button
+            className="button button-secondary"
+            type="button"
+            onClick={u1CommandType && !networkUncertain && !recoveryOnlyRequest ? returnToEdit : () => onClose()}
+            disabled={busy && (!u1CommandType || shellState.phase === "CONFIRMING")}
+            data-testid={u1CommandType ? (networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
+          >
+            {u1CommandType
+              ? networkUncertain || recoveryOnlyRequest
+                ? "关闭"
+                : shellState.phase === "AUTO_PREVIEWING"
+                  ? "取消核对"
+                  : "返回修改"
+              : receipt ? "完成" : "取消"}
+          </button>
+          {!preview && !receipt && !networkUncertain && (!businessFacing || Boolean(error) || shellState.phase === "EDITING") ? <button className="button button-primary" type="button" onClick={() => void loadPreview()} disabled={busy || writeBlocked} data-testid="create-command-preview">
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : null}{shellState.phase === "EDITING" ? "继续核对" : businessFacing ? "重新载入核对信息" : "生成服务端预览"}
           </button> : null}
           {preview && previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className="button button-primary" type="button" onClick={regeneratePreview} disabled={busy || writeBlocked} data-testid="regenerate-command-preview">
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
@@ -1476,7 +2001,7 @@ export function CommandDialog({
         </>
       }
     >
-      <p className="command-description">{request.description}</p>
+      <p className="command-description" data-command-shell-state={u1CommandType ? shellState.phase : undefined}>{request.description}</p>
       <div aria-live="polite" className="sr-status">{busy ? "正在处理" : receipt ? (receipt.businessCommitted ? "操作已完成" : "操作未完成") : ""}</div>
       <InlineError
         error={fulfillment && error ? new Error(networkUncertain
@@ -1489,14 +2014,25 @@ export function CommandDialog({
         title={failedNotExecuted ? "操作未执行" : "操作处理失败"}
         hideTechnicalDetails={businessFacing}
       />
+      {u1CommandType && failedNotExecuted && !error ? <InlineError
+        error={new Error(notExecutedMessage)}
+        title="操作未执行"
+        hideTechnicalDetails
+      /> : null}
       <InlineError error={writeBlocked && !receipt ? new Error(writeBlockedReason) : undefined} title="写入已暂停" />
-      <InlineError
-        error={previewExpired && !receipt ? new Error(businessFacing ? "本次核对已失效，请重新载入核对信息。" : "Preview 已过期。库存或授权可能已经变化，请关闭后刷新并重新生成 Preview。") : undefined}
-        title={businessFacing ? "核对已失效" : "Preview 已过期"}
-      />
+      {previewExpired && !receipt ? <div ref={expiryErrorRef} tabIndex={-1} data-testid={u1CommandType ? "command-preview-expired" : undefined}>
+        <InlineError
+          error={new Error(businessFacing ? "本次核对已失效，请重新载入核对信息。" : "Preview 已过期。库存或授权可能已经变化，请关闭后刷新并重新生成 Preview。")}
+          title={businessFacing ? "核对已失效" : "Preview 已过期"}
+        />
+      </div> : null}
+      {u1CommandType && shellState.phase === "CONFIRMING" ? <div className="command-shell-progress" role="status" aria-live="polite" data-testid="command-shell-progress">
+        <LoaderCircle className="spin" aria-hidden="true" size={19} />
+        <div><strong>正在提交{commandShellLabel(u1CommandType)}</strong><p>请勿关闭页面或重复操作。</p></div>
+      </div> : null}
       {!preview && !receipt ? (
         <div className="command-pending">
-          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">
@@ -1506,9 +2042,24 @@ export function CommandDialog({
           </>}
         </div>
       ) : null}
+      {u1CommandType && fulfillment && shellState.phase === "EDITING" && !preview && !receipt ? <section className="reason-section" aria-labelledby="fulfillment-edit-reason-heading">
+        <h3 id="fulfillment-edit-reason-heading">修改办理原因</h3>
+        <div className="form-grid">
+          <label className="span-two">填写后会记录在本次变更历史中
+            <textarea value={reasonNote} onChange={(event) => setReasonNote(event.target.value)} required maxLength={1000} rows={2} data-testid="reason-note" />
+          </label>
+        </div>
+      </section> : null}
       {preview && !receipt ? (
         <>
-          <EffectSummary preview={preview} fulfillment={fulfillment} />
+          {u1CommandType ? <h3 className="command-shell-review-heading" ref={reviewHeadingRef} tabIndex={-1} data-testid="command-review-heading">请核对{commandShellLabel(u1CommandType)}</h3> : null}
+          <EffectSummary
+            preview={preview}
+            fulfillment={fulfillment}
+            commandTitle={request.title}
+            {...(request.initialReason?.note ? { reasonNote: request.initialReason.note } : {})}
+            {...(u1CommandType ? { businessCommand: u1CommandType } : {})}
+          />
           {!businessFacing ? <section className="reason-section" aria-labelledby="reason-heading">
             <h3 id="reason-heading">确认原因</h3>
             <div className="form-grid form-grid-two">
@@ -1534,10 +2085,10 @@ export function CommandDialog({
           data-command-state="duplicate-returned-original-receipt"
         >
           <strong>{businessFacing ? "已找到原操作结果" : "已返回原 Receipt"}</strong>
-          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
+          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
         </div>
       ) : null}
-      {receipt ? <ReceiptPanel
+      {receipt && !u1CommandType ? <ReceiptPanel
         receipt={receipt}
         onNavigateToResource={onClose}
         memberStay={memberLodging}
@@ -1546,9 +2097,9 @@ export function CommandDialog({
       /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
-          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
+          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : u1CommandType ? "系统只查询原操作使用的幂等身份，不会重复提交。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recover()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : "查询命令结果"}
+            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : u1CommandType ? "查询原操作结果" : "查询命令结果"}
           </button>
         </div>
       ) : null}

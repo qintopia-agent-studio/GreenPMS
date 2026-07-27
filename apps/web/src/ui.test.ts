@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { businessStatusLabel, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, lodgingReceiptCopy, occupantSummaryItems, receiptTransactionReferenceLabel } from "./ui.tsx";
+import { businessStatusLabel, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, receiptExecutionSemanticsAreCoherent, receiptTransactionReferenceLabel, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
 describe("Fulfillment business presentation", () => {
   it("uses one Chinese lifecycle vocabulary without protocol or enum labels", () => {
@@ -116,5 +116,168 @@ describe("Occupant command summaries", () => {
       heading: "住宿订单未创建",
       description: "本次操作没有写入住宿订单。"
     });
+  });
+});
+
+describe("Committed command projection refresh", () => {
+  it("keeps a known committed result terminal when the page refresh callback fails", async () => {
+    const committedReceipt = {
+      receiptId: "receipt_committed",
+      commandId: "command_committed",
+      executionStatus: "EXECUTED" as const,
+      businessCommitted: true,
+      correlationId: "correlation_committed",
+      result: { maintenanceLockId: "lock_committed" },
+      resourceRefs: ["lock_committed"],
+      factRefs: [],
+      committedAt: "2026-07-27T10:00:00.000Z"
+    };
+    const notices: Array<{ message: string; receiptId: string }> = [];
+
+    const outcome = await notifyKnownCommittedCommand({
+      commandType: "LOCK_MAINTENANCE",
+      receipt: committedReceipt,
+      onCommitted: () => {
+        throw new Error("projection refresh failed");
+      },
+      onBusinessSuccess: (message, receipt) => notices.push({ message, receiptId: receipt.receiptId })
+    });
+
+    expect(outcome).toBe("REFRESH_FAILED");
+    expect(notices).toEqual([{
+      message: "设置维修锁房已完成，但页面刷新失败。请点击页面上的刷新按钮查看最新结果。",
+      receiptId: committedReceipt.receiptId
+    }]);
+    expect(notices[0]?.message).not.toMatch(/未写入|结果未知|重新提交/);
+  });
+});
+
+describe("U1 confirmation evidence", () => {
+  const money = (minorUnits: number) => ({ minorUnits, currency: "CNY" });
+
+  it("fails closed for incomplete maintenance and fulfillment effects", () => {
+    expect(u1PreviewHasBusinessEvidence("LOCK_MAINTENANCE", {
+      inventoryUnit: { code: "101", name: "四人间" },
+      arrivalDate: "2026-07-27",
+      departureDate: "2026-07-28",
+      reason: "维修"
+    })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("LOCK_MAINTENANCE", {
+      arrivalDate: "2026-07-27",
+      departureDate: "2026-07-28",
+      reason: "维修"
+    })).toBe(false);
+    const releaseEffect = {
+      maintenanceLockId: "maintenance_lock_1",
+      inventoryUnitId: "inventory_unit_1",
+      arrivalDate: "2026-07-27",
+      departureDate: "2026-07-28"
+    };
+    const releaseInput = { maintenanceLockId: "maintenance_lock_1" };
+    expect(u1PreviewHasBusinessEvidence("RELEASE_MAINTENANCE", releaseEffect, releaseInput)).toBe(true);
+    for (const key of Object.keys(releaseEffect)) {
+      expect(u1PreviewHasBusinessEvidence("RELEASE_MAINTENANCE", { ...releaseEffect, [key]: undefined }, releaseInput), key).toBe(false);
+    }
+    expect(u1PreviewHasBusinessEvidence("RELEASE_MAINTENANCE", releaseEffect, { maintenanceLockId: "maintenance_lock_2" })).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("RELEASE_MAINTENANCE", { ...releaseEffect, departureDate: releaseEffect.arrivalDate }, releaseInput)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("RELEASE_MAINTENANCE", { ...releaseEffect, arrivalDate: "2026-02-30" }, releaseInput)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("CHECK_OUT", {
+      fromStatus: "CHECKED_IN",
+      toStatus: "CHECKED_OUT",
+      businessDate: "2026-07-27",
+      effectiveDate: "2026-07-27",
+      recordingMode: "ON_SCHEDULE"
+    })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("CHECK_OUT", {
+      fromStatus: "CHECKED_IN",
+      toStatus: "CHECKED_OUT"
+    })).toBe(false);
+  });
+
+  it("requires the authoritative reprice identity, pricing, and amount evidence", () => {
+    const effect = {
+      orderId: "order_1",
+      inventoryUnitId: "inventory_unit_1",
+      stayTimeline: [{ serviceDate: "2026-07-27", inventoryUnitId: "inventory_unit_1" }],
+      before: { currentContractAmount: money(13_000) },
+      policyBaseAmount: money(13_000),
+      targetCurrentContractAmount: money(11_000),
+      manualAdjustmentMinor: -2_000,
+      pricing: {
+        coverageSet: [],
+        cashLines: [{
+          lineKind: "NIGHT",
+          serviceDate: "2026-07-27",
+          inventoryUnitId: "inventory_unit_1",
+          description: "单人间住宿",
+          amount: money(13_000)
+        }],
+        cashRemainder: money(13_000),
+        currentContractAmount: money(11_000)
+      }
+    };
+    const input = { orderId: "order_1", targetCurrentContractAmountMinor: 11_000 };
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", effect, input)).toBe(true);
+    for (const key of Object.keys(effect)) {
+      expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...effect, [key]: undefined }, input), key).toBe(false);
+    }
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", effect, { ...input, orderId: "order_2" })).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", effect, { ...input, targetCurrentContractAmountMinor: 10_900 })).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", {
+      ...effect,
+      pricing: { ...effect.pricing, currentContractAmount: money(10_900) }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...effect, targetCurrentContractAmount: { minorUnits: 11_000, currency: "USD" } }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...effect, manualAdjustmentMinor: -1_900 }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...effect, stayTimeline: [] }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", {
+      ...effect,
+      stayTimeline: [{ serviceDate: "2026-07-27", inventoryUnitId: "inventory_unit_2" }]
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", {
+      ...effect,
+      stayTimeline: [
+        { serviceDate: "2026-07-27", inventoryUnitId: "inventory_unit_1" },
+        { serviceDate: "2026-07-29", inventoryUnitId: "inventory_unit_1" }
+      ]
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", {
+      ...effect,
+      targetCurrentContractAmount: money(11_050)
+    }, { ...input, targetCurrentContractAmountMinor: 11_050 })).toBe(false);
+    for (const key of Object.keys(effect.pricing)) {
+      expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", {
+        ...effect,
+        pricing: { ...effect.pricing, [key]: undefined }
+      }, input), `pricing.${key}`).toBe(false);
+    }
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", {
+      ...effect,
+      pricing: {
+        ...effect.pricing,
+        cashLines: [{ ...effect.pricing.cashLines[0], serviceDate: "2026-07-28" }]
+      }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", {
+      pricingDecision: {
+        policyBaseAmount: money(13_000),
+        targetCurrentContractAmount: money(11_000)
+      }
+    }, input)).toBe(false);
+  });
+
+  it("rejects contradictory Receipt execution semantics", () => {
+    const base = {
+      receiptId: "receipt_1",
+      commandId: "command_1",
+      correlationId: "correlation_1",
+      resourceRefs: [],
+      factRefs: []
+    };
+    expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "EXECUTED", businessCommitted: true })).toBe(true);
+    expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "NOT_EXECUTED", businessCommitted: false })).toBe(true);
+    expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "UNKNOWN", businessCommitted: false })).toBe(true);
+    expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "NOT_EXECUTED", businessCommitted: true })).toBe(false);
+    expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "EXECUTED", businessCommitted: false })).toBe(false);
   });
 });

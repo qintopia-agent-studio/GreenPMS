@@ -106,8 +106,19 @@ async function openMaintenanceCommand(page: Page, candidate: MaintenanceCandidat
   await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
   await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
   await page.getByLabel("维修原因").fill(businessReason);
-  await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
-  await expect(page.getByRole("dialog")).toBeVisible();
+  const responsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+      && new URL(response.url()).pathname === "/api/v1/command-previews"
+      && response.status() === 200
+  ));
+  await page.getByRole("button", { name: "继续核对", exact: true }).click();
+  const response = await responsePromise;
+  const body = await response.json() as PreviewResponseBody;
+  await expect(page.getByTestId("command-effect")).toBeVisible();
+  return {
+    preview: body.preview,
+    idempotencyKey: response.request().headers()["idempotency-key"] ?? ""
+  };
 }
 
 async function createPreview(page: Page, trigger: Locator) {
@@ -182,26 +193,6 @@ async function blockCountForReason(reason: string): Promise<number> {
   }
 }
 
-async function previewAndConfirm(page: Page, reasonNote: string, expectedEffect: readonly string[]) {
-  await page.getByTestId("create-command-preview").click();
-  const effect = page.getByTestId("command-effect");
-  await expect(effect).toBeVisible();
-  for (const text of expectedEffect) await expect(effect).toContainText(text);
-  await page.getByTestId("reason-note").fill(reasonNote);
-  await page.getByTestId("confirm-command").click();
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("业务写入已提交");
-  await expect(receipt).toContainText("EXECUTED");
-  return receipt;
-}
-
-async function finishReceipt(page: Page, waitForRefresh = false) {
-  const refresh = waitForRefresh ? roomStatusResponse(page) : undefined;
-  await page.getByRole("button", { name: "完成", exact: true }).click();
-  await expect(page.getByTestId("command-receipt")).toBeHidden();
-  if (refresh) await refresh;
-}
-
 test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration writes no lock", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only room-status Preview expiry coverage");
   test.setTimeout(90_000);
@@ -235,8 +226,7 @@ test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration wri
       });
     }, { times: 1 });
 
-    await openMaintenanceCommand(page, candidate, businessReason);
-    const first = await createPreview(page, page.getByTestId("create-command-preview"));
+    const first = await openMaintenanceCommand(page, candidate, businessReason);
     expect(first.preview.previewId).toMatch(/^preview_/);
     expect(first.idempotencyKey).toMatch(/^web-preview-lock_maintenance-/);
     expect(first.preview.effect).toMatchObject({
@@ -246,9 +236,11 @@ test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration wri
       reason: businessReason
     });
     await expect(page.getByTestId("command-effect")).toContainText(businessReason);
-    await page.getByTestId("reason-note").fill("An expired room-status Preview must never place a Block");
+    await expect(page.getByTestId("command-review-heading")).toBeFocused();
+    await expect(page.getByTestId("reason-note")).toHaveCount(0);
 
-    await expect(page.getByRole("alert").filter({ hasText: "Preview 已过期" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("alert").filter({ hasText: "本次核对已失效" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("command-preview-expired")).toBeFocused();
     await expect(page.getByTestId("confirm-command")).toHaveCount(0);
     const regenerate = page.getByTestId("regenerate-command-preview");
     await expect(regenerate).toBeVisible();
@@ -308,7 +300,7 @@ test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration wri
     expect(previews.find((preview) => preview.id === second.preview.previewId)).toMatchObject({ status: "OPEN", used_at: null });
     expect(await blockCountForReason(businessReason)).toBe(0);
 
-    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await page.getByRole("button", { name: "返回修改", exact: true }).click();
   } finally {
     await db.destroy();
   }
@@ -330,10 +322,9 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
       .where("reason", "=", businessReason)
       .execute()).toHaveLength(0);
 
-    await openMaintenanceCommand(page, candidate, businessReason);
-    const prepared = await createPreview(page, page.getByTestId("create-command-preview"));
+    const prepared = await openMaintenanceCommand(page, candidate, businessReason);
     await expect(page.getByTestId("command-effect")).toContainText(businessReason);
-    await page.getByTestId("reason-note").fill("Recover the committed LOCK_MAINTENANCE command without retrying it");
+    await expect(page.getByTestId("reason-note")).toHaveCount(0);
 
     let originalConfirmationKey = "";
     let confirmPostCount = 0;
@@ -349,7 +340,7 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     }, { times: 1 });
 
     await page.getByTestId("confirm-command").click();
-    await expect(page.getByText("执行状态需要恢复查询", { exact: true })).toBeVisible();
+    await expect(page.getByText("设置维修锁房结果需要查询", { exact: true })).toBeVisible();
     await expect(page.getByTestId("confirm-command")).toHaveCount(0);
     await expect(page.getByTestId("regenerate-command-preview")).toHaveCount(0);
     expect(originalConfirmationKey).toMatch(/^web-confirm-lock_maintenance-/);
@@ -364,18 +355,17 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
       targetRefs: [`inventoryUnitId=${candidate.unitId}`]
     });
 
-    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await page.getByTestId("command-close").click();
     let recovery = page.getByTestId("inventory-command-recovery");
-    await expect(recovery).toContainText("LOCK_MAINTENANCE");
-    await expect(recovery).toContainText("UNKNOWN");
-    await expect(recovery).toContainText(originalConfirmationKey);
+    await expect(recovery).toContainText("设置维修锁房结果需要恢复查询");
+    await expect(recovery).not.toContainText(originalConfirmationKey);
 
     await page.reload();
     await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
     await expect(page.getByRole("grid")).toBeVisible();
     recovery = page.getByTestId("inventory-command-recovery");
-    await expect(recovery).toContainText("UNKNOWN");
-    await expect(recovery).toContainText(originalConfirmationKey);
+    await expect(recovery).toContainText("设置维修锁房结果需要恢复查询");
+    await expect(recovery).not.toContainText(originalConfirmationKey);
     expect(await readCommandRecoveries(page)).toEqual([expect.objectContaining({
       state: "UNKNOWN",
       commandType: "LOCK_MAINTENANCE",
@@ -383,6 +373,11 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     })]);
     expect(confirmPostCount).toBe(1);
 
+    const preservedDraftDrawer = page.locator("dialog.modal-drawer");
+    if (await preservedDraftDrawer.isVisible()) {
+      await preservedDraftDrawer.getByRole("button", { name: "关闭", exact: true }).click();
+      await expect(preservedDraftDrawer).toBeHidden();
+    }
     await recovery.getByTestId("inventory-command-recovery-open").click();
     let recoveryQueryCount = 0;
     page.on("request", (request) => {
@@ -401,7 +396,7 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
         && url.searchParams.get("commandType") === "LOCK_MAINTENANCE"
         && url.searchParams.get("idempotencyKey") === originalConfirmationKey;
     });
-    await page.getByRole("button", { name: "查询命令结果", exact: true }).click();
+    await page.getByRole("button", { name: "查询原操作结果", exact: true }).click();
     const recoveryResponse = await recoveryResponsePromise;
     expect(recoveryResponse.status()).toBe(200);
     const recoveredBody = await recoveryResponse.json() as ReceiptResponseBody;
@@ -413,24 +408,12 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     expect(recoveredBody.resourceRefs[0]).toMatch(/^maint_/);
     expect(recoveryQueryCount).toBe(1);
 
-    const recoveredReceipt = page.getByTestId("command-receipt");
-    const recoveredOriginal = page.getByTestId("command-recovered-original");
-    await expect(recoveredOriginal).toHaveAttribute("data-command-state", "duplicate-returned-original-receipt");
-    await expect(recoveredOriginal).toContainText("没有重复执行业务命令");
-    await expect(recoveredReceipt).toContainText("业务写入已提交");
-    await expect(recoveredReceipt).toContainText("EXECUTED");
-    const receiptIdCode = recoveredReceipt.locator("code").filter({ hasText: /^receipt_/ });
-    const commandIdCode = recoveredReceipt.locator("code").filter({ hasText: /^command_/ });
-    const blockIdCode = recoveredReceipt.locator("code").filter({ hasText: /^maint_/ });
-    await expect(receiptIdCode).toHaveCount(1);
-    await expect(commandIdCode).toHaveCount(1);
-    await expect(blockIdCode).toHaveCount(1);
-    const receiptId = (await receiptIdCode.textContent())?.trim();
-    const commandId = (await commandIdCode.textContent())?.trim();
-    const blockId = (await blockIdCode.textContent())?.trim();
-    expect(receiptId).toBe(recoveredBody.receiptId);
-    expect(commandId).toBe(recoveredBody.commandId);
-    expect(blockId).toBe(recoveredBody.resourceRefs[0]);
+    await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+    await expect(page.getByTestId("command-result-notice")).toContainText("维修锁房已设置，房态已刷新");
+    await expect(page.getByTestId("command-receipt")).toBeHidden();
+    const receiptId = recoveredBody.receiptId;
+    const commandId = recoveredBody.commandId;
+    const blockId = recoveredBody.resourceRefs[0];
     expect(blockId).toMatch(/^maint_/);
     expect(confirmPostCount).toBe(1);
 
@@ -478,7 +461,6 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
       .execute();
     expect(activeClaims).toHaveLength(1);
 
-    await finishReceipt(page, true);
     await expect(page.getByTestId("inventory-command-recovery")).toBeHidden();
     expect(await page.evaluate(() => Array.from(
       { length: sessionStorage.length },
@@ -487,21 +469,9 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
 
     const interval = page.locator(`[data-room-status-row="${candidate.unitId}"] .room-status-interval-maintenance`);
     await expect(interval).toHaveCount(1);
-    await interval.click();
-    await expect(page.locator("section.room-status-context-section").filter({
-      has: page.getByRole("heading", { name: "来源事实" })
-    })).toContainText(businessReason);
-    await page.locator(".room-status-context-actions")
-      .getByRole("button", { name: "释放维修锁房", exact: true })
-      .click();
-    const releaseReceipt = await previewAndConfirm(page, "Release the recovered E2E maintenance lock", [
-      blockId!,
-      candidate.arrivalDate,
-      candidate.departureDate,
-      "RELEASE_MAINTENANCE"
-    ]);
-    await expect(releaseReceipt.locator("code").filter({ hasText: blockId! })).toHaveCount(1);
-    await finishReceipt(page, true);
+    await releaseMaintenanceForCleanup(page, blockId!);
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
     await expect(interval).toHaveCount(0);
 
     const released = await db.selectFrom("maintenance_locks")

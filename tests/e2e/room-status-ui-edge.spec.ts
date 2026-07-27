@@ -129,22 +129,20 @@ async function expectFullyHitTestable(target: Locator, description: string): Pro
   }
 }
 
-async function previewAndConfirm(page: Page, confirmationReason: string): Promise<Locator> {
-  await page.getByTestId("create-command-preview").click();
-  await expect(page.getByTestId("command-effect")).toBeVisible();
-  await page.getByTestId("reason-note").fill(confirmationReason);
+async function previewAndConfirm(page: Page): Promise<{ resourceRefs: string[] }> {
+  await expect(page.getByTestId("command-effect")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId("reason-note")).toHaveCount(0);
   const refreshedPromise = roomStatusResponse(page);
+  const confirmedPromise = page.waitForResponse((response) => response.request().method() === "POST"
+    && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(new URL(response.url()).pathname)
+    && response.status() === 200);
   await page.getByTestId("confirm-command").click();
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("业务写入已提交");
-  await expect(receipt).toContainText("EXECUTED");
+  const receipt = await (await confirmedPromise).json() as { resourceRefs: string[] };
   await refreshedPromise;
-  return receipt;
-}
-
-async function finishReceipt(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
   await expect(page.getByTestId("command-receipt")).toBeHidden();
+  await expect(page.getByTestId("command-result-notice")).toBeVisible();
+  return receipt;
 }
 
 function findFiveNightDragCandidate(board: RoomStatusBoardDto) {
@@ -345,7 +343,7 @@ test("a short 200 percent reflow keeps critical controls reachable outside inten
   test.skip(testInfo.project.name !== "desktop", "single dedicated 2x desktop context for 200 percent zoom");
   test.setTimeout(90_000);
   const zoomContext = await browser.newContext({
-    baseURL: process.env.ROOM_STATUS_E2E_BASE_URL ?? "http://127.0.0.1:4173",
+    baseURL: process.env.ROOM_STATUS_E2E_BASE_URL ?? `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? "4173"}`,
     viewport: { width: 720, height: 450 },
     screen: { width: 1440, height: 900 },
     deviceScaleFactor: 2,
@@ -428,10 +426,9 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
     await page.getByLabel("退房日期", { exact: true }).fill(candidate.blockEnd);
     await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
     await page.getByLabel("维修原因").fill(businessReason);
-    await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
-    const placementReceipt = await previewAndConfirm(page, "Create a typed Block for interval-overlay drag evidence");
-    await expect(placementReceipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
-    await finishReceipt(page);
+    await page.getByRole("button", { name: "继续核对", exact: true }).click();
+    const placementReceipt = await previewAndConfirm(page);
+    expect(placementReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
 
     const interval = row.locator(".room-status-interval-maintenance");
     const startCell = roomCell(page, candidate.unitId, candidate.dragStart);
@@ -477,9 +474,8 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
     if (await interval.count() === 1) {
       await interval.click();
       await page.locator(".room-status-context-actions").getByRole("button", { name: "释放维修锁房", exact: true }).click();
-      const releaseReceipt = await previewAndConfirm(page, "Release the typed Block after interval-overlay drag evidence");
-      await expect(releaseReceipt.locator("code").filter({ hasText: /^maint_/ })).toHaveCount(1);
-      await finishReceipt(page);
+      const releaseReceipt = await previewAndConfirm(page);
+      expect(releaseReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
       await expect(interval).toHaveCount(0);
     }
   }
@@ -513,7 +509,7 @@ test("Block drafts cannot leave the server-validated room-status selection", asy
   await from.fill(addDays(candidate.arrivalDate, -1));
   await dialog.getByLabel("维修原因").fill(`Out-of-window draft ${randomUUID()}`);
   expect(await from.evaluate((element: HTMLInputElement) => element.validity.valid)).toBe(false);
-  await dialog.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续核对", exact: true }).click();
   await expect(dialog).toBeVisible();
   expect(previewRequestCount).toBe(0);
 });
@@ -533,7 +529,7 @@ test("a maintenance draft survives stale query conditions at 320px and resumes a
   let dialog = page.getByRole("dialog", { name: /^维修锁房 ·/ });
   const businessReason = `Preserved at 320px ${randomUUID()}`;
   const reason = dialog.getByLabel("维修原因");
-  const submit = dialog.getByRole("button", { name: "继续生成 Preview", exact: true });
+  const submit = dialog.getByRole("button", { name: "继续核对", exact: true });
   await reason.fill(businessReason);
   await expect(submit).toBeEnabled();
 
@@ -639,14 +635,13 @@ test("a maintenance draft survives stale query conditions at 320px and resumes a
     expect(await submit.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
     await expectFullyHitTestable(submit, "320px resumed Preview action");
     await page.keyboard.press("Enter");
-    const commandDialog = page.getByRole("dialog").filter({ has: page.getByTestId("create-command-preview") });
+    const commandDialog = page.locator("dialog.modal-wide");
     await expect(commandDialog).toBeVisible();
-    const previewButton = page.getByTestId("create-command-preview");
-    await tabTo(page, previewButton, "320px server Preview action");
-    expect(await previewButton.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
-    await expectFullyHitTestable(previewButton, "320px server Preview action");
-    await page.keyboard.press("Enter");
-    await expect(page.getByTestId("command-effect")).toBeVisible();
+    await expect(page.getByTestId("command-effect")).toBeVisible({ timeout: 15_000 });
+    const confirmButton = page.getByTestId("confirm-command");
+    await tabTo(page, confirmButton, "320px business confirmation action");
+    expect(await confirmButton.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+    await expectFullyHitTestable(confirmButton, "320px business confirmation action");
     await page.screenshot({ path: testInfo.outputPath("server-preview-at-320px.png") });
     await page.keyboard.press("Escape");
     await expect(commandDialog).toBeHidden();
