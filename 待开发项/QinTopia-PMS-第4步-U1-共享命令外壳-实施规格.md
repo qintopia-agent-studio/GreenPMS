@@ -2,7 +2,7 @@
 title: 'QinTopia PMS 第 4 步 U1 共享命令外壳'
 type: 'feature'
 created: '2026-07-27'
-status: 'awaiting_user_acceptance'
+status: 'accepted'
 review_loop_iteration: 1
 baseline_commit: '0c1aed475a5abe33e136b8390005f6b4382c4505'
 context:
@@ -66,6 +66,7 @@ context:
 
 ## Spec Change Log
 
+- 2026-07-28：用户逐项确认 U1 的 5 项人工验收均为 `OK`，U1 转为 `accepted`。单层入住/退房核对、可选办理备注、核对页自然 freshness 过期、调价默认当前金额、房态内联退房及默认审计备注均通过；下一切片为 U2，正式 4.2 仍未开始。
 - 2026-07-27：三项人工验收问题及盲审竞态已修复，状态转为 `awaiting_user_acceptance`。入住、退房使用单层核对与可选备注，房态桌面/手机均在当前页办理，调价默认当前金额；自然 freshness 过期不打断已开始核对，但 revision、查询范围、门店、账号、订单、Stay、权限或投影状态变化继续失败关闭。未知结果恢复会保留原订单目标或关闭无关订单上下文。U2 与正式 4.2 未开始。
 - 2026-07-27：U1 人工验收发现三项交互问题，状态退回 `in_progress`：入住/退房核对页与“返回修改”页面重复，且正常履约不应强制填写原因；调整金额输入框必须默认为当前订单金额；从房态办理退房应留在当前窗口，不跳转完整订单页。本轮只修复 U1 Web 交互与回归，不改 contracts、API、领域、数据库或履约/计价规则，不启动 U2 或正式 4.2。
 
