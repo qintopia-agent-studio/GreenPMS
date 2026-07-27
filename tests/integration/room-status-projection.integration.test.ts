@@ -949,6 +949,23 @@ describe("PostgreSQL room-status projection", () => {
       sourceEndDate: tomorrow
     });
     expect(taskForOrder(movedOrderId)?.actualInventoryUnitId).not.toBe(rooms[3]!.id);
+    const movedStayId = moved.result!.stayId as string;
+    const movedTimeline = await board({ arrivalDate: yesterday, departureDate: tomorrow, pageSize: 200 });
+    const movedIntervalIn = (unitId: string) => unitIn(movedTimeline, unitId).intervals.find((interval) => (
+      interval.references.some((reference) => reference.type === "ORDER" && reference.id === movedOrderId)
+    ));
+    expect(movedIntervalIn(rooms[3]!.id)).toMatchObject({
+      actualInventoryUnitId: rooms[3]!.id,
+      startDate: yesterday,
+      endDate: businessDate,
+      references: expect.arrayContaining([expect.objectContaining({ type: "STAY", id: movedStayId })])
+    });
+    expect(movedIntervalIn(rooms[4]!.id)).toMatchObject({
+      actualInventoryUnitId: rooms[4]!.id,
+      startDate: businessDate,
+      endDate: tomorrow,
+      references: expect.arrayContaining([expect.objectContaining({ type: "STAY", id: movedStayId })])
+    });
     expect(taskForOrder(overdueArrivalOrderId)).toMatchObject({
       taskKind: "EXCEPTION",
       businessDate,

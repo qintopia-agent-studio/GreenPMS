@@ -4,16 +4,21 @@ import {
   DEFAULT_ROOM_STATUS_FILTERS,
   MAX_VISIBLE_DAYS,
   createRoomStatusViewState,
+  createRoomStatusOrderReturnState,
   dateWindowStartForFocus,
   filterRoomStatusRooms,
+  hasRoomStatusOrderReturnEnvelope,
   intervalsRenderedOnRoomStatusGrid,
   moveRoomStatusFocus,
   parseRoomStatusRestoration,
+  parseRoomStatusOrderReturnTarget,
   reconcileRoomStatusRestoration,
+  resolveRoomStatusOrderReturnTarget,
   roomStatusAutoVisibleDays,
   roomStatusFactFingerprint,
   roomStatusCellBelongsToStay,
   roomStatusOrderIdentityForDate,
+  roomStatusOrderIdentityForReturnTarget,
   roomStatusViewReducer,
   selectionFromCells,
   selectionFromInputs,
@@ -187,6 +192,292 @@ describe("RoomStatus stable order selection", () => {
       stayId: "stay_bed",
       unitId: "unit_room_101"
     });
+  });
+
+  it("resolves the same Stay from either side of a room move without merging a same-nickname order", () => {
+    const movedOrderReference = { ...orderReference, id: "order_moved", href: "/orders/order_moved" };
+    const movedStayReference = { ...stayReference, id: "stay_moved" };
+    const fromRoom = unit({
+      id: "unit_room_b01",
+      roomId: "unit_room_b01",
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({
+        id: "interval_moved_from",
+        displayInventoryUnitId: "unit_room_b01",
+        actualInventoryUnitId: "unit_room_b01",
+        roomId: "unit_room_b01",
+        startDate: "2026-07-20",
+        endDate: "2026-07-22",
+        sourceStartDate: "2026-07-20",
+        sourceEndDate: "2026-07-25",
+        primaryOccupantLabel: "青禾",
+        references: [movedOrderReference, movedStayReference]
+      })]
+    });
+    const toRoom = unit({
+      id: "unit_room_b02",
+      roomId: "unit_room_b02",
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({
+        id: "interval_moved_to",
+        displayInventoryUnitId: "unit_room_b02",
+        actualInventoryUnitId: "unit_room_b02",
+        roomId: "unit_room_b02",
+        startDate: "2026-07-22",
+        endDate: "2026-07-25",
+        sourceStartDate: "2026-07-20",
+        sourceEndDate: "2026-07-25",
+        primaryOccupantLabel: "青禾",
+        references: [movedOrderReference, movedStayReference]
+      })]
+    });
+    const sameNicknameOtherStay = unit({
+      id: "unit_room_b03",
+      roomId: "unit_room_b03",
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({
+        id: "interval_same_nickname_other_stay",
+        displayInventoryUnitId: "unit_room_b03",
+        actualInventoryUnitId: "unit_room_b03",
+        roomId: "unit_room_b03",
+        startDate: "2026-07-22",
+        endDate: "2026-07-25",
+        sourceStartDate: "2026-07-22",
+        sourceEndDate: "2026-07-25",
+        primaryOccupantLabel: "青禾",
+        references: [
+          { ...orderReference, id: "order_other", href: "/orders/order_other" },
+          { ...stayReference, id: "stay_other" }
+        ]
+      })]
+    });
+
+    expect(roomStatusOrderIdentityForDate(fromRoom, "2026-07-21")).toMatchObject({
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      unitId: "unit_room_b01"
+    });
+    expect(roomStatusOrderIdentityForDate(toRoom, "2026-07-22")).toMatchObject({
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      unitId: "unit_room_b02"
+    });
+    expect(roomStatusCellBelongsToStay(fromRoom, "2026-07-21", "stay_moved")).toBe(true);
+    expect(roomStatusCellBelongsToStay(toRoom, "2026-07-22", "stay_moved")).toBe(true);
+    expect(roomStatusCellBelongsToStay(fromRoom, "2026-07-22", "stay_moved")).toBe(false);
+    expect(roomStatusCellBelongsToStay(sameNicknameOtherStay, "2026-07-22", "stay_moved")).toBe(false);
+
+    const returnState = createRoomStatusOrderReturnState("property_qintopia", {
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      arrivalDate: "2026-07-20"
+    }, "2026-07-22");
+    const returnTarget = parseRoomStatusOrderReturnTarget(returnState);
+    expect(returnTarget).toMatchObject({ orderId: "order_moved", stayId: "stay_moved", triggerDate: "2026-07-22" });
+    expect(roomStatusOrderIdentityForReturnTarget([fromRoom, toRoom, sameNicknameOtherStay], returnTarget!)).toMatchObject({
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      unitId: "unit_room_b02"
+    });
+    const parentAggregateCopy = unit({
+      id: "unit_parent_b02",
+      roomId: "unit_parent_b02",
+      salesMode: "BED_SPLIT",
+      intervals: [lodgingInterval({
+        id: "interval_moved_to_parent_copy",
+        displayInventoryUnitId: "unit_parent_b02",
+        actualInventoryUnitId: "unit_room_b02",
+        roomId: "unit_parent_b02",
+        startDate: "2026-07-22",
+        endDate: "2026-07-25",
+        sourceStartDate: "2026-07-20",
+        sourceEndDate: "2026-07-25",
+        primaryOccupantLabel: "青禾",
+        references: [movedOrderReference, movedStayReference]
+      })]
+    });
+    expect(roomStatusOrderIdentityForReturnTarget(
+      [fromRoom, parentAggregateCopy, toRoom, sameNicknameOtherStay],
+      returnTarget!
+    )).toMatchObject({
+      intervalId: "interval_moved_to",
+      unitId: "unit_room_b02"
+    });
+    expect(roomStatusOrderIdentityForReturnTarget([fromRoom, toRoom], {
+      ...returnTarget!,
+      triggerDate: "2026-07-19"
+    })).toBeNull();
+    expect(resolveRoomStatusOrderReturnTarget([fromRoom, toRoom], {
+      ...returnTarget!,
+      triggerDate: "2026-07-19"
+    })).toEqual({ kind: "NOT_FOUND" });
+  });
+
+  it("strictly parses a property-scoped order return target", () => {
+    const returnState = createRoomStatusOrderReturnState("property_qintopia", {
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      arrivalDate: "2026-07-20"
+    }, "2026-07-22");
+    expect(parseRoomStatusOrderReturnTarget(returnState)).toEqual({
+      version: 1,
+      propertyId: "property_qintopia",
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      triggerDate: "2026-07-22"
+    });
+    expect(hasRoomStatusOrderReturnEnvelope(returnState)).toBe(true);
+    expect(hasRoomStatusOrderReturnEnvelope({ fromRoomStatus: true })).toBe(false);
+
+    const invalidStates: unknown[] = [
+      null,
+      [],
+      { fromRoomStatus: true },
+      { ...returnState, unexpected: true },
+      { ...returnState, fromRoomStatus: false },
+      { ...returnState, roomStatusOrderReturn: { ...returnState.roomStatusOrderReturn, unexpected: true } },
+      { ...returnState, roomStatusOrderReturn: { ...returnState.roomStatusOrderReturn, version: 2 } },
+      { ...returnState, roomStatusOrderReturn: { ...returnState.roomStatusOrderReturn, orderId: " order_moved" } },
+      { ...returnState, roomStatusOrderReturn: { ...returnState.roomStatusOrderReturn, stayId: "" } },
+      { ...returnState, roomStatusOrderReturn: { ...returnState.roomStatusOrderReturn, triggerDate: "2026-02-30" } }
+    ];
+    for (const state of invalidStates) {
+      expect(parseRoomStatusOrderReturnTarget(state)).toBeNull();
+    }
+    expect(hasRoomStatusOrderReturnEnvelope(invalidStates[3])).toBe(true);
+    expect(parseRoomStatusOrderReturnTarget({
+      ...returnState,
+      roomStatusOrderReturn: { ...returnState.roomStatusOrderReturn, propertyId: " property_other" }
+    })).toBeNull();
+    expect(parseRoomStatusOrderReturnTarget({
+      ...returnState,
+      roomStatusOrderReturn: { ...returnState.roomStatusOrderReturn, propertyId: "property_other" }
+    })).toMatchObject({ propertyId: "property_other" });
+  });
+
+  it("fails closed when more than one matching Stay segment covers the return trigger date", () => {
+    const movedOrderReference = { ...orderReference, id: "order_moved", href: "/orders/order_moved" };
+    const movedStayReference = { ...stayReference, id: "stay_moved" };
+    const matchingRoom = (unitId: string, intervalId: string) => unit({
+      id: unitId,
+      roomId: unitId,
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({
+        id: intervalId,
+        displayInventoryUnitId: unitId,
+        actualInventoryUnitId: unitId,
+        roomId: unitId,
+        startDate: "2026-07-22",
+        endDate: "2026-07-25",
+        references: [movedOrderReference, movedStayReference]
+      })]
+    });
+
+    expect(roomStatusOrderIdentityForReturnTarget([
+      matchingRoom("unit_room_b01", "interval_moved_b01"),
+      matchingRoom("unit_room_b02", "interval_moved_b02")
+    ], {
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      triggerDate: "2026-07-22"
+    })).toBeNull();
+    expect(resolveRoomStatusOrderReturnTarget([
+      matchingRoom("unit_room_b01", "interval_moved_b01"),
+      matchingRoom("unit_room_b02", "interval_moved_b02")
+    ], {
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      triggerDate: "2026-07-22"
+    })).toEqual({ kind: "AMBIGUOUS" });
+  });
+
+  it("does not collapse distinct direct intervals at the same placement", () => {
+    const movedOrderReference = { ...orderReference, id: "order_moved", href: "/orders/order_moved" };
+    const movedStayReference = { ...stayReference, id: "stay_moved" };
+    const directRoom = unit({
+      id: "unit_room_b01",
+      roomId: "unit_room_b01",
+      salesMode: "WHOLE_ROOM",
+      intervals: ["interval_direct_first", "interval_direct_second"].map((id) => lodgingInterval({
+        id,
+        displayInventoryUnitId: "unit_room_b01",
+        actualInventoryUnitId: "unit_room_b01",
+        roomId: "unit_room_b01",
+        startDate: "2026-07-22",
+        endDate: "2026-07-25",
+        references: [movedOrderReference, movedStayReference]
+      }))
+    });
+
+    expect(resolveRoomStatusOrderReturnTarget([directRoom], {
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      triggerDate: "2026-07-22"
+    })).toEqual({ kind: "AMBIGUOUS" });
+  });
+
+  it("prefers the canonical child interval over its parent-room display copy", () => {
+    const bedOrderReference = { ...orderReference, id: "order_bed", href: "/orders/order_bed" };
+    const bedStayReference = { ...stayReference, id: "stay_bed" };
+    const parent = unit({
+      id: "unit_room_101",
+      roomId: "unit_room_101",
+      salesMode: "BED_SPLIT",
+      intervals: [lodgingInterval({
+        id: "interval_bed_parent_display",
+        displayInventoryUnitId: "unit_room_101",
+        actualInventoryUnitId: "unit_room_101_bed_a",
+        roomId: "unit_room_101",
+        startDate: "2026-07-20",
+        endDate: "2026-07-25",
+        references: [bedOrderReference, bedStayReference]
+      })]
+    });
+    const bed = unit({
+      id: "unit_room_101_bed_a",
+      roomId: "unit_room_101",
+      salesMode: "BED_SPLIT",
+      intervals: [lodgingInterval({
+        id: "interval_bed_canonical",
+        displayInventoryUnitId: "unit_room_101_bed_a",
+        actualInventoryUnitId: "unit_room_101_bed_a",
+        roomId: "unit_room_101",
+        startDate: "2026-07-20",
+        endDate: "2026-07-25",
+        references: [bedOrderReference, bedStayReference]
+      })]
+    });
+
+    expect(roomStatusOrderIdentityForReturnTarget([parent, bed], {
+      orderId: "order_bed",
+      stayId: "stay_bed",
+      triggerDate: "2026-07-22"
+    })).toMatchObject({
+      intervalId: "interval_bed_canonical",
+      unitId: "unit_room_101_bed_a"
+    });
+    expect(roomStatusCellBelongsToStay(parent, "2026-07-22", "stay_bed")).toBe(false);
+    expect(roomStatusCellBelongsToStay(bed, "2026-07-22", "stay_bed")).toBe(true);
+  });
+
+  it("does not highlight a damaged interval with an ambiguous stable identity", () => {
+    const damaged = unit({
+      id: "unit_room_ambiguous",
+      roomId: "unit_room_ambiguous",
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({
+        actualInventoryUnitId: "unit_room_ambiguous",
+        displayInventoryUnitId: "unit_room_ambiguous",
+        references: [
+          { ...orderReference, id: "order_first", href: "/orders/order_first" },
+          { ...orderReference, id: "order_second", href: "/orders/order_second" },
+          { ...stayReference, id: "stay_ambiguous" }
+        ]
+      })]
+    });
+
+    expect(roomStatusOrderIdentityForDate(damaged, "2026-07-20")).toBeNull();
+    expect(roomStatusCellBelongsToStay(damaged, "2026-07-20", "stay_ambiguous")).toBe(false);
   });
 
   it("fails closed when a concrete cell contains more than one stable order identity", () => {

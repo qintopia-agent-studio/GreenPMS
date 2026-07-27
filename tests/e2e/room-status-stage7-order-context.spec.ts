@@ -225,24 +225,24 @@ test("split-bed parent refuses to guess while each expanded bed opens its own or
   await expect(roomCell(page, fixture.splitBed.bedAId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
 });
 
-test("one Stay stays highlighted across extension, move, rows, and a clipped date window", async ({ page }, testInfo) => {
+test("selecting either side of a move highlights one Stay across rows and a clipped date window", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 stable Stay identity coverage");
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
   await showFixtureRange(page, { clipped: true });
 
   const visibleOldRoomDate = addDays(fixture.dates.arrivalDate, 1);
-  const context = await selectOccupiedCell(
+  const contextFromOriginalRoom = await selectOccupiedCell(
     page,
     fixture.movedStay.fromRoomId,
     visibleOldRoomDate,
     fixture.movedStay.orderId
   );
-  await expect(context).toContainText(`订单 ${fixture.movedStay.orderId}`);
-  await expect(context).toContainText("B01");
-  await expect(context).toContainText("B02");
-  await expect(context).toContainText(fixture.dates.arrivalDate);
-  await expect(context).toContainText(fixture.dates.departureDate);
+  await expect(contextFromOriginalRoom).toContainText(`订单 ${fixture.movedStay.orderId}`);
+  await expect(contextFromOriginalRoom).toContainText("B01");
+  await expect(contextFromOriginalRoom).toContainText("B02");
+  await expect(contextFromOriginalRoom).toContainText(fixture.dates.arrivalDate);
+  await expect(contextFromOriginalRoom).toContainText(fixture.dates.departureDate);
 
   await expect(roomCell(page, fixture.movedStay.fromRoomId, visibleOldRoomDate)).toHaveClass(/is-stay-selected/);
   for (let offset = 2; offset < 4; offset += 1) {
@@ -250,6 +250,81 @@ test("one Stay stays highlighted across extension, move, rows, and a clipped dat
       .toHaveClass(/is-stay-selected/);
   }
   await expect(roomCell(page, fixture.movedStay.fromRoomId, fixture.dates.moveDate)).not.toHaveClass(/is-stay-selected/);
+  await closeOrderContext(contextFromOriginalRoom);
+
+  const unrelatedOrder = fixture.adjacentSameNickname[0]!;
+  const unrelatedContext = await selectOccupiedCell(
+    page,
+    unrelatedOrder.roomId,
+    visibleOldRoomDate,
+    unrelatedOrder.orderId
+  );
+  await expect(roomCell(page, unrelatedOrder.roomId, visibleOldRoomDate)).toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, visibleOldRoomDate)).not.toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, fixture.movedStay.toRoomId, addDays(fixture.dates.arrivalDate, 2))).not.toHaveClass(/is-stay-selected/);
+  await closeOrderContext(unrelatedContext);
+
+  const visibleNewRoomDate = addDays(fixture.dates.arrivalDate, 3);
+  const contextFromNewRoom = await selectOccupiedCell(
+    page,
+    fixture.movedStay.toRoomId,
+    visibleNewRoomDate,
+    fixture.movedStay.orderId
+  );
+  await expect(contextFromNewRoom).toContainText(`订单 ${fixture.movedStay.orderId}`);
+  await expect(page.getByRole("heading", { name: `订单 ${fixture.movedStay.orderId}`, exact: true })).toHaveCount(1);
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, visibleOldRoomDate)).toHaveClass(/is-stay-selected/);
+  for (let offset = 2; offset < 4; offset += 1) {
+    await expect(roomCell(page, fixture.movedStay.toRoomId, addDays(fixture.dates.arrivalDate, offset)))
+      .toHaveClass(/is-stay-selected/);
+  }
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, fixture.dates.moveDate)).not.toHaveClass(/is-stay-selected/);
+});
+
+test("returning after moving the selected date restores the same Stay on its latest room", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7R return identity coverage");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  await showFixtureRange(page);
+
+  const filteredBoard = roomStatusResponse(page);
+  await page.getByLabel("搜索房间或床位", { exact: true }).fill("B02");
+  await filteredBoard;
+  await expect(roomRow(page, fixture.movedStay.fromRoomId)).toHaveCount(0);
+
+  const selectedDate = fixture.dates.moveDate;
+  const context = await selectOccupiedCell(
+    page,
+    fixture.movedStay.toRoomId,
+    selectedDate,
+    fixture.movedStay.orderId
+  );
+  await context.getByRole("button", { name: "换房", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "小满", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "换房", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "换房", exact: true })).toBeVisible();
+  await page.getByTestId("move-unit-id").selectOption(fixture.movedStay.fromRoomId);
+  await page.getByTestId("move-effective-date").fill(selectedDate);
+  await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
+  await page.getByTestId("create-command-preview").click();
+  await page.getByTestId("reason-note").fill("阶段 7R 返回房态选择回归");
+  await page.getByTestId("confirm-command").click();
+  const receipt = page.getByTestId("command-receipt");
+  await expect(receipt).toContainText("业务写入已提交");
+  await page.getByRole("button", { name: "完成", exact: true }).click();
+  await page.getByRole("link", { name: "返回房态", exact: true }).click();
+
+  const restoredContext = orderContext(page, fixture.movedStay.orderId);
+  await expect(restoredContext).toBeVisible();
+  await expect(page.getByLabel("搜索房间或床位", { exact: true })).toHaveValue("");
+  await expect(roomCell(page, fixture.movedStay.toRoomId, selectedDate)).not.toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, selectedDate)).toHaveClass(/is-stay-selected/);
+  await expect(roomCell(page, fixture.movedStay.fromRoomId, selectedDate)).toBeFocused();
+  for (const otherOrder of fixture.adjacentSameNickname) {
+    await expect(roomCell(page, otherOrder.roomId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
+    await expect(page.getByRole("heading", { name: `订单 ${otherOrder.orderId}`, exact: true })).toHaveCount(0);
+  }
 });
 
 test("READ order context keeps navigation but exposes no business write entry", async ({ page }, testInfo) => {

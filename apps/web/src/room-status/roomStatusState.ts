@@ -85,6 +85,29 @@ export interface RoomStatusOrderIdentity {
   departureDate: string;
 }
 
+export interface RoomStatusOrderReturnTarget {
+  version: 1;
+  propertyId: string;
+  orderId: string;
+  stayId: string;
+  triggerDate: string;
+}
+
+export interface RoomStatusOrderReturnState {
+  fromRoomStatus: true;
+  roomStatusOrderReturn: RoomStatusOrderReturnTarget;
+}
+
+export type RoomStatusOrderReturnResolution =
+  | { kind: "MATCH"; identity: RoomStatusOrderIdentity }
+  | { kind: "NOT_FOUND" }
+  | { kind: "AMBIGUOUS" };
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === allowedKeys.length && keys.every((key) => allowedKeys.includes(key));
+}
+
 function stableReferenceId(interval: RoomStatusIntervalDto, type: "ORDER" | "STAY"): string | null {
   const ids = [...new Set(interval.references.filter((reference) => reference.type === type).map((reference) => reference.id))];
   return ids.length === 1 ? ids[0]! : null;
@@ -120,18 +143,110 @@ export function roomStatusOrderIdentityForDate(
   return identities.size === 1 ? matches[0]! : null;
 }
 
+export function createRoomStatusOrderReturnState(
+  propertyId: string,
+  identity: Pick<RoomStatusOrderIdentity, "orderId" | "stayId" | "arrivalDate">,
+  triggerDate?: string
+): RoomStatusOrderReturnState {
+  return {
+    fromRoomStatus: true,
+    roomStatusOrderReturn: {
+      version: 1,
+      propertyId,
+      orderId: identity.orderId,
+      stayId: identity.stayId,
+      triggerDate: triggerDate && isIsoLocalDate(triggerDate) ? triggerDate : identity.arrivalDate
+    }
+  };
+}
+
+export function hasRoomStatusOrderReturnEnvelope(state: unknown): boolean {
+  return Boolean(state
+    && typeof state === "object"
+    && !Array.isArray(state)
+    && Object.prototype.hasOwnProperty.call(state, "roomStatusOrderReturn"));
+}
+
+export function parseRoomStatusOrderReturnTarget(
+  state: unknown
+): RoomStatusOrderReturnTarget | null {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const routeState = state as Record<string, unknown>;
+  if (!hasOnlyKeys(routeState, ["fromRoomStatus", "roomStatusOrderReturn"])
+    || routeState.fromRoomStatus !== true) return null;
+  const target = routeState.roomStatusOrderReturn;
+  if (!target || typeof target !== "object" || Array.isArray(target)) return null;
+  const value = target as Record<string, unknown>;
+  if (!hasOnlyKeys(value, ["version", "propertyId", "orderId", "stayId", "triggerDate"])
+    || value.version !== 1
+    || typeof value.propertyId !== "string" || value.propertyId !== value.propertyId.trim() || !value.propertyId || value.propertyId.length > 200
+    || typeof value.orderId !== "string" || value.orderId !== value.orderId.trim() || !value.orderId || value.orderId.length > 200
+    || typeof value.stayId !== "string" || value.stayId !== value.stayId.trim() || !value.stayId || value.stayId.length > 200
+    || typeof value.triggerDate !== "string" || !isIsoLocalDate(value.triggerDate)) return null;
+  return {
+    version: 1,
+    propertyId: value.propertyId,
+    orderId: value.orderId,
+    stayId: value.stayId,
+    triggerDate: value.triggerDate
+  };
+}
+
+export function resolveRoomStatusOrderReturnTarget(
+  units: readonly RoomStatusUnitDto[],
+  target: Pick<RoomStatusOrderReturnTarget, "orderId" | "stayId" | "triggerDate">
+): RoomStatusOrderReturnResolution {
+  const matches = units.flatMap((unit) => unit.intervals.flatMap((interval) => {
+    const identity = roomStatusOrderIdentityForInterval(interval);
+    return identity?.orderId === target.orderId && identity.stayId === target.stayId
+      ? [{ identity, direct: unit.id === identity.unitId }]
+      : [];
+  }));
+  const matchesByPlacement = new Map<string, Array<{ identity: RoomStatusOrderIdentity; direct: boolean }>>();
+  for (const match of matches) {
+    const key = JSON.stringify([
+      match.identity.orderId,
+      match.identity.stayId,
+      match.identity.unitId,
+      match.identity.arrivalDate,
+      match.identity.departureDate
+    ]);
+    const placement = matchesByPlacement.get(key) ?? [];
+    placement.push(match);
+    matchesByPlacement.set(key, placement);
+  }
+  const uniqueMatches = [...matchesByPlacement.values()].flatMap((placement) => {
+    const directMatches = placement.filter((match) => match.direct);
+    const canonicalMatches = directMatches.length > 0 ? directMatches : placement;
+    const uniqueIntervals = new Map(canonicalMatches.map((match) => [match.identity.intervalId, match.identity]));
+    return [...uniqueIntervals.values()];
+  }).sort((left, right) => (
+    left.arrivalDate.localeCompare(right.arrivalDate)
+    || left.departureDate.localeCompare(right.departureDate)
+    || left.unitId.localeCompare(right.unitId)
+  ));
+  const triggerMatches = uniqueMatches.filter((identity) => (
+    identity.arrivalDate <= target.triggerDate && target.triggerDate < identity.departureDate
+  ));
+  if (triggerMatches.length === 0) return { kind: "NOT_FOUND" };
+  if (triggerMatches.length > 1) return { kind: "AMBIGUOUS" };
+  return { kind: "MATCH", identity: triggerMatches[0]! };
+}
+
+export function roomStatusOrderIdentityForReturnTarget(
+  units: readonly RoomStatusUnitDto[],
+  target: Pick<RoomStatusOrderReturnTarget, "orderId" | "stayId" | "triggerDate">
+): RoomStatusOrderIdentity | null {
+  const resolution = resolveRoomStatusOrderReturnTarget(units, target);
+  return resolution.kind === "MATCH" ? resolution.identity : null;
+}
+
 export function roomStatusCellBelongsToStay(
   unit: RoomStatusUnitDto,
   serviceDate: string,
   stayId: string
 ): boolean {
-  return unit.intervals.some((interval) => (
-    interval.actualInventoryUnitId === unit.id
-    && interval.startDate <= serviceDate
-    && serviceDate < interval.endDate
-    && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
-    && interval.references.some((reference) => reference.type === "STAY" && reference.id === stayId)
-  ));
+  return roomStatusOrderIdentityForDate(unit, serviceDate)?.stayId === stayId;
 }
 
 export function intervalsRenderedOnRoomStatusGrid(

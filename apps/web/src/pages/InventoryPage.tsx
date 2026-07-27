@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import { FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import type {
   CreateOrderAdditionalGuestInputDto,
   CreateOrderPrimaryGuestInputDto,
@@ -45,13 +45,17 @@ import {
 } from "../ui";
 import {
   assertRoomStatusBoard,
+  createRoomStatusOrderReturnState,
   createRoomStatusViewState,
   dateWindowStartForFocus,
   filterRoomStatusRooms,
   hasActiveRoomStatusFilters,
+  hasRoomStatusOrderReturnEnvelope,
   isIsoLocalDate,
   parseRoomStatusRestoration,
+  parseRoomStatusOrderReturnTarget,
   reconcileRoomStatusRestoration,
+  resolveRoomStatusOrderReturnTarget,
   roomStatusAutoVisibleDays,
   roomStatusFactFingerprint,
   roomStatusOrderIdentityForDate,
@@ -1322,12 +1326,15 @@ function buildMobileGroups(board: RoomStatusBoardDto): RoomStatusMobileGroups {
 
 export function InventoryPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const isMobile = useRoomStatusMobileViewport();
   const { meta, principal, propertyId } = useWorkspace();
   const property = meta.properties.find((item) => item.id === propertyId);
   const propertyTimezone = property?.timezone ?? "UTC";
   const orderPrincipalScope = `${principal.subjectId}:${principal.credentialType}:${principal.propertyAccess[propertyId] ?? "NONE"}`;
   const initialRestoration = useRef(readRoomStatusRestoration(principal.subjectId, propertyId));
+  const orderReturnEnvelopePresent = useRef(hasRoomStatusOrderReturnEnvelope(location.state));
+  const pendingOrderReturnTarget = useRef(parseRoomStatusOrderReturnTarget(location.state));
   const [range, setRange] = useState<RoomStatusRange>(() => initialRestoration.current?.range ?? defaultRoomStatusRange(propertyTimezone));
   const [viewState, dispatchView] = useReducer(
     roomStatusViewReducer,
@@ -1344,6 +1351,7 @@ export function InventoryPage() {
   const permissionDeniedRef = useRef(false);
   const pendingRestoration = useRef<RoomStatusRestorationSnapshot | undefined>(initialRestoration.current);
   const orderRestorationAttempted = useRef(false);
+  const orderReturnResolutionStarted = useRef(false);
   const restorationPageAdjusted = useRef(false);
   const restorationPagesVisited = useRef(new Set<number>());
   const previousPropertyId = useRef(propertyId);
@@ -1835,6 +1843,7 @@ export function InventoryPage() {
   useEffect(() => {
     if (orderRestorationAttempted.current || !initialRestoration.current || !renderedBoard) return;
     orderRestorationAttempted.current = true;
+    if (orderReturnEnvelopePresent.current) return;
     const restoredSelection = viewState.selection;
     if (!restoredSelection) return;
     const restoredUnit = findRoomStatusUnit(renderedBoard, restoredSelection.unitId);
@@ -1848,6 +1857,171 @@ export function InventoryPage() {
     setDesktopContextCollapsed(false);
     setFocusRequestToken((value) => value + 1);
   }, [renderedBoard, viewState.selection]);
+
+  useEffect(() => {
+    const target = pendingOrderReturnTarget.current;
+    if (!renderedBoard || !boardMatchesCurrentQuery || orderReturnResolutionStarted.current) return;
+    if (!target) {
+      if (!orderReturnEnvelopePresent.current) return;
+      orderReturnEnvelopePresent.current = false;
+      navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+      dispatchView({ type: "SET_SELECTION", selection: null });
+      setReturnNotice("订单返回信息已损坏，未恢复旧的订单上下文。请按最新房态重新选择。");
+      return;
+    }
+    if (target.propertyId !== propertyId) {
+      pendingOrderReturnTarget.current = null;
+      orderReturnEnvelopePresent.current = false;
+      navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+      dispatchView({ type: "SET_SELECTION", selection: null });
+      setReturnNotice("订单所属物业与当前房态不一致，未恢复订单上下文。请切换到正确物业后重新选择。");
+      return;
+    }
+    orderReturnResolutionStarted.current = true;
+    let current = true;
+    let activeController: AbortController | undefined;
+    const clearReturnedContext = () => {
+      setSelectedUnitId(undefined);
+      setSelectedDayDate(undefined);
+      setSelectedIntervalId(undefined);
+      setSelectedOrderIdentity(undefined);
+      setSelectedOrderView(undefined);
+      setSelectedOrderLoadedScope(undefined);
+      setSelectedCorrectionOccupantId(undefined);
+      setOrderContextOpen(false);
+      dispatchView({ type: "SET_SELECTION", selection: null });
+    };
+    const consumeReturnState = () => {
+      orderReturnEnvelopePresent.current = false;
+      navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+    };
+    const applyReturnedIdentity = (identity: RoomStatusOrderIdentity, pageIndex: number, totalPages: number) => {
+      pendingOrderReturnTarget.current = null;
+      orderReturnResolutionStarted.current = false;
+      consumeReturnState();
+      const parentRoomId = meta.inventoryUnits.find((candidate) => candidate.id === identity.unitId)?.parent_room_id;
+      if (parentRoomId && !viewState.expandedRoomIds.includes(parentRoomId)) {
+        dispatchView({ type: "TOGGLE_ROOM", roomId: parentRoomId });
+      }
+      const pageChanges = pageIndex !== renderedBoard.page.index;
+      if (pageChanges) {
+        dispatchView({ type: "SET_ROOM_PAGE", index: pageIndex, totalPages });
+      }
+      dispatchView({ type: "SET_FOCUS", focus: { unitId: identity.unitId, serviceDate: target.triggerDate } });
+      dispatchView({
+        type: "SET_DATE_WINDOW",
+        start: dateWindowStartForFocus(
+          renderedBoard.dates,
+          viewState.dateWindowStart,
+          viewState.dateWindowSize,
+          target.triggerDate
+        ),
+        totalDates: renderedBoard.dates.length
+      });
+      selectOrderContextIdentity(identity, target.triggerDate);
+      if (pageChanges) focusAfterNextBoard.current = true;
+      else setFocusRequestToken((value) => value + 1);
+      setReturnNotice("订单处理完成，已按最新房态恢复原住宿选择。");
+    };
+    const loadReturnPage = async (pageIndex: number) => {
+      const controller = new AbortController();
+      activeController = controller;
+      const timeout = window.setTimeout(() => {
+        controller.abort(new Error("恢复订单位置的房态查询超时"));
+      }, ROOM_STATUS_QUERY_TIMEOUT_MS);
+      try {
+        return await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, viewState.filters), controller.signal);
+      } finally {
+        window.clearTimeout(timeout);
+        if (activeController === controller) activeController = undefined;
+      }
+    };
+    const resolveReturnedStay = async () => {
+      if (renderedBoard.projectionState !== "READY") {
+        throw new Error("最新房态投影不完整，不能安全恢复订单位置");
+      }
+      const boards = [renderedBoard];
+      for (let pageIndex = 0; pageIndex < renderedBoard.page.totalPages; pageIndex += 1) {
+        if (pageIndex === renderedBoard.page.index) continue;
+        const response = await loadReturnPage(pageIndex);
+        if (!current) return;
+        assertRoomStatusBoard(response, { propertyId, range, pageIndex });
+        if (response.revision !== renderedBoard.revision
+          || response.businessDate !== renderedBoard.businessDate
+          || response.accessLevel !== renderedBoard.accessLevel
+          || response.projectionState !== renderedBoard.projectionState
+          || response.page.size !== renderedBoard.page.size
+          || response.page.totalRooms !== renderedBoard.page.totalRooms
+          || response.page.totalPages !== renderedBoard.page.totalPages) {
+          throw new Error("恢复订单位置期间房态分页事实已变化");
+        }
+        boards.push(response);
+      }
+      if (!current) return;
+      const resolution = resolveRoomStatusOrderReturnTarget(
+        boards.flatMap((candidate) => candidate.rooms.flatMap((room) => [room, ...room.children])),
+        target
+      );
+      if (resolution.kind === "MATCH") {
+        const targetBoard = boards.find((candidate) => candidate.rooms.some((room) => (
+          room.id === resolution.identity.unitId
+          || room.children.some((child) => child.id === resolution.identity.unitId)
+        )));
+        if (!targetBoard) throw new Error("恢复订单位置时未找到匹配房源分页");
+        applyReturnedIdentity(resolution.identity, targetBoard.page.index, targetBoard.page.totalPages);
+        return;
+      }
+      if (resolution.kind === "NOT_FOUND" && hasActiveRoomStatusFilters(viewState.filters)) {
+        orderReturnResolutionStarted.current = false;
+        dispatchView({ type: "CLEAR_FILTERS" });
+        dispatchView({ type: "SET_ROOM_PAGE", index: 0, totalPages: renderedBoard.page.totalPages });
+        setReturnNotice("原住宿不在当前筛选结果中，已清除筛选并继续恢复订单位置。");
+        return;
+      }
+      pendingOrderReturnTarget.current = null;
+      orderReturnResolutionStarted.current = false;
+      consumeReturnState();
+      clearReturnedContext();
+      setReturnNotice(resolution.kind === "AMBIGUOUS"
+        ? "订单处理完成，但最新房态存在多个相互冲突的住宿位置。已安全关闭订单上下文，请刷新后重新核对。"
+        : "订单处理完成，但最新房态中找不到原住宿位置。已安全关闭订单上下文，请按最新房态重新选择。");
+    };
+    void resolveReturnedStay().catch((error: unknown) => {
+      if (!current) return;
+      pendingOrderReturnTarget.current = null;
+      orderReturnResolutionStarted.current = false;
+      consumeReturnState();
+      clearReturnedContext();
+      setActionError(error);
+      setReturnNotice("订单处理完成，但暂时无法核对最新住宿位置。订单上下文已安全关闭，请按最新房态重新选择。");
+    });
+    return () => {
+      current = false;
+      activeController?.abort();
+      orderReturnResolutionStarted.current = false;
+    };
+  }, [
+    boardMatchesCurrentQuery,
+    location.pathname,
+    location.search,
+    meta.inventoryUnits,
+    navigate,
+    propertyId,
+    range.arrivalDate,
+    range.departureDate,
+    renderedBoard?.page.index,
+    renderedBoard?.page.totalPages,
+    renderedBoard?.revision,
+    viewState.filters.kind,
+    viewState.filters.minimumCapacity,
+    viewState.filters.roomTypeCode,
+    viewState.filters.salesMode,
+    viewState.filters.search,
+    viewState.filters.status,
+    viewState.dateWindowSize,
+    viewState.dateWindowStart,
+    viewState.expandedRoomIds
+  ]);
 
   useEffect(() => {
     if (!selectedOrderIdentity || !renderedBoard) return;
@@ -2173,7 +2347,16 @@ export function InventoryPage() {
   function openReference(reference: { href: string | null }) {
     if (!reference.href) return;
     persistViewNow();
-    if (reference.href.startsWith("/orders/")) navigate(reference.href, { state: { fromRoomStatus: true } });
+    if (reference.href.startsWith("/orders/")) {
+      const state = selectedOrderIdentity && reference.href === `/orders/${selectedOrderIdentity.orderId}`
+        ? createRoomStatusOrderReturnState(
+            propertyId,
+            selectedOrderIdentity,
+            selectedDayDate ?? viewState.selection?.anchorDate
+          )
+        : { fromRoomStatus: true };
+      navigate(reference.href, { state });
+    }
     else window.open(reference.href, "_blank", "noopener,noreferrer");
   }
 
@@ -2182,7 +2365,11 @@ export function InventoryPage() {
     persistViewNow();
     const query = actionCode ? `?action=${encodeURIComponent(actionCode)}` : "";
     navigate(`/orders/${encodeURIComponent(selectedOrderIdentity.orderId)}${query}`, {
-      state: { fromRoomStatus: true }
+      state: createRoomStatusOrderReturnState(
+        propertyId,
+        selectedOrderIdentity,
+        selectedDayDate ?? viewState.selection?.anchorDate
+      )
     });
   }
 

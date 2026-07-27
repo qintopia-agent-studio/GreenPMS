@@ -266,10 +266,6 @@ export async function prepareStage7Acceptance(
       fullName: "阶段七床位住客乙",
       nickname: "小满"
     });
-    await execute(db, "CHECK_IN", {
-      propertyId: demo.propertyId,
-      orderId: bedA.orderId
-    }, `${fixturePrefix}-bed-a-check-in`);
 
     const bedMaintenance = await execute(db, "LOCK_MAINTENANCE", {
       propertyId: demo.propertyId,
@@ -317,7 +313,7 @@ export async function prepareStage7Acceptance(
       arrivalDate,
       departureDate: originalDepartureDate,
       fullName: "跨分段住宿住客",
-      nickname: "青禾"
+      nickname: "小满"
     });
     await execute(db, "EXTEND_STAY", {
       propertyId: demo.propertyId,
@@ -347,10 +343,6 @@ export async function prepareStage7Acceptance(
       nickname: "云舒",
       stayType: "FREE"
     });
-    await execute(db, "CHECK_IN", {
-      propertyId: demo.propertyId,
-      orderId: freeStay.orderId
-    }, `${fixturePrefix}-free-stay-check-in`);
 
     return {
       database: new URL(databaseUrl).pathname.slice(1),
