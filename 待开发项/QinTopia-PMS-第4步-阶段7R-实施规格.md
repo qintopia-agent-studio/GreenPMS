@@ -2,7 +2,7 @@
 title: 'QinTopia PMS 第 4 步阶段 7R 换房后 Stay 选择回归'
 type: 'bugfix'
 created: '2026-07-27'
-status: 'awaiting_user_acceptance'
+status: 'accepted'
 review_loop_iteration: 0
 baseline_commit: 'bf1f37d'
 context:
@@ -65,6 +65,7 @@ context:
 - 2026-07-27：首个失败金标确认“在完整订单执行换房后返回房态会丢失原订单上下文”。修复以物业隔离的 `orderId + stayId + triggerDate` 路由身份重新解析最新住宿位置，并在当前筛选确实隐藏已移动住宿时清除失效筛选后继续恢复；一般详情返回仍保留原筛选。
 - 2026-07-27：盲审与边界路径审阅补齐全分页统一 revision/营业日/权限/投影/分页元数据核对、查询超时、父房展示副本与具体床位 canonical interval 去重，以及多个 direct interval、`PARTIAL` 投影、损坏或跨物业路由状态的失败关闭。基线既有的“订单上下文保持打开时由后台 revision 迁移位置”逻辑未在 7R 跨层重构，留待独立检查点处理。
 - 2026-07-27：状态转为 `awaiting_user_acceptance`。未修改 MOVE_UNIT、计价、库存 Claim、会员权益或服务端投影语义；U1/U2 与正式 4.2 均未开始。
+- 2026-07-27：用户明确回复“7R 通过”，人工验证换房前后双向选择、同名订单隔离和完整订单返回恢复均符合预期；7R 转为 `accepted`，后续序列移至 U1。
 
 ## Verification
 
