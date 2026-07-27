@@ -23,19 +23,21 @@ async function main(): Promise<void> {
     const rates = typeof policy.product_anchor_rates_minor === "string"
       ? JSON.parse(policy.product_anchor_rates_minor) as Record<string, unknown>
       : policy.product_anchor_rates_minor as Record<string, unknown>;
-    // This isolated dataset uses a round policy base so 15% boundaries remain exact whole-yuan inputs.
+    // This isolated dataset uses round policy bases so 15% boundaries remain exact whole-yuan inputs.
+    const roundWholeYuanRates = {
+      "1": 10_000,
+      "7": 70_000,
+      "14": 140_000,
+      "30": 300_000
+    };
     await db.transaction().execute(async (trx) => {
       await sql`ALTER TABLE pricing_policy_versions DISABLE TRIGGER pricing_policy_versions_append_only`.execute(trx);
       await trx.updateTable("pricing_policy_versions")
         .set({
           product_anchor_rates_minor: {
             ...rates,
-            shared_bath_double_whole_room: {
-              "1": 10_000,
-              "7": 70_000,
-              "14": 140_000,
-              "30": 300_000
-            }
+            shared_bath_double_whole_room: roundWholeYuanRates,
+            shared_bath_standard_room: roundWholeYuanRates
           }
         })
         .where("id", "=", demo.publicPricingPolicyId)
@@ -43,34 +45,38 @@ async function main(): Promise<void> {
       await sql`ALTER TABLE pricing_policy_versions ENABLE TRIGGER pricing_policy_versions_append_only`.execute(trx);
     });
 
-    const room = await db.selectFrom("inventory_units")
+    const today = todayInTimeZone("Asia/Shanghai");
+    const scenarios = [
+      { key: "external-85", unitCode: "104", targetMinor: 8_500 },
+      { key: "external-84", unitCode: "106", targetMinor: 8_400 },
+      { key: "external-116", unitCode: "204", targetMinor: 11_600 },
+      { key: "wecom-policy", unitCode: "D03", targetMinor: 10_000 },
+      { key: "wecom-adjusted", unitCode: "D04", targetMinor: 9_900 }
+    ];
+    const rooms = await db.selectFrom("inventory_units")
       .select(["id", "code"])
       .where("property_id", "=", demo.propertyId)
       .where("kind", "=", "ROOM")
-      .where("code", "=", "104")
-      .executeTakeFirstOrThrow();
-    const today = todayInTimeZone("Asia/Shanghai");
-    const scenarios = [
-      { key: "external-85", arrivalOffset: 20, targetMinor: 85_000 },
-      { key: "external-84", arrivalOffset: 32, targetMinor: 84_000 },
-      { key: "external-116", arrivalOffset: 44, targetMinor: 116_000 },
-      { key: "wecom-policy", arrivalOffset: 56, targetMinor: 100_000 },
-      { key: "wecom-adjusted", arrivalOffset: 68, targetMinor: 99_000 }
-    ];
+      .where("code", "in", scenarios.map((scenario) => scenario.unitCode))
+      .execute();
+    const roomByCode = new Map(rooms.map((room) => [room.code, room]));
+    if (roomByCode.size !== scenarios.length) throw new Error("Stage 2 acceptance rooms are incomplete");
+
+    const arrivalDate = addDays(today, 2);
+    const departureDate = addDays(arrivalDate, 1);
     const fixtures = [];
     for (const scenario of scenarios) {
-      const arrivalDate = addDays(today, scenario.arrivalOffset);
-      const departureDate = addDays(arrivalDate, 10);
+      const room = roomByCode.get(scenario.unitCode)!;
       const quote = await createQuoteForTesting(db, {
         propertyId: demo.propertyId,
         inventoryUnitId: room.id,
-        stayType: "CUSTOM",
+        stayType: "TRANSIENT",
         arrivalDate,
         departureDate,
         pricingPolicyVersionId: demo.publicPricingPolicyId
       });
-      if (quote.currentContractAmount.minorUnits !== 100_000) {
-        throw new Error(`${scenario.key} expected a 100000 policy amount, received ${quote.currentContractAmount.minorUnits}`);
+      if (quote.currentContractAmount.minorUnits !== 10_000) {
+        throw new Error(`${scenario.key} expected a 10000 policy amount, received ${quote.currentContractAmount.minorUnits}`);
       }
       fixtures.push({
         key: scenario.key,
