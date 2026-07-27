@@ -373,6 +373,17 @@ export function fulfillmentTransitionIsExpected(commandType: CommandType, effect
   return false;
 }
 
+export function fulfillmentAuditNote(
+  commandType: "CHECK_IN" | "CHECK_OUT",
+  effect: Record<string, unknown>,
+  operatorNote: string
+): string {
+  const trimmed = operatorNote.trim();
+  if (trimmed) return trimmed;
+  if (commandType === "CHECK_IN") return "按计划办理入住";
+  return effect.recordingMode === "LATE_RECORDED" ? "迟录计划退房" : "按计划办理退房";
+}
+
 function fulfillmentCommandLabel(commandType: CommandType): string {
   if (commandType === "CHECK_IN") return "办理入住";
   if (commandType === "CHECK_OUT") return "办理退房";
@@ -1618,9 +1629,10 @@ export function CommandDialog({
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
+  const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
   const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment;
   const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : fulfillment && executableCommandType ? executableCommandType : "OPERATOR_CONFIRMED"));
-  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
   const recoveryOnlyRequest = Boolean(initialConfirmationKey);
   const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && !initialReceipt));
@@ -1676,7 +1688,7 @@ export function CommandDialog({
   const previewExpired = Boolean(preview && (!Number.isFinite(previewExpiry) || expiryClock >= previewExpiry));
   const canConfirm = Boolean(preview
     && reasonCode.trim()
-    && (createOrderBusiness || reasonNote.trim())
+    && (createOrderBusiness || lodgingFulfillment || reasonNote.trim())
     && !busy
     && !writeBlocked
     && !previewExpired
@@ -1780,6 +1792,7 @@ export function CommandDialog({
 
   function closeCommandDialog() {
     if (u1CommandType
+      && !lodgingFulfillment
       && !networkUncertain
       && !recoveryOnlyRequest
       && (shellState.phase === "READY_TO_CONFIRM" || shellState.phase === "PREVIEW_EXPIRED" || shellState.phase === "NOT_EXECUTED")) {
@@ -1811,7 +1824,7 @@ export function CommandDialog({
   }, []);
 
   async function confirm() {
-    if (!preview || !reasonCode.trim() || (!createOrderBusiness && !reasonNote.trim()) || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
+    if (!preview || !reasonCode.trim() || (!createOrderBusiness && !lodgingFulfillment && !reasonNote.trim()) || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
     if (!isExecutableCommandType(request.commandType)) {
       setError(new Error("该历史操作不能重新确认"));
       return;
@@ -1843,9 +1856,12 @@ export function CommandDialog({
     const lease = beginRequestLease();
     let result: ReceiptDto;
     try {
+      const confirmedReasonNote = lodgingFulfillment
+        ? fulfillmentAuditNote(request.commandType as "CHECK_IN" | "CHECK_OUT", preview.effect, reasonNote)
+        : reasonNote.trim();
       result = await api.confirm(preview.previewId, propertyId, request.commandType, preview.effectHash, {
         code: reasonCode.trim(),
-        note: reasonNote.trim()
+        note: confirmedReasonNote
       }, key, lease.controller.signal);
       if (!leaseIsActive(lease)) return;
     } catch (nextError) {
@@ -1975,13 +1991,15 @@ export function CommandDialog({
           <button
             className="button button-secondary"
             type="button"
-            onClick={u1CommandType && !networkUncertain && !recoveryOnlyRequest ? returnToEdit : () => onClose()}
+            onClick={u1CommandType && !lodgingFulfillment && !networkUncertain && !recoveryOnlyRequest ? returnToEdit : () => onClose()}
             disabled={busy && (!u1CommandType || shellState.phase === "CONFIRMING")}
-            data-testid={u1CommandType ? (networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
+            data-testid={u1CommandType ? (lodgingFulfillment || networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
           >
             {u1CommandType
               ? networkUncertain || recoveryOnlyRequest
                 ? "关闭"
+                : lodgingFulfillment
+                  ? "取消"
                 : shellState.phase === "AUTO_PREVIEWING"
                   ? "取消核对"
                   : "返回修改"
@@ -2040,7 +2058,7 @@ export function CommandDialog({
           </>}
         </div>
       ) : null}
-      {u1CommandType && fulfillment && shellState.phase === "EDITING" && !preview && !receipt ? <section className="reason-section" aria-labelledby="fulfillment-edit-reason-heading">
+      {u1CommandType && fulfillment && !lodgingFulfillment && shellState.phase === "EDITING" && !preview && !receipt ? <section className="reason-section" aria-labelledby="fulfillment-edit-reason-heading">
         <h3 id="fulfillment-edit-reason-heading">修改办理原因</h3>
         <div className="form-grid">
           <label className="span-two">填写后会记录在本次变更历史中
@@ -2066,10 +2084,10 @@ export function CommandDialog({
             </div>
           </section> : null}
           {fulfillment ? <section className="reason-section" aria-labelledby="fulfillment-reason-heading">
-            <h3 id="fulfillment-reason-heading">办理原因</h3>
+            <h3 id="fulfillment-reason-heading">{lodgingFulfillment ? "办理备注" : "办理原因"}</h3>
             <div className="form-grid">
-              <label className="span-two">填写后会记录在本次变更历史中
-                <textarea value={reasonNote} onChange={(event) => setReasonNote(event.target.value)} required maxLength={1000} rows={2} placeholder="例如：客人临时调整行程，提前退房" data-testid="reason-note" />
+              <label className="span-two">{lodgingFulfillment ? "办理备注（选填）" : "填写后会记录在本次变更历史中"}
+                <textarea value={reasonNote} onChange={(event) => setReasonNote(event.target.value)} required={!lodgingFulfillment} maxLength={1000} rows={2} placeholder={lodgingFulfillment ? "可补充本次办理情况" : "记录本次人工确认依据"} data-testid="reason-note" />
               </label>
             </div>
           </section> : null}

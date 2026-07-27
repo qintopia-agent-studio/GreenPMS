@@ -208,19 +208,20 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   const arrivalRow = page.locator("article.queue-row").filter({ hasText: "2C住客" });
   await arrivalRow.getByRole("button", { name: "入住", exact: true }).click();
   await expect(page.getByTestId("reason-note")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("办理备注（选填）", { exact: true })).toBeVisible();
   await page.getByTestId("reason-note").fill("2C 浏览器验收入住核销");
-  await page.getByTestId("command-return-to-edit").click();
-  await expect(page.getByTestId("reason-note")).toHaveValue("2C 浏览器验收入住核销");
-  const refreshedCheckInPreview = page.waitForResponse((response) => response.request().method() === "POST"
-    && new URL(response.url()).pathname === "/api/v1/command-previews"
-    && response.status() === 200);
-  await page.getByRole("button", { name: "继续核对", exact: true }).click();
-  await refreshedCheckInPreview;
+  await expect(page.getByTestId("command-return-to-edit")).toHaveCount(0);
   await expect(page.getByTestId("reason-note")).toHaveValue("2C 浏览器验收入住核销");
   await page.getByTestId("confirm-command").click();
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
   await expect(page.getByTestId("command-result-notice")).toContainText("办理入住已完成，住宿状态已刷新");
   await expect(page.getByTestId("command-receipt")).toBeHidden();
+
+  await page.goto(`/orders/${encodeURIComponent(createOrderReceipt.result!.orderId!)}`);
+  const persistedCheckInNote = page.getByTestId("check-in-result")
+    .getByText("办理备注", { exact: true })
+    .locator("xpath=following-sibling::dd");
+  await expect(persistedCheckInNote).toHaveText("2C 浏览器验收入住核销");
 
   await page.getByRole("link", { name: "会员", exact: true }).click();
   await page.getByTestId("member-search-query").fill(fixture.identity);

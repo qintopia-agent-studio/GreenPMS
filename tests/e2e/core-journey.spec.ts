@@ -553,6 +553,7 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await closeReceipt(page);
 
   await page.getByTestId("reprice-order").click();
+  await expect(page.getByTestId("reprice-target-yuan")).toHaveValue("130");
   await page.getByTestId("reprice-target-yuan").fill("110");
   await page.getByTestId("reprice-reason").fill("Set this revision final total to CNY 110");
   await page.getByRole("button", { name: "继续核对" }).click();
@@ -564,6 +565,10 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(manualRevision.locator("td").nth(3)).toHaveText("¥130.00");
   await expect(manualRevision.locator("td").nth(4).locator("strong")).toHaveText("-¥20.00");
   await expect(manualRevision.locator("td").nth(5)).toHaveText("¥110.00");
+
+  await page.getByTestId("reprice-order").click();
+  await expect(page.getByTestId("reprice-target-yuan")).toHaveValue("110");
+  await page.getByRole("dialog", { name: "调整订单金额" }).getByRole("button", { name: "取消", exact: true }).click();
 
   await page.getByRole("button", { name: "缩短", exact: true }).click();
   await page.getByTestId("new-departure-date").fill(addDays(businessDate, 2));

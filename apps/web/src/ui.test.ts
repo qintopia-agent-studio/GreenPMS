@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { businessStatusLabel, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, receiptExecutionSemanticsAreCoherent, receiptTransactionReferenceLabel, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+import { businessStatusLabel, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, receiptExecutionSemanticsAreCoherent, receiptTransactionReferenceLabel, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
 describe("Fulfillment business presentation", () => {
   it("uses one Chinese lifecycle vocabulary without protocol or enum labels", () => {
@@ -55,6 +55,17 @@ describe("Fulfillment business presentation", () => {
       heading: "迟录退房已完成",
       description: "退房按原计划退房日 2026-07-25 生效，于 2026-07-26 营业日迟录；订单金额保持不变，住宿库存已释放。"
     });
+  });
+
+  it("uses stable audit notes when an operator leaves a lodging note empty", () => {
+    expect(fulfillmentAuditNote("CHECK_IN", { recordingMode: "ON_SCHEDULE" }, "")).toBe("按计划办理入住");
+    expect(fulfillmentAuditNote("CHECK_OUT", { recordingMode: "ON_SCHEDULE" }, "   ")).toBe("按计划办理退房");
+    expect(fulfillmentAuditNote("CHECK_OUT", { recordingMode: "LATE_RECORDED" }, "\n")).toBe("迟录计划退房");
+  });
+
+  it("trims and preserves an operator-provided lodging note", () => {
+    expect(fulfillmentAuditNote("CHECK_IN", { recordingMode: "ON_SCHEDULE" }, "  已核对证件  ")).toBe("已核对证件");
+    expect(fulfillmentAuditNote("CHECK_OUT", { recordingMode: "LATE_RECORDED" }, "  客人昨晚已离店  ")).toBe("客人昨晚已离店");
   });
 });
 

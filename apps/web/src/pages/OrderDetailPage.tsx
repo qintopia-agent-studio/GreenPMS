@@ -59,6 +59,21 @@ function shiftDate(value: string, days: number): string {
   return `${year}-${month}-${day}`;
 }
 
+export function initialRepriceTargetYuan(currentContractAmountMinor: number, draftTargetMinor: unknown): string {
+  const validDraftTarget = typeof draftTargetMinor === "number"
+    && Number.isSafeInteger(draftTargetMinor)
+    && draftTargetMinor >= 0
+    && draftTargetMinor % 100 === 0;
+  return String((validDraftTarget ? draftTargetMinor : currentContractAmountMinor) / 100);
+}
+
+export function wholeYuanAmountMinor(value: string): number | undefined {
+  const targetYuan = Number(value);
+  return Number.isSafeInteger(targetYuan) && targetYuan >= 0
+    ? targetYuan * 100
+    : undefined;
+}
+
 const formTitles: Record<FormAction, string> = {
   RECORD_COLLECTION: "记录收款事实",
   RECORD_REFUND: "引用原收款退款",
@@ -190,7 +205,7 @@ function FulfillmentResult({ type, record }: {
         <div><dt>办理营业日</dt><dd>{record.recordedBusinessDate ? formatDate(record.recordedBusinessDate) : "历史未记录"}</dd></div>
         <div><dt>记录时间</dt><dd>{formatDateTime(record.recordedAt)}</dd></div>
         <div><dt>操作人</dt><dd>{record.actor?.displayName ?? "历史未记录"}</dd></div>
-        <div><dt>办理原因</dt><dd>{record.reason.note}</dd></div>
+        <div><dt>办理备注</dt><dd>{record.reason.note.trim() || "未填写"}</dd></div>
       </dl> : null}
     </article>
   );
@@ -229,9 +244,10 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
   const [newDepartureDate, setNewDepartureDate] = useState(action === "SHORTEN_STAY" ? shiftDate(view.order.departure_date, -1) : shiftDate(view.order.departure_date, 1));
   const [newUnitId, setNewUnitId] = useState(moveCandidates[0]?.id ?? "");
   const [effectiveDate, setEffectiveDate] = useState(view.order.arrival_date);
-  const [targetContractYuan, setTargetContractYuan] = useState(() => typeof draft?.input.targetCurrentContractAmountMinor === "number"
-    ? String(draft.input.targetCurrentContractAmountMinor / 100)
-    : String(view.amounts.currentContractAmount.minorUnits / 100));
+  const [targetContractYuan, setTargetContractYuan] = useState(() => initialRepriceTargetYuan(
+    view.amounts.currentContractAmount.minorUnits,
+    draft?.input.targetCurrentContractAmountMinor
+  ));
   const [repriceReason, setRepriceReason] = useState(draft?.initialReason?.note ?? "");
   const [validationError, setValidationError] = useState<unknown>();
 
@@ -271,9 +287,8 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
       description = "服务端重新校验目标库存并使用成交时锁定政策重算。";
     }
     if (action === "REPRICE_ORDER") {
-      const targetYuan = Number(targetContractYuan);
-      const targetCurrentContractAmountMinor = targetYuan * 100;
-      if (!Number.isSafeInteger(targetCurrentContractAmountMinor) || targetCurrentContractAmountMinor < 0) {
+      const targetCurrentContractAmountMinor = wholeYuanAmountMinor(targetContractYuan);
+      if (targetCurrentContractAmountMinor === undefined) {
         setValidationError(new Error("指定最终总价必须是大于或等于零的整元金额"));
         return;
       }

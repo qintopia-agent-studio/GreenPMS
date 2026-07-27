@@ -21,7 +21,10 @@ import {
   staffQuoteError,
   quoteRecoveryStorageKey,
   readQuoteCommandRecovery,
+  roomStatusCommandWriteGate,
   roomStatusOrderContextMode,
+  roomStatusOrderCommandScope,
+  selectedOrderCommandScopeIsCurrent,
   roomStatusBlockDraftWithinSelection,
   saveQuoteCommandRecovery
 } from "./InventoryPage";
@@ -72,6 +75,66 @@ const pending = {
   },
   state: "SENDING"
 } as const;
+
+describe("selected order command authorization scope", () => {
+  it("requires every command to keep its bound principal scope", () => {
+    expect(selectedOrderCommandScopeIsCurrent(undefined, "property:operator:SESSION:WRITE")).toBe(false);
+    expect(selectedOrderCommandScopeIsCurrent("property:operator:SESSION:WRITE", "property:operator:SESSION:WRITE")).toBe(true);
+    expect(selectedOrderCommandScopeIsCurrent("property:operator:SESSION:WRITE", "property:viewer:TOKEN:READ")).toBe(false);
+  });
+
+  it("binds room-status order commands to the principal, order and Stay", () => {
+    const principalScope = "property_qintopia:operator:SESSION:WRITE";
+    const selected = roomStatusOrderCommandScope(principalScope, { orderId: "order_1", stayId: "stay_1" });
+    expect(selectedOrderCommandScopeIsCurrent(selected, principalScope, { orderId: "order_1", stayId: "stay_1" })).toBe(true);
+    expect(selectedOrderCommandScopeIsCurrent(selected, principalScope, { orderId: "order_2", stayId: "stay_1" })).toBe(false);
+    expect(selectedOrderCommandScopeIsCurrent(selected, principalScope, { orderId: "order_1", stayId: "stay_2" })).toBe(false);
+    expect(selectedOrderCommandScopeIsCurrent(selected, "property_other:operator:SESSION:WRITE", { orderId: "order_1", stayId: "stay_1" })).toBe(false);
+  });
+});
+
+describe("room-status command write gates", () => {
+  it("blocks a new command from stale projection without invalidating an unchanged active command", () => {
+    expect(roomStatusCommandWriteGate({
+      projectionWritable: false,
+      activeProjectionValid: true,
+      recoveryBlocked: false,
+      recoveryReady: true,
+      recoveryError: undefined,
+      contextInvalidated: false,
+      targetScopeCurrent: true
+    })).toEqual({ startBlocked: true, activeBlocked: false });
+  });
+
+  it.each([
+    { label: "query or revision changed", contextInvalidated: true, targetScopeCurrent: true, recoveryReady: true, recoveryError: undefined },
+    { label: "principal, order, or Stay changed", contextInvalidated: false, targetScopeCurrent: false, recoveryReady: true, recoveryError: undefined },
+    { label: "recovery scope is not ready", contextInvalidated: false, targetScopeCurrent: true, recoveryReady: false, recoveryError: undefined },
+    { label: "recovery storage failed", contextInvalidated: false, targetScopeCurrent: true, recoveryReady: true, recoveryError: new Error("storage unavailable") }
+  ])("fails closed when $label", ({ contextInvalidated, targetScopeCurrent, recoveryReady, recoveryError }) => {
+    expect(roomStatusCommandWriteGate({
+      projectionWritable: true,
+      activeProjectionValid: true,
+      recoveryBlocked: false,
+      recoveryReady,
+      recoveryError,
+      contextInvalidated,
+      targetScopeCurrent
+    }).activeBlocked).toBe(true);
+  });
+
+  it("blocks an active command when authorization or projection readiness is lost", () => {
+    expect(roomStatusCommandWriteGate({
+      projectionWritable: false,
+      activeProjectionValid: false,
+      recoveryBlocked: false,
+      recoveryReady: true,
+      recoveryError: undefined,
+      contextInvalidated: false,
+      targetScopeCurrent: true
+    })).toEqual({ startBlocked: true, activeBlocked: true });
+  });
+});
 
 describe("CREATE_QUOTE request lifecycle", () => {
   it("matches the API's 200-character full-name limit for primary and additional guests", () => {

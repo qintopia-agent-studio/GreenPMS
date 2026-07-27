@@ -3,8 +3,8 @@ title: 'QinTopia PMS 第 4 步 U1 共享命令外壳'
 type: 'feature'
 created: '2026-07-27'
 status: 'awaiting_user_acceptance'
-review_loop_iteration: 0
-baseline_commit: 'd5b26891c67163e49f2a0bd208d2b4f46371edc2'
+review_loop_iteration: 1
+baseline_commit: '0c1aed475a5abe33e136b8390005f6b4382c4505'
 context:
   - '待开发项/sprint-change-proposal-2026-07-26-channel-order-pricing-and-4.2.md'
   - '待开发项/房态与订单运营流程分步开发计划.md'
@@ -21,7 +21,7 @@ context:
 
 ## Boundaries & Constraints
 
-**Always:** 白名单为 `CREATE_ORDER`（普通/免费/会员）、`CREATE_MEMBER`、`CREATE_MEMBERSHIP_ORDER`、`RECORD_MEMBERSHIP_PAYMENT`、`CORRECT_MEMBERSHIP_PAYMENT`、`ACTIVATE_MEMBERSHIP_ORDER`、`CORRECT_MEMBER_ENTITLEMENT_BALANCE`、`LOCK_MAINTENANCE`、`RELEASE_MAINTENANCE`、`CORRECT_ORDER_OCCUPANT`、`REPRICE_ORDER`、`CHECK_IN`、`CHECK_OUT`。全部自动核对，只显示中文业务摘要并只确认一次；返回修改保留草稿并废弃旧预检。Confirm 前先持久化原幂等身份；结果未知只查询原键，终态明确前不重发。成功后自动关闭、刷新、清除对应恢复记录、恢复焦点并显示非模态结果；明确未执行说明零写入并解锁。关闭、路由变化或新尝试后的迟到响应不得覆盖当前状态。
+**Always:** 白名单为 `CREATE_ORDER`（普通/免费/会员）、`CREATE_MEMBER`、`CREATE_MEMBERSHIP_ORDER`、`RECORD_MEMBERSHIP_PAYMENT`、`CORRECT_MEMBERSHIP_PAYMENT`、`ACTIVATE_MEMBERSHIP_ORDER`、`CORRECT_MEMBER_ENTITLEMENT_BALANCE`、`LOCK_MAINTENANCE`、`RELEASE_MAINTENANCE`、`CORRECT_ORDER_OCCUPANT`、`REPRICE_ORDER`、`CHECK_IN`、`CHECK_OUT`。全部自动核对，只显示中文业务摘要并只确认一次；除经 2026-07-27 人工验收重新协商的 `CHECK_IN`、`CHECK_OUT` 单层核对例外外，返回修改保留草稿并废弃旧预检。入住、退房在同一核对页填写可选备注，只开放取消和正式确认。Confirm 前先持久化原幂等身份；结果未知只查询原键，终态明确前不重发。成功后自动关闭、刷新、清除对应恢复记录、恢复焦点并显示非模态结果；明确未执行说明零写入并解锁。关闭、路由变化或新尝试后的迟到响应不得覆盖当前状态。
 
 **Ask First:** 若需改 contracts/OpenAPI、服务端、领域、数据库或任一命令的业务输入、允许动作、计价、库存、权益、审计、事务语义，立即暂停；若安全恢复必须保留独立成功页，也暂停确认。
 
@@ -32,8 +32,8 @@ context:
 | State | Expected behavior | Failure handling |
 |---|---|---|
 | 自动核对中 | 打开白名单命令即载入绑定草稿的核对信息 | 可取消请求；迟到结果忽略 |
-| 可确认 | 显示业务摘要，聚焦标题，只开放返回修改/确认 | 缺失依据不开放确认 |
-| 返回修改 | 恢复全部草稿，旧预检失效 | 零写入 |
+| 可确认 | 显示业务摘要并聚焦标题；一般命令开放返回修改/确认，入住、退房只开放取消/确认 | 缺失依据不开放确认 |
+| 返回修改 | 非入住、退房命令恢复全部草稿，旧预检失效 | 零写入 |
 | 核对过期 | 隐藏确认，聚焦中文错误并可重新核对 | 陈旧确认零写入 |
 | 提交中 | 可见进度；禁关闭、Escape、重复确认 | 身份持久化失败则不发 Confirm |
 | 结果未知 | 关闭/刷新后仍查询原键 | 禁止盲重试 |
@@ -59,12 +59,21 @@ context:
 - [x] `tests/e2e/setup-u1-acceptance.ts`、两份分步计划与本规格 -- 准备独立验收数据；实施时记 `in_progress`，门禁通过后记 `awaiting_user_acceptance` 并附结果，不启动 U2。
 
 **Acceptance Criteria:**
-- Given 任一白名单入口，when 核对、返回修改或确认，then 无技术协议词、草稿不丢且正式确认恰好一次。
+- Given 任一白名单入口，when 核对、返回修改（入住、退房除外）或确认，then 无技术协议词、草稿不丢且正式确认恰好一次。
 - Given 过期、确定失败、存储失败、网络中断或刷新，when 状态变化，then 只开放安全动作，未知不重复写，明确未执行零写入。
 - Given 成功，when 投影刷新，then 弹窗自动关闭、最新事实和非模态中文结果可见、焦点恢复且无残留恢复锁。
 - Given U1 完成，when 交付，then 独立实例、账号、代表性验收数据和八态人工步骤可用；U2、正式 4.2 和排除命令未改变。
 
 ## Spec Change Log
+
+- 2026-07-27：三项人工验收问题及盲审竞态已修复，状态转为 `awaiting_user_acceptance`。入住、退房使用单层核对与可选备注，房态桌面/手机均在当前页办理，调价默认当前金额；自然 freshness 过期不打断已开始核对，但 revision、查询范围、门店、账号、订单、Stay、权限或投影状态变化继续失败关闭。未知结果恢复会保留原订单目标或关闭无关订单上下文。U2 与正式 4.2 未开始。
+- 2026-07-27：U1 人工验收发现三项交互问题，状态退回 `in_progress`：入住/退房核对页与“返回修改”页面重复，且正常履约不应强制填写原因；调整金额输入框必须默认为当前订单金额；从房态办理退房应留在当前窗口，不跳转完整订单页。本轮只修复 U1 Web 交互与回归，不改 contracts、API、领域、数据库或履约/计价规则，不启动 U2 或正式 4.2。
+
+## Human Acceptance Fixes
+
+- [x] `apps/web/src/ui.tsx`、`OrderDetailPage.tsx` -- 入住/退房只保留一页核对；改为“办理备注（选填）”，空白时使用稳定系统审计备注满足既有服务端合同。
+- [x] `InventoryPage.tsx`、`RoomStatusOrderContext.tsx` -- 房态中的入住/退房动作直接打开当前页共享履约弹窗，绑定选中的精确物业和订单范围，成功后刷新房态与订单上下文。
+- [x] Web 单测与 U1/Stage 8 E2E -- 固定空备注可确认、无重复返回步骤、调价输入默认当前金额，以及房态内联退房不跳转并刷新投影。
 
 ## Design Notes
 
@@ -72,6 +81,7 @@ context:
 
 ## Verification
 
+- 2026-07-27 人工验收返修：TypeScript、production build、`git diff --check` 与 Unit `330/330` 通过；U1 专属 E2E `3 passed / 3 expected skipped`，Stage 8 桌面/手机 E2E `5 passed / 5 expected skipped`，调价当前值与会员备注持久化 E2E `2/2`。Stage 8 真实竞态同时证明只读投影立即禁用确认、自然 freshness 过期不误杀已开始核对、内联按钮可真实点击且 URL 保持房态根页。
 - 2026-07-27：TypeScript、production build、`git diff --check` 通过；Unit `316/316`、Integration `182/182`、Contract/OpenAPI `57/57`、pricing facts `7/7` 通过。
 - U1 专属桌面/手机 E2E `3 passed / 3 expected skipped`；调价与维修释放真实旅程 `2/2`；Stage 8 独立履约 `5 passed / 5 expected skipped`；修正后的手机今日入住 `1/1`。
 - 完整 E2E 首轮为 `61 passed / 56 skipped / 8 did not run / 17 failed`。其中两条 Stage 8 失败由共享数据库前序占用污染造成，独立复跑全绿；一条手机用例违反已验收的提前退房门禁，修正为合法入住旅程后通过。其余为 U1 排除范围内的既有 Token 与房态性能、拖选、恢复、响应式断言；U1 相关套件无剩余失败，不在本切片跨阶段修复。
@@ -79,52 +89,32 @@ context:
 
 ## Suggested Review Order
 
-**状态机与确认边界**
+**单层履约核对**
 
-- 从精确 13 命令白名单和八态转换理解 U1 边界。
-  [`commandShellState.ts:3`](../apps/web/src/command-shell/commandShellState.ts#L3)
+- 入住、退房改为可选备注并在空值时生成稳定审计文字。
+  [`ui.tsx:376`](../apps/web/src/ui.tsx#L376)
 
-- 核对迟到响应、旧幂等键和终态不可回退门禁。
-  [`commandShellState.ts:87`](../apps/web/src/command-shell/commandShellState.ts#L87)
+- 共享弹窗只为入住、退房移除重复返回修改步骤。
+  [`ui.tsx:1632`](../apps/web/src/ui.tsx#L1632)
 
-- 检查调价、维修释放和履约摘要的权威证据一致性。
-  [`ui.tsx:477`](../apps/web/src/ui.tsx#L477)
+**房态内联与失败关闭**
 
-- 共享弹窗统一自动核对、返回修改、提交和成功收口。
-  [`ui.tsx:1529`](../apps/web/src/ui.tsx#L1529)
+- 新命令与活动命令分别处理 freshness 和权威投影失效。
+  [`InventoryPage.tsx:1340`](../apps/web/src/pages/InventoryPage.tsx#L1340)
 
-**恢复与隐私**
+- 房态内联履约绑定门店、账号、订单和 Stay。
+  [`InventoryPage.tsx:2448`](../apps/web/src/pages/InventoryPage.tsx#L2448)
 
-- 恢复记录只保留主体、范围、原键和稳定目标身份。
-  [`ui.tsx:1142`](../apps/web/src/ui.tsx#L1142)
+- 未知结果恢复不会刷新当前无关订单上下文。
+  [`InventoryPage.tsx:2639`](../apps/web/src/pages/InventoryPage.tsx#L2639)
 
-- 终态转换不持久化 Receipt、金额或住客资料。
-  [`ui.tsx:1290`](../apps/web/src/ui.tsx#L1290)
+- 订单上下文仅把入住、退房留在当前房态页。
+  [`RoomStatusOrderContext.tsx:134`](../apps/web/src/room-status/RoomStatusOrderContext.tsx#L134)
 
-- 浏览器恢复锁在保存、清除失败时继续失败关闭。
-  [`ui.tsx:1366`](../apps/web/src/ui.tsx#L1366)
+**调价与验证**
 
-**宿主页绑定**
+- 调价默认当前金额并拒绝非整元草稿及提交。
+  [`OrderDetailPage.tsx:62`](../apps/web/src/pages/OrderDetailPage.tsx#L62)
 
-- 房态动作刷新权威投影并恢复原选区与焦点。
-  [`InventoryPage.tsx:2555`](../apps/web/src/pages/InventoryPage.tsx#L2555)
-
-- 订单资料更正草稿绑定精确订单和住宿人。
-  [`OrderOccupantCorrectionDialog.tsx:32`](../apps/web/src/components/OrderOccupantCorrectionDialog.tsx#L32)
-
-- 会员操作返回修改后重开对应业务表单。
-  [`MembersPage.tsx:608`](../apps/web/src/pages/MembersPage.tsx#L608)
-
-- 今日履约成功后等待真实订单投影刷新。
-  [`TodayPage.tsx:101`](../apps/web/src/pages/TodayPage.tsx#L101)
-
-**验证证据**
-
-- 单测证明恢复存储无 Receipt 和业务敏感字段。
-  [`OrderDetailPage.test.ts:321`](../apps/web/src/pages/OrderDetailPage.test.ts#L321)
-
-- 单测覆盖损坏 effect 与原输入串线失败关闭。
-  [`ui.test.ts:155`](../apps/web/src/ui.test.ts#L155)
-
-- 浏览器覆盖草稿返回、未知恢复和移动端自动关闭。
-  [`command-shell-u1.spec.ts:79`](../tests/e2e/command-shell-u1.spec.ts#L79)
+- 浏览器覆盖只读竞态、自然过期、桌面/手机内联和备注持久化。
+  [`room-status-stage8-fulfillment.spec.ts:217`](../tests/e2e/room-status-stage8-fulfillment.spec.ts#L217)

@@ -4,9 +4,11 @@ import { buildOrderOccupantCorrectionRequest, correctionDraftMatchesOccupant, re
 import {
   enabledOrderActionCodes,
   fulfillmentResultLabel,
+  initialRepriceTargetYuan,
   occupantSnapshotEntries,
   orderDetailBackTarget,
   orderFulfillmentNotice,
+  wholeYuanAmountMinor,
   orderViewMatchesPrincipalScope,
   orderedOrderOccupants,
   primaryOrderOccupant,
@@ -104,6 +106,24 @@ describe("fulfillment result presentation", () => {
       enabled: false,
       disabledReason: "ORDER_STATE_INVALID"
     }])).toBeUndefined();
+  });
+});
+
+describe("reprice form defaults", () => {
+  it("starts from the current order amount unless an exact draft value is restored", () => {
+    expect(initialRepriceTargetYuan(13_000, undefined)).toBe("130");
+    expect(initialRepriceTargetYuan(13_000, 11_000)).toBe("110");
+    expect(initialRepriceTargetYuan(13_000, Number.NaN)).toBe("130");
+    expect(initialRepriceTargetYuan(13_000, -100)).toBe("130");
+    expect(initialRepriceTargetYuan(13_000, 11_050)).toBe("130");
+  });
+
+  it("accepts only non-negative whole-yuan values", () => {
+    expect(wholeYuanAmountMinor("110")).toBe(11_000);
+    expect(wholeYuanAmountMinor("0")).toBe(0);
+    expect(wholeYuanAmountMinor("110.5")).toBeUndefined();
+    expect(wholeYuanAmountMinor("-1")).toBeUndefined();
+    expect(wholeYuanAmountMinor("not-a-number")).toBeUndefined();
   });
 });
 

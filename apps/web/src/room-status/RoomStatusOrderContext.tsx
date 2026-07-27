@@ -68,6 +68,7 @@ export interface RoomStatusOrderContextProps {
   writeBlocked?: boolean;
   onClose?: () => void;
   onOpenOrder: (actionCode?: string) => void;
+  onFulfillmentAction: (action: "CHECK_IN" | "CHECK_OUT") => void;
   onCorrectOccupant: (occupant: OrderOccupant) => void;
   onLocateRange: (target: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) => void;
 }
@@ -123,13 +124,19 @@ export function RoomStatusOrderContext({
   writeBlocked = false,
   onClose,
   onOpenOrder,
+  onFulfillmentAction,
   onCorrectOccupant,
   onLocateRange
 }: RoomStatusOrderContextProps) {
   const unitMap = new Map(units.map((unit) => [unit.id, unit]));
   const enabledActions = view.allowedActions.filter((action) => action.enabled);
   const canCorrectOccupants = enabledActions.some((action) => action.code === "CORRECT_ORDER_OCCUPANT") && !writeBlocked;
-  const routedActions = enabledActions.filter((action) => action.code !== "CORRECT_ORDER_OCCUPANT");
+  const fulfillmentActions = enabledActions.filter((action): action is typeof action & { code: "CHECK_IN" | "CHECK_OUT" } => (
+    action.code === "CHECK_IN" || action.code === "CHECK_OUT"
+  ));
+  const routedActions = enabledActions.filter((action) => (
+    action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
+  ));
   const source = view.order.stay_type === "FREE"
     ? `免费住宿 · ${view.order.free_stay_reason || "未填写原因"}`
     : view.order.member_id || view.order.member_contract_id
@@ -276,7 +283,10 @@ export function RoomStatusOrderContext({
       <section className="room-status-context-actions" aria-labelledby="room-status-order-actions-heading">
         <div className="room-status-context-section-heading"><ArrowRight aria-hidden="true" size={17} /><h3 id="room-status-order-actions-heading">订单入口</h3></div>
         <button type="button" className="room-status-button" onClick={() => onOpenOrder()}>查看完整订单<ArrowRight aria-hidden="true" size={16} /></button>
-        {routedActions.length ? <ul>{routedActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" onClick={() => onOpenOrder(action.code)}>{actionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} /></button></li>)}</ul> : null}
+        {fulfillmentActions.length || routedActions.length ? <ul>
+          {fulfillmentActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action-mode="inline" onClick={() => onFulfillmentAction(action.code)}>{actionLabels[action.code]}</button></li>)}
+          {routedActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" data-room-status-action-mode="order-detail" onClick={() => onOpenOrder(action.code)}>{actionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} /></button></li>)}
+        </ul> : null}
       </section>
 
       <footer className="room-status-context-freshness"><Clock3 aria-hidden="true" size={15} /><span>订单更新 {formatDateTime(view.order.updated_at)}</span><span>{view.accessLevel === "WRITE" ? "可写" : "只读"}</span></footer>

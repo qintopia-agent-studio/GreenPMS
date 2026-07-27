@@ -1318,6 +1318,44 @@ function actionUnit(unit: RoomStatusUnitDto, available: boolean): InventoryActio
   };
 }
 
+export function selectedOrderCommandScopeIsCurrent(
+  selectedScope: string | undefined,
+  principalScope: string,
+  identity?: Pick<RoomStatusOrderIdentity, "orderId" | "stayId">
+): boolean {
+  if (!selectedScope) return false;
+  return selectedScope === principalScope
+    || selectedScope === roomStatusOrderCommandScope(principalScope, identity);
+}
+
+export function roomStatusOrderCommandScope(
+  principalScope: string,
+  identity?: Pick<RoomStatusOrderIdentity, "orderId" | "stayId">
+): string {
+  return identity
+    ? JSON.stringify([principalScope, identity.orderId, identity.stayId])
+    : principalScope;
+}
+
+export function roomStatusCommandWriteGate(input: {
+  projectionWritable: boolean;
+  activeProjectionValid: boolean;
+  recoveryBlocked: boolean;
+  recoveryReady: boolean;
+  recoveryError: unknown;
+  contextInvalidated: boolean;
+  targetScopeCurrent: boolean;
+}): { startBlocked: boolean; activeBlocked: boolean } {
+  return {
+    startBlocked: input.recoveryBlocked || !input.projectionWritable,
+    activeBlocked: !input.activeProjectionValid
+      || !input.recoveryReady
+      || Boolean(input.recoveryError)
+      || input.contextInvalidated
+      || !input.targetScopeCurrent
+  };
+}
+
 function buildMobileGroups(board: RoomStatusBoardDto): RoomStatusMobileGroups {
   const tasks = board.operationalTasks.filter((task) => task.businessDate === board.businessDate);
   return {
@@ -1335,7 +1373,7 @@ export function InventoryPage() {
   const { meta, principal, propertyId } = useWorkspace();
   const property = meta.properties.find((item) => item.id === propertyId);
   const propertyTimezone = property?.timezone ?? "UTC";
-  const orderPrincipalScope = `${principal.subjectId}:${principal.credentialType}:${principal.propertyAccess[propertyId] ?? "NONE"}`;
+  const orderPrincipalScope = `${propertyId}:${principal.subjectId}:${principal.credentialType}:${principal.propertyAccess[propertyId] ?? "NONE"}`;
   const initialRestoration = useRef(readRoomStatusRestoration(principal.subjectId, propertyId));
   const orderReturnEnvelopePresent = useRef(hasRoomStatusOrderReturnEnvelope(location.state));
   const pendingOrderReturnTarget = useRef(parseRoomStatusOrderReturnTarget(location.state));
@@ -1409,6 +1447,7 @@ export function InventoryPage() {
   if (!commandAttemptGuardRef.current) commandAttemptGuardRef.current = new RoomStatusCommandAttemptGuard();
   const commandAttemptGuard = commandAttemptGuardRef.current;
   const commandRevisionRef = useRef<string | undefined>(undefined);
+  const commandQueryKeyRef = useRef<string | undefined>(undefined);
   const refreshedReceiptIdRef = useRef<string | undefined>(undefined);
   const focusAfterNextBoard = useRef(false);
   const pendingMobileTaskFocus = useRef<PendingMobileTaskFocus | undefined>(undefined);
@@ -1417,6 +1456,7 @@ export function InventoryPage() {
     subjectId: string;
     snapshot: RoomStatusRestorationSnapshot;
   } | undefined>(undefined);
+  const currentSelectedOrderCommandScope = roomStatusOrderCommandScope(orderPrincipalScope, selectedOrderIdentity);
 
   useEffect(() => {
     boardRef.current = board;
@@ -1467,19 +1507,21 @@ export function InventoryPage() {
       })
       .finally(() => current && setSelectedOrderLoading(false));
     return () => { current = false; };
-  }, [board?.revision, orderPrincipalScope, orderRefreshToken, propertyId, refreshToken, selectedOrderIdentity]);
+  }, [board?.businessDate, board?.revision, orderPrincipalScope, orderRefreshToken, propertyId, selectedOrderIdentity]);
 
   useEffect(() => {
-    if (command?.commandType !== "CORRECT_ORDER_OCCUPANT" || selectedOrderCommandScope === orderPrincipalScope) return;
+    if (!command || selectedOrderCommandScopeIsCurrent(selectedOrderCommandScope, orderPrincipalScope, selectedOrderIdentity)) return;
     commandAttemptGuard.invalidate();
     commandPhaseRef.current = "IDLE";
     commandRevisionRef.current = undefined;
+    commandQueryKeyRef.current = undefined;
     setCommand(undefined);
     setCommandDraft(undefined);
     setSelectedOrderCommandScope(undefined);
     setSelectedCorrectionOccupantId(undefined);
     setRecoveryDialogOpen(false);
-  }, [command, orderPrincipalScope, selectedOrderCommandScope]);
+    setActionError(new Error("当前命令绑定的门店、账号、订单或住宿已经变化，原操作已关闭；请重新选择后办理。"));
+  }, [command, currentSelectedOrderCommandScope, selectedOrderCommandScope]);
 
   useEffect(() => {
     if (!selectedCorrectionOccupantId || !selectedCorrectionRevision || !board) return;
@@ -1562,6 +1604,7 @@ export function InventoryPage() {
     commandPhaseRef.current = "IDLE";
     commandAttemptGuard.invalidate();
     commandRevisionRef.current = undefined;
+    commandQueryKeyRef.current = undefined;
     focusAfterNextBoard.current = false;
     setCommandContextInvalidated(false);
     setCommand(undefined);
@@ -1718,6 +1761,7 @@ export function InventoryPage() {
           commandPhaseRef.current = "IDLE";
           commandAttemptGuard.invalidate();
           commandRevisionRef.current = undefined;
+          commandQueryKeyRef.current = undefined;
           focusAfterNextBoard.current = false;
           setCommandContextInvalidated(false);
           setCommand(undefined);
@@ -1792,14 +1836,34 @@ export function InventoryPage() {
     || queryPhase === "RANGE_LOADING"
     || queryPhase === "REFRESHING"
     || Boolean(board && !boardMatchesCurrentQuery);
-  const projectionWritable = Boolean(board
+  const activeProjectionValid = Boolean(board
     && boardMatchesCurrentQuery
-    && !boardStale
+    && !queryError
     && !focusAfterNextBoard.current
     && board.projectionState === "READY"
     && board.accessLevel === "WRITE"
     && (queryPhase === "READY" || queryPhase === "REFRESHING"));
-  const commandsBlocked = commandRecovery.blocked || !projectionWritable;
+  const projectionWritable = activeProjectionValid && !boardExpired;
+  const commandTargetScopeCurrent = selectedOrderCommandScopeIsCurrent(
+    selectedOrderCommandScope,
+    orderPrincipalScope,
+    selectedOrderIdentity
+  );
+  const commandWriteGate = roomStatusCommandWriteGate({
+    projectionWritable,
+    activeProjectionValid,
+    recoveryBlocked: commandRecovery.blocked,
+    recoveryReady: commandRecovery.ready,
+    recoveryError: commandRecovery.error,
+    contextInvalidated: commandContextInvalidated,
+    targetScopeCurrent: commandTargetScopeCurrent
+  });
+  const commandsBlocked = commandWriteGate.startBlocked;
+  const activeCommandWriteBlocked = commandWriteGate.activeBlocked;
+  useEffect(() => {
+    if (!command || commandPhaseRef.current === "IDLE" || !commandQueryKeyRef.current) return;
+    if (commandQueryKeyRef.current !== currentBoardQueryKey) setCommandContextInvalidated(true);
+  }, [command, currentBoardQueryKey]);
   const renderedBoard = useMemo(
     () => boardForCurrentProperty
       ? displayRoomStatusBoard(boardForCurrentProperty, commandsBlocked && !command, boardStale)
@@ -2381,6 +2445,35 @@ export function InventoryPage() {
     });
   }
 
+  function startSelectedOrderFulfillment(commandType: "CHECK_IN" | "CHECK_OUT") {
+    setActionError(undefined);
+    const view = authorizedSelectedOrderView;
+    const identity = selectedOrderIdentity;
+    const action = view?.allowedActions.find((candidate) => candidate.code === commandType);
+    if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
+      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未发送办理命令。请重新选择住宿后再试。"));
+      return;
+    }
+    if (selectedOrderLoading || commandsBlocked || view.accessLevel !== "WRITE") {
+      setActionError(new Error("当前房态或订单权限不允许写入，未发送办理命令。请刷新后重新核对。"));
+      return;
+    }
+    if (!action?.enabled) {
+      setActionError(new Error("服务端当前未允许这项办理操作，未发送命令。请刷新订单状态后重新核对。"));
+      return;
+    }
+    const started = startCommand({
+      commandType,
+      title: commandType === "CHECK_IN" ? "办理入住" : "办理退房",
+      description: commandType === "CHECK_IN"
+        ? "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。"
+        : "核对后将住宿状态更新为已退房并释放后续住宿库存；退房不会重复核销会员权益。",
+      presentation: "FULFILLMENT",
+      input: { propertyId: view.order.property_id, orderId: view.order.id }
+    }, roomStatusOrderCommandScope(orderPrincipalScope, identity));
+    if (!started) setSelectedOrderCommandScope(undefined);
+  }
+
   function closeSelectedOrderContext() {
     setSelectedCorrectionOccupantId(undefined);
     setOrderContextOpen(false);
@@ -2461,7 +2554,7 @@ export function InventoryPage() {
     }
   }
 
-  function startCommand(request: CommandRequest): boolean {
+  function startCommand(request: CommandRequest, targetScope = orderPrincipalScope): boolean {
     if (commandsBlocked) {
       setActionError(new Error("当前房态已陈旧、正在刷新、权限已收窄或命令恢复尚未收口；命令未发送，表单草稿保持不变。"));
       return false;
@@ -2470,10 +2563,12 @@ export function InventoryPage() {
     setCommandAttemptId(attemptId);
     commandPhaseRef.current = "DRAFT";
     commandRevisionRef.current = boardRef.current?.revision;
+    commandQueryKeyRef.current = boardQueryKeyRef.current;
     setCommandContextInvalidated(false);
     setRecoveryDialogOpen(false);
     setActionError(undefined);
     setCommandDraft(undefined);
+    setSelectedOrderCommandScope(targetScope);
     setCommand(request);
     return true;
   }
@@ -2543,12 +2638,31 @@ export function InventoryPage() {
 
   function openRecoveryDialog() {
     if (!commandRecovery.pending) return;
+    const recoveryOrderId = commandRecovery.pending.targetRefs
+      .find((reference) => reference.startsWith("orderId="))
+      ?.slice("orderId=".length);
+    const recoveryMatchesSelectedOrder = Boolean(
+      recoveryOrderId
+      && selectedOrderIdentity?.orderId === recoveryOrderId
+    );
+    if (commandRecovery.pending.presentation === "FULFILLMENT" && !recoveryMatchesSelectedOrder) {
+      setSelectedOrderIdentity(undefined);
+      setSelectedOrderView(undefined);
+      setSelectedOrderLoadedScope(undefined);
+      setSelectedOrderError(undefined);
+      setSelectedOrderLoading(false);
+      setOrderContextOpen(false);
+    }
     const attemptId = commandAttemptGuard.begin();
     setCommandAttemptId(attemptId);
     commandPhaseRef.current = "CONFIRMING";
     commandRevisionRef.current = boardRef.current?.revision;
+    commandQueryKeyRef.current = boardQueryKeyRef.current;
     setCommandContextInvalidated(false);
     setRecoveryDialogOpen(true);
+    setSelectedOrderCommandScope(recoveryMatchesSelectedOrder
+      ? roomStatusOrderCommandScope(orderPrincipalScope, selectedOrderIdentity)
+      : orderPrincipalScope);
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
 
@@ -2568,6 +2682,7 @@ export function InventoryPage() {
     commandAttemptGuard.invalidate();
     commandPhaseRef.current = "IDLE";
     commandRevisionRef.current = undefined;
+    commandQueryKeyRef.current = undefined;
     setCommand(undefined);
     setSelectedOrderCommandScope(undefined);
     setRecoveryDialogOpen(false);
@@ -2670,9 +2785,10 @@ export function InventoryPage() {
         view={authorizedSelectedOrderView}
         units={meta.inventoryUnits}
         loading={selectedOrderLoading}
-        writeBlocked={commandsBlocked || authorizedSelectedOrderView.accessLevel !== "WRITE"}
+        writeBlocked={selectedOrderLoading || commandsBlocked || authorizedSelectedOrderView.accessLevel !== "WRITE"}
         onClose={closeSelectedOrderContext}
         onOpenOrder={openSelectedOrder}
+        onFulfillmentAction={startSelectedOrderFulfillment}
         onCorrectOccupant={(occupant) => {
           setCommandDraft(undefined);
           setSelectedCorrectionOccupantId(occupant.id);
@@ -2924,16 +3040,15 @@ export function InventoryPage() {
           setSelectedCorrectionOccupantId(undefined);
           setSelectedCorrectionRevision(undefined);
           setRecoveryDialogOpen(false);
-          setSelectedOrderCommandScope(orderPrincipalScope);
-          startCommand(request);
+          startCommand(request, currentSelectedOrderCommandScope);
         }}
       /> : null}
-      {command && (command.commandType !== "CORRECT_ORDER_OCCUPANT" || selectedOrderCommandScope === orderPrincipalScope) ? <CommandDialog
+      {command && commandTargetScopeCurrent ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}-${commandAttemptId}` : `new-room-status-command-${commandAttemptId}`}
         request={command}
         onClose={closeCommandDialog}
-        writeBlocked={!recoveryDialogOpen && (commandsBlocked || commandContextInvalidated)}
-        writeBlockedReason="房态权限、查询范围、数据新鲜度或操作恢复状态已经变化。请关闭后刷新，再重新核对本次操作。"
+        writeBlocked={!recoveryDialogOpen && activeCommandWriteBlocked}
+        writeBlockedReason="当前命令绑定的门店、账号、订单、住宿、查询范围或业务版本已经变化，或者操作恢复状态异常。请关闭后重新核对。"
         onCommitted={refreshCommittedRoomStatus}
         onBusinessSuccess={(message) => {
           setCommandNotice(message);

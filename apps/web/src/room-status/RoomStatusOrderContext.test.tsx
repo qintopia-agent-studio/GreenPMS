@@ -129,7 +129,7 @@ const units = [
 
 describe("RoomStatusOrderContext", () => {
   it("shows the complete Stay, each segment, correction audit, and only enabled server actions", () => {
-    const html = renderToStaticMarkup(<RoomStatusOrderContext view={orderView()} units={units} onOpenOrder={() => undefined} onCorrectOccupant={() => undefined} onLocateRange={() => undefined} />);
+    const html = renderToStaticMarkup(<RoomStatusOrderContext view={orderView()} units={units} onOpenOrder={() => undefined} onFulfillmentAction={() => undefined} onCorrectOccupant={() => undefined} onLocateRange={() => undefined} />);
     expect(html).toContain("3 夜");
     expect(html).toContain("101 一栋101");
     expect(html).toContain("102 一栋102");
@@ -146,11 +146,47 @@ describe("RoomStatusOrderContext", () => {
     expect(html).not.toContain("INITIAL");
     expect(html).toContain("更正资料");
     expect(html).toContain("办理入住");
+    expect(html).toContain('data-room-status-action-mode="inline"');
     expect(html).not.toContain("办理退房");
   });
 
+  it("keeps check-in and check-out local while routing complex order actions to order detail", () => {
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        allowedActions: [
+          { code: "CHECK_IN", enabled: true, disabledReason: null },
+          { code: "CHECK_OUT", enabled: true, disabledReason: null },
+          { code: "REPRICE_ORDER", enabled: true, disabledReason: null }
+        ]
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html.match(/data-room-status-action-mode="inline"/g)).toHaveLength(2);
+    expect(html.match(/data-room-status-action-mode="order-detail"/g)).toHaveLength(1);
+    expect(html).toContain("办理入住");
+    expect(html).toContain("办理退房");
+    expect(html).toContain("调整订单金额");
+  });
+
+  it("keeps local fulfillment visible but disabled while room-status writes are blocked", () => {
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView()}
+      units={units}
+      writeBlocked
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-room-status-action-mode="inline"[^>]*>办理入住/);
+  });
+
   it("keeps authoritative order facts readable while exposing no write entry to READ access", () => {
-    const html = renderToStaticMarkup(<RoomStatusOrderContext view={orderView({ accessLevel: "READ", allowedActions: [] })} units={units} onOpenOrder={() => undefined} onCorrectOccupant={() => undefined} onLocateRange={() => undefined} />);
+    const html = renderToStaticMarkup(<RoomStatusOrderContext view={orderView({ accessLevel: "READ", allowedActions: [] })} units={units} onOpenOrder={() => undefined} onFulfillmentAction={() => undefined} onCorrectOccupant={() => undefined} onLocateRange={() => undefined} />);
     expect(html).toContain("山峰");
     expect(html).toContain("查看完整订单");
     expect(html).not.toContain("更正资料");
@@ -170,6 +206,7 @@ describe("RoomStatusOrderContext", () => {
       })}
       units={units}
       onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
       onCorrectOccupant={() => undefined}
       onLocateRange={() => undefined}
     />);
@@ -195,6 +232,7 @@ describe("RoomStatusOrderContext", () => {
       })}
       units={units}
       onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
       onCorrectOccupant={() => undefined}
       onLocateRange={() => undefined}
     />);
