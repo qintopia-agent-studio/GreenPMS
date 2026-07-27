@@ -871,8 +871,6 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
             <dt>房态变化</dt><dd><strong>该区间将设为维修锁房</strong></dd>
           </> : <>
             <dt>目标房源</dt><dd><strong>{commandTitle ?? scalar(effect.inventoryUnitId)}</strong></dd>
-            <dt>房源记录</dt><dd>{scalar(effect.inventoryUnitId)}</dd>
-            <dt>维修锁房记录</dt><dd>{scalar(effect.maintenanceLockId)}</dd>
             <dt>释放范围</dt><dd><strong>完整释放这条维修锁房及对应库存占用</strong></dd>
             <dt>历史记录</dt><dd>保留</dd>
           </>}

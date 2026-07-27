@@ -1491,8 +1491,6 @@ test("maintenance lock can be listed and released", async ({ page }, testInfo: T
   const releaseSummary = page.getByTestId("command-effect");
   await expect(releaseSummary).toContainText("目标房源");
   await expect(releaseSummary).toContainText("释放维修锁 · 102");
-  await expect(releaseSummary).toContainText("房源记录");
-  await expect(releaseSummary).toContainText("维修锁房记录");
   await confirmU1Command(page, ["完整释放这条维修锁房"]);
 
   await selectRoomStatusRange(page, "102", "2026-08-11", "2026-08-10");

@@ -75,7 +75,7 @@ context:
 - 2026-07-27：TypeScript、production build、`git diff --check` 通过；Unit `316/316`、Integration `182/182`、Contract/OpenAPI `57/57`、pricing facts `7/7` 通过。
 - U1 专属桌面/手机 E2E `3 passed / 3 expected skipped`；调价与维修释放真实旅程 `2/2`；Stage 8 独立履约 `5 passed / 5 expected skipped`；修正后的手机今日入住 `1/1`。
 - 完整 E2E 首轮为 `61 passed / 56 skipped / 8 did not run / 17 failed`。其中两条 Stage 8 失败由共享数据库前序占用污染造成，独立复跑全绿；一条手机用例违反已验收的提前退房门禁，修正为合法入住旅程后通过。其余为 U1 排除范围内的既有 Token 与房态性能、拖选、恢复、响应式断言；U1 相关套件无剩余失败，不在本切片跨阶段修复。
-- 评审补丁已闭合：所有关闭路径保留草稿、迟到键门禁、未知结果原键查询、Receipt 语义一致性、权威投影刷新、焦点回退、恢复存储仅保留身份，以及调价/维修释放 effect 与原输入的一致性失败关闭。
+- 评审补丁已闭合：所有关闭路径保留草稿、迟到键门禁、未知结果原键查询、Receipt 语义一致性、权威投影刷新、焦点回退、恢复存储仅保留身份；调价核对严格覆盖原金额、连续住宿时间线、完整 pricing 证据、币种/整元/差额一致性及原订单目标，维修释放严格绑定原锁房目标并显示可识别房号，任一损坏证据均不开放确认。
 
 ## Suggested Review Order
 
