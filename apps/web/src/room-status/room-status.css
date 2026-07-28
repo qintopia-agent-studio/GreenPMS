@@ -1330,6 +1330,8 @@
 .room-status-quick-history {
   display: flex;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 38px;
   align-items: center;
   gap: 8px;
@@ -1349,7 +1351,19 @@
 
 .room-status-quick-orders > button > span {
   display: grid;
+  min-width: 0;
   gap: 2px;
+}
+
+.room-status-quick-orders > button > svg {
+  flex: 0 0 auto;
+}
+
+.room-status-quick-orders > button strong {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .room-status-quick-history {

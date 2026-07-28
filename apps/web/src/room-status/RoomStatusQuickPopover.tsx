@@ -145,14 +145,41 @@ export function RoomStatusQuickPopover({
     if (!node) return;
     reposition();
     const resizeObserver = new ResizeObserver(reposition);
-    resizeObserver.observe(node);
-    const frame = requestAnimationFrame(reposition);
+    const layoutRoot = anchor.closest<HTMLElement>(".room-status-grid");
+    const layoutBoundary = anchor.closest<HTMLElement>(".inventory-page")
+      ?? anchor.closest<HTMLElement>(".room-status-grid-section")
+      ?? layoutRoot;
+    for (const observed of new Set<HTMLElement>([
+      node,
+      anchor,
+      ...(rowAnchor ? [rowAnchor] : []),
+      ...(layoutRoot ? [layoutRoot] : []),
+      ...(layoutBoundary ? [layoutBoundary] : [])
+    ])) {
+      resizeObserver.observe(observed);
+    }
+    const geometrySignature = () => {
+      const anchorBounds = anchor.getBoundingClientRect();
+      const rowBounds = rowAnchor?.getBoundingClientRect() ?? anchorBounds;
+      return `${anchorBounds.left}:${anchorBounds.right}:${anchorBounds.top}:${anchorBounds.bottom}:${rowBounds.top}:${rowBounds.bottom}:${window.innerWidth}:${window.innerHeight}`;
+    };
+    let previousGeometry = geometrySignature();
+    let frame = 0;
+    const trackGeometry = () => {
+      const nextGeometry = geometrySignature();
+      if (nextGeometry !== previousGeometry) {
+        previousGeometry = nextGeometry;
+        reposition();
+      }
+      frame = requestAnimationFrame(trackGeometry);
+    };
+    frame = requestAnimationFrame(trackGeometry);
     node.focus({ preventScroll: true });
     return () => {
       cancelAnimationFrame(frame);
       resizeObserver.disconnect();
     };
-  }, [reposition]);
+  }, [anchor, reposition, rowAnchor]);
 
   useEffect(() => {
     anchor.setAttribute("aria-expanded", "true");

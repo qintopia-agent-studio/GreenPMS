@@ -287,6 +287,87 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
   }
 });
 
+test("U2 quick popover repositions after room-row or page geometry changes without a viewport event", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 dynamic-placement coverage");
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await login(page);
+  await showRange(page);
+  await page.getByTestId("date-window-mode-21").click();
+
+  const targetDate = addDays(fixture.dates.arrivalDate, 10);
+  const target = page.locator(`.room-status-day-available[data-room-status-cell="true"][data-service-date="${targetDate}"]`).first();
+  await target.scrollIntoViewIfNeeded();
+  await target.focus();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  const originalRowHeight = await popover.evaluate((element) => {
+    const row = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
+    if (!row) throw new Error("快捷操作框缺少房源行");
+    const popoverBox = element.getBoundingClientRect();
+    const rowBox = row.getBoundingClientRect();
+    if (popoverBox.top < rowBox.bottom + 7) throw new Error("测试房源行下方没有足够的初始空间");
+    const original = row.style.height;
+    row.style.height = `${rowBox.height + 220}px`;
+    return original;
+  });
+
+  await expect.poll(() => popover.evaluate((element) => {
+    const row = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
+    if (!row) throw new Error("快捷操作框缺少房源行");
+    const popoverBox = element.getBoundingClientRect();
+    const rowBox = row.getBoundingClientRect();
+    return popoverBox.top >= rowBox.bottom + 7 || popoverBox.bottom <= rowBox.top - 7;
+  })).toBe(true);
+  await popover.evaluate((element, height) => {
+    const row = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
+    if (row) row.style.height = height;
+  }, originalRowHeight);
+
+  await popover.evaluate(() => {
+    const workspace = document.querySelector<HTMLElement>(".room-status-workspace");
+    if (!workspace) throw new Error("快捷操作框缺少房态工作区");
+    const notice = document.createElement("div");
+    notice.dataset.u2LayoutShift = "true";
+    notice.style.height = "100px";
+    workspace.before(notice);
+  });
+  await expect.poll(() => popover.evaluate((element) => {
+    const row = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
+    if (!row) throw new Error("快捷操作框缺少房源行");
+    const popoverBox = element.getBoundingClientRect();
+    const rowBox = row.getBoundingClientRect();
+    return popoverBox.top >= rowBox.bottom + 7 || popoverBox.bottom <= rowBox.top - 7;
+  })).toBe(true);
+  await page.locator("[data-u2-layout-shift=true]").evaluate((element) => element.remove());
+});
+
+test("U2 quick popover contains a legal 200-character unbroken occupant label", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 long-label coverage");
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await login(page);
+  await showRange(page);
+
+  const { popover } = await openWholeRoomPopover(page);
+  const longLabel = "U".repeat(200);
+  await popover.locator(".room-status-quick-orders strong").evaluate((element, value) => {
+    element.textContent = value;
+  }, longLabel);
+  await expect(popover.locator(".room-status-quick-orders strong")).toHaveText(longLabel);
+  const geometry = await popover.evaluate((element) => {
+    const button = element.querySelector<HTMLElement>(".room-status-quick-orders button");
+    const label = element.querySelector<HTMLElement>(".room-status-quick-orders strong");
+    if (!button || !label) throw new Error("快捷操作框缺少订单按钮或住客名称");
+    return {
+      popoverWidth: element.getBoundingClientRect().width,
+      popoverFits: element.scrollWidth <= element.clientWidth,
+      buttonFits: button.scrollWidth <= button.clientWidth,
+      labelFits: label.scrollWidth <= label.clientWidth
+    };
+  });
+  expect(geometry).toEqual({ popoverWidth: 280, popoverFits: true, buttonFits: true, labelFits: true });
+});
+
 test("U2 Escape closes a quick popover before the underlying non-modal order drawer", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop-only U2 layered Escape coverage");
   await page.setViewportSize({ width: 1366, height: 768 });
