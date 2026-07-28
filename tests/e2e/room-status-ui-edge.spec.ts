@@ -416,15 +416,25 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
   await page.setViewportSize({ width: 1440, height: 900 });
   const board = await login(page);
   await expect(page.getByRole("grid")).toBeVisible();
+  await page.getByTestId("date-window-mode-21").click();
   const candidate = findFiveNightDragCandidate(board);
   const businessReason = `Room-status overlay drag ${randomUUID()}`;
 
   const row = roomRow(page, candidate.unitId);
   try {
-    await page.getByTestId("room-status-unit-select").selectOption(candidate.unitId);
-    await page.getByLabel("入住日期", { exact: true }).fill(candidate.blockStart);
-    await page.getByLabel("退房日期", { exact: true }).fill(candidate.blockEnd);
-    await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
+    const blockStartCell = roomCell(page, candidate.unitId, candidate.blockStart);
+    const blockEndCell = roomCell(page, candidate.unitId, addDays(candidate.blockEnd, -1));
+    const blockStartBox = await blockStartCell.boundingBox();
+    const blockEndBox = await blockEndCell.boundingBox();
+    expect(blockStartBox).not.toBeNull();
+    expect(blockEndBox).not.toBeNull();
+    await page.mouse.move(blockStartBox!.x + blockStartBox!.width / 2, blockStartBox!.y + blockStartBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(blockEndBox!.x + blockEndBox!.width / 2, blockEndBox!.y + blockEndBox!.height / 2, { steps: 8 });
+    await page.mouse.up();
+    const actionPopover = page.getByTestId("room-status-quick-popover");
+    await expect(actionPopover).toHaveAttribute("data-selection-kind", "range");
+    await actionPopover.getByRole("button", { name: "维修锁房", exact: true }).click();
     await page.getByLabel("维修原因").fill(businessReason);
     await page.getByRole("button", { name: "继续核对", exact: true }).click();
     const placementReceipt = await previewAndConfirm(page);
@@ -461,18 +471,23 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
     await page.mouse.move(boxes.end!.x + boxes.end!.width / 2, pointerY, { steps: 8 });
     await page.mouse.up();
 
-    await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(candidate.dragStart);
-    await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(addDays(candidate.dragEnd, 1));
+    const rangePopover = page.getByTestId("room-status-quick-popover");
+    await expect(rangePopover).toBeVisible();
+    await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
     for (const date of board.dates.filter((date) => date >= candidate.dragStart && date <= candidate.dragEnd)) {
       await expect(roomCell(page, candidate.unitId, date)).toHaveAttribute("aria-selected", "true");
     }
     await expectFullyHitTestable(startCell, "drag selection start cell");
     await expectFullyHitTestable(endCell, "drag selection end cell");
     await page.screenshot({ path: testInfo.outputPath("mouse-drag-crosses-interval-overlay.png") });
+    await page.keyboard.press("Escape");
+    await expect(rangePopover).toBeHidden();
   } finally {
     const interval = row.locator(".room-status-interval-maintenance");
     if (await interval.count() === 1) {
       await interval.click();
+      const actionPopover = page.getByTestId("room-status-quick-popover");
+      await actionPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
       await page.locator(".room-status-context-actions").getByRole("button", { name: "释放维修锁房", exact: true }).click();
       const releaseReceipt = await previewAndConfirm(page);
       expect(releaseReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);

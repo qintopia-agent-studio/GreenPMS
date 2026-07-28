@@ -203,8 +203,6 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     expect(endBox).not.toBeNull();
     expect(adjacentBox).not.toBeNull();
     expect(rowBoxBefore).not.toBeNull();
-    const arrivalBeforeDrag = await page.getByLabel("入住日期", { exact: true }).inputValue();
-    const departureBeforeDrag = await page.getByLabel("退房日期", { exact: true }).inputValue();
 
     await startCell.hover({ position: { x: startBox!.width / 2, y: startBox!.height - 8 } });
     await page.mouse.down();
@@ -215,8 +213,8 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
       { steps: 1 }
     );
 
-    await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(arrivalBeforeDrag);
-    await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(departureBeforeDrag);
+    await expect(page.getByTestId("room-status-quick-popover")).toBeHidden();
+    await expect(page.locator("dialog.room-status-write-drawer")).toBeHidden();
     await expect(roomCell(page, "unit_room_102", "2026-07-29")).toHaveAttribute("aria-selected", "true");
     await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="unit_room_103"][aria-selected="true"]`)).toHaveCount(0);
     const rowBoxDuring = await sourceRow.boundingBox();
@@ -225,13 +223,16 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
 
     await page.mouse.up();
     await expect(sourceRow).not.toHaveClass(/is-drag-source-row/);
-    await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue("2026-07-26");
-    await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue("2026-07-30");
+    const rangePopover = page.getByTestId("room-status-quick-popover");
+    await expect(rangePopover).toBeVisible();
+    await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
+    await expect(rangePopover).toContainText("4晚");
     const rowBoxAfter = await sourceRow.boundingBox();
     expect(rowBoxAfter?.y).toBe(rowBoxBefore!.y);
     expect(rowBoxAfter?.height).toBe(rowBoxBefore!.height);
-    await expect(page.getByTestId("quote-result")).toContainText("4 晚", { timeout: 15_000 });
     await page.screenshot({ path: testInfo.outputPath("stage-1-drag-locked-to-source-row.png"), fullPage: true });
+    await page.keyboard.press("Escape");
+    await expect(rangePopover).toBeHidden();
 
     await startCell.hover({ position: { x: startBox!.width / 2, y: startBox!.height - 8 } });
     await page.mouse.down();
@@ -260,7 +261,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await page.mouse.up();
   });
 
-  test("连续拖选日期时右侧滚动容器保持稳定并显示最终报价", async ({ page }, testInfo) => {
+  test("连续拖选日期时不发送中间报价并在选择动作后显示最终报价", async ({ page }, testInfo) => {
     const quotePayloads: Array<Record<string, unknown>> = [];
     page.on("request", (request) => {
       if (request.method() === "POST" && request.url().endsWith("/api/v1/quotes")) {
@@ -269,40 +270,25 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     });
     await login(page);
     await setBoardRange(page, "2026-07-23", "2026-08-15");
-    await selectDraft(page, "unit_room_102", "2026-07-26", "2026-07-28");
-    await expect(page.getByTestId("quote-result")).toContainText("2 晚", { timeout: 15_000 });
-    expect(quotePayloads).toHaveLength(1);
-
-    const sideColumn = page.locator(".room-status-side-column");
-    await sideColumn.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await page.evaluate(() => {
-      const element = document.querySelector<HTMLElement>(".room-status-side-column");
-      if (!element) throw new Error("找不到右侧滚动容器");
-      const samples: Array<{ scrollTop: number; clientHeight: number; scrollHeight: number; position: number }> = [];
-      let sampling = true;
-      const sample = () => {
-        const maxScrollTop = element.scrollHeight - element.clientHeight;
-        samples.push({
-          scrollTop: element.scrollTop,
-          clientHeight: element.clientHeight,
-          scrollHeight: element.scrollHeight,
-          position: maxScrollTop > 0 ? element.scrollTop / maxScrollTop : 0
-        });
-        if (sampling) requestAnimationFrame(sample);
-      };
-      (window as typeof window & {
-        __sideColumnSamples: typeof samples;
-        __stopSideColumnSampling: () => void;
-      }).__sideColumnSamples = samples;
-      (window as typeof window & {
-        __sideColumnSamples: typeof samples;
-        __stopSideColumnSampling: () => void;
-      }).__stopSideColumnSampling = () => { sampling = false; };
-      requestAnimationFrame(sample);
-    });
+    await page.getByTestId("date-window-mode-21").click();
+    await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
+    expect(quotePayloads).toHaveLength(0);
 
     const startCell = roomCell(page, "unit_room_102", "2026-07-26");
     await startCell.scrollIntoViewIfNeeded();
+    const stableLayoutBefore = await page.evaluate(() => {
+      const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+      if (!grid) throw new Error("房态网格不存在");
+      const box = grid.getBoundingClientRect();
+      return {
+        windowY: window.scrollY,
+        gridTop: box.top,
+        gridHeight: box.height,
+        gridTopScroll: grid.scrollTop,
+        clientHeight: grid.clientHeight,
+        scrollHeight: grid.scrollHeight
+      };
+    });
     const startBox = await startCell.boundingBox();
     expect(startBox).not.toBeNull();
     await page.mouse.move(startBox!.x + startBox!.width / 2, startBox!.y + startBox!.height / 2);
@@ -313,31 +299,38 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
       expect(box).not.toBeNull();
       await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2, { steps: 3 });
       await page.waitForTimeout(420);
-      expect(quotePayloads).toHaveLength(1);
+      expect(quotePayloads).toHaveLength(0);
+      expect(await page.evaluate(() => {
+        const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+        if (!grid) throw new Error("房态网格不存在");
+        const bounds = grid.getBoundingClientRect();
+        return {
+          windowY: window.scrollY,
+          gridTop: bounds.top,
+          gridHeight: bounds.height,
+          gridTopScroll: grid.scrollTop,
+          clientHeight: grid.clientHeight,
+          scrollHeight: grid.scrollHeight
+        };
+      })).toEqual(stableLayoutBefore);
     }
     await page.mouse.up();
-
+    const rangePopover = page.getByTestId("room-status-quick-popover");
+    await expect(rangePopover).toBeVisible();
+    await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
+    await expect(rangePopover).toContainText("6晚");
+    expect(quotePayloads).toHaveLength(0);
+    await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
     await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue("2026-07-26");
     await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue("2026-08-01");
     await expect(page.getByTestId("quote-result")).toContainText("6 晚", { timeout: 15_000 });
     await expect(page.getByTestId("quote-result")).toContainText("¥1,392");
-    expect(quotePayloads).toHaveLength(2);
-    expect(quotePayloads[1]).toEqual(expect.objectContaining({
+    expect(quotePayloads).toHaveLength(1);
+    expect(quotePayloads[0]).toEqual(expect.objectContaining({
       inventoryUnitId: "unit_room_102",
       arrivalDate: "2026-07-26",
       departureDate: "2026-08-01"
     }));
-    await page.evaluate(() => (window as typeof window & { __stopSideColumnSampling: () => void }).__stopSideColumnSampling());
-    await page.waitForTimeout(50);
-
-    const samples = await page.evaluate(() => (window as typeof window & {
-      __sideColumnSamples: Array<{ scrollTop: number; clientHeight: number; scrollHeight: number; position: number }>;
-    }).__sideColumnSamples);
-    expect(samples.length).toBeGreaterThan(20);
-    expect(new Set(samples.map((sample) => sample.clientHeight))).toEqual(new Set([samples[0]!.clientHeight]));
-    expect(new Set(samples.map((sample) => sample.scrollHeight))).toEqual(new Set([samples[0]!.scrollHeight]));
-    expect(new Set(samples.map((sample) => sample.scrollTop))).toEqual(new Set([samples[0]!.scrollTop]));
-    expect(samples.every((sample) => sample.position === samples[0]!.position)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath("stage-1-stable-side-column-during-drag.png"), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath("stage-1-stable-grid-during-drag.png"), fullPage: true });
   });
 });

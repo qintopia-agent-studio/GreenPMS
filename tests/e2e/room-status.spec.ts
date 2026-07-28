@@ -393,6 +393,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   const observerPage = await observerContext.newPage();
   await login(observerPage);
   await expectDesktopGrid(observerPage);
+  await observerPage.getByTestId("date-window-mode-21").click();
+  await expect(observerPage.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
 
   expect(board.propertyId).toBe(propertyId);
   expect(board.projectionState).toBe("READY");
@@ -412,29 +414,31 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   const bedBId = "unit_room_104_bed_b";
 
   const expandRoom = roomRow(page, roomId).getByRole("button", { name: /^展开.*床位$/ });
+  const expandObserverRoom = roomRow(observerPage, roomId).getByRole("button", { name: /^展开.*床位$/ });
   await expect(expandRoom).toBeVisible();
+  await expect(expandObserverRoom).toBeVisible();
   await expandRoom.click();
+  await expandObserverRoom.click();
   await expect(roomRow(page, bedAId)).toBeVisible();
   await expect(roomRow(page, bedBId)).toBeVisible();
+  await expect(roomRow(observerPage, bedAId)).toBeVisible();
 
   const bedAStart = roomCell(page, bedAId, arrivalDate);
   await expect(bedAStart).toHaveAccessibleName(/104.*床位 A.*可售.*可以安排/);
   await bedAStart.focus();
-  await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
   await expect(page.locator("[data-room-status-cell='true']:focus")).toHaveAttribute("data-service-date", addDays(arrivalDate, 1));
   expect(await page.locator("[data-room-status-cell='true']:focus").evaluate((element) => element.matches(":focus-visible"))).toBe(true);
-  await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(arrivalDate);
-  await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(departureDate);
   await expect(roomCell(page, bedAId, arrivalDate)).toHaveAttribute("aria-selected", "true");
   await expect(roomCell(page, bedAId, addDays(arrivalDate, 1))).toHaveAttribute("aria-selected", "true");
 
+  await page.keyboard.press("Enter");
+  const rangePopover = page.getByTestId("room-status-quick-popover");
+  await expect(rangePopover).toBeVisible();
+  await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
+  await expect(rangePopover).toContainText("2晚");
   const actionRegion = page.locator(".room-status-context-actions");
-  for (const action of ["创建正常住宿订单", "创建免费入住", "放置维修锁房"]) {
-    await expect(actionRegion.getByRole("button", { name: action, exact: true })).toBeEnabled();
-  }
-
-  const maintenanceTrigger = actionRegion.getByRole("button", { name: "放置维修锁房", exact: true });
+  const maintenanceTrigger = rangePopover.getByRole("button", { name: "维修锁房", exact: true });
   await tabTo(page, maintenanceTrigger, "放置维修锁房动作");
   await page.keyboard.press("Enter");
   const businessReason = `E2E room-status parent-child block ${arrivalDate}`;
@@ -462,9 +466,18 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   expect(receipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
   expect(propagatedResponse).toBeDefined();
   const observerResponse = await propagatedResponse!;
-  const observerBoard = await observerResponse.json() as RoomStatusBoardDto;
-  await expect(observerPage.locator(".room-status-freshness")).toContainText(`revision ${observerBoard.revision}`);
-  expect(performance.now() - propagationStartedAt, "second workbench revision visibility").toBeLessThanOrEqual(5_000);
+  expect(observerResponse.status()).toBe(200);
+  expect(performance.now() - propagationStartedAt, "second workbench projection propagation").toBeLessThanOrEqual(5_000);
+  await observerPage.bringToFront();
+  const renderedResponse = observerPage.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === `/api/v1/properties/${propertyId}/room-status` && response.status() === 200;
+  });
+  await observerPage.getByRole("button", { name: "刷新房态", exact: true }).click();
+  await renderedResponse;
+  const observerParentInterval = roomRow(observerPage, roomId).locator(".room-status-interval-maintenance");
+  await expect(observerParentInterval).toBeVisible({ timeout: 5_000 });
+  await expect(observerParentInterval).toHaveAccessibleName(/A.*维修/);
   const bedAInterval = roomRow(page, bedAId).locator(".room-status-interval-maintenance");
   const parentInterval = roomRow(page, roomId).locator(".room-status-interval-maintenance");
   await expect(bedAInterval, "the committing workbench refreshes after the command closes").toBeVisible();
@@ -481,20 +494,21 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(roomCell(page, bedBId, arrivalDate)).toHaveAccessibleName(/可售.*可以安排/);
 
   await bedAStart.focus();
-  await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Enter");
+  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
   const relatedSources = page.locator("section.room-status-context-section").filter({
-    has: page.getByRole("heading", { name: "选区关联来源事实" })
+    has: page.getByRole("heading", { name: "选区内住宿或锁房" })
   });
   await expect(relatedSources).toContainText("维修");
   await expect(relatedSources).toContainText("住宿日期");
   await expect(relatedSources).not.toContainText(/MAINTENANCE|unit_room_|Block|Receipt/);
 
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedAInterval.click();
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
   const sourceSection = page.locator("section.room-status-context-section").filter({
-    has: page.getByRole("heading", { name: "来源事实" })
+    has: page.getByRole("heading", { name: "住宿或锁房记录" })
   });
   await expect(sourceSection).toContainText("维修");
   await expect(sourceSection).toContainText(businessReason);
@@ -508,13 +522,12 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(conflictSection).not.toContainText(/unit_room_|Block|Claim|conflict/i);
   await page.screenshot({ path: testInfo.outputPath("room-status-desktop-typed-source-active.png"), fullPage: true });
 
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   const bedBStart = roomCell(page, bedBId, arrivalDate);
   await bedBStart.focus();
-  await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
-  await actionRegion.getByRole("button", { name: "放置维修锁房", exact: true }).click();
+  await page.keyboard.press("Enter");
+  await rangePopover.getByRole("button", { name: "维修锁房", exact: true }).click();
   const siblingReason = `E2E sibling bed block ${arrivalDate}`;
   await page.getByLabel("维修原因").fill(siblingReason);
   await page.getByRole("button", { name: "继续核对", exact: true }).click();
@@ -530,12 +543,12 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(roomCell(page, bedAId, arrivalDate)).toHaveAccessibleName(/维修.*当前不可安排/);
   await expect(roomCell(page, bedBId, arrivalDate)).toHaveAccessibleName(/维修.*当前不可安排/);
 
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   const parentStart = roomCell(page, roomId, arrivalDate);
   await parentStart.focus();
-  await page.keyboard.press("Space");
   await page.keyboard.press("Shift+ArrowRight");
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  await page.keyboard.press("Enter");
+  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
   await expect(conflictSection.locator(".room-status-conflict-list > li")).toHaveCount(2);
   await expect(conflictSection).toContainText("已有住宿，不能重复安排");
   await expect(conflictSection).not.toContainText(/unit_room_|Block|Claim|conflict/i);
@@ -546,12 +559,9 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(page.getByTestId("confirm-command")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("room-status-desktop-blocking-conflict.png"), fullPage: true });
 
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
-  await bedBStart.focus();
-  await page.keyboard.press("Space");
-  await page.keyboard.press("Shift+ArrowRight");
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedBInterval.click();
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
   const siblingReleaseReceipt = await previewAndConfirm(page, [
     "完整释放这条维修锁房"
@@ -560,12 +570,9 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(bedBInterval).toHaveCount(0);
   await expect(bedAInterval).toBeVisible();
 
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
-  await bedAStart.focus();
-  await page.keyboard.press("Space");
-  await page.keyboard.press("Shift+ArrowRight");
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedAInterval.click();
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
   const releaseReceipt = await previewAndConfirm(page, [
     "完整释放这条维修锁房"
@@ -576,7 +583,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(roomCell(page, roomId, arrivalDate)).toHaveAccessibleName(/可售.*可以安排/);
   await expect(roomCell(page, bedAId, arrivalDate)).toHaveAccessibleName(/可售.*可以安排/);
 
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   const search = page.getByLabel("搜索房间或床位");
   await search.fill("104");
   await expect(page.getByText("1 间房", { exact: true })).toBeVisible();
@@ -774,8 +781,13 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   await parentCell.focus();
   await expect(page.getByRole("tooltip")).toContainText("已占 4/4");
   expect((await roomRow(page, room!.id).boundingBox())!.height).toBe(occupiedBounds!.height);
-  await page.keyboard.press("Space");
+  await page.keyboard.press("Enter");
+  const quickPopover = page.getByTestId("room-status-quick-popover");
+  await expect(quickPopover).toBeVisible();
   await expect(parentCell).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Escape");
+  await expect(quickPopover).toBeHidden();
+  await expect(parentCell).toBeFocused();
   await parentCell.hover();
   await page.mouse.move(1, 1);
   await page.waitForTimeout(250);
@@ -910,6 +922,7 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
   test.setTimeout(120_000);
   const { board } = await login(page);
   await expectDesktopGrid(page);
+  await page.getByTestId("date-window-mode-21").click();
 
   let candidate: { unitId: string; arrivalDate: string; departureDate: string } | undefined;
   for (const room of board.rooms) {
@@ -936,6 +949,10 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
   await page.mouse.down();
   await page.mouse.move(finalBox!.x + finalBox!.width / 2, finalBox!.y + finalBox!.height - 8, { steps: 4 });
   await page.mouse.up();
+  const rangePopover = page.getByTestId("room-status-quick-popover");
+  await expect(rangePopover).toBeVisible();
+  await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
+  await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(candidate!.arrivalDate);
   await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(candidate!.departureDate);
 
@@ -948,6 +965,11 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
   await expect(page.getByLabel("退房日期", { exact: true })).toHaveAttribute("aria-describedby", selectionErrorId!);
   await page.getByLabel("退房日期", { exact: true }).fill(candidate!.departureDate);
   await expect(selectionDateError).toBeHidden();
+  const writeDrawer = page.locator("dialog.room-status-write-drawer");
+  await writeDrawer.getByRole("button", { name: "关闭办理区域", exact: true }).click();
+  const viewDrawer = page.locator("dialog.room-status-view-drawer");
+  await viewDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(viewDrawer).toBeHidden();
 
   const search = page.getByLabel("搜索房间或床位");
   await search.focus();
@@ -1328,7 +1350,6 @@ test("room-status reload LCP and a real 90-night grid stay within the interactio
   expect(elapsedMs, "90-night request through keyboard-interactive grid").toBeLessThanOrEqual(2_000);
 
   const selectionArrival = addDays(today, 1);
-  await page.keyboard.press("Space");
   for (let index = 0; index < 14; index += 1) {
     await page.keyboard.press("Shift+ArrowRight");
     await expect(page.locator("[data-room-status-cell='true']:focus"))
@@ -1336,12 +1357,17 @@ test("room-status reload LCP and a real 90-night grid stay within the interactio
   }
   await expect(page.locator("[data-room-status-cell='true']:focus"))
     .toHaveAttribute("data-service-date", addDays(today, 15));
-  await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(selectionArrival);
-  await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(addDays(today, 16));
   const crossWindowTarget = roomCell(page, firstUnitId!, addDays(today, 15));
-  await expect(crossWindowTarget).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => crossWindowTarget.evaluate((element) => element.matches(":focus-visible")))
     .toBe(true);
+  await page.keyboard.press("Enter");
+  const rangePopover = page.getByTestId("room-status-quick-popover");
+  await expect(rangePopover).toBeVisible();
+  await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
+  await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(selectionArrival);
+  await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(addDays(today, 16));
+  await expect(crossWindowTarget).toHaveAttribute("aria-selected", "true");
 });
 
 test("mobile room status uses task tabs and a full-screen fact detail instead of the matrix", async ({ page }, testInfo: TestInfo) => {
@@ -1350,7 +1376,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await page.setViewportSize({ width: 768, height: 1024 });
   const { board } = await login(page);
   await expectDesktopGrid(page);
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
 
   let touchCandidate: { unitId: string; startDate: string; endDate: string } | undefined;
   for (const room of board.rooms) {
@@ -1454,7 +1480,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     departureDate: orderDepartureDate
   });
   await makeReservedOrderOverdue(overdueOrderId, today);
-  await page.getByRole("dialog", { name: "选中对象上下文" }).getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   const overdueRefresh = roomStatusResponse(page);
   await page.getByRole("button", { name: "刷新房态", exact: true }).click();
   await overdueRefresh;

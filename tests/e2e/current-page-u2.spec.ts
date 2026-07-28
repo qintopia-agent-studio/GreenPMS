@@ -22,6 +22,11 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+function formatChineseDate(value: string): string {
+  const [, , month = "", day = ""] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value) ?? [];
+  return `${Number(month)}月${Number(day)}日`;
+}
+
 function roomStatusResponse(page: Page, expectedRange?: { arrivalDate: string; departureDate: string }) {
   return page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -91,6 +96,7 @@ async function openWholeRoomPopover(page: Page): Promise<{ trigger: Locator; pop
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-selection-kind", "day");
   return { trigger, popover };
 }
 
@@ -120,21 +126,26 @@ test.beforeAll(async ({}, workerInfo) => {
 
 test("U2 desktop empty cell popover stays in view and Escape restores the exact cell and both scroll axes", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop-only U2 quick-popover coverage");
-  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.setViewportSize({ width: 1280, height: 900 });
   await login(page);
   await showRange(page);
   await page.getByTestId("date-window-mode-21").click();
   await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
 
   const targetDate = addDays(fixture.dates.arrivalDate, 10);
-  const target = roomCell(page, fixture.stage6.emptyCreationRoomId, targetDate);
+  const target = page.locator(`.room-status-day-available[data-room-status-cell="true"][data-service-date="${targetDate}"]`).first();
+  const upperTarget = roomCell(page, fixture.stage6.emptyCreationRoomId, targetDate);
   const scrollport = page.locator(".room-status-grid-scroll");
-  await target.scrollIntoViewIfNeeded();
   await scrollport.evaluate((element) => {
     element.scrollLeft = Math.min(element.scrollWidth - element.clientWidth, 180);
-    element.scrollTop = Math.min(element.scrollHeight - element.clientHeight, 90);
+    element.scrollTop = 0;
   });
   await target.scrollIntoViewIfNeeded();
+  const targetUnitId = await target.getAttribute("data-unit-id");
+  const targetAccessibleName = await target.getAttribute("aria-label");
+  expect(targetUnitId).toBeTruthy();
+  expect(targetAccessibleName).toBeTruthy();
+  const targetUnitLabel = targetAccessibleName!.split("，")[0]!;
   await target.focus();
   const before = await page.evaluate(() => {
     const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
@@ -143,8 +154,13 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
 
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
+  const viewDrawer = page.locator("dialog.room-status-view-drawer");
+  const writeDrawer = page.locator("dialog.room-status-write-drawer");
   await expect(popover).toBeVisible();
-  await expect(popover).toContainText(fixture.stage6.emptyCreationRoom.split(" ").slice(1).join(" "));
+  await expect(popover).toHaveAttribute("data-unit-id", targetUnitId!);
+  await expect(popover.locator("header strong")).toHaveText(targetUnitLabel);
+  await expect(viewDrawer).toBeHidden();
+  await expect(writeDrawer).toBeHidden();
   await expect(popover.getByRole("button", { name: "创建住宿", exact: true })).toBeVisible();
   await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeVisible();
   await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
@@ -152,12 +168,35 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
 
   const geometry = await popover.evaluate((element) => {
     const box = element.getBoundingClientRect();
-    return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: window.innerWidth, height: window.innerHeight };
+    const rowElement = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
+    const title = element.querySelector<HTMLElement>("header strong");
+    const close = element.querySelector<HTMLElement>("header .room-status-icon-button");
+    if (!rowElement || !title || !close) throw new Error("快捷操作框缺少房源行、标题或关闭按钮");
+    const row = rowElement.getBoundingClientRect();
+    const titleBox = title.getBoundingClientRect();
+    const closeBox = close.getBoundingClientRect();
+    return {
+      left: box.left,
+      top: box.top,
+      right: box.right,
+      bottom: box.bottom,
+      popoverWidth: box.width,
+      rowTop: row.top,
+      rowBottom: row.bottom,
+      titleFits: title.scrollWidth <= title.clientWidth && title.scrollHeight <= title.clientHeight,
+      titleEndsBeforeClose: titleBox.right <= closeBox.left,
+      width: window.innerWidth,
+      height: window.innerHeight
+    };
   });
   expect(geometry.left).toBeGreaterThanOrEqual(7);
   expect(geometry.top).toBeGreaterThanOrEqual(7);
   expect(geometry.right).toBeLessThanOrEqual(geometry.width - 7);
   expect(geometry.bottom).toBeLessThanOrEqual(geometry.height - 7);
+  expect(geometry.popoverWidth).toBeLessThanOrEqual(280);
+  expect(geometry.top).toBeGreaterThanOrEqual(geometry.rowBottom + 7);
+  expect(geometry.titleFits).toBe(true);
+  expect(geometry.titleEndsBeforeClose).toBe(true);
 
   await page.keyboard.press("Escape");
   await expect(popover).toBeHidden();
@@ -166,6 +205,31 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
     const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
     return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
   })).toEqual(before);
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await upperTarget.scrollIntoViewIfNeeded();
+  await upperTarget.evaluate((element) => {
+    const grid = element.closest<HTMLElement>(".room-status-grid-scroll");
+    const row = element.closest<HTMLElement>("[data-room-status-row]");
+    if (!grid || !row) throw new Error("房态格缺少网格或房源行");
+    grid.scrollTop += row.getBoundingClientRect().bottom - grid.getBoundingClientRect().bottom + 8;
+  });
+  await upperTarget.focus();
+  await page.keyboard.press("Enter");
+  await expect(popover).toBeVisible();
+  const upperGeometry = await popover.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const rowElement = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
+    if (!rowElement) throw new Error("快捷操作框缺少房源行");
+    return { bottom: box.bottom, rowTop: rowElement.getBoundingClientRect().top };
+  });
+  expect(upperGeometry.bottom).toBeLessThanOrEqual(upperGeometry.rowTop - 7);
+  await popover.getByRole("button", { name: "维修锁房", exact: true }).click();
+  await expect(writeDrawer).toBeVisible();
+  await expect(writeDrawer.getByLabel("开始日期", { exact: true })).toHaveValue(targetDate);
+  await expect(writeDrawer.getByLabel("结束日期", { exact: true })).toHaveValue(addDays(targetDate, 1));
+  await writeDrawer.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(writeDrawer).toBeHidden();
 });
 
 test("U2 desktop order popover opens an overlay drawer without shrinking the board and restores focus", async ({ page }, testInfo) => {
@@ -289,16 +353,19 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   const staleStart = roomCell(page, emptyRoomId, staleStartDate);
   const staleEnd = roomCell(page, emptyRoomId, staleEndDate);
   const selectionDrawer = page.locator("dialog.room-status-write-drawer");
+  const popover = page.getByTestId("room-status-quick-popover");
 
   await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
-  await expect(selectionDrawer).toBeVisible();
-  await selectionDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-selection-kind", "range");
+  await expect(selectionDrawer).toBeHidden();
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
   await expect(staleStart).toHaveClass(/is-selected/);
   await expect(staleEnd).toHaveClass(/is-selected/);
 
   const emptyTarget = roomCell(page, emptyRoomId, emptyTargetDate);
   await emptyTarget.click();
-  const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
@@ -309,8 +376,9 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   await expect(emptyTarget).toHaveClass(/is-selected/);
 
   await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
-  await expect(selectionDrawer).toBeVisible();
-  await selectionDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(popover).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
   await refreshCurrentRange(page);
   const uniqueCell = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
   await uniqueCell.focus();
@@ -341,8 +409,9 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
 
   await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
-  await expect(selectionDrawer).toBeVisible();
-  await selectionDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(popover).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
   await refreshCurrentRange(page);
   const parent = roomCell(page, fixture.splitBed.roomId, fixture.dates.arrivalDate);
   await parent.focus();
@@ -380,7 +449,9 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   await page.getByTestId("date-window-mode-21").click();
 
   const targetDate = addDays(fixture.dates.arrivalDate, 10);
+  const rangeEndDate = addDays(targetDate, 1);
   const target = roomCell(page, fixture.stage6.emptyCreationRoomId, targetDate);
+  const rangeEnd = roomCell(page, fixture.stage6.emptyCreationRoomId, rangeEndDate);
   const other = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
   const scrollport = page.locator(".room-status-grid-scroll");
   await target.scrollIntoViewIfNeeded();
@@ -389,18 +460,69 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
     element.scrollTop = Math.min(element.scrollHeight - element.clientHeight, 75);
   });
   await target.scrollIntoViewIfNeeded();
+  await rangeEnd.scrollIntoViewIfNeeded();
   await refreshCurrentRange(page);
+  await target.scrollIntoViewIfNeeded();
+  await rangeEnd.scrollIntoViewIfNeeded();
   await target.focus();
   const before = await page.evaluate(() => {
     const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
     return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
   });
 
-  await page.keyboard.press("Enter");
-  await page.getByRole("button", { name: "创建住宿", exact: true }).click();
+  const quotePayloads: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/quotes") {
+      quotePayloads.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
   const drawer = page.locator("dialog.modal-drawer");
+  await dragRoomStatusRange(page, fixture.stage6.emptyCreationRoomId, targetDate, rangeEndDate);
+  const rangePopover = page.getByTestId("room-status-quick-popover");
+  await expect(rangePopover).toBeVisible();
+  await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
+  await expect(rangePopover).toContainText(`${formatChineseDate(targetDate)}至${formatChineseDate(addDays(rangeEndDate, 1))}`);
+  await expect(rangePopover).toContainText("2晚");
+  await expect(drawer).toBeHidden();
+  await page.waitForTimeout(300);
+  expect(quotePayloads).toHaveLength(0);
+  const placement = await rangePopover.evaluate((element) => {
+    const popover = element.getBoundingClientRect();
+    const rowElement = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
+    const meta = element.querySelector<HTMLElement>(".room-status-quick-meta");
+    const close = element.querySelector<HTMLElement>("header .room-status-icon-button");
+    if (!rowElement || !meta || !close) throw new Error("快捷操作框缺少房源行、范围摘要或关闭按钮");
+    const row = rowElement.getBoundingClientRect();
+    const metaBox = meta.getBoundingClientRect();
+    const closeBox = close.getBoundingClientRect();
+    return {
+      width: popover.width,
+      top: popover.top,
+      bottom: popover.bottom,
+      rowTop: row.top,
+      rowBottom: row.bottom,
+      metaFits: meta.scrollWidth <= meta.clientWidth && meta.scrollHeight <= meta.clientHeight,
+      metaEndsBeforeClose: metaBox.right <= closeBox.left
+    };
+  });
+  expect(placement.width).toBeLessThanOrEqual(280);
+  expect(
+    placement.top >= placement.rowBottom + 7 || placement.bottom <= placement.rowTop - 7,
+    `快捷操作框不得覆盖触发房源行：${JSON.stringify(placement)}`
+  ).toBe(true);
+  expect(placement.metaFits).toBe(true);
+  expect(placement.metaEndsBeforeClose).toBe(true);
+  await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
   await expect(drawer).toBeVisible();
   await expect(drawer).toHaveClass(/room-status-write-drawer/);
+  await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(targetDate);
+  await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(addDays(rangeEndDate, 1));
+  await expect.poll(() => quotePayloads).toHaveLength(1);
+  expect(quotePayloads[0]).toEqual(expect.objectContaining({
+    inventoryUnitId: fixture.stage6.emptyCreationRoomId,
+    arrivalDate: targetDate,
+    departureDate: addDays(rangeEndDate, 1)
+  }));
   expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
   await expect(drawer.locator(".modal-footer")).toBeVisible();
   await expect(page.getByTestId("create-order")).toBeVisible();
@@ -422,24 +544,28 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
 
   await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(drawer).toBeHidden();
-  await expect(target).toBeFocused();
+  await expect(rangeEnd).toBeFocused();
   await expect(target).toHaveClass(/is-selected/);
+  await expect(rangeEnd).toHaveClass(/is-selected/);
   await expect.poll(() => page.evaluate(() => {
     const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
     return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
   })).toEqual(before);
 
-  await target.focus();
-  await page.keyboard.press("Enter");
-  await page.getByRole("button", { name: "维修锁房", exact: true }).click();
+  await dragRoomStatusRange(page, fixture.stage6.emptyCreationRoomId, targetDate, rangeEndDate);
+  await expect(rangePopover).toBeVisible();
+  await rangePopover.getByRole("button", { name: "维修锁房", exact: true }).click();
   const maintenanceDrawer = page.locator("dialog.room-status-write-drawer");
   await expect(maintenanceDrawer).toBeVisible();
   await expect(maintenanceDrawer.getByRole("heading", { name: /维修锁房/ })).toBeVisible();
+  await expect(maintenanceDrawer.getByLabel("开始日期", { exact: true })).toHaveValue(targetDate);
+  await expect(maintenanceDrawer.getByLabel("结束日期", { exact: true })).toHaveValue(addDays(rangeEndDate, 1));
   expect(await maintenanceDrawer.evaluate((element) => element.matches(":modal"))).toBe(true);
   await maintenanceDrawer.getByRole("button", { name: "取消", exact: true }).click();
   await expect(maintenanceDrawer).toBeHidden();
-  await expect(target).toBeFocused();
+  await expect(rangeEnd).toBeFocused();
   await expect(target).toHaveClass(/is-selected/);
+  await expect(rangeEnd).toHaveClass(/is-selected/);
   await expect.poll(() => page.evaluate(() => {
     const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
     return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };

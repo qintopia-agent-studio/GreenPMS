@@ -1454,6 +1454,7 @@ export function InventoryPage() {
     serviceDate: string;
     anchor: HTMLElement;
     intervalId?: string;
+    selection?: RoomStatusSelection;
   }>();
   const [orderRefreshToken, setOrderRefreshToken] = useState(0);
   const [selectedOrderCommandScope, setSelectedOrderCommandScope] = useState<string>();
@@ -1918,11 +1919,14 @@ export function InventoryPage() {
   const quickPopoverUnit = findRoomStatusUnit(renderedBoard, quickPopoverTarget?.unitId);
   const quickPopoverDay = quickPopoverUnit?.days.find((day) => day.serviceDate === quickPopoverTarget?.serviceDate) ?? null;
   const quickPopoverInterval = quickPopoverUnit?.intervals.find((interval) => interval.id === quickPopoverTarget?.intervalId) ?? null;
-  const quickPopoverActions = (quickPopoverInterval
-    ? intervalActions(quickPopoverInterval, null)
-    : dayActions(quickPopoverUnit, quickPopoverDay))
+  const quickPopoverSelection = quickPopoverTarget?.selection ?? null;
+  const quickPopoverActions = (quickPopoverSelection
+    ? selectionActions(quickPopoverUnit, quickPopoverSelection)
+    : quickPopoverInterval
+      ? intervalActions(quickPopoverInterval, null)
+      : dayActions(quickPopoverUnit, quickPopoverDay))
     .filter((action) => currentReleaseFeatures.cleaningWorkflow || action.code !== "COMPLETE_CLEANING");
-  const quickPopoverOrders = quickPopoverUnit && quickPopoverTarget
+  const quickPopoverOrders = quickPopoverUnit && quickPopoverTarget && !quickPopoverSelection
     ? roomStatusOrderOptionsForDate(quickPopoverUnit, quickPopoverTarget.serviceDate)
     : { kind: "READY" as const, orders: [] };
   const quickPopoverPreviewStayId = roomStatusUniqueOrderStayId(quickPopoverOrders);
@@ -2527,6 +2531,50 @@ export function InventoryPage() {
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, intervalId: interval.id });
   }
 
+  function inspectSelection(unit: RoomStatusUnitDto, selection: RoomStatusSelection, anchor: HTMLElement) {
+    const serviceDate = anchor.dataset.serviceDate;
+    if (selection.unitId !== unit.id
+      || anchor.dataset.unitId !== unit.id
+      || !serviceDate
+      || serviceDate < selection.arrivalDate
+      || serviceDate >= selection.departureDate) {
+      setActionError(new Error("当前日期选区与触发房态格不一致，未打开快捷操作。请重新选择。"));
+      return;
+    }
+    setQuoteRecoveryOutcome(undefined);
+    setActionError(undefined);
+    captureRoomStatusInteraction(anchor, selection);
+    dispatchView({ type: "SET_SELECTION", selection });
+    setSelectedUnitId(unit.id);
+    setSelectedDayDate(undefined);
+    setSelectedIntervalId(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedOrderView(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setOrderContextOpen(false);
+    setDesktopContextCollapsed(true);
+    setQuoteTarget(undefined);
+    setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, selection });
+  }
+
+  function previewSelection(selection: RoomStatusSelection | null) {
+    setQuickPopoverTarget(undefined);
+    setQuoteRecoveryOutcome(undefined);
+    setActionError(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedOrderView(undefined);
+    setSelectedCorrectionOccupantId(undefined);
+    setOrderContextOpen(false);
+    setDesktopContextCollapsed(true);
+    setQuoteTarget(undefined);
+    dispatchView({ type: "SET_SELECTION", selection });
+    if (selection) {
+      setSelectedUnitId(selection.unitId);
+      setSelectedDayDate(undefined);
+      setSelectedIntervalId(undefined);
+    }
+  }
+
   function selectRange(selection: RoomStatusSelection | null) {
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
@@ -3046,7 +3094,8 @@ export function InventoryPage() {
                 focusRequestToken={focusRequestToken}
                 onToggleRoom={(roomId) => dispatchView({ type: "TOGGLE_ROOM", roomId })}
                 onFocusedCellChange={(focus) => dispatchView({ type: "SET_FOCUS", focus })}
-                onSelectionChange={selectRange}
+                onSelectionPreviewChange={previewSelection}
+                onInspectSelection={inspectSelection}
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}
                 onDateWindowChange={(start) => changeDateWindow(start, renderedBoard.dates.length)}
                 onDateWindowModeChange={changeDateWindowMode}
@@ -3107,6 +3156,7 @@ export function InventoryPage() {
               status={quickPopoverDay.status}
               actions={quickPopoverActions}
               orderOptions={quickPopoverOrders}
+              {...(quickPopoverSelection ? { selection: quickPopoverSelection } : {})}
               onClose={(reason) => {
                 setQuickPopoverTarget(undefined);
                 if (reason === "DISMISS") {
@@ -3117,16 +3167,18 @@ export function InventoryPage() {
                 }
               }}
               onCreate={() => {
-                const selection = selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
+                const selection = quickPopoverSelection
+                  ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
                 setSelectedUnitId(quickPopoverUnit.id);
-                setSelectedDayDate(quickPopoverTarget.serviceDate);
+                setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
                 setSelectedIntervalId(undefined);
                 selectRange(selection);
               }}
               onLockMaintenance={(action) => {
-                const selection = selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
+                const selection = quickPopoverSelection
+                  ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
                 setSelectedUnitId(quickPopoverUnit.id);
-                setSelectedDayDate(quickPopoverTarget.serviceDate);
+                setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
                 setSelectedIntervalId(undefined);
                 selectRange(selection);
                 handleAction(action, quickPopoverUnit, selection);
@@ -3138,10 +3190,14 @@ export function InventoryPage() {
                 setSelectedCorrectionOccupantId(undefined);
                 setOrderContextOpen(false);
                 setSelectedUnitId(quickPopoverUnit.id);
-                setSelectedDayDate(quickPopoverTarget.serviceDate);
+                setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
                 setSelectedIntervalId(quickPopoverTarget.intervalId);
                 setQuoteTarget(undefined);
-                dispatchView({ type: "SET_SELECTION", selection: selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate) });
+                dispatchView({
+                  type: "SET_SELECTION",
+                  selection: quickPopoverSelection
+                    ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate)
+                });
                 setDesktopContextCollapsed(false);
               }}
               onOpenOrder={(option) => selectOrderContextIdentity(option.identity, quickPopoverTarget.serviceDate)}
@@ -3176,7 +3232,7 @@ export function InventoryPage() {
             </Modal>
           ) : null}
 
-          {!isMobile && desktopContextCollapsed && (selectedUnit || selectedOrderIdentity || viewState.selection) ? (
+          {!isMobile && desktopContextCollapsed && !quickPopoverTarget && (selectedUnit || selectedOrderIdentity || viewState.selection) ? (
             <button type="button" className="button button-primary room-status-context-reopen" onClick={reopenDesktopContext}>
               <PanelRightOpen aria-hidden="true" size={17} />打开{selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
             </button>

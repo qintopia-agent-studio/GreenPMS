@@ -5,7 +5,7 @@ status: in-progress
 implementation_authorized: true
 created: 2026-07-23
 baseline_commit: 4fbf90daa47803ed4ac7ae3f4f46d256665d1e16
-current_step: step_4_u2_in_progress
+current_step: step_4_u2_awaiting_user_acceptance
 execution_model: tiered-flow-with-batched-human-acceptance
 technical_companion: ./房态与订单运营流程分步开发计划.md
 ---
@@ -23,7 +23,7 @@ technical_companion: ./房态与订单运营流程分步开发计划.md
 - 分级有争议时按就高不就低处理（拿不准的一律按 A 级走）；已开始的 U2 返工验收仍按原约定等待 `U2 通过`，不受本次规则调整影响。
 - 第 2 步已于 2026-07-24 通过人工验收；用户于 2026-07-25 明确回复“第三步通过”，第 3 步阶段 5、6、7 全部验收通过。
 - 用户免除阶段 6 单独人工检测；阶段 6、阶段 7 与手机端已完成合并验收。第 4 步检查点 4.1 已于 2026-07-26 人工验收通过；当前版本按 [`spec-disable-cleaning-workflow.md`](../docs/implementation/spec-disable-cleaning-workflow.md) 暂停清洁工作流，4.1 收窄为入住、退房、会员权益核销与库存释放。4.2 及以后仍未开始。
-- 用户已批准[渠道订单计价、住宿生命周期与后续范围纠偏提案](./sprint-change-proposal-2026-07-26-channel-order-pricing-and-4.2.md)。4.1 已通过并以提交 `1ab8872` 收尾；重新打开的工程阶段 2、阶段 7R 和 U1 已完成独立人工验收。U2 的旧拖选区间残留缺陷已于 2026-07-28 完成返工并重新等待人工验收，未收到 `U2 通过` 前不进入第 4 步正式检查点 4.2。U1/U2 是独立纠偏切片，不再使用会与正式检查点混淆的“4.2A/4.2B”名称。
+- 用户已批准[渠道订单计价、住宿生命周期与后续范围纠偏提案](./sprint-change-proposal-2026-07-26-channel-order-pricing-and-4.2.md)。4.1 已通过并以提交 `1ab8872` 收尾；重新打开的工程阶段 2、阶段 7R 和 U1 已完成独立人工验收。U2 两轮验收返工已于 2026-07-28 完成，当前重新等待人工验收；未收到 `U2 通过` 前不进入第 4 步正式检查点 4.2。U1/U2 是独立纠偏切片，不再使用会与正式检查点混淆的“4.2A/4.2B”名称。
 - 每一步包含若干小的技术检查点；每个检查点完成后我都会提供可访问网址、演示数据和点击顺序，然后停止开发，避免一次交付过大。
 - 你确认该步骤的全部检查点并回复“本步通过”后，才进入下一步；未通过时只修当前步骤。
 - 人工验收使用真实 Web、API 和 PostgreSQL，不用 mock 或静态演示。
@@ -377,7 +377,7 @@ U2 人工验收通过口令为 `U2 通过`。未收到该口令前，不得进�
 | 3（阶段 7） | 已通过 | 2026-07-25 用户明确回复“第三步通过”；连续 Stay、准确订单上下文、资料更正、桌面/手机响应式及 21 天档位均通过；阶段 8 未开始 |
 | 4（阶段 7R） | 已通过 | 2026-07-27 用户明确回复“7R 通过”；换房前后双向选择、完整详情返回恢复、同名订单隔离和最新位置聚焦符合预期。Unit `306/306`、Integration `182/182`、Stage 7 桌面/手机 E2E `13 passed / 13 expected skipped`、TypeScript、production build 与补丁格式均通过 |
 | 4（U1） | 已通过 | 2026-07-28 用户逐项确认 5 项人工验收均为 `OK`；入住/退房单层核对与可选备注、房态内联办理、调价默认当前金额及权限/revision 竞态通过。Unit `330/330`、U1 E2E `3 passed / 3 expected skipped`、Stage 8 E2E `5 passed / 5 expected skipped`、调价与会员备注 E2E `2/2`、TypeScript、production build 与补丁格式通过 |
-| 4（U2） | 进行中 | 第二轮人工验收要求单击与拖选统一先进入轻量快捷操作框，并让操作框优先显示在所选行下方、缩小尺寸、不遮挡触发格；当前只返修该交互，正式 4.2 不开始 |
+| 4（U2） | 等待人工验收 | 单击与拖选已统一先进入不超过 `280px` 的轻量快捷操作框，选择动作后才打开抽屉；操作框优先位于所选行下方、空间不足时位于上方，不遮挡触发行。Unit `413/413`、U2 桌面 `9 passed / 1 expected skipped`、移动端 `1 passed / 9 expected skipped`、相关 Stage 1/7 回归通过；验收库未重置，等待用户回复 `U2 通过`，正式 4.2 不开始 |
 | 4.1 | 已通过 | 2026-07-26 用户明确回复“4.1 通过”；入住、计划退房、逾期迟录、会员权益核销、库存释放、停用清洁与日期门禁人工验收完成。Unit `290/290`、Integration `171/171`、Contract/OpenAPI `57/57`、Stage 8 E2E `5 passed / 5 expected skipped`、TypeScript 和构建均通过 |
 | 4.2 | 未开始 | - |
 | 4.3 | 未开始 | - |

@@ -5,6 +5,7 @@ created: '2026-07-28'
 status: 'awaiting_user_acceptance'
 baseline_commit: 'e4e777a'
 rework_baseline_commit: '2b2b9d3'
+interaction_rework_baseline_commit: '15f9fd8'
 context:
   - '待开发项/QinTopia-PMS-分步开发与人工验收计划.md'
   - '待开发项/房态与订单运营流程分步开发计划.md'
@@ -110,7 +111,41 @@ U2 门禁通过后启动独立实例并等待用户明确回复 `U2 通过`。�
 - 原 U2 PostgreSQL Integration `183/183`、Contract/OpenAPI `58/58` 不受本次纯前端状态返工影响。
 - 独立验收库 `qintopia_u2_acceptance` 未重置；验收实例继续使用 `http://127.0.0.1:4231/`。
 
+## Acceptance Rework 2
+
+- [x] **Given** 工作人员单击一个房态格或拖选同一房源的多日区间，**When** 选择提交，**Then** 两种方式都先显示同一轻量快捷操作框，不直接打开查看或写抽屉。
+- [x] **Given** 快捷操作框已打开，**When** 选择创建住宿、维修锁房或查看房态记录，**Then** 才进入对应覆盖式抽屉，并保留原房源、完整日期区间、滚动位置和焦点。
+- [x] **Given** 触发格所在行下方足以容纳操作框，**When** 操作框定位，**Then** 优先显示在该行下方且不覆盖所选格；下方不足时显示在该行上方，横向仅做视口边缘避让。
+- [x] **Given** 操作框只承载范围摘要和动作入口，**When** 在典型桌面视口显示，**Then** 宽度不超过 `280px`、控件紧凑、文字完整，订单列表和键盘/Escape 语义不退化。
+- [x] Unit 和真实浏览器 E2E 覆盖上下方定位、单击与拖选同入口、动作后开抽屉、关闭恢复及既有准确订单选择。
+
+2026-07-28 第二轮人工验收发现：拖选多日当前会直接打开右侧抽屉，而单击一格先显示快捷操作框；同时操作框优先放在触发格左右并遮挡房态内容。U2 再次退回 `in_progress`，只统一选择入口并收紧操作框尺寸、位置，不修改任何业务动作、计价、库存或订单规则。
+
+2026-07-28 第二轮返工完成：单格、鼠标拖选和键盘扩展区间已统一先进入快捷操作框；操作框按完整触发行上下定位、按真实内容高度修正位置，宽度不超过 `280px`，房源标题与范围摘要完整显示。选择动作后沿用既有抽屉业务流程，完整日期区间、双轴位置和焦点恢复不变。U2 转为 `awaiting_user_acceptance`，验收库不重置，继续等待 `U2 通过`。
+
+## Rework 2 Gate Results
+
+- TypeScript、production build 与 `git diff --check` 通过；Unit `413/413` 通过。
+- U2 桌面完整 E2E：`9 passed / 1 expected skipped / 0 failed`；U2 移动端：`1 passed / 9 expected skipped / 0 failed`。
+- Stage 1 连续拖选、Stage 7 双工作台维修状态渲染聚焦回归分别 `1/1` 通过；本轮其余选择、抽屉、长区间和父房/床位回归沿用已通过结果。
+- 原 U2 PostgreSQL Integration `183/183`、Contract/OpenAPI `58/58` 不受本次纯前端交互返工影响。
+- 独立验收库 `qintopia_u2_acceptance` 未重置；验收实例继续使用 `http://127.0.0.1:4231/`，未收到 `U2 通过` 前不开始正式 4.2。
+
 ## Suggested Review Order
+
+**第二轮入口统一与浮层定位**
+
+- 区间提交只建立快捷操作上下文，不提前请求报价或打开抽屉。
+  [`InventoryPage.tsx:2534`](../apps/web/src/pages/InventoryPage.tsx#L2534)
+
+- 鼠标、触控和键盘区间统一通过同一检查入口。
+  [`RoomStatusGrid.tsx:309`](../apps/web/src/room-status/RoomStatusGrid.tsx#L309)
+
+- 真实内容高度决定上下位置并严格避让完整触发行。
+  [`RoomStatusQuickPopover.tsx:17`](../apps/web/src/room-status/RoomStatusQuickPopover.tsx#L17)
+
+- 浏览器证明单格/拖选时序、280px、文字完整和双轴恢复。
+  [`current-page-u2.spec.ts:127`](../tests/e2e/current-page-u2.spec.ts#L127)
 
 **返工入口与状态互斥**
 

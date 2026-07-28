@@ -114,7 +114,8 @@ export interface RoomStatusGridProps {
   focusRequestToken?: number;
   onToggleRoom: (roomId: string) => void;
   onFocusedCellChange: (focus: RoomStatusCellFocus) => void;
-  onSelectionChange: (selection: RoomStatusSelection | null) => void;
+  onSelectionPreviewChange: (selection: RoomStatusSelection | null) => void;
+  onInspectSelection: (unit: RoomStatusUnitDto, selection: RoomStatusSelection, anchor: HTMLElement) => void;
   onPageChange: (pageIndex: number) => void;
   onDateWindowChange: (start: number) => void;
   onDateWindowModeChange: (mode: RoomStatusDateWindowMode) => void;
@@ -265,7 +266,8 @@ export function RoomStatusGrid({
   focusRequestToken = 0,
   onToggleRoom,
   onFocusedCellChange,
-  onSelectionChange,
+  onSelectionPreviewChange,
+  onInspectSelection,
   onPageChange,
   onDateWindowChange,
   onDateWindowModeChange,
@@ -307,9 +309,12 @@ export function RoomStatusGrid({
     setPointerPreviewSelection(null);
     if (active.touch) setTouchSelectionMode(false);
     if (commit && active.lastServiceDate === active.anchorDate) onInspectDay(active.unit, active.day, active.sourceCell);
-    else if (commit) onSelectionChange(active.selection);
+    else if (commit) {
+      const anchor = cellRefs.current.get(`${active.unitId}:${active.lastServiceDate}`) ?? active.sourceCell;
+      onInspectSelection(active.unit, active.selection, anchor);
+    }
     return true;
-  }, [onInspectDay, onSelectionChange]);
+  }, [onInspectDay, onInspectSelection]);
   const cancelBedOccupancyTooltipDismiss = useCallback(() => {
     if (bedOccupancyTooltipDismissTimer.current === null) return;
     window.clearTimeout(bedOccupancyTooltipDismissTimer.current);
@@ -452,7 +457,7 @@ export function RoomStatusGrid({
       window.removeEventListener("lostpointercapture", handlePointerCancel, true);
       window.removeEventListener("blur", handleWindowBlur);
     };
-  }, [finishPointerSelection, onSelectionChange]);
+  }, [finishPointerSelection]);
 
   useEffect(() => () => {
     pointerSelection.current = null;
@@ -498,7 +503,7 @@ export function RoomStatusGrid({
     onFocusedCellChange(next);
     if (event.shiftKey) {
       const anchorDate = selection?.unitId === next.unitId ? selection.anchorDate : current.serviceDate;
-      onSelectionChange(selectionFromCells(next.unitId, anchorDate, next.serviceDate));
+      onSelectionPreviewChange(selectionFromCells(next.unitId, anchorDate, next.serviceDate));
     }
     if (!windowChanges) requestAnimationFrame(() => cellRefs.current.get(`${next.unitId}:${next.serviceDate}`)?.focus());
   };
@@ -522,19 +527,33 @@ export function RoomStatusGrid({
         return;
       }
       finishPointerSelection();
-      onSelectionChange(null);
+      onSelectionPreviewChange(null);
       return;
     }
     if (event.key === " " || event.key === "Spacebar") {
       event.preventDefault();
       const serviceDate = event.currentTarget.dataset.serviceDate!;
-      const anchorDate = event.shiftKey && selection?.unitId === unit.id ? selection.anchorDate : serviceDate;
-      onSelectionChange(selectionFromCells(unit.id, anchorDate, serviceDate));
+      const selectedRange = selection?.unitId === unit.id
+        && selection.arrivalDate <= serviceDate
+        && serviceDate < selection.departureDate
+        && selection.departureDate !== addLocalDateDays(selection.arrivalDate, 1)
+        ? selection
+        : null;
+      if (selectedRange) onInspectSelection(unit, selectedRange, event.currentTarget);
+      else onInspectDay(unit, day, event.currentTarget);
       return;
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      onInspectDay(unit, day, event.currentTarget);
+      const serviceDate = event.currentTarget.dataset.serviceDate!;
+      const selectedRange = selection?.unitId === unit.id
+        && selection.arrivalDate <= serviceDate
+        && serviceDate < selection.departureDate
+        && selection.departureDate !== addLocalDateDays(selection.arrivalDate, 1)
+        ? selection
+        : null;
+      if (selectedRange) onInspectSelection(unit, selectedRange, event.currentTarget);
+      else onInspectDay(unit, day, event.currentTarget);
     }
   };
 
