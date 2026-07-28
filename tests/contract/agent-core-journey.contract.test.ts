@@ -53,6 +53,7 @@ type CommandRun = {
 
 let app: FastifyInstance;
 let db: Kysely<Database>;
+let lifecycleQueryOrderId: string | undefined;
 let reportActiveOwnerConfirmObserved: (() => void) | undefined;
 const originalLogLevel = process.env.LOG_LEVEL;
 
@@ -433,6 +434,7 @@ describe("scoped agent HTTP core journey", () => {
     });
     const orderId = created.receipt.result?.orderId as string;
     expect(orderId).toMatch(/^order_/);
+    lifecycleQueryOrderId = orderId;
     expect(created.receipt.resourceRefs).toEqual(expect.arrayContaining([orderId, occupantId]));
 
     const createdOrderResponse = await app.inject({
@@ -453,6 +455,28 @@ describe("scoped agent HTTP core journey", () => {
       documentNumber: "AGENT-HTTP-2028",
       createdAt: expect.any(String)
     }]);
+    expect(createdOrder.originalArrangement).toEqual({
+      arrivalDate,
+      departureDate: originalDepartureDate,
+      intervals: [{ inventoryUnitId: memberRoomId, arrivalDate, departureDate: originalDepartureDate }]
+    });
+    expect(createdOrder.effectiveArrangement).toMatchObject({
+      presentation: "CURRENT",
+      businessDate: arrivalDate,
+      arrivalDate,
+      departureDate: originalDepartureDate,
+      intervals: [{ inventoryUnitId: memberRoomId, arrivalDate, departureDate: originalDepartureDate }]
+    });
+    expect(createdOrder.fulfillment).toEqual({ state: "NOT_CHECKED_IN", checkIn: null, checkOut: null });
+    expect(createdOrder.arrangementHistory).toEqual([
+      expect.objectContaining({
+        type: "INITIAL_BOOKING",
+        before: null,
+        after: createdOrder.originalArrangement,
+        pricingSummary: expect.any(Object),
+        fundsSummary: expect.any(Object)
+      })
+    ]);
     const hiddenOrder = await app.inject({
       method: "GET",
       url: `/api/v1/orders/${orderId}`,
@@ -585,6 +609,7 @@ describe("scoped agent HTTP core journey", () => {
     expect(finalOrder.amendments.find((amendment: { amendment_type: string }) => amendment.amendment_type === "CHECK_IN")?.payload)
       .toMatchObject({ businessDate: arrivalDate });
     expect(finalOrder.fulfillment).toMatchObject({
+      state: "IN_HOUSE",
       checkIn: {
         type: "CHECK_IN",
         plannedBusinessDate: arrivalDate,
@@ -593,6 +618,17 @@ describe("scoped agent HTTP core journey", () => {
       },
       checkOut: null
     });
+    expect(finalOrder.originalArrangement).toEqual(createdOrder.originalArrangement);
+    expect(finalOrder.effectiveArrangement).toMatchObject({
+      presentation: "CURRENT",
+      businessDate: arrivalDate,
+      arrivalDate,
+      departureDate: shortenedDepartureDate,
+      intervals: [{ inventoryUnitId: memberRoomId, arrivalDate, departureDate: shortenedDepartureDate }]
+    });
+    expect(finalOrder.arrangementHistory.map((item: { type: string }) => item.type)).toEqual([
+      "INITIAL_BOOKING", "SHORTENING"
+    ]);
     expect(finalOrder.pricingRevisions).toHaveLength(2);
     expect(finalOrder.pricingRevisions.every((revision: { policy_version_id: string }) => (
       revision.policy_version_id === demo.transientPolicyId
@@ -732,5 +768,31 @@ describe("scoped agent HTTP core journey", () => {
     });
     expect(recovered.statusCode, recovered.body).toBe(200);
     expect(recovered.json()).toEqual(receipt);
+  });
+
+  it("fails the order HTTP query closed without leaking raw lifecycle facts", async () => {
+    if (!lifecycleQueryOrderId) throw new Error("The lifecycle journey order was not created");
+    const order = await db.selectFrom("orders")
+      .select("version")
+      .where("id", "=", lifecycleQueryOrderId)
+      .executeTakeFirstOrThrow();
+    await db.updateTable("orders")
+      .set({ version: order.version + 1 })
+      .where("id", "=", lifecycleQueryOrderId)
+      .execute();
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/orders/${lifecycleQueryOrderId}`,
+      headers: { authorization: `Bearer ${demo.writeToken}` }
+    });
+    expect(response.statusCode, response.body).toBe(500);
+    expect(response.json()).toMatchObject({
+      code: "INTERNAL_ERROR",
+      retryable: false
+    });
+    for (const rawField of ["segments", "amendments", "payload", "originalArrangement", "effectiveArrangement"]) {
+      expect(response.body).not.toContain(`\"${rawField}\"`);
+    }
   });
 });

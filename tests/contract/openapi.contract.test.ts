@@ -756,7 +756,9 @@ describe("OpenAPI 3.1 command contract", () => {
       expect(arbitraryRecordLocations(schema), `${method.toUpperCase()} ${path}`).toEqual([]);
     }
     const orderDetailSchema = document.paths["/api/v1/orders/{id}"].get.responses["200"].content["application/json"].schema as JsonSchema;
-    expect(orderDetailSchema.required).toContain("fulfillment");
+    expect(orderDetailSchema.required).toEqual(expect.arrayContaining([
+      "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory"
+    ]));
     const pricingRevisionSchema = (((orderDetailSchema.properties as Record<string, JsonSchema>).pricingRevisions!.items) as JsonSchema);
     expect(pricingRevisionSchema.required).toEqual(expect.arrayContaining([
       "policy_version_id", "policy_base_amount_minor", "pricing_basis", "manual_adjustment_minor",
@@ -766,7 +768,12 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(pricingRevisionSchema.properties).not.toHaveProperty("channel_settlement_amount_minor");
     const fulfillmentSchema = (orderDetailSchema.properties as Record<string, JsonSchema>).fulfillment!;
     expect(fulfillmentSchema.additionalProperties).toBe(false);
-    expect(Object.keys(fulfillmentSchema.properties as Record<string, JsonSchema>).sort()).toEqual(["checkIn", "checkOut"]);
+    expect(Object.keys(fulfillmentSchema.properties as Record<string, JsonSchema>).sort()).toEqual(["checkIn", "checkOut", "state"]);
+    expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("NOT_CHECKED_IN"));
+    expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("IN_HOUSE"));
+    expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("CHECKED_OUT"));
+    expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("CANCELLED"));
+    expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("NO_SHOW"));
     for (const [slot, type] of [["checkIn", "CHECK_IN"], ["checkOut", "CHECK_OUT"]] as const) {
       const slotSchema = (fulfillmentSchema.properties as Record<string, JsonSchema>)[slot]!;
       const recordSchema = (slotSchema.anyOf as JsonSchema[]).find((variant) => variant.type === "object")!;
@@ -781,6 +788,25 @@ describe("OpenAPI 3.1 command contract", () => {
       expect(modeJson).toContain("LATE_RECORDED");
       expect(modeJson).toContain("LEGACY_UNCLASSIFIED");
     }
+    for (const field of ["originalArrangement", "effectiveArrangement"] as const) {
+      const arrangementSchema = (orderDetailSchema.properties as Record<string, JsonSchema>)[field]!;
+      expect(arrangementSchema.additionalProperties).toBe(false);
+      expect(arrangementSchema.required).toEqual(expect.arrayContaining(["arrivalDate", "departureDate", "intervals"]));
+      const arrangementProperties = arrangementSchema.properties as Record<string, JsonSchema>;
+      const intervalSchema = arrangementProperties.intervals!.items as JsonSchema;
+      expect(intervalSchema.additionalProperties).toBe(false);
+      expect(intervalSchema.required).toEqual(["inventoryUnitId", "arrivalDate", "departureDate"]);
+    }
+    const effectiveArrangementSchema = (orderDetailSchema.properties as Record<string, JsonSchema>).effectiveArrangement!;
+    expect(effectiveArrangementSchema.required).toEqual(expect.arrayContaining(["presentation", "businessDate"]));
+    const arrangementHistorySchema = (orderDetailSchema.properties as Record<string, JsonSchema>).arrangementHistory!.items as JsonSchema;
+    expect(arrangementHistorySchema.additionalProperties).toBe(false);
+    expect(arrangementHistorySchema.required).toEqual(expect.arrayContaining([
+      "type", "before", "after", "reason", "actor", "recordedAt", "pricingSummary", "fundsSummary"
+    ]));
+    const arrangementHistoryProperties = arrangementHistorySchema.properties as Record<string, JsonSchema>;
+    expect(JSON.stringify(arrangementHistoryProperties.type)).toEqual(expect.stringContaining("INITIAL_BOOKING"));
+    expect(JSON.stringify(arrangementHistoryProperties.type)).toEqual(expect.stringContaining("MOVE"));
     const roomStatusSchema = document.paths["/api/v1/properties/{id}/room-status"].get.responses["200"].content["application/json"].schema;
     const roomProperties = (((roomStatusSchema.properties as Record<string, JsonSchema>).rooms!.items as JsonSchema).properties) as Record<string, JsonSchema>;
     expect(roomProperties).toHaveProperty("bedOccupancies");

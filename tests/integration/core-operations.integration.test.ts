@@ -564,13 +564,15 @@ describe("PostgreSQL core operations", () => {
     expect(refund.factRefs).toHaveLength(1);
     await previewAndConfirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "check-in");
 
+    await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
+    const checkoutArrivalDate = await propertyLocalToday(db, demo.propertyId);
     const checkoutCreated = await createOrder(demo.secondRoomId, "planned-check-out", {
-      arrival: addDays(arrivalDate, -1),
-      departure: arrivalDate
+      arrival: checkoutArrivalDate,
+      departure: addDays(checkoutArrivalDate, 1)
     });
     const checkoutOrderId = checkoutCreated.result!.orderId as string;
-    await db.updateTable("orders").set({ status: "CHECKED_IN" }).where("id", "=", checkoutOrderId).execute();
-    await db.updateTable("stays").set({ status: "IN_HOUSE" }).where("order_id", "=", checkoutOrderId).execute();
+    await previewAndConfirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: checkoutOrderId } }, "planned-check-out-check-in");
+    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
     await previewAndConfirm({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId: checkoutOrderId } }, "check-out");
 
     const view = await getOrderView(db, orderId);
@@ -588,6 +590,14 @@ describe("PostgreSQL core operations", () => {
     const checkoutView = await getOrderView(db, checkoutOrderId);
     expect(checkoutView.order.status).toBe("CHECKED_OUT");
     expect(checkoutView.stay.status).toBe("COMPLETED");
+    expect(checkoutView.fulfillment.state).toBe("CHECKED_OUT");
+    expect(checkoutView.fulfillment.checkIn).not.toBeNull();
+    expect(checkoutView.fulfillment.checkOut).not.toBeNull();
+    expect(checkoutView.effectiveArrangement).toMatchObject({
+      presentation: "LAST",
+      arrivalDate: checkoutArrivalDate,
+      departureDate: addDays(checkoutArrivalDate, 1)
+    });
     expect(await db.selectFrom("inventory_claims").select("id")
       .where("source_type", "=", "ORDER_SEGMENT")
       .where("source_id", "in", view.segments.map((segment) => segment.id))
@@ -611,6 +621,18 @@ describe("PostgreSQL core operations", () => {
     const availability = await listAvailability(db, demo.propertyId, "2026-07-22", "2026-07-24");
     expect(availability.find((unit) => unit.id === demo.roomId)?.available).toBe(true);
     expect(availability.find((unit) => unit.id === demo.secondRoomId)?.available).toBe(false);
+  });
+
+  it("fails the order query closed when the immutable amendment chain no longer matches the order version", async () => {
+    const created = await createOrder(demo.roomId, "damaged-lifecycle", { stayType: "FREE" });
+    const orderId = created.result!.orderId as string;
+    await db.updateTable("orders").set({ version: 2 }).where("id", "=", orderId).execute();
+
+    await expect(getOrderView(db, orderId)).rejects.toMatchObject({
+      code: "INTERNAL_ERROR",
+      statusCode: 500,
+      retryable: false
+    });
   });
 
   it("recalculates each service date from the active inventory timeline across repeated moves", async () => {
@@ -674,6 +696,24 @@ describe("PostgreSQL core operations", () => {
     expect(view.amounts.currentContractAmount.minorUnits).toBe(0);
     expect(view.pricingRevisions.every((revision) => revision.policy_version_id === demo.transientPolicyId)).toBe(true);
     expect(view.currentSegment.arrivalDate).toBe("2026-07-21");
+    expect(view.originalArrangement).toEqual({
+      arrivalDate: "2026-07-21",
+      departureDate: "2026-07-25",
+      intervals: [{ inventoryUnitId: demo.roomId, arrivalDate: "2026-07-21", departureDate: "2026-07-25" }]
+    });
+    expect(view.effectiveArrangement).toMatchObject({
+      presentation: "CURRENT",
+      arrivalDate: "2026-07-21",
+      departureDate: "2026-07-25",
+      intervals: [{ inventoryUnitId: demo.roomId, arrivalDate: "2026-07-21", departureDate: "2026-07-25" }]
+    });
+    expect(view.arrangementHistory.map((item) => item.type)).toEqual([
+      "INITIAL_BOOKING", "MOVE", "SHORTENING", "EXTENSION", "MOVE"
+    ]);
+    for (const [index, interval] of view.effectiveArrangement.intervals.entries()) {
+      expect(interval.departureDate > interval.arrivalDate).toBe(true);
+      if (index > 0) expect(interval.arrivalDate).toBe(view.effectiveArrangement.intervals[index - 1]!.departureDate);
+    }
   });
 
   it("shortens exactly to and then before the latest move effective date", async () => {
@@ -1021,11 +1061,18 @@ describe("PostgreSQL core operations", () => {
     const cancelledView = await getOrderView(db, cancelledOrderId);
     expect(cancelledView.order.status).toBe("CANCELLED");
     expect(cancelledView.coverageSet.every((item) => item.status === "RELEASED")).toBe(true);
+    expect(cancelledView.fulfillment.state).toBe("CANCELLED");
+    expect(cancelledView.effectiveArrangement.presentation).toBe("BEFORE_CANCELLATION");
+    expect(cancelledView.effectiveArrangement.intervals).toEqual(cancelledView.originalArrangement.intervals);
 
     const noShow = await createOrder(demo.secondRoomId, "no-show", { stayType: "FREE" });
     const noShowOrderId = noShow.result!.orderId as string;
     await previewAndConfirm({ commandType: "MARK_NO_SHOW", input: { propertyId: demo.propertyId, orderId: noShowOrderId } }, "no-show");
-    expect((await getOrderView(db, noShowOrderId)).order.status).toBe("NO_SHOW");
+    const noShowView = await getOrderView(db, noShowOrderId);
+    expect(noShowView.order.status).toBe("NO_SHOW");
+    expect(noShowView.fulfillment.state).toBe("NO_SHOW");
+    expect(noShowView.effectiveArrangement.presentation).toBe("NO_SHOW_ORDER");
+    expect(noShowView.effectiveArrangement.intervals).toEqual(noShowView.originalArrangement.intervals);
     expect(await db.selectFrom("inventory_claims").select("id").where("active", "=", true).execute()).toHaveLength(0);
   });
 

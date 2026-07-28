@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import { FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type {
@@ -62,11 +62,13 @@ import {
   roomStatusFactFingerprint,
   roomStatusOrderIdentityForDate,
   roomStatusOrderIdentityForInterval,
+  roomStatusOrderOptionsForDate,
   roomStatusUnitLabel,
   RoomStatusContext,
   RoomStatusGrid,
   RoomStatusMobileTasks,
   RoomStatusOrderContext,
+  RoomStatusQuickPopover,
   RoomStatusToolbar,
   roomStatusViewReducer,
   selectionFromCells,
@@ -91,7 +93,9 @@ const bookingChannelLabels: Record<BookingChannelCode, string> = {
 };
 
 export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boolean): "INLINE" | "DRAWER" {
-  return !isMobile && (workspaceWidth === 0 || workspaceWidth >= 1240) ? "INLINE" : "DRAWER";
+  void workspaceWidth;
+  void isMobile;
+  return "DRAWER";
 }
 
 export function bookingChannelRequiredForStay(useMemberEntitlement: boolean, stayType?: string): boolean {
@@ -523,6 +527,7 @@ function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, dra
   onSubmit: (request: CommandRequest) => boolean;
 }) {
   const { propertyId } = useWorkspace();
+  const formId = useId();
   const [from, setFrom] = useState(() => typeof draft?.input.arrivalDate === "string" ? draft.input.arrivalDate : arrivalDate);
   const [to, setTo] = useState(() => typeof draft?.input.departureDate === "string" ? draft.input.departureDate : departureDate);
   const [reason, setReason] = useState(() => typeof draft?.input.reason === "string" ? draft.input.reason : "");
@@ -545,8 +550,14 @@ function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, dra
   }
 
   return (
-    <Modal title={`维修锁房 · ${unitName(unit)}`} onClose={onClose} footer={null}>
-      <form className="modal-form" onSubmit={submit}>
+    <Modal
+      title={`维修锁房 · ${unitName(unit)}`}
+      onClose={onClose}
+      size="drawer"
+      className="room-status-write-drawer"
+      footer={<><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" form={formId} className="button button-primary" disabled={writeBlocked}>继续核对</button></>}
+    >
+      <form id={formId} className="modal-form" onSubmit={submit}>
         <InlineError
           error={writeBlocked ? new Error("当前房态已陈旧、正在刷新、权限已收窄或命令恢复尚未收口。日期和原因草稿仍保留，重新取得可写房态后再继续。") : undefined}
           title="草稿已保留，写入已暂停"
@@ -557,7 +568,6 @@ function MaintenanceDialog({ unit, arrivalDate, departureDate, writeBlocked, dra
           <label>结束日期<input type="date" value={to} min={isIsoLocalDate(from) ? addLocalDateDays(from, 1) : arrivalDate} max={departureDate} onChange={(event) => { setTo(event.target.value); setValidationError(undefined); }} required /></label>
           <label className="span-two">维修原因<textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} /></label>
         </div>
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked}>继续核对</button></div>
       </form>
     </Modal>
   );
@@ -1102,7 +1112,7 @@ function QuoteWorkbench({
                     </label>
                     {paidPricingDraft?.differenceFromPolicyMinor !== undefined ? <div className="span-two inline-summary" data-testid="create-order-price-difference">
                       <span>政策基础金额 {formatMoney(quote.currentContractAmount)}</span>
-                      <strong>差异 {formatMoney({ currency: quote.currentContractAmount.currency, minorUnits: paidPricingDraft.differenceFromPolicyMinor })}</strong>
+                      <strong>与政策基础金额差额 {formatMoney({ currency: quote.currentContractAmount.currency, minorUnits: paidPricingDraft.differenceFromPolicyMinor })}</strong>
                     </div> : null}
                     {paidPricingDraft?.channelReasonRequired ? <label className="span-two">渠道价格差异说明
                       <textarea value={channelPriceDifferenceReason} onChange={(event) => setChannelPriceDifferenceReason(event.target.value)} required maxLength={1000} rows={2} data-testid="channel-price-difference-reason" />
@@ -1138,6 +1148,17 @@ const ROOM_STATUS_POLL_MS = 4_000;
 const ROOM_STATUS_QUERY_TIMEOUT_MS = 15_000;
 const ROOM_STATUS_RESTORATION_PREFIX = "qintopia.room-status-view.v1";
 const selectionActionCodes = new Set(["CREATE_ORDER", "CREATE_FREE_STAY", "LOCK_MAINTENANCE"]);
+
+interface RoomStatusInteractionSnapshot {
+  anchor: HTMLElement;
+  selection: RoomStatusSelection | null;
+  focusedCell: RoomStatusViewState["focusedCell"];
+  windowX: number;
+  windowY: number;
+  grid: HTMLElement | null;
+  gridLeft: number;
+  gridTop: number;
+}
 
 interface RoomStatusQuoteTarget {
   unitId: string;
@@ -1426,7 +1447,13 @@ export function InventoryPage() {
   const [selectedCorrectionOccupantId, setSelectedCorrectionOccupantId] = useState<string>();
   const [selectedCorrectionRevision, setSelectedCorrectionRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
-  const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(false);
+  const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
+  const [quickPopoverTarget, setQuickPopoverTarget] = useState<{
+    unitId: string;
+    serviceDate: string;
+    anchor: HTMLElement;
+    intervalId?: string;
+  }>();
   const [orderRefreshToken, setOrderRefreshToken] = useState(0);
   const [selectedOrderCommandScope, setSelectedOrderCommandScope] = useState<string>();
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
@@ -1442,6 +1469,7 @@ export function InventoryPage() {
   const quoteSectionRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const boardColumnRef = useRef<HTMLDivElement>(null);
+  const roomStatusInteractionSnapshotRef = useRef<RoomStatusInteractionSnapshot | undefined>(undefined);
   const commandPhaseRef = useRef<RoomStatusCommandPhase>("IDLE");
   const commandAttemptGuardRef = useRef<RoomStatusCommandAttemptGuard | null>(null);
   if (!commandAttemptGuardRef.current) commandAttemptGuardRef.current = new RoomStatusCommandAttemptGuard();
@@ -1450,6 +1478,7 @@ export function InventoryPage() {
   const commandQueryKeyRef = useRef<string | undefined>(undefined);
   const refreshedReceiptIdRef = useRef<string | undefined>(undefined);
   const focusAfterNextBoard = useRef(false);
+  const returnedOrderCellFocus = useRef<{ unitId: string; serviceDate: string } | undefined>(undefined);
   const pendingMobileTaskFocus = useRef<PendingMobileTaskFocus | undefined>(undefined);
   const mobileFocusSequence = useRef(0);
   const latestRestoration = useRef<{
@@ -1489,9 +1518,10 @@ export function InventoryPage() {
       return;
     }
     let current = true;
+    const controller = new AbortController();
     setSelectedOrderLoading(true);
     setSelectedOrderError(undefined);
-    api.order(selectedOrderIdentity.orderId)
+    api.order(selectedOrderIdentity.orderId, controller.signal)
       .then((response) => {
         if (!current) return;
         if (response.order.property_id !== propertyId || response.stay.id !== selectedOrderIdentity.stayId) {
@@ -1502,11 +1532,15 @@ export function InventoryPage() {
       })
       .catch((nextError) => {
         if (!current) return;
+        if (nextError instanceof DOMException && nextError.name === "AbortError") return;
         setSelectedOrderView(undefined);
         setSelectedOrderError(nextError);
       })
       .finally(() => current && setSelectedOrderLoading(false));
-    return () => { current = false; };
+    return () => {
+      current = false;
+      controller.abort();
+    };
   }, [board?.businessDate, board?.revision, orderPrincipalScope, orderRefreshToken, propertyId, selectedOrderIdentity]);
 
   useEffect(() => {
@@ -1606,6 +1640,7 @@ export function InventoryPage() {
     commandRevisionRef.current = undefined;
     commandQueryKeyRef.current = undefined;
     focusAfterNextBoard.current = false;
+    returnedOrderCellFocus.current = undefined;
     setCommandContextInvalidated(false);
     setCommand(undefined);
     setQueryError(undefined);
@@ -1695,6 +1730,7 @@ export function InventoryPage() {
         setQueryError(undefined);
         setQueryPhase("READY");
         setClock(Date.now());
+        setOrderRefreshToken((value) => value + 1);
         if (focusAfterNextBoard.current) {
           focusAfterNextBoard.current = false;
           setFocusRequestToken((value) => value + 1);
@@ -1712,7 +1748,7 @@ export function InventoryPage() {
           if (resolution.outcome === "FACT_CHANGED") {
             setReturnNotice(restored.revision === response.revision
               ? "已重新校验返回位置。原选区的可售、状态、来源、冲突或允许动作已经变化；已保留选区供核对并将焦点移至选区起点。旧 Preview 不会继续使用。"
-              : "房态 revision 已变化，且原选区的可售、状态、来源、冲突或允许动作已经变化；已保留选区供核对并将焦点移至选区起点。旧 Preview 不会继续使用。");
+              : "房态数据已变化，且原选区的可售、状态、来源、冲突或允许动作已经变化；已保留选区供核对并将焦点移至选区起点。旧核对结果不会继续使用。");
           } else if (resolution.outcome === "FALLBACK") {
             setReturnNotice(`原焦点或选区在当前筛选、展开、分页或日期窗口中已不可见。${pageAdjusted ? "原分页已失效；" : ""}${resolution.filtersCleared ? "原筛选已无结果并已清除；" : ""}已清除旧选区并将焦点移至当前视图首个可见房间和日期。旧 Preview 不会继续使用。`);
           } else if (resolution.outcome === "EMPTY") {
@@ -1724,7 +1760,7 @@ export function InventoryPage() {
               : "已恢复上次房态范围、筛选、展开、滚动、选区和焦点。它们均已验证为当前可见且可聚焦。"
             );
           } else {
-            setReturnNotice("房态 revision 已变化。已刷新并确认原选区与焦点在当前筛选、展开、分页和日期窗口中仍可见；任何旧 Preview 均已作废。");
+            setReturnNotice("房态数据已变化。已刷新并确认原选区与焦点在当前筛选、展开、分页和日期窗口中仍可见；任何旧核对结果均已作废。");
           }
         }
       })
@@ -1876,6 +1912,16 @@ export function InventoryPage() {
   const selectedUnit = findRoomStatusUnit(renderedBoard, selectedUnitId ?? viewState.selection?.unitId);
   const selectedDay = selectedUnit?.days.find((day) => day.serviceDate === selectedDayDate) ?? null;
   const selectedInterval = selectedUnit?.intervals.find((interval) => interval.id === selectedIntervalId) ?? null;
+  const quickPopoverUnit = findRoomStatusUnit(renderedBoard, quickPopoverTarget?.unitId);
+  const quickPopoverDay = quickPopoverUnit?.days.find((day) => day.serviceDate === quickPopoverTarget?.serviceDate) ?? null;
+  const quickPopoverInterval = quickPopoverUnit?.intervals.find((interval) => interval.id === quickPopoverTarget?.intervalId) ?? null;
+  const quickPopoverActions = (quickPopoverInterval
+    ? intervalActions(quickPopoverInterval, null)
+    : dayActions(quickPopoverUnit, quickPopoverDay))
+    .filter((action) => currentReleaseFeatures.cleaningWorkflow || action.code !== "COMPLETE_CLEANING");
+  const quickPopoverOrders = quickPopoverUnit && quickPopoverTarget
+    ? roomStatusOrderOptionsForDate(quickPopoverUnit, quickPopoverTarget.serviceDate)
+    : { kind: "READY" as const, orders: [] };
   const selectedSelectionDays = selectionDays(selectedUnit, viewState.selection);
   const relatedIntervals = useMemo(() => {
     if (!selectedUnit) return [];
@@ -1899,6 +1945,13 @@ export function InventoryPage() {
   const useInlineOrderContext = roomStatusOrderContextMode(workspaceWidth, isMobile) === "INLINE";
   const authorizedSelectedOrderView = selectedOrderLoadedScope === orderPrincipalScope ? selectedOrderView : undefined;
   const selectedCorrectionOccupant = authorizedSelectedOrderView?.occupants.find((occupant) => occupant.id === selectedCorrectionOccupantId);
+
+  useEffect(() => {
+    if (!quickPopoverTarget) return;
+    if (quickPopoverTarget.anchor.isConnected && quickPopoverUnit && quickPopoverDay) return;
+    setQuickPopoverTarget(undefined);
+    if (renderedBoard) setReturnNotice("原房态格已不在当前页面，快捷操作已关闭。请重新选择房态格。");
+  }, [quickPopoverDay, quickPopoverTarget, quickPopoverUnit, renderedBoard]);
 
   useEffect(() => {
     if (!renderedBoard || viewState.dateWindowMode !== "AUTO") return;
@@ -1931,10 +1984,31 @@ export function InventoryPage() {
   }, [renderedBoard, viewState.selection]);
 
   useEffect(() => {
+    const target = returnedOrderCellFocus.current;
+    if (!target || !orderContextOpen || selectedOrderIdentity?.unitId !== target.unitId) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        const cell = [...document.querySelectorAll<HTMLElement>("[data-room-status-cell='true']")]
+          .find((candidate) => candidate.dataset.unitId === target.unitId
+            && candidate.dataset.serviceDate === target.serviceDate);
+        if (!cell) return;
+        cell.focus({ preventScroll: true });
+        returnedOrderCellFocus.current = undefined;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  }, [orderContextOpen, renderedBoard?.page.index, renderedBoard?.revision, selectedOrderIdentity?.unitId]);
+
+  useEffect(() => {
     const target = pendingOrderReturnTarget.current;
     if (!renderedBoard || !boardMatchesCurrentQuery || orderReturnResolutionStarted.current) return;
     if (!target) {
       if (!orderReturnEnvelopePresent.current) return;
+      returnedOrderCellFocus.current = undefined;
       orderReturnEnvelopePresent.current = false;
       navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
       dispatchView({ type: "SET_SELECTION", selection: null });
@@ -1942,6 +2016,7 @@ export function InventoryPage() {
       return;
     }
     if (target.propertyId !== propertyId) {
+      returnedOrderCellFocus.current = undefined;
       pendingOrderReturnTarget.current = null;
       orderReturnEnvelopePresent.current = false;
       navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
@@ -1953,6 +2028,7 @@ export function InventoryPage() {
     let current = true;
     let activeController: AbortController | undefined;
     const clearReturnedContext = () => {
+      returnedOrderCellFocus.current = undefined;
       setSelectedUnitId(undefined);
       setSelectedDayDate(undefined);
       setSelectedIntervalId(undefined);
@@ -1990,6 +2066,7 @@ export function InventoryPage() {
         ),
         totalDates: renderedBoard.dates.length
       });
+      returnedOrderCellFocus.current = { unitId: identity.unitId, serviceDate: target.triggerDate };
       selectOrderContextIdentity(identity, target.triggerDate);
       if (pageChanges) focusAfterNextBoard.current = true;
       else setFocusRequestToken((value) => value + 1);
@@ -2141,7 +2218,7 @@ export function InventoryPage() {
           setSelectedDayDate(triggerDate);
           setSelectedIntervalId(identity.intervalId);
           setSelectedOrderIdentity(identity);
-          setReturnNotice("房态 revision 已变化，住宿已移动到其他房源页；已保留订单上下文并定位到最新分段。");
+          setReturnNotice("房态数据已变化，住宿已移动到其他房源页；已保留订单上下文并定位到最新安排。");
           return;
         }
       }
@@ -2155,7 +2232,7 @@ export function InventoryPage() {
     void findMovedStay().catch((error: unknown) => {
       if (!current) return;
       setActionError(error);
-      setReturnNotice("房态 revision 已变化，但暂时无法核对该住宿是否移动到其他房源页；订单上下文保持打开，请刷新后重试。");
+      setReturnNotice("房态数据已变化，但暂时无法核对该住宿是否移动到其他房源页；订单上下文保持打开，请刷新后重试。");
     });
     return () => { current = false; };
   }, [
@@ -2192,6 +2269,8 @@ export function InventoryPage() {
   const quoteActionUnit = quoteTarget && quoteUnit ? actionUnit(quoteUnit, projectionWritable) : undefined;
 
   function clearTransientRoomStatusContext() {
+    returnedOrderCellFocus.current = undefined;
+    setQuickPopoverTarget(undefined);
     setSelectedUnitId(undefined);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
@@ -2199,6 +2278,7 @@ export function InventoryPage() {
     setSelectedOrderView(undefined);
     setSelectedCorrectionOccupantId(undefined);
     setOrderContextOpen(false);
+    setDesktopContextCollapsed(true);
     setQuoteTarget(undefined);
     setMaintenanceTarget(undefined);
     setMobileCreateOpen(false);
@@ -2302,7 +2382,47 @@ export function InventoryPage() {
     });
   }
 
+  function captureRoomStatusInteraction(anchor: HTMLElement) {
+    const cell = anchor.closest<HTMLElement>("[data-room-status-cell='true']");
+    const unitId = cell?.dataset.unitId;
+    const serviceDate = cell?.dataset.serviceDate;
+    const grid = anchor.closest<HTMLElement>(".room-status-grid-scroll");
+    roomStatusInteractionSnapshotRef.current = {
+      anchor,
+      selection: viewState.selection ? { ...viewState.selection } : null,
+      focusedCell: unitId && serviceDate
+        ? { unitId, serviceDate }
+        : viewState.focusedCell ? { ...viewState.focusedCell } : null,
+      windowX: window.scrollX,
+      windowY: window.scrollY,
+      grid,
+      gridLeft: grid?.scrollLeft ?? 0,
+      gridTop: grid?.scrollTop ?? 0
+    };
+  }
+
+  function restoreRoomStatusInteraction() {
+    const snapshot = roomStatusInteractionSnapshotRef.current;
+    roomStatusInteractionSnapshotRef.current = undefined;
+    if (!snapshot) {
+      setFocusRequestToken((value) => value + 1);
+      return;
+    }
+    dispatchView({ type: "SET_SELECTION", selection: snapshot.selection });
+    dispatchView({ type: "SET_FOCUS", focus: snapshot.focusedCell });
+    requestAnimationFrame(() => {
+      snapshot.grid?.scrollTo({ left: snapshot.gridLeft, top: snapshot.gridTop, behavior: "auto" });
+      window.scrollTo({ left: snapshot.windowX, top: snapshot.windowY, behavior: "auto" });
+      if (snapshot.anchor.isConnected) snapshot.anchor.focus({ preventScroll: true });
+      requestAnimationFrame(() => {
+        snapshot.grid?.scrollTo({ left: snapshot.gridLeft, top: snapshot.gridTop, behavior: "auto" });
+        window.scrollTo({ left: snapshot.windowX, top: snapshot.windowY, behavior: "auto" });
+      });
+    });
+  }
+
   function inspectUnit(unit: RoomStatusUnitDto) {
+    setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
     setSelectedOrderIdentity(undefined);
     setSelectedCorrectionOccupantId(undefined);
@@ -2310,9 +2430,11 @@ export function InventoryPage() {
     setSelectedUnitId(unit.id);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
+    setDesktopContextCollapsed(false);
   }
 
   function selectOrderContextIdentity(identity: RoomStatusOrderIdentity, serviceDate?: string) {
+    setQuickPopoverTarget(undefined);
     const sameOrder = selectedOrderIdentity?.orderId === identity.orderId
       && selectedOrderIdentity.stayId === identity.stayId;
     setActionError(undefined);
@@ -2351,50 +2473,27 @@ export function InventoryPage() {
     });
   }
 
-  function inspectDay(unit: RoomStatusUnitDto, day: RoomStatusDayDto | null) {
+  function inspectDay(unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement) {
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
-    setSelectedUnitId(unit.id);
-    const orderIdentity = day ? roomStatusOrderIdentityForDate(unit, day.serviceDate) : null;
-    if (orderIdentity) {
-      selectOrderContextIdentity(orderIdentity, day?.serviceDate);
-    } else if (day && !day.available) {
-      setSelectedOrderIdentity(undefined);
-      setSelectedOrderView(undefined);
-      setSelectedCorrectionOccupantId(undefined);
-      setOrderContextOpen(false);
-      setQuoteTarget(undefined);
-      dispatchView({ type: "SET_SELECTION", selection: selectionFromCells(unit.id, day.serviceDate, day.serviceDate) });
-      setActionError(new Error(unit.kind === "ROOM" && unit.salesMode === "BED_SPLIT"
-        ? "该房间格汇总床位占用，不能代表一张订单。请展开房间并选择具体床位。"
-        : "当前占用缺少唯一、稳定的订单引用，未打开订单或新建住宿流程。请刷新后重新核对。"));
-    } else if (day) {
-      selectRange(selectionFromCells(unit.id, day.serviceDate, day.serviceDate));
+    const serviceDate = day?.serviceDate ?? anchor.dataset.serviceDate;
+    if (!serviceDate) {
+      setActionError(new Error("当前房态格缺少营业日期，未打开快捷操作。请刷新后重试。"));
+      return;
     }
-    if (!orderIdentity) {
-      setSelectedDayDate(day?.serviceDate);
-      setSelectedIntervalId(undefined);
-    }
+    captureRoomStatusInteraction(anchor);
+    setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor });
   }
 
-  function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto) {
+  function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) {
     setQuoteRecoveryOutcome(undefined);
-    setSelectedOrderIdentity(undefined);
-    setSelectedCorrectionOccupantId(undefined);
-    setOrderContextOpen(false);
-    setSelectedUnitId(unit.id);
-    selectRange({
-      unitId: unit.id,
-      anchorDate: interval.startDate,
-      focusDate: addLocalDateDays(interval.endDate, -1),
-      arrivalDate: interval.startDate,
-      departureDate: interval.endDate
-    });
-    setSelectedDayDate(undefined);
-    setSelectedIntervalId(interval.id);
+    setActionError(undefined);
+    captureRoomStatusInteraction(anchor);
+    setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, intervalId: interval.id });
   }
 
   function selectRange(selection: RoomStatusSelection | null) {
+    setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
     setSelectedOrderIdentity(undefined);
     setSelectedOrderView(undefined);
@@ -2402,6 +2501,7 @@ export function InventoryPage() {
     setOrderContextOpen(false);
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
+      setDesktopContextCollapsed(false);
       setSelectedUnitId(selection.unitId);
       setQuoteTarget((current) => ({
         unitId: selection.unitId,
@@ -2454,7 +2554,7 @@ export function InventoryPage() {
       setActionError(new Error("当前订单上下文与房态住宿引用不一致，未发送办理命令。请重新选择住宿后再试。"));
       return;
     }
-    if (selectedOrderLoading || commandsBlocked || view.accessLevel !== "WRITE") {
+    if (commandsBlocked || view.accessLevel !== "WRITE") {
       setActionError(new Error("当前房态或订单权限不允许写入，未发送办理命令。请刷新后重新核对。"));
       return;
     }
@@ -2475,16 +2575,18 @@ export function InventoryPage() {
   }
 
   function closeSelectedOrderContext() {
+    returnedOrderCellFocus.current = undefined;
     setSelectedCorrectionOccupantId(undefined);
     setOrderContextOpen(false);
     setDesktopContextCollapsed(true);
-    setFocusRequestToken((value) => value + 1);
+    restoreRoomStatusInteraction();
   }
 
   function closeDesktopContext() {
+    returnedOrderCellFocus.current = undefined;
     setDesktopContextCollapsed(true);
     if (selectedOrderIdentity) setOrderContextOpen(false);
-    setFocusRequestToken((value) => value + 1);
+    restoreRoomStatusInteraction();
   }
 
   function reopenDesktopContext() {
@@ -2784,8 +2886,9 @@ export function InventoryPage() {
       <RoomStatusOrderContext
         view={authorizedSelectedOrderView}
         units={meta.inventoryUnits}
-        loading={selectedOrderLoading}
+        loading={false}
         writeBlocked={selectedOrderLoading || commandsBlocked || authorizedSelectedOrderView.accessLevel !== "WRITE"}
+        primaryActionPlacement={isMobile || !useInlineOrderContext ? "DRAWER_FOOTER" : "CONTENT"}
         onClose={closeSelectedOrderContext}
         onOpenOrder={openSelectedOrder}
         onFulfillmentAction={startSelectedOrderFulfillment}
@@ -2954,25 +3057,79 @@ export function InventoryPage() {
             </div> : null}
           </div>
 
-          {!isMobile && !desktopContextCollapsed && !useInlineOrderContext && (!selectedOrderIdentity || orderContextOpen) ? (
+          {quickPopoverTarget && quickPopoverUnit && quickPopoverDay ? (
+            <RoomStatusQuickPopover
+              anchor={quickPopoverTarget.anchor}
+              unit={quickPopoverUnit}
+              serviceDate={quickPopoverTarget.serviceDate}
+              status={quickPopoverDay.status}
+              actions={quickPopoverActions}
+              orderOptions={quickPopoverOrders}
+              onClose={(reason) => {
+                setQuickPopoverTarget(undefined);
+                if (reason === "DISMISS") roomStatusInteractionSnapshotRef.current = undefined;
+              }}
+              onCreate={() => {
+                const selection = selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
+                setSelectedUnitId(quickPopoverUnit.id);
+                setSelectedDayDate(quickPopoverTarget.serviceDate);
+                setSelectedIntervalId(undefined);
+                selectRange(selection);
+              }}
+              onLockMaintenance={(action) => {
+                const selection = selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
+                setSelectedUnitId(quickPopoverUnit.id);
+                setSelectedDayDate(quickPopoverTarget.serviceDate);
+                setSelectedIntervalId(undefined);
+                selectRange(selection);
+                handleAction(action, quickPopoverUnit, selection);
+                setQuoteTarget(undefined);
+              }}
+              onViewStatus={() => {
+                setSelectedOrderIdentity(undefined);
+                setSelectedOrderView(undefined);
+                setSelectedCorrectionOccupantId(undefined);
+                setOrderContextOpen(false);
+                setSelectedUnitId(quickPopoverUnit.id);
+                setSelectedDayDate(quickPopoverTarget.serviceDate);
+                setSelectedIntervalId(quickPopoverTarget.intervalId);
+                setQuoteTarget(undefined);
+                dispatchView({ type: "SET_SELECTION", selection: selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate) });
+                setDesktopContextCollapsed(false);
+              }}
+              onOpenOrder={(option) => selectOrderContextIdentity(option.identity, quickPopoverTarget.serviceDate)}
+            />
+          ) : null}
+
+          {!isMobile && !desktopContextCollapsed && !useInlineOrderContext && (selectedUnit || selectedOrderIdentity || viewState.selection) && (!selectedOrderIdentity || orderContextOpen) ? (
             <Modal
               title={selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
               size="drawer"
-              modal={false}
+              modal={!selectedOrderIdentity && showQuoteWorkbench}
+              className={!selectedOrderIdentity && showQuoteWorkbench ? "room-status-write-drawer" : "room-status-view-drawer"}
               onClose={closeDesktopContext}
-              footer={null}
+              footer={<>
+                <button type="button" className="button button-secondary" onClick={closeDesktopContext}>关闭</button>
+                {selectedOrderIdentity ? <button type="button" className="button button-primary" onClick={() => openSelectedOrder()}>查看完整订单</button> : null}
+              </>}
             >
               {selectedOrderIdentity ? selectedOrderContext : desktopSelectionContext}
             </Modal>
           ) : null}
 
           {isMobile && selectedOrderIdentity && orderContextOpen ? (
-            <Modal title="订单上下文" size="mobile-fullscreen" modal onClose={closeSelectedOrderContext} footer={null}>
+            <Modal
+              title="订单上下文"
+              size="mobile-fullscreen"
+              modal
+              onClose={closeSelectedOrderContext}
+              footer={<><button type="button" className="button button-secondary" onClick={closeSelectedOrderContext}>关闭</button><button type="button" className="button button-primary" onClick={() => openSelectedOrder()}>查看完整订单</button></>}
+            >
               {selectedOrderContext}
             </Modal>
           ) : null}
 
-          {!isMobile && desktopContextCollapsed ? (
+          {!isMobile && desktopContextCollapsed && (selectedUnit || selectedOrderIdentity || viewState.selection) ? (
             <button type="button" className="button button-primary room-status-context-reopen" onClick={reopenDesktopContext}>
               <PanelRightOpen aria-hidden="true" size={17} />打开{selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
             </button>
@@ -3023,7 +3180,7 @@ export function InventoryPage() {
         </>
       )}
 
-      {maintenanceTarget && viewState.selection && !command ? <MaintenanceDialog unit={maintenanceTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} {...(commandDraft?.commandType === "LOCK_MAINTENANCE" ? { draft: commandDraft } : {})} onClose={() => { setMaintenanceTarget(undefined); setCommandDraft(undefined); }} onSubmit={startCommand} /> : null}
+      {maintenanceTarget && viewState.selection && !command ? <MaintenanceDialog unit={maintenanceTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} {...(commandDraft?.commandType === "LOCK_MAINTENANCE" ? { draft: commandDraft } : {})} onClose={() => { setMaintenanceTarget(undefined); setCommandDraft(undefined); restoreRoomStatusInteraction(); }} onSubmit={startCommand} /> : null}
       {authorizedSelectedOrderView && selectedCorrectionOccupant ? <OrderOccupantCorrectionDialog
         view={authorizedSelectedOrderView}
         occupant={selectedCorrectionOccupant}
@@ -3053,7 +3210,10 @@ export function InventoryPage() {
         onBusinessSuccess={(message) => {
           setCommandNotice(message);
           setCommandDraft(undefined);
-          if (command.commandType === "LOCK_MAINTENANCE") setMaintenanceTarget(undefined);
+          if (command.commandType === "LOCK_MAINTENANCE") {
+            setMaintenanceTarget(undefined);
+            roomStatusInteractionSnapshotRef.current = undefined;
+          }
         }}
         onBusinessNotExecuted={(message) => setCommandNotice(message)}
         onReturnToEdit={returnCommandToEdit}

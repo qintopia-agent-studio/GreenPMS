@@ -228,7 +228,8 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
       && new URL(response.url()).pathname === `/api/v1/orders/${fixture.restoration.orderId}`
       && response.status() === 200
   ), { timeout: 30_000 });
-  await cell.dblclick();
+  await cell.click();
+  await page.getByTestId("room-status-quick-popover").locator(".room-status-quick-orders button").click();
   await selectedOrderResponse;
   const context = page.locator(".room-status-order-context").filter({ hasText: fixture.restoration.nickname });
   await expect(context).toBeVisible({ timeout: 30_000 });
@@ -257,16 +258,25 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
       && new URL(response.url()).pathname === `/api/v1/orders/${fixture.restoration.orderId}`
       && response.status() === 200
   ), { timeout: 30_000 });
-  await cell.dblclick();
+  await cell.click();
+  await page.getByTestId("room-status-quick-popover").locator(".room-status-quick-orders button").click();
   await reopenedOrderResponse;
   await expect(context).toBeVisible();
   await expect(checkInButton).toBeEnabled();
 
   let delayedPoll = false;
+  let finishDelayedPoll: (() => void) | undefined;
+  const delayedPollFinished = new Promise<void>((resolve) => { finishDelayedPoll = resolve; });
   await page.route(roomStatusPattern, async (route) => {
     if (!delayedPoll) {
       delayedPoll = true;
       await new Promise((resolve) => setTimeout(resolve, 7_000));
+      try {
+        await route.continue();
+      } finally {
+        finishDelayedPoll?.();
+      }
+      return;
     }
     await route.continue();
   });
@@ -280,12 +290,14 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
       await expect(dialog.getByRole("button", { name: "确认办理入住", exact: true })).toBeEnabled();
     }
   });
+  if (delayedPoll) await delayedPollFinished;
   await page.unroute(roomStatusPattern);
   await expect(context).toContainText("在住");
   for (const date of [fixture.arrivalDate, addDays(fixture.arrivalDate, 1)]) {
     await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.restoration.unitId}"][data-service-date="${date}"]`)).toHaveClass(/is-stay-selected/);
   }
-  await context.getByRole("button", { name: "查看完整订单", exact: true }).click();
+  await page.getByRole("dialog", { name: "订单上下文" }).locator(".modal-footer")
+    .getByRole("button", { name: "查看完整订单", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/orders/${fixture.restoration.orderId}$`));
   const checkInResult = page.getByTestId("check-in-result");
   await expect(fulfillmentNote(checkInResult)).toHaveText("按计划办理入住");
@@ -346,7 +358,8 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
       && new URL(response.url()).pathname === `/api/v1/orders/${fixture.plannedCheckout.orderId}`
       && response.status() === 200
   ));
-  await plannedCheckoutCell.dblclick();
+  await plannedCheckoutCell.click();
+  await page.getByTestId("room-status-quick-popover").locator(".room-status-quick-orders button").click();
   await plannedCheckoutOrder;
   const plannedCheckoutContext = page.locator(".room-status-order-context").filter({ hasText: fixture.plannedCheckout.nickname });
   await expect(plannedCheckoutContext).toBeVisible();
@@ -509,7 +522,7 @@ test("阶段 8 4.1 手机端履约使用相同中文核对和结果", async ({ p
   await confirmFulfillmentDialog(page, "入住");
   await expect(freeContext).toContainText("在住");
   const freeContextDialog = page.getByRole("dialog", { name: "订单上下文" });
-  await freeContextDialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await freeContextDialog.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(freeContextDialog).toBeHidden();
 
   const checkoutContext = await openMobileOrderContext(page, fixture.plannedCheckout);

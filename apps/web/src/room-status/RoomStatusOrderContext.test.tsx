@@ -61,7 +61,72 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       { id: "segment_1", stay_id: "stay_stage7", sequence: 1, inventory_unit_id: "room_101", arrival_date: "2026-07-25", departure_date: "2026-07-27", segment_type: "INITIAL", supersedes_segment_id: null, amendment_id: "amendment_1", created_at: "2026-07-24T10:00:00.000Z" },
       { id: "segment_2", stay_id: "stay_stage7", sequence: 2, inventory_unit_id: "room_102", arrival_date: "2026-07-27", departure_date: "2026-07-28", segment_type: "MOVE", supersedes_segment_id: "segment_1", amendment_id: "amendment_2", created_at: "2026-07-25T10:00:00.000Z" }
     ],
-    fulfillment: { checkIn: null, checkOut: null },
+    originalArrangement: {
+      arrivalDate: "2026-07-25",
+      departureDate: "2026-07-28",
+      intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-07-25", departureDate: "2026-07-28" }]
+    },
+    effectiveArrangement: {
+      arrivalDate: "2026-07-25",
+      departureDate: "2026-07-28",
+      intervals: [
+        { inventoryUnitId: "room_101", arrivalDate: "2026-07-25", departureDate: "2026-07-27" },
+        { inventoryUnitId: "room_102", arrivalDate: "2026-07-27", departureDate: "2026-07-28" }
+      ],
+      presentation: "CURRENT",
+      businessDate: "2026-07-25"
+    },
+    fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null },
+    arrangementHistory: [{
+      type: "INITIAL_BOOKING",
+      before: null,
+      after: {
+        arrivalDate: "2026-07-25",
+        departureDate: "2026-07-28",
+        intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-07-25", departureDate: "2026-07-28" }]
+      },
+      reason: { code: "CREATE_ORDER", note: "" },
+      actor: { subjectId: "operator", displayName: "前台操作员" },
+      recordedAt: "2026-07-24T10:00:00.000Z",
+      pricingSummary: {
+        policyBaseAmount: { currency: "CNY", minorUnits: 60000 },
+        currentContractAmount: { currency: "CNY", minorUnits: 60000 },
+        differenceFromPolicy: { currency: "CNY", minorUnits: 0 }
+      },
+      fundsSummary: {
+        netRecordedCollection: { currency: "CNY", minorUnits: 0 },
+        collectionDifference: { currency: "CNY", minorUnits: 60000 },
+        factCount: 0
+      }
+    }, {
+      type: "MOVE",
+      before: {
+        arrivalDate: "2026-07-25",
+        departureDate: "2026-07-28",
+        intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-07-25", departureDate: "2026-07-28" }]
+      },
+      after: {
+        arrivalDate: "2026-07-25",
+        departureDate: "2026-07-28",
+        intervals: [
+          { inventoryUnitId: "room_101", arrivalDate: "2026-07-25", departureDate: "2026-07-27" },
+          { inventoryUnitId: "room_102", arrivalDate: "2026-07-27", departureDate: "2026-07-28" }
+        ]
+      },
+      reason: { code: "ROOM_CHANGE", note: "住客申请换房" },
+      actor: { subjectId: "operator", displayName: "前台操作员" },
+      recordedAt: "2026-07-25T10:00:00.000Z",
+      pricingSummary: {
+        policyBaseAmount: { currency: "CNY", minorUnits: 60000 },
+        currentContractAmount: { currency: "CNY", minorUnits: 60000 },
+        differenceFromPolicy: { currency: "CNY", minorUnits: 0 }
+      },
+      fundsSummary: {
+        netRecordedCollection: { currency: "CNY", minorUnits: 30000 },
+        collectionDifference: { currency: "CNY", minorUnits: 30000 },
+        factCount: 1
+      }
+    }],
     amendments: [{
       id: "amendment_2",
       order_id: "order_stage7",
@@ -128,22 +193,30 @@ const units = [
 ] as never[];
 
 describe("RoomStatusOrderContext", () => {
-  it("shows the complete Stay, each segment, correction audit, and only enabled server actions", () => {
+  it("shows the four typed lifecycle layers, correction audit, and only enabled server actions", () => {
     const html = renderToStaticMarkup(<RoomStatusOrderContext view={orderView()} units={units} onOpenOrder={() => undefined} onFulfillmentAction={() => undefined} onCorrectOccupant={() => undefined} onLocateRange={() => undefined} />);
     expect(html).toContain("3 夜");
     expect(html).toContain("101 一栋101");
     expect(html).toContain("102 一栋102");
     expect(html).toContain("录入时昵称写错");
     expect(html).toContain("换房");
-    expect(html).toContain("101 一栋101 → 102 一栋102");
-    expect(html).toContain("操作人：前台操作员");
-    expect(html).toContain("变更时资金：已收净额");
-    expect(html).toContain("相关资金：收款 ¥300.00 · PAY-1");
+    expect(html).toContain("原始预订安排");
+    expect(html).toContain("当前住宿安排");
+    expect(html).toContain("入住与退房结果");
+    expect(html).toContain("住宿安排变更历史");
+    expect(html).toContain("调整前：101 一栋101");
+    expect(html).toContain("调整后：101 一栋101");
+    expect(html).toContain("变更时已登记净收款");
     expect(html).toContain("资金记录");
     expect(html).toContain("收款 ·");
-    expect(html).toContain("定位这次变更");
+    expect(html).toContain("净影响：");
+    expect(html).toContain("外部交易单号：PAY-1");
+    expect(html).toContain("方式：企业微信");
+    expect(html).toContain("定位调整后第 1 段");
     expect(html).not.toContain("MOVE_UNIT");
     expect(html).not.toContain("INITIAL");
+    expect(html).not.toContain("Segment ID");
+    expect(html).not.toContain("payload");
     expect(html).toContain("更正资料");
     expect(html).toContain("办理入住");
     expect(html).toContain('data-room-status-action-mode="inline"');
@@ -183,6 +256,7 @@ describe("RoomStatusOrderContext", () => {
       onLocateRange={() => undefined}
     />);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-room-status-action-mode="inline"[^>]*>办理入住/);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*<svg[^>]*>[\s\S]*?更正资料<\/button>/);
   });
 
   it("keeps authoritative order facts readable while exposing no write entry to READ access", () => {

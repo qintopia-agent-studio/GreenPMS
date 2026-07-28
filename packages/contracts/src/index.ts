@@ -654,6 +654,62 @@ export interface OrderAllowedActionDto {
 export const fulfillmentRecordingModes = ["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"] as const;
 export type FulfillmentRecordingMode = (typeof fulfillmentRecordingModes)[number];
 
+export const orderFulfillmentStates = ["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW"] as const;
+export type OrderFulfillmentState = (typeof orderFulfillmentStates)[number];
+
+export const orderEffectiveArrangementPresentations = ["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER"] as const;
+export type OrderEffectiveArrangementPresentation = (typeof orderEffectiveArrangementPresentations)[number];
+
+export const orderArrangementChangeTypes = [
+  "INITIAL_BOOKING",
+  "RESCHEDULE",
+  "EXTENSION",
+  "SHORTENING",
+  "MOVE",
+  "EARLY_CHECK_OUT"
+] as const;
+export type OrderArrangementChangeType = (typeof orderArrangementChangeTypes)[number];
+
+export interface OrderArrangementIntervalDto {
+  inventoryUnitId: string;
+  arrivalDate: string;
+  departureDate: string;
+}
+
+export interface OrderArrangementDto {
+  arrivalDate: string;
+  departureDate: string;
+  intervals: OrderArrangementIntervalDto[];
+}
+
+export interface OrderEffectiveArrangementDto extends OrderArrangementDto {
+  presentation: OrderEffectiveArrangementPresentation;
+  businessDate: string;
+}
+
+export interface OrderArrangementPricingSummaryDto {
+  policyBaseAmount: MoneyDto;
+  currentContractAmount: MoneyDto;
+  differenceFromPolicy: MoneyDto;
+}
+
+export interface OrderArrangementFundsSummaryDto {
+  netRecordedCollection: MoneyDto;
+  collectionDifference: MoneyDto;
+  factCount: number;
+}
+
+export interface OrderArrangementHistoryItemDto {
+  type: OrderArrangementChangeType;
+  before: OrderArrangementDto | null;
+  after: OrderArrangementDto;
+  reason: { code: string; note: string };
+  actor: { subjectId: string; displayName: string } | null;
+  recordedAt: string;
+  pricingSummary: OrderArrangementPricingSummaryDto;
+  fundsSummary: OrderArrangementFundsSummaryDto;
+}
+
 export interface OrderFulfillmentRecordDto {
   type: "CHECK_IN" | "CHECK_OUT";
   plannedBusinessDate: string;
@@ -665,6 +721,7 @@ export interface OrderFulfillmentRecordDto {
 }
 
 export interface OrderFulfillmentProjectionDto {
+  state: OrderFulfillmentState;
   checkIn: OrderFulfillmentRecordDto | null;
   checkOut: OrderFulfillmentRecordDto | null;
 }

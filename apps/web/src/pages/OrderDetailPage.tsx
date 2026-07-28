@@ -18,14 +18,18 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   currentReleaseFeatures,
   type CommandType,
+  type MoneyDto,
   type OrderActionCode,
   type OrderAllowedActionDto,
+  type OrderArrangementDto,
+  type OrderArrangementHistoryItemDto,
+  type OrderEffectiveArrangementPresentation,
   type OrderFulfillmentRecordDto
 } from "@qintopia/contracts";
 import { api } from "../api";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { useWorkspace } from "../session";
-import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
+import type { CollectionFactDto, CommandRequest, InventoryUnitDto, OrderViewDto, PricingRevisionDto } from "../types";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -189,6 +193,140 @@ export function fulfillmentResultLabel(record: OrderFulfillmentRecordDto): strin
   return record.type === "CHECK_IN" ? "按计划办理入住" : "按计划办理退房";
 }
 
+export function effectiveArrangementTitle(presentation: OrderEffectiveArrangementPresentation): string {
+  switch (presentation) {
+    case "CURRENT": return "当前住宿安排";
+    case "LAST": return "最后住宿安排";
+    case "BEFORE_CANCELLATION": return "取消前安排";
+    case "NO_SHOW_ORDER": return "未到订单安排";
+  }
+}
+
+export function arrangementChangeLabel(type: OrderArrangementHistoryItemDto["type"]): string {
+  switch (type) {
+    case "INITIAL_BOOKING": return "创建预订";
+    case "RESCHEDULE": return "调整预订日期";
+    case "EXTENSION": return "延长住宿";
+    case "SHORTENING": return "缩短住宿";
+    case "MOVE": return "更换房源";
+    case "EARLY_CHECK_OUT": return "提前退房";
+  }
+}
+
+export function collectionFactTypeLabel(type: CollectionFactDto["fact_type"]): string {
+  if (type === "COLLECTION") return "收款";
+  if (type === "REFUND") return "退款";
+  return "冲销";
+}
+
+export function collectionMethodLabel(method: string): string {
+  const labels: Record<string, string> = {
+    CASH: "现金",
+    BANK_TRANSFER: "银行转账",
+    CARD: "银行卡",
+    WECOM: "企业微信",
+    WECHAT: "微信",
+    ALIPAY: "支付宝",
+    OTHER: "其他方式"
+  };
+  return labels[method] ?? "其他方式";
+}
+
+export function pricingBasisLabel(basis: PricingRevisionDto["pricing_basis"]): string {
+  switch (basis) {
+    case "CHANNEL_CONTRACT": return "本单渠道应结金额";
+    case "MANUAL_ADJUSTMENT": return "人工调价";
+    case "MEMBER_ENTITLEMENT": return "会员权益计价";
+    case "FREE": return "免费入住";
+    case "POLICY": return "政策价";
+  }
+}
+
+export function collectionDifferencePresentation(amount: MoneyDto): { label: "待收" | "多收" | "已结清"; amount: MoneyDto } {
+  return {
+    label: amount.minorUnits > 0 ? "待收" : amount.minorUnits < 0 ? "多收" : "已结清",
+    amount: { ...amount, minorUnits: Math.abs(amount.minorUnits) }
+  };
+}
+
+function arrangementUnitLabel(units: ReadonlyMap<string, Pick<InventoryUnitDto, "code" | "name">>, inventoryUnitId: string): string {
+  const unit = units.get(inventoryUnitId);
+  return unit ? `${unit.code} · ${unit.name}` : "房源名称暂不可用";
+}
+
+function ArrangementDetails({ arrangement, units }: {
+  arrangement: OrderArrangementDto;
+  units: ReadonlyMap<string, Pick<InventoryUnitDto, "code" | "name">>;
+}) {
+  return <dl className="detail-list">
+    <div><dt>整体周期</dt><dd>{formatDate(arrangement.arrivalDate)} 至 {formatDate(arrangement.departureDate)}</dd></div>
+    {arrangement.intervals.map((interval, index) => <div key={`${interval.inventoryUnitId}:${interval.arrivalDate}:${interval.departureDate}`}>
+      <dt>{arrangement.intervals.length > 1 ? `第 ${index + 1} 段房源` : "住宿房源"}</dt>
+      <dd><strong>{arrangementUnitLabel(units, interval.inventoryUnitId)}</strong><small> · {formatDate(interval.arrivalDate)} 至 {formatDate(interval.departureDate)}</small></dd>
+    </div>)}
+  </dl>;
+}
+
+function ArrangementHistoryAmounts({ item }: { item: OrderArrangementHistoryItemDto }) {
+  const difference = collectionDifferencePresentation(item.fundsSummary.collectionDifference);
+  return <dl className="detail-list">
+    <div><dt>政策基础金额</dt><dd>{formatMoney(item.pricingSummary.policyBaseAmount)}</dd></div>
+    <div><dt>订单金额</dt><dd>{formatMoney(item.pricingSummary.currentContractAmount)}</dd></div>
+    <div><dt>与政策基础金额差额</dt><dd>{formatMoney(item.pricingSummary.differenceFromPolicy)}</dd></div>
+    <div><dt>已登记净收款</dt><dd>{formatMoney(item.fundsSummary.netRecordedCollection)}</dd></div>
+    <div><dt>{difference.label}</dt><dd>{formatMoney(difference.amount)}</dd></div>
+  </dl>;
+}
+
+export function OrderLifecycleSections({ view, inventoryUnits }: {
+  view: Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
+  inventoryUnits: Array<Pick<InventoryUnitDto, "id" | "code" | "name">>;
+}) {
+  const units = new Map(inventoryUnits.map((unit) => [unit.id, unit]));
+  return <>
+    <div className="detail-grid" data-testid="order-arrangements">
+      <section className="detail-section" aria-labelledby="original-arrangement-heading">
+        <div className="section-title-row"><h2 id="original-arrangement-heading">原始预订安排</h2></div>
+        <ArrangementDetails arrangement={view.originalArrangement} units={units} />
+      </section>
+      <section className="detail-section" aria-labelledby="effective-arrangement-heading">
+        <div className="section-title-row"><h2 id="effective-arrangement-heading">{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</h2></div>
+        <ArrangementDetails arrangement={view.effectiveArrangement} units={units} />
+      </section>
+    </div>
+
+    <section className="detail-section full-detail" aria-labelledby="fulfillment-heading" data-testid="order-fulfillment">
+      <div className="section-title-row"><h2 id="fulfillment-heading">入住与退房结果</h2></div>
+      <p className="muted compact">这里显示的是系统办理营业日和记录时间，不代表住客实际到店或离店的精确时刻。</p>
+      <div className="amendment-list">
+        <FulfillmentResult type="CHECK_IN" record={view.fulfillment.checkIn} />
+        <FulfillmentResult type="CHECK_OUT" record={view.fulfillment.checkOut} />
+      </div>
+    </section>
+
+    <section className="detail-section full-detail" aria-labelledby="arrangement-history-heading" data-testid="arrangement-history">
+      <div className="section-title-row"><h2 id="arrangement-history-heading">住宿安排变更历史</h2><span>{view.arrangementHistory.length} 条</span></div>
+      <div className="amendment-list">{view.arrangementHistory.map((item, index) => <article key={`${item.type}:${item.recordedAt}:${index}`}>
+        <div>
+          <strong>第 {index + 1} 条 · {arrangementChangeLabel(item.type)}</strong>
+          <span>{item.actor?.displayName ?? "历史未记录操作人"} · {formatDateTime(item.recordedAt)}</span>
+          <p>{item.reason.note.trim() || "未填写变更说明"}</p>
+        </div>
+        <div>
+          <span>{item.before ? "变更前" : "最初安排"}</span>
+          {item.before ? <ArrangementDetails arrangement={item.before} units={units} /> : <p>此条记录创建了最初住宿安排。</p>}
+          <span>变更后</span>
+          <ArrangementDetails arrangement={item.after} units={units} />
+        </div>
+        <div>
+          <span>当时金额摘要 · {item.fundsSummary.factCount} 条资金记录</span>
+          <ArrangementHistoryAmounts item={item} />
+        </div>
+      </article>)}</div>
+    </section>
+  </>;
+}
+
 function FulfillmentResult({ type, record }: {
   type: "CHECK_IN" | "CHECK_OUT";
   record: OrderFulfillmentRecordDto | null;
@@ -205,7 +343,7 @@ function FulfillmentResult({ type, record }: {
         <div><dt>办理营业日</dt><dd>{record.recordedBusinessDate ? formatDate(record.recordedBusinessDate) : "历史未记录"}</dd></div>
         <div><dt>记录时间</dt><dd>{formatDateTime(record.recordedAt)}</dd></div>
         <div><dt>操作人</dt><dd>{record.actor?.displayName ?? "历史未记录"}</dd></div>
-        <div><dt>办理备注</dt><dd>{record.reason.note.trim() || "未填写"}</dd></div>
+        <div><dt>办理备注</dt><dd>{record.reason.note.trim() || fulfillmentResultLabel(record)}</dd></div>
       </dl> : null}
     </article>
   );
@@ -222,10 +360,11 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
   const { meta } = useWorkspace();
   const collections = view.collectionFacts.filter((fact) => fact.fact_type === "COLLECTION");
   const refundableCollections = collections.filter((fact) => remainingRefundableMinor(view.collectionFacts, fact) > 0);
-  const currentUnit = meta.inventoryUnits.find((unit) => unit.id === view.currentSegment.inventoryUnitId);
+  const currentInventoryUnitId = view.effectiveArrangement.intervals.at(-1)?.inventoryUnitId;
+  const currentUnit = meta.inventoryUnits.find((unit) => unit.id === currentInventoryUnitId);
   const moveCandidates = meta.inventoryUnits.filter((unit) => (
     unit.property_id === view.order.property_id
-    && unit.id !== view.currentSegment.inventoryUnitId
+    && unit.id !== currentInventoryUnitId
     && (!view.order.member_contract_id || unit.kind === currentUnit?.kind)
   ));
   const initialSelectedFactId = initialFactId ?? refundableCollections[0]?.fact_id ?? "";
@@ -280,7 +419,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
     }
     if (action === "SHORTEN_STAY" || action === "EXTEND_STAY") {
       Object.assign(base, { newDepartureDate });
-      description = "服务端使用订单锁定的政策版本重算，并追加 amendment 与 pricing revision。";
+      description = "服务端使用订单锁定的政策重新计算，并追加住宿安排与计价记录。";
     }
     if (action === "MOVE_UNIT") {
       Object.assign(base, { newInventoryUnitId: newUnitId, effectiveDate });
@@ -297,7 +436,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
         return;
       }
       Object.assign(base, { targetCurrentContractAmountMinor });
-      description = "服务端将按锁定政策重新计算基础金额，并把本次指定总价记录为独立计价修订。";
+      description = "服务端将按锁定政策重新计算基础金额，并把本次指定总价记录为一条新的计价记录。";
     }
     onSubmit({
       commandType: action,
@@ -314,9 +453,9 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
         <InlineError error={validationError} title="无法继续" />
         {(action === "RECORD_COLLECTION" || action === "RECORD_REFUND") ? (
           <div className="form-grid form-grid-two">
-            {action === "RECORD_REFUND" ? <label className="span-two">引用原收款<select value={factId} onChange={(event) => setFactId(event.target.value)} required>{refundableCollections.map((fact) => <option key={fact.fact_id} value={fact.fact_id}>{fact.fact_id} · 剩余 {formatMinor(remainingRefundableMinor(view.collectionFacts, fact), fact.currency)} · {fact.method}</option>)}</select></label> : null}
+            {action === "RECORD_REFUND" ? <label className="span-two">选择原收款<select value={factId} onChange={(event) => setFactId(event.target.value)} required>{refundableCollections.map((fact) => <option key={fact.fact_id} value={fact.fact_id}>{formatDateTime(fact.created_at)} · {fact.transaction_reference ?? "未记录外部交易单号"} · 可退 {formatMinor(remainingRefundableMinor(view.collectionFacts, fact), fact.currency)} · {collectionMethodLabel(fact.method)}</option>)}</select></label> : null}
             <label>金额（最小货币单位）<input type="number" min="1" step="1" value={amountMinor} onChange={(event) => { setAmountMinor(event.target.value); setValidationError(undefined); }} required inputMode="numeric" data-testid="fact-amount-minor" /></label>
-            <label>方式<select value={method} onChange={(event) => setMethod(event.target.value)}><option value="CASH">CASH</option><option value="BANK_TRANSFER">BANK TRANSFER</option><option value="CARD">CARD</option><option value="OTHER">OTHER</option></select></label>
+            <label>方式<select value={method} onChange={(event) => setMethod(event.target.value)}><option value="CASH">现金</option><option value="BANK_TRANSFER">银行转账</option><option value="CARD">银行卡</option><option value="OTHER">其他方式</option></select></label>
             <label className="span-two">外部交易单号<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="transaction-reference" /></label>
             <label className="span-two">备注<textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} maxLength={1000} /></label>
           </div>
@@ -338,14 +477,10 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary">{action === "REPRICE_ORDER" ? "继续核对" : "继续生成 Preview"}</button></div>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary">继续核对</button></div>
       </form>
     </Modal>
   );
-}
-
-function JsonDetails({ label, value }: { label: string; value: unknown }) {
-  return <details className="table-details"><summary>{label}</summary><pre>{JSON.stringify(value, null, 2)}</pre></details>;
 }
 
 function countArray(value: unknown): number {
@@ -355,7 +490,7 @@ function countArray(value: unknown): number {
 function FactActions({ fact, canRefund, disabled, onRefund }: { fact: CollectionFactDto; canRefund: boolean; disabled: boolean; onRefund: () => void }) {
   return (
     <div className="row-actions">
-      {canRefund && fact.fact_type === "COLLECTION" ? <button className="icon-button" type="button" onClick={onRefund} disabled={disabled} title="引用退款" aria-label={`引用事实 ${fact.fact_id} 退款`} data-order-action="RECORD_REFUND"><Undo2 aria-hidden="true" size={16} /></button> : null}
+      {canRefund && fact.fact_type === "COLLECTION" ? <button className="icon-button" type="button" onClick={onRefund} disabled={disabled} title="为这笔收款记录退款" aria-label={`为 ${fact.transaction_reference ?? "这笔收款"} 记录退款`} data-order-action="RECORD_REFUND"><Undo2 aria-hidden="true" size={16} /></button> : null}
     </div>
   );
 }
@@ -519,22 +654,23 @@ export function OrderDetailPage() {
   if (view && !orderViewMatchesPrincipalScope(loadedPrincipalOrderScope, principalOrderScope)) return <LoadingBlock label="正在切换订单访问权限" />;
   if (error || !view) return <div><Link className="back-link" to={backTarget} state={backTarget === "/" ? location.state : undefined}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link><InlineError error={error ?? new Error("Order not found")} title="无法载入订单" /></div>;
 
-  const currentUnit = unitMap.get(view.currentSegment.inventoryUnitId);
   const occupants = orderedOrderOccupants(view.occupants);
   const primaryOccupant = primaryOrderOccupant(occupants);
+  const visibleArrangementUnits = [...new Set(view.effectiveArrangement.intervals.map((interval) => arrangementUnitLabel(unitMap, interval.inventoryUnitId)))];
+  const visibleArrangementDifference = collectionDifferencePresentation(view.amounts.collectionDifference);
 
   return (
     <div className="order-detail-page">
       <Link className="back-link" to={backTarget} state={backTarget === "/" ? location.state : undefined}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link>
       <header className="order-heading">
-        <div><div className="order-title-row"><h1>{guestName(primaryOccupant ? { nickname: primaryOccupant.nickname, fullName: primaryOccupant.fullName } : view.order.primary_guest_snapshot)}</h1><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div><code>{view.order.id}</code></div>
-        <div className="order-unit"><span>当前库存</span><strong>{currentUnit ? `${currentUnit.code} · ${currentUnit.name}` : view.currentSegment.inventoryUnitId}</strong></div>
+        <div><div className="order-title-row"><h1>{guestName(primaryOccupant ? { nickname: primaryOccupant.nickname, fullName: primaryOccupant.fullName } : view.order.primary_guest_snapshot)}</h1><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div></div>
+        <div className="order-unit"><span>{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</span><strong>{visibleArrangementUnits.join("、")}</strong></div>
       </header>
 
       <section className="amount-strip" aria-label="订单可复算金额" data-testid="order-amounts">
-        <div><span>currentContractAmount</span><strong>{formatMoney(view.amounts.currentContractAmount)}</strong></div>
-        <div><span>netRecordedCollection</span><strong>{formatMoney(view.amounts.netRecordedCollection)}</strong></div>
-        <div><span>collectionDifference</span><strong>{formatMoney(view.amounts.collectionDifference)}</strong></div>
+        <div><span>订单金额</span><strong>{formatMoney(view.amounts.currentContractAmount)}</strong></div>
+        <div><span>已登记净收款</span><strong>{formatMoney(view.amounts.netRecordedCollection)}</strong></div>
+        <div><span>{visibleArrangementDifference.label}</span><strong>{formatMoney(visibleArrangementDifference.amount)}</strong></div>
       </section>
 
       <InlineError error={recoveryError} title="恢复记录未收口" />
@@ -584,16 +720,10 @@ export function OrderDetailPage() {
             ))}
           </ol>
         </section>
-        <section className="detail-section" aria-labelledby="stay-heading"><div className="section-title-row"><h2 id="stay-heading">住宿状态</h2><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div><dl className="detail-list"><div><dt>住宿周期</dt><dd>{formatDate(view.order.arrival_date)} 至 {formatDate(view.order.departure_date)}</dd></div><div><dt>住宿类型</dt><dd>{view.order.stay_type === "FREE" ? "免费住宿" : view.order.member_id || view.order.member_contract_id ? "会员住宿" : "普通住宿"}</dd></div>{view.order.stay_type === "FREE" ? <><div><dt>免费入住类型</dt><dd>{view.order.free_stay_category_code === "VOLUNTEER" ? "义工" : view.order.free_stay_category_code === "RECEPTION" ? "接待" : "历史未记录"}</dd></div><div><dt>免费入住原因</dt><dd>{view.order.free_stay_reason}</dd></div></> : view.order.member_id || view.order.member_contract_id ? <div><dt>住宿来源</dt><dd>会员权益</dd></div> : <><div><dt>订单来源渠道</dt><dd>{view.order.booking_channel_code ? bookingChannelLabels[view.order.booking_channel_code] : "历史未记录"}</dd></div><div><dt>渠道订单号</dt><dd><code>{view.order.booking_channel_code === "WECOM" ? "不适用" : view.order.channel_order_reference ?? (view.order.booking_channel_code ? "未填写" : "历史未记录")}</code></dd></div></>}</dl></section>
+        <section className="detail-section" aria-labelledby="stay-heading"><div className="section-title-row"><h2 id="stay-heading">住宿状态</h2><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div><dl className="detail-list"><div><dt>{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</dt><dd>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</dd></div><div><dt>住宿类型</dt><dd>{view.order.stay_type === "FREE" ? "免费住宿" : view.order.member_id || view.order.member_contract_id ? "会员住宿" : "普通住宿"}</dd></div>{view.order.stay_type === "FREE" ? <><div><dt>免费入住类型</dt><dd>{view.order.free_stay_category_code === "VOLUNTEER" ? "义工" : view.order.free_stay_category_code === "RECEPTION" ? "接待" : "历史未记录"}</dd></div><div><dt>免费入住原因</dt><dd>{view.order.free_stay_reason}</dd></div></> : view.order.member_id || view.order.member_contract_id ? <div><dt>住宿来源</dt><dd>会员权益</dd></div> : <><div><dt>订单来源渠道</dt><dd>{view.order.booking_channel_code ? bookingChannelLabels[view.order.booking_channel_code] : "历史未记录"}</dd></div><div><dt>渠道订单号</dt><dd>{view.order.booking_channel_code === "WECOM" ? "不适用" : view.order.channel_order_reference ?? (view.order.booking_channel_code ? "未填写" : "历史未记录")}</dd></div></>}</dl></section>
       </div>
 
-      <section className="detail-section full-detail" aria-labelledby="fulfillment-heading" data-testid="order-fulfillment">
-        <div className="section-title-row"><h2 id="fulfillment-heading">入住与退房结果</h2></div>
-        <div className="amendment-list">
-          <FulfillmentResult type="CHECK_IN" record={view.fulfillment.checkIn} />
-          <FulfillmentResult type="CHECK_OUT" record={view.fulfillment.checkOut} />
-        </div>
-      </section>
+      <OrderLifecycleSections view={view} inventoryUnits={meta.inventoryUnits} />
 
       {currentReleaseFeatures.cleaningWorkflow && view.cleaningTasks.length ? <section className="detail-section full-detail" aria-labelledby="cleaning-heading" data-testid="order-cleaning-tasks">
         <div className="section-title-row"><h2 id="cleaning-heading"><Sparkles aria-hidden="true" size={18} />清洁任务</h2><span>{view.cleaningTasks.length}</span></div>
@@ -612,39 +742,28 @@ export function OrderDetailPage() {
         {view.occupantCorrections.length ? <div className="amendment-list" data-testid="occupant-correction-history">{view.occupantCorrections.map((correction) => {
           const occupant = occupants.find((candidate) => candidate.id === correction.occupantId);
           return <article key={correction.id} data-testid="occupant-correction-history-item">
-            <div><strong>#{correction.sequence} · {correction.correctedSnapshot.nickname || `住宿人 ${occupant?.ordinal ?? correction.occupantId}`}</strong><code>{correction.occupantId} · {correction.id}</code></div>
-            <div><span>{correction.actor.displayName} · <code>{correction.actor.subjectId}</code> · {formatDateTime(correction.createdAt)}</span><p>{correction.reason.code} · {correction.reason.note}</p></div>
+            <div><strong>第 {correction.sequence} 次 · {correction.correctedSnapshot.nickname || `住宿人 ${occupant?.ordinal ?? "资料"}`}</strong><span>{correction.actor.displayName} · {formatDateTime(correction.createdAt)}</span><p>{correction.reason.note.trim() || "未填写更正说明"}</p></div>
             <div><span>更正前</span><dl className="detail-list">{occupantSnapshotEntries(correction.priorSnapshot).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}</dl></div>
             <div><span>更正后</span><dl className="detail-list">{occupantSnapshotEntries(correction.correctedSnapshot).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}</dl></div>
-            <div><span>审计引用</span><p>Amendment <code>{correction.amendmentId}</code> · Command <code>{correction.commandId}</code></p></div>
           </article>;
         })}</div> : <EmptyState title="尚无资料更正" detail="住宿人创建时的原始资料保持不变；人工更正会在此追加审计记录。" />}
       </section>
 
-      <section className="detail-section full-detail"><div className="section-title-row"><h2 id="segments-heading">住宿分段</h2><span>{view.segments.length}</span></div><div className="table-region" role="region" aria-label="住宿分段" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">库存单元</th><th scope="col">周期</th><th scope="col">类型</th><th scope="col">Segment ID</th></tr></thead><tbody>{view.segments.map((segment) => { const unit = unitMap.get(segment.inventory_unit_id); return <tr key={segment.id}><td>{segment.sequence}</td><th scope="row">{unit ? `${unit.code} · ${unit.name}` : segment.inventory_unit_id}</th><td>{formatDate(segment.arrival_date)} 至 {formatDate(segment.departure_date)}</td><td>{segment.segment_type}</td><td><code>{segment.id}</code></td></tr>; })}</tbody></table></div></section>
-
       <section className="detail-section full-detail" aria-labelledby="revisions-heading">
         <div className="section-title-row"><h2 id="revisions-heading">计价记录</h2><span>{view.pricingRevisions.length}</span></div>
-        <div className="table-region" role="region" aria-label="计价修订" tabIndex={0}>
+        <div className="table-region" role="region" aria-label="计价记录" tabIndex={0}>
           <table className="data-table compact-table">
-            <thead><tr><th scope="col">序号</th><th scope="col">锁定政策</th><th scope="col">周期</th><th scope="col">权益覆盖</th><th scope="col">政策基础金额</th><th scope="col">价格差额</th><th scope="col">订单合同金额</th><th scope="col">价格性质与说明</th></tr></thead>
+            <thead><tr><th scope="col">计价记录</th><th scope="col">锁定政策</th><th scope="col">周期</th><th scope="col">权益覆盖</th><th scope="col">政策基础金额</th><th scope="col">与政策基础金额差额</th><th scope="col">订单金额</th><th scope="col">计价方式与说明</th></tr></thead>
             <tbody>{view.pricingRevisions.map((revision) => {
-              const basisLabel = revision.pricing_basis === "CHANNEL_CONTRACT"
-                ? "渠道合同价"
-                : revision.pricing_basis === "MANUAL_ADJUSTMENT"
-                  ? "人工调价"
-                  : revision.pricing_basis === "MEMBER_ENTITLEMENT"
-                    ? "会员权益计价"
-                    : revision.pricing_basis === "FREE" ? "免费入住" : "政策价";
               return <tr key={revision.id}>
-                <th scope="row">#{revision.revision_no}<code>{revision.id}</code></th>
-                <td><code>{revision.policy_version_id}</code></td>
+                <th scope="row">第 {revision.revision_no} 次计价</th>
+                <td>{meta.pricingPolicyVersions.some((policy) => policy.id === revision.policy_version_id) ? "已锁定政策" : "历史锁定政策"}</td>
                 <td>{formatDate(revision.arrival_date)} 至 {formatDate(revision.departure_date)}</td>
                 <td>{countArray(revision.coverage_set)}</td>
                 <td>{formatMinor(revision.policy_base_amount_minor, revision.currency)}</td>
-                <td><span>{revision.pricing_basis === "CHANNEL_CONTRACT" ? "渠道合同价差" : revision.pricing_basis === "MANUAL_ADJUSTMENT" ? "人工调价差额" : "与政策价差额"}</span><strong>{formatMinor(revision.difference_from_policy_minor, revision.currency)}</strong></td>
+                <td><strong>{formatMinor(revision.difference_from_policy_minor, revision.currency)}</strong></td>
                 <td><strong>{formatMinor(revision.current_contract_amount_minor, revision.currency)}</strong></td>
-                <td><strong>{basisLabel}</strong><small>{revision.reason.note || "无需说明"}</small></td>
+                <td><strong>{pricingBasisLabel(revision.pricing_basis)}</strong><small>{revision.reason.note || "无需说明"}</small></td>
               </tr>;
             })}</tbody>
           </table>
@@ -653,9 +772,7 @@ export function OrderDetailPage() {
 
       <section className="detail-section full-detail" aria-labelledby="coverage-table-heading"><div className="section-title-row"><h2 id="coverage-table-heading">会员权益覆盖</h2><span>{view.coverageSet.length}</span></div>{view.coverageSet.length ? <div className="table-region" role="region" aria-label="会员覆盖" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">服务日期</th><th scope="col">住宿位置</th><th scope="col">权益类型</th><th scope="col">状态</th></tr></thead><tbody>{view.coverageSet.map((coverage) => <tr key={coverage.id}><td>{coverage.service_date}</td><td>{unitMap.get(coverage.inventory_unit_id)?.code ?? "房源"}</td><td>{coverage.unit_kind === "ROOM_NIGHT" ? "间夜" : "床夜"}</td><td><StatusBadge value={coverage.status} label={businessStatusLabel(coverage.status)} /></td></tr>)}</tbody></table></div> : <EmptyState title="没有会员覆盖" detail="此订单未使用会员住宿权益。" />}</section>
 
-      <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销事实</h2><span>{view.collectionFacts.length}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款事实" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">Fact ID</th><th scope="col">类型</th><th scope="col">事实金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">引用 / 冲销</th><th scope="col">方式与备注</th><th scope="col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact) => <tr key={fact.fact_id}><th scope="row"><code>{fact.fact_id}</code><small>{formatDateTime(fact.created_at)}</small></th><td><StatusBadge value={fact.fact_type} /></td><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td><code>{fact.transaction_reference ?? (fact.fact_type === "REVERSAL" ? "-" : "历史未记录")}</code></td><td><code>{fact.references_fact_id ?? fact.reverses_fact_id ?? "-"}</code></td><td><strong>{fact.method}</strong><small>{fact.note || "-"}</small></td><td><FactActions fact={fact} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款事实" detail="使用订单操作记录第一笔独立收款。" />}</section>
-
-      <section className="detail-section full-detail" aria-labelledby="amendments-heading"><div className="section-title-row"><h2 id="amendments-heading">Amendments</h2><span>{view.amendments.length}</span></div><div className="amendment-list">{view.amendments.map((amendment) => <article key={amendment.id}><div><strong>#{amendment.sequence} · {amendment.amendment_type}</strong><code>{amendment.id}</code></div><div><span>{amendment.reason_code}</span><p>{amendment.reason_note}</p></div><div><span>v{amendment.prior_version} → v{amendment.new_version}</span><JsonDetails label="payload" value={amendment.payload} /></div></article>)}</div></section>
+      <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{view.collectionFacts.length}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">方式</th><th scope="col">备注</th><th scope="col">记录时间</th><th scope="col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact) => <tr key={fact.fact_id}><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{fact.transaction_reference ?? (fact.fact_type === "REVERSAL" ? "不适用" : "历史未记录")}</td><td>{collectionMethodLabel(fact.method)}</td><td>{fact.note || "未填写"}</td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail="使用订单操作记录第一笔独立收款。" />}</section>
 
       {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {correctingOccupant ? <OrderOccupantCorrectionDialog view={view} occupant={correctingOccupant} {...(correctionDraftMatchesOccupant(commandDraft, view.order.id, correctingOccupant.id) ? { draft: commandDraft } : {})} onClose={() => { setCorrectingOccupant(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("CORRECT_ORDER_OCCUPANT")) return; setCorrectingOccupant(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}

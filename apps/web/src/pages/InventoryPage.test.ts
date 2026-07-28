@@ -384,10 +384,10 @@ describe("CREATE_QUOTE request lifecycle", () => {
 });
 
 describe("Room-status order context layout", () => {
-  it("uses measured workspace width instead of viewport assumptions", () => {
-    expect(roomStatusOrderContextMode(0, false)).toBe("INLINE");
+  it("keeps every desktop width on the non-compressing drawer path", () => {
+    expect(roomStatusOrderContextMode(0, false)).toBe("DRAWER");
     expect(roomStatusOrderContextMode(1239, false)).toBe("DRAWER");
-    expect(roomStatusOrderContextMode(1240, false)).toBe("INLINE");
+    expect(roomStatusOrderContextMode(1240, false)).toBe("DRAWER");
     expect(roomStatusOrderContextMode(1600, true)).toBe("DRAWER");
   });
 });

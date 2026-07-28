@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { AlertCircle, Check, ChevronRight, Clock3, Copy, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { AlertCircle, Check, ChevronRight, Clock3, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
   commandTypes,
@@ -194,18 +194,37 @@ interface ModalProps {
   size?: "default" | "wide" | "drawer" | "mobile-fullscreen";
   closeDisabled?: boolean;
   modal?: boolean;
+  className?: string;
 }
 
-export function Modal({ title, onClose, children, footer, size = "default", closeDisabled = false, modal = true }: ModalProps) {
+export function Modal({ title, onClose, children, footer, size = "default", closeDisabled = false, modal = true, className }: ModalProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (modal && dialog && !dialog.open) dialog.showModal();
+    if (dialog) {
+      const currentlyModal = dialog.matches(":modal");
+      if (modal && !currentlyModal) {
+        if (dialog.open) dialog.close();
+        dialog.showModal();
+      } else if (!modal && currentlyModal) {
+        dialog.close();
+        dialog.show();
+      } else if (!modal && !dialog.open) {
+        dialog.show();
+      }
+    }
+    if (!modal && dialog) {
+      requestAnimationFrame(() => {
+        const firstControl = dialog.querySelector<HTMLElement>(
+          "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+        );
+        (firstControl ?? dialog).focus({ preventScroll: true });
+      });
+    }
     return () => {
-      if (!modal) return;
       if (previousFocus?.isConnected) previousFocus.focus();
       else {
         const fallback = document.querySelector<HTMLElement>("[data-testid='command-result-notice'], main h1, h1");
@@ -220,6 +239,7 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
   useEffect(() => {
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || closeDisabled || !dialogRef.current?.open) return;
+      if (document.querySelector("[data-testid='room-status-quick-popover']")) return;
       const openDialogs = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")];
       if (openDialogs.at(-1) !== dialogRef.current) return;
       event.preventDefault();
@@ -265,7 +285,7 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
 
   return (
     <dialog
-      className={`modal modal-${size}`}
+      className={`modal modal-${size}${className ? ` ${className}` : ""}`}
       ref={dialogRef}
       open={modal ? undefined : true}
       tabIndex={-1}
@@ -432,6 +452,49 @@ function scalar(value: unknown): string {
   if (typeof value === "number") return String(value);
   if (typeof value === "string") return value;
   return JSON.stringify(value);
+}
+
+const commandBusinessLabels: Partial<Record<HistoricalCommandType, string>> = {
+  SHORTEN_STAY: "缩短住宿",
+  EXTEND_STAY: "续住",
+  MOVE_UNIT: "换房",
+  CANCEL_ORDER: "取消订单",
+  MARK_NO_SHOW: "标记未到",
+  RECORD_COLLECTION: "记录收款",
+  RECORD_REFUND: "记录退款",
+  REVERSE_FACT: "冲销收退款记录"
+};
+
+const effectFieldLabels: Record<string, string> = {
+  arrivalDate: "入住日期",
+  departureDate: "退房日期",
+  effectiveDate: "生效日期",
+  businessDate: "办理营业日",
+  currentContractAmount: "订单金额",
+  status: "住宿状态",
+  fromStatus: "原状态",
+  toStatus: "新状态",
+  transactionReference: "外部交易单号",
+  reason: "业务说明"
+};
+
+function operatorDifferenceEntries(value: Record<string, unknown>): Array<{ key: string; label: string; value: string }> {
+  return Object.entries(value).flatMap(([key, fieldValue]) => {
+    const label = effectFieldLabels[key];
+    if (!label) return [];
+    const amount = moneyFrom(fieldValue);
+    if (amount) return [{ key, label, value: formatMoney(amount) }];
+    if ((key === "arrivalDate" || key === "departureDate" || key === "effectiveDate" || key === "businessDate") && typeof fieldValue === "string") {
+      return [{ key, label, value: formatDate(fieldValue) }];
+    }
+    if ((key === "status" || key === "fromStatus" || key === "toStatus") && typeof fieldValue === "string") {
+      return [{ key, label, value: businessStatusLabel(fieldValue) }];
+    }
+    if (typeof fieldValue === "string" || typeof fieldValue === "number" || typeof fieldValue === "boolean") {
+      return [{ key, label, value: scalar(fieldValue) }];
+    }
+    return [];
+  });
 }
 
 export function guestNicknameLabel(snapshot: Record<string, unknown>): string {
@@ -825,7 +888,7 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
           <dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? "未填写"}</dd>
           {policyBaseAmount ? <><dt>政策基础金额</dt><dd data-testid="preview-policy-base-amount">{formatMoney(policyBaseAmount)}</dd></> : null}
           {targetCurrentContractAmount ? <><dt>{channelContract ? "本单渠道应结金额" : "订单合同金额"}</dt><dd data-testid="preview-target-contract-amount"><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd></> : null}
-          {differenceFromPolicy && differenceFromPolicy.minorUnits !== 0 ? <><dt>{channelContract ? "渠道合同价差" : "人工调价差额"}</dt><dd data-testid={manualAdjustment ? "preview-manual-adjustment" : "preview-channel-contract-difference"}>{formatMoney(differenceFromPolicy)}</dd></> : null}
+          {differenceFromPolicy && differenceFromPolicy.minorUnits !== 0 ? <><dt>{channelContract ? "与政策基础金额差额" : "人工调价差额"}</dt><dd data-testid={manualAdjustment ? "preview-manual-adjustment" : "preview-channel-contract-difference"}>{formatMoney(differenceFromPolicy)}</dd></> : null}
           {pricingReason && typeof pricingReason.note === "string" && pricingReason.note ? <><dt>{channelContract ? "渠道价格差异说明" : "人工调价原因"}</dt><dd>{pricingReason.note}</dd></> : null}
         </dl>
         <p className="muted compact">确认后，订单合同金额与首条计价记录将在同一事务中写入。</p>
@@ -840,7 +903,7 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
     const pricingReason = createPricingDecision && isRecord(createPricingDecision.reason) ? createPricingDecision.reason : undefined;
     const pricingBasis = createPricingDecision?.pricingBasis;
     const pricingBasisLabel = pricingBasis === "CHANNEL_CONTRACT"
-      ? "渠道合同价"
+      ? "本单渠道应结金额"
       : pricingBasis === "MANUAL_ADJUSTMENT"
         ? "人工调价"
         : pricingBasis === "FREE"
@@ -863,7 +926,7 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
           <dt>计价依据</dt><dd>{pricingBasisLabel}</dd>
           {policyBase ? <><dt>政策基础金额</dt><dd>{formatMoney(policyBase)}</dd></> : null}
           {targetAmount ? <><dt>{pricingBasis === "CHANNEL_CONTRACT" ? "本单渠道应结金额" : "订单合同金额"}</dt><dd><strong>{formatMoney(targetAmount)}</strong></dd></> : null}
-          {difference ? <><dt>与政策价差异</dt><dd>{formatMoney(difference)}</dd></> : null}
+          {difference ? <><dt>与政策基础金额差额</dt><dd>{formatMoney(difference)}</dd></> : null}
           {pricingReason && typeof pricingReason.note === "string" && pricingReason.note ? <><dt>{pricingBasis === "CHANNEL_CONTRACT" ? "渠道价格差异说明" : "人工调价原因"}</dt><dd>{pricingReason.note}</dd></> : null}
         </dl>
       </section>
@@ -926,11 +989,10 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
     <div className="effect-summary" data-testid="command-effect">
       <div className="preview-meta">
         <span><Clock3 aria-hidden="true" size={15} />有效至 {formatDateTime(preview.expiresAt)}</span>
-        <code title={preview.effectHash}>{preview.effectHash.slice(0, 12)}...</code>
       </div>
 
       <section className="effect-section" aria-labelledby="effect-difference-heading">
-        <h3 id="effect-difference-heading">服务端变更差异</h3>
+        <h3 id="effect-difference-heading">请核对{commandBusinessLabels[preview.commandType] ?? "本次操作"}</h3>
         <dl className="difference-grid">
           {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
           {member ? <><dt>会员档案动作</dt><dd>{scalar(effect.operation)}</dd><dt>会员姓名 / 身份证</dt><dd>{scalar(member.fullName)} · <code>{scalar(member.identityCardNumber)}</code></dd><dt>手机号 / 微信号</dt><dd>{scalar(member.phone)} · {scalar(member.wechat)}</dd></> : null}
@@ -941,31 +1003,29 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
           {hasBookingChannel && !isFreeStay ? <><dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</dd></> : null}
           {isFreeStay ? <><dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd><dt>免费入住原因</dt><dd>{freeStayReason ?? "历史未记录"}</dd></> : null}
           {inventoryUnit ? <><dt>库存单元</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
-          {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>生效区间</dt><dd><code>[{effect.arrivalDate}, {effect.departureDate})</code></dd></> : null}
-          {typeof effect.serviceDate === "string" ? <><dt>营业日期</dt><dd>{effect.serviceDate}</dd></> : null}
+          {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
+          {typeof effect.serviceDate === "string" ? <><dt>营业日期</dt><dd>{formatDate(effect.serviceDate)}</dd></> : null}
           {typeof effect.reason === "string" ? <><dt>业务原因</dt><dd>{effect.reason}</dd></> : null}
-          {typeof effect.internalUseBlockId === "string" ? <><dt>内部占用 Block</dt><dd><code>{effect.internalUseBlockId}</code></dd></> : null}
-          {typeof effect.cleaningTaskId === "string" ? <><dt>清洁任务</dt><dd><code>{effect.cleaningTaskId}</code></dd></> : null}
           {fromUnit && toUnit ? <><dt>换房</dt><dd>{scalar(fromUnit.code)} <ChevronRight aria-label="变更为" size={15} /> {scalar(toUnit.code)}</dd></> : null}
-          {before ? Object.entries(before).map(([key, value]) => (
-            <div className="difference-row" key={`before-${key}`}>
-              <dt>{key}</dt><dd><span className="before-value">{moneyFrom(value) ? formatMoney(moneyFrom(value)) : scalar(value)}</span></dd>
+          {before ? operatorDifferenceEntries(before).map((entry) => (
+            <div className="difference-row" key={`before-${entry.key}`}>
+              <dt>{entry.label}</dt><dd><span className="before-value">{entry.value}</span></dd>
             </div>
           )) : null}
-          {after ? Object.entries(after).filter(([key]) => key !== "pricing").map(([key, value]) => (
-            <div className="difference-row" key={`after-${key}`}>
-              <dt>{key}（变更后）</dt><dd><span className="after-value">{moneyFrom(value) ? formatMoney(moneyFrom(value)) : scalar(value)}</span></dd>
+          {after ? operatorDifferenceEntries(after).map((entry) => (
+            <div className="difference-row" key={`after-${entry.key}`}>
+              <dt>{entry.label}（变更后）</dt><dd><span className="after-value">{entry.value}</span></dd>
             </div>
           )) : null}
           {typeof effect.amountMinor === "number" && typeof effect.currency === "string" ? <><dt>事实金额</dt><dd>{formatMoney({ currency: effect.currency, minorUnits: effect.amountMinor })}</dd></> : null}
           {hasTransactionReference ? <><dt>外部交易单号</dt><dd>{typeof effect.transactionReference === "string" ? effect.transactionReference : "历史未记录"}</dd></> : null}
-          {typeof effect.fromStatus === "string" && typeof effect.toStatus === "string" ? <><dt>状态</dt><dd>{effect.fromStatus} <ChevronRight aria-label="变更为" size={15} /> {effect.toStatus}</dd></> : null}
+          {typeof effect.fromStatus === "string" && typeof effect.toStatus === "string" ? <><dt>状态</dt><dd>{businessStatusLabel(effect.fromStatus)} <ChevronRight aria-label="变更为" size={15} /> {businessStatusLabel(effect.toStatus)}</dd></> : null}
           {entitlementTransition ? <><dt>权益状态变化</dt><dd>{scalar(entitlementTransition.from)} <ChevronRight aria-label="变更为" size={15} /> {scalar(entitlementTransition.to)} · {scalar(entitlementTransition.coverageCount)} 晚</dd></> : null}
-          {policyBaseAmount ? <><dt>政策基础报价</dt><dd data-testid="preview-policy-base-amount">{formatMoney(policyBaseAmount)}</dd></> : null}
-          {targetCurrentContractAmount ? <><dt>指定最终总价</dt><dd data-testid="preview-target-contract-amount">{formatMoney(targetCurrentContractAmount)}</dd></> : null}
-          {manualAdjustmentMinor !== undefined && (policyBaseAmount || targetCurrentContractAmount) ? <><dt>人工调价差额</dt><dd data-testid="preview-manual-adjustment">{formatMinor(manualAdjustmentMinor, policyBaseAmount?.currency ?? targetCurrentContractAmount!.currency)}</dd></> : null}
+          {policyBaseAmount ? <><dt>政策基础金额</dt><dd data-testid="preview-policy-base-amount">{formatMoney(policyBaseAmount)}</dd></> : null}
+          {targetCurrentContractAmount ? <><dt>订单金额</dt><dd data-testid="preview-target-contract-amount">{formatMoney(targetCurrentContractAmount)}</dd></> : null}
+          {manualAdjustmentMinor !== undefined && (policyBaseAmount || targetCurrentContractAmount) ? <><dt>与政策基础金额差额</dt><dd data-testid="preview-manual-adjustment">{formatMinor(manualAdjustmentMinor, policyBaseAmount?.currency ?? targetCurrentContractAmount!.currency)}</dd></> : null}
           {!before && !after && !guest && !inventoryUnit && !fromUnit && typeof effect.amountMinor !== "number" && typeof effect.fromStatus !== "string"
-            ? <><dt>命令</dt><dd>{preview.commandType}</dd></> : null}
+            ? <><dt>操作</dt><dd>{commandBusinessLabels[preview.commandType] ?? "业务操作"}</dd></> : null}
         </dl>
       </section>
 
@@ -973,24 +1033,16 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
         <section className="effect-section" aria-labelledby="effect-pricing-heading">
           <h3 id="effect-pricing-heading">计价结果</h3>
           <div className="preview-amounts">
-            <div><span>coverageSet</span><strong>{coverage.length} 晚</strong></div>
-            <div><span>cashRemainder</span><strong>{formatMoney(moneyFrom(pricing.cashRemainder))}</strong></div>
-            <div><span>currentContractAmount</span><strong>{formatMoney(moneyFrom(pricing.currentContractAmount))}</strong></div>
+            <div><span>会员权益覆盖</span><strong>{coverage.length} 晚</strong></div>
+            <div><span>未覆盖金额</span><strong>{formatMoney(moneyFrom(pricing.cashRemainder))}</strong></div>
+            <div><span>订单金额</span><strong>{formatMoney(moneyFrom(pricing.currentContractAmount))}</strong></div>
           </div>
           {cashLines.length ? <p className="muted compact">现金计价行：{cashLines.length}</p> : null}
         </section>
       ) : null}
 
-      <details className="raw-details">
-        <summary>完整 effect</summary>
-        <pre>{JSON.stringify(effect, null, 2)}</pre>
-      </details>
     </div>
   );
-}
-
-function copyText(value: string) {
-  void navigator.clipboard?.writeText(value);
 }
 
 export function lodgingReceiptCopy(committed: boolean, memberStay: boolean): { heading: string; description: string } {
@@ -1140,25 +1192,20 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
       <div className="receipt-title-row">
         <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
         <div>
-          <h3 id="receipt-heading">{committed ? "业务写入已提交" : "业务写入未提交"}</h3>
-          <p>{receipt.executionStatus}</p>
+          <h3 id="receipt-heading">{committed ? "操作已完成" : "操作未完成"}</h3>
+          <p>{committed ? "业务结果已经记录。" : "本次操作没有写入业务结果。"}</p>
         </div>
       </div>
       {receipt.error ? <div className="receipt-error"><strong>{receipt.error.code}</strong><p>{receipt.error.message}</p></div> : null}
       <dl className="receipt-grid">
-        <dt>Receipt ID</dt><dd><code>{receipt.receiptId || "-"}</code>{receipt.receiptId ? <button type="button" className="copy-button" onClick={() => copyText(receipt.receiptId)} aria-label="复制 Receipt ID" title="复制"><Copy size={14} /></button> : null}</dd>
-        <dt>Command ID</dt><dd><code>{receipt.commandId || "-"}</code></dd>
-        <dt>Correlation ID</dt><dd><code>{receipt.correlationId || "-"}</code></dd>
-        <dt>资源引用</dt><dd className="code-list">{receipt.resourceRefs.length ? receipt.resourceRefs.map((ref) => <code key={ref}>{ref}</code>) : "-"}</dd>
-        <dt>事实引用</dt><dd className="code-list">{receipt.factRefs.length ? receipt.factRefs.map((ref) => <code key={ref}>{ref}</code>) : "-"}</dd>
         {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={result?.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : primaryGuest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(primaryGuest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(primaryGuest.fullName)}</dd></> : null}
         {hasBookingChannel && !isFreeStay ? <><dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd><dt>渠道订单号</dt><dd><code>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</code></dd></> : null}
         {isFreeStay ? <><dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd><dt>免费入住原因</dt><dd>{freeStayReason ?? "历史未记录"}</dd></> : null}
         {hasTransactionReference && result ? <><dt>外部交易单号</dt><dd><code>{receiptTransactionReferenceLabel(result)}</code></dd></> : null}
-        {memberId ? <><dt>Member ID</dt><dd><code>{memberId}</code></dd><dt>Member Contract ID</dt><dd><code>{memberContractId ?? "未选择"}</code></dd><dt>外部申请引用</dt><dd><code>{memberExternalReferenceId ?? "未关联"}</code></dd></> : null}
-        {policyBaseAmount ? <><dt>政策基础报价</dt><dd data-testid="receipt-policy-base-amount">{formatMoney(policyBaseAmount)}</dd></> : null}
-        {targetCurrentContractAmount ? <><dt>指定最终总价</dt><dd data-testid="receipt-target-contract-amount">{formatMoney(targetCurrentContractAmount)}</dd></> : null}
-        {manualAdjustmentMinor !== undefined && (policyBaseAmount || targetCurrentContractAmount) ? <><dt>人工调价差额</dt><dd data-testid="receipt-manual-adjustment">{formatMinor(manualAdjustmentMinor, policyBaseAmount?.currency ?? targetCurrentContractAmount!.currency)}</dd></> : null}
+        {memberId ? <><dt>会员住宿</dt><dd>已关联会员权益</dd>{memberExternalReferenceId ? <><dt>外部申请</dt><dd>已关联</dd></> : null}</> : null}
+        {policyBaseAmount ? <><dt>政策基础金额</dt><dd data-testid="receipt-policy-base-amount">{formatMoney(policyBaseAmount)}</dd></> : null}
+        {targetCurrentContractAmount ? <><dt>{pricingDecision?.pricingBasis === "CHANNEL_CONTRACT" ? "本单渠道应结金额" : "订单金额"}</dt><dd data-testid="receipt-target-contract-amount">{formatMoney(targetCurrentContractAmount)}</dd></> : null}
+        {manualAdjustmentMinor !== undefined && (policyBaseAmount || targetCurrentContractAmount) ? <><dt>与政策基础金额差额</dt><dd data-testid="receipt-manual-adjustment">{formatMinor(manualAdjustmentMinor, policyBaseAmount?.currency ?? targetCurrentContractAmount!.currency)}</dd></> : null}
       </dl>
       {orderId ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
     </section>

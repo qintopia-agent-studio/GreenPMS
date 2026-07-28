@@ -399,7 +399,12 @@ textarea:focus-visible {
   min-height: 100vh;
   min-height: 100dvh;
   display: grid;
-  grid-template-columns: 210px minmax(0, 1fr);
+  grid-template-columns: 176px minmax(0, 1fr);
+  transition: grid-template-columns 160ms ease;
+}
+
+.app-shell.sidebar-is-collapsed {
+  grid-template-columns: 60px minmax(0, 1fr);
 }
 
 .sidebar {
@@ -410,13 +415,63 @@ textarea:focus-visible {
   height: 100dvh;
   display: flex;
   flex-direction: column;
-  padding: 18px 14px;
+  padding: 16px 10px;
   background: #eef1ee;
   border-right: 1px solid var(--border);
 }
 
+.sidebar-brand-row {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
 .sidebar-brand {
-  padding: 2px 8px 22px;
+  min-width: 0;
+  padding: 2px 6px;
+}
+
+.sidebar-brand-compact {
+  display: none;
+}
+
+.sidebar-toggle {
+  flex: 0 0 auto;
+}
+
+.sidebar-is-collapsed .sidebar-brand-row {
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.sidebar-is-collapsed .sidebar-brand {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar-is-collapsed .sidebar-brand-full,
+.sidebar-is-collapsed .sidebar-brand-product,
+.sidebar-is-collapsed .nav-link span,
+.sidebar-is-collapsed .sidebar-user div {
+  display: none;
+}
+
+.sidebar-is-collapsed .sidebar-brand-compact {
+  display: inline;
+}
+
+.sidebar-is-collapsed .primary-navigation .nav-link {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.sidebar-is-collapsed .sidebar-user {
+  grid-template-columns: 1fr;
+  justify-items: center;
 }
 
 .primary-navigation {
@@ -1888,6 +1943,15 @@ thead .sticky-column {
   max-height: none;
 }
 
+.room-status-write-drawer .room-status-quote-section .full-width {
+  position: sticky;
+  z-index: 2;
+  bottom: -16px;
+  margin-top: 16px;
+  padding-block: 12px;
+  box-shadow: 0 -1px 0 var(--border);
+}
+
 body:has(.modal-mobile-fullscreen[open]) {
   overflow: hidden;
 }
@@ -2835,6 +2899,10 @@ pre {
     display: block;
   }
 
+  .app-shell.sidebar-is-collapsed {
+    display: block;
+  }
+
   .sidebar {
     position: sticky;
     top: 0;
@@ -2848,6 +2916,23 @@ pre {
 
   .sidebar-brand {
     padding: 0;
+  }
+
+  .sidebar-brand-row,
+  .sidebar-is-collapsed .sidebar-brand-row {
+    min-height: 0;
+    flex-direction: row;
+    margin: 0;
+  }
+
+  .sidebar-is-collapsed .sidebar-brand-full,
+  .sidebar-is-collapsed .sidebar-brand-product {
+    display: inline;
+  }
+
+  .sidebar-is-collapsed .sidebar-brand-compact,
+  .sidebar-toggle {
+    display: none;
   }
 
   .primary-navigation,

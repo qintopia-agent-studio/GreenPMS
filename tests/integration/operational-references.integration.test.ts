@@ -827,15 +827,17 @@ describe.sequential("booking channels and external transaction references on Pos
           INSERT INTO orders(id, property_id, status, stay_type, arrival_date, departure_date, primary_guest_snapshot, pricing_policy_version_id, member_contract_id, current_revision_id, version)
           VALUES ('order_historical_nulls', '${demo.propertyId}', 'RESERVED', 'FREE', '2029-02-01', '2029-02-02', '{"fullName":"Historical Null Guest"}'::jsonb, '${demo.freePolicyId}', NULL, NULL, 1);
           INSERT INTO stays(id, order_id, status) VALUES ('stay_historical_nulls', 'order_historical_nulls', 'PLANNED');
-          INSERT INTO amendments(id, order_id, sequence, amendment_type, reason_code, reason_note, prior_version, new_version, payload)
-          VALUES ('amend_historical_nulls', 'order_historical_nulls', 1, 'CREATE_ORDER', 'HISTORICAL', 'Created before channel capture', 0, 1, '{"quoteId":"quote_historical","inventoryUnitId":"${demo.roomId}","arrivalDate":"2029-02-01","departureDate":"2029-02-02"}'::jsonb);
+          INSERT INTO amendments(id, order_id, sequence, amendment_type, reason_code, reason_note, prior_version, new_version, payload, created_at)
+          VALUES ('amend_historical_nulls', 'order_historical_nulls', 1, 'CREATE_ORDER', 'HISTORICAL', 'Created before channel capture', 0, 1, '{"quoteId":"quote_historical","inventoryUnitId":"${demo.roomId}","arrivalDate":"2029-02-01","departureDate":"2029-02-02"}'::jsonb, '2028-12-01T00:00:00Z');
           INSERT INTO stay_segments(id, stay_id, sequence, inventory_unit_id, arrival_date, departure_date, segment_type, supersedes_segment_id, amendment_id)
           VALUES ('segment_historical_nulls', 'stay_historical_nulls', 1, '${demo.roomId}', '2029-02-01', '2029-02-02', 'INITIAL', NULL, 'amend_historical_nulls');
+          INSERT INTO inventory_claims(id, property_id, room_id, inventory_unit_id, service_date, source_type, source_id, active, released_at)
+          VALUES ('claim_historical_nulls', '${demo.propertyId}', '${demo.roomId}', '${demo.roomId}', '2029-02-01', 'ORDER_SEGMENT', 'segment_historical_nulls', true, NULL);
           INSERT INTO pricing_revisions(id, order_id, revision_no, amendment_id, policy_version_id, arrival_date, departure_date, coverage_set, cash_lines, manual_adjustment_minor, current_contract_amount_minor, currency)
           VALUES ('revision_historical_nulls', 'order_historical_nulls', 1, 'amend_historical_nulls', '${demo.freePolicyId}', '2029-02-01', '2029-02-02', '[]'::jsonb, '[]'::jsonb, 0, 0, 'CNY');
           UPDATE orders SET current_revision_id = 'revision_historical_nulls' WHERE id = 'order_historical_nulls';
-          INSERT INTO collection_facts(fact_id, order_id, fact_type, amount_minor, net_effect_minor, currency, references_fact_id, reverses_fact_id, method, note, command_id)
-          VALUES ('fact_historical_nulls', 'order_historical_nulls', 'COLLECTION', 100, 90, 'USD', NULL, NULL, 'CASH', 'Recorded before transaction reference and shape guards', 'command_historical_nulls');
+          INSERT INTO collection_facts(fact_id, order_id, fact_type, amount_minor, net_effect_minor, currency, references_fact_id, reverses_fact_id, method, note, command_id, created_at)
+          VALUES ('fact_historical_nulls', 'order_historical_nulls', 'COLLECTION', 100, 90, 'USD', NULL, NULL, 'CASH', 'Recorded before transaction reference and shape guards', 'command_historical_nulls', '2028-12-02T00:00:00Z');
 
           INSERT INTO orders(id, property_id, status, stay_type, arrival_date, departure_date, primary_guest_snapshot, pricing_policy_version_id, member_contract_id, current_revision_id, version)
           VALUES ('order_historical_explicit_null', '${demo.propertyId}', 'RESERVED', 'FREE', '2029-02-03', '2029-02-04', '{"fullName":"Historical Explicit Null Guest","nickname":null}'::jsonb, '${demo.freePolicyId}', NULL, NULL, 1);
@@ -844,6 +846,8 @@ describe.sequential("booking channels and external transaction references on Pos
           VALUES ('amend_historical_explicit_null', 'order_historical_explicit_null', 1, 'CREATE_ORDER', 'HISTORICAL', 'Created with an explicit null nickname', 0, 1, '{"quoteId":"quote_historical_explicit_null","inventoryUnitId":"${demo.secondRoomId}","arrivalDate":"2029-02-03","departureDate":"2029-02-04"}'::jsonb);
           INSERT INTO stay_segments(id, stay_id, sequence, inventory_unit_id, arrival_date, departure_date, segment_type, supersedes_segment_id, amendment_id)
           VALUES ('segment_historical_explicit_null', 'stay_historical_explicit_null', 1, '${demo.secondRoomId}', '2029-02-03', '2029-02-04', 'INITIAL', NULL, 'amend_historical_explicit_null');
+          INSERT INTO inventory_claims(id, property_id, room_id, inventory_unit_id, service_date, source_type, source_id, active, released_at)
+          VALUES ('claim_historical_explicit_null', '${demo.propertyId}', '${demo.secondRoomId}', '${demo.secondRoomId}', '2029-02-03', 'ORDER_SEGMENT', 'segment_historical_explicit_null', true, NULL);
           INSERT INTO pricing_revisions(id, order_id, revision_no, amendment_id, policy_version_id, arrival_date, departure_date, coverage_set, cash_lines, manual_adjustment_minor, current_contract_amount_minor, currency)
           VALUES ('revision_historical_explicit_null', 'order_historical_explicit_null', 1, 'amend_historical_explicit_null', '${demo.freePolicyId}', '2029-02-03', '2029-02-04', '[]'::jsonb, '[]'::jsonb, 0, 0, 'CNY');
           UPDATE orders SET current_revision_id = 'revision_historical_explicit_null' WHERE id = 'order_historical_explicit_null';

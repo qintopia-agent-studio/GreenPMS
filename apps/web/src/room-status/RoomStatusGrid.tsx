@@ -119,10 +119,24 @@ export interface RoomStatusGridProps {
   onDateWindowChange: (start: number) => void;
   onDateWindowModeChange: (mode: RoomStatusDateWindowMode) => void;
   onInspectUnit: (unit: RoomStatusUnitDto) => void;
-  onInspectDay: (unit: RoomStatusUnitDto, day: RoomStatusDayDto | null) => void;
-  onInspectInterval: (unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto) => void;
+  onInspectDay: (unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement) => void;
+  onInspectInterval: (unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) => void;
   onClearFilters: () => void;
   onScrollAnchorChange?: (anchor: RoomStatusScrollAnchor) => void;
+}
+
+export function roomStatusIntervalServiceDateAtPointer(
+  dates: readonly string[],
+  startColumn: number,
+  endColumn: number,
+  bounds: Pick<DOMRect, "left" | "width">,
+  clientX: number
+): string {
+  const span = Math.max(1, endColumn - startColumn);
+  if (!Number.isFinite(clientX) || bounds.width <= 0) return dates[startColumn] ?? "";
+  const relative = Math.max(0, Math.min(bounds.width - Number.EPSILON, clientX - bounds.left));
+  const offset = Math.min(span - 1, Math.floor(relative / (bounds.width / span)));
+  return dates[startColumn + offset] ?? dates[startColumn] ?? "";
 }
 
 function intervalsForWindow(intervals: readonly RoomStatusIntervalDto[], dates: readonly string[]): PositionedInterval[] {
@@ -292,7 +306,7 @@ export function RoomStatusGrid({
     setDraggingUnitId(null);
     setPointerPreviewSelection(null);
     if (active.touch) setTouchSelectionMode(false);
-    if (commit && active.lastServiceDate === active.anchorDate) onInspectDay(active.unit, active.day);
+    if (commit && active.lastServiceDate === active.anchorDate) onInspectDay(active.unit, active.day, active.sourceCell);
     else if (commit) onSelectionChange(active.selection);
     return true;
   }, [onInspectDay, onSelectionChange]);
@@ -520,7 +534,7 @@ export function RoomStatusGrid({
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      onInspectDay(unit, day);
+      onInspectDay(unit, day, event.currentTarget);
     }
   };
 
@@ -535,7 +549,7 @@ export function RoomStatusGrid({
     if (touch && !touchSelectionMode) {
       event.preventDefault();
       onFocusedCellChange({ unitId: unit.id, serviceDate });
-      onInspectDay(unit, day);
+      onInspectDay(unit, day, event.currentTarget);
       event.currentTarget.focus();
       closeBedOccupancyTooltip();
       return;
@@ -854,7 +868,7 @@ export function RoomStatusGrid({
                             }
                           : undefined}
                         onPointerDown={(event) => handlePointerDown(event, unit, date, day)}
-                        onDoubleClick={() => onInspectDay(unit, day)}
+                        onDoubleClick={(event) => onInspectDay(unit, day, event.currentTarget)}
                         onKeyDown={(event) => handleCellKeyDown(event, unit, day)}
                       >
                         {bedOccupancy ? (
@@ -899,7 +913,18 @@ export function RoomStatusGrid({
                               onPointerDown={(event) => event.stopPropagation()}
                               onDoubleClick={(event) => event.stopPropagation()}
                               onKeyDown={(event) => event.stopPropagation()}
-                              onClick={() => onInspectInterval(unit, interval)}
+                              onClick={(event) => onInspectInterval(
+                                unit,
+                                interval,
+                                event.currentTarget,
+                                roomStatusIntervalServiceDateAtPointer(
+                                  dates,
+                                  startColumn,
+                                  endColumn,
+                                  event.currentTarget.getBoundingClientRect(),
+                                  event.clientX
+                                )
+                              )}
                             >
                               <span>{gridLabel}</span>
                               {maintenance ? null : <small>{roomStatusSourceLabels[interval.sourceKind]} · {roomStatusPresentation[interval.status].label}</small>}

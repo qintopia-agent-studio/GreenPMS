@@ -217,7 +217,7 @@ export function RoomStatusContext({
         <section className="room-status-context-section" aria-labelledby="room-status-unit-heading">
           <div className="room-status-context-section-heading">
             <Layers3 aria-hidden="true" size={17} />
-            <h3 id="room-status-unit-heading">库存单元</h3>
+            <h3 id="room-status-unit-heading">房间信息</h3>
           </div>
           <dl className="room-status-context-facts">
             <dt>楼栋 / 房源</dt><dd>{roomStatusUnitLabel(selectedUnit)}</dd>
@@ -233,7 +233,7 @@ export function RoomStatusContext({
         <section className="room-status-context-section" aria-labelledby="room-status-source-heading">
           <div className="room-status-context-section-heading">
             <ShieldAlert aria-hidden="true" size={17} />
-            <h3 id="room-status-source-heading">来源事实</h3>
+            <h3 id="room-status-source-heading">住宿或锁房记录</h3>
           </div>
           <dl className="room-status-context-facts">
             <dt>业务类型</dt><dd>{roomStatusSourceLabels[selectedInterval.sourceKind]}</dd>
@@ -246,13 +246,13 @@ export function RoomStatusContext({
         <section className="room-status-context-section" aria-labelledby="room-status-day-heading">
           <div className="room-status-context-section-heading">
             <Clock3 aria-hidden="true" size={17} />
-            <h3 id="room-status-day-heading">逐日事实</h3>
+            <h3 id="room-status-day-heading">当日房态</h3>
           </div>
           <dl className="room-status-context-facts">
             <dt>日期</dt><dd>{selectedDay.serviceDate}</dd>
-            <dt>服务端状态</dt><dd><RoomStatusMark status={selectedDay.status} compact /></dd>
-            <dt>服务端可售</dt><dd>{selectedDay.available ? "是" : "否"}</dd>
-            <dt>连续区间</dt><dd>{selectedDay.intervalIds.length ? selectedDay.intervalIds.map((id) => <code key={id}>{id} </code>) : "无"}</dd>
+            <dt>状态</dt><dd><RoomStatusMark status={selectedDay.status} compact /></dd>
+            <dt>可安排住宿</dt><dd>{selectedDay.available ? "是" : "否"}</dd>
+            <dt>关联记录</dt><dd>{selectedDay.intervalIds.length ? `${selectedDay.intervalIds.length} 条` : "无"}</dd>
           </dl>
         </section>
       ) : null}
@@ -261,7 +261,7 @@ export function RoomStatusContext({
         <section className="room-status-context-section" aria-labelledby="room-status-related-sources-heading">
           <div className="room-status-context-section-heading">
             <ShieldAlert aria-hidden="true" size={17} />
-            <h3 id="room-status-related-sources-heading">选区关联来源事实</h3>
+            <h3 id="room-status-related-sources-heading">选区内住宿或锁房</h3>
           </div>
           <ol className="room-status-related-source-list">
             {contextIntervals.map((interval) => (

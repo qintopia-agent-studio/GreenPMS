@@ -200,7 +200,37 @@ async function createOrder(options: {
 }
 
 async function markOrderInHouseFixture(orderId: string) {
-  await db.updateTable("orders").set({ status: "CHECKED_IN" }).where("id", "=", orderId).execute();
+  const order = await db.selectFrom("orders")
+    .select(["status", "version", "arrival_date"])
+    .where("id", "=", orderId)
+    .executeTakeFirstOrThrow();
+  const segment = await db.selectFrom("stay_segments as segment")
+    .innerJoin("stays as stay", "stay.id", "segment.stay_id")
+    .select("segment.inventory_unit_id")
+    .where("stay.order_id", "=", orderId)
+    .orderBy("segment.sequence", "desc")
+    .executeTakeFirstOrThrow();
+  const nextVersion = order.version + 1;
+  await db.insertInto("amendments").values({
+    id: `amend_room_status_fixture_check_in_${++sequence}`,
+    order_id: orderId,
+    sequence: nextVersion,
+    amendment_type: "CHECK_IN",
+    reason_code: "ROOM_STATUS_FIXTURE_SETUP",
+    reason_note: "准备房态在住与迟录退房测试状态",
+    prior_version: order.version,
+    new_version: nextVersion,
+    payload: {
+      orderId,
+      fromStatus: order.status,
+      toStatus: "CHECKED_IN",
+      inventoryUnitId: segment.inventory_unit_id,
+      businessDate: order.arrival_date,
+      entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: 0 }
+    },
+    command_id: null
+  }).execute();
+  await db.updateTable("orders").set({ status: "CHECKED_IN", version: nextVersion }).where("id", "=", orderId).execute();
   await db.updateTable("stays").set({ status: "IN_HOUSE" }).where("order_id", "=", orderId).execute();
 }
 

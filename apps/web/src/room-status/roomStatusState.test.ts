@@ -18,6 +18,7 @@ import {
   roomStatusFactFingerprint,
   roomStatusCellBelongsToStay,
   roomStatusOrderIdentityForDate,
+  roomStatusOrderOptionsForDate,
   roomStatusOrderIdentityForReturnTarget,
   roomStatusViewReducer,
   selectionFromCells,
@@ -168,6 +169,151 @@ describe("RoomStatus grid intervals", () => {
     });
     expect(intervalsRenderedOnRoomStatusGrid(room)).toEqual([]);
     expect(intervalsRenderedOnRoomStatusGrid(bed)).toEqual([]);
+  });
+});
+
+describe("RoomStatus quick order options", () => {
+  it("lists every exact bed order from a parent room without guessing a single order", () => {
+    const bedAInterval = lodgingInterval({
+      label: "订单 order_bed",
+      primaryOccupantLabel: "云朵",
+      occupants: [{ occupantId: "occupant_bed_a", nickname: "云朵" }],
+      actualInventoryUnitId: "unit_bed_101_a",
+      startDate: "2026-07-20",
+      endDate: "2026-07-21",
+      sourceStartDate: "2026-07-18",
+      sourceEndDate: "2026-07-24"
+    });
+    const bedBInterval = lodgingInterval({
+      id: "interval_bed_order_b",
+      label: "订单 order_bed_b",
+      primaryOccupantLabel: "青岚",
+      occupants: [{ occupantId: "occupant_bed_b", nickname: "青岚" }],
+      actualInventoryUnitId: "unit_bed_101_b",
+      references: [
+        { ...orderReference, id: "order_bed_b", href: "/orders/order_bed_b" },
+        { ...stayReference, id: "stay_bed_b" }
+      ]
+    });
+    const parent = unit({
+      children: [
+        unit({ id: "unit_bed_101_a", roomId: "unit_room_101", parentRoomId: "unit_room_101", kind: "BED", salesMode: "BED_SPLIT", intervals: [bedAInterval], children: [] }),
+        unit({ id: "unit_bed_101_b", roomId: "unit_room_101", parentRoomId: "unit_room_101", kind: "BED", salesMode: "BED_SPLIT", intervals: [bedBInterval], children: [] })
+      ]
+    });
+
+    const result = roomStatusOrderOptionsForDate(parent, "2026-07-20");
+    expect(result.kind).toBe("READY");
+    if (result.kind === "READY") {
+      expect(result.orders.map((order) => [order.label, order.identity.orderId])).toEqual([
+        ["云朵", "order_bed"],
+        ["青岚", "order_bed_b"]
+      ]);
+      expect(result.orders[0]?.identity).toMatchObject({
+        arrivalDate: "2026-07-18",
+        departureDate: "2026-07-24"
+      });
+    }
+  });
+
+  it("never falls back to a machine interval label when occupant labels are unavailable", () => {
+    const interval = lodgingInterval({
+      label: "订单 order_internal_123",
+      primaryOccupantLabel: null,
+      occupants: []
+    });
+    const bed = unit({
+      id: "unit_bed_101_a",
+      roomId: "unit_room_101",
+      parentRoomId: "unit_room_101",
+      kind: "BED",
+      salesMode: "BED_SPLIT",
+      intervals: [interval],
+      children: []
+    });
+    const result = roomStatusOrderOptionsForDate(bed, "2026-07-20");
+    expect(result).toMatchObject({ kind: "READY", orders: [{ label: "住宿订单" }] });
+  });
+
+  it("fails closed when any visible lodging lacks a stable order and Stay pair", () => {
+    const broken = lodgingInterval({ references: [orderReference] });
+    const bed = unit({
+      id: "unit_bed_101_a",
+      roomId: "unit_room_101",
+      parentRoomId: "unit_room_101",
+      kind: "BED",
+      salesMode: "BED_SPLIT",
+      intervals: [broken],
+      children: []
+    });
+    expect(roomStatusOrderOptionsForDate(bed, "2026-07-20")).toEqual({ kind: "INVALID_REFERENCE" });
+  });
+
+  it("keeps validating a child-bed lodging inherited by a filtered parent row", () => {
+    const inherited = lodgingInterval({
+      actualInventoryUnitId: "unit_bed_filtered",
+      references: [orderReference]
+    });
+    const parent = unit({
+      kind: "ROOM",
+      salesMode: "BED_SPLIT",
+      intervals: [inherited],
+      children: []
+    });
+
+    expect(roomStatusOrderOptionsForDate(parent, "2026-07-20"))
+      .toEqual({ kind: "INVALID_REFERENCE" });
+  });
+
+  it("fails closed unless visible Order and Stay references form a one-to-one mapping", () => {
+    const parentFor = (references: RoomStatusIntervalDto["references"]) => unit({
+      children: [
+        unit({
+          id: "unit_bed_101_a",
+          roomId: "unit_room_101",
+          parentRoomId: "unit_room_101",
+          kind: "BED",
+          salesMode: "BED_SPLIT",
+          intervals: [lodgingInterval({ actualInventoryUnitId: "unit_bed_101_a" })],
+          children: []
+        }),
+        unit({
+          id: "unit_bed_101_b",
+          roomId: "unit_room_101",
+          parentRoomId: "unit_room_101",
+          kind: "BED",
+          salesMode: "BED_SPLIT",
+          intervals: [lodgingInterval({
+            id: "interval_bed_order_b",
+            actualInventoryUnitId: "unit_bed_101_b",
+            references
+          })],
+          children: []
+        })
+      ]
+    });
+
+    const oneOrderToTwoStays = parentFor([
+      orderReference,
+      { ...stayReference, id: "stay_bed_b", label: "Stay stay_bed_b" }
+    ]);
+    expect(roomStatusOrderOptionsForDate(oneOrderToTwoStays, "2026-07-20"))
+      .toEqual({ kind: "INVALID_REFERENCE" });
+
+    const twoOrdersToOneStay = parentFor([
+      { ...orderReference, id: "order_bed_b", label: "Order order_bed_b", href: "/orders/order_bed_b" },
+      stayReference
+    ]);
+    expect(roomStatusOrderOptionsForDate(twoOrdersToOneStay, "2026-07-20"))
+      .toEqual({ kind: "INVALID_REFERENCE" });
+
+    const duplicateIntervalId = parentFor([
+      orderReference,
+      { ...stayReference, id: "stay_bed_b", label: "Stay stay_bed_b" }
+    ]);
+    duplicateIntervalId.children[1]!.intervals[0]!.id = duplicateIntervalId.children[0]!.intervals[0]!.id;
+    expect(roomStatusOrderOptionsForDate(duplicateIntervalId, "2026-07-20"))
+      .toEqual({ kind: "INVALID_REFERENCE" });
   });
 });
 

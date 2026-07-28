@@ -1,0 +1,458 @@
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
+import type { RoomStatusBoardDto } from "@qintopia/contracts";
+import { prepareU2Acceptance, type U2AcceptanceFixture } from "./setup-u2-acceptance.ts";
+
+const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
+  ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
+const propertyId = "prop_qintopia_demo";
+const fixtureDayOffset = 7;
+let fixture: U2AcceptanceFixture;
+
+function isDesktop(testInfo: TestInfo): boolean {
+  return testInfo.project.name === "desktop" || process.env.ROOM_STATUS_E2E_PROJECT === "desktop";
+}
+
+function isMobile(testInfo: TestInfo): boolean {
+  return testInfo.project.name === "mobile" || process.env.ROOM_STATUS_E2E_PROJECT === "mobile";
+}
+
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function roomStatusResponse(page: Page, expectedRange?: { arrivalDate: string; departureDate: string }) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === `/api/v1/properties/${propertyId}/room-status`
+      && (!expectedRange || (url.searchParams.get("arrivalDate") === expectedRange.arrivalDate
+        && url.searchParams.get("departureDate") === expectedRange.departureDate))
+      && response.status() === 200;
+  });
+}
+
+function orderResponse(page: Page, orderId: string) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname === `/api/v1/orders/${orderId}`
+      && response.status() === 200;
+  }, { timeout: 15_000 });
+}
+
+function roomCell(page: Page, unitId: string, serviceDate: string): Locator {
+  return page.locator(`[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${serviceDate}"]`);
+}
+
+async function login(page: Page): Promise<RoomStatusBoardDto> {
+  await page.goto(process.env.ROOM_STATUS_E2E_BASE_URL ?? "/");
+  await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId("login-username").fill(fixture.operator.username);
+  await page.getByTestId("login-password").fill(fixture.operator.password);
+  const responsePromise = roomStatusResponse(page);
+  await page.getByTestId("login-submit").click();
+  const response = await responsePromise;
+  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  return response.json() as Promise<RoomStatusBoardDto>;
+}
+
+async function showRange(page: Page, nights = 20, expectDesktopBoard = true): Promise<void> {
+  const departureDate = addDays(fixture.dates.arrivalDate, nights);
+  await page.getByTestId("departure-date").fill(departureDate);
+  const arrivalResponse = roomStatusResponse(page, { arrivalDate: fixture.dates.arrivalDate, departureDate });
+  await page.getByTestId("arrival-date").fill(fixture.dates.arrivalDate);
+  await arrivalResponse;
+  if (expectDesktopBoard) {
+    await expect(page.getByTestId("room-status-board-range"))
+      .toHaveAttribute("data-range-arrival", fixture.dates.arrivalDate);
+  }
+}
+
+async function refreshCurrentRange(page: Page): Promise<void> {
+  const range = {
+    arrivalDate: await page.getByTestId("arrival-date").inputValue(),
+    departureDate: await page.getByTestId("departure-date").inputValue()
+  };
+  const refreshed = roomStatusResponse(page, range);
+  await page.getByRole("button", { name: "刷新房态", exact: true })
+    .evaluate((element: HTMLButtonElement) => element.click());
+  await refreshed;
+  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
+  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+  await expect(page.locator(".room-status-toolbar")).toContainText("投影完整");
+}
+
+async function openWholeRoomPopover(page: Page): Promise<{ trigger: Locator; popover: Locator }> {
+  const trigger = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
+  await expect(trigger).toBeVisible();
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  return { trigger, popover };
+}
+
+test.beforeAll(async ({}, workerInfo) => {
+  fixture = await prepareU2Acceptance(e2eDatabaseUrl, {
+    reset: false,
+    dayOffset: fixtureDayOffset
+      + (workerInfo.project.name === "mobile" ? 10 : 0)
+      + workerInfo.workerIndex * 20
+  });
+});
+
+test("U2 desktop empty cell popover stays in view and Escape restores the exact cell and both scroll axes", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 quick-popover coverage");
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await login(page);
+  await showRange(page);
+  await page.getByTestId("date-window-mode-21").click();
+  await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
+
+  const targetDate = addDays(fixture.dates.arrivalDate, 10);
+  const target = roomCell(page, fixture.stage6.emptyCreationRoomId, targetDate);
+  const scrollport = page.locator(".room-status-grid-scroll");
+  await target.scrollIntoViewIfNeeded();
+  await scrollport.evaluate((element) => {
+    element.scrollLeft = Math.min(element.scrollWidth - element.clientWidth, 180);
+    element.scrollTop = Math.min(element.scrollHeight - element.clientHeight, 90);
+  });
+  await target.scrollIntoViewIfNeeded();
+  await target.focus();
+  const before = await page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  });
+
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText(fixture.stage6.emptyCreationRoom.split(" ").slice(1).join(" "));
+  await expect(popover.getByRole("button", { name: "创建住宿", exact: true })).toBeVisible();
+  await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeVisible();
+  await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
+  await expect(popover).not.toContainText(/清洁|房务/);
+
+  const geometry = await popover.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: window.innerWidth, height: window.innerHeight };
+  });
+  expect(geometry.left).toBeGreaterThanOrEqual(7);
+  expect(geometry.top).toBeGreaterThanOrEqual(7);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.width - 7);
+  expect(geometry.bottom).toBeLessThanOrEqual(geometry.height - 7);
+
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
+  await expect(target).toBeFocused();
+  await expect.poll(() => page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  })).toEqual(before);
+});
+
+test("U2 desktop order popover opens an overlay drawer without shrinking the board and restores focus", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 drawer coverage");
+  test.setTimeout(120_000);
+  for (const viewport of [
+    { width: 1280, height: 720 },
+    { width: 1366, height: 768 },
+    { width: 1440, height: 800 }
+  ]) {
+    await page.setViewportSize(viewport);
+    if (page.url() === "about:blank") {
+      await login(page);
+      await showRange(page);
+    }
+    const boardWidth = await page.locator(".room-status-grid-section").evaluate((element) => element.getBoundingClientRect().width);
+    const { trigger, popover } = await openWholeRoomPopover(page);
+    await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(1);
+    await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
+    const selectedOrder = orderResponse(page, fixture.wholeRoom.orderId);
+    await popover.locator(".room-status-quick-orders button").click();
+    await selectedOrder;
+
+    const drawer = page.locator("dialog.modal-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(drawer.locator(".modal-header button")).toBeFocused();
+    const context = drawer.locator(".room-status-order-context");
+    await expect(context.getByRole("heading", { name: "小川的住宿订单", exact: true })).toBeVisible();
+    await expect(context.getByRole("heading", { name: "原始预订安排", exact: true })).toBeVisible();
+    await expect(context.getByRole("heading", { name: "当前住宿安排", exact: true })).toBeVisible();
+    await expect(context.getByRole("heading", { name: "入住与退房结果", exact: true })).toBeVisible();
+    await expect(context.getByRole("heading", { name: "住宿安排变更历史", exact: true })).toBeVisible();
+    await expect(context).not.toContainText(/order_|INITIAL|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision|渠道合同价/);
+    expect(await page.locator(".room-status-grid-section").evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(boardWidth, 1);
+
+    const drawerGeometry = await drawer.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, right: box.right, bottom: box.bottom, width: box.width, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight };
+    });
+    expect(drawerGeometry.top).toBeCloseTo(0, 0);
+    expect(drawerGeometry.right).toBeCloseTo(drawerGeometry.viewportWidth, 0);
+    expect(drawerGeometry.bottom).toBeCloseTo(drawerGeometry.viewportHeight, 0);
+    expect(drawerGeometry.width).toBeGreaterThanOrEqual(420);
+    expect(drawerGeometry.width).toBeLessThanOrEqual(480);
+
+    const correctionAction = context.getByRole("button", { name: "更正资料", exact: true }).first();
+    await expect(correctionAction).toBeEnabled();
+    const polledOrder = orderResponse(page, fixture.wholeRoom.orderId);
+    await polledOrder;
+    await expect(correctionAction).toBeEnabled();
+
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+    await expect(trigger).toBeFocused();
+  }
+});
+
+test("U2 Escape closes a quick popover before the underlying non-modal order drawer", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 layered Escape coverage");
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await login(page);
+  await showRange(page);
+  const selectedOrder = orderResponse(page, fixture.wholeRoom.orderId);
+  const { popover } = await openWholeRoomPopover(page);
+  await popover.locator(".room-status-quick-orders button").click();
+  await selectedOrder;
+  const drawer = page.locator("dialog.modal-drawer");
+  await expect(drawer).toBeVisible();
+
+  const other = roomCell(page, fixture.stage6.emptyCreationRoomId, fixture.dates.arrivalDate);
+  await other.focus();
+  await page.keyboard.press("Enter");
+  const layeredPopover = page.getByTestId("room-status-quick-popover");
+  await expect(layeredPopover).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(layeredPopover).toBeHidden();
+  await expect(drawer).toBeVisible();
+  await expect(other).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await expect(other).toBeFocused();
+});
+
+test("U2 desktop parent room lists each exact order and an outside click keeps the new focus", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 parent-order coverage");
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await login(page);
+  await showRange(page);
+
+  const parent = roomCell(page, fixture.splitBed.roomId, fixture.dates.arrivalDate);
+  await parent.focus();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(2);
+  await expect(popover).toContainText("山峰");
+  await expect(popover).toContainText("小满");
+  await expect(popover).not.toContainText(/order_|订单 order/);
+
+  await page.keyboard.press("Escape");
+  await expect(parent).toBeFocused();
+  await page.keyboard.press("Enter");
+  const dateMode = page.getByTestId("date-window-mode-7");
+  await dateMode.click();
+  await expect(popover).toBeHidden();
+  await expect(dateMode).toBeFocused();
+});
+
+test("U2 desktop write drawer is modal and restores its cell, selection, focus, and scroll snapshot", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 write-drawer coverage");
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await login(page);
+  await showRange(page);
+  await page.getByTestId("date-window-mode-21").click();
+
+  const targetDate = addDays(fixture.dates.arrivalDate, 10);
+  const target = roomCell(page, fixture.stage6.emptyCreationRoomId, targetDate);
+  const other = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
+  const scrollport = page.locator(".room-status-grid-scroll");
+  await target.scrollIntoViewIfNeeded();
+  await scrollport.evaluate((element) => {
+    element.scrollLeft = Math.min(element.scrollWidth - element.clientWidth, 220);
+    element.scrollTop = Math.min(element.scrollHeight - element.clientHeight, 75);
+  });
+  await target.scrollIntoViewIfNeeded();
+  await refreshCurrentRange(page);
+  await target.focus();
+  const before = await page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  });
+
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "创建住宿", exact: true }).click();
+  const drawer = page.locator("dialog.modal-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer).toHaveClass(/room-status-write-drawer/);
+  expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
+  await expect(drawer.locator(".modal-footer")).toBeVisible();
+  await expect(page.getByTestId("create-order")).toBeVisible();
+  await expect(target).toHaveClass(/is-selected/);
+
+  let outsideInteractionBlocked = false;
+  try {
+    await other.click({ trial: true, timeout: 1_000 });
+  } catch {
+    outsideInteractionBlocked = true;
+  }
+  expect(outsideInteractionBlocked).toBe(true);
+
+  await drawer.getByRole("button", { name: "关闭办理区域", exact: true }).click();
+  await expect(drawer).toBeVisible();
+  await expect(drawer).toHaveClass(/room-status-view-drawer/);
+  expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(false);
+  await other.click({ trial: true });
+
+  await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(drawer).toBeHidden();
+  await expect(target).toBeFocused();
+  await expect(target).not.toHaveClass(/is-selected/);
+  await expect.poll(() => page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  })).toEqual(before);
+
+  await target.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "维修锁房", exact: true }).click();
+  const maintenanceDrawer = page.locator("dialog.room-status-write-drawer");
+  await expect(maintenanceDrawer).toBeVisible();
+  await expect(maintenanceDrawer.getByRole("heading", { name: /维修锁房/ })).toBeVisible();
+  expect(await maintenanceDrawer.evaluate((element) => element.matches(":modal"))).toBe(true);
+  await maintenanceDrawer.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(maintenanceDrawer).toBeHidden();
+  await expect(target).toBeFocused();
+  await expect(target).not.toHaveClass(/is-selected/);
+  await expect.poll(() => page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  })).toEqual(before);
+});
+
+test("U2 full order page uses four Chinese business layers and never exposes machine identifiers", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 order-detail coverage");
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await login(page);
+  await showRange(page);
+  const { popover } = await openWholeRoomPopover(page);
+  const selectedOrder = orderResponse(page, fixture.wholeRoom.orderId);
+  await popover.locator(".room-status-quick-orders button").click();
+  await selectedOrder;
+  await page.getByRole("button", { name: "查看完整订单", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/orders/${fixture.wholeRoom.orderId}$`));
+
+  const main = page.locator("main");
+  for (const heading of ["原始预订安排", "当前住宿安排", "入住与退房结果", "住宿安排变更历史"]) {
+    await expect(main.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+  }
+  await expect(main.getByText("订单金额", { exact: true }).first()).toBeVisible();
+  await expect(main.getByText("已登记净收款", { exact: true }).first()).toBeVisible();
+  await expect(main.getByText(fixture.wholeRoom.orderId, { exact: true })).toHaveCount(0);
+  await expect(main).not.toContainText(/INITIAL|Segment ID|Amendments|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision|currentContractAmount|netRecordedCollection|collectionDifference|渠道合同价/);
+});
+
+test("U2 desktop sidebar keeps 176px and 60px states across routes and reload", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 sidebar coverage");
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await login(page);
+  const sidebar = page.locator(".sidebar");
+  expect(await sidebar.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(176, 1);
+
+  await page.getByTestId("sidebar-toggle").click();
+  await expect.poll(() => sidebar.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(60, 1);
+  await page.getByRole("link", { name: "订单", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "订单", exact: true })).toBeVisible();
+  await expect.poll(() => sidebar.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(60, 1);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "订单", exact: true })).toBeVisible();
+  await expect.poll(() => sidebar.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(60, 1);
+  await page.getByTestId("sidebar-toggle").click();
+  await expect.poll(() => sidebar.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(176, 1);
+});
+
+test("U2 mobile order context is full-screen, machine-free, and returns focus to the occupancy", async ({ page }, testInfo) => {
+  test.skip(!isMobile(testInfo), "mobile-only U2 order-context coverage");
+  await page.setViewportSize({ width: 375, height: 812 });
+  await login(page);
+  await showRange(page, 7, false);
+  await expect(page.getByTestId("sidebar-toggle")).toBeHidden();
+  for (const viewport of [{ width: 375, height: 812 }, { width: 320, height: 700 }]) {
+    await page.setViewportSize(viewport);
+    const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
+    const trigger = occupancy.getByRole("button", { name: "打开订单上下文", exact: true });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).not.toContainText(/order_|INITIAL|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision|渠道合同价/);
+    const geometry = await dialog.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: window.innerWidth, height: window.innerHeight, scrollWidth: document.documentElement.scrollWidth };
+    });
+    expect(geometry.left).toBeCloseTo(0, 0);
+    expect(geometry.top).toBeCloseTo(0, 0);
+    expect(geometry.right).toBeCloseTo(geometry.width, 0);
+    expect(geometry.bottom).toBeCloseTo(geometry.height, 0);
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width + 1);
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  }
+});
+
+test("U2 order context remains reachable at 200 percent desktop zoom", async ({ browser }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "single dedicated 2x desktop context for U2 zoom coverage");
+  const zoomContext = await browser.newContext({
+    baseURL: process.env.ROOM_STATUS_E2E_BASE_URL ?? `http://127.0.0.1:${process.env.E2E_WEB_PORT ?? "4173"}`,
+    viewport: { width: 720, height: 450 },
+    screen: { width: 1440, height: 900 },
+    deviceScaleFactor: 2,
+    isMobile: false,
+    hasTouch: false
+  });
+  const page = await zoomContext.newPage();
+  try {
+    await login(page);
+    await showRange(page, 7, false);
+    expect(await page.evaluate(() => ({
+      cssWidth: window.innerWidth,
+      cssHeight: window.innerHeight,
+      pixelRatio: window.devicePixelRatio
+    }))).toEqual({ cssWidth: 720, cssHeight: 450, pixelRatio: 2 });
+
+    const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
+    const trigger = occupancy.getByRole("button", { name: "打开订单上下文", exact: true });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
+    await expect(dialog).toBeVisible();
+    const geometry = await dialog.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return {
+        left: box.left,
+        top: box.top,
+        right: box.right,
+        bottom: box.bottom,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        pageScrollWidth: document.documentElement.scrollWidth
+      };
+    });
+    expect(geometry.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.top).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    expect(geometry.bottom).toBeLessThanOrEqual(geometry.viewportHeight + 1);
+    expect(geometry.pageScrollWidth).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    await expect(dialog.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  } finally {
+    await zoomContext.close();
+  }
+});

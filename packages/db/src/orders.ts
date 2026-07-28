@@ -5,6 +5,11 @@ import {
   orderActionCodes,
   type AccessLevel,
   type CoverageItemDto,
+  type OrderArrangementDto,
+  type OrderArrangementFundsSummaryDto,
+  type OrderArrangementHistoryItemDto,
+  type OrderArrangementIntervalDto,
+  type OrderEffectiveArrangementDto,
   type OrderFulfillmentProjectionDto,
   type OrderFulfillmentRecordDto,
   type OrderAllowedActionDto,
@@ -304,7 +309,7 @@ function fulfillmentRecord(
 export function projectOrderFulfillment(
   amendments: readonly FulfillmentAmendmentRow[],
   dates: { arrivalDate: string; departureDate: string }
-): OrderFulfillmentProjectionDto {
+): Omit<OrderFulfillmentProjectionDto, "state"> {
   parseLocalDate(dates.arrivalDate);
   parseLocalDate(dates.departureDate);
   const checkIns = amendments.filter((amendment) => amendment.amendment_type === "CHECK_IN");
@@ -315,6 +320,620 @@ export function projectOrderFulfillment(
   return {
     checkIn: fulfillmentRecord(checkIns[0], "CHECK_IN", dates.arrivalDate),
     checkOut: fulfillmentRecord(checkOuts[0], "CHECK_OUT", dates.departureDate)
+  };
+}
+
+interface LifecycleOrderRow {
+  id: string;
+  status: string;
+  stay_type: string;
+  arrival_date: string;
+  departure_date: string;
+  current_revision_id: string | null;
+  version: number;
+}
+
+interface LifecycleStayRow {
+  id: string;
+  status: string;
+}
+
+interface LifecycleSegmentRow {
+  id: string;
+  stay_id: string;
+  sequence: number;
+  inventory_unit_id: string;
+  arrival_date: string;
+  departure_date: string;
+  segment_type: string;
+  supersedes_segment_id: string | null;
+  amendment_id: string;
+}
+
+interface LifecycleAmendmentRow extends FulfillmentAmendmentRow {
+  id: string;
+  order_id: string;
+  prior_version: number;
+  new_version: number;
+}
+
+interface LifecycleRevisionRow {
+  id: string;
+  order_id: string;
+  revision_no: number;
+  amendment_id: string;
+  arrival_date: string;
+  departure_date: string;
+  policy_base_amount_minor: number;
+  current_contract_amount_minor: number;
+  currency: string;
+}
+
+interface LifecycleCollectionFactRow {
+  order_id: string;
+  net_effect_minor: number;
+  currency: string;
+  created_at: Date | string;
+}
+
+const orderLifecycleAmendmentTypes = new Set<string>([
+  "CREATE_ORDER",
+  "CORRECT_ORDER_OCCUPANT",
+  "EXTEND_STAY",
+  "SHORTEN_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "REFRESH_MEMBER_COVERAGE",
+  "CANCEL_ORDER",
+  "MARK_NO_SHOW",
+  "CHECK_IN",
+  "CHECK_OUT"
+] as const);
+
+const pricingRevisionAmendmentTypes = new Set<string>([
+  "CREATE_ORDER",
+  "EXTEND_STAY",
+  "SHORTEN_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "REFRESH_MEMBER_COVERAGE",
+  "CANCEL_ORDER",
+  "MARK_NO_SHOW"
+] as const);
+
+const requiredPricingRevisionAmendmentTypes = new Set<string>([
+  "CREATE_ORDER",
+  "EXTEND_STAY",
+  "SHORTEN_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "REFRESH_MEMBER_COVERAGE"
+] as const);
+
+const freeTerminalPricingRevisionAmendmentTypes = new Set<string>([
+  "CANCEL_ORDER",
+  "MARK_NO_SHOW"
+] as const);
+
+const staySegmentAmendmentTypes = new Set<string>([
+  "CREATE_ORDER",
+  "EXTEND_STAY",
+  "SHORTEN_STAY",
+  "MOVE_UNIT"
+] as const);
+
+type LifecycleOrderStatus = "RESERVED" | "CHECKED_IN" | "CHECKED_OUT" | "CANCELLED" | "NO_SHOW";
+
+export interface OrderLifecycleProjection {
+  originalArrangement: OrderArrangementDto;
+  effectiveArrangement: OrderEffectiveArrangementDto;
+  fulfillment: OrderFulfillmentProjectionDto;
+  arrangementHistory: OrderArrangementHistoryItemDto[];
+}
+
+function lifecycleFailure(message: string, details?: Record<string, unknown>): never {
+  throw new DomainError("INTERNAL_ERROR", message, 500, false, details);
+}
+
+function lifecycleDate(value: unknown, field: string): string {
+  if (typeof value !== "string") lifecycleFailure(`订单住宿生命周期的${field}损坏`);
+  try {
+    parseLocalDate(value);
+  } catch {
+    lifecycleFailure(`订单住宿生命周期的${field}损坏`);
+  }
+  return value;
+}
+
+function lifecycleDateTime(value: Date | string, field: string): string {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) lifecycleFailure(`订单住宿生命周期的${field}损坏`);
+  return parsed.toISOString();
+}
+
+function arrangement(intervals: readonly OrderArrangementIntervalDto[]): OrderArrangementDto {
+  if (intervals.length === 0) lifecycleFailure("订单住宿安排不能为空");
+  const normalized: OrderArrangementIntervalDto[] = [];
+  for (const interval of intervals) {
+    const arrivalDate = lifecycleDate(interval.arrivalDate, "入住日期");
+    const departureDate = lifecycleDate(interval.departureDate, "退房日期");
+    if (departureDate <= arrivalDate) lifecycleFailure("订单住宿安排日期区间无效");
+    if (!interval.inventoryUnitId) lifecycleFailure("订单住宿安排的房源缺失");
+    const previous = normalized.at(-1);
+    if (previous) {
+      if (arrivalDate !== previous.departureDate) {
+        lifecycleFailure(arrivalDate < previous.departureDate ? "订单住宿安排存在日期重叠" : "订单住宿安排存在日期空洞");
+      }
+      if (previous.inventoryUnitId === interval.inventoryUnitId) {
+        previous.departureDate = departureDate;
+        continue;
+      }
+    }
+    normalized.push({ inventoryUnitId: interval.inventoryUnitId, arrivalDate, departureDate });
+  }
+  return {
+    arrivalDate: normalized[0]!.arrivalDate,
+    departureDate: normalized.at(-1)!.departureDate,
+    intervals: normalized
+  };
+}
+
+function overlayArrangement(
+  before: OrderArrangementDto,
+  replacement: OrderArrangementIntervalDto,
+  changeType: "EXTEND_STAY" | "SHORTEN_STAY" | "MOVE"
+): OrderArrangementDto {
+  const replacementArrival = lifecycleDate(replacement.arrivalDate, "变更入住日期");
+  const replacementDeparture = lifecycleDate(replacement.departureDate, "变更退房日期");
+  if (replacementDeparture <= replacementArrival) lifecycleFailure("订单住宿变更日期区间无效");
+  if (replacementArrival < before.arrivalDate || replacementArrival >= before.departureDate) {
+    lifecycleFailure("订单住宿变更未从当前安排内开始");
+  }
+  if (changeType === "MOVE" && replacementDeparture !== before.departureDate) {
+    lifecycleFailure("换房后的退房日期与变更前安排不一致");
+  }
+  if (changeType === "EXTEND_STAY" && replacementDeparture <= before.departureDate) {
+    lifecycleFailure("续住没有延长当前住宿安排");
+  }
+  if (changeType === "SHORTEN_STAY" && replacementDeparture >= before.departureDate) {
+    lifecycleFailure("缩短住宿没有缩短当前住宿安排");
+  }
+  const containing = before.intervals.find((interval) => (
+    interval.arrivalDate <= replacementArrival && replacementArrival < interval.departureDate
+  ));
+  if (!containing) lifecycleFailure("订单住宿变更起点不属于变更前安排");
+  const prefix = before.intervals.flatMap((interval): OrderArrangementIntervalDto[] => {
+    if (interval.departureDate <= replacementArrival) return [{ ...interval }];
+    if (interval.arrivalDate < replacementArrival) {
+      return [{ ...interval, departureDate: replacementArrival }];
+    }
+    return [];
+  });
+  return arrangement([...prefix, {
+    inventoryUnitId: replacement.inventoryUnitId,
+    arrivalDate: replacementArrival,
+    departureDate: replacementDeparture
+  }]);
+}
+
+function arrangementTimeline(value: OrderArrangementDto): StayTimelineItem[] {
+  return value.intervals.flatMap((interval) => enumerateServiceDates(interval.arrivalDate, interval.departureDate)
+    .map((serviceDate) => ({ serviceDate, inventoryUnitId: interval.inventoryUnitId })));
+}
+
+function payloadTimeline(amendment: LifecycleAmendmentRow): StayTimelineItem[] {
+  const payload = recordValue(amendment.payload);
+  if (!payload) lifecycleFailure("订单住宿变更的 typed payload 损坏", { amendmentId: amendment.id });
+  let value: unknown;
+  if (amendment.amendment_type === "MOVE_UNIT") value = payload.stayTimeline;
+  else {
+    const after = recordValue(payload.after);
+    value = after?.stayTimeline;
+  }
+  if (!Array.isArray(value)) lifecycleFailure("订单住宿变更缺少 typed 时间线", { amendmentId: amendment.id });
+  return value.map((item, index) => {
+    const row = recordValue(item);
+    if (!row || typeof row.inventoryUnitId !== "string") {
+      lifecycleFailure("订单住宿变更的 typed 时间线损坏", { amendmentId: amendment.id, timelineIndex: index });
+    }
+    return {
+      serviceDate: lifecycleDate(row.serviceDate, "变更服务日期"),
+      inventoryUnitId: row.inventoryUnitId
+    };
+  });
+}
+
+function timelineMatches(left: readonly StayTimelineItem[], right: readonly StayTimelineItem[]): boolean {
+  return left.length === right.length && left.every((item, index) => (
+    item.serviceDate === right[index]?.serviceDate && item.inventoryUnitId === right[index]?.inventoryUnitId
+  ));
+}
+
+function lifecycleActor(amendment: LifecycleAmendmentRow): { subjectId: string; displayName: string } | null {
+  const hasId = Boolean(amendment.actor_subject_id);
+  const hasName = Boolean(amendment.actor_display_name);
+  if (hasId !== hasName) lifecycleFailure("订单住宿变更的操作人信息损坏", { amendmentId: amendment.id });
+  return amendment.actor_subject_id && amendment.actor_display_name
+    ? { subjectId: amendment.actor_subject_id, displayName: amendment.actor_display_name }
+    : null;
+}
+
+function arrangementChangeType(amendmentType: string): OrderArrangementHistoryItemDto["type"] {
+  if (amendmentType === "CREATE_ORDER") return "INITIAL_BOOKING";
+  if (amendmentType === "EXTEND_STAY") return "EXTENSION";
+  if (amendmentType === "SHORTEN_STAY") return "SHORTENING";
+  if (amendmentType === "MOVE_UNIT") return "MOVE";
+  return lifecycleFailure("订单住宿安排包含无法识别的变更类型", { amendmentType });
+}
+
+function fulfillmentState(orderStatus: string): OrderFulfillmentProjectionDto["state"] {
+  if (orderStatus === "RESERVED") return "NOT_CHECKED_IN";
+  if (orderStatus === "CHECKED_IN") return "IN_HOUSE";
+  if (orderStatus === "CHECKED_OUT") return "CHECKED_OUT";
+  if (orderStatus === "CANCELLED") return "CANCELLED";
+  if (orderStatus === "NO_SHOW") return "NO_SHOW";
+  return lifecycleFailure("订单住宿生命周期包含无法识别的订单状态", { orderStatus });
+}
+
+function effectivePresentation(orderStatus: string): OrderEffectiveArrangementDto["presentation"] {
+  if (orderStatus === "RESERVED" || orderStatus === "CHECKED_IN") return "CURRENT";
+  if (orderStatus === "CHECKED_OUT") return "LAST";
+  if (orderStatus === "CANCELLED") return "BEFORE_CANCELLATION";
+  if (orderStatus === "NO_SHOW") return "NO_SHOW_ORDER";
+  return lifecycleFailure("订单住宿生命周期包含无法识别的订单状态", { orderStatus });
+}
+
+function validateLifecycleStatus(
+  orderStatus: string,
+  stayStatus: string,
+  amendments: readonly LifecycleAmendmentRow[],
+  fulfillment: Omit<OrderFulfillmentProjectionDto, "state">
+): OrderFulfillmentProjectionDto["state"] {
+  const expectedStayStatus: Record<LifecycleOrderStatus, string> = {
+    RESERVED: "PLANNED",
+    CHECKED_IN: "IN_HOUSE",
+    CHECKED_OUT: "COMPLETED",
+    CANCELLED: "CANCELLED",
+    NO_SHOW: "NO_SHOW"
+  };
+  if (!Object.hasOwn(expectedStayStatus, orderStatus)) {
+    lifecycleFailure("订单住宿生命周期包含无法识别的订单状态", { orderStatus });
+  }
+  const finalStatus = orderStatus as LifecycleOrderStatus;
+  if (expectedStayStatus[finalStatus] !== stayStatus) {
+    lifecycleFailure("订单状态与住宿状态不一致", { orderStatus, stayStatus });
+  }
+
+  let projectedStatus: LifecycleOrderStatus | null = null;
+  for (const [index, amendment] of amendments.entries()) {
+    const amendmentType = amendment.amendment_type;
+    if (!orderLifecycleAmendmentTypes.has(amendmentType)) {
+      lifecycleFailure("订单住宿生命周期包含非订单变更类型", {
+        amendmentId: amendment.id,
+        amendmentType
+      });
+    }
+    if (index === 0) {
+      if (amendmentType !== "CREATE_ORDER") {
+        lifecycleFailure("订单住宿生命周期必须从创建订单开始", { amendmentId: amendment.id, amendmentType });
+      }
+      projectedStatus = "RESERVED";
+      continue;
+    }
+    if (amendmentType === "CREATE_ORDER") {
+      lifecycleFailure("订单住宿生命周期重复创建订单", { amendmentId: amendment.id });
+    }
+
+    let transition: { from: LifecycleOrderStatus; to: LifecycleOrderStatus } | null = null;
+    if (amendmentType === "CHECK_IN") transition = { from: "RESERVED", to: "CHECKED_IN" };
+    else if (amendmentType === "CHECK_OUT") transition = { from: "CHECKED_IN", to: "CHECKED_OUT" };
+    else if (amendmentType === "CANCEL_ORDER") transition = { from: "RESERVED", to: "CANCELLED" };
+    else if (amendmentType === "MARK_NO_SHOW") transition = { from: "RESERVED", to: "NO_SHOW" };
+
+    if (transition) {
+      const payload = recordValue(amendment.payload);
+      if (projectedStatus !== transition.from
+        || payload?.fromStatus !== transition.from
+        || payload?.toStatus !== transition.to) {
+        lifecycleFailure("订单 typed 状态变更顺序或前后状态损坏", {
+          amendmentId: amendment.id,
+          amendmentType,
+          projectedStatus,
+          expectedFromStatus: transition.from,
+          expectedToStatus: transition.to
+        });
+      }
+      projectedStatus = transition.to;
+      continue;
+    }
+
+    if (amendmentType !== "CORRECT_ORDER_OCCUPANT"
+      && projectedStatus !== "RESERVED"
+      && projectedStatus !== "CHECKED_IN") {
+      lifecycleFailure("终态订单包含不允许的住宿或计价变更", {
+        amendmentId: amendment.id,
+        amendmentType,
+        projectedStatus
+      });
+    }
+  }
+
+  if (projectedStatus !== finalStatus) {
+    lifecycleFailure("订单最终状态与 typed 状态变更链不一致", {
+      orderStatus: finalStatus,
+      projectedStatus
+    });
+  }
+  const validFulfillment = finalStatus === "RESERVED" || finalStatus === "CANCELLED" || finalStatus === "NO_SHOW"
+    ? !fulfillment.checkIn && !fulfillment.checkOut
+    : finalStatus === "CHECKED_IN"
+      ? Boolean(fulfillment.checkIn) && !fulfillment.checkOut
+      : Boolean(fulfillment.checkIn) && Boolean(fulfillment.checkOut);
+  if (!validFulfillment) lifecycleFailure("订单状态与 typed 履约事实不一致", { orderStatus: finalStatus });
+  return fulfillmentState(finalStatus);
+}
+
+export function projectOrderLifecycle(input: {
+  order: LifecycleOrderRow;
+  stay: LifecycleStayRow;
+  businessDate: string;
+  segments: readonly LifecycleSegmentRow[];
+  amendments: readonly LifecycleAmendmentRow[];
+  revisions: readonly LifecycleRevisionRow[];
+  facts: readonly LifecycleCollectionFactRow[];
+  activeTimeline: readonly StayTimelineItem[];
+}): OrderLifecycleProjection {
+  lifecycleDate(input.businessDate, "营业日期");
+  if (input.amendments.length !== input.order.version) lifecycleFailure("订单版本与不可变变更记录数量不一致");
+  const amendmentIds = new Set<string>();
+  let priorAmendmentCreatedAt: string | undefined;
+  input.amendments.forEach((amendment, index) => {
+    if (amendmentIds.has(amendment.id)) lifecycleFailure("订单变更记录 ID 重复", { amendmentId: amendment.id });
+    amendmentIds.add(amendment.id);
+    const expectedSequence = index + 1;
+    if (amendment.order_id !== input.order.id
+      || amendment.sequence !== expectedSequence
+      || amendment.prior_version !== expectedSequence - 1
+      || amendment.new_version !== expectedSequence
+      || !orderLifecycleAmendmentTypes.has(amendment.amendment_type)) {
+      lifecycleFailure("订单不可变变更记录链损坏", { amendmentId: amendment.id, expectedSequence });
+    }
+    lifecycleActor(amendment);
+    const createdAt = lifecycleDateTime(amendment.created_at, "变更记录时间");
+    if (priorAmendmentCreatedAt && createdAt < priorAmendmentCreatedAt) {
+      lifecycleFailure("订单变更记录时间没有按 sequence 非递减", { amendmentId: amendment.id, expectedSequence });
+    }
+    priorAmendmentCreatedAt = createdAt;
+  });
+  if (input.segments.length === 0) lifecycleFailure("订单缺少原始预订安排");
+  const amendmentById = new Map(input.amendments.map((amendment) => [amendment.id, amendment]));
+  if (input.revisions.length === 0 || !input.order.current_revision_id) {
+    lifecycleFailure("订单缺少当前计价版本");
+  }
+  const revisionIds = new Set<string>();
+  const revisionAmendmentIds = new Set<string>();
+  let priorRevisionAmendmentSequence = 0;
+  let revisionCurrency: string | undefined;
+  input.revisions.forEach((revision, index) => {
+    const expectedRevisionNo = index + 1;
+    const amendment = amendmentById.get(revision.amendment_id);
+    if (revisionIds.has(revision.id)
+      || revisionAmendmentIds.has(revision.amendment_id)
+      || revision.order_id !== input.order.id
+      || revision.revision_no !== expectedRevisionNo
+      || !amendment
+      || !pricingRevisionAmendmentTypes.has(amendment.amendment_type)
+      || amendment.sequence <= priorRevisionAmendmentSequence) {
+      lifecycleFailure("订单计价版本链损坏", {
+        revisionId: revision.id,
+        expectedRevisionNo,
+        amendmentId: revision.amendment_id
+      });
+    }
+    if (!Number.isSafeInteger(revision.policy_base_amount_minor)
+      || !Number.isSafeInteger(revision.current_contract_amount_minor)
+      || !revision.currency
+      || (revisionCurrency !== undefined && revision.currency !== revisionCurrency)) {
+      lifecycleFailure("订单计价版本金额或币种链损坏", { revisionId: revision.id });
+    }
+    revisionCurrency = revision.currency;
+    revisionIds.add(revision.id);
+    revisionAmendmentIds.add(revision.amendment_id);
+    priorRevisionAmendmentSequence = amendment.sequence;
+  });
+  if (input.revisions.at(-1)!.id !== input.order.current_revision_id) {
+    lifecycleFailure("订单当前计价版本指针与最新计价版本不一致", {
+      currentRevisionId: input.order.current_revision_id,
+      latestRevisionId: input.revisions.at(-1)!.id
+    });
+  }
+  for (const amendment of input.amendments) {
+    const matches = input.revisions.filter((revision) => revision.amendment_id === amendment.id);
+    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type)
+      || (input.order.stay_type === "FREE" && freeTerminalPricingRevisionAmendmentTypes.has(amendment.amendment_type));
+    if (requiresRevision && matches.length !== 1) {
+      lifecycleFailure("订单计价变更没有唯一计价版本", {
+        amendmentId: amendment.id,
+        amendmentType: amendment.amendment_type
+      });
+    }
+    if (!requiresRevision && matches.length !== 0) {
+      lifecycleFailure("非计价变更不能包含计价版本", {
+        amendmentId: amendment.id,
+        amendmentType: amendment.amendment_type
+      });
+    }
+  }
+  const segmentAmendmentCounts = new Map<string, number>();
+  for (const segment of input.segments) {
+    const amendment = amendmentById.get(segment.amendment_id);
+    if (!amendment || !staySegmentAmendmentTypes.has(amendment.amendment_type)) {
+      lifecycleFailure("订单住宿安排引用了非住宿变更记录", {
+        segmentId: segment.id,
+        amendmentId: segment.amendment_id
+      });
+    }
+    segmentAmendmentCounts.set(segment.amendment_id, (segmentAmendmentCounts.get(segment.amendment_id) ?? 0) + 1);
+  }
+  for (const amendment of input.amendments) {
+    if (!staySegmentAmendmentTypes.has(amendment.amendment_type)) continue;
+    if (segmentAmendmentCounts.get(amendment.id) !== 1) {
+      lifecycleFailure("订单住宿变更没有唯一住宿安排版本", {
+        amendmentId: amendment.id,
+        amendmentType: amendment.amendment_type
+      });
+    }
+  }
+  const segmentIds = new Set<string>();
+  let current: OrderArrangementDto | undefined;
+  let original: OrderArrangementDto | undefined;
+  let priorSegmentAmendmentSequence = 0;
+  const history: OrderArrangementHistoryItemDto[] = [];
+  const arrangementsByAmendmentSequence: Array<{ sequence: number; arrangement: OrderArrangementDto }> = [];
+
+  for (const [index, segment] of input.segments.entries()) {
+    const expectedSequence = index + 1;
+    if (segmentIds.has(segment.id)) lifecycleFailure("订单住宿安排版本 ID 重复", { segmentId: segment.id });
+    segmentIds.add(segment.id);
+    if (segment.stay_id !== input.stay.id || segment.sequence !== expectedSequence) {
+      lifecycleFailure("订单住宿安排版本链损坏", { segmentId: segment.id, expectedSequence });
+    }
+    const amendment = amendmentById.get(segment.amendment_id);
+    if (!amendment || amendment.sequence <= priorSegmentAmendmentSequence) {
+      lifecycleFailure("订单住宿安排没有按变更记录顺序形成", { segmentId: segment.id });
+    }
+    priorSegmentAmendmentSequence = amendment.sequence;
+    let next: OrderArrangementDto;
+    let before: OrderArrangementDto | null;
+    if (index === 0) {
+      if (segment.segment_type !== "INITIAL" || segment.supersedes_segment_id !== null || amendment.amendment_type !== "CREATE_ORDER") {
+        lifecycleFailure("订单原始预订安排版本损坏", { segmentId: segment.id });
+      }
+      const payload = recordValue(amendment.payload);
+      if (!payload
+        || payload.inventoryUnitId !== segment.inventory_unit_id
+        || payload.arrivalDate !== segment.arrival_date
+        || payload.departureDate !== segment.departure_date) {
+        lifecycleFailure("订单原始预订安排与 CREATE_ORDER 事实不一致", { segmentId: segment.id });
+      }
+      next = arrangement([{
+        inventoryUnitId: segment.inventory_unit_id,
+        arrivalDate: segment.arrival_date,
+        departureDate: segment.departure_date
+      }]);
+      original = next;
+      before = null;
+    } else {
+      const priorSegment = input.segments[index - 1]!;
+      const expectedAmendment = segment.segment_type === "MOVE"
+        ? "MOVE_UNIT"
+        : segment.segment_type === "EXTEND_STAY" || segment.segment_type === "SHORTEN_STAY"
+          ? segment.segment_type
+          : null;
+      const overlayType = segment.segment_type === "MOVE" ? "MOVE" : segment.segment_type;
+      if (!current || segment.supersedes_segment_id !== priorSegment.id || amendment.amendment_type !== expectedAmendment) {
+        lifecycleFailure("订单住宿安排 supersession 链或变更类型损坏", { segmentId: segment.id });
+      }
+      before = current;
+      next = overlayArrangement(current, {
+        inventoryUnitId: segment.inventory_unit_id,
+        arrivalDate: segment.arrival_date,
+        departureDate: segment.departure_date
+      }, overlayType as "EXTEND_STAY" | "SHORTEN_STAY" | "MOVE");
+      if (!timelineMatches(payloadTimeline(amendment), arrangementTimeline(next))) {
+        lifecycleFailure("订单住宿安排与 typed 变更时间线不一致", { amendmentId: amendment.id });
+      }
+    }
+    const revisionMatches = input.revisions.filter((revision) => revision.amendment_id === amendment.id);
+    if (revisionMatches.length !== 1) lifecycleFailure("订单住宿变更没有唯一计价摘要", { amendmentId: amendment.id });
+    const revision = revisionMatches[0]!;
+    if (revision.order_id !== input.order.id
+      || revision.arrival_date !== next.arrivalDate
+      || revision.departure_date !== next.departureDate
+      || !Number.isSafeInteger(revision.policy_base_amount_minor)
+      || !Number.isSafeInteger(revision.current_contract_amount_minor)
+      || !revision.currency) {
+      lifecycleFailure("订单住宿变更的计价摘要损坏", { amendmentId: amendment.id });
+    }
+    const recordedAt = lifecycleDateTime(amendment.created_at, "变更记录时间");
+    const factsAtChange = input.facts.filter((fact) => {
+      if (fact.order_id !== input.order.id || !Number.isSafeInteger(fact.net_effect_minor)) {
+        lifecycleFailure("订单住宿变更的资金摘要损坏", { amendmentId: amendment.id });
+      }
+      return lifecycleDateTime(fact.created_at, "资金记录时间") <= recordedAt;
+    });
+    if (factsAtChange.some((fact) => fact.currency !== revision.currency)) {
+      lifecycleFailure("订单住宿变更的资金币种与计价币种不一致", { amendmentId: amendment.id });
+    }
+    const netRecordedCollectionMinor = factsAtChange.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
+    if (!Number.isSafeInteger(netRecordedCollectionMinor)) lifecycleFailure("订单住宿变更的资金合计超出支持范围");
+    const fundsSummary: OrderArrangementFundsSummaryDto = {
+      netRecordedCollection: { currency: revision.currency, minorUnits: netRecordedCollectionMinor },
+      collectionDifference: {
+        currency: revision.currency,
+        minorUnits: revision.current_contract_amount_minor - netRecordedCollectionMinor
+      },
+      factCount: factsAtChange.length
+    };
+    history.push({
+      type: arrangementChangeType(amendment.amendment_type),
+      before,
+      after: next,
+      reason: { code: amendment.reason_code, note: amendment.reason_note },
+      actor: lifecycleActor(amendment),
+      recordedAt,
+      pricingSummary: {
+        policyBaseAmount: { currency: revision.currency, minorUnits: revision.policy_base_amount_minor },
+        currentContractAmount: { currency: revision.currency, minorUnits: revision.current_contract_amount_minor },
+        differenceFromPolicy: {
+          currency: revision.currency,
+          minorUnits: revision.current_contract_amount_minor - revision.policy_base_amount_minor
+        }
+      },
+      fundsSummary
+    });
+    arrangementsByAmendmentSequence.push({ sequence: amendment.sequence, arrangement: next });
+    current = next;
+  }
+
+  for (const revision of input.revisions) {
+    const amendment = amendmentById.get(revision.amendment_id)!;
+    const effectiveArrangement = arrangementsByAmendmentSequence
+      .filter((entry) => entry.sequence <= amendment.sequence)
+      .at(-1)?.arrangement;
+    if (!effectiveArrangement
+      || revision.arrival_date !== effectiveArrangement.arrivalDate
+      || revision.departure_date !== effectiveArrangement.departureDate) {
+      lifecycleFailure("订单计价版本与当时有效住宿安排不一致", {
+        revisionId: revision.id,
+        amendmentId: revision.amendment_id
+      });
+    }
+  }
+
+  if (!original || !current) lifecycleFailure("订单住宿生命周期投影为空");
+  if (current.arrivalDate !== input.order.arrival_date || current.departureDate !== input.order.departure_date) {
+    lifecycleFailure("订单当前日期与住宿安排版本链不一致");
+  }
+  const projectedTimeline = arrangementTimeline(current);
+  const terminal = input.order.status === "CHECKED_OUT" || input.order.status === "CANCELLED" || input.order.status === "NO_SHOW";
+  if (terminal ? input.activeTimeline.length !== 0 : !timelineMatches(projectedTimeline, input.activeTimeline)) {
+    lifecycleFailure("订单有效 Claim 与住宿安排版本链不一致", { orderStatus: input.order.status });
+  }
+  const fulfillmentEvents = projectOrderFulfillment(input.amendments, {
+    arrivalDate: current.arrivalDate,
+    departureDate: current.departureDate
+  });
+  const state = validateLifecycleStatus(input.order.status, input.stay.status, input.amendments, fulfillmentEvents);
+  return {
+    originalArrangement: original,
+    effectiveArrangement: {
+      ...current,
+      presentation: effectivePresentation(input.order.status),
+      businessDate: input.businessDate
+    },
+    fulfillment: { state, ...fulfillmentEvents },
+    arrangementHistory: history
   };
 }
 
@@ -399,6 +1018,33 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     phone: correction[`${prefix}_phone`],
     documentNumber: correction[`${prefix}_document_number`]
   });
+  const terminal = context.order.status === "CHECKED_OUT"
+    || context.order.status === "CANCELLED"
+    || context.order.status === "NO_SHOW";
+  const activeTimeline = terminal
+    ? await db.selectFrom("inventory_claims")
+      .select(["service_date", "inventory_unit_id", "id"])
+      .where("source_type", "=", "ORDER_SEGMENT")
+      .where("source_id", "in", context.segmentIds)
+      .where("active", "=", true)
+      .orderBy("service_date")
+      .orderBy("id")
+      .execute()
+      .then((claims) => claims.map((claim) => ({
+        serviceDate: claim.service_date,
+        inventoryUnitId: claim.inventory_unit_id
+      })))
+    : await loadActiveStayTimeline(db, context);
+  const lifecycle = projectOrderLifecycle({
+    order: context.order,
+    stay: context.stay,
+    businessDate,
+    segments,
+    amendments,
+    revisions,
+    facts,
+    activeTimeline
+  });
   return {
     accessLevel,
     allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
@@ -437,10 +1083,10 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     stay: context.stay,
     currentSegment: context.currentSegment,
     segments,
-    fulfillment: projectOrderFulfillment(amendments, {
-      arrivalDate: context.order.arrival_date,
-      departureDate: context.order.departure_date
-    }),
+    originalArrangement: lifecycle.originalArrangement,
+    effectiveArrangement: lifecycle.effectiveArrangement,
+    fulfillment: lifecycle.fulfillment,
+    arrangementHistory: lifecycle.arrangementHistory,
     amendments: amendments.map((amendment) => ({
       id: amendment.id,
       order_id: amendment.order_id,

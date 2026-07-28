@@ -69,6 +69,39 @@ const tabs: ReadonlyArray<{ code: RoomStatusMobileTab; label: string; group: key
   { code: "EXCEPTIONS", label: "异常", group: "exceptions", Icon: AlertTriangle }
 ];
 
+const historyActionLabels: Readonly<Record<string, string>> = {
+  CREATE_ORDER: "创建住宿",
+  CHECK_IN: "办理入住",
+  CHECK_OUT: "办理退房",
+  CANCEL_ORDER: "取消住宿",
+  MARK_NO_SHOW: "标记未到",
+  EXTEND_STAY: "延长住宿",
+  SHORTEN_STAY: "缩短住宿",
+  MOVE_UNIT: "调整房间",
+  REPRICE_ORDER: "调整金额",
+  LOCK_MAINTENANCE: "维修锁房",
+  RELEASE_MAINTENANCE: "释放维修锁房",
+  COMPLETE_CLEANING: "完成清洁",
+  LEGACY_UNAVAILABLE: "历史不可售记录"
+};
+
+const historySourceLabels: Readonly<Record<RoomStatusOperationalTaskDto["history"][number]["source"], string>> = {
+  WEB_SESSION: "前台工作台",
+  API_TOKEN: "系统接口",
+  SYSTEM: "系统自动记录",
+  UNKNOWN: "历史记录"
+};
+
+const referenceBusinessLabels: Readonly<Record<RoomStatusOperationalTaskDto["references"][number]["type"], string>> = {
+  CLAIM: "库存占用记录",
+  ORDER: "住宿订单",
+  STAY: "住宿记录",
+  OPERATIONS: "运营任务",
+  BLOCK: "维修锁房记录",
+  INVENTORY_UNIT: "房源",
+  RECEIPT: "办理记录"
+};
+
 export function nextMobileTaskFocusId(
   tasks: readonly RoomStatusOperationalTaskDto[],
   completedTaskId: string,
@@ -266,7 +299,7 @@ export function RoomStatusMobileTasks({
           <h2 id={`${tabsId}-heading`}>今日运营任务</h2>
         </div>
         <div className="room-status-mobile-header-actions">
-          <small>{formatRoomStatusDateTime(board.asOf)} · revision {board.revision}</small>
+          <small>更新于 {formatRoomStatusDateTime(board.asOf)}</small>
           {canCreate ? (
             <button type="button" className="room-status-button" aria-label="新建住宿或锁房" onClick={onCreate}>
               <Plus aria-hidden="true" size={17} />新建
@@ -379,13 +412,13 @@ export function RoomStatusMobileTasks({
                     onClick={() => openTask(interval)}
                   >
                     <span className="room-status-mobile-task-title">
-                      <strong>{unit ? roomStatusUnitLabel(unit) : interval.displayInventoryUnitId}</strong>
+                      <strong>{unit ? roomStatusUnitLabel(unit) : "房源名称暂不可用"}</strong>
                       <RoomStatusMark status={interval.status} compact />
                     </span>
                     {lodging ? <span>住宿人 · {businessLabel}</span> : null}
                     {!lodging ? <span>{interval.label}</span> : null}
-                    <small>来源完整区间 {formatRoomStatusDate(interval.sourceStartDate)}至{formatRoomStatusDate(interval.sourceEndDate)} · {roomStatusSourceLabels[interval.sourceKind]}</small>
-                    {!unit ? <small className="room-status-mobile-task-warning">库存单元未包含在当前查询页，保留稳定 ID。</small> : null}
+                    <small>完整业务周期 {formatRoomStatusDate(interval.sourceStartDate)}至{formatRoomStatusDate(interval.sourceEndDate)} · {roomStatusSourceLabels[interval.sourceKind]}</small>
+                    {!unit ? <small className="room-status-mobile-task-warning">当前查询页未包含该房源名称，请刷新或调整房源页。</small> : null}
                     {!lodging && interval.conflicts.length ? <small className="room-status-mobile-task-warning">{interval.conflicts.length} 个日期占用</small> : null}
                   </button>
                   {primaryAction ? (
@@ -394,7 +427,7 @@ export function RoomStatusMobileTasks({
                     </button>
                   ) : (
                     <button type="button" className="room-status-button room-status-button-secondary room-status-mobile-primary-action" onClick={() => openTask(interval)}>
-                      查看事实<ArrowRight aria-hidden="true" size={17} />
+                      查看详情<ArrowRight aria-hidden="true" size={17} />
                     </button>
                   )}
                 </li>
@@ -412,7 +445,7 @@ export function RoomStatusMobileTasks({
 
       {detailInterval ? (
         <Modal
-          title={`${detailUnit?.code ?? "稳定库存引用"} · 任务详情`}
+          title={`${detailUnit?.code ?? "房源"} · 任务详情`}
           size="mobile-fullscreen"
           onClose={() => setDetailIntervalId(null)}
           footer={(
@@ -443,20 +476,16 @@ export function RoomStatusMobileTasks({
               <h3 id={`${tabsId}-detail-range`}><CalendarDays aria-hidden="true" size={18} />房源与日期</h3>
               <dl>
                 <dt>房源</dt><dd>{detailUnit ? roomStatusUnitLabel(detailUnit) : "当前查询页未包含房源名称"}</dd>
-                <dt>营业日期</dt><dd><code>{detailInterval.businessDate}</code></dd>
-                <dt>任务显示区间</dt><dd><code>[{detailInterval.startDate}, {detailInterval.endDate})</code></dd>
-                <dt>来源完整区间</dt><dd><code>[{detailInterval.sourceStartDate}, {detailInterval.sourceEndDate})</code></dd>
-                {!detailLodging ? <><dt>显示库存 ID</dt><dd><code>{detailInterval.displayInventoryUnitId}</code></dd></> : null}
-                {!detailLodging ? <><dt>实际库存 ID</dt><dd><code>{detailInterval.actualInventoryUnitId}</code></dd></> : null}
+                <dt>营业日期</dt><dd>{formatRoomStatusDate(detailInterval.businessDate)}</dd>
+                <dt>当前显示日期</dt><dd>{formatRoomStatusDate(detailInterval.startDate)}至{formatRoomStatusDate(detailInterval.endDate)}</dd>
+                <dt>完整业务周期</dt><dd>{formatRoomStatusDate(detailInterval.sourceStartDate)}至{formatRoomStatusDate(detailInterval.sourceEndDate)}</dd>
               </dl>
             </section>
             {!detailLodging ? <section aria-labelledby={`${tabsId}-detail-source`}>
-              <h3 id={`${tabsId}-detail-source`}><Blocks aria-hidden="true" size={18} />来源事实</h3>
+              <h3 id={`${tabsId}-detail-source`}><Blocks aria-hidden="true" size={18} />任务说明</h3>
               <dl>
-                <dt>区间 ID</dt><dd><code>{detailInterval.id}</code></dd>
-                <dt>阻断库存</dt><dd>{detailInterval.blocking ? "是" : "否"}</dd>
+                <dt>影响可售</dt><dd>{detailInterval.blocking ? "是" : "否"}</dd>
                 <dt>原因</dt><dd>{detailInterval.reason ?? "未提供原因"}</dd>
-                <dt>Claim</dt><dd>{detailInterval.claimIds.length ? detailInterval.claimIds.map((id) => <code key={id}>{id} </code>) : "无"}</dd>
               </dl>
               {detailInterval.references.length ? (
                 <ul className="room-status-mobile-detail-references">
@@ -467,9 +496,9 @@ export function RoomStatusMobileTasks({
                           setDetailIntervalId(null);
                           onOpenReference(reference);
                         }}>
-                          <strong>{reference.label}</strong><span>{reference.type}</span><code>{reference.id}</code>
+                          <strong>{referenceBusinessLabels[reference.type]}</strong><span>查看相关记录</span>
                         </button>
-                      ) : <div><strong>{reference.label}</strong><span>{reference.type}</span><code>{reference.id}</code></div>}
+                      ) : <div><strong>{referenceBusinessLabels[reference.type]}</strong><span>当前无可打开页面</span></div>}
                     </li>
                   ))}
                 </ul>
@@ -486,18 +515,17 @@ export function RoomStatusMobileTasks({
             )}
             {!detailLodging && detailInterval.history.length ? (
               <section aria-labelledby={`${tabsId}-detail-history`}>
-                <h3 id={`${tabsId}-detail-history`}><Clock3 aria-hidden="true" size={18} />事实历史</h3>
+                <h3 id={`${tabsId}-detail-history`}><Clock3 aria-hidden="true" size={18} />办理历史</h3>
                 <ol className="room-status-mobile-detail-history">
                   {detailInterval.history.map((item, index) => (
                     <li key={`${item.occurredAt}:${item.commandId ?? index}`}>
-                      <strong>{item.action}</strong>
-                      <span>{formatRoomStatusDateTime(item.occurredAt)} · {item.source} · actor {item.actorId ?? "已脱敏 / 未记录"}</span>
-                      <code>{item.commandId ?? "无 Command"}</code>
+                      <strong>{historyActionLabels[item.action] ?? "运营状态更新"}</strong>
+                      <span>{formatRoomStatusDateTime(item.occurredAt)} · {historySourceLabels[item.source]} · {item.actorId ? "工作人员" : "系统记录"}</span>
                       {item.receiptId ? (
                         <button type="button" className="room-status-text-button" onClick={() => {
                           setDetailIntervalId(null);
                           onOpenReceipt(item.receiptId!);
-                        }}>查看 Receipt <code>{item.receiptId}</code></button>
+                        }}>查看办理记录</button>
                       ) : null}
                     </li>
                   ))}
@@ -513,9 +541,8 @@ export function RoomStatusMobileTasks({
             <section aria-labelledby={`${tabsId}-detail-freshness`}>
               <h3 id={`${tabsId}-detail-freshness`}><Clock3 aria-hidden="true" size={18} />数据新鲜度</h3>
               <dl>
-                <dt>数据时点</dt><dd>{board.asOf}</dd>
-                <dt>有效至</dt><dd>{board.freshUntil}</dd>
-                <dt>Revision</dt><dd><code>{board.revision}</code></dd>
+                <dt>更新时间</dt><dd>{formatRoomStatusDateTime(board.asOf)}</dd>
+                <dt>有效至</dt><dd>{formatRoomStatusDateTime(board.freshUntil)}</dd>
               </dl>
             </section>
             {!detailAction ? <p className="room-status-mobile-detail-no-action">服务端未为当前任务下发可执行动作。查看详情不会写入业务事实。</p> : null}

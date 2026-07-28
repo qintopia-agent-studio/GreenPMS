@@ -8,7 +8,10 @@ import {
   freeStayCategoryCodes,
   fulfillmentRecordingModes,
   historicalRecoverableCommandTypes,
+  orderArrangementChangeTypes,
   orderActionCodes,
+  orderEffectiveArrangementPresentations,
+  orderFulfillmentStates,
   ROOM_STATUS_MAX_QUERY_NIGHTS,
   ROOM_STATUS_OPERATIONAL_TASK_LIMIT,
   recoverableCommandTypes,
@@ -1307,8 +1310,42 @@ const CheckOutFulfillmentRecordSchema = strictObject({
   ...OrderFulfillmentRecordProperties
 });
 const OrderFulfillmentProjectionSchema = strictObject({
+  state: Type.Union(orderFulfillmentStates.map((state) => Type.Literal(state))),
   checkIn: nullable(CheckInFulfillmentRecordSchema),
   checkOut: nullable(CheckOutFulfillmentRecordSchema)
+});
+const OrderArrangementIntervalSchema = strictObject({
+  inventoryUnitId: Id,
+  arrivalDate: LocalDate,
+  departureDate: LocalDate
+});
+const OrderArrangementSchema = strictObject({
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  intervals: Type.Array(OrderArrangementIntervalSchema, { minItems: 1 })
+});
+const OrderEffectiveArrangementSchema = strictObject({
+  ...OrderArrangementSchema.properties,
+  presentation: Type.Union(orderEffectiveArrangementPresentations.map((presentation) => Type.Literal(presentation))),
+  businessDate: LocalDate
+});
+const OrderArrangementHistoryItemSchema = strictObject({
+  type: Type.Union(orderArrangementChangeTypes.map((type) => Type.Literal(type))),
+  before: nullable(OrderArrangementSchema),
+  after: OrderArrangementSchema,
+  reason: RecordedCommandReasonSchema,
+  actor: nullable(strictObject({ subjectId: Id, displayName: ShortText })),
+  recordedAt: DateTime,
+  pricingSummary: strictObject({
+    policyBaseAmount: Money,
+    currentContractAmount: Money,
+    differenceFromPolicy: Money
+  }),
+  fundsSummary: strictObject({
+    netRecordedCollection: Money,
+    collectionDifference: Money,
+    factCount: Type.Integer({ minimum: 0 })
+  })
 });
 export const CollectionFactRowSchema = strictObject({
   fact_id: Id, order_id: Id,
@@ -1346,7 +1383,10 @@ export const OrderDetailResponseSchema = strictObject({
   ]) }),
   currentSegment: strictObject({ id: Id, sequence: Type.Integer({ minimum: 1 }), inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate }),
   segments: Type.Array(StaySegmentRowSchema),
+  originalArrangement: OrderArrangementSchema,
+  effectiveArrangement: OrderEffectiveArrangementSchema,
   fulfillment: OrderFulfillmentProjectionSchema,
+  arrangementHistory: Type.Array(OrderArrangementHistoryItemSchema, { minItems: 1 }),
   amendments: Type.Array(AmendmentRowSchema),
   pricingRevisions: Type.Array(PricingRevisionRowSchema),
   coverageSet: Type.Array(CoverageRowSchema),

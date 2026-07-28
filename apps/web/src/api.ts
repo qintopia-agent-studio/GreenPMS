@@ -9,11 +9,11 @@ import type {
   MemberViewDto,
   MetaDto,
   OrderRowDto,
-  OrderViewDto,
   PrincipalDto,
   HistoricalRecoverableCommandType,
   TokenDto
 } from "./types";
+import { parseOrderView } from "./orderViewValidation";
 
 interface ErrorPayload {
   code?: unknown;
@@ -152,7 +152,10 @@ export const api = {
     if (status) query.set("status", status);
     return request<{ orders: OrderRowDto[] }>(`/api/v1/orders?${query.toString()}`);
   },
-  order: (orderId: string) => request<OrderViewDto>(`/api/v1/orders/${encodeURIComponent(orderId)}`),
+  order: (orderId: string, signal?: AbortSignal) => request<unknown>(
+    `/api/v1/orders/${encodeURIComponent(orderId)}`,
+    signal ? { signal } : {}
+  ).then(parseOrderView),
   members: (propertyId: string, memberQuery?: string) => {
     const query = new URLSearchParams({ propertyId });
     if (memberQuery?.trim()) query.set("query", memberQuery.trim());

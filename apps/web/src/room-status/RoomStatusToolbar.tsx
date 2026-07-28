@@ -112,7 +112,7 @@ export function RoomStatusToolbar({
         <div className="room-status-toolbar-identity">
           <span>当前物业</span>
           <strong>{propertyLabel}</strong>
-          <small>{principalLabel} · {board.accessLevel}</small>
+          <small>{principalLabel} · {board.accessLevel === "WRITE" ? "可写" : "只读"}</small>
         </div>
 
         <div className="room-status-range-controls" aria-label="房态日期范围">
@@ -165,7 +165,7 @@ export function RoomStatusToolbar({
         <div className={`room-status-freshness room-status-freshness-${projectionReady ? "ready" : "partial"}`}>
           <span role="status" aria-live="polite">{rangeLoading ? "正在载入新范围，旧事实不可操作" : projectionReady ? "投影完整" : "投影不完整，写动作应保持阻断"}</span>
           <strong>数据时点 {new Date(board.asOf).toLocaleString("zh-CN", { hour12: false })}</strong>
-          <small>有效至 {new Date(board.freshUntil).toLocaleString("zh-CN", { hour12: false })} · revision {board.revision}</small>
+          <small>有效至 {new Date(board.freshUntil).toLocaleString("zh-CN", { hour12: false })}</small>
         </div>
       </div>
 

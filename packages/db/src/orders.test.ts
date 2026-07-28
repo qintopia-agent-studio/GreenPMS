@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderAllowedActions, projectOrderFulfillment } from "./orders.ts";
+import { orderAllowedActions, projectOrderFulfillment, projectOrderLifecycle } from "./orders.ts";
 
 function action(
   status: string,
@@ -195,5 +195,566 @@ describe("projectOrderFulfillment", () => {
       amendment("CHECK_IN", "2026-08-01", 2),
       amendment("CHECK_IN", "2026-08-01", 3)
     ], { arrivalDate: "2026-08-01", departureDate: "2026-08-03" })).toThrow("订单履约记录存在重复状态事实");
+  });
+});
+
+describe("projectOrderLifecycle", () => {
+  const actor = { subjectId: "subject_operator", displayName: "前台操作员" };
+  const amendment = (options: {
+    id: string;
+    sequence: number;
+    type: string;
+    payload: Record<string, unknown>;
+  }) => ({
+    id: options.id,
+    order_id: "order_1",
+    sequence: options.sequence,
+    amendment_type: options.type,
+    payload: options.payload,
+    reason_code: options.type,
+    reason_note: `${options.type} note`,
+    prior_version: options.sequence - 1,
+    new_version: options.sequence,
+    actor_subject_id: actor.subjectId,
+    actor_display_name: actor.displayName,
+    created_at: new Date(`2026-08-0${options.sequence}T12:00:00.000Z`)
+  });
+  const revision = (
+    amendmentId: string,
+    arrivalDate: string,
+    departureDate: string,
+    amount = 10_000,
+    revisionNo = Number(amendmentId.match(/\d+$/)?.[0] ?? 1)
+  ) => ({
+    id: `revision_${revisionNo}`,
+    order_id: "order_1",
+    revision_no: revisionNo,
+    amendment_id: amendmentId,
+    arrival_date: arrivalDate,
+    departure_date: departureDate,
+    policy_base_amount_minor: amount,
+    current_contract_amount_minor: amount,
+    currency: "CNY"
+  });
+  const base = () => ({
+    order: {
+      id: "order_1",
+      status: "RESERVED",
+      stay_type: "TRANSIENT",
+      arrival_date: "2026-08-01",
+      departure_date: "2026-08-03",
+      current_revision_id: "revision_1" as string | null,
+      version: 1
+    },
+    stay: { id: "stay_1", status: "PLANNED" },
+    businessDate: "2026-08-01",
+    segments: [{
+      id: "segment_1",
+      stay_id: "stay_1",
+      sequence: 1,
+      inventory_unit_id: "room_a",
+      arrival_date: "2026-08-01",
+      departure_date: "2026-08-03",
+      segment_type: "INITIAL",
+      supersedes_segment_id: null as string | null,
+      amendment_id: "amend_1"
+    }],
+    amendments: [amendment({
+      id: "amend_1",
+      sequence: 1,
+      type: "CREATE_ORDER",
+      payload: {
+        inventoryUnitId: "room_a",
+        arrivalDate: "2026-08-01",
+        departureDate: "2026-08-03"
+      }
+    })],
+    revisions: [revision("amend_1", "2026-08-01", "2026-08-03")],
+    facts: [] as Array<{
+      order_id: string;
+      net_effect_minor: number;
+      currency: string;
+      created_at: Date;
+    }>,
+    activeTimeline: [
+      { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+      { serviceDate: "2026-08-02", inventoryUnitId: "room_a" }
+    ]
+  });
+
+  it("keeps the original arrangement immutable while replaying a gap-free, non-overlapping effective timeline", () => {
+    const input = base();
+    input.order.departure_date = "2026-08-04";
+    input.order.version = 4;
+    input.amendments.push(
+      amendment({
+        id: "amend_2",
+        sequence: 2,
+        type: "EXTEND_STAY",
+        payload: {
+          after: {
+            stayTimeline: [
+              { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+              { serviceDate: "2026-08-02", inventoryUnitId: "room_a" },
+              { serviceDate: "2026-08-03", inventoryUnitId: "room_a" },
+              { serviceDate: "2026-08-04", inventoryUnitId: "room_a" }
+            ]
+          }
+        }
+      }),
+      amendment({
+        id: "amend_3",
+        sequence: 3,
+        type: "MOVE_UNIT",
+        payload: {
+          stayTimeline: [
+            { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+            { serviceDate: "2026-08-02", inventoryUnitId: "room_a" },
+            { serviceDate: "2026-08-03", inventoryUnitId: "room_b" },
+            { serviceDate: "2026-08-04", inventoryUnitId: "room_b" }
+          ]
+        }
+      }),
+      amendment({
+        id: "amend_4",
+        sequence: 4,
+        type: "SHORTEN_STAY",
+        payload: {
+          after: {
+            stayTimeline: [
+              { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+              { serviceDate: "2026-08-02", inventoryUnitId: "room_a" },
+              { serviceDate: "2026-08-03", inventoryUnitId: "room_b" }
+            ]
+          }
+        }
+      })
+    );
+    input.segments.push(
+      {
+        id: "segment_2", stay_id: "stay_1", sequence: 2, inventory_unit_id: "room_a",
+        arrival_date: "2026-08-01", departure_date: "2026-08-05", segment_type: "EXTEND_STAY",
+        supersedes_segment_id: "segment_1", amendment_id: "amend_2"
+      },
+      {
+        id: "segment_3", stay_id: "stay_1", sequence: 3, inventory_unit_id: "room_b",
+        arrival_date: "2026-08-03", departure_date: "2026-08-05", segment_type: "MOVE",
+        supersedes_segment_id: "segment_2", amendment_id: "amend_3"
+      },
+      {
+        id: "segment_4", stay_id: "stay_1", sequence: 4, inventory_unit_id: "room_b",
+        arrival_date: "2026-08-03", departure_date: "2026-08-04", segment_type: "SHORTEN_STAY",
+        supersedes_segment_id: "segment_3", amendment_id: "amend_4"
+      }
+    );
+    input.revisions.push(
+      revision("amend_2", "2026-08-01", "2026-08-05", 20_000),
+      revision("amend_3", "2026-08-01", "2026-08-05", 20_000),
+      revision("amend_4", "2026-08-01", "2026-08-04", 15_000)
+    );
+    input.order.current_revision_id = "revision_4";
+    input.activeTimeline = [
+      { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+      { serviceDate: "2026-08-02", inventoryUnitId: "room_a" },
+      { serviceDate: "2026-08-03", inventoryUnitId: "room_b" }
+    ];
+
+    const result = projectOrderLifecycle(input);
+    expect(result.originalArrangement).toEqual({
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-08-03",
+      intervals: [{ inventoryUnitId: "room_a", arrivalDate: "2026-08-01", departureDate: "2026-08-03" }]
+    });
+    expect(result.effectiveArrangement).toMatchObject({
+      presentation: "CURRENT",
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-08-04",
+      intervals: [
+        { inventoryUnitId: "room_a", arrivalDate: "2026-08-01", departureDate: "2026-08-03" },
+        { inventoryUnitId: "room_b", arrivalDate: "2026-08-03", departureDate: "2026-08-04" }
+      ]
+    });
+    expect(result.arrangementHistory.map((item) => item.type)).toEqual([
+      "INITIAL_BOOKING", "EXTENSION", "MOVE", "SHORTENING"
+    ]);
+    expect(result.arrangementHistory[0]!.before).toBeNull();
+    expect(result.arrangementHistory.at(-1)!.before?.departureDate).toBe("2026-08-05");
+  });
+
+  it.each([
+    ["CHECKED_IN", "IN_HOUSE", "IN_HOUSE", "CURRENT", "CHECK_IN"],
+    ["CHECKED_OUT", "COMPLETED", "CHECKED_OUT", "LAST", "CHECK_OUT"],
+    ["CANCELLED", "CANCELLED", "CANCELLED", "BEFORE_CANCELLATION", "CANCEL_ORDER"],
+    ["NO_SHOW", "NO_SHOW", "NO_SHOW", "NO_SHOW_ORDER", "MARK_NO_SHOW"]
+  ] as const)("projects typed %s lifecycle state and the correct arrangement presentation", (
+    orderStatus,
+    stayStatus,
+    expectedState,
+    expectedPresentation,
+    terminalType
+  ) => {
+    const input = base();
+    input.order.status = orderStatus;
+    input.stay.status = stayStatus;
+    const checkIn = amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "CHECK_IN",
+      payload: {
+        fromStatus: "RESERVED",
+        toStatus: "CHECKED_IN",
+        businessDate: "2026-08-01",
+        effectiveDate: "2026-08-01",
+        recordingMode: "ON_SCHEDULE"
+      }
+    });
+    if (orderStatus === "CHECKED_IN" || orderStatus === "CHECKED_OUT") input.amendments.push(checkIn);
+    if (orderStatus === "CHECKED_OUT") {
+      input.amendments.push(amendment({
+        id: "amend_3",
+        sequence: 3,
+        type: "CHECK_OUT",
+        payload: {
+          fromStatus: "CHECKED_IN",
+          toStatus: "CHECKED_OUT",
+          businessDate: "2026-08-03",
+          effectiveDate: "2026-08-03",
+          recordingMode: "ON_SCHEDULE"
+        }
+      }));
+    } else if (orderStatus === "CANCELLED" || orderStatus === "NO_SHOW") {
+      input.amendments.push(amendment({
+        id: "amend_2",
+        sequence: 2,
+        type: terminalType,
+        payload: { fromStatus: "RESERVED", toStatus: orderStatus }
+      }));
+    }
+    input.order.version = input.amendments.length;
+    if (orderStatus === "CHECKED_OUT" || orderStatus === "CANCELLED" || orderStatus === "NO_SHOW") {
+      input.activeTimeline = [];
+    }
+
+    const result = projectOrderLifecycle(input);
+    expect(result.fulfillment.state).toBe(expectedState);
+    expect(result.effectiveArrangement.presentation).toBe(expectedPresentation);
+    if (orderStatus === "CHECKED_IN" || orderStatus === "CHECKED_OUT") expect(result.fulfillment.checkIn).not.toBeNull();
+    if (orderStatus === "CHECKED_OUT") expect(result.fulfillment.checkOut).not.toBeNull();
+  });
+
+  it.each([
+    ["CANCELLED", "CANCELLED", "CANCEL_ORDER"],
+    ["NO_SHOW", "NO_SHOW", "MARK_NO_SHOW"]
+  ] as const)("requires one zero-pricing terminal revision for a FREE %s order", (orderStatus, stayStatus, terminalType) => {
+    const input = base();
+    input.order.status = orderStatus;
+    input.order.stay_type = "FREE";
+    input.stay.status = stayStatus;
+    input.order.version = 2;
+    input.activeTimeline = [];
+    input.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: terminalType,
+      payload: { fromStatus: "RESERVED", toStatus: orderStatus }
+    }));
+    input.revisions.push(revision("amend_2", "2026-08-01", "2026-08-03", 0));
+    input.order.current_revision_id = "revision_2";
+
+    expect(projectOrderLifecycle(input).fulfillment.state).toBe(orderStatus);
+
+    input.revisions.pop();
+    input.order.current_revision_id = "revision_1";
+    expect(() => projectOrderLifecycle(input)).toThrow(/计价变更没有唯一计价版本/);
+  });
+
+  it("fails closed for a broken supersession chain, a mismatched typed timeline, or stale active Claims", () => {
+    const broken = base();
+    broken.order.version = 2;
+    broken.order.departure_date = "2026-08-04";
+    broken.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "EXTEND_STAY",
+      payload: { after: { stayTimeline: [
+        { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-02", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-03", inventoryUnitId: "room_a" }
+      ] } }
+    }));
+    broken.segments.push({
+      id: "segment_2", stay_id: "stay_1", sequence: 2, inventory_unit_id: "room_a",
+      arrival_date: "2026-08-01", departure_date: "2026-08-04", segment_type: "EXTEND_STAY",
+      supersedes_segment_id: "segment_missing", amendment_id: "amend_2"
+    });
+    broken.revisions.push(revision("amend_2", "2026-08-01", "2026-08-04"));
+    broken.order.current_revision_id = "revision_2";
+    broken.activeTimeline.push({ serviceDate: "2026-08-03", inventoryUnitId: "room_a" });
+    expect(() => projectOrderLifecycle(broken)).toThrow(/supersession/);
+
+    const mismatchedTimeline = structuredClone(broken);
+    mismatchedTimeline.segments[1]!.supersedes_segment_id = "segment_1";
+    (mismatchedTimeline.amendments[1]!.payload as { after: { stayTimeline: Array<{ inventoryUnitId: string }> } })
+      .after.stayTimeline[2]!.inventoryUnitId = "room_b";
+    expect(() => projectOrderLifecycle(mismatchedTimeline)).toThrow(/typed 变更时间线/);
+
+    const staleClaims = base();
+    staleClaims.activeTimeline[1]!.inventoryUnitId = "room_b";
+    expect(() => projectOrderLifecycle(staleClaims)).toThrow(/有效 Claim/);
+  });
+
+  it("fails closed when order and Stay state do not agree with typed fulfillment facts", () => {
+    const input = base();
+    input.order.status = "CHECKED_OUT";
+    input.stay.status = "COMPLETED";
+    input.activeTimeline = [];
+    expect(() => projectOrderLifecycle(input)).toThrow(/最终状态与 typed 状态变更链/);
+
+    const wrongStay = base();
+    wrongStay.stay.status = "IN_HOUSE";
+    expect(() => projectOrderLifecycle(wrongStay)).toThrow(/订单状态与住宿状态/);
+  });
+
+  it("rejects non-order amendment types even when their version chain is structurally valid", () => {
+    const input = base();
+    input.order.version = 2;
+    input.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "CREATE_MEMBER",
+      payload: {}
+    }));
+
+    expect(() => projectOrderLifecycle(input)).toThrow(/订单不可变变更记录链损坏/);
+  });
+
+  it("requires a continuous pricing revision chain whose latest ID is the order current pointer", () => {
+    const missingPointer = base();
+    missingPointer.order.current_revision_id = null;
+    expect(() => projectOrderLifecycle(missingPointer)).toThrow(/缺少当前计价版本/);
+
+    const stalePointer = base();
+    stalePointer.order.current_revision_id = "revision_missing";
+    expect(() => projectOrderLifecycle(stalePointer)).toThrow(/当前计价版本指针与最新计价版本不一致/);
+
+    const skippedRevision = base();
+    skippedRevision.revisions[0]!.revision_no = 2;
+    expect(() => projectOrderLifecycle(skippedRevision)).toThrow(/计价版本链损坏/);
+
+    const duplicateAmendment = base();
+    duplicateAmendment.revisions.push({
+      ...duplicateAmendment.revisions[0]!,
+      id: "revision_2",
+      revision_no: 2
+    });
+    duplicateAmendment.order.current_revision_id = "revision_2";
+    expect(() => projectOrderLifecycle(duplicateAmendment)).toThrow(/计价版本链损坏/);
+  });
+
+  it("requires every pricing mutation to create exactly one pricing revision", () => {
+    const missingRevision = base();
+    missingRevision.order.version = 2;
+    missingRevision.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "REPRICE_ORDER",
+      payload: { operation: "REPRICE_ORDER" }
+    }));
+    expect(() => projectOrderLifecycle(missingRevision)).toThrow(/计价变更没有唯一计价版本/);
+
+    missingRevision.revisions.push(revision("amend_2", "2026-08-01", "2026-08-03"));
+    missingRevision.order.current_revision_id = "revision_2";
+    expect(projectOrderLifecycle(missingRevision).effectiveArrangement.departureDate).toBe("2026-08-03");
+
+    const orphanRevision = base();
+    orphanRevision.revisions.push({
+      ...revision("amend_missing", "2026-08-01", "2026-08-03", 10_000, 2),
+      id: "revision_2"
+    });
+    orphanRevision.order.current_revision_id = "revision_2";
+    expect(() => projectOrderLifecycle(orphanRevision)).toThrow(/计价版本链损坏/);
+  });
+
+  it("rejects pricing revisions attached to non-pricing amendments or a mismatched effective arrangement", () => {
+    const nonPricingRevision = base();
+    nonPricingRevision.order.version = 2;
+    nonPricingRevision.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "CORRECT_ORDER_OCCUPANT",
+      payload: { operation: "CORRECT_ORDER_OCCUPANT" }
+    }));
+    nonPricingRevision.revisions.push(revision("amend_2", "2026-08-01", "2026-08-03"));
+    nonPricingRevision.order.current_revision_id = "revision_2";
+    expect(() => projectOrderLifecycle(nonPricingRevision)).toThrow(/计价版本链损坏/);
+
+    const wrongDates = base();
+    wrongDates.order.version = 2;
+    wrongDates.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "REPRICE_ORDER",
+      payload: { operation: "REPRICE_ORDER" }
+    }));
+    wrongDates.revisions.push(revision("amend_2", "2026-08-02", "2026-08-03"));
+    wrongDates.order.current_revision_id = "revision_2";
+    expect(() => projectOrderLifecycle(wrongDates)).toThrow(/与当时有效住宿安排不一致/);
+
+    const wrongCurrency = base();
+    wrongCurrency.order.version = 2;
+    wrongCurrency.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "REPRICE_ORDER",
+      payload: { operation: "REPRICE_ORDER" }
+    }));
+    wrongCurrency.revisions.push({ ...revision("amend_2", "2026-08-01", "2026-08-03"), currency: "USD" });
+    wrongCurrency.order.current_revision_id = "revision_2";
+    expect(() => projectOrderLifecycle(wrongCurrency)).toThrow(/金额或币种链损坏/);
+  });
+
+  it("requires every stay-changing amendment to create exactly one Stay segment", () => {
+    const missingSegment = base();
+    missingSegment.order.version = 2;
+    missingSegment.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "MOVE_UNIT",
+      payload: {
+        stayTimeline: [
+          { serviceDate: "2026-08-01", inventoryUnitId: "room_b" },
+          { serviceDate: "2026-08-02", inventoryUnitId: "room_b" }
+        ]
+      }
+    }));
+    missingSegment.revisions.push(revision("amend_2", "2026-08-01", "2026-08-03"));
+    missingSegment.order.current_revision_id = "revision_2";
+    expect(() => projectOrderLifecycle(missingSegment)).toThrow(/住宿变更没有唯一住宿安排版本/);
+
+    const duplicateInitial = base();
+    duplicateInitial.segments.push({
+      ...duplicateInitial.segments[0]!,
+      id: "segment_2",
+      sequence: 2
+    });
+    expect(() => projectOrderLifecycle(duplicateInitial)).toThrow(/住宿变更没有唯一住宿安排版本/);
+  });
+
+  it("rejects amendment timestamps that move backwards but includes funds recorded at the same instant", () => {
+    const backwards = base();
+    backwards.order.version = 2;
+    const correction = amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "CORRECT_ORDER_OCCUPANT",
+      payload: { operation: "CORRECT_ORDER_OCCUPANT" }
+    });
+    correction.created_at = new Date("2026-07-31T12:00:00.000Z");
+    backwards.amendments.push(correction);
+    expect(() => projectOrderLifecycle(backwards)).toThrow(/记录时间没有按 sequence 非递减/);
+
+    correction.created_at = backwards.amendments[0]!.created_at;
+    backwards.facts.push({
+      order_id: "order_1",
+      net_effect_minor: 4_000,
+      currency: "CNY",
+      created_at: backwards.amendments[0]!.created_at as Date
+    });
+    const projection = projectOrderLifecycle(backwards);
+    expect(projection.arrangementHistory[0]!.fundsSummary).toMatchObject({
+      netRecordedCollection: { currency: "CNY", minorUnits: 4_000 },
+      factCount: 1
+    });
+  });
+
+  it("replays typed status transitions in order and requires the final order state to match", () => {
+    const checkOutBeforeCheckIn = base();
+    checkOutBeforeCheckIn.order.status = "CHECKED_OUT";
+    checkOutBeforeCheckIn.stay.status = "COMPLETED";
+    checkOutBeforeCheckIn.order.version = 3;
+    checkOutBeforeCheckIn.activeTimeline = [];
+    checkOutBeforeCheckIn.amendments.push(
+      amendment({
+        id: "amend_2",
+        sequence: 2,
+        type: "CHECK_OUT",
+        payload: {
+          fromStatus: "CHECKED_IN",
+          toStatus: "CHECKED_OUT",
+          businessDate: "2026-08-03",
+          effectiveDate: "2026-08-03",
+          recordingMode: "ON_SCHEDULE"
+        }
+      }),
+      amendment({
+        id: "amend_3",
+        sequence: 3,
+        type: "CHECK_IN",
+        payload: {
+          fromStatus: "RESERVED",
+          toStatus: "CHECKED_IN",
+          businessDate: "2026-08-01",
+          effectiveDate: "2026-08-01",
+          recordingMode: "ON_SCHEDULE"
+        }
+      })
+    );
+    expect(() => projectOrderLifecycle(checkOutBeforeCheckIn)).toThrow(/typed 状态变更顺序/);
+
+    const wrongTransitionPayload = base();
+    wrongTransitionPayload.order.status = "CHECKED_IN";
+    wrongTransitionPayload.stay.status = "IN_HOUSE";
+    wrongTransitionPayload.order.version = 2;
+    wrongTransitionPayload.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "CHECK_IN",
+      payload: {
+        fromStatus: "CHECKED_IN",
+        toStatus: "CHECKED_IN",
+        businessDate: "2026-08-01",
+        effectiveDate: "2026-08-01",
+        recordingMode: "ON_SCHEDULE"
+      }
+    }));
+    expect(() => projectOrderLifecycle(wrongTransitionPayload)).toThrow(/typed 状态变更顺序/);
+
+    const finalStatusMismatch = base();
+    finalStatusMismatch.order.status = "CHECKED_IN";
+    finalStatusMismatch.stay.status = "IN_HOUSE";
+    expect(() => projectOrderLifecycle(finalStatusMismatch)).toThrow(/最终状态与 typed 状态变更链/);
+  });
+
+  it("allows occupant corrections after a terminal transition but rejects later mutable-order amendments", () => {
+    const cancelled = base();
+    cancelled.order.status = "CANCELLED";
+    cancelled.stay.status = "CANCELLED";
+    cancelled.order.version = 3;
+    cancelled.activeTimeline = [];
+    cancelled.amendments.push(
+      amendment({
+        id: "amend_2",
+        sequence: 2,
+        type: "CANCEL_ORDER",
+        payload: { fromStatus: "RESERVED", toStatus: "CANCELLED" }
+      }),
+      amendment({
+        id: "amend_3",
+        sequence: 3,
+        type: "CORRECT_ORDER_OCCUPANT",
+        payload: { operation: "CORRECT_ORDER_OCCUPANT" }
+      })
+    );
+    expect(projectOrderLifecycle(cancelled).fulfillment.state).toBe("CANCELLED");
+
+    cancelled.amendments[2] = amendment({
+      id: "amend_3",
+      sequence: 3,
+      type: "REPRICE_ORDER",
+      payload: { operation: "REPRICE_ORDER" }
+    });
+    cancelled.revisions.push(revision("amend_3", "2026-08-01", "2026-08-03", 10_000, 2));
+    cancelled.order.current_revision_id = "revision_2";
+    expect(() => projectOrderLifecycle(cancelled)).toThrow(/终态订单包含不允许/);
   });
 });

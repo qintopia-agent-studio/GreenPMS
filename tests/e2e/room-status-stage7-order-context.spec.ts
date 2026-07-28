@@ -65,10 +65,12 @@ function roomRow(page: Page, unitId: string): Locator {
   return page.locator(`[data-room-status-row="${unitId}"]`);
 }
 
-function orderContext(page: Page, orderId: string): Locator {
-  return page.locator(".room-status-order-context").filter({
-    has: page.getByRole("heading", { name: `订单 ${orderId}`, exact: true })
-  });
+function orderContext(page: Page, _orderId?: string): Locator {
+  return page.locator(".room-status-order-context:visible").last();
+}
+
+function orderDrawer(page: Page): Locator {
+  return page.getByRole("dialog", { name: "订单上下文", exact: true });
 }
 
 async function login(
@@ -123,11 +125,22 @@ async function showFixtureRange(page: Page, options: { clipped?: boolean; nights
 }
 
 async function selectOccupiedCell(page: Page, unitId: string, serviceDate: string, orderId: string): Promise<Locator> {
-  const selectedOrderResponse = orderResponse(page, orderId);
-  await roomCell(page, unitId, serviceDate).click();
-  await selectedOrderResponse;
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  const cell = roomCell(page, unitId, serviceDate);
+  await cell.focus();
+  await expect(cell).toBeFocused();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  const orderOptions = popover.locator(".room-status-quick-orders button");
+  await expect(orderOptions).toHaveCount(1);
+  await orderOptions.click();
   const context = orderContext(page, orderId);
   await expect(context).toBeVisible();
+  await expect(context.getByRole("heading", { name: "完整住宿", exact: true })).toBeVisible();
+  await expect(context).not.toContainText(orderId);
   return context;
 }
 
@@ -139,7 +152,9 @@ async function closeOrderContext(context: Locator): Promise<void> {
 test.beforeAll(async ({}, workerInfo) => {
   fixture = await prepareStage7Acceptance(e2eDatabaseUrl, {
     reset: false,
-    dayOffset: fixtureDayOffset + (workerInfo.project.name === "mobile" ? 30 : 0)
+    dayOffset: fixtureDayOffset
+      + (workerInfo.project.name === "mobile" ? 30 : 0)
+      + workerInfo.workerIndex * 60
   });
 });
 
@@ -174,7 +189,8 @@ test("whole-room cells open the exact order and adjacent same-nickname orders ne
   await expect(secondContext).toContainText("小满");
   await expect(roomCell(page, second!.roomId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
   await expect(roomCell(page, first!.roomId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
-  await expect(page.getByRole("heading", { name: `订单 ${first!.orderId}`, exact: true })).toHaveCount(0);
+  await expect(page.locator(".room-status-order-context:visible")).toHaveCount(1);
+  await expect(secondContext).not.toContainText(first!.orderId);
 });
 
 test("split-bed parent refuses to guess while each expanded bed opens its own order", async ({ page }, testInfo) => {
@@ -184,14 +200,20 @@ test("split-bed parent refuses to guess while each expanded bed opens its own or
   await showFixtureRange(page);
 
   const parentCell = roomCell(page, fixture.splitBed.roomId, fixture.dates.arrivalDate);
-  await parentCell.click();
+  await parentCell.focus();
+  await page.keyboard.press("Enter");
   await expect(parentCell).toHaveAttribute("data-bed-occupancy-ratio", "2/4");
   await expect(page.locator(".room-status-order-context")).toHaveCount(0);
   await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
-  await expect(page.getByText("该房间格汇总床位占用，不能代表一张订单。请展开房间并选择具体床位。", { exact: true })).toBeVisible();
+  const parentPopover = page.getByTestId("room-status-quick-popover");
+  await expect(parentPopover.locator(".room-status-quick-orders button")).toHaveCount(2);
+  await expect(parentPopover).toContainText("山峰");
+  await expect(parentPopover).toContainText("小满");
+  await expect(parentPopover).not.toContainText(/order_|订单 order/);
   await expect(page.getByTestId("member-search")).toHaveCount(0);
   await expect(page.getByTestId("create-order")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /报价/ })).toHaveCount(0);
+  await page.keyboard.press("Escape");
 
   const expandButton = roomRow(page, fixture.splitBed.roomId).getByRole("button", { name: /^展开.*床位$/ });
   await expandButton.click();
@@ -238,7 +260,7 @@ test("selecting either side of a move highlights one Stay across rows and a clip
     visibleOldRoomDate,
     fixture.movedStay.orderId
   );
-  await expect(contextFromOriginalRoom).toContainText(`订单 ${fixture.movedStay.orderId}`);
+  await expect(contextFromOriginalRoom.getByRole("heading", { name: "小满的住宿订单", exact: true })).toBeVisible();
   await expect(contextFromOriginalRoom).toContainText("B01");
   await expect(contextFromOriginalRoom).toContainText("B02");
   await expect(contextFromOriginalRoom).toContainText(fixture.dates.arrivalDate);
@@ -271,8 +293,8 @@ test("selecting either side of a move highlights one Stay across rows and a clip
     visibleNewRoomDate,
     fixture.movedStay.orderId
   );
-  await expect(contextFromNewRoom).toContainText(`订单 ${fixture.movedStay.orderId}`);
-  await expect(page.getByRole("heading", { name: `订单 ${fixture.movedStay.orderId}`, exact: true })).toHaveCount(1);
+  await expect(contextFromNewRoom.getByRole("heading", { name: "小满的住宿订单", exact: true })).toBeVisible();
+  await expect(page.locator(".room-status-order-context:visible")).toHaveCount(1);
   await expect(roomCell(page, fixture.movedStay.fromRoomId, visibleOldRoomDate)).toHaveClass(/is-stay-selected/);
   for (let offset = 2; offset < 4; offset += 1) {
     await expect(roomCell(page, fixture.movedStay.toRoomId, addDays(fixture.dates.arrivalDate, offset)))
@@ -305,12 +327,12 @@ test("returning after moving the selected date restores the same Stay on its lat
   await expect(page.getByRole("heading", { name: "换房", exact: true })).toBeVisible();
   await page.getByTestId("move-unit-id").selectOption(fixture.movedStay.fromRoomId);
   await page.getByTestId("move-effective-date").fill(selectedDate);
-  await page.getByRole("button", { name: "继续生成 Preview", exact: true }).click();
+  await page.getByRole("button", { name: "继续核对", exact: true }).click();
   await page.getByTestId("create-command-preview").click();
   await page.getByTestId("reason-note").fill("阶段 7R 返回房态选择回归");
   await page.getByTestId("confirm-command").click();
   const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("业务写入已提交");
+  await expect(receipt).toContainText("操作已完成");
   await page.getByRole("button", { name: "完成", exact: true }).click();
   await page.getByRole("link", { name: "返回房态", exact: true }).click();
 
@@ -323,7 +345,7 @@ test("returning after moving the selected date restores the same Stay on its lat
   await expect(roomCell(page, fixture.movedStay.fromRoomId, selectedDate)).toBeFocused();
   for (const otherOrder of fixture.adjacentSameNickname) {
     await expect(roomCell(page, otherOrder.roomId, fixture.dates.arrivalDate)).not.toHaveClass(/is-stay-selected/);
-    await expect(page.getByRole("heading", { name: `订单 ${otherOrder.orderId}`, exact: true })).toHaveCount(0);
+    await expect(restoredContext).not.toContainText(otherOrder.orderId);
   }
 });
 
@@ -341,7 +363,7 @@ test("READ order context keeps navigation but exposes no business write entry", 
     fixture.wholeRoom.orderId
   );
   await expect(context).toContainText("只读");
-  await expect(context.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
+  await expect(orderDrawer(page).getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
   await expect(context.getByRole("button", { name: "更正资料", exact: true })).toHaveCount(0);
   await expect(context.getByRole("button", {
     name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款/
@@ -505,7 +527,7 @@ test("occupant correction Preview and Confirm refresh both order context and roo
   }
 });
 
-test("an external occupant correction refreshes the open context and its non-segment amendment remains locatable", async ({ page }, testInfo) => {
+test("an external occupant correction refreshes the open context and remains visible without machine references", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 external revision coverage");
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -571,13 +593,10 @@ test("an external occupant correction refreshes the open context and its non-seg
   await expect(staleDialog).toBeHidden();
   await expect(page.getByRole("alert").filter({ hasText: "原更正表单已关闭" })).toBeVisible();
 
-  const correctionAmendment = context.locator(".room-status-order-corrections > li")
-    .filter({ hasText: "更正住宿人资料" })
+  const correctionAmendment = context.getByRole("region", { name: "资料更正记录", exact: true }).getByRole("listitem")
     .filter({ hasText: "另一位操作员核对后更正" });
-  await expect(correctionAmendment).toContainText("操作人：Demo Agent");
-  await correctionAmendment.getByRole("button", { name: "定位这次变更", exact: true }).click();
-  await expect(roomCell(page, fixture.splitBed.bedBId, fixture.dates.arrivalDate)).toBeFocused();
-  await expect(roomCell(page, fixture.splitBed.bedBId, fixture.dates.arrivalDate)).toHaveClass(/is-stay-selected/);
+  await expect(correctionAmendment).toContainText("Demo Agent");
+  await expect(correctionAmendment).toContainText("昵称：小满 → 秋实");
 });
 
 test("adaptive date columns stay fixed while desktop context collapses and large screens show more days", async ({ page }, testInfo) => {
@@ -587,12 +606,10 @@ test("adaptive date columns stay fixed while desktop context collapses and large
   await showFixtureRange(page, { nights: 14 });
 
   const drawer = page.locator("dialog.modal-drawer");
-  await expect(drawer).toBeVisible();
+  await expect(drawer).toHaveCount(0);
   await expect(page.getByTestId("date-window-mode-auto")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".room-status-date-header")).toHaveCount(10);
 
-  await drawer.getByRole("button", { name: "关闭", exact: true }).click();
-  await expect(drawer).toBeHidden();
   const expandedRange = roomStatusResponse(page);
   await page.getByTestId("date-window-mode-21").click();
   await expandedRange;
@@ -600,10 +617,6 @@ test("adaptive date columns stay fixed while desktop context collapses and large
   await expect(page.locator(".room-status-date-header")).toHaveCount(21);
   await page.getByTestId("date-window-mode-auto").click();
   await expect(page.locator(".room-status-date-header")).toHaveCount(10);
-  const reopenSelection = page.getByRole("button", { name: "打开选中对象上下文", exact: true });
-  await expect(reopenSelection).toBeVisible();
-  await reopenSelection.click();
-  await expect(drawer).toBeVisible();
 
   const trigger = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
   const widthBeforeOrder = await trigger.evaluate((element) => element.getBoundingClientRect().width);
@@ -620,7 +633,7 @@ test("adaptive date columns stay fixed while desktop context collapses and large
   expect(await trigger.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(widthBeforeOrder, 1);
 
   await closeOrderContext(context);
-  await expect(page.getByRole("button", { name: "打开订单上下文", exact: true })).toBeVisible();
+  await expect(drawer).toBeHidden();
   await page.setViewportSize({ width: 1920, height: 900 });
   await expect.poll(() => page.locator(".room-status-date-header").count()).toBeGreaterThan(10);
   const largeAutoCount = await page.locator(".room-status-date-header").count();
@@ -698,9 +711,8 @@ test("desktop drawer geometry, Escape focus, and full-order return preserve room
         });
         expect(scrollBeforeRefresh).toBeGreaterThan(0);
         const refreshedBoard = roomStatusResponse(page);
-        const refreshedOrder = orderResponse(page, fixture.wholeRoom.orderId);
         await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-        await Promise.all([refreshedBoard, refreshedOrder]);
+        await refreshedBoard;
         await expect(context).toBeVisible();
         expect(await drawerBody.evaluate((element) => element.scrollTop)).toBe(scrollBeforeRefresh);
       }
@@ -722,9 +734,9 @@ test("desktop drawer geometry, Escape focus, and full-order return preserve room
     triggerDate,
     fixture.splitBed.bedAOrderId
   );
-  await context.getByRole("button", { name: "查看完整订单", exact: true }).click();
+  await orderDrawer(page).getByRole("button", { name: "查看完整订单", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/orders/${fixture.splitBed.bedAOrderId}$`));
-  await expect(page.getByText(fixture.splitBed.bedAOrderId, { exact: true })).toBeVisible();
+  await expect(page.getByText(fixture.splitBed.bedAOrderId, { exact: true })).toHaveCount(0);
 
   const returnedBoard = roomStatusResponse(page);
   await page.getByRole("link", { name: "返回房态", exact: true }).click();
@@ -755,12 +767,13 @@ test("375px mobile occupancy opens and closes the order context, then returns fr
 
   await page.keyboard.press("Escape");
   await expect(context).toBeHidden();
+  await expect(trigger).toBeFocused();
 
   await trigger.click();
   await expect(context).toBeVisible();
-  await context.getByRole("button", { name: "查看完整订单", exact: true }).click();
+  await orderDrawer(page).getByRole("button", { name: "查看完整订单", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/orders/${fixture.wholeRoom.orderId}$`));
-  await expect(page.getByText(fixture.wholeRoom.orderId, { exact: true })).toBeVisible();
+  await expect(page.getByText(fixture.wholeRoom.orderId, { exact: true })).toHaveCount(0);
 
   const returnedBoard = roomStatusResponse(page);
   await page.getByRole("link", { name: "返回房态", exact: true }).click();
@@ -787,7 +800,7 @@ test("375px mobile split-bed summary keeps the parent neutral and opens each exa
   const context = orderContext(page, fixture.splitBed.bedAOrderId);
   await expect(context).toBeVisible();
   await expect(context).toContainText("山峰");
-  await expect(page.getByRole("heading", { name: `订单 ${fixture.splitBed.bedBOrderId}`, exact: true })).toHaveCount(0);
+  await expect(context).not.toContainText(fixture.splitBed.bedBOrderId);
 });
 
 test("320px READ mobile context exposes navigation but no correction or business action", async ({ page }, testInfo) => {
@@ -804,7 +817,7 @@ test("320px READ mobile context exposes navigation but no correction or business
   const context = orderContext(page, fixture.wholeRoom.orderId);
   await expect(context).toBeVisible();
   await expect(context).toContainText("只读");
-  await expect(context.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
+  await expect(orderDrawer(page).getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
   await expect(context.getByRole("button", { name: "更正资料", exact: true })).toHaveCount(0);
   await expect(context.getByRole("button", {
     name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款/

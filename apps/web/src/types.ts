@@ -10,7 +10,10 @@ import type {
   ReceiptDto,
   HistoricalCommandType,
   HistoricalRecoverableCommandType,
+  OrderArrangementDto,
+  OrderArrangementHistoryItemDto,
   OrderAllowedActionDto,
+  OrderEffectiveArrangementDto,
   OrderFulfillmentProjectionDto,
   OrderOccupantSnapshotDto,
   StayType
@@ -464,7 +467,10 @@ export interface OrderViewDto {
     departureDate: string;
   };
   segments: StaySegmentDto[];
+  originalArrangement: OrderArrangementDto;
+  effectiveArrangement: OrderEffectiveArrangementDto;
   fulfillment: OrderFulfillmentProjectionDto;
+  arrangementHistory: OrderArrangementHistoryItemDto[];
   amendments: AmendmentDto[];
   pricingRevisions: PricingRevisionDto[];
   coverageSet: CoverageRowDto[];

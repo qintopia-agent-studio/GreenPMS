@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
 import { buildOrderOccupantCorrectionRequest, correctionDraftMatchesOccupant, restoredOptionalCorrectionValue } from "../components/OrderOccupantCorrectionDialog";
 import {
   enabledOrderActionCodes,
+  effectiveArrangementTitle,
   fulfillmentResultLabel,
   initialRepriceTargetYuan,
+  collectionDifferencePresentation,
+  collectionFactTypeLabel,
+  collectionMethodLabel,
+  arrangementChangeLabel,
   occupantSnapshotEntries,
+  OrderLifecycleSections,
+  pricingBasisLabel,
   orderDetailBackTarget,
   orderFulfillmentNotice,
   wholeYuanAmountMinor,
@@ -106,6 +115,139 @@ describe("fulfillment result presentation", () => {
       enabled: false,
       disabledReason: "ORDER_STATE_INVALID"
     }])).toBeUndefined();
+  });
+});
+
+describe("operator-facing order lifecycle presentation", () => {
+  const money = (minorUnits: number) => ({ currency: "CNY", minorUnits });
+  const originalArrangement = {
+    arrivalDate: "2026-07-25",
+    departureDate: "2026-07-27",
+    intervals: [{ inventoryUnitId: "unit_d01", arrivalDate: "2026-07-25", departureDate: "2026-07-27" }]
+  };
+  const movedArrangement = {
+    arrivalDate: "2026-07-25",
+    departureDate: "2026-07-28",
+    intervals: [
+      { inventoryUnitId: "unit_d01", arrivalDate: "2026-07-25", departureDate: "2026-07-26" },
+      { inventoryUnitId: "unit_d02", arrivalDate: "2026-07-26", departureDate: "2026-07-28" }
+    ]
+  };
+  const lifecycle = {
+    originalArrangement,
+    effectiveArrangement: {
+      ...movedArrangement,
+      presentation: "LAST" as const,
+      businessDate: "2026-07-28"
+    },
+    fulfillment: {
+      state: "CHECKED_OUT" as const,
+      checkIn: {
+        type: "CHECK_IN" as const,
+        plannedBusinessDate: "2026-07-25",
+        recordedBusinessDate: "2026-07-25",
+        recordingMode: "ON_SCHEDULE" as const,
+        recordedAt: "2026-07-25T10:00:00.000Z",
+        actor: { subjectId: "subject_internal_check_in", displayName: "前台甲" },
+        reason: { code: "CHECK_IN_INTERNAL", note: "正常办理" }
+      },
+      checkOut: {
+        type: "CHECK_OUT" as const,
+        plannedBusinessDate: "2026-07-28",
+        recordedBusinessDate: "2026-07-28",
+        recordingMode: "ON_SCHEDULE" as const,
+        recordedAt: "2026-07-28T09:00:00.000Z",
+        actor: { subjectId: "subject_internal_check_out", displayName: "前台乙" },
+        reason: { code: "CHECK_OUT_INTERNAL", note: "按计划离店" }
+      }
+    },
+    arrangementHistory: [{
+      type: "INITIAL_BOOKING" as const,
+      before: null,
+      after: originalArrangement,
+      reason: { code: "CREATE_ORDER_INTERNAL", note: "电话预订" },
+      actor: { subjectId: "subject_internal_create", displayName: "前台甲" },
+      recordedAt: "2026-07-24T08:00:00.000Z",
+      pricingSummary: {
+        policyBaseAmount: money(20_000),
+        currentContractAmount: money(18_000),
+        differenceFromPolicy: money(-2_000)
+      },
+      fundsSummary: {
+        netRecordedCollection: money(18_000),
+        collectionDifference: money(0),
+        factCount: 1
+      }
+    }, {
+      type: "MOVE" as const,
+      before: originalArrangement,
+      after: movedArrangement,
+      reason: { code: "MOVE_UNIT_INTERNAL", note: "住客申请更换房源" },
+      actor: { subjectId: "subject_internal_move", displayName: "前台乙" },
+      recordedAt: "2026-07-26T08:00:00.000Z",
+      pricingSummary: {
+        policyBaseAmount: money(30_000),
+        currentContractAmount: money(28_000),
+        differenceFromPolicy: money(-2_000)
+      },
+      fundsSummary: {
+        netRecordedCollection: money(18_000),
+        collectionDifference: money(10_000),
+        factCount: 1
+      }
+    }]
+  } satisfies Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
+
+  it("renders the four server-projected business layers with terminal wording", () => {
+    const html = renderToStaticMarkup(createElement(OrderLifecycleSections, {
+      view: lifecycle,
+      inventoryUnits: [
+        { id: "unit_d01", code: "D01", name: "单人间" },
+        { id: "unit_d02", code: "D02", name: "标准间" }
+      ]
+    }));
+
+    expect(html).toContain("原始预订安排");
+    expect(html).toContain("最后住宿安排");
+    expect(html).toContain("入住与退房结果");
+    expect(html).toContain("住宿安排变更历史");
+    expect(html).toContain("创建预订");
+    expect(html).toContain("更换房源");
+    expect(html).toContain("D01 · 单人间");
+    expect(html).toContain("D02 · 标准间");
+    expect(html).toContain("与政策基础金额差额");
+    expect(html).toContain("待收");
+    expect(html).not.toMatch(/INITIAL_BOOKING|MOVE_UNIT_INTERNAL|subject_internal|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision/);
+  });
+
+  it("fails closed to a business placeholder instead of exposing an unknown inventory id", () => {
+    const damagedName = {
+      ...lifecycle,
+      effectiveArrangement: {
+        ...lifecycle.effectiveArrangement,
+        intervals: [{ inventoryUnitId: "unit_internal_missing", arrivalDate: "2026-07-25", departureDate: "2026-07-28" }]
+      }
+    };
+    const html = renderToStaticMarkup(createElement(OrderLifecycleSections, { view: damagedName, inventoryUnits: [] }));
+    expect(html).toContain("房源名称暂不可用");
+    expect(html).not.toContain("unit_internal_missing");
+  });
+
+  it("maps every lifecycle, amount, fact, and payment label to operator language", () => {
+    expect(["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER"].map((value) => effectiveArrangementTitle(value as Parameters<typeof effectiveArrangementTitle>[0]))).toEqual([
+      "当前住宿安排", "最后住宿安排", "取消前安排", "未到订单安排"
+    ]);
+    expect(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT"].map((value) => arrangementChangeLabel(value as Parameters<typeof arrangementChangeLabel>[0]))).toEqual([
+      "创建预订", "调整预订日期", "延长住宿", "缩短住宿", "更换房源", "提前退房"
+    ]);
+    expect(["COLLECTION", "REFUND", "REVERSAL"].map((value) => collectionFactTypeLabel(value as CollectionFactDto["fact_type"]))).toEqual(["收款", "退款", "冲销"]);
+    expect(["CASH", "BANK_TRANSFER", "CARD", "OTHER", "LEGACY_UNKNOWN"].map(collectionMethodLabel)).toEqual(["现金", "银行转账", "银行卡", "其他方式", "其他方式"]);
+    expect(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"].map((value) => pricingBasisLabel(value as Parameters<typeof pricingBasisLabel>[0]))).toEqual([
+      "政策价", "本单渠道应结金额", "人工调价", "会员权益计价", "免费入住"
+    ]);
+    expect(collectionDifferencePresentation(money(200))).toEqual({ label: "待收", amount: money(200) });
+    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "多收", amount: money(300) });
+    expect(collectionDifferencePresentation(money(0))).toEqual({ label: "已结清", amount: money(0) });
   });
 });
 

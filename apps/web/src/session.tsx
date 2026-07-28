@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from "react";
-import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, RefreshCw, Smartphone, UserRound } from "lucide-react";
+import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, UserRound } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, ApiError } from "./api";
 import type { MetaDto, PendingTokenCommand, PrincipalDto, RetainedTokenSecret } from "./types";
@@ -129,7 +129,7 @@ export function WorkspaceProvider({ principal, children }: {
     setMeta(nextMeta);
     setPropertyIdState((current) => {
       if (current && nextMeta.properties.some((property) => property.id === current)) return current;
-      const saved = localStorage.getItem("qintopia.propertyId");
+      const saved = storedLocalValue("qintopia.propertyId");
       if (saved && nextMeta.properties.some((property) => property.id === saved)) return saved;
       return nextMeta.properties[0]?.id ?? "";
     });
@@ -146,7 +146,7 @@ export function WorkspaceProvider({ principal, children }: {
   }
 
   function setPropertyId(nextPropertyId: string) {
-    localStorage.setItem("qintopia.propertyId", nextPropertyId);
+    persistLocalValue("qintopia.propertyId", nextPropertyId);
     setPropertyIdState(nextPropertyId);
   }
 
@@ -178,13 +178,69 @@ const navigation = [
   { to: "/today", label: "移动履约", icon: Smartphone, end: false }
 ] as const;
 
-function Navigation({ mobile = false }: { mobile?: boolean }) {
+const sidebarStoragePrefix = "qintopia:pms:sidebar-collapsed:v1";
+
+export function sidebarStorageKey(subjectId: string): string {
+  return `${sidebarStoragePrefix}:${encodeURIComponent(subjectId)}`;
+}
+
+export function availableLocalStorage(owner: { readonly localStorage: Storage } | undefined): Storage | undefined {
+  if (!owner) return undefined;
+  try {
+    return owner.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function storedLocalValue(key: string): string | null {
+  try {
+    return availableLocalStorage(typeof window === "undefined" ? undefined : window)?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function persistLocalValue(key: string, value: string): void {
+  try {
+    availableLocalStorage(typeof window === "undefined" ? undefined : window)?.setItem(key, value);
+  } catch {
+    // The workspace remains usable when browser storage is unavailable.
+  }
+}
+
+export function storedSidebarCollapsed(storage: Pick<Storage, "getItem"> | undefined, subjectId: string): boolean {
+  if (!storage) return false;
+  try {
+    return storage.getItem(sidebarStorageKey(subjectId)) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function persistSidebarCollapsed(storage: Pick<Storage, "setItem"> | undefined, subjectId: string, collapsed: boolean): void {
+  if (!storage) return;
+  try {
+    storage.setItem(sidebarStorageKey(subjectId), String(collapsed));
+  } catch {
+    // The navigation remains usable when browser storage is unavailable.
+  }
+}
+
+function Navigation({ mobile = false, collapsed = false }: { mobile?: boolean; collapsed?: boolean }) {
   return (
     <nav className={mobile ? "mobile-navigation" : "primary-navigation"} aria-label={mobile ? "移动主导航" : "主导航"}>
       {navigation.map((item) => {
         const Icon = item.icon;
         return (
-          <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => isActive ? "nav-link active" : "nav-link"}>
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={({ isActive }) => isActive ? "nav-link active" : "nav-link"}
+            title={!mobile && collapsed ? item.label : undefined}
+            aria-label={!mobile && collapsed ? item.label : undefined}
+          >
             <Icon aria-hidden="true" size={mobile ? 20 : 18} />
             <span>{item.label}</span>
           </NavLink>
@@ -199,6 +255,10 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
   const property = meta.properties.find((item) => item.id === propertyId);
   const [logoutFailure, setLogoutFailure] = useState<{ error: unknown; sessionState: "ACTIVE" | "UNKNOWN" }>();
   const [loggingOut, setLoggingOut] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => storedSidebarCollapsed(
+    availableLocalStorage(typeof window === "undefined" ? undefined : window),
+    principal.subjectId
+  ));
   const logoutErrorRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -228,18 +288,39 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
     }
   }
 
+  function toggleSidebar() {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      persistSidebarCollapsed(availableLocalStorage(typeof window === "undefined" ? undefined : window), principal.subjectId, next);
+      return next;
+    });
+  }
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${sidebarCollapsed ? " sidebar-is-collapsed" : ""}`}>
       <a className="skip-link" href="#main-content">跳至主要内容</a>
       <aside className="sidebar">
-        <div className="sidebar-brand">
-          <span className="brand-word">QinTopia</span>
-          <span>PMS</span>
+        <div className="sidebar-brand-row">
+          <div className="sidebar-brand" aria-label="QinTopia PMS">
+            <span className="brand-word"><span className="sidebar-brand-full">QinTopia</span><span className="sidebar-brand-compact" aria-hidden="true">Q</span></span>
+            <span className="sidebar-brand-product">PMS</span>
+          </div>
+          <button
+            className="icon-button sidebar-toggle"
+            type="button"
+            onClick={toggleSidebar}
+            aria-label={sidebarCollapsed ? "展开左侧导航" : "收起左侧导航"}
+            title={sidebarCollapsed ? "展开左侧导航" : "收起左侧导航"}
+            aria-expanded={!sidebarCollapsed}
+            data-testid="sidebar-toggle"
+          >
+            {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" size={18} /> : <PanelLeftClose aria-hidden="true" size={18} />}
+          </button>
         </div>
-        <Navigation />
+        <Navigation collapsed={sidebarCollapsed} />
         <div className="sidebar-user">
           <UserRound aria-hidden="true" size={18} />
-          <div><strong>{principal.displayName}</strong><span>{principal.propertyAccess[propertyId] ?? "READ"}</span></div>
+          <div><strong>{principal.displayName}</strong><span>{principal.propertyAccess[propertyId] === "WRITE" ? "可写" : "只读"}</span></div>
           <button className="icon-button" type="button" onClick={() => void logout()} disabled={loggingOut} aria-label="退出登录" title="退出登录"><LogOut aria-hidden="true" size={18} /></button>
         </div>
       </aside>

@@ -81,6 +81,8 @@ export interface RoomStatusOrderIdentity {
   stayId: string;
   intervalId: string;
   unitId: string;
+  intervalStartDate: string;
+  intervalEndDate: string;
   arrivalDate: string;
   departureDate: string;
 }
@@ -123,8 +125,10 @@ export function roomStatusOrderIdentityForInterval(interval: RoomStatusIntervalD
     stayId,
     intervalId: interval.id,
     unitId: interval.actualInventoryUnitId,
-    arrivalDate: interval.startDate,
-    departureDate: interval.endDate
+    intervalStartDate: interval.startDate,
+    intervalEndDate: interval.endDate,
+    arrivalDate: interval.sourceStartDate,
+    departureDate: interval.sourceEndDate
   } : null;
 }
 
@@ -141,6 +145,59 @@ export function roomStatusOrderIdentityForDate(
   )).flatMap((interval) => roomStatusOrderIdentityForInterval(interval) ?? []);
   const identities = new Set(matches.map((match) => `${match.orderId}:${match.stayId}`));
   return identities.size === 1 ? matches[0]! : null;
+}
+
+export interface RoomStatusOrderOption {
+  identity: RoomStatusOrderIdentity;
+  label: string;
+}
+
+export type RoomStatusOrderOptionsResult =
+  | { kind: "READY"; orders: RoomStatusOrderOption[] }
+  | { kind: "INVALID_REFERENCE" };
+
+export function roomStatusOrderOptionsForDate(
+  unit: RoomStatusUnitDto,
+  serviceDate: string
+): RoomStatusOrderOptionsResult {
+  const candidates = unit.kind === "ROOM" && unit.salesMode === "BED_SPLIT"
+    ? [unit, ...unit.children]
+    : [unit];
+  const intervals = candidates.flatMap((candidate) => candidate.intervals)
+    .filter((interval) => interval.startDate <= serviceDate
+      && serviceDate < interval.endDate
+      && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+      && (interval.status === "RESERVED" || interval.status === "IN_HOUSE"));
+  const options: RoomStatusOrderOption[] = [];
+  for (const interval of intervals) {
+    const identity = roomStatusOrderIdentityForInterval(interval);
+    if (!identity) return { kind: "INVALID_REFERENCE" };
+    const occupantLabel = interval.primaryOccupantLabel?.trim()
+      || interval.occupants.find((occupant) => occupant.nickname?.trim())?.nickname?.trim()
+      || "住宿订单";
+    options.push({ identity, label: occupantLabel });
+  }
+  const unique = new Map<string, RoomStatusOrderOption>();
+  const stayByOrder = new Map<string, string>();
+  const orderByStay = new Map<string, string>();
+  for (const option of options) {
+    const { orderId, stayId } = option.identity;
+    if ((stayByOrder.has(orderId) && stayByOrder.get(orderId) !== stayId)
+      || (orderByStay.has(stayId) && orderByStay.get(stayId) !== orderId)) {
+      return { kind: "INVALID_REFERENCE" };
+    }
+    stayByOrder.set(orderId, stayId);
+    orderByStay.set(stayId, orderId);
+    const key = JSON.stringify([option.identity.orderId, option.identity.stayId]);
+    const existing = unique.get(key);
+    if (existing && (existing.identity.unitId !== option.identity.unitId
+      || existing.identity.arrivalDate !== option.identity.arrivalDate
+      || existing.identity.departureDate !== option.identity.departureDate)) {
+      return { kind: "INVALID_REFERENCE" };
+    }
+    if (!existing) unique.set(key, option);
+  }
+  return { kind: "READY", orders: [...unique.values()] };
 }
 
 export function createRoomStatusOrderReturnState(
@@ -208,8 +265,8 @@ export function resolveRoomStatusOrderReturnTarget(
       match.identity.orderId,
       match.identity.stayId,
       match.identity.unitId,
-      match.identity.arrivalDate,
-      match.identity.departureDate
+      match.identity.intervalStartDate,
+      match.identity.intervalEndDate
     ]);
     const placement = matchesByPlacement.get(key) ?? [];
     placement.push(match);
@@ -221,12 +278,12 @@ export function resolveRoomStatusOrderReturnTarget(
     const uniqueIntervals = new Map(canonicalMatches.map((match) => [match.identity.intervalId, match.identity]));
     return [...uniqueIntervals.values()];
   }).sort((left, right) => (
-    left.arrivalDate.localeCompare(right.arrivalDate)
-    || left.departureDate.localeCompare(right.departureDate)
+    left.intervalStartDate.localeCompare(right.intervalStartDate)
+    || left.intervalEndDate.localeCompare(right.intervalEndDate)
     || left.unitId.localeCompare(right.unitId)
   ));
   const triggerMatches = uniqueMatches.filter((identity) => (
-    identity.arrivalDate <= target.triggerDate && target.triggerDate < identity.departureDate
+    identity.intervalStartDate <= target.triggerDate && target.triggerDate < identity.intervalEndDate
   ));
   if (triggerMatches.length === 0) return { kind: "NOT_FOUND" };
   if (triggerMatches.length > 1) return { kind: "AMBIGUOUS" };
