@@ -156,6 +156,12 @@ export type RoomStatusOrderOptionsResult =
   | { kind: "READY"; orders: RoomStatusOrderOption[] }
   | { kind: "INVALID_REFERENCE" };
 
+export function roomStatusUniqueOrderStayId(options: RoomStatusOrderOptionsResult): string | null {
+  return options.kind === "READY" && options.orders.length === 1
+    ? options.orders[0]!.identity.stayId
+    : null;
+}
+
 export function roomStatusOrderOptionsForDate(
   unit: RoomStatusUnitDto,
   serviceDate: string

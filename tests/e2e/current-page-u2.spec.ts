@@ -94,6 +94,21 @@ async function openWholeRoomPopover(page: Page): Promise<{ trigger: Locator; pop
   return { trigger, popover };
 }
 
+async function dragRoomStatusRange(page: Page, unitId: string, startDate: string, endDate: string): Promise<void> {
+  const start = roomCell(page, unitId, startDate);
+  const end = roomCell(page, unitId, endDate);
+  await start.scrollIntoViewIfNeeded();
+  await end.scrollIntoViewIfNeeded();
+  const startBox = await start.boundingBox();
+  const endBox = await end.boundingBox();
+  expect(startBox).not.toBeNull();
+  expect(endBox).not.toBeNull();
+  await page.mouse.move(startBox!.x + startBox!.width / 2, startBox!.y + startBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(endBox!.x + endBox!.width / 2, endBox!.y + endBox!.height / 2, { steps: 8 });
+  await page.mouse.up();
+}
+
 test.beforeAll(async ({}, workerInfo) => {
   fixture = await prepareU2Acceptance(e2eDatabaseUrl, {
     reset: false,
@@ -259,6 +274,104 @@ test("U2 desktop parent room lists each exact order and an outside click keeps t
   await expect(dateMode).toBeFocused();
 });
 
+test("U2 replaces a stale drag range with the clicked cell or exact Stay", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 mutually-exclusive selection coverage");
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await login(page);
+  await showRange(page);
+  await page.getByTestId("date-window-mode-21").click();
+  await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
+
+  const emptyRoomId = fixture.stage6.emptyCreationRoomId;
+  const emptyTargetDate = addDays(fixture.dates.arrivalDate, 9);
+  const staleStartDate = addDays(fixture.dates.arrivalDate, 10);
+  const staleEndDate = addDays(staleStartDate, 1);
+  const staleStart = roomCell(page, emptyRoomId, staleStartDate);
+  const staleEnd = roomCell(page, emptyRoomId, staleEndDate);
+  const selectionDrawer = page.locator("dialog.room-status-write-drawer");
+
+  await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
+  await expect(selectionDrawer).toBeVisible();
+  await selectionDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(staleStart).toHaveClass(/is-selected/);
+  await expect(staleEnd).toHaveClass(/is-selected/);
+
+  const emptyTarget = roomCell(page, emptyRoomId, emptyTargetDate);
+  await emptyTarget.click();
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(staleStart).not.toHaveClass(/is-selected/);
+  await expect(staleEnd).not.toHaveClass(/is-selected/);
+  await expect(emptyTarget).toHaveClass(/is-selected/);
+  await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
+  await expect(emptyTarget).toHaveClass(/is-selected/);
+
+  await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
+  await expect(selectionDrawer).toBeVisible();
+  await selectionDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await refreshCurrentRange(page);
+  const uniqueCell = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
+  await uniqueCell.focus();
+  await page.keyboard.press("Enter");
+  await expect(popover).toBeVisible();
+  await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(1);
+  await expect(staleStart).not.toHaveClass(/is-selected/);
+  await expect(staleEnd).not.toHaveClass(/is-selected/);
+  for (let dayOffset = 0; dayOffset < 3; dayOffset += 1) {
+    await expect(roomCell(page, fixture.wholeRoom.roomId, addDays(fixture.dates.arrivalDate, dayOffset)))
+      .toHaveClass(/is-stay-selected/);
+  }
+  const wholeRoomOrder = orderResponse(page, fixture.wholeRoom.orderId);
+  await popover.locator(".room-status-quick-orders button").click();
+  await wholeRoomOrder;
+  const uniqueOrderDrawer = page.locator("dialog.room-status-view-drawer");
+  await expect(uniqueOrderDrawer).toBeVisible();
+  await expect(staleStart).not.toHaveClass(/is-selected/);
+  await expect(staleEnd).not.toHaveClass(/is-selected/);
+  for (let dayOffset = 0; dayOffset < 3; dayOffset += 1) {
+    await expect(roomCell(page, fixture.wholeRoom.roomId, addDays(fixture.dates.arrivalDate, dayOffset)))
+      .toHaveClass(/is-stay-selected/);
+  }
+  await uniqueOrderDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(uniqueOrderDrawer).toBeHidden();
+  await expect(roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate)).toHaveClass(/is-selected/);
+  await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(1);
+  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
+
+  await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
+  await expect(selectionDrawer).toBeVisible();
+  await selectionDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await refreshCurrentRange(page);
+  const parent = roomCell(page, fixture.splitBed.roomId, fixture.dates.arrivalDate);
+  await parent.focus();
+  await page.keyboard.press("Enter");
+  await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(2);
+  await expect(staleStart).not.toHaveClass(/is-selected/);
+  await expect(staleEnd).not.toHaveClass(/is-selected/);
+  await expect(parent).toHaveClass(/is-selected/);
+  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
+
+  const selectedOrder = orderResponse(page, fixture.splitBed.bedAOrderId);
+  await popover.getByRole("button", { name: /山峰/ }).click();
+  await selectedOrder;
+  const drawer = page.locator("dialog.room-status-view-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(page.getByRole("button", { name: /收起1栋 101.*床位/ })).toHaveAttribute("aria-expanded", "true");
+  for (let dayOffset = 0; dayOffset < 5; dayOffset += 1) {
+    await expect(roomCell(page, fixture.splitBed.bedAId, addDays(fixture.dates.arrivalDate, dayOffset)))
+      .toHaveClass(/is-stay-selected/);
+  }
+  await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(drawer).toBeHidden();
+  await expect(staleStart).not.toHaveClass(/is-selected/);
+  await expect(staleEnd).not.toHaveClass(/is-selected/);
+  await expect(parent).toHaveClass(/is-selected/);
+  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
+  await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(1);
+});
+
 test("U2 desktop write drawer is modal and restores its cell, selection, focus, and scroll snapshot", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop-only U2 write-drawer coverage");
   await page.setViewportSize({ width: 1280, height: 720 });
@@ -310,7 +423,7 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(drawer).toBeHidden();
   await expect(target).toBeFocused();
-  await expect(target).not.toHaveClass(/is-selected/);
+  await expect(target).toHaveClass(/is-selected/);
   await expect.poll(() => page.evaluate(() => {
     const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
     return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
@@ -326,7 +439,7 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   await maintenanceDrawer.getByRole("button", { name: "取消", exact: true }).click();
   await expect(maintenanceDrawer).toBeHidden();
   await expect(target).toBeFocused();
-  await expect(target).not.toHaveClass(/is-selected/);
+  await expect(target).toHaveClass(/is-selected/);
   await expect.poll(() => page.evaluate(() => {
     const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
     return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };

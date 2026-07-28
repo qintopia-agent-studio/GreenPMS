@@ -63,6 +63,7 @@ import {
   roomStatusOrderIdentityForDate,
   roomStatusOrderIdentityForInterval,
   roomStatusOrderOptionsForDate,
+  roomStatusUniqueOrderStayId,
   roomStatusUnitLabel,
   RoomStatusContext,
   RoomStatusGrid,
@@ -1620,6 +1621,8 @@ export function InventoryPage() {
     boardRef.current = undefined;
     setBoardQueryKey(undefined);
     boardQueryKeyRef.current = undefined;
+    setQuickPopoverTarget(undefined);
+    roomStatusInteractionSnapshotRef.current = undefined;
     setSelectedUnitId(undefined);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
@@ -1922,6 +1925,7 @@ export function InventoryPage() {
   const quickPopoverOrders = quickPopoverUnit && quickPopoverTarget
     ? roomStatusOrderOptionsForDate(quickPopoverUnit, quickPopoverTarget.serviceDate)
     : { kind: "READY" as const, orders: [] };
+  const quickPopoverPreviewStayId = roomStatusUniqueOrderStayId(quickPopoverOrders);
   const selectedSelectionDays = selectionDays(selectedUnit, viewState.selection);
   const relatedIntervals = useMemo(() => {
     if (!selectedUnit) return [];
@@ -1950,6 +1954,8 @@ export function InventoryPage() {
     if (!quickPopoverTarget) return;
     if (quickPopoverTarget.anchor.isConnected && quickPopoverUnit && quickPopoverDay) return;
     setQuickPopoverTarget(undefined);
+    roomStatusInteractionSnapshotRef.current = undefined;
+    dispatchView({ type: "SET_SELECTION", selection: null });
     if (renderedBoard) setReturnNotice("原房态格已不在当前页面，快捷操作已关闭。请重新选择房态格。");
   }, [quickPopoverDay, quickPopoverTarget, quickPopoverUnit, renderedBoard]);
 
@@ -2227,6 +2233,8 @@ export function InventoryPage() {
       setSelectedOrderView(undefined);
       setSelectedCorrectionOccupantId(undefined);
       setOrderContextOpen(false);
+      roomStatusInteractionSnapshotRef.current = undefined;
+      dispatchView({ type: "SET_SELECTION", selection: null });
       setReturnNotice("原先选中的住宿已不在最新房态投影中，订单上下文已安全关闭。请按最新房态重新选择。");
     };
     void findMovedStay().catch((error: unknown) => {
@@ -2382,14 +2390,17 @@ export function InventoryPage() {
     });
   }
 
-  function captureRoomStatusInteraction(anchor: HTMLElement) {
+  function captureRoomStatusInteraction(
+    anchor: HTMLElement,
+    selection: RoomStatusSelection | null = viewState.selection
+  ) {
     const cell = anchor.closest<HTMLElement>("[data-room-status-cell='true']");
     const unitId = cell?.dataset.unitId;
     const serviceDate = cell?.dataset.serviceDate;
     const grid = anchor.closest<HTMLElement>(".room-status-grid-scroll");
     roomStatusInteractionSnapshotRef.current = {
       anchor,
-      selection: viewState.selection ? { ...viewState.selection } : null,
+      selection: selection ? { ...selection } : null,
       focusedCell: unitId && serviceDate
         ? { unitId, serviceDate }
         : viewState.focusedCell ? { ...viewState.focusedCell } : null,
@@ -2447,6 +2458,10 @@ export function InventoryPage() {
     setQuoteTarget(undefined);
     setOrderContextOpen(true);
     setDesktopContextCollapsed(false);
+    const parentRoomId = meta.inventoryUnits.find((unit) => unit.id === identity.unitId)?.parent_room_id;
+    if (parentRoomId && !viewState.expandedRoomIds.includes(parentRoomId)) {
+      dispatchView({ type: "TOGGLE_ROOM", roomId: parentRoomId });
+    }
     const requestedTriggerDate = serviceDate && identity.arrivalDate <= serviceDate && serviceDate < identity.departureDate
       ? serviceDate
       : identity.arrivalDate;
@@ -2481,14 +2496,34 @@ export function InventoryPage() {
       setActionError(new Error("当前房态格缺少营业日期，未打开快捷操作。请刷新后重试。"));
       return;
     }
-    captureRoomStatusInteraction(anchor);
+    const triggerSelection = selectionFromCells(unit.id, serviceDate, serviceDate);
+    captureRoomStatusInteraction(anchor, triggerSelection);
+    dispatchView({ type: "SET_SELECTION", selection: triggerSelection });
+    setSelectedUnitId(unit.id);
+    setSelectedDayDate(serviceDate);
+    setSelectedIntervalId(undefined);
+    setQuoteTarget(undefined);
+    if (!orderContextOpen) {
+      setSelectedOrderIdentity(undefined);
+      setSelectedOrderView(undefined);
+    }
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor });
   }
 
   function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) {
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
-    captureRoomStatusInteraction(anchor);
+    const triggerSelection = selectionFromCells(unit.id, serviceDate, serviceDate);
+    captureRoomStatusInteraction(anchor, triggerSelection);
+    dispatchView({ type: "SET_SELECTION", selection: triggerSelection });
+    setSelectedUnitId(unit.id);
+    setSelectedDayDate(serviceDate);
+    setSelectedIntervalId(interval.id);
+    setQuoteTarget(undefined);
+    if (!orderContextOpen) {
+      setSelectedOrderIdentity(undefined);
+      setSelectedOrderView(undefined);
+    }
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, intervalId: interval.id });
   }
 
@@ -2591,7 +2626,10 @@ export function InventoryPage() {
 
   function reopenDesktopContext() {
     setDesktopContextCollapsed(false);
-    if (selectedOrderIdentity) setOrderContextOpen(true);
+    if (selectedOrderIdentity) {
+      dispatchView({ type: "SET_SELECTION", selection: null });
+      setOrderContextOpen(true);
+    }
   }
 
   async function locateOrderRange(target: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) {
@@ -2994,7 +3032,11 @@ export function InventoryPage() {
                 expandedRoomIds={viewState.expandedRoomIds}
                 focusedCell={viewState.focusedCell}
                 selection={viewState.selection}
-                selectedStayId={selectedOrderIdentity?.stayId ?? null}
+                selectedStayId={quickPopoverTarget
+                  ? quickPopoverPreviewStayId
+                  : orderContextOpen && !desktopContextCollapsed
+                    ? selectedOrderIdentity?.stayId ?? null
+                    : null}
                 dateWindowStart={viewState.dateWindowStart}
                 dateWindowSize={viewState.dateWindowSize}
                 dateWindowMode={viewState.dateWindowMode}
@@ -3067,7 +3109,12 @@ export function InventoryPage() {
               orderOptions={quickPopoverOrders}
               onClose={(reason) => {
                 setQuickPopoverTarget(undefined);
-                if (reason === "DISMISS") roomStatusInteractionSnapshotRef.current = undefined;
+                if (reason === "DISMISS") {
+                  roomStatusInteractionSnapshotRef.current = undefined;
+                  if (selectedOrderIdentity && orderContextOpen) {
+                    dispatchView({ type: "SET_SELECTION", selection: null });
+                  }
+                }
               }}
               onCreate={() => {
                 const selection = selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);

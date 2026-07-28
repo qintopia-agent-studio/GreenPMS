@@ -19,6 +19,7 @@ import {
   roomStatusCellBelongsToStay,
   roomStatusOrderIdentityForDate,
   roomStatusOrderOptionsForDate,
+  roomStatusUniqueOrderStayId,
   roomStatusOrderIdentityForReturnTarget,
   roomStatusViewReducer,
   selectionFromCells,
@@ -318,6 +319,29 @@ describe("RoomStatus quick order options", () => {
 });
 
 describe("RoomStatus stable order selection", () => {
+  it("previews a Stay only when a quick-popover cell resolves to exactly one order", () => {
+    const exact = roomStatusOrderOptionsForDate(unit({
+      salesMode: "WHOLE_ROOM",
+      intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101" })]
+    }), "2026-07-20");
+    expect(roomStatusUniqueOrderStayId(exact)).toBe("stay_bed");
+
+    expect(exact.kind).toBe("READY");
+    if (exact.kind !== "READY") throw new Error("expected an exact order option");
+    expect(roomStatusUniqueOrderStayId({
+      kind: "READY",
+      orders: [
+        exact.orders[0]!,
+        {
+          ...exact.orders[0]!,
+          identity: { ...exact.orders[0]!.identity, orderId: "order_b", stayId: "stay_b" }
+        }
+      ]
+    })).toBeNull();
+    expect(roomStatusUniqueOrderStayId({ kind: "READY", orders: [] })).toBeNull();
+    expect(roomStatusUniqueOrderStayId({ kind: "INVALID_REFERENCE" })).toBeNull();
+  });
+
   it("resolves only concrete room or bed rows and highlights every matching Stay segment", () => {
     const wholeRoom = unit({
       salesMode: "WHOLE_ROOM",
@@ -698,6 +722,27 @@ describe("RoomStatus selection", () => {
     expect(selectionFromInputs("unit_101", "2026-07-20", "2026-07-20")).toBeNull();
     expect(selectionFromInputs("unit_101", "2026-02-30", "2026-03-02")).toBeNull();
     expect(selectionFromInputs("unit_101", "2026-07-20", "2026-07-22")).toMatchObject({ focusDate: "2026-07-21" });
+  });
+
+  it("replaces an existing range when a different cell is inspected without extension", () => {
+    const state = createRoomStatusViewState({
+      focusedCell: { unitId: "room_a", serviceDate: "2026-07-20" },
+      selection: selectionFromCells("room_a", "2026-07-20", "2026-07-22")
+    });
+    const next = roomStatusViewReducer(state, {
+      type: "SELECT_CELL",
+      unitId: "room_b",
+      serviceDate: "2026-07-25",
+      extend: false
+    });
+    expect(next.selection).toEqual({
+      unitId: "room_b",
+      anchorDate: "2026-07-25",
+      focusDate: "2026-07-25",
+      arrivalDate: "2026-07-25",
+      departureDate: "2026-07-26"
+    });
+    expect(next.focusedCell).toEqual({ unitId: "room_b", serviceDate: "2026-07-25" });
   });
 
   it("moves a roving focus and extends from the original anchor", () => {

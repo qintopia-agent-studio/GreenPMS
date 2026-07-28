@@ -4,6 +4,7 @@ type: 'feature'
 created: '2026-07-28'
 status: 'awaiting_user_acceptance'
 baseline_commit: 'e4e777a'
+rework_baseline_commit: '2b2b9d3'
 context:
   - '待开发项/QinTopia-PMS-分步开发与人工验收计划.md'
   - '待开发项/房态与订单运营流程分步开发计划.md'
@@ -90,7 +91,37 @@ U2 门禁通过后启动独立实例并等待用户明确回复 `U2 通过`。�
 
 </frozen-after-approval>
 
+## Acceptance Rework
+
+- [x] 点击新的普通房态格时清除旧拖选区间，只保留新格快捷浮层的当前上下文。
+- [x] 从单笔住宿格或父房订单列表选择准确订单时清除旧拖选区间，只高亮该订单在当前窗口内的完整 Stay。
+- [x] 真实浏览器回归覆盖空格、单笔住宿格和父房多订单格，证明旧选区不会残留或在关闭上下文后恢复。
+- [x] 四人间换二人间且价格产品不同却未在当前页面清楚呈现重价的问题只登记到阶段 11；U2 不修改 `MOVE_UNIT`、计价、库存或会员权益规则。
+
+2026-07-28 人工验收发现：拖选多日区间后点击其他普通格或订单格，旧选区仍与新上下文同时高亮。U2 退回 `in_progress`，只返修选择状态互斥及其回归；其他已通过验收项保持有效。
+
+2026-07-28 返工完成：新格单选、唯一订单完整 Stay、父房多订单后准确 Stay 三种上下文已互斥；失效锚点、物业/账号切换、投影删除住宿和抽屉重开不会恢复过期选区。双重只读审查完成，真实补丁问题均已修复；换房重价可见性只登记到阶段 11。
+
+## Rework Gate Results
+
+- TypeScript、production build 与 `git diff --check` 通过；Unit `410/410` 通过。
+- U2 桌面/手机完整 E2E：`10 passed / 10 expected skipped / 0 failed`。
+- 阶段 7 选区与抽屉回归：`4/4` 通过；整房、父房多订单、跨房 Stay 和完整订单返回均保持原语义。
+- 原 U2 PostgreSQL Integration `183/183`、Contract/OpenAPI `58/58` 不受本次纯前端状态返工影响。
+- 独立验收库 `qintopia_u2_acceptance` 未重置；验收实例继续使用 `http://127.0.0.1:4231/`。
+
 ## Suggested Review Order
+
+**返工入口与状态互斥**
+
+- 新格替换旧区间，唯一订单与抽屉上下文只保留一个高亮来源。
+  [`InventoryPage.tsx:2393`](../apps/web/src/pages/InventoryPage.tsx#L2393)
+
+- 唯一、空白、多订单和损坏引用保持严格分流。
+  [`roomStatusState.ts:159`](../apps/web/src/room-status/roomStatusState.ts#L159)
+
+- 真实浏览器覆盖空格、单笔订单、父房多订单及关闭恢复。
+  [`current-page-u2.spec.ts:277`](../tests/e2e/current-page-u2.spec.ts#L277)
 
 **权威投影与失败关闭**
 
