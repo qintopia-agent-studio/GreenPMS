@@ -69,7 +69,7 @@
 MVP 中累计周期是一个 Order 的同一 Stay 内 `[originalArrival, finalDeparture)`：
 
 - `EXTEND_STAY` 从原始入住日累计到新退房日，不只计算新增晚数。
-- `SHORTEN_STAY` 按缩短后的完整区间重新选档，不保留缩短前档位。
+- `RESCHEDULE_STAY` 按调整后的完整区间重新选档，不保留调整前档位。
 - 跨月不会打断累计。
 - 同一 Stay 内换房分段若前段 `departureDate` 等于后段 `arrivalDate`，日期无缝且累计不断档。
 - 已 `CHECK_OUT` 的订单不会与另一个订单自动合并，也不新增 `continuationOfOrderId`。至少空出一个服务日后重新入住，是新的 Order/Stay 与新的计价周期，从新入住日重新计算。

@@ -216,7 +216,7 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("D01 · 单人间");
     expect(html).toContain("D02 · 标准间");
     expect(html).toContain("与政策基础金额差额");
-    expect(html).toContain("待收");
+    expect(html).toContain("待补收参考");
     expect(html).not.toMatch(/INITIAL_BOOKING|MOVE_UNIT_INTERNAL|subject_internal|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision/);
   });
 
@@ -245,9 +245,9 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"].map((value) => pricingBasisLabel(value as Parameters<typeof pricingBasisLabel>[0]))).toEqual([
       "政策价", "本单渠道应结金额", "人工调价", "会员权益计价", "免费入住"
     ]);
-    expect(collectionDifferencePresentation(money(200))).toEqual({ label: "待收", amount: money(200) });
-    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "多收", amount: money(300) });
-    expect(collectionDifferencePresentation(money(0))).toEqual({ label: "已结清", amount: money(0) });
+    expect(collectionDifferencePresentation(money(200))).toEqual({ label: "待补收参考", amount: money(200) });
+    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "多收 / 退款参考", amount: money(300) });
+    expect(collectionDifferencePresentation(money(0))).toEqual({ label: "当前记录无差额", amount: money(0) });
   });
 });
 

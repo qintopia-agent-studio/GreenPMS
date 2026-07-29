@@ -4,7 +4,7 @@ import schema from "../../docs/pricing-facts/pricing-case.schema.json";
 const plans = ["TRANSIENT", "WEEKLY", "MONTHLY", "CUSTOM", "FIXED_TERM", "ROLLING", "FREE"] as const;
 const distributedTags: PricingFactScenarioTag[][] = [
   ["BASELINE", "BOUNDARY"],
-  ["SHORTEN", "BOUNDARY"],
+  ["RESCHEDULE", "BOUNDARY"],
   ["EXTEND"],
   ["MOVE"],
   ["CROSS_MONTH"],
@@ -14,7 +14,7 @@ const distributedTags: PricingFactScenarioTag[][] = [
 
 function pricingCase(index: number): PricingFactCase {
   const amendmentByTag = {
-    SHORTEN: "SHORTEN_STAY",
+    RESCHEDULE: "RESCHEDULE_STAY",
     EXTEND: "EXTEND_STAY",
     MOVE: "MOVE_UNIT"
   } as const;
@@ -140,7 +140,7 @@ describe("real pricing fact completion gate", () => {
     expect(() => assertPricingFactCoverage(cosmeticBoundaryEvidence)).toThrow(expect.objectContaining({ code: "PRICING_FACTS_COVERAGE_INCOMPLETE" }));
 
     const missingAmendmentInput = completeCases();
-    missingAmendmentInput.find((entry) => entry.scenarioTags.includes("SHORTEN"))!.amendments = [];
+    missingAmendmentInput.find((entry) => entry.scenarioTags.includes("RESCHEDULE"))!.amendments = [];
     expect(() => assertPricingFactCoverage(missingAmendmentInput)).toThrow(expect.objectContaining({ code: "PRICING_FACTS_COVERAGE_INCOMPLETE" }));
   });
 

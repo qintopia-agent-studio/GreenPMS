@@ -9,13 +9,14 @@ import {
 
 describe("U1 command shell state", () => {
   it("freezes the approved command whitelist", () => {
-    expect(u1CommandTypes).toHaveLength(13);
+    expect(u1CommandTypes).toHaveLength(15);
     for (const commandType of u1CommandTypes) {
       expect(isU1CommandType(commandType)).toBe(true);
       expect(commandShellSuccessMessage(commandType)).toMatch(/[。]$/);
     }
     expect(isU1CommandType("COMPLETE_CLEANING")).toBe(false);
-    expect(isU1CommandType("EXTEND_STAY")).toBe(false);
+    expect(isU1CommandType("RESCHEDULE_STAY")).toBe(true);
+    expect(isU1CommandType("EXTEND_STAY")).toBe(true);
     expect(isU1CommandType("ISSUE_TOKEN")).toBe(false);
   });
 

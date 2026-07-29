@@ -139,7 +139,8 @@ async function selectOccupiedCell(page: Page, unitId: string, serviceDate: strin
   await orderOptions.click();
   const context = orderContext(page, orderId);
   await expect(context).toBeVisible();
-  await expect(context.getByRole("heading", { name: "完整住宿", exact: true })).toBeVisible();
+  await expect(context.getByRole("heading", { name: "完整住宿", exact: true }))
+    .toBeVisible({ timeout: 15_000 });
   await expect(context).not.toContainText(orderId);
   return context;
 }

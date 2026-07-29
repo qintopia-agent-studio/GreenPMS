@@ -63,7 +63,7 @@ async function createMemberOrder(prefix: string, arrivalDate: string, departureD
     stayType: "TRANSIENT",
     arrivalDate,
     departureDate,
-    pricingPolicyVersionId: demo.transientPolicyId,
+    pricingPolicyVersionId: demo.publicPricingPolicyId,
     memberContractId: demo.memberContractId
   });
   const receipt = await confirm({
@@ -330,17 +330,20 @@ describe("check-in entitlement consumption lifecycle", () => {
     expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
   });
 
-  it("never restores consumed nights when an in-house member stay is shortened", async () => {
+  it("keeps consumed nights unchanged when in-house shortening is rejected", async () => {
     const arrivalDate = await propertyLocalToday(db, demo.propertyId);
     const orderId = await createMemberOrder("shorten-consumed", arrivalDate, shiftDate(arrivalDate, 2));
     await confirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "shorten-consumed-check-in");
-    const shortened = await confirm({
+    const before = await getOrderView(db, orderId);
+    await expect(preview({
       commandType: "SHORTEN_STAY",
       input: { propertyId: demo.propertyId, orderId, newDepartureDate: shiftDate(arrivalDate, 1) }
-    }, "shorten-consumed-command");
-    expect(shortened.factRefs).toEqual([]);
+    }, "shorten-consumed-command")).rejects.toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "当前版本暂不支持通过缩短住宿办理提前退房"
+    });
     const coverage = (await getOrderView(db, orderId)).coverageSet;
-    expect(coverage).toHaveLength(2);
+    expect(coverage).toEqual(before.coverageSet);
     expect(coverage.every((item) => item.status === "CONSUMED")).toBe(true);
     expect(await db.selectFrom("entitlement_ledger").select("fact_id").where("order_id", "=", orderId).where("entry_type", "=", "RELEASE").execute()).toHaveLength(0);
   });

@@ -41,6 +41,7 @@ const OptionalNote = Type.String({ maxLength: 1000 });
 const SafeInteger = Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER });
 const PositiveAmount = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const NonNegativeWholeYuanAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
+const StayChangeTargetAmount = Type.Integer({ minimum: 0, maximum: 2_147_483_600, multipleOf: 100 });
 const NonZeroInteger = Type.Union([
   Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: -1 }),
   Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })
@@ -284,7 +285,21 @@ export const CommandEnvelopeSchema = Type.Union([
     expectedPriorSnapshot: OrderOccupantPriorSnapshotSchema,
     correctedSnapshot: OrderOccupantCorrectedSnapshotSchema
   })),
-  commandEnvelope("EXTEND_STAY", strictObject({ ...OrderInput, newDepartureDate: LocalDate })),
+  commandEnvelope("RESCHEDULE_STAY", strictObject({
+    ...OrderInput,
+    newArrivalDate: LocalDate,
+    newDepartureDate: LocalDate,
+    targetCurrentContractAmountMinor: Type.Optional(StayChangeTargetAmount),
+    channelPriceDifferenceReason: Type.Optional(Note),
+    manualPriceAdjustmentReason: Type.Optional(Note)
+  })),
+  commandEnvelope("EXTEND_STAY", strictObject({
+    ...OrderInput,
+    newDepartureDate: LocalDate,
+    targetCurrentContractAmountMinor: Type.Optional(StayChangeTargetAmount),
+    channelPriceDifferenceReason: Type.Optional(Note),
+    manualPriceAdjustmentReason: Type.Optional(Note)
+  })),
   commandEnvelope("SHORTEN_STAY", strictObject({ ...OrderInput, newDepartureDate: LocalDate })),
   commandEnvelope("MOVE_UNIT", strictObject({ ...OrderInput, newInventoryUnitId: Id, effectiveDate: LocalDate })),
   commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: NonNegativeWholeYuanAmount })),
@@ -412,6 +427,21 @@ export const QuoteRequestSchema = strictObject({
 });
 const StayTimelineItemSchema = strictObject({ serviceDate: LocalDate, inventoryUnitId: Id });
 const StayTimelineSchema = Type.Array(StayTimelineItemSchema, { minItems: 1 });
+const StayChangeDateDiffSchema = strictObject({
+  preservedDates: Type.Array(LocalDate),
+  releasedDates: Type.Array(LocalDate),
+  addedDates: Type.Array(LocalDate)
+});
+const StayChangeEntitlementDiffSchema = strictObject({
+  preservedCoverageDates: Type.Array(LocalDate),
+  releasedCoverageDates: Type.Array(LocalDate),
+  addedCoverageDates: Type.Array(LocalDate),
+  consumedCoverageDates: Type.Array(LocalDate)
+});
+const StayChangeFundsSummarySchema = strictObject({
+  netRecordedCollection: Money,
+  collectionDifference: Money
+});
 
 export const CommandEffectSchema = Type.Union([
   strictObject({
@@ -555,6 +585,29 @@ export const CommandEffectSchema = Type.Union([
     operation: Type.Union([Type.Literal("ROTATE"), Type.Literal("REVOKE")])
   }),
   strictObject({
+    operation: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
+    orderId: Id,
+    stayId: Id,
+    inventoryUnitId: Id,
+    before: strictObject({
+      arrivalDate: LocalDate,
+      departureDate: LocalDate,
+      nights: Type.Integer({ minimum: 1, maximum: 366 }),
+      currentContractAmount: Money
+    }),
+    after: strictObject({
+      arrivalDate: LocalDate,
+      departureDate: LocalDate,
+      nights: Type.Integer({ minimum: 1, maximum: 366 }),
+      stayTimeline: StayTimelineSchema,
+      pricing: PricingResultSchema
+    }),
+    pricingDecision: CreateOrderPricingDecisionSchema,
+    inventoryChange: StayChangeDateDiffSchema,
+    entitlementChange: StayChangeEntitlementDiffSchema,
+    fundsSummary: StayChangeFundsSummarySchema
+  }),
+  strictObject({
     orderId: Id,
     inventoryUnitId: Id,
     before: strictObject({ departureDate: LocalDate, currentContractAmount: Money }),
@@ -695,7 +748,38 @@ const TokenRotationResultSchema = strictObject({
   expiresAt: DateTime
 });
 const TokenRevocationResultSchema = strictObject({ tokenId: Id, revoked: Type.Literal(true) });
-const StayChangeResultSchema = strictObject({ orderId: Id, amendmentId: Id, staySegmentId: Id, pricingRevisionId: Id });
+const StayChangeResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  amendmentId: Id,
+  staySegmentId: Id,
+  pricingRevisionId: Id,
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementChange: StayChangeEntitlementDiffSchema,
+  fundsSummary: StayChangeFundsSummarySchema
+});
+const MoveUnitResultSchema = strictObject({
+  orderId: Id,
+  amendmentId: Id,
+  staySegmentId: Id,
+  pricingRevisionId: Id
+});
 const RepriceResultSchema = strictObject({
   orderId: Id, amendmentId: Id, pricingRevisionId: Id,
   policyBaseAmount: Money,
@@ -776,6 +860,7 @@ export const ExecutedCommandResultSchema = Type.Union([
   TokenRotationResultSchema,
   TokenRevocationResultSchema,
   StayChangeResultSchema,
+  MoveUnitResultSchema,
   RepriceResultSchema,
   CoverageRefreshResultSchema,
   CollectionFactResultSchema,

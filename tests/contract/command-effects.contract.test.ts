@@ -6,7 +6,7 @@ import { commandTypes, type CommandType } from "@qintopia/contracts";
 import { newOpaqueSecret, parseLocalDate, todayInTimeZone } from "@qintopia/domain";
 import type { Database } from "@qintopia/db";
 import type { Kysely } from "kysely";
-import { CommandEffectSchema } from "../../apps/api/src/schemas.ts";
+import { CommandEffectSchema, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { resetDatabase } from "../helpers/database.ts";
@@ -22,7 +22,8 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   ACTIVATE_MEMBERSHIP_ORDER: ["agreedPrice", "entitlementUnitKind", "entitlementUnits", "fromStatus", "memberName", "membershipOrderId", "operation", "paymentDifference", "paymentTotal", "productName", "toStatus", "validFrom", "validUntil"],
   CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayCategoryCode", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingDecision", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
-  EXTEND_STAY: ["after", "before", "inventoryUnitId", "orderId"],
+  RESCHEDULE_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
+  EXTEND_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
   SHORTEN_STAY: ["after", "before", "inventoryUnitId", "orderId"],
   MOVE_UNIT: ["effectiveDate", "fromInventoryUnit", "occupancyCapacity", "occupantCount", "orderId", "pricing", "stayTimeline", "toInventoryUnit"],
   REPRICE_ORDER: ["before", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
@@ -146,6 +147,29 @@ afterAll(async () => {
 });
 
 describe("Command effect HTTP contract", () => {
+  it("accepts only the persisted MOVE_UNIT receipt result shape", () => {
+    const receipt = {
+      receiptId: "receipt_move_contract",
+      commandId: "command_move_contract",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "move-unit-result-contract",
+      result: {
+        orderId: "order_move_contract",
+        amendmentId: "amendment_move_contract",
+        staySegmentId: "segment_move_contract",
+        pricingRevisionId: "pricing_revision_move_contract"
+      },
+      resourceRefs: [],
+      factRefs: []
+    };
+    expect(Value.Check(ReceiptSchema, receipt)).toBe(true);
+    expect(Value.Check(ReceiptSchema, {
+      ...receipt,
+      result: { ...receipt.result, unexpected: true }
+    })).toBe(false);
+  });
+
   it("requires CREATE_MEMBER previews to keep the internal member id unset", () => {
     expect(Value.Check(CommandEffectSchema, {
       operation: "CREATE_MEMBER_PROFILE",
@@ -355,16 +379,17 @@ describe("Command effect HTTP contract", () => {
       }
     });
 
-    await capture("SHORTEN_STAY", {
+    await capture("RESCHEDULE_STAY", {
       propertyId: demo.propertyId,
       orderId,
-      newDepartureDate: "2028-04-13"
+      newArrivalDate: "2028-04-09",
+      newDepartureDate: "2028-04-14",
+      targetCurrentContractAmountMinor: 60_000
     });
-    await capture("EXTEND_STAY", {
-      propertyId: demo.propertyId,
-      orderId,
-      newDepartureDate: "2028-04-15"
-    });
+    // SHORTEN_STAY remains readable as historical protocol but is no longer
+    // previewable in 4.2: reserved changes use RESCHEDULE_STAY and checked-in
+    // shortening is intentionally deferred to 4.3.
+    covered.add("SHORTEN_STAY");
     await capture("MOVE_UNIT", {
       propertyId: demo.propertyId,
       orderId,
@@ -437,6 +462,11 @@ describe("Command effect HTTP contract", () => {
     const checkIn = await capture("CHECK_IN", { propertyId: demo.propertyId, orderId: checkInOrderId });
     expect(checkIn.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     await confirm(checkIn);
+    await capture("EXTEND_STAY", {
+      propertyId: demo.propertyId,
+      orderId: checkInOrderId,
+      newDepartureDate: shiftLocalDate(propertyToday, 2)
+    });
     const checkoutPriced = await quote({
       arrivalDate: shiftLocalDate(propertyToday, -1),
       departureDate: propertyToday,

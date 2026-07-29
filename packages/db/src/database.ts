@@ -44,7 +44,8 @@ export async function databaseReady(db: Kysely<Database>): Promise<boolean> {
       && applied.has("022_order_occupant_corrections.sql")
       && applied.has("023_collection_fact_pricing_revision.sql")
       && applied.has("024_free_stay_category_code.sql")
-      && applied.has("025_channel_order_atomic_pricing.sql");
+      && applied.has("025_channel_order_atomic_pricing.sql")
+      && applied.has("026_stage9_stay_change_guards.sql");
   } catch {
     return false;
   }

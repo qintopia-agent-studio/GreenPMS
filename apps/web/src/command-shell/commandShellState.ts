@@ -13,7 +13,9 @@ export const u1CommandTypes = [
   "CORRECT_ORDER_OCCUPANT",
   "REPRICE_ORDER",
   "CHECK_IN",
-  "CHECK_OUT"
+  "CHECK_OUT",
+  "RESCHEDULE_STAY",
+  "EXTEND_STAY"
 ] as const satisfies readonly HistoricalCommandType[];
 
 export type U1CommandType = (typeof u1CommandTypes)[number];
@@ -136,6 +138,8 @@ export function commandShellSuccessMessage(commandType: U1CommandType): string {
     case "REPRICE_ORDER": return "订单金额已调整，订单信息已刷新。";
     case "CHECK_IN": return "办理入住已完成，住宿状态已刷新。";
     case "CHECK_OUT": return "办理退房已完成，住宿状态已刷新。";
+    case "RESCHEDULE_STAY": return "预订日期已调整，订单和房态已刷新。";
+    case "EXTEND_STAY": return "住宿已延长，订单和房态已刷新。";
   }
 }
 
@@ -154,6 +158,8 @@ export function commandShellLabel(commandType: U1CommandType): string {
     case "REPRICE_ORDER": return "调整订单金额";
     case "CHECK_IN": return "办理入住";
     case "CHECK_OUT": return "办理退房";
+    case "RESCHEDULE_STAY": return "调整预订日期";
+    case "EXTEND_STAY": return "延长住宿";
   }
 }
 

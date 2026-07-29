@@ -236,16 +236,30 @@ describe.sequential("Receipt permanent references for member entitlement facts",
     expect(checkedOut.factRefs).toEqual([]);
   });
 
-  it("keeps retained and released coverage references exact when shortening", async () => {
+  it("keeps retained and released coverage references exact when rescheduling", async () => {
     const created = await createMemberOrder("shorten", "2028-05-01", "2028-05-04");
     const allCoverageIds = created.coverage.map((item) => item.id);
     const releasedCoverageIds = created.coverage
       .filter((item) => item.service_date >= "2028-05-02")
       .map((item) => item.id);
     const shortened = await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newDepartureDate: "2028-05-02" }
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newArrivalDate: "2028-05-01",
+        newDepartureDate: "2028-05-02"
+      }
     }, "shorten");
+    const releasedClaimIds = await db.selectFrom("inventory_claims as claim")
+      .innerJoin("stay_segments as segment", "segment.id", "claim.source_id")
+      .innerJoin("stays as stay", "stay.id", "segment.stay_id")
+      .select("claim.id")
+      .where("stay.order_id", "=", created.orderId)
+      .where("claim.active", "=", false)
+      .where("claim.service_date", ">=", "2028-05-02")
+      .orderBy("claim.id")
+      .execute();
 
     await expectExactLedgerReferences({
       receipt: shortened,
@@ -253,9 +267,11 @@ describe.sequential("Receipt permanent references for member entitlement facts",
       coverageResourceIds: releasedCoverageIds,
       resourceRefs: [
         created.orderId,
+        shortened.result!.stayId as string,
         shortened.result!.amendmentId as string,
         shortened.result!.staySegmentId as string,
         shortened.result!.pricingRevisionId as string,
+        ...releasedClaimIds.map((claim) => claim.id),
         ...allCoverageIds
       ]
     });

@@ -40,6 +40,26 @@ async function waitForUnknown(commandType: string, idempotencyKey: string) {
   throw new Error("Timed out waiting for the active command execution lock");
 }
 
+async function waitForBlockedEntitlementOwner() {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await sql<{ waiting: boolean }>`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where datname = current_database()
+          and pid <> pg_backend_pid()
+          and state = 'active'
+          and wait_event_type = 'Lock'
+          and query ilike '%member_contracts%'
+      ) as waiting
+    `.execute(db);
+    if (result.rows[0]?.waiting) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for the command owner to reach the entitlement row blocker");
+}
+
 async function waitForInventoryLockWait() {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -400,6 +420,7 @@ describe("durable command protocol", () => {
       confirmMetadata
     );
     try {
+      await waitForBlockedEntitlementOwner();
       expect(await waitForUnknown("ADJUST_MEMBER_ENTITLEMENT", confirmMetadata.idempotencyKey))
         .toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
       const ledgerCountDuring = await db.selectFrom("entitlement_ledger")
@@ -452,6 +473,7 @@ describe("durable command protocol", () => {
     await blocked;
 
     const owner = confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, confirmMetadata);
+    await waitForBlockedEntitlementOwner();
     await waitForUnknown("ADJUST_MEMBER_ENTITLEMENT", confirmMetadata.idempotencyKey);
     try {
       const retryOutcome = await Promise.race([

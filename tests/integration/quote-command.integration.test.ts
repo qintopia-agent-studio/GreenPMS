@@ -59,6 +59,26 @@ async function waitForUnknown(idempotencyKey: string) {
   throw new Error("Timed out waiting for the active CREATE_QUOTE command lock");
 }
 
+async function waitForBlockedQuoteOwner() {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await sql<{ waiting: boolean }>`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where datname = current_database()
+          and pid <> pg_backend_pid()
+          and state = 'active'
+          and wait_event_type = 'Lock'
+          and query ilike '%quotes%'
+      ) as waiting
+    `.execute(db);
+    if (result.rows[0]?.waiting) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for the CREATE_QUOTE owner to reach the quote insert blocker");
+}
+
 beforeEach(async () => {
   db = await resetDatabase(databaseUrl);
 });
@@ -262,6 +282,7 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
       departureDate: "2028-08-18"
     }, ownerMetadata);
     try {
+      await waitForBlockedQuoteOwner();
       await waitForUnknown(ownerMetadata.idempotencyKey);
       await expect(Promise.race([
         executeQuoteCommand(db, readPrincipal, baseInput, completedMetadata),
@@ -301,6 +322,7 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
     const commandMetadata = metadata("quote-in-flight");
     const owner = executeQuoteCommand(db, readPrincipal, baseInput, commandMetadata);
     try {
+      await waitForBlockedQuoteOwner();
       expect(await waitForUnknown(commandMetadata.idempotencyKey))
         .toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
       const retryOutcomes = await Promise.race([

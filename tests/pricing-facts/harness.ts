@@ -31,7 +31,7 @@ export type PricingFactBusinessPlan = (typeof pricingFactBusinessPlans)[number];
 
 export const pricingFactScenarioTags = [
   "BASELINE",
-  "SHORTEN",
+  "RESCHEDULE",
   "EXTEND",
   "MOVE",
   "CROSS_MONTH",
@@ -43,7 +43,7 @@ export type PricingFactScenarioTag = (typeof pricingFactScenarioTags)[number];
 
 export const requiredPricingFactScenarioTags = [
   "BASELINE",
-  "SHORTEN",
+  "RESCHEDULE",
   "EXTEND",
   "CROSS_MONTH",
   "PARTIAL_MEMBER_COVERAGE",
@@ -77,7 +77,7 @@ export interface PricingFactCoverageItem {
 
 export interface PricingFactRevision {
   revisionNo: number;
-  amendmentType: "CREATE_ORDER" | "SHORTEN_STAY" | "EXTEND_STAY" | "MOVE_UNIT" | "REPRICE_ORDER";
+  amendmentType: "CREATE_ORDER" | "RESCHEDULE_STAY" | "EXTEND_STAY" | "MOVE_UNIT" | "REPRICE_ORDER";
   pricingPolicyVersionReference: string;
   arrivalDate: string;
   departureDate: string;
@@ -91,7 +91,7 @@ export interface PricingFactRevision {
 
 export interface PricingFactAmendment {
   sequence: number;
-  amendmentType: "SHORTEN_STAY" | "EXTEND_STAY" | "MOVE_UNIT" | "REPRICE_ORDER";
+  amendmentType: "RESCHEDULE_STAY" | "EXTEND_STAY" | "MOVE_UNIT" | "REPRICE_ORDER";
   requestedAt: string;
   input: Record<string, unknown>;
 }
@@ -232,7 +232,7 @@ export function assertPricingFactCoverage(cases: PricingFactCase[]): void {
     const coverageDatesAreValid = new Set(coverageDates).size === coverageDates.length
       && coverageDates.every((serviceDate) => expectedServiceDateSet.has(serviceDate));
     const requiredAmendments = [
-      ["SHORTEN", "SHORTEN_STAY"],
+      ["RESCHEDULE", "RESCHEDULE_STAY"],
       ["EXTEND", "EXTEND_STAY"],
       ["MOVE", "MOVE_UNIT"]
     ] as const;

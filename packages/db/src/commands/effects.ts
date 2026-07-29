@@ -7,12 +7,22 @@ import {
   enumerateServiceDates,
   parseLocalDate,
   requireTransactionReference,
+  stayChangePricingDecision,
   stableHash,
   validateBookingChannel,
+  type CoverageCandidate,
   type PricingResult
 } from "@qintopia/domain";
 import { adjustedEntitlementAvailableBalance, entitlementAvailableBalance, parsePostgresBigInt } from "../entitlement-balance.ts";
-import { activeCoverageCandidates, loadActiveStayTimeline, loadOrderContext, orderAmountSummary, type StayTimelineItem } from "../orders.ts";
+import {
+  activeCoverageCandidates,
+  loadActiveStayTimeline,
+  loadOrderContext,
+  orderAmountSummary,
+  projectOrderLifecycle,
+  type OrderContext,
+  type StayTimelineItem
+} from "../orders.ts";
 import { allocateCoverageCandidates, loadPricingPolicy, loadStoredQuote, resolveMemberCoverage } from "../pricing-service.ts";
 import { inventoryFingerprint, loadInventoryUnit, type DbExecutor } from "../inventory.ts";
 import { propertyLocalToday } from "../members.ts";
@@ -238,6 +248,8 @@ async function priceStayTimeline(db: DbExecutor, options: {
   policyVersionId: string;
   timeline: StayTimelineItem[];
   manualAdjustmentMinor: number;
+  coverageAllocationDates?: string[];
+  reallocatableHeld?: CoverageCandidate[];
 }): Promise<PricingResult> {
   if (options.stayType === "FREE" && (options.memberId || options.memberContractId)) {
     throw new DomainError("PRICING_POLICY_UNCONFIGURED", "Free stays cannot use member entitlement coverage", 409);
@@ -255,26 +267,33 @@ async function priceStayTimeline(db: DbExecutor, options: {
   }
 
   const preserved = await activeCoverageCandidates(db, options.orderId, expectedDates);
+  const allocationDates = options.coverageAllocationDates ?? expectedDates;
   const firstUnit = units.get(options.timeline[0]!.inventoryUnitId)!;
   if (options.memberId && [...units.values()].some((unit) => unit.kind !== firstUnit.kind || unit.roomTypeCode !== firstUnit.roomTypeCode)) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "会员住宿不能跨越不同会员产品对应的房型", 409);
   }
-  const candidates = options.memberId
+  const allocated = options.memberId
     ? (await resolveMemberCoverage(db, {
       propertyId: options.propertyId,
       memberId: options.memberId,
       inventoryUnitKind: firstUnit.kind,
       roomTypeCode: firstUnit.roomTypeCode,
-      dates: expectedDates,
-      preserved
+      dates: allocationDates,
+      // Preserve consumed history as eligibility evidence when an in-house
+      // membership expires and newly added nights must fall back to cash.
+      preserved,
+      ...(options.reallocatableHeld ? { reallocatableHeld: options.reallocatableHeld } : {})
     })).coverageCandidates
     : await allocateCoverageCandidates(db, {
       propertyId: options.propertyId,
       inventoryUnitKind: firstUnit.kind,
-      dates: expectedDates,
-      preserved,
+      dates: allocationDates,
+      preserved: preserved.filter((item) => allocationDates.includes(item.serviceDate)),
+      ...(options.reallocatableHeld ? { reallocatableHeld: options.reallocatableHeld } : {}),
       ...(options.memberContractId ? { memberContractId: options.memberContractId } : {})
     });
+  const candidates = [...preserved.filter((item) => !allocationDates.includes(item.serviceDate)), ...allocated]
+    .sort((left, right) => left.serviceDate.localeCompare(right.serviceDate));
   const policy = await loadPricingPolicy(db, options.propertyId, options.policyVersionId);
   if (policy.calculationKind === "DURATION_BAND_TOTAL") {
     return calculateDurationTimelinePricing({
@@ -341,6 +360,78 @@ async function activeRefundedAmount(db: DbExecutor, collectionFactId: string): P
 
 function finalize(propertyId: string, effect: Record<string, unknown>, basisVersions: Record<string, unknown>): BuiltCommandEffect {
   return { propertyId, effect, basisVersions, effectHash: stableHash({ effect, basisVersions }) };
+}
+
+function dateDiff(beforeDates: string[], afterDates: string[]) {
+  const before = new Set(beforeDates);
+  const after = new Set(afterDates);
+  return {
+    preservedDates: beforeDates.filter((date) => after.has(date)),
+    releasedDates: beforeDates.filter((date) => !after.has(date)),
+    addedDates: afterDates.filter((date) => !before.has(date))
+  };
+}
+
+async function assertStayDateChangeLifecycle(
+  db: DbExecutor,
+  context: OrderContext,
+  businessDate: string,
+  activeTimeline: readonly StayTimelineItem[]
+): Promise<void> {
+  const [segments, amendments, revisions, facts] = await Promise.all([
+    db.selectFrom("stay_segments")
+      .selectAll()
+      .where("stay_id", "=", context.stay.id)
+      .orderBy("sequence")
+      .execute(),
+    db.selectFrom("amendments")
+      .leftJoin("command_executions", "command_executions.id", "amendments.command_id")
+      .leftJoin("subjects", "subjects.id", "command_executions.subject_id")
+      .selectAll("amendments")
+      .select([
+        "command_executions.subject_id as actor_subject_id",
+        "subjects.display_name as actor_display_name"
+      ])
+      .where("amendments.order_id", "=", context.order.id)
+      .orderBy("amendments.sequence")
+      .execute(),
+    db.selectFrom("pricing_revisions")
+      .selectAll()
+      .where("order_id", "=", context.order.id)
+      .orderBy("revision_no")
+      .execute(),
+    db.selectFrom("collection_facts")
+      .selectAll()
+      .where("order_id", "=", context.order.id)
+      .orderBy("created_at")
+      .orderBy("fact_id")
+      .execute()
+  ]);
+  projectOrderLifecycle({
+    order: context.order,
+    stay: context.stay,
+    businessDate,
+    segments,
+    amendments,
+    revisions,
+    facts,
+    activeTimeline
+  });
+}
+
+function pricingDecisionEffect(
+  currency: string,
+  decision: ReturnType<typeof stayChangePricingDecision>
+) {
+  return {
+    pricingBasis: decision.pricingBasis,
+    policyBaseAmount: money(currency, decision.policyBaseAmountMinor),
+    targetCurrentContractAmount: money(currency, decision.currentContractAmountMinor),
+    differenceFromPolicy: money(currency, decision.differenceFromPolicyMinor),
+    manualAdjustmentMinor: decision.manualAdjustmentMinor,
+    differenceExceedsThreshold: decision.differenceExceedsThreshold,
+    reason: decision.reason
+  };
 }
 
 export async function buildCommandEffect(db: DbExecutor, commandType: CommandType, rawInput: unknown): Promise<BuiltCommandEffect> {
@@ -992,57 +1083,167 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   }
 
   if (commandType === "SHORTEN_STAY") {
-    assertOrderMutable(context.order.status);
-    const newDepartureDate = requireString(input, "newDepartureDate");
     if (context.order.status === "CHECKED_IN") {
       const businessDate = await propertyLocalToday(db, propertyId);
-      if (newDepartureDate <= businessDate) {
-        throw new DomainError("INVALID_ORDER_STATE", "当前版本暂不支持通过缩短住宿办理提前退房", 409, false, {
-          businessDate,
-          departureDate: context.order.departure_date
-        });
-      }
+      throw new DomainError(
+        "INVALID_ORDER_STATE",
+        "当前版本暂不支持通过缩短住宿办理提前退房",
+        409,
+        false,
+        { businessDate, departureDate: context.order.departure_date }
+      );
     }
-    const dates = enumerateServiceDates(context.order.arrival_date, newDepartureDate);
-    if (newDepartureDate >= context.order.departure_date) throw new DomainError("VALIDATION_ERROR", "New departure must shorten the stay");
-    const currentTimeline = await loadActiveStayTimeline(db, context);
-    const stayTimeline = currentTimeline.filter((item) => item.serviceDate < newDepartureDate);
-    const pricing = await priceStayTimeline(db, {
-      propertyId, orderId, memberId: context.order.member_id, memberContractId: context.order.member_contract_id,
-      arrivalDate: context.order.arrival_date, departureDate: newDepartureDate,
-      stayType: context.order.stay_type as StayType, policyVersionId: context.order.pricing_policy_version_id,
-      timeline: stayTimeline, manualAdjustmentMinor: 0
-    });
-    return finalize(propertyId, {
-      orderId, inventoryUnitId: stayTimeline.at(-1)!.inventoryUnitId,
-      before: { departureDate: context.order.departure_date, currentContractAmount: (await orderAmountSummary(db, context)).currentContractAmount },
-      after: { departureDate: newDepartureDate, nights: dates.length, stayTimeline, pricing }
-    }, { ...baseBasis, stayTimeline: currentTimeline });
+    throw new DomainError(
+      "INVALID_ORDER_STATE",
+      context.order.status === "RESERVED"
+        ? "未入住订单请使用调整预订日期"
+        : "当前订单状态不能缩短住宿",
+      409
+    );
   }
 
-  if (commandType === "EXTEND_STAY") {
-    assertOrderMutable(context.order.status);
-    const newDepartureDate = requireString(input, "newDepartureDate");
-    if (newDepartureDate <= context.order.departure_date) throw new DomainError("VALIDATION_ERROR", "New departure must extend the stay");
+  if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") {
+    const reschedule = commandType === "RESCHEDULE_STAY";
+    if (reschedule && context.order.status !== "RESERVED") {
+      throw new DomainError("INVALID_ORDER_STATE", "只有未入住订单可以调整预订日期", 409);
+    }
+    if (!reschedule && context.order.status !== "CHECKED_IN") {
+      throw new DomainError("INVALID_ORDER_STATE", "只有在住订单可以延长住宿", 409);
+    }
+
+    const businessDate = await propertyLocalToday(db, propertyId);
     const currentTimeline = await loadActiveStayTimeline(db, context);
-    const extensionUnitId = currentTimeline.at(-1)!.inventoryUnitId;
-    const extraFingerprint = await inventoryFingerprint(db, propertyId, extensionUnitId, context.order.departure_date, newDepartureDate, context.segmentIds);
-    if (extraFingerprint.length > 0) throw new DomainError("INVENTORY_CONFLICT", "Extension inventory is unavailable", 409);
-    const stayTimeline = [
-      ...currentTimeline,
-      ...enumerateServiceDates(context.order.departure_date, newDepartureDate).map((serviceDate) => ({ serviceDate, inventoryUnitId: extensionUnitId }))
-    ];
-    const pricing = await priceStayTimeline(db, {
-      propertyId, orderId, memberId: context.order.member_id, memberContractId: context.order.member_contract_id,
-      arrivalDate: context.order.arrival_date, departureDate: newDepartureDate,
-      stayType: context.order.stay_type as StayType, policyVersionId: context.order.pricing_policy_version_id,
-      timeline: stayTimeline, manualAdjustmentMinor: 0
+    await assertStayDateChangeLifecycle(db, context, businessDate, currentTimeline);
+    const currentRuns = timelineRuns(currentTimeline);
+    if (reschedule && currentRuns.length !== 1) {
+      throw new DomainError("INVALID_ORDER_STATE", "该订单已有换房安排，当前版本暂不能调整预订日期", 409);
+    }
+    const newArrivalDate = reschedule ? requireString(input, "newArrivalDate") : context.order.arrival_date;
+    const newDepartureDate = requireString(input, "newDepartureDate");
+    const newDates = enumerateServiceDates(newArrivalDate, newDepartureDate);
+    if (reschedule) {
+      if (newArrivalDate < businessDate) {
+        throw new DomainError("VALIDATION_ERROR", "新的入住日期不能早于当前营业日期");
+      }
+      if (newArrivalDate === context.order.arrival_date && newDepartureDate === context.order.departure_date) {
+        throw new DomainError("VALIDATION_ERROR", "调整后的入住和退房日期必须发生变化");
+      }
+    } else {
+      if (newDepartureDate <= context.order.departure_date) {
+        throw new DomainError("VALIDATION_ERROR", "新的退房日期必须晚于原计划退房日期");
+      }
+      if (businessDate > context.order.departure_date && newDepartureDate <= businessDate) {
+        throw new DomainError("VALIDATION_ERROR", "逾期续住后的退房日期必须晚于当前营业日期");
+      }
+    }
+
+    const inventoryUnitId = reschedule ? currentRuns[0]!.inventoryUnitId : currentTimeline.at(-1)!.inventoryUnitId;
+    const oldDates = currentTimeline.map((item) => item.serviceDate);
+    const inventoryChange = dateDiff(oldDates, newDates);
+    const inventoryFingerprintStart = reschedule ? newArrivalDate : context.order.departure_date;
+    const fingerprint = await inventoryFingerprint(
+      db,
+      propertyId,
+      inventoryUnitId,
+      inventoryFingerprintStart,
+      newDepartureDate,
+      context.segmentIds
+    );
+    if (fingerprint.length > 0) {
+      throw new DomainError("INVENTORY_CONFLICT", reschedule ? "调整后的住宿日期存在库存冲突" : "延长日期的库存不可用", 409);
+    }
+    const stayTimeline = reschedule
+      ? newDates.map((serviceDate) => ({ serviceDate, inventoryUnitId }))
+      : [
+        ...currentTimeline,
+        ...inventoryChange.addedDates.map((serviceDate) => ({ serviceDate, inventoryUnitId }))
+      ];
+
+    const activeCoverage = await activeCoverageCandidates(db, orderId);
+    if (reschedule && activeCoverage.some((item) => item.status === "CONSUMED")) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能调整预订日期", 409);
+    }
+    if (!reschedule && activeCoverage.some((item) => item.status === "HELD")) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销的原住宿权益，当前数据状态异常，不能延长住宿", 409);
+    }
+    const reallocatableHeld = reschedule
+      ? activeCoverage.filter((item) => item.status === "HELD" && !newDates.includes(item.serviceDate))
+      : [];
+    const policyPricing = await priceStayTimeline(db, {
+      propertyId,
+      orderId,
+      memberId: context.order.member_id,
+      memberContractId: context.order.member_contract_id,
+      arrivalDate: newArrivalDate,
+      departureDate: newDepartureDate,
+      stayType: context.order.stay_type as StayType,
+      policyVersionId: context.order.pricing_policy_version_id,
+      timeline: stayTimeline,
+      manualAdjustmentMinor: 0,
+      coverageAllocationDates: reschedule ? newDates : inventoryChange.addedDates,
+      reallocatableHeld
     });
+    const decision = stayChangePricingDecision({
+      commandType,
+      bookingChannelCode: context.order.booking_channel_code,
+      stayType: context.order.stay_type,
+      memberStay: Boolean(context.order.member_id || context.order.member_contract_id),
+      policyBaseAmountMinor: policyPricing.currentContractAmount.minorUnits,
+      targetCurrentContractAmountMinor: input.targetCurrentContractAmountMinor,
+      channelPriceDifferenceReason: input.channelPriceDifferenceReason,
+      manualPriceAdjustmentReason: input.manualPriceAdjustmentReason
+    });
+    const pricing: PricingResult = {
+      ...policyPricing,
+      currentContractAmount: money(policyPricing.currentContractAmount.currency, decision.currentContractAmountMinor)
+    };
+    const oldAmountSummary = await orderAmountSummary(db, context);
+    const newCoverageDates = pricing.coverageSet.map((item) => item.serviceDate);
+    const oldCoverageDates = activeCoverage.map((item) => item.serviceDate);
+    const coverageDiff = dateDiff(oldCoverageDates, newCoverageDates);
+    const entitlementChange = {
+      preservedCoverageDates: coverageDiff.preservedDates,
+      releasedCoverageDates: coverageDiff.releasedDates,
+      addedCoverageDates: coverageDiff.addedDates,
+      consumedCoverageDates: reschedule ? [] : coverageDiff.addedDates
+    };
+    const fundsSummary = {
+      netRecordedCollection: oldAmountSummary.netRecordedCollection,
+      collectionDifference: money(
+        pricing.currentContractAmount.currency,
+        pricing.currentContractAmount.minorUnits - oldAmountSummary.netRecordedCollection.minorUnits
+      )
+    };
+    const effectDecision = pricingDecisionEffect(pricing.currentContractAmount.currency, decision);
     return finalize(propertyId, {
-      orderId, inventoryUnitId: extensionUnitId,
-      before: { departureDate: context.order.departure_date, currentContractAmount: (await orderAmountSummary(db, context)).currentContractAmount },
-      after: { departureDate: newDepartureDate, stayTimeline, pricing }
-    }, { ...baseBasis, stayTimeline: currentTimeline, inventory: extraFingerprint });
+      operation: commandType,
+      orderId,
+      stayId: context.stay.id,
+      inventoryUnitId,
+      before: {
+        arrivalDate: context.order.arrival_date,
+        departureDate: context.order.departure_date,
+        nights: oldDates.length,
+        currentContractAmount: oldAmountSummary.currentContractAmount
+      },
+      after: {
+        arrivalDate: newArrivalDate,
+        departureDate: newDepartureDate,
+        nights: newDates.length,
+        stayTimeline,
+        pricing
+      },
+      pricingDecision: effectDecision,
+      inventoryChange,
+      entitlementChange,
+      fundsSummary
+    }, {
+      ...baseBasis,
+      businessDate,
+      stayTimeline: currentTimeline,
+      inventory: fingerprint,
+      activeCoverage
+    });
   }
 
   if (commandType === "MOVE_UNIT") {

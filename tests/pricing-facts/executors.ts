@@ -243,11 +243,15 @@ export async function executeConfirmedPricingFact(pricingCase: PricingFactCase):
   appendRevision("CREATE_ORDER");
   for (const amendment of pricingCase.amendments) {
     const amendmentInput = requireObject(amendment.input, `amendments[${amendment.sequence}].input`);
-    if (amendment.amendmentType === "SHORTEN_STAY") {
+    if (amendment.amendmentType === "RESCHEDULE_STAY") {
+      const newArrivalDate = requireString(amendmentInput.newArrivalDate, "newArrivalDate");
       const newDepartureDate = requireString(amendmentInput.newDepartureDate, "newDepartureDate");
-      timeline = timeline.filter((item) => item.serviceDate < newDepartureDate);
+      const template = timeline[0];
+      if (!template) throw new Error("Cannot reschedule an empty timeline");
+      timeline = enumerateServiceDates(newArrivalDate, newDepartureDate).map((serviceDate) => ({ ...template, serviceDate }));
+      arrivalDate = newArrivalDate;
       departureDate = newDepartureDate;
-      appendRevision("SHORTEN_STAY");
+      appendRevision("RESCHEDULE_STAY");
       continue;
     }
     if (amendment.amendmentType === "EXTEND_STAY") {

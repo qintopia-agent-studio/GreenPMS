@@ -816,7 +816,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 025, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 026, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -987,6 +987,9 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration025 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/025_channel_order_atomic_pricing.sql"), "utf8");
         await client.query(migration025);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('025_channel_order_atomic_pricing.sql')");
+        const migration026 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/026_stage9_stay_change_guards.sql"), "utf8");
+        await client.query(migration026);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('026_stage9_stay_change_guards.sql')");
       } finally {
         await client.end();
       }

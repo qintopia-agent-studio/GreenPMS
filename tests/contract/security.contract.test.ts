@@ -1118,16 +1118,13 @@ describe("HTTP security contract", () => {
     }, "timeline-order");
     const orderId = created.confirmation.body.result?.orderId as string;
     const previews = await Promise.all([
-      previewCommand(demo.writeToken, "SHORTEN_STAY", {
+      previewCommand(demo.writeToken, "RESCHEDULE_STAY", {
         propertyId: demo.propertyId,
         orderId,
-        newDepartureDate: "2028-02-13"
+        newArrivalDate: "2028-02-10",
+        newDepartureDate: "2028-02-13",
+        targetCurrentContractAmountMinor: 36_000
       }, "timeline-shorten"),
-      previewCommand(demo.writeToken, "EXTEND_STAY", {
-        propertyId: demo.propertyId,
-        orderId,
-        newDepartureDate: "2028-02-15"
-      }, "timeline-extend"),
       previewCommand(demo.writeToken, "MOVE_UNIT", {
         propertyId: demo.propertyId,
         orderId,
@@ -1181,10 +1178,12 @@ describe("HTTP security contract", () => {
       .where("active", "=", true)
       .execute();
 
-    const internal = await previewCommand(demo.writeToken, "SHORTEN_STAY", {
+    const internal = await previewCommand(demo.writeToken, "RESCHEDULE_STAY", {
       propertyId: demo.propertyId,
       orderId,
-      newDepartureDate: "2028-03-11"
+      newArrivalDate: "2028-03-10",
+      newDepartureDate: "2028-03-11",
+      targetCurrentContractAmountMinor: 12_000
     }, "internal-error-probe");
     expect(internal.response.statusCode).toBe(500);
     expect(internal.response.json()).toEqual({

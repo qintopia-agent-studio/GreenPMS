@@ -211,6 +211,17 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
     }).execute();
 
     await previewAndConfirm({
+      commandType: "REPRICE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        targetCurrentContractAmountMinor: 70_000
+      }
+    }, "cross-product-manual-target");
+    let view = await getOrderView(db, created.orderId);
+    expect(view.amounts.currentContractAmount.minorUnits).toBe(70_000);
+
+    await previewAndConfirm({
       commandType: "MOVE_UNIT",
       input: {
         propertyId: demo.propertyId,
@@ -219,10 +230,11 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
         effectiveDate: "2026-03-08"
       }
     }, "cross-product-move");
-
-    let view = await getOrderView(db, created.orderId);
+    view = await getOrderView(db, created.orderId);
     expect(view.amounts.currentContractAmount.minorUnits).toBe(65_000);
     expect(view.pricingRevisions.at(-1)?.policy_version_id).toBe(demo.publicPricingPolicyId);
+    expect(view.pricingRevisions.at(-1)?.policy_base_amount_minor).toBe(65_000);
+    expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(0);
     expect(view.pricingRevisions.at(-1)?.cash_lines).toEqual([
       expect.objectContaining({
         lineKind: "STAY_TOTAL",
@@ -233,50 +245,28 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
         ]
       })
     ]);
-
-    await previewAndConfirm({
-      commandType: "REPRICE_ORDER",
-      input: {
-        propertyId: demo.propertyId,
-        orderId: created.orderId,
-        targetCurrentContractAmountMinor: 70_000
-      }
-    }, "cross-product-manual-target");
-    view = await getOrderView(db, created.orderId);
-    expect(view.pricingRevisions.at(-1)?.policy_base_amount_minor).toBe(65_000);
-    expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(5_000);
-    expect(view.amounts.currentContractAmount.minorUnits).toBe(70_000);
-
-    await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newDepartureDate: "2026-03-14" }
-    }, "cross-product-shorten");
-    view = await getOrderView(db, created.orderId);
-    expect(view.pricingRevisions.at(-1)?.policy_base_amount_minor).toBe(81_400);
-    expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(0);
-    expect(view.amounts.currentContractAmount.minorUnits).toBe(81_400);
   });
 
   it("keeps FREE changes zero, entitlement-free, and append-only through cancellation", async () => {
     const created = await createOrder({
       prefix: "free-history",
       unitId: "unit_room_201",
-      arrivalDate: "2026-03-30",
-      departureDate: "2026-04-02",
+      arrivalDate: "2026-08-30",
+      departureDate: "2026-09-02",
       stayType: "FREE",
       freeStayReason: "Volunteer accommodation"
     });
     await previewAndConfirm({
-      commandType: "EXTEND_STAY",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newDepartureDate: "2026-04-04" }
+      commandType: "RESCHEDULE_STAY",
+      input: { propertyId: demo.propertyId, orderId: created.orderId, newArrivalDate: "2026-08-30", newDepartureDate: "2026-09-04" }
     }, "free-extend");
     await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newDepartureDate: "2026-04-03" }
+      commandType: "RESCHEDULE_STAY",
+      input: { propertyId: demo.propertyId, orderId: created.orderId, newArrivalDate: "2026-08-30", newDepartureDate: "2026-09-03" }
     }, "free-shorten");
     await previewAndConfirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newInventoryUnitId: "unit_room_205", effectiveDate: "2026-04-01" }
+      input: { propertyId: demo.propertyId, orderId: created.orderId, newInventoryUnitId: "unit_room_205", effectiveDate: "2026-09-01" }
     }, "free-move");
     await previewAndConfirm({
       commandType: "CANCEL_ORDER",

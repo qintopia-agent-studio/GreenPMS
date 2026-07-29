@@ -9,9 +9,9 @@ import {
   type CreateOrderPricingBasis
 } from "@qintopia/contracts";
 import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, validateBookingChannel } from "@qintopia/domain";
-import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims } from "../inventory.ts";
+import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims, releaseInventoryClaimsOnDates } from "../inventory.ts";
 import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, lockOrder, reconcileCoverage, releaseCoverage, type StayTimelineItem } from "../orders.ts";
-import { loadStoredQuote, lockEntitlementLots } from "../pricing-service.ts";
+import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from "../pricing-service.ts";
 import type { Database } from "../schema.ts";
 import { normalizeIdentityCardNumber, requireObject, requireString } from "./effects.ts";
 
@@ -110,6 +110,14 @@ function stayTimelineFromEffect(effect: Record<string, unknown>): StayTimelineIt
     const item = requireObject(rawItem, `stayTimeline[${index}]`);
     return { serviceDate: requireString(item, "serviceDate"), inventoryUnitId: requireString(item, "inventoryUnitId") };
   });
+}
+
+function stringArray(record: Record<string, unknown>, field: string): string[] {
+  const value = record[field];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) {
+    throw new DomainError("INTERNAL_ERROR", `${field} is invalid`, 500);
+  }
+  return value as string[];
 }
 
 function trailingTimelineRun(timeline: StayTimelineItem[]): { inventoryUnitId: string; arrivalDate: string } {
@@ -225,15 +233,27 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   await lockOrder(trx, orderId);
   const context = await loadOrderContext(trx, orderId);
   if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
-  await lockEntitlementLots(trx, context.order.member_contract_id ?? undefined);
+  if (context.order.member_id) {
+    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${context.order.member_id}`}, 0::bigint))`.execute(trx);
+    await lockMemberEntitlementLots(trx, propertyId, context.order.member_id);
+  } else {
+    await lockEntitlementLots(trx, context.order.member_contract_id ?? undefined);
+  }
 
-  if (["SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "CHECK_OUT"].includes(commandType)) {
+  if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "CHECK_OUT"].includes(commandType)) {
     const timeline = await loadActiveStayTimeline(trx, context);
     const roomDates = await roomDatesForTimeline(trx, propertyId, timeline);
     if (commandType === "EXTEND_STAY") {
       const extensionUnit = await loadInventoryUnit(trx, propertyId, timeline.at(-1)!.inventoryUnitId);
       roomDates.push(...enumerateServiceDates(context.order.departure_date, requireString(input, "newDepartureDate"))
         .map((serviceDate) => ({ roomId: extensionUnit.roomId, serviceDate })));
+    }
+    if (commandType === "RESCHEDULE_STAY") {
+      const currentUnit = await loadInventoryUnit(trx, propertyId, timeline[0]!.inventoryUnitId);
+      roomDates.push(...enumerateServiceDates(
+        requireString(input, "newArrivalDate"),
+        requireString(input, "newDepartureDate")
+      ).map((serviceDate) => ({ roomId: currentUnit.roomId, serviceDate })));
     }
     if (commandType === "MOVE_UNIT") {
       const newUnit = await loadInventoryUnit(trx, propertyId, requireString(input, "newInventoryUnitId"));
@@ -890,7 +910,134 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     };
   }
 
-  if (["SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT"].includes(options.commandType)) {
+  if (options.commandType === "RESCHEDULE_STAY" || options.commandType === "EXTEND_STAY") {
+    const amendmentId = await appendAmendment(trx, {
+      orderId,
+      sequence: context.order.version + 1,
+      amendmentType: options.commandType,
+      reasonCode: options.reason.code,
+      reasonNote: options.reason.note,
+      priorVersion: context.order.version,
+      payload: effect,
+      commandId: options.commandId
+    });
+    const after = nestedObject(effect, "after");
+    const arrivalDate = requireString(after, "arrivalDate");
+    const departureDate = requireString(after, "departureDate");
+    const stayTimeline = stayTimelineFromEffect(effect);
+    const inventoryUnitId = requireString(effect, "inventoryUnitId");
+    const segmentArrivalDate = options.commandType === "RESCHEDULE_STAY"
+      ? arrivalDate
+      : trailingTimelineRun(stayTimeline).arrivalDate;
+    const inventoryChange = nestedObject(effect, "inventoryChange");
+    const releasedDates = stringArray(inventoryChange, "releasedDates");
+    const addedDates = stringArray(inventoryChange, "addedDates");
+    const pricing = pricingSnapshot(effect, {
+      stayType: context.order.stay_type,
+      memberId: context.order.member_id,
+      memberContractId: context.order.member_contract_id
+    });
+    const segmentId = newId("segment");
+    await trx.insertInto("stay_segments").values({
+      id: segmentId,
+      stay_id: context.stay.id,
+      sequence: context.currentSegment.sequence + 1,
+      inventory_unit_id: inventoryUnitId,
+      arrival_date: segmentArrivalDate,
+      departure_date: departureDate,
+      segment_type: options.commandType,
+      supersedes_segment_id: context.currentSegment.id,
+      amendment_id: amendmentId
+    }).execute();
+
+    const revisionId = await insertRevision(trx, {
+      orderId,
+      revisionNo: context.revision.revisionNo + 1,
+      amendmentId,
+      policyVersionId: context.order.pricing_policy_version_id,
+      arrivalDate,
+      departureDate,
+      pricing
+    });
+
+    const releasedClaimIds = await releaseInventoryClaimsOnDates(
+      trx,
+      "ORDER_SEGMENT",
+      context.segmentIds,
+      releasedDates
+    );
+    const unit = await loadInventoryUnit(trx, propertyId, inventoryUnitId);
+    const addedClaimIds = await createInventoryClaims(trx, {
+      propertyId,
+      unit,
+      dates: addedDates,
+      sourceType: "ORDER_SEGMENT",
+      sourceId: segmentId,
+      excludeSourceIds: [...context.segmentIds, segmentId]
+    });
+
+    const reconciled = context.order.member_id || context.order.member_contract_id
+      ? await reconcileCoverage(trx, {
+        orderId,
+        contractId: context.order.member_contract_id ?? "",
+        ...(context.order.member_id ? { memberId: context.order.member_id } : {}),
+        revisionId,
+        coverageSet: pricing.coverageSet,
+        commandId: options.commandId
+      })
+      : { coverageIds: [], factIds: [] };
+    const entitlementChange = nestedObject(effect, "entitlementChange");
+    const consumedCoverageDates = stringArray(entitlementChange, "consumedCoverageDates");
+    const consumed = options.commandType === "EXTEND_STAY" && (context.order.member_id || context.order.member_contract_id)
+      ? await consumeCoverage(trx, orderId, options.commandId, {
+        serviceDates: consumedCoverageDates,
+        reason: "EXTEND_STAY_ENTITLEMENT_CONSUMED"
+      })
+      : { coverageIds: [], factIds: [] };
+
+    await trx.updateTable("orders").set({
+      arrival_date: arrivalDate,
+      departure_date: departureDate,
+      current_revision_id: revisionId,
+      version: context.order.version + 1,
+      updated_at: new Date()
+    }).where("id", "=", orderId).execute();
+
+    const pricingDecision = nestedObject(effect, "pricingDecision");
+    const fundsSummary = nestedObject(effect, "fundsSummary");
+    const before = nestedObject(effect, "before");
+    return {
+      persistedResult: {
+        orderId,
+        stayId: context.stay.id,
+        amendmentId,
+        staySegmentId: segmentId,
+        pricingRevisionId: revisionId,
+        arrivalDate,
+        departureDate,
+        before,
+        after,
+        pricingDecision,
+        inventoryChange,
+        entitlementChange,
+        fundsSummary
+      },
+      resourceRefs: [...new Set([
+        orderId,
+        context.stay.id,
+        amendmentId,
+        segmentId,
+        revisionId,
+        ...releasedClaimIds,
+        ...addedClaimIds,
+        ...reconciled.coverageIds,
+        ...consumed.coverageIds
+      ])],
+      factRefs: [...new Set([...reconciled.factIds, ...consumed.factIds])]
+    };
+  }
+
+  if (["SHORTEN_STAY", "MOVE_UNIT"].includes(options.commandType)) {
     const amendmentId = await appendAmendment(trx, {
       orderId, sequence: context.order.version + 1, amendmentType: options.commandType,
       reasonCode: options.reason.code, reasonNote: options.reason.note, priorVersion: context.order.version, payload: effect,
@@ -911,7 +1058,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const coverageIds: string[] = [];
     const coverageFactIds: string[] = [];
 
-    if (options.commandType === "SHORTEN_STAY" || options.commandType === "EXTEND_STAY") {
+    if (options.commandType === "SHORTEN_STAY") {
       departureDate = requireString(nestedObject(effect, "after"), "departureDate");
     }
     if (options.commandType === "MOVE_UNIT") segmentType = "MOVE";
@@ -927,9 +1074,6 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       const released = await releaseCoverage(trx, orderId, options.commandId, { fromDate: departureDate, reholdCoverageSet: pricing.coverageSet });
       coverageIds.push(...released.coverageIds);
       coverageFactIds.push(...released.factIds);
-    } else if (options.commandType === "EXTEND_STAY") {
-      const unit = await loadInventoryUnit(trx, propertyId, unitId);
-      await createInventoryClaims(trx, { propertyId, unit, dates: enumerateServiceDates(context.order.departure_date, departureDate), sourceType: "ORDER_SEGMENT", sourceId: segmentId });
     } else {
       const effectiveDate = requireString(effect, "effectiveDate");
       await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds, effectiveDate);

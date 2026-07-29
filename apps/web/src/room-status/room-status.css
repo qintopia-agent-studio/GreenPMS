@@ -470,8 +470,13 @@
 }
 
 .room-status-date-header.is-today {
-  box-shadow: inset 0 -3px 0 var(--brand);
+  background: color-mix(in srgb, var(--brand) 10%, var(--surface-muted));
   color: var(--brand-hover);
+}
+
+.room-status-date-header.is-today span {
+  color: var(--brand-hover);
+  font-weight: 650;
 }
 
 .room-status-grid-row {
@@ -613,7 +618,10 @@
 }
 
 .room-status-day-cell.is-today {
-  border-left: 2px solid var(--brand);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--brand) 7%, transparent),
+    color-mix(in srgb, var(--brand) 7%, transparent)
+  );
 }
 
 .room-status-day-reserved {

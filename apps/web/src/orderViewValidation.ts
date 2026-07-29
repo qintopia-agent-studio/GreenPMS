@@ -393,18 +393,32 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const stay = record(result.stay, "stay");
   const accessLevel = stringValue(result.accessLevel, "accessLevel");
   if (accessLevel !== "READ" && accessLevel !== "WRITE") fail("accessLevel", "不是支持的权限");
+  const seenActionCodes = new Set<string>();
+  const enabledDateActions: string[] = [];
   arrayValue(result.allowedActions, "allowedActions").forEach((item, index) => {
     const action = record(item, `allowedActions[${index}]`);
+    exactKeys(action, `allowedActions[${index}]`, ["code", "enabled", "disabledReason"]);
     const code = stringValue(action.code, `allowedActions[${index}].code`);
     if (!actionCodes.has(code)) fail(`allowedActions[${index}].code`, "不是支持的订单操作");
+    if (seenActionCodes.has(code)) fail(`allowedActions[${index}].code`, "重复");
+    seenActionCodes.add(code);
     if (typeof action.enabled !== "boolean") fail(`allowedActions[${index}].enabled`, "必须是布尔值");
     nullableString(action.disabledReason, `allowedActions[${index}].disabledReason`);
     if (accessLevel === "READ" && action.enabled) fail(`allowedActions[${index}]`, "只读权限不能包含可执行写操作");
+    if (action.enabled && (code === "RESCHEDULE_STAY" || code === "EXTEND_STAY" || code === "SHORTEN_STAY")) enabledDateActions.push(code);
   });
   stringValue(order.id, "order.id");
   stringValue(order.property_id, "order.property_id");
   const orderStatus = stringValue(order.status, "order.status");
   if (!Object.hasOwn(orderProjectionExpectations, orderStatus)) fail("order.status", "不是支持的订单状态");
+  const expectedDateAction = orderStatus === "RESERVED"
+    ? "RESCHEDULE_STAY"
+    : orderStatus === "CHECKED_IN"
+      ? "EXTEND_STAY"
+      : undefined;
+  if (enabledDateActions.some((code) => code !== expectedDateAction)) {
+    fail("allowedActions", "日期操作与订单状态不一致");
+  }
   const expectation = orderProjectionExpectations[orderStatus as keyof typeof orderProjectionExpectations];
   const orderArrivalDate = localDate(order.arrival_date, "order.arrival_date");
   const orderDepartureDate = localDate(order.departure_date, "order.departure_date");

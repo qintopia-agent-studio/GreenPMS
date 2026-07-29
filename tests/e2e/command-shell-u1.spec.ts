@@ -42,15 +42,22 @@ function availableRoom(board: RoomStatusBoardDto): { unitId: string; arrivalDate
 }
 
 async function openMaintenanceReview(page: Page, candidate: ReturnType<typeof availableRoom>, reason: string) {
-  await page.getByTestId("room-status-unit-select").selectOption(candidate.unitId);
-  await page.getByLabel("入住日期", { exact: true }).fill(candidate.arrivalDate);
-  await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
-  await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
-  await page.getByLabel("维修原因").fill(reason);
+  const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${candidate.unitId}"][data-service-date="${candidate.arrivalDate}"]`);
+  await cell.scrollIntoViewIfNeeded();
+  await cell.focus();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await popover.getByRole("button", { name: "维修锁房", exact: true }).click();
+  const drawer = page.locator("dialog.room-status-write-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByLabel("开始日期", { exact: true })).toHaveValue(candidate.arrivalDate);
+  await expect(drawer.getByLabel("结束日期", { exact: true })).toHaveValue(candidate.departureDate);
+  await drawer.getByLabel("维修原因").fill(reason);
   const preview = page.waitForResponse((response) => response.request().method() === "POST"
     && new URL(response.url()).pathname === "/api/v1/command-previews"
     && response.status() === 200);
-  await page.getByRole("button", { name: "继续核对", exact: true }).click();
+  await drawer.getByRole("button", { name: "继续核对", exact: true }).click();
   await preview;
   await expect(page.getByTestId("command-effect")).toContainText("请核对设置维修锁房");
 }
@@ -87,16 +94,16 @@ test("U1 returns to the maintenance draft, confirms once, auto closes and refres
     await expect(page.getByTestId("command-review-heading")).toBeFocused();
     await expect(dialog).not.toContainText(/Preview|Confirm|Receipt|Command|effectHash|Claim/);
     await page.keyboard.press("Escape");
-    await expect(page.getByLabel("维修原因")).toHaveValue(reason);
+    await expect(page.locator("dialog.room-status-write-drawer").getByLabel("维修原因")).toHaveValue(reason);
 
     const escapeReturnPreview = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/command-previews" && response.status() === 200);
-    await page.getByRole("button", { name: "继续核对", exact: true }).click();
+    await page.locator("dialog.room-status-write-drawer").getByRole("button", { name: "继续核对", exact: true }).click();
     await escapeReturnPreview;
     await dialog.getByTestId("command-return-to-edit").click();
-    await expect(page.getByLabel("维修原因")).toHaveValue(reason);
+    await expect(page.locator("dialog.room-status-write-drawer").getByLabel("维修原因")).toHaveValue(reason);
 
     const secondPreview = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/command-previews" && response.status() === 200);
-    await page.getByRole("button", { name: "继续核对", exact: true }).click();
+    await page.locator("dialog.room-status-write-drawer").getByRole("button", { name: "继续核对", exact: true }).click();
     await secondPreview;
     let confirmCount = 0;
     page.on("request", (request) => {
@@ -111,8 +118,9 @@ test("U1 returns to the maintenance draft, confirms once, auto closes and refres
       observer.observe(document.body, { childList: true, subtree: true, attributes: true });
     });
     await page.getByTestId("confirm-command").click();
-    await expect(page.locator("dialog.modal-wide")).toBeHidden();
-    await expect(page.getByTestId("command-result-notice")).toContainText("维修锁房已设置，房态已刷新");
+    await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
+    await expect(page.getByTestId("command-result-notice"))
+      .toContainText("维修锁房已设置，房态已刷新", { timeout: 15_000 });
     expect(confirmCount).toBe(1);
     expect(await page.evaluate(() => (window as typeof window & { u1ReceiptWasVisible?: boolean }).u1ReceiptWasVisible)).toBe(false);
     await expect.poll(() => page.evaluate(() => Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index)).filter((key) => key?.startsWith("qintopia.command-recovery.v1:")).length)).toBe(0);

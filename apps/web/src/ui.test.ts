@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { businessStatusLabel, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, receiptExecutionSemanticsAreCoherent, receiptTransactionReferenceLabel, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+import { businessStatusLabel, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, receiptExecutionSemanticsAreCoherent, receiptTransactionReferenceLabel, stayDatePreviewPricingSummary, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
 describe("Fulfillment business presentation", () => {
   it("uses one Chinese lifecycle vocabulary without protocol or enum labels", () => {
@@ -274,6 +274,180 @@ describe("U1 confirmation evidence", () => {
         policyBaseAmount: money(13_000),
         targetCurrentContractAmount: money(11_000)
       }
+    }, input)).toBe(false);
+  });
+
+  it.each(["RESCHEDULE_STAY", "EXTEND_STAY"] as const)("requires coherent %s date, pricing, entitlement, inventory and funds evidence", (commandType) => {
+    const beforeArrivalDate = "2026-08-02";
+    const beforeDepartureDate = "2026-08-04";
+    const afterArrivalDate = commandType === "RESCHEDULE_STAY" ? "2026-08-03" : beforeArrivalDate;
+    const afterDepartureDate = "2026-08-05";
+    const effect = {
+      operation: commandType,
+      orderId: "order_1",
+      stayId: "stay_1",
+      inventoryUnitId: "room_1",
+      before: {
+        arrivalDate: beforeArrivalDate,
+        departureDate: beforeDepartureDate,
+        nights: 2,
+        currentContractAmount: money(20_000)
+      },
+      after: {
+        arrivalDate: afterArrivalDate,
+        departureDate: afterDepartureDate,
+        nights: commandType === "RESCHEDULE_STAY" ? 2 : 3,
+        stayTimeline: commandType === "RESCHEDULE_STAY"
+          ? [
+              { serviceDate: "2026-08-03", inventoryUnitId: "room_1" },
+              { serviceDate: "2026-08-04", inventoryUnitId: "room_1" }
+            ]
+          : [
+              { serviceDate: "2026-08-02", inventoryUnitId: "room_1" },
+              { serviceDate: "2026-08-03", inventoryUnitId: "room_1" },
+              { serviceDate: "2026-08-04", inventoryUnitId: "room_1" }
+            ],
+        pricing: {
+          coverageSet: [],
+          cashLines: [],
+          cashRemainder: money(30_000),
+          currentContractAmount: money(30_000)
+        }
+      },
+      pricingDecision: {
+        pricingBasis: "POLICY",
+        policyBaseAmount: money(30_000),
+        targetCurrentContractAmount: money(30_000),
+        differenceFromPolicy: money(0),
+        manualAdjustmentMinor: 0,
+        differenceExceedsThreshold: false,
+        reason: { code: "POLICY", note: "" }
+      },
+      inventoryChange: commandType === "RESCHEDULE_STAY"
+        ? { preservedDates: ["2026-08-03"], releasedDates: ["2026-08-02"], addedDates: ["2026-08-04"] }
+        : { preservedDates: ["2026-08-02", "2026-08-03"], releasedDates: [], addedDates: ["2026-08-04"] },
+      entitlementChange: {
+        preservedCoverageDates: [],
+        releasedCoverageDates: [],
+        addedCoverageDates: [],
+        consumedCoverageDates: []
+      },
+      fundsSummary: {
+        netRecordedCollection: money(10_000),
+        collectionDifference: money(20_000)
+      }
+    };
+    const input = {
+      orderId: "order_1",
+      ...(commandType === "RESCHEDULE_STAY" ? { newArrivalDate: afterArrivalDate } : {}),
+      newDepartureDate: afterDepartureDate
+    };
+    expect(u1PreviewHasBusinessEvidence(commandType, effect, input)).toBe(true);
+    const preview = {
+      previewId: "preview_1",
+      commandType,
+      effect,
+      effectHash: "effect_hash_1",
+      expiresAt: "2026-08-01T12:00:00.000Z"
+    } as Parameters<typeof stayDatePreviewPricingSummary>[1];
+    expect(stayDatePreviewPricingSummary(commandType, preview, input)).toEqual({
+      beforeAmount: money(20_000),
+      policyBaseAmount: money(30_000),
+      targetAmount: money(30_000),
+      differenceFromPolicy: money(0),
+      netRecordedCollection: money(10_000),
+      collectionDifference: money(20_000),
+      pricingBasis: "POLICY"
+    });
+    expect(stayDatePreviewPricingSummary(commandType, { ...preview, effect: { ...effect, fundsSummary: undefined } }, input)).toBeUndefined();
+    for (const key of ["before", "after", "pricingDecision", "inventoryChange", "entitlementChange", "fundsSummary"] as const) {
+      expect(u1PreviewHasBusinessEvidence(commandType, { ...effect, [key]: undefined }, input), key).toBe(false);
+    }
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...effect,
+      fundsSummary: { ...effect.fundsSummary, collectionDifference: money(19_900) }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...effect,
+      after: { ...effect.after, nights: 99 }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...effect,
+      pricingDecision: { ...effect.pricingDecision, differenceFromPolicy: money(100) }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...effect,
+      inventoryChange: { ...effect.inventoryChange, addedDates: ["2026-08-30"] }
+    }, input)).toBe(false);
+
+    const memberCoverageDates = commandType === "RESCHEDULE_STAY"
+      ? ["2026-08-03", "2026-08-04"]
+      : ["2026-08-02", "2026-08-03", "2026-08-04"];
+    const memberEffect = {
+      ...effect,
+      before: { ...effect.before, currentContractAmount: money(0) },
+      after: {
+        ...effect.after,
+        pricing: {
+          ...effect.after.pricing,
+          coverageSet: memberCoverageDates.map((serviceDate) => ({
+            serviceDate,
+            inventoryUnitId: "room_1",
+            unitKind: "ROOM_NIGHT",
+            entitlementLotId: "lot_1"
+          })),
+          cashRemainder: money(0),
+          currentContractAmount: money(0)
+        }
+      },
+      pricingDecision: {
+        ...effect.pricingDecision,
+        pricingBasis: "MEMBER_ENTITLEMENT",
+        policyBaseAmount: money(0),
+        targetCurrentContractAmount: money(0),
+        differenceFromPolicy: money(0)
+      },
+      entitlementChange: commandType === "RESCHEDULE_STAY"
+        ? {
+            preservedCoverageDates: ["2026-08-03"],
+            releasedCoverageDates: ["2026-08-02"],
+            addedCoverageDates: ["2026-08-04"],
+            consumedCoverageDates: []
+          }
+        : {
+            preservedCoverageDates: ["2026-08-02", "2026-08-03"],
+            releasedCoverageDates: [],
+            addedCoverageDates: ["2026-08-04"],
+            consumedCoverageDates: ["2026-08-04"]
+          },
+      fundsSummary: {
+        netRecordedCollection: money(0),
+        collectionDifference: money(0)
+      }
+    };
+    expect(u1PreviewHasBusinessEvidence(commandType, memberEffect, input)).toBe(true);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...memberEffect,
+      entitlementChange: { ...memberEffect.entitlementChange, preservedCoverageDates: [] }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...memberEffect,
+      entitlementChange: { ...memberEffect.entitlementChange, addedCoverageDates: [] }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...memberEffect,
+      entitlementChange: { ...memberEffect.entitlementChange, releasedCoverageDates: ["2026-08-30"] }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...memberEffect,
+      entitlementChange: {
+        ...memberEffect.entitlementChange,
+        consumedCoverageDates: commandType === "RESCHEDULE_STAY" ? ["2026-08-04"] : []
+      }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...memberEffect,
+      pricingDecision: { ...memberEffect.pricingDecision, pricingBasis: "POLICY" }
     }, input)).toBe(false);
   });
 

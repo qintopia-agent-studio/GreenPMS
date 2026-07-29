@@ -1,9 +1,9 @@
 {
-  "caseId": "rev561-weekly-shorten-7-to-6",
-  "anonymizedOrderRef": "OWNER-CONFIRMED-RULE-SHORTEN-7-TO-6",
-  "businessExplanation": "Shortening reselects the band from the complete shortened interval and keeps the original locked policy.",
+  "caseId": "rev561-weekly-reschedule-7-to-6",
+  "anonymizedOrderRef": "OWNER-CONFIRMED-RULE-RESCHEDULE-7-TO-6",
+  "businessExplanation": "Rescheduling reselects the band from the complete adjusted interval and keeps the original locked policy.",
   "businessPlan": "WEEKLY",
-  "scenarioTags": ["SHORTEN", "BOUNDARY"],
+  "scenarioTags": ["RESCHEDULE", "BOUNDARY"],
   "propertyTimeZone": "Asia/Shanghai",
   "currency": "CNY",
   "inventoryUnitKind": "BED",
@@ -19,13 +19,13 @@
   "coverageSet": [],
   "amendments": [{
     "sequence": 2,
-    "amendmentType": "SHORTEN_STAY",
+    "amendmentType": "RESCHEDULE_STAY",
     "requestedAt": "2026-03-02T03:00:00.000Z",
-    "input": { "newDepartureDate": "2026-03-07", "reason": "Owner-confirmed shortening boundary fact" }
+    "input": { "newArrivalDate": "2026-03-01", "newDepartureDate": "2026-03-07", "reason": "Owner-confirmed rescheduling boundary fact" }
   }],
   "rounding": { "stage": "FINAL_STAY_TOTAL", "unit": "CNY_YUAN", "mode": "HALF_UP_POSITIVE" },
   "boundaryEvidence": {
-    "boundaryName": "seven-night band reselected after shortening",
+    "boundaryName": "seven-night band reselected after rescheduling",
     "comparisonCaseId": "rev561-transient-6-night",
     "observedBehaviorChange": "The six-night result uses P1 and does not retain the prior seven-night band."
   },
@@ -60,7 +60,7 @@
       },
       {
         "revisionNo": 2,
-        "amendmentType": "SHORTEN_STAY",
+        "amendmentType": "RESCHEDULE_STAY",
         "pricingPolicyVersionReference": "policy_qintopia_public_2026_rev561_v1",
         "arrivalDate": "2026-03-01",
         "departureDate": "2026-03-07",

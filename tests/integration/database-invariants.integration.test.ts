@@ -664,7 +664,8 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
     for (const migrationName of [
       "019_member_stay_booking_channel_rules.sql",
       "020_whole_room_occupants.sql",
-      "021_defer_internal_use.sql"
+      "021_defer_internal_use.sql",
+      "026_stage9_stay_change_guards.sql"
     ]) {
       await db.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
       try {

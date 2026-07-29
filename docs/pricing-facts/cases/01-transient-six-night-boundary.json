@@ -20,7 +20,7 @@
   "rounding": { "stage": "FINAL_STAY_TOTAL", "unit": "CNY_YUAN", "mode": "HALF_UP_POSITIVE" },
   "boundaryEvidence": {
     "boundaryName": "strictly-less-than-seven transient boundary",
-    "comparisonCaseId": "rev561-weekly-shorten-7-to-6",
+    "comparisonCaseId": "rev561-weekly-reschedule-7-to-6",
     "observedBehaviorChange": "Six nights uses P1 while seven nights enters the seven-night band."
   },
   "expected": {

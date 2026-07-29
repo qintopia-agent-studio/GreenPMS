@@ -15,6 +15,7 @@ import {
   guestFormComplete,
   guestFormInput,
   formatMinorForYuanInput,
+  inventoryRecoveryIsBusinessFacing,
   membershipCoverageSummary,
   parseYuanAmountToMinor,
   quotePricingSummary,
@@ -90,6 +91,15 @@ describe("selected order command authorization scope", () => {
     expect(selectedOrderCommandScopeIsCurrent(selected, principalScope, { orderId: "order_2", stayId: "stay_1" })).toBe(false);
     expect(selectedOrderCommandScopeIsCurrent(selected, principalScope, { orderId: "order_1", stayId: "stay_2" })).toBe(false);
     expect(selectedOrderCommandScopeIsCurrent(selected, "property_other:operator:SESSION:WRITE", { orderId: "order_1", stayId: "stay_1" })).toBe(false);
+  });
+});
+
+describe("room-status command recovery presentation", () => {
+  it("keeps every staff-facing lodging workflow on the Chinese business recovery path", () => {
+    expect(inventoryRecoveryIsBusinessFacing("MEMBER_STAY")).toBe(true);
+    expect(inventoryRecoveryIsBusinessFacing("FULFILLMENT")).toBe(true);
+    expect(inventoryRecoveryIsBusinessFacing("STAY_DATES")).toBe(true);
+    expect(inventoryRecoveryIsBusinessFacing(undefined)).toBe(false);
   });
 });
 

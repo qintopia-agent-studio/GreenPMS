@@ -455,8 +455,9 @@ function scalar(value: unknown): string {
 }
 
 const commandBusinessLabels: Partial<Record<HistoricalCommandType, string>> = {
+  RESCHEDULE_STAY: "调整预订日期",
   SHORTEN_STAY: "缩短住宿",
-  EXTEND_STAY: "续住",
+  EXTEND_STAY: "延长住宿",
   MOVE_UNIT: "换房",
   CANCEL_ORDER: "取消订单",
   MARK_NO_SHOW: "标记未到",
@@ -535,6 +536,11 @@ function nonblankString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const expected = new Set(keys);
+  return Object.keys(value).length === expected.size && Object.keys(value).every((key) => expected.has(key));
+}
+
 type EvidenceMoney = { minorUnits: number; currency: string };
 
 function hasMoney(value: unknown): value is EvidenceMoney {
@@ -554,6 +560,186 @@ function localDateEpoch(value: unknown): number | undefined {
   const epoch = Date.parse(`${value}T00:00:00.000Z`);
   if (!Number.isFinite(epoch) || new Date(epoch).toISOString().slice(0, 10) !== value) return undefined;
   return epoch;
+}
+
+function localDateRange(arrivalDate: string, departureDate: string): string[] | undefined {
+  const arrival = localDateEpoch(arrivalDate);
+  const departure = localDateEpoch(departureDate);
+  if (arrival === undefined || departure === undefined || departure <= arrival) return undefined;
+  const dates: string[] = [];
+  for (let epoch = arrival; epoch < departure; epoch += 86_400_000) {
+    dates.push(new Date(epoch).toISOString().slice(0, 10));
+  }
+  return dates.length <= 366 ? dates : undefined;
+}
+
+function exactDateList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || !value.every((item) => localDateEpoch(item) !== undefined)) return undefined;
+  const dates = value as string[];
+  return new Set(dates).size === dates.length ? dates : undefined;
+}
+
+function sameDateSet(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && actual.every((date) => expected.includes(date));
+}
+
+function dateChangePreviewHasEvidence(
+  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY",
+  effect: Record<string, unknown>,
+  input: Record<string, unknown>
+): boolean {
+  if (!hasExactKeys(effect, ["operation", "orderId", "stayId", "inventoryUnitId", "before", "after", "pricingDecision", "inventoryChange", "entitlementChange", "fundsSummary"])
+    || effect.operation !== commandType
+    || !nonblankString(effect.orderId)
+    || effect.orderId !== input.orderId
+    || !nonblankString(effect.stayId)
+    || !nonblankString(effect.inventoryUnitId)) return false;
+  const before = isRecord(effect.before) ? effect.before : undefined;
+  const after = isRecord(effect.after) ? effect.after : undefined;
+  const decision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
+  const inventory = isRecord(effect.inventoryChange) ? effect.inventoryChange : undefined;
+  const entitlement = isRecord(effect.entitlementChange) ? effect.entitlementChange : undefined;
+  const funds = isRecord(effect.fundsSummary) ? effect.fundsSummary : undefined;
+  if (!before || !after || !decision || !inventory || !entitlement || !funds
+    || !hasExactKeys(before, ["arrivalDate", "departureDate", "nights", "currentContractAmount"])
+    || !hasExactKeys(after, ["arrivalDate", "departureDate", "nights", "stayTimeline", "pricing"])
+    || !hasExactKeys(decision, ["pricingBasis", "policyBaseAmount", "targetCurrentContractAmount", "differenceFromPolicy", "manualAdjustmentMinor", "differenceExceedsThreshold", "reason"])
+    || !hasExactKeys(inventory, ["preservedDates", "releasedDates", "addedDates"])
+    || !hasExactKeys(entitlement, ["preservedCoverageDates", "releasedCoverageDates", "addedCoverageDates", "consumedCoverageDates"])
+    || !hasExactKeys(funds, ["netRecordedCollection", "collectionDifference"])) return false;
+
+  const beforeDates = typeof before.arrivalDate === "string" && typeof before.departureDate === "string"
+    ? localDateRange(before.arrivalDate, before.departureDate)
+    : undefined;
+  const afterDates = typeof after.arrivalDate === "string" && typeof after.departureDate === "string"
+    ? localDateRange(after.arrivalDate, after.departureDate)
+    : undefined;
+  if (!beforeDates || !afterDates
+    || before.nights !== beforeDates.length
+    || after.nights !== afterDates.length
+    || after.nights < 1
+    || after.nights > 366
+    || (commandType === "RESCHEDULE_STAY" && (after.arrivalDate !== input.newArrivalDate || after.departureDate !== input.newDepartureDate))
+    || (commandType === "EXTEND_STAY" && (after.arrivalDate !== before.arrivalDate || after.departureDate !== input.newDepartureDate || String(after.departureDate) <= String(before.departureDate)))) return false;
+
+  const timeline = repriceStayTimeline(after.stayTimeline);
+  if (!timeline || timeline.length !== afterDates.length
+    || !timeline.every((item, index) => item.serviceDate === afterDates[index])) return false;
+  const timelineByDate = new Map(timeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
+  const pricing = isRecord(after.pricing) ? after.pricing : undefined;
+  if (!pricing || !hasExactKeys(pricing, ["coverageSet", "cashLines", "cashRemainder", "currentContractAmount"])) return false;
+
+  const pricingBasis = decision.pricingBasis;
+  if (pricingBasis !== "POLICY" && pricingBasis !== "CHANNEL_CONTRACT" && pricingBasis !== "MANUAL_ADJUSTMENT"
+    && pricingBasis !== "MEMBER_ENTITLEMENT" && pricingBasis !== "FREE") return false;
+  const pricingReason = isRecord(decision.reason) ? decision.reason : undefined;
+  const beforeAmount = before.currentContractAmount;
+  const policyAmount = decision.policyBaseAmount;
+  const targetAmount = decision.targetCurrentContractAmount;
+  const difference = decision.differenceFromPolicy;
+  const netCollection = funds.netRecordedCollection;
+  const collectionDifference = funds.collectionDifference;
+  if (!pricingReason || !hasExactKeys(pricingReason, ["code", "note"])
+    || !nonblankString(pricingReason.code)
+    || typeof pricingReason.note !== "string"
+    || !hasMoney(beforeAmount) || !hasMoney(policyAmount) || !hasMoney(targetAmount) || !hasMoney(difference)
+    || !hasMoney(pricing.cashRemainder) || !hasMoney(pricing.currentContractAmount)
+    || !hasMoney(netCollection) || !hasMoney(collectionDifference)
+    || [beforeAmount, policyAmount, difference, pricing.cashRemainder, pricing.currentContractAmount, netCollection, collectionDifference]
+      .some((amount) => amount.currency !== targetAmount.currency)
+    || targetAmount.minorUnits < 0
+    || targetAmount.minorUnits > 2_147_483_600
+    || targetAmount.minorUnits % 100 !== 0
+    || difference.minorUnits !== targetAmount.minorUnits - policyAmount.minorUnits
+    || !moneyMatches(pricing.currentContractAmount, targetAmount)
+    || collectionDifference.minorUnits !== targetAmount.minorUnits - netCollection.minorUnits
+    || !Number.isSafeInteger(decision.manualAdjustmentMinor)
+    || (pricingBasis === "MANUAL_ADJUSTMENT"
+      ? decision.manualAdjustmentMinor !== difference.minorUnits
+      : decision.manualAdjustmentMinor !== 0)
+    || typeof decision.differenceExceedsThreshold !== "boolean"
+    || decision.differenceExceedsThreshold !== (Math.abs(difference.minorUnits) * 100 > policyAmount.minorUnits * 15)
+    || (input.targetCurrentContractAmountMinor !== undefined && input.targetCurrentContractAmountMinor !== targetAmount.minorUnits)
+    || !pricingCoverageHasEvidence(pricing.coverageSet, timelineByDate)
+    || !Array.isArray(pricing.cashLines)
+    || !pricing.cashLines.every((line) => pricingCashLineHasEvidence(line, targetAmount.currency, timelineByDate))) return false;
+
+  const preservedDates = exactDateList(inventory.preservedDates);
+  const releasedDates = exactDateList(inventory.releasedDates);
+  const addedDates = exactDateList(inventory.addedDates);
+  const expectedPreserved = beforeDates.filter((date) => afterDates.includes(date));
+  const expectedReleased = beforeDates.filter((date) => !afterDates.includes(date));
+  const expectedAdded = afterDates.filter((date) => !beforeDates.includes(date));
+  if (!preservedDates || !releasedDates || !addedDates
+    || !sameDateSet(preservedDates, expectedPreserved)
+    || !sameDateSet(releasedDates, expectedReleased)
+    || !sameDateSet(addedDates, expectedAdded)) return false;
+
+  const preservedCoverageDates = exactDateList(entitlement.preservedCoverageDates);
+  const releasedCoverageDates = exactDateList(entitlement.releasedCoverageDates);
+  const addedCoverageDates = exactDateList(entitlement.addedCoverageDates);
+  const consumedCoverageDates = exactDateList(entitlement.consumedCoverageDates);
+  const currentCoverageDates = Array.isArray(pricing.coverageSet)
+    ? exactDateList(pricing.coverageSet.map((item) => isRecord(item) ? item.serviceDate : undefined))
+    : undefined;
+  if (!preservedCoverageDates || !releasedCoverageDates || !addedCoverageDates || !consumedCoverageDates
+    || !currentCoverageDates
+    || !preservedCoverageDates.every((date) => expectedPreserved.includes(date))
+    || !releasedCoverageDates.every((date) => expectedReleased.includes(date))
+    || !addedCoverageDates.every((date) => expectedAdded.includes(date))
+    || !sameDateSet(currentCoverageDates, [...preservedCoverageDates, ...addedCoverageDates])
+    || releasedCoverageDates.some((date) => currentCoverageDates.includes(date))
+    || (pricingBasis !== "MEMBER_ENTITLEMENT"
+      && (currentCoverageDates.length > 0
+        || preservedCoverageDates.length > 0
+        || releasedCoverageDates.length > 0
+        || addedCoverageDates.length > 0
+        || consumedCoverageDates.length > 0))
+    || (commandType === "RESCHEDULE_STAY"
+      ? consumedCoverageDates.length > 0
+      : !sameDateSet(consumedCoverageDates, addedCoverageDates))) return false;
+  return true;
+}
+
+export interface StayDatePreviewPricingSummary {
+  beforeAmount: MoneyDto;
+  policyBaseAmount: MoneyDto;
+  targetAmount: MoneyDto;
+  differenceFromPolicy: MoneyDto;
+  netRecordedCollection: MoneyDto;
+  collectionDifference: MoneyDto;
+  pricingBasis: "POLICY" | "CHANNEL_CONTRACT" | "MANUAL_ADJUSTMENT" | "MEMBER_ENTITLEMENT" | "FREE";
+}
+
+export function stayDatePreviewPricingSummary(
+  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY",
+  preview: PreviewDto,
+  input: Record<string, unknown>
+): StayDatePreviewPricingSummary | undefined {
+  if (!dateChangePreviewHasEvidence(commandType, preview.effect, input)) return undefined;
+  const before = isRecord(preview.effect.before) ? preview.effect.before : undefined;
+  const decision = isRecord(preview.effect.pricingDecision) ? preview.effect.pricingDecision : undefined;
+  const funds = isRecord(preview.effect.fundsSummary) ? preview.effect.fundsSummary : undefined;
+  const beforeAmount = moneyFrom(before?.currentContractAmount);
+  const policyBaseAmount = moneyFrom(decision?.policyBaseAmount);
+  const targetAmount = moneyFrom(decision?.targetCurrentContractAmount);
+  const differenceFromPolicy = moneyFrom(decision?.differenceFromPolicy);
+  const netRecordedCollection = moneyFrom(funds?.netRecordedCollection);
+  const collectionDifference = moneyFrom(funds?.collectionDifference);
+  const pricingBasis = decision?.pricingBasis;
+  if (!beforeAmount || !policyBaseAmount || !targetAmount || !differenceFromPolicy
+    || !netRecordedCollection || !collectionDifference
+    || (pricingBasis !== "POLICY" && pricingBasis !== "CHANNEL_CONTRACT" && pricingBasis !== "MANUAL_ADJUSTMENT"
+      && pricingBasis !== "MEMBER_ENTITLEMENT" && pricingBasis !== "FREE")) return undefined;
+  return {
+    beforeAmount,
+    policyBaseAmount,
+    targetAmount,
+    differenceFromPolicy,
+    netRecordedCollection,
+    collectionDifference,
+    pricingBasis
+  };
 }
 
 function repriceStayTimeline(value: unknown): Array<{ serviceDate: string; inventoryUnitId: string }> | undefined {
@@ -700,6 +886,9 @@ export function u1PreviewHasBusinessEvidence(
           && Array.isArray(pricing.cashLines)
           && pricing.cashLines.every((line) => pricingCashLineHasEvidence(line, targetAmount.currency, timelineByDate));
       }
+    case "RESCHEDULE_STAY":
+    case "EXTEND_STAY":
+      return dateChangePreviewHasEvidence(commandType, effect, input);
     case "CHECK_IN":
     case "CHECK_OUT":
       return fulfillmentTransitionIsExpected(commandType, effect);
@@ -738,6 +927,40 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
     : typeof effect.manualAdjustmentMinor === "number" ? effect.manualAdjustmentMinor : undefined;
   const coverage = pricing && Array.isArray(pricing.coverageSet) ? pricing.coverageSet : [];
   const cashLines = pricing && Array.isArray(pricing.cashLines) ? pricing.cashLines : [];
+
+  if (businessCommand === "RESCHEDULE_STAY" || businessCommand === "EXTEND_STAY") {
+    const beforeNights = before && typeof before.nights === "number" ? before.nights : undefined;
+    const afterNights = after && typeof after.nights === "number" ? after.nights : undefined;
+    const funds = isRecord(effect.fundsSummary) ? effect.fundsSummary : undefined;
+    const netCollection = moneyFrom(funds?.netRecordedCollection);
+    const collectionDifference = moneyFrom(funds?.collectionDifference);
+    const memberPricing = pricingBasis === "MEMBER_ENTITLEMENT";
+    const uncoveredNights = afterNights === undefined ? undefined : Math.max(0, afterNights - coverage.length);
+    return <div className="effect-summary stay-date-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="stay-date-command-summary-heading">
+        <h3 id="stay-date-command-summary-heading">请核对{commandShellLabel(businessCommand)}</h3>
+        <dl className="difference-grid">
+          {before ? <><dt>原住宿日期</dt><dd>{formatDate(String(before.arrivalDate))} 至 {formatDate(String(before.departureDate))}</dd></> : null}
+          {after ? <><dt>新住宿日期</dt><dd><strong>{formatDate(String(after.arrivalDate))} 至 {formatDate(String(after.departureDate))}</strong></dd></> : null}
+          {beforeNights !== undefined ? <><dt>原住宿晚数</dt><dd>{beforeNights} 晚</dd></> : null}
+          {afterNights !== undefined ? <><dt>完整新晚数</dt><dd>{afterNights} 晚{beforeNights !== undefined ? `（${afterNights - beforeNights >= 0 ? "+" : ""}${afterNights - beforeNights}）` : ""}</dd></> : null}
+          {before && moneyFrom(before.currentContractAmount) ? <><dt>原合同金额</dt><dd>{formatMoney(moneyFrom(before.currentContractAmount))}</dd></> : null}
+          {policyBaseAmount ? <><dt>政策基础金额</dt><dd>{formatMoney(policyBaseAmount)}</dd></> : null}
+          {targetCurrentContractAmount ? <><dt>{pricingBasis === "CHANNEL_CONTRACT" ? "本单渠道应结金额" : "订单新金额"}</dt><dd><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd></> : null}
+          {differenceFromPolicy ? <><dt>与政策基础金额差额</dt><dd>{formatMoney(differenceFromPolicy)}</dd></> : null}
+          {pricingReason && typeof pricingReason.note === "string" && pricingReason.note ? <>
+            <dt>{pricingBasis === "CHANNEL_CONTRACT" ? "渠道价格差异说明" : pricingBasis === "MANUAL_ADJUSTMENT" ? "人工调价原因" : "计价说明"}</dt>
+            <dd>{pricingReason.note}</dd>
+          </> : null}
+          {netCollection ? <><dt>已登记净收款</dt><dd>{formatMoney(netCollection)}</dd></> : null}
+          {collectionDifference ? <><dt>{collectionDifference.minorUnits > 0 ? "待补收参考" : collectionDifference.minorUnits < 0 ? "多收 / 退款参考" : "当前记录无差额"}</dt><dd>{formatMoney({ ...collectionDifference, minorUnits: Math.abs(collectionDifference.minorUnits) })}</dd></> : null}
+          {memberPricing ? <><dt>会员权益覆盖</dt><dd>{coverage.length} 晚</dd>{uncoveredNights !== undefined ? <><dt>未覆盖晚数</dt><dd>{uncoveredNights} 晚</dd></> : null}<dt>未覆盖金额</dt><dd>{formatMoney(pricing ? moneyFrom(pricing.cashRemainder) : undefined)}</dd></> : null}
+          <dt>住宿日期变更原因</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+        </dl>
+        <p className="muted compact">差额只作补收或退款参考；确认不会自动登记收款、退款或结清。</p>
+      </section>
+    </div>;
+  }
   const hasBookingChannel = Object.hasOwn(effect, "bookingChannelCode");
   const bookingChannelCode = typeof effect.bookingChannelCode === "string" ? effect.bookingChannelCode : null;
   const channelOrderReference = typeof effect.channelOrderReference === "string" ? effect.channelOrderReference : null;
@@ -1174,6 +1397,26 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
       {orderId && committed ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
     </section>;
   }
+  if (businessCommand === "RESCHEDULE_STAY" || businessCommand === "EXTEND_STAY") {
+    const arrivalDate = result && typeof result.arrivalDate === "string" ? result.arrivalDate : undefined;
+    const departureDate = result && typeof result.departureDate === "string" ? result.departureDate : undefined;
+    const funds = result && isRecord(result.fundsSummary) ? result.fundsSummary : undefined;
+    const difference = moneyFrom(funds?.collectionDifference);
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{committed ? `${commandShellLabel(businessCommand)}已完成` : `${commandShellLabel(businessCommand)}未执行`}</h3>
+          <p>{committed ? commandShellSuccessMessage(businessCommand) : commandShellNotExecutedMessage(businessCommand)}</p>
+        </div>
+      </div>
+      {committed && arrivalDate && departureDate ? <dl className="receipt-grid">
+        <dt>当前住宿日期</dt><dd>{formatDate(arrivalDate)} 至 {formatDate(departureDate)}</dd>
+        {difference ? <><dt>{difference.minorUnits > 0 ? "待补收参考" : difference.minorUnits < 0 ? "多收 / 退款参考" : "当前记录无差额"}</dt><dd>{formatMoney({ ...difference, minorUnits: Math.abs(difference.minorUnits) })}</dd></> : null}
+      </dl> : null}
+      {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+    </section>;
+  }
   if (businessCommand && isU1CommandType(businessCommand)) {
     const label = commandShellLabel(businessCommand);
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
@@ -1272,7 +1515,7 @@ export interface PersistedCommandRecovery {
   commandType: HistoricalCommandType;
   confirmationKey: string;
   targetRefs: string[];
-  presentation?: "MEMBER_STAY" | "FULFILLMENT";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES";
   state: PersistedCommandRecoveryState;
   updatedAt: string;
 }
@@ -1381,9 +1624,10 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || !value.confirmationKey
     || !Array.isArray(value.targetRefs)
     || !value.targetRefs.every((item) => typeof item === "string")
-    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT")
+    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES")
     || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
     || (value.presentation === "FULFILLMENT" && !isFulfillmentBusinessCommand(value.commandType))
+    || (value.presentation === "STAY_DATES" && value.commandType !== "RESCHEDULE_STAY" && value.commandType !== "EXTEND_STAY")
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
     || typeof value.updatedAt !== "string") {
     return { kind: "CORRUPT", error: new Error("本地命令恢复记录版本或结构无效；无法确认原命令是否执行，已暂停本物业写命令") };
@@ -1465,6 +1709,7 @@ export function transitionPersistedCommandRecovery(
 export function recoveryCommandRequest(recovery: PersistedCommandRecovery): CommandRequest {
   const memberStay = recovery.presentation === "MEMBER_STAY";
   const fulfillment = recovery.presentation === "FULFILLMENT";
+  const stayDates = recovery.presentation === "STAY_DATES";
   const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
   return {
@@ -1473,6 +1718,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
       ? "恢复会员住宿结果"
       : fulfillment && commandType
         ? `恢复${fulfillmentCommandLabel(commandType)}结果`
+        : stayDates && u1CommandType
+          ? `恢复${commandShellLabel(u1CommandType)}结果`
         : u1CommandType
           ? `查询${commandShellLabel(u1CommandType)}结果`
         : `${recovery.commandType} · 原命令恢复`,
@@ -1480,6 +1727,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
       ? "系统只查询原住宿办理结果，不会重复创建订单或冻结会员权益。"
       : fulfillment
         ? "系统只查询刚才的操作结果，不会重复办理。"
+        : stayDates && u1CommandType
+          ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : u1CommandType
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : "仅使用已保存的原幂等键查询服务端命令结果，不会发起新的业务写入。",
@@ -1675,6 +1924,8 @@ export function CommandDialog({
   const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
+  const stayDates = request.presentation === "STAY_DATES"
+    && (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY");
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
   const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
   const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment;
@@ -2031,7 +2282,7 @@ export function CommandDialog({
     <Modal
       title={request.title}
       onClose={closeCommandDialog}
-      size="wide"
+      size={stayDates ? "drawer" : "wide"}
       closeDisabled={busy && (!u1CommandType || shellState.phase === "CONFIRMING")}
       footer={
         <>
@@ -2059,7 +2310,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }

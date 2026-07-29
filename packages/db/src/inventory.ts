@@ -338,8 +338,9 @@ export async function createInventoryClaims(trx: Transaction<Database>, options:
   dates: string[];
   sourceType: "ORDER_SEGMENT" | "MAINTENANCE" | "INTERNAL_USE";
   sourceId: string;
+  excludeSourceIds?: string[];
 }): Promise<string[]> {
-  await assertUnitAvailable(trx, options.unit, options.dates);
+  await assertUnitAvailable(trx, options.unit, options.dates, options.excludeSourceIds);
   const claimIds: string[] = [];
   for (const serviceDate of options.dates) {
     const claimId = newId("claim");
@@ -397,6 +398,60 @@ export async function releaseInventoryClaims(trx: Transaction<Database>, sourceT
         .where("bed_id", "=", claim.inventory_unit_id).where("service_date", "=", claim.service_date).where("bed_claim_id", "=", claim.id).execute();
     }
     await trx.updateTable("inventory_claims").set({ active: false, released_at: new Date() }).where("id", "=", claim.id).execute();
+  }
+  return claims.map((claim) => claim.id);
+}
+
+export async function releaseInventoryClaimsOnDates(
+  trx: Transaction<Database>,
+  sourceType: "ORDER_SEGMENT" | "MAINTENANCE" | "INTERNAL_USE",
+  sourceIds: string[],
+  serviceDates: string[]
+): Promise<string[]> {
+  if (sourceIds.length === 0 || serviceDates.length === 0) return [];
+  const claims = await trx.selectFrom("inventory_claims")
+    .selectAll()
+    .where("source_type", "=", sourceType)
+    .where("source_id", "in", sourceIds)
+    .where("service_date", "in", [...new Set(serviceDates)].sort())
+    .where("active", "=", true)
+    .orderBy("room_id")
+    .orderBy("service_date")
+    .orderBy("id")
+    .execute();
+  for (const claim of claims) {
+    const unit = await trx.selectFrom("inventory_units").select("kind").where("id", "=", claim.inventory_unit_id).executeTakeFirstOrThrow();
+    let pointerUpdate;
+    if (unit.kind === "ROOM") {
+      pointerUpdate = await trx.updateTable("inventory_room_days")
+        .set({ whole_claim_id: null, version: sql`version + 1`, updated_at: new Date() })
+        .where("room_id", "=", claim.room_id)
+        .where("service_date", "=", claim.service_date)
+        .where("whole_claim_id", "=", claim.id)
+        .executeTakeFirst();
+    } else {
+      pointerUpdate = await trx.updateTable("inventory_bed_days")
+        .set({ bed_claim_id: null, version: sql`version + 1`, updated_at: new Date() })
+        .where("bed_id", "=", claim.inventory_unit_id)
+        .where("service_date", "=", claim.service_date)
+        .where("bed_claim_id", "=", claim.id)
+        .executeTakeFirst();
+    }
+    if (pointerUpdate.numUpdatedRows !== 1n) {
+      throw new DomainError("INTERNAL_ERROR", "库存占用指针损坏，不能调整住宿日期", 500, false, {
+        claimId: claim.id,
+        inventoryUnitId: claim.inventory_unit_id,
+        serviceDate: claim.service_date
+      });
+    }
+    const claimUpdate = await trx.updateTable("inventory_claims")
+      .set({ active: false, released_at: new Date() })
+      .where("id", "=", claim.id)
+      .where("active", "=", true)
+      .executeTakeFirst();
+    if (claimUpdate.numUpdatedRows !== 1n) {
+      throw new DomainError("INTERNAL_ERROR", "库存占用记录损坏，不能调整住宿日期", 500, false, { claimId: claim.id });
+    }
   }
   return claims.map((claim) => claim.id);
 }

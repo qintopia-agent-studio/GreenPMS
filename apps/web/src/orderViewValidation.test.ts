@@ -188,6 +188,23 @@ describe("parseOrderView", () => {
     expect(parseOrderView(input)).toBe(input);
   });
 
+  it("accepts only the lifecycle-specific enabled date action and rejects duplicate actions", () => {
+    const reserved = orderView();
+    (reserved as unknown as { allowedActions: unknown[] }).allowedActions = [{ code: "RESCHEDULE_STAY", enabled: true, disabledReason: null }];
+    expect(parseOrderView(reserved)).toBe(reserved);
+
+    const wrongReserved = orderView();
+    (wrongReserved as unknown as { allowedActions: unknown[] }).allowedActions = [{ code: "EXTEND_STAY", enabled: true, disabledReason: null }];
+    expect(() => parseOrderView(wrongReserved)).toThrow("与订单状态不一致");
+
+    const duplicate = orderView();
+    (duplicate as unknown as { allowedActions: unknown[] }).allowedActions = [
+      { code: "RESCHEDULE_STAY", enabled: true, disabledReason: null },
+      { code: "RESCHEDULE_STAY", enabled: false, disabledReason: "重复" }
+    ];
+    expect(() => parseOrderView(duplicate)).toThrow("重复");
+  });
+
   it.each([
     ["missing original arrangement", (input: ReturnType<typeof orderView>) => { delete (input as Partial<typeof input>).originalArrangement; }],
     ["unknown history type", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.type = "INITIAL"; }],

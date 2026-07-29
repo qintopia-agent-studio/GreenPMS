@@ -207,6 +207,8 @@ describe("RoomStatusOrderContext", () => {
     expect(html).toContain("调整前：101 一栋101");
     expect(html).toContain("调整后：101 一栋101");
     expect(html).toContain("变更时已登记净收款");
+    expect(html).toContain("待补收参考");
+    expect(html).not.toContain("已结清");
     expect(html).toContain("资金记录");
     expect(html).toContain("收款 ·");
     expect(html).toContain("净影响：");
@@ -243,6 +245,43 @@ describe("RoomStatusOrderContext", () => {
     expect(html).toContain("办理入住");
     expect(html).toContain("办理退房");
     expect(html).toContain("调整订单金额");
+  });
+
+  it("keeps rescheduling and extension inside room status and shows the approved multi-room fail-close reason", () => {
+    const multiRoom = orderView({
+      allowedActions: [{ code: "RESCHEDULE_STAY", enabled: true, disabledReason: null }]
+    });
+    const blockedHtml = renderToStaticMarkup(<RoomStatusOrderContext
+      view={multiRoom}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onDateAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(blockedHtml).toContain("该订单已有换房安排，当前版本暂不能调整预订日期");
+    expect(blockedHtml).not.toContain('data-room-status-action="RESCHEDULE_STAY"');
+
+    const singleRoom = orderView({
+      effectiveArrangement: {
+        ...orderView().effectiveArrangement,
+        intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-07-25", departureDate: "2026-07-28" }]
+      },
+      allowedActions: [{ code: "RESCHEDULE_STAY", enabled: true, disabledReason: null }]
+    });
+    const enabledHtml = renderToStaticMarkup(<RoomStatusOrderContext
+      view={singleRoom}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onDateAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(enabledHtml).toContain("调整预订日期");
+    expect(enabledHtml).toContain('data-room-status-action="RESCHEDULE_STAY"');
+    expect(enabledHtml).toContain('data-room-status-action-mode="inline"');
   });
 
   it("keeps local fulfillment visible but disabled while room-status writes are blocked", () => {

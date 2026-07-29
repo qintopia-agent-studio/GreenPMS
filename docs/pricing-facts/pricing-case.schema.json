@@ -14,7 +14,7 @@
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "enum": ["BASELINE", "SHORTEN", "EXTEND", "MOVE", "CROSS_MONTH", "PARTIAL_MEMBER_COVERAGE", "MANUAL_ADJUSTMENT", "BOUNDARY"] }
+      "items": { "enum": ["BASELINE", "RESCHEDULE", "EXTEND", "MOVE", "CROSS_MONTH", "PARTIAL_MEMBER_COVERAGE", "MANUAL_ADJUSTMENT", "BOUNDARY"] }
     },
     "propertyTimeZone": { "type": "string", "minLength": 1 },
     "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
@@ -45,7 +45,7 @@
         "required": ["sequence", "amendmentType", "requestedAt", "input"],
         "properties": {
           "sequence": { "type": "integer", "minimum": 2 },
-          "amendmentType": { "enum": ["SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "REPRICE_ORDER"] },
+          "amendmentType": { "enum": ["RESCHEDULE_STAY", "EXTEND_STAY", "MOVE_UNIT", "REPRICE_ORDER"] },
           "requestedAt": { "type": "string", "format": "date-time" },
           "input": { "type": "object", "minProperties": 1, "additionalProperties": true }
         }
@@ -76,7 +76,7 @@
             "required": ["revisionNo", "amendmentType", "pricingPolicyVersionReference", "arrivalDate", "departureDate", "coverageSet", "cashLines", "manualAdjustmentMinor", "cashRemainderMinor", "currentContractAmountMinor", "roundingEvidence"],
             "properties": {
               "revisionNo": { "type": "integer", "minimum": 1 },
-              "amendmentType": { "enum": ["CREATE_ORDER", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "REPRICE_ORDER"] },
+              "amendmentType": { "enum": ["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY", "MOVE_UNIT", "REPRICE_ORDER"] },
               "pricingPolicyVersionReference": { "type": "string", "minLength": 1 },
               "arrivalDate": { "type": "string", "format": "date" },
               "departureDate": { "type": "string", "format": "date" },

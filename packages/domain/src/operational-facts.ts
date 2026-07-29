@@ -159,6 +159,33 @@ export function createOrderPricingDecision(input: {
   };
 }
 
+export function stayChangePricingDecision(input: {
+  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY";
+  bookingChannelCode: BookingChannelCode | null;
+  stayType: string;
+  memberStay: boolean;
+  policyBaseAmountMinor: unknown;
+  targetCurrentContractAmountMinor?: unknown;
+  channelPriceDifferenceReason?: unknown;
+  manualPriceAdjustmentReason?: unknown;
+}): CreateOrderPricingDecisionDto {
+  const decision = createOrderPricingDecision(input);
+  const suffix = decision.pricingBasis === "CHANNEL_CONTRACT"
+    ? "CHANNEL_CONTRACT"
+    : decision.pricingBasis === "MANUAL_ADJUSTMENT"
+      ? "MANUAL_PRICE"
+      : decision.pricingBasis === "MEMBER_ENTITLEMENT"
+        ? "MEMBER"
+        : decision.pricingBasis;
+  return {
+    ...decision,
+    reason: {
+      ...decision.reason,
+      code: `${input.commandType}_${suffix}`
+    }
+  };
+}
+
 export function requireTransactionReference(value: unknown): string {
   if (typeof value !== "string" || value.trim() === "") {
     throw new DomainError("VALIDATION_ERROR", "transactionReference is required");

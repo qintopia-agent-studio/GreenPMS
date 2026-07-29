@@ -5,7 +5,7 @@
 | 文件 | 证据 |
 |---|---|
 | `01-transient-six-night-boundary.json` | 6 夜为临住、P1、政策生效日与跨月不拆 |
-| `02-weekly-shorten-boundary.json` | 7→6 夜缩短后按完整新区间重选档 |
+| `02-weekly-reschedule-boundary.json` | 未入住订单从 7 夜调整为 6 夜后按完整新区间重选档 |
 | `03-monthly-extension-boundary.json` | 29→30 夜累计续住并接受跳档下降 |
 | `04-custom-cross-month-move.json` | 连续跨月、跨产品换房、统一 14 夜档与最终一次舍入 |
 | `05-fixed-term-partial-member.json` | 具体 coverageSet 与 7 个未覆盖日期逐日 P1 |

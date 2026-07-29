@@ -315,11 +315,12 @@ export async function prepareStage7Acceptance(
       fullName: "跨分段住宿住客",
       nickname: "小满"
     });
-    await execute(db, "EXTEND_STAY", {
+    await execute(db, "RESCHEDULE_STAY", {
       propertyId: demo.propertyId,
       orderId: moved.orderId,
+      newArrivalDate: arrivalDate,
       newDepartureDate: departureDate
-    }, `${fixturePrefix}-extend`);
+    }, `${fixturePrefix}-reschedule`);
     await execute(db, "MOVE_UNIT", {
       propertyId: demo.propertyId,
       orderId: moved.orderId,

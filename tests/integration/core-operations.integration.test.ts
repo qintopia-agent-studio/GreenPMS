@@ -352,7 +352,7 @@ describe("PostgreSQL core operations", () => {
       order_id: orderId,
       contract_id: demo.memberContractId,
       lot_id: demo.roomLotId,
-      inventory_unit_id: demo.secondRoomId,
+      inventory_unit_id: oldCoverage.inventory_unit_id,
       service_date: "2026-07-22",
       unit_kind: "ROOM_NIGHT",
       status: "HELD",
@@ -397,30 +397,44 @@ describe("PostgreSQL core operations", () => {
       commandType: "ADJUST_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 1, adjustmentReason: "Three-night re-hold acceptance" }
     }, "rehold-adjust");
-    const created = await createOrder(demo.roomId, "rehold", { member: true });
+    const created = await createOrder(demo.roomId, "rehold", {
+      member: true,
+      arrival: "2026-08-01",
+      departure: "2026-08-04"
+    });
     const orderId = created.result!.orderId as string;
     const initialView = await getOrderView(db, orderId);
-    const initialCoverage = initialView.coverageSet.find((item) => item.service_date === "2026-07-23")!;
+    const initialCoverage = initialView.coverageSet.find((item) => item.service_date === "2026-08-03")!;
 
     await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-23" }
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newArrivalDate: "2026-08-01",
+        newDepartureDate: "2026-08-03"
+      }
     }, "rehold-shorten");
     expect((await getOrderView(db, orderId)).coverageSet.find((item) => item.id === initialCoverage.id)?.status).toBe("RELEASED");
 
     const extended = await previewAndConfirm({
-      commandType: "EXTEND_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-24" }
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newArrivalDate: "2026-08-01",
+        newDepartureDate: "2026-08-04"
+      }
     }, "rehold-extend");
     expect(extended.businessCommitted).toBe(true);
     const view = await getOrderView(db, orderId);
-    const coverageForReturnedNight = view.coverageSet.filter((item) => item.service_date === "2026-07-23");
+    const coverageForReturnedNight = view.coverageSet.filter((item) => item.service_date === "2026-08-03");
     expect(coverageForReturnedNight).toHaveLength(2);
     expect(coverageForReturnedNight.map((item) => item.status).sort()).toEqual(["HELD", "RELEASED"]);
     const activeCoverage = coverageForReturnedNight.find((item) => item.status === "HELD")!;
     expect(activeCoverage.id).not.toBe(initialCoverage.id);
     const ledger = await db.selectFrom("entitlement_ledger").select(["fact_id", "entry_type", "coverage_id", "quantity_delta"])
-      .where("order_id", "=", orderId).where("service_date", "=", "2026-07-23").execute();
+      .where("order_id", "=", orderId).where("service_date", "=", "2026-08-03").execute();
     expect(ledger.filter((entry) => entry.entry_type === "HOLD")).toHaveLength(2);
     expect(ledger.filter((entry) => entry.entry_type === "HOLD").map((entry) => entry.coverage_id)).toContain(activeCoverage.id);
     expect(new Set(ledger.map((entry) => entry.fact_id)).size).toBe(ledger.length);
@@ -553,8 +567,8 @@ describe("PostgreSQL core operations", () => {
       input: { propertyId: demo.propertyId, orderId, amountMinor: 6_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-COLLECTION-TWO", note: "second installment" }
     }, "collection-two");
     const shortened = await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: departureDate }
+      commandType: "RESCHEDULE_STAY",
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: arrivalDate, newDepartureDate: departureDate }
     }, "shorten");
     expect(shortened.businessCommitted).toBe(true);
     const refund = await previewAndConfirm({
@@ -609,16 +623,19 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("appends extension and move revisions while retaining the locked policy", async () => {
-    const created = await createOrder(demo.roomId, "move", { stayType: "FREE", arrival: "2026-07-21", departure: "2026-07-22" });
+    const created = await createOrder(demo.roomId, "move", { stayType: "FREE", arrival: "2026-08-01", departure: "2026-08-02" });
     const orderId = created.result!.orderId as string;
-    await previewAndConfirm({ commandType: "EXTEND_STAY", input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-24" } }, "extend");
-    await previewAndConfirm({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-07-22" } }, "move");
+    await previewAndConfirm({
+      commandType: "RESCHEDULE_STAY",
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-04" }
+    }, "extend");
+    await previewAndConfirm({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-08-02" } }, "move");
     const view = await getOrderView(db, orderId);
     expect(view.segments).toHaveLength(3);
     expect(view.pricingRevisions).toHaveLength(3);
     expect(view.pricingRevisions.every((revision) => revision.policy_version_id === demo.freePolicyId)).toBe(true);
     expect(view.currentSegment.inventoryUnitId).toBe(demo.secondRoomId);
-    const availability = await listAvailability(db, demo.propertyId, "2026-07-22", "2026-07-24");
+    const availability = await listAvailability(db, demo.propertyId, "2026-08-02", "2026-08-04");
     expect(availability.find((unit) => unit.id === demo.roomId)?.available).toBe(true);
     expect(availability.find((unit) => unit.id === demo.secondRoomId)?.available).toBe(false);
   });
@@ -640,34 +657,34 @@ describe("PostgreSQL core operations", () => {
       commandType: "ADJUST_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 2, adjustmentReason: "Four-night timeline acceptance" }
     }, "timeline-adjust");
-    const created = await createOrder(demo.roomId, "timeline", { member: true, arrival: "2026-07-21", departure: "2026-07-25" });
+    const created = await createOrder(demo.roomId, "timeline", { member: true, arrival: "2026-08-01", departure: "2026-08-05" });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
-      commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-07-23" }
-    }, "timeline-move-one");
-    await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-24" }
+      commandType: "RESCHEDULE_STAY",
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-04" }
     }, "timeline-shorten");
 
     let context = await loadOrderContext(db, orderId);
     expect(await loadActiveStayTimeline(db, context)).toEqual([
-      { serviceDate: "2026-07-21", inventoryUnitId: demo.roomId },
-      { serviceDate: "2026-07-22", inventoryUnitId: demo.roomId },
-      { serviceDate: "2026-07-23", inventoryUnitId: demo.secondRoomId }
+      { serviceDate: "2026-08-01", inventoryUnitId: demo.roomId },
+      { serviceDate: "2026-08-02", inventoryUnitId: demo.roomId },
+      { serviceDate: "2026-08-03", inventoryUnitId: demo.roomId }
     ]);
     let view = await getOrderView(db, orderId);
     let activeCoverage = view.coverageSet.filter((item) => item.status === "HELD");
     expect(activeCoverage).toHaveLength(3);
     expect(new Set(activeCoverage.map((item) => item.service_date)).size).toBe(3);
-    expect(activeCoverage.find((item) => item.service_date === "2026-07-21")?.inventory_unit_id).toBe(demo.roomId);
-    expect(activeCoverage.find((item) => item.service_date === "2026-07-23")?.inventory_unit_id).toBe(demo.secondRoomId);
+    expect(activeCoverage.find((item) => item.service_date === "2026-08-01")?.inventory_unit_id).toBe(demo.roomId);
+    expect(activeCoverage.find((item) => item.service_date === "2026-08-03")?.inventory_unit_id).toBe(demo.roomId);
 
     await previewAndConfirm({
-      commandType: "EXTEND_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-25" }
+      commandType: "RESCHEDULE_STAY",
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-05" }
     }, "timeline-extend");
+    await previewAndConfirm({
+      commandType: "MOVE_UNIT",
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-08-03" }
+    }, "timeline-move-one");
     await previewAndConfirm({
       commandType: "REPRICE_ORDER",
       input: { propertyId: demo.propertyId, orderId, targetCurrentContractAmountMinor: 500 }
@@ -678,14 +695,14 @@ describe("PostgreSQL core operations", () => {
 
     await previewAndConfirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.roomId, effectiveDate: "2026-07-23" }
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.roomId, effectiveDate: "2026-08-03" }
     }, "timeline-move-two");
     context = await loadOrderContext(db, orderId);
     expect(await loadActiveStayTimeline(db, context)).toEqual([
-      { serviceDate: "2026-07-21", inventoryUnitId: demo.roomId },
-      { serviceDate: "2026-07-22", inventoryUnitId: demo.roomId },
-      { serviceDate: "2026-07-23", inventoryUnitId: demo.roomId },
-      { serviceDate: "2026-07-24", inventoryUnitId: demo.roomId }
+      { serviceDate: "2026-08-01", inventoryUnitId: demo.roomId },
+      { serviceDate: "2026-08-02", inventoryUnitId: demo.roomId },
+      { serviceDate: "2026-08-03", inventoryUnitId: demo.roomId },
+      { serviceDate: "2026-08-04", inventoryUnitId: demo.roomId }
     ]);
     view = await getOrderView(db, orderId);
     activeCoverage = view.coverageSet.filter((item) => item.status === "HELD");
@@ -695,20 +712,20 @@ describe("PostgreSQL core operations", () => {
     expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(0);
     expect(view.amounts.currentContractAmount.minorUnits).toBe(0);
     expect(view.pricingRevisions.every((revision) => revision.policy_version_id === demo.transientPolicyId)).toBe(true);
-    expect(view.currentSegment.arrivalDate).toBe("2026-07-21");
+    expect(view.currentSegment.arrivalDate).toBe("2026-08-01");
     expect(view.originalArrangement).toEqual({
-      arrivalDate: "2026-07-21",
-      departureDate: "2026-07-25",
-      intervals: [{ inventoryUnitId: demo.roomId, arrivalDate: "2026-07-21", departureDate: "2026-07-25" }]
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-08-05",
+      intervals: [{ inventoryUnitId: demo.roomId, arrivalDate: "2026-08-01", departureDate: "2026-08-05" }]
     });
     expect(view.effectiveArrangement).toMatchObject({
       presentation: "CURRENT",
-      arrivalDate: "2026-07-21",
-      departureDate: "2026-07-25",
-      intervals: [{ inventoryUnitId: demo.roomId, arrivalDate: "2026-07-21", departureDate: "2026-07-25" }]
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-08-05",
+      intervals: [{ inventoryUnitId: demo.roomId, arrivalDate: "2026-08-01", departureDate: "2026-08-05" }]
     });
     expect(view.arrangementHistory.map((item) => item.type)).toEqual([
-      "INITIAL_BOOKING", "MOVE", "SHORTENING", "EXTENSION", "MOVE"
+      "INITIAL_BOOKING", "RESCHEDULE", "RESCHEDULE", "MOVE", "MOVE"
     ]);
     for (const [index, interval] of view.effectiveArrangement.intervals.entries()) {
       expect(interval.departureDate > interval.arrivalDate).toBe(true);
@@ -716,39 +733,35 @@ describe("PostgreSQL core operations", () => {
     }
   });
 
-  it("shortens exactly to and then before the latest move effective date", async () => {
+  it("rejects reserved date changes after a move arrangement without changing the timeline", async () => {
     const created = await createOrder(demo.roomId, "shorten-move-boundary", {
       stayType: "FREE",
-      arrival: "2026-07-21",
-      departure: "2026-07-25"
+      arrival: "2026-08-01",
+      departure: "2026-08-05"
     });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-07-23" }
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-08-03" }
     }, "shorten-move-boundary-move");
-    await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-23" }
-    }, "shorten-at-move-boundary");
-    let context = await loadOrderContext(db, orderId);
+    await expect(createCommandPreview(db, principal, {
+      commandType: "RESCHEDULE_STAY",
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-03" }
+    }, metadata("reschedule-after-move-rejected"))).rejects.toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "该订单已有换房安排，当前版本暂不能调整预订日期"
+    });
+    const context = await loadOrderContext(db, orderId);
     expect(await loadActiveStayTimeline(db, context)).toEqual([
-      { serviceDate: "2026-07-21", inventoryUnitId: demo.roomId },
-      { serviceDate: "2026-07-22", inventoryUnitId: demo.roomId }
+      { serviceDate: "2026-08-01", inventoryUnitId: demo.roomId },
+      { serviceDate: "2026-08-02", inventoryUnitId: demo.roomId },
+      { serviceDate: "2026-08-03", inventoryUnitId: demo.secondRoomId },
+      { serviceDate: "2026-08-04", inventoryUnitId: demo.secondRoomId }
     ]);
-    expect(context.currentSegment.inventoryUnitId).toBe(demo.roomId);
-
-    await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-22" }
-    }, "shorten-before-move-boundary");
-    context = await loadOrderContext(db, orderId);
-    expect(await loadActiveStayTimeline(db, context)).toEqual([
-      { serviceDate: "2026-07-21", inventoryUnitId: demo.roomId }
-    ]);
+    expect(context.currentSegment.inventoryUnitId).toBe(demo.secondRoomId);
   });
 
-  it("supports move, extension, and shortening while checked in", async () => {
+  it("supports move and extension while checked in and keeps shortening failed closed", async () => {
     const arrivalDate = await propertyLocalToday(db, demo.propertyId);
     const moveDate = addDays(arrivalDate, 1);
     const originalDepartureDate = addDays(arrivalDate, 3);
@@ -768,16 +781,20 @@ describe("PostgreSQL core operations", () => {
       commandType: "EXTEND_STAY",
       input: { propertyId: demo.propertyId, orderId, newDepartureDate: extendedDepartureDate }
     }, "checked-in-amendments-extend");
-    await previewAndConfirm({
+    await expect(createCommandPreview(db, principal, {
       commandType: "SHORTEN_STAY",
       input: { propertyId: demo.propertyId, orderId, newDepartureDate: originalDepartureDate }
-    }, "checked-in-amendments-shorten");
+    }, metadata("checked-in-amendments-shorten-rejected"))).rejects.toMatchObject({
+      code: "INVALID_ORDER_STATE",
+      message: "当前版本暂不支持通过缩短住宿办理提前退房"
+    });
     const context = await loadOrderContext(db, orderId);
     expect(context.order.status).toBe("CHECKED_IN");
     expect(await loadActiveStayTimeline(db, context)).toEqual([
       { serviceDate: arrivalDate, inventoryUnitId: demo.roomId },
       { serviceDate: moveDate, inventoryUnitId: demo.secondRoomId },
-      { serviceDate: addDays(arrivalDate, 2), inventoryUnitId: demo.secondRoomId }
+      { serviceDate: addDays(arrivalDate, 2), inventoryUnitId: demo.secondRoomId },
+      { serviceDate: addDays(arrivalDate, 3), inventoryUnitId: demo.secondRoomId }
     ]);
   });
 
@@ -970,7 +987,10 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("keeps a manual adjustment in one revision and does not inherit it", async () => {
-    const created = await createOrder(demo.roomId, "manual-adjustment");
+    const created = await createOrder(demo.roomId, "manual-adjustment", {
+      arrival: "2026-08-01",
+      departure: "2026-08-04"
+    });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
       commandType: "REPRICE_ORDER",
@@ -980,8 +1000,14 @@ describe("PostgreSQL core operations", () => {
     expect(view.amounts.currentContractAmount.minorUnits).toBe(35_000);
     expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(-1_000);
     await previewAndConfirm({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-07-23" }
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newArrivalDate: "2026-08-01",
+        newDepartureDate: "2026-08-03",
+        targetCurrentContractAmountMinor: 24_000
+      }
     }, "shorten-after-reprice");
     view = await getOrderView(db, orderId);
     expect(view.amounts.currentContractAmount.minorUnits).toBe(24_000);

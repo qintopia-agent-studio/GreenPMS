@@ -336,7 +336,7 @@ describe("scoped agent HTTP core journey", () => {
         stayType: "TRANSIENT",
         arrivalDate,
         departureDate: originalDepartureDate,
-        pricingPolicyVersionId: demo.transientPolicyId,
+        pricingPolicyVersionId: demo.publicPricingPolicyId,
         memberId: demo.memberId
       }
     } as const;
@@ -357,16 +357,16 @@ describe("scoped agent HTTP core journey", () => {
       inventoryUnitId: memberRoomId,
       memberId: demo.memberId,
       memberContractId: demo.memberContractId,
-      pricingPolicyVersionId: demo.transientPolicyId,
+      pricingPolicyVersionId: demo.publicPricingPolicyId,
       coverageSet: [
         { serviceDate: arrivalDate, inventoryUnitId: memberRoomId, unitKind: "ROOM_NIGHT", entitlementLotId: demo.roomLotId },
         { serviceDate: secondServiceDate, inventoryUnitId: memberRoomId, unitKind: "ROOM_NIGHT", entitlementLotId: demo.roomLotId }
       ],
-      cashRemainder: { currency: "CNY", minorUnits: 12_000 },
-      currentContractAmount: { currency: "CNY", minorUnits: 12_000 }
+      cashRemainder: { currency: "CNY", minorUnits: 13_000 },
+      currentContractAmount: { currency: "CNY", minorUnits: 13_000 }
     });
     expect(quote.cashLines).toEqual([
-      expect.objectContaining({ serviceDate: finalServiceDate, amount: { currency: "CNY", minorUnits: 12_000 } })
+      expect.objectContaining({ serviceDate: finalServiceDate, amount: { currency: "CNY", minorUnits: 13_000 } })
     ]);
     const quoteReplay = await app.inject(quoteRequest);
     expect(quoteReplay.statusCode, quoteReplay.body).toBe(200);
@@ -403,7 +403,7 @@ describe("scoped agent HTTP core journey", () => {
       occupancyCapacity: 1,
       bookingChannelCode: null,
       channelOrderReference: null,
-      pricingPolicyVersionId: demo.transientPolicyId,
+      pricingPolicyVersionId: demo.publicPricingPolicyId,
       pricingDecision: {
         pricingBasis: "MEMBER_ENTITLEMENT",
         policyBaseAmount: quote.currentContractAmount,
@@ -429,7 +429,7 @@ describe("scoped agent HTTP core journey", () => {
       }],
       bookingChannelCode: null,
       channelOrderReference: null,
-      pricingPolicyVersionId: demo.transientPolicyId,
+      pricingPolicyVersionId: demo.publicPricingPolicyId,
       pricingDecision: created.preview.effect.pricingDecision
     });
     const orderId = created.receipt.result?.orderId as string;
@@ -528,9 +528,10 @@ describe("scoped agent HTTP core journey", () => {
     expect(secondCollection.receipt.factRefs).toHaveLength(1);
     expect(secondCollection.receipt.factRefs[0]).not.toBe(firstCollectionFactId);
 
-    const shortened = await runCommand(demo.writeToken, "SHORTEN_STAY", {
+    const shortened = await runCommand(demo.writeToken, "RESCHEDULE_STAY", {
       propertyId: demo.propertyId,
       orderId,
+      newArrivalDate: arrivalDate,
       newDepartureDate: shortenedDepartureDate
     }, "shorten-stay");
     expect(shortened.receipt.result).toMatchObject({ orderId, pricingRevisionId: expect.any(String) });
@@ -597,7 +598,7 @@ describe("scoped agent HTTP core journey", () => {
       id: orderId,
       status: "CHECKED_IN",
       departure_date: shortenedDepartureDate,
-      pricing_policy_version_id: demo.transientPolicyId,
+      pricing_policy_version_id: demo.publicPricingPolicyId,
       member_contract_id: demo.memberContractId
     });
     expect(finalOrder.stay.status).toBe("IN_HOUSE");
@@ -627,11 +628,11 @@ describe("scoped agent HTTP core journey", () => {
       intervals: [{ inventoryUnitId: memberRoomId, arrivalDate, departureDate: shortenedDepartureDate }]
     });
     expect(finalOrder.arrangementHistory.map((item: { type: string }) => item.type)).toEqual([
-      "INITIAL_BOOKING", "SHORTENING"
+      "INITIAL_BOOKING", "RESCHEDULE"
     ]);
     expect(finalOrder.pricingRevisions).toHaveLength(2);
     expect(finalOrder.pricingRevisions.every((revision: { policy_version_id: string }) => (
-      revision.policy_version_id === demo.transientPolicyId
+      revision.policy_version_id === demo.publicPricingPolicyId
     ))).toBe(true);
     expect(finalOrder.collectionFacts).toHaveLength(3);
     expect(finalOrder.amounts).toEqual({

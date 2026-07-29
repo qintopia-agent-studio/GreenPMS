@@ -62,7 +62,7 @@ describe("database migration concurrency", () => {
         .sort();
       const rows = await client.query<{ name: string }>("SELECT name FROM schema_migrations ORDER BY name");
       expect(rows.rows.map((row) => row.name)).toEqual(expectedMigrations);
-      expect(expectedMigrations).toHaveLength(25);
+      expect(expectedMigrations).toHaveLength(26);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -74,6 +74,7 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("023_collection_fact_pricing_revision.sql");
       expect(expectedMigrations).toContain("024_free_stay_category_code.sql");
       expect(expectedMigrations).toContain("025_channel_order_atomic_pricing.sql");
+      expect(expectedMigrations).toContain("026_stage9_stay_change_guards.sql");
     } finally {
       await client.end();
     }

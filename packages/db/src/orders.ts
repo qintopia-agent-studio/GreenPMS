@@ -50,19 +50,22 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function pricingReasonFromAmendment(amendment: {
+export function pricingReasonFromAmendment(amendment: {
   amendment_type: string;
   reason_code: string;
   reason_note: string;
   payload: unknown;
 } | undefined): { code: string; note: string } {
   if (!amendment) return { code: "HISTORICAL", note: "" };
-  if (amendment.amendment_type === "CREATE_ORDER") {
+  if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY"].includes(amendment.amendment_type)) {
     const payload = recordValue(amendment.payload);
     const decision = recordValue(payload?.pricingDecision);
     const reason = recordValue(decision?.reason);
     if (typeof reason?.code === "string" && typeof reason.note === "string") {
       return { code: reason.code, note: reason.note };
+    }
+    if (amendment.amendment_type !== "CREATE_ORDER") {
+      throw new DomainError("INTERNAL_ERROR", "订单住宿日期变更的计价原因损坏", 500);
     }
   }
   return { code: amendment.reason_code, note: amendment.reason_note };
@@ -150,15 +153,17 @@ export function orderAllowedActions(
   accessLevel: AccessLevel,
   status: string,
   hasRefundableCollection: boolean,
-  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string }
+  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string },
+  hasMultipleArrangementIntervals = false
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
     CORRECT_ORDER_OCCUPANT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
     CHECK_IN: ["RESERVED"],
     CHECK_OUT: ["CHECKED_IN"],
-    SHORTEN_STAY: ["RESERVED", "CHECKED_IN"],
-    EXTEND_STAY: ["RESERVED", "CHECKED_IN"],
+    RESCHEDULE_STAY: ["RESERVED"],
+    SHORTEN_STAY: [],
+    EXTEND_STAY: ["CHECKED_IN"],
     MOVE_UNIT: ["RESERVED", "CHECKED_IN"],
     REPRICE_ORDER: ["RESERVED", "CHECKED_IN"],
     CANCEL_ORDER: ["RESERVED"],
@@ -180,6 +185,8 @@ export function orderAllowedActions(
         if (fulfillmentDates.businessDate < fulfillmentDates.departureDate) {
           fulfillmentDisabledReason = "DEPARTURE_DATE_NOT_REACHED";
         }
+      } else if (code === "RESCHEDULE_STAY" && hasMultipleArrangementIntervals) {
+        fulfillmentDisabledReason = "该订单已有换房安排，当前版本暂不能调整预订日期";
       }
     }
     const enabled = statusAllows
@@ -379,6 +386,7 @@ interface LifecycleCollectionFactRow {
 const orderLifecycleAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
+  "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
@@ -392,6 +400,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
 
 const pricingRevisionAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
+  "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
@@ -403,6 +412,7 @@ const pricingRevisionAmendmentTypes = new Set<string>([
 
 const requiredPricingRevisionAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
+  "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
@@ -417,6 +427,7 @@ const freeTerminalPricingRevisionAmendmentTypes = new Set<string>([
 
 const staySegmentAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
+  "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT"
@@ -560,6 +571,7 @@ function lifecycleActor(amendment: LifecycleAmendmentRow): { subjectId: string; 
 
 function arrangementChangeType(amendmentType: string): OrderArrangementHistoryItemDto["type"] {
   if (amendmentType === "CREATE_ORDER") return "INITIAL_BOOKING";
+  if (amendmentType === "RESCHEDULE_STAY") return "RESCHEDULE";
   if (amendmentType === "EXTEND_STAY") return "EXTENSION";
   if (amendmentType === "SHORTEN_STAY") return "SHORTENING";
   if (amendmentType === "MOVE_UNIT") return "MOVE";
@@ -827,7 +839,7 @@ export function projectOrderLifecycle(input: {
       const priorSegment = input.segments[index - 1]!;
       const expectedAmendment = segment.segment_type === "MOVE"
         ? "MOVE_UNIT"
-        : segment.segment_type === "EXTEND_STAY" || segment.segment_type === "SHORTEN_STAY"
+        : segment.segment_type === "RESCHEDULE_STAY" || segment.segment_type === "EXTEND_STAY" || segment.segment_type === "SHORTEN_STAY"
           ? segment.segment_type
           : null;
       const overlayType = segment.segment_type === "MOVE" ? "MOVE" : segment.segment_type;
@@ -835,11 +847,17 @@ export function projectOrderLifecycle(input: {
         lifecycleFailure("订单住宿安排 supersession 链或变更类型损坏", { segmentId: segment.id });
       }
       before = current;
-      next = overlayArrangement(current, {
-        inventoryUnitId: segment.inventory_unit_id,
-        arrivalDate: segment.arrival_date,
-        departureDate: segment.departure_date
-      }, overlayType as "EXTEND_STAY" | "SHORTEN_STAY" | "MOVE");
+      next = segment.segment_type === "RESCHEDULE_STAY"
+        ? arrangement([{
+          inventoryUnitId: segment.inventory_unit_id,
+          arrivalDate: segment.arrival_date,
+          departureDate: segment.departure_date
+        }])
+        : overlayArrangement(current, {
+          inventoryUnitId: segment.inventory_unit_id,
+          arrivalDate: segment.arrival_date,
+          departureDate: segment.departure_date
+        }, overlayType as "EXTEND_STAY" | "SHORTEN_STAY" | "MOVE");
       if (!timelineMatches(payloadTimeline(amendment), arrangementTimeline(next))) {
         lifecycleFailure("订单住宿安排与 typed 变更时间线不一致", { amendmentId: amendment.id });
       }
@@ -1051,7 +1069,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       businessDate,
       arrivalDate: context.order.arrival_date,
       departureDate: context.order.departure_date
-    }),
+    }, lifecycle.effectiveArrangement.intervals.length > 1),
     order: context.order,
     occupants: occupantRows.map((occupant) => {
       const correction = latestByOccupant.get(occupant.id);
@@ -1432,8 +1450,30 @@ export async function releaseCoverage(trx: Transaction<Database>, orderId: strin
   return { coverageIds: items.map((item) => item.id), factIds };
 }
 
-export async function consumeCoverage(trx: Transaction<Database>, orderId: string, commandId: string): Promise<{ coverageIds: string[]; factIds: string[] }> {
-  const items = await trx.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).where("status", "=", "HELD").forUpdate().execute();
+export async function consumeCoverage(trx: Transaction<Database>, orderId: string, commandId: string, options: {
+  serviceDates?: string[];
+  reason?: "CHECK_IN_ENTITLEMENT_CONSUMED" | "EXTEND_STAY_ENTITLEMENT_CONSUMED";
+} = {}): Promise<{ coverageIds: string[]; factIds: string[] }> {
+  let requestedServiceDates: string[] | undefined;
+  let query = trx.selectFrom("coverage_items")
+    .selectAll()
+    .where("order_id", "=", orderId)
+    .where("status", "=", "HELD");
+  if (options.serviceDates) {
+    requestedServiceDates = [...new Set(options.serviceDates)].sort();
+    if (requestedServiceDates.length === 0) return { coverageIds: [], factIds: [] };
+    query = query.where("service_date", "in", requestedServiceDates);
+  }
+  const items = await query.orderBy("service_date").forUpdate().execute();
+  if (requestedServiceDates
+    && (items.length !== requestedServiceDates.length
+      || items.some((item, index) => item.service_date !== requestedServiceDates![index]))) {
+    throw new DomainError("INTERNAL_ERROR", "续住新增权益与待核销日期不一致", 500, false, {
+      orderId,
+      requestedServiceDates,
+      heldServiceDates: items.map((item) => item.service_date)
+    });
+  }
   const factIds: string[] = [];
   for (const item of items) {
     await trx.updateTable("coverage_items").set({ status: "CONSUMED", updated_at: new Date() }).where("id", "=", item.id).execute();
@@ -1441,7 +1481,7 @@ export async function consumeCoverage(trx: Transaction<Database>, orderId: strin
     await trx.insertInto("entitlement_ledger").values({
       fact_id: factId, lot_id: item.lot_id, entry_type: "CONSUME", quantity_delta: 0,
       service_date: item.service_date, order_id: orderId, coverage_id: item.id,
-      reason: "CHECK_IN_ENTITLEMENT_CONSUMED", command_id: commandId
+      reason: options.reason ?? "CHECK_IN_ENTITLEMENT_CONSUMED", command_id: commandId
     }).execute();
     factIds.push(factId);
   }

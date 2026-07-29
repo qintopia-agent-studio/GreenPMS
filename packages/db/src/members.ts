@@ -1,7 +1,15 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { sql } from "kysely";
 import { DomainError } from "@qintopia/contracts";
 import { entitlementAvailableBalance } from "./entitlement-balance.ts";
 import type { DbExecutor } from "./inventory.ts";
+
+const propertyClockForTesting = new AsyncLocalStorage<Date>();
+
+export function withPropertyClockForTesting<T>(instant: Date, operation: () => Promise<T>): Promise<T> {
+  if (!Number.isFinite(instant.getTime())) throw new Error("Test property clock instant is invalid");
+  return propertyClockForTesting.run(new Date(instant), operation);
+}
 
 export function localDateInTimeZone(timeZone: string, instant = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -20,7 +28,7 @@ export async function propertyLocalToday(db: DbExecutor, propertyId: string): Pr
     .where("id", "=", propertyId)
     .executeTakeFirst();
   if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
-  return localDateInTimeZone(property.timezone, new Date(property.as_of));
+  return localDateInTimeZone(property.timezone, propertyClockForTesting.getStore() ?? new Date(property.as_of));
 }
 
 export async function getMemberView(db: DbExecutor, propertyId: string, memberId: string) {

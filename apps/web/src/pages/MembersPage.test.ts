@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MemberSummaryDto, MembershipOrderSummaryDto } from "../types";
-import { effectiveMemberId, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, normalizeMemberQuery, parseEntitlementBalance, shouldClearMemberSearchAfterCommit, yuanInputToMinor } from "./MembersPage";
+import { effectiveMemberId, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, ledgerEntryLabel, normalizeMemberQuery, parseEntitlementBalance, shouldClearMemberSearchAfterCommit, yuanInputToMinor } from "./MembersPage";
 
 const members = [
   { member: { id: "member_first" } },
@@ -56,6 +56,11 @@ describe("member directory state", () => {
     expect(ledgerEntryDisplayQuantity("CONSUME", 0)).toEqual({ label: "本次核销", quantity: 1, prefix: "", tone: "is-negative" });
     expect(ledgerEntryDisplayQuantity("HOLD", -1)).toEqual({ label: "余额", quantity: -1, prefix: "", tone: "is-negative" });
     expect(ledgerEntryDisplayQuantity("RELEASE", 1)).toEqual({ label: "余额", quantity: 1, prefix: "+", tone: "is-positive" });
+  });
+
+  it("distinguishes extension consumption from the original check-in consumption", () => {
+    expect(ledgerEntryLabel("CONSUME", "CHECK_IN_ENTITLEMENT_CONSUMED")).toBe("入住核销");
+    expect(ledgerEntryLabel("CONSUME", "EXTEND_STAY_ENTITLEMENT_CONSUMED")).toBe("续住核销");
   });
 
   it("shows multiple formal product entitlements in parallel and excludes unclassified historical lots", () => {

@@ -45,6 +45,7 @@ function isExecutableCommandType(commandType: CommandType): commandType is Execu
 const roomStatusVisibleCommands = new Set<CommandType>([
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
+  "RESCHEDULE_STAY",
   "SHORTEN_STAY",
   "EXTEND_STAY",
   "MOVE_UNIT",
@@ -643,18 +644,17 @@ async function persistRejected(db: Kysely<Database>, principal: AuthPrincipal, o
   reason: CommandReason;
   error: DomainError;
   replayExisting?: boolean;
-  expirePreviewId?: string;
+  closePreviewId?: string;
 }): Promise<ReceiptDto> {
   return db.transaction().execute(async (trx) => {
-    if (options.expirePreviewId) {
+    if (options.closePreviewId) {
       await trx.updateTable("command_previews")
         .set({ status: "EXPIRED", used_at: null })
-        .where("id", "=", options.expirePreviewId)
+        .where("id", "=", options.closePreviewId)
         .where("subject_id", "=", principal.subjectId)
         .where("property_id", "=", options.propertyId)
         .where("command_type", "=", options.commandType)
         .where("status", "=", "OPEN")
-        .where("expires_at", "<=", new Date())
         .execute();
     }
     const commandId = newId("command");
@@ -797,6 +797,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           ].includes(error.code)
             || (isTokenLifecycleCommand(commandType) && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
+            || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") && error.code === "VALIDATION_ERROR")
             || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
             throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });
@@ -872,8 +873,8 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           reason: confirmation.reason,
           error: rejectionError,
           replayExisting: false,
-          ...(rejectionError.code === "PREVIEW_STALE" && rejectionError.details?.causeCode === "PREVIEW_EXPIRED"
-            ? { expirePreviewId: previewId }
+          ...(rejectionError.code === "PREVIEW_STALE"
+            ? { closePreviewId: previewId }
             : {})
         });
       } catch (persistenceError) {

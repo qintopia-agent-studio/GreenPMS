@@ -2,6 +2,7 @@ import { ArrowRight, CalendarRange, Clock3, Crosshair, FilePenLine, ReceiptText,
 import { currentReleaseFeatures } from "@qintopia/contracts";
 import type { InventoryUnitDto, OrderViewDto } from "../types";
 import { businessStatusLabel, formatDate, formatDateTime, formatMoney, StatusBadge } from "../ui";
+import { stayDateChangeActionState, type StayDateChangeAction } from "../components/StayDateChangeDrawer";
 
 type OrderOccupant = OrderViewDto["occupants"][number];
 
@@ -9,8 +10,9 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
   CHECK_IN: "办理入住",
   CHECK_OUT: "办理退房",
+  RESCHEDULE_STAY: "调整预订日期",
   SHORTEN_STAY: "缩短住宿",
-  EXTEND_STAY: "续住",
+  EXTEND_STAY: "延长住宿",
   MOVE_UNIT: "换房",
   REPRICE_ORDER: "调整订单金额",
   CANCEL_ORDER: "取消订单",
@@ -78,6 +80,7 @@ export interface RoomStatusOrderContextProps {
   primaryActionPlacement?: "CONTENT" | "DRAWER_FOOTER";
   onOpenOrder: (actionCode?: string) => void;
   onFulfillmentAction: (action: "CHECK_IN" | "CHECK_OUT") => void;
+  onDateAction?: (action: StayDateChangeAction) => void;
   onCorrectOccupant: (occupant: OrderOccupant) => void;
   onLocateRange: (target: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) => void;
 }
@@ -174,6 +177,7 @@ export function RoomStatusOrderContext({
   primaryActionPlacement = "CONTENT",
   onOpenOrder,
   onFulfillmentAction,
+  onDateAction,
   onCorrectOccupant,
   onLocateRange
 }: RoomStatusOrderContextProps) {
@@ -183,8 +187,15 @@ export function RoomStatusOrderContext({
   const fulfillmentActions = enabledActions.filter((action): action is typeof action & { code: "CHECK_IN" | "CHECK_OUT" } => (
     action.code === "CHECK_IN" || action.code === "CHECK_OUT"
   ));
+  const dateActionState = stayDateChangeActionState(view);
+  const dateActions = enabledActions.filter((action): action is typeof action & { code: StayDateChangeAction } => (
+    (action.code === "RESCHEDULE_STAY" || action.code === "EXTEND_STAY")
+      && dateActionState?.action === action.code
+      && dateActionState.enabled
+  ));
   const routedActions = enabledActions.filter((action) => (
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
+      && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY"
   ));
   const amountDifference = view.amounts.collectionDifference;
   const source = view.order.stay_type === "FREE"
@@ -216,7 +227,7 @@ export function RoomStatusOrderContext({
           <dt>来源</dt><dd>{source}</dd>
           <dt>订单金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
           <dt>已登记净收款</dt><dd>{formatMoney(view.amounts.netRecordedCollection)}</dd>
-          <dt>{amountDifference.minorUnits > 0 ? "待收" : amountDifference.minorUnits < 0 ? "多收" : "已结清"}</dt><dd>{formatMoney({ currency: amountDifference.currency, minorUnits: Math.abs(amountDifference.minorUnits) })}</dd>
+          <dt>{amountDifference.minorUnits > 0 ? "待补收参考" : amountDifference.minorUnits < 0 ? "多收 / 退款参考" : "当前记录无差额"}</dt><dd>{formatMoney({ currency: amountDifference.currency, minorUnits: Math.abs(amountDifference.minorUnits) })}</dd>
           <dt>资金记录</dt><dd>{view.collectionFacts.length} 笔</dd>
         </dl>
       </section>
@@ -276,7 +287,7 @@ export function RoomStatusOrderContext({
               <span>调整后：{arrangementSummary(item.after, unitMap)}</span>
               <span>说明：{item.reason.note || (item.type === "INITIAL_BOOKING" ? "按原始预订建立" : "未填写说明")}</span>
               <span>订单金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
-              <span>变更时已登记净收款：{formatMoney(item.fundsSummary.netRecordedCollection)} · {difference.minorUnits > 0 ? `待收 ${formatMoney({ currency: difference.currency, minorUnits: difference.minorUnits })}` : difference.minorUnits < 0 ? `多收 ${formatMoney({ currency: difference.currency, minorUnits: Math.abs(difference.minorUnits) })}` : "已结清"}</span>
+              <span>变更时已登记净收款：{formatMoney(item.fundsSummary.netRecordedCollection)} · {difference.minorUnits > 0 ? `待补收参考 ${formatMoney({ currency: difference.currency, minorUnits: difference.minorUnits })}` : difference.minorUnits < 0 ? `多收 / 退款参考 ${formatMoney({ currency: difference.currency, minorUnits: Math.abs(difference.minorUnits) })}` : "当前记录无差额"}</span>
               <small>{item.actor?.displayName ?? "系统记录"} · {formatDateTime(item.recordedAt)}</small>
               {item.after.intervals.map((interval, intervalIndex) => <button key={`${interval.inventoryUnitId}:${interval.arrivalDate}`} type="button" className="room-status-text-button" onClick={() => onLocateRange(interval)}><Crosshair aria-hidden="true" size={15} />{item.after.intervals.length > 1 ? `定位调整后第 ${intervalIndex + 1} 段` : "定位调整后安排"}</button>)}
             </li>;
@@ -315,8 +326,10 @@ export function RoomStatusOrderContext({
       <section className="room-status-context-actions" aria-labelledby="room-status-order-actions-heading">
         <div className="room-status-context-section-heading"><ArrowRight aria-hidden="true" size={17} /><h3 id="room-status-order-actions-heading">订单入口</h3></div>
         {primaryActionPlacement === "CONTENT" ? <button type="button" className="room-status-button" onClick={() => onOpenOrder()}>查看完整订单<ArrowRight aria-hidden="true" size={16} /></button> : null}
-        {fulfillmentActions.length || routedActions.length ? <ul>
+        {dateActionState && !dateActionState.enabled && dateActionState.reason ? <p className="room-status-context-note" role="status" data-testid="stay-date-action-blocked">{dateActionState.reason}</p> : null}
+        {fulfillmentActions.length || dateActions.length || routedActions.length ? <ul>
           {fulfillmentActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action-mode="inline" onClick={() => onFulfillmentAction(action.code)}>{actionLabels[action.code]}</button></li>)}
+          {dateActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onDateAction?.(action.code)}>{actionLabels[action.code]}</button></li>)}
           {routedActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" data-room-status-action-mode="order-detail" onClick={() => onOpenOrder(action.code)}>{actionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} /></button></li>)}
         </ul> : null}
       </section>

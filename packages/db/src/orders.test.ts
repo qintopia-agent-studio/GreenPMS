@@ -1,5 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { orderAllowedActions, projectOrderFulfillment, projectOrderLifecycle } from "./orders.ts";
+import { orderAllowedActions, pricingReasonFromAmendment, projectOrderFulfillment, projectOrderLifecycle } from "./orders.ts";
+
+describe("pricingReasonFromAmendment", () => {
+  it.each(["RESCHEDULE_STAY", "EXTEND_STAY"])("keeps the typed pricing reason separate from the %s stay-change reason", (amendmentType) => {
+    expect(pricingReasonFromAmendment({
+      amendment_type: amendmentType,
+      reason_code: "STAY_CHANGE",
+      reason_note: "住客调整行程",
+      payload: {
+        pricingDecision: {
+          reason: { code: "RESCHEDULE_STAY_CHANNEL_CONTRACT", note: "渠道活动价格重新确认" }
+        }
+      }
+    })).toEqual({ code: "RESCHEDULE_STAY_CHANNEL_CONTRACT", note: "渠道活动价格重新确认" });
+  });
+
+  it("fails closed when a Stage 9 pricing reason is damaged", () => {
+    expect(() => pricingReasonFromAmendment({
+      amendment_type: "RESCHEDULE_STAY",
+      reason_code: "STAY_CHANGE",
+      reason_note: "住客调整行程",
+      payload: { pricingDecision: {} }
+    })).toThrow("订单住宿日期变更的计价原因损坏");
+  });
+});
 
 function action(
   status: string,

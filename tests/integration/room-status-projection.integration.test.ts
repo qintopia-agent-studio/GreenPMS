@@ -1374,12 +1374,12 @@ describe("PostgreSQL room-status projection", () => {
       .toHaveLength(5);
   });
 
-  it("projects confirmed shortening and extension from the current Claim timeline with amendment Receipts", async () => {
+  it("projects confirmed reserved date changes from the current Claim timeline with amendment Receipts", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
-    const arrivalDate = shiftLocalDate(businessDate, -5);
-    const originalDepartureDate = shiftLocalDate(businessDate, -1);
-    const shortenedDepartureDate = shiftLocalDate(businessDate, -3);
-    const extendedDepartureDate = businessDate;
+    const arrivalDate = shiftLocalDate(businessDate, 3);
+    const originalDepartureDate = shiftLocalDate(businessDate, 7);
+    const shortenedDepartureDate = shiftLocalDate(businessDate, 5);
+    const extendedDepartureDate = shiftLocalDate(businessDate, 8);
     const created = await createOrder({
       unitId: demo.secondRoomId,
       arrivalDate,
@@ -1389,8 +1389,14 @@ describe("PostgreSQL room-status projection", () => {
     const orderId = created.result!.orderId as string;
 
     const shortened = await execute({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: shortenedDepartureDate }
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newArrivalDate: arrivalDate,
+        newDepartureDate: shortenedDepartureDate,
+        targetCurrentContractAmountMinor: 24_000
+      }
     }, "authoritative-stay-shorten");
     const afterShorten = await board({ arrivalDate, departureDate: extendedDepartureDate });
     const shortenedIntervals = unitIn(afterShorten, demo.secondRoomId).intervals
@@ -1407,16 +1413,22 @@ describe("PostgreSQL room-status projection", () => {
     });
     expect(shortenedIntervals[0]!.claimIds).toHaveLength(2);
     expect(shortenedIntervals[0]!.history).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "SHORTEN_STAY", commandId: expect.any(String) }),
-      expect.objectContaining({ action: "SHORTEN_STAY", receiptId: shortened.receiptId })
+      expect.objectContaining({ action: "RESCHEDULE_STAY", commandId: expect.any(String) }),
+      expect.objectContaining({ action: "RESCHEDULE_STAY", receiptId: shortened.receiptId })
     ]));
     expect(shortenedIntervals[0]!.references).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "RECEIPT", id: shortened.receiptId })
     ]));
 
     const extended = await execute({
-      commandType: "EXTEND_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: extendedDepartureDate }
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newArrivalDate: arrivalDate,
+        newDepartureDate: extendedDepartureDate,
+        targetCurrentContractAmountMinor: 60_000
+      }
     }, "authoritative-stay-extend");
     const afterExtend = await board({ arrivalDate, departureDate: extendedDepartureDate });
     const extendedIntervals = unitIn(afterExtend, demo.secondRoomId).intervals
@@ -1433,9 +1445,9 @@ describe("PostgreSQL room-status projection", () => {
     });
     expect(extendedIntervals[0]!.claimIds).toHaveLength(5);
     expect(extendedIntervals[0]!.history).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "SHORTEN_STAY", receiptId: shortened.receiptId }),
-      expect.objectContaining({ action: "EXTEND_STAY", commandId: expect.any(String) }),
-      expect.objectContaining({ action: "EXTEND_STAY", receiptId: extended.receiptId })
+      expect.objectContaining({ action: "RESCHEDULE_STAY", receiptId: shortened.receiptId }),
+      expect.objectContaining({ action: "RESCHEDULE_STAY", commandId: expect.any(String) }),
+      expect.objectContaining({ action: "RESCHEDULE_STAY", receiptId: extended.receiptId })
     ]));
     expect(extendedIntervals[0]!.references).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "RECEIPT", id: shortened.receiptId }),
@@ -1587,7 +1599,7 @@ describe("PostgreSQL room-status projection", () => {
   it("enforces arrival and early-checkout gates while recording overdue check-out against the planned departure date", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const futureArrivalDate = shiftLocalDate(businessDate, 1);
-    const futureDepartureDate = shiftLocalDate(businessDate, 3);
+    const futureDepartureDate = shiftLocalDate(businessDate, 2);
     const future = await createOrder({
       unitId: demo.secondRoomId,
       arrivalDate: futureArrivalDate,
@@ -1761,7 +1773,7 @@ describe("PostgreSQL room-status projection", () => {
     });
   });
 
-  it("keeps the in-house operational task after shortening before check-in on the business date", async () => {
+  it("keeps the in-house operational task after rescheduling before check-in on the business date", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const arrivalDate = businessDate;
     const departureDate = shiftLocalDate(businessDate, 2);
@@ -1774,8 +1786,14 @@ describe("PostgreSQL room-status projection", () => {
     });
     const orderId = created.result!.orderId as string;
     await execute({
-      commandType: "SHORTEN_STAY",
-      input: { propertyId: demo.propertyId, orderId, newDepartureDate: shortenedDepartureDate }
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newArrivalDate: arrivalDate,
+        newDepartureDate: shortenedDepartureDate,
+        targetCurrentContractAmountMinor: 12_000
+      }
     }, "shorten-before-check-in-shorten");
     await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "shorten-before-check-in-check-in");
 

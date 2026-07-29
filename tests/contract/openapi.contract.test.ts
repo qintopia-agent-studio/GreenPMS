@@ -44,7 +44,14 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     ]
   },
   CORRECT_ORDER_OCCUPANT: { required: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"], properties: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"] },
-  EXTEND_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
+  RESCHEDULE_STAY: {
+    required: ["propertyId", "orderId", "newArrivalDate", "newDepartureDate"],
+    properties: ["propertyId", "orderId", "newArrivalDate", "newDepartureDate", "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason"]
+  },
+  EXTEND_STAY: {
+    required: ["propertyId", "orderId", "newDepartureDate"],
+    properties: ["propertyId", "orderId", "newDepartureDate", "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason"]
+  },
   SHORTEN_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
   MOVE_UNIT: { required: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"], properties: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"] },
   REPRICE_ORDER: { required: ["propertyId", "orderId", "targetCurrentContractAmountMinor"], properties: ["propertyId", "orderId", "targetCurrentContractAmountMinor"] },
@@ -250,6 +257,21 @@ describe("OpenAPI 3.1 command contract", () => {
       minLength: 1,
       maxLength: 1000
     });
+    for (const commandType of ["RESCHEDULE_STAY", "EXTEND_STAY"] as const) {
+      const stayChangeInput = (variants.get(commandType)!.properties as Record<string, JsonSchema>).input!;
+      expect((stayChangeInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
+        type: "integer",
+        minimum: 0,
+        maximum: 2_147_483_600,
+        multipleOf: 100
+      });
+      expect((stayChangeInput.properties as Record<string, JsonSchema>).channelPriceDifferenceReason).toMatchObject({
+        type: "string", minLength: 1, maxLength: 1000
+      });
+      expect((stayChangeInput.properties as Record<string, JsonSchema>).manualPriceAdjustmentReason).toMatchObject({
+        type: "string", minLength: 1, maxLength: 1000
+      });
+    }
     expect((createInput.properties as Record<string, JsonSchema>).freeStayReason).toMatchObject({ minLength: 1, maxLength: 1000 });
     const createFreeStayCategory = ((createInput.properties as Record<string, JsonSchema>).freeStayCategoryCode)!;
     const createFreeStayCategoryVariants = createFreeStayCategory.anyOf as Array<{ enum: string[] }>;

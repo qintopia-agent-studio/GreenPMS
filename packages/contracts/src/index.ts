@@ -35,6 +35,7 @@ export const commandTypes = [
   "ACTIVATE_MEMBERSHIP_ORDER",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
+  "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
@@ -601,6 +602,25 @@ export interface CreateOrderInputDto {
   freeStayCategoryCode?: FreeStayCategoryCode;
 }
 
+export interface RescheduleStayInputDto {
+  propertyId: string;
+  orderId: string;
+  newArrivalDate: string;
+  newDepartureDate: string;
+  targetCurrentContractAmountMinor?: number;
+  channelPriceDifferenceReason?: string;
+  manualPriceAdjustmentReason?: string;
+}
+
+export interface ExtendStayInputDto {
+  propertyId: string;
+  orderId: string;
+  newDepartureDate: string;
+  targetCurrentContractAmountMinor?: number;
+  channelPriceDifferenceReason?: string;
+  manualPriceAdjustmentReason?: string;
+}
+
 export interface CreateOrderPricingDecisionDto {
   pricingBasis: CreateOrderPricingBasis;
   policyBaseAmountMinor: number;
@@ -634,6 +654,7 @@ export const orderActionCodes = [
   "CORRECT_ORDER_OCCUPANT",
   "CHECK_IN",
   "CHECK_OUT",
+  "RESCHEDULE_STAY",
   "SHORTEN_STAY",
   "EXTEND_STAY",
   "MOVE_UNIT",

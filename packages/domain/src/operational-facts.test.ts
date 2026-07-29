@@ -6,6 +6,7 @@ import {
   channelPriceDifferenceExceedsThreshold,
   parseBookingChannelCode,
   requireTransactionReference,
+  stayChangePricingDecision,
   validateBookingChannel
 } from "./operational-facts.ts";
 
@@ -147,6 +148,79 @@ describe("operational fact identifiers", () => {
       targetCurrentContractAmountMinor: 84_050,
       channelPriceDifferenceReason: "非法角分金额"
     })).toThrow(/whole-yuan/);
+  });
+
+  it("rebuilds external-channel stay changes at the exact 15 percent boundary", () => {
+    expect(stayChangePricingDecision({
+      commandType: "RESCHEDULE_STAY",
+      bookingChannelCode: "CTRIP",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 100_000,
+      targetCurrentContractAmountMinor: 85_000
+    })).toMatchObject({
+      pricingBasis: "CHANNEL_CONTRACT",
+      currentContractAmountMinor: 85_000,
+      manualAdjustmentMinor: 0,
+      differenceExceedsThreshold: false,
+      reason: { code: "RESCHEDULE_STAY_CHANNEL_CONTRACT", note: "" }
+    });
+    expect(() => stayChangePricingDecision({
+      commandType: "RESCHEDULE_STAY",
+      bookingChannelCode: "CTRIP",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 100_000,
+      targetCurrentContractAmountMinor: 84_000
+    })).toThrow(/channelPriceDifferenceReason is required/);
+  });
+
+  it("does not inherit WECOM deviations when extending a stay", () => {
+    expect(stayChangePricingDecision({
+      commandType: "EXTEND_STAY",
+      bookingChannelCode: "WECOM",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 42_000
+    })).toMatchObject({
+      pricingBasis: "POLICY",
+      currentContractAmountMinor: 42_000,
+      manualAdjustmentMinor: 0,
+      reason: { code: "EXTEND_STAY_POLICY", note: "" }
+    });
+    expect(() => stayChangePricingDecision({
+      commandType: "EXTEND_STAY",
+      bookingChannelCode: "WECOM",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 42_000,
+      targetCurrentContractAmountMinor: 41_000
+    })).toThrow(/manualPriceAdjustmentReason is required/);
+  });
+
+  it("keeps free and member stay changes database-priced and rejects amount overrides", () => {
+    expect(stayChangePricingDecision({
+      commandType: "RESCHEDULE_STAY",
+      bookingChannelCode: null,
+      stayType: "FREE",
+      memberStay: false,
+      policyBaseAmountMinor: 0
+    })).toMatchObject({ pricingBasis: "FREE", currentContractAmountMinor: 0 });
+    expect(stayChangePricingDecision({
+      commandType: "EXTEND_STAY",
+      bookingChannelCode: null,
+      stayType: "TRANSIENT",
+      memberStay: true,
+      policyBaseAmountMinor: 12_000
+    })).toMatchObject({ pricingBasis: "MEMBER_ENTITLEMENT", currentContractAmountMinor: 12_000 });
+    expect(() => stayChangePricingDecision({
+      commandType: "EXTEND_STAY",
+      bookingChannelCode: null,
+      stayType: "TRANSIENT",
+      memberStay: true,
+      policyBaseAmountMinor: 12_000,
+      targetCurrentContractAmountMinor: 12_000
+    })).toThrow(/must not be submitted for FREE or member stays/);
   });
 
   it("normalizes and requires a real transaction reference", () => {

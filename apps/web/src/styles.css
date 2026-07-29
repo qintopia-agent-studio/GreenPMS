@@ -2342,13 +2342,129 @@ pre {
   padding: 11px 12px;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
-  background: var(--surface-subtle);
+  background: var(--surface-muted);
 }
 
 .command-shell-progress p {
   margin: 2px 0 0;
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 13px;
+}
+
+.stay-date-change-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stay-date-change-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.stay-date-change-heading span,
+.stay-date-change-heading small,
+.stay-date-pricing-section p,
+.stay-date-pricing-section small,
+.stay-date-pricing-note {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.stay-date-change-heading strong,
+.stay-date-change-heading small {
+  overflow-wrap: anywhere;
+}
+
+.stay-date-change-heading small:last-child {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.stay-date-pricing-section {
+  display: grid;
+  gap: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.stay-date-pricing-section h3,
+.stay-date-pricing-section p {
+  margin: 0;
+}
+
+.stay-date-pricing-section h3 {
+  font-size: 0.96rem;
+}
+
+.stay-date-price-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 6px 16px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
+.stay-date-price-preview span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.stay-date-price-preview strong {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.stay-date-price-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  color: var(--muted);
+}
+
+.stay-date-price-toggle {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.stay-date-price-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 1px 0 0;
+  padding: 0;
+  accent-color: var(--brand);
+}
+
+.stay-date-price-toggle > span {
+  display: grid;
+  gap: 2px;
+}
+
+.stay-date-price-toggle small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.stay-date-pricing-note {
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
 }
 
 .list-toolbar {

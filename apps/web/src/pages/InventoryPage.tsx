@@ -28,6 +28,7 @@ import type {
   StayType
 } from "../types";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
+import { StayDateChangeDrawer, type StayDateChangeAction } from "../components/StayDateChangeDrawer";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -97,6 +98,10 @@ export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boo
   void workspaceWidth;
   void isMobile;
   return "DRAWER";
+}
+
+export function inventoryRecoveryIsBusinessFacing(presentation: CommandRequest["presentation"]): boolean {
+  return presentation === "MEMBER_STAY" || presentation === "FULFILLMENT" || presentation === "STAY_DATES";
 }
 
 export function bookingChannelRequiredForStay(useMemberEntitlement: boolean, stayType?: string): boolean {
@@ -1447,6 +1452,8 @@ export function InventoryPage() {
   const [selectedOrderError, setSelectedOrderError] = useState<unknown>();
   const [selectedCorrectionOccupantId, setSelectedCorrectionOccupantId] = useState<string>();
   const [selectedCorrectionRevision, setSelectedCorrectionRevision] = useState<string>();
+  const [selectedStayDateAction, setSelectedStayDateAction] = useState<StayDateChangeAction>();
+  const [selectedStayDateRevision, setSelectedStayDateRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
   const [quickPopoverTarget, setQuickPopoverTarget] = useState<{
@@ -1546,6 +1553,12 @@ export function InventoryPage() {
   }, [board?.businessDate, board?.revision, orderPrincipalScope, orderRefreshToken, propertyId, selectedOrderIdentity]);
 
   useEffect(() => {
+    setSelectedStayDateAction(undefined);
+    setSelectedStayDateRevision(undefined);
+    setCommandDraft((current) => current?.presentation === "STAY_DATES" ? undefined : current);
+  }, [selectedOrderIdentity?.orderId, selectedOrderIdentity?.stayId]);
+
+  useEffect(() => {
     if (!command || selectedOrderCommandScopeIsCurrent(selectedOrderCommandScope, orderPrincipalScope, selectedOrderIdentity)) return;
     commandAttemptGuard.invalidate();
     commandPhaseRef.current = "IDLE";
@@ -1566,6 +1579,15 @@ export function InventoryPage() {
     setSelectedCorrectionRevision(undefined);
     setActionError(new Error("订单资料已被其他操作刷新。为避免覆盖新值，原更正表单已关闭；请重新打开后核对。"));
   }, [board?.revision, selectedCorrectionOccupantId, selectedCorrectionRevision]);
+
+  useEffect(() => {
+    if (!selectedStayDateAction || !selectedStayDateRevision || !board) return;
+    if (board.revision === selectedStayDateRevision) return;
+    setSelectedStayDateAction(undefined);
+    setSelectedStayDateRevision(undefined);
+    setCommandDraft(undefined);
+    setActionError(new Error("订单日期或房态已经变化。为避免使用旧数据，原日期表单已关闭；请重新打开后核对。"));
+  }, [board?.revision, selectedStayDateAction, selectedStayDateRevision]);
 
   const boardMatchesCurrentProperty = Boolean(board && board.propertyId === propertyId);
   const currentBoardQueryKey = roomStatusQueryKey(roomStatusQuery(range, viewState.roomPageIndex, viewState.filters));
@@ -2657,6 +2679,33 @@ export function InventoryPage() {
     if (!started) setSelectedOrderCommandScope(undefined);
   }
 
+  function startSelectedOrderDateAction(commandType: StayDateChangeAction) {
+    setActionError(undefined);
+    const view = authorizedSelectedOrderView;
+    const identity = selectedOrderIdentity;
+    const action = view?.allowedActions.find((candidate) => candidate.code === commandType);
+    if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
+      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未打开日期调整。请重新选择住宿后再试。"));
+      return;
+    }
+    if (commandsBlocked || view.accessLevel !== "WRITE") {
+      setActionError(new Error("当前房态或订单权限不允许写入，未打开日期调整。请刷新后重新核对。"));
+      return;
+    }
+    if (!action?.enabled) {
+      setActionError(new Error("服务端当前未允许这项日期调整，未发送命令。请刷新订单状态后重新核对。"));
+      return;
+    }
+    if (commandType === "RESCHEDULE_STAY" && view.effectiveArrangement.intervals.length !== 1) {
+      setActionError(new Error("该订单已有换房安排，当前版本暂不能调整预订日期"));
+      return;
+    }
+    setCommandDraft(undefined);
+    setSelectedStayDateAction(commandType);
+    setSelectedStayDateRevision(boardRef.current?.revision);
+    setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
+  }
+
   function closeSelectedOrderContext() {
     returnedOrderCellFocus.current = undefined;
     setSelectedCorrectionOccupantId(undefined);
@@ -2833,7 +2882,7 @@ export function InventoryPage() {
       recoveryOrderId
       && selectedOrderIdentity?.orderId === recoveryOrderId
     );
-    if (commandRecovery.pending.presentation === "FULFILLMENT" && !recoveryMatchesSelectedOrder) {
+    if ((commandRecovery.pending.presentation === "FULFILLMENT" || commandRecovery.pending.presentation === "STAY_DATES") && !recoveryMatchesSelectedOrder) {
       setSelectedOrderIdentity(undefined);
       setSelectedOrderView(undefined);
       setSelectedOrderLoadedScope(undefined);
@@ -2907,6 +2956,13 @@ export function InventoryPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
+    if (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY") {
+      if (authorizedSelectedOrderView) {
+        setSelectedStayDateAction(request.commandType);
+        setSelectedStayDateRevision(boardRef.current?.revision);
+      }
+      return;
+    }
     if (request.commandType === "CORRECT_ORDER_OCCUPANT") {
       const occupantId = request.input.occupantId;
       if (typeof occupantId === "string" && authorizedSelectedOrderView?.occupants.some((occupant) => occupant.id === occupantId)) {
@@ -2937,6 +2993,25 @@ export function InventoryPage() {
       }
       setSelectedOrderView(orderResponse);
       setSelectedOrderLoadedScope(orderPrincipalScope);
+      const effective = orderResponse.effectiveArrangement;
+      const triggerDate = selectedDayDate
+        && effective.arrivalDate <= selectedDayDate
+        && selectedDayDate < effective.departureDate
+        ? selectedDayDate
+        : effective.arrivalDate;
+      const refreshedIdentity = resolveRoomStatusOrderReturnTarget(
+        response.rooms.flatMap((room) => [room, ...room.children]),
+        { orderId: selectedOrderIdentity.orderId, stayId: selectedOrderIdentity.stayId, triggerDate }
+      );
+      if (refreshedIdentity.kind === "AMBIGUOUS") {
+        throw new Error("刷新后的房态存在多个相互冲突的住宿位置，无法安全恢复选择");
+      }
+      setSelectedDayDate(triggerDate);
+      if (refreshedIdentity.kind === "MATCH") {
+        selectOrderContextIdentity(refreshedIdentity.identity, triggerDate);
+        returnedOrderCellFocus.current = { unitId: refreshedIdentity.identity.unitId, serviceDate: triggerDate };
+        setFocusRequestToken((value) => value + 1);
+      }
     }
     refreshedReceiptIdRef.current = receipt.receiptId;
   }
@@ -2978,6 +3053,7 @@ export function InventoryPage() {
         onClose={closeSelectedOrderContext}
         onOpenOrder={openSelectedOrder}
         onFulfillmentAction={startSelectedOrderFulfillment}
+        onDateAction={startSelectedOrderDateAction}
         onCorrectOccupant={(occupant) => {
           setCommandDraft(undefined);
           setSelectedCorrectionOccupantId(occupant.id);
@@ -3045,7 +3121,7 @@ export function InventoryPage() {
       <InlineError error={restorationError} title="房态位置未保存" />
       <InlineError error={actionError} title="动作未开始" />
       <InlineError error={quoteRecoveryOutcome} title="报价恢复结果" />
-      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={commandRecovery.pending.presentation === "MEMBER_STAY" || commandRecovery.pending.presentation === "FULFILLMENT"} /> : null}
+      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={inventoryRecoveryIsBusinessFacing(commandRecovery.pending.presentation)} /> : null}
       {returnNotice ? <div className="room-status-return-notice" role="status">{returnNotice}</div> : null}
       {boardStale ? <div className="room-status-stale-notice" role="alert">当前房态已陈旧或刷新失败。页面保留最后一次来源事实，但所有依赖新鲜度的写动作已暂停。</div> : null}
       {queryError ? <InlineError error={queryError} title={board ? "房态刷新失败" : "无法查询房态"} /> : null}
@@ -3303,6 +3379,32 @@ export function InventoryPage() {
           startCommand(request, currentSelectedOrderCommandScope);
         }}
       /> : null}
+      {authorizedSelectedOrderView && selectedStayDateAction ? <StayDateChangeDrawer
+        action={selectedStayDateAction}
+        view={authorizedSelectedOrderView}
+        inventoryUnitLabel={[...new Set(authorizedSelectedOrderView.effectiveArrangement.intervals.map((interval) => {
+          const unit = meta.inventoryUnits.find((candidate) => candidate.id === interval.inventoryUnitId);
+          return unit ? `${unit.code} · ${unit.name}` : "房源";
+        }))].join(" → ")}
+        writeBlocked={commandsBlocked || selectedStayDateRevision !== board?.revision}
+        {...(commandDraft?.commandType === selectedStayDateAction ? { draft: commandDraft } : {})}
+        onClose={() => {
+          setSelectedStayDateAction(undefined);
+          setSelectedStayDateRevision(undefined);
+          setSelectedOrderCommandScope(undefined);
+          setCommandDraft(undefined);
+          restoreRoomStatusInteraction();
+        }}
+        onSubmit={(request) => {
+          const identity = selectedOrderIdentity;
+          if (!identity || commandsBlocked || request.commandType !== selectedStayDateAction) return;
+          setSelectedStayDateAction(undefined);
+          setSelectedStayDateRevision(undefined);
+          setCommandDraft(undefined);
+          setRecoveryDialogOpen(false);
+          startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
+        }}
+      /> : null}
       {command && commandTargetScopeCurrent ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}-${commandAttemptId}` : `new-room-status-command-${commandAttemptId}`}
         request={command}
@@ -3313,6 +3415,8 @@ export function InventoryPage() {
         onBusinessSuccess={(message) => {
           setCommandNotice(message);
           setCommandDraft(undefined);
+          setSelectedStayDateAction(undefined);
+          setSelectedStayDateRevision(undefined);
           if (command.commandType === "LOCK_MAINTENANCE") {
             setMaintenanceTarget(undefined);
             roomStatusInteractionSnapshotRef.current = undefined;

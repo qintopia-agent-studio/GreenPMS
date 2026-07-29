@@ -30,6 +30,7 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
   roomTypeCode: string | null;
   dates: string[];
   preserved?: CoverageCandidate[];
+  reallocatableHeld?: CoverageCandidate[];
 }): Promise<MemberCoverageResolution> {
   const member = await db.selectFrom("member_property_links")
     .select("member_id")
@@ -74,22 +75,29 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
     ])
     .execute();
 
+  const preservedSource = options.preserved ?? [];
+  const preserved = preservedSource.filter((item) => options.dates.includes(item.serviceDate));
+  const hasConsumedCoverageHistory = preservedSource.some((item) => item.status === "CONSUMED");
   const matching = rows.filter((row) => row.allowed_room_type_code === options.roomTypeCode
     && row.allowed_inventory_kind === options.inventoryUnitKind
     && row.entitlement_unit_kind === entitlementKindFor(options.inventoryUnitKind));
   if (matching.length === 0) {
+    if (hasConsumedCoverageHistory) return { coverageCandidates: preserved };
     throw new DomainError("ENTITLEMENT_CONFLICT", "该会员的已生效权益不适用于所选房型", 409);
   }
   const validForStay = matching.filter((row) => row.expires_on >= propertyToday
     && parsePostgresBigInt(row.expire_count, "Entitlement expiration count") === 0n
     && options.dates.some((date) => row.valid_from <= date && date <= row.valid_until && date <= row.expires_on));
-  const preserved = (options.preserved ?? []).filter((item) => options.dates.includes(item.serviceDate));
   if (validForStay.length === 0) return { coverageCandidates: preserved };
 
   const remaining = new Map(validForStay.map((row) => [
     row.lot_id,
     entitlementAvailableBalance(row.total_units, row.ledger_delta)
   ]));
+  for (const held of options.reallocatableHeld ?? []) {
+    if (held.status !== "HELD") continue;
+    remaining.set(held.entitlementLotId, (remaining.get(held.entitlementLotId) ?? 0) + 1);
+  }
   const coverageCandidates: CoverageCandidate[] = [...preserved];
   const alreadyCovered = new Set(preserved.map((item) => item.serviceDate));
   const usedContractIds = new Set<string>();
@@ -108,10 +116,12 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
     usedContractIds.add(selected.contract_id);
     coverageCandidates.push({ serviceDate, entitlementLotId: selected.lot_id });
   }
-  if (usedContractIds.size > 1) {
-    throw new DomainError("ENTITLEMENT_CONFLICT", "本次住宿需要跨多份会员权益，消耗顺序尚未确认，暂不能创建会员住宿", 409);
-  }
-  const memberContractId = usedContractIds.values().next().value ?? (validForStay.length === 1 ? validForStay[0]!.contract_id : undefined);
+  const validContractIds = new Set(validForStay.map((row) => row.contract_id));
+  const memberContractId = usedContractIds.size === 1
+    ? usedContractIds.values().next().value
+    : usedContractIds.size === 0 && validContractIds.size === 1
+      ? validContractIds.values().next().value
+      : undefined;
   return { ...(memberContractId ? { memberContractId } : {}), coverageCandidates };
 }
 
@@ -146,6 +156,7 @@ export async function allocateCoverageCandidates(db: DbExecutor, options: {
   inventoryUnitKind: InventoryUnitKind;
   dates: string[];
   preserved?: CoverageCandidate[];
+  reallocatableHeld?: CoverageCandidate[];
 }): Promise<CoverageCandidate[]> {
   if (!options.memberContractId) return options.preserved ?? [];
   const contract = await db.selectFrom("member_contracts")
@@ -176,6 +187,10 @@ export async function allocateCoverageCandidates(db: DbExecutor, options: {
   const eligibleLots = lots.filter((lot) => lot.expires_on >= propertyToday
     && parsePostgresBigInt(lot.expire_count, "Entitlement expiration count") === 0n);
   const remaining = new Map(eligibleLots.map((lot) => [lot.id, entitlementAvailableBalance(lot.total_units, lot.ledger_delta)]));
+  for (const held of options.reallocatableHeld ?? []) {
+    if (held.status !== "HELD") continue;
+    remaining.set(held.entitlementLotId, (remaining.get(held.entitlementLotId) ?? 0) + 1);
+  }
   const result: CoverageCandidate[] = [];
   for (const preserved of options.preserved ?? []) {
     if (options.dates.includes(preserved.serviceDate)) result.push(preserved);
@@ -184,7 +199,11 @@ export async function allocateCoverageCandidates(db: DbExecutor, options: {
   for (const serviceDate of options.dates) {
     if (alreadyCovered.has(serviceDate)) continue;
     if (serviceDate < contract.valid_from || serviceDate > contract.valid_until) continue;
-    const lot = eligibleLots.find((candidate) => candidate.expires_on >= serviceDate && (remaining.get(candidate.id) ?? 0) > 0);
+    const eligible = eligibleLots.filter((candidate) => candidate.expires_on >= serviceDate && (remaining.get(candidate.id) ?? 0) > 0);
+    if (eligible.length > 1) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "该会员有多份权益可覆盖同一住宿日期，消耗顺序尚未确认，暂不能调整住宿日期", 409);
+    }
+    const lot = eligible[0];
     if (!lot) continue;
     remaining.set(lot.id, (remaining.get(lot.id) ?? 0) - 1);
     result.push({ serviceDate, entitlementLotId: lot.id });
@@ -368,4 +387,26 @@ export async function lockEntitlementLots(trx: Transaction<Database>, contractId
   if (!contractId) return;
   await trx.selectFrom("member_contracts").select("id").where("id", "=", contractId).forUpdate().executeTakeFirstOrThrow();
   await trx.selectFrom("entitlement_lots").select("id").where("contract_id", "=", contractId).orderBy("id").forUpdate().execute();
+}
+
+export async function lockMemberEntitlementLots(
+  trx: Transaction<Database>,
+  propertyId: string,
+  memberId: string
+): Promise<void> {
+  const contracts = await trx.selectFrom("member_contracts")
+    .select("id")
+    .where("property_id", "=", propertyId)
+    .where("member_id", "=", memberId)
+    .orderBy("id")
+    .forUpdate()
+    .execute();
+  const contractIds = contracts.map((contract) => contract.id);
+  if (contractIds.length === 0) return;
+  await trx.selectFrom("entitlement_lots")
+    .select("id")
+    .where("contract_id", "in", contractIds)
+    .orderBy("id")
+    .forUpdate()
+    .execute();
 }

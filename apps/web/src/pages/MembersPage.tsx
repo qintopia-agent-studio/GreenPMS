@@ -282,11 +282,14 @@ function MemberProfile({ member }: { member: MemberViewDto }) {
   </section>;
 }
 
-function ledgerEntryLabel(entryType: MemberViewDto["ledger"][number]["entry_type"]): string {
+export function ledgerEntryLabel(
+  entryType: MemberViewDto["ledger"][number]["entry_type"],
+  reason?: string
+): string {
   if (entryType === "ADJUST") return "余额更正";
   if (entryType === "HOLD") return "预订冻结";
   if (entryType === "RELEASE") return "冻结释放";
-  if (entryType === "CONSUME") return "入住核销";
+  if (entryType === "CONSUME") return reason === "EXTEND_STAY_ENTITLEMENT_CONSUMED" ? "续住核销" : "入住核销";
   return "权益到期";
 }
 
@@ -411,7 +414,7 @@ function MemberEntitlementsPanel({ view, disabled, onCorrect }: {
           const unit = lot?.unit_kind === "BED_NIGHT" ? "床夜" : "间夜";
           const displayQuantity = ledgerEntryDisplayQuantity(entry.entry_type, entry.quantity_delta);
           return <li key={entry.fact_id} data-testid={`member-ledger-entry-${entry.entry_type.toLowerCase()}`}>
-            <div><strong>{ledgerEntryLabel(entry.entry_type)}</strong><span className={displayQuantity.tone} data-testid="member-ledger-quantity">{displayQuantity.label} {displayQuantity.prefix}{displayQuantity.quantity} {unit}</span></div>
+            <div><strong>{ledgerEntryLabel(entry.entry_type, entry.reason)}</strong><span className={displayQuantity.tone} data-testid="member-ledger-quantity">{displayQuantity.label} {displayQuantity.prefix}{displayQuantity.quantity} {unit}</span></div>
             <small>{order.product_name} · {entry.service_date ? `住宿日期 ${formatDate(entry.service_date)}` : formatDate(entry.created_at)}</small>
             {entry.entry_type === "ADJUST" ? <p>{entry.reason}</p> : null}
           </li>;
