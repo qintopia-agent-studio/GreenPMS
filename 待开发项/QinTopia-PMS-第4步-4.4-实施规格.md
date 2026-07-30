@@ -237,7 +237,12 @@ Confirm 必须在一个事务中：
 ### Implementation Plan
 
 - 先关闭唯一产品 Gate，再按 T1 -> T7 的 red-green-refactor 顺序实施。
-- 后端合同稳定后再并行拆分 Web 与非重叠测试夹具，最后由主任务执行合并验证。
+- T1 由单一 owner 负责 `packages/contracts`、API schema、领域计价及对应 contract/unit 测试；合同冻结前不启动依赖其 DTO 的写入实现。
+- T2 与 T5 后端由同一 owner 串行负责 `effects.ts`、`apply.ts`、migration 028、恢复脚本及对应 PostgreSQL 测试，避免两个 worker 同时改写日期与库存事务主干。
+- T3 独立负责 Query/API、当前位置/计划位置和损坏投影失败关闭；发现合同缺口退回 T1，不直接修改 contracts。
+- T4 与 T5 Web 由同一 owner 串行负责换房抽屉、日期组合动作、订单 DTO 校验和房态即时刷新，避免两个 worker 同时修改日期抽屉与动作入口。
+- T6 的 Unit/Integration/Contract 测试跟随各生产文件 owner；独立 E2E owner 只修改 Stage 11 夹具和跨阶段回归用例，不修改产品代码。
+- T1 合同冻结后，T2、T3、T4 才可按上述不重叠所有权并行；T2-T5 稳定后启动 E2E，最后由主任务执行 T7 合并验证和两轮只读审查。
 
 ### Debug Log
 
