@@ -24,7 +24,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
   RESCHEDULE_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
   EXTEND_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
-  SHORTEN_STAY: ["after", "before", "inventoryUnitId", "orderId"],
+  SHORTEN_STAY: ["after", "before", "businessDate", "completionMode", "entitlementSummary", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "refundReferenceAmount", "stayId"],
   MOVE_UNIT: ["effectiveDate", "fromInventoryUnit", "occupancyCapacity", "occupantCount", "orderId", "pricing", "stayTimeline", "toInventoryUnit"],
   REPRICE_ORDER: ["before", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
   CANCEL_ORDER: ["currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
@@ -113,8 +113,15 @@ async function quote(options: {
   departureDate?: string;
   inventoryUnitId?: string;
   memberId?: string;
+  pricingPolicyVersionId?: string;
 } = {}) {
   const propertyToday = todayInTimeZone("Asia/Shanghai");
+  const arrivalDate = options.arrivalDate ?? propertyToday;
+  const departureDate = options.departureDate ?? shiftLocalDate(propertyToday, 4);
+  const pricingPolicyVersionId = options.pricingPolicyVersionId
+    ?? (arrivalDate.slice(0, 7) === departureDate.slice(0, 7)
+      ? demo.transientPolicyId
+      : demo.publicPricingPolicyId);
   const response = await app.inject({
     method: "POST",
     url: "/api/v1/quotes",
@@ -123,9 +130,9 @@ async function quote(options: {
       propertyId: demo.propertyId,
       inventoryUnitId: options.inventoryUnitId ?? demo.roomId,
       stayType: "TRANSIENT",
-      arrivalDate: options.arrivalDate ?? propertyToday,
-      departureDate: options.departureDate ?? shiftLocalDate(propertyToday, 4),
-      pricingPolicyVersionId: demo.transientPolicyId,
+      arrivalDate,
+      departureDate,
+      pricingPolicyVersionId,
       ...(options.memberId ? { memberId: options.memberId } : {})
     }
   });
@@ -181,6 +188,78 @@ describe("Command effect HTTP contract", () => {
         wechat: "contract-member"
       },
       propertyLink: { operation: "CREATE" }
+    })).toBe(false);
+  });
+
+  it("requires SHORTEN_STAY to freeze the authoritative collection fact count", () => {
+    const effect = {
+      operation: "SHORTEN_STAY",
+      orderId: "order_contract",
+      stayId: "stay_contract",
+      inventoryUnitId: "room_contract",
+      businessDate: "2026-07-30",
+      completionMode: "SHORTEN_IN_HOUSE",
+      before: {
+        arrivalDate: "2026-07-28",
+        departureDate: "2026-08-02",
+        nights: 5,
+        currentContractAmount: { currency: "CNY", minorUnits: 58_000 }
+      },
+      after: {
+        arrivalDate: "2026-07-28",
+        departureDate: "2026-07-31",
+        nights: 3,
+        stayTimeline: [
+          { serviceDate: "2026-07-28", inventoryUnitId: "room_contract" },
+          { serviceDate: "2026-07-29", inventoryUnitId: "room_contract" },
+          { serviceDate: "2026-07-30", inventoryUnitId: "room_contract" }
+        ],
+        pricing: {
+          coverageSet: [],
+          cashLines: [],
+          cashRemainder: { currency: "CNY", minorUnits: 34_800 },
+          currentContractAmount: { currency: "CNY", minorUnits: 34_800 }
+        }
+      },
+      pricingDecision: {
+        pricingBasis: "POLICY",
+        policyBaseAmount: { currency: "CNY", minorUnits: 34_800 },
+        targetCurrentContractAmount: { currency: "CNY", minorUnits: 34_800 },
+        differenceFromPolicy: { currency: "CNY", minorUnits: 0 },
+        manualAdjustmentMinor: 0,
+        differenceExceedsThreshold: false,
+        reason: { code: "STAY_CHANGE_POLICY", note: "" }
+      },
+      inventoryChange: {
+        preservedDates: ["2026-07-28", "2026-07-29", "2026-07-30"],
+        releasedDates: ["2026-07-31", "2026-08-01"],
+        addedDates: []
+      },
+      entitlementSummary: {
+        currentConsumedCoverageDates: [],
+        retainedHistoricalConsumedCoverageDates: [],
+        ledgerWriteCount: 0
+      },
+      fundsSummary: {
+        netRecordedCollection: { currency: "CNY", minorUnits: 58_000 },
+        collectionDifference: { currency: "CNY", minorUnits: -23_200 },
+        factCount: 2
+      },
+      refundReferenceAmount: { currency: "CNY", minorUnits: 23_200 }
+    };
+
+    expect(Value.Check(CommandEffectSchema, effect)).toBe(true);
+    expect(Value.Check(CommandEffectSchema, { ...effect, businessDate: undefined })).toBe(false);
+    expect(Value.Check(CommandEffectSchema, {
+      ...effect,
+      fundsSummary: {
+        netRecordedCollection: effect.fundsSummary.netRecordedCollection,
+        collectionDifference: effect.fundsSummary.collectionDifference
+      }
+    })).toBe(false);
+    expect(Value.Check(CommandEffectSchema, {
+      ...effect,
+      fundsSummary: { ...effect.fundsSummary, factCount: -1 }
     })).toBe(false);
   });
 
@@ -448,7 +527,10 @@ describe("Command effect HTTP contract", () => {
 
     const checkInPriced = await quote({
       arrivalDate: propertyToday,
-      departureDate: shiftLocalDate(propertyToday, 1)
+      departureDate: shiftLocalDate(propertyToday, 1),
+      pricingPolicyVersionId: propertyToday.slice(0, 7) === shiftLocalDate(propertyToday, 2).slice(0, 7)
+        ? demo.transientPolicyId
+        : demo.publicPricingPolicyId
     });
     const checkInOrder = await capture("CREATE_ORDER", {
       propertyId: demo.propertyId,

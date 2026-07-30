@@ -52,6 +52,16 @@ export function formatMinor(minorUnits: number, currency: string): string {
   return formatMoney({ minorUnits, currency });
 }
 
+const externalBookingChannels = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
+
+export function stayDateFundsAreOperatorFacing(
+  bookingChannelCode: string | null | undefined,
+  pricingBasis?: string
+): boolean {
+  if (bookingChannelCode && externalBookingChannels.has(bookingChannelCode)) return false;
+  return pricingBasis !== "CHANNEL_CONTRACT";
+}
+
 export function formatDate(value: string | undefined): string {
   if (!value) return "-";
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
@@ -584,11 +594,15 @@ function sameDateSet(actual: readonly string[], expected: readonly string[]): bo
 }
 
 function dateChangePreviewHasEvidence(
-  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY",
+  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY" | "SHORTEN_STAY",
   effect: Record<string, unknown>,
   input: Record<string, unknown>
 ): boolean {
-  if (!hasExactKeys(effect, ["operation", "orderId", "stayId", "inventoryUnitId", "before", "after", "pricingDecision", "inventoryChange", "entitlementChange", "fundsSummary"])
+  const shorten = commandType === "SHORTEN_STAY";
+  const expectedKeys = shorten
+    ? ["operation", "orderId", "stayId", "inventoryUnitId", "businessDate", "completionMode", "before", "after", "pricingDecision", "inventoryChange", "entitlementSummary", "fundsSummary", "refundReferenceAmount"]
+    : ["operation", "orderId", "stayId", "inventoryUnitId", "before", "after", "pricingDecision", "inventoryChange", "entitlementChange", "fundsSummary"];
+  if (!hasExactKeys(effect, expectedKeys)
     || effect.operation !== commandType
     || !nonblankString(effect.orderId)
     || effect.orderId !== input.orderId
@@ -598,15 +612,21 @@ function dateChangePreviewHasEvidence(
   const after = isRecord(effect.after) ? effect.after : undefined;
   const decision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
   const inventory = isRecord(effect.inventoryChange) ? effect.inventoryChange : undefined;
-  const entitlement = isRecord(effect.entitlementChange) ? effect.entitlementChange : undefined;
+  const entitlement = isRecord(shorten ? effect.entitlementSummary : effect.entitlementChange)
+    ? (shorten ? effect.entitlementSummary : effect.entitlementChange) as Record<string, unknown>
+    : undefined;
   const funds = isRecord(effect.fundsSummary) ? effect.fundsSummary : undefined;
   if (!before || !after || !decision || !inventory || !entitlement || !funds
     || !hasExactKeys(before, ["arrivalDate", "departureDate", "nights", "currentContractAmount"])
     || !hasExactKeys(after, ["arrivalDate", "departureDate", "nights", "stayTimeline", "pricing"])
     || !hasExactKeys(decision, ["pricingBasis", "policyBaseAmount", "targetCurrentContractAmount", "differenceFromPolicy", "manualAdjustmentMinor", "differenceExceedsThreshold", "reason"])
     || !hasExactKeys(inventory, ["preservedDates", "releasedDates", "addedDates"])
-    || !hasExactKeys(entitlement, ["preservedCoverageDates", "releasedCoverageDates", "addedCoverageDates", "consumedCoverageDates"])
-    || !hasExactKeys(funds, ["netRecordedCollection", "collectionDifference"])) return false;
+    || !hasExactKeys(entitlement, shorten
+      ? ["currentConsumedCoverageDates", "retainedHistoricalConsumedCoverageDates", "ledgerWriteCount"]
+      : ["preservedCoverageDates", "releasedCoverageDates", "addedCoverageDates", "consumedCoverageDates"])
+    || !hasExactKeys(funds, shorten
+      ? ["netRecordedCollection", "collectionDifference", "factCount"]
+      : ["netRecordedCollection", "collectionDifference"])) return false;
 
   const beforeDates = typeof before.arrivalDate === "string" && typeof before.departureDate === "string"
     ? localDateRange(before.arrivalDate, before.departureDate)
@@ -614,13 +634,21 @@ function dateChangePreviewHasEvidence(
   const afterDates = typeof after.arrivalDate === "string" && typeof after.departureDate === "string"
     ? localDateRange(after.arrivalDate, after.departureDate)
     : undefined;
+  const businessDate = shorten && typeof effect.businessDate === "string" && localDateEpoch(effect.businessDate) !== undefined
+    ? effect.businessDate
+    : undefined;
   if (!beforeDates || !afterDates
     || before.nights !== beforeDates.length
     || after.nights !== afterDates.length
     || after.nights < 1
     || after.nights > 366
     || (commandType === "RESCHEDULE_STAY" && (after.arrivalDate !== input.newArrivalDate || after.departureDate !== input.newDepartureDate))
-    || (commandType === "EXTEND_STAY" && (after.arrivalDate !== before.arrivalDate || after.departureDate !== input.newDepartureDate || String(after.departureDate) <= String(before.departureDate)))) return false;
+    || (commandType === "EXTEND_STAY" && (after.arrivalDate !== before.arrivalDate || after.departureDate !== input.newDepartureDate || String(after.departureDate) <= String(before.departureDate)))
+    || (commandType === "SHORTEN_STAY" && (after.arrivalDate !== before.arrivalDate || after.departureDate !== input.newDepartureDate || String(after.departureDate) >= String(before.departureDate)))
+    || (shorten && (!businessDate
+      || (effect.completionMode === "EARLY_CHECK_OUT" && after.departureDate !== businessDate)
+      || (effect.completionMode === "SHORTEN_IN_HOUSE" && String(after.departureDate) <= businessDate)
+      || (effect.completionMode !== "SHORTEN_IN_HOUSE" && effect.completionMode !== "EARLY_CHECK_OUT")))) return false;
 
   const timeline = repriceStayTimeline(after.stayTimeline);
   if (!timeline || timeline.length !== afterDates.length
@@ -660,7 +688,11 @@ function dateChangePreviewHasEvidence(
     || typeof decision.differenceExceedsThreshold !== "boolean"
     || decision.differenceExceedsThreshold !== (Math.abs(difference.minorUnits) * 100 > policyAmount.minorUnits * 15)
     || (input.targetCurrentContractAmountMinor !== undefined && input.targetCurrentContractAmountMinor !== targetAmount.minorUnits)
-    || !pricingCoverageHasEvidence(pricing.coverageSet, timelineByDate)
+    || !pricingCoverageHasEvidence(
+      pricing.coverageSet,
+      timelineByDate,
+      shorten && pricingBasis === "MEMBER_ENTITLEMENT"
+    )
     || !Array.isArray(pricing.cashLines)
     || !pricing.cashLines.every((line) => pricingCashLineHasEvidence(line, targetAmount.currency, timelineByDate))) return false;
 
@@ -674,6 +706,30 @@ function dateChangePreviewHasEvidence(
     || !sameDateSet(preservedDates, expectedPreserved)
     || !sameDateSet(releasedDates, expectedReleased)
     || !sameDateSet(addedDates, expectedAdded)) return false;
+
+  if (shorten) {
+    const currentConsumedCoverageDates = exactDateList(entitlement.currentConsumedCoverageDates);
+    const retainedHistoricalConsumedCoverageDates = exactDateList(entitlement.retainedHistoricalConsumedCoverageDates);
+    const currentCoverageDates = Array.isArray(pricing.coverageSet)
+      ? exactDateList(pricing.coverageSet.map((item) => isRecord(item) ? item.serviceDate : undefined))
+      : undefined;
+    const refundReferenceAmount = effect.refundReferenceAmount;
+    if (!currentConsumedCoverageDates || !retainedHistoricalConsumedCoverageDates || !currentCoverageDates
+      || entitlement.ledgerWriteCount !== 0
+      || !Number.isSafeInteger(funds.factCount)
+      || (funds.factCount as number) < 0
+      || !sameDateSet(currentCoverageDates, currentConsumedCoverageDates)
+      || !currentConsumedCoverageDates.every((date) => afterDates.includes(date))
+      || !retainedHistoricalConsumedCoverageDates.every((date) => !afterDates.includes(date))
+      || !hasMoney(refundReferenceAmount)
+      || refundReferenceAmount.currency !== targetAmount.currency
+      || refundReferenceAmount.minorUnits < 0
+      || refundReferenceAmount.minorUnits > 2_147_483_647
+      || refundReferenceAmount.minorUnits !== Math.max(0, netCollection.minorUnits - targetAmount.minorUnits)
+      || (pricingBasis !== "MEMBER_ENTITLEMENT"
+        && (currentConsumedCoverageDates.length > 0 || retainedHistoricalConsumedCoverageDates.length > 0))) return false;
+    return true;
+  }
 
   const preservedCoverageDates = exactDateList(entitlement.preservedCoverageDates);
   const releasedCoverageDates = exactDateList(entitlement.releasedCoverageDates);
@@ -702,17 +758,25 @@ function dateChangePreviewHasEvidence(
 }
 
 export interface StayDatePreviewPricingSummary {
+  beforeArrivalDate: string;
+  beforeDepartureDate: string;
+  beforeNights: number;
+  afterArrivalDate: string;
+  afterDepartureDate: string;
+  afterNights: number;
+  completionMode?: "SHORTEN_IN_HOUSE" | "EARLY_CHECK_OUT";
   beforeAmount: MoneyDto;
   policyBaseAmount: MoneyDto;
   targetAmount: MoneyDto;
   differenceFromPolicy: MoneyDto;
   netRecordedCollection: MoneyDto;
   collectionDifference: MoneyDto;
+  refundReferenceAmount: MoneyDto;
   pricingBasis: "POLICY" | "CHANNEL_CONTRACT" | "MANUAL_ADJUSTMENT" | "MEMBER_ENTITLEMENT" | "FREE";
 }
 
 export function stayDatePreviewPricingSummary(
-  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY",
+  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY" | "SHORTEN_STAY",
   preview: PreviewDto,
   input: Record<string, unknown>
 ): StayDatePreviewPricingSummary | undefined {
@@ -726,18 +790,29 @@ export function stayDatePreviewPricingSummary(
   const differenceFromPolicy = moneyFrom(decision?.differenceFromPolicy);
   const netRecordedCollection = moneyFrom(funds?.netRecordedCollection);
   const collectionDifference = moneyFrom(funds?.collectionDifference);
+  const refundReferenceAmount = commandType === "SHORTEN_STAY"
+    ? moneyFrom(preview.effect.refundReferenceAmount)
+    : { currency: targetAmount?.currency ?? "CNY", minorUnits: 0 };
   const pricingBasis = decision?.pricingBasis;
   if (!beforeAmount || !policyBaseAmount || !targetAmount || !differenceFromPolicy
-    || !netRecordedCollection || !collectionDifference
+    || !netRecordedCollection || !collectionDifference || !refundReferenceAmount
     || (pricingBasis !== "POLICY" && pricingBasis !== "CHANNEL_CONTRACT" && pricingBasis !== "MANUAL_ADJUSTMENT"
       && pricingBasis !== "MEMBER_ENTITLEMENT" && pricingBasis !== "FREE")) return undefined;
   return {
+    beforeArrivalDate: String(before?.arrivalDate),
+    beforeDepartureDate: String(before?.departureDate),
+    beforeNights: Number(before?.nights),
+    afterArrivalDate: String(isRecord(preview.effect.after) ? preview.effect.after.arrivalDate : ""),
+    afterDepartureDate: String(isRecord(preview.effect.after) ? preview.effect.after.departureDate : ""),
+    afterNights: Number(isRecord(preview.effect.after) ? preview.effect.after.nights : 0),
+    ...(commandType === "SHORTEN_STAY" ? { completionMode: preview.effect.completionMode as "SHORTEN_IN_HOUSE" | "EARLY_CHECK_OUT" } : {}),
     beforeAmount,
     policyBaseAmount,
     targetAmount,
     differenceFromPolicy,
     netRecordedCollection,
     collectionDifference,
+    refundReferenceAmount,
     pricingBasis
   };
 }
@@ -756,11 +831,16 @@ function repriceStayTimeline(value: unknown): Array<{ serviceDate: string; inven
   return timeline;
 }
 
-function pricingCoverageHasEvidence(value: unknown, timelineByDate: Map<string, string>): boolean {
+function pricingCoverageHasEvidence(
+  value: unknown,
+  timelineByDate: Map<string, string>,
+  allowConsumedHistoricalInventoryUnit = false
+): boolean {
   return Array.isArray(value) && value.every((item) => isRecord(item)
     && nonblankString(item.serviceDate)
     && nonblankString(item.inventoryUnitId)
-    && timelineByDate.get(item.serviceDate) === item.inventoryUnitId
+    && timelineByDate.has(item.serviceDate)
+    && (timelineByDate.get(item.serviceDate) === item.inventoryUnitId || allowConsumedHistoricalInventoryUnit)
     && (item.unitKind === "ROOM_NIGHT" || item.unitKind === "BED_NIGHT")
     && nonblankString(item.entitlementLotId));
 }
@@ -888,6 +968,7 @@ export function u1PreviewHasBusinessEvidence(
       }
     case "RESCHEDULE_STAY":
     case "EXTEND_STAY":
+    case "SHORTEN_STAY":
       return dateChangePreviewHasEvidence(commandType, effect, input);
     case "CHECK_IN":
     case "CHECK_OUT":
@@ -900,7 +981,7 @@ export function receiptTransactionReferenceLabel(result: Record<string, unknown>
   return typeof result.transactionReference === "string" ? result.transactionReference : "历史未记录";
 }
 
-function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: U1CommandType; reasonNote?: string; commandTitle?: string }) {
+function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: U1CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null }) {
   const effect = preview.effect;
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
@@ -928,36 +1009,43 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
   const coverage = pricing && Array.isArray(pricing.coverageSet) ? pricing.coverageSet : [];
   const cashLines = pricing && Array.isArray(pricing.cashLines) ? pricing.cashLines : [];
 
-  if (businessCommand === "RESCHEDULE_STAY" || businessCommand === "EXTEND_STAY") {
+  if (businessCommand === "RESCHEDULE_STAY" || businessCommand === "EXTEND_STAY" || businessCommand === "SHORTEN_STAY") {
     const beforeNights = before && typeof before.nights === "number" ? before.nights : undefined;
     const afterNights = after && typeof after.nights === "number" ? after.nights : undefined;
     const funds = isRecord(effect.fundsSummary) ? effect.fundsSummary : undefined;
     const netCollection = moneyFrom(funds?.netRecordedCollection);
     const collectionDifference = moneyFrom(funds?.collectionDifference);
+    const refundReferenceAmount = businessCommand === "SHORTEN_STAY" ? moneyFrom(effect.refundReferenceAmount) : undefined;
     const memberPricing = pricingBasis === "MEMBER_ENTITLEMENT";
+    const previewBookingChannelCode = stableBookingChannelCode
+      ?? (typeof effect.bookingChannelCode === "string" ? effect.bookingChannelCode : undefined);
+    const showFunds = stayDateFundsAreOperatorFacing(previewBookingChannelCode, pricingBasis);
+    const earlyCheckout = businessCommand === "SHORTEN_STAY" && effect.completionMode === "EARLY_CHECK_OUT";
     const uncoveredNights = afterNights === undefined ? undefined : Math.max(0, afterNights - coverage.length);
     return <div className="effect-summary stay-date-command-summary" data-testid="command-effect">
       <section className="effect-section" aria-labelledby="stay-date-command-summary-heading">
-        <h3 id="stay-date-command-summary-heading">请核对{commandShellLabel(businessCommand)}</h3>
+        <h3 id="stay-date-command-summary-heading">请核对{earlyCheckout ? "提前退房" : commandShellLabel(businessCommand)}</h3>
         <dl className="difference-grid">
           {before ? <><dt>原住宿日期</dt><dd>{formatDate(String(before.arrivalDate))} 至 {formatDate(String(before.departureDate))}</dd></> : null}
           {after ? <><dt>新住宿日期</dt><dd><strong>{formatDate(String(after.arrivalDate))} 至 {formatDate(String(after.departureDate))}</strong></dd></> : null}
           {beforeNights !== undefined ? <><dt>原住宿晚数</dt><dd>{beforeNights} 晚</dd></> : null}
           {afterNights !== undefined ? <><dt>完整新晚数</dt><dd>{afterNights} 晚{beforeNights !== undefined ? `（${afterNights - beforeNights >= 0 ? "+" : ""}${afterNights - beforeNights}）` : ""}</dd></> : null}
-          {before && moneyFrom(before.currentContractAmount) ? <><dt>原合同金额</dt><dd>{formatMoney(moneyFrom(before.currentContractAmount))}</dd></> : null}
+          {showFunds && before && moneyFrom(before.currentContractAmount) ? <><dt>原合同金额</dt><dd>{formatMoney(moneyFrom(before.currentContractAmount))}</dd></> : null}
           {policyBaseAmount ? <><dt>政策基础金额</dt><dd>{formatMoney(policyBaseAmount)}</dd></> : null}
-          {targetCurrentContractAmount ? <><dt>{pricingBasis === "CHANNEL_CONTRACT" ? "本单渠道应结金额" : "订单新金额"}</dt><dd><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd></> : null}
+          {targetCurrentContractAmount ? <><dt>{showFunds ? "订单新金额" : "本单渠道应结金额"}</dt><dd><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd></> : null}
           {differenceFromPolicy ? <><dt>与政策基础金额差额</dt><dd>{formatMoney(differenceFromPolicy)}</dd></> : null}
-          {pricingReason && typeof pricingReason.note === "string" && pricingReason.note ? <>
-            <dt>{pricingBasis === "CHANNEL_CONTRACT" ? "渠道价格差异说明" : pricingBasis === "MANUAL_ADJUSTMENT" ? "人工调价原因" : "计价说明"}</dt>
-            <dd>{pricingReason.note}</dd>
+          {!showFunds ? <><dt>渠道价格差异说明</dt><dd>{pricingReason && typeof pricingReason.note === "string" && pricingReason.note.trim() ? pricingReason.note.trim() : "无需额外说明"}</dd></> : pricingReason && typeof pricingReason.note === "string" && pricingReason.note ? <>
+            <dt>{pricingBasis === "MANUAL_ADJUSTMENT" ? "人工调价原因" : "计价说明"}</dt><dd>{pricingReason.note}</dd>
           </> : null}
-          {netCollection ? <><dt>已登记净收款</dt><dd>{formatMoney(netCollection)}</dd></> : null}
-          {collectionDifference ? <><dt>{collectionDifference.minorUnits > 0 ? "待补收参考" : collectionDifference.minorUnits < 0 ? "多收 / 退款参考" : "当前记录无差额"}</dt><dd>{formatMoney({ ...collectionDifference, minorUnits: Math.abs(collectionDifference.minorUnits) })}</dd></> : null}
+          {showFunds && netCollection ? <><dt>已登记净收款</dt><dd>{formatMoney(netCollection)}</dd></> : null}
+          {showFunds && collectionDifference ? <><dt>{collectionDifference.minorUnits > 0 ? "待补收参考" : collectionDifference.minorUnits < 0 ? "多收差额" : "当前记录无差额"}</dt><dd>{formatMoney({ ...collectionDifference, minorUnits: Math.abs(collectionDifference.minorUnits) })}</dd></> : null}
+          {showFunds && refundReferenceAmount && refundReferenceAmount.minorUnits > 0 ? <><dt>建议退款</dt><dd><strong>{formatMoney(refundReferenceAmount)}</strong></dd></> : null}
           {memberPricing ? <><dt>会员权益覆盖</dt><dd>{coverage.length} 晚</dd>{uncoveredNights !== undefined ? <><dt>未覆盖晚数</dt><dd>{uncoveredNights} 晚</dd></> : null}<dt>未覆盖金额</dt><dd>{formatMoney(pricing ? moneyFrom(pricing.cashRemainder) : undefined)}</dd></> : null}
-          <dt>住宿日期变更原因</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+          <dt>{earlyCheckout ? "提前离店原因" : "住宿日期变更原因"}</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
         </dl>
-        <p className="muted compact">差额只作补收或退款参考；确认不会自动登记收款、退款或结清。</p>
+        {showFunds && refundReferenceAmount && refundReferenceAmount.minorUnits > 0
+          ? <p className="muted compact">该金额仅供工作人员办理退款参考，目前尚未登记退款。</p>
+          : showFunds ? <p className="muted compact">差额只作补收参考；确认不会自动登记收款或结清。</p> : null}
       </section>
     </div>;
   }
@@ -1279,12 +1367,13 @@ export function lodgingReceiptCopy(committed: boolean, memberStay: boolean): { h
     : { heading: "住宿订单未创建", description: "本次操作没有写入住宿订单。" };
 }
 
-function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false }: {
+function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false, bookingChannelCode: requestBookingChannelCode }: {
   receipt: ReceiptDto;
   onNavigateToResource?: () => void;
   businessCommand?: CommandType;
   commandType?: CommandType;
   memberStay?: boolean;
+  bookingChannelCode?: string | null;
 }) {
   const result = isRecord(receipt.result) ? receipt.result : undefined;
   const orderId = result && typeof result.orderId === "string" ? result.orderId : undefined;
@@ -1306,6 +1395,8 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
   const manualAdjustmentMinor = typeof pricingDecision?.manualAdjustmentMinor === "number"
     ? pricingDecision.manualAdjustmentMinor
     : result && typeof result.manualAdjustmentMinor === "number" ? result.manualAdjustmentMinor : undefined;
+  const differenceFromPolicy = result ? moneyFrom(pricingDecision?.differenceFromPolicy) : undefined;
+  const pricingReason = pricingDecision && isRecord(pricingDecision.reason) ? pricingDecision.reason : undefined;
   const committed = receipt.businessCommitted;
   if (businessCommand && fulfillmentBusinessCommands.has(businessCommand)) {
     const entitlementTransition = result && isRecord(result.entitlementTransition) ? result.entitlementTransition : undefined;
@@ -1397,22 +1488,37 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
       {orderId && committed ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
     </section>;
   }
-  if (businessCommand === "RESCHEDULE_STAY" || businessCommand === "EXTEND_STAY") {
+  if (businessCommand === "RESCHEDULE_STAY" || businessCommand === "EXTEND_STAY" || businessCommand === "SHORTEN_STAY") {
     const arrivalDate = result && typeof result.arrivalDate === "string" ? result.arrivalDate : undefined;
     const departureDate = result && typeof result.departureDate === "string" ? result.departureDate : undefined;
     const funds = result && isRecord(result.fundsSummary) ? result.fundsSummary : undefined;
     const difference = moneyFrom(funds?.collectionDifference);
+    const refundReferenceAmount = businessCommand === "SHORTEN_STAY" ? moneyFrom(result?.refundReferenceAmount) : undefined;
+    const showFunds = stayDateFundsAreOperatorFacing(
+      requestBookingChannelCode ?? bookingChannelCode,
+      typeof pricingDecision?.pricingBasis === "string" ? pricingDecision.pricingBasis : undefined
+    );
+    const completionMode = result?.completionMode;
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
       <div className="receipt-title-row">
         <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
         <div>
-          <h3 id="receipt-heading">{committed ? `${commandShellLabel(businessCommand)}已完成` : `${commandShellLabel(businessCommand)}未执行`}</h3>
-          <p>{committed ? commandShellSuccessMessage(businessCommand) : commandShellNotExecutedMessage(businessCommand)}</p>
+          <h3 id="receipt-heading">{committed ? `${businessCommand === "SHORTEN_STAY" && completionMode === "EARLY_CHECK_OUT" ? "提前退房" : commandShellLabel(businessCommand)}已完成` : `${commandShellLabel(businessCommand)}未执行`}</h3>
+          <p>{committed
+            ? businessCommand === "SHORTEN_STAY" && completionMode === "EARLY_CHECK_OUT"
+              ? "提前退房已完成，订单、住宿状态和房态已刷新。"
+              : commandShellSuccessMessage(businessCommand)
+            : commandShellNotExecutedMessage(businessCommand)}</p>
         </div>
       </div>
       {committed && arrivalDate && departureDate ? <dl className="receipt-grid">
         <dt>当前住宿日期</dt><dd>{formatDate(arrivalDate)} 至 {formatDate(departureDate)}</dd>
-        {difference ? <><dt>{difference.minorUnits > 0 ? "待补收参考" : difference.minorUnits < 0 ? "多收 / 退款参考" : "当前记录无差额"}</dt><dd>{formatMoney({ ...difference, minorUnits: Math.abs(difference.minorUnits) })}</dd></> : null}
+        {!showFunds && policyBaseAmount ? <><dt>政策基础金额</dt><dd>{formatMoney(policyBaseAmount)}</dd></> : null}
+        {!showFunds && targetCurrentContractAmount ? <><dt>本单渠道应结金额</dt><dd><strong>{formatMoney(targetCurrentContractAmount)}</strong></dd></> : null}
+        {!showFunds && differenceFromPolicy ? <><dt>与政策基础金额差额</dt><dd>{formatMoney(differenceFromPolicy)}</dd></> : null}
+        {!showFunds ? <><dt>渠道价格差异说明</dt><dd>{typeof pricingReason?.note === "string" && pricingReason.note.trim() ? pricingReason.note.trim() : "无需额外说明"}</dd></> : null}
+        {showFunds && difference ? <><dt>{difference.minorUnits > 0 ? "待补收参考" : difference.minorUnits < 0 ? "多收差额" : "当前记录无差额"}</dt><dd>{formatMoney({ ...difference, minorUnits: Math.abs(difference.minorUnits) })}</dd></> : null}
+        {showFunds && refundReferenceAmount && refundReferenceAmount.minorUnits > 0 ? <><dt>建议退款</dt><dd><strong>{formatMoney(refundReferenceAmount)}</strong></dd><dt>退款状态</dt><dd>该金额仅供工作人员办理退款参考，目前尚未登记退款。</dd></> : null}
       </dl> : null}
       {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
     </section>;
@@ -1474,6 +1580,23 @@ export interface CommandDialogCloseContext {
   receipt: ReceiptDto;
 }
 
+export function knownCommittedCommandMessage(
+  commandType: U1CommandType,
+  receipt: ReceiptDto,
+  outcome: "REFRESHED" | "REFRESH_FAILED"
+): string {
+  const result = isRecord(receipt.result) ? receipt.result : undefined;
+  const earlyCheckout = commandType === "SHORTEN_STAY" && result?.completionMode === "EARLY_CHECK_OUT";
+  if (outcome === "REFRESH_FAILED") {
+    return earlyCheckout
+      ? "提前退房已完成，但页面刷新失败。请点击页面上的刷新按钮查看最新结果。"
+      : commandShellRefreshFailedMessage(commandType);
+  }
+  return earlyCheckout
+    ? "提前退房已完成，订单、住宿状态和房态已刷新。"
+    : commandShellSuccessMessage(commandType);
+}
+
 export async function notifyKnownCommittedCommand(input: {
   commandType: U1CommandType;
   receipt: ReceiptDto;
@@ -1487,9 +1610,7 @@ export async function notifyKnownCommittedCommand(input: {
     outcome = "REFRESH_FAILED";
   }
   input.onBusinessSuccess?.(
-    outcome === "REFRESHED"
-      ? commandShellSuccessMessage(input.commandType)
-      : commandShellRefreshFailedMessage(input.commandType),
+    knownCommittedCommandMessage(input.commandType, input.receipt, outcome),
     input.receipt
   );
   return outcome;
@@ -1627,7 +1748,7 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES")
     || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
     || (value.presentation === "FULFILLMENT" && !isFulfillmentBusinessCommand(value.commandType))
-    || (value.presentation === "STAY_DATES" && value.commandType !== "RESCHEDULE_STAY" && value.commandType !== "EXTEND_STAY")
+    || (value.presentation === "STAY_DATES" && value.commandType !== "RESCHEDULE_STAY" && value.commandType !== "EXTEND_STAY" && value.commandType !== "SHORTEN_STAY")
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
     || typeof value.updatedAt !== "string") {
     return { kind: "CORRUPT", error: new Error("本地命令恢复记录版本或结构无效；无法确认原命令是否执行，已暂停本物业写命令") };
@@ -1925,7 +2046,11 @@ export function CommandDialog({
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const stayDates = request.presentation === "STAY_DATES"
-    && (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY");
+    && (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY");
+  const requestBookingChannelValue = (request as unknown as { bookingChannelCode?: unknown }).bookingChannelCode;
+  const requestBookingChannelCode = typeof requestBookingChannelValue === "string" || requestBookingChannelValue === null
+    ? requestBookingChannelValue
+    : undefined;
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
   const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
   const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment;
@@ -2371,6 +2496,7 @@ export function CommandDialog({
             preview={preview}
             fulfillment={fulfillment}
             commandTitle={request.title}
+            {...(requestBookingChannelCode !== undefined ? { bookingChannelCode: requestBookingChannelCode } : {})}
             {...(request.initialReason?.note ? { reasonNote: request.initialReason.note } : {})}
             {...(u1CommandType ? { businessCommand: u1CommandType } : {})}
           />
@@ -2406,6 +2532,7 @@ export function CommandDialog({
         receipt={receipt}
         onNavigateToResource={onClose}
         memberStay={memberLodging}
+        {...(requestBookingChannelCode !== undefined ? { bookingChannelCode: requestBookingChannelCode } : {})}
         {...(executableCommandType ? { commandType: executableCommandType } : {})}
         {...(businessFacing && executableCommandType ? { businessCommand: executableCommandType } : {})}
       /> : null}

@@ -390,9 +390,16 @@ export function calculatePricing(input: PricingInput): PricingResult {
 
 export function amountSummary(currency: string, currentContractAmount: number, signedCollectionEffects: number[]) {
   const netRecordedCollection = signedCollectionEffects.reduce((sum, effect) => sum + effect, 0);
+  const refundReferenceAmount = Math.max(0, netRecordedCollection - currentContractAmount);
+  if (!Number.isSafeInteger(netRecordedCollection)
+    || !Number.isSafeInteger(refundReferenceAmount)
+    || refundReferenceAmount > 2_147_483_647) {
+    throw new DomainError("VALIDATION_ERROR", "订单建议退款金额超出支持范围", 409);
+  }
   return {
     currentContractAmount: { currency, minorUnits: currentContractAmount },
     netRecordedCollection: { currency, minorUnits: netRecordedCollection },
-    collectionDifference: { currency, minorUnits: currentContractAmount - netRecordedCollection }
+    collectionDifference: { currency, minorUnits: currentContractAmount - netRecordedCollection },
+    refundReferenceAmount: { currency, minorUnits: refundReferenceAmount }
   };
 }

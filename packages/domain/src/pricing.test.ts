@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DomainError } from '@qintopia/contracts';
-import { calculatePricing, type PricingInput, type PricingPolicy } from './pricing.ts';
+import { amountSummary, calculatePricing, type PricingInput, type PricingPolicy } from './pricing.ts';
 
 const base = {
   propertyId: '10000000-0000-4000-8000-000000000001',
@@ -70,5 +70,29 @@ describe('approved finite pricing policies', () => {
     const newRevision = calculatePricing({ ...base, policy, coverageCandidates: [] });
     expect(oldRevision.currentContractAmount.minorUnits).toBe(37_600);
     expect(newRevision.currentContractAmount.minorUnits).toBe(38_400);
+  });
+
+  it('derives a non-negative refund reference from recorded collection facts', () => {
+    expect(amountSummary('CNY', 20_000, [15_000, 10_000, -2_000])).toEqual({
+      currentContractAmount: { currency: 'CNY', minorUnits: 20_000 },
+      netRecordedCollection: { currency: 'CNY', minorUnits: 23_000 },
+      collectionDifference: { currency: 'CNY', minorUnits: -3_000 },
+      refundReferenceAmount: { currency: 'CNY', minorUnits: 3_000 },
+    });
+    expect(amountSummary('CNY', 20_000, [8_000])).toMatchObject({
+      refundReferenceAmount: { currency: 'CNY', minorUnits: 0 },
+    });
+  });
+
+  it('fails closed when aggregated collections would exceed the refund reference contract', () => {
+    expect(() => amountSummary('CNY', 0, [2_000_000_000, 200_000_000]))
+      .toThrowError(/建议退款金额超出支持范围/);
+  });
+
+  it('accepts the maximum public refund reference and rejects the next minor unit', () => {
+    expect(amountSummary('CNY', 100, [2_147_483_747]).refundReferenceAmount)
+      .toEqual({ currency: 'CNY', minorUnits: 2_147_483_647 });
+    expect(() => amountSummary('CNY', 99, [2_147_483_747]))
+      .toThrowError(/建议退款金额超出支持范围/);
   });
 });

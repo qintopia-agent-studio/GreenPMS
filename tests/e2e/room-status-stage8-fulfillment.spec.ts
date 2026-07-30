@@ -101,9 +101,16 @@ async function confirmFulfillmentDialog(page: Page, action: "入住" | "退房",
   }
   await dialog.getByRole("button", { name: `确认办理${action}`, exact: true }).click();
   if (options.loseCommittedResponse) {
-    await expect(dialog.getByText("刚才的操作结果需要查询", { exact: true })).toBeVisible();
-    await expect(dialog).not.toContainText(forbiddenProtocol);
-    await dialog.getByRole("button", { name: "查询操作结果", exact: true }).click();
+    const dialogRecovery = dialog.getByText("刚才的操作结果需要查询", { exact: true });
+    const pageRecovery = page.getByRole("status", { name: `待恢复办理${action}`, exact: true });
+    await expect(dialogRecovery.or(pageRecovery)).toBeVisible();
+    if (await dialog.isVisible()) {
+      await expect(dialog).not.toContainText(forbiddenProtocol);
+      await dialog.getByRole("button", { name: "查询操作结果", exact: true }).click();
+    } else {
+      await expect(pageRecovery).not.toContainText(forbiddenProtocol);
+      await pageRecovery.getByRole("button", { name: `查询办理${action}结果`, exact: true }).click();
+    }
   }
   await expect(dialog).toBeHidden({ timeout: 30_000 });
   await expect(page.getByTestId("command-result-notice")).toContainText(`办理${action}已完成，住宿状态已刷新`);
@@ -337,10 +344,11 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
       await openOrder(page, stay);
     }
     await expect(page.getByTestId("check-out")).toHaveCount(0);
-    const earlyDepartureNotice = page.locator(".action-band").getByTestId("fulfillment-date-notice");
+    const earlyDepartureNotice = page.locator(".action-band").getByTestId("stay-date-action-notice");
     await expect(earlyDepartureNotice).toBeVisible();
-    await expect(earlyDepartureNotice).toContainText("暂不能办理退房");
-    await expect(earlyDepartureNotice).toContainText("当前版本暂不办理提前退房");
+    await expect(earlyDepartureNotice).toContainText("暂不能缩短住宿或提前退房");
+    await expect(earlyDepartureNotice).toContainText("入住当天暂不办理缩短或提前退房");
+    await expect(earlyDepartureNotice).toContainText("当前版本尚未开放撤销入住");
   }
 
   await page.goto("/");
@@ -464,16 +472,17 @@ test("阶段 8 4.1 日期门禁原因归位且逾期在住不延长当前房态"
   await login(page);
 
   for (const gated of [
-    { stay: fixture.futureCheckIn, action: "入住", reason: "不能提前办理入住" },
-    { stay: fixture.overdueCheckIn, action: "入住", reason: "不能按普通入住补办" },
-    { stay: fixture.earlyCheckoutGate, action: "退房", reason: "当前版本暂不办理提前退房" }
+    { stay: fixture.futureCheckIn, action: "入住", noticeTestId: "fulfillment-date-notice", title: "暂不能办理入住", reason: "不能提前办理入住" },
+    { stay: fixture.overdueCheckIn, action: "入住", noticeTestId: "fulfillment-date-notice", title: "暂不能办理入住", reason: "不能按普通入住补办" },
+    { stay: fixture.earlyCheckoutGate, action: "退房", noticeTestId: "stay-date-action-notice", title: "暂不能缩短住宿或提前退房", reason: "入住当天暂不办理缩短或提前退房" }
   ] as const) {
     await openOrder(page, gated.stay);
     await expect(page.getByTestId(gated.action === "入住" ? "check-in" : "check-out")).toHaveCount(0);
-    const notice = page.locator(".action-band").getByTestId("fulfillment-date-notice");
+    const notice = page.locator(".action-band").getByTestId(gated.noticeTestId);
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText(`暂不能办理${gated.action}`);
+    await expect(notice).toContainText(gated.title);
     await expect(notice).toContainText(gated.reason);
+    if (gated.action === "退房") await expect(notice).toContainText("当前版本尚未开放撤销入住");
   }
 
   await page.goto("/");

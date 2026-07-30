@@ -28,6 +28,12 @@ function addDays(date: string, days: number): string {
   return value.toISOString().slice(0, 10);
 }
 
+function testPricingPolicyForDates(arrivalDate: string, departureDate: string): string {
+  return arrivalDate.slice(0, 7) === departureDate.slice(0, 7)
+    ? demo.transientPolicyId
+    : demo.publicPricingPolicyId;
+}
+
 async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Promise<ReceiptDto> {
   const preview = await createCommandPreview(db, principal, envelope, metadata(`${prefix}-preview`));
   return confirmCommandPreview(db, principal, preview.preview.previewId, {
@@ -43,13 +49,15 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
 
 async function quote(unitId: string, options: { member?: boolean; stayType?: "TRANSIENT" | "FREE"; arrival?: string; departure?: string } = {}) {
   const stayType = options.stayType ?? "TRANSIENT";
+  const arrivalDate = options.arrival ?? "2026-07-21";
+  const departureDate = options.departure ?? "2026-07-24";
   return createQuote(db, {
     propertyId: demo.propertyId,
     inventoryUnitId: unitId,
     stayType,
-    arrivalDate: options.arrival ?? "2026-07-21",
-    departureDate: options.departure ?? "2026-07-24",
-    pricingPolicyVersionId: stayType === "FREE" ? demo.freePolicyId : demo.transientPolicyId,
+    arrivalDate,
+    departureDate,
+    pricingPolicyVersionId: stayType === "FREE" ? demo.freePolicyId : testPricingPolicyForDates(arrivalDate, departureDate),
     ...(options.member ? { memberContractId: demo.memberContractId } : {})
   });
 }
@@ -597,7 +605,8 @@ describe("PostgreSQL core operations", () => {
     expect(view.amounts).toEqual({
       currentContractAmount: { currency: "CNY", minorUnits: 0 },
       netRecordedCollection: { currency: "CNY", minorUnits: 9_000 },
-      collectionDifference: { currency: "CNY", minorUnits: -9_000 }
+      collectionDifference: { currency: "CNY", minorUnits: -9_000 },
+      refundReferenceAmount: { currency: "CNY", minorUnits: 9_000 }
     });
     expect(view.coverageSet.some((item) => item.status === "CONSUMED")).toBe(true);
     expect(view.coverageSet.some((item) => item.status === "HELD")).toBe(false);
@@ -761,7 +770,7 @@ describe("PostgreSQL core operations", () => {
     expect(context.currentSegment.inventoryUnitId).toBe(demo.secondRoomId);
   });
 
-  it("supports move and extension while checked in and keeps shortening failed closed", async () => {
+  it("supports move and extension while checked in and rejects shortening on the arrival day", async () => {
     const arrivalDate = await propertyLocalToday(db, demo.propertyId);
     const moveDate = addDays(arrivalDate, 1);
     const originalDepartureDate = addDays(arrivalDate, 3);
@@ -786,7 +795,7 @@ describe("PostgreSQL core operations", () => {
       input: { propertyId: demo.propertyId, orderId, newDepartureDate: originalDepartureDate }
     }, metadata("checked-in-amendments-shorten-rejected"))).rejects.toMatchObject({
       code: "INVALID_ORDER_STATE",
-      message: "当前版本暂不支持通过缩短住宿办理提前退房"
+      message: "入住当天暂不办理缩短或提前退房；未实际使用房间时请使用后续的撤销入住流程"
     });
     const context = await loadOrderContext(db, orderId);
     expect(context.order.status).toBe("CHECKED_IN");

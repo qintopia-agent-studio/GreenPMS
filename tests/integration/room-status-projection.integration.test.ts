@@ -154,6 +154,12 @@ function shiftLocalDate(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+function testPricingPolicyForDates(arrivalDate: string, departureDate: string): string {
+  return arrivalDate.slice(0, 7) === departureDate.slice(0, 7)
+    ? demo.transientPolicyId
+    : demo.publicPricingPolicyId;
+}
+
 function unitIn(result: RoomStatusBoardDto, unitId: string): RoomStatusUnitDto {
   for (const room of result.rooms) {
     if (room.id === unitId) return room;
@@ -180,7 +186,9 @@ async function createOrder(options: {
     stayType,
     arrivalDate: options.arrivalDate,
     departureDate: options.departureDate,
-    pricingPolicyVersionId: stayType === "FREE" ? demo.freePolicyId : demo.transientPolicyId,
+    pricingPolicyVersionId: stayType === "FREE"
+      ? demo.freePolicyId
+      : testPricingPolicyForDates(options.arrivalDate, options.departureDate),
     ...(options.memberContractId ? { memberContractId: options.memberContractId } : {})
   });
   return execute({
@@ -1680,8 +1688,7 @@ describe("PostgreSQL room-status projection", () => {
       input: { propertyId: demo.propertyId, orderId: earlyCheckoutOrderId, newDepartureDate: businessDate }
     }, "early-check-out-shorten-bypass-rejected")).rejects.toMatchObject({
       code: "INVALID_ORDER_STATE",
-      message: "当前版本暂不支持通过缩短住宿办理提前退房",
-      details: { businessDate, departureDate: earlyDepartureDate }
+      message: "入住当天暂不办理缩短或提前退房；未实际使用房间时请使用后续的撤销入住流程"
     });
     expect(await orderFulfillmentState(earlyCheckoutOrderId)).toEqual(earlyCheckoutBefore);
     expect(await Promise.all([
@@ -1778,6 +1785,14 @@ describe("PostgreSQL room-status projection", () => {
     const arrivalDate = businessDate;
     const departureDate = shiftLocalDate(businessDate, 2);
     const shortenedDepartureDate = shiftLocalDate(businessDate, 1);
+    const shortenedQuote = await createQuote(db, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.secondRoomId,
+      stayType: "TRANSIENT",
+      arrivalDate,
+      departureDate: shortenedDepartureDate,
+      pricingPolicyVersionId: testPricingPolicyForDates(arrivalDate, departureDate)
+    });
     const created = await createOrder({
       unitId: demo.secondRoomId,
       arrivalDate,
@@ -1792,7 +1807,7 @@ describe("PostgreSQL room-status projection", () => {
         orderId,
         newArrivalDate: arrivalDate,
         newDepartureDate: shortenedDepartureDate,
-        targetCurrentContractAmountMinor: 12_000
+        targetCurrentContractAmountMinor: shortenedQuote.currentContractAmount.minorUnits
       }
     }, "shorten-before-check-in-shorten");
     await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "shorten-before-check-in-check-in");

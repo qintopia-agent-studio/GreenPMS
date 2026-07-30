@@ -95,6 +95,7 @@ function orderView() {
       fundsSummary: {
         netRecordedCollection: money(0),
         collectionDifference: money(20_000),
+        refundReferenceAmount: money(0),
         factCount: 0
       }
     }] as TestHistoryItem[],
@@ -123,7 +124,8 @@ function orderView() {
     amounts: {
       currentContractAmount: money(20_000),
       netRecordedCollection: money(0),
-      collectionDifference: money(20_000)
+      collectionDifference: money(20_000),
+      refundReferenceAmount: money(0)
     }
   };
 }
@@ -140,6 +142,8 @@ function appendHistoryTransition(
   input.effectiveArrangement.arrivalDate = after.arrivalDate;
   input.effectiveArrangement.departureDate = after.departureDate;
   input.effectiveArrangement.intervals = after.intervals;
+  input.pricingRevisions.at(-1)!.arrival_date = after.arrivalDate;
+  input.pricingRevisions.at(-1)!.departure_date = after.departureDate;
   input.arrangementHistory.push({
     type,
     before,
@@ -155,6 +159,7 @@ function appendHistoryTransition(
     fundsSummary: {
       netRecordedCollection: money(0),
       collectionDifference: money(20_000),
+      refundReferenceAmount: money(0),
       factCount: 0
     }
   });
@@ -203,6 +208,17 @@ describe("parseOrderView", () => {
       { code: "RESCHEDULE_STAY", enabled: false, disabledReason: "重复" }
     ];
     expect(() => parseOrderView(duplicate)).toThrow("重复");
+
+    const inHouse = orderView();
+    inHouse.order.status = "CHECKED_IN";
+    inHouse.stay.status = "IN_HOUSE";
+    inHouse.fulfillment.state = "IN_HOUSE";
+    inHouse.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    (inHouse as unknown as { allowedActions: unknown[] }).allowedActions = [
+      { code: "EXTEND_STAY", enabled: true, disabledReason: null },
+      { code: "SHORTEN_STAY", enabled: true, disabledReason: null }
+    ];
+    expect(parseOrderView(inHouse)).toBe(inHouse);
   });
 
   it.each([
@@ -384,7 +400,8 @@ describe("parseOrderView", () => {
     ["pricing currency", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.currency = "USD"; }, "金额摘要币种不一致"],
     ["currency format", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.currency = "cny"; }, "必须是三位大写货币代码"],
     ["policy difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = 1; }, "与政策基础金额差额不一致"],
-    ["collection difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 19_999; }, "待收或多收差额不一致"]
+    ["collection difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 19_999; }, "待收或多收差额不一致"],
+    ["refund reference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.refundReferenceAmount.minorUnits = 1; }, "建议退款金额不一致"]
   ])("rejects inconsistent history money for %s", (_label, damage, expected) => {
     const input = orderView();
     damage(input);
@@ -400,7 +417,142 @@ describe("parseOrderView", () => {
     changed.pricingSummary.differenceFromPolicy.currency = "USD";
     changed.fundsSummary.netRecordedCollection.currency = "USD";
     changed.fundsSummary.collectionDifference.currency = "USD";
+    changed.fundsSummary.refundReferenceAmount.currency = "USD";
     expect(() => parseOrderView(input)).toThrow("与上一条住宿安排变更币种不一致");
+  });
+
+  it("accepts a later standalone repricing when the accommodation arrangement is unchanged", () => {
+    const input = orderView();
+    input.order.current_revision_id = "revision_2";
+    input.pricingRevisions.push({
+      ...input.pricingRevisions[0]!,
+      id: "revision_2",
+      revision_no: 2,
+      amendment_id: "amendment_2",
+      pricing_basis: "MANUAL_ADJUSTMENT",
+      manual_adjustment_minor: -5_000,
+      current_contract_amount_minor: 15_000,
+      difference_from_policy_minor: -5_000,
+      reason: { code: "REPRICE_ORDER", note: "住客协商调价" },
+      created_at: "2026-07-28T09:00:00.000Z"
+    });
+    input.amounts.currentContractAmount.minorUnits = 15_000;
+    input.amounts.collectionDifference.minorUnits = 15_000;
+
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("accepts a later standalone repricing that returns the unchanged stay to policy price", () => {
+    const input = orderView();
+    input.arrangementHistory[0]!.pricingSummary.currentContractAmount.minorUnits = 15_000;
+    input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = -5_000;
+    input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 15_000;
+    input.order.current_revision_id = "revision_2";
+    input.pricingRevisions.push({
+      ...input.pricingRevisions[0]!,
+      id: "revision_2",
+      revision_no: 2,
+      amendment_id: "amendment_2",
+      pricing_basis: "POLICY",
+      policy_base_amount_minor: 20_000,
+      current_contract_amount_minor: 20_000,
+      difference_from_policy_minor: 0,
+      manual_adjustment_minor: 0,
+      reason: { code: "REPRICE_ORDER", note: "恢复政策价" },
+      created_at: "2026-07-28T09:00:00.000Z"
+    });
+
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it.each([
+    ["contract differs from policy", (input: ReturnType<typeof orderView>) => {
+      input.pricingRevisions[1]!.current_contract_amount_minor = 19_000;
+      input.pricingRevisions[1]!.difference_from_policy_minor = -1_000;
+      input.amounts.currentContractAmount.minorUnits = 19_000;
+      input.amounts.collectionDifference.minorUnits = 19_000;
+    }],
+    ["non-zero manual adjustment", (input: ReturnType<typeof orderView>) => {
+      input.pricingRevisions[1]!.manual_adjustment_minor = 1;
+    }],
+    ["wrong reason", (input: ReturnType<typeof orderView>) => {
+      input.pricingRevisions[1]!.reason.code = "CREATE_ORDER";
+    }]
+  ])("rejects a damaged standalone policy repricing: %s", (_label, damage) => {
+    const input = orderView();
+    input.arrangementHistory[0]!.pricingSummary.currentContractAmount.minorUnits = 15_000;
+    input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = -5_000;
+    input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 15_000;
+    input.order.current_revision_id = "revision_2";
+    input.pricingRevisions.push({
+      ...input.pricingRevisions[0]!,
+      id: "revision_2",
+      revision_no: 2,
+      amendment_id: "amendment_2",
+      pricing_basis: "POLICY",
+      reason: { code: "REPRICE_ORDER", note: "恢复政策价" },
+      created_at: "2026-07-28T09:00:00.000Z"
+    });
+    damage(input);
+
+    expect(() => parseOrderView(input)).toThrow();
+  });
+
+  it.each([
+    ["wrong reason", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.reason.code = "CREATE_ORDER"; }, "没有合法的后续独立调价记录"],
+    ["wrong basis", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.pricing_basis = "POLICY"; }, "人工调价差额不一致"],
+    ["changed arrival", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.arrival_date = "2026-07-29"; }, "与当前住宿安排日期不一致"],
+    ["changed departure", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.departure_date = "2026-07-31"; }, "与当前住宿安排日期不一致"],
+    ["predates arrangement", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.created_at = "2026-07-27T09:00:00.000Z"; }, "没有合法的后续独立调价记录"]
+  ])("rejects an amount mismatch without a valid later standalone repricing: %s", (_label, damage, expected) => {
+    const input = orderView();
+    input.order.current_revision_id = "revision_2";
+    input.pricingRevisions.push({
+      ...input.pricingRevisions[0]!,
+      id: "revision_2",
+      revision_no: 2,
+      amendment_id: "amendment_2",
+      pricing_basis: "MANUAL_ADJUSTMENT",
+      manual_adjustment_minor: -5_000,
+      current_contract_amount_minor: 15_000,
+      difference_from_policy_minor: -5_000,
+      reason: { code: "REPRICE_ORDER", note: "住客协商调价" },
+      created_at: "2026-07-28T09:00:00.000Z"
+    });
+    input.amounts.currentContractAmount.minorUnits = 15_000;
+    input.amounts.collectionDifference.minorUnits = 15_000;
+    damage(input);
+
+    expect(() => parseOrderView(input)).toThrow(expected);
+  });
+
+  it("rejects a standalone repricing whose current currency differs from the accommodation history", () => {
+    const input = orderView();
+    const history = input.arrangementHistory[0]!;
+    history.pricingSummary.policyBaseAmount.currency = "USD";
+    history.pricingSummary.currentContractAmount.currency = "USD";
+    history.pricingSummary.differenceFromPolicy.currency = "USD";
+    history.fundsSummary.netRecordedCollection.currency = "USD";
+    history.fundsSummary.collectionDifference.currency = "USD";
+    history.fundsSummary.refundReferenceAmount.currency = "USD";
+
+    expect(() => parseOrderView(input)).toThrow("与最新住宿安排计价摘要币种不一致");
+  });
+
+  it.each([
+    ["unknown basis", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.pricing_basis = "MANUAL" as never; }, "不是支持的计价方式"],
+    ["negative policy base", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.policy_base_amount_minor = -1; }, "必须是非负金额"],
+    ["negative contract amount", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.current_contract_amount_minor = -1; }, "必须是非负金额"],
+    ["wrong difference", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.difference_from_policy_minor = 1; }, "与政策基础金额差额不一致"],
+    ["wrong manual adjustment", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.manual_adjustment_minor = 1; }, "人工调价差额不一致"],
+    ["cross-order revision", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.order_id = "order_other"; }, "与订单不一致"],
+    ["invalid revision dates", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.departure_date = input.pricingRevisions[0]!.arrival_date; }, "日期区间无效"],
+    ["current revision arrival mismatch", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.arrival_date = "2026-07-29"; }, "与当前住宿安排日期不一致"],
+    ["current revision departure mismatch", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[0]!.departure_date = "2026-07-31"; }, "与当前住宿安排日期不一致"]
+  ])("rejects a damaged pricing revision: %s", (_label, damage, expected) => {
+    const input = orderView();
+    damage(input);
+    expect(() => parseOrderView(input)).toThrow(expected);
   });
 
   it.each([

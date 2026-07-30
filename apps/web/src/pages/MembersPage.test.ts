@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MemberSummaryDto, MembershipOrderSummaryDto } from "../types";
-import { effectiveMemberId, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, ledgerEntryLabel, normalizeMemberQuery, parseEntitlementBalance, shouldClearMemberSearchAfterCommit, yuanInputToMinor } from "./MembersPage";
+import { effectiveMemberId, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, ledgerEntryLabel, ledgerOrderHref, memberDeepLinkSelection, normalizeMemberQuery, parseEntitlementBalance, parseMemberDeepLink, shouldClearMemberSearchAfterCommit, targetEntitlementContractId, yuanInputToMinor } from "./MembersPage";
 
 const members = [
   { member: { id: "member_first" } },
@@ -8,6 +8,36 @@ const members = [
 ] as MemberSummaryDto[];
 
 describe("member directory state", () => {
+  it("parses member and contract deep links without accepting blank values", () => {
+    expect(parseMemberDeepLink("?memberId=member_2&contractId=contract_2")).toEqual({
+      memberId: "member_2",
+      contractId: "contract_2"
+    });
+    expect(parseMemberDeepLink("?memberId=%20&contractId=%20")).toEqual({});
+  });
+
+  it("selects only a member that exists in the current property list", () => {
+    expect(memberDeepLinkSelection(members, "member_second")).toBe("member_second");
+    expect(memberDeepLinkSelection(members, "member_missing")).toBeUndefined();
+    expect(memberDeepLinkSelection(members, undefined)).toBeUndefined();
+  });
+
+  it("targets only a contract that owns a displayed formal entitlement", () => {
+    const view = {
+      contracts: [{ id: "contract_formal" }, { id: "contract_without_product" }],
+      lots: [{ id: "lot_formal", contract_id: "contract_formal" }, { id: "lot_history", contract_id: "contract_without_product" }],
+      membershipOrders: [{ order: { entitlement_lot_id: "lot_formal" } }]
+    } as never;
+    expect(targetEntitlementContractId(view, "contract_formal")).toBe("contract_formal");
+    expect(targetEntitlementContractId(view, "contract_without_product")).toBeUndefined();
+    expect(targetEntitlementContractId(view, "contract_missing")).toBeUndefined();
+  });
+
+  it("links only ledger entries associated with a lodging order", () => {
+    expect(ledgerOrderHref({ order_id: "order_member_1" } as never)).toBe("/orders/order_member_1");
+    expect(ledgerOrderHref({ order_id: null } as never)).toBeUndefined();
+  });
+
   it("keeps a valid selection and falls back when the result set changes", () => {
     expect(effectiveMemberId(members, "member_second")).toBe("member_second");
     expect(effectiveMemberId(members, "member_missing")).toBe("member_first");

@@ -25,7 +25,7 @@ const desktopUnitCodeOverrides = {
   "202": "309",
   "203": "A01",
   "204": "A02",
-  D01: "B02",
+  D01: "B01",
   D02: "206"
 } as const;
 const forbiddenProtocol = /Preview|Confirm|Receipt|Command|RESCHEDULE_STAY|EXTEND_STAY|order_[a-z0-9_]+|segment_[a-z0-9_]+/i;
@@ -131,6 +131,7 @@ async function openRoomStatusOrder(page: Page, stay: Stage9StayFixture): Promise
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", stay.unitId);
   await popover.getByRole("button", { name: new RegExp(stay.nickname) }).click();
   const context = page.locator(".room-status-order-context");
   await expect(context).toContainText(stay.nickname, { timeout: 30_000 });
@@ -139,8 +140,8 @@ async function openRoomStatusOrder(page: Page, stay: Stage9StayFixture): Promise
 
 async function extendHistoricalStay(page: Page, stay: Stage9ExtensionFixture, reason: string): Promise<void> {
   await openOrder(page, stay);
-  await page.getByRole("button", { name: "延长住宿", exact: true }).click();
-  const form = page.getByRole("dialog", { name: "延长住宿", exact: true });
+  await page.getByRole("button", { name: "调整退房日期", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "调整退房日期", exact: true });
   const context = form.getByTestId("stay-date-order-context");
   await expect(context).toContainText("当前住宿日期 · 在住");
   await expect(context).toContainText(stay.nickname);
@@ -250,10 +251,14 @@ test("4.2 desktop external-channel reschedule returns to the draft, records the 
   });
   await expect(review).toContainText("原住宿日期");
   await expect(review).toContainText("新住宿日期");
-  await expect(review).toContainText("原合同金额");
+  await expect(review).not.toContainText("原合同金额");
   await expect(review).toContainText("政策基础金额");
   await expect(review).toContainText("本单渠道应结金额");
+  await expect(review).toContainText("与政策基础金额差额");
   await expect(review).toContainText("渠道价格差异说明");
+  await expect(review).not.toContainText("已登记净收款");
+  await expect(review).not.toContainText("待补收参考");
+  await expect(review).not.toContainText("建议退款");
   await expect(review).toContainText(fixture.external.channelPriceDifferenceReason);
   await review.getByTestId("command-return-to-edit").click();
   form = page.getByRole("dialog", { name: "调整预订日期", exact: true });
@@ -280,22 +285,33 @@ test("4.2 desktop room-status entry restores selection, released dates are avail
   await login(page, { roomStatusRange: true });
   const oldFirst = roomCell(page, fixture.shift, fixture.shift.arrivalDate);
   await expect(oldFirst).toBeVisible();
-  const context = await openRoomStatusOrder(page, fixture.shift);
-  const action = context.getByRole("button", { name: "调整预订日期", exact: true });
-  const refreshAction = async () => {
+  await openRoomStatusOrder(page, fixture.shift);
+  const refreshAction = async (): Promise<Locator> => {
     const refreshed = roomStatusResponse(page, fixture.rangeArrivalDate, fixture.rangeDepartureDate);
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
     await refreshed;
+    await expect(oldFirst).toHaveClass(/is-stay-selected/);
+    const availableCell = roomCell(page, fixture.external, fixture.external.newDepartureDate);
+    await availableCell.focus();
+    await page.keyboard.press("Enter");
+    const availablePopover = page.getByTestId("room-status-quick-popover");
+    await expect(availablePopover).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(availablePopover).toBeHidden();
+    const context = await openRoomStatusOrder(page, fixture.shift);
+    const action = context.getByRole("button", { name: "调整预订日期", exact: true });
+    await expect(action).toBeVisible();
     await expect(action).toBeEnabled({ timeout: 15_000 });
+    return action;
   };
-  await refreshAction();
+  let action = await refreshAction();
   await action.click();
   const form = await fillRescheduleForm(page, fixture.shift as Stage9AcceptanceFixture["external"], "房态入口改期");
   await form.press("Escape");
   await expect(form).toBeHidden();
   await expect(oldFirst).toBeFocused();
-  await refreshAction();
+  action = await refreshAction();
   await action.click();
   await fillRescheduleForm(page, fixture.shift as Stage9AcceptanceFixture["external"], "房态入口改期");
   await continueToReview(page, "调整预订日期");
@@ -311,8 +327,8 @@ test("4.2 desktop checked-in member extension keeps old and added dates under th
   test.skip(!isDesktop(testInfo), "desktop Stage 9 checked-in member extension");
   await login(page, { roomStatusRange: true });
   await openOrder(page, fixture.memberInHouse);
-  await page.getByRole("button", { name: "延长住宿", exact: true }).click();
-  const form = page.getByRole("dialog", { name: "延长住宿", exact: true });
+  await page.getByRole("button", { name: "调整退房日期", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "调整退房日期", exact: true });
   await expect(form.getByTestId("stay-date-arrival")).toBeDisabled();
   await form.getByTestId("stay-date-departure").fill(fixture.memberInHouse.newDepartureDate);
   await form.getByTestId("stay-date-reason").fill("住客确认续住一晚");

@@ -15,7 +15,9 @@ async function runCommand(db: Kysely<Database>, principal: AuthPrincipal, comman
     commandType,
     confirmation: true,
     expectedEffectHash: preview.preview.effectHash,
-    reason: { code: "RESTORE_FIXTURE", note: "Create deterministic non-empty backup/restore acceptance facts" }
+    reason: commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "RESTORE_FIXTURE", note: "Create deterministic non-empty backup/restore acceptance facts" }
   }, {
     idempotencyKey: `${reference}-confirm`,
     correlationId: reference
@@ -87,7 +89,8 @@ export async function createRestoreFixture(reference: string): Promise<void> {
       quoteId: quote.quote.quoteId,
       primaryGuest: { fullName: "Restore Verification Guest", nickname: "Restore Guest", documentNumber: reference },
       bookingChannelCode: "CTRIP",
-      channelOrderReference: reference
+      channelOrderReference: reference,
+      targetCurrentContractAmountMinor: quote.quote.currentContractAmount.minorUnits
     }, `${reference}-create-order`);
     const orderId = created.result?.orderId;
     if (typeof orderId !== "string") throw new Error("Restore fixture CREATE_ORDER returned no orderId");

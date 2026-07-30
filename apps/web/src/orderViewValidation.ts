@@ -14,6 +14,7 @@ const arrangementChangeTypes = new Set(["INITIAL_BOOKING", "RESCHEDULE", "EXTENS
 const effectivePresentations = new Set(["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER"]);
 const fulfillmentStates = new Set(["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]);
 const recordingModes = new Set(["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"]);
+const pricingBases = new Set(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"]);
 const actionCodes = new Set<string>(orderActionCodes);
 const orderProjectionExpectations = {
   RESERVED: { stayStatus: "PLANNED", fulfillmentState: "NOT_CHECKED_IN", presentation: "CURRENT" },
@@ -346,14 +347,15 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
   const pricing = record(result.pricingSummary, `${path}.pricingSummary`);
   exactKeys(pricing, `${path}.pricingSummary`, ["policyBaseAmount", "currentContractAmount", "differenceFromPolicy"]);
   const funds = record(result.fundsSummary, `${path}.fundsSummary`);
-  exactKeys(funds, `${path}.fundsSummary`, ["netRecordedCollection", "collectionDifference", "factCount"]);
+  exactKeys(funds, `${path}.fundsSummary`, ["netRecordedCollection", "collectionDifference", "refundReferenceAmount", "factCount"]);
   if (!Number.isSafeInteger(funds.factCount) || Number(funds.factCount) < 0) fail(`${path}.fundsSummary.factCount`, "必须是非负整数");
   const policyBaseAmount = money(pricing.policyBaseAmount, `${path}.pricingSummary.policyBaseAmount`);
   const currentContractAmount = money(pricing.currentContractAmount, `${path}.pricingSummary.currentContractAmount`);
   const differenceFromPolicy = money(pricing.differenceFromPolicy, `${path}.pricingSummary.differenceFromPolicy`);
   const netRecordedCollection = money(funds.netRecordedCollection, `${path}.fundsSummary.netRecordedCollection`);
   const collectionDifference = money(funds.collectionDifference, `${path}.fundsSummary.collectionDifference`);
-  const amounts = [policyBaseAmount, currentContractAmount, differenceFromPolicy, netRecordedCollection, collectionDifference];
+  const refundReferenceAmount = money(funds.refundReferenceAmount, `${path}.fundsSummary.refundReferenceAmount`);
+  const amounts = [policyBaseAmount, currentContractAmount, differenceFromPolicy, netRecordedCollection, collectionDifference, refundReferenceAmount];
   if (amounts.some((amount) => amount.currency !== currentContractAmount.currency)) {
     fail(path, "金额摘要币种不一致");
   }
@@ -366,6 +368,10 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
   if (!Number.isSafeInteger(expectedCollectionDifference)
     || collectionDifference.minorUnits !== expectedCollectionDifference) {
     fail(`${path}.fundsSummary.collectionDifference`, "待收或多收差额不一致");
+  }
+  if (refundReferenceAmount.minorUnits < 0
+    || refundReferenceAmount.minorUnits !== Math.max(0, netRecordedCollection.minorUnits - currentContractAmount.minorUnits)) {
+    fail(`${path}.fundsSummary.refundReferenceAmount`, "建议退款金额不一致");
   }
   return {
     type: result.type as OrderArrangementHistoryItemDto["type"],
@@ -382,6 +388,7 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
     fundsSummary: {
       netRecordedCollection,
       collectionDifference,
+      refundReferenceAmount,
       factCount: funds.factCount as number
     }
   };
@@ -411,12 +418,12 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   stringValue(order.property_id, "order.property_id");
   const orderStatus = stringValue(order.status, "order.status");
   if (!Object.hasOwn(orderProjectionExpectations, orderStatus)) fail("order.status", "不是支持的订单状态");
-  const expectedDateAction = orderStatus === "RESERVED"
-    ? "RESCHEDULE_STAY"
+  const allowedDateActions = orderStatus === "RESERVED"
+    ? new Set(["RESCHEDULE_STAY"])
     : orderStatus === "CHECKED_IN"
-      ? "EXTEND_STAY"
-      : undefined;
-  if (enabledDateActions.some((code) => code !== expectedDateAction)) {
+      ? new Set(["EXTEND_STAY", "SHORTEN_STAY"])
+      : new Set<string>();
+  if (enabledDateActions.some((code) => !allowedDateActions.has(code))) {
     fail("allowedActions", "日期操作与订单状态不一致");
   }
   const expectation = orderProjectionExpectations[orderStatus as keyof typeof orderProjectionExpectations];
@@ -481,19 +488,22 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   }
 
   const amountsValue = record(result.amounts, "amounts");
-  exactKeys(amountsValue, "amounts", ["currentContractAmount", "netRecordedCollection", "collectionDifference"]);
+  exactKeys(amountsValue, "amounts", ["currentContractAmount", "netRecordedCollection", "collectionDifference", "refundReferenceAmount"]);
   const currentContractAmount = money(amountsValue.currentContractAmount, "amounts.currentContractAmount");
   const netRecordedCollection = money(amountsValue.netRecordedCollection, "amounts.netRecordedCollection");
   const collectionDifference = money(amountsValue.collectionDifference, "amounts.collectionDifference");
+  const refundReferenceAmount = money(amountsValue.refundReferenceAmount, "amounts.refundReferenceAmount");
   if (currentContractAmount.currency !== netRecordedCollection.currency
     || currentContractAmount.currency !== collectionDifference.currency
-    || collectionDifference.minorUnits !== currentContractAmount.minorUnits - netRecordedCollection.minorUnits) {
+    || currentContractAmount.currency !== refundReferenceAmount.currency
+    || collectionDifference.minorUnits !== currentContractAmount.minorUnits - netRecordedCollection.minorUnits
+    || refundReferenceAmount.minorUnits < 0
+    || refundReferenceAmount.minorUnits !== Math.max(0, netRecordedCollection.minorUnits - currentContractAmount.minorUnits)) {
     fail("amounts", "币种或待收、多收差额不一致");
   }
   const latestHistoryAmount = history.at(-1)!.pricingSummary.currentContractAmount;
-  if (latestHistoryAmount.currency !== currentContractAmount.currency
-    || latestHistoryAmount.minorUnits !== currentContractAmount.minorUnits) {
-    fail("amounts.currentContractAmount", "与最新住宿安排计价摘要不一致");
+  if (latestHistoryAmount.currency !== currentContractAmount.currency) {
+    fail("amounts.currentContractAmount.currency", "与最新住宿安排计价摘要币种不一致");
   }
 
   const occupants = arrayValue(result.occupants, "occupants");
@@ -529,16 +539,29 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const pricingRevisions = arrayValue(result.pricingRevisions, "pricingRevisions");
   if (pricingRevisions.length === 0) fail("pricingRevisions", "必须包含计价记录");
   pricingRevisions.forEach((item, index) => {
-    const revision = record(item, `pricingRevisions[${index}]`);
-    stringValue(revision.id, `pricingRevisions[${index}].id`);
-    safeInteger(revision.revision_no, `pricingRevisions[${index}].revision_no`, 1);
-    localDate(revision.arrival_date, `pricingRevisions[${index}].arrival_date`);
-    localDate(revision.departure_date, `pricingRevisions[${index}].departure_date`);
-    safeInteger(revision.policy_base_amount_minor, `pricingRevisions[${index}].policy_base_amount_minor`);
-    safeInteger(revision.current_contract_amount_minor, `pricingRevisions[${index}].current_contract_amount_minor`);
-    safeInteger(revision.manual_adjustment_minor, `pricingRevisions[${index}].manual_adjustment_minor`);
-    safeInteger(revision.difference_from_policy_minor, `pricingRevisions[${index}].difference_from_policy_minor`);
-    stringValue(revision.pricing_basis, `pricingRevisions[${index}].pricing_basis`);
+    const path = `pricingRevisions[${index}]`;
+    const revision = record(item, path);
+    stringValue(revision.id, `${path}.id`);
+    if (stringValue(revision.order_id, `${path}.order_id`) !== order.id) fail(`${path}.order_id`, "与订单不一致");
+    safeInteger(revision.revision_no, `${path}.revision_no`, 1);
+    const arrivalDate = localDate(revision.arrival_date, `${path}.arrival_date`);
+    const departureDate = localDate(revision.departure_date, `${path}.departure_date`);
+    if (departureDate <= arrivalDate) fail(path, "日期区间无效");
+    const policyBaseAmount = safeInteger(revision.policy_base_amount_minor, `${path}.policy_base_amount_minor`);
+    const currentRevisionAmount = safeInteger(revision.current_contract_amount_minor, `${path}.current_contract_amount_minor`);
+    if (policyBaseAmount < 0) fail(`${path}.policy_base_amount_minor`, "必须是非负金额");
+    if (currentRevisionAmount < 0) fail(`${path}.current_contract_amount_minor`, "必须是非负金额");
+    const manualAdjustment = safeInteger(revision.manual_adjustment_minor, `${path}.manual_adjustment_minor`);
+    const differenceFromPolicy = safeInteger(revision.difference_from_policy_minor, `${path}.difference_from_policy_minor`);
+    if (differenceFromPolicy !== currentRevisionAmount - policyBaseAmount) {
+      fail(`${path}.difference_from_policy_minor`, "与政策基础金额差额不一致");
+    }
+    const pricingBasis = stringValue(revision.pricing_basis, `${path}.pricing_basis`);
+    if (!pricingBases.has(pricingBasis)) fail(`${path}.pricing_basis`, "不是支持的计价方式");
+    if ((pricingBasis === "MANUAL_ADJUSTMENT" && manualAdjustment !== differenceFromPolicy)
+      || (pricingBasis !== "MANUAL_ADJUSTMENT" && manualAdjustment !== 0)) {
+      fail(`${path}.manual_adjustment_minor`, "人工调价差额不一致");
+    }
     reason(revision.reason, `pricingRevisions[${index}].reason`);
     const currency = stringValue(revision.currency, `pricingRevisions[${index}].currency`);
     if (currency !== currentContractAmount.currency) fail(`pricingRevisions[${index}].currency`, "与订单金额币种不一致");
@@ -547,6 +570,32 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   if (latestRevision.id !== order.current_revision_id
     || latestRevision.current_contract_amount_minor !== currentContractAmount.minorUnits) {
     fail("pricingRevisions[latest]", "与订单当前计价指针或金额不一致");
+  }
+  if (latestRevision.arrival_date !== effective.arrivalDate
+    || latestRevision.departure_date !== effective.departureDate) {
+    fail("pricingRevisions[latest]", "与当前住宿安排日期不一致");
+  }
+  if (latestHistoryAmount.minorUnits !== currentContractAmount.minorUnits) {
+    const latestRevisionReason = reason(latestRevision.reason, "pricingRevisions[latest].reason");
+    const latestRevisionBasis = stringValue(latestRevision.pricing_basis, "pricingRevisions[latest].pricing_basis");
+    const latestRevisionPolicyBase = safeInteger(latestRevision.policy_base_amount_minor, "pricingRevisions[latest].policy_base_amount_minor");
+    const latestRevisionDifference = safeInteger(latestRevision.difference_from_policy_minor, "pricingRevisions[latest].difference_from_policy_minor");
+    const latestRevisionManualAdjustment = safeInteger(latestRevision.manual_adjustment_minor, "pricingRevisions[latest].manual_adjustment_minor");
+    const latestRevisionArrival = localDate(latestRevision.arrival_date, "pricingRevisions[latest].arrival_date");
+    const latestRevisionDeparture = localDate(latestRevision.departure_date, "pricingRevisions[latest].departure_date");
+    const latestRevisionCreatedAt = dateTime(latestRevision.created_at, "pricingRevisions[latest].created_at");
+    const validStandaloneBasis = latestRevisionBasis === "MANUAL_ADJUSTMENT"
+      || (latestRevisionBasis === "POLICY"
+        && latestRevisionPolicyBase === currentContractAmount.minorUnits
+        && latestRevisionDifference === 0
+        && latestRevisionManualAdjustment === 0);
+    if (latestRevisionReason.code !== "REPRICE_ORDER"
+      || !validStandaloneBasis
+      || latestRevisionArrival !== effective.arrivalDate
+      || latestRevisionDeparture !== effective.departureDate
+      || Date.parse(latestRevisionCreatedAt) < Date.parse(history.at(-1)!.recordedAt)) {
+      fail("amounts.currentContractAmount", "与最新住宿安排计价摘要不一致，且没有合法的后续独立调价记录");
+    }
   }
 
   let collectionTotal = 0;

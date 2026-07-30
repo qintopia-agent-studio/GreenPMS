@@ -306,6 +306,7 @@ export interface AmountSummaryDto {
   currentContractAmount: MoneyDto;
   netRecordedCollection: MoneyDto;
   collectionDifference: MoneyDto;
+  refundReferenceAmount: MoneyDto;
 }
 
 export const roomStatusStatuses = [
@@ -621,6 +622,15 @@ export interface ExtendStayInputDto {
   manualPriceAdjustmentReason?: string;
 }
 
+export interface ShortenStayInputDto {
+  propertyId: string;
+  orderId: string;
+  newDepartureDate: string;
+  targetCurrentContractAmountMinor?: number;
+  channelPriceDifferenceReason?: string;
+  manualPriceAdjustmentReason?: string;
+}
+
 export interface CreateOrderPricingDecisionDto {
   pricingBasis: CreateOrderPricingBasis;
   policyBaseAmountMinor: number;
@@ -717,6 +727,7 @@ export interface OrderArrangementPricingSummaryDto {
 export interface OrderArrangementFundsSummaryDto {
   netRecordedCollection: MoneyDto;
   collectionDifference: MoneyDto;
+  refundReferenceAmount: MoneyDto;
   factCount: number;
 }
 

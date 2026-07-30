@@ -797,7 +797,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           ].includes(error.code)
             || (isTokenLifecycleCommand(commandType) && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
-            || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") && error.code === "VALIDATION_ERROR")
+            || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
             || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
             throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });

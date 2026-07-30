@@ -1,8 +1,9 @@
 import { ArrowRight, CalendarRange, Clock3, Crosshair, FilePenLine, ReceiptText, Sparkles, Users, X } from "lucide-react";
 import { currentReleaseFeatures } from "@qintopia/contracts";
-import type { InventoryUnitDto, OrderViewDto } from "../types";
-import { businessStatusLabel, formatDate, formatDateTime, formatMoney, StatusBadge } from "../ui";
-import { stayDateChangeActionState, type StayDateChangeAction } from "../components/StayDateChangeDrawer";
+import { Link } from "react-router-dom";
+import type { InventoryUnitDto, MemberViewDto, OrderViewDto } from "../types";
+import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMoney, stayDateFundsAreOperatorFacing, StatusBadge } from "../ui";
+import { stayDateChangeActionState, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 
 type OrderOccupant = OrderViewDto["occupants"][number];
 
@@ -74,15 +75,27 @@ function collectionMethodLabel(method: string): string {
 export interface RoomStatusOrderContextProps {
   view: OrderViewDto;
   units: readonly InventoryUnitDto[];
+  memberView?: MemberViewDto;
   loading?: boolean;
   writeBlocked?: boolean;
   onClose?: () => void;
   primaryActionPlacement?: "CONTENT" | "DRAWER_FOOTER";
   onOpenOrder: (actionCode?: string) => void;
+  onOpenMember?: (target: { memberId: string; contractId: string }) => void;
   onFulfillmentAction: (action: "CHECK_IN" | "CHECK_OUT") => void;
-  onDateAction?: (action: StayDateChangeAction) => void;
+  onDateAction?: (action: StayDateChangeAction, mode?: StayDateChangeMode) => void;
   onCorrectOccupant: (occupant: OrderOccupant) => void;
   onLocateRange: (target: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) => void;
+}
+
+function membershipCoverageStatusSummary(view: OrderViewDto, status: "HELD" | "CONSUMED", lotId: string): string | undefined {
+  const coverage = view.coverageSet.filter((item) => item.status === status
+    && item.contract_id === view.order.member_contract_id
+    && item.lot_id === lotId);
+  const roomNights = coverage.filter((item) => item.unit_kind === "ROOM_NIGHT").length;
+  const bedNights = coverage.filter((item) => item.unit_kind === "BED_NIGHT").length;
+  const units = [roomNights ? `${roomNights} 间夜` : null, bedNights ? `${bedNights} 床夜` : null].filter(Boolean);
+  return units.length ? `${status === "CONSUMED" ? "已核销" : "已冻结"} ${units.join(" · ")}` : undefined;
 }
 
 function occupantLabel(occupant: OrderOccupant): string {
@@ -171,11 +184,13 @@ function FulfillmentRecord({
 export function RoomStatusOrderContext({
   view,
   units,
+  memberView,
   loading = false,
   writeBlocked = false,
   onClose,
   primaryActionPlacement = "CONTENT",
   onOpenOrder,
+  onOpenMember,
   onFulfillmentAction,
   onDateAction,
   onCorrectOccupant,
@@ -187,17 +202,26 @@ export function RoomStatusOrderContext({
   const fulfillmentActions = enabledActions.filter((action): action is typeof action & { code: "CHECK_IN" | "CHECK_OUT" } => (
     action.code === "CHECK_IN" || action.code === "CHECK_OUT"
   ));
-  const dateActionState = stayDateChangeActionState(view);
+  const dateActionStates = (["RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY"] as const)
+    .map((action) => stayDateChangeActionState(view, action))
+    .filter((state): state is NonNullable<typeof state> => Boolean(state));
+  const extensionState = dateActionStates.find((state) => state.action === "EXTEND_STAY");
+  const shortenState = dateActionStates.find((state) => state.action === "SHORTEN_STAY");
   const dateActions = enabledActions.filter((action): action is typeof action & { code: StayDateChangeAction } => (
-    (action.code === "RESCHEDULE_STAY" || action.code === "EXTEND_STAY")
-      && dateActionState?.action === action.code
-      && dateActionState.enabled
+    action.code === "RESCHEDULE_STAY"
+      && dateActionStates.some((state) => state.action === action.code && state.enabled)
   ));
+  const departureAdjustmentAction = view.order.status === "CHECKED_IN"
+    ? extensionState?.enabled ? "EXTEND_STAY" : shortenState?.enabled ? "SHORTEN_STAY" : undefined
+    : undefined;
   const routedActions = enabledActions.filter((action) => (
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
-      && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY"
+      && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY" && action.code !== "SHORTEN_STAY"
   ));
   const amountDifference = view.amounts.collectionDifference;
+  const currentPricingRevision = view.pricingRevisions.find((revision) => revision.id === view.order.current_revision_id)
+    ?? view.pricingRevisions[view.pricingRevisions.length - 1];
+  const showPerOrderFunds = stayDateFundsAreOperatorFacing(view.order.booking_channel_code, currentPricingRevision?.pricing_basis);
   const source = view.order.stay_type === "FREE"
     ? `免费住宿 · ${view.order.free_stay_reason || "未填写原因"}`
     : view.order.member_id || view.order.member_contract_id
@@ -205,6 +229,17 @@ export function RoomStatusOrderContext({
       : view.order.booking_channel_code
         ? `${channelLabels[view.order.booking_channel_code]}${view.order.channel_order_reference ? ` · ${view.order.channel_order_reference}` : ""}`
         : "历史未记录";
+  const matchingMemberView = memberView?.member.id === view.order.member_id ? memberView : undefined;
+  const matchingMembershipOrder = matchingMemberView?.membershipOrders.find(({ order }) => (
+    order.status === "ACTIVE"
+      && order.contract_id === view.order.member_contract_id
+  ));
+  const memberProfileTarget = matchingMemberView && view.order.member_contract_id
+    ? { memberId: matchingMemberView.member.id, contractId: view.order.member_contract_id }
+    : undefined;
+  const matchingLotId = matchingMembershipOrder?.order.entitlement_lot_id ?? undefined;
+  const consumedMembershipSummary = matchingLotId ? membershipCoverageStatusSummary(view, "CONSUMED", matchingLotId) : undefined;
+  const heldMembershipSummary = matchingLotId ? membershipCoverageStatusSummary(view, "HELD", matchingLotId) : undefined;
 
   return (
     <aside className="room-status-context room-status-order-context" aria-labelledby="room-status-order-context-heading" aria-busy={loading}>
@@ -225,12 +260,33 @@ export function RoomStatusOrderContext({
           <dt>日期</dt><dd>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</dd>
           <dt>夜数</dt><dd>{nightsBetween(view.effectiveArrangement.arrivalDate, view.effectiveArrangement.departureDate)} 夜</dd>
           <dt>来源</dt><dd>{source}</dd>
-          <dt>订单金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
-          <dt>已登记净收款</dt><dd>{formatMoney(view.amounts.netRecordedCollection)}</dd>
-          <dt>{amountDifference.minorUnits > 0 ? "待补收参考" : amountDifference.minorUnits < 0 ? "多收 / 退款参考" : "当前记录无差额"}</dt><dd>{formatMoney({ currency: amountDifference.currency, minorUnits: Math.abs(amountDifference.minorUnits) })}</dd>
+          {!showPerOrderFunds && currentPricingRevision ? <>
+            <dt>政策基础金额</dt><dd>{formatMinor(currentPricingRevision.policy_base_amount_minor, currentPricingRevision.currency)}</dd>
+            <dt>本单渠道应结金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
+            <dt>与政策基础金额差额</dt><dd>{formatMinor(currentPricingRevision.difference_from_policy_minor, currentPricingRevision.currency)}</dd>
+            <dt>渠道价格差异说明</dt><dd>{currentPricingRevision.reason.note.trim() || "无需额外说明"}</dd>
+          </> : <>
+            <dt>订单金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
+            <dt>已登记净收款</dt><dd>{formatMoney(view.amounts.netRecordedCollection)}</dd>
+            <dt>{amountDifference.minorUnits > 0 ? "待补收参考" : amountDifference.minorUnits < 0 ? "多收差额" : "当前记录无差额"}</dt><dd>{formatMoney({ currency: amountDifference.currency, minorUnits: Math.abs(amountDifference.minorUnits) })}</dd>
+            {view.amounts.refundReferenceAmount.minorUnits > 0 ? <><dt>建议退款</dt><dd><strong>{formatMoney(view.amounts.refundReferenceAmount)}</strong><small>目前尚未登记退款</small></dd></> : null}
+          </>}
           <dt>资金记录</dt><dd>{view.collectionFacts.length} 笔</dd>
         </dl>
       </section>
+
+      {matchingMemberView && matchingMembershipOrder && memberProfileTarget ? <section className="room-status-context-section" aria-labelledby="room-status-order-membership-heading">
+        <div className="room-status-context-section-heading"><Users aria-hidden="true" size={17} /><h3 id="room-status-order-membership-heading">会员权益</h3></div>
+        <div className="room-status-context-facts">
+          <p>会员：{matchingMemberView.member.full_name}</p>
+          <p>使用权益：{matchingMembershipOrder.order.product_name}</p>
+          {consumedMembershipSummary ? <p>{consumedMembershipSummary}</p> : null}
+          {heldMembershipSummary ? <p>{heldMembershipSummary}</p> : null}
+        </div>
+        {onOpenMember
+          ? <button type="button" className="room-status-text-button" onClick={() => onOpenMember(memberProfileTarget)}>查看会员档案<ArrowRight aria-hidden="true" size={15} /></button>
+          : <Link className="room-status-text-button" to={`/members?memberId=${encodeURIComponent(memberProfileTarget.memberId)}&contractId=${encodeURIComponent(memberProfileTarget.contractId)}`}>查看会员档案<ArrowRight aria-hidden="true" size={15} /></Link>}
+      </section> : null}
 
       {currentReleaseFeatures.cleaningWorkflow && view.cleaningTasks.length ? <section className="room-status-context-section" aria-labelledby="room-status-order-cleaning-heading">
         <div className="room-status-context-section-heading"><Sparkles aria-hidden="true" size={17} /><h3 id="room-status-order-cleaning-heading">清洁任务</h3></div>
@@ -286,8 +342,14 @@ export function RoomStatusOrderContext({
               {item.before ? <span>调整前：{arrangementSummary(item.before, unitMap)}</span> : null}
               <span>调整后：{arrangementSummary(item.after, unitMap)}</span>
               <span>说明：{item.reason.note || (item.type === "INITIAL_BOOKING" ? "按原始预订建立" : "未填写说明")}</span>
-              <span>订单金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
-              <span>变更时已登记净收款：{formatMoney(item.fundsSummary.netRecordedCollection)} · {difference.minorUnits > 0 ? `待补收参考 ${formatMoney({ currency: difference.currency, minorUnits: difference.minorUnits })}` : difference.minorUnits < 0 ? `多收 / 退款参考 ${formatMoney({ currency: difference.currency, minorUnits: Math.abs(difference.minorUnits) })}` : "当前记录无差额"}</span>
+              {!showPerOrderFunds ? <>
+                <span>政策基础金额：{formatMoney(item.pricingSummary.policyBaseAmount)}</span>
+                <span>本单渠道应结金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
+              </> : <>
+                <span>订单金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
+                <span>变更时已登记净收款：{formatMoney(item.fundsSummary.netRecordedCollection)} · {difference.minorUnits > 0 ? `待补收参考 ${formatMoney({ currency: difference.currency, minorUnits: difference.minorUnits })}` : difference.minorUnits < 0 ? `多收差额 ${formatMoney({ currency: difference.currency, minorUnits: Math.abs(difference.minorUnits) })}` : "当前记录无差额"}</span>
+                {item.fundsSummary.refundReferenceAmount.minorUnits > 0 ? <span>建议退款 {formatMoney(item.fundsSummary.refundReferenceAmount)} · 目前尚未登记退款</span> : null}
+              </>}
               <small>{item.actor?.displayName ?? "系统记录"} · {formatDateTime(item.recordedAt)}</small>
               {item.after.intervals.map((interval, intervalIndex) => <button key={`${interval.inventoryUnitId}:${interval.arrivalDate}`} type="button" className="room-status-text-button" onClick={() => onLocateRange(interval)}><Crosshair aria-hidden="true" size={15} />{item.after.intervals.length > 1 ? `定位调整后第 ${intervalIndex + 1} 段` : "定位调整后安排"}</button>)}
             </li>;
@@ -326,10 +388,11 @@ export function RoomStatusOrderContext({
       <section className="room-status-context-actions" aria-labelledby="room-status-order-actions-heading">
         <div className="room-status-context-section-heading"><ArrowRight aria-hidden="true" size={17} /><h3 id="room-status-order-actions-heading">订单入口</h3></div>
         {primaryActionPlacement === "CONTENT" ? <button type="button" className="room-status-button" onClick={() => onOpenOrder()}>查看完整订单<ArrowRight aria-hidden="true" size={16} /></button> : null}
-        {dateActionState && !dateActionState.enabled && dateActionState.reason ? <p className="room-status-context-note" role="status" data-testid="stay-date-action-blocked">{dateActionState.reason}</p> : null}
-        {fulfillmentActions.length || dateActions.length || routedActions.length ? <ul>
+        {[...new Set(dateActionStates.filter((state) => !state.enabled && state.reason).map((state) => state.reason!))].map((reason) => <p key={reason} className="room-status-context-note" role="status" data-testid="stay-date-action-blocked">{reason}</p>)}
+        {fulfillmentActions.length || dateActions.length || departureAdjustmentAction || routedActions.length ? <ul>
           {fulfillmentActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action-mode="inline" onClick={() => onFulfillmentAction(action.code)}>{actionLabels[action.code]}</button></li>)}
-          {dateActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onDateAction?.(action.code)}>{actionLabels[action.code]}</button></li>)}
+          {dateActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onDateAction?.(action.code, "DATE_CHANGE")}>{actionLabels[action.code]}</button></li>)}
+          {departureAdjustmentAction ? <li><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action="ADJUST_DEPARTURE" data-room-status-action-mode="inline" onClick={() => onDateAction?.(departureAdjustmentAction, "ADJUST_DEPARTURE")}>调整退房日期</button></li> : null}
           {routedActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" data-room-status-action-mode="order-detail" onClick={() => onOpenOrder(action.code)}>{actionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} /></button></li>)}
         </ul> : null}
       </section>

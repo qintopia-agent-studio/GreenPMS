@@ -52,7 +52,10 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     required: ["propertyId", "orderId", "newDepartureDate"],
     properties: ["propertyId", "orderId", "newDepartureDate", "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason"]
   },
-  SHORTEN_STAY: { required: ["propertyId", "orderId", "newDepartureDate"], properties: ["propertyId", "orderId", "newDepartureDate"] },
+  SHORTEN_STAY: {
+    required: ["propertyId", "orderId", "newDepartureDate"],
+    properties: ["propertyId", "orderId", "newDepartureDate", "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason"]
+  },
   MOVE_UNIT: { required: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"], properties: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"] },
   REPRICE_ORDER: { required: ["propertyId", "orderId", "targetCurrentContractAmountMinor"], properties: ["propertyId", "orderId", "targetCurrentContractAmountMinor"] },
   CANCEL_ORDER: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },

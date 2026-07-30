@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { BadgeCheck, CircleDollarSign, CreditCard, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useWorkspace } from "../session";
 import type { CommandRequest, MemberContractDto, MemberSummaryDto, MemberViewDto, MembershipOrderSummaryDto, MembershipPaymentFactDto, MembershipProductDto } from "../types";
@@ -19,6 +20,27 @@ import {
   usePersistentCommandRecovery
 } from "../ui";
 
+export interface MemberDeepLink {
+  memberId?: string;
+  contractId?: string;
+}
+
+export function parseMemberDeepLink(search: string): MemberDeepLink {
+  const params = new URLSearchParams(search);
+  const memberId = params.get("memberId")?.trim();
+  const contractId = params.get("contractId")?.trim();
+  return {
+    ...(memberId ? { memberId } : {}),
+    ...(contractId ? { contractId } : {})
+  };
+}
+
+export function memberDeepLinkSelection(members: MemberSummaryDto[], requestedMemberId: string | undefined): string | undefined {
+  return requestedMemberId && members.some(({ member }) => member.id === requestedMemberId)
+    ? requestedMemberId
+    : undefined;
+}
+
 export function effectiveMemberId(members: MemberSummaryDto[], requestedMemberId: string): string {
   return members.some((summary) => summary.member.id === requestedMemberId)
     ? requestedMemberId
@@ -35,6 +57,18 @@ export function shouldClearMemberSearchAfterCommit(commandType: CommandRequest["
 
 export function formalEntitlementLotIds(membershipOrders: MembershipOrderSummaryDto[]): Set<string> {
   return new Set(membershipOrders.flatMap(({ order }) => order.entitlement_lot_id ? [order.entitlement_lot_id] : []));
+}
+
+export function targetEntitlementContractId(view: MemberViewDto, requestedContractId: string | undefined): string | undefined {
+  if (!requestedContractId || !view.contracts.some((contract) => contract.id === requestedContractId)) return undefined;
+  const formalLotIds = formalEntitlementLotIds(view.membershipOrders);
+  return view.lots.some((lot) => lot.contract_id === requestedContractId && formalLotIds.has(lot.id))
+    ? requestedContractId
+    : undefined;
+}
+
+export function ledgerOrderHref(entry: Pick<MemberViewDto["ledger"][number], "order_id">): string | undefined {
+  return entry.order_id ? `/orders/${encodeURIComponent(entry.order_id)}` : undefined;
 }
 
 export function yuanInputToMinor(value: string, wholeYuan = false): number | undefined {
@@ -361,11 +395,13 @@ function CorrectEntitlementBalanceDialog({ propertyId, lot, currentBalance, draf
   </Modal>;
 }
 
-function MemberEntitlementsPanel({ view, disabled, onCorrect }: {
+function MemberEntitlementsPanel({ view, disabled, targetContractId, onCorrect }: {
   view: MemberViewDto;
   disabled: boolean;
+  targetContractId?: string;
   onCorrect: (lot: MemberViewDto["lots"][number], currentBalance: number) => void;
 }) {
+  const targetArticleRef = useRef<HTMLElement>(null);
   const balanceByLot = new Map(view.lotBalances.map((balance) => [balance.lotId, balance.availableUnits]));
   const orderByLot = new Map(view.membershipOrders.flatMap((summary) => summary.order.entitlement_lot_id ? [[summary.order.entitlement_lot_id, summary.order] as const] : []));
   const formalLotIds = formalEntitlementLotIds(view.membershipOrders);
@@ -377,6 +413,11 @@ function MemberEntitlementsPanel({ view, disabled, onCorrect }: {
     total[lot.unit_kind] += balanceByLot.get(lot.id) ?? 0;
     return total;
   }, { ROOM_NIGHT: 0, BED_NIGHT: 0 });
+  useEffect(() => {
+    if (!targetContractId || !targetArticleRef.current) return;
+    targetArticleRef.current.focus({ preventScroll: true });
+    targetArticleRef.current.scrollIntoView({ block: "center", inline: "nearest" });
+  }, [targetContractId]);
   return <section className="member-entitlements-panel" aria-labelledby="member-entitlements-heading">
     <div className="section-title-row">
       <div><span className="section-kicker">会员权益</span><h2 id="member-entitlements-heading">可住宿余额</h2></div>
@@ -393,8 +434,9 @@ function MemberEntitlementsPanel({ view, disabled, onCorrect }: {
         const available = balanceByLot.get(lot.id) ?? 0;
         const unit = lot.unit_kind === "ROOM_NIGHT" ? "间夜" : "床夜";
         const active = isEntitlementLotActive(contract, lot.expires_on, view.balanceAsOfDate);
-        return <article key={lot.id} className="member-entitlement-lot" data-testid="member-entitlement-lot">
-          <div className="member-entitlement-heading"><div><h3>{order.product_name}</h3><p>{active ? "有效" : "已失效"}</p></div><strong>{available} {unit}</strong></div>
+        const targeted = lot.contract_id === targetContractId;
+        return <article key={lot.id} className="member-entitlement-lot" data-testid={targeted ? "member-entitlement-target" : "member-entitlement-lot"} {...(targeted ? { ref: targetArticleRef, tabIndex: -1, "aria-current": "true" as const } : {})}>
+          <div className="member-entitlement-heading"><div>{targeted ? <span className="section-kicker">当前住宿使用</span> : null}<h3>{order.product_name}</h3><p>{active ? "有效" : "已失效"}</p></div><strong>{available} {unit}</strong></div>
           <dl>
             <div><dt>会员类型</dt><dd>{order.product_name}</dd></div>
             <div><dt>有效期</dt><dd>{contract ? `${formatDate(contract.valid_from)} 至 ${formatDate(contract.valid_until)}` : `至 ${formatDate(lot.expires_on)}`}</dd></div>
@@ -413,10 +455,12 @@ function MemberEntitlementsPanel({ view, disabled, onCorrect }: {
           const order = orderByLot.get(entry.lot_id)!;
           const unit = lot?.unit_kind === "BED_NIGHT" ? "床夜" : "间夜";
           const displayQuantity = ledgerEntryDisplayQuantity(entry.entry_type, entry.quantity_delta);
+          const orderHref = ledgerOrderHref(entry);
           return <li key={entry.fact_id} data-testid={`member-ledger-entry-${entry.entry_type.toLowerCase()}`}>
             <div><strong>{ledgerEntryLabel(entry.entry_type, entry.reason)}</strong><span className={displayQuantity.tone} data-testid="member-ledger-quantity">{displayQuantity.label} {displayQuantity.prefix}{displayQuantity.quantity} {unit}</span></div>
             <small>{order.product_name} · {entry.service_date ? `住宿日期 ${formatDate(entry.service_date)}` : formatDate(entry.created_at)}</small>
             {entry.entry_type === "ADJUST" ? <p>{entry.reason}</p> : null}
+            {orderHref ? <Link className="room-status-text-button" to={orderHref}>查看住宿订单</Link> : null}
           </li>;
         })}
       </ol>}
@@ -491,12 +535,17 @@ function MembershipOrdersPanel({ view, disabled, onCreate, onPayment, onCorrect,
 }
 
 export function MembersPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const { principal, propertyId, refreshMeta } = useWorkspace();
+  const initialDeepLink = useRef(parseMemberDeepLink(location.search));
+  const deepLinkSelectionPending = useRef(true);
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [members, setMembers] = useState<MemberSummaryDto[]>([]);
   const [selectedMemberId, setSelectedMemberId] = useState("");
+  const [targetContractId, setTargetContractId] = useState<string | undefined>(initialDeepLink.current.contractId);
   const [member, setMember] = useState<MemberViewDto>();
   const [loadingList, setLoadingList] = useState(true);
   const [loadingMember, setLoadingMember] = useState(false);
@@ -526,6 +575,7 @@ export function MembersPage() {
     setRecoveryError(undefined);
     setCommandNotice(undefined);
     setSelectedMemberId("");
+    setTargetContractId(initialDeepLink.current.contractId);
   }, [propertyId]);
 
   useEffect(() => {
@@ -536,7 +586,14 @@ export function MembersPage() {
     setMember(undefined);
     api.members(propertyId, searchQuery || undefined)
       .then((response) => {
-        if (current) setMembers(response.members);
+        if (current) {
+          const linkedMemberId = deepLinkSelectionPending.current
+            ? memberDeepLinkSelection(response.members, initialDeepLink.current.memberId)
+            : undefined;
+          deepLinkSelectionPending.current = false;
+          setMembers(response.members);
+          setSelectedMemberId((selected) => selected || linkedMemberId || "");
+        }
       })
       .catch((nextError) => {
         if (current) setError(nextError);
@@ -548,6 +605,7 @@ export function MembersPage() {
   }, [propertyId, searchQuery, refreshToken]);
 
   const currentMemberId = effectiveMemberId(members, selectedMemberId);
+  const activeTargetContractId = member ? targetEntitlementContractId(member, targetContractId) : undefined;
 
   useEffect(() => {
     if (!currentMemberId) {
@@ -574,7 +632,15 @@ export function MembersPage() {
   function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSelectedMemberId("");
+    setTargetContractId(undefined);
+    navigate("/members", { replace: true });
     setSearchQuery(normalizeMemberQuery(searchInput));
+  }
+
+  function selectMember(memberId: string) {
+    setSelectedMemberId(memberId);
+    setTargetContractId(undefined);
+    navigate(`/members?memberId=${encodeURIComponent(memberId)}`, { replace: true });
   }
 
   function refresh() {
@@ -666,15 +732,15 @@ export function MembersPage() {
     <form className="member-search" role="search" aria-label="搜索会员" onSubmit={search}>
       <label htmlFor="member-search-query">搜索会员<input id="member-search-query" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="姓名、身份证号、手机号或微信号" data-testid="member-search-query" /></label>
       <button className="button button-secondary" type="submit" disabled={loadingList}><Search aria-hidden="true" size={17} />搜索</button>
-      {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); }}>清除</button> : null}
+      {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); setTargetContractId(undefined); navigate("/members", { replace: true }); }}>清除</button> : null}
     </form>
 
     <InlineError error={error} title="无法载入会员档案" />
     {loadingList ? <LoadingBlock label="正在载入会员列表" /> : !members.length ? <EmptyState title="未找到会员" detail="可更换搜索条件，或新建一位会员。" /> : <div className="member-directory">
-      <MemberList members={members} selectedMemberId={currentMemberId} onSelect={setSelectedMemberId} />
+      <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
         <MemberProfile member={member} />
-        <MemberEntitlementsPanel view={member} disabled={commandsBlocked} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
+        <MemberEntitlementsPanel view={member} disabled={commandsBlocked} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
         <MembershipOrdersPanel
           view={member}
           disabled={commandsBlocked}

@@ -3,6 +3,7 @@ import {
   QuoteRequestGuard,
   RoomStatusCommandAttemptGuard,
   RoomStatusQueryAttemptGuard,
+  SelectedMemberViewRequestGuard,
   GUEST_FULL_NAME_MAX_LENGTH,
   applyMemberSelectionToGuestForms,
   bookingChannelRequiredForStay,
@@ -26,6 +27,8 @@ import {
   roomStatusOrderContextMode,
   roomStatusOrderCommandScope,
   selectedOrderCommandScopeIsCurrent,
+  selectedOrderMemberLookup,
+  selectedStayDateRequestIsCompatible,
   roomStatusBlockDraftWithinSelection,
   saveQuoteCommandRecovery
 } from "./InventoryPage";
@@ -91,6 +94,60 @@ describe("selected order command authorization scope", () => {
     expect(selectedOrderCommandScopeIsCurrent(selected, principalScope, { orderId: "order_2", stayId: "stay_1" })).toBe(false);
     expect(selectedOrderCommandScopeIsCurrent(selected, principalScope, { orderId: "order_1", stayId: "stay_2" })).toBe(false);
     expect(selectedOrderCommandScopeIsCurrent(selected, "property_other:operator:SESSION:WRITE", { orderId: "order_1", stayId: "stay_1" })).toBe(false);
+  });
+});
+
+describe("selected order member profile scope", () => {
+  it("does not request a member profile for a non-member order", () => {
+    expect(selectedOrderMemberLookup({
+      order: { id: "order_cash", property_id: propertyId, member_id: null },
+      stay: { id: "stay_cash" }
+    } as never, propertyId, "stay_cash")).toBeUndefined();
+  });
+
+  it("binds member loading to the authoritative property, order and Stay", () => {
+    expect(selectedOrderMemberLookup({
+      order: { id: "order_member", property_id: propertyId, member_id: "member_1" },
+      stay: { id: "stay_member" }
+    } as never, propertyId, "stay_member")).toEqual({
+      memberId: "member_1",
+      scope: `${propertyId}:order_member:stay_member:member_1`
+    });
+    expect(selectedOrderMemberLookup({
+      order: { id: "order_member", property_id: "property_other", member_id: "member_1" },
+      stay: { id: "stay_member" }
+    } as never, propertyId, "stay_member")).toBeUndefined();
+  });
+
+  it("rejects a late member response after the selected order changes", () => {
+    const guard = new SelectedMemberViewRequestGuard();
+    const first = guard.begin("property:order_1:stay_1:member_1");
+    const second = guard.begin("property:order_2:stay_2:member_2");
+    let applied = "";
+
+    expect(guard.runIfActive(first, () => { applied = "member_1"; })).toBe(false);
+    expect(guard.runIfActive(second, () => { applied = "member_2"; })).toBe(true);
+    expect(applied).toBe("member_2");
+
+    guard.invalidate();
+    expect(guard.runIfActive(second, () => { applied = "stale"; })).toBe(false);
+    expect(applied).toBe("member_2");
+  });
+});
+
+describe("selected stay date command routing", () => {
+  it("allows the unified departure drawer to resolve to either lifecycle command", () => {
+    expect(selectedStayDateRequestIsCompatible("EXTEND_STAY", "ADJUST_DEPARTURE", "EXTEND_STAY")).toBe(true);
+    expect(selectedStayDateRequestIsCompatible("EXTEND_STAY", "ADJUST_DEPARTURE", "SHORTEN_STAY")).toBe(true);
+    expect(selectedStayDateRequestIsCompatible("SHORTEN_STAY", "ADJUST_DEPARTURE", "EXTEND_STAY")).toBe(true);
+    expect(selectedStayDateRequestIsCompatible("EXTEND_STAY", "ADJUST_DEPARTURE", "RESCHEDULE_STAY")).toBe(false);
+  });
+
+  it("keeps concrete date-change drawers bound to their original command", () => {
+    expect(selectedStayDateRequestIsCompatible("RESCHEDULE_STAY", "DATE_CHANGE", "RESCHEDULE_STAY")).toBe(true);
+    expect(selectedStayDateRequestIsCompatible("RESCHEDULE_STAY", "DATE_CHANGE", "EXTEND_STAY")).toBe(false);
+    expect(selectedStayDateRequestIsCompatible("SHORTEN_STAY", "EARLY_CHECK_OUT", "SHORTEN_STAY")).toBe(true);
+    expect(selectedStayDateRequestIsCompatible("SHORTEN_STAY", "EARLY_CHECK_OUT", "EXTEND_STAY")).toBe(false);
   });
 });
 

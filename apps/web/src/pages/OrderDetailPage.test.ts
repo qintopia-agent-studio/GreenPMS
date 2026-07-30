@@ -13,10 +13,12 @@ import {
   collectionMethodLabel,
   arrangementChangeLabel,
   occupantSnapshotEntries,
+  OrderAmountStrip,
   OrderLifecycleSections,
   pricingBasisLabel,
   orderDetailBackTarget,
   orderFulfillmentNotice,
+  orderStayDateRequestIsCompatible,
   wholeYuanAmountMinor,
   orderViewMatchesPrincipalScope,
   orderedOrderOccupants,
@@ -74,8 +76,17 @@ describe("fulfillment result presentation", () => {
       action: "CHECK_OUT",
       title: "暂不能办理退房"
     });
-    expect(notice?.body).toContain("当前版本暂不办理提前退房");
+    expect(notice?.body).toContain("当前订单暂不能办理提前退房");
     expect(notice?.body).not.toContain("请先缩短");
+    expect(orderFulfillmentNotice([{
+      code: "CHECK_OUT",
+      enabled: false,
+      disabledReason: "DEPARTURE_DATE_NOT_REACHED"
+    }, {
+      code: "SHORTEN_STAY",
+      enabled: true,
+      disabledReason: null
+    }])).toBeUndefined();
     expect(orderFulfillmentNotice([{
       code: "CHECK_OUT",
       enabled: true,
@@ -176,6 +187,7 @@ describe("operator-facing order lifecycle presentation", () => {
       fundsSummary: {
         netRecordedCollection: money(18_000),
         collectionDifference: money(0),
+        refundReferenceAmount: money(0),
         factCount: 1
       }
     }, {
@@ -193,6 +205,7 @@ describe("operator-facing order lifecycle presentation", () => {
       fundsSummary: {
         netRecordedCollection: money(18_000),
         collectionDifference: money(10_000),
+        refundReferenceAmount: money(0),
         factCount: 1
       }
     }]
@@ -218,6 +231,106 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("与政策基础金额差额");
     expect(html).toContain("待补收参考");
     expect(html).not.toMatch(/INITIAL_BOOKING|MOVE_UNIT_INTERNAL|subject_internal|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision/);
+  });
+
+  it("shows channel contract pricing without per-order collection language", () => {
+    const channelAmounts = {
+      currentContractAmount: money(81_600),
+      netRecordedCollection: money(40_000),
+      collectionDifference: money(41_600),
+      refundReferenceAmount: money(2_000)
+    };
+    const channelRevision = {
+      id: "revision_channel",
+      order_id: "order_channel",
+      revision_no: 2,
+      amendment_id: "amendment_channel",
+      policy_version_id: "policy_v1",
+      arrival_date: "2026-08-01",
+      departure_date: "2026-08-03",
+      coverage_set: [],
+      cash_lines: [],
+      policy_base_amount_minor: 69_600,
+      pricing_basis: "CHANNEL_CONTRACT" as const,
+      manual_adjustment_minor: 0,
+      current_contract_amount_minor: 81_600,
+      difference_from_policy_minor: 12_000,
+      reason: { code: "CHANNEL_PRICE_DIFFERENCE", note: "携程活动价格重新确认" },
+      currency: "CNY",
+      created_at: "2026-07-30T10:00:00.000Z"
+    };
+    const amountHtml = renderToStaticMarkup(createElement(OrderAmountStrip, {
+      amounts: channelAmounts,
+      pricingRevision: channelRevision
+    }));
+    const historyHtml = renderToStaticMarkup(createElement(OrderLifecycleSections, {
+      view: lifecycle,
+      inventoryUnits: [{ id: "unit_d01", code: "D01", name: "单人间" }],
+      showPerOrderFunds: false,
+      channelPriceDifferenceReason: "携程活动价格重新确认"
+    }));
+    const html = amountHtml + historyHtml;
+
+    expect(html).toContain("政策基础金额");
+    expect(html).toContain("本单渠道应结金额");
+    expect(html).toContain("与政策基础金额差额");
+    expect(html).toContain("渠道价格差异说明");
+    expect(html).toContain("携程活动价格重新确认");
+    expect(html).not.toMatch(/已登记净收款|待补收参考|多收差额|建议退款/);
+  });
+
+  it.each(["POLICY", "MANUAL_ADJUSTMENT"] as const)("keeps external-channel semantics after a later %s repricing", (pricingBasis) => {
+    const policyBaseAmount = 69_600;
+    const currentContractAmount = pricingBasis === "POLICY" ? policyBaseAmount : 75_000;
+    const html = renderToStaticMarkup(createElement(OrderAmountStrip, {
+      amounts: {
+        currentContractAmount: money(currentContractAmount),
+        netRecordedCollection: money(90_000),
+        collectionDifference: money(currentContractAmount - 90_000),
+        refundReferenceAmount: money(90_000 - currentContractAmount)
+      },
+      bookingChannelCode: "CTRIP",
+      pricingRevision: {
+        id: "revision_reprice",
+        pricing_basis: pricingBasis,
+        policy_base_amount_minor: policyBaseAmount,
+        current_contract_amount_minor: currentContractAmount,
+        difference_from_policy_minor: currentContractAmount - policyBaseAmount,
+        manual_adjustment_minor: pricingBasis === "MANUAL_ADJUSTMENT" ? currentContractAmount - policyBaseAmount : 0,
+        reason: { code: "REPRICE_ORDER", note: pricingBasis === "POLICY" ? "恢复政策价" : "渠道重新协商" },
+        currency: "CNY"
+      } as never
+    }));
+
+    expect(html).toContain("政策基础金额");
+    expect(html).toContain("本单渠道应结金额");
+    expect(html).toContain("与政策基础金额差额");
+    expect(html).toContain("渠道价格差异说明");
+    expect(html).not.toMatch(/已登记净收款|待补收参考|多收差额|建议退款/);
+  });
+
+  it("keeps per-order collection language for non-channel pricing", () => {
+    const html = renderToStaticMarkup(createElement(OrderAmountStrip, {
+      amounts: {
+        currentContractAmount: money(69_600),
+        netRecordedCollection: money(40_000),
+        collectionDifference: money(29_600),
+        refundReferenceAmount: money(0)
+      },
+      pricingRevision: {
+        id: "revision_policy",
+        pricing_basis: "POLICY",
+        policy_base_amount_minor: 69_600,
+        current_contract_amount_minor: 69_600,
+        difference_from_policy_minor: 0,
+        reason: { code: "POLICY", note: "" },
+        currency: "CNY"
+      } as never
+    }));
+
+    expect(html).toContain("订单金额");
+    expect(html).toContain("已登记净收款");
+    expect(html).toContain("待补收参考");
   });
 
   it("fails closed to a business placeholder instead of exposing an unknown inventory id", () => {
@@ -246,7 +359,7 @@ describe("operator-facing order lifecycle presentation", () => {
       "政策价", "本单渠道应结金额", "人工调价", "会员权益计价", "免费入住"
     ]);
     expect(collectionDifferencePresentation(money(200))).toEqual({ label: "待补收参考", amount: money(200) });
-    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "多收 / 退款参考", amount: money(300) });
+    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "多收差额", amount: money(300) });
     expect(collectionDifferencePresentation(money(0))).toEqual({ label: "当前记录无差额", amount: money(0) });
   });
 });
@@ -266,6 +379,22 @@ describe("reprice form defaults", () => {
     expect(wholeYuanAmountMinor("110.5")).toBeUndefined();
     expect(wholeYuanAmountMinor("-1")).toBeUndefined();
     expect(wholeYuanAmountMinor("not-a-number")).toBeUndefined();
+  });
+});
+
+describe("order stay date command routing", () => {
+  it("lets the unified departure drawer resolve to extension, shortening, or early checkout", () => {
+    expect(orderStayDateRequestIsCompatible("EXTEND_STAY", "ADJUST_DEPARTURE", "EXTEND_STAY")).toBe(true);
+    expect(orderStayDateRequestIsCompatible("EXTEND_STAY", "ADJUST_DEPARTURE", "SHORTEN_STAY")).toBe(true);
+    expect(orderStayDateRequestIsCompatible("SHORTEN_STAY", "ADJUST_DEPARTURE", "EXTEND_STAY")).toBe(true);
+    expect(orderStayDateRequestIsCompatible("EXTEND_STAY", "ADJUST_DEPARTURE", "RESCHEDULE_STAY")).toBe(false);
+  });
+
+  it("keeps non-unified date drawers bound to their concrete command", () => {
+    expect(orderStayDateRequestIsCompatible("RESCHEDULE_STAY", "DATE_CHANGE", "RESCHEDULE_STAY")).toBe(true);
+    expect(orderStayDateRequestIsCompatible("RESCHEDULE_STAY", "DATE_CHANGE", "SHORTEN_STAY")).toBe(false);
+    expect(orderStayDateRequestIsCompatible("SHORTEN_STAY", "EARLY_CHECK_OUT", "SHORTEN_STAY")).toBe(true);
+    expect(orderStayDateRequestIsCompatible("SHORTEN_STAY", "EARLY_CHECK_OUT", "EXTEND_STAY")).toBe(false);
   });
 });
 
@@ -658,6 +787,31 @@ describe("shared Web command recovery persistence", () => {
       input: { propertyId: "property_qintopia" }
     });
     expect(JSON.stringify(recoveryCommandRequest(recovery))).not.toMatch(/order_internal_target|Receipt|Command|CHECKED_OUT/);
+  });
+
+  it("retains SHORTEN_STAY as a date-change recovery without persisting its order draft", () => {
+    const request = {
+      commandType: "SHORTEN_STAY",
+      title: "提前退房",
+      description: "核对提前退房",
+      presentation: "STAY_DATES",
+      input: { propertyId: "property_qintopia", orderId: "order_internal_target", newDepartureDate: "2026-07-29" }
+    } satisfies CommandRequest;
+    const recovery = transitionPersistedCommandRecovery(undefined, {
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      request
+    }, { ...confirming, confirmationKey: "web-confirm-shorten-stay" }).recovery!;
+
+    expect(recovery).toMatchObject({ commandType: "SHORTEN_STAY", presentation: "STAY_DATES" });
+    expect(recoveryCommandRequest(recovery)).toMatchObject({
+      commandType: "SHORTEN_STAY",
+      presentation: "STAY_DATES",
+      title: "恢复缩短住宿或提前退房结果",
+      input: { propertyId: "property_qintopia" }
+    });
+    expect(recovery).not.toHaveProperty("newDepartureDate");
+    expect(recoveryCommandRequest(recovery).input).not.toHaveProperty("newDepartureDate");
   });
 
   it("rejects a damaged recovery record that pairs fulfillment presentation with another command", () => {

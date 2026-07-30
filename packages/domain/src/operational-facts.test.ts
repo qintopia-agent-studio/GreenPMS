@@ -198,6 +198,23 @@ describe("operational fact identifiers", () => {
     })).toThrow(/manualPriceAdjustmentReason is required/);
   });
 
+  it("rebuilds shortening prices without inheriting an external-channel target", () => {
+    expect(stayChangePricingDecision({
+      commandType: "SHORTEN_STAY",
+      bookingChannelCode: "MEITUAN",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 100_000,
+      targetCurrentContractAmountMinor: 85_000
+    })).toMatchObject({
+      pricingBasis: "CHANNEL_CONTRACT",
+      currentContractAmountMinor: 85_000,
+      manualAdjustmentMinor: 0,
+      differenceExceedsThreshold: false,
+      reason: { code: "SHORTEN_STAY_CHANNEL_CONTRACT", note: "" }
+    });
+  });
+
   it("keeps free and member stay changes database-priced and rejects amount overrides", () => {
     expect(stayChangePricingDecision({
       commandType: "RESCHEDULE_STAY",

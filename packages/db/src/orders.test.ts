@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { orderAllowedActions, pricingReasonFromAmendment, projectOrderFulfillment, projectOrderLifecycle } from "./orders.ts";
 
 describe("pricingReasonFromAmendment", () => {
-  it.each(["RESCHEDULE_STAY", "EXTEND_STAY"])("keeps the typed pricing reason separate from the %s stay-change reason", (amendmentType) => {
+  it.each(["RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY"])("keeps the typed pricing reason separate from the %s stay-change reason", (amendmentType) => {
     expect(pricingReasonFromAmendment({
       amendment_type: amendmentType,
       reason_code: "STAY_CHANGE",
@@ -29,9 +29,10 @@ function action(
   status: string,
   code: string,
   hasRefundableCollection = false,
-  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string }
+  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string },
+  hasFutureMove = false
 ) {
-  return orderAllowedActions("WRITE", status, hasRefundableCollection, fulfillmentDates)
+  return orderAllowedActions("WRITE", status, hasRefundableCollection, fulfillmentDates, hasFutureMove)
     .find((candidate) => candidate.code === code);
 }
 
@@ -86,6 +87,23 @@ describe("orderAllowedActions", () => {
         expect(action(status, code)).toMatchObject({ enabled: false, disabledReason: "ORDER_STATE_NOT_ALLOWED" });
       }
     }
+  });
+
+  it("allows only post-arrival shortening and blocks a future room move with a Chinese reason", () => {
+    const dates = { businessDate: "2026-08-03", arrivalDate: "2026-08-01", departureDate: "2026-08-06" };
+    expect(action("CHECKED_IN", "SHORTEN_STAY", false, dates)).toEqual({
+      code: "SHORTEN_STAY",
+      enabled: true,
+      disabledReason: null
+    });
+    expect(action("CHECKED_IN", "SHORTEN_STAY", false, { ...dates, businessDate: dates.arrivalDate })).toMatchObject({
+      enabled: false,
+      disabledReason: expect.stringContaining("入住当天")
+    });
+    expect(action("CHECKED_IN", "SHORTEN_STAY", false, dates, true)).toMatchObject({
+      enabled: false,
+      disabledReason: expect.stringContaining("尚未生效的换房安排")
+    });
   });
 
   it("enables refund only when an active collection still has refundable value", () => {
@@ -344,6 +362,13 @@ describe("projectOrderLifecycle", () => {
         sequence: 4,
         type: "SHORTEN_STAY",
         payload: {
+          completionMode: "SHORTEN_IN_HOUSE",
+          fundsSummary: {
+            netRecordedCollection: { currency: "CNY", minorUnits: 0 },
+            collectionDifference: { currency: "CNY", minorUnits: 15_000 },
+            factCount: 0
+          },
+          refundReferenceAmount: { currency: "CNY", minorUnits: 0 },
           after: {
             stayTimeline: [
               { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
@@ -403,6 +428,128 @@ describe("projectOrderLifecycle", () => {
     ]);
     expect(result.arrangementHistory[0]!.before).toBeNull();
     expect(result.arrangementHistory.at(-1)!.before?.departureDate).toBe("2026-08-05");
+  });
+
+  it("keeps a SHORTEN_STAY funds summary frozen when later money facts use earlier or equal timestamps", () => {
+    const input = base();
+    input.order.departure_date = "2026-08-02";
+    input.order.version = 2;
+    input.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "SHORTEN_STAY",
+      payload: {
+        completionMode: "SHORTEN_IN_HOUSE",
+        fundsSummary: {
+          netRecordedCollection: { currency: "CNY", minorUnits: 12_000 },
+          collectionDifference: { currency: "CNY", minorUnits: -7_000 },
+          factCount: 1
+        },
+        refundReferenceAmount: { currency: "CNY", minorUnits: 7_000 },
+        after: {
+          stayTimeline: [{ serviceDate: "2026-08-01", inventoryUnitId: "room_a" }]
+        }
+      }
+    }));
+    input.segments.push({
+      id: "segment_2", stay_id: "stay_1", sequence: 2, inventory_unit_id: "room_a",
+      arrival_date: "2026-08-01", departure_date: "2026-08-02", segment_type: "SHORTEN_STAY",
+      supersedes_segment_id: "segment_1", amendment_id: "amend_2"
+    });
+    input.revisions.push(revision("amend_2", "2026-08-01", "2026-08-02", 5_000));
+    input.order.current_revision_id = "revision_2";
+    input.activeTimeline = [{ serviceDate: "2026-08-01", inventoryUnitId: "room_a" }];
+    input.facts.push({
+      order_id: "order_1",
+      net_effect_minor: 12_000,
+      currency: "CNY",
+      created_at: new Date("2026-08-01T12:00:00.000Z")
+    });
+
+    const beforeLaterFacts = projectOrderLifecycle(input).arrangementHistory.at(-1)!.fundsSummary;
+    input.facts.push(
+      {
+        order_id: "order_1",
+        net_effect_minor: 3_000,
+        currency: "CNY",
+        created_at: new Date("2026-07-31T12:00:00.000Z")
+      },
+      {
+        order_id: "order_1",
+        net_effect_minor: -1_000,
+        currency: "CNY",
+        created_at: input.amendments[1]!.created_at as Date
+      }
+    );
+    const afterLaterFacts = projectOrderLifecycle(input).arrangementHistory.at(-1)!.fundsSummary;
+
+    expect(beforeLaterFacts).toMatchObject({
+      netRecordedCollection: { currency: "CNY", minorUnits: 12_000 },
+      collectionDifference: { currency: "CNY", minorUnits: -7_000 },
+      refundReferenceAmount: { currency: "CNY", minorUnits: 7_000 }
+    });
+    expect(afterLaterFacts).toEqual(beforeLaterFacts);
+  });
+
+  it.each([
+    ["missing funds summary", (payload: Record<string, unknown>) => { delete payload.fundsSummary; }],
+    ["extra funds field", (payload: Record<string, unknown>) => {
+      (payload.fundsSummary as Record<string, unknown>).unexpected = true;
+    }],
+    ["wrong frozen currency", (payload: Record<string, unknown>) => {
+      ((payload.fundsSummary as { netRecordedCollection: Record<string, unknown> }).netRecordedCollection).currency = "USD";
+    }],
+    ["invalid frozen fact count", (payload: Record<string, unknown>) => {
+      (payload.fundsSummary as Record<string, unknown>).factCount = -1;
+    }],
+    ["inconsistent collection difference", (payload: Record<string, unknown>) => {
+      ((payload.fundsSummary as { collectionDifference: Record<string, unknown> }).collectionDifference).minorUnits = -6_999;
+    }],
+    ["inconsistent refund reference", (payload: Record<string, unknown>) => {
+      (payload.refundReferenceAmount as Record<string, unknown>).minorUnits = 6_999;
+    }],
+    ["refund reference above the public money limit", (payload: Record<string, unknown>) => {
+      const fundsSummary = (payload.fundsSummary as {
+        netRecordedCollection: Record<string, unknown>;
+        collectionDifference: Record<string, unknown>;
+      });
+      fundsSummary.netRecordedCollection.minorUnits = 2_147_488_648;
+      fundsSummary.collectionDifference.minorUnits = -2_147_483_648;
+      (payload.refundReferenceAmount as Record<string, unknown>).minorUnits = 2_147_483_648;
+    }]
+  ])("fails closed for a SHORTEN_STAY payload with %s", (_label, damage) => {
+    const input = base();
+    input.order.departure_date = "2026-08-02";
+    input.order.version = 2;
+    const shorten = amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "SHORTEN_STAY",
+      payload: {
+        completionMode: "SHORTEN_IN_HOUSE",
+        fundsSummary: {
+          netRecordedCollection: { currency: "CNY", minorUnits: 12_000 },
+          collectionDifference: { currency: "CNY", minorUnits: -7_000 },
+          factCount: 1
+        },
+        refundReferenceAmount: { currency: "CNY", minorUnits: 7_000 },
+        after: {
+          stayTimeline: [{ serviceDate: "2026-08-01", inventoryUnitId: "room_a" }]
+        }
+      }
+    });
+    damage(shorten.payload);
+    input.amendments.push(shorten);
+    input.segments.push({
+      id: "segment_2", stay_id: "stay_1", sequence: 2, inventory_unit_id: "room_a",
+      arrival_date: "2026-08-01", departure_date: "2026-08-02", segment_type: "SHORTEN_STAY",
+      supersedes_segment_id: "segment_1", amendment_id: "amend_2"
+    });
+    input.revisions.push(revision("amend_2", "2026-08-01", "2026-08-02", 5_000));
+    input.order.current_revision_id = "revision_2";
+    input.activeTimeline = [{ serviceDate: "2026-08-01", inventoryUnitId: "room_a" }];
+
+    expect(() => projectOrderLifecycle(input)).toThrow(/冻结资金摘要/);
   });
 
   it.each([

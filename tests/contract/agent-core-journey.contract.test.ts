@@ -638,7 +638,8 @@ describe("scoped agent HTTP core journey", () => {
     expect(finalOrder.amounts).toEqual({
       currentContractAmount: { currency: "CNY", minorUnits: 0 },
       netRecordedCollection: { currency: "CNY", minorUnits: 9_000 },
-      collectionDifference: { currency: "CNY", minorUnits: -9_000 }
+      collectionDifference: { currency: "CNY", minorUnits: -9_000 },
+      refundReferenceAmount: { currency: "CNY", minorUnits: 9_000 }
     });
     expect(finalOrder.coverageSet).toHaveLength(2);
     expect(finalOrder.coverageSet.every((item: { status: string }) => item.status === "CONSUMED")).toBe(true);

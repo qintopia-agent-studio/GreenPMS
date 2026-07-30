@@ -1,4 +1,4 @@
-import { CalendarPlus2, CalendarRange, LoaderCircle } from "lucide-react";
+import { CalendarMinus2, CalendarPlus2, CalendarRange, LoaderCircle, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
 import type { CommandRequest, OrderViewDto } from "../types";
@@ -8,11 +8,13 @@ import {
   businessStatusLabel,
   formatDate,
   formatMoney,
+  stayDateFundsAreOperatorFacing,
   stayDatePreviewPricingSummary,
   type StayDatePreviewPricingSummary
 } from "../ui";
 
-export type StayDateChangeAction = "RESCHEDULE_STAY" | "EXTEND_STAY";
+export type StayDateChangeAction = "RESCHEDULE_STAY" | "EXTEND_STAY" | "SHORTEN_STAY";
+export type StayDateChangeMode = "DATE_CHANGE" | "EARLY_CHECK_OUT" | "ADJUST_DEPARTURE";
 
 export interface StayDateChangeDraft {
   newArrivalDate: string;
@@ -75,17 +77,28 @@ function draftAmountYuan(input: Record<string, unknown> | undefined): string {
 export function stayDateChangeInitialDraft(
   action: StayDateChangeAction,
   view: OrderViewDto,
-  recovered?: CommandRequest
+  recovered?: CommandRequest,
+  mode: StayDateChangeMode = "DATE_CHANGE"
 ): StayDateChangeDraft {
-  const recoveredInput = recovered?.commandType === action ? recovered.input : undefined;
+  const recoveredMatches = recovered?.commandType === action
+    || (mode === "ADJUST_DEPARTURE" && (recovered?.commandType === "EXTEND_STAY" || recovered?.commandType === "SHORTEN_STAY"));
+  const recoveredInput = recoveredMatches ? recovered?.input : undefined;
   const targetContractYuan = draftAmountYuan(recoveredInput);
   return {
     newArrivalDate: action === "RESCHEDULE_STAY"
       ? draftString(recoveredInput, "newArrivalDate") || view.effectiveArrangement.arrivalDate
       : view.effectiveArrangement.arrivalDate,
     newDepartureDate: draftString(recoveredInput, "newDepartureDate")
-      || (action === "EXTEND_STAY" ? shiftDate(view.effectiveArrangement.departureDate, 1) : view.effectiveArrangement.departureDate),
-    reason: recovered?.commandType === action ? recovered.initialReason?.note ?? "" : "",
+      || (mode === "ADJUST_DEPARTURE"
+        ? view.effectiveArrangement.departureDate
+        : action === "EXTEND_STAY"
+          ? shiftDate(view.effectiveArrangement.departureDate, 1)
+          : action === "SHORTEN_STAY"
+            ? mode === "EARLY_CHECK_OUT"
+              ? view.effectiveArrangement.businessDate
+              : [shiftDate(view.effectiveArrangement.departureDate, -1), view.effectiveArrangement.businessDate].sort().at(-1)!
+            : view.effectiveArrangement.departureDate),
+    reason: recoveredMatches ? recovered?.initialReason?.note ?? "" : "",
     targetContractYuan,
     channelPriceDifferenceReason: draftString(recoveredInput, "channelPriceDifferenceReason"),
     manuallyAdjustWecomPrice: view.order.booking_channel_code === "WECOM" && targetContractYuan !== "",
@@ -93,20 +106,40 @@ export function stayDateChangeInitialDraft(
   };
 }
 
-export function stayDateChangeActionState(view: OrderViewDto): StayDateChangeActionState | undefined {
-  const action = view.order.status === "RESERVED"
+export function stayDateChangeActionForDeparture(
+  view: OrderViewDto,
+  newDepartureDate: string
+): Extract<StayDateChangeAction, "EXTEND_STAY" | "SHORTEN_STAY"> | undefined {
+  if (view.order.status !== "CHECKED_IN" || !isLocalDate(newDepartureDate)) return undefined;
+  if (newDepartureDate > view.effectiveArrangement.departureDate) return "EXTEND_STAY";
+  if (newDepartureDate < view.effectiveArrangement.departureDate) return "SHORTEN_STAY";
+  return undefined;
+}
+
+function operatorFacingDisabledReason(reason: string): string {
+  if (reason.includes("后续的撤销入住流程")) {
+    return "入住当天暂不办理缩短或提前退房；当前版本尚未开放撤销入住，请在确认住客实际使用房间后再办理入住";
+  }
+  return reason;
+}
+
+export function stayDateChangeActionState(view: OrderViewDto, requestedAction?: StayDateChangeAction): StayDateChangeActionState | undefined {
+  const action = requestedAction ?? (view.order.status === "RESERVED"
     ? "RESCHEDULE_STAY"
     : view.order.status === "CHECKED_IN"
       ? "EXTEND_STAY"
-      : undefined;
+      : undefined);
   if (!action) return undefined;
+  if ((view.order.status === "RESERVED" && action !== "RESCHEDULE_STAY")
+    || (view.order.status === "CHECKED_IN" && action !== "EXTEND_STAY" && action !== "SHORTEN_STAY")
+    || (view.order.status !== "RESERVED" && view.order.status !== "CHECKED_IN")) return undefined;
   const authoritative = view.allowedActions.find((candidate) => candidate.code === action);
   if (!authoritative) return undefined;
   if (!authoritative?.enabled) {
     return {
       action,
       enabled: false,
-      reason: authoritative?.disabledReason?.trim() || "当前订单状态暂不能办理日期调整"
+      reason: operatorFacingDisabledReason(authoritative?.disabledReason?.trim() || "当前订单状态暂不能办理日期调整")
     };
   }
   if (action === "RESCHEDULE_STAY" && view.effectiveArrangement.intervals.length !== 1) {
@@ -122,10 +155,15 @@ export function stayDateChangeActionState(view: OrderViewDto): StayDateChangeAct
 export function buildStayDateChangeRequest(
   action: StayDateChangeAction,
   view: OrderViewDto,
-  draft: StayDateChangeDraft
+  draft: StayDateChangeDraft,
+  mode: StayDateChangeMode = "DATE_CHANGE"
 ): CommandRequest {
-  const actionState = stayDateChangeActionState(view);
-  if (!actionState || actionState.action !== action || !actionState.enabled) {
+  const resolvedAction = mode === "ADJUST_DEPARTURE"
+    ? stayDateChangeActionForDeparture(view, draft.newDepartureDate)
+    : action;
+  if (!resolvedAction) throw new Error("请选择不同于当前计划退房日的新退房日期");
+  const actionState = stayDateChangeActionState(view, resolvedAction);
+  if (!actionState || actionState.action !== resolvedAction || !actionState.enabled) {
     throw new Error(actionState?.reason || "当前订单状态暂不能办理日期调整");
   }
   if (!isLocalDate(draft.newArrivalDate) || !isLocalDate(draft.newDepartureDate)) {
@@ -134,7 +172,7 @@ export function buildStayDateChangeRequest(
   if (draft.newDepartureDate <= draft.newArrivalDate) {
     throw new Error("退房日期必须晚于入住日期");
   }
-  if (action === "RESCHEDULE_STAY") {
+  if (resolvedAction === "RESCHEDULE_STAY") {
     if (draft.newArrivalDate < view.effectiveArrangement.businessDate) {
       throw new Error("新入住日期不能早于当前营业日");
     }
@@ -142,7 +180,7 @@ export function buildStayDateChangeRequest(
       && draft.newDepartureDate === view.effectiveArrangement.departureDate) {
       throw new Error("入住日期和退房日期均未变化");
     }
-  } else {
+  } else if (resolvedAction === "EXTEND_STAY") {
     if (draft.newArrivalDate !== view.effectiveArrangement.arrivalDate) {
       throw new Error("在住续住不能修改入住日期");
     }
@@ -153,6 +191,19 @@ export function buildStayDateChangeRequest(
       && draft.newDepartureDate <= view.effectiveArrangement.businessDate) {
       throw new Error("逾期续住后的退房日期必须晚于当前营业日");
     }
+  } else {
+    if (draft.newArrivalDate !== view.effectiveArrangement.arrivalDate) {
+      throw new Error("在住缩短不能修改入住日期");
+    }
+    if (draft.newDepartureDate >= view.effectiveArrangement.departureDate) {
+      throw new Error("缩短后的退房日期必须早于原计划退房日");
+    }
+    if (draft.newDepartureDate < view.effectiveArrangement.businessDate) {
+      throw new Error("新的退房日期不能早于当前营业日期");
+    }
+    if (view.effectiveArrangement.arrivalDate >= view.effectiveArrangement.businessDate) {
+      throw new Error("入住当天暂不办理缩短或提前退房；当前版本尚未开放撤销入住，请在确认住客实际使用房间后再办理入住");
+    }
   }
   const reason = draft.reason.trim();
   if (!reason) throw new Error("请填写本次住宿日期变更原因");
@@ -160,13 +211,14 @@ export function buildStayDateChangeRequest(
   const input: Record<string, unknown> = {
     propertyId: view.order.property_id,
     orderId: view.order.id,
-    ...(action === "RESCHEDULE_STAY" ? { newArrivalDate: draft.newArrivalDate } : {}),
+    ...(resolvedAction === "RESCHEDULE_STAY" ? { newArrivalDate: draft.newArrivalDate } : {}),
     newDepartureDate: draft.newDepartureDate
   };
   const memberStay = Boolean(view.order.member_id || view.order.member_contract_id);
   const freeStay = view.order.stay_type === "FREE";
   const channel = view.order.booking_channel_code;
-  if (!memberStay && !freeStay && channel && externalChannels.has(channel)) {
+  const externalChannelStay = !memberStay && !freeStay && Boolean(channel && externalChannels.has(channel));
+  if (externalChannelStay) {
     const target = wholeYuanMinor(draft.targetContractYuan);
     if (target === undefined) throw new Error("请重新填写本单渠道应结金额，金额必须是支持范围内的非负整元");
     input.targetCurrentContractAmountMinor = target;
@@ -180,20 +232,31 @@ export function buildStayDateChangeRequest(
     input.targetCurrentContractAmountMinor = target;
     input.manualPriceAdjustmentReason = draft.manualPriceAdjustmentReason.trim();
   }
-  return {
-    commandType: action,
-    title: action === "RESCHEDULE_STAY" ? "调整预订日期" : "延长住宿",
-    description: action === "RESCHEDULE_STAY"
-      ? "系统将按新日期重新核对完整库存、原锁定价格政策、会员权益和已登记收款差额。"
-      : "系统将按完整新住宿周期重新核对新增库存、原锁定价格政策、会员权益和已登记收款差额。",
+  const request: CommandRequest & { bookingChannelCode: string | null } = {
+    commandType: resolvedAction,
+    title: resolvedAction === "RESCHEDULE_STAY" ? "调整预订日期" : resolvedAction === "EXTEND_STAY" ? "延长住宿" : draft.newDepartureDate === view.effectiveArrangement.businessDate ? "提前退房" : "缩短住宿",
+    description: externalChannelStay
+      ? resolvedAction === "RESCHEDULE_STAY"
+        ? "系统将按新日期核对完整库存、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
+        : resolvedAction === "EXTEND_STAY"
+          ? "系统将按完整新住宿周期核对新增库存、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
+          : "系统将原子核对缩短后的住宿安排、库存释放、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
+      : resolvedAction === "RESCHEDULE_STAY"
+        ? "系统将按新日期重新核对完整库存、原锁定价格政策、会员权益和已登记收款差额。"
+        : resolvedAction === "EXTEND_STAY"
+          ? "系统将按完整新住宿周期重新核对新增库存、原锁定价格政策、会员权益和已登记收款差额。"
+          : "系统将原子核对缩短后的住宿安排、完整重价、库存释放、已登记收款差额和建议退款。",
     presentation: "STAY_DATES",
-    initialReason: { code: action, note: reason },
+    bookingChannelCode: channel,
+    initialReason: { code: resolvedAction, note: reason },
     input
   };
+  return request;
 }
 
 export function StayDateChangeDrawer({
   action,
+  mode = "DATE_CHANGE",
   view,
   inventoryUnitLabel,
   draft: recovered,
@@ -202,6 +265,7 @@ export function StayDateChangeDrawer({
   onSubmit
 }: {
   action: StayDateChangeAction;
+  mode?: StayDateChangeMode;
   view: OrderViewDto;
   inventoryUnitLabel: string;
   draft?: CommandRequest;
@@ -209,14 +273,24 @@ export function StayDateChangeDrawer({
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
-  const initial = stayDateChangeInitialDraft(action, view, recovered);
+  const initial = stayDateChangeInitialDraft(action, view, recovered, mode);
   const [draft, setDraft] = useState(initial);
   const [error, setError] = useState<unknown>();
   const memberStay = Boolean(view.order.member_id || view.order.member_contract_id);
   const freeStay = view.order.stay_type === "FREE";
   const externalChannel = Boolean(view.order.booking_channel_code && externalChannels.has(view.order.booking_channel_code));
   const wecom = view.order.booking_channel_code === "WECOM";
-  const actionState = stayDateChangeActionState(view);
+  const resolvedAction = mode === "ADJUST_DEPARTURE"
+    ? stayDateChangeActionForDeparture(view, draft.newDepartureDate)
+    : action;
+  const departureActionStates = mode === "ADJUST_DEPARTURE"
+    ? [stayDateChangeActionState(view, "EXTEND_STAY"), stayDateChangeActionState(view, "SHORTEN_STAY")].filter((state): state is StayDateChangeActionState => Boolean(state))
+    : [];
+  const actionState = resolvedAction
+    ? stayDateChangeActionState(view, resolvedAction)
+    : mode === "ADJUST_DEPARTURE"
+      ? departureActionStates.find((state) => state.enabled) ?? departureActionStates[0]
+      : stayDateChangeActionState(view, action);
   const guestNickname = typeof view.order.primary_guest_snapshot.nickname === "string"
     && view.order.primary_guest_snapshot.nickname.trim()
     ? view.order.primary_guest_snapshot.nickname.trim()
@@ -230,12 +304,13 @@ export function StayDateChangeDrawer({
       return buildStayDateChangeRequest(action, view, {
         ...draft,
         reason: draft.reason.trim() || "住宿日期调整金额核对"
-      });
+      }, mode);
     } catch {
       return undefined;
     }
   }, [
     action,
+    mode,
     view,
     draft.newArrivalDate,
     draft.newDepartureDate,
@@ -251,7 +326,7 @@ export function StayDateChangeDrawer({
   useEffect(() => {
     const generation = previewGeneration.current + 1;
     previewGeneration.current = generation;
-    if (!previewRequest || !previewSignature || writeBlocked || !actionState?.enabled) {
+    if (!previewRequest || !previewSignature || !resolvedAction || writeBlocked || !actionState?.enabled) {
       setPricePreview({ status: "EMPTY" });
       return;
     }
@@ -259,12 +334,12 @@ export function StayDateChangeDrawer({
     const timer = window.setTimeout(() => {
       setPricePreview({ status: "LOADING" });
       void api.preview(
-        { commandType: action, input: previewRequest.input },
-        api.commandMetadata(`stay-date-price-${action.toLowerCase()}`),
+        { commandType: resolvedAction, input: previewRequest.input },
+        api.commandMetadata(`stay-date-price-${resolvedAction.toLowerCase()}`),
         controller.signal
       ).then((response) => {
         if (controller.signal.aborted || previewGeneration.current !== generation) return;
-        const summary = stayDatePreviewPricingSummary(action, response.preview, previewRequest.input);
+        const summary = stayDatePreviewPricingSummary(resolvedAction, response.preview, previewRequest.input);
         if (!summary) {
           setPricePreview({ status: "ERROR", error: new Error("服务端返回的日期与金额核对信息不完整，请重新选择日期") });
           return;
@@ -285,7 +360,7 @@ export function StayDateChangeDrawer({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [action, actionState?.enabled, previewRefresh, previewSignature, writeBlocked]);
+  }, [actionState?.enabled, previewRefresh, previewRequest, previewSignature, resolvedAction, writeBlocked]);
 
   useEffect(() => {
     if (pricePreview.status !== "READY") return;
@@ -313,13 +388,19 @@ export function StayDateChangeDrawer({
       if (pricePreview.status !== "READY" || pricePreview.signature !== previewSignature) {
         throw new Error("请等待调整后订单金额计算完成，再继续核对");
       }
-      onSubmit(buildStayDateChangeRequest(action, view, draft));
+      onSubmit(buildStayDateChangeRequest(action, view, draft, mode));
     } catch (nextError) {
       setError(nextError);
     }
   }
 
-  const title = action === "RESCHEDULE_STAY" ? "调整预订日期" : "延长住宿";
+  const earlyCheckout = resolvedAction === "SHORTEN_STAY" && draft.newDepartureDate === view.effectiveArrangement.businessDate;
+  const dateConstraintError = (action === "SHORTEN_STAY" || mode === "ADJUST_DEPARTURE")
+    && isLocalDate(draft.newDepartureDate)
+    && draft.newDepartureDate < view.effectiveArrangement.businessDate
+    ? new Error("新的退房日期不能早于当前营业日期")
+    : undefined;
+  const title = mode === "ADJUST_DEPARTURE" ? "调整退房日期" : action === "RESCHEDULE_STAY" ? "调整预订日期" : action === "EXTEND_STAY" ? "延长住宿" : earlyCheckout ? "提前退房" : "缩短住宿";
   return <Modal
     title={title}
     size="drawer"
@@ -331,7 +412,7 @@ export function StayDateChangeDrawer({
     </>}
   >
     <div className="stay-date-change-heading">
-      {action === "RESCHEDULE_STAY" ? <CalendarRange aria-hidden="true" size={20} /> : <CalendarPlus2 aria-hidden="true" size={20} />}
+      {action === "RESCHEDULE_STAY" ? <CalendarRange aria-hidden="true" size={20} /> : mode === "ADJUST_DEPARTURE" ? <CalendarRange aria-hidden="true" size={20} /> : action === "EXTEND_STAY" ? <CalendarPlus2 aria-hidden="true" size={20} /> : earlyCheckout ? <LogOut aria-hidden="true" size={20} /> : <CalendarMinus2 aria-hidden="true" size={20} />}
       <div data-testid="stay-date-order-context">
         <span>{action === "RESCHEDULE_STAY" ? "当前预订日期" : "当前住宿日期"} · {businessStatusLabel(view.order.status)}</span>
         <strong>{guestNickname}</strong>
@@ -340,13 +421,14 @@ export function StayDateChangeDrawer({
       </div>
     </div>
     <InlineError error={error} title="无法继续核对" />
+    <InlineError error={dateConstraintError} title="日期不符合办理条件" hideTechnicalDetails />
     <InlineError error={!actionState?.enabled ? new Error(actionState?.reason || "当前订单状态暂不能办理日期调整") : undefined} title="暂不能办理" hideTechnicalDetails />
     <InlineError error={writeBlocked ? new Error("当前页面正在恢复未完成操作或订单事实已经变化，请收口后重新打开") : undefined} title="写入已暂停" hideTechnicalDetails />
     <form id="stay-date-change-form" className="modal-form" onSubmit={submit}>
       <div className="form-grid form-grid-two">
-        <label>入住日期<input type="date" value={draft.newArrivalDate} min={view.effectiveArrangement.businessDate} disabled={action === "EXTEND_STAY"} onChange={(event) => update({ newArrivalDate: event.target.value })} required data-testid="stay-date-arrival" /></label>
-        <label>退房日期<input type="date" value={draft.newDepartureDate} min={shiftDate(draft.newArrivalDate, 1)} onChange={(event) => update({ newDepartureDate: event.target.value })} required data-testid="stay-date-departure" /></label>
-        <label className="span-two">住宿日期变更原因<textarea value={draft.reason} onChange={(event) => update({ reason: event.target.value })} required maxLength={1000} rows={3} data-testid="stay-date-reason" /></label>
+        <label>入住日期<input type="date" value={draft.newArrivalDate} min={view.effectiveArrangement.businessDate} disabled={action !== "RESCHEDULE_STAY"} onChange={(event) => update({ newArrivalDate: event.target.value })} required data-testid="stay-date-arrival" /></label>
+        <label>退房日期<input type="date" value={draft.newDepartureDate} min={action === "SHORTEN_STAY" || mode === "ADJUST_DEPARTURE" ? view.effectiveArrangement.businessDate : shiftDate(draft.newArrivalDate, 1)} {...(action === "SHORTEN_STAY" && mode !== "ADJUST_DEPARTURE" ? { max: shiftDate(view.effectiveArrangement.departureDate, -1) } : {})} onChange={(event) => update({ newDepartureDate: event.target.value })} required data-testid="stay-date-departure" /></label>
+        <label className="span-two">{earlyCheckout ? "提前离店原因" : "住宿日期变更原因"}<textarea value={draft.reason} onChange={(event) => update({ reason: event.target.value })} required maxLength={1000} rows={3} data-testid="stay-date-reason" /></label>
       </div>
 
       {externalChannel && !memberStay && !freeStay ? <section className="stay-date-pricing-section" aria-labelledby="channel-repricing-heading">
@@ -376,20 +458,29 @@ export function StayDateChangeDrawer({
         {pricePreview.status === "ERROR" ? <InlineError error={pricePreview.error} title="暂时无法核对新金额" hideTechnicalDetails /> : null}
         {pricePreview.status === "READY" ? (() => {
           const { summary } = pricePreview;
+          const showPerOrderFunds = stayDateFundsAreOperatorFacing(view.order.booking_channel_code, summary.pricingBasis);
           const change = {
             currency: summary.targetAmount.currency,
             minorUnits: summary.targetAmount.minorUnits - summary.beforeAmount.minorUnits
           };
           return <>
             <div className="stay-date-price-preview" data-testid="stay-date-price-preview">
-              <span>原订单金额</span>
-              <strong data-testid="stay-date-original-amount">{formatMoney(summary.beforeAmount)}</strong>
-              {summary.pricingBasis === "CHANNEL_CONTRACT" ? <><span>新日期政策金额</span><strong>{formatMoney(summary.policyBaseAmount)}</strong></> : null}
-              <span>{summary.pricingBasis === "CHANNEL_CONTRACT" ? "本单渠道应结金额" : "调整后订单金额"}</span>
+              <span>原住宿日期</span>
+              <strong>{formatDate(summary.beforeArrivalDate)} 至 {formatDate(summary.beforeDepartureDate)}</strong>
+              <span>新住宿日期</span>
+              <strong>{formatDate(summary.afterArrivalDate)} 至 {formatDate(summary.afterDepartureDate)}</strong>
+              <span>{resolvedAction === "SHORTEN_STAY" ? "减少晚数" : "晚数变化"}</span>
+              <strong>{resolvedAction === "SHORTEN_STAY" ? summary.beforeNights - summary.afterNights : summary.afterNights - summary.beforeNights} 晚</strong>
+              <span>完整新晚数</span>
+              <strong>{summary.afterNights} 晚</strong>
+              {showPerOrderFunds ? <><span>原订单金额</span><strong data-testid="stay-date-original-amount">{formatMoney(summary.beforeAmount)}</strong></> : null}
+              {!showPerOrderFunds ? <><span>政策基础金额</span><strong>{formatMoney(summary.policyBaseAmount)}</strong></> : null}
+              <span>{showPerOrderFunds ? "调整后订单金额" : "本单渠道应结金额"}</span>
               <strong data-testid="stay-date-new-amount">{formatMoney(summary.targetAmount)}</strong>
-              <span>金额变化</span>
-              <strong>{formatMoney(change)}</strong>
+              {!showPerOrderFunds ? <><span>与政策基础金额差额</span><strong>{formatMoney(summary.differenceFromPolicy)}</strong><span>渠道价格差异说明</span><strong>{draft.channelPriceDifferenceReason.trim() || "无需额外说明"}</strong></> : <><span>金额变化</span><strong>{formatMoney(change)}</strong></>}
+              {showPerOrderFunds ? <><span>已登记净收款</span><strong>{formatMoney(summary.netRecordedCollection)}</strong><span>{summary.collectionDifference.minorUnits > 0 ? "待补收参考" : summary.collectionDifference.minorUnits < 0 ? "多收差额" : "当前记录无差额"}</span><strong>{formatMoney({ ...summary.collectionDifference, minorUnits: Math.abs(summary.collectionDifference.minorUnits) })}</strong>{summary.refundReferenceAmount.minorUnits > 0 ? <><span>建议退款</span><strong data-testid="stay-date-refund-reference">{formatMoney(summary.refundReferenceAmount)}</strong></> : null}</> : null}
             </div>
+            {showPerOrderFunds && summary.refundReferenceAmount.minorUnits > 0 ? <p data-testid="stay-date-refund-note">该金额仅供工作人员办理退款参考，目前尚未登记退款。</p> : null}
             <p>系统已按新的住宿日期重新计算。正式确认时还会再次核对库存和订单事实。</p>
           </>;
         })() : null}

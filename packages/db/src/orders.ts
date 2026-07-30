@@ -57,7 +57,7 @@ export function pricingReasonFromAmendment(amendment: {
   payload: unknown;
 } | undefined): { code: string; note: string } {
   if (!amendment) return { code: "HISTORICAL", note: "" };
-  if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY"].includes(amendment.amendment_type)) {
+  if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY"].includes(amendment.amendment_type)) {
     const payload = recordValue(amendment.payload);
     const decision = recordValue(payload?.pricingDecision);
     const reason = recordValue(decision?.reason);
@@ -154,7 +154,7 @@ export function orderAllowedActions(
   status: string,
   hasRefundableCollection: boolean,
   fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string },
-  hasMultipleArrangementIntervals = false
+  hasFutureMove = false
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
@@ -162,7 +162,7 @@ export function orderAllowedActions(
     CHECK_IN: ["RESERVED"],
     CHECK_OUT: ["CHECKED_IN"],
     RESCHEDULE_STAY: ["RESERVED"],
-    SHORTEN_STAY: [],
+    SHORTEN_STAY: ["CHECKED_IN"],
     EXTEND_STAY: ["CHECKED_IN"],
     MOVE_UNIT: ["RESERVED", "CHECKED_IN"],
     REPRICE_ORDER: ["RESERVED", "CHECKED_IN"],
@@ -185,8 +185,18 @@ export function orderAllowedActions(
         if (fulfillmentDates.businessDate < fulfillmentDates.departureDate) {
           fulfillmentDisabledReason = "DEPARTURE_DATE_NOT_REACHED";
         }
-      } else if (code === "RESCHEDULE_STAY" && hasMultipleArrangementIntervals) {
+      } else if (code === "RESCHEDULE_STAY" && hasFutureMove) {
         fulfillmentDisabledReason = "该订单已有换房安排，当前版本暂不能调整预订日期";
+      } else if (code === "SHORTEN_STAY") {
+        if (fulfillmentDates.arrivalDate >= fulfillmentDates.businessDate) {
+          fulfillmentDisabledReason = "入住当天暂不办理缩短或提前退房；未实际使用房间时请使用后续的撤销入住流程";
+        } else if (fulfillmentDates.businessDate >= fulfillmentDates.departureDate) {
+          fulfillmentDisabledReason = fulfillmentDates.businessDate === fulfillmentDates.departureDate
+            ? "已到计划退房日，请使用普通退房"
+            : "已超过计划退房日，请使用迟录退房";
+        } else if (hasFutureMove) {
+          fulfillmentDisabledReason = "该订单已有尚未生效的换房安排，请在换房流程中处理后再缩短住宿";
+        }
       }
     }
     const enabled = statusAllows
@@ -560,6 +570,51 @@ function timelineMatches(left: readonly StayTimelineItem[], right: readonly Stay
   ));
 }
 
+function frozenShortenFundsSummary(
+  amendment: LifecycleAmendmentRow,
+  revision: LifecycleRevisionRow
+): OrderArrangementFundsSummaryDto {
+  const payload = recordValue(amendment.payload);
+  const fundsSummary = recordValue(payload?.fundsSummary);
+  const netRecordedCollection = recordValue(fundsSummary?.netRecordedCollection);
+  const collectionDifference = recordValue(fundsSummary?.collectionDifference);
+  const refundReferenceAmount = recordValue(payload?.refundReferenceAmount);
+  const exactKeys = (value: Record<string, unknown> | undefined, expected: readonly string[]) => (
+    value !== undefined
+      && Object.keys(value).length === expected.length
+      && expected.every((key) => Object.hasOwn(value, key))
+  );
+  const validMoney = (value: Record<string, unknown> | undefined) => (
+    exactKeys(value, ["currency", "minorUnits"])
+      && value?.currency === revision.currency
+      && Number.isSafeInteger(value.minorUnits)
+  );
+  if (!exactKeys(fundsSummary, ["netRecordedCollection", "collectionDifference", "factCount"])
+    || !validMoney(netRecordedCollection)
+    || !validMoney(collectionDifference)
+    || !validMoney(refundReferenceAmount)
+    || !Number.isSafeInteger(fundsSummary?.factCount)
+    || Number(fundsSummary?.factCount) < 0) {
+    lifecycleFailure("缩短住宿记录的冻结资金摘要损坏", { amendmentId: amendment.id });
+  }
+  const frozenFundsSummary = fundsSummary!;
+  const netMinor = netRecordedCollection!.minorUnits as number;
+  const differenceMinor = collectionDifference!.minorUnits as number;
+  const refundMinor = refundReferenceAmount!.minorUnits as number;
+  if (differenceMinor !== revision.current_contract_amount_minor - netMinor
+    || refundMinor < 0
+    || refundMinor > 2_147_483_647
+    || refundMinor !== Math.max(0, netMinor - revision.current_contract_amount_minor)) {
+    lifecycleFailure("缩短住宿记录的冻结资金摘要与计价版本不一致", { amendmentId: amendment.id });
+  }
+  return {
+    netRecordedCollection: { currency: revision.currency, minorUnits: netMinor },
+    collectionDifference: { currency: revision.currency, minorUnits: differenceMinor },
+    refundReferenceAmount: { currency: revision.currency, minorUnits: refundMinor },
+    factCount: frozenFundsSummary.factCount as number
+  };
+}
+
 function lifecycleActor(amendment: LifecycleAmendmentRow): { subjectId: string; displayName: string } | null {
   const hasId = Boolean(amendment.actor_subject_id);
   const hasName = Boolean(amendment.actor_display_name);
@@ -569,11 +624,17 @@ function lifecycleActor(amendment: LifecycleAmendmentRow): { subjectId: string; 
     : null;
 }
 
-function arrangementChangeType(amendmentType: string): OrderArrangementHistoryItemDto["type"] {
+function arrangementChangeType(amendment: LifecycleAmendmentRow): OrderArrangementHistoryItemDto["type"] {
+  const amendmentType = amendment.amendment_type;
   if (amendmentType === "CREATE_ORDER") return "INITIAL_BOOKING";
   if (amendmentType === "RESCHEDULE_STAY") return "RESCHEDULE";
   if (amendmentType === "EXTEND_STAY") return "EXTENSION";
-  if (amendmentType === "SHORTEN_STAY") return "SHORTENING";
+  if (amendmentType === "SHORTEN_STAY") {
+    const payload = recordValue(amendment.payload);
+    if (payload?.completionMode === "SHORTEN_IN_HOUSE") return "SHORTENING";
+    if (payload?.completionMode === "EARLY_CHECK_OUT") return "EARLY_CHECK_OUT";
+    return lifecycleFailure("缩短住宿记录的完成方式损坏", { amendmentId: amendment.id });
+  }
   if (amendmentType === "MOVE_UNIT") return "MOVE";
   return lifecycleFailure("订单住宿安排包含无法识别的变更类型", { amendmentType });
 }
@@ -883,18 +944,26 @@ export function projectOrderLifecycle(input: {
     if (factsAtChange.some((fact) => fact.currency !== revision.currency)) {
       lifecycleFailure("订单住宿变更的资金币种与计价币种不一致", { amendmentId: amendment.id });
     }
-    const netRecordedCollectionMinor = factsAtChange.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
-    if (!Number.isSafeInteger(netRecordedCollectionMinor)) lifecycleFailure("订单住宿变更的资金合计超出支持范围");
-    const fundsSummary: OrderArrangementFundsSummaryDto = {
-      netRecordedCollection: { currency: revision.currency, minorUnits: netRecordedCollectionMinor },
-      collectionDifference: {
-        currency: revision.currency,
-        minorUnits: revision.current_contract_amount_minor - netRecordedCollectionMinor
-      },
-      factCount: factsAtChange.length
-    };
+    const fundsSummary: OrderArrangementFundsSummaryDto = amendment.amendment_type === "SHORTEN_STAY"
+      ? frozenShortenFundsSummary(amendment, revision)
+      : (() => {
+        const netRecordedCollectionMinor = factsAtChange.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
+        if (!Number.isSafeInteger(netRecordedCollectionMinor)) lifecycleFailure("订单住宿变更的资金合计超出支持范围");
+        return {
+          netRecordedCollection: { currency: revision.currency, minorUnits: netRecordedCollectionMinor },
+          collectionDifference: {
+            currency: revision.currency,
+            minorUnits: revision.current_contract_amount_minor - netRecordedCollectionMinor
+          },
+          refundReferenceAmount: {
+            currency: revision.currency,
+            minorUnits: Math.max(0, netRecordedCollectionMinor - revision.current_contract_amount_minor)
+          },
+          factCount: factsAtChange.length
+        };
+      })();
     history.push({
-      type: arrangementChangeType(amendment.amendment_type),
+      type: arrangementChangeType(amendment),
       before,
       after: next,
       reason: { code: amendment.reason_code, note: amendment.reason_note },
@@ -1069,7 +1138,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       businessDate,
       arrivalDate: context.order.arrival_date,
       departureDate: context.order.departure_date
-    }, lifecycle.effectiveArrangement.intervals.length > 1),
+    }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate)),
     order: context.order,
     occupants: occupantRows.map((occupant) => {
       const correction = latestByOccupant.get(occupant.id);

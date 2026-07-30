@@ -330,7 +330,7 @@ describe("check-in entitlement consumption lifecycle", () => {
     expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
   });
 
-  it("keeps consumed nights unchanged when in-house shortening is rejected", async () => {
+  it("keeps consumed nights unchanged when shortening is rejected on the arrival day", async () => {
     const arrivalDate = await propertyLocalToday(db, demo.propertyId);
     const orderId = await createMemberOrder("shorten-consumed", arrivalDate, shiftDate(arrivalDate, 2));
     await confirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "shorten-consumed-check-in");
@@ -340,7 +340,7 @@ describe("check-in entitlement consumption lifecycle", () => {
       input: { propertyId: demo.propertyId, orderId, newDepartureDate: shiftDate(arrivalDate, 1) }
     }, "shorten-consumed-command")).rejects.toMatchObject({
       code: "INVALID_ORDER_STATE",
-      message: "当前版本暂不支持通过缩短住宿办理提前退房"
+      message: "入住当天暂不办理缩短或提前退房；未实际使用房间时请使用后续的撤销入住流程"
     });
     const coverage = (await getOrderView(db, orderId)).coverageSet;
     expect(coverage).toEqual(before.coverageSet);

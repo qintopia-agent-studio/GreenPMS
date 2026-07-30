@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRightLeft,
-  CalendarPlus2,
   CalendarRange,
   CircleDollarSign,
   LogIn,
@@ -31,7 +30,8 @@ import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from ".
 import {
   StayDateChangeDrawer,
   stayDateChangeActionState,
-  type StayDateChangeAction
+  type StayDateChangeAction,
+  type StayDateChangeMode
 } from "../components/StayDateChangeDrawer";
 import { useWorkspace } from "../session";
 import type { CollectionFactDto, CommandRequest, InventoryUnitDto, OrderViewDto, PricingRevisionDto } from "../types";
@@ -52,6 +52,7 @@ import {
   Modal,
   isTerminalCommandRecovery,
   recoveryCommandRequest,
+  stayDateFundsAreOperatorFacing,
   usePersistentCommandRecovery,
   StatusBadge
 } from "../ui";
@@ -81,6 +82,16 @@ export function wholeYuanAmountMinor(value: string): number | undefined {
   return Number.isSafeInteger(targetYuan) && targetYuan >= 0
     ? targetYuan * 100
     : undefined;
+}
+
+export function orderStayDateRequestIsCompatible(
+  openedAction: StayDateChangeAction,
+  mode: StayDateChangeMode,
+  requestCommandType: CommandRequest["commandType"]
+): boolean {
+  return mode === "ADJUST_DEPARTURE"
+    ? requestCommandType === "EXTEND_STAY" || requestCommandType === "SHORTEN_STAY"
+    : requestCommandType === openedAction;
 }
 
 const formTitles: Record<FormAction, string> = {
@@ -136,10 +147,12 @@ export function orderFulfillmentNotice(actions: readonly OrderAllowedActionDto[]
   }
   const checkout = actions.find((action) => action.code === "CHECK_OUT");
   if (checkout?.disabledReason === "DEPARTURE_DATE_NOT_REACHED") {
+    const shorten = actions.find((action) => action.code === "SHORTEN_STAY");
+    if (shorten) return undefined;
     return {
       action: "CHECK_OUT",
       title: "暂不能办理退房",
-      body: "尚未到计划退房日。当前版本暂不办理提前退房；订单日期、金额、库存和会员权益保持不变。提前退房将在后续流程中统一核对离店原因、住宿缩短、重新计价和退款参考额。"
+      body: "尚未到计划退房日，当前订单暂不能办理提前退房。"
     };
   }
   return undefined;
@@ -248,14 +261,14 @@ export function pricingBasisLabel(basis: PricingRevisionDto["pricing_basis"]): s
 }
 
 export function collectionDifferencePresentation(amount: MoneyDto): {
-  label: "待补收参考" | "多收 / 退款参考" | "当前记录无差额";
+  label: "待补收参考" | "多收差额" | "当前记录无差额";
   amount: MoneyDto;
 } {
   return {
     label: amount.minorUnits > 0
       ? "待补收参考"
       : amount.minorUnits < 0
-        ? "多收 / 退款参考"
+        ? "多收差额"
         : "当前记录无差额",
     amount: { ...amount, minorUnits: Math.abs(amount.minorUnits) }
   };
@@ -279,20 +292,31 @@ function ArrangementDetails({ arrangement, units }: {
   </dl>;
 }
 
-function ArrangementHistoryAmounts({ item }: { item: OrderArrangementHistoryItemDto }) {
+function ArrangementHistoryAmounts({ item, showPerOrderFunds }: {
+  item: OrderArrangementHistoryItemDto;
+  showPerOrderFunds: boolean;
+}) {
   const difference = collectionDifferencePresentation(item.fundsSummary.collectionDifference);
   return <dl className="detail-list">
     <div><dt>政策基础金额</dt><dd>{formatMoney(item.pricingSummary.policyBaseAmount)}</dd></div>
-    <div><dt>订单金额</dt><dd>{formatMoney(item.pricingSummary.currentContractAmount)}</dd></div>
+    <div><dt>{showPerOrderFunds ? "订单金额" : "本单渠道应结金额"}</dt><dd>{formatMoney(item.pricingSummary.currentContractAmount)}</dd></div>
     <div><dt>与政策基础金额差额</dt><dd>{formatMoney(item.pricingSummary.differenceFromPolicy)}</dd></div>
-    <div><dt>已登记净收款</dt><dd>{formatMoney(item.fundsSummary.netRecordedCollection)}</dd></div>
-    <div><dt>{difference.label}</dt><dd>{formatMoney(difference.amount)}</dd></div>
+    {showPerOrderFunds ? <>
+      <div><dt>已登记净收款</dt><dd>{formatMoney(item.fundsSummary.netRecordedCollection)}</dd></div>
+      <div><dt>{difference.label}</dt><dd>{formatMoney(difference.amount)}</dd></div>
+    </> : null}
+    {showPerOrderFunds && item.fundsSummary.refundReferenceAmount.minorUnits > 0 ? <>
+      <div><dt>建议退款</dt><dd><strong>{formatMoney(item.fundsSummary.refundReferenceAmount)}</strong></dd></div>
+      <div><dt>退款状态</dt><dd>该金额仅供工作人员办理退款参考，目前尚未登记退款。</dd></div>
+    </> : null}
   </dl>;
 }
 
-export function OrderLifecycleSections({ view, inventoryUnits }: {
+export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds = true, channelPriceDifferenceReason }: {
   view: Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
   inventoryUnits: Array<Pick<InventoryUnitDto, "id" | "code" | "name">>;
+  showPerOrderFunds?: boolean;
+  channelPriceDifferenceReason?: string | undefined;
 }) {
   const units = new Map(inventoryUnits.map((unit) => [unit.id, unit]));
   return <>
@@ -318,6 +342,7 @@ export function OrderLifecycleSections({ view, inventoryUnits }: {
 
     <section className="detail-section full-detail" aria-labelledby="arrangement-history-heading" data-testid="arrangement-history">
       <div className="section-title-row"><h2 id="arrangement-history-heading">住宿安排变更历史</h2><span>{view.arrangementHistory.length} 条</span></div>
+      {!showPerOrderFunds && channelPriceDifferenceReason?.trim() ? <p className="muted compact">渠道价格差异说明：{channelPriceDifferenceReason.trim()}</p> : null}
       <div className="amendment-list">{view.arrangementHistory.map((item, index) => <article key={`${item.type}:${item.recordedAt}:${index}`}>
         <div>
           <strong>第 {index + 1} 条 · {arrangementChangeLabel(item.type)}</strong>
@@ -332,11 +357,34 @@ export function OrderLifecycleSections({ view, inventoryUnits }: {
         </div>
         <div>
           <span>当时金额摘要 · {item.fundsSummary.factCount} 条资金记录</span>
-          <ArrangementHistoryAmounts item={item} />
+          <ArrangementHistoryAmounts item={item} showPerOrderFunds={showPerOrderFunds} />
         </div>
       </article>)}</div>
     </section>
   </>;
+}
+
+export function OrderAmountStrip({ amounts, pricingRevision, bookingChannelCode }: {
+  amounts: OrderViewDto["amounts"];
+  pricingRevision?: PricingRevisionDto | undefined;
+  bookingChannelCode?: string | null;
+}) {
+  const showPerOrderFunds = stayDateFundsAreOperatorFacing(bookingChannelCode, pricingRevision?.pricing_basis);
+  const difference = collectionDifferencePresentation(amounts.collectionDifference);
+  if (!showPerOrderFunds && pricingRevision) {
+    return <section className="amount-strip" aria-label="订单可复算金额" data-testid="order-amounts">
+      <div><span>政策基础金额</span><strong>{formatMinor(pricingRevision.policy_base_amount_minor, pricingRevision.currency)}</strong></div>
+      <div><span>本单渠道应结金额</span><strong>{formatMoney(amounts.currentContractAmount)}</strong></div>
+      <div><span>与政策基础金额差额</span><strong>{formatMinor(pricingRevision.difference_from_policy_minor, pricingRevision.currency)}</strong></div>
+      <div><span>渠道价格差异说明</span><strong>{pricingRevision.reason.note.trim() || "无需额外说明"}</strong></div>
+    </section>;
+  }
+  return <section className="amount-strip" aria-label="订单可复算金额" data-testid="order-amounts">
+    <div><span>订单金额</span><strong>{formatMoney(amounts.currentContractAmount)}</strong></div>
+    <div><span>已登记净收款</span><strong>{formatMoney(amounts.netRecordedCollection)}</strong></div>
+    <div><span>{difference.label}</span><strong>{formatMoney(difference.amount)}</strong></div>
+    {amounts.refundReferenceAmount.minorUnits > 0 ? <div><span>建议退款</span><strong>{formatMoney(amounts.refundReferenceAmount)}</strong><small>尚未登记退款</small></div> : null}
+  </section>;
 }
 
 function FulfillmentResult({ type, record }: {
@@ -380,7 +428,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
     && (!view.order.member_contract_id || unit.kind === currentUnit?.kind)
   ));
   const initialSelectedFactId = initialFactId ?? refundableCollections[0]?.fact_id ?? "";
-  const recordedExcessMinor = Math.max(0, -view.amounts.collectionDifference.minorUnits);
+  const recordedExcessMinor = view.amounts.refundReferenceAmount.minorUnits;
   function suggestedRefundFor(collectionFactId: string): number {
     const collection = collections.find((fact) => fact.fact_id === collectionFactId);
     if (!collection) return 0;
@@ -522,6 +570,7 @@ export function OrderDetailPage() {
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [formAction, setFormAction] = useState<FormAction>();
   const [stayDateAction, setStayDateAction] = useState<StayDateChangeAction>();
+  const [stayDateMode, setStayDateMode] = useState<StayDateChangeMode>("DATE_CHANGE");
   const [correctingOccupant, setCorrectingOccupant] = useState<OrderOccupant>();
   const [initialFactId, setInitialFactId] = useState<string>();
   const [command, setCommand] = useState<CommandRequest>();
@@ -538,12 +587,14 @@ export function OrderDetailPage() {
   const enabledActions = useMemo(() => new Set(enabledOrderActionCodes(view?.allowedActions ?? [])), [view]);
   const fulfillmentNotice = useMemo(() => orderFulfillmentNotice(view?.allowedActions ?? []), [view]);
   const requestedAction = useMemo(() => requestedOrderAction(location.search, view?.allowedActions ?? []), [location.search, view]);
+  const requestedRawAction = useMemo(() => new URLSearchParams(location.search).get("action"), [location.search]);
   const backTarget = orderDetailBackTarget(location.state);
 
   useEffect(() => {
     setRecoveryError(undefined);
     setFormAction(undefined);
     setStayDateAction(undefined);
+    setStayDateMode("DATE_CHANGE");
     setCorrectingOccupant(undefined);
     setInitialFactId(undefined);
     setCommand(undefined);
@@ -597,6 +648,18 @@ export function OrderDetailPage() {
   useEffect(() => {
     if (view && view.order.property_id !== propertyId) navigate("/orders", { replace: true });
   }, [navigate, propertyId, view]);
+
+  useEffect(() => {
+    if (!view || requestedRawAction !== "CHECK_OUT") return;
+    const checkoutEnabled = view.allowedActions.some((action) => action.code === "CHECK_OUT" && action.enabled);
+    const shortenEnabled = view.allowedActions.some((action) => action.code === "SHORTEN_STAY" && action.enabled);
+    const focusKey = `${orderId}:EARLY_CHECK_OUT`;
+    if (checkoutEnabled || !shortenEnabled || focusedActionKeyRef.current === focusKey) return;
+    focusedActionKeyRef.current = focusKey;
+    setCommandDraft(undefined);
+    setStayDateMode("EARLY_CHECK_OUT");
+    setStayDateAction("SHORTEN_STAY");
+  }, [orderId, requestedRawAction, view]);
 
   useEffect(() => {
     if (!requestedAction) return;
@@ -654,8 +717,9 @@ export function OrderDetailPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
-    if (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY") {
+    if (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY") {
       setStayDateAction(request.commandType);
+      setStayDateMode(viewRef.current?.order.status === "CHECKED_IN" ? "ADJUST_DEPARTURE" : "DATE_CHANGE");
       return;
     }
     if (request.commandType === "REPRICE_ORDER") {
@@ -676,8 +740,16 @@ export function OrderDetailPage() {
   const occupants = orderedOrderOccupants(view.occupants);
   const primaryOccupant = primaryOrderOccupant(occupants);
   const visibleArrangementUnits = [...new Set(view.effectiveArrangement.intervals.map((interval) => arrangementUnitLabel(unitMap, interval.inventoryUnitId)))];
-  const visibleArrangementDifference = collectionDifferencePresentation(view.amounts.collectionDifference);
-  const stayDateActionState = stayDateChangeActionState(view);
+  const currentPricingRevision = view.pricingRevisions.find((revision) => revision.id === view.order.current_revision_id)
+    ?? view.pricingRevisions[view.pricingRevisions.length - 1];
+  const showPerOrderFunds = stayDateFundsAreOperatorFacing(view.order.booking_channel_code, currentPricingRevision?.pricing_basis);
+  const rescheduleState = stayDateChangeActionState(view, "RESCHEDULE_STAY");
+  const extendState = stayDateChangeActionState(view, "EXTEND_STAY");
+  const shortenState = stayDateChangeActionState(view, "SHORTEN_STAY");
+  const departureAdjustmentAction = view.order.status === "CHECKED_IN"
+    ? extendState?.enabled ? "EXTEND_STAY" : shortenState?.enabled ? "SHORTEN_STAY" : undefined
+    : undefined;
+  const blockedStayDateState = view.order.status === "RESERVED" ? rescheduleState : shortenState;
 
   return (
     <div className="order-detail-page">
@@ -687,11 +759,7 @@ export function OrderDetailPage() {
         <div className="order-unit"><span>{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</span><strong>{visibleArrangementUnits.join("、")}</strong></div>
       </header>
 
-      <section className="amount-strip" aria-label="订单可复算金额" data-testid="order-amounts">
-        <div><span>订单金额</span><strong>{formatMoney(view.amounts.currentContractAmount)}</strong></div>
-        <div><span>已登记净收款</span><strong>{formatMoney(view.amounts.netRecordedCollection)}</strong></div>
-        <div><span>{visibleArrangementDifference.label}</span><strong>{formatMoney(visibleArrangementDifference.amount)}</strong></div>
-      </section>
+      <OrderAmountStrip amounts={view.amounts} pricingRevision={currentPricingRevision} bookingChannelCode={view.order.booking_channel_code} />
 
       <InlineError error={recoveryError} title="恢复记录未收口" />
       <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" />
@@ -708,17 +776,17 @@ export function OrderDetailPage() {
               <div><strong>{fulfillmentNotice.title}</strong><span>{fulfillmentNotice.body}</span></div>
             </div>
           ) : null}
-          {stayDateActionState && !stayDateActionState.enabled && stayDateActionState.reason ? (
+          {blockedStayDateState && !blockedStayDateState.enabled && blockedStayDateState.reason ? (
             <div className="fulfillment-date-notice" role="status" data-testid="stay-date-action-notice">
               <AlertTriangle aria-hidden="true" size={18} />
-              <div><strong>暂不能办理日期调整</strong><span>{stayDateActionState.reason}</span></div>
+              <div><strong>{view.order.status === "RESERVED" ? "暂不能调整预订日期" : "暂不能缩短住宿或提前退房"}</strong><span>{blockedStayDateState.reason}</span></div>
             </div>
           ) : null}
           <div className="action-toolbar">
             {enabledActions.has("RECORD_COLLECTION") ? <button className="button button-secondary" type="button" onClick={() => openForm("RECORD_COLLECTION")} disabled={orderActionsBlocked} data-testid="record-collection" data-order-action="RECORD_COLLECTION"><CircleDollarSign aria-hidden="true" size={17} />收款</button> : null}
             {enabledActions.has("RECORD_REFUND") ? <button className="button button-secondary" type="button" onClick={() => openForm("RECORD_REFUND")} disabled={orderActionsBlocked} data-order-action="RECORD_REFUND"><Undo2 aria-hidden="true" size={17} />退款</button> : null}
-            {stayDateActionState?.enabled && stayDateActionState.action === "RESCHEDULE_STAY" ? <button className="button button-secondary" type="button" onClick={() => { setCommandDraft(undefined); setStayDateAction("RESCHEDULE_STAY"); }} disabled={orderActionsBlocked} data-order-action="RESCHEDULE_STAY"><CalendarRange aria-hidden="true" size={17} />调整预订日期</button> : null}
-            {stayDateActionState?.enabled && stayDateActionState.action === "EXTEND_STAY" ? <button className="button button-secondary" type="button" onClick={() => { setCommandDraft(undefined); setStayDateAction("EXTEND_STAY"); }} disabled={orderActionsBlocked} data-order-action="EXTEND_STAY"><CalendarPlus2 aria-hidden="true" size={17} />延长住宿</button> : null}
+            {rescheduleState?.enabled ? <button className="button button-secondary" type="button" onClick={() => { setCommandDraft(undefined); setStayDateMode("DATE_CHANGE"); setStayDateAction("RESCHEDULE_STAY"); }} disabled={orderActionsBlocked} data-order-action="RESCHEDULE_STAY"><CalendarRange aria-hidden="true" size={17} />调整预订日期</button> : null}
+            {departureAdjustmentAction ? <button className="button button-secondary" type="button" onClick={() => { setCommandDraft(undefined); setStayDateMode("ADJUST_DEPARTURE"); setStayDateAction(departureAdjustmentAction); }} disabled={orderActionsBlocked} data-order-action="ADJUST_DEPARTURE"><CalendarRange aria-hidden="true" size={17} />调整退房日期</button> : null}
             {enabledActions.has("MOVE_UNIT") ? <button className="button button-secondary" type="button" onClick={() => openForm("MOVE_UNIT")} disabled={orderActionsBlocked} data-order-action="MOVE_UNIT"><ArrowRightLeft aria-hidden="true" size={17} />换房</button> : null}
             {enabledActions.has("REPRICE_ORDER") ? <button className="button button-secondary" type="button" onClick={() => openForm("REPRICE_ORDER")} disabled={orderActionsBlocked} data-testid="reprice-order" data-order-action="REPRICE_ORDER"><CircleDollarSign aria-hidden="true" size={17} />调整金额</button> : null}
             {enabledActions.has("CHECK_IN") ? <button className="button button-primary" type="button" onClick={() => directCommand("CHECK_IN", "办理入住", "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。") } disabled={orderActionsBlocked} data-testid="check-in" data-order-action="CHECK_IN"><LogIn aria-hidden="true" size={17} />入住</button> : null}
@@ -749,7 +817,12 @@ export function OrderDetailPage() {
         <section className="detail-section" aria-labelledby="stay-heading"><div className="section-title-row"><h2 id="stay-heading">住宿状态</h2><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div><dl className="detail-list"><div><dt>{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</dt><dd>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</dd></div><div><dt>住宿类型</dt><dd>{view.order.stay_type === "FREE" ? "免费住宿" : view.order.member_id || view.order.member_contract_id ? "会员住宿" : "普通住宿"}</dd></div>{view.order.stay_type === "FREE" ? <><div><dt>免费入住类型</dt><dd>{view.order.free_stay_category_code === "VOLUNTEER" ? "义工" : view.order.free_stay_category_code === "RECEPTION" ? "接待" : "历史未记录"}</dd></div><div><dt>免费入住原因</dt><dd>{view.order.free_stay_reason}</dd></div></> : view.order.member_id || view.order.member_contract_id ? <div><dt>住宿来源</dt><dd>会员权益</dd></div> : <><div><dt>订单来源渠道</dt><dd>{view.order.booking_channel_code ? bookingChannelLabels[view.order.booking_channel_code] : "历史未记录"}</dd></div><div><dt>渠道订单号</dt><dd>{view.order.booking_channel_code === "WECOM" ? "不适用" : view.order.channel_order_reference ?? (view.order.booking_channel_code ? "未填写" : "历史未记录")}</dd></div></>}</dl></section>
       </div>
 
-      <OrderLifecycleSections view={view} inventoryUnits={meta.inventoryUnits} />
+      <OrderLifecycleSections
+        view={view}
+        inventoryUnits={meta.inventoryUnits}
+        showPerOrderFunds={showPerOrderFunds}
+        channelPriceDifferenceReason={currentPricingRevision?.reason.note}
+      />
 
       {currentReleaseFeatures.cleaningWorkflow && view.cleaningTasks.length ? <section className="detail-section full-detail" aria-labelledby="cleaning-heading" data-testid="order-cleaning-tasks">
         <div className="section-title-row"><h2 id="cleaning-heading"><Sparkles aria-hidden="true" size={18} />清洁任务</h2><span>{view.cleaningTasks.length}</span></div>
@@ -803,14 +876,18 @@ export function OrderDetailPage() {
       {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {stayDateAction ? <StayDateChangeDrawer
         action={stayDateAction}
+        mode={stayDateMode}
         view={view}
         inventoryUnitLabel={visibleArrangementUnits.join(" → ")}
         writeBlocked={orderActionsBlocked}
         {...(commandDraft?.commandType === stayDateAction ? { draft: commandDraft } : {})}
-        onClose={() => { setStayDateAction(undefined); setCommandDraft(undefined); }}
+        onClose={() => { setStayDateAction(undefined); setStayDateMode("DATE_CHANGE"); setCommandDraft(undefined); }}
         onSubmit={(request) => {
-          if (orderActionsBlocked || request.commandType !== stayDateAction || !enabledActions.has(stayDateAction)) return;
+          if (orderActionsBlocked
+            || !orderStayDateRequestIsCompatible(stayDateAction, stayDateMode, request.commandType)
+            || !enabledActions.has(request.commandType as OrderActionCode)) return;
           setStayDateAction(undefined);
+          setStayDateMode("DATE_CHANGE");
           setCommandDraft(undefined);
           setRecoveryDialogOpen(false);
           setCommand(request);

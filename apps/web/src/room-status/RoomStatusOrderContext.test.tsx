@@ -96,6 +96,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       fundsSummary: {
         netRecordedCollection: { currency: "CNY", minorUnits: 0 },
         collectionDifference: { currency: "CNY", minorUnits: 60000 },
+        refundReferenceAmount: { currency: "CNY", minorUnits: 0 },
         factCount: 0
       }
     }, {
@@ -124,6 +125,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       fundsSummary: {
         netRecordedCollection: { currency: "CNY", minorUnits: 30000 },
         collectionDifference: { currency: "CNY", minorUnits: 30000 },
+        refundReferenceAmount: { currency: "CNY", minorUnits: 0 },
         factCount: 1
       }
     }],
@@ -181,7 +183,8 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
     amounts: {
       currentContractAmount: { currency: "CNY", minorUnits: 60000 },
       netRecordedCollection: { currency: "CNY", minorUnits: 30000 },
-      collectionDifference: { currency: "CNY", minorUnits: 30000 }
+      collectionDifference: { currency: "CNY", minorUnits: 30000 },
+      refundReferenceAmount: { currency: "CNY", minorUnits: 0 }
     },
     ...overrides
   };
@@ -225,6 +228,92 @@ describe("RoomStatusOrderContext", () => {
     expect(html).not.toContain("办理退房");
   });
 
+  it("shows external-channel contract pricing without per-order collection language after refresh", () => {
+    const base = orderView();
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: {
+          ...base.order,
+          booking_channel_code: "CTRIP",
+          channel_order_reference: "CTRIP-204",
+          current_revision_id: "revision_channel"
+        },
+        pricingRevisions: [{
+          ...base.pricingRevisions[0]!,
+          id: "revision_channel",
+          pricing_basis: "CHANNEL_CONTRACT",
+          policy_base_amount_minor: 69_600,
+          current_contract_amount_minor: 81_600,
+          difference_from_policy_minor: 12_000,
+          reason: { code: "CHANNEL_PRICE_DIFFERENCE", note: "携程活动价格重新确认" }
+        }],
+        amounts: {
+          currentContractAmount: { currency: "CNY", minorUnits: 81_600 },
+          netRecordedCollection: { currency: "CNY", minorUnits: 90_000 },
+          collectionDifference: { currency: "CNY", minorUnits: -8_400 },
+          refundReferenceAmount: { currency: "CNY", minorUnits: 8_400 }
+        }
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+
+    expect(html).toContain("政策基础金额");
+    expect(html).toContain("本单渠道应结金额");
+    expect(html).toContain("与政策基础金额差额");
+    expect(html).toContain("渠道价格差异说明");
+    expect(html).toContain("携程活动价格重新确认");
+    expect(html).toContain("资金记录");
+    expect(html).toContain("收款 ·");
+    expect(html).not.toMatch(/已登记净收款|待补收参考|多收差额|建议退款/);
+  });
+
+  it.each(["POLICY", "MANUAL_ADJUSTMENT"] as const)("keeps external-channel semantics after a later %s repricing", (pricingBasis) => {
+    const base = orderView();
+    const policyBaseAmount = 69_600;
+    const currentContractAmount = pricingBasis === "POLICY" ? policyBaseAmount : 75_000;
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: {
+          ...base.order,
+          booking_channel_code: "MEITUAN",
+          channel_order_reference: "MEITUAN-204",
+          current_revision_id: "revision_reprice"
+        },
+        pricingRevisions: [{
+          ...base.pricingRevisions[0]!,
+          id: "revision_reprice",
+          pricing_basis: pricingBasis,
+          policy_base_amount_minor: policyBaseAmount,
+          current_contract_amount_minor: currentContractAmount,
+          difference_from_policy_minor: currentContractAmount - policyBaseAmount,
+          manual_adjustment_minor: pricingBasis === "MANUAL_ADJUSTMENT" ? currentContractAmount - policyBaseAmount : 0,
+          reason: { code: "REPRICE_ORDER", note: pricingBasis === "POLICY" ? "恢复政策价" : "渠道重新协商" }
+        }],
+        amounts: {
+          currentContractAmount: { currency: "CNY", minorUnits: currentContractAmount },
+          netRecordedCollection: { currency: "CNY", minorUnits: 90_000 },
+          collectionDifference: { currency: "CNY", minorUnits: currentContractAmount - 90_000 },
+          refundReferenceAmount: { currency: "CNY", minorUnits: 90_000 - currentContractAmount }
+        }
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+
+    expect(html).toContain("政策基础金额");
+    expect(html).toContain("本单渠道应结金额");
+    expect(html).toContain("与政策基础金额差额");
+    expect(html).toContain("渠道价格差异说明");
+    expect(html).not.toMatch(/已登记净收款|待补收参考|多收差额|建议退款/);
+  });
+
   it("keeps check-in and check-out local while routing complex order actions to order detail", () => {
     const html = renderToStaticMarkup(<RoomStatusOrderContext
       view={orderView({
@@ -245,6 +334,51 @@ describe("RoomStatusOrderContext", () => {
     expect(html).toContain("办理入住");
     expect(html).toContain("办理退房");
     expect(html).toContain("调整订单金额");
+  });
+
+  it("exposes one in-house departure-date adjustment entry instead of three competing actions", () => {
+    const base = orderView();
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        allowedActions: [
+          { code: "CHECK_OUT", enabled: false, disabledReason: "DEPARTURE_DATE_NOT_REACHED" },
+          { code: "EXTEND_STAY", enabled: true, disabledReason: null },
+          { code: "SHORTEN_STAY", enabled: true, disabledReason: null }
+        ],
+        order: { ...base.order, status: "CHECKED_IN" },
+        stay: { id: base.stay.id, status: "IN_HOUSE" },
+        effectiveArrangement: {
+          ...base.effectiveArrangement,
+          businessDate: "2026-07-26",
+          intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-07-25", departureDate: "2026-07-28" }]
+        },
+        fulfillment: {
+          state: "IN_HOUSE",
+          checkIn: {
+            type: "CHECK_IN",
+            plannedBusinessDate: "2026-07-25",
+            recordedBusinessDate: "2026-07-25",
+            recordingMode: "ON_SCHEDULE",
+            recordedAt: "2026-07-25T08:00:00.000Z",
+            actor: { subjectId: "operator", displayName: "前台操作员" },
+            reason: { code: "CHECK_IN", note: "" }
+          },
+          checkOut: null
+        }
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onDateAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toContain('data-room-status-action="ADJUST_DEPARTURE"');
+    expect(html).toContain("调整退房日期");
+    expect(html).not.toContain('data-room-status-action="EXTEND_STAY"');
+    expect(html).not.toContain('data-room-status-action="SHORTEN_STAY"');
+    expect(html).not.toContain('data-room-status-action="EARLY_CHECK_OUT"');
+    expect(html).not.toContain('data-room-status-action-mode="inline">办理退房');
   });
 
   it("keeps rescheduling and extension inside room status and shows the approved multi-room fail-close reason", () => {
@@ -325,6 +459,203 @@ describe("RoomStatusOrderContext", () => {
     />);
     expect(html).toContain("会员权益 · 1 房晚 · 1 床晚");
     expect(html).not.toContain("2 房晚");
+  });
+
+  it("identifies the exact member product and links to the corresponding member profile", () => {
+    const member = {
+      member: {
+        id: "member_1",
+        identity_card_number: "ID-1",
+        full_name: "阶段十会员住客",
+        phone: "13800000000",
+        wechat: "wx-member-1",
+        created_at: "2026-07-20T10:00:00.000Z"
+      },
+      membershipOrders: [{
+        order: {
+          id: "membership_order_1",
+          member_id: "member_1",
+          status: "ACTIVE",
+          contract_id: "contract_1",
+          product_name: "公卫单人间会员",
+          entitlement_lot_id: "lot_1"
+        }
+      }, {
+        order: {
+          id: "membership_order_other_contract",
+          member_id: "member_1",
+          status: "ACTIVE",
+          contract_id: "contract_other",
+          product_name: "其他合同会员产品",
+          entitlement_lot_id: "lot_other"
+        }
+      }]
+    } as never;
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...orderView().order, member_id: "member_1", member_contract_id: "contract_1" },
+        coverageSet: [
+          { id: "coverage_1", order_id: "order_stage7", contract_id: "contract_1", lot_id: "lot_1", inventory_unit_id: "room_101", service_date: "2026-07-25", unit_kind: "ROOM_NIGHT", status: "CONSUMED", held_by_revision_id: "revision_1", created_at: "2026-07-24T10:00:00.000Z", updated_at: "2026-07-25T10:00:00.000Z" },
+          { id: "coverage_2", order_id: "order_stage7", contract_id: "contract_1", lot_id: "lot_1", inventory_unit_id: "room_101", service_date: "2026-07-26", unit_kind: "ROOM_NIGHT", status: "HELD", held_by_revision_id: "revision_1", created_at: "2026-07-24T10:00:00.000Z", updated_at: "2026-07-25T10:00:00.000Z" }
+        ]
+      })}
+      units={units}
+      memberView={member}
+      onOpenMember={() => undefined}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toContain("会员：阶段十会员住客");
+    expect(html).toContain("使用权益：公卫单人间会员");
+    expect(html).toContain("已核销 1 间夜");
+    expect(html).toContain("已冻结 1 间夜");
+    expect(html).toContain("查看会员档案");
+    expect(html).not.toContain("contract_1");
+    expect(html).not.toContain("lot_1");
+    expect(html).not.toContain("其他合同会员产品");
+  });
+
+  it("uses the active contract product even when current coverage belongs to another entitlement lot", () => {
+    const member = {
+      member: {
+        id: "member_1",
+        identity_card_number: "ID-1",
+        full_name: "阶段十会员住客",
+        phone: "13800000000",
+        wechat: "wx-member-1",
+        created_at: "2026-07-20T10:00:00.000Z"
+      },
+      membershipOrders: [{
+        order: {
+          id: "membership_order_1",
+          member_id: "member_1",
+          status: "ACTIVE",
+          contract_id: "contract_1",
+          product_name: "合同对应会员产品",
+          entitlement_lot_id: "lot_other"
+        }
+      }]
+    } as never;
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...orderView().order, member_id: "member_1", member_contract_id: "contract_1" },
+        coverageSet: [
+          { id: "coverage_1", order_id: "order_stage7", contract_id: "contract_1", lot_id: "lot_1", inventory_unit_id: "room_101", service_date: "2026-07-25", unit_kind: "ROOM_NIGHT", status: "CONSUMED", held_by_revision_id: "revision_1", created_at: "2026-07-24T10:00:00.000Z", updated_at: "2026-07-25T10:00:00.000Z" }
+        ]
+      })}
+      units={units}
+      memberView={member}
+      onOpenMember={() => undefined}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toContain("合同对应会员产品");
+    expect(html).toContain("查看会员档案");
+    expect(html).not.toContain("已核销 1 间夜");
+  });
+
+  it("shows the active contract member and product when the current coverage set is empty", () => {
+    const member = {
+      member: {
+        id: "member_1",
+        identity_card_number: "ID-1",
+        full_name: "阶段十会员住客",
+        phone: "13800000000",
+        wechat: "wx-member-1",
+        created_at: "2026-07-20T10:00:00.000Z"
+      },
+      membershipOrders: [{
+        order: {
+          id: "membership_order_1",
+          member_id: "member_1",
+          status: "ACTIVE",
+          contract_id: "contract_1",
+          product_name: "公卫单人间会员",
+          entitlement_lot_id: "lot_1"
+        }
+      }, {
+        order: {
+          id: "membership_order_other_contract",
+          member_id: "member_1",
+          status: "ACTIVE",
+          contract_id: "contract_other",
+          product_name: "其他合同会员产品",
+          entitlement_lot_id: "lot_other"
+        }
+      }]
+    } as never;
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...orderView().order, member_id: "member_1", member_contract_id: "contract_1" },
+        coverageSet: []
+      })}
+      units={units}
+      memberView={member}
+      onOpenMember={() => undefined}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toContain("会员：阶段十会员住客");
+    expect(html).toContain("使用权益：公卫单人间会员");
+    expect(html).toContain("查看会员档案");
+    expect(html).not.toMatch(/已核销|已冻结/);
+  });
+
+  it("does not link a draft membership order even when a damaged DTO exposes an active lot", () => {
+    const member = {
+      member: {
+        id: "member_1",
+        identity_card_number: "ID-1",
+        full_name: "阶段十会员住客",
+        phone: "13800000000",
+        wechat: "wx-member-1",
+        created_at: "2026-07-20T10:00:00.000Z"
+      },
+      membershipOrders: [{
+        order: {
+          id: "membership_order_1",
+          member_id: "member_1",
+          status: "DRAFT",
+          contract_id: "contract_1",
+          product_name: "未生效会员产品",
+          entitlement_lot_id: "lot_1"
+        }
+      }, {
+        order: {
+          id: "membership_order_wrong_contract",
+          member_id: "member_1",
+          status: "ACTIVE",
+          contract_id: "contract_wrong",
+          product_name: "错误合同会员产品",
+          entitlement_lot_id: "lot_wrong"
+        }
+      }]
+    } as never;
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...orderView().order, member_id: "member_1", member_contract_id: "contract_1" },
+        coverageSet: [
+          { id: "coverage_1", order_id: "order_stage7", contract_id: "contract_1", lot_id: "lot_1", inventory_unit_id: "room_101", service_date: "2026-07-25", unit_kind: "ROOM_NIGHT", status: "CONSUMED", held_by_revision_id: "revision_1", created_at: "2026-07-24T10:00:00.000Z", updated_at: "2026-07-25T10:00:00.000Z" }
+        ]
+      })}
+      units={units}
+      memberView={member}
+      onOpenMember={() => undefined}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).not.toContain("未生效会员产品");
+    expect(html).not.toContain("错误合同会员产品");
+    expect(html).not.toContain("其他合同会员产品");
+    expect(html).not.toContain("查看会员档案");
   });
 
   it("hides historical cleaning tasks while the current release keeps the workflow disabled", () => {

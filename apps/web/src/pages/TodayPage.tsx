@@ -134,7 +134,8 @@ export function TodayPage() {
             <StatusBadge value={order.status} label={businessStatusLabel(order.status)} />
             <div className="queue-actions">
               {tab === "ARRIVALS" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_IN", "办理入住")} disabled={commandsBlocked}><LogIn aria-hidden="true" size={17} />入住</button> : null}
-              {tab === "DEPARTURES" || tab === "IN_HOUSE" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_OUT", "办理退房")} disabled={commandsBlocked}><LogOut aria-hidden="true" size={17} />退房</button> : null}
+              {tab === "DEPARTURES" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_OUT", "办理退房")} disabled={commandsBlocked}><LogOut aria-hidden="true" size={17} />退房</button> : null}
+              {tab === "IN_HOUSE" ? <Link className="button button-primary" to={`/orders/${encodeURIComponent(order.id)}?action=CHECK_OUT`}><LogOut aria-hidden="true" size={17} />退房</Link> : null}
               <Link className="icon-button" to={`/orders/${encodeURIComponent(order.id)}`} aria-label={`查看订单 ${order.id}`} title="查看订单"><ChevronRight aria-hidden="true" size={19} /></Link>
             </div>
           </article>

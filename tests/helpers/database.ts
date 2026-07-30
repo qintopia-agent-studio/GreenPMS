@@ -15,7 +15,19 @@ export async function resetDatabase(databaseUrl: string): Promise<Kysely<Databas
   const admin = new pg.Client({ connectionString: adminUrl.toString() });
   await admin.connect();
   try {
-    await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [databaseName]);
+    let activeSessions = 0;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const result = await admin.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+        [databaseName]
+      );
+      activeSessions = Number(result.rows[0]?.count ?? 0);
+      if (activeSessions === 0) break;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+    if (activeSessions > 0) {
+      await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [databaseName]);
+    }
     await admin.query(`DROP DATABASE IF EXISTS "${databaseName.replaceAll('"', '""')}"`);
     await admin.query(`CREATE DATABASE "${databaseName.replaceAll('"', '""')}"`);
   } finally {

@@ -160,7 +160,7 @@ export function createOrderPricingDecision(input: {
 }
 
 export function stayChangePricingDecision(input: {
-  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY";
+  commandType: "RESCHEDULE_STAY" | "EXTEND_STAY" | "SHORTEN_STAY";
   bookingChannelCode: BookingChannelCode | null;
   stayType: string;
   memberStay: boolean;

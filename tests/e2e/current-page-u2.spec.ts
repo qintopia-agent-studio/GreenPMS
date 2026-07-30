@@ -368,8 +368,8 @@ test("U2 quick popover contains a legal 200-character unbroken occupant label", 
   expect(geometry).toEqual({ popoverWidth: 280, popoverFits: true, buttonFits: true, labelFits: true });
 });
 
-test("U2 Escape closes a quick popover before the underlying non-modal order drawer", async ({ page }, testInfo) => {
-  test.skip(!isDesktop(testInfo), "desktop-only U2 layered Escape coverage");
+test("U2 selecting a new room-status cell invalidates the old order drawer before opening the quick popover", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 stale-drawer coverage");
   await page.setViewportSize({ width: 1366, height: 768 });
   await login(page);
   await showRange(page);
@@ -385,14 +385,87 @@ test("U2 Escape closes a quick popover before the underlying non-modal order dra
   await page.keyboard.press("Enter");
   const layeredPopover = page.getByTestId("room-status-quick-popover");
   await expect(layeredPopover).toBeVisible();
+  await expect(drawer).toBeHidden();
   await page.keyboard.press("Escape");
   await expect(layeredPopover).toBeHidden();
-  await expect(drawer).toBeVisible();
-  await expect(other).toBeFocused();
-
-  await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
   await expect(other).toBeFocused();
+});
+
+test("U2 a delayed response for an invalidated order cannot reopen or overwrite the new room-status selection", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop-only U2 stale-order-response coverage");
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await login(page);
+  await showRange(page);
+
+  let releaseOldOrderResponse: (() => void) | undefined;
+  const oldOrderResponseReleased = new Promise<void>((resolve) => {
+    releaseOldOrderResponse = resolve;
+  });
+  let settleOldOrderRoute: (() => void) | undefined;
+  let rejectOldOrderRoute: ((error: unknown) => void) | undefined;
+  const oldOrderRouteSettled = new Promise<void>((resolve, reject) => {
+    settleOldOrderRoute = resolve;
+    rejectOldOrderRoute = reject;
+  });
+  await page.route(`**/api/v1/orders/${fixture.wholeRoom.orderId}`, async (route) => {
+    await oldOrderResponseReleased;
+    try {
+      await route.continue();
+      settleOldOrderRoute?.();
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Route is already handled")) {
+        settleOldOrderRoute?.();
+        return;
+      }
+      rejectOldOrderRoute?.(error);
+    }
+  });
+
+  const oldOrderRequestSettled = new Promise<"response" | "failed">((resolve) => {
+    const matchesOldOrderRequest = (method: string, rawUrl: string) => {
+      const url = new URL(rawUrl);
+      return method === "GET"
+        && url.pathname === `/api/v1/orders/${fixture.wholeRoom.orderId}`;
+    };
+    const cleanup = () => {
+      page.off("response", onResponse);
+      page.off("requestfailed", onRequestFailed);
+    };
+    const onResponse = (response: import("@playwright/test").Response) => {
+      const url = new URL(response.url());
+      if (!matchesOldOrderRequest(response.request().method(), url.toString()) || response.status() !== 200) return;
+      cleanup();
+      resolve("response");
+    };
+    const onRequestFailed = (request: import("@playwright/test").Request) => {
+      if (!matchesOldOrderRequest(request.method(), request.url())) return;
+      cleanup();
+      resolve("failed");
+    };
+    page.on("response", onResponse);
+    page.on("requestfailed", onRequestFailed);
+  });
+
+  const { popover } = await openWholeRoomPopover(page);
+  await popover.locator(".room-status-quick-orders button").click();
+  const drawer = page.locator("dialog.room-status-view-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer).toContainText("正在载入权威订单上下文");
+
+  const other = roomCell(page, fixture.stage6.emptyCreationRoomId, fixture.dates.arrivalDate);
+  await other.click();
+  const replacementPopover = page.getByTestId("room-status-quick-popover");
+  await expect(replacementPopover).toBeVisible();
+  await expect(drawer).toBeHidden();
+
+  releaseOldOrderResponse?.();
+  await Promise.all([oldOrderRequestSettled, oldOrderRouteSettled]);
+  await page.unroute(`**/api/v1/orders/${fixture.wholeRoom.orderId}`);
+  await expect(drawer).toBeHidden();
+  await expect(replacementPopover).toBeVisible();
+  await expect(replacementPopover).toHaveAttribute("data-unit-id", fixture.stage6.emptyCreationRoomId);
+  await expect(other).toHaveClass(/is-selected/);
 });
 
 test("U2 desktop parent room lists each exact order and an outside click keeps the new focus", async ({ page }, testInfo) => {

@@ -21,6 +21,7 @@ import type {
   CommandRequest,
   MemberContractDto,
   MemberDto,
+  MemberViewDto,
   OrderViewDto,
   PricingPolicyVersionDto,
   QuoteDto,
@@ -28,7 +29,7 @@ import type {
   StayType
 } from "../types";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
-import { StayDateChangeDrawer, type StayDateChangeAction } from "../components/StayDateChangeDrawer";
+import { StayDateChangeDrawer, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -268,6 +269,33 @@ export class RoomStatusCommandAttemptGuard {
 
   runIfActive(attemptId: number, action: () => void): boolean {
     if (this.activeAttemptId !== attemptId) return false;
+    action();
+    return true;
+  }
+}
+
+export interface SelectedMemberViewRequestLease {
+  scope: string;
+  generation: number;
+}
+
+export class SelectedMemberViewRequestGuard {
+  private generation = 0;
+  private activeScope: string | undefined;
+
+  begin(scope: string): SelectedMemberViewRequestLease {
+    this.generation += 1;
+    this.activeScope = scope;
+    return { scope, generation: this.generation };
+  }
+
+  invalidate(): void {
+    this.generation += 1;
+    this.activeScope = undefined;
+  }
+
+  runIfActive(lease: SelectedMemberViewRequestLease, action: () => void): boolean {
+    if (this.activeScope !== lease.scope || this.generation !== lease.generation) return false;
     action();
     return true;
   }
@@ -1364,6 +1392,29 @@ export function roomStatusOrderCommandScope(
     : principalScope;
 }
 
+export function selectedOrderMemberLookup(
+  view: Pick<OrderViewDto, "order" | "stay">,
+  propertyId: string,
+  stayId: string
+): { memberId: string; scope: string } | undefined {
+  const memberId = view.order.member_id;
+  if (!memberId || view.order.property_id !== propertyId || view.stay.id !== stayId) return undefined;
+  return {
+    memberId,
+    scope: `${propertyId}:${view.order.id}:${view.stay.id}:${memberId}`
+  };
+}
+
+export function selectedStayDateRequestIsCompatible(
+  openedAction: StayDateChangeAction,
+  mode: StayDateChangeMode,
+  requestCommandType: CommandRequest["commandType"]
+): boolean {
+  return mode === "ADJUST_DEPARTURE"
+    ? requestCommandType === "EXTEND_STAY" || requestCommandType === "SHORTEN_STAY"
+    : requestCommandType === openedAction;
+}
+
 export function roomStatusCommandWriteGate(input: {
   projectionWritable: boolean;
   activeProjectionValid: boolean;
@@ -1447,12 +1498,14 @@ export function InventoryPage() {
   const [selectedIntervalId, setSelectedIntervalId] = useState<string>();
   const [selectedOrderIdentity, setSelectedOrderIdentity] = useState<RoomStatusOrderIdentity>();
   const [selectedOrderView, setSelectedOrderView] = useState<OrderViewDto>();
+  const [selectedMemberView, setSelectedMemberView] = useState<MemberViewDto>();
   const [selectedOrderLoadedScope, setSelectedOrderLoadedScope] = useState<string>();
   const [selectedOrderLoading, setSelectedOrderLoading] = useState(false);
   const [selectedOrderError, setSelectedOrderError] = useState<unknown>();
   const [selectedCorrectionOccupantId, setSelectedCorrectionOccupantId] = useState<string>();
   const [selectedCorrectionRevision, setSelectedCorrectionRevision] = useState<string>();
   const [selectedStayDateAction, setSelectedStayDateAction] = useState<StayDateChangeAction>();
+  const [selectedStayDateMode, setSelectedStayDateMode] = useState<StayDateChangeMode>("DATE_CHANGE");
   const [selectedStayDateRevision, setSelectedStayDateRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
@@ -1483,6 +1536,9 @@ export function InventoryPage() {
   const commandAttemptGuardRef = useRef<RoomStatusCommandAttemptGuard | null>(null);
   if (!commandAttemptGuardRef.current) commandAttemptGuardRef.current = new RoomStatusCommandAttemptGuard();
   const commandAttemptGuard = commandAttemptGuardRef.current;
+  const selectedMemberRequestGuardRef = useRef<SelectedMemberViewRequestGuard | null>(null);
+  if (!selectedMemberRequestGuardRef.current) selectedMemberRequestGuardRef.current = new SelectedMemberViewRequestGuard();
+  const selectedMemberRequestGuard = selectedMemberRequestGuardRef.current;
   const commandRevisionRef = useRef<string | undefined>(undefined);
   const commandQueryKeyRef = useRef<string | undefined>(undefined);
   const refreshedReceiptIdRef = useRef<string | undefined>(undefined);
@@ -1553,7 +1609,38 @@ export function InventoryPage() {
   }, [board?.businessDate, board?.revision, orderPrincipalScope, orderRefreshToken, propertyId, selectedOrderIdentity]);
 
   useEffect(() => {
+    const memberLookup = selectedOrderIdentity
+      && selectedOrderView
+      && selectedOrderLoadedScope === orderPrincipalScope
+      ? selectedOrderMemberLookup(selectedOrderView, propertyId, selectedOrderIdentity.stayId)
+      : undefined;
+    if (!memberLookup) {
+      selectedMemberRequestGuard.invalidate();
+      setSelectedMemberView(undefined);
+      return;
+    }
+
+    const lease = selectedMemberRequestGuard.begin(memberLookup.scope);
+    setSelectedMemberView(undefined);
+    api.member(memberLookup.memberId, propertyId)
+      .then((response) => {
+        selectedMemberRequestGuard.runIfActive(lease, () => {
+          if (response.member.id !== memberLookup.memberId) {
+            setSelectedMemberView(undefined);
+            return;
+          }
+          setSelectedMemberView(response);
+        });
+      })
+      .catch(() => {
+        selectedMemberRequestGuard.runIfActive(lease, () => setSelectedMemberView(undefined));
+      });
+    return () => selectedMemberRequestGuard.invalidate();
+  }, [orderPrincipalScope, propertyId, selectedMemberRequestGuard, selectedOrderIdentity, selectedOrderLoadedScope, selectedOrderView]);
+
+  useEffect(() => {
     setSelectedStayDateAction(undefined);
+    setSelectedStayDateMode("DATE_CHANGE");
     setSelectedStayDateRevision(undefined);
     setCommandDraft((current) => current?.presentation === "STAY_DATES" ? undefined : current);
   }, [selectedOrderIdentity?.orderId, selectedOrderIdentity?.stayId]);
@@ -1584,6 +1671,7 @@ export function InventoryPage() {
     if (!selectedStayDateAction || !selectedStayDateRevision || !board) return;
     if (board.revision === selectedStayDateRevision) return;
     setSelectedStayDateAction(undefined);
+    setSelectedStayDateMode("DATE_CHANGE");
     setSelectedStayDateRevision(undefined);
     setCommandDraft(undefined);
     setActionError(new Error("订单日期或房态已经变化。为避免使用旧数据，原日期表单已关闭；请重新打开后核对。"));
@@ -2458,12 +2546,30 @@ export function InventoryPage() {
     });
   }
 
+  function invalidateSelectedOrderForRoomStatusInspection() {
+    returnedOrderCellFocus.current = undefined;
+    setSelectedOrderIdentity(undefined);
+    setSelectedOrderView(undefined);
+    selectedMemberRequestGuard.invalidate();
+    setSelectedMemberView(undefined);
+    setSelectedOrderLoadedScope(undefined);
+    setSelectedOrderError(undefined);
+    setSelectedOrderLoading(false);
+    setSelectedCorrectionOccupantId(undefined);
+    setSelectedCorrectionRevision(undefined);
+    setSelectedStayDateAction(undefined);
+    setSelectedStayDateMode("DATE_CHANGE");
+    setSelectedStayDateRevision(undefined);
+    setSelectedOrderCommandScope(undefined);
+    setCommandDraft(undefined);
+    setOrderContextOpen(false);
+    setDesktopContextCollapsed(true);
+  }
+
   function inspectUnit(unit: RoomStatusUnitDto) {
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
-    setSelectedOrderIdentity(undefined);
-    setSelectedCorrectionOccupantId(undefined);
-    setOrderContextOpen(false);
+    invalidateSelectedOrderForRoomStatusInspection();
     setSelectedUnitId(unit.id);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
@@ -2525,14 +2631,11 @@ export function InventoryPage() {
     const triggerSelection = selectionFromCells(unit.id, serviceDate, serviceDate);
     captureRoomStatusInteraction(anchor, triggerSelection);
     dispatchView({ type: "SET_SELECTION", selection: triggerSelection });
+    invalidateSelectedOrderForRoomStatusInspection();
     setSelectedUnitId(unit.id);
     setSelectedDayDate(serviceDate);
     setSelectedIntervalId(undefined);
     setQuoteTarget(undefined);
-    if (!orderContextOpen) {
-      setSelectedOrderIdentity(undefined);
-      setSelectedOrderView(undefined);
-    }
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor });
   }
 
@@ -2542,14 +2645,11 @@ export function InventoryPage() {
     const triggerSelection = selectionFromCells(unit.id, serviceDate, serviceDate);
     captureRoomStatusInteraction(anchor, triggerSelection);
     dispatchView({ type: "SET_SELECTION", selection: triggerSelection });
+    invalidateSelectedOrderForRoomStatusInspection();
     setSelectedUnitId(unit.id);
     setSelectedDayDate(serviceDate);
     setSelectedIntervalId(interval.id);
     setQuoteTarget(undefined);
-    if (!orderContextOpen) {
-      setSelectedOrderIdentity(undefined);
-      setSelectedOrderView(undefined);
-    }
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, intervalId: interval.id });
   }
 
@@ -2567,14 +2667,10 @@ export function InventoryPage() {
     setActionError(undefined);
     captureRoomStatusInteraction(anchor, selection);
     dispatchView({ type: "SET_SELECTION", selection });
+    invalidateSelectedOrderForRoomStatusInspection();
     setSelectedUnitId(unit.id);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
-    setSelectedOrderIdentity(undefined);
-    setSelectedOrderView(undefined);
-    setSelectedCorrectionOccupantId(undefined);
-    setOrderContextOpen(false);
-    setDesktopContextCollapsed(true);
     setQuoteTarget(undefined);
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, selection });
   }
@@ -2583,11 +2679,7 @@ export function InventoryPage() {
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
-    setSelectedOrderIdentity(undefined);
-    setSelectedOrderView(undefined);
-    setSelectedCorrectionOccupantId(undefined);
-    setOrderContextOpen(false);
-    setDesktopContextCollapsed(true);
+    invalidateSelectedOrderForRoomStatusInspection();
     setQuoteTarget(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
@@ -2600,10 +2692,7 @@ export function InventoryPage() {
   function selectRange(selection: RoomStatusSelection | null) {
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
-    setSelectedOrderIdentity(undefined);
-    setSelectedOrderView(undefined);
-    setSelectedCorrectionOccupantId(undefined);
-    setOrderContextOpen(false);
+    invalidateSelectedOrderForRoomStatusInspection();
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
       setDesktopContextCollapsed(false);
@@ -2679,7 +2768,7 @@ export function InventoryPage() {
     if (!started) setSelectedOrderCommandScope(undefined);
   }
 
-  function startSelectedOrderDateAction(commandType: StayDateChangeAction) {
+  function startSelectedOrderDateAction(commandType: StayDateChangeAction, mode: StayDateChangeMode = "DATE_CHANGE") {
     setActionError(undefined);
     const view = authorizedSelectedOrderView;
     const identity = selectedOrderIdentity;
@@ -2701,6 +2790,7 @@ export function InventoryPage() {
       return;
     }
     setCommandDraft(undefined);
+    setSelectedStayDateMode(mode);
     setSelectedStayDateAction(commandType);
     setSelectedStayDateRevision(boardRef.current?.revision);
     setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
@@ -2956,9 +3046,14 @@ export function InventoryPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
-    if (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY") {
+    if (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY") {
       if (authorizedSelectedOrderView) {
         setSelectedStayDateAction(request.commandType);
+        setSelectedStayDateMode(
+          authorizedSelectedOrderView.order.status === "CHECKED_IN"
+            ? "ADJUST_DEPARTURE"
+            : "DATE_CHANGE"
+        );
         setSelectedStayDateRevision(boardRef.current?.revision);
       }
       return;
@@ -3047,11 +3142,13 @@ export function InventoryPage() {
       <RoomStatusOrderContext
         view={authorizedSelectedOrderView}
         units={meta.inventoryUnits}
+        {...(selectedMemberView ? { memberView: selectedMemberView } : {})}
         loading={false}
         writeBlocked={selectedOrderLoading || commandsBlocked || authorizedSelectedOrderView.accessLevel !== "WRITE"}
         primaryActionPlacement={isMobile || !useInlineOrderContext ? "DRAWER_FOOTER" : "CONTENT"}
         onClose={closeSelectedOrderContext}
         onOpenOrder={openSelectedOrder}
+        onOpenMember={({ memberId, contractId }) => navigate(`/members?memberId=${encodeURIComponent(memberId)}&contractId=${encodeURIComponent(contractId)}`)}
         onFulfillmentAction={startSelectedOrderFulfillment}
         onDateAction={startSelectedOrderDateAction}
         onCorrectOccupant={(occupant) => {
@@ -3381,6 +3478,7 @@ export function InventoryPage() {
       /> : null}
       {authorizedSelectedOrderView && selectedStayDateAction ? <StayDateChangeDrawer
         action={selectedStayDateAction}
+        mode={selectedStayDateMode}
         view={authorizedSelectedOrderView}
         inventoryUnitLabel={[...new Set(authorizedSelectedOrderView.effectiveArrangement.intervals.map((interval) => {
           const unit = meta.inventoryUnits.find((candidate) => candidate.id === interval.inventoryUnitId);
@@ -3390,6 +3488,7 @@ export function InventoryPage() {
         {...(commandDraft?.commandType === selectedStayDateAction ? { draft: commandDraft } : {})}
         onClose={() => {
           setSelectedStayDateAction(undefined);
+          setSelectedStayDateMode("DATE_CHANGE");
           setSelectedStayDateRevision(undefined);
           setSelectedOrderCommandScope(undefined);
           setCommandDraft(undefined);
@@ -3397,8 +3496,13 @@ export function InventoryPage() {
         }}
         onSubmit={(request) => {
           const identity = selectedOrderIdentity;
-          if (!identity || commandsBlocked || request.commandType !== selectedStayDateAction) return;
+          if (!identity || commandsBlocked || !selectedStayDateRequestIsCompatible(
+            selectedStayDateAction,
+            selectedStayDateMode,
+            request.commandType
+          )) return;
           setSelectedStayDateAction(undefined);
+          setSelectedStayDateMode("DATE_CHANGE");
           setSelectedStayDateRevision(undefined);
           setCommandDraft(undefined);
           setRecoveryDialogOpen(false);
@@ -3416,6 +3520,7 @@ export function InventoryPage() {
           setCommandNotice(message);
           setCommandDraft(undefined);
           setSelectedStayDateAction(undefined);
+          setSelectedStayDateMode("DATE_CHANGE");
           setSelectedStayDateRevision(undefined);
           if (command.commandType === "LOCK_MAINTENANCE") {
             setMaintenanceTarget(undefined);

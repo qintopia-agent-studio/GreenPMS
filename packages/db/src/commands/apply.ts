@@ -1037,9 +1037,128 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     };
   }
 
-  if (["SHORTEN_STAY", "MOVE_UNIT"].includes(options.commandType)) {
+  if (options.commandType === "SHORTEN_STAY") {
+    if (requireString(effect, "operation") !== "SHORTEN_STAY") {
+      throw new DomainError("INTERNAL_ERROR", "Shorten stay effect has an invalid operation", 500);
+    }
+    const completionMode = requireString(effect, "completionMode");
+    if (completionMode !== "SHORTEN_IN_HOUSE" && completionMode !== "EARLY_CHECK_OUT") {
+      throw new DomainError("INTERNAL_ERROR", "Shorten stay effect has an invalid completion mode", 500);
+    }
+    const businessDate = requireString(effect, "businessDate");
+    const after = nestedObject(effect, "after");
+    const arrivalDate = requireString(after, "arrivalDate");
+    const departureDate = requireString(after, "departureDate");
+    if ((completionMode === "EARLY_CHECK_OUT" && departureDate !== businessDate)
+      || (completionMode === "SHORTEN_IN_HOUSE" && departureDate <= businessDate)) {
+      throw new DomainError("INTERNAL_ERROR", "Shorten stay effect completion mode does not match its business date", 500);
+    }
+    const stayTimeline = stayTimelineFromEffect(effect);
+    const currentTail = trailingTimelineRun(stayTimeline);
+    const inventoryUnitId = currentTail.inventoryUnitId;
+    const inventoryChange = nestedObject(effect, "inventoryChange");
+    const releasedDates = stringArray(inventoryChange, "releasedDates");
+    const pricing = pricingSnapshot(effect, {
+      stayType: context.order.stay_type,
+      memberId: context.order.member_id,
+      memberContractId: context.order.member_contract_id
+    });
+    const arrangementAmendmentId = await appendAmendment(trx, {
+      orderId, sequence: context.order.version + 1, amendmentType: "SHORTEN_STAY",
+      reasonCode: options.reason.code, reasonNote: options.reason.note, priorVersion: context.order.version, payload: effect,
+      commandId: options.commandId
+    });
+    const segmentId = newId("segment");
+    await trx.insertInto("stay_segments").values({
+      id: segmentId, stay_id: context.stay.id, sequence: context.currentSegment.sequence + 1,
+      inventory_unit_id: inventoryUnitId, arrival_date: currentTail.arrivalDate, departure_date: departureDate,
+      segment_type: "SHORTEN_STAY", supersedes_segment_id: context.currentSegment.id, amendment_id: arrangementAmendmentId
+    }).execute();
+    const revisionId = await insertRevision(trx, {
+      orderId, revisionNo: context.revision.revisionNo + 1, amendmentId: arrangementAmendmentId,
+      policyVersionId: context.order.pricing_policy_version_id,
+      arrivalDate, departureDate, pricing
+    });
+    const releasedClaimIds = completionMode === "EARLY_CHECK_OUT"
+      ? await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds)
+      : await releaseInventoryClaimsOnDates(trx, "ORDER_SEGMENT", context.segmentIds, releasedDates);
+    let checkoutAmendmentId: string | null = null;
+    let fulfillmentTiming: { effectiveDate: string; recordedBusinessDate: string; recordingMode: "ON_SCHEDULE" } | null = null;
+    if (completionMode === "EARLY_CHECK_OUT") {
+      const checkoutEffect = {
+        orderId,
+        fromStatus: "CHECKED_IN",
+        toStatus: "CHECKED_OUT",
+        inventoryUnitId,
+        businessDate: departureDate,
+        effectiveDate: departureDate,
+        recordingMode: "ON_SCHEDULE"
+      };
+      checkoutAmendmentId = await appendAmendment(trx, {
+        orderId,
+        sequence: context.order.version + 2,
+        amendmentType: "CHECK_OUT",
+        reasonCode: options.reason.code,
+        reasonNote: options.reason.note,
+        priorVersion: context.order.version + 1,
+        payload: checkoutEffect,
+        commandId: options.commandId
+      });
+      fulfillmentTiming = {
+        effectiveDate: departureDate,
+        recordedBusinessDate: departureDate,
+        recordingMode: "ON_SCHEDULE"
+      };
+      await trx.updateTable("stays").set({ status: "COMPLETED" }).where("id", "=", context.stay.id).execute();
+    }
+    await trx.updateTable("orders").set({
+      departure_date: departureDate,
+      current_revision_id: revisionId,
+      ...(completionMode === "EARLY_CHECK_OUT" ? { status: "CHECKED_OUT" } : {}),
+      version: context.order.version + (completionMode === "EARLY_CHECK_OUT" ? 2 : 1),
+      updated_at: new Date()
+    }).where("id", "=", orderId).execute();
+    const before = nestedObject(effect, "before");
+    const pricingDecision = nestedObject(effect, "pricingDecision");
+    const entitlementSummary = nestedObject(effect, "entitlementSummary");
+    const fundsSummary = nestedObject(effect, "fundsSummary");
+    const refundReferenceAmount = moneyMinor(effect.refundReferenceAmount, "refundReferenceAmount");
+    return {
+      persistedResult: {
+        orderId,
+        stayId: context.stay.id,
+        arrangementAmendmentId,
+        checkoutAmendmentId,
+        staySegmentId: segmentId,
+        pricingRevisionId: revisionId,
+        completionMode,
+        arrivalDate,
+        departureDate,
+        before,
+        after,
+        pricingDecision,
+        inventoryChange,
+        entitlementSummary,
+        fundsSummary,
+        refundReferenceAmount,
+        fulfillmentTiming
+      },
+      resourceRefs: [...new Set([
+        orderId,
+        context.stay.id,
+        arrangementAmendmentId,
+        ...(checkoutAmendmentId ? [checkoutAmendmentId] : []),
+        segmentId,
+        revisionId,
+        ...releasedClaimIds
+      ])],
+      factRefs: []
+    };
+  }
+
+  if (options.commandType === "MOVE_UNIT") {
     const amendmentId = await appendAmendment(trx, {
-      orderId, sequence: context.order.version + 1, amendmentType: options.commandType,
+      orderId, sequence: context.order.version + 1, amendmentType: "MOVE_UNIT",
       reasonCode: options.reason.code, reasonNote: options.reason.note, priorVersion: context.order.version, payload: effect,
       commandId: options.commandId
     });
@@ -1052,42 +1171,24 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const stayTimeline = stayTimelineFromEffect(effect);
     const currentTail = trailingTimelineRun(stayTimeline);
     const unitId = currentTail.inventoryUnitId;
-    let departureDate = context.order.departure_date;
-    const segmentArrival = currentTail.arrivalDate;
-    let segmentType: string = options.commandType;
-    const coverageIds: string[] = [];
-    const coverageFactIds: string[] = [];
-
-    if (options.commandType === "SHORTEN_STAY") {
-      departureDate = requireString(nestedObject(effect, "after"), "departureDate");
-    }
-    if (options.commandType === "MOVE_UNIT") segmentType = "MOVE";
-
+    const departureDate = context.order.departure_date;
     await trx.insertInto("stay_segments").values({
       id: segmentId, stay_id: context.stay.id, sequence: context.currentSegment.sequence + 1,
-      inventory_unit_id: unitId, arrival_date: segmentArrival, departure_date: departureDate,
-      segment_type: segmentType, supersedes_segment_id: context.currentSegment.id, amendment_id: amendmentId
+      inventory_unit_id: unitId, arrival_date: currentTail.arrivalDate, departure_date: departureDate,
+      segment_type: "MOVE", supersedes_segment_id: context.currentSegment.id, amendment_id: amendmentId
     }).execute();
-
-    if (options.commandType === "SHORTEN_STAY") {
-      await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds, departureDate);
-      const released = await releaseCoverage(trx, orderId, options.commandId, { fromDate: departureDate, reholdCoverageSet: pricing.coverageSet });
-      coverageIds.push(...released.coverageIds);
-      coverageFactIds.push(...released.factIds);
-    } else {
-      const effectiveDate = requireString(effect, "effectiveDate");
-      await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds, effectiveDate);
-      const released = await releaseCoverage(trx, orderId, options.commandId, { fromDate: effectiveDate, reholdCoverageSet: pricing.coverageSet });
-      coverageIds.push(...released.coverageIds);
-      coverageFactIds.push(...released.factIds);
-      const unit = await loadInventoryUnit(trx, propertyId, unitId);
-      await createInventoryClaims(trx, { propertyId, unit, dates: enumerateServiceDates(effectiveDate, departureDate), sourceType: "ORDER_SEGMENT", sourceId: segmentId });
-    }
+    const effectiveDate = requireString(effect, "effectiveDate");
+    await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds, effectiveDate);
+    const released = await releaseCoverage(trx, orderId, options.commandId, { fromDate: effectiveDate, reholdCoverageSet: pricing.coverageSet });
+    const unit = await loadInventoryUnit(trx, propertyId, unitId);
+    await createInventoryClaims(trx, { propertyId, unit, dates: enumerateServiceDates(effectiveDate, departureDate), sourceType: "ORDER_SEGMENT", sourceId: segmentId });
     const revisionId = await insertRevision(trx, {
       orderId, revisionNo: context.revision.revisionNo + 1, amendmentId,
       policyVersionId: context.order.pricing_policy_version_id,
       arrivalDate: context.order.arrival_date, departureDate, pricing
     });
+    const coverageIds = [...released.coverageIds];
+    const coverageFactIds = [...released.factIds];
     if (context.order.member_id || context.order.member_contract_id) {
       const held = await holdCoverage(trx, { orderId, contractId: context.order.member_contract_id ?? "", ...(context.order.member_id ? { memberId: context.order.member_id } : {}), inventoryUnitId: unitId, revisionId, coverageSet: pricing.coverageSet, commandId: options.commandId });
       coverageIds.push(...held.coverageIds);
@@ -1100,8 +1201,9 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       }
     }
     await trx.updateTable("orders").set({
-      departure_date: departureDate, current_revision_id: revisionId,
-      version: context.order.version + 1, updated_at: new Date()
+      current_revision_id: revisionId,
+      version: context.order.version + 1,
+      updated_at: new Date()
     }).where("id", "=", orderId).execute();
     return {
       persistedResult: { orderId, amendmentId, staySegmentId: segmentId, pricingRevisionId: revisionId },

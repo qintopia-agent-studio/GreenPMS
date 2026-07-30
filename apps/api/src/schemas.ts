@@ -72,6 +72,10 @@ export const Money = strictObject({
   currency: Type.String({ minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" }),
   minorUnits: SafeInteger
 });
+export const NonNegativeMoney = strictObject({
+  currency: Type.String({ minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" }),
+  minorUnits: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
+});
 export const CoverageItem = strictObject({
   serviceDate: LocalDate,
   inventoryUnitId: Id,
@@ -108,7 +112,8 @@ export const CashLine = Type.Union([NightlyCashLine, StayTotalCashLine]);
 export const AmountSummarySchema = strictObject({
   currentContractAmount: Money,
   netRecordedCollection: Money,
-  collectionDifference: Money
+  collectionDifference: Money,
+  refundReferenceAmount: NonNegativeMoney
 });
 export const CommandReasonSchema = strictObject({
   code: Type.String({ minLength: 1, maxLength: 80 }),
@@ -300,7 +305,13 @@ export const CommandEnvelopeSchema = Type.Union([
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note)
   })),
-  commandEnvelope("SHORTEN_STAY", strictObject({ ...OrderInput, newDepartureDate: LocalDate })),
+  commandEnvelope("SHORTEN_STAY", strictObject({
+    ...OrderInput,
+    newDepartureDate: LocalDate,
+    targetCurrentContractAmountMinor: Type.Optional(StayChangeTargetAmount),
+    channelPriceDifferenceReason: Type.Optional(Note),
+    manualPriceAdjustmentReason: Type.Optional(Note)
+  })),
   commandEnvelope("MOVE_UNIT", strictObject({ ...OrderInput, newInventoryUnitId: Id, effectiveDate: LocalDate })),
   commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: NonNegativeWholeYuanAmount })),
   commandEnvelope("CANCEL_ORDER", strictObject(OrderInput)),
@@ -441,6 +452,16 @@ const StayChangeEntitlementDiffSchema = strictObject({
 const StayChangeFundsSummarySchema = strictObject({
   netRecordedCollection: Money,
   collectionDifference: Money
+});
+const ShortenStayFundsSummarySchema = strictObject({
+  netRecordedCollection: Money,
+  collectionDifference: Money,
+  factCount: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
+});
+const ShortenStayEntitlementSummarySchema = strictObject({
+  currentConsumedCoverageDates: Type.Array(LocalDate),
+  retainedHistoricalConsumedCoverageDates: Type.Array(LocalDate),
+  ledgerWriteCount: Type.Literal(0)
 });
 
 export const CommandEffectSchema = Type.Union([
@@ -608,15 +629,30 @@ export const CommandEffectSchema = Type.Union([
     fundsSummary: StayChangeFundsSummarySchema
   }),
   strictObject({
+    operation: Type.Literal("SHORTEN_STAY"),
     orderId: Id,
+    stayId: Id,
     inventoryUnitId: Id,
-    before: strictObject({ departureDate: LocalDate, currentContractAmount: Money }),
-    after: strictObject({
+    businessDate: LocalDate,
+    completionMode: Type.Union([Type.Literal("SHORTEN_IN_HOUSE"), Type.Literal("EARLY_CHECK_OUT")]),
+    before: strictObject({
+      arrivalDate: LocalDate,
       departureDate: LocalDate,
-      nights: Type.Optional(Type.Integer({ minimum: 1 })),
+      nights: Type.Integer({ minimum: 1, maximum: 366 }),
+      currentContractAmount: Money
+    }),
+    after: strictObject({
+      arrivalDate: LocalDate,
+      departureDate: LocalDate,
+      nights: Type.Integer({ minimum: 1, maximum: 366 }),
       stayTimeline: StayTimelineSchema,
       pricing: PricingResultSchema
-    })
+    }),
+    pricingDecision: CreateOrderPricingDecisionSchema,
+    inventoryChange: StayChangeDateDiffSchema,
+    entitlementSummary: ShortenStayEntitlementSummarySchema,
+    fundsSummary: ShortenStayFundsSummarySchema,
+    refundReferenceAmount: NonNegativeMoney
   }),
   strictObject({
     orderId: Id,
@@ -774,6 +810,40 @@ const StayChangeResultSchema = strictObject({
   entitlementChange: StayChangeEntitlementDiffSchema,
   fundsSummary: StayChangeFundsSummarySchema
 });
+const ShortenStayResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  arrangementAmendmentId: Id,
+  checkoutAmendmentId: nullable(Id),
+  staySegmentId: Id,
+  pricingRevisionId: Id,
+  completionMode: Type.Union([Type.Literal("SHORTEN_IN_HOUSE"), Type.Literal("EARLY_CHECK_OUT")]),
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementSummary: ShortenStayEntitlementSummarySchema,
+  fundsSummary: ShortenStayFundsSummarySchema,
+  refundReferenceAmount: NonNegativeMoney,
+  fulfillmentTiming: nullable(strictObject({
+    effectiveDate: LocalDate,
+    recordedBusinessDate: LocalDate,
+    recordingMode: Type.Literal("ON_SCHEDULE")
+  }))
+});
 const MoveUnitResultSchema = strictObject({
   orderId: Id,
   amendmentId: Id,
@@ -860,6 +930,7 @@ export const ExecutedCommandResultSchema = Type.Union([
   TokenRotationResultSchema,
   TokenRevocationResultSchema,
   StayChangeResultSchema,
+  ShortenStayResultSchema,
   MoveUnitResultSchema,
   RepriceResultSchema,
   CoverageRefreshResultSchema,
@@ -1429,6 +1500,7 @@ const OrderArrangementHistoryItemSchema = strictObject({
   fundsSummary: strictObject({
     netRecordedCollection: Money,
     collectionDifference: Money,
+    refundReferenceAmount: NonNegativeMoney,
     factCount: Type.Integer({ minimum: 0 })
   })
 });

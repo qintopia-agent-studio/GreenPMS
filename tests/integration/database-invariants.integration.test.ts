@@ -665,7 +665,8 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       "019_member_stay_booking_channel_rules.sql",
       "020_whole_room_occupants.sql",
       "021_defer_internal_use.sql",
-      "026_stage9_stay_change_guards.sql"
+      "026_stage9_stay_change_guards.sql",
+      "027_stage10_stay_shortening_guards.sql"
     ]) {
       await db.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
       try {
@@ -674,6 +675,54 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
         await db.insertInto("schema_migrations").values({ name: migrationName }).execute();
       }
     }
+    expect(await databaseReady(db)).toBe(true);
+
+    const rollbackProbe = new Error("rollback readiness object probe");
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`DROP TRIGGER amendments_stage10_validate_combination ON amendments`.execute(trx);
+      expect(await databaseReady(trx)).toBe(false);
+      throw rollbackProbe;
+    })).rejects.toBe(rollbackProbe);
+    expect(await databaseReady(db)).toBe(true);
+
+    for (const trigger of [
+      { name: "pricing_revisions_stage10_validate", table: "pricing_revisions" },
+      { name: "amendments_stage10_reject_checkout_bypass", table: "amendments" },
+      { name: "entitlement_ledger_stage10_reject_write", table: "entitlement_ledger" }
+    ] as const) {
+      await expect(db.transaction().execute(async (trx) => {
+        await sql.raw(`DROP TRIGGER ${trigger.name} ON ${trigger.table}`).execute(trx);
+        expect(await databaseReady(trx), trigger.name).toBe(false);
+        throw rollbackProbe;
+      })).rejects.toBe(rollbackProbe);
+      expect(await databaseReady(db), trigger.name).toBe(true);
+    }
+
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`
+        CREATE FUNCTION qintopia_test_stage10_noop_trigger() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+      await sql`DROP TRIGGER pricing_revisions_stage10_validate ON pricing_revisions`.execute(trx);
+      await sql`
+        CREATE TRIGGER pricing_revisions_stage10_validate
+        BEFORE INSERT ON pricing_revisions
+        FOR EACH ROW EXECUTE FUNCTION qintopia_test_stage10_noop_trigger()
+      `.execute(trx);
+      expect(await databaseReady(trx)).toBe(false);
+      throw rollbackProbe;
+    })).rejects.toBe(rollbackProbe);
+    expect(await databaseReady(db)).toBe(true);
+
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`ALTER FUNCTION qintopia_assert_stage10_shorten_combination(text) RENAME TO qintopia_assert_stage10_shorten_combination_missing`.execute(trx);
+      expect(await databaseReady(trx)).toBe(false);
+      throw rollbackProbe;
+    })).rejects.toBe(rollbackProbe);
     expect(await databaseReady(db)).toBe(true);
   });
 });
