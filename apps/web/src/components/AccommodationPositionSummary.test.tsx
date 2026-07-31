@@ -21,7 +21,7 @@ function view(state: "NOT_CHECKED_IN" | "IN_HOUSE", businessDate: string) {
         { inventoryUnitId: "room_103", arrivalDate: "2026-08-04", departureDate: "2026-08-05" }
       ]
     },
-    fulfillment: { state, checkIn: null, checkOut: null }
+    fulfillment: { state, checkIn: null, checkOut: null, checkInRevocation: null }
   } as never;
 }
 

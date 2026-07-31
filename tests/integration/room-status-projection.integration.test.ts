@@ -1607,7 +1607,7 @@ describe("PostgreSQL room-status projection", () => {
     expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
   });
 
-  it("enforces arrival and early-checkout gates while recording overdue check-out against the planned departure date", async () => {
+  it("enforces future-arrival and early-checkout gates while late-recording overdue fulfillment", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const futureArrivalDate = shiftLocalDate(businessDate, 1);
     const futureDepartureDate = shiftLocalDate(businessDate, 2);
@@ -1647,17 +1647,24 @@ describe("PostgreSQL room-status projection", () => {
     });
     const overdueArrivalOrderId = overdueArrival.result!.orderId as string;
     expect((await getOrderView(db, overdueArrivalOrderId)).allowedActions.find((action) => action.code === "CHECK_IN"))
-      .toEqual({ code: "CHECK_IN", enabled: false, disabledReason: "ARRIVAL_DATE_PASSED" });
-    const overdueArrivalBefore = await orderFulfillmentState(overdueArrivalOrderId);
-    await expect(prepare({
+      .toEqual({ code: "CHECK_IN", enabled: true, disabledReason: null });
+    const overdueArrivalPrepared = await prepare({
       commandType: "CHECK_IN",
       input: { propertyId: demo.propertyId, orderId: overdueArrivalOrderId }
-    }, "overdue-check-in-rejected")).rejects.toMatchObject({
-      code: "INVALID_ORDER_STATE",
-      message: "已超过计划入住日，不能办理普通入住",
-      details: { businessDate, arrivalDate: overdueArrivalDate }
+    }, "overdue-check-in-late-recorded");
+    expect(overdueArrivalPrepared.preview.effect).toMatchObject({
+      businessDate,
+      effectiveDate: overdueArrivalDate,
+      recordingMode: "LATE_RECORDED"
     });
-    expect(await orderFulfillmentState(overdueArrivalOrderId)).toEqual(overdueArrivalBefore);
+    const overdueArrivalConfirmed = await confirmPrepared(overdueArrivalPrepared, "overdue-check-in-late-recorded");
+    expect(overdueArrivalConfirmed.receipt.result).toMatchObject({
+      fulfillmentTiming: {
+        effectiveDate: overdueArrivalDate,
+        recordedBusinessDate: businessDate,
+        recordingMode: "LATE_RECORDED"
+      }
+    });
 
     const earlyDepartureDate = shiftLocalDate(businessDate, 1);
     const earlyCheckout = await createOrder({

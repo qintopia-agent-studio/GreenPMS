@@ -489,9 +489,10 @@ export interface CommandRequest {
   input: Record<string, unknown>;
   title: string;
   description: string;
-  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
   recoveryEffectHash?: string;
   inventoryUnitLabels?: Record<string, string>;
+  orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string };
   initialReason?: CommandReason;
 }
 

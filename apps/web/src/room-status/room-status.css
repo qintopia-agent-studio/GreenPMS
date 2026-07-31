@@ -1517,7 +1517,7 @@
   }
 }
 
-@media (max-width: 575px), (max-width: 767px) and (max-height: 500px) {
+@media (max-width: 767px) {
   .room-status-grid-section,
   .room-status-desktop-workspace > .room-status-grid-section {
     display: none;
@@ -1562,6 +1562,63 @@
     min-height: 44px;
     flex: 0 0 auto;
     padding: 7px 10px;
+  }
+
+  .room-status-mobile-range {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 12px;
+    align-items: center;
+    border-top: 1px solid var(--border);
+    padding: 10px 14px;
+    background: var(--surface-muted);
+  }
+
+  .room-status-mobile-range > div:first-child {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  .room-status-mobile-range span {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .room-status-mobile-range strong {
+    overflow: hidden;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .room-status-mobile-range-picker {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding-top: 6px;
+  }
+
+  .room-status-mobile-range-picker label {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .room-status-mobile-range-picker input {
+    min-width: 0;
+    min-height: 40px;
+    padding: 6px 8px;
+  }
+
+  .room-status-mobile-range-picker .room-status-text-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+    min-height: 36px;
   }
 
   .room-status-mobile-pagination {
@@ -1609,8 +1666,47 @@
   }
 
   .room-status-mobile-occupancies h3 {
-    margin: 0 0 8px;
+    margin: 0;
     font-size: 15px;
+  }
+
+  .room-status-mobile-occupancies-title {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  .room-status-mobile-occupancies-title > div {
+    display: grid;
+    min-width: 0;
+    flex: 1 1 auto;
+    gap: 2px;
+  }
+
+  .room-status-mobile-occupancies-title > div > span {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .room-status-mobile-occupancies-title .room-status-icon-button {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 4px;
+  }
+
+  .room-status-mobile-occupancies-title .room-status-text-button {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 4px 6px;
+    font-size: 12px;
+  }
+
+  .room-status-mobile-occupancies-explanation {
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
   }
 
   .room-status-mobile-occupancies ul {

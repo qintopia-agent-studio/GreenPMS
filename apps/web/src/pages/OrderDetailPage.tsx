@@ -30,6 +30,10 @@ import { AccommodationPositionSummary } from "../components/AccommodationPositio
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { MoveUnitDrawer } from "../components/MoveUnitDrawer";
 import {
+  OrderLifecycleActionDrawer,
+  type OrderLifecycleAction
+} from "../components/OrderLifecycleActionDrawer";
+import {
   StayDateChangeDrawer,
   stayDateChangeActionState,
   type StayDateChangeAction,
@@ -220,8 +224,9 @@ export function occupantSnapshotEntries(snapshot: Pick<OrderOccupant, "nickname"
 
 export function fulfillmentResultLabel(record: OrderFulfillmentRecordDto): string {
   if (record.recordingMode === "LEGACY_UNCLASSIFIED") return "历史记录未分类";
-  if (record.recordingMode === "LATE_RECORDED") return "迟录退房";
-  return record.type === "CHECK_IN" ? "按计划办理入住" : "按计划办理退房";
+  if (record.recordingMode === "LATE_RECORDED") return record.type === "CHECK_IN" ? "迟录入住" : "迟录退房";
+  if (record.type === "CHECK_IN") return "按计划办理入住";
+  return record.type === "REVOKE_CHECK_IN" ? "撤销误办入住" : "按计划办理退房";
 }
 
 export function effectiveArrangementTitle(presentation: OrderEffectiveArrangementPresentation): string {
@@ -230,6 +235,7 @@ export function effectiveArrangementTitle(presentation: OrderEffectiveArrangemen
     case "LAST": return "最后住宿安排";
     case "BEFORE_CANCELLATION": return "取消前安排";
     case "NO_SHOW_ORDER": return "未到订单安排";
+    case "BEFORE_CHECK_IN_REVOCATION": return "撤销入住前安排";
   }
 }
 
@@ -351,6 +357,9 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
       <div className="amendment-list">
         <FulfillmentResult type="CHECK_IN" record={view.fulfillment.checkIn} />
         <FulfillmentResult type="CHECK_OUT" record={view.fulfillment.checkOut} />
+        {view.fulfillment.checkInRevocation
+          ? <FulfillmentResult type="REVOKE_CHECK_IN" record={view.fulfillment.checkInRevocation} />
+          : null}
       </div>
     </section>
 
@@ -402,18 +411,20 @@ export function OrderAmountStrip({ amounts, pricingRevision, bookingChannelCode 
 }
 
 function FulfillmentResult({ type, record }: {
-  type: "CHECK_IN" | "CHECK_OUT";
+  type: "CHECK_IN" | "CHECK_OUT" | "REVOKE_CHECK_IN";
   record: OrderFulfillmentRecordDto | null;
 }) {
   const isCheckIn = type === "CHECK_IN";
+  const isRevocation = type === "REVOKE_CHECK_IN";
+  const heading = isCheckIn ? "入住结果" : isRevocation ? "撤销入住结果" : "退房结果";
   return (
-    <article data-testid={isCheckIn ? "check-in-result" : "check-out-result"}>
+    <article data-testid={isCheckIn ? "check-in-result" : isRevocation ? "check-in-revocation-result" : "check-out-result"}>
       <div>
-        <strong>{isCheckIn ? "入住结果" : "退房结果"}</strong>
-        <span>{record ? fulfillmentResultLabel(record) : isCheckIn ? "未办理入住" : "未办理退房"}</span>
+        <strong>{heading}</strong>
+        <span>{record ? fulfillmentResultLabel(record) : `未办理${isCheckIn ? "入住" : isRevocation ? "撤销入住" : "退房"}`}</span>
       </div>
       {record ? <dl className="detail-list">
-        <div><dt>{isCheckIn ? "计划入住日" : "计划退房日"}</dt><dd>{formatDate(record.plannedBusinessDate)}</dd></div>
+        <div><dt>{isCheckIn || isRevocation ? "计划入住日" : "计划退房日"}</dt><dd>{formatDate(record.plannedBusinessDate)}</dd></div>
         <div><dt>办理营业日</dt><dd>{record.recordedBusinessDate ? formatDate(record.recordedBusinessDate) : "历史未记录"}</dd></div>
         <div><dt>记录时间</dt><dd>{formatDateTime(record.recordedAt)}</dd></div>
         <div><dt>操作人</dt><dd>{record.actor?.displayName ?? "历史未记录"}</dd></div>
@@ -565,6 +576,7 @@ export function OrderDetailPage() {
   const [formAction, setFormAction] = useState<FormAction>();
   const [stayDateAction, setStayDateAction] = useState<StayDateChangeAction>();
   const [movingUnit, setMovingUnit] = useState(false);
+  const [lifecycleAction, setLifecycleAction] = useState<OrderLifecycleAction>();
   const [stayDateMode, setStayDateMode] = useState<StayDateChangeMode>("DATE_CHANGE");
   const [correctingOccupant, setCorrectingOccupant] = useState<OrderOccupant>();
   const [initialFactId, setInitialFactId] = useState<string>();
@@ -578,7 +590,7 @@ export function OrderDetailPage() {
   const editorIsOpenRef = useRef(false);
   const focusedActionKeyRef = useRef<string | undefined>(undefined);
 
-  editorIsOpenRef.current = Boolean(formAction || stayDateAction || movingUnit || correctingOccupant);
+  editorIsOpenRef.current = Boolean(formAction || stayDateAction || movingUnit || correctingOccupant || lifecycleAction);
 
   const pendingRecovery = commandRecovery.pending;
   const orderActionsBlocked = commandRecovery.blocked;
@@ -593,6 +605,7 @@ export function OrderDetailPage() {
     setFormAction(undefined);
     setStayDateAction(undefined);
     setMovingUnit(false);
+    setLifecycleAction(undefined);
     setStayDateMode("DATE_CHANGE");
     setCorrectingOccupant(undefined);
     setInitialFactId(undefined);
@@ -635,6 +648,7 @@ export function OrderDetailPage() {
           setFormAction(undefined);
           setStayDateAction(undefined);
           setMovingUnit(false);
+          setLifecycleAction(undefined);
           setCorrectingOccupant(undefined);
           setInitialFactId(undefined);
           setCommandDraft(undefined);
@@ -702,6 +716,12 @@ export function OrderDetailPage() {
     });
   }
 
+  function openLifecycleAction(action: OrderLifecycleAction) {
+    if (orderActionsBlocked || !enabledActions.has(action)) return;
+    setCommandDraft(undefined);
+    setLifecycleAction(action);
+  }
+
   function openRecoveryDialog() {
     if (!pendingRecovery) return;
     setRecoveryDialogOpen(true);
@@ -723,6 +743,10 @@ export function OrderDetailPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
+    if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN") {
+      setLifecycleAction(request.commandType);
+      return;
+    }
     if (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY") {
       setStayDateAction(request.commandType);
       setStayDateMode(viewRef.current?.order.status === "CHECKED_IN" ? "ADJUST_DEPARTURE" : "DATE_CHANGE");
@@ -801,9 +825,10 @@ export function OrderDetailPage() {
             {enabledActions.has("REPRICE_ORDER") ? <button className="button button-secondary" type="button" onClick={() => openForm("REPRICE_ORDER")} disabled={orderActionsBlocked} data-testid="reprice-order" data-order-action="REPRICE_ORDER"><CircleDollarSign aria-hidden="true" size={17} />调整金额</button> : null}
             {enabledActions.has("CHECK_IN") ? <button className="button button-primary" type="button" onClick={() => directCommand("CHECK_IN", "办理入住", "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。") } disabled={orderActionsBlocked} data-testid="check-in" data-order-action="CHECK_IN"><LogIn aria-hidden="true" size={17} />入住</button> : null}
             {enabledActions.has("CHECK_OUT") ? <button className="button button-primary" type="button" onClick={() => directCommand("CHECK_OUT", "办理退房", "核对后将住宿状态更新为已退房并释放后续住宿库存；退房不会重复核销会员权益。") } disabled={orderActionsBlocked} data-testid="check-out" data-order-action="CHECK_OUT"><LogOut aria-hidden="true" size={17} />退房</button> : null}
-            {enabledActions.has("CANCEL_ORDER") || enabledActions.has("MARK_NO_SHOW") ? <div className="action-separator" aria-hidden="true" /> : null}
-            {enabledActions.has("CANCEL_ORDER") ? <button className="icon-button danger-icon" type="button" onClick={() => directCommand("CANCEL_ORDER", "取消订单", "确认取消订单并释放服务端库存与会员覆盖。") } disabled={orderActionsBlocked} aria-label="取消订单" title="取消订单" data-order-action="CANCEL_ORDER"><XCircle aria-hidden="true" size={18} /></button> : null}
-            {enabledActions.has("MARK_NO_SHOW") ? <button className="icon-button danger-icon" type="button" onClick={() => directCommand("MARK_NO_SHOW", "标记未到", "确认标记未到并释放服务端库存与会员覆盖。") } disabled={orderActionsBlocked} aria-label="标记未到" title="标记未到" data-order-action="MARK_NO_SHOW"><UserX aria-hidden="true" size={18} /></button> : null}
+            {enabledActions.has("CANCEL_ORDER") || enabledActions.has("MARK_NO_SHOW") || enabledActions.has("REVOKE_CHECK_IN") ? <div className="action-separator" aria-hidden="true" /> : null}
+            {enabledActions.has("CANCEL_ORDER") ? <button className="button button-secondary danger-button" type="button" onClick={() => openLifecycleAction("CANCEL_ORDER")} disabled={orderActionsBlocked} data-order-action="CANCEL_ORDER"><XCircle aria-hidden="true" size={18} />取消订单</button> : null}
+            {enabledActions.has("MARK_NO_SHOW") ? <button className="button button-secondary danger-button" type="button" onClick={() => openLifecycleAction("MARK_NO_SHOW")} disabled={orderActionsBlocked} data-order-action="MARK_NO_SHOW"><UserX aria-hidden="true" size={18} />标记未到</button> : null}
+            {enabledActions.has("REVOKE_CHECK_IN") ? <button className="button button-secondary danger-button" type="button" onClick={() => openLifecycleAction("REVOKE_CHECK_IN")} disabled={orderActionsBlocked} data-order-action="REVOKE_CHECK_IN"><Undo2 aria-hidden="true" size={18} />撤销入住</button> : null}
             {enabledActions.size === 0 ? <span>当前没有可执行操作</span> : enabledActions.size === 1 && enabledActions.has("CORRECT_ORDER_OCCUPANT") ? <span>请在下方住宿人条目中更正资料</span> : null}
           </div>
         </div>
@@ -919,6 +944,21 @@ export function OrderDetailPage() {
         }}
       /> : null}
       {correctingOccupant ? <OrderOccupantCorrectionDialog view={view} occupant={correctingOccupant} {...(correctionDraftMatchesOccupant(commandDraft, view.order.id, correctingOccupant.id) ? { draft: commandDraft } : {})} onClose={() => { setCorrectingOccupant(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("CORRECT_ORDER_OCCUPANT")) return; setCorrectingOccupant(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
+      {lifecycleAction ? <OrderLifecycleActionDrawer
+        action={lifecycleAction}
+        view={view}
+        inventoryUnitLabels={Object.fromEntries(meta.inventoryUnits.map((unit) => [unit.id, `${unit.code} · ${unit.name}`]))}
+        writeBlocked={orderActionsBlocked}
+        {...(commandDraft?.commandType === lifecycleAction ? { draft: commandDraft } : {})}
+        onClose={() => { setLifecycleAction(undefined); setCommandDraft(undefined); }}
+        onSubmit={(request) => {
+          if (orderActionsBlocked || request.commandType !== lifecycleAction || !enabledActions.has(lifecycleAction)) return;
+          setLifecycleAction(undefined);
+          setCommandDraft(undefined);
+          setRecoveryDialogOpen(false);
+          setCommand(request);
+        }}
+      /> : null}
       {command ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${pendingRecovery?.confirmationKey ?? "missing"}` : "new-order-command"}
         request={command}

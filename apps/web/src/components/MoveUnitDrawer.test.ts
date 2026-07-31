@@ -50,7 +50,7 @@ function view(orderOverrides: Partial<OrderViewDto["order"]> = {}): OrderViewDto
     segments: [],
     originalArrangement: { arrivalDate: "2026-08-02", departureDate: "2026-08-04", intervals: [{ inventoryUnitId: "room_1", arrivalDate: "2026-08-02", departureDate: "2026-08-04" }] },
     effectiveArrangement: { arrivalDate: "2026-08-02", departureDate: "2026-08-04", intervals: [{ inventoryUnitId: "room_1", arrivalDate: "2026-08-02", departureDate: "2026-08-04" }], presentation: "CURRENT", businessDate: "2026-08-01" },
-    fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null }, arrangementHistory: [], amendments: [], pricingRevisions: [],
+    fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null, checkInRevocation: null }, arrangementHistory: [], amendments: [], pricingRevisions: [],
     coverageSet: [], collectionFacts: [], cleaningTasks: [],
     amounts: {
       currentContractAmount: { currency: "CNY", minorUnits: 20_000 }, netRecordedCollection: { currency: "CNY", minorUnits: 0 },

@@ -160,6 +160,8 @@ function roomStatusResponse(page: Page, arrivalDate: string, departureDate: stri
 }
 
 async function showRange(page: Page, arrivalDate: string, departureDate: string) {
+  const mobileRangeToggle = page.getByTestId("mobile-room-status-range-toggle");
+  if (await mobileRangeToggle.isVisible()) await mobileRangeToggle.click();
   await page.getByTestId("departure-date").fill(departureDate);
   const loaded = roomStatusResponse(page, arrivalDate, departureDate);
   await page.getByTestId("arrival-date").fill(arrivalDate);
@@ -168,11 +170,17 @@ async function showRange(page: Page, arrivalDate: string, departureDate: string)
   await expect(page.getByTestId("departure-date")).toHaveValue(departureDate);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
   await expect(page.locator(".room-status-stale-notice")).toHaveCount(0, { timeout: 30_000 });
-  await expect(page.locator(".room-status-toolbar")).toContainText("投影完整");
+  if (await page.locator(".room-status-toolbar").count()) {
+    await expect(page.locator(".room-status-toolbar")).toContainText("投影完整");
+  }
 }
 
 async function showFixtureRange(page: Page) {
   await showRange(page, fixture.arrivalDate, addDays(fixture.departureDate, 1));
+  const occupancyToggle = page.getByTestId("mobile-room-status-occupancies-toggle");
+  if (await occupancyToggle.isVisible() && await occupancyToggle.getAttribute("aria-expanded") === "false") {
+    await occupancyToggle.click();
+  }
 }
 
 async function filterRoomStatus(page: Page, search: string, arrivalDate: string, departureDate: string) {
@@ -217,7 +225,7 @@ function readOnlyRoomStatus(board: RoomStatusBoardDto): RoomStatusBoardDto {
 async function openMobileOrderContext(page: Page, stay: Stage8StayFixture) {
   const row = page.locator(".room-status-mobile-occupancies li").filter({ hasText: stay.nickname }).first();
   await expect(row).toBeVisible({ timeout: 30_000 });
-  await row.getByRole("button", { name: "打开订单上下文", exact: true }).click();
+  await row.getByRole("button", { name: "查看订单信息", exact: true }).click();
   const context = page.locator(".room-status-order-context").filter({ hasText: stay.nickname });
   await expect(context).toBeVisible({ timeout: 30_000 });
   return context;

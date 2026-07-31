@@ -208,7 +208,12 @@ describe.sequential("Receipt permanent references for member entitlement facts",
       receipt: cancelled,
       entryTypes: ["RELEASE", "RELEASE"],
       coverageResourceIds: coverageIds,
-      resourceRefs: [created.orderId, cancelled.result!.amendmentId as string, ...coverageIds]
+      resourceRefs: [
+        created.orderId,
+        cancelled.result!.amendmentId as string,
+        cancelled.result!.pricingRevisionId as string,
+        ...coverageIds
+      ]
     });
   });
 

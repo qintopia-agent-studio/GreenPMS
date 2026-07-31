@@ -69,6 +69,7 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN",
   "CHECK_IN",
   "CHECK_OUT",
   "LOCK_MAINTENANCE",
@@ -80,7 +81,10 @@ const strictRecoveryEvidenceCommands = new Set<CommandType>([
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
-  "MOVE_UNIT"
+  "MOVE_UNIT",
+  "CANCEL_ORDER",
+  "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN"
 ]);
 
 async function lockCommandProtocolEpoch(trx: Transaction<Database>): Promise<void> {

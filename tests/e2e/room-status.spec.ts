@@ -630,7 +630,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(page.getByRole("heading", { name: "订单", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "房态", exact: true }).click();
   await expectDesktopGrid(page);
-  await expect(page.getByRole("status").filter({ hasText: /已恢复上次房态范围|房态 revision 已变化/ })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: /已恢复上次查看位置|房态已更新/ })).toBeVisible();
   await expect(page.getByLabel("搜索房间或床位")).toHaveValue("104");
   await expect(roomRow(page, roomId).getByRole("button", { name: /^收起.*床位$/ })).toBeVisible();
   await expect(roomCell(page, bedBId, arrivalDate)).toHaveAttribute("aria-selected", "true");

@@ -50,6 +50,10 @@ describe("Fulfillment business presentation", () => {
       fromStatus: "RESERVED", toStatus: "CHECKED_IN",
       businessDate: "2026-07-25", effectiveDate: "2026-07-25", recordingMode: "ON_SCHEDULE"
     })).toBe(true);
+    expect(fulfillmentTransitionIsExpected("CHECK_IN", {
+      fromStatus: "RESERVED", toStatus: "CHECKED_IN",
+      businessDate: "2026-07-26", effectiveDate: "2026-07-25", recordingMode: "LATE_RECORDED"
+    })).toBe(true);
     expect(fulfillmentTransitionIsExpected("CHECK_OUT", {
       fromStatus: "CHECKED_IN", toStatus: "CHECKED_OUT",
       businessDate: "2026-07-26", effectiveDate: "2026-07-25", recordingMode: "LATE_RECORDED"
@@ -75,6 +79,7 @@ describe("Fulfillment business presentation", () => {
 
   it("uses stable audit notes when an operator leaves a lodging note empty", () => {
     expect(fulfillmentAuditNote("CHECK_IN", { recordingMode: "ON_SCHEDULE" }, "")).toBe("按计划办理入住");
+    expect(fulfillmentAuditNote("CHECK_IN", { recordingMode: "LATE_RECORDED" }, "")).toBe("迟录计划入住");
     expect(fulfillmentAuditNote("CHECK_OUT", { recordingMode: "ON_SCHEDULE" }, "   ")).toBe("按计划办理退房");
     expect(fulfillmentAuditNote("CHECK_OUT", { recordingMode: "LATE_RECORDED" }, "\n")).toBe("迟录计划退房");
   });
@@ -82,6 +87,95 @@ describe("Fulfillment business presentation", () => {
   it("trims and preserves an operator-provided lodging note", () => {
     expect(fulfillmentAuditNote("CHECK_IN", { recordingMode: "ON_SCHEDULE" }, "  已核对证件  ")).toBe("已核对证件");
     expect(fulfillmentAuditNote("CHECK_OUT", { recordingMode: "LATE_RECORDED" }, "  客人昨晚已离店  ")).toBe("客人昨晚已离店");
+  });
+});
+
+describe("Order lifecycle evidence", () => {
+  const money = (minorUnits: number) => ({ currency: "CNY", minorUnits });
+  const cancelEffect = {
+    orderId: "order_cancel",
+    fromStatus: "RESERVED",
+    toStatus: "CANCELLED",
+    inventoryUnitId: "room_101",
+    businessDate: "2026-08-01",
+    freeStayReason: null,
+    freeStayCategoryCode: null,
+    currentContractAmount: money(0),
+    amounts: {
+      currentContractAmount: money(0),
+      netRecordedCollection: money(20_000),
+      collectionDifference: money(-20_000),
+      refundReferenceAmount: money(20_000)
+    },
+    entitlementTransition: { from: "HELD", to: "RELEASED", coverageCount: 2 },
+    pricingRevision: { currentContractAmount: money(0), pricingBasis: "POLICY" }
+  };
+
+  it("accepts only the complete cancel preview and rejects damaged financial or entitlement evidence", () => {
+    expect(u1PreviewHasBusinessEvidence("CANCEL_ORDER", cancelEffect, { orderId: "order_cancel" })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("CANCEL_ORDER", {
+      ...cancelEffect,
+      amounts: { ...cancelEffect.amounts, refundReferenceAmount: money(19_999) }
+    }, { orderId: "order_cancel" })).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("CANCEL_ORDER", {
+      ...cancelEffect,
+      entitlementTransition: { ...cancelEffect.entitlementTransition, to: "CONSUMED" }
+    }, { orderId: "order_cancel" })).toBe(false);
+  });
+
+  it("requires the same-day unused-room acknowledgement for revoke check-in", () => {
+    const effect = {
+      ...cancelEffect,
+      orderId: "order_revoke",
+      fromStatus: "CHECKED_IN",
+      toStatus: "CHECK_IN_REVOKED",
+      effectiveDate: "2026-08-01",
+      recordingMode: "ON_SCHEDULE",
+      unusedRoomConfirmed: true,
+      entitlementTransition: { from: "CONSUMED", to: "RESTORED", coverageCount: 2 }
+    };
+    delete (effect as Partial<typeof cancelEffect>).freeStayReason;
+    delete (effect as Partial<typeof cancelEffect>).freeStayCategoryCode;
+    expect(u1PreviewHasBusinessEvidence("REVOKE_CHECK_IN", effect, {
+      orderId: "order_revoke", unusedRoomConfirmed: true
+    })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("REVOKE_CHECK_IN", effect, {
+      orderId: "order_revoke", unusedRoomConfirmed: false
+    })).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REVOKE_CHECK_IN", { ...effect, effectiveDate: "2026-07-31" }, {
+      orderId: "order_revoke", unusedRoomConfirmed: true
+    })).toBe(false);
+  });
+
+  it("fails closed for a committed lifecycle receipt without complete linked evidence", () => {
+    const result = {
+      orderId: "order_cancel",
+      amendmentId: "amendment_cancel",
+      status: "CANCELLED",
+      pricingRevisionId: "revision_cancel",
+      effectHash: "a".repeat(64),
+      entitlementTransition: { from: "HELD", to: "RELEASED", coverageCount: 2 }
+    };
+    const receipt = {
+      receiptId: "receipt_cancel",
+      commandId: "command_cancel",
+      executionStatus: "EXECUTED" as const,
+      businessCommitted: true,
+      correlationId: "correlation_cancel",
+      result,
+      resourceRefs: ["order_cancel", "amendment_cancel", "revision_cancel"],
+      factRefs: [],
+      committedAt: "2026-08-01T10:00:00.000Z"
+    };
+    expect(receiptHasCommandEvidence("CANCEL_ORDER", receipt, { orderId: "order_cancel" }, cancelEffect)).toBe(true);
+    expect(receiptHasCommandEvidence("CANCEL_ORDER", {
+      ...receipt,
+      resourceRefs: ["order_cancel", "amendment_cancel"]
+    }, { orderId: "order_cancel" }, cancelEffect)).toBe(false);
+    expect(receiptHasCommandEvidence("CANCEL_ORDER", {
+      ...receipt,
+      result: { ...result, status: "NO_SHOW" }
+    }, { orderId: "order_cancel" }, cancelEffect)).toBe(false);
   });
 });
 

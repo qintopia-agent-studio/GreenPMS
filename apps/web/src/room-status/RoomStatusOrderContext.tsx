@@ -5,6 +5,7 @@ import { AccommodationPositionSummary } from "../components/AccommodationPositio
 import type { InventoryUnitDto, MemberViewDto, OrderViewDto } from "../types";
 import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMoney, stayDateFundsAreOperatorFacing, StatusBadge } from "../ui";
 import { stayDateChangeActionState, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
+import type { OrderLifecycleAction } from "../components/OrderLifecycleActionDrawer";
 
 type OrderOccupant = OrderViewDto["occupants"][number];
 
@@ -19,6 +20,7 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   REPRICE_ORDER: "调整订单金额",
   CANCEL_ORDER: "取消订单",
   MARK_NO_SHOW: "标记未到",
+  REVOKE_CHECK_IN: "撤销入住",
   RECORD_COLLECTION: "记录收款",
   RECORD_REFUND: "记录退款"
 };
@@ -43,7 +45,8 @@ const effectiveArrangementLabels: Record<OrderViewDto["effectiveArrangement"]["p
   CURRENT: "当前住宿安排",
   LAST: "最后住宿安排",
   BEFORE_CANCELLATION: "取消前住宿安排",
-  NO_SHOW_ORDER: "未到订单安排"
+  NO_SHOW_ORDER: "未到订单安排",
+  BEFORE_CHECK_IN_REVOCATION: "撤销入住前住宿安排"
 };
 
 const fulfillmentStateLabels: Record<OrderViewDto["fulfillment"]["state"], string> = {
@@ -51,7 +54,8 @@ const fulfillmentStateLabels: Record<OrderViewDto["fulfillment"]["state"], strin
   IN_HOUSE: "在住",
   CHECKED_OUT: "已退房",
   CANCELLED: "已取消",
-  NO_SHOW: "未到"
+  NO_SHOW: "未到",
+  CHECK_IN_REVOKED: "入住已撤销"
 };
 
 const collectionFactLabels = {
@@ -84,6 +88,7 @@ export interface RoomStatusOrderContextProps {
   onOpenOrder: (actionCode?: string) => void;
   onOpenMember?: (target: { memberId: string; contractId: string }) => void;
   onFulfillmentAction: (action: "CHECK_IN" | "CHECK_OUT") => void;
+  onLifecycleAction?: (action: OrderLifecycleAction) => void;
   onDateAction?: (action: StayDateChangeAction, mode?: StayDateChangeMode) => void;
   onMoveUnit?: () => void;
   onCorrectOccupant: (occupant: OrderOccupant) => void;
@@ -169,16 +174,18 @@ function FulfillmentRecord({
   type,
   record
 }: {
-  type: "CHECK_IN" | "CHECK_OUT";
+  type: "CHECK_IN" | "CHECK_OUT" | "REVOKE_CHECK_IN";
   record: OrderViewDto["fulfillment"]["checkIn"];
 }) {
   const isCheckIn = type === "CHECK_IN";
-  if (!record) return <li><strong>{isCheckIn ? "入住" : "退房"}</strong><span>尚无办理记录</span></li>;
+  const isRevocation = type === "REVOKE_CHECK_IN";
+  const label = isCheckIn ? "入住" : isRevocation ? "撤销入住" : "退房";
+  if (!record) return <li><strong>{label}</strong><span>尚无办理记录</span></li>;
   return <li>
-    <strong>{isCheckIn ? "入住办理" : "退房办理"}</strong>
-    <span>{isCheckIn ? "计划入住日" : "计划退房日"}：{formatDate(record.plannedBusinessDate)}</span>
+    <strong>{label}办理</strong>
+    <span>{isCheckIn || isRevocation ? "计划入住日" : "计划退房日"}：{formatDate(record.plannedBusinessDate)}</span>
     <span>办理营业日：{record.recordedBusinessDate ? formatDate(record.recordedBusinessDate) : "历史未记录"}</span>
-    <span>备注：{record.reason.note || (isCheckIn ? "按计划办理入住" : "按计划办理退房")}</span>
+    <span>备注：{record.reason.note || (isCheckIn ? "按计划办理入住" : isRevocation ? "撤销误办入住" : "按计划办理退房")}</span>
     <small>{record.actor?.displayName ?? "系统记录"} · 记录于 {formatDateTime(record.recordedAt)}</small>
   </li>;
 }
@@ -194,6 +201,7 @@ export function RoomStatusOrderContext({
   onOpenOrder,
   onOpenMember,
   onFulfillmentAction,
+  onLifecycleAction,
   onDateAction,
   onMoveUnit,
   onCorrectOccupant,
@@ -218,10 +226,14 @@ export function RoomStatusOrderContext({
     ? extensionState?.enabled ? "EXTEND_STAY" : shortenState?.enabled ? "SHORTEN_STAY" : undefined
     : undefined;
   const moveUnitEnabled = enabledActions.some((action) => action.code === "MOVE_UNIT");
+  const lifecycleActions = enabledActions.filter((action): action is typeof action & { code: OrderLifecycleAction } => (
+    action.code === "CANCEL_ORDER" || action.code === "MARK_NO_SHOW" || action.code === "REVOKE_CHECK_IN"
+  ));
   const routedActions = enabledActions.filter((action) => (
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
       && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY" && action.code !== "SHORTEN_STAY"
-      && action.code !== "MOVE_UNIT"
+      && action.code !== "MOVE_UNIT" && action.code !== "CANCEL_ORDER" && action.code !== "MARK_NO_SHOW"
+      && action.code !== "REVOKE_CHECK_IN"
   ));
   const amountDifference = view.amounts.collectionDifference;
   const currentPricingRevision = view.pricingRevisions.find((revision) => revision.id === view.order.current_revision_id)
@@ -335,6 +347,7 @@ export function RoomStatusOrderContext({
         <ol className="room-status-order-corrections">
           <FulfillmentRecord type="CHECK_IN" record={view.fulfillment.checkIn} />
           <FulfillmentRecord type="CHECK_OUT" record={view.fulfillment.checkOut} />
+          {view.fulfillment.checkInRevocation ? <FulfillmentRecord type="REVOKE_CHECK_IN" record={view.fulfillment.checkInRevocation} /> : null}
         </ol>
       </section>
 
@@ -395,11 +408,12 @@ export function RoomStatusOrderContext({
         <div className="room-status-context-section-heading"><ArrowRight aria-hidden="true" size={17} /><h3 id="room-status-order-actions-heading">订单入口</h3></div>
         {primaryActionPlacement === "CONTENT" ? <button type="button" className="room-status-button" onClick={() => onOpenOrder()}>查看完整订单<ArrowRight aria-hidden="true" size={16} /></button> : null}
         {[...new Set(dateActionStates.filter((state) => !state.enabled && state.reason).map((state) => state.reason!))].map((reason) => <p key={reason} className="room-status-context-note" role="status" data-testid="stay-date-action-blocked">{reason}</p>)}
-        {fulfillmentActions.length || dateActions.length || departureAdjustmentAction || moveUnitEnabled || routedActions.length ? <ul>
+        {fulfillmentActions.length || lifecycleActions.length || dateActions.length || departureAdjustmentAction || moveUnitEnabled || routedActions.length ? <ul>
           {fulfillmentActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action-mode="inline" onClick={() => onFulfillmentAction(action.code)}>{actionLabels[action.code]}</button></li>)}
           {dateActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onDateAction?.(action.code, "DATE_CHANGE")}>{actionLabels[action.code]}</button></li>)}
           {departureAdjustmentAction ? <li><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action="ADJUST_DEPARTURE" data-room-status-action-mode="inline" onClick={() => onDateAction?.(departureAdjustmentAction, "ADJUST_DEPARTURE")}>调整退房日期</button></li> : null}
           {moveUnitEnabled ? <li><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action="MOVE_UNIT" data-room-status-action-mode="inline" onClick={onMoveUnit}>换房</button></li> : null}
+          {lifecycleActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked || !onLifecycleAction} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onLifecycleAction?.(action.code)}>{actionLabels[action.code]}</button></li>)}
           {routedActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" data-room-status-action-mode="order-detail" onClick={() => onOpenOrder(action.code)}>{actionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} /></button></li>)}
         </ul> : null}
       </section>

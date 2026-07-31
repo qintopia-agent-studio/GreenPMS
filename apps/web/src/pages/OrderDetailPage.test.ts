@@ -89,6 +89,12 @@ describe("fulfillment result presentation", () => {
       recordedBusinessDate: "2026-07-26",
       recordingMode: "LATE_RECORDED"
     })).toBe("迟录退房");
+    expect(fulfillmentResultLabel({
+      ...base,
+      type: "CHECK_IN",
+      recordedBusinessDate: "2026-07-26",
+      recordingMode: "LATE_RECORDED"
+    })).toBe("迟录入住");
   });
 
   it("does not pretend an incomplete historical record is on time", () => {
@@ -204,7 +210,8 @@ describe("operator-facing order lifecycle presentation", () => {
         recordedAt: "2026-07-28T09:00:00.000Z",
         actor: { subjectId: "subject_internal_check_out", displayName: "前台乙" },
         reason: { code: "CHECK_OUT_INTERNAL", note: "按计划离店" }
-      }
+      },
+      checkInRevocation: null
     },
     arrangementHistory: [{
       type: "INITIAL_BOOKING" as const,
@@ -265,6 +272,37 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("与政策基础金额差额");
     expect(html).toContain("待补收参考");
     expect(html).not.toMatch(/INITIAL_BOOKING|MOVE_UNIT_INTERNAL|subject_internal|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision/);
+  });
+
+  it("keeps the original check-in visible alongside the later revocation fact", () => {
+    const html = renderToStaticMarkup(createElement(OrderLifecycleSections, {
+      view: {
+        ...lifecycle,
+        effectiveArrangement: {
+          ...lifecycle.effectiveArrangement,
+          presentation: "BEFORE_CHECK_IN_REVOCATION"
+        },
+        fulfillment: {
+          state: "CHECK_IN_REVOKED",
+          checkIn: lifecycle.fulfillment.checkIn,
+          checkOut: null,
+          checkInRevocation: {
+            type: "REVOKE_CHECK_IN",
+            plannedBusinessDate: "2026-07-25",
+            recordedBusinessDate: "2026-07-25",
+            recordingMode: "ON_SCHEDULE",
+            recordedAt: "2026-07-25T10:10:00.000Z",
+            actor: { subjectId: "operator", displayName: "前台甲" },
+            reason: { code: "REVOKE_CHECK_IN", note: "住客看房后未入住" }
+          }
+        }
+      },
+      inventoryUnits: [{ id: "unit_d01", code: "D01", name: "单人间" }]
+    }));
+    expect(html).toContain("撤销入住前安排");
+    expect(html).toContain("入住结果");
+    expect(html).toContain("撤销入住结果");
+    expect(html).toContain("住客看房后未入住");
   });
 
   it("shows channel contract pricing without per-order collection language", () => {
@@ -888,7 +926,49 @@ describe("shared Web command recovery persistence", () => {
     expect(JSON.stringify(recovery)).not.toMatch(/room_internal_target|2026-07-29|20000/);
   });
 
-  it("fails closed when a stay-date or move recovery loses its bound effect hash", () => {
+  it("retains lifecycle recovery identity and acknowledgement without persisting the operator reason", () => {
+    const request = {
+      commandType: "REVOKE_CHECK_IN",
+      title: "撤销入住",
+      description: "核对撤销入住",
+      presentation: "ORDER_LIFECYCLE",
+      initialReason: { code: "REVOKE_CHECK_IN", note: "住客看房后未入住" },
+      input: {
+        propertyId: "property_qintopia",
+        orderId: "order_revoke_target",
+        unusedRoomConfirmed: true
+      }
+    } satisfies CommandRequest;
+    const recovery = transitionPersistedCommandRecovery(undefined, {
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      request
+    }, {
+      ...confirming,
+      confirmationKey: "web-confirm-revoke-check-in",
+      effectHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }).recovery!;
+
+    expect(recovery).toMatchObject({
+      commandType: "REVOKE_CHECK_IN",
+      presentation: "ORDER_LIFECYCLE",
+      targetRefs: ["orderId=order_revoke_target"]
+    });
+    expect(JSON.stringify(recovery)).not.toContain("住客看房后未入住");
+    expect(recoveryCommandRequest(recovery)).toMatchObject({
+      commandType: "REVOKE_CHECK_IN",
+      presentation: "ORDER_LIFECYCLE",
+      title: "恢复撤销入住结果",
+      recoveryEffectHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      input: {
+        propertyId: "property_qintopia",
+        orderId: "order_revoke_target",
+        unusedRoomConfirmed: true
+      }
+    });
+  });
+
+  it("fails closed when a stay-date, move or lifecycle recovery loses its bound effect hash", () => {
     const storage = new MemoryStorage();
     const key = commandRecoveryStorageKey(context.subjectId, context.scopeId);
     const strictRecovery = {
@@ -908,6 +988,13 @@ describe("shared Web command recovery persistence", () => {
     expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId).kind).toBe("CORRUPT");
 
     storage.setItem(key, JSON.stringify({ ...strictRecovery, effectHash: "not-a-sha256" }));
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId).kind).toBe("CORRUPT");
+
+    storage.setItem(key, JSON.stringify({
+      ...strictRecovery,
+      commandType: "REVOKE_CHECK_IN",
+      presentation: "ORDER_LIFECYCLE"
+    }));
     expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId).kind).toBe("CORRUPT");
 
     expect(transitionPersistedCommandRecovery(undefined, {

@@ -11,6 +11,7 @@ import {
   LogIn,
   LogOut,
   Plus,
+  CircleHelp,
   ShieldAlert
 } from "lucide-react";
 import type { RoomStatusActionDto, RoomStatusBoardDto, RoomStatusOperationalTaskDto, RoomStatusUnitDto } from "@qintopia/contracts";
@@ -49,12 +50,15 @@ export interface RoomStatusMobileFocusRequest {
 
 export interface RoomStatusMobileTasksProps {
   board: RoomStatusBoardDto;
+  range: Readonly<{ arrivalDate: string; departureDate: string }>;
   groups: RoomStatusMobileGroups;
   activeTab: RoomStatusMobileTab;
   canCreate: boolean;
   focusRequest?: RoomStatusMobileFocusRequest | undefined;
   onTabChange: (tab: RoomStatusMobileTab) => void;
   onPageChange: (pageIndex: number) => void;
+  onRangeChange: (range: { arrivalDate: string; departureDate: string }) => void;
+  onToday: () => void;
   onCreate: () => void;
   onOpenReference: (reference: RoomStatusOperationalTaskDto["references"][number]) => void;
   onOpenReceipt: (receiptId: string) => void;
@@ -217,12 +221,15 @@ export function executableTaskAction(
 
 export function RoomStatusMobileTasks({
   board,
+  range,
   groups,
   activeTab,
   canCreate,
   focusRequest,
   onTabChange,
   onPageChange,
+  onRangeChange,
+  onToday,
   onCreate,
   onOpenReference,
   onOpenReceipt,
@@ -236,6 +243,9 @@ export function RoomStatusMobileTasks({
   const taskRefs = useRef(new Map<string, HTMLButtonElement>());
   const handledFocusRequest = useRef(0);
   const [detailIntervalId, setDetailIntervalId] = useState<string | null>(null);
+  const [showOccupancyExplanation, setShowOccupancyExplanation] = useState(false);
+  const [showOccupancyList, setShowOccupancyList] = useState(false);
+  const [showRangePicker, setShowRangePicker] = useState(false);
   const unitMap = useMemo(() => flattenUnitMap(board), [board]);
   const lodgingOccupancySummaries = useMemo(() => mobileLodgingOccupancySummaries(board), [board]);
   const intervalMap = useMemo(() => {
@@ -308,6 +318,45 @@ export function RoomStatusMobileTasks({
         </div>
       </header>
 
+      <section className="room-status-mobile-range" aria-label="查看房态日期">
+        <div>
+          <span>查看日期</span>
+          <strong>{formatRoomStatusDate(range.arrivalDate)} 至 {formatRoomStatusDate(range.departureDate)}</strong>
+        </div>
+        <button
+          type="button"
+          className="room-status-text-button"
+          data-testid="mobile-room-status-range-toggle"
+          aria-expanded={showRangePicker}
+          aria-controls={`${tabsId}-range-picker`}
+          onClick={() => setShowRangePicker((current) => !current)}
+        >调整</button>
+        {showRangePicker ? <div id={`${tabsId}-range-picker`} className="room-status-mobile-range-picker">
+          <label>
+            开始日期
+            <input
+              data-testid="arrival-date"
+              type="date"
+              value={range.arrivalDate}
+              onChange={(event) => onRangeChange({ ...range, arrivalDate: event.target.value })}
+            />
+          </label>
+          <label>
+            结束日期
+            <input
+              data-testid="departure-date"
+              type="date"
+              value={range.departureDate}
+              onChange={(event) => onRangeChange({ ...range, departureDate: event.target.value })}
+            />
+          </label>
+          <button type="button" className="room-status-text-button" onClick={() => {
+            onToday();
+            setShowRangePicker(false);
+          }}>回到今天</button>
+        </div> : null}
+      </section>
+
       {board.page.totalPages > 1 ? (
         <nav className="room-status-mobile-pagination" aria-label="移动房源分页">
           <span>房源第 {board.page.index + 1} / {board.page.totalPages} 页，共 {board.page.totalRooms} 间</span>
@@ -337,9 +386,35 @@ export function RoomStatusMobileTasks({
       ) : null}
 
       {lodgingOccupancySummaries.length ? (
-        <section className="room-status-mobile-occupancies" aria-label="住宿人" role="region">
-          <h3>当前日期范围住宿人</h3>
-          <ul>
+        <section className="room-status-mobile-occupancies" aria-label="当前日期范围占用明细" role="region">
+          <div className="room-status-mobile-occupancies-title">
+            <div>
+              <h3>当前日期范围占用明细</h3>
+              <span>共 {lodgingOccupancySummaries.length} 条占用记录</span>
+            </div>
+            <button
+              type="button"
+              className="room-status-icon-button room-status-button-secondary"
+              aria-label="查看住宿安排说明"
+              aria-expanded={showOccupancyExplanation}
+              aria-controls={`${tabsId}-occupancy-explanation`}
+              title="查看说明"
+              onClick={() => setShowOccupancyExplanation((current) => !current)}
+            >
+              <CircleHelp aria-hidden="true" size={17} />
+            </button>
+            <button
+              type="button"
+              className="room-status-text-button"
+              data-testid="mobile-room-status-occupancies-toggle"
+              aria-expanded={showOccupancyList}
+              onClick={() => setShowOccupancyList((current) => !current)}
+            >{showOccupancyList ? "收起占用明细" : "查看占用明细"}</button>
+          </div>
+          {showOccupancyExplanation ? <p id={`${tabsId}-occupancy-explanation`} className="room-status-mobile-occupancies-explanation">
+            这里按房间和日期列出当前查看范围内的已预订和在住占用，用于核对每天的占用情况；它不是今日待办，也不会直接创建订单。
+          </p> : null}
+          {showOccupancyList ? <ul>
             {lodgingOccupancySummaries.map((summary) => (
               <li key={summary.key}>
                 <div className="room-status-mobile-occupancy-heading">
@@ -355,10 +430,10 @@ export function RoomStatusMobileTasks({
                     >{line}</span>
                   ))}
                 </div>
-                {summary.orderIdentity ? <button type="button" className="room-status-text-button" onClick={() => onOpenOrderContext(summary.orderIdentity!, summary.serviceDate)}>打开订单上下文<ArrowRight aria-hidden="true" size={16} /></button> : null}
+                {summary.orderIdentity ? <button type="button" className="room-status-text-button" onClick={() => onOpenOrderContext(summary.orderIdentity!, summary.serviceDate)}>查看订单信息<ArrowRight aria-hidden="true" size={16} /></button> : null}
               </li>
             ))}
-          </ul>
+          </ul> : null}
         </section>
       ) : null}
 

@@ -18,7 +18,7 @@ import {
 import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
 import { legacyEffectProtocol, type HistoricalProtocolVersion } from "./historical-command-protocol.ts";
 import type { DbExecutor } from "./inventory.ts";
-import { propertyLocalToday } from "./members.ts";
+import { propertyLocalClock, propertyLocalToday } from "./members.ts";
 import type { Database } from "./schema.ts";
 
 export interface OrderContext {
@@ -169,7 +169,7 @@ export function orderAllowedActions(
   accessLevel: AccessLevel,
   status: string,
   hasRefundableCollection: boolean,
-  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string },
+  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string; localTime?: string },
   hasFutureMove = false
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
@@ -184,6 +184,7 @@ export function orderAllowedActions(
     REPRICE_ORDER: ["RESERVED", "CHECKED_IN"],
     CANCEL_ORDER: ["RESERVED"],
     MARK_NO_SHOW: ["RESERVED"],
+    REVOKE_CHECK_IN: ["CHECKED_IN"],
     RECORD_COLLECTION: ["RESERVED", "CHECKED_IN", "CHECKED_OUT"],
     RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]
   };
@@ -194,8 +195,8 @@ export function orderAllowedActions(
       if (code === "CHECK_IN") {
         if (fulfillmentDates.businessDate < fulfillmentDates.arrivalDate) {
           fulfillmentDisabledReason = "ARRIVAL_DATE_NOT_REACHED";
-        } else if (fulfillmentDates.businessDate > fulfillmentDates.arrivalDate) {
-          fulfillmentDisabledReason = "ARRIVAL_DATE_PASSED";
+        } else if (fulfillmentDates.businessDate >= fulfillmentDates.departureDate) {
+          fulfillmentDisabledReason = "已到或超过计划退房日，不能补办入住";
         }
       } else if (code === "CHECK_OUT") {
         if (fulfillmentDates.businessDate < fulfillmentDates.departureDate) {
@@ -215,6 +216,14 @@ export function orderAllowedActions(
         } else if (status === "CHECKED_IN" && fulfillmentDates.businessDate >= fulfillmentDates.departureDate) {
           fulfillmentDisabledReason = "已到或超过计划退房日，请先办理续住或退房";
         }
+      } else if (code === "MARK_NO_SHOW") {
+        if (fulfillmentDates.businessDate < fulfillmentDates.arrivalDate
+          || (fulfillmentDates.businessDate === fulfillmentDates.arrivalDate
+            && (fulfillmentDates.localTime ?? "00:00") < "20:00")) {
+          fulfillmentDisabledReason = "计划到店日 20:00 后才能标记未到";
+        }
+      } else if (code === "REVOKE_CHECK_IN" && fulfillmentDates.businessDate !== fulfillmentDates.arrivalDate) {
+        fulfillmentDisabledReason = "只有计划入住当天可以撤销误办入住";
       }
     }
     const enabled = statusAllows
@@ -289,7 +298,7 @@ function recordedAt(amendment: FulfillmentAmendmentRow): string {
 
 function fulfillmentRecord(
   amendment: FulfillmentAmendmentRow | undefined,
-  type: "CHECK_IN" | "CHECK_OUT",
+  type: "CHECK_IN" | "CHECK_OUT" | "REVOKE_CHECK_IN",
   plannedBusinessDate: string
 ): OrderFulfillmentRecordDto | null {
   if (!amendment) return null;
@@ -311,7 +320,10 @@ function fulfillmentRecord(
       throw new DomainError("INTERNAL_ERROR", "履约记录的办理营业日期损坏", 500);
     }
     const timingMatches = type === "CHECK_IN"
-      ? payload.recordingMode === "ON_SCHEDULE" && recordedDate === effectiveDate
+      ? (payload.recordingMode === "ON_SCHEDULE" && recordedDate === effectiveDate)
+        || (payload.recordingMode === "LATE_RECORDED" && recordedDate > effectiveDate)
+      : type === "REVOKE_CHECK_IN"
+        ? payload.recordingMode === "ON_SCHEDULE" && recordedDate === effectiveDate
       : payload.recordingMode === "ON_SCHEDULE"
         ? recordedDate === effectiveDate
         : recordedDate > effectiveDate;
@@ -349,12 +361,14 @@ export function projectOrderFulfillment(
   parseLocalDate(dates.departureDate);
   const checkIns = amendments.filter((amendment) => amendment.amendment_type === "CHECK_IN");
   const checkOuts = amendments.filter((amendment) => amendment.amendment_type === "CHECK_OUT");
-  if (checkIns.length > 1 || checkOuts.length > 1) {
+  const checkInRevocations = amendments.filter((amendment) => amendment.amendment_type === "REVOKE_CHECK_IN");
+  if (checkIns.length > 1 || checkOuts.length > 1 || checkInRevocations.length > 1) {
     throw new DomainError("INTERNAL_ERROR", "订单履约记录存在重复状态事实", 500);
   }
   return {
     checkIn: fulfillmentRecord(checkIns[0], "CHECK_IN", dates.arrivalDate),
-    checkOut: fulfillmentRecord(checkOuts[0], "CHECK_OUT", dates.departureDate)
+    checkOut: fulfillmentRecord(checkOuts[0], "CHECK_OUT", dates.departureDate),
+    checkInRevocation: fulfillmentRecord(checkInRevocations[0], "REVOKE_CHECK_IN", dates.arrivalDate)
   };
 }
 
@@ -423,6 +437,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN",
   "CHECK_IN",
   "CHECK_OUT"
 ] as const);
@@ -436,7 +451,8 @@ const pricingRevisionAmendmentTypes = new Set<string>([
   "REPRICE_ORDER",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
-  "MARK_NO_SHOW"
+  "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN"
 ] as const);
 
 const requiredPricingRevisionAmendmentTypes = new Set<string>([
@@ -446,12 +462,10 @@ const requiredPricingRevisionAmendmentTypes = new Set<string>([
   "SHORTEN_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
-  "REFRESH_MEMBER_COVERAGE"
-] as const);
-
-const freeTerminalPricingRevisionAmendmentTypes = new Set<string>([
+  "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
-  "MARK_NO_SHOW"
+  "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN"
 ] as const);
 
 const staySegmentAmendmentTypes = new Set<string>([
@@ -462,7 +476,7 @@ const staySegmentAmendmentTypes = new Set<string>([
   "MOVE_UNIT"
 ] as const);
 
-type LifecycleOrderStatus = "RESERVED" | "CHECKED_IN" | "CHECKED_OUT" | "CANCELLED" | "NO_SHOW";
+type LifecycleOrderStatus = "RESERVED" | "CHECKED_IN" | "CHECKED_OUT" | "CANCELLED" | "NO_SHOW" | "CHECK_IN_REVOKED";
 
 export interface OrderLifecycleProjection {
   originalArrangement: OrderArrangementDto;
@@ -700,6 +714,7 @@ function fulfillmentState(orderStatus: string): OrderFulfillmentProjectionDto["s
   if (orderStatus === "CHECKED_OUT") return "CHECKED_OUT";
   if (orderStatus === "CANCELLED") return "CANCELLED";
   if (orderStatus === "NO_SHOW") return "NO_SHOW";
+  if (orderStatus === "CHECK_IN_REVOKED") return "CHECK_IN_REVOKED";
   return lifecycleFailure("订单住宿生命周期包含无法识别的订单状态", { orderStatus });
 }
 
@@ -708,6 +723,7 @@ function effectivePresentation(orderStatus: string): OrderEffectiveArrangementDt
   if (orderStatus === "CHECKED_OUT") return "LAST";
   if (orderStatus === "CANCELLED") return "BEFORE_CANCELLATION";
   if (orderStatus === "NO_SHOW") return "NO_SHOW_ORDER";
+  if (orderStatus === "CHECK_IN_REVOKED") return "BEFORE_CHECK_IN_REVOCATION";
   return lifecycleFailure("订单住宿生命周期包含无法识别的订单状态", { orderStatus });
 }
 
@@ -722,7 +738,8 @@ function validateLifecycleStatus(
     CHECKED_IN: "IN_HOUSE",
     CHECKED_OUT: "COMPLETED",
     CANCELLED: "CANCELLED",
-    NO_SHOW: "NO_SHOW"
+    NO_SHOW: "NO_SHOW",
+    CHECK_IN_REVOKED: "CHECK_IN_REVOKED"
   };
   if (!Object.hasOwn(expectedStayStatus, orderStatus)) {
     lifecycleFailure("订单住宿生命周期包含无法识别的订单状态", { orderStatus });
@@ -757,6 +774,7 @@ function validateLifecycleStatus(
     else if (amendmentType === "CHECK_OUT") transition = { from: "CHECKED_IN", to: "CHECKED_OUT" };
     else if (amendmentType === "CANCEL_ORDER") transition = { from: "RESERVED", to: "CANCELLED" };
     else if (amendmentType === "MARK_NO_SHOW") transition = { from: "RESERVED", to: "NO_SHOW" };
+    else if (amendmentType === "REVOKE_CHECK_IN") transition = { from: "CHECKED_IN", to: "CHECK_IN_REVOKED" };
 
     if (transition) {
       const payload = recordValue(amendment.payload);
@@ -793,10 +811,12 @@ function validateLifecycleStatus(
     });
   }
   const validFulfillment = finalStatus === "RESERVED" || finalStatus === "CANCELLED" || finalStatus === "NO_SHOW"
-    ? !fulfillment.checkIn && !fulfillment.checkOut
+    ? !fulfillment.checkIn && !fulfillment.checkOut && !fulfillment.checkInRevocation
     : finalStatus === "CHECKED_IN"
-      ? Boolean(fulfillment.checkIn) && !fulfillment.checkOut
-      : Boolean(fulfillment.checkIn) && Boolean(fulfillment.checkOut);
+      ? Boolean(fulfillment.checkIn) && !fulfillment.checkOut && !fulfillment.checkInRevocation
+      : finalStatus === "CHECK_IN_REVOKED"
+        ? Boolean(fulfillment.checkIn) && !fulfillment.checkOut && Boolean(fulfillment.checkInRevocation)
+        : Boolean(fulfillment.checkIn) && Boolean(fulfillment.checkOut) && !fulfillment.checkInRevocation;
   if (!validFulfillment) lifecycleFailure("订单状态与 typed 履约事实不一致", { orderStatus: finalStatus });
   return fulfillmentState(finalStatus);
 }
@@ -860,6 +880,10 @@ export function projectOrderLifecycle(input: {
     }
     if (!Number.isSafeInteger(revision.policy_base_amount_minor)
       || !Number.isSafeInteger(revision.current_contract_amount_minor)
+      || ((amendment.amendment_type === "CANCEL_ORDER"
+        || amendment.amendment_type === "MARK_NO_SHOW"
+        || amendment.amendment_type === "REVOKE_CHECK_IN")
+        && (revision.policy_base_amount_minor !== 0 || revision.current_contract_amount_minor !== 0))
       || !revision.currency
       || (revisionCurrency !== undefined && revision.currency !== revisionCurrency)) {
       lifecycleFailure("订单计价版本金额或币种链损坏", { revisionId: revision.id });
@@ -877,8 +901,7 @@ export function projectOrderLifecycle(input: {
   }
   for (const amendment of input.amendments) {
     const matches = input.revisions.filter((revision) => revision.amendment_id === amendment.id);
-    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type)
-      || (input.order.stay_type === "FREE" && freeTerminalPricingRevisionAmendmentTypes.has(amendment.amendment_type));
+    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type);
     if (requiresRevision && matches.length !== 1) {
       lifecycleFailure("订单计价变更没有唯一计价版本", {
         amendmentId: amendment.id,
@@ -1061,7 +1084,10 @@ export function projectOrderLifecycle(input: {
     lifecycleFailure("订单当前日期与住宿安排版本链不一致");
   }
   const projectedTimeline = arrangementTimeline(current);
-  const terminal = input.order.status === "CHECKED_OUT" || input.order.status === "CANCELLED" || input.order.status === "NO_SHOW";
+  const terminal = input.order.status === "CHECKED_OUT"
+    || input.order.status === "CANCELLED"
+    || input.order.status === "NO_SHOW"
+    || input.order.status === "CHECK_IN_REVOKED";
   if (terminal ? input.activeTimeline.length !== 0 : !timelineMatches(projectedTimeline, input.activeTimeline)) {
     lifecycleFailure("订单有效 Claim 与住宿安排版本链不一致", { orderStatus: input.order.status });
   }
@@ -1103,8 +1129,8 @@ function hasRefundableCollection(facts: Array<{
 
 async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel) {
   const context = await loadOrderContext(db, orderId);
-  const [businessDate, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, cleaningTasks] = await Promise.all([
-    propertyLocalToday(db, context.order.property_id),
+  const [localClock, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, cleaningTasks] = await Promise.all([
+    propertyLocalClock(db, context.order.property_id),
     db.selectFrom("schema_migrations").select("applied_at")
       .where("name", "=", "028_stage11_move_unit_guards.sql").executeTakeFirst(),
     db.selectFrom("order_occupants").selectAll().where("order_id", "=", orderId).orderBy("ordinal").execute(),
@@ -1153,6 +1179,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       .orderBy("task.created_at")
       .execute() : Promise.resolve([])
   ]);
+  const businessDate = localClock.date;
   if (!protocolEpochRow) throw new DomainError("INTERNAL_ERROR", "Stage 11 protocol epoch is unavailable", 500);
   const stage11Epoch = protocolEpochRow.applied_at instanceof Date
     ? protocolEpochRow.applied_at
@@ -1186,7 +1213,8 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
   });
   const terminal = context.order.status === "CHECKED_OUT"
     || context.order.status === "CANCELLED"
-    || context.order.status === "NO_SHOW";
+    || context.order.status === "NO_SHOW"
+    || context.order.status === "CHECK_IN_REVOKED";
   const activeTimeline = terminal
     ? await db.selectFrom("inventory_claims")
       .select(["service_date", "inventory_unit_id", "id"])
@@ -1216,7 +1244,8 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
       businessDate,
       arrivalDate: context.order.arrival_date,
-      departureDate: context.order.departure_date
+      departureDate: context.order.departure_date,
+      localTime: localClock.time
     }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate)),
     order: context.order,
     occupants: occupantRows.map((occupant) => {
@@ -1647,6 +1676,61 @@ export async function consumeCoverage(trx: Transaction<Database>, orderId: strin
     await incrementContractAndLotVersions(trx, contractId, [...new Set(items.filter((item) => item.contract_id === contractId).map((item) => item.lot_id))]);
   }
   return { coverageIds: items.map((item) => item.id), factIds };
+}
+
+export async function restoreConsumedCoverage(
+  trx: Transaction<Database>,
+  orderId: string,
+  commandId: string
+): Promise<{ coverageIds: string[]; factIds: string[] }> {
+  const items = await trx.selectFrom("coverage_items")
+    .selectAll()
+    .where("order_id", "=", orderId)
+    .where("status", "=", "CONSUMED")
+    .orderBy("service_date")
+    .forUpdate()
+    .execute();
+  if (items.length === 0) return { coverageIds: [], factIds: [] };
+
+  const coverageIds = items.map((item) => item.id);
+  const existingFacts = await trx.selectFrom("entitlement_ledger")
+    .select(["coverage_id", "entry_type"])
+    .where("coverage_id", "in", coverageIds)
+    .where("entry_type", "in", ["CONSUME", "RESTORE"])
+    .execute();
+  const consumedIds = new Set(existingFacts.filter((fact) => fact.entry_type === "CONSUME").map((fact) => fact.coverage_id));
+  const restoredIds = new Set(existingFacts.filter((fact) => fact.entry_type === "RESTORE").map((fact) => fact.coverage_id));
+  if (items.some((item) => !consumedIds.has(item.id) || restoredIds.has(item.id))) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "会员权益核销历史不能安全补偿", 409, false, {
+      orderId,
+      coverageIds
+    });
+  }
+
+  const factIds: string[] = [];
+  for (const item of items) {
+    const factId = newId("fact");
+    await trx.insertInto("entitlement_ledger").values({
+      fact_id: factId,
+      lot_id: item.lot_id,
+      entry_type: "RESTORE",
+      quantity_delta: 1,
+      service_date: item.service_date,
+      order_id: orderId,
+      coverage_id: item.id,
+      reason: "REVOKE_CHECK_IN_ENTITLEMENT_RESTORED",
+      command_id: commandId
+    }).execute();
+    factIds.push(factId);
+  }
+  for (const contractId of new Set(items.map((item) => item.contract_id))) {
+    await incrementContractAndLotVersions(
+      trx,
+      contractId,
+      [...new Set(items.filter((item) => item.contract_id === contractId).map((item) => item.lot_id))]
+    );
+  }
+  return { coverageIds, factIds };
 }
 
 export async function incrementContractAndLotVersions(trx: Transaction<Database>, contractId: string, lotIds: string[]): Promise<void> {

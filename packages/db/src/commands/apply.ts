@@ -10,7 +10,7 @@ import {
 } from "@qintopia/contracts";
 import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, validateBookingChannel } from "@qintopia/domain";
 import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims, releaseInventoryClaimsOnDates } from "../inventory.ts";
-import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, lockOrder, reconcileCoverage, releaseCoverage, type StayTimelineItem } from "../orders.ts";
+import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, lockOrder, reconcileCoverage, releaseCoverage, restoreConsumedCoverage, type StayTimelineItem } from "../orders.ts";
 import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from "../pricing-service.ts";
 import type { Database } from "../schema.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
@@ -253,7 +253,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     await lockEntitlementLots(trx, context.order.member_contract_id ?? undefined);
   }
 
-  if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "CHECK_OUT"].includes(commandType)) {
+  if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_OUT"].includes(commandType)) {
     const timeline = await loadActiveStayTimeline(trx, context);
     const roomDates = await roomDatesForTimeline(trx, propertyId, timeline);
     if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") {
@@ -1441,7 +1441,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     CHECK_IN: { orderStatus: "CHECKED_IN", stayStatus: "IN_HOUSE" },
     CHECK_OUT: { orderStatus: "CHECKED_OUT", stayStatus: "COMPLETED" },
     CANCEL_ORDER: { orderStatus: "CANCELLED", stayStatus: "CANCELLED" },
-    MARK_NO_SHOW: { orderStatus: "NO_SHOW", stayStatus: "NO_SHOW" }
+    MARK_NO_SHOW: { orderStatus: "NO_SHOW", stayStatus: "NO_SHOW" },
+    REVOKE_CHECK_IN: { orderStatus: "CHECK_IN_REVOKED", stayStatus: "CHECK_IN_REVOKED" }
   };
   const target = statusCommands[options.commandType];
   if (target) {
@@ -1453,15 +1454,13 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     let coverageRefs = { coverageIds: [] as string[], factIds: [] as string[] };
     let statusPricingRevisionId: string | undefined;
     let cleaningTaskId: string | undefined;
-    if (context.order.stay_type === "FREE" && (options.commandType === "CANCEL_ORDER" || options.commandType === "MARK_NO_SHOW")) {
+    if (options.commandType === "CANCEL_ORDER" || options.commandType === "MARK_NO_SHOW" || options.commandType === "REVOKE_CHECK_IN") {
       const prior = await trx.selectFrom("pricing_revisions").selectAll().where("id", "=", context.revision.id).executeTakeFirstOrThrow();
-      const coverageSet = prior.coverage_set as CoverageItemDto[];
-      const cashLines = prior.cash_lines as unknown[];
-      if (coverageSet.length !== 0 || cashLines.some((line) => {
-        const amount = line && typeof line === "object" ? (line as { amount?: { minorUnits?: unknown } }).amount?.minorUnits : undefined;
-        return amount !== 0;
-      }) || prior.current_contract_amount_minor !== 0) {
-        throw new DomainError("INTERNAL_ERROR", "Free stay pricing must remain zero and entitlement-free", 500);
+      const pricingRevision = nestedObject(effect, "pricingRevision");
+      const pricingBasis = requireString(pricingRevision, "pricingBasis");
+      if (!createOrderPricingBasisCodes.includes(pricingBasis as CreateOrderPricingBasis)
+        || moneyMinor(pricingRevision.currentContractAmount, "pricingRevision.currentContractAmount").minorUnits !== 0) {
+        throw new DomainError("INTERNAL_ERROR", "Terminal pricing revision must be a typed zero amount", 500);
       }
       statusPricingRevisionId = await insertRevision(trx, {
         orderId,
@@ -1471,10 +1470,10 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         arrivalDate: context.order.arrival_date,
         departureDate: context.order.departure_date,
         pricing: {
-          coverageSet,
-          cashLines,
+          coverageSet: [],
+          cashLines: [],
           policyBaseAmountMinor: 0,
-          pricingBasis: "FREE",
+          pricingBasis: pricingBasis as CreateOrderPricingBasis,
           manualAdjustmentMinor: 0,
           currentContractAmountMinor: 0,
           currency: prior.currency
@@ -1512,6 +1511,13 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       coverageRefs = await releaseCoverage(trx, orderId, options.commandId);
       await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds);
     }
+    if (options.commandType === "REVOKE_CHECK_IN") {
+      if (effect.unusedRoomConfirmed !== true) {
+        throw new DomainError("INTERNAL_ERROR", "撤销入住缺少未使用房间确认", 500);
+      }
+      coverageRefs = await restoreConsumedCoverage(trx, orderId, options.commandId);
+      await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds);
+    }
     await trx.updateTable("orders").set({
       status: target.orderStatus,
       ...(statusPricingRevisionId ? { current_revision_id: statusPricingRevisionId } : {}),
@@ -1524,15 +1530,15 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         orderId,
         amendmentId,
         status: target.orderStatus,
-        ...((options.commandType === "CHECK_IN" || options.commandType === "CANCEL_ORDER" || options.commandType === "MARK_NO_SHOW") ? {
+        ...((options.commandType === "CHECK_IN" || options.commandType === "CANCEL_ORDER" || options.commandType === "MARK_NO_SHOW" || options.commandType === "REVOKE_CHECK_IN") ? {
           entitlementTransition: {
-            from: "HELD",
-            to: options.commandType === "CHECK_IN" ? "CONSUMED" : "RELEASED",
+            from: options.commandType === "REVOKE_CHECK_IN" ? "CONSUMED" : "HELD",
+            to: options.commandType === "CHECK_IN" ? "CONSUMED" : options.commandType === "REVOKE_CHECK_IN" ? "RESTORED" : "RELEASED",
             coverageCount: coverageRefs.coverageIds.length
           }
         } : {}),
         ...(statusPricingRevisionId ? { pricingRevisionId: statusPricingRevisionId } : {}),
-        ...((options.commandType === "CHECK_IN" || options.commandType === "CHECK_OUT") ? {
+        ...((options.commandType === "CHECK_IN" || options.commandType === "CHECK_OUT" || options.commandType === "REVOKE_CHECK_IN") ? {
           fulfillmentTiming: {
             effectiveDate: requireString(effect, "effectiveDate"),
             recordedBusinessDate: requireString(effect, "businessDate"),

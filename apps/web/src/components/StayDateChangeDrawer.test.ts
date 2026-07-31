@@ -51,7 +51,7 @@ function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       presentation: "CURRENT",
       businessDate: "2026-08-01"
     },
-    fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null },
+    fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null, checkInRevocation: null },
     arrangementHistory: [],
     amendments: [],
     pricingRevisions: [],
@@ -158,7 +158,7 @@ describe("stay date change drawer rules", () => {
       allowedActions: [{ code: "EXTEND_STAY", enabled: true, disabledReason: null }],
       order: { ...view().order, status: "CHECKED_IN" },
       stay: { id: "stay_1", status: "IN_HOUSE" },
-      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null }
+      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null, checkInRevocation: null }
     });
     const draft = stayDateChangeInitialDraft("EXTEND_STAY", checkedIn);
     expect(draft.newArrivalDate).toBe("2026-08-02");
@@ -181,7 +181,7 @@ describe("stay date change drawer rules", () => {
         presentation: "CURRENT",
         businessDate: "2026-08-03"
       },
-      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null }
+      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null, checkInRevocation: null }
     });
     expect(stayDateChangeActionState(checkedIn, "EXTEND_STAY")?.enabled).toBe(true);
     expect(stayDateChangeActionState(checkedIn, "SHORTEN_STAY")?.enabled).toBe(true);
@@ -212,7 +212,7 @@ describe("stay date change drawer rules", () => {
         presentation: "CURRENT",
         businessDate: "2026-08-03"
       },
-      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null }
+      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null, checkInRevocation: null }
     });
     const request = buildStayDateChangeRequest("SHORTEN_STAY", checkedInChannel, {
       ...stayDateChangeInitialDraft("SHORTEN_STAY", checkedInChannel),
@@ -241,7 +241,7 @@ describe("stay date change drawer rules", () => {
         presentation: "CURRENT",
         businessDate: "2026-08-03"
       },
-      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null }
+      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null, checkInRevocation: null }
     });
     expect(stayDateChangeActionForDeparture(checkedIn, "2026-08-06")).toBe("EXTEND_STAY");
     expect(stayDateChangeActionForDeparture(checkedIn, "2026-08-04")).toBe("SHORTEN_STAY");
@@ -278,7 +278,7 @@ describe("stay date change drawer rules", () => {
         presentation: "CURRENT",
         businessDate: "2026-08-03"
       },
-      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null }
+      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null, checkInRevocation: null }
     });
     const html = renderToStaticMarkup(createElement(StayDateChangeDrawer, {
       action: "EXTEND_STAY",
@@ -300,7 +300,7 @@ describe("stay date change drawer rules", () => {
       allowedActions: [{ code: "SHORTEN_STAY", enabled: false, disabledReason: "入住当天暂不办理缩短或提前退房；未实际使用房间时请使用后续的撤销入住流程" }],
       order: { ...view().order, status: "CHECKED_IN" },
       stay: { id: "stay_1", status: "IN_HOUSE" },
-      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null }
+      fulfillment: { state: "IN_HOUSE", checkIn: null, checkOut: null, checkInRevocation: null }
     });
     expect(stayDateChangeActionState(checkedIn, "SHORTEN_STAY")).toEqual({
       action: "SHORTEN_STAY",

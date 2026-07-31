@@ -66,6 +66,7 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
   REPRICE_ORDER: { required: ["propertyId", "orderId", "targetCurrentContractAmountMinor"], properties: ["propertyId", "orderId", "targetCurrentContractAmountMinor"] },
   CANCEL_ORDER: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   MARK_NO_SHOW: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
+  REVOKE_CHECK_IN: { required: ["propertyId", "orderId", "unusedRoomConfirmed"], properties: ["propertyId", "orderId", "unusedRoomConfirmed"] },
   LOCK_MAINTENANCE: { required: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"], properties: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"] },
   RELEASE_MAINTENANCE: { required: ["propertyId", "maintenanceLockId"], properties: ["propertyId", "maintenanceLockId"] },
   COMPLETE_CLEANING: { required: ["propertyId", "cleaningTaskId"], properties: ["propertyId", "cleaningTaskId"] },
@@ -1200,13 +1201,13 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(pricingRevisionSchema.properties).not.toHaveProperty("channel_settlement_amount_minor");
     const fulfillmentSchema = (orderDetailSchema.properties as Record<string, JsonSchema>).fulfillment!;
     expect(fulfillmentSchema.additionalProperties).toBe(false);
-    expect(Object.keys(fulfillmentSchema.properties as Record<string, JsonSchema>).sort()).toEqual(["checkIn", "checkOut", "state"]);
+    expect(Object.keys(fulfillmentSchema.properties as Record<string, JsonSchema>).sort()).toEqual(["checkIn", "checkInRevocation", "checkOut", "state"]);
     expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("NOT_CHECKED_IN"));
     expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("IN_HOUSE"));
     expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("CHECKED_OUT"));
     expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("CANCELLED"));
     expect(JSON.stringify((fulfillmentSchema.properties as Record<string, JsonSchema>).state)).toEqual(expect.stringContaining("NO_SHOW"));
-    for (const [slot, type] of [["checkIn", "CHECK_IN"], ["checkOut", "CHECK_OUT"]] as const) {
+    for (const [slot, type] of [["checkIn", "CHECK_IN"], ["checkOut", "CHECK_OUT"], ["checkInRevocation", "REVOKE_CHECK_IN"]] as const) {
       const slotSchema = (fulfillmentSchema.properties as Record<string, JsonSchema>)[slot]!;
       const recordSchema = (slotSchema.anyOf as JsonSchema[]).find((variant) => variant.type === "object")!;
       expect(recordSchema.additionalProperties).toBe(false);
@@ -1573,6 +1574,95 @@ describe("OpenAPI 3.1 command contract", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+  });
+
+  it("serializes and recovers a committed terminal order result", async () => {
+    const quoteResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/quotes",
+      headers: {
+        authorization: `Bearer ${demo.writeToken}`,
+        "content-type": "application/json",
+        "idempotency-key": "contract-terminal-order-quote",
+        "x-correlation-id": "contract-terminal-order-quote"
+      },
+      payload: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: demo.roomId,
+        stayType: "TRANSIENT",
+        arrivalDate: "2027-12-20",
+        departureDate: "2027-12-22",
+        pricingPolicyVersionId: demo.transientPolicyId
+      }
+    });
+    expect(quoteResponse.statusCode, quoteResponse.body).toBe(200);
+    const created = await command(demo.writeToken, "CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: quoteResponse.json().quote.quoteId,
+      primaryGuest: {
+        fullName: "Terminal Contract Guest",
+        nickname: "Terminal Guest",
+        phone: "13800000555",
+        documentNumber: "DOC-TERMINAL-CONTRACT-1"
+      },
+      bookingChannelCode: "WECOM"
+    });
+    const orderId = created.result.orderId as string;
+    const previewResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: {
+        authorization: `Bearer ${demo.writeToken}`,
+        "content-type": "application/json",
+        "idempotency-key": "contract-terminal-cancel-preview",
+        "x-correlation-id": "contract-terminal-cancel"
+      },
+      payload: { commandType: "CANCEL_ORDER", input: { propertyId: demo.propertyId, orderId } }
+    });
+    expect(previewResponse.statusCode, previewResponse.body).toBe(200);
+    const preview = previewResponse.json().preview;
+    const confirmResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/command-previews/${preview.previewId}/confirm`,
+      headers: {
+        authorization: `Bearer ${demo.writeToken}`,
+        "content-type": "application/json",
+        "idempotency-key": "contract-terminal-cancel-confirm",
+        "x-correlation-id": "contract-terminal-cancel"
+      },
+      payload: {
+        propertyId: demo.propertyId,
+        commandType: "CANCEL_ORDER",
+        confirmation: true,
+        expectedEffectHash: preview.effectHash,
+        reason: { code: "CONTRACT_TEST", note: "Verify terminal receipt serialization" }
+      }
+    });
+    expect(confirmResponse.statusCode, confirmResponse.body).toBe(200);
+    const cancelled = confirmResponse.json();
+    expect(cancelled.result).toMatchObject({
+      orderId,
+      status: "CANCELLED",
+      pricingRevisionId: expect.any(String),
+      effectHash: expect.stringMatching(/^[a-f0-9]{64}$/)
+    });
+
+    const recovered = await app.inject({
+      method: "GET",
+      url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=CANCEL_ORDER&idempotencyKey=contract-terminal-cancel-confirm`,
+      headers: { authorization: `Bearer ${demo.writeToken}` }
+    });
+    expect(recovered.statusCode, recovered.body).toBe(200);
+    expect(recovered.json()).toMatchObject({
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      result: {
+        orderId,
+        status: "CANCELLED",
+        pricingRevisionId: cancelled.result.pricingRevisionId,
+        effectHash: cancelled.result.effectHash
+      }
+    });
   });
 
   it("serializes stable order, member, fact, and audit views from executed facts", async () => {

@@ -65,6 +65,8 @@ async function login(page: Page): Promise<RoomStatusBoardDto> {
 
 async function showRange(page: Page, nights = 20, expectDesktopBoard = true): Promise<void> {
   const departureDate = addDays(fixture.dates.arrivalDate, nights);
+  const mobileRangeToggle = page.getByTestId("mobile-room-status-range-toggle");
+  if (await mobileRangeToggle.isVisible()) await mobileRangeToggle.click();
   await page.getByTestId("departure-date").fill(departureDate);
   const arrivalResponse = roomStatusResponse(page, { arrivalDate: fixture.dates.arrivalDate, departureDate });
   await page.getByTestId("arrival-date").fill(fixture.dates.arrivalDate);
@@ -72,6 +74,10 @@ async function showRange(page: Page, nights = 20, expectDesktopBoard = true): Pr
   if (expectDesktopBoard) {
     await expect(page.getByTestId("room-status-board-range"))
       .toHaveAttribute("data-range-arrival", fixture.dates.arrivalDate);
+  }
+  const occupancyToggle = page.getByTestId("mobile-room-status-occupancies-toggle");
+  if (await occupancyToggle.isVisible() && await occupancyToggle.getAttribute("aria-expanded") === "false") {
+    await occupancyToggle.click();
   }
 }
 
@@ -801,12 +807,16 @@ test("U2 mobile order context is full-screen, machine-free, and returns focus to
   test.skip(!isMobile(testInfo), "mobile-only U2 order-context coverage");
   await page.setViewportSize({ width: 375, height: 812 });
   await login(page);
+  await expect(page.locator(".room-status-toolbar")).toHaveCount(0);
+  await expect(page.locator(".room-status-grid-section")).toBeHidden();
+  await page.getByRole("button", { name: "查看住宿安排说明", exact: true }).click();
+  await expect(page.getByText("这里按房间和日期列出当前查看范围内的已预订和在住占用，用于核对每天的占用情况；它不是今日待办，也不会直接创建订单。", { exact: true })).toBeVisible();
   await showRange(page, 7, false);
   await expect(page.getByTestId("sidebar-toggle")).toBeHidden();
   for (const viewport of [{ width: 375, height: 812 }, { width: 320, height: 700 }]) {
     await page.setViewportSize(viewport);
     const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
-    const trigger = occupancy.getByRole("button", { name: "打开订单上下文", exact: true });
+    const trigger = occupancy.getByRole("button", { name: "查看订单信息", exact: true });
     await trigger.click();
     const dialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
     await expect(dialog).toBeVisible();
@@ -848,7 +858,7 @@ test("U2 order context remains reachable at 200 percent desktop zoom", async ({ 
     }))).toEqual({ cssWidth: 720, cssHeight: 450, pixelRatio: 2 });
 
     const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
-    const trigger = occupancy.getByRole("button", { name: "打开订单上下文", exact: true });
+    const trigger = occupancy.getByRole("button", { name: "查看订单信息", exact: true });
     await trigger.click();
     const dialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
     await expect(dialog).toBeVisible();

@@ -65,7 +65,7 @@ export const HistoricalRecoverableCommandTypeSchema = Type.Union(
 );
 export const OrderStatusSchema = Type.Union([
   Type.Literal("RESERVED"), Type.Literal("CHECKED_IN"), Type.Literal("CHECKED_OUT"),
-  Type.Literal("CANCELLED"), Type.Literal("NO_SHOW")
+  Type.Literal("CANCELLED"), Type.Literal("NO_SHOW"), Type.Literal("CHECK_IN_REVOKED")
 ]);
 
 export const Money = strictObject({
@@ -323,6 +323,7 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: NonNegativeWholeYuanAmount })),
   commandEnvelope("CANCEL_ORDER", strictObject(OrderInput)),
   commandEnvelope("MARK_NO_SHOW", strictObject(OrderInput)),
+  commandEnvelope("REVOKE_CHECK_IN", strictObject({ ...OrderInput, unusedRoomConfirmed: Type.Literal(true) })),
   commandEnvelope("LOCK_MAINTENANCE", strictObject({ ...PropertyInput, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note })),
   commandEnvelope("RELEASE_MAINTENANCE", strictObject({ ...PropertyInput, maintenanceLockId: Id })),
   commandEnvelope("COMPLETE_CLEANING", strictObject({ ...PropertyInput, cleaningTaskId: Id })),
@@ -815,9 +816,14 @@ export const CommandEffectSchema = Type.Union([
       status: Type.Literal("PENDING")
     })),
     entitlementTransition: Type.Optional(strictObject({
-      from: Type.Literal("HELD"),
-      to: Type.Union([Type.Literal("CONSUMED"), Type.Literal("RELEASED")]),
+      from: Type.Union([Type.Literal("HELD"), Type.Literal("CONSUMED")]),
+      to: Type.Union([Type.Literal("CONSUMED"), Type.Literal("RELEASED"), Type.Literal("RESTORED")]),
       coverageCount: Type.Integer({ minimum: 0 })
+    })),
+    unusedRoomConfirmed: Type.Optional(Type.Literal(true)),
+    pricingRevision: Type.Optional(strictObject({
+      currentContractAmount: Money,
+      pricingBasis: Type.Union(createOrderPricingBasisCodes.map((code) => Type.Literal(code)))
     }))
   })
 ]);
@@ -1063,6 +1069,7 @@ const OrderStatusResultSchema = strictObject({
   amendmentId: Id,
   status: OrderStatusSchema,
   pricingRevisionId: Type.Optional(Id),
+  effectHash: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })),
   cleaningTaskId: Type.Optional(Id),
   fulfillmentTiming: Type.Optional(strictObject({
     effectiveDate: LocalDate,
@@ -1070,8 +1077,8 @@ const OrderStatusResultSchema = strictObject({
     recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
   })),
   entitlementTransition: Type.Optional(strictObject({
-    from: Type.Literal("HELD"),
-    to: Type.Union([Type.Literal("CONSUMED"), Type.Literal("RELEASED")]),
+    from: Type.Union([Type.Literal("HELD"), Type.Literal("CONSUMED")]),
+    to: Type.Union([Type.Literal("CONSUMED"), Type.Literal("RELEASED"), Type.Literal("RESTORED")]),
     coverageCount: Type.Integer({ minimum: 0 })
   }))
 });
@@ -1796,10 +1803,15 @@ const CheckOutFulfillmentRecordSchema = strictObject({
   type: Type.Literal("CHECK_OUT"),
   ...OrderFulfillmentRecordProperties
 });
+const CheckInRevocationFulfillmentRecordSchema = strictObject({
+  type: Type.Literal("REVOKE_CHECK_IN"),
+  ...OrderFulfillmentRecordProperties
+});
 const OrderFulfillmentProjectionSchema = strictObject({
   state: Type.Union(orderFulfillmentStates.map((state) => Type.Literal(state))),
   checkIn: nullable(CheckInFulfillmentRecordSchema),
-  checkOut: nullable(CheckOutFulfillmentRecordSchema)
+  checkOut: nullable(CheckOutFulfillmentRecordSchema),
+  checkInRevocation: nullable(CheckInRevocationFulfillmentRecordSchema)
 });
 const OrderArrangementIntervalSchema = strictObject({
   inventoryUnitId: Id,
@@ -1867,7 +1879,7 @@ export const OrderDetailResponseSchema = strictObject({
   })),
   stay: strictObject({ id: Id, status: Type.Union([
     Type.Literal("PLANNED"), Type.Literal("IN_HOUSE"), Type.Literal("COMPLETED"),
-    Type.Literal("CANCELLED"), Type.Literal("NO_SHOW")
+    Type.Literal("CANCELLED"), Type.Literal("NO_SHOW"), Type.Literal("CHECK_IN_REVOKED")
   ]) }),
   currentSegment: strictObject({ id: Id, sequence: Type.Integer({ minimum: 1 }), inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate }),
   segments: Type.Array(StaySegmentRowSchema),
@@ -1980,7 +1992,7 @@ export const MembersQuerySchema = strictObject({
 export const MembersListResponseSchema = strictObject({ members: Type.Array(MemberSummarySchema) });
 export const EntitlementLedgerRowSchema = strictObject({
   fact_id: Id, lot_id: Id,
-  entry_type: Type.Union([Type.Literal("ADJUST"), Type.Literal("HOLD"), Type.Literal("RELEASE"), Type.Literal("CONSUME"), Type.Literal("EXPIRE")]),
+  entry_type: Type.Union([Type.Literal("ADJUST"), Type.Literal("HOLD"), Type.Literal("RELEASE"), Type.Literal("CONSUME"), Type.Literal("RESTORE"), Type.Literal("EXPIRE")]),
   quantity_delta: SafeInteger, service_date: nullable(LocalDate), order_id: nullable(Id), coverage_id: nullable(Id),
   reason: Type.String({ minLength: 1, maxLength: 1000 }), command_id: nullable(Id), created_at: DateTime
 });

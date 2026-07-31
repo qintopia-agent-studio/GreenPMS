@@ -492,7 +492,7 @@ describe("scoped agent HTTP core journey", () => {
       departureDate: originalDepartureDate,
       intervals: [{ inventoryUnitId: memberRoomId, arrivalDate, departureDate: originalDepartureDate }]
     });
-    expect(createdOrder.fulfillment).toEqual({ state: "NOT_CHECKED_IN", checkIn: null, checkOut: null });
+    expect(createdOrder.fulfillment).toEqual({ state: "NOT_CHECKED_IN", checkIn: null, checkOut: null, checkInRevocation: null });
     expect(createdOrder.arrangementHistory).toEqual([
       expect.objectContaining({
         type: "INITIAL_BOOKING",

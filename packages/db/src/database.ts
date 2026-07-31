@@ -32,7 +32,8 @@ const currentMigrationNames = [
   "025_channel_order_atomic_pricing.sql",
   "026_stage9_stay_change_guards.sql",
   "027_stage10_stay_shortening_guards.sql",
-  "028_stage11_move_unit_guards.sql"
+  "028_stage11_move_unit_guards.sql",
+  "029_stage12_terminal_order_guards.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -237,6 +238,55 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       JOIN pg_class AS relation ON relation.oid = trigger.tgrelid
       JOIN pg_proc AS handler ON handler.oid = trigger.tgfoid
     `.execute(db);
+    const stage12Objects = await sql<{
+      function_count: string;
+      deferred_trigger_count: string;
+      immediate_trigger_count: string;
+      restore_index_count: string;
+    }>`
+      SELECT
+        (
+          (to_regprocedure('qintopia_validate_entitlement_lifecycle_fact()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_stage12_terminal_amendment()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_stage12_terminal_revision()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_assert_stage12_terminal_command(text)') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_stage12_terminal_execution()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_stage12_terminal_child()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_protect_stage12_terminal_status()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_stage12_order_terminal_transition()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_stage12_stay_terminal_transition()') IS NOT NULL)::integer
+        )::text AS function_count,
+        count(*) FILTER (
+          WHERE NOT trigger.tgisinternal
+            AND trigger.tgdeferrable
+            AND trigger.tginitdeferred
+            AND trigger.tgenabled IN ('O','A')
+            AND trigger.tgname IN (
+              'command_executions_stage12_validate_terminal',
+              'entitlement_ledger_stage12_validate_terminal',
+              'orders_stage12_validate_terminal_transition',
+              'stays_stage12_validate_terminal_transition'
+            )
+        )::text AS deferred_trigger_count,
+        count(*) FILTER (
+          WHERE NOT trigger.tgisinternal
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgenabled IN ('O','A')
+            AND trigger.tgname IN (
+              'amendments_stage12_validate_terminal',
+              'pricing_revisions_stage12_validate_terminal',
+              'orders_stage12_protect_terminal_status',
+              'stays_stage12_protect_terminal_status'
+            )
+        )::text AS immediate_trigger_count,
+        (
+          SELECT count(*)::text FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'entitlement_ledger_one_restore_per_coverage_idx'
+        ) AS restore_index_count
+      FROM pg_trigger AS trigger
+    `.execute(db);
     return stage10Objects.rows[0]?.function_count === "3"
       && stage10Objects.rows[0]?.deferred_trigger_count === "2"
       && stage10Objects.rows[0]?.immediate_trigger_count === "3"
@@ -244,7 +294,11 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       && stage11Objects.rows[0]?.replacement_count === "2"
       && stage11Objects.rows[0]?.body_marker_count === "8"
       && stage11Objects.rows[0]?.deferred_trigger_count === "4"
-      && stage11Objects.rows[0]?.immediate_trigger_count === "8";
+      && stage11Objects.rows[0]?.immediate_trigger_count === "8"
+      && stage12Objects.rows[0]?.function_count === "9"
+      && stage12Objects.rows[0]?.deferred_trigger_count === "4"
+      && stage12Objects.rows[0]?.immediate_trigger_count === "4"
+      && stage12Objects.rows[0]?.restore_index_count === "1";
   } catch {
     return false;
   }

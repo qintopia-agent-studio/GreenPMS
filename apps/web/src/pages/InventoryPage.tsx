@@ -30,6 +30,10 @@ import type {
 } from "../types";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { MoveUnitDrawer } from "../components/MoveUnitDrawer";
+import {
+  OrderLifecycleActionDrawer,
+  type OrderLifecycleAction
+} from "../components/OrderLifecycleActionDrawer";
 import { StayDateChangeDrawer, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 import {
   CommandDialog,
@@ -1584,6 +1588,8 @@ export function InventoryPage() {
   const [selectedStayDateRevision, setSelectedStayDateRevision] = useState<string>();
   const [selectedMoveUnitOpen, setSelectedMoveUnitOpen] = useState(false);
   const [selectedMoveUnitRevision, setSelectedMoveUnitRevision] = useState<string>();
+  const [selectedLifecycleAction, setSelectedLifecycleAction] = useState<OrderLifecycleAction>();
+  const [selectedLifecycleRevision, setSelectedLifecycleRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
   const [quickPopoverTarget, setQuickPopoverTarget] = useState<{
@@ -1721,7 +1727,11 @@ export function InventoryPage() {
     setSelectedStayDateRevision(undefined);
     setSelectedMoveUnitOpen(false);
     setSelectedMoveUnitRevision(undefined);
-    setCommandDraft((current) => current?.presentation === "STAY_DATES" || current?.presentation === "MOVE_UNIT" ? undefined : current);
+    setSelectedLifecycleAction(undefined);
+    setSelectedLifecycleRevision(undefined);
+    setCommandDraft((current) => current?.presentation === "STAY_DATES"
+      || current?.presentation === "MOVE_UNIT"
+      || current?.presentation === "ORDER_LIFECYCLE" ? undefined : current);
   }, [selectedOrderIdentity?.orderId, selectedOrderIdentity?.stayId]);
 
   useEffect(() => {
@@ -1764,6 +1774,15 @@ export function InventoryPage() {
     setCommandDraft(undefined);
     setActionError(new Error("订单或房态已经变化。为避免使用旧数据，原换房表单已关闭；请重新打开后核对。"));
   }, [board?.revision, selectedMoveUnitOpen, selectedMoveUnitRevision]);
+
+  useEffect(() => {
+    if (!selectedLifecycleAction || !selectedLifecycleRevision || !board) return;
+    if (board.revision === selectedLifecycleRevision) return;
+    setSelectedLifecycleAction(undefined);
+    setSelectedLifecycleRevision(undefined);
+    setCommandDraft(undefined);
+    setActionError(new Error("订单或房态已经变化。为避免处理错误订单，原操作表单已关闭；请重新选择后核对。"));
+  }, [board?.revision, selectedLifecycleAction, selectedLifecycleRevision]);
 
   const boardMatchesCurrentProperty = Boolean(board && board.propertyId === propertyId);
   const currentBoardQueryKey = roomStatusQueryKey(roomStatusQuery(range, viewState.roomPageIndex, viewState.filters));
@@ -1953,17 +1972,17 @@ export function InventoryPage() {
               ? "已重新校验返回位置。原选区的可售、状态、来源、冲突或允许动作已经变化；已保留选区供核对并将焦点移至选区起点。旧 Preview 不会继续使用。"
               : "房态数据已变化，且原选区的可售、状态、来源、冲突或允许动作已经变化；已保留选区供核对并将焦点移至选区起点。旧核对结果不会继续使用。");
           } else if (resolution.outcome === "FALLBACK") {
-            setReturnNotice(`原焦点或选区在当前筛选、展开、分页或日期窗口中已不可见。${pageAdjusted ? "原分页已失效；" : ""}${resolution.filtersCleared ? "原筛选已无结果并已清除；" : ""}已清除旧选区并将焦点移至当前视图首个可见房间和日期。旧 Preview 不会继续使用。`);
+            setReturnNotice("当前筛选或日期范围已变化，已切换为当前可用的房态内容。");
           } else if (resolution.outcome === "EMPTY") {
-            setReturnNotice("原房态返回位置已失效，且当前页没有可聚焦的库存日期格。已清除旧焦点和选区；旧 Preview 不会继续使用。");
+            setReturnNotice("上次查看的位置已失效，已回到当前可用的房态内容。");
           } else if (restored.revision === response.revision) {
             const adjusted = pageAdjusted || resolution.dateWindowAdjusted || resolution.scrollAnchorAdjusted;
             setReturnNotice(adjusted
-              ? "已恢复上次房态范围、筛选、展开、选区和焦点；不可用的分页、日期窗口或滚动锚点已校正到当前可见内容。"
-              : "已恢复上次房态范围、筛选、展开、滚动、选区和焦点。它们均已验证为当前可见且可聚焦。"
+              ? "已恢复上次查看位置，并按当前房态更新。"
+              : "已恢复上次查看位置。"
             );
           } else {
-            setReturnNotice("房态数据已变化。已刷新并确认原选区与焦点在当前筛选、展开、分页和日期窗口中仍可见；任何旧核对结果均已作废。");
+            setReturnNotice("房态已更新，已恢复当前可用的查看位置。");
           }
         }
       })
@@ -3099,6 +3118,25 @@ export function InventoryPage() {
     setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
   }
 
+  function startSelectedOrderLifecycleAction(commandType: OrderLifecycleAction) {
+    setActionError(undefined);
+    const view = authorizedSelectedOrderView;
+    const identity = selectedOrderIdentity;
+    const action = view?.allowedActions.find((candidate) => candidate.code === commandType);
+    if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
+      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未打开操作表单。请重新选择住宿后再试。"));
+      return;
+    }
+    if (commandsBlocked || view.accessLevel !== "WRITE" || !action?.enabled) {
+      setActionError(new Error("服务端当前未允许这项订单操作，未打开表单。请刷新订单状态后重新核对。"));
+      return;
+    }
+    setCommandDraft(undefined);
+    setSelectedLifecycleAction(commandType);
+    setSelectedLifecycleRevision(boardRef.current?.revision);
+    setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
+  }
+
   function closeSelectedOrderContext() {
     returnedOrderCellFocus.current = undefined;
     setSelectedCorrectionOccupantId(undefined);
@@ -3350,6 +3388,13 @@ export function InventoryPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
+    if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN") {
+      if (authorizedSelectedOrderView) {
+        setSelectedLifecycleAction(request.commandType);
+        setSelectedLifecycleRevision(boardRef.current?.revision);
+      }
+      return;
+    }
     if (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY") {
       if (authorizedSelectedOrderView) {
         setSelectedStayDateAction(request.commandType);
@@ -3461,6 +3506,7 @@ export function InventoryPage() {
         onOpenOrder={openSelectedOrder}
         onOpenMember={({ memberId, contractId }) => navigate(`/members?memberId=${encodeURIComponent(memberId)}&contractId=${encodeURIComponent(contractId)}`)}
         onFulfillmentAction={startSelectedOrderFulfillment}
+        onLifecycleAction={startSelectedOrderLifecycleAction}
         onDateAction={startSelectedOrderDateAction}
         onMoveUnit={startSelectedOrderMoveUnit}
         onCorrectOccupant={(occupant) => {
@@ -3593,12 +3639,18 @@ export function InventoryPage() {
               />
               <RoomStatusMobileTasks
                 board={renderedBoard}
+                range={range}
                 groups={mobileGroups}
                 activeTab={mobileTab}
                 canCreate={!commandsBlocked && renderedBoard.accessLevel === "WRITE"}
                 focusRequest={mobileFocusRequest}
                 onTabChange={setMobileTab}
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}
+                onRangeChange={applyRange}
+                onToday={() => {
+                  const nights = Math.max(1, rangeNights(range));
+                  applyRange({ arrivalDate: todayDate, departureDate: addLocalDateDays(todayDate, nights) });
+                }}
                 onCreate={() => setMobileCreateOpen(true)}
                 onOpenReference={openReference}
                 onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
@@ -3724,8 +3776,6 @@ export function InventoryPage() {
             </button>
           ) : null}
 
-          {isMobile ? roomStatusToolbar : null}
-
           {isMobile && mobileCreateOpen ? (
             <Modal title="新建住宿或锁房" size="mobile-fullscreen" onClose={() => setMobileCreateOpen(false)} footer={null}>
               <RoomStatusContext
@@ -3845,6 +3895,34 @@ export function InventoryPage() {
           startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
         }}
       /> : null}
+      {authorizedSelectedOrderView && selectedLifecycleAction ? <OrderLifecycleActionDrawer
+        action={selectedLifecycleAction}
+        view={authorizedSelectedOrderView}
+        inventoryUnitLabels={Object.fromEntries(meta.inventoryUnits.map((unit) => [unit.id, `${unit.code} · ${unit.name}`]))}
+        writeBlocked={commandsBlocked || selectedLifecycleRevision !== board?.revision}
+        {...(commandDraft?.commandType === selectedLifecycleAction ? { draft: commandDraft } : {})}
+        onClose={() => {
+          setSelectedLifecycleAction(undefined);
+          setSelectedLifecycleRevision(undefined);
+          setSelectedOrderCommandScope(undefined);
+          setCommandDraft(undefined);
+          restoreRoomStatusInteraction();
+        }}
+        onSubmit={(request) => {
+          const identity = selectedOrderIdentity;
+          const currentView = authorizedSelectedOrderView;
+          const action = currentView?.allowedActions.find((candidate) => candidate.code === selectedLifecycleAction);
+          if (!identity || commandsBlocked || selectedLifecycleRevision !== board?.revision
+            || request.commandType !== selectedLifecycleAction
+            || currentView.order.id !== identity.orderId || currentView.stay.id !== identity.stayId
+            || !action?.enabled) return;
+          setSelectedLifecycleAction(undefined);
+          setSelectedLifecycleRevision(undefined);
+          setCommandDraft(undefined);
+          setRecoveryDialogOpen(false);
+          startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
+        }}
+      /> : null}
       {command && commandTargetScopeCurrent ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}-${commandAttemptId}` : `new-room-status-command-${commandAttemptId}`}
         request={command}
@@ -3860,6 +3938,8 @@ export function InventoryPage() {
           setSelectedStayDateRevision(undefined);
           setSelectedMoveUnitOpen(false);
           setSelectedMoveUnitRevision(undefined);
+          setSelectedLifecycleAction(undefined);
+          setSelectedLifecycleRevision(undefined);
           if (command.commandType === "CREATE_ORDER") {
             setQuoteTarget(undefined);
             setDesktopContextCollapsed(true);

@@ -1996,6 +1996,61 @@ body:has(.modal-mobile-fullscreen[open]) {
   gap: 20px;
 }
 
+.lifecycle-action-context {
+  display: grid;
+  gap: 4px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.lifecycle-action-context strong {
+  font-size: 15px;
+}
+
+.lifecycle-action-context span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.lifecycle-unused-confirmation {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
+.lifecycle-unused-confirmation input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--brand);
+}
+
+.lifecycle-unused-confirmation span {
+  display: grid;
+  gap: 3px;
+}
+
+.lifecycle-unused-confirmation small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.danger-button {
+  border-color: #d6a5a1;
+  color: var(--danger);
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
 .form-actions {
   display: flex;
   justify-content: flex-end;
@@ -3433,6 +3488,12 @@ pre {
   .modal-wide {
     width: calc(100vw - 16px);
     max-height: calc(100dvh - 16px);
+  }
+
+  .modal-drawer {
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
   }
 
   .modal-mobile-fullscreen {

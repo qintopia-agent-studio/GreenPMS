@@ -17,7 +17,10 @@ export const u1CommandTypes = [
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
-  "MOVE_UNIT"
+  "MOVE_UNIT",
+  "CANCEL_ORDER",
+  "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN"
 ] as const satisfies readonly HistoricalCommandType[];
 
 export type U1CommandType = (typeof u1CommandTypes)[number];
@@ -144,6 +147,9 @@ export function commandShellSuccessMessage(commandType: U1CommandType): string {
     case "EXTEND_STAY": return "住宿已延长，订单和房态已刷新。";
     case "SHORTEN_STAY": return "住宿已缩短，订单和房态已刷新。";
     case "MOVE_UNIT": return "换房已完成，订单和房态已刷新。";
+    case "CANCEL_ORDER": return "订单已取消，订单和房态已刷新。";
+    case "MARK_NO_SHOW": return "订单已标记未到，订单和房态已刷新。";
+    case "REVOKE_CHECK_IN": return "入住已撤销，订单、房态和会员权益已刷新。";
   }
 }
 
@@ -166,6 +172,9 @@ export function commandShellLabel(commandType: U1CommandType): string {
     case "EXTEND_STAY": return "延长住宿";
     case "SHORTEN_STAY": return "缩短住宿或提前退房";
     case "MOVE_UNIT": return "办理换房";
+    case "CANCEL_ORDER": return "取消订单";
+    case "MARK_NO_SHOW": return "标记未到";
+    case "REVOKE_CHECK_IN": return "撤销入住";
   }
 }
 

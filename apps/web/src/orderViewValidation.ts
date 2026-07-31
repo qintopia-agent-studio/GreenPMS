@@ -11,8 +11,8 @@ type JsonRecord = Record<string, unknown>;
 
 const localDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 const arrangementChangeTypes = new Set(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT"]);
-const effectivePresentations = new Set(["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER"]);
-const fulfillmentStates = new Set(["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]);
+const effectivePresentations = new Set(["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER", "BEFORE_CHECK_IN_REVOCATION"]);
+const fulfillmentStates = new Set(["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"]);
 const recordingModes = new Set(["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"]);
 const pricingBases = new Set(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"]);
 const actionCodes = new Set<string>(orderActionCodes);
@@ -27,7 +27,8 @@ const orderProjectionExpectations = {
   CHECKED_IN: { stayStatus: "IN_HOUSE", fulfillmentState: "IN_HOUSE", presentation: "CURRENT" },
   CHECKED_OUT: { stayStatus: "COMPLETED", fulfillmentState: "CHECKED_OUT", presentation: "LAST" },
   CANCELLED: { stayStatus: "CANCELLED", fulfillmentState: "CANCELLED", presentation: "BEFORE_CANCELLATION" },
-  NO_SHOW: { stayStatus: "NO_SHOW", fulfillmentState: "NO_SHOW", presentation: "NO_SHOW_ORDER" }
+  NO_SHOW: { stayStatus: "NO_SHOW", fulfillmentState: "NO_SHOW", presentation: "NO_SHOW_ORDER" },
+  CHECK_IN_REVOKED: { stayStatus: "CHECK_IN_REVOKED", fulfillmentState: "CHECK_IN_REVOKED", presentation: "BEFORE_CHECK_IN_REVOCATION" }
 } as const;
 
 export class OrderViewValidationError extends Error {
@@ -352,7 +353,7 @@ function effectiveArrangement(value: unknown, path: string): OrderEffectiveArran
   };
 }
 
-function fulfillmentRecord(value: unknown, path: string, expectedType: "CHECK_IN" | "CHECK_OUT") {
+function fulfillmentRecord(value: unknown, path: string, expectedType: "CHECK_IN" | "CHECK_OUT" | "REVOKE_CHECK_IN") {
   if (value === null) return null;
   const result = record(value, path);
   exactKeys(result, path, ["type", "plannedBusinessDate", "recordedBusinessDate", "recordingMode", "recordedAt", "actor", "reason"]);
@@ -367,8 +368,9 @@ function fulfillmentRecord(value: unknown, path: string, expectedType: "CHECK_IN
     fail(path, "按计划办理日期与计划日期不一致");
   }
   if (recordingMode === "LATE_RECORDED"
-    && (expectedType !== "CHECK_OUT" || recordedBusinessDate === null || recordedBusinessDate <= plannedBusinessDate)) {
-    fail(path, "迟录退房日期没有晚于计划退房日");
+    && ((expectedType !== "CHECK_IN" && expectedType !== "CHECK_OUT")
+      || recordedBusinessDate === null || recordedBusinessDate <= plannedBusinessDate)) {
+    fail(path, expectedType === "CHECK_IN" ? "迟录入住日期没有晚于计划入住日" : "迟录退房日期没有晚于计划退房日");
   }
   return {
     type: expectedType,
@@ -383,20 +385,26 @@ function fulfillmentRecord(value: unknown, path: string, expectedType: "CHECK_IN
 
 function fulfillment(value: unknown, path: string): OrderFulfillmentProjectionDto {
   const result = record(value, path);
-  exactKeys(result, path, ["state", "checkIn", "checkOut"]);
+  exactKeys(result, path, ["state", "checkIn", "checkOut", "checkInRevocation"]);
   if (!fulfillmentStates.has(String(result.state))) fail(`${path}.state`, "不是支持的履约状态");
   const checkIn = fulfillmentRecord(result.checkIn, `${path}.checkIn`, "CHECK_IN");
   const checkOut = fulfillmentRecord(result.checkOut, `${path}.checkOut`, "CHECK_OUT");
+  const checkInRevocation = fulfillmentRecord(result.checkInRevocation, `${path}.checkInRevocation`, "REVOKE_CHECK_IN");
   const valid = result.state === "NOT_CHECKED_IN" || result.state === "CANCELLED" || result.state === "NO_SHOW"
-    ? !checkIn && !checkOut
+    ? !checkIn && !checkOut && !checkInRevocation
     : result.state === "IN_HOUSE"
-      ? Boolean(checkIn) && !checkOut
-      : result.state === "CHECKED_OUT" && Boolean(checkIn) && Boolean(checkOut);
-  if (!valid) fail(path, "履约状态与入住、退房记录不一致");
+      ? Boolean(checkIn) && !checkOut && !checkInRevocation
+      : result.state === "CHECKED_OUT"
+        ? Boolean(checkIn) && Boolean(checkOut) && !checkInRevocation
+        : result.state === "CHECK_IN_REVOKED" && Boolean(checkIn) && !checkOut && Boolean(checkInRevocation);
+  if (!valid) fail(path, "履约状态与入住、退房或撤销记录不一致");
   if (checkIn && checkOut && Date.parse(checkOut.recordedAt) < Date.parse(checkIn.recordedAt)) {
     fail(path, "退房记录时间早于入住记录时间");
   }
-  return { state: result.state as OrderFulfillmentProjectionDto["state"], checkIn, checkOut };
+  if (checkIn && checkInRevocation && Date.parse(checkInRevocation.recordedAt) < Date.parse(checkIn.recordedAt)) {
+    fail(path, "撤销入住记录时间早于入住记录时间");
+  }
+  return { state: result.state as OrderFulfillmentProjectionDto["state"], checkIn, checkOut, checkInRevocation };
 }
 
 function historyItem(value: unknown, path: string): OrderArrangementHistoryItemDto {
@@ -473,6 +481,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const seenActionCodes = new Set<string>();
   const enabledDateActions: string[] = [];
   let moveUnitEnabled = false;
+  const enabledLifecycleActions: string[] = [];
   arrayValue(result.allowedActions, "allowedActions").forEach((item, index) => {
     const action = record(item, `allowedActions[${index}]`);
     exactKeys(action, `allowedActions[${index}]`, ["code", "enabled", "disabledReason"]);
@@ -485,6 +494,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     if (accessLevel === "READ" && action.enabled) fail(`allowedActions[${index}]`, "只读权限不能包含可执行写操作");
     if (action.enabled && (code === "RESCHEDULE_STAY" || code === "EXTEND_STAY" || code === "SHORTEN_STAY")) enabledDateActions.push(code);
     if (action.enabled && code === "MOVE_UNIT") moveUnitEnabled = true;
+    if (action.enabled && (code === "CANCEL_ORDER" || code === "MARK_NO_SHOW" || code === "REVOKE_CHECK_IN")) enabledLifecycleActions.push(code);
   });
   const orderId = stringValue(order.id, "order.id");
   stringValue(order.property_id, "order.property_id");
@@ -497,6 +507,14 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
       : new Set<string>();
   if (enabledDateActions.some((code) => !allowedDateActions.has(code))) {
     fail("allowedActions", "日期操作与订单状态不一致");
+  }
+  const allowedLifecycleActions = orderStatus === "RESERVED"
+    ? new Set(["CANCEL_ORDER", "MARK_NO_SHOW"])
+    : orderStatus === "CHECKED_IN"
+      ? new Set(["REVOKE_CHECK_IN"])
+      : new Set<string>();
+  if (enabledLifecycleActions.some((code) => !allowedLifecycleActions.has(code))) {
+    fail("allowedActions", "取消、未到或撤销入住操作与订单状态不一致");
   }
   const expectation = orderProjectionExpectations[orderStatus as keyof typeof orderProjectionExpectations];
   const orderArrivalDate = localDate(order.arrival_date, "order.arrival_date");
@@ -549,6 +567,10 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   if (fulfillmentProjection.checkOut?.plannedBusinessDate !== undefined
     && fulfillmentProjection.checkOut.plannedBusinessDate !== effective.departureDate) {
     fail("fulfillment.checkOut.plannedBusinessDate", "与当前安排退房日不一致");
+  }
+  if (fulfillmentProjection.checkInRevocation?.plannedBusinessDate !== undefined
+    && fulfillmentProjection.checkInRevocation.plannedBusinessDate !== effective.arrivalDate) {
+    fail("fulfillment.checkInRevocation.plannedBusinessDate", "与当前安排入住日不一致");
   }
   if (!Array.isArray(result.arrangementHistory) || result.arrangementHistory.length === 0) {
     fail("arrangementHistory", "必须包含初始预订记录");
@@ -684,6 +706,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   });
   const standaloneRepriceRevisionIds = new Set<string>();
   const standaloneMemberRepriceRevisionIds = new Set<string>();
+  const lifecycleZeroRevisionIds = new Set<string>();
   const pricingRevisions = arrayValue(result.pricingRevisions, "pricingRevisions");
   if (pricingRevisions.length === 0) fail("pricingRevisions", "必须包含计价记录");
   pricingRevisions.forEach((item, index) => {
@@ -741,6 +764,29 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
       }
     }
     if (standaloneReprice) standaloneRepriceRevisionIds.add(revisionId);
+    const lifecycleAmendmentType = orderStatus === "CANCELLED"
+      ? "CANCEL_ORDER"
+      : orderStatus === "NO_SHOW"
+        ? "MARK_NO_SHOW"
+        : orderStatus === "CHECK_IN_REVOKED"
+          ? "REVOKE_CHECK_IN"
+          : undefined;
+    if (index > 0 && lifecycleAmendmentType && currentRevisionAmount === 0) {
+      const matchingLifecycleAmendments = amendments.flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const candidate = item as JsonRecord;
+        return candidate.id === revisionAmendmentId ? [candidate] : [];
+      });
+      const lifecycleAmendment = matchingLifecycleAmendments.length === 1 ? matchingLifecycleAmendments[0] : undefined;
+      if (lifecycleAmendment
+        && lifecycleAmendment.order_id === orderId
+        && lifecycleAmendment.amendment_type === lifecycleAmendmentType
+        && lifecycleAmendment.reason_code === pricingReason.code
+        && lifecycleAmendment.reason_note === pricingReason.note
+        && Date.parse(dateTime(lifecycleAmendment.created_at, "amendments[lifecycle].created_at")) <= Date.parse(revisionCreatedAt)) {
+        lifecycleZeroRevisionIds.add(revisionId);
+      }
+    }
     const standaloneMemberReprice = standaloneReprice
       && Boolean(memberId?.trim())
       && Boolean(memberContractId?.trim())
@@ -782,7 +828,9 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
             && latestRevisionPolicyBase === currentContractAmount.minorUnits
             && latestRevisionDifference === 0
             && latestRevisionManualAdjustment === 0));
-    if (!validStandaloneBasis
+    const validLifecycleZeroRevision = currentContractAmount.minorUnits === 0
+      && lifecycleZeroRevisionIds.has(latestRevisionId);
+    if ((!validStandaloneBasis && !validLifecycleZeroRevision)
       || latestRevisionArrival !== effective.arrivalDate
       || latestRevisionDeparture !== effective.departureDate
       || Date.parse(latestRevisionCreatedAt) < Date.parse(history.at(-1)!.recordedAt)) {

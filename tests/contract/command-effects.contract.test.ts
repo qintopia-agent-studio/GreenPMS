@@ -4,7 +4,7 @@ import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { commandTypes, type CommandType } from "@qintopia/contracts";
 import { newOpaqueSecret, parseLocalDate, todayInTimeZone } from "@qintopia/domain";
-import type { Database } from "@qintopia/db";
+import { withPropertyClockForTesting, type Database } from "@qintopia/db";
 import type { Kysely } from "kysely";
 import { CommandEffectSchema, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
@@ -30,8 +30,9 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
     "occupancyCapacity", "occupantCount", "operation", "orderId", "pricingDecision", "stayId", "toInventoryUnit"
   ],
   REPRICE_ORDER: ["before", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
-  CANCEL_ORDER: ["currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
-  MARK_NO_SHOW: ["currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
+  CANCEL_ORDER: ["amounts", "businessDate", "currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "pricingRevision", "toStatus"],
+  MARK_NO_SHOW: ["amounts", "businessDate", "currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "pricingRevision", "toStatus"],
+  REVOKE_CHECK_IN: ["amounts", "businessDate", "currentContractAmount", "effectiveDate", "entitlementTransition", "fromStatus", "inventoryUnitId", "orderId", "pricingRevision", "recordingMode", "toStatus", "unusedRoomConfirmed"],
   LOCK_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnit", "reason"],
   RELEASE_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnitId", "maintenanceLockId"],
   COMPLETE_CLEANING: ["cleaningTaskId", "fromStatus", "inventoryUnitId", "orderId", "roomId", "serviceDate", "stayId", "toStatus"],
@@ -591,7 +592,10 @@ describe("Command effect HTTP contract", () => {
       targetCurrentContractAmountMinor: 47_900
     });
     await capture("CANCEL_ORDER", { propertyId: demo.propertyId, orderId });
-    await capture("MARK_NO_SHOW", { propertyId: demo.propertyId, orderId });
+    await withPropertyClockForTesting(new Date("2028-04-10T12:30:00.000Z"), () => capture("MARK_NO_SHOW", {
+      propertyId: demo.propertyId,
+      orderId
+    }));
 
     const memberPriced = await quote({
       arrivalDate: "2028-05-10",
@@ -668,6 +672,11 @@ describe("Command effect HTTP contract", () => {
     expect((extensionResult.before as { stayTimeline: unknown }).stayTimeline).toEqual(
       (extension.effect.before as { stayTimeline: unknown }).stayTimeline
     );
+    await capture("REVOKE_CHECK_IN", {
+      propertyId: demo.propertyId,
+      orderId: checkInOrderId,
+      unusedRoomConfirmed: true
+    });
     const checkoutPriced = await quote({
       arrivalDate: shiftLocalDate(propertyToday, -1),
       departureDate: propertyToday,

@@ -32,6 +32,22 @@ const tabs: Array<{ id: TodayTab; label: string }> = [
   { id: "EXCEPTIONS", label: "异常" }
 ];
 
+export function buildTodayBuckets(orders: readonly OrderRowDto[], businessDate: string): Record<TodayTab, OrderRowDto[]> {
+  return {
+    ARRIVALS: orders.filter((order) => order.arrival_date === businessDate && order.status === "RESERVED"),
+    IN_HOUSE: orders.filter((order) => order.status === "CHECKED_IN"),
+    DEPARTURES: orders.filter((order) => order.departure_date === businessDate && order.status === "CHECKED_IN"),
+    EXCEPTIONS: orders.filter((order) => {
+      const overdueArrival = order.status === "RESERVED"
+        && order.arrival_date < businessDate
+        && businessDate <= order.departure_date;
+      const overdueDeparture = order.departure_date < businessDate
+        && !["CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"].includes(order.status);
+      return overdueArrival || overdueDeparture || order.status === "NO_SHOW" || order.status === "CANCELLED";
+    })
+  };
+}
+
 export function TodayPage() {
   const { meta, principal, propertyId } = useWorkspace();
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
@@ -71,12 +87,10 @@ export function TodayPage() {
     return () => { current = false; };
   }, [propertyId, refreshToken]);
 
-  const buckets = useMemo<Record<TodayTab, OrderRowDto[]>>(() => ({
-    ARRIVALS: orders.filter((order) => order.arrival_date === businessDate && order.status === "RESERVED"),
-    IN_HOUSE: orders.filter((order) => order.status === "CHECKED_IN"),
-    DEPARTURES: orders.filter((order) => order.departure_date === businessDate && order.status === "CHECKED_IN"),
-    EXCEPTIONS: orders.filter((order) => ["NO_SHOW", "CANCELLED"].includes(order.status) || (order.departure_date < businessDate && !["CHECKED_OUT", "CANCELLED", "NO_SHOW"].includes(order.status)))
-  }), [businessDate, orders]);
+  const buckets = useMemo<Record<TodayTab, OrderRowDto[]>>(
+    () => buildTodayBuckets(orders, businessDate),
+    [businessDate, orders]
+  );
 
   function directCommand(order: OrderRowDto, commandType: CommandType, title: string) {
     if (commandsBlocked) return;
@@ -130,13 +144,16 @@ export function TodayPage() {
         {loading ? <LoadingBlock label="正在载入履约队列" /> : visible.length === 0 ? <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" /> : visible.map((order) => (
           <article className="queue-row" key={order.id}>
             <div className="queue-icon" aria-hidden="true">{tab === "EXCEPTIONS" ? <AlertTriangle size={19} /> : tab === "DEPARTURES" ? <LogOut size={19} /> : tab === "ARRIVALS" ? <LogIn size={19} /> : <DoorOpen size={19} />}</div>
-            <div className="queue-primary"><strong>{guestName(order.primary_guest_snapshot)}</strong><code>{order.id}</code><span>{formatDate(order.arrival_date)} 至 {formatDate(order.departure_date)}</span></div>
+            <div className="queue-primary"><strong>{guestName(order.primary_guest_snapshot)}</strong><span>{formatDate(order.arrival_date)} 至 {formatDate(order.departure_date)}</span></div>
             <StatusBadge value={order.status} label={businessStatusLabel(order.status)} />
             <div className="queue-actions">
               {tab === "ARRIVALS" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_IN", "办理入住")} disabled={commandsBlocked}><LogIn aria-hidden="true" size={17} />入住</button> : null}
               {tab === "DEPARTURES" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_OUT", "办理退房")} disabled={commandsBlocked}><LogOut aria-hidden="true" size={17} />退房</button> : null}
               {tab === "IN_HOUSE" ? <Link className="button button-primary" to={`/orders/${encodeURIComponent(order.id)}?action=CHECK_OUT`}><LogOut aria-hidden="true" size={17} />退房</Link> : null}
-              <Link className="icon-button" to={`/orders/${encodeURIComponent(order.id)}`} aria-label={`查看订单 ${order.id}`} title="查看订单"><ChevronRight aria-hidden="true" size={19} /></Link>
+              {tab === "EXCEPTIONS" && order.status === "RESERVED" && order.arrival_date < businessDate
+                ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(order.id)}`}>处理逾期到店<ChevronRight aria-hidden="true" size={17} /></Link>
+                : null}
+              <Link className="icon-button" to={`/orders/${encodeURIComponent(order.id)}`} aria-label={`查看${guestName(order.primary_guest_snapshot)}的订单`} title="查看订单"><ChevronRight aria-hidden="true" size={19} /></Link>
             </div>
           </article>
         ))}

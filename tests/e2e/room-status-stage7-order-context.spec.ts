@@ -113,6 +113,8 @@ async function showFixtureRange(page: Page, options: { clipped?: boolean; nights
       ? addDays(fixture.dates.departureDate, -1)
       : addDays(fixture.dates.departureDate, 2);
 
+  const mobileRangeToggle = page.getByTestId("mobile-room-status-range-toggle");
+  if (await mobileRangeToggle.isVisible()) await mobileRangeToggle.click();
   const departureResponse = roomStatusResponse(page);
   await page.getByTestId("departure-date").fill(rangeEnd);
   await departureResponse;
@@ -122,6 +124,10 @@ async function showFixtureRange(page: Page, options: { clipped?: boolean; nights
   const boardRange = page.getByTestId("room-status-board-range");
   if (await boardRange.count()) await expect(boardRange).toHaveAttribute("data-range-arrival", rangeStart);
   else await expect(page.getByTestId("arrival-date")).toHaveValue(rangeStart);
+  const occupancyToggle = page.getByTestId("mobile-room-status-occupancies-toggle");
+  if (await occupancyToggle.isVisible() && await occupancyToggle.getAttribute("aria-expanded") === "false") {
+    await occupancyToggle.click();
+  }
 }
 
 async function selectOccupiedCell(
@@ -767,7 +773,7 @@ test("375px mobile occupancy opens and closes the order context, then returns fr
   await showFixtureRange(page);
 
   const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
-  const trigger = occupancy.getByRole("button", { name: "打开订单上下文", exact: true });
+  const trigger = occupancy.getByRole("button", { name: "查看订单信息", exact: true });
   const selectedOrderResponse = orderResponse(page, fixture.wholeRoom.orderId);
   await trigger.click();
   await selectedOrderResponse;
@@ -802,11 +808,11 @@ test("375px mobile split-bed summary keeps the parent neutral and opens each exa
   const occupancies = page.locator(".room-status-mobile-occupancies li");
   const parent = occupancies.filter({ hasText: "2/4" }).filter({ hasText: "山峰" }).first();
   await expect(parent).toBeVisible();
-  await expect(parent.getByRole("button", { name: "打开订单上下文", exact: true })).toHaveCount(0);
+  await expect(parent.getByRole("button", { name: "查看订单信息", exact: true })).toHaveCount(0);
 
   const bedA = occupancies.filter({ hasText: "1人" }).filter({ hasText: "山峰" }).first();
   const selectedOrderResponse = orderResponse(page, fixture.splitBed.bedAOrderId);
-  await bedA.getByRole("button", { name: "打开订单上下文", exact: true }).click();
+  await bedA.getByRole("button", { name: "查看订单信息", exact: true }).click();
   await selectedOrderResponse;
   const context = orderContext(page, fixture.splitBed.bedAOrderId);
   await expect(context).toBeVisible();
@@ -823,7 +829,7 @@ test("320px READ mobile context exposes navigation but no correction or business
 
   const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
   const selectedOrderResponse = orderResponse(page, fixture.wholeRoom.orderId);
-  await occupancy.getByRole("button", { name: "打开订单上下文", exact: true }).click();
+  await occupancy.getByRole("button", { name: "查看订单信息", exact: true }).click();
   await selectedOrderResponse;
   const context = orderContext(page, fixture.wholeRoom.orderId);
   await expect(context).toBeVisible();

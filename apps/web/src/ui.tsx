@@ -142,7 +142,9 @@ const businessStatusLabels: Record<string, string> = {
   PENDING: "待清洁",
   HELD: "已冻结",
   CONSUMED: "已核销",
-  RELEASED: "已释放"
+  RELEASED: "已释放",
+  CHECK_IN_REVOKED: "入住已撤销",
+  RESTORED: "已补偿恢复"
 };
 
 export function businessStatusLabel(value: string): string {
@@ -398,7 +400,9 @@ export function fulfillmentTransitionIsExpected(commandType: CommandType, effect
   if (commandType === "COMPLETE_CLEANING") return true;
   if (typeof effect.businessDate !== "string" || typeof effect.effectiveDate !== "string") return false;
   if (commandType === "CHECK_IN") {
-    return effect.recordingMode === "ON_SCHEDULE" && effect.businessDate === effect.effectiveDate;
+    return effect.recordingMode === "ON_SCHEDULE"
+      ? effect.businessDate === effect.effectiveDate
+      : effect.recordingMode === "LATE_RECORDED" && effect.businessDate > effect.effectiveDate;
   }
   if (commandType === "CHECK_OUT") {
     return effect.recordingMode === "ON_SCHEDULE"
@@ -415,7 +419,7 @@ export function fulfillmentAuditNote(
 ): string {
   const trimmed = operatorNote.trim();
   if (trimmed) return trimmed;
-  if (commandType === "CHECK_IN") return "按计划办理入住";
+  if (commandType === "CHECK_IN") return effect.recordingMode === "LATE_RECORDED" ? "迟录计划入住" : "按计划办理入住";
   return effect.recordingMode === "LATE_RECORDED" ? "迟录计划退房" : "按计划办理退房";
 }
 
@@ -434,12 +438,18 @@ export function fulfillmentReceiptCopy(
 ): { heading: string; description: string } {
   const label = fulfillmentCommandLabel(commandType);
   if (!committed) return { heading: `${label}未完成`, description: "本次操作没有改变住宿记录。" };
-  if (commandType === "CHECK_IN") return {
-    heading: "办理入住已完成",
-    description: consumedCoverageCount > 0
-      ? `住宿状态已更新为在住；本次核销 ${consumedCoverageCount} 晚已冻结的会员权益。`
-      : "住宿状态已更新为在住；本次不涉及会员权益。"
-  };
+  if (commandType === "CHECK_IN") {
+    const lateRecorded = timing?.recordingMode === "LATE_RECORDED";
+    const timingDescription = lateRecorded
+      ? `入住按原计划入住日 ${formatDate(timing.effectiveDate)} 生效，于 ${formatDate(timing.recordedBusinessDate)} 营业日迟录；`
+      : "";
+    return {
+      heading: lateRecorded ? "迟录入住已完成" : "办理入住已完成",
+      description: consumedCoverageCount > 0
+        ? `${timingDescription}住宿状态已更新为在住；本次核销 ${consumedCoverageCount} 晚已冻结的会员权益。`
+        : `${timingDescription}住宿状态已更新为在住；本次不涉及会员权益。`
+    };
+  }
   if (commandType === "CHECK_OUT") return {
     heading: timing?.recordingMode === "LATE_RECORDED" ? "迟录退房已完成" : "办理退房已完成",
     description: timing?.recordingMode === "LATE_RECORDED"
@@ -476,6 +486,7 @@ const commandBusinessLabels: Partial<Record<HistoricalCommandType, string>> = {
   MOVE_UNIT: "换房",
   CANCEL_ORDER: "取消订单",
   MARK_NO_SHOW: "标记未到",
+  REVOKE_CHECK_IN: "撤销入住",
   RECORD_COLLECTION: "记录收款",
   RECORD_REFUND: "记录退款",
   REVERSE_FACT: "冲销收退款记录"
@@ -1530,6 +1541,64 @@ function pricingCashLinesHaveCompletePaidEvidence(
     && authoritativeTotal === BigInt(cashRemainder.minorUnits);
 }
 
+type OrderLifecycleCommand = "CANCEL_ORDER" | "MARK_NO_SHOW" | "REVOKE_CHECK_IN";
+
+function orderLifecycleExpectedTransition(commandType: OrderLifecycleCommand) {
+  if (commandType === "CANCEL_ORDER") return { from: "RESERVED", to: "CANCELLED", entitlementFrom: "HELD", entitlementTo: "RELEASED" } as const;
+  if (commandType === "MARK_NO_SHOW") return { from: "RESERVED", to: "NO_SHOW", entitlementFrom: "HELD", entitlementTo: "RELEASED" } as const;
+  return { from: "CHECKED_IN", to: "CHECK_IN_REVOKED", entitlementFrom: "CONSUMED", entitlementTo: "RESTORED" } as const;
+}
+
+export function orderLifecyclePreviewHasEvidence(
+  commandType: OrderLifecycleCommand,
+  effect: Record<string, unknown>,
+  input: Record<string, unknown> = {}
+): boolean {
+  const expectedKeys = commandType === "REVOKE_CHECK_IN"
+    ? ["orderId", "fromStatus", "toStatus", "inventoryUnitId", "businessDate", "effectiveDate", "recordingMode", "currentContractAmount", "amounts", "entitlementTransition", "unusedRoomConfirmed", "pricingRevision"]
+    : ["orderId", "fromStatus", "toStatus", "inventoryUnitId", "businessDate", "freeStayReason", "freeStayCategoryCode", "currentContractAmount", "amounts", "entitlementTransition", "pricingRevision"];
+  if (!hasExactKeys(effect, expectedKeys)
+    || !nonblankString(effect.orderId)
+    || (input.orderId !== undefined && effect.orderId !== input.orderId)
+    || !nonblankString(effect.inventoryUnitId)
+    || localDateEpoch(effect.businessDate) === undefined
+    || (commandType === "REVOKE_CHECK_IN" && (
+      effect.effectiveDate !== effect.businessDate || effect.recordingMode !== "ON_SCHEDULE"
+    ))
+    || (commandType === "REVOKE_CHECK_IN" && (input.unusedRoomConfirmed !== true || effect.unusedRoomConfirmed !== true))) return false;
+
+  const transition = orderLifecycleExpectedTransition(commandType);
+  const currentContractAmount = moneyFrom(effect.currentContractAmount);
+  const amounts = isRecord(effect.amounts) ? effect.amounts : undefined;
+  const pricingRevision = isRecord(effect.pricingRevision) ? effect.pricingRevision : undefined;
+  const entitlement = isRecord(effect.entitlementTransition) ? effect.entitlementTransition : undefined;
+  if (effect.fromStatus !== transition.from || effect.toStatus !== transition.to
+    || !currentContractAmount || currentContractAmount.minorUnits !== 0
+    || !amounts || !hasExactKeys(amounts, ["currentContractAmount", "netRecordedCollection", "collectionDifference", "refundReferenceAmount"])
+    || !pricingRevision || !hasExactKeys(pricingRevision, ["currentContractAmount", "pricingBasis"])
+    || !entitlement || !hasExactKeys(entitlement, ["from", "to", "coverageCount"])) return false;
+
+  const amountCurrent = moneyFrom(amounts.currentContractAmount);
+  const netCollection = moneyFrom(amounts.netRecordedCollection);
+  const collectionDifference = moneyFrom(amounts.collectionDifference);
+  const refundReferenceAmount = moneyFrom(amounts.refundReferenceAmount);
+  const revisionAmount = moneyFrom(pricingRevision.currentContractAmount);
+  return Boolean(amountCurrent && netCollection && collectionDifference && refundReferenceAmount && revisionAmount
+    && [amountCurrent, netCollection, collectionDifference, refundReferenceAmount, revisionAmount]
+      .every((amount) => amount.currency === currentContractAmount.currency)
+    && amountCurrent.minorUnits === 0
+    && revisionAmount.minorUnits === 0
+    && netCollection.minorUnits >= 0
+    && collectionDifference.minorUnits === -netCollection.minorUnits
+    && refundReferenceAmount.minorUnits === netCollection.minorUnits
+    && typeof pricingRevision.pricingBasis === "string"
+    && ["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"].includes(pricingRevision.pricingBasis)
+    && entitlement.from === transition.entitlementFrom
+    && entitlement.to === transition.entitlementTo
+    && Number.isSafeInteger(entitlement.coverageCount)
+    && Number(entitlement.coverageCount) >= 0);
+}
+
 export function u1PreviewHasBusinessEvidence(
   commandType: U1CommandType,
   effect: Record<string, unknown>,
@@ -1630,6 +1699,10 @@ export function u1PreviewHasBusinessEvidence(
       return dateChangePreviewHasEvidence(commandType, effect, input);
     case "MOVE_UNIT":
       return moveUnitPreviewHasEvidence(effect, input);
+    case "CANCEL_ORDER":
+    case "MARK_NO_SHOW":
+    case "REVOKE_CHECK_IN":
+      return orderLifecyclePreviewHasEvidence(commandType, effect, input);
     case "CHECK_IN":
     case "CHECK_OUT":
       return fulfillmentTransitionIsExpected(commandType, effect);
@@ -1672,7 +1745,7 @@ export function StayTimelineDisplay({ timeline, labels, testId }: {
   </ol>;
 }
 
-function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode, inventoryUnitLabels, commandInput }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: U1CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null; inventoryUnitLabels?: Record<string, string>; commandInput?: Record<string, unknown> }) {
+function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode, inventoryUnitLabels, orderLifecycleContext, commandInput }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: U1CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null; inventoryUnitLabels?: Record<string, string>; orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string }; commandInput?: Record<string, unknown> }) {
   const effect = preview.effect;
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
@@ -1699,6 +1772,48 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
     : typeof effect.manualAdjustmentMinor === "number" ? effect.manualAdjustmentMinor : undefined;
   const coverage = pricing && Array.isArray(pricing.coverageSet) ? pricing.coverageSet : [];
   const cashLines = pricing && Array.isArray(pricing.cashLines) ? pricing.cashLines : [];
+
+  if (businessCommand === "CANCEL_ORDER" || businessCommand === "MARK_NO_SHOW" || businessCommand === "REVOKE_CHECK_IN") {
+    if (!orderLifecyclePreviewHasEvidence(businessCommand, effect, commandInput ?? {})) {
+      return <div className="effect-summary lifecycle-command-summary" data-testid="command-effect">
+        <section className="effect-section" aria-labelledby="lifecycle-command-summary-heading">
+          <h3 id="lifecycle-command-summary-heading">无法核对本次订单处理</h3>
+          <p>服务端返回的状态、库存、权益或金额信息不完整，不能确认。请关闭后刷新订单状态。</p>
+        </section>
+      </div>;
+    }
+    const amounts = effect.amounts as Record<string, unknown>;
+    const lifecycleEntitlement = effect.entitlementTransition as Record<string, unknown>;
+    const lifecycleCurrentAmount = moneyFrom(amounts.currentContractAmount)!;
+    const lifecycleNetCollection = moneyFrom(amounts.netRecordedCollection)!;
+    const lifecycleRefundReference = moneyFrom(amounts.refundReferenceAmount)!;
+    const inventoryUnitId = String(effect.inventoryUnitId);
+    const unitLabel = inventoryUnitLabels?.[inventoryUnitId] ?? "当前住宿房源";
+    const coverageCount = Number(lifecycleEntitlement.coverageCount);
+    const revoked = businessCommand === "REVOKE_CHECK_IN";
+    return <div className="effect-summary lifecycle-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="lifecycle-command-summary-heading">
+        <h3 id="lifecycle-command-summary-heading">请核对{commandShellLabel(businessCommand)}</h3>
+        <dl className="difference-grid">
+          {orderLifecycleContext ? <><dt>住客</dt><dd><strong>{orderLifecycleContext.guestName}</strong></dd></> : null}
+          {orderLifecycleContext ? <><dt>住宿日期</dt><dd>{formatDate(orderLifecycleContext.arrivalDate)} 至 {formatDate(orderLifecycleContext.departureDate)}</dd></> : null}
+          <dt>住宿状态</dt><dd>{businessStatusLabel(String(effect.fromStatus))} <ChevronRight aria-label="变更为" size={15} /> <strong>{businessStatusLabel(String(effect.toStatus))}</strong></dd>
+          <dt>住宿位置</dt><dd>{unitLabel}</dd>
+          <dt>办理营业日</dt><dd>{formatDate(String(effect.businessDate))}</dd>
+          <dt>库存安排</dt><dd><strong>{revoked ? "当天及以后住宿库存立即恢复可售" : "当前及后续住宿库存立即恢复可售"}</strong></dd>
+          <dt>会员权益</dt><dd>{coverageCount > 0
+            ? revoked ? `补偿恢复本次入住已核销的 ${coverageCount} 晚权益` : `释放 ${coverageCount} 晚已冻结权益`
+            : "本次不涉及会员权益"}</dd>
+          <dt>保留记录</dt><dd>{revoked ? "保留原入住记录和原会员核销历史，另行追加撤销与补偿记录" : "保留原预订、计价和变更历史"}</dd>
+          <dt>处理后订单金额</dt><dd><strong>{formatMoney(lifecycleCurrentAmount)}</strong></dd>
+          <dt>已登记净收款</dt><dd>{formatMoney(lifecycleNetCollection)}</dd>
+          <dt>退款参考</dt><dd><strong>{formatMoney(lifecycleRefundReference)}</strong></dd>
+          <dt>{revoked ? "撤销原因" : businessCommand === "CANCEL_ORDER" ? "取消原因" : "未到说明"}</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+        </dl>
+        <p className="muted compact">退款参考仅用于后续人工登记。目前尚未登记退款，本次操作不会自动退款、登记平台结算或新增资金记录。</p>
+      </section>
+    </div>;
+  }
 
   if (businessCommand === "RESCHEDULE_STAY" || businessCommand === "EXTEND_STAY" || businessCommand === "SHORTEN_STAY") {
     const beforeNights = before && typeof before.nights === "number" ? before.nights : undefined;
@@ -1829,6 +1944,9 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
         <dl className="difference-grid">
           {preview.commandType === "CHECK_IN" ? <>
             <dt>住宿状态</dt><dd>{businessStatusLabel(String(effect.fromStatus))} <ChevronRight aria-label="变更为" size={15} /> <strong>{businessStatusLabel(String(effect.toStatus))}</strong></dd>
+            <dt>办理方式</dt><dd><strong>{effect.recordingMode === "LATE_RECORDED" ? "迟录入住" : "按计划办理入住"}</strong></dd>
+            <dt>计划入住日</dt><dd>{formatDate(String(effect.effectiveDate))}</dd>
+            <dt>办理营业日</dt><dd>{formatDate(String(effect.businessDate))}</dd>
             <dt>会员权益</dt><dd>{coverageCount > 0 ? `本次核销 ${coverageCount} 晚已冻结权益` : "本次不涉及会员权益"}</dd>
           </> : null}
           {preview.commandType === "CHECK_OUT" ? <>
@@ -2390,7 +2508,7 @@ export interface PersistedCommandRecovery {
   commandType: HistoricalCommandType;
   confirmationKey: string;
   targetRefs: string[];
-  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
   effectHash?: string;
   state: PersistedCommandRecoveryState;
   updatedAt: string;
@@ -2562,6 +2680,67 @@ function dateChangeReceiptHasEvidence(
   return true;
 }
 
+function orderLifecycleReceiptHasEvidence(
+  commandType: OrderLifecycleCommand,
+  value: unknown,
+  input: Record<string, unknown>,
+  previewEffect?: Record<string, unknown>,
+  expectedEffectHash?: string
+): boolean {
+  if (!isRecord(value)
+    || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
+    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
+    || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
+    || value.error !== undefined
+    || !Array.isArray(value.resourceRefs) || !value.resourceRefs.every(nonblankString)
+    || new Set(value.resourceRefs).size !== value.resourceRefs.length
+    || !Array.isArray(value.factRefs) || !value.factRefs.every(nonblankString)
+    || new Set(value.factRefs).size !== value.factRefs.length
+    || !isRecord(value.result)) return false;
+
+  const result = value.result;
+  const expectedResultKeys = commandType === "REVOKE_CHECK_IN"
+    ? ["orderId", "amendmentId", "status", "pricingRevisionId", "effectHash", "fulfillmentTiming", "entitlementTransition"]
+    : ["orderId", "amendmentId", "status", "pricingRevisionId", "effectHash", "entitlementTransition"];
+  const transition = orderLifecycleExpectedTransition(commandType);
+  const entitlement = isRecord(result.entitlementTransition) ? result.entitlementTransition : undefined;
+  if (!hasExactKeys(result, expectedResultKeys)
+    || !nonblankString(result.orderId)
+    || (input.orderId !== undefined && result.orderId !== input.orderId)
+    || !nonblankString(result.amendmentId)
+    || !nonblankString(result.pricingRevisionId)
+    || !isEffectHash(result.effectHash)
+    || result.status !== transition.to
+    || !entitlement || !hasExactKeys(entitlement, ["from", "to", "coverageCount"])
+    || entitlement.from !== transition.entitlementFrom || entitlement.to !== transition.entitlementTo
+    || !Number.isSafeInteger(entitlement.coverageCount) || Number(entitlement.coverageCount) < 0) return false;
+
+  if (commandType === "REVOKE_CHECK_IN") {
+    const timing = isRecord(result.fulfillmentTiming) ? result.fulfillmentTiming : undefined;
+    if (!timing || !hasExactKeys(timing, ["effectiveDate", "recordedBusinessDate", "recordingMode"])
+      || timing.recordingMode !== "ON_SCHEDULE"
+      || timing.effectiveDate !== timing.recordedBusinessDate) return false;
+  }
+
+  const resourceRefs = value.resourceRefs as string[];
+  if (![result.orderId, result.amendmentId, result.pricingRevisionId]
+    .every((id) => resourceRefs.includes(id as string))) return false;
+  if (expectedEffectHash !== undefined && (!isEffectHash(expectedEffectHash) || result.effectHash !== expectedEffectHash)) return false;
+  if (previewEffect) {
+    if (!orderLifecyclePreviewHasEvidence(commandType, previewEffect, input)
+      || previewEffect.toStatus !== result.status
+      || !evidenceValuesEqual(previewEffect.entitlementTransition, result.entitlementTransition)) return false;
+    if (commandType === "REVOKE_CHECK_IN") {
+      const timing = result.fulfillmentTiming as Record<string, unknown>;
+      if (previewEffect.effectiveDate !== timing.effectiveDate
+        || previewEffect.businessDate !== timing.recordedBusinessDate
+        || previewEffect.recordingMode !== timing.recordingMode) return false;
+    }
+  }
+  return true;
+}
+
 export function receiptHasCommandEvidence(
   commandType: HistoricalCommandType,
   receipt: ReceiptDto,
@@ -2576,6 +2755,10 @@ export function receiptHasCommandEvidence(
   }
   if (commandType === "MOVE_UNIT" && receipt.businessCommitted) {
     return moveUnitReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
+  if ((commandType === "CANCEL_ORDER" || commandType === "MARK_NO_SHOW" || commandType === "REVOKE_CHECK_IN")
+    && receipt.businessCommitted) {
+    return orderLifecycleReceiptHasEvidence(commandType, receipt, input, previewEffect, expectedEffectHash);
   }
   return true;
 }
@@ -2619,12 +2802,13 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || !value.confirmationKey
     || !Array.isArray(value.targetRefs)
     || !value.targetRefs.every((item) => typeof item === "string")
-    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT")
+    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT" && value.presentation !== "ORDER_LIFECYCLE")
     || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
     || (value.presentation === "FULFILLMENT" && !isFulfillmentBusinessCommand(value.commandType))
     || (value.presentation === "STAY_DATES" && value.commandType !== "RESCHEDULE_STAY" && value.commandType !== "EXTEND_STAY" && value.commandType !== "SHORTEN_STAY")
     || (value.presentation === "MOVE_UNIT" && value.commandType !== "MOVE_UNIT")
-    || ((value.presentation === "STAY_DATES" || value.presentation === "MOVE_UNIT") && !isEffectHash(value.effectHash))
+    || (value.presentation === "ORDER_LIFECYCLE" && value.commandType !== "CANCEL_ORDER" && value.commandType !== "MARK_NO_SHOW" && value.commandType !== "REVOKE_CHECK_IN")
+    || ((value.presentation === "STAY_DATES" || value.presentation === "MOVE_UNIT" || value.presentation === "ORDER_LIFECYCLE") && !isEffectHash(value.effectHash))
     || (value.effectHash !== undefined && !isEffectHash(value.effectHash))
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
     || typeof value.updatedAt !== "string") {
@@ -2665,7 +2849,9 @@ export function transitionPersistedCommandRecovery(
   }
   if (progress.state === "CONFIRMING") {
     const propertyId = context.request.input.propertyId;
-    const strictRecoveryEvidence = context.request.presentation === "STAY_DATES" || context.request.presentation === "MOVE_UNIT";
+    const strictRecoveryEvidence = context.request.presentation === "STAY_DATES"
+      || context.request.presentation === "MOVE_UNIT"
+      || context.request.presentation === "ORDER_LIFECYCLE";
     if (!isPersistableCommandType(context.request.commandType) || typeof propertyId !== "string" || !propertyId) {
       return { accepted: false, recovery: current };
     }
@@ -2713,6 +2899,7 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const fulfillment = recovery.presentation === "FULFILLMENT";
   const stayDates = recovery.presentation === "STAY_DATES";
   const moveUnit = recovery.presentation === "MOVE_UNIT";
+  const orderLifecycle = recovery.presentation === "ORDER_LIFECYCLE";
   const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
   return {
@@ -2722,6 +2909,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
       : fulfillment && commandType
         ? `恢复${fulfillmentCommandLabel(commandType)}结果`
         : stayDates && u1CommandType
+          ? `恢复${commandShellLabel(u1CommandType)}结果`
+        : orderLifecycle && u1CommandType
           ? `恢复${commandShellLabel(u1CommandType)}结果`
         : moveUnit && u1CommandType
           ? `恢复${commandShellLabel(u1CommandType)}结果`
@@ -2734,6 +2923,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
         ? "系统只查询刚才的操作结果，不会重复办理。"
         : stayDates && u1CommandType
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
+        : orderLifecycle && u1CommandType
+          ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : moveUnit && u1CommandType
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : u1CommandType
@@ -2741,7 +2932,14 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
         : "仅使用已保存的原幂等键查询服务端命令结果，不会发起新的业务写入。",
     ...(recovery.presentation ? { presentation: recovery.presentation } : {}),
     ...(recovery.effectHash ? { recoveryEffectHash: recovery.effectHash } : {}),
-    input: { propertyId: recovery.propertyId }
+    input: {
+      propertyId: recovery.propertyId,
+      ...(orderLifecycle ? Object.fromEntries(recovery.targetRefs.map((reference) => {
+        const separator = reference.indexOf("=");
+        return separator > 0 ? [reference.slice(0, separator), reference.slice(separator + 1)] : ["", ""];
+      }).filter(([key, value]) => key && value)) : {}),
+      ...(orderLifecycle && recovery.commandType === "REVOKE_CHECK_IN" ? { unusedRoomConfirmed: true } : {})
+    }
   };
 }
 
@@ -2935,6 +3133,8 @@ export function CommandDialog({
   const stayDates = request.presentation === "STAY_DATES"
     && (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY");
   const moveUnit = request.presentation === "MOVE_UNIT" && request.commandType === "MOVE_UNIT";
+  const orderLifecycle = request.presentation === "ORDER_LIFECYCLE"
+    && (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN");
   const requestBookingChannelValue = (request as unknown as { bookingChannelCode?: unknown }).bookingChannelCode;
   const requestBookingChannelCode = typeof requestBookingChannelValue === "string" || requestBookingChannelValue === null
     ? requestBookingChannelValue
@@ -3300,7 +3500,7 @@ export function CommandDialog({
     <Modal
       title={request.title}
       onClose={closeCommandDialog}
-      size={stayDates || moveUnit ? "drawer" : "wide"}
+      size={stayDates || moveUnit || orderLifecycle ? "drawer" : "wide"}
       closeDisabled={busy && (!u1CommandType || shellState.phase === "CONFIRMING")}
       footer={
         <>
@@ -3391,6 +3591,7 @@ export function CommandDialog({
             commandTitle={request.title}
             commandInput={request.input}
             {...(request.inventoryUnitLabels ? { inventoryUnitLabels: request.inventoryUnitLabels } : {})}
+            {...(request.orderLifecycleContext ? { orderLifecycleContext: request.orderLifecycleContext } : {})}
             {...(requestBookingChannelCode !== undefined ? { bookingChannelCode: requestBookingChannelCode } : {})}
             {...(request.initialReason?.note ? { reasonNote: request.initialReason.note } : {})}
             {...(u1CommandType ? { businessCommand: u1CommandType } : {})}

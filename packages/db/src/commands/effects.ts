@@ -27,7 +27,7 @@ import {
 } from "../orders.ts";
 import { allocateCoverageCandidates, loadPricingPolicy, loadStoredQuote, resolveMemberCoverage } from "../pricing-service.ts";
 import { inventoryFingerprint, loadInventoryUnit, type DbExecutor } from "../inventory.ts";
-import { propertyLocalToday } from "../members.ts";
+import { propertyLocalClock, propertyLocalToday } from "../members.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
 
 export interface BuiltCommandEffect {
@@ -1742,10 +1742,10 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         arrivalDate: context.order.arrival_date
       });
     }
-    if (businessDate > context.order.arrival_date) {
-      throw new DomainError("INVALID_ORDER_STATE", "已超过计划入住日，不能办理普通入住", 409, false, {
+    if (businessDate >= context.order.departure_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "已到或超过计划退房日，不能补办入住", 409, false, {
         businessDate,
-        arrivalDate: context.order.arrival_date
+        departureDate: context.order.departure_date
       });
     }
     const heldCoverage = await db.selectFrom("coverage_items").select("id")
@@ -1756,8 +1756,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       toStatus: "CHECKED_IN",
       inventoryUnitId: context.currentSegment.inventoryUnitId,
       businessDate,
-      effectiveDate: businessDate,
-      recordingMode: "ON_SCHEDULE",
+      effectiveDate: context.order.arrival_date,
+      recordingMode: businessDate === context.order.arrival_date ? "ON_SCHEDULE" : "LATE_RECORDED",
       entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: heldCoverage.length }
     }, {
       ...baseBasis,
@@ -1807,18 +1807,104 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 
   if (commandType === "CANCEL_ORDER" || commandType === "MARK_NO_SHOW") {
     if (context.order.status !== "RESERVED") throw new DomainError("INVALID_ORDER_STATE", `${commandType} requires a reserved order`, 409);
+    const localClock = await propertyLocalClock(db, propertyId);
+    if (commandType === "MARK_NO_SHOW"
+      && (localClock.date < context.order.arrival_date
+        || (localClock.date === context.order.arrival_date && localClock.time < "20:00"))) {
+      throw new DomainError("INVALID_ORDER_STATE", "计划到店日 20:00 后才能标记未到", 409, false, {
+        businessDate: localClock.date,
+        arrivalDate: context.order.arrival_date
+      });
+    }
     const heldCoverage = await db.selectFrom("coverage_items").select("id")
       .where("order_id", "=", orderId).where("status", "=", "HELD").orderBy("id").execute();
+    const collectionFacts = await db.selectFrom("collection_facts").select("net_effect_minor")
+      .where("order_id", "=", orderId).execute();
+    const amounts = amountSummary(context.revision.currency, 0, collectionFacts.map((fact) => fact.net_effect_minor));
+    const pricingBasis = context.order.stay_type === "FREE"
+      ? "FREE"
+      : context.order.member_id || context.order.member_contract_id
+        ? "MEMBER_ENTITLEMENT"
+        : context.order.booking_channel_code && context.order.booking_channel_code !== "WECOM"
+          ? "CHANNEL_CONTRACT"
+          : "POLICY";
     return finalize(propertyId, {
       orderId,
       fromStatus: context.order.status,
       toStatus: commandType === "CANCEL_ORDER" ? "CANCELLED" : "NO_SHOW",
       inventoryUnitId: context.currentSegment.inventoryUnitId,
+      businessDate: localClock.date,
       freeStayReason: context.order.free_stay_reason,
       freeStayCategoryCode: context.order.free_stay_category_code,
-      currentContractAmount: { currency: context.revision.currency, minorUnits: context.revision.currentContractAmountMinor },
+      currentContractAmount: { currency: context.revision.currency, minorUnits: 0 },
+      amounts,
+      pricingRevision: {
+        currentContractAmount: { currency: context.revision.currency, minorUnits: 0 },
+        pricingBasis
+      },
       entitlementTransition: { from: "HELD", to: "RELEASED", coverageCount: heldCoverage.length }
-    }, { ...baseBasis, heldCoverageIds: heldCoverage.map((coverage) => coverage.id) });
+    }, {
+      ...baseBasis,
+      heldCoverageIds: heldCoverage.map((coverage) => coverage.id),
+      businessDate: localClock.date,
+      ...(commandType === "MARK_NO_SHOW" ? { noShowThreshold: "20:00", noShowEligible: true } : {})
+    });
+  }
+
+  if (commandType === "REVOKE_CHECK_IN") {
+    if (context.order.status !== "CHECKED_IN") {
+      throw new DomainError("INVALID_ORDER_STATE", "只有在住订单可以撤销误办入住", 409);
+    }
+    if (input.unusedRoomConfirmed !== true) {
+      throw new DomainError("VALIDATION_ERROR", "必须确认房间未被实际使用");
+    }
+    const businessDate = await propertyLocalToday(db, propertyId);
+    if (businessDate !== context.order.arrival_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "只有计划入住当天可以撤销误办入住", 409, false, {
+        businessDate,
+        arrivalDate: context.order.arrival_date
+      });
+    }
+    const [consumedCoverage, heldCoverage, collectionFacts] = await Promise.all([
+      db.selectFrom("coverage_items").select("id")
+        .where("order_id", "=", orderId).where("status", "=", "CONSUMED").orderBy("id").execute(),
+      db.selectFrom("coverage_items").select("id")
+        .where("order_id", "=", orderId).where("status", "=", "HELD").orderBy("id").execute(),
+      db.selectFrom("collection_facts").select("net_effect_minor").where("order_id", "=", orderId).execute()
+    ]);
+    if (heldCoverage.length > 0) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销会员权益，不能安全撤销入住", 409);
+    }
+    const pricingBasis = context.order.stay_type === "FREE"
+      ? "FREE"
+      : context.order.member_id || context.order.member_contract_id
+        ? "MEMBER_ENTITLEMENT"
+        : context.order.booking_channel_code && context.order.booking_channel_code !== "WECOM"
+          ? "CHANNEL_CONTRACT"
+          : "POLICY";
+    return finalize(propertyId, {
+      orderId,
+      fromStatus: context.order.status,
+      toStatus: "CHECK_IN_REVOKED",
+      inventoryUnitId: context.currentSegment.inventoryUnitId,
+      businessDate,
+      effectiveDate: businessDate,
+      recordingMode: "ON_SCHEDULE",
+      unusedRoomConfirmed: true,
+      currentContractAmount: { currency: context.revision.currency, minorUnits: 0 },
+      amounts: amountSummary(context.revision.currency, 0, collectionFacts.map((fact) => fact.net_effect_minor)),
+      pricingRevision: {
+        currentContractAmount: { currency: context.revision.currency, minorUnits: 0 },
+        pricingBasis
+      },
+      entitlementTransition: { from: "CONSUMED", to: "RESTORED", coverageCount: consumedCoverage.length }
+    }, {
+      ...baseBasis,
+      businessDate,
+      unusedRoomConfirmed: true,
+      consumedCoverageIds: consumedCoverage.map((coverage) => coverage.id),
+      heldCoverageIds: []
+    });
   }
 
   throw new DomainError("VALIDATION_ERROR", `Unsupported command type: ${commandType}`);

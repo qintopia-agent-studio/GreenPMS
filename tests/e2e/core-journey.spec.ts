@@ -743,17 +743,40 @@ test("desktop stay changes and exception commands remain operable through Web", 
   const cancelOrderId = await createOrder(page, { stayMode: "NORMAL", unitCode: "101", guest: "E2E Cancel Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "YOUMUDAO", channelOrderReference: "TEST-E2E-YOUMUDAO-001" });
   await page.goto(`/orders/${encodeURIComponent(cancelOrderId)}`);
   await page.getByRole("button", { name: "取消订单" }).click();
-  await confirmCommand(page, "Cancel and release inventory");
-  await closeReceipt(page);
+  const cancelDrawer = page.getByRole("dialog", { name: "取消订单", exact: true });
+  await expect(cancelDrawer).toBeVisible();
+  await expect(cancelDrawer.getByTestId("lifecycle-reason")).toHaveValue("");
+  await cancelDrawer.getByTestId("lifecycle-reason").fill("住客确认取消本次住宿并释放库存");
+  await cancelDrawer.getByRole("button", { name: "继续核对", exact: true }).click();
+  const cancelReview = page.getByRole("dialog", { name: "取消订单", exact: true });
+  await expect(cancelReview.getByTestId("command-effect")).toBeVisible({ timeout: 30_000 });
+  await expect(cancelReview).toContainText("处理后订单金额");
+  await expect(cancelReview).toContainText("¥0.00");
+  await expect(cancelReview).toContainText("本次操作不会自动退款");
+  await expect(cancelReview).not.toContainText(/CANCEL_ORDER|Preview|Receipt|Command|order_[a-z0-9_-]+/i);
+  await cancelReview.getByRole("button", { name: "确认取消订单", exact: true }).click();
+  const cancelRecovery = cancelReview.getByRole("button", { name: "查询原操作结果", exact: true });
+  const cancellationNeedsRecovery = await Promise.race([
+    cancelRecovery.waitFor({ state: "visible", timeout: 10_000 }).then(() => true),
+    cancelReview.waitFor({ state: "hidden", timeout: 10_000 }).then(() => false)
+  ]);
+  if (cancellationNeedsRecovery) await cancelRecovery.click();
+  await expect(cancelReview).toBeHidden({ timeout: 30_000 });
   await expect(page.locator(".order-title-row").getByText("已取消", { exact: true })).toBeVisible();
 
   await page.goto("/");
   const noShowOrderId = await createOrder(page, { stayMode: "NORMAL", unitCode: "102", guest: "E2E No Show Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "WECOM" });
   await page.goto(`/orders/${encodeURIComponent(noShowOrderId)}`);
-  await page.getByRole("button", { name: "标记未到" }).click();
-  await confirmCommand(page, "Mark no-show and release inventory");
-  await closeReceipt(page);
-  await expect(page.locator(".order-title-row").getByText("未到", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "标记未到", exact: true })).toHaveCount(0);
+  const noShowView = await page.request.get(`/api/v1/orders/${encodeURIComponent(noShowOrderId)}`);
+  expect(noShowView.ok()).toBe(true);
+  const noShowActions = (await noShowView.json() as {
+    allowedActions: Array<{ code: string; enabled: boolean; disabledReason: string | null }>;
+  }).allowedActions;
+  expect(noShowActions.find((action) => action.code === "MARK_NO_SHOW")).toMatchObject({
+    enabled: false,
+    disabledReason: "计划到店日 20:00 后才能标记未到"
+  });
   await assertNoA11yViolations(page);
 });
 

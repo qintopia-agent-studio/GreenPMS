@@ -42,6 +42,7 @@ export const commandTypes = [
   "REPRICE_ORDER",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN",
   "LOCK_MAINTENANCE",
   "RELEASE_MAINTENANCE",
   "COMPLETE_CLEANING",
@@ -641,6 +642,12 @@ export interface MoveUnitInputDto {
   manualPriceAdjustmentReason?: string;
 }
 
+export interface RevokeCheckInInputDto {
+  propertyId: string;
+  orderId: string;
+  unusedRoomConfirmed: true;
+}
+
 export interface CreateOrderPricingDecisionDto {
   pricingBasis: CreateOrderPricingBasis;
   policyBaseAmountMinor: number;
@@ -681,6 +688,7 @@ export const orderActionCodes = [
   "REPRICE_ORDER",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
+  "REVOKE_CHECK_IN",
   "RECORD_COLLECTION",
   "RECORD_REFUND"
 ] as const;
@@ -695,10 +703,10 @@ export interface OrderAllowedActionDto {
 export const fulfillmentRecordingModes = ["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"] as const;
 export type FulfillmentRecordingMode = (typeof fulfillmentRecordingModes)[number];
 
-export const orderFulfillmentStates = ["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW"] as const;
+export const orderFulfillmentStates = ["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"] as const;
 export type OrderFulfillmentState = (typeof orderFulfillmentStates)[number];
 
-export const orderEffectiveArrangementPresentations = ["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER"] as const;
+export const orderEffectiveArrangementPresentations = ["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER", "BEFORE_CHECK_IN_REVOCATION"] as const;
 export type OrderEffectiveArrangementPresentation = (typeof orderEffectiveArrangementPresentations)[number];
 
 export const orderArrangementChangeTypes = [
@@ -753,7 +761,7 @@ export interface OrderArrangementHistoryItemDto {
 }
 
 export interface OrderFulfillmentRecordDto {
-  type: "CHECK_IN" | "CHECK_OUT";
+  type: "CHECK_IN" | "CHECK_OUT" | "REVOKE_CHECK_IN";
   plannedBusinessDate: string;
   recordedBusinessDate: string | null;
   recordingMode: FulfillmentRecordingMode;
@@ -766,6 +774,7 @@ export interface OrderFulfillmentProjectionDto {
   state: OrderFulfillmentState;
   checkIn: OrderFulfillmentRecordDto | null;
   checkOut: OrderFulfillmentRecordDto | null;
+  checkInRevocation: OrderFulfillmentRecordDto | null;
 }
 
 export interface CorrectOrderOccupantInputDto {

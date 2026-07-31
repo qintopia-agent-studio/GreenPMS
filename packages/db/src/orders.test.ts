@@ -48,7 +48,7 @@ function action(
   status: string,
   code: string,
   hasRefundableCollection = false,
-  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string },
+  fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string; localTime?: string },
   hasFutureMove = false
 ) {
   return orderAllowedActions("WRITE", status, hasRefundableCollection, fulfillmentDates, hasFutureMove)
@@ -62,7 +62,7 @@ describe("orderAllowedActions", () => {
     }
   });
 
-  it("enables normal fulfillment only on the matching planned business date", () => {
+  it("enables scheduled and late-recorded check-in only before the planned departure date", () => {
     const future = { businessDate: "2026-07-25", arrivalDate: "2026-08-01", departureDate: "2026-08-03" };
     expect(action("RESERVED", "CHECK_IN", false, future)).toEqual({
       code: "CHECK_IN",
@@ -79,13 +79,31 @@ describe("orderAllowedActions", () => {
     expect(action("CHECKED_IN", "CHECK_OUT", false, { ...future, businessDate: future.departureDate })?.enabled).toBe(true);
     expect(action("RESERVED", "CHECK_IN", false, { ...future, businessDate: "2026-08-02" })).toEqual({
       code: "CHECK_IN",
+      enabled: true,
+      disabledReason: null
+    });
+    expect(action("RESERVED", "CHECK_IN", false, { ...future, businessDate: future.departureDate })).toMatchObject({
       enabled: false,
-      disabledReason: "ARRIVAL_DATE_PASSED"
+      disabledReason: "已到或超过计划退房日，不能补办入住"
     });
     expect(action("CHECKED_IN", "CHECK_OUT", false, { ...future, businessDate: "2026-08-04" })).toEqual({
       code: "CHECK_OUT",
       enabled: true,
       disabledReason: null
+    });
+  });
+
+  it("gates no-show at local 20:00 and same-day check-in revocation by arrival date", () => {
+    const dates = { businessDate: "2026-08-01", arrivalDate: "2026-08-01", departureDate: "2026-08-03" };
+    expect(action("RESERVED", "MARK_NO_SHOW", false, { ...dates, localTime: "19:59" })).toMatchObject({
+      enabled: false,
+      disabledReason: "计划到店日 20:00 后才能标记未到"
+    });
+    expect(action("RESERVED", "MARK_NO_SHOW", false, { ...dates, localTime: "20:00" })?.enabled).toBe(true);
+    expect(action("CHECKED_IN", "REVOKE_CHECK_IN", false, dates)?.enabled).toBe(true);
+    expect(action("CHECKED_IN", "REVOKE_CHECK_IN", false, { ...dates, businessDate: "2026-08-02" })).toMatchObject({
+      enabled: false,
+      disabledReason: "只有计划入住当天可以撤销误办入住"
     });
   });
 
@@ -202,7 +220,8 @@ describe("projectOrderFulfillment", () => {
         recordedAt: "2026-08-03T12:00:00.000Z",
         actor,
         reason: { code: "FRONT_DESK", note: "办理退房" }
-      }
+      },
+      checkInRevocation: null
     });
   });
 
@@ -658,7 +677,8 @@ describe("projectOrderLifecycle", () => {
     ["CHECKED_IN", "IN_HOUSE", "IN_HOUSE", "CURRENT", "CHECK_IN"],
     ["CHECKED_OUT", "COMPLETED", "CHECKED_OUT", "LAST", "CHECK_OUT"],
     ["CANCELLED", "CANCELLED", "CANCELLED", "BEFORE_CANCELLATION", "CANCEL_ORDER"],
-    ["NO_SHOW", "NO_SHOW", "NO_SHOW", "NO_SHOW_ORDER", "MARK_NO_SHOW"]
+    ["NO_SHOW", "NO_SHOW", "NO_SHOW", "NO_SHOW_ORDER", "MARK_NO_SHOW"],
+    ["CHECK_IN_REVOKED", "CHECK_IN_REVOKED", "CHECK_IN_REVOKED", "BEFORE_CHECK_IN_REVOCATION", "REVOKE_CHECK_IN"]
   ] as const)("projects typed %s lifecycle state and the correct arrangement presentation", (
     orderStatus,
     stayStatus,
@@ -681,7 +701,7 @@ describe("projectOrderLifecycle", () => {
         recordingMode: "ON_SCHEDULE"
       }
     });
-    if (orderStatus === "CHECKED_IN" || orderStatus === "CHECKED_OUT") input.amendments.push(checkIn);
+    if (orderStatus === "CHECKED_IN" || orderStatus === "CHECKED_OUT" || orderStatus === "CHECK_IN_REVOKED") input.amendments.push(checkIn);
     if (orderStatus === "CHECKED_OUT") {
       input.amendments.push(amendment({
         id: "amend_3",
@@ -702,17 +722,38 @@ describe("projectOrderLifecycle", () => {
         type: terminalType,
         payload: { fromStatus: "RESERVED", toStatus: orderStatus }
       }));
+    } else if (orderStatus === "CHECK_IN_REVOKED") {
+      input.amendments.push(amendment({
+        id: "amend_3",
+        sequence: 3,
+        type: terminalType,
+        payload: {
+          fromStatus: "CHECKED_IN",
+          toStatus: "CHECK_IN_REVOKED",
+          businessDate: "2026-08-01",
+          effectiveDate: "2026-08-01",
+          recordingMode: "ON_SCHEDULE"
+        }
+      }));
     }
     input.order.version = input.amendments.length;
-    if (orderStatus === "CHECKED_OUT" || orderStatus === "CANCELLED" || orderStatus === "NO_SHOW") {
+    if (orderStatus === "CANCELLED" || orderStatus === "NO_SHOW") {
+      input.revisions.push(revision("amend_2", "2026-08-01", "2026-08-03", 0, 2));
+      input.order.current_revision_id = "revision_2";
+    } else if (orderStatus === "CHECK_IN_REVOKED") {
+      input.revisions.push(revision("amend_3", "2026-08-01", "2026-08-03", 0, 2));
+      input.order.current_revision_id = "revision_2";
+    }
+    if (orderStatus === "CHECKED_OUT" || orderStatus === "CANCELLED" || orderStatus === "NO_SHOW" || orderStatus === "CHECK_IN_REVOKED") {
       input.activeTimeline = [];
     }
 
     const result = projectOrderLifecycle(input);
     expect(result.fulfillment.state).toBe(expectedState);
     expect(result.effectiveArrangement.presentation).toBe(expectedPresentation);
-    if (orderStatus === "CHECKED_IN" || orderStatus === "CHECKED_OUT") expect(result.fulfillment.checkIn).not.toBeNull();
+    if (orderStatus === "CHECKED_IN" || orderStatus === "CHECKED_OUT" || orderStatus === "CHECK_IN_REVOKED") expect(result.fulfillment.checkIn).not.toBeNull();
     if (orderStatus === "CHECKED_OUT") expect(result.fulfillment.checkOut).not.toBeNull();
+    if (orderStatus === "CHECK_IN_REVOKED") expect(result.fulfillment.checkInRevocation).not.toBeNull();
   });
 
   it.each([
@@ -1018,6 +1059,8 @@ describe("projectOrderLifecycle", () => {
         payload: { operation: "CORRECT_ORDER_OCCUPANT" }
       })
     );
+    cancelled.revisions.push(revision("amend_2", "2026-08-01", "2026-08-03", 0, 2));
+    cancelled.order.current_revision_id = "revision_2";
     expect(projectOrderLifecycle(cancelled).fulfillment.state).toBe("CANCELLED");
 
     cancelled.amendments[2] = amendment({
@@ -1026,8 +1069,8 @@ describe("projectOrderLifecycle", () => {
       type: "REPRICE_ORDER",
       payload: { operation: "REPRICE_ORDER" }
     });
-    cancelled.revisions.push(revision("amend_3", "2026-08-01", "2026-08-03", 10_000, 2));
-    cancelled.order.current_revision_id = "revision_2";
+    cancelled.revisions.push(revision("amend_3", "2026-08-01", "2026-08-03", 10_000, 3));
+    cancelled.order.current_revision_id = "revision_3";
     expect(() => projectOrderLifecycle(cancelled)).toThrow(/终态订单包含不允许/);
   });
 });

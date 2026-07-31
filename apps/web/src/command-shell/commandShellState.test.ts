@@ -9,7 +9,7 @@ import {
 
 describe("U1 command shell state", () => {
   it("freezes the approved command whitelist", () => {
-    expect(u1CommandTypes).toHaveLength(17);
+    expect(u1CommandTypes).toHaveLength(20);
     expect(isU1CommandType("SHORTEN_STAY")).toBe(true);
     for (const commandType of u1CommandTypes) {
       expect(isU1CommandType(commandType)).toBe(true);
@@ -19,6 +19,9 @@ describe("U1 command shell state", () => {
     expect(isU1CommandType("RESCHEDULE_STAY")).toBe(true);
     expect(isU1CommandType("EXTEND_STAY")).toBe(true);
     expect(isU1CommandType("MOVE_UNIT")).toBe(true);
+    expect(isU1CommandType("CANCEL_ORDER")).toBe(true);
+    expect(isU1CommandType("MARK_NO_SHOW")).toBe(true);
+    expect(isU1CommandType("REVOKE_CHECK_IN")).toBe(true);
     expect(isU1CommandType("ISSUE_TOKEN")).toBe(false);
   });
 

@@ -210,7 +210,7 @@ export function RoomStatusWarning({ children }: { children: string }) {
   );
 }
 
-const mobileMediaQuery = "(max-width: 575px), (max-width: 767px) and (max-height: 500px)";
+const mobileMediaQuery = "(max-width: 767px)";
 
 function subscribeToMobileViewport(onStoreChange: () => void): () => void {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => undefined;

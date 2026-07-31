@@ -16,7 +16,7 @@ function arrangement(inventoryUnitId = "room_101", arrivalDate = "2026-07-28", d
   };
 }
 
-function fulfillmentFact(type: "CHECK_IN" | "CHECK_OUT", plannedBusinessDate: string, recordedAt: string) {
+function fulfillmentFact(type: "CHECK_IN" | "CHECK_OUT" | "REVOKE_CHECK_IN", plannedBusinessDate: string, recordedAt: string) {
   return {
     type,
     plannedBusinessDate,
@@ -107,7 +107,8 @@ function orderView() {
     fulfillment: {
       state: "NOT_CHECKED_IN",
       checkIn: null as ReturnType<typeof fulfillmentFact> | null,
-      checkOut: null as ReturnType<typeof fulfillmentFact> | null
+      checkOut: null as ReturnType<typeof fulfillmentFact> | null,
+      checkInRevocation: null as ReturnType<typeof fulfillmentFact> | null
     },
     arrangementHistory: [{
       type: "INITIAL_BOOKING",
@@ -280,6 +281,51 @@ describe("parseOrderView", () => {
     expect(parseOrderView(input)).toBe(input);
   });
 
+  it("accepts a revoked same-day check-in while retaining the original check-in record", () => {
+    const input = orderView();
+    input.order.status = "CHECK_IN_REVOKED";
+    input.order.current_revision_id = "revision_2";
+    input.order.version = 3;
+    input.stay.status = "CHECK_IN_REVOKED";
+    input.effectiveArrangement.presentation = "BEFORE_CHECK_IN_REVOCATION";
+    input.fulfillment.state = "CHECK_IN_REVOKED";
+    input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    input.fulfillment.checkInRevocation = fulfillmentFact("REVOKE_CHECK_IN", "2026-07-28", "2026-07-28T09:00:00.000Z");
+    input.amendments.push(amendment({
+      id: "amendment_2", sequence: 2, amendment_type: "CHECK_IN", prior_version: 1, new_version: 2,
+      command_id: "command_2", created_at: "2026-07-28T08:00:00.000Z"
+    }), amendment({
+      id: "amendment_3", sequence: 3, amendment_type: "REVOKE_CHECK_IN", reason_code: "REVOKE_CHECK_IN",
+      reason_note: "住客未实际使用房间", prior_version: 2, new_version: 3, command_id: "command_3",
+      created_at: "2026-07-28T09:00:00.000Z"
+    }));
+    input.pricingRevisions.push({
+      ...input.pricingRevisions[0]!, id: "revision_2", revision_no: 2, amendment_id: "amendment_3",
+      current_contract_amount_minor: 0, difference_from_policy_minor: -20_000,
+      reason: { code: "REVOKE_CHECK_IN", note: "住客未实际使用房间" }, created_at: "2026-07-28T09:00:00.000Z"
+    });
+    input.amounts.currentContractAmount.minorUnits = 0;
+    input.amounts.collectionDifference.minorUnits = 0;
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it.each([
+    ["missing revocation record", (input: ReturnType<typeof orderView>) => { input.fulfillment.checkInRevocation = null; }],
+    ["missing retained check-in", (input: ReturnType<typeof orderView>) => { input.fulfillment.checkIn = null; }],
+    ["wrong revocation type", (input: ReturnType<typeof orderView>) => { input.fulfillment.checkInRevocation!.type = "CHECK_OUT"; }],
+    ["unexpected revocation field", (input: ReturnType<typeof orderView>) => { Object.assign(input.fulfillment.checkInRevocation!, { rawPayload: {} }); }]
+  ])("fails closed for a damaged revoked check-in projection: %s", (_label, damage) => {
+    const input = orderView();
+    input.order.status = "CHECK_IN_REVOKED";
+    input.stay.status = "CHECK_IN_REVOKED";
+    input.effectiveArrangement.presentation = "BEFORE_CHECK_IN_REVOCATION";
+    input.fulfillment.state = "CHECK_IN_REVOKED";
+    input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    input.fulfillment.checkInRevocation = fulfillmentFact("REVOKE_CHECK_IN", "2026-07-28", "2026-07-28T09:00:00.000Z");
+    damage(input);
+    expect(() => parseOrderView(input)).toThrow(OrderViewValidationError);
+  });
+
   it("accepts only the lifecycle-specific enabled date action and rejects duplicate actions", () => {
     const reserved = orderView();
     (reserved as unknown as { allowedActions: unknown[] }).allowedActions = [{ code: "RESCHEDULE_STAY", enabled: true, disabledReason: null }];
@@ -364,7 +410,7 @@ describe("parseOrderView", () => {
   it("rejects fulfillment state and records that contradict each other", () => {
     const input = orderView();
     input.fulfillment.state = "CHECKED_OUT";
-    expect(() => parseOrderView(input)).toThrow("履约状态与入住、退房记录不一致");
+    expect(() => parseOrderView(input)).toThrow("履约状态与入住、退房或撤销记录不一致");
   });
 
   it("accepts a checked-out projection when order, Stay, presentation, and typed facts agree", () => {
@@ -420,6 +466,20 @@ describe("parseOrderView", () => {
     input.fulfillment.checkIn.recordedAt = "2026-07-28T08:00:00.000Z";
     input.fulfillment.checkOut.recordingMode = "LATE_RECORDED";
     expect(() => parseOrderView(input)).toThrow("迟录退房日期没有晚于计划退房日");
+  });
+
+  it("accepts a late-recorded check-in only after its planned arrival date", () => {
+    const input = orderView();
+    input.order.status = "CHECKED_IN";
+    input.stay.status = "IN_HOUSE";
+    input.fulfillment.state = "IN_HOUSE";
+    input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-29T08:00:00.000Z");
+    input.fulfillment.checkIn.recordingMode = "LATE_RECORDED";
+    input.fulfillment.checkIn.recordedBusinessDate = "2026-07-29";
+    expect(parseOrderView(input)).toBe(input);
+
+    input.fulfillment.checkIn.recordedBusinessDate = "2026-07-28";
+    expect(() => parseOrderView(input)).toThrow("迟录入住日期没有晚于计划入住日");
   });
 
   it("requires history timestamps to be non-decreasing while allowing equal timestamps", () => {

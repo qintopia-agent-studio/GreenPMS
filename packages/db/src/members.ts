@@ -22,13 +22,34 @@ export function localDateInTimeZone(timeZone: string, instant = new Date()): str
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-export async function propertyLocalToday(db: DbExecutor, propertyId: string): Promise<string> {
+export function localClockInTimeZone(timeZone: string, instant = new Date()): { date: string; time: string } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(instant);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    time: `${values.hour}:${values.minute}`
+  };
+}
+
+export async function propertyLocalClock(db: DbExecutor, propertyId: string): Promise<{ date: string; time: string }> {
   const property = await db.selectFrom("properties")
     .select(["timezone", sql<Date>`transaction_timestamp()`.as("as_of")])
     .where("id", "=", propertyId)
     .executeTakeFirst();
   if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
-  return localDateInTimeZone(property.timezone, propertyClockForTesting.getStore() ?? new Date(property.as_of));
+  return localClockInTimeZone(property.timezone, propertyClockForTesting.getStore() ?? new Date(property.as_of));
+}
+
+export async function propertyLocalToday(db: DbExecutor, propertyId: string): Promise<string> {
+  return (await propertyLocalClock(db, propertyId)).date;
 }
 
 export async function getMemberView(db: DbExecutor, propertyId: string, memberId: string) {

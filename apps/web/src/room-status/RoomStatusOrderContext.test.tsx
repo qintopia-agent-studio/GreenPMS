@@ -76,7 +76,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       presentation: "CURRENT",
       businessDate: "2026-07-25"
     },
-    fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null },
+    fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null, checkInRevocation: null },
     arrangementHistory: [{
       type: "INITIAL_BOOKING",
       before: null,
@@ -339,6 +339,29 @@ describe("RoomStatusOrderContext", () => {
     expect(html).toContain("调整订单金额");
   });
 
+  it("keeps cancel, no-show and revoke check-in inside the current room-status context", () => {
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        allowedActions: [
+          { code: "CANCEL_ORDER", enabled: true, disabledReason: null },
+          { code: "MARK_NO_SHOW", enabled: true, disabledReason: null },
+          { code: "REVOKE_CHECK_IN", enabled: true, disabledReason: null }
+        ]
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onLifecycleAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html.match(/data-room-status-action-mode="inline"/g)).toHaveLength(3);
+    expect(html).toContain('data-room-status-action="CANCEL_ORDER"');
+    expect(html).toContain('data-room-status-action="MARK_NO_SHOW"');
+    expect(html).toContain('data-room-status-action="REVOKE_CHECK_IN"');
+    expect(html).not.toContain('data-room-status-action-mode="order-detail"');
+  });
+
   it("exposes one in-house departure-date adjustment entry instead of three competing actions", () => {
     const base = orderView();
     const html = renderToStaticMarkup(<RoomStatusOrderContext
@@ -366,7 +389,8 @@ describe("RoomStatusOrderContext", () => {
             actor: { subjectId: "operator", displayName: "前台操作员" },
             reason: { code: "CHECK_IN", note: "" }
           },
-          checkOut: null
+          checkOut: null,
+          checkInRevocation: null
         }
       })}
       units={units}
