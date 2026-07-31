@@ -1,6 +1,7 @@
 import { ArrowRight, CalendarRange, Clock3, Crosshair, FilePenLine, ReceiptText, Sparkles, Users, X } from "lucide-react";
 import { currentReleaseFeatures } from "@qintopia/contracts";
 import { Link } from "react-router-dom";
+import { AccommodationPositionSummary } from "../components/AccommodationPositionSummary";
 import type { InventoryUnitDto, MemberViewDto, OrderViewDto } from "../types";
 import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMoney, stayDateFundsAreOperatorFacing, StatusBadge } from "../ui";
 import { stayDateChangeActionState, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
@@ -84,6 +85,7 @@ export interface RoomStatusOrderContextProps {
   onOpenMember?: (target: { memberId: string; contractId: string }) => void;
   onFulfillmentAction: (action: "CHECK_IN" | "CHECK_OUT") => void;
   onDateAction?: (action: StayDateChangeAction, mode?: StayDateChangeMode) => void;
+  onMoveUnit?: () => void;
   onCorrectOccupant: (occupant: OrderOccupant) => void;
   onLocateRange: (target: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) => void;
 }
@@ -193,6 +195,7 @@ export function RoomStatusOrderContext({
   onOpenMember,
   onFulfillmentAction,
   onDateAction,
+  onMoveUnit,
   onCorrectOccupant,
   onLocateRange
 }: RoomStatusOrderContextProps) {
@@ -214,9 +217,11 @@ export function RoomStatusOrderContext({
   const departureAdjustmentAction = view.order.status === "CHECKED_IN"
     ? extensionState?.enabled ? "EXTEND_STAY" : shortenState?.enabled ? "SHORTEN_STAY" : undefined
     : undefined;
+  const moveUnitEnabled = enabledActions.some((action) => action.code === "MOVE_UNIT");
   const routedActions = enabledActions.filter((action) => (
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
       && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY" && action.code !== "SHORTEN_STAY"
+      && action.code !== "MOVE_UNIT"
   ));
   const amountDifference = view.amounts.collectionDifference;
   const currentPricingRevision = view.pricingRevisions.find((revision) => revision.id === view.order.current_revision_id)
@@ -320,6 +325,7 @@ export function RoomStatusOrderContext({
 
       <section className="room-status-context-section" aria-labelledby="room-status-order-effective-arrangement-heading">
         <div className="room-status-context-section-heading"><CalendarRange aria-hidden="true" size={17} /><h3 id="room-status-order-effective-arrangement-heading">{effectiveArrangementLabels[view.effectiveArrangement.presentation]}</h3></div>
+        <AccommodationPositionSummary view={view} inventoryUnits={units} />
         <ArrangementIntervals arrangement={view.effectiveArrangement} unitMap={unitMap} onLocateRange={onLocateRange} actionLabel="定位当前安排" />
       </section>
 
@@ -389,10 +395,11 @@ export function RoomStatusOrderContext({
         <div className="room-status-context-section-heading"><ArrowRight aria-hidden="true" size={17} /><h3 id="room-status-order-actions-heading">订单入口</h3></div>
         {primaryActionPlacement === "CONTENT" ? <button type="button" className="room-status-button" onClick={() => onOpenOrder()}>查看完整订单<ArrowRight aria-hidden="true" size={16} /></button> : null}
         {[...new Set(dateActionStates.filter((state) => !state.enabled && state.reason).map((state) => state.reason!))].map((reason) => <p key={reason} className="room-status-context-note" role="status" data-testid="stay-date-action-blocked">{reason}</p>)}
-        {fulfillmentActions.length || dateActions.length || departureAdjustmentAction || routedActions.length ? <ul>
+        {fulfillmentActions.length || dateActions.length || departureAdjustmentAction || moveUnitEnabled || routedActions.length ? <ul>
           {fulfillmentActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action-mode="inline" onClick={() => onFulfillmentAction(action.code)}>{actionLabels[action.code]}</button></li>)}
           {dateActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onDateAction?.(action.code, "DATE_CHANGE")}>{actionLabels[action.code]}</button></li>)}
           {departureAdjustmentAction ? <li><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action="ADJUST_DEPARTURE" data-room-status-action-mode="inline" onClick={() => onDateAction?.(departureAdjustmentAction, "ADJUST_DEPARTURE")}>调整退房日期</button></li> : null}
+          {moveUnitEnabled ? <li><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action="MOVE_UNIT" data-room-status-action-mode="inline" onClick={onMoveUnit}>换房</button></li> : null}
           {routedActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" data-room-status-action-mode="order-detail" onClick={() => onOpenOrder(action.code)}>{actionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} /></button></li>)}
         </ul> : null}
       </section>

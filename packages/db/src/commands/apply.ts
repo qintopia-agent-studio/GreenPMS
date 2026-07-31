@@ -13,6 +13,7 @@ import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInve
 import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, lockOrder, reconcileCoverage, releaseCoverage, type StayTimelineItem } from "../orders.ts";
 import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from "../pricing-service.ts";
 import type { Database } from "../schema.ts";
+import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
 import { normalizeIdentityCardNumber, requireObject, requireString } from "./effects.ts";
 
 export interface AppliedCommand {
@@ -118,6 +119,18 @@ function stringArray(record: Record<string, unknown>, field: string): string[] {
     throw new DomainError("INTERNAL_ERROR", `${field} is invalid`, 500);
   }
   return value as string[];
+}
+
+function inventoryClaimSummaries(record: Record<string, unknown>, field: string): Array<{ serviceDate: string; inventoryUnitId: string }> {
+  const value = record[field];
+  if (!Array.isArray(value)) throw new DomainError("INTERNAL_ERROR", `${field} is invalid`, 500);
+  return value.map((entry, index) => {
+    const item = requireObject(entry, `${field}[${index}]`);
+    return {
+      serviceDate: requireString(item, "serviceDate"),
+      inventoryUnitId: requireString(item, "inventoryUnitId")
+    };
+  });
 }
 
 function trailingTimelineRun(timeline: StayTimelineItem[]): { inventoryUnitId: string; arrivalDate: string } {
@@ -243,20 +256,34 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "CHECK_OUT"].includes(commandType)) {
     const timeline = await loadActiveStayTimeline(trx, context);
     const roomDates = await roomDatesForTimeline(trx, propertyId, timeline);
-    if (commandType === "EXTEND_STAY") {
-      const extensionUnit = await loadInventoryUnit(trx, propertyId, timeline.at(-1)!.inventoryUnitId);
-      roomDates.push(...enumerateServiceDates(context.order.departure_date, requireString(input, "newDepartureDate"))
-        .map((serviceDate) => ({ roomId: extensionUnit.roomId, serviceDate })));
-    }
-    if (commandType === "RESCHEDULE_STAY") {
-      const currentUnit = await loadInventoryUnit(trx, propertyId, timeline[0]!.inventoryUnitId);
-      roomDates.push(...enumerateServiceDates(
-        requireString(input, "newArrivalDate"),
-        requireString(input, "newDepartureDate")
-      ).map((serviceDate) => ({ roomId: currentUnit.roomId, serviceDate })));
+    if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") {
+      const plannedTimeline = planStayDateChangeTimeline({
+        currentTimeline: timeline,
+        oldArrivalDate: context.order.arrival_date,
+        oldDepartureDate: context.order.departure_date,
+        newArrivalDate: commandType === "RESCHEDULE_STAY"
+          ? requireString(input, "newArrivalDate")
+          : context.order.arrival_date,
+        newDepartureDate: requireString(input, "newDepartureDate")
+      });
+      roomDates.push(...await roomDatesForTimeline(trx, propertyId, plannedTimeline));
     }
     if (commandType === "MOVE_UNIT") {
-      const newUnit = await loadInventoryUnit(trx, propertyId, requireString(input, "newInventoryUnitId"));
+      const newInventoryUnitId = requireString(input, "newInventoryUnitId");
+      const target = await trx.selectFrom("inventory_units")
+        .select(["id", "parent_room_id"])
+        .where("id", "=", newInventoryUnitId)
+        .where("property_id", "=", propertyId)
+        .executeTakeFirst();
+      if (!target) throw new DomainError("NOT_FOUND", "Inventory unit not found", 404);
+      const metadataUnitIds = [...new Set([target.id, target.parent_room_id].filter((id): id is string => Boolean(id)))].sort();
+      await trx.selectFrom("inventory_units")
+        .select("id")
+        .where("id", "in", metadataUnitIds)
+        .orderBy("id")
+        .forUpdate()
+        .execute();
+      const newUnit = await loadInventoryUnit(trx, propertyId, newInventoryUnitId);
       const effectiveDate = requireString(input, "effectiveDate");
       parseLocalDate(effectiveDate);
       roomDates.push(...enumerateServiceDates(effectiveDate, context.order.departure_date)
@@ -926,12 +953,37 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const departureDate = requireString(after, "departureDate");
     const stayTimeline = stayTimelineFromEffect(effect);
     const inventoryUnitId = requireString(effect, "inventoryUnitId");
-    const segmentArrivalDate = options.commandType === "RESCHEDULE_STAY"
-      ? arrivalDate
-      : trailingTimelineRun(stayTimeline).arrivalDate;
+    const currentTimeline = await loadActiveStayTimeline(trx, context);
+    const expectedTimeline = planStayDateChangeTimeline({
+      currentTimeline,
+      oldArrivalDate: context.order.arrival_date,
+      oldDepartureDate: context.order.departure_date,
+      newArrivalDate: arrivalDate,
+      newDepartureDate: departureDate
+    });
+    if (stayTimeline.length !== expectedTimeline.length || stayTimeline.some((item, index) => (
+      item.serviceDate !== expectedTimeline[index]?.serviceDate
+      || item.inventoryUnitId !== expectedTimeline[index]?.inventoryUnitId
+    ))) {
+      throw new DomainError("INTERNAL_ERROR", "调整住宿日期的结果与方案 B 时间线不一致", 500);
+    }
+    const currentTail = trailingTimelineRun(stayTimeline);
+    if (inventoryUnitId !== currentTail.inventoryUnitId) {
+      throw new DomainError("INTERNAL_ERROR", "调整住宿日期的尾段房源不一致", 500);
+    }
+    const segmentArrivalDate = currentTail.arrivalDate;
     const inventoryChange = nestedObject(effect, "inventoryChange");
     const releasedDates = stringArray(inventoryChange, "releasedDates");
     const addedDates = stringArray(inventoryChange, "addedDates");
+    const preservedDates = stringArray(inventoryChange, "preservedDates");
+    const pairDiff = timelinePairDiff(currentTimeline, stayTimeline);
+    const sameDates = (actual: string[], expected: StayTimelineItem[]) => actual.length === expected.length
+      && actual.every((date, index) => date === expected[index]?.serviceDate);
+    if (!sameDates(preservedDates, pairDiff.preserved)
+      || !sameDates(releasedDates, pairDiff.released)
+      || !sameDates(addedDates, pairDiff.added)) {
+      throw new DomainError("INTERNAL_ERROR", "调整住宿日期的库存差异与完整时间线不一致", 500);
+    }
     const pricing = pricingSnapshot(effect, {
       stayType: context.order.stay_type,
       memberId: context.order.member_id,
@@ -966,15 +1018,30 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       context.segmentIds,
       releasedDates
     );
-    const unit = await loadInventoryUnit(trx, propertyId, inventoryUnitId);
-    const addedClaimIds = await createInventoryClaims(trx, {
-      propertyId,
-      unit,
-      dates: addedDates,
-      sourceType: "ORDER_SEGMENT",
-      sourceId: segmentId,
-      excludeSourceIds: [...context.segmentIds, segmentId]
-    });
+    if (releasedClaimIds.length !== pairDiff.released.length) {
+      throw new DomainError("INTERNAL_ERROR", "调整住宿日期未精确释放旧库存占用", 500);
+    }
+    const addedByUnit = new Map<string, string[]>();
+    for (const item of pairDiff.added) {
+      const dates = addedByUnit.get(item.inventoryUnitId) ?? [];
+      dates.push(item.serviceDate);
+      addedByUnit.set(item.inventoryUnitId, dates);
+    }
+    const addedClaimIds: string[] = [];
+    for (const [unitId, dates] of addedByUnit) {
+      const unit = await loadInventoryUnit(trx, propertyId, unitId);
+      addedClaimIds.push(...await createInventoryClaims(trx, {
+        propertyId,
+        unit,
+        dates,
+        sourceType: "ORDER_SEGMENT",
+        sourceId: segmentId,
+        excludeSourceIds: [...context.segmentIds, segmentId]
+      }));
+    }
+    if (addedClaimIds.length !== pairDiff.added.length) {
+      throw new DomainError("INTERNAL_ERROR", "调整住宿日期未精确创建新库存占用", 500);
+    }
 
     const reconciled = context.order.member_id || context.order.member_contract_id
       ? await reconcileCoverage(trx, {
@@ -1132,6 +1199,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         staySegmentId: segmentId,
         pricingRevisionId: revisionId,
         completionMode,
+        businessDate,
         arrivalDate,
         departureDate,
         before,
@@ -1157,12 +1225,16 @@ export async function applyCommand(trx: Transaction<Database>, options: {
   }
 
   if (options.commandType === "MOVE_UNIT") {
+    if (requireString(effect, "operation") !== "MOVE_UNIT") {
+      throw new DomainError("INTERNAL_ERROR", "Move unit effect has an invalid operation", 500);
+    }
     const amendmentId = await appendAmendment(trx, {
       orderId, sequence: context.order.version + 1, amendmentType: "MOVE_UNIT",
       reasonCode: options.reason.code, reasonNote: options.reason.note, priorVersion: context.order.version, payload: effect,
       commandId: options.commandId
     });
     const segmentId = newId("segment");
+    const after = nestedObject(effect, "after");
     const pricing = pricingSnapshot(effect, {
       stayType: context.order.stay_type,
       memberId: context.order.member_id,
@@ -1171,44 +1243,130 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const stayTimeline = stayTimelineFromEffect(effect);
     const currentTail = trailingTimelineRun(stayTimeline);
     const unitId = currentTail.inventoryUnitId;
-    const departureDate = context.order.departure_date;
+    const arrivalDate = requireString(after, "arrivalDate");
+    const departureDate = requireString(after, "departureDate");
+    const effectiveDate = requireString(effect, "effectiveDate");
+    const businessDate = requireString(effect, "businessDate");
+    if (arrivalDate !== context.order.arrival_date || departureDate !== context.order.departure_date
+      || currentTail.arrivalDate > effectiveDate || unitId !== requireString(nestedObject(effect, "toInventoryUnit"), "id")) {
+      throw new DomainError("INTERNAL_ERROR", "Move unit effect has an invalid resulting timeline", 500);
+    }
     await trx.insertInto("stay_segments").values({
       id: segmentId, stay_id: context.stay.id, sequence: context.currentSegment.sequence + 1,
-      inventory_unit_id: unitId, arrival_date: currentTail.arrivalDate, departure_date: departureDate,
+      inventory_unit_id: unitId, arrival_date: effectiveDate, departure_date: departureDate,
       segment_type: "MOVE", supersedes_segment_id: context.currentSegment.id, amendment_id: amendmentId
     }).execute();
-    const effectiveDate = requireString(effect, "effectiveDate");
-    await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds, effectiveDate);
-    const released = await releaseCoverage(trx, orderId, options.commandId, { fromDate: effectiveDate, reholdCoverageSet: pricing.coverageSet });
+    const inventoryChange = nestedObject(effect, "inventoryChange");
+    const preservedClaims = inventoryClaimSummaries(inventoryChange, "preservedClaims");
+    const releasedClaims = inventoryClaimSummaries(inventoryChange, "releasedClaims");
+    const addedClaims = inventoryClaimSummaries(inventoryChange, "addedClaims");
+    const beforeTimelineByDate = new Map(
+      inventoryClaimSummaries(nestedObject(effect, "before"), "stayTimeline")
+        .map((claim) => [claim.serviceDate, claim.inventoryUnitId])
+    );
+    const afterTimelineByDate = new Map(stayTimeline.map((claim) => [claim.serviceDate, claim.inventoryUnitId]));
+    const expectedPreserved = [...beforeTimelineByDate].filter(([serviceDate, inventoryUnitId]) =>
+      afterTimelineByDate.get(serviceDate) === inventoryUnitId
+    );
+    const expectedReleased = [...beforeTimelineByDate].filter(([serviceDate, inventoryUnitId]) =>
+      afterTimelineByDate.get(serviceDate) !== inventoryUnitId
+    );
+    const expectedAdded = [...afterTimelineByDate].filter(([serviceDate, inventoryUnitId]) =>
+      beforeTimelineByDate.get(serviceDate) !== inventoryUnitId
+    );
+    const matchesClaimSet = (
+      actual: Array<{ serviceDate: string; inventoryUnitId: string }>,
+      expected: Array<[string, string]>
+    ) => {
+      const actualKeys = actual.map((claim) => `${claim.serviceDate}\u0000${claim.inventoryUnitId}`).sort();
+      const expectedKeys = expected.map(([serviceDate, inventoryUnitId]) => `${serviceDate}\u0000${inventoryUnitId}`).sort();
+      return actualKeys.length === expectedKeys.length
+        && new Set(actualKeys).size === actualKeys.length
+        && new Set(expectedKeys).size === expectedKeys.length
+        && actualKeys.every((key, index) => key === expectedKeys[index]);
+    };
+    if (!matchesClaimSet(preservedClaims, expectedPreserved)
+      || !matchesClaimSet(releasedClaims, expectedReleased)
+      || !matchesClaimSet(addedClaims, expectedAdded)
+      || addedClaims.some((claim) => claim.inventoryUnitId !== unitId)) {
+      throw new DomainError("INTERNAL_ERROR", "Move unit effect inventory diff does not match its stay timeline", 500);
+    }
+    const releasedClaimIds = await releaseInventoryClaimsOnDates(
+      trx,
+      "ORDER_SEGMENT",
+      context.segmentIds,
+      releasedClaims.map((claim) => claim.serviceDate)
+    );
+    if (releasedClaimIds.length !== releasedClaims.length) {
+      throw new DomainError("INTERNAL_ERROR", "Move unit did not release the exact inventory claim set", 500);
+    }
     const unit = await loadInventoryUnit(trx, propertyId, unitId);
-    await createInventoryClaims(trx, { propertyId, unit, dates: enumerateServiceDates(effectiveDate, departureDate), sourceType: "ORDER_SEGMENT", sourceId: segmentId });
+    const addedClaimIds = await createInventoryClaims(trx, {
+      propertyId,
+      unit,
+      dates: addedClaims.map((claim) => claim.serviceDate),
+      sourceType: "ORDER_SEGMENT",
+      sourceId: segmentId,
+      excludeSourceIds: [...context.segmentIds, segmentId]
+    });
+    if (addedClaimIds.length !== addedClaims.length) {
+      throw new DomainError("INTERNAL_ERROR", "Move unit did not create the exact inventory claim set", 500);
+    }
     const revisionId = await insertRevision(trx, {
       orderId, revisionNo: context.revision.revisionNo + 1, amendmentId,
       policyVersionId: context.order.pricing_policy_version_id,
-      arrivalDate: context.order.arrival_date, departureDate, pricing
+      arrivalDate, departureDate, pricing
     });
-    const coverageIds = [...released.coverageIds];
-    const coverageFactIds = [...released.factIds];
-    if (context.order.member_id || context.order.member_contract_id) {
-      const held = await holdCoverage(trx, { orderId, contractId: context.order.member_contract_id ?? "", ...(context.order.member_id ? { memberId: context.order.member_id } : {}), inventoryUnitId: unitId, revisionId, coverageSet: pricing.coverageSet, commandId: options.commandId });
-      coverageIds.push(...held.coverageIds);
-      coverageFactIds.push(...held.factIds);
-      await bumpMembershipForCoverage(trx, context.order.member_contract_id, pricing.coverageSet);
-      if (context.order.status === "CHECKED_IN") {
-        const consumed = await consumeCoverage(trx, orderId, options.commandId);
-        coverageIds.push(...consumed.coverageIds);
-        coverageFactIds.push(...consumed.factIds);
-      }
+    const reconciled = context.order.member_id || context.order.member_contract_id
+      ? await reconcileCoverage(trx, {
+        orderId,
+        contractId: context.order.member_contract_id ?? "",
+        ...(context.order.member_id ? { memberId: context.order.member_id } : {}),
+        revisionId,
+        coverageSet: pricing.coverageSet,
+        commandId: options.commandId
+      })
+      : { coverageIds: [], factIds: [] };
+    const entitlementSummary = nestedObject(effect, "entitlementSummary");
+    const ledgerWriteCount = entitlementSummary.ledgerWriteCount;
+    if (!Number.isSafeInteger(ledgerWriteCount) || ledgerWriteCount !== reconciled.factIds.length) {
+      throw new DomainError("INTERNAL_ERROR", "Move unit entitlement summary does not match persisted ledger writes", 500);
     }
     await trx.updateTable("orders").set({
       current_revision_id: revisionId,
       version: context.order.version + 1,
       updated_at: new Date()
     }).where("id", "=", orderId).execute();
+    const before = nestedObject(effect, "before");
+    const pricingDecision = nestedObject(effect, "pricingDecision");
+    const fundsSummary = nestedObject(effect, "fundsSummary");
     return {
-      persistedResult: { orderId, amendmentId, staySegmentId: segmentId, pricingRevisionId: revisionId },
-      resourceRefs: [...new Set([orderId, amendmentId, segmentId, revisionId, ...coverageIds])],
-      factRefs: [...new Set(coverageFactIds)]
+      persistedResult: {
+        orderId,
+        stayId: context.stay.id,
+        amendmentId,
+        staySegmentId: segmentId,
+        pricingRevisionId: revisionId,
+        businessDate,
+        effectiveDate,
+        before,
+        after,
+        pricingDecision,
+        inventoryChange,
+        entitlementSummary,
+        fundsSummary
+      },
+      resourceRefs: [...new Set([
+        orderId,
+        context.stay.id,
+        amendmentId,
+        segmentId,
+        revisionId,
+        ...releasedClaimIds,
+        ...addedClaimIds,
+        ...reconciled.coverageIds
+      ])],
+      factRefs: [...new Set(reconciled.factIds)]
     };
   }
 

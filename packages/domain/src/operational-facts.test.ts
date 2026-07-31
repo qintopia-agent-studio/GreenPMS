@@ -215,6 +215,76 @@ describe("operational fact identifiers", () => {
     });
   });
 
+  it("rebuilds MOVE_UNIT external-channel prices without inheriting the previous target", () => {
+    expect(() => stayChangePricingDecision({
+      commandType: "MOVE_UNIT",
+      bookingChannelCode: "CTRIP",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 100_000
+    })).toThrow(/targetCurrentContractAmountMinor is required/);
+    expect(stayChangePricingDecision({
+      commandType: "MOVE_UNIT",
+      bookingChannelCode: "CTRIP",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 100_000,
+      targetCurrentContractAmountMinor: 85_000
+    })).toMatchObject({
+      pricingBasis: "CHANNEL_CONTRACT",
+      currentContractAmountMinor: 85_000,
+      manualAdjustmentMinor: 0,
+      differenceExceedsThreshold: false,
+      reason: { code: "MOVE_UNIT_CHANNEL_CONTRACT", note: "" }
+    });
+    expect(() => stayChangePricingDecision({
+      commandType: "MOVE_UNIT",
+      bookingChannelCode: "MEITUAN",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 100_000,
+      targetCurrentContractAmountMinor: 116_000
+    })).toThrow(/channelPriceDifferenceReason is required/);
+  });
+
+  it("uses the new policy price for WECOM MOVE_UNIT and rejects overrides for free or member stays", () => {
+    expect(stayChangePricingDecision({
+      commandType: "MOVE_UNIT",
+      bookingChannelCode: "WECOM",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 54_400
+    })).toMatchObject({
+      pricingBasis: "POLICY",
+      currentContractAmountMinor: 54_400,
+      manualAdjustmentMinor: 0,
+      reason: { code: "MOVE_UNIT_POLICY", note: "" }
+    });
+    expect(() => stayChangePricingDecision({
+      commandType: "MOVE_UNIT",
+      bookingChannelCode: "WECOM",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 54_400,
+      targetCurrentContractAmountMinor: 53_900
+    })).toThrow(/manualPriceAdjustmentReason is required/);
+    expect(stayChangePricingDecision({
+      commandType: "MOVE_UNIT",
+      bookingChannelCode: null,
+      stayType: "FREE",
+      memberStay: false,
+      policyBaseAmountMinor: 0
+    })).toMatchObject({ pricingBasis: "FREE", currentContractAmountMinor: 0 });
+    expect(() => stayChangePricingDecision({
+      commandType: "MOVE_UNIT",
+      bookingChannelCode: null,
+      stayType: "TRANSIENT",
+      memberStay: true,
+      policyBaseAmountMinor: 0,
+      targetCurrentContractAmountMinor: 0
+    })).toThrow(/must not be submitted for FREE or member stays/);
+  });
+
   it("keeps free and member stay changes database-priced and rejects amount overrides", () => {
     expect(stayChangePricingDecision({
       commandType: "RESCHEDULE_STAY",

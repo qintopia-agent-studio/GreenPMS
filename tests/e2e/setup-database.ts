@@ -1,11 +1,13 @@
 import { todayInTimeZone } from "@qintopia/domain";
 import { demo } from "../../packages/db/src/seed.ts";
-import { resetDatabase } from "../helpers/database.ts";
+import { resetDatabase, resetDatabaseInPlace } from "../helpers/database.ts";
 
 export const e2eDatabaseUrl = process.env.E2E_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
 
 async function main() {
-  const db = await resetDatabase(e2eDatabaseUrl);
+  const db = process.env.E2E_DATABASE_RESET_MODE === "IN_PLACE"
+    ? await resetDatabaseInPlace(e2eDatabaseUrl)
+    : await resetDatabase(e2eDatabaseUrl);
   const propertyToday = todayInTimeZone("Asia/Shanghai");
   const yesterday = new Date(`${propertyToday}T00:00:00.000Z`);
   yesterday.setUTCDate(yesterday.getUTCDate() - 1);

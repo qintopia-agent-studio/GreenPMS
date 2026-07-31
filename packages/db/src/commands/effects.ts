@@ -28,6 +28,7 @@ import {
 import { allocateCoverageCandidates, loadPricingPolicy, loadStoredQuote, resolveMemberCoverage } from "../pricing-service.ts";
 import { inventoryFingerprint, loadInventoryUnit, type DbExecutor } from "../inventory.ts";
 import { propertyLocalToday } from "../members.ts";
+import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
 
 export interface BuiltCommandEffect {
   propertyId: string;
@@ -1116,14 +1117,6 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         409
       );
     }
-    const currentRuns = timelineRuns(currentTimeline);
-    if (currentRuns.slice(1).some((run) => run.arrivalDate >= businessDate)) {
-      throw new DomainError(
-        "INVALID_ORDER_STATE",
-        "该订单已有尚未生效的换房安排，请在换房流程中处理后再缩短住宿",
-        409
-      );
-    }
     const newDepartureDate = requireString(input, "newDepartureDate");
     parseLocalDate(newDepartureDate);
     if (newDepartureDate >= context.order.departure_date) {
@@ -1261,7 +1254,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         arrivalDate: context.order.arrival_date,
         departureDate: context.order.departure_date,
         nights: oldDates.length,
-        currentContractAmount: oldAmountSummary.currentContractAmount
+        currentContractAmount: oldAmountSummary.currentContractAmount,
+        stayTimeline: currentTimeline
       },
       after: {
         arrivalDate: context.order.arrival_date,
@@ -1300,10 +1294,6 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const businessDate = await propertyLocalToday(db, propertyId);
     const currentTimeline = await loadActiveStayTimeline(db, context);
     await assertStayDateChangeLifecycle(db, context, businessDate, currentTimeline);
-    const currentRuns = timelineRuns(currentTimeline);
-    if (reschedule && currentRuns.length !== 1) {
-      throw new DomainError("INVALID_ORDER_STATE", "该订单已有换房安排，当前版本暂不能调整预订日期", 409);
-    }
     const newArrivalDate = reschedule ? requireString(input, "newArrivalDate") : context.order.arrival_date;
     const newDepartureDate = requireString(input, "newDepartureDate");
     const newDates = enumerateServiceDates(newArrivalDate, newDepartureDate);
@@ -1323,37 +1313,61 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       }
     }
 
-    const inventoryUnitId = reschedule ? currentRuns[0]!.inventoryUnitId : currentTimeline.at(-1)!.inventoryUnitId;
     const oldDates = currentTimeline.map((item) => item.serviceDate);
-    const inventoryChange = dateDiff(oldDates, newDates);
-    const inventoryFingerprintStart = reschedule ? newArrivalDate : context.order.departure_date;
-    const fingerprint = await inventoryFingerprint(
-      db,
-      propertyId,
-      inventoryUnitId,
-      inventoryFingerprintStart,
-      newDepartureDate,
-      context.segmentIds
+    const stayTimeline = planStayDateChangeTimeline({
+      currentTimeline,
+      oldArrivalDate: context.order.arrival_date,
+      oldDepartureDate: context.order.departure_date,
+      newArrivalDate,
+      newDepartureDate
+    });
+    const pairDiff = timelinePairDiff(currentTimeline, stayTimeline);
+    const inventoryChange = {
+      preservedDates: pairDiff.preserved.map((item) => item.serviceDate),
+      releasedDates: pairDiff.released.map((item) => item.serviceDate),
+      addedDates: pairDiff.added.map((item) => item.serviceDate)
+    };
+    const inventoryUnitId = stayTimeline.at(-1)!.inventoryUnitId;
+    const fingerprintParts = await Promise.all(pairDiff.added.map(async (item) => ({
+      item,
+      fingerprint: await inventoryFingerprint(
+        db,
+        propertyId,
+        item.inventoryUnitId,
+        item.serviceDate,
+        nextServiceDate(item.serviceDate),
+        context.segmentIds
+      )
+    })));
+    const fingerprint = fingerprintParts.flatMap(({ item, fingerprint: entries }) =>
+      entries.map((entry) => `${item.serviceDate}:${item.inventoryUnitId}:${entry}`)
     );
     if (fingerprint.length > 0) {
       throw new DomainError("INVENTORY_CONFLICT", reschedule ? "调整后的住宿日期存在库存冲突" : "延长日期的库存不可用", 409);
     }
-    const stayTimeline = reschedule
-      ? newDates.map((serviceDate) => ({ serviceDate, inventoryUnitId }))
-      : [
-        ...currentTimeline,
-        ...inventoryChange.addedDates.map((serviceDate) => ({ serviceDate, inventoryUnitId }))
-      ];
 
-    const activeCoverage = await activeCoverageCandidates(db, orderId);
+    const [activeCoverage, activeCoverageRows] = await Promise.all([
+      activeCoverageCandidates(db, orderId),
+      db.selectFrom("coverage_items")
+        .select(["service_date", "inventory_unit_id", "status"])
+        .where("order_id", "=", orderId)
+        .where("status", "in", ["HELD", "CONSUMED"])
+        .orderBy("service_date")
+        .execute()
+    ]);
     if (reschedule && activeCoverage.some((item) => item.status === "CONSUMED")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能调整预订日期", 409);
     }
     if (!reschedule && activeCoverage.some((item) => item.status === "HELD")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销的原住宿权益，当前数据状态异常，不能延长住宿", 409);
     }
+    const afterUnitByDate = new Map(stayTimeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
     const reallocatableHeld = reschedule
-      ? activeCoverage.filter((item) => item.status === "HELD" && !newDates.includes(item.serviceDate))
+      ? activeCoverage.filter((item) => {
+        if (item.status !== "HELD") return false;
+        const active = activeCoverageRows.find((row) => row.service_date === item.serviceDate && row.status === "HELD");
+        return !active || afterUnitByDate.get(item.serviceDate) !== active.inventory_unit_id;
+      })
       : [];
     const policyPricing = await priceStayTimeline(db, {
       propertyId,
@@ -1366,7 +1380,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       policyVersionId: context.order.pricing_policy_version_id,
       timeline: stayTimeline,
       manualAdjustmentMinor: 0,
-      coverageAllocationDates: reschedule ? newDates : inventoryChange.addedDates,
+      coverageAllocationDates: reschedule ? newDates : pairDiff.added.map((item) => item.serviceDate),
       reallocatableHeld
     });
     const decision = stayChangePricingDecision({
@@ -1384,14 +1398,22 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       currentContractAmount: money(policyPricing.currentContractAmount.currency, decision.currentContractAmountMinor)
     };
     const oldAmountSummary = await orderAmountSummary(db, context);
-    const newCoverageDates = pricing.coverageSet.map((item) => item.serviceDate);
-    const oldCoverageDates = activeCoverage.map((item) => item.serviceDate);
-    const coverageDiff = dateDiff(oldCoverageDates, newCoverageDates);
+    const desiredCoverageKeys = new Set(pricing.coverageSet.map((item) => `${item.serviceDate}\u0000${item.inventoryUnitId}`));
+    const activeCoverageKeys = new Set(activeCoverageRows.map((item) => `${item.service_date}\u0000${item.inventory_unit_id}`));
+    const preservedCoverageDates = activeCoverageRows
+      .filter((item) => desiredCoverageKeys.has(`${item.service_date}\u0000${item.inventory_unit_id}`))
+      .map((item) => item.service_date);
+    const releasedCoverageDates = activeCoverageRows
+      .filter((item) => !desiredCoverageKeys.has(`${item.service_date}\u0000${item.inventory_unit_id}`))
+      .map((item) => item.service_date);
+    const addedCoverageDates = pricing.coverageSet
+      .filter((item) => !activeCoverageKeys.has(`${item.serviceDate}\u0000${item.inventoryUnitId}`))
+      .map((item) => item.serviceDate);
     const entitlementChange = {
-      preservedCoverageDates: coverageDiff.preservedDates,
-      releasedCoverageDates: coverageDiff.releasedDates,
-      addedCoverageDates: coverageDiff.addedDates,
-      consumedCoverageDates: reschedule ? [] : coverageDiff.addedDates
+      preservedCoverageDates,
+      releasedCoverageDates,
+      addedCoverageDates,
+      consumedCoverageDates: reschedule ? [] : addedCoverageDates
     };
     const fundsSummary = {
       netRecordedCollection: oldAmountSummary.netRecordedCollection,
@@ -1410,6 +1432,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         arrivalDate: context.order.arrival_date,
         departureDate: context.order.departure_date,
         nights: oldDates.length,
+        stayTimeline: currentTimeline,
         currentContractAmount: oldAmountSummary.currentContractAmount
       },
       after: {
@@ -1433,16 +1456,32 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   }
 
   if (commandType === "MOVE_UNIT") {
-    assertOrderMutable(context.order.status);
     const newInventoryUnitId = requireString(input, "newInventoryUnitId");
     const effectiveDate = requireString(input, "effectiveDate");
     parseLocalDate(effectiveDate);
-    if (effectiveDate < context.order.arrival_date || effectiveDate >= context.order.departure_date) throw new DomainError("VALIDATION_ERROR", "effectiveDate must be within the stay");
+    if (context.order.status !== "RESERVED" && context.order.status !== "CHECKED_IN") {
+      throw new DomainError("INVALID_ORDER_STATE", "只有已预订或在住订单可以换房", 409);
+    }
+    const businessDate = await propertyLocalToday(db, propertyId);
     const currentTimeline = await loadActiveStayTimeline(db, context);
+    await assertStayDateChangeLifecycle(db, context, businessDate, currentTimeline);
+    if (context.order.status === "RESERVED" && businessDate > context.order.arrival_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "逾期未到订单暂不能换房，请先处理到店日期", 409);
+    }
+    if (context.order.status === "CHECKED_IN" && businessDate >= context.order.departure_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "已到或超过计划退房日，请先办理续住或退房", 409);
+    }
+    if (effectiveDate < context.order.arrival_date || effectiveDate >= context.order.departure_date) throw new DomainError("VALIDATION_ERROR", "effectiveDate must be within the stay");
+    if (context.order.status === "CHECKED_IN" && effectiveDate < businessDate) {
+      throw new DomainError("VALIDATION_ERROR", "换房生效日期不能早于当前营业日期");
+    }
     const effectiveUnitId = currentTimeline.find((item) => item.serviceDate === effectiveDate)!.inventoryUnitId;
     const currentUnit = await loadInventoryUnit(db, propertyId, effectiveUnitId);
     const newUnit = await loadInventoryUnit(db, propertyId, newInventoryUnitId);
-    if (currentUnit.id === newUnit.id) throw new DomainError("VALIDATION_ERROR", "New inventory unit must differ from the current unit");
+    const stayTimeline = currentTimeline.map((item) => item.serviceDate < effectiveDate ? item : { ...item, inventoryUnitId: newUnit.id });
+    if (stayTimeline.every((item, index) => item.inventoryUnitId === currentTimeline[index]?.inventoryUnitId)) {
+      throw new DomainError("VALIDATION_ERROR", "换房后的住宿安排必须发生变化");
+    }
     const occupantCountRow = await db.selectFrom("order_occupants")
       .select(({ fn }) => fn.countAll<string>().as("count"))
       .where("order_id", "=", orderId)
@@ -1457,34 +1496,148 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         `${newUnit.code} 最多登记 ${newUnit.occupancyCapacity} 位住宿人，当前订单有 ${occupantCount} 位`
       );
     }
-    if ((context.order.member_id || context.order.member_contract_id)
-      && (currentUnit.kind !== newUnit.kind || currentUnit.roomTypeCode !== newUnit.roomTypeCode)) {
-      throw new DomainError("ENTITLEMENT_CONFLICT", "会员住宿只能更换到同一会员产品适用的房型", 409);
+    if (context.order.member_id || context.order.member_contract_id) {
+      const currentUnits = await Promise.all([...new Set(currentTimeline.map((item) => item.inventoryUnitId))]
+        .map((unitId) => loadInventoryUnit(db, propertyId, unitId)));
+      if (currentUnits.some((unit) => unit.kind !== newUnit.kind || unit.roomTypeCode !== newUnit.roomTypeCode)) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "会员住宿只能更换到同一会员产品适用的房型", 409);
+      }
+    }
+    const activeCoverage = await activeCoverageCandidates(db, orderId);
+    if (context.order.status === "RESERVED" && activeCoverage.some((item) => item.status === "CONSUMED")) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能换房", 409);
+    }
+    if (context.order.status === "CHECKED_IN" && activeCoverage.some((item) => item.status === "HELD")) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销的原住宿权益，当前数据状态异常，不能换房", 409);
     }
     const fingerprint = await inventoryFingerprint(db, propertyId, newUnit.id, effectiveDate, context.order.departure_date, context.segmentIds);
-    if (fingerprint.length > 0) throw new DomainError("INVENTORY_CONFLICT", "Destination inventory is unavailable", 409);
-    const stayTimeline = currentTimeline.map((item) => item.serviceDate < effectiveDate ? item : { ...item, inventoryUnitId: newUnit.id });
-    const pricing = await priceStayTimeline(db, {
+    if (fingerprint.length > 0) {
+      throw new DomainError("INVENTORY_CONFLICT", "目标房源在所选换房日期内已有占用，请选择其他房源。", 409);
+    }
+    const policyPricing = await priceStayTimeline(db, {
       propertyId, orderId, memberId: context.order.member_id, memberContractId: context.order.member_contract_id,
       arrivalDate: context.order.arrival_date, departureDate: context.order.departure_date,
       stayType: context.order.stay_type as StayType, policyVersionId: context.order.pricing_policy_version_id,
       timeline: stayTimeline, manualAdjustmentMinor: 0
     });
+    const decision = stayChangePricingDecision({
+      commandType,
+      bookingChannelCode: context.order.booking_channel_code,
+      stayType: context.order.stay_type,
+      memberStay: Boolean(context.order.member_id || context.order.member_contract_id),
+      policyBaseAmountMinor: policyPricing.currentContractAmount.minorUnits,
+      targetCurrentContractAmountMinor: input.targetCurrentContractAmountMinor,
+      channelPriceDifferenceReason: input.channelPriceDifferenceReason,
+      manualPriceAdjustmentReason: input.manualPriceAdjustmentReason
+    });
+    const pricing: PricingResult = {
+      ...policyPricing,
+      currentContractAmount: money(policyPricing.currentContractAmount.currency, decision.currentContractAmountMinor)
+    };
+    const oldAmountSummary = await orderAmountSummary(db, context);
+    const collectionFacts = await db.selectFrom("collection_facts")
+      .select([
+        "fact_id", "fact_type", "amount_minor", "net_effect_minor", "currency",
+        "references_fact_id", "reverses_fact_id", "pricing_revision_id", "command_id", "created_at"
+      ])
+      .where("order_id", "=", orderId)
+      .orderBy("created_at")
+      .orderBy("fact_id")
+      .execute();
+    const activeCoverageRows = await db.selectFrom("coverage_items")
+      .select(["id", "service_date", "lot_id", "status", "inventory_unit_id", "unit_kind"])
+      .where("order_id", "=", orderId)
+      .where("status", "in", ["HELD", "CONSUMED"])
+      .orderBy("service_date")
+      .execute();
+    const desiredCoverageByDate = new Map(pricing.coverageSet.map((item) => [item.serviceDate, item]));
+    const preservedCoverageDates: string[] = [];
+    const migratedHeldCoverageDates: string[] = [];
+    const consumedCoverageDates: string[] = [];
+    for (const coverage of activeCoverageRows) {
+      const desired = desiredCoverageByDate.get(coverage.service_date);
+      if (coverage.status === "CONSUMED") {
+        consumedCoverageDates.push(coverage.service_date);
+      } else if (desired
+        && coverage.inventory_unit_id === desired.inventoryUnitId
+        && coverage.unit_kind === desired.unitKind
+        && coverage.lot_id === desired.entitlementLotId) {
+        preservedCoverageDates.push(coverage.service_date);
+      } else if (desired) {
+        migratedHeldCoverageDates.push(coverage.service_date);
+      }
+    }
+    const beforeClaims = currentTimeline.map((item) => ({
+      serviceDate: item.serviceDate,
+      inventoryUnitId: item.inventoryUnitId
+    }));
+    const afterClaims = stayTimeline.map((item) => ({
+      serviceDate: item.serviceDate,
+      inventoryUnitId: item.inventoryUnitId
+    }));
+    const preservedClaims = beforeClaims.filter((item, index) => item.inventoryUnitId === afterClaims[index]?.inventoryUnitId);
+    const releasedClaims = beforeClaims.filter((item, index) => item.inventoryUnitId !== afterClaims[index]?.inventoryUnitId);
+    const addedClaims = afterClaims.filter((item, index) => item.inventoryUnitId !== beforeClaims[index]?.inventoryUnitId);
+    const actualCurrentUnitId = context.order.status === "CHECKED_IN"
+      ? currentTimeline.find((item) => item.serviceDate === businessDate)?.inventoryUnitId
+      : undefined;
+    if (context.order.status === "CHECKED_IN" && !actualCurrentUnitId) {
+      throw new DomainError("INTERNAL_ERROR", "在住订单的当前营业日不在有效住宿安排内", 500);
+    }
+    const actualCurrentInventoryUnit = actualCurrentUnitId
+      ? await loadInventoryUnit(db, propertyId, actualCurrentUnitId)
+      : null;
+    const fundsSummary = {
+      netRecordedCollection: oldAmountSummary.netRecordedCollection,
+      collectionDifference: money(
+        pricing.currentContractAmount.currency,
+        pricing.currentContractAmount.minorUnits - oldAmountSummary.netRecordedCollection.minorUnits
+      ),
+      factCount: collectionFacts.length
+    };
     return finalize(propertyId, {
+      operation: "MOVE_UNIT",
       orderId,
-      fromInventoryUnit: currentUnit,
+      stayId: context.stay.id,
+      businessDate,
       toInventoryUnit: newUnit,
       effectiveDate,
       occupantCount,
       occupancyCapacity: newUnit.occupancyCapacity,
-      stayTimeline,
-      pricing
+      before: {
+        arrivalDate: context.order.arrival_date,
+        departureDate: context.order.departure_date,
+        nights: currentTimeline.length,
+        currentContractAmount: oldAmountSummary.currentContractAmount,
+        stayTimeline: currentTimeline,
+        actualCurrentInventoryUnit,
+        effectiveDateInventoryUnit: currentUnit
+      },
+      after: {
+        arrivalDate: context.order.arrival_date,
+        departureDate: context.order.departure_date,
+        nights: stayTimeline.length,
+        stayTimeline,
+        pricing
+      },
+      pricingDecision: pricingDecisionEffect(pricing.currentContractAmount.currency, decision),
+      inventoryChange: { preservedClaims, releasedClaims, addedClaims },
+      entitlementSummary: {
+        preservedCoverageDates,
+        migratedHeldCoverageDates,
+        consumedCoverageDates,
+        ledgerWriteCount: migratedHeldCoverageDates.length * 2
+      },
+      fundsSummary
     }, {
       ...baseBasis,
+      businessDate,
       stayTimeline: currentTimeline,
       inventory: fingerprint,
       occupantCount,
-      destinationOccupancyCapacity: newUnit.occupancyCapacity
+      destinationInventoryUnit: newUnit,
+      activeCoverage: activeCoverageRows,
+      collectionFacts
     });
   }
 

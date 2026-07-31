@@ -125,6 +125,15 @@ async function openOrder(page: Page, stay: Stage8StayFixture) {
   await expect(page.locator(".order-unit")).toContainText(stay.unitCode);
 }
 
+async function selectQuickPopoverOrder(page: Page, stay: Stage8StayFixture): Promise<void> {
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", stay.unitId);
+  const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: stay.nickname });
+  await expect(orderOption).toHaveCount(1);
+  await orderOption.click();
+}
+
 async function verifyMemberProfile(page: Page, stay: Stage8StayFixture, coverageCount: number) {
   await page.goto("/members");
   await expect(page.getByRole("heading", { name: "会员档案", exact: true })).toBeVisible();
@@ -216,7 +225,7 @@ async function openMobileOrderContext(page: Page, stay: Stage8StayFixture) {
 
 test.beforeAll(async ({}, workerInfo) => {
   fixture = await prepareStage8Acceptance(e2eDatabaseUrl, {
-    reset: false,
+    reset: true,
     scenario: workerInfo.project.name === "mobile" ? "mobile" : "desktop"
   });
 });
@@ -236,7 +245,7 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
       && response.status() === 200
   ), { timeout: 30_000 });
   await cell.click();
-  await page.getByTestId("room-status-quick-popover").locator(".room-status-quick-orders button").click();
+  await selectQuickPopoverOrder(page, fixture.restoration);
   await selectedOrderResponse;
   const context = page.locator(".room-status-order-context").filter({ hasText: fixture.restoration.nickname });
   await expect(context).toBeVisible({ timeout: 30_000 });
@@ -266,7 +275,7 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
       && response.status() === 200
   ), { timeout: 30_000 });
   await cell.click();
-  await page.getByTestId("room-status-quick-popover").locator(".room-status-quick-orders button").click();
+  await selectQuickPopoverOrder(page, fixture.restoration);
   await reopenedOrderResponse;
   await expect(context).toBeVisible();
   await expect(checkInButton).toBeEnabled();
@@ -293,7 +302,8 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
     beforeConfirm: async (dialog) => {
       const staleNotice = page.locator(".room-status-stale-notice");
       await expect(staleNotice).toBeVisible({ timeout: 15_000 });
-      await expect(checkInButton).toBeDisabled();
+      await expect(context).toBeHidden();
+      await expect(checkInButton).toHaveCount(0);
       await expect(dialog.getByRole("button", { name: "确认办理入住", exact: true })).toBeEnabled();
     }
   });
@@ -367,7 +377,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
       && response.status() === 200
   ));
   await plannedCheckoutCell.click();
-  await page.getByTestId("room-status-quick-popover").locator(".room-status-quick-orders button").click();
+  await selectQuickPopoverOrder(page, fixture.plannedCheckout);
   await plannedCheckoutOrder;
   const plannedCheckoutContext = page.locator(".room-status-order-context").filter({ hasText: fixture.plannedCheckout.nickname });
   await expect(plannedCheckoutContext).toBeVisible();

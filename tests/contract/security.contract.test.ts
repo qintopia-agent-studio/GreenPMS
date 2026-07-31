@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import { Value } from "@sinclair/typebox/value";
 import type { CommandType } from "@qintopia/contracts";
 import { newOpaqueSecret, sha256 } from "@qintopia/domain";
-import { createDatabase, type Database } from "@qintopia/db";
+import { createDatabase, databaseReady, type Database } from "@qintopia/db";
 import { ErrorResponse, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -217,6 +217,28 @@ afterAll(async () => {
 });
 
 describe("HTTP security contract", () => {
+  it("fails readiness for unknown migrations and non-operational guard trigger states", async () => {
+    await db.insertInto("schema_migrations").values({ name: "999_future_application.sql" }).execute();
+    try {
+      expect(await databaseReady(db)).toBe(false);
+    } finally {
+      await db.deleteFrom("schema_migrations").where("name", "=", "999_future_application.sql").execute();
+    }
+    expect(await databaseReady(db)).toBe(true);
+
+    const rollbackProbe = new Error("rollback readiness trigger state probe");
+    for (const triggerState of ["DISABLE", "ENABLE REPLICA"] as const) {
+      await expect(db.transaction().execute(async (trx) => {
+        await sql.raw(
+          `ALTER TABLE amendments ${triggerState} TRIGGER amendments_stage11_validate_move_combination`
+        ).execute(trx);
+        expect(await databaseReady(trx)).toBe(false);
+        throw rollbackProbe;
+      })).rejects.toBe(rollbackProbe);
+      expect(await databaseReady(db)).toBe(true);
+    }
+  });
+
   it("allows only the configured Origin for session writes and rejects mismatches with zero artifacts", async () => {
     const sessionCookie = newOpaqueSecret("qts");
     await db.insertInto("web_sessions").values({
@@ -343,18 +365,23 @@ describe("HTTP security contract", () => {
       db.selectFrom("maintenance_locks").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
       db.selectFrom("inventory_claims").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
     ]);
-    const prepared = await previewCommand(demo.writeToken, "LOCK_MAINTENANCE", {
-      propertyId: demo.propertyId,
-      inventoryUnitId: demo.secondRoomId,
-      arrivalDate: "2029-11-01",
-      departureDate: "2029-11-02",
-      reason: "HTTP expired Preview contract"
-    }, "http-expired-preview");
+    const prepared = await (async () => {
+      const previousTtl = process.env.PREVIEW_TTL_SECONDS;
+      process.env.PREVIEW_TTL_SECONDS = "0";
+      try {
+        return await previewCommand(demo.writeToken, "LOCK_MAINTENANCE", {
+          propertyId: demo.propertyId,
+          inventoryUnitId: demo.secondRoomId,
+          arrivalDate: "2029-11-01",
+          departureDate: "2029-11-02",
+          reason: "HTTP expired Preview contract"
+        }, "http-expired-preview");
+      } finally {
+        if (previousTtl === undefined) delete process.env.PREVIEW_TTL_SECONDS;
+        else process.env.PREVIEW_TTL_SECONDS = previousTtl;
+      }
+    })();
     expect(prepared.response.statusCode, prepared.response.body).toBe(200);
-    await db.updateTable("command_previews")
-      .set({ expires_at: new Date(Date.now() - 1_000) })
-      .where("id", "=", prepared.body.preview.previewId)
-      .execute();
 
     const first = await confirmPreview(demo.writeToken, prepared.body.preview, "http-expired-first");
     const second = await confirmPreview(demo.writeToken, prepared.body.preview, "http-expired-second");
@@ -1129,7 +1156,8 @@ describe("HTTP security contract", () => {
         propertyId: demo.propertyId,
         orderId,
         newInventoryUnitId: demo.secondRoomId,
-        effectiveDate: "2028-02-12"
+        effectiveDate: "2028-02-12",
+        targetCurrentContractAmountMinor: quote.json().quote.currentContractAmount.minorUnits
       }, "timeline-move"),
       previewCommand(demo.writeToken, "REPRICE_ORDER", {
         propertyId: demo.propertyId,

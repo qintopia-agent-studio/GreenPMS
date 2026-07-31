@@ -320,19 +320,22 @@ describe("RoomStatusOrderContext", () => {
         allowedActions: [
           { code: "CHECK_IN", enabled: true, disabledReason: null },
           { code: "CHECK_OUT", enabled: true, disabledReason: null },
+          { code: "MOVE_UNIT", enabled: true, disabledReason: null },
           { code: "REPRICE_ORDER", enabled: true, disabledReason: null }
         ]
       })}
       units={units}
       onOpenOrder={() => undefined}
       onFulfillmentAction={() => undefined}
+      onMoveUnit={() => undefined}
       onCorrectOccupant={() => undefined}
       onLocateRange={() => undefined}
     />);
-    expect(html.match(/data-room-status-action-mode="inline"/g)).toHaveLength(2);
+    expect(html.match(/data-room-status-action-mode="inline"/g)).toHaveLength(3);
     expect(html.match(/data-room-status-action-mode="order-detail"/g)).toHaveLength(1);
     expect(html).toContain("办理入住");
     expect(html).toContain("办理退房");
+    expect(html).toContain("换房");
     expect(html).toContain("调整订单金额");
   });
 
@@ -381,7 +384,7 @@ describe("RoomStatusOrderContext", () => {
     expect(html).not.toContain('data-room-status-action-mode="inline">办理退房');
   });
 
-  it("keeps rescheduling and extension inside room status and shows the approved multi-room fail-close reason", () => {
+  it("keeps Scheme B multi-room rescheduling and extension inside room status", () => {
     const multiRoom = orderView({
       allowedActions: [{ code: "RESCHEDULE_STAY", enabled: true, disabledReason: null }]
     });
@@ -394,8 +397,8 @@ describe("RoomStatusOrderContext", () => {
       onCorrectOccupant={() => undefined}
       onLocateRange={() => undefined}
     />);
-    expect(blockedHtml).toContain("该订单已有换房安排，当前版本暂不能调整预订日期");
-    expect(blockedHtml).not.toContain('data-room-status-action="RESCHEDULE_STAY"');
+    expect(blockedHtml).toContain('data-room-status-action="RESCHEDULE_STAY"');
+    expect(blockedHtml).not.toContain("该订单已有换房安排，当前版本暂不能调整预订日期");
 
     const singleRoom = orderView({
       effectiveArrangement: {

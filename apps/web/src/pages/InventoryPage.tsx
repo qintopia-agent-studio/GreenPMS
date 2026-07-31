@@ -29,6 +29,7 @@ import type {
   StayType
 } from "../types";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
+import { MoveUnitDrawer } from "../components/MoveUnitDrawer";
 import { StayDateChangeDrawer, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 import {
   CommandDialog,
@@ -51,6 +52,7 @@ import {
   assertRoomStatusBoard,
   createRoomStatusOrderReturnState,
   createRoomStatusViewState,
+  DEFAULT_ROOM_STATUS_FILTERS,
   dateWindowStartForFocus,
   filterRoomStatusRooms,
   hasActiveRoomStatusFilters,
@@ -102,7 +104,75 @@ export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boo
 }
 
 export function inventoryRecoveryIsBusinessFacing(presentation: CommandRequest["presentation"]): boolean {
-  return presentation === "MEMBER_STAY" || presentation === "FULFILLMENT" || presentation === "STAY_DATES";
+  return presentation === "MEMBER_STAY" || presentation === "FULFILLMENT" || presentation === "STAY_DATES" || presentation === "MOVE_UNIT";
+}
+
+export function roomStatusGridSelectedStayId(
+  quickPopoverOpen: boolean,
+  quickPopoverStayId: string | null,
+  selectedOrder?: Pick<RoomStatusOrderIdentity, "stayId">,
+  stableSelectedStayId?: string
+): string | null {
+  return quickPopoverOpen
+    ? quickPopoverStayId ?? stableSelectedStayId ?? null
+    : selectedOrder?.stayId ?? stableSelectedStayId ?? null;
+}
+
+export function roomStatusAnchorMatches(
+  anchor: Pick<HTMLElement, "dataset">,
+  unitId: string,
+  serviceDate: string
+): boolean {
+  return anchor.dataset.unitId === unitId && anchor.dataset.serviceDate === serviceDate;
+}
+
+export function roomStatusQuickTargetMatches(
+  target: { unitId: string; serviceDate: string } | undefined,
+  unitId: string,
+  serviceDate: string
+): boolean {
+  return target?.unitId === unitId && target.serviceDate === serviceDate;
+}
+
+export function roomStatusAutoWindowStart(
+  dates: readonly string[],
+  currentStart: number,
+  autoSize: number,
+  focusedCell: RoomStatusViewState["focusedCell"]
+): number {
+  return focusedCell
+    ? dateWindowStartForFocus(dates, currentStart, autoSize, focusedCell.serviceDate)
+    : currentStart;
+}
+
+const roomStatusFilterKeys = [
+  "search",
+  "roomTypeCode",
+  "salesMode",
+  "status",
+  "kind",
+  "minimumCapacity"
+] as const satisfies readonly (keyof RoomStatusViewState["filters"])[];
+
+export function roomStatusFiltersRevealingTarget(
+  filters: RoomStatusViewState["filters"],
+  targetVisible: (candidate: RoomStatusViewState["filters"]) => boolean
+): RoomStatusViewState["filters"] {
+  if (targetVisible(filters)) return filters;
+  const activeKeys = roomStatusFilterKeys.filter((key) => filters[key] !== DEFAULT_ROOM_STATUS_FILTERS[key]);
+  for (let clearedCount = 1; clearedCount <= activeKeys.length; clearedCount += 1) {
+    for (let mask = 1; mask < 2 ** activeKeys.length; mask += 1) {
+      if (mask.toString(2).replaceAll("0", "").length !== clearedCount) continue;
+      const candidate = { ...filters };
+      activeKeys.forEach((key, index) => {
+        if (mask & (1 << index)) {
+          (candidate as Record<keyof RoomStatusViewState["filters"], unknown>)[key] = DEFAULT_ROOM_STATUS_FILTERS[key];
+        }
+      });
+      if (targetVisible(candidate)) return candidate;
+    }
+  }
+  return { ...DEFAULT_ROOM_STATUS_FILTERS };
 }
 
 export function bookingChannelRequiredForStay(useMemberEntitlement: boolean, stayType?: string): boolean {
@@ -1205,6 +1275,10 @@ type PendingMobileTaskFocus = Omit<RoomStatusMobileFocusRequest, "token">;
 
 type RoomStatusCommandPhase = "IDLE" | "DRAFT" | "PREVIEW" | "CONFIRMING" | "SETTLED";
 
+export function roomStatusProjectionRefreshAllowed(phase: RoomStatusCommandPhase): boolean {
+  return phase !== "CONFIRMING";
+}
+
 function roomStatusQuery(
   range: RoomStatusRange,
   page: number,
@@ -1496,6 +1570,7 @@ export function InventoryPage() {
   const [selectedUnitId, setSelectedUnitId] = useState<string>();
   const [selectedDayDate, setSelectedDayDate] = useState<string>();
   const [selectedIntervalId, setSelectedIntervalId] = useState<string>();
+  const [selectedGridStayId, setSelectedGridStayId] = useState<string>();
   const [selectedOrderIdentity, setSelectedOrderIdentity] = useState<RoomStatusOrderIdentity>();
   const [selectedOrderView, setSelectedOrderView] = useState<OrderViewDto>();
   const [selectedMemberView, setSelectedMemberView] = useState<MemberViewDto>();
@@ -1507,6 +1582,8 @@ export function InventoryPage() {
   const [selectedStayDateAction, setSelectedStayDateAction] = useState<StayDateChangeAction>();
   const [selectedStayDateMode, setSelectedStayDateMode] = useState<StayDateChangeMode>("DATE_CHANGE");
   const [selectedStayDateRevision, setSelectedStayDateRevision] = useState<string>();
+  const [selectedMoveUnitOpen, setSelectedMoveUnitOpen] = useState(false);
+  const [selectedMoveUnitRevision, setSelectedMoveUnitRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
   const [quickPopoverTarget, setQuickPopoverTarget] = useState<{
@@ -1642,7 +1719,9 @@ export function InventoryPage() {
     setSelectedStayDateAction(undefined);
     setSelectedStayDateMode("DATE_CHANGE");
     setSelectedStayDateRevision(undefined);
-    setCommandDraft((current) => current?.presentation === "STAY_DATES" ? undefined : current);
+    setSelectedMoveUnitOpen(false);
+    setSelectedMoveUnitRevision(undefined);
+    setCommandDraft((current) => current?.presentation === "STAY_DATES" || current?.presentation === "MOVE_UNIT" ? undefined : current);
   }, [selectedOrderIdentity?.orderId, selectedOrderIdentity?.stayId]);
 
   useEffect(() => {
@@ -1677,6 +1756,15 @@ export function InventoryPage() {
     setActionError(new Error("订单日期或房态已经变化。为避免使用旧数据，原日期表单已关闭；请重新打开后核对。"));
   }, [board?.revision, selectedStayDateAction, selectedStayDateRevision]);
 
+  useEffect(() => {
+    if (!selectedMoveUnitOpen || !selectedMoveUnitRevision || !board) return;
+    if (board.revision === selectedMoveUnitRevision) return;
+    setSelectedMoveUnitOpen(false);
+    setSelectedMoveUnitRevision(undefined);
+    setCommandDraft(undefined);
+    setActionError(new Error("订单或房态已经变化。为避免使用旧数据，原换房表单已关闭；请重新打开后核对。"));
+  }, [board?.revision, selectedMoveUnitOpen, selectedMoveUnitRevision]);
+
   const boardMatchesCurrentProperty = Boolean(board && board.propertyId === propertyId);
   const currentBoardQueryKey = roomStatusQueryKey(roomStatusQuery(range, viewState.roomPageIndex, viewState.filters));
   const boardMatchesCurrentQuery = Boolean(board
@@ -1695,7 +1783,7 @@ export function InventoryPage() {
       if (document.visibilityState !== "visible") return;
       setClock(Date.now());
       if (!permissionDeniedRef.current
-        && commandPhaseRef.current !== "CONFIRMING"
+        && roomStatusProjectionRefreshAllowed(commandPhaseRef.current)
         && !queryAttemptGuard.isInFlight()) {
         setRefreshToken((value) => value + 1);
       }
@@ -1704,7 +1792,7 @@ export function InventoryPage() {
       if (document.visibilityState !== "visible") return;
       setClock(Date.now());
       if (!permissionDeniedRef.current
-        && commandPhaseRef.current !== "CONFIRMING"
+        && roomStatusProjectionRefreshAllowed(commandPhaseRef.current)
         && !queryAttemptGuard.isInFlight()) {
         setRefreshToken((value) => value + 1);
       }
@@ -1737,6 +1825,7 @@ export function InventoryPage() {
     setSelectedUnitId(undefined);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
+    setSelectedGridStayId(undefined);
     setSelectedOrderIdentity(undefined);
     setSelectedOrderView(undefined);
     setSelectedOrderLoadedScope(undefined);
@@ -2028,7 +2117,14 @@ export function InventoryPage() {
   const selectedInterval = selectedUnit?.intervals.find((interval) => interval.id === selectedIntervalId) ?? null;
   const quickPopoverUnit = findRoomStatusUnit(renderedBoard, quickPopoverTarget?.unitId);
   const quickPopoverDay = quickPopoverUnit?.days.find((day) => day.serviceDate === quickPopoverTarget?.serviceDate) ?? null;
-  const quickPopoverInterval = quickPopoverUnit?.intervals.find((interval) => interval.id === quickPopoverTarget?.intervalId) ?? null;
+  const quickPopoverInterval = quickPopoverUnit?.intervals.find((interval) => (
+    quickPopoverTarget?.intervalId
+      ? interval.id === quickPopoverTarget.intervalId
+      : interval.actualInventoryUnitId === quickPopoverUnit.id
+        && interval.startDate <= quickPopoverTarget!.serviceDate
+        && quickPopoverTarget!.serviceDate < interval.endDate
+  )) ?? null;
+  const quickPopoverStatus = quickPopoverInterval?.status ?? quickPopoverDay?.status ?? "UNKNOWN";
   const quickPopoverSelection = quickPopoverTarget?.selection ?? null;
   const quickPopoverActions = (quickPopoverSelection
     ? selectionActions(quickPopoverUnit, quickPopoverSelection)
@@ -2039,7 +2135,9 @@ export function InventoryPage() {
   const quickPopoverOrders = quickPopoverUnit && quickPopoverTarget && !quickPopoverSelection
     ? roomStatusOrderOptionsForDate(quickPopoverUnit, quickPopoverTarget.serviceDate)
     : { kind: "READY" as const, orders: [] };
-  const quickPopoverPreviewStayId = roomStatusUniqueOrderStayId(quickPopoverOrders);
+  const quickPopoverPreviewStayId = (quickPopoverInterval
+    ? roomStatusOrderIdentityForInterval(quickPopoverInterval)?.stayId
+    : undefined) ?? roomStatusUniqueOrderStayId(quickPopoverOrders);
   const selectedSelectionDays = selectionDays(selectedUnit, viewState.selection);
   const relatedIntervals = useMemo(() => {
     if (!selectedUnit) return [];
@@ -2066,24 +2164,69 @@ export function InventoryPage() {
 
   useEffect(() => {
     if (!quickPopoverTarget) return;
-    if (quickPopoverTarget.anchor.isConnected && quickPopoverUnit && quickPopoverDay) return;
+    if (quickPopoverTarget.anchor.isConnected && quickPopoverUnit && (quickPopoverDay || quickPopoverInterval)) return;
+    if (quickPopoverUnit && (quickPopoverDay || quickPopoverInterval)) {
+      const detachedAnchor = quickPopoverTarget.anchor;
+      const targetUnitId = quickPopoverTarget.unitId;
+      const targetServiceDate = quickPopoverTarget.serviceDate;
+      const replacementAnchor = [...(boardColumnRef.current?.querySelectorAll<HTMLElement>("[data-room-status-cell='true']") ?? [])]
+        .find((anchor) => roomStatusAnchorMatches(anchor, targetUnitId, targetServiceDate));
+      if (replacementAnchor) {
+        const snapshot = roomStatusInteractionSnapshotRef.current;
+        if (snapshot?.anchor === detachedAnchor) {
+          roomStatusInteractionSnapshotRef.current = {
+            ...snapshot,
+            anchor: replacementAnchor,
+            grid: replacementAnchor.closest<HTMLElement>(".room-status-grid-scroll")
+          };
+        }
+        setQuickPopoverTarget((current) => (
+          roomStatusQuickTargetMatches(current, targetUnitId, targetServiceDate)
+            && current?.anchor === detachedAnchor
+            ? { ...current, anchor: replacementAnchor }
+            : current
+        ));
+        return;
+      }
+    }
     setQuickPopoverTarget(undefined);
     roomStatusInteractionSnapshotRef.current = undefined;
     dispatchView({ type: "SET_SELECTION", selection: null });
     if (renderedBoard) setReturnNotice("原房态格已不在当前页面，快捷操作已关闭。请重新选择房态格。");
-  }, [quickPopoverDay, quickPopoverTarget, quickPopoverUnit, renderedBoard]);
+  }, [quickPopoverDay, quickPopoverInterval, quickPopoverTarget, quickPopoverUnit, renderedBoard]);
 
   useEffect(() => {
     if (!renderedBoard || viewState.dateWindowMode !== "AUTO") return;
     const autoSize = roomStatusAutoVisibleDays(boardColumnWidth);
     if (autoSize === viewState.dateWindowSize) return;
+    const nextStart = roomStatusAutoWindowStart(
+      renderedBoard.dates,
+      viewState.dateWindowStart,
+      autoSize,
+      viewState.focusedCell
+    );
     dispatchView({
       type: "SET_DATE_WINDOW_MODE",
       mode: "AUTO",
       autoSize,
       totalDates: renderedBoard.dates.length
     });
-  }, [boardColumnWidth, renderedBoard, viewState.dateWindowMode, viewState.dateWindowSize]);
+    if (nextStart !== viewState.dateWindowStart) {
+      dispatchView({
+        type: "SET_DATE_WINDOW",
+        start: nextStart,
+        size: autoSize,
+        totalDates: renderedBoard.dates.length
+      });
+    }
+  }, [
+    boardColumnWidth,
+    renderedBoard,
+    viewState.dateWindowMode,
+    viewState.dateWindowSize,
+    viewState.dateWindowStart,
+    viewState.focusedCell
+  ]);
 
   useEffect(() => {
     if (orderRestorationAttempted.current || !initialRestoration.current || !renderedBoard) return;
@@ -2113,15 +2256,25 @@ export function InventoryPage() {
           .find((candidate) => candidate.dataset.unitId === target.unitId
             && candidate.dataset.serviceDate === target.serviceDate);
         if (!cell) return;
+        dispatchView({ type: "SET_FOCUS", focus: target });
+        cell.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
         cell.focus({ preventScroll: true });
-        returnedOrderCellFocus.current = undefined;
+        if (cell.ownerDocument.activeElement === cell) returnedOrderCellFocus.current = undefined;
       });
     });
     return () => {
       cancelAnimationFrame(firstFrame);
       if (secondFrame) cancelAnimationFrame(secondFrame);
     };
-  }, [orderContextOpen, renderedBoard?.page.index, renderedBoard?.revision, selectedOrderIdentity?.unitId]);
+  }, [
+    boardQueryKey,
+    orderContextOpen,
+    renderedBoard?.page.index,
+    renderedBoard?.revision,
+    selectedOrderIdentity?.unitId,
+    viewState.dateWindowSize,
+    viewState.dateWindowStart
+  ]);
 
   useEffect(() => {
     const target = pendingOrderReturnTarget.current;
@@ -2293,63 +2446,179 @@ export function InventoryPage() {
   ]);
 
   useEffect(() => {
-    if (!selectedOrderIdentity || !renderedBoard) return;
+    if (command || !selectedOrderIdentity || !renderedBoard || !boardMatchesCurrentQuery) return;
     const identityOutsideCurrentRange = selectedOrderIdentity.departureDate <= renderedBoard.range.arrivalDate
       || selectedOrderIdentity.arrivalDate >= renderedBoard.range.departureDate;
     if (identityOutsideCurrentRange) return;
-    const stayStillProjected = renderedBoard.rooms
-      .flatMap((room) => [room, ...room.children])
-      .some((unit) => unit.intervals.some((interval) => interval.references.some(
-        (reference) => reference.type === "STAY" && reference.id === selectedOrderIdentity.stayId
-      )));
-    if (stayStillProjected) return;
+    const triggerDate = selectedDayDate
+      && selectedOrderIdentity.arrivalDate <= selectedDayDate
+      && selectedDayDate < selectedOrderIdentity.departureDate
+      ? selectedDayDate
+      : selectedOrderIdentity.arrivalDate;
+    const target = {
+      orderId: selectedOrderIdentity.orderId,
+      stayId: selectedOrderIdentity.stayId,
+      triggerDate
+    };
+    const currentResolution = resolveRoomStatusOrderReturnTarget(
+      renderedBoard.rooms.flatMap((room) => [room, ...room.children]),
+      target
+    );
+    if (currentResolution.kind === "MATCH") return;
     let current = true;
-    const findMovedStay = async () => {
-      for (let pageIndex = 0; pageIndex < renderedBoard.page.totalPages; pageIndex += 1) {
-        if (pageIndex === renderedBoard.page.index) continue;
-        const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, viewState.filters));
-        if (!current) return;
-        assertRoomStatusBoard(response, { propertyId, range, pageIndex });
-        for (const unit of response.rooms.flatMap((room) => [room, ...room.children])) {
-          const interval = unit.intervals.find((candidate) => candidate.references.some(
-            (reference) => reference.type === "STAY" && reference.id === selectedOrderIdentity.stayId
-          ));
-          const identity = interval ? roomStatusOrderIdentityForInterval(interval) : null;
-          if (!identity || identity.orderId !== selectedOrderIdentity.orderId) continue;
-          const triggerDate = selectedDayDate && identity.arrivalDate <= selectedDayDate && selectedDayDate < identity.departureDate
-            ? selectedDayDate
-            : identity.arrivalDate;
-          const parentRoomId = meta.inventoryUnits.find((candidate) => candidate.id === unit.id)?.parent_room_id;
-          if (parentRoomId && !viewState.expandedRoomIds.includes(parentRoomId)) {
-            dispatchView({ type: "TOGGLE_ROOM", roomId: parentRoomId });
-          }
-          dispatchView({ type: "SET_ROOM_PAGE", index: pageIndex, totalPages: response.page.totalPages });
-          dispatchView({
-            type: "SET_SELECTION",
-            selection: {
-              unitId: identity.unitId,
-              anchorDate: triggerDate,
-              focusDate: triggerDate,
-              arrivalDate: identity.arrivalDate,
-              departureDate: identity.departureDate
-            }
-          });
-          setSelectedUnitId(identity.unitId);
-          setSelectedDayDate(triggerDate);
-          setSelectedIntervalId(identity.intervalId);
-          setSelectedOrderIdentity(identity);
-          setReturnNotice("房态数据已变化，住宿已移动到其他房源页；已保留订单上下文并定位到最新安排。");
-          return;
-        }
-      }
-      if (!current) return;
+    const failClosed = (notice: string) => {
+      setSelectedUnitId(undefined);
+      setSelectedDayDate(undefined);
+      setSelectedIntervalId(undefined);
+      setSelectedGridStayId(undefined);
       setSelectedOrderIdentity(undefined);
       setSelectedOrderView(undefined);
+      setSelectedOrderLoadedScope(undefined);
       setSelectedCorrectionOccupantId(undefined);
       setOrderContextOpen(false);
       roomStatusInteractionSnapshotRef.current = undefined;
       dispatchView({ type: "SET_SELECTION", selection: null });
-      setReturnNotice("原先选中的住宿已不在最新房态投影中，订单上下文已安全关闭。请按最新房态重新选择。");
+      setReturnNotice(notice);
+    };
+    if (currentResolution.kind === "AMBIGUOUS") {
+      failClosed("最新房态存在多个相互冲突的住宿位置，订单上下文已安全关闭。请刷新后重新核对。");
+      return;
+    }
+    const sameFilters = (
+      left: RoomStatusViewState["filters"],
+      right: RoomStatusViewState["filters"]
+    ) => roomStatusFilterKeys.every((key) => left[key] === right[key]);
+    const assertSamePageSet = (candidate: RoomStatusBoardDto, baseline: RoomStatusBoardDto) => {
+      if (candidate.revision !== baseline.revision
+        || candidate.businessDate !== baseline.businessDate
+        || candidate.accessLevel !== baseline.accessLevel
+        || candidate.projectionState !== baseline.projectionState
+        || candidate.page.size !== baseline.page.size
+        || candidate.page.totalRooms !== baseline.page.totalRooms
+        || candidate.page.totalPages !== baseline.page.totalPages) {
+        throw new Error("定位换房结果期间房态分页事实已变化");
+      }
+    };
+    const loadPage = async (pageIndex: number, filters: RoomStatusViewState["filters"]) => {
+      const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, filters));
+      if (!current) return undefined;
+      assertRoomStatusBoard(response, { propertyId, range, pageIndex });
+      return response;
+    };
+    const loadPageSet = async (
+      filters: RoomStatusViewState["filters"],
+      seed?: RoomStatusBoardDto
+    ) => {
+      const baseline = seed ?? await loadPage(0, filters);
+      if (!baseline || !current) return [];
+      const boards = [baseline];
+      for (let pageIndex = 0; pageIndex < baseline.page.totalPages; pageIndex += 1) {
+        if (pageIndex === baseline.page.index) continue;
+        const response = await loadPage(pageIndex, filters);
+        if (!response || !current) return [];
+        assertSamePageSet(response, baseline);
+        boards.push(response);
+      }
+      return boards;
+    };
+    const resolveOnBoards = (boards: readonly RoomStatusBoardDto[]) => {
+      const resolution = resolveRoomStatusOrderReturnTarget(
+        boards.flatMap((candidate) => candidate.rooms.flatMap((room) => [room, ...room.children])),
+        target
+      );
+      if (resolution.kind !== "MATCH") return { resolution } as const;
+      const targetBoard = boards.find((candidate) => candidate.rooms.some((room) => (
+        room.id === resolution.identity.unitId
+        || room.children.some((child) => child.id === resolution.identity.unitId)
+      )));
+      return targetBoard
+        ? { resolution, targetBoard } as const
+        : { resolution: { kind: "NOT_FOUND" as const } } as const;
+    };
+    const applyMovedStay = (
+      identity: RoomStatusOrderIdentity,
+      targetBoard: RoomStatusBoardDto,
+      filters: RoomStatusViewState["filters"]
+    ) => {
+      const filtersChanged = !sameFilters(filters, viewState.filters);
+      const pageChanged = targetBoard.page.index !== renderedBoard.page.index;
+      const parentRoomId = meta.inventoryUnits.find((candidate) => candidate.id === identity.unitId)?.parent_room_id;
+      if (filtersChanged) dispatchView({ type: "SET_FILTERS", filters });
+      if (parentRoomId && !viewState.expandedRoomIds.includes(parentRoomId)) {
+        dispatchView({ type: "TOGGLE_ROOM", roomId: parentRoomId });
+      }
+      if (pageChanged || filtersChanged) {
+        dispatchView({ type: "SET_ROOM_PAGE", index: targetBoard.page.index, totalPages: targetBoard.page.totalPages });
+      }
+      dispatchView({
+        type: "SET_SELECTION",
+        selection: {
+          unitId: identity.unitId,
+          anchorDate: triggerDate,
+          focusDate: triggerDate,
+          arrivalDate: identity.intervalStartDate,
+          departureDate: identity.intervalEndDate
+        }
+      });
+      dispatchView({ type: "SET_FOCUS", focus: { unitId: identity.unitId, serviceDate: triggerDate } });
+      setSelectedUnitId(identity.unitId);
+      setSelectedDayDate(triggerDate);
+      setSelectedIntervalId(identity.intervalId);
+      setSelectedGridStayId(identity.stayId);
+      setSelectedOrderIdentity(identity);
+      returnedOrderCellFocus.current = { unitId: identity.unitId, serviceDate: triggerDate };
+      roomStatusInteractionSnapshotRef.current = undefined;
+      if (pageChanged || filtersChanged) focusAfterNextBoard.current = true;
+      else setFocusRequestToken((value) => value + 1);
+      setReturnNotice(filtersChanged
+        ? "住宿已移动到筛选外的房源；已仅清除遮挡目标的筛选条件，并保留订单上下文定位到最新安排。"
+        : "房态数据已变化，住宿已移动到其他房源页；已保留订单上下文并定位到最新安排。");
+    };
+    const findMovedStay = async () => {
+      const filteredBoards = await loadPageSet(viewState.filters, renderedBoard);
+      if (!current) return;
+      const filtered = resolveOnBoards(filteredBoards);
+      if (filtered.resolution.kind === "MATCH" && filtered.targetBoard) {
+        applyMovedStay(filtered.resolution.identity, filtered.targetBoard, viewState.filters);
+        return;
+      }
+      if (filtered.resolution.kind === "AMBIGUOUS") {
+        failClosed("最新房态存在多个相互冲突的住宿位置，订单上下文已安全关闭。请刷新后重新核对。");
+        return;
+      }
+      if (!hasActiveRoomStatusFilters(viewState.filters)) {
+        failClosed("原先选中的住宿已不在最新房态投影中，订单上下文已安全关闭。请按最新房态重新选择。");
+        return;
+      }
+      const unfilteredBoards = await loadPageSet(DEFAULT_ROOM_STATUS_FILTERS);
+      if (!current) return;
+      const unfiltered = resolveOnBoards(unfilteredBoards);
+      if (unfiltered.resolution.kind !== "MATCH" || !unfiltered.targetBoard) {
+        failClosed(unfiltered.resolution.kind === "AMBIGUOUS"
+          ? "最新房态存在多个相互冲突的住宿位置，订单上下文已安全关闭。请刷新后重新核对。"
+          : "原先选中的住宿已不在最新房态投影中，订单上下文已安全关闭。请按最新房态重新选择。");
+        return;
+      }
+      const targetRoom = unfiltered.targetBoard.rooms.find((room) => (
+        room.id === unfiltered.resolution.identity.unitId
+        || room.children.some((child) => child.id === unfiltered.resolution.identity.unitId)
+      ));
+      if (!targetRoom) throw new Error("定位换房结果时无法确认目标房源");
+      const relaxedFilters = roomStatusFiltersRevealingTarget(viewState.filters, (candidate) => (
+        filterRoomStatusRooms([targetRoom], candidate).some(({ room, children }) => (
+          room.id === unfiltered.resolution.identity.unitId
+          || children.some((child) => child.id === unfiltered.resolution.identity.unitId)
+        ))
+      ));
+      const finalBoards = sameFilters(relaxedFilters, DEFAULT_ROOM_STATUS_FILTERS)
+        ? unfilteredBoards
+        : await loadPageSet(relaxedFilters);
+      if (!current) return;
+      const final = resolveOnBoards(finalBoards);
+      if (final.resolution.kind !== "MATCH" || !final.targetBoard) {
+        throw new Error("清除遮挡筛选后房态事实发生变化，未改写当前订单上下文");
+      }
+      applyMovedStay(final.resolution.identity, final.targetBoard, relaxedFilters);
     };
     void findMovedStay().catch((error: unknown) => {
       if (!current) return;
@@ -2358,6 +2627,8 @@ export function InventoryPage() {
     });
     return () => { current = false; };
   }, [
+    boardMatchesCurrentQuery,
+    command,
     meta.inventoryUnits,
     propertyId,
     range.arrivalDate,
@@ -2366,7 +2637,12 @@ export function InventoryPage() {
     selectedDayDate,
     selectedOrderIdentity,
     viewState.expandedRoomIds,
-    viewState.filters
+    viewState.filters.kind,
+    viewState.filters.minimumCapacity,
+    viewState.filters.roomTypeCode,
+    viewState.filters.salesMode,
+    viewState.filters.search,
+    viewState.filters.status
   ]);
   const policies = meta.pricingPolicyVersions.filter((policy) => policy.property_id === propertyId && policy.status === "PUBLISHED");
   const filterOptions = renderedBoard?.filterOptions ?? {
@@ -2396,6 +2672,7 @@ export function InventoryPage() {
     setSelectedUnitId(undefined);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
+    setSelectedGridStayId(undefined);
     setSelectedOrderIdentity(undefined);
     setSelectedOrderView(undefined);
     setSelectedCorrectionOccupantId(undefined);
@@ -2573,6 +2850,7 @@ export function InventoryPage() {
     setSelectedUnitId(unit.id);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
+    setSelectedGridStayId(undefined);
     setDesktopContextCollapsed(false);
   }
 
@@ -2584,6 +2862,7 @@ export function InventoryPage() {
     setSelectedUnitId(identity.unitId);
     setSelectedDayDate(serviceDate);
     setSelectedIntervalId(identity.intervalId);
+    setSelectedGridStayId(identity.stayId);
     setSelectedOrderIdentity(identity);
     if (!sameOrder) setSelectedOrderView(undefined);
     setSelectedCorrectionOccupantId(undefined);
@@ -2623,18 +2902,21 @@ export function InventoryPage() {
   function inspectDay(unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement) {
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
+    setReturnNotice(undefined);
     const serviceDate = day?.serviceDate ?? anchor.dataset.serviceDate;
     if (!serviceDate) {
       setActionError(new Error("当前房态格缺少营业日期，未打开快捷操作。请刷新后重试。"));
       return;
     }
     const triggerSelection = selectionFromCells(unit.id, serviceDate, serviceDate);
+    const identity = roomStatusOrderIdentityForDate(unit, serviceDate);
     captureRoomStatusInteraction(anchor, triggerSelection);
     dispatchView({ type: "SET_SELECTION", selection: triggerSelection });
     invalidateSelectedOrderForRoomStatusInspection();
     setSelectedUnitId(unit.id);
     setSelectedDayDate(serviceDate);
     setSelectedIntervalId(undefined);
+    setSelectedGridStayId(identity?.stayId);
     setQuoteTarget(undefined);
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor });
   }
@@ -2642,6 +2924,7 @@ export function InventoryPage() {
   function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) {
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
+    setReturnNotice(undefined);
     const triggerSelection = selectionFromCells(unit.id, serviceDate, serviceDate);
     captureRoomStatusInteraction(anchor, triggerSelection);
     dispatchView({ type: "SET_SELECTION", selection: triggerSelection });
@@ -2649,6 +2932,7 @@ export function InventoryPage() {
     setSelectedUnitId(unit.id);
     setSelectedDayDate(serviceDate);
     setSelectedIntervalId(interval.id);
+    setSelectedGridStayId(roomStatusOrderIdentityForInterval(interval)?.stayId);
     setQuoteTarget(undefined);
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, intervalId: interval.id });
   }
@@ -2665,12 +2949,14 @@ export function InventoryPage() {
     }
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
+    setReturnNotice(undefined);
     captureRoomStatusInteraction(anchor, selection);
     dispatchView({ type: "SET_SELECTION", selection });
     invalidateSelectedOrderForRoomStatusInspection();
     setSelectedUnitId(unit.id);
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);
+    setSelectedGridStayId(undefined);
     setQuoteTarget(undefined);
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, selection });
   }
@@ -2681,6 +2967,7 @@ export function InventoryPage() {
     setActionError(undefined);
     invalidateSelectedOrderForRoomStatusInspection();
     setQuoteTarget(undefined);
+    setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
       setSelectedUnitId(selection.unitId);
@@ -2693,6 +2980,7 @@ export function InventoryPage() {
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
     invalidateSelectedOrderForRoomStatusInspection();
+    setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
       setDesktopContextCollapsed(false);
@@ -2785,14 +3073,29 @@ export function InventoryPage() {
       setActionError(new Error("服务端当前未允许这项日期调整，未发送命令。请刷新订单状态后重新核对。"));
       return;
     }
-    if (commandType === "RESCHEDULE_STAY" && view.effectiveArrangement.intervals.length !== 1) {
-      setActionError(new Error("该订单已有换房安排，当前版本暂不能调整预订日期"));
-      return;
-    }
     setCommandDraft(undefined);
     setSelectedStayDateMode(mode);
     setSelectedStayDateAction(commandType);
     setSelectedStayDateRevision(boardRef.current?.revision);
+    setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
+  }
+
+  function startSelectedOrderMoveUnit() {
+    setActionError(undefined);
+    const view = authorizedSelectedOrderView;
+    const identity = selectedOrderIdentity;
+    const action = view?.allowedActions.find((candidate) => candidate.code === "MOVE_UNIT");
+    if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
+      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未打开换房。请重新选择住宿后再试。"));
+      return;
+    }
+    if (commandsBlocked || view.accessLevel !== "WRITE" || !action?.enabled) {
+      setActionError(new Error("服务端当前未允许办理换房，未打开表单。请刷新订单状态后重新核对。"));
+      return;
+    }
+    setCommandDraft(undefined);
+    setSelectedMoveUnitOpen(true);
+    setSelectedMoveUnitRevision(boardRef.current?.revision);
     setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
   }
 
@@ -2934,6 +3237,7 @@ export function InventoryPage() {
         });
         requestAnimationFrame(() => quoteSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
       } else {
+        setQuoteTarget(undefined);
         setMaintenanceTarget(unit);
       }
       return true;
@@ -2972,7 +3276,7 @@ export function InventoryPage() {
       recoveryOrderId
       && selectedOrderIdentity?.orderId === recoveryOrderId
     );
-    if ((commandRecovery.pending.presentation === "FULFILLMENT" || commandRecovery.pending.presentation === "STAY_DATES") && !recoveryMatchesSelectedOrder) {
+    if ((commandRecovery.pending.presentation === "FULFILLMENT" || commandRecovery.pending.presentation === "STAY_DATES" || commandRecovery.pending.presentation === "MOVE_UNIT") && !recoveryMatchesSelectedOrder) {
       setSelectedOrderIdentity(undefined);
       setSelectedOrderView(undefined);
       setSelectedOrderLoadedScope(undefined);
@@ -3055,6 +3359,13 @@ export function InventoryPage() {
             : "DATE_CHANGE"
         );
         setSelectedStayDateRevision(boardRef.current?.revision);
+      }
+      return;
+    }
+    if (request.commandType === "MOVE_UNIT") {
+      if (authorizedSelectedOrderView) {
+        setSelectedMoveUnitOpen(true);
+        setSelectedMoveUnitRevision(boardRef.current?.revision);
       }
       return;
     }
@@ -3151,6 +3462,7 @@ export function InventoryPage() {
         onOpenMember={({ memberId, contractId }) => navigate(`/members?memberId=${encodeURIComponent(memberId)}&contractId=${encodeURIComponent(contractId)}`)}
         onFulfillmentAction={startSelectedOrderFulfillment}
         onDateAction={startSelectedOrderDateAction}
+        onMoveUnit={startSelectedOrderMoveUnit}
         onCorrectOccupant={(occupant) => {
           setCommandDraft(undefined);
           setSelectedCorrectionOccupantId(occupant.id);
@@ -3253,11 +3565,12 @@ export function InventoryPage() {
                 expandedRoomIds={viewState.expandedRoomIds}
                 focusedCell={viewState.focusedCell}
                 selection={viewState.selection}
-                selectedStayId={quickPopoverTarget
-                  ? quickPopoverPreviewStayId
-                  : orderContextOpen && !desktopContextCollapsed
-                    ? selectedOrderIdentity?.stayId ?? null
-                    : null}
+                selectedStayId={roomStatusGridSelectedStayId(
+                  Boolean(quickPopoverTarget),
+                  quickPopoverPreviewStayId,
+                  selectedOrderIdentity,
+                  selectedGridStayId
+                )}
                 dateWindowStart={viewState.dateWindowStart}
                 dateWindowSize={viewState.dateWindowSize}
                 dateWindowMode={viewState.dateWindowMode}
@@ -3321,12 +3634,12 @@ export function InventoryPage() {
             </div> : null}
           </div>
 
-          {quickPopoverTarget && quickPopoverUnit && quickPopoverDay ? (
+          {quickPopoverTarget && quickPopoverUnit ? (
             <RoomStatusQuickPopover
               anchor={quickPopoverTarget.anchor}
               unit={quickPopoverUnit}
               serviceDate={quickPopoverTarget.serviceDate}
-              status={quickPopoverDay.status}
+              status={quickPopoverStatus}
               actions={quickPopoverActions}
               orderOptions={quickPopoverOrders}
               {...(quickPopoverSelection ? { selection: quickPopoverSelection } : {})}
@@ -3377,7 +3690,7 @@ export function InventoryPage() {
             />
           ) : null}
 
-          {!isMobile && !desktopContextCollapsed && !useInlineOrderContext && (selectedUnit || selectedOrderIdentity || viewState.selection) && (!selectedOrderIdentity || orderContextOpen) ? (
+          {!command && !isMobile && !desktopContextCollapsed && !useInlineOrderContext && (selectedUnit || selectedOrderIdentity || viewState.selection) && (!selectedOrderIdentity || orderContextOpen) ? (
             <Modal
               title={selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
               size="drawer"
@@ -3484,6 +3797,7 @@ export function InventoryPage() {
           const unit = meta.inventoryUnits.find((candidate) => candidate.id === interval.inventoryUnitId);
           return unit ? `${unit.code} · ${unit.name}` : "房源";
         }))].join(" → ")}
+        inventoryUnits={meta.inventoryUnits}
         writeBlocked={commandsBlocked || selectedStayDateRevision !== board?.revision}
         {...(commandDraft?.commandType === selectedStayDateAction ? { draft: commandDraft } : {})}
         onClose={() => {
@@ -3509,6 +3823,28 @@ export function InventoryPage() {
           startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
         }}
       /> : null}
+      {authorizedSelectedOrderView && selectedMoveUnitOpen ? <MoveUnitDrawer
+        view={authorizedSelectedOrderView}
+        units={meta.inventoryUnits}
+        writeBlocked={commandsBlocked || selectedMoveUnitRevision !== board?.revision}
+        {...(commandDraft?.commandType === "MOVE_UNIT" ? { draft: commandDraft } : {})}
+        onClose={() => {
+          setSelectedMoveUnitOpen(false);
+          setSelectedMoveUnitRevision(undefined);
+          setSelectedOrderCommandScope(undefined);
+          setCommandDraft(undefined);
+          restoreRoomStatusInteraction();
+        }}
+        onSubmit={(request) => {
+          const identity = selectedOrderIdentity;
+          if (!identity || commandsBlocked || request.commandType !== "MOVE_UNIT") return;
+          setSelectedMoveUnitOpen(false);
+          setSelectedMoveUnitRevision(undefined);
+          setCommandDraft(undefined);
+          setRecoveryDialogOpen(false);
+          startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
+        }}
+      /> : null}
       {command && commandTargetScopeCurrent ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}-${commandAttemptId}` : `new-room-status-command-${commandAttemptId}`}
         request={command}
@@ -3522,8 +3858,17 @@ export function InventoryPage() {
           setSelectedStayDateAction(undefined);
           setSelectedStayDateMode("DATE_CHANGE");
           setSelectedStayDateRevision(undefined);
+          setSelectedMoveUnitOpen(false);
+          setSelectedMoveUnitRevision(undefined);
+          if (command.commandType === "CREATE_ORDER") {
+            setQuoteTarget(undefined);
+            setDesktopContextCollapsed(true);
+            setMobileCreateOpen(false);
+          }
           if (command.commandType === "LOCK_MAINTENANCE") {
             setMaintenanceTarget(undefined);
+            setDesktopContextCollapsed(true);
+            setMobileCreateOpen(false);
             roomStatusInteractionSnapshotRef.current = undefined;
           }
         }}

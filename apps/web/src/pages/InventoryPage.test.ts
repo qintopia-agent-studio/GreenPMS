@@ -24,8 +24,14 @@ import {
   quoteRecoveryStorageKey,
   readQuoteCommandRecovery,
   roomStatusCommandWriteGate,
+  roomStatusFiltersRevealingTarget,
+  roomStatusAnchorMatches,
+  roomStatusAutoWindowStart,
+  roomStatusQuickTargetMatches,
+  roomStatusGridSelectedStayId,
   roomStatusOrderContextMode,
   roomStatusOrderCommandScope,
+  roomStatusProjectionRefreshAllowed,
   selectedOrderCommandScopeIsCurrent,
   selectedOrderMemberLookup,
   selectedStayDateRequestIsCompatible,
@@ -97,6 +103,87 @@ describe("selected order command authorization scope", () => {
   });
 });
 
+describe("room-status complete Stay selection", () => {
+  it("keeps an exact cell Stay stable across quick-popover and context visibility changes", () => {
+    expect(roomStatusGridSelectedStayId(false, null, { stayId: "stay_cross_room" })).toBe("stay_cross_room");
+    expect(roomStatusGridSelectedStayId(true, "stay_quick", { stayId: "stay_previous" })).toBe("stay_quick");
+    expect(roomStatusGridSelectedStayId(true, null, { stayId: "stay_previous" })).toBeNull();
+    expect(roomStatusGridSelectedStayId(true, null, undefined, "stay_from_interval")).toBe("stay_from_interval");
+    expect(roomStatusGridSelectedStayId(false, null, undefined, "stay_from_interval")).toBe("stay_from_interval");
+    expect(roomStatusGridSelectedStayId(false, null)).toBeNull();
+  });
+
+  it("rebinds a quick action only to the same room-status unit and date", () => {
+    const anchor = { dataset: { unitId: "unit_room_d_gen_04", serviceDate: "2026-09-12" } } as never;
+    expect(roomStatusAnchorMatches(anchor, "unit_room_d_gen_04", "2026-09-12")).toBe(true);
+    expect(roomStatusAnchorMatches(anchor, "unit_room_d_gen_05", "2026-09-12")).toBe(false);
+    expect(roomStatusAnchorMatches(anchor, "unit_room_d_gen_04", "2026-09-13")).toBe(false);
+
+    const current = { unitId: "unit_room_d_gen_05", serviceDate: "2026-09-12" };
+    expect(roomStatusQuickTargetMatches(current, "unit_room_d_gen_04", "2026-09-12")).toBe(false);
+    expect(roomStatusQuickTargetMatches(current, "unit_room_d_gen_05", "2026-09-12")).toBe(true);
+    expect(roomStatusQuickTargetMatches(undefined, "unit_room_d_gen_05", "2026-09-12")).toBe(false);
+  });
+});
+
+describe("room-status automatic date window", () => {
+  const dates = Array.from({ length: 14 }, (_, index) => `2026-08-${String(index + 1).padStart(2, "0")}`);
+
+  it("keeps a restored focus visible when AUTO shrinks the date window", () => {
+    expect(roomStatusAutoWindowStart(dates, 0, 10, {
+      unitId: "unit_room_e_gen_03",
+      serviceDate: dates[10]!
+    })).toBe(1);
+  });
+
+  it("does not move an AUTO window without a focus or when the focus is already visible", () => {
+    expect(roomStatusAutoWindowStart(dates, 2, 10, null)).toBe(2);
+    expect(roomStatusAutoWindowStart(dates, 2, 10, {
+      unitId: "unit_room_e_gen_03",
+      serviceDate: dates[9]!
+    })).toBe(2);
+  });
+});
+
+describe("moved Stay filter recovery", () => {
+  it("clears only the filter fields that hide the moved destination", () => {
+    const filters = {
+      search: "原房间",
+      roomTypeCode: "SHARED_BATH_SINGLE",
+      salesMode: "WHOLE_ROOM" as const,
+      status: "IN_HOUSE" as const,
+      kind: "ROOM" as const,
+      minimumCapacity: 1
+    };
+    const recovered = roomStatusFiltersRevealingTarget(filters, (candidate) => (
+      candidate.search === ""
+      && candidate.status === "ALL"
+      && candidate.roomTypeCode === "SHARED_BATH_SINGLE"
+      && candidate.salesMode === "WHOLE_ROOM"
+      && candidate.kind === "ROOM"
+      && candidate.minimumCapacity === 1
+    ));
+
+    expect(recovered).toEqual({
+      ...filters,
+      search: "",
+      status: "ALL"
+    });
+  });
+
+  it("preserves every filter when the moved destination is already visible", () => {
+    const filters = {
+      search: "D02",
+      roomTypeCode: "ALL",
+      salesMode: "ALL" as const,
+      status: "ALL" as const,
+      kind: "ALL" as const,
+      minimumCapacity: null
+    };
+    expect(roomStatusFiltersRevealingTarget(filters, () => true)).toBe(filters);
+  });
+});
+
 describe("selected order member profile scope", () => {
   it("does not request a member profile for a non-member order", () => {
     expect(selectedOrderMemberLookup({
@@ -156,6 +243,7 @@ describe("room-status command recovery presentation", () => {
     expect(inventoryRecoveryIsBusinessFacing("MEMBER_STAY")).toBe(true);
     expect(inventoryRecoveryIsBusinessFacing("FULFILLMENT")).toBe(true);
     expect(inventoryRecoveryIsBusinessFacing("STAY_DATES")).toBe(true);
+    expect(inventoryRecoveryIsBusinessFacing("MOVE_UNIT")).toBe(true);
     expect(inventoryRecoveryIsBusinessFacing(undefined)).toBe(false);
   });
 });
@@ -484,6 +572,14 @@ describe("Room-status command attempt lifecycle", () => {
 });
 
 describe("Room-status query attempt lifecycle", () => {
+  it("keeps projection refresh active until the command enters formal confirmation", () => {
+    expect(roomStatusProjectionRefreshAllowed("IDLE")).toBe(true);
+    expect(roomStatusProjectionRefreshAllowed("DRAFT")).toBe(true);
+    expect(roomStatusProjectionRefreshAllowed("PREVIEW")).toBe(true);
+    expect(roomStatusProjectionRefreshAllowed("SETTLED")).toBe(true);
+    expect(roomStatusProjectionRefreshAllowed("CONFIRMING")).toBe(false);
+  });
+
   it("keeps a slow query active so a polling tick can skip overlapping refreshes", () => {
     const guard = new RoomStatusQueryAttemptGuard();
     const slowAttemptId = guard.begin();

@@ -16,6 +16,12 @@ const fulfillmentStates = new Set(["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", 
 const recordingModes = new Set(["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"]);
 const pricingBases = new Set(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"]);
 const actionCodes = new Set<string>(orderActionCodes);
+const historicalProtocolByAmendmentType = new Map<string, string>([
+  ["RESCHEDULE_STAY", "LEGACY_STAGE_9_10"],
+  ["EXTEND_STAY", "LEGACY_STAGE_9_10"],
+  ["SHORTEN_STAY", "LEGACY_STAGE_10"],
+  ["MOVE_UNIT", "PRE_STAGE_11"]
+]);
 const orderProjectionExpectations = {
   RESERVED: { stayStatus: "PLANNED", fulfillmentState: "NOT_CHECKED_IN", presentation: "CURRENT" },
   CHECKED_IN: { stayStatus: "IN_HOUSE", fulfillmentState: "IN_HOUSE", presentation: "CURRENT" },
@@ -46,6 +52,31 @@ function exactKeys(value: JsonRecord, path: string, keys: readonly string[]) {
   if (unexpected) fail(`${path}.${unexpected}`, "不是允许的字段");
   const missing = keys.find((key) => !(key in value));
   if (missing) fail(`${path}.${missing}`, "缺失");
+}
+
+function exactKeysWithOptional(value: JsonRecord, path: string, required: readonly string[], optional: readonly string[] = []) {
+  const allowed = new Set([...required, ...optional]);
+  const unexpected = Object.keys(value).find((key) => !allowed.has(key));
+  if (unexpected) fail(`${path}.${unexpected}`, "不是允许的字段");
+  const missing = required.find((key) => !(key in value));
+  if (missing) fail(`${path}.${missing}`, "缺失");
+}
+
+function historicalAmendmentMetadata(amendment: JsonRecord, path: string, amendmentType: string) {
+  const hasProtocolVersion = Object.hasOwn(amendment, "protocolVersion");
+  const hasRecoveryMode = Object.hasOwn(amendment, "recoveryMode");
+  if (hasProtocolVersion !== hasRecoveryMode) {
+    fail(path, "历史协议版本与只读恢复标记必须成对提供");
+  }
+  if (!hasProtocolVersion) return;
+  if (amendment.recoveryMode !== "HISTORICAL_READ_ONLY") {
+    fail(`${path}.recoveryMode`, "不是支持的历史读取模式");
+  }
+  const protocolVersion = stringValue(amendment.protocolVersion, `${path}.protocolVersion`);
+  const expectedProtocolVersion = historicalProtocolByAmendmentType.get(amendmentType);
+  if (!expectedProtocolVersion || protocolVersion !== expectedProtocolVersion) {
+    fail(`${path}.protocolVersion`, "与住宿变更类型不一致");
+  }
 }
 
 function stringValue(value: unknown, path: string, allowEmpty = false): string {
@@ -214,10 +245,43 @@ function isSingleSuffixMove(before: OrderArrangementDto, after: OrderArrangement
     .every((date) => inventoryUnitAt(after, date) === movedUnitId);
 }
 
-function isContiguousInventorySubsequence(before: OrderArrangementDto, after: OrderArrangementDto): boolean {
-  const beforeUnits = before.intervals.map((interval) => interval.inventoryUnitId);
-  const afterUnits = after.intervals.map((interval) => interval.inventoryUnitId);
-  return beforeUnits.some((_, start) => afterUnits.every((unit, index) => unit === beforeUnits[start + index]));
+function dateEpoch(value: string): number {
+  return Date.parse(`${value}T00:00:00.000Z`);
+}
+
+function shiftLocalDate(value: string, days: number): string {
+  return new Date(dateEpoch(value) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+function arrangementNights(value: OrderArrangementDto): number {
+  return Math.round((dateEpoch(value.departureDate) - dateEpoch(value.arrivalDate)) / 86_400_000);
+}
+
+function followsSchemeBReschedule(before: OrderArrangementDto, after: OrderArrangementDto): boolean {
+  const beforeNights = arrangementNights(before);
+  const afterNights = arrangementNights(after);
+  const firstUnit = before.intervals[0]?.inventoryUnitId;
+  const lastUnit = before.intervals.at(-1)?.inventoryUnitId;
+  if (!firstUnit || !lastUnit) return false;
+  for (let offset = 0; offset < afterNights; offset += 1) {
+    const newDate = shiftLocalDate(after.arrivalDate, offset);
+    let expectedUnit: string | undefined;
+    if (beforeNights === afterNights) {
+      expectedUnit = inventoryUnitAt(before, shiftLocalDate(before.arrivalDate, offset));
+    } else if (after.departureDate <= before.arrivalDate) {
+      expectedUnit = firstUnit;
+    } else if (after.arrivalDate >= before.departureDate) {
+      expectedUnit = lastUnit;
+    } else if (newDate < before.arrivalDate) {
+      expectedUnit = firstUnit;
+    } else if (newDate >= before.departureDate) {
+      expectedUnit = lastUnit;
+    } else {
+      expectedUnit = inventoryUnitAt(before, newDate);
+    }
+    if (!expectedUnit || inventoryUnitAt(after, newDate) !== expectedUnit) return false;
+  }
+  return true;
 }
 
 function isSingleSuffixExtension(before: OrderArrangementDto, after: OrderArrangementDto): boolean {
@@ -243,14 +307,9 @@ function validateArrangementChange(item: OrderArrangementHistoryItemDto, path: s
   const before = item.before;
   const after = item.after;
   if (item.type === "RESCHEDULE") {
-    const overlapArrival = before.arrivalDate > after.arrivalDate ? before.arrivalDate : after.arrivalDate;
-    const overlapDeparture = before.departureDate < after.departureDate ? before.departureDate : after.departureDate;
-    const retainedTimelineUnchanged = overlapArrival < overlapDeparture
-      ? sameInventoryTimeline(before, after, overlapArrival, overlapDeparture)
-      : isContiguousInventorySubsequence(before, after);
     if ((before.arrivalDate === after.arrivalDate && before.departureDate === after.departureDate)
-      || !retainedTimelineUnchanged) {
-      fail(path, "改期必须只改变住宿日期");
+      || !followsSchemeBReschedule(before, after)) {
+      fail(path, "改期后的房源安排不符合已确认的换房节点平移与首尾裁剪规则");
     }
     return;
   }
@@ -396,12 +455,24 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
 
 export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const result = record(value, "根节点");
+  exactKeys(result, "根节点", [
+    "accessLevel", "allowedActions", "order", "occupants", "occupantCorrections", "stay", "currentSegment",
+    "segments", "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory", "amendments",
+    "pricingRevisions", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
+  ]);
   const order = record(result.order, "order");
+  exactKeys(order, "order", [
+    "id", "property_id", "status", "stay_type", "arrival_date", "departure_date", "primary_guest_snapshot",
+    "booking_channel_code", "channel_order_reference", "free_stay_reason", "free_stay_category_code",
+    "pricing_policy_version_id", "member_id", "member_contract_id", "current_revision_id", "version", "created_at", "updated_at"
+  ]);
   const stay = record(result.stay, "stay");
+  exactKeys(stay, "stay", ["id", "status"]);
   const accessLevel = stringValue(result.accessLevel, "accessLevel");
   if (accessLevel !== "READ" && accessLevel !== "WRITE") fail("accessLevel", "不是支持的权限");
   const seenActionCodes = new Set<string>();
   const enabledDateActions: string[] = [];
+  let moveUnitEnabled = false;
   arrayValue(result.allowedActions, "allowedActions").forEach((item, index) => {
     const action = record(item, `allowedActions[${index}]`);
     exactKeys(action, `allowedActions[${index}]`, ["code", "enabled", "disabledReason"]);
@@ -413,8 +484,9 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     nullableString(action.disabledReason, `allowedActions[${index}].disabledReason`);
     if (accessLevel === "READ" && action.enabled) fail(`allowedActions[${index}]`, "只读权限不能包含可执行写操作");
     if (action.enabled && (code === "RESCHEDULE_STAY" || code === "EXTEND_STAY" || code === "SHORTEN_STAY")) enabledDateActions.push(code);
+    if (action.enabled && code === "MOVE_UNIT") moveUnitEnabled = true;
   });
-  stringValue(order.id, "order.id");
+  const orderId = stringValue(order.id, "order.id");
   stringValue(order.property_id, "order.property_id");
   const orderStatus = stringValue(order.status, "order.status");
   if (!Object.hasOwn(orderProjectionExpectations, orderStatus)) fail("order.status", "不是支持的订单状态");
@@ -432,14 +504,24 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   if (orderDepartureDate <= orderArrivalDate) fail("order", "日期区间无效");
   const stayStatus = stringValue(stay.status, "stay.status");
   stringValue(stay.id, "stay.id");
-  stringValue(order.stay_type, "order.stay_type");
-  nullableString(order.member_id, "order.member_id");
-  nullableString(order.member_contract_id, "order.member_contract_id");
+  const stayType = stringValue(order.stay_type, "order.stay_type");
+  if (stayType !== "TRANSIENT" && stayType !== "MEMBER" && stayType !== "FREE") fail("order.stay_type", "不是支持的住宿类型");
+  const primaryGuest = record(order.primary_guest_snapshot, "order.primary_guest_snapshot");
+  exactKeysWithOptional(primaryGuest, "order.primary_guest_snapshot", ["fullName"], ["nickname", "phone", "documentNumber"]);
+  stringValue(primaryGuest.fullName, "order.primary_guest_snapshot.fullName");
+  for (const field of ["nickname", "phone", "documentNumber"] as const) {
+    if (field in primaryGuest) nullableString(primaryGuest[field], `order.primary_guest_snapshot.${field}`);
+  }
+  const memberId = nullableString(order.member_id, "order.member_id");
+  const memberContractId = nullableString(order.member_contract_id, "order.member_contract_id");
   nullableString(order.booking_channel_code, "order.booking_channel_code");
   nullableString(order.channel_order_reference, "order.channel_order_reference");
   nullableString(order.free_stay_reason, "order.free_stay_reason");
   nullableString(order.free_stay_category_code, "order.free_stay_category_code");
   nullableString(order.current_revision_id, "order.current_revision_id");
+  stringValue(order.pricing_policy_version_id, "order.pricing_policy_version_id");
+  safeInteger(order.version, "order.version", 1);
+  dateTime(order.created_at, "order.created_at");
   dateTime(order.updated_at, "order.updated_at");
   if (stayStatus !== expectation.stayStatus) fail("stay.status", "与订单状态不一致");
   const original = arrangement(result.originalArrangement, "originalArrangement");
@@ -449,6 +531,12 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   }
   if (effective.presentation !== expectation.presentation) {
     fail("effectiveArrangement.presentation", "与订单状态不一致");
+  }
+  if (moveUnitEnabled && !(
+    (orderStatus === "RESERVED" && effective.businessDate <= orderArrivalDate)
+    || (orderStatus === "CHECKED_IN" && effective.businessDate < orderDepartureDate)
+  )) {
+    fail("allowedActions", "换房操作与订单状态或营业日期不一致");
   }
   const fulfillmentProjection = fulfillment(result.fulfillment, "fulfillment");
   if (fulfillmentProjection.state !== expectation.fulfillmentState) {
@@ -510,6 +598,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const occupantIds = new Set<string>();
   occupants.forEach((item, index) => {
     const occupant = record(item, `occupants[${index}]`);
+    exactKeys(occupant, `occupants[${index}]`, ["id", "orderId", "ordinal", "role", "fullName", "nickname", "phone", "documentNumber", "createdAt"]);
     const id = stringValue(occupant.id, `occupants[${index}].id`);
     if (occupantIds.has(id)) fail(`occupants[${index}].id`, "重复");
     occupantIds.add(id);
@@ -525,6 +614,9 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
 
   arrayValue(result.occupantCorrections, "occupantCorrections").forEach((item, index) => {
     const correction = record(item, `occupantCorrections[${index}]`);
+    exactKeys(correction, `occupantCorrections[${index}]`, [
+      "id", "orderId", "occupantId", "sequence", "priorSnapshot", "correctedSnapshot", "reason", "actor", "amendmentId", "commandId", "createdAt"
+    ]);
     stringValue(correction.id, `occupantCorrections[${index}].id`);
     if (stringValue(correction.orderId, `occupantCorrections[${index}].orderId`) !== order.id) fail(`occupantCorrections[${index}].orderId`, "与订单不一致");
     if (!occupantIds.has(stringValue(correction.occupantId, `occupantCorrections[${index}].occupantId`))) fail(`occupantCorrections[${index}].occupantId`, "没有对应住宿人");
@@ -533,17 +625,82 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     occupantSnapshot(correction.priorSnapshot, `occupantCorrections[${index}].priorSnapshot`);
     occupantSnapshot(correction.correctedSnapshot, `occupantCorrections[${index}].correctedSnapshot`);
     reason(correction.reason, `occupantCorrections[${index}].reason`);
+    stringValue(correction.amendmentId, `occupantCorrections[${index}].amendmentId`);
+    stringValue(correction.commandId, `occupantCorrections[${index}].commandId`);
     dateTime(correction.createdAt, `occupantCorrections[${index}].createdAt`);
   });
 
+  const stayId = stringValue(stay.id, "stay.id");
+  const currentSegment = record(result.currentSegment, "currentSegment");
+  exactKeys(currentSegment, "currentSegment", ["id", "sequence", "inventoryUnitId", "arrivalDate", "departureDate"]);
+  stringValue(currentSegment.id, "currentSegment.id");
+  safeInteger(currentSegment.sequence, "currentSegment.sequence", 1);
+  stringValue(currentSegment.inventoryUnitId, "currentSegment.inventoryUnitId");
+  const currentSegmentArrival = localDate(currentSegment.arrivalDate, "currentSegment.arrivalDate");
+  const currentSegmentDeparture = localDate(currentSegment.departureDate, "currentSegment.departureDate");
+  if (currentSegmentDeparture <= currentSegmentArrival) fail("currentSegment", "日期区间无效");
+
+  arrayValue(result.segments, "segments").forEach((item, index) => {
+    const path = `segments[${index}]`;
+    const segment = record(item, path);
+    exactKeys(segment, path, [
+      "id", "stay_id", "sequence", "inventory_unit_id", "arrival_date", "departure_date", "segment_type",
+      "supersedes_segment_id", "amendment_id", "created_at"
+    ]);
+    stringValue(segment.id, `${path}.id`);
+    if (stringValue(segment.stay_id, `${path}.stay_id`) !== stayId) fail(`${path}.stay_id`, "与住宿不一致");
+    safeInteger(segment.sequence, `${path}.sequence`, 1);
+    stringValue(segment.inventory_unit_id, `${path}.inventory_unit_id`);
+    const segmentArrival = localDate(segment.arrival_date, `${path}.arrival_date`);
+    const segmentDeparture = localDate(segment.departure_date, `${path}.departure_date`);
+    if (segmentDeparture <= segmentArrival) fail(path, "日期区间无效");
+    stringValue(segment.segment_type, `${path}.segment_type`);
+    nullableString(segment.supersedes_segment_id, `${path}.supersedes_segment_id`);
+    stringValue(segment.amendment_id, `${path}.amendment_id`);
+    dateTime(segment.created_at, `${path}.created_at`);
+  });
+
+  const amendments = arrayValue(result.amendments, "amendments");
+  amendments.forEach((item, index) => {
+    const path = `amendments[${index}]`;
+    const amendment = record(item, path);
+    exactKeysWithOptional(amendment, path, [
+      "id", "order_id", "sequence", "amendment_type", "reason_code", "reason_note", "prior_version", "new_version",
+      "payload", "command_id", "actor", "created_at"
+    ], ["protocolVersion", "recoveryMode"]);
+    stringValue(amendment.id, `${path}.id`);
+    if (stringValue(amendment.order_id, `${path}.order_id`) !== orderId) fail(`${path}.order_id`, "与订单不一致");
+    safeInteger(amendment.sequence, `${path}.sequence`, 1);
+    const amendmentType = stringValue(amendment.amendment_type, `${path}.amendment_type`);
+    stringValue(amendment.reason_code, `${path}.reason_code`);
+    stringValue(amendment.reason_note, `${path}.reason_note`, true);
+    safeInteger(amendment.prior_version, `${path}.prior_version`, 0);
+    safeInteger(amendment.new_version, `${path}.new_version`, 1);
+    record(amendment.payload, `${path}.payload`);
+    nullableString(amendment.command_id, `${path}.command_id`);
+    nullableActor(amendment.actor, `${path}.actor`);
+    dateTime(amendment.created_at, `${path}.created_at`);
+    historicalAmendmentMetadata(amendment, path, amendmentType);
+  });
+  const standaloneRepriceRevisionIds = new Set<string>();
+  const standaloneMemberRepriceRevisionIds = new Set<string>();
   const pricingRevisions = arrayValue(result.pricingRevisions, "pricingRevisions");
   if (pricingRevisions.length === 0) fail("pricingRevisions", "必须包含计价记录");
   pricingRevisions.forEach((item, index) => {
     const path = `pricingRevisions[${index}]`;
     const revision = record(item, path);
-    stringValue(revision.id, `${path}.id`);
-    if (stringValue(revision.order_id, `${path}.order_id`) !== order.id) fail(`${path}.order_id`, "与订单不一致");
-    safeInteger(revision.revision_no, `${path}.revision_no`, 1);
+    exactKeys(revision, path, [
+      "id", "order_id", "revision_no", "amendment_id", "policy_version_id", "arrival_date", "departure_date",
+      "coverage_set", "cash_lines", "policy_base_amount_minor", "pricing_basis", "manual_adjustment_minor",
+      "current_contract_amount_minor", "difference_from_policy_minor", "reason", "currency", "created_at"
+    ]);
+    const revisionId = stringValue(revision.id, `${path}.id`);
+    if (stringValue(revision.order_id, `${path}.order_id`) !== orderId) fail(`${path}.order_id`, "与订单不一致");
+    const revisionAmendmentId = stringValue(revision.amendment_id, `${path}.amendment_id`);
+    stringValue(revision.policy_version_id, `${path}.policy_version_id`);
+    arrayValue(revision.coverage_set, `${path}.coverage_set`);
+    arrayValue(revision.cash_lines, `${path}.cash_lines`);
+    const revisionNo = safeInteger(revision.revision_no, `${path}.revision_no`, 1);
     const arrivalDate = localDate(revision.arrival_date, `${path}.arrival_date`);
     const departureDate = localDate(revision.departure_date, `${path}.departure_date`);
     if (departureDate <= arrivalDate) fail(path, "日期区间无效");
@@ -558,11 +715,43 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     }
     const pricingBasis = stringValue(revision.pricing_basis, `${path}.pricing_basis`);
     if (!pricingBases.has(pricingBasis)) fail(`${path}.pricing_basis`, "不是支持的计价方式");
+    const pricingReason = reason(revision.reason, `${path}.reason`);
+    const revisionCreatedAt = dateTime(revision.created_at, `${path}.created_at`);
+    let standaloneReprice = false;
+    const standaloneRepriceCandidate = index > 0
+      && revisionNo === index + 1
+      && Boolean(pricingReason.note.trim());
+    if (standaloneRepriceCandidate) {
+      const matchingAmendments = amendments.flatMap((item, amendmentIndex) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const amendment = item as JsonRecord;
+        return amendment.id === revisionAmendmentId ? [{ amendment, amendmentIndex }] : [];
+      });
+      const match = matchingAmendments.length === 1 ? matchingAmendments[0] : undefined;
+      if (match) {
+        const amendmentPath = `amendments[${match.amendmentIndex}]`;
+        const amendmentFactsMatch = match.amendment.order_id === orderId
+          && match.amendment.amendment_type === "REPRICE_ORDER"
+          && match.amendment.reason_code === pricingReason.code
+          && match.amendment.reason_note === pricingReason.note;
+        if (amendmentFactsMatch) {
+          const amendmentCreatedAt = dateTime(match.amendment.created_at, `${amendmentPath}.created_at`);
+          standaloneReprice = Date.parse(amendmentCreatedAt) <= Date.parse(revisionCreatedAt);
+        }
+      }
+    }
+    if (standaloneReprice) standaloneRepriceRevisionIds.add(revisionId);
+    const standaloneMemberReprice = standaloneReprice
+      && Boolean(memberId?.trim())
+      && Boolean(memberContractId?.trim())
+      && pricingBasis === "MEMBER_ENTITLEMENT"
+      && manualAdjustment === differenceFromPolicy;
+    if (standaloneMemberReprice) standaloneMemberRepriceRevisionIds.add(revisionId);
     if ((pricingBasis === "MANUAL_ADJUSTMENT" && manualAdjustment !== differenceFromPolicy)
-      || (pricingBasis !== "MANUAL_ADJUSTMENT" && manualAdjustment !== 0)) {
+      || (pricingBasis === "MEMBER_ENTITLEMENT" && manualAdjustment !== 0 && !standaloneMemberReprice)
+      || (pricingBasis !== "MANUAL_ADJUSTMENT" && pricingBasis !== "MEMBER_ENTITLEMENT" && manualAdjustment !== 0)) {
       fail(`${path}.manual_adjustment_minor`, "人工调价差额不一致");
     }
-    reason(revision.reason, `pricingRevisions[${index}].reason`);
     const currency = stringValue(revision.currency, `pricingRevisions[${index}].currency`);
     if (currency !== currentContractAmount.currency) fail(`pricingRevisions[${index}].currency`, "与订单金额币种不一致");
   });
@@ -576,7 +765,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     fail("pricingRevisions[latest]", "与当前住宿安排日期不一致");
   }
   if (latestHistoryAmount.minorUnits !== currentContractAmount.minorUnits) {
-    const latestRevisionReason = reason(latestRevision.reason, "pricingRevisions[latest].reason");
+    const latestRevisionId = stringValue(latestRevision.id, "pricingRevisions[latest].id");
     const latestRevisionBasis = stringValue(latestRevision.pricing_basis, "pricingRevisions[latest].pricing_basis");
     const latestRevisionPolicyBase = safeInteger(latestRevision.policy_base_amount_minor, "pricingRevisions[latest].policy_base_amount_minor");
     const latestRevisionDifference = safeInteger(latestRevision.difference_from_policy_minor, "pricingRevisions[latest].difference_from_policy_minor");
@@ -584,13 +773,16 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     const latestRevisionArrival = localDate(latestRevision.arrival_date, "pricingRevisions[latest].arrival_date");
     const latestRevisionDeparture = localDate(latestRevision.departure_date, "pricingRevisions[latest].departure_date");
     const latestRevisionCreatedAt = dateTime(latestRevision.created_at, "pricingRevisions[latest].created_at");
-    const validStandaloneBasis = latestRevisionBasis === "MANUAL_ADJUSTMENT"
-      || (latestRevisionBasis === "POLICY"
-        && latestRevisionPolicyBase === currentContractAmount.minorUnits
-        && latestRevisionDifference === 0
-        && latestRevisionManualAdjustment === 0);
-    if (latestRevisionReason.code !== "REPRICE_ORDER"
-      || !validStandaloneBasis
+    const validStandaloneBasis = latestRevisionBasis === "MEMBER_ENTITLEMENT"
+      ? standaloneMemberRepriceRevisionIds.has(latestRevisionId)
+      : memberId === null && memberContractId === null
+        && standaloneRepriceRevisionIds.has(latestRevisionId)
+        && (latestRevisionBasis === "MANUAL_ADJUSTMENT"
+          || (latestRevisionBasis === "POLICY"
+            && latestRevisionPolicyBase === currentContractAmount.minorUnits
+            && latestRevisionDifference === 0
+            && latestRevisionManualAdjustment === 0));
+    if (!validStandaloneBasis
       || latestRevisionArrival !== effective.arrivalDate
       || latestRevisionDeparture !== effective.departureDate
       || Date.parse(latestRevisionCreatedAt) < Date.parse(history.at(-1)!.recordedAt)) {
@@ -601,13 +793,22 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   let collectionTotal = 0;
   arrayValue(result.collectionFacts, "collectionFacts").forEach((item, index) => {
     const fact = record(item, `collectionFacts[${index}]`);
+    exactKeys(fact, `collectionFacts[${index}]`, [
+      "fact_id", "order_id", "fact_type", "amount_minor", "net_effect_minor", "currency", "references_fact_id",
+      "reverses_fact_id", "method", "note", "transaction_reference", "pricing_revision_id", "command_id", "created_at"
+    ]);
     stringValue(fact.fact_id, `collectionFacts[${index}].fact_id`);
+    if (stringValue(fact.order_id, `collectionFacts[${index}].order_id`) !== orderId) fail(`collectionFacts[${index}].order_id`, "与订单不一致");
     const netEffect = safeInteger(fact.net_effect_minor, `collectionFacts[${index}].net_effect_minor`);
     safeInteger(fact.amount_minor, `collectionFacts[${index}].amount_minor`);
     stringValue(fact.fact_type, `collectionFacts[${index}].fact_type`);
     stringValue(fact.method, `collectionFacts[${index}].method`);
     stringValue(fact.note, `collectionFacts[${index}].note`, true);
+    nullableString(fact.references_fact_id, `collectionFacts[${index}].references_fact_id`);
+    nullableString(fact.reverses_fact_id, `collectionFacts[${index}].reverses_fact_id`);
     nullableString(fact.transaction_reference, `collectionFacts[${index}].transaction_reference`);
+    stringValue(fact.pricing_revision_id, `collectionFacts[${index}].pricing_revision_id`);
+    stringValue(fact.command_id, `collectionFacts[${index}].command_id`);
     if (stringValue(fact.currency, `collectionFacts[${index}].currency`) !== currentContractAmount.currency) fail(`collectionFacts[${index}].currency`, "与订单金额币种不一致");
     dateTime(fact.created_at, `collectionFacts[${index}].created_at`);
     collectionTotal += netEffect;
@@ -615,15 +816,36 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   });
   if (collectionTotal !== netRecordedCollection.minorUnits) fail("collectionFacts", "净影响合计与已登记净收款不一致");
 
-  for (const [field, requiredFields] of [
-    ["coverageSet", ["id", "inventory_unit_id", "service_date", "unit_kind", "status"]],
-    ["cleaningTasks", ["id", "inventoryUnitId", "serviceDate", "status", "createdAt"]]
-  ] as const) {
-    arrayValue(result[field], field).forEach((item, index) => {
-      const row = record(item, `${field}[${index}]`);
-      for (const required of requiredFields) stringValue(row[required], `${field}[${index}].${required}`);
-    });
-  }
+  arrayValue(result.coverageSet, "coverageSet").forEach((item, index) => {
+    const path = `coverageSet[${index}]`;
+    const row = record(item, path);
+    exactKeys(row, path, ["id", "order_id", "contract_id", "lot_id", "inventory_unit_id", "service_date", "unit_kind", "status", "held_by_revision_id", "created_at", "updated_at"]);
+    stringValue(row.id, `${path}.id`);
+    if (stringValue(row.order_id, `${path}.order_id`) !== orderId) fail(`${path}.order_id`, "与订单不一致");
+    stringValue(row.contract_id, `${path}.contract_id`);
+    stringValue(row.lot_id, `${path}.lot_id`);
+    stringValue(row.inventory_unit_id, `${path}.inventory_unit_id`);
+    localDate(row.service_date, `${path}.service_date`);
+    if (row.unit_kind !== "ROOM_NIGHT" && row.unit_kind !== "BED_NIGHT") fail(`${path}.unit_kind`, "不是支持的会员权益类型");
+    if (row.status !== "HELD" && row.status !== "CONSUMED" && row.status !== "RELEASED") fail(`${path}.status`, "不是支持的权益状态");
+    stringValue(row.held_by_revision_id, `${path}.held_by_revision_id`);
+    dateTime(row.created_at, `${path}.created_at`);
+    dateTime(row.updated_at, `${path}.updated_at`);
+  });
+
+  arrayValue(result.cleaningTasks, "cleaningTasks").forEach((item, index) => {
+    const path = `cleaningTasks[${index}]`;
+    const row = record(item, path);
+    exactKeys(row, path, ["id", "inventoryUnitId", "serviceDate", "status", "createdAt", "completedAt", "createdBy", "completedBy"]);
+    stringValue(row.id, `${path}.id`);
+    stringValue(row.inventoryUnitId, `${path}.inventoryUnitId`);
+    localDate(row.serviceDate, `${path}.serviceDate`);
+    if (row.status !== "PENDING" && row.status !== "COMPLETED") fail(`${path}.status`, "不是支持的清洁状态");
+    dateTime(row.createdAt, `${path}.createdAt`);
+    if (row.completedAt !== null) dateTime(row.completedAt, `${path}.completedAt`);
+    nullableActor(row.createdBy, `${path}.createdBy`);
+    nullableActor(row.completedBy, `${path}.completedBy`);
+  });
 }
 
 export function parseOrderView(value: unknown): OrderViewDto {

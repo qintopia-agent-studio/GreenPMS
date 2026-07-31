@@ -65,9 +65,10 @@ describe("roomStatusPopoverPosition", () => {
 });
 
 describe("roomStatusPopoverViewportEventShouldClose", () => {
-  it("keeps the popover open for its own overflow scroll", () => {
-    expect(roomStatusPopoverViewportEventShouldClose("scroll", true)).toBe(false);
-    expect(roomStatusPopoverViewportEventShouldClose("scroll", false)).toBe(true);
-    expect(roomStatusPopoverViewportEventShouldClose("resize", true)).toBe(true);
+  it("keeps the popover tethered while its anchor remains visible", () => {
+    expect(roomStatusPopoverViewportEventShouldClose("scroll", true, false)).toBe(false);
+    expect(roomStatusPopoverViewportEventShouldClose("scroll", false, true)).toBe(false);
+    expect(roomStatusPopoverViewportEventShouldClose("scroll", false, false)).toBe(true);
+    expect(roomStatusPopoverViewportEventShouldClose("resize", true, true)).toBe(true);
   });
 });

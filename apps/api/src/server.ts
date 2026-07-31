@@ -33,7 +33,7 @@ import {
   listAvailability,
   listMemberSummaries,
   loadReferenceCatalog,
-  projectCommandEffectForRead,
+  projectStoredPreviewForRead,
   confirmCommandPreview,
   type ConfirmRequest,
   type Database
@@ -43,7 +43,8 @@ import {
   AuditResponseSchema,
   AvailabilityUnitSchema,
   CommandEnvelopeSchema,
-  CommandResultRecoverySchema,
+  HistoricalCommandPreviewResponseSchema,
+  HistoricalCommandResultRecoverySchema,
   ConfirmSchema,
   ErrorResponse,
   FactResponseSchema,
@@ -64,15 +65,14 @@ import {
   OrderStatusSchema,
   OrdersListResponseSchema,
   PreviewParams,
-  PreviewSchema,
   QuoteRequestSchema,
   QuoteCommandResponseSchema,
   ReferenceCatalogResponseSchema,
-  ReceiptSchema,
+  HistoricalReceiptReadSchema,
   HistoricalRecoverableCommandTypeSchema,
   RoomStatusBoardSchema,
   RoomStatusQuerySchema,
-  StoredPreviewResponseSchema,
+  HistoricalStoredPreviewResponseSchema,
   TokensResponseSchema,
   WriteHeaders
 } from "./schemas.ts";
@@ -269,15 +269,23 @@ export async function buildServer(db: Kysely<Database>) {
   app.get("/api/v1/properties/:id/availability", {
     schema: {
       tags: ["queries"], params: IdParams,
-      querystring: Type.Object({ arrivalDate: LocalDate, departureDate: LocalDate, unitKind: Type.Optional(Type.Union([Type.Literal("ROOM"), Type.Literal("BED")])) }, { additionalProperties: false }),
-      response: { 200: Type.Object({ propertyId: Type.String(), units: Type.Array(AvailabilityUnitSchema) }), 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses }
+      querystring: Type.Object({
+        arrivalDate: LocalDate,
+        departureDate: LocalDate,
+        unitKind: Type.Optional(Type.Union([Type.Literal("ROOM"), Type.Literal("BED")])),
+        excludeOrderId: Type.Optional(Id)
+      }, { additionalProperties: false }),
+      response: { 200: Type.Object({ propertyId: Type.String(), units: Type.Array(AvailabilityUnitSchema) }, { additionalProperties: false }), 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses }
     }
   }, async (request) => {
     const { id } = request.params as { id: string };
-    const query = request.query as { arrivalDate: string; departureDate: string; unitKind?: InventoryUnitKind };
+    const query = request.query as { arrivalDate: string; departureDate: string; unitKind?: InventoryUnitKind; excludeOrderId?: string };
     const principal = await requirePrincipal(db, request);
     requirePropertyAccess(principal, id, "READ");
-    return { propertyId: id, units: await listAvailability(db, id, query.arrivalDate, query.departureDate, query.unitKind) };
+    return {
+      propertyId: id,
+      units: await listAvailability(db, id, query.arrivalDate, query.departureDate, query.unitKind, query.excludeOrderId)
+    };
   });
 
   app.get("/api/v1/properties/:id/room-status", {
@@ -453,7 +461,7 @@ export async function buildServer(db: Kysely<Database>) {
       commandPreviewRequestBodies.set(request, structuredClone(request.body));
     },
     config: { rateLimit: { max: positiveIntegerEnv("COMMAND_PREVIEW_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "command-previews" } },
-    schema: { tags: ["commands"], headers: WriteHeaders, body: CommandEnvelopeSchema, response: { 200: Type.Object({ preview: PreviewSchema, receipt: ReceiptSchema }, { additionalProperties: false }), 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["commands"], headers: WriteHeaders, body: CommandEnvelopeSchema, response: { 200: HistoricalCommandPreviewResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
     if (request.validationError) {
       const historicalEnvelope = commandPreviewRequestBodies.get(request);
@@ -480,7 +488,7 @@ export async function buildServer(db: Kysely<Database>) {
   });
 
   app.get("/api/v1/command-previews/:previewId", {
-    schema: { tags: ["commands"], params: PreviewParams, response: { 200: StoredPreviewResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["commands"], params: PreviewParams, response: { 200: HistoricalStoredPreviewResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
     const principal = await requirePrincipal(db, request);
     const preview = await db.selectFrom("command_previews").selectAll()
@@ -488,12 +496,12 @@ export async function buildServer(db: Kysely<Database>) {
       .where("subject_id", "=", principal.subjectId).executeTakeFirst();
     if (!preview) throw new DomainError("PREVIEW_NOT_FOUND", "Preview not found", 404);
     requireScopedResourceAccess(principal, preview.property_id);
-    return { ...preview, effect: projectCommandEffectForRead(preview.command_type, preview.effect as Record<string, unknown>) };
+    return projectStoredPreviewForRead(db, preview);
   });
 
   app.post("/api/v1/command-previews/:previewId/confirm", {
     config: { rateLimit: { max: positiveIntegerEnv("COMMAND_CONFIRM_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "command-confirms" } },
-    schema: { tags: ["commands"], headers: WriteHeaders, params: PreviewParams, body: ConfirmSchema, response: { 200: ReceiptSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: Type.Union([ReceiptSchema, ErrorResponse]), 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["commands"], headers: WriteHeaders, params: PreviewParams, body: ConfirmSchema, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: Type.Union([HistoricalReceiptReadSchema, ErrorResponse]), 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request, reply) => {
     const principal = await requirePrincipal(db, request);
     const previewId = (request.params as { previewId: string }).previewId;
@@ -505,16 +513,16 @@ export async function buildServer(db: Kysely<Database>) {
     return receipt;
   });
 
-  app.get("/api/v1/receipts/:id", { schema: { tags: ["receipts"], params: IdParams, response: { 200: ReceiptSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
+  app.get("/api/v1/receipts/:id", { schema: { tags: ["receipts"], params: IdParams, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
     return getReceipt(db, principal, (request.params as { id: string }).id);
   });
-  app.get("/api/v1/commands/:id", { schema: { tags: ["receipts"], params: IdParams, response: { 200: CommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
+  app.get("/api/v1/commands/:id", { schema: { tags: ["receipts"], params: IdParams, response: { 200: HistoricalCommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
     return getCommand(db, principal, (request.params as { id: string }).id);
   });
   app.get("/api/v1/command-results", {
-    schema: { tags: ["receipts"], querystring: Type.Object({ propertyId: Id, commandType: HistoricalRecoverableCommandTypeSchema, idempotencyKey: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }), response: { 200: CommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["receipts"], querystring: Type.Object({ propertyId: Id, commandType: HistoricalRecoverableCommandTypeSchema, idempotencyKey: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }), response: { 200: HistoricalCommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
     const principal = await requirePrincipal(db, request);
     const query = request.query as { propertyId: string; commandType: HistoricalRecoverableCommandType; idempotencyKey: string };

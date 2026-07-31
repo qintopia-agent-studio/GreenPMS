@@ -111,11 +111,12 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
       const suffix = index.toString().padStart(3, "0");
       const reason = `E2E performance typed source ${arrivalDate} ${suffix}`;
       const existing = await db.selectFrom("maintenance_locks")
-        .select("id")
+        .select(["id", "status"])
         .where("property_id", "=", performancePropertyId)
         .where("reason", "=", reason)
-        .executeTakeFirst();
-      if (existing) continue;
+        .execute();
+      if (existing.some((lock) => lock.status === "ACTIVE")) continue;
+      const generation = existing.length + 1;
       const sourceStart = addDays(arrivalDate, index % 20);
       const sourceEnd = addDays(sourceStart, 21);
       const preview = await createCommandPreview(db, principal, {
@@ -128,8 +129,8 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
           reason
         }
       }, {
-        idempotencyKey: `e2e-performance-preview-${arrivalDate}-${suffix}`,
-        correlationId: `e2e-performance-preview-${arrivalDate}-${suffix}`
+        idempotencyKey: `e2e-performance-preview-${arrivalDate}-${suffix}-${generation}`,
+        correlationId: `e2e-performance-preview-${arrivalDate}-${suffix}-${generation}`
       });
       await confirmCommandPreview(db, principal, preview.preview.previewId, {
         propertyId: performancePropertyId,
@@ -141,8 +142,8 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
           note: "Populate the measured room-status projection with real typed sources"
         }
       }, {
-        idempotencyKey: `e2e-performance-confirm-${arrivalDate}-${suffix}`,
-        correlationId: `e2e-performance-confirm-${arrivalDate}-${suffix}`
+        idempotencyKey: `e2e-performance-confirm-${arrivalDate}-${suffix}-${generation}`,
+        correlationId: `e2e-performance-confirm-${arrivalDate}-${suffix}-${generation}`
       });
     }
   } finally {
@@ -226,7 +227,18 @@ test("200 real inventory units by 90 nights become keyboard-interactive within t
   expect(board.dates).toHaveLength(90);
   expect(board.rooms.reduce((count, room) => count + 1 + room.children.length, 0)).toBe(roomStatusPageSize);
   expect(board.rooms.flatMap((room) => room.intervals).filter((interval) => interval.sourceKind === "MAINTENANCE").length).toBeGreaterThanOrEqual(5);
-  await expect(grid.locator(".room-status-interval-maintenance")).toHaveCount(5);
+  const renderedDates = await grid.locator("[data-room-status-row]").first()
+    .locator("[data-room-status-cell='true']")
+    .evaluateAll((cells) => cells.map((cell) => cell.getAttribute("data-service-date")).filter((date): date is string => date !== null));
+  const visibleStartDate = renderedDates.at(0)!;
+  const visibleEndDate = addDays(renderedDates.at(-1)!, 1);
+  const visibleMaintenanceCount = board.rooms
+    .flatMap((room) => room.intervals)
+    .filter((interval) => interval.sourceKind === "MAINTENANCE"
+      && interval.startDate < visibleEndDate
+      && interval.endDate > visibleStartDate)
+    .length;
+  await expect(grid.locator(".room-status-interval-maintenance")).toHaveCount(visibleMaintenanceCount);
   expect(board.page).toMatchObject({ index: 0, size: roomStatusPageSize, totalRooms: 200, totalPages: 4 });
   expect(responseBody.byteLength).toBeLessThanOrEqual(2_100_000);
   expect(response.headers()["content-encoding"]).toMatch(/^(br|gzip|zstd)$/);

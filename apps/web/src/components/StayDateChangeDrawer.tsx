@@ -1,10 +1,11 @@
 import { CalendarMinus2, CalendarPlus2, CalendarRange, LoaderCircle, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
-import type { CommandRequest, OrderViewDto } from "../types";
+import type { CommandRequest, InventoryUnitDto, OrderViewDto } from "../types";
 import {
   InlineError,
   Modal,
+  StayTimelineDisplay,
   businessStatusLabel,
   formatDate,
   formatMoney,
@@ -142,13 +143,6 @@ export function stayDateChangeActionState(view: OrderViewDto, requestedAction?: 
       reason: operatorFacingDisabledReason(authoritative?.disabledReason?.trim() || "当前订单状态暂不能办理日期调整")
     };
   }
-  if (action === "RESCHEDULE_STAY" && view.effectiveArrangement.intervals.length !== 1) {
-    return {
-      action,
-      enabled: false,
-      reason: "该订单已有换房安排，当前版本暂不能调整预订日期"
-    };
-  }
   return { action, enabled: view.accessLevel === "WRITE", reason: view.accessLevel === "WRITE" ? null : "当前账号只有查看权限" };
 }
 
@@ -259,6 +253,7 @@ export function StayDateChangeDrawer({
   mode = "DATE_CHANGE",
   view,
   inventoryUnitLabel,
+  inventoryUnits = [],
   draft: recovered,
   writeBlocked = false,
   onClose,
@@ -268,6 +263,7 @@ export function StayDateChangeDrawer({
   mode?: StayDateChangeMode;
   view: OrderViewDto;
   inventoryUnitLabel: string;
+  inventoryUnits?: Array<Pick<InventoryUnitDto, "id" | "code" | "name">>;
   draft?: CommandRequest;
   writeBlocked?: boolean;
   onClose: () => void;
@@ -298,6 +294,9 @@ export function StayDateChangeDrawer({
   const [pricePreview, setPricePreview] = useState<PricePreviewState>({ status: "EMPTY" });
   const [previewRefresh, setPreviewRefresh] = useState(0);
   const previewGeneration = useRef(0);
+  const inventoryUnitLabels = useMemo(() => Object.fromEntries(
+    inventoryUnits.map((unit) => [unit.id, `${unit.code} · ${unit.name}`])
+  ), [inventoryUnits]);
 
   const previewRequest = useMemo(() => {
     try {
@@ -388,7 +387,10 @@ export function StayDateChangeDrawer({
       if (pricePreview.status !== "READY" || pricePreview.signature !== previewSignature) {
         throw new Error("请等待调整后订单金额计算完成，再继续核对");
       }
-      onSubmit(buildStayDateChangeRequest(action, view, draft, mode));
+      onSubmit({
+        ...buildStayDateChangeRequest(action, view, draft, mode),
+        inventoryUnitLabels
+      });
     } catch (nextError) {
       setError(nextError);
     }
@@ -479,6 +481,14 @@ export function StayDateChangeDrawer({
               <strong data-testid="stay-date-new-amount">{formatMoney(summary.targetAmount)}</strong>
               {!showPerOrderFunds ? <><span>与政策基础金额差额</span><strong>{formatMoney(summary.differenceFromPolicy)}</strong><span>渠道价格差异说明</span><strong>{draft.channelPriceDifferenceReason.trim() || "无需额外说明"}</strong></> : <><span>金额变化</span><strong>{formatMoney(change)}</strong></>}
               {showPerOrderFunds ? <><span>已登记净收款</span><strong>{formatMoney(summary.netRecordedCollection)}</strong><span>{summary.collectionDifference.minorUnits > 0 ? "待补收参考" : summary.collectionDifference.minorUnits < 0 ? "多收差额" : "当前记录无差额"}</span><strong>{formatMoney({ ...summary.collectionDifference, minorUnits: Math.abs(summary.collectionDifference.minorUnits) })}</strong>{summary.refundReferenceAmount.minorUnits > 0 ? <><span>建议退款</span><strong data-testid="stay-date-refund-reference">{formatMoney(summary.refundReferenceAmount)}</strong></> : null}</> : null}
+            </div>
+            <div className="stay-date-timeline-review">
+              <h4>调整后完整住宿安排</h4>
+              <StayTimelineDisplay
+                timeline={summary.afterTimeline}
+                labels={inventoryUnitLabels}
+                testId="stay-date-preview-timeline"
+              />
             </div>
             {showPerOrderFunds && summary.refundReferenceAmount.minorUnits > 0 ? <p data-testid="stay-date-refund-note">该金额仅供工作人员办理退款参考，目前尚未登记退款。</p> : null}
             <p>系统已按新的住宿日期重新计算。正式确认时还会再次核对库存和订单事实。</p>

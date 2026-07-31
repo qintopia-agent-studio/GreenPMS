@@ -666,7 +666,8 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       "020_whole_room_occupants.sql",
       "021_defer_internal_use.sql",
       "026_stage9_stay_change_guards.sql",
-      "027_stage10_stay_shortening_guards.sql"
+      "027_stage10_stay_shortening_guards.sql",
+      "028_stage11_move_unit_guards.sql"
     ]) {
       await db.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
       try {
@@ -676,8 +677,29 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       }
     }
     expect(await databaseReady(db)).toBe(true);
-
     const rollbackProbe = new Error("rollback readiness object probe");
+
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`DROP TRIGGER amendments_stage11_validate_move_combination ON amendments`.execute(trx);
+      expect(await databaseReady(trx)).toBe(false);
+      throw rollbackProbe;
+    })).rejects.toBe(rollbackProbe);
+    expect(await databaseReady(db)).toBe(true);
+
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`DROP TRIGGER coverage_items_stage11_preserve_consumed_update ON coverage_items`.execute(trx);
+      expect(await databaseReady(trx)).toBe(false);
+      throw rollbackProbe;
+    })).rejects.toBe(rollbackProbe);
+    expect(await databaseReady(db)).toBe(true);
+
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`ALTER FUNCTION qintopia_assert_stage11_move_combination(text) RENAME TO qintopia_assert_stage11_move_combination_missing`.execute(trx);
+      expect(await databaseReady(trx)).toBe(false);
+      throw rollbackProbe;
+    })).rejects.toBe(rollbackProbe);
+    expect(await databaseReady(db)).toBe(true);
+
     await expect(db.transaction().execute(async (trx) => {
       await sql`DROP TRIGGER amendments_stage10_validate_combination ON amendments`.execute(trx);
       expect(await databaseReady(trx)).toBe(false);

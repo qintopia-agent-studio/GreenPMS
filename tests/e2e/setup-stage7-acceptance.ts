@@ -5,6 +5,7 @@ import { confirmCommandPreview, createCommandPreview } from "../../packages/db/s
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { resetE2eDatabase } from "./reset-database.ts";
 
 const demo = {
   propertyId: "prop_qintopia_demo",
@@ -226,9 +227,8 @@ export async function prepareStage7Acceptance(
   databaseUrl = defaultDatabaseUrl,
   options: PrepareStage7AcceptanceOptions = {}
 ): Promise<Stage7AcceptanceFixture> {
-  const db = options.reset === false
-    ? createDatabase(databaseUrl)
-    : await (await import("../helpers/database.ts")).resetDatabase(databaseUrl);
+  if (options.reset !== false) await resetE2eDatabase(databaseUrl);
+  const db = createDatabase(databaseUrl);
   try {
     await ensureReadOnlyPrincipal(db);
     const arrivalDate = addDays(todayInTimeZone("Asia/Shanghai"), options.dayOffset ?? 0);

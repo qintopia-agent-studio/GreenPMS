@@ -6,6 +6,7 @@ import { createDatabase } from "../../packages/db/src/database.ts";
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { resetE2eDatabase } from "./reset-database.ts";
 
 // Keep Playwright's browser-test loader away from seed.ts, which intentionally uses import.meta.
 // These are the stable IDs created by tests/e2e/setup-database.ts.
@@ -294,9 +295,8 @@ export async function prepareStage9Acceptance(
     unitCodeOverrides?: Stage9UnitCodeOverrides;
   } = {}
 ): Promise<Stage9AcceptanceFixture> {
-  const db = options.reset === false
-    ? createDatabase(databaseUrl)
-    : await (await import("../helpers/database.ts")).resetDatabase(databaseUrl);
+  if (options.reset !== false) await resetE2eDatabase(databaseUrl);
+  const db = createDatabase(databaseUrl);
   try {
     const businessDate = todayInTimeZone("Asia/Shanghai");
     const dayOffset = options.dayOffset ?? 2;
@@ -562,8 +562,9 @@ export async function prepareStage9Acceptance(
 
 export async function prepareStage9MobileAcceptance(
   databaseUrl = defaultDatabaseUrl,
-  options: { suffix?: string; unitCodeOverride?: string } = {}
+  options: { reset?: boolean; suffix?: string; unitCodeOverride?: string } = {}
 ): Promise<Stage9MobileAcceptanceFixture> {
+  if (options.reset === true) await resetE2eDatabase(databaseUrl);
   const db = createDatabase(databaseUrl);
   try {
     const businessDate = todayInTimeZone("Asia/Shanghai");

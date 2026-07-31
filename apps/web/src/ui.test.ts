@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { businessStatusLabel, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, receiptExecutionSemanticsAreCoherent, receiptTransactionReferenceLabel, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+import { ApiError } from "./api.ts";
+import { businessErrorMessage, businessStatusLabel, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+
+describe("operator-facing business errors", () => {
+  it("does not misreport an inventory conflict as a generic state change", () => {
+    expect(businessErrorMessage(new ApiError(409, {
+      code: "INVENTORY_CONFLICT",
+      message: "Destination inventory is unavailable",
+      correlationId: "correlation_inventory_conflict"
+    }))).toBe("所选房源在目标日期区间已有占用，请重新选择房源或日期。");
+    expect(businessErrorMessage(new ApiError(409, {
+      code: "INVENTORY_CONFLICT",
+      message: "目标房源在所选换房日期内已有占用，请选择其他房源。",
+      correlationId: "correlation_inventory_conflict_cn"
+    }))).toBe("目标房源在所选换房日期内已有占用，请选择其他房源。");
+  });
+});
 
 describe("Fulfillment business presentation", () => {
   it("uses one Chinese lifecycle vocabulary without protocol or enum labels", () => {
@@ -332,6 +348,10 @@ describe("U1 confirmation evidence", () => {
         arrivalDate: beforeArrivalDate,
         departureDate: beforeDepartureDate,
         nights: 2,
+        stayTimeline: [
+          { serviceDate: "2026-08-02", inventoryUnitId: "room_1" },
+          { serviceDate: "2026-08-03", inventoryUnitId: "room_1" }
+        ],
         currentContractAmount: money(20_000)
       },
       after: {
@@ -398,6 +418,7 @@ describe("U1 confirmation evidence", () => {
       afterArrivalDate: commandType === "RESCHEDULE_STAY" ? "2026-08-03" : "2026-08-02",
       afterDepartureDate: "2026-08-05",
       afterNights: commandType === "RESCHEDULE_STAY" ? 2 : 3,
+      afterTimeline: effect.after.stayTimeline,
       beforeAmount: money(20_000),
       policyBaseAmount: money(30_000),
       targetAmount: money(30_000),
@@ -426,6 +447,15 @@ describe("U1 confirmation evidence", () => {
     expect(u1PreviewHasBusinessEvidence(commandType, {
       ...effect,
       inventoryChange: { ...effect.inventoryChange, addedDates: ["2026-08-30"] }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence(commandType, {
+      ...effect,
+      after: {
+        ...effect.after,
+        stayTimeline: effect.after.stayTimeline.map((item, index) => (
+          index === effect.after.stayTimeline.length - 1 ? { ...item, inventoryUnitId: "room_2" } : item
+        ))
+      }
     }, input)).toBe(false);
 
     const memberCoverageDates = commandType === "RESCHEDULE_STAY"
@@ -507,7 +537,13 @@ describe("U1 confirmation evidence", () => {
       inventoryUnitId: "room_1",
       businessDate: "2026-08-03",
       completionMode: "EARLY_CHECK_OUT",
-      before: { arrivalDate: "2026-08-01", departureDate: "2026-08-05", nights: 4, currentContractAmount: money(40_000) },
+      before: {
+        arrivalDate: "2026-08-01",
+        departureDate: "2026-08-05",
+        nights: 4,
+        currentContractAmount: money(40_000),
+        stayTimeline: ["01", "02", "03", "04"].map((day) => ({ serviceDate: `2026-08-${day}`, inventoryUnitId: "room_1" }))
+      },
       after: {
         arrivalDate: "2026-08-01",
         departureDate: "2026-08-03",
@@ -540,6 +576,17 @@ describe("U1 confirmation evidence", () => {
     expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", { ...effect, businessDate: undefined }, input)).toBe(false);
     expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", { ...effect, businessDate: "2026-02-30" }, input)).toBe(false);
     expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", { ...effect, businessDate: "2026-08-02" }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", {
+      ...effect,
+      before: { ...effect.before, stayTimeline: undefined }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", {
+      ...effect,
+      after: {
+        ...effect.after,
+        stayTimeline: effect.after.stayTimeline.map((item) => ({ ...item, inventoryUnitId: "room_forged" }))
+      }
+    }, input)).toBe(false);
     expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", { ...effect, completionMode: "SHORTEN_IN_HOUSE" }, input)).toBe(false);
     expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", { ...effect, completionMode: "UNKNOWN" }, input)).toBe(false);
     expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", { ...effect, entitlementSummary: { ...effect.entitlementSummary, ledgerWriteCount: 1 } }, input)).toBe(false);
@@ -553,6 +600,57 @@ describe("U1 confirmation evidence", () => {
       },
       refundReferenceAmount: money(2_147_483_648)
     }, input)).toBe(false);
+
+    const effectHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const result = {
+      orderId: "order_1",
+      stayId: "stay_1",
+      arrangementAmendmentId: "amendment_arrangement",
+      checkoutAmendmentId: "amendment_checkout",
+      staySegmentId: "segment_2",
+      pricingRevisionId: "revision_2",
+      completionMode: "EARLY_CHECK_OUT",
+      businessDate: "2026-08-03",
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-08-03",
+      before: effect.before,
+      after: effect.after,
+      pricingDecision: effect.pricingDecision,
+      inventoryChange: effect.inventoryChange,
+      entitlementSummary: effect.entitlementSummary,
+      fundsSummary: effect.fundsSummary,
+      refundReferenceAmount: effect.refundReferenceAmount,
+      fulfillmentTiming: {
+        effectiveDate: "2026-08-03",
+        recordedBusinessDate: "2026-08-03",
+        recordingMode: "ON_SCHEDULE"
+      },
+      effectHash
+    };
+    const receipt = {
+      receiptId: "receipt_shorten",
+      commandId: "command_shorten",
+      executionStatus: "EXECUTED" as const,
+      businessCommitted: true,
+      correlationId: "correlation_shorten",
+      result,
+      resourceRefs: [
+        "order_1", "stay_1", "amendment_arrangement", "amendment_checkout", "segment_2", "revision_2"
+      ],
+      factRefs: [],
+      committedAt: "2026-08-03T10:00:00.000Z"
+    };
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", receipt, input, effect, effectHash)).toBe(true);
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", {
+      ...receipt,
+      result: { ...result, businessDate: undefined }
+    }, input, effect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", {
+      ...receipt,
+      result: { ...result, businessDate: "2026-08-02" }
+    }, input, effect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", receipt, input, effect,
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).toBe(false);
   });
 
   it("accepts consumed member coverage that preserves its pre-move inventory fact", () => {
@@ -563,7 +661,18 @@ describe("U1 confirmation evidence", () => {
       inventoryUnitId: "room_2",
       businessDate: "2026-08-02",
       completionMode: "SHORTEN_IN_HOUSE",
-      before: { arrivalDate: "2026-08-01", departureDate: "2026-08-05", nights: 4, currentContractAmount: money(0) },
+      before: {
+        arrivalDate: "2026-08-01",
+        departureDate: "2026-08-05",
+        nights: 4,
+        currentContractAmount: money(0),
+        stayTimeline: [
+          { serviceDate: "2026-08-01", inventoryUnitId: "room_1" },
+          { serviceDate: "2026-08-02", inventoryUnitId: "room_2" },
+          { serviceDate: "2026-08-03", inventoryUnitId: "room_2" },
+          { serviceDate: "2026-08-04", inventoryUnitId: "room_2" }
+        ]
+      },
       after: {
         arrivalDate: "2026-08-01",
         departureDate: "2026-08-03",
@@ -636,5 +745,54 @@ describe("U1 confirmation evidence", () => {
     expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "UNKNOWN", businessCommitted: false })).toBe(true);
     expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "NOT_EXECUTED", businessCommitted: true })).toBe(false);
     expect(receiptExecutionSemanticsAreCoherent({ ...base, executionStatus: "EXECUTED", businessCommitted: false })).toBe(false);
+  });
+
+  it("recomputes the approved Plan B timeline instead of trusting a self-consistent server mapping", () => {
+    const beforeTimeline = [
+      { serviceDate: "2026-08-10", inventoryUnitId: "room_a" },
+      { serviceDate: "2026-08-11", inventoryUnitId: "room_a" },
+      { serviceDate: "2026-08-12", inventoryUnitId: "room_b" },
+      { serviceDate: "2026-08-13", inventoryUnitId: "room_b" }
+    ];
+
+    expect(planBDateChangeTimeline(beforeTimeline, "2026-08-10", "2026-08-14", "2026-08-12", "2026-08-16"))
+      .toEqual([
+        { serviceDate: "2026-08-12", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-13", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-14", inventoryUnitId: "room_b" },
+        { serviceDate: "2026-08-15", inventoryUnitId: "room_b" }
+      ]);
+    expect(planBDateChangeTimeline(beforeTimeline, "2026-08-10", "2026-08-14", "2026-08-09", "2026-08-15"))
+      .toEqual([
+        { serviceDate: "2026-08-09", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-10", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-11", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-12", inventoryUnitId: "room_b" },
+        { serviceDate: "2026-08-13", inventoryUnitId: "room_b" },
+        { serviceDate: "2026-08-14", inventoryUnitId: "room_b" }
+      ]);
+    expect(planBDateChangeTimeline(beforeTimeline, "2026-08-10", "2026-08-14", "2026-08-16", "2026-08-18"))
+      .toEqual([
+        { serviceDate: "2026-08-16", inventoryUnitId: "room_b" },
+        { serviceDate: "2026-08-17", inventoryUnitId: "room_b" }
+      ]);
+  });
+
+  it("fails closed for committed stay-date Receipts without complete command evidence", () => {
+    const malformedReceipt = {
+      receiptId: "receipt_date_change",
+      commandId: "command_date_change",
+      executionStatus: "EXECUTED" as const,
+      businessCommitted: true,
+      correlationId: "correlation_date_change",
+      result: {},
+      resourceRefs: [],
+      factRefs: [],
+      committedAt: "2026-08-01T10:00:00.000Z"
+    };
+
+    expect(receiptHasCommandEvidence("RESCHEDULE_STAY", malformedReceipt, { orderId: "order_1" })).toBe(false);
+    expect(receiptHasCommandEvidence("EXTEND_STAY", malformedReceipt, { orderId: "order_1" })).toBe(false);
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", malformedReceipt, { orderId: "order_1" })).toBe(false);
   });
 });

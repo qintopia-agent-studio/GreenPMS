@@ -312,7 +312,14 @@ export const CommandEnvelopeSchema = Type.Union([
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note)
   })),
-  commandEnvelope("MOVE_UNIT", strictObject({ ...OrderInput, newInventoryUnitId: Id, effectiveDate: LocalDate })),
+  commandEnvelope("MOVE_UNIT", strictObject({
+    ...OrderInput,
+    newInventoryUnitId: Id,
+    effectiveDate: LocalDate,
+    targetCurrentContractAmountMinor: Type.Optional(StayChangeTargetAmount),
+    channelPriceDifferenceReason: Type.Optional(Note),
+    manualPriceAdjustmentReason: Type.Optional(Note)
+  })),
   commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: NonNegativeWholeYuanAmount })),
   commandEnvelope("CANCEL_ORDER", strictObject(OrderInput)),
   commandEnvelope("MARK_NO_SHOW", strictObject(OrderInput)),
@@ -462,6 +469,104 @@ const ShortenStayEntitlementSummarySchema = strictObject({
   currentConsumedCoverageDates: Type.Array(LocalDate),
   retainedHistoricalConsumedCoverageDates: Type.Array(LocalDate),
   ledgerWriteCount: Type.Literal(0)
+});
+const InventoryClaimSummarySchema = strictObject({
+  serviceDate: LocalDate,
+  inventoryUnitId: Id
+});
+const MoveUnitInventoryChangeSchema = strictObject({
+  preservedClaims: Type.Array(InventoryClaimSummarySchema),
+  releasedClaims: Type.Array(InventoryClaimSummarySchema),
+  addedClaims: Type.Array(InventoryClaimSummarySchema)
+});
+const MoveUnitEntitlementSummarySchema = strictObject({
+  preservedCoverageDates: Type.Array(LocalDate),
+  migratedHeldCoverageDates: Type.Array(LocalDate),
+  consumedCoverageDates: Type.Array(LocalDate),
+  ledgerWriteCount: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
+});
+const MoveUnitFundsSummarySchema = strictObject({
+  netRecordedCollection: Money,
+  collectionDifference: Money,
+  factCount: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
+});
+const MoveUnitBeforeSchema = strictObject({
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  nights: Type.Integer({ minimum: 1, maximum: 366 }),
+  currentContractAmount: Money,
+  stayTimeline: StayTimelineSchema,
+  actualCurrentInventoryUnit: nullable(InventoryUnitRecordSchema),
+  effectiveDateInventoryUnit: InventoryUnitRecordSchema
+});
+const MoveUnitAfterSchema = strictObject({
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  nights: Type.Integer({ minimum: 1, maximum: 366 }),
+  stayTimeline: StayTimelineSchema,
+  pricing: PricingResultSchema
+});
+
+const LegacyStayChangeEffectSchema = strictObject({
+  operation: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
+  orderId: Id,
+  stayId: Id,
+  inventoryUnitId: Id,
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementChange: StayChangeEntitlementDiffSchema,
+  fundsSummary: StayChangeFundsSummarySchema
+});
+
+const LegacyShortenStayEffectSchema = strictObject({
+  operation: Type.Literal("SHORTEN_STAY"),
+  orderId: Id,
+  stayId: Id,
+  inventoryUnitId: Id,
+  businessDate: LocalDate,
+  completionMode: Type.Union([Type.Literal("SHORTEN_IN_HOUSE"), Type.Literal("EARLY_CHECK_OUT")]),
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementSummary: ShortenStayEntitlementSummarySchema,
+  fundsSummary: ShortenStayFundsSummarySchema,
+  refundReferenceAmount: NonNegativeMoney
+});
+
+const LegacyMoveUnitEffectSchema = strictObject({
+  orderId: Id,
+  fromInventoryUnit: InventoryUnitRecordSchema,
+  toInventoryUnit: InventoryUnitRecordSchema,
+  effectiveDate: LocalDate,
+  occupantCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+  occupancyCapacity: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+  stayTimeline: StayTimelineSchema,
+  pricing: PricingResultSchema
 });
 
 export const CommandEffectSchema = Type.Union([
@@ -614,7 +719,8 @@ export const CommandEffectSchema = Type.Union([
       arrivalDate: LocalDate,
       departureDate: LocalDate,
       nights: Type.Integer({ minimum: 1, maximum: 366 }),
-      currentContractAmount: Money
+      currentContractAmount: Money,
+      stayTimeline: StayTimelineSchema
     }),
     after: strictObject({
       arrivalDate: LocalDate,
@@ -639,7 +745,8 @@ export const CommandEffectSchema = Type.Union([
       arrivalDate: LocalDate,
       departureDate: LocalDate,
       nights: Type.Integer({ minimum: 1, maximum: 366 }),
-      currentContractAmount: Money
+      currentContractAmount: Money,
+      stayTimeline: StayTimelineSchema
     }),
     after: strictObject({
       arrivalDate: LocalDate,
@@ -655,14 +762,20 @@ export const CommandEffectSchema = Type.Union([
     refundReferenceAmount: NonNegativeMoney
   }),
   strictObject({
+    operation: Type.Literal("MOVE_UNIT"),
     orderId: Id,
-    fromInventoryUnit: InventoryUnitRecordSchema,
+    stayId: Id,
+    businessDate: LocalDate,
     toInventoryUnit: InventoryUnitRecordSchema,
     effectiveDate: LocalDate,
-    occupantCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
-    occupancyCapacity: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
-    stayTimeline: StayTimelineSchema,
-    pricing: PricingResultSchema
+    occupantCount: Type.Integer({ minimum: 1, maximum: 1000 }),
+    occupancyCapacity: Type.Integer({ minimum: 1, maximum: 1000 }),
+    before: MoveUnitBeforeSchema,
+    after: MoveUnitAfterSchema,
+    pricingDecision: CreateOrderPricingDecisionSchema,
+    inventoryChange: MoveUnitInventoryChangeSchema,
+    entitlementSummary: MoveUnitEntitlementSummarySchema,
+    fundsSummary: MoveUnitFundsSummarySchema
   }),
   strictObject({
     orderId: Id,
@@ -790,6 +903,87 @@ const StayChangeResultSchema = strictObject({
   amendmentId: Id,
   staySegmentId: Id,
   pricingRevisionId: Id,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money,
+    stayTimeline: StayTimelineSchema
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementChange: StayChangeEntitlementDiffSchema,
+  fundsSummary: StayChangeFundsSummarySchema
+});
+const ShortenStayResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  arrangementAmendmentId: Id,
+  checkoutAmendmentId: nullable(Id),
+  staySegmentId: Id,
+  pricingRevisionId: Id,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  completionMode: Type.Union([Type.Literal("SHORTEN_IN_HOUSE"), Type.Literal("EARLY_CHECK_OUT")]),
+  businessDate: LocalDate,
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money,
+    stayTimeline: StayTimelineSchema
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementSummary: ShortenStayEntitlementSummarySchema,
+  fundsSummary: ShortenStayFundsSummarySchema,
+  refundReferenceAmount: NonNegativeMoney,
+  fulfillmentTiming: nullable(strictObject({
+    effectiveDate: LocalDate,
+    recordedBusinessDate: LocalDate,
+    recordingMode: Type.Literal("ON_SCHEDULE")
+  }))
+});
+const MoveUnitResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  amendmentId: Id,
+  staySegmentId: Id,
+  pricingRevisionId: Id,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  businessDate: LocalDate,
+  effectiveDate: LocalDate,
+  before: MoveUnitBeforeSchema,
+  after: MoveUnitAfterSchema,
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: MoveUnitInventoryChangeSchema,
+  entitlementSummary: MoveUnitEntitlementSummarySchema,
+  fundsSummary: MoveUnitFundsSummarySchema
+});
+const LegacyStayChangeResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  amendmentId: Id,
+  staySegmentId: Id,
+  pricingRevisionId: Id,
   arrivalDate: LocalDate,
   departureDate: LocalDate,
   before: strictObject({
@@ -810,7 +1004,7 @@ const StayChangeResultSchema = strictObject({
   entitlementChange: StayChangeEntitlementDiffSchema,
   fundsSummary: StayChangeFundsSummarySchema
 });
-const ShortenStayResultSchema = strictObject({
+const LegacyShortenStayResultSchema = strictObject({
   orderId: Id,
   stayId: Id,
   arrangementAmendmentId: Id,
@@ -844,7 +1038,7 @@ const ShortenStayResultSchema = strictObject({
     recordingMode: Type.Literal("ON_SCHEDULE")
   }))
 });
-const MoveUnitResultSchema = strictObject({
+const LegacyMoveUnitResultSchema = strictObject({
   orderId: Id,
   amendmentId: Id,
   staySegmentId: Id,
@@ -952,6 +1146,101 @@ export const ReceiptSchema = strictObject({
   committedAt: Type.Optional(DateTime)
 });
 
+const HistoricalReadOnlyMetadata = {
+  recoveryMode: Type.Literal("HISTORICAL_READ_ONLY")
+} as const;
+const LegacyStayChangePreviewSchema = strictObject({
+  previewId: Id,
+  commandType: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  effect: LegacyStayChangeEffectSchema,
+  expiresAt: DateTime
+});
+const LegacyShortenStayPreviewSchema = strictObject({
+  previewId: Id,
+  commandType: Type.Literal("SHORTEN_STAY"),
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  effect: LegacyShortenStayEffectSchema,
+  expiresAt: DateTime
+});
+const LegacyMoveUnitPreviewSchema = strictObject({
+  previewId: Id,
+  commandType: Type.Literal("MOVE_UNIT"),
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  effect: LegacyMoveUnitEffectSchema,
+  expiresAt: DateTime
+});
+const LegacyPreviewReceiptStayChangeResultSchema = strictObject({ preview: LegacyStayChangePreviewSchema });
+const LegacyPreviewReceiptShortenResultSchema = strictObject({ preview: LegacyShortenStayPreviewSchema });
+const LegacyPreviewReceiptMoveResultSchema = strictObject({ preview: LegacyMoveUnitPreviewSchema });
+const HistoricalExecutedReceiptBase = {
+  receiptId: Id,
+  commandId: Id,
+  executionStatus: Type.Literal("EXECUTED"),
+  businessCommitted: Type.Literal(true),
+  correlationId: Type.String({ minLength: 1, maxLength: 160 }),
+  resourceRefs: Type.Array(Id),
+  factRefs: Type.Array(Id),
+  committedAt: Type.Optional(DateTime),
+  ...HistoricalReadOnlyMetadata
+} as const;
+const HistoricalStayChangeReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("LEGACY_STAGE_9_10"),
+  result: Type.Union([LegacyStayChangeResultSchema, LegacyPreviewReceiptStayChangeResultSchema])
+});
+const HistoricalShortenReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("LEGACY_STAGE_10"),
+  result: Type.Union([LegacyShortenStayResultSchema, LegacyPreviewReceiptShortenResultSchema])
+});
+const HistoricalMoveReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("PRE_STAGE_11"),
+  result: Type.Union([LegacyMoveUnitResultSchema, LegacyPreviewReceiptMoveResultSchema])
+});
+export const HistoricalReceiptReadSchema = Type.Union([
+  ReceiptSchema,
+  HistoricalStayChangeReceiptReadSchema,
+  HistoricalShortenReceiptReadSchema,
+  HistoricalMoveReceiptReadSchema
+]);
+
+const CurrentCommandPreviewResponseSchema = strictObject({
+  preview: PreviewSchema,
+  receipt: ReceiptSchema
+});
+const HistoricalStayChangePreviewReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("LEGACY_STAGE_9_10"),
+  result: LegacyPreviewReceiptStayChangeResultSchema
+});
+const HistoricalShortenPreviewReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("LEGACY_STAGE_10"),
+  result: LegacyPreviewReceiptShortenResultSchema
+});
+const HistoricalMovePreviewReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("PRE_STAGE_11"),
+  result: LegacyPreviewReceiptMoveResultSchema
+});
+export const HistoricalCommandPreviewResponseSchema = Type.Union([
+  CurrentCommandPreviewResponseSchema,
+  strictObject({
+    preview: LegacyStayChangePreviewSchema,
+    receipt: HistoricalStayChangePreviewReceiptReadSchema
+  }),
+  strictObject({
+    preview: LegacyShortenStayPreviewSchema,
+    receipt: HistoricalShortenPreviewReceiptReadSchema
+  }),
+  strictObject({
+    preview: LegacyMoveUnitPreviewSchema,
+    receipt: HistoricalMovePreviewReceiptReadSchema
+  })
+]);
+
 export const QuoteCommandResponseSchema = strictObject({
   quote: QuoteSchema,
   receipt: ReceiptSchema
@@ -959,6 +1248,17 @@ export const QuoteCommandResponseSchema = strictObject({
 
 export const CommandResultRecoverySchema = Type.Union([
   ReceiptSchema,
+  strictObject({ executionStatus: Type.Literal("NOT_EXECUTED"), businessCommitted: Type.Literal(false) }),
+  strictObject({
+    executionStatus: Type.Literal("UNKNOWN"),
+    businessCommitted: Type.Literal(false),
+    commandId: Type.Optional(Id),
+    correlationId: Type.Optional(Type.String({ minLength: 1, maxLength: 160 }))
+  })
+]);
+
+export const HistoricalCommandResultRecoverySchema = Type.Union([
+  HistoricalReceiptReadSchema,
   strictObject({ executionStatus: Type.Literal("NOT_EXECUTED"), businessCommitted: Type.Literal(false) }),
   strictObject({
     executionStatus: Type.Literal("UNKNOWN"),
@@ -1413,15 +1713,46 @@ const CreateOrderAmendmentPayloadSchema = strictObject({
   freeStayCategoryCode: Type.Optional(nullable(FreeStayCategoryCodeSchema)),
   pricingDecision: Type.Optional(CreateOrderPricingDecisionSchema)
 });
-const AmendmentRowSchema = strictObject({
-  id: Id, order_id: Id, sequence: Type.Integer({ minimum: 1 }), amendment_type: CommandTypeSchema,
+const AmendmentRowBase = {
+  id: Id, order_id: Id, sequence: Type.Integer({ minimum: 1 }),
   reason_code: Type.String({ minLength: 1, maxLength: 80 }), reason_note: OptionalNote,
   prior_version: Type.Integer({ minimum: 0 }), new_version: Type.Integer({ minimum: 1 }),
-  payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema]),
   command_id: nullable(Id),
   actor: nullable(strictObject({ subjectId: Id, displayName: ShortText })),
   created_at: DateTime
+} as const;
+const CurrentAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: CommandTypeSchema,
+  payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema])
 });
+const LegacyStayChangeAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
+  payload: LegacyStayChangeEffectSchema,
+  protocolVersion: Type.Literal("LEGACY_STAGE_9_10"),
+  ...HistoricalReadOnlyMetadata
+});
+const LegacyShortenAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("SHORTEN_STAY"),
+  payload: LegacyShortenStayEffectSchema,
+  protocolVersion: Type.Literal("LEGACY_STAGE_10"),
+  ...HistoricalReadOnlyMetadata
+});
+const LegacyMoveAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("MOVE_UNIT"),
+  payload: LegacyMoveUnitEffectSchema,
+  protocolVersion: Type.Literal("PRE_STAGE_11"),
+  ...HistoricalReadOnlyMetadata
+});
+const AmendmentRowSchema = Type.Union([
+  CurrentAmendmentRowSchema,
+  LegacyStayChangeAmendmentRowSchema,
+  LegacyShortenAmendmentRowSchema,
+  LegacyMoveAmendmentRowSchema
+]);
 const PricingRevisionRowSchema = strictObject({
   id: Id, order_id: Id, revision_no: Type.Integer({ minimum: 1 }), amendment_id: Id, policy_version_id: Id,
   arrival_date: LocalDate, departure_date: LocalDate, coverage_set: Type.Array(CoverageItem), cash_lines: Type.Array(CashLine),
@@ -1730,6 +2061,42 @@ export const StoredPreviewResponseSchema = strictObject({
   created_at: DateTime,
   used_at: nullable(DateTime)
 });
+const HistoricalStoredPreviewBase = {
+  id: Id,
+  property_id: Id,
+  input_hash: Type.String({ minLength: 64, maxLength: 64 }),
+  effect_hash: Type.String({ minLength: 64, maxLength: 64 }),
+  expires_at: DateTime,
+  status: Type.Union([Type.Literal("OPEN"), Type.Literal("USED"), Type.Literal("EXPIRED")]),
+  created_at: DateTime,
+  used_at: nullable(DateTime),
+  confirmable: Type.Literal(false),
+  ...HistoricalReadOnlyMetadata
+} as const;
+const HistoricalStayChangeStoredPreviewSchema = strictObject({
+  ...HistoricalStoredPreviewBase,
+  command_type: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
+  effect: LegacyStayChangeEffectSchema,
+  protocolVersion: Type.Literal("LEGACY_STAGE_9_10")
+});
+const HistoricalShortenStoredPreviewSchema = strictObject({
+  ...HistoricalStoredPreviewBase,
+  command_type: Type.Literal("SHORTEN_STAY"),
+  effect: LegacyShortenStayEffectSchema,
+  protocolVersion: Type.Literal("LEGACY_STAGE_10")
+});
+const HistoricalMoveStoredPreviewSchema = strictObject({
+  ...HistoricalStoredPreviewBase,
+  command_type: Type.Literal("MOVE_UNIT"),
+  effect: LegacyMoveUnitEffectSchema,
+  protocolVersion: Type.Literal("PRE_STAGE_11")
+});
+export const HistoricalStoredPreviewResponseSchema = Type.Union([
+  StoredPreviewResponseSchema,
+  HistoricalStayChangeStoredPreviewSchema,
+  HistoricalShortenStoredPreviewSchema,
+  HistoricalMoveStoredPreviewSchema
+]);
 
 export const IdParams = strictObject({ id: Id });
 export const PreviewParams = strictObject({ previewId: Id });

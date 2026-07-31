@@ -836,13 +836,16 @@ describe("PostgreSQL room-status projection", () => {
     });
     const movedOrderId = moved.result!.orderId as string;
     await markOrderInHouseFixture(movedOrderId);
+    const movedView = await getOrderView(db, movedOrderId);
     await execute({
       commandType: "MOVE_UNIT",
       input: {
         propertyId: demo.propertyId,
         orderId: movedOrderId,
         newInventoryUnitId: rooms[4]!.id,
-        effectiveDate: businessDate
+        effectiveDate: businessDate,
+        targetCurrentContractAmountMinor: movedView.amounts.currentContractAmount.minorUnits,
+        channelPriceDifferenceReason: "跨房型换房，重新确认本单渠道应结金额"
       }
     }, "task-move-unit");
 
@@ -1093,7 +1096,7 @@ describe("PostgreSQL room-status projection", () => {
       stayType: "TRANSIENT",
       arrivalDate: businessDate,
       departureDate: tomorrow,
-      pricingPolicyVersionId: demo.transientPolicyId
+      pricingPolicyVersionId: testPricingPolicyForDates(businessDate, tomorrow)
     })).rejects.toMatchObject({ code: "INVENTORY_CONFLICT" });
     await expect(createQuote(db, {
       propertyId: demo.propertyId,
@@ -1101,7 +1104,7 @@ describe("PostgreSQL room-status projection", () => {
       stayType: "TRANSIENT",
       arrivalDate: businessDate,
       departureDate: tomorrow,
-      pricingPolicyVersionId: demo.transientPolicyId
+      pricingPolicyVersionId: testPricingPolicyForDates(businessDate, tomorrow)
     })).resolves.toMatchObject({
       inventoryUnitId: rooms[6]!.id,
       arrivalDate: businessDate,

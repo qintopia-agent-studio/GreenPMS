@@ -33,6 +33,21 @@ function requestPath(request: Request): string {
   return new URL(request.url()).pathname;
 }
 
+function roomCell(page: Page, unitId: string, serviceDate: string): Locator {
+  return page.locator(`.room-status-day-available[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${serviceDate}"]`);
+}
+
+async function clickRoomStatusCell(page: Page, cell: Locator, unitId: string): Promise<void> {
+  await cell.scrollIntoViewIfNeeded();
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  await cell.click();
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", unitId);
+}
+
 async function login(page: Page) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
@@ -51,23 +66,49 @@ async function openPaidOrderDraft(page: Page, options: {
   await page.getByTestId("arrival-date").fill(options.arrivalDate);
   await page.getByTestId("departure-date").fill(departureDate);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
-
-  if ((page.viewportSize()?.width ?? 0) < 576) {
-    await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "新建住宿或锁房" })).toBeVisible();
+  const mobile = (page.viewportSize()?.width ?? 0) < 576;
+  if (!mobile) {
+    await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-arrival", options.arrivalDate);
+    await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", departureDate);
+    const refreshed = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "GET"
+        && url.pathname.endsWith("/room-status")
+        && url.searchParams.get("arrivalDate") === options.arrivalDate
+        && url.searchParams.get("departureDate") === departureDate
+        && response.ok();
+    });
+    await page.getByRole("button", { name: "刷新房态", exact: true }).click();
+    await refreshed;
+    await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   }
 
   const unitId = `unit_room_${options.unitCode[0]!.toLowerCase()}_gen_${options.unitCode.slice(1)}`;
-  await page.getByTestId("room-status-unit-select").selectOption(unitId);
-  await page.getByLabel("入住日期", { exact: true }).fill(options.arrivalDate);
-  await page.getByLabel("退房日期", { exact: true }).fill(departureDate);
-
   const quoteResponse = page.waitForResponse((response) =>
     response.request().method() === "POST"
       && new URL(response.url()).pathname === "/api/v1/quotes"
       && response.ok()
   );
-  await page.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  if (mobile) {
+    await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
+    const createDialog = page.getByRole("dialog", { name: "新建住宿或锁房", exact: true });
+    await expect(createDialog).toBeVisible();
+    await createDialog.getByTestId("room-status-unit-select").selectOption(unitId);
+    await createDialog.getByLabel("入住日期", { exact: true }).fill(options.arrivalDate);
+    await createDialog.getByLabel("退房日期", { exact: true }).fill(departureDate);
+    await createDialog.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  } else {
+    const cell = roomCell(page, unitId, options.arrivalDate);
+    await expect(cell).toBeVisible();
+    await clickRoomStatusCell(page, cell, unitId);
+    const popover = page.getByTestId("room-status-quick-popover");
+    await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
+
+    const writeDrawer = page.locator("dialog.room-status-write-drawer");
+    await expect(writeDrawer).toBeVisible();
+    await expect(writeDrawer.getByLabel("入住日期", { exact: true })).toHaveValue(options.arrivalDate);
+    await expect(writeDrawer.getByLabel("退房日期", { exact: true })).toHaveValue(departureDate);
+  }
   const quote = (await (await quoteResponse).json()).quote as {
     currentContractAmount: { minorUnits: number };
   };
@@ -143,18 +184,17 @@ async function createOrderAndOpenDetail(page: Page, options: {
   await expect(page.getByTestId("command-receipt")).toBeHidden();
   await page.goto(`/orders/${encodeURIComponent(receipt.result!.orderId!)}`);
   await expect(page).toHaveURL(/\/orders\/order_[^/?#]+$/, { timeout: 15_000 });
-  await expect(page.getByText("正在载入订单详情", { exact: true })).toBeHidden({ timeout: 15_000 });
-
-  const stay = page.getByRole("heading", { name: "住宿状态", exact: true }).locator("..").locator("..");
+  const stay = page.getByRole("region", { name: "住宿状态", exact: true });
+  await expect(stay).toBeVisible({ timeout: 15_000 });
   await expect(stay).toContainText(options.expectedChannel === "WECOM" ? "企业微信" : { YOUMUDAO: "游牧岛", CTRIP: "携程", MEITUAN: "美团" }[options.expectedChannel]);
   await expect(stay).toContainText(options.expectedReference ?? "不适用");
-  const revision = page.getByRole("region", { name: "计价修订" });
+  const revision = page.locator('.table-region[aria-label="计价记录表格"]');
   await expect(revision.locator("tbody tr")).toHaveCount(1);
   await expect(revision).toContainText(money(options.expectedPolicyBaseMinor));
   await expect(revision).toContainText(money(options.expectedTargetMinor));
   await expect(revision).toContainText(options.expectedChannel === "WECOM" && options.expectedTargetMinor !== options.expectedPolicyBaseMinor
     ? "人工调价"
-    : options.expectedChannel === "WECOM" ? "政策价" : "渠道合同价");
+    : options.expectedChannel === "WECOM" ? "政策价" : "本单渠道应结金额");
   await expect(revision).toContainText(options.expectedReason ?? "无需说明");
 }
 

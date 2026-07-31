@@ -172,16 +172,16 @@ test("U1 unknown result only queries the original confirmation key after reload"
     const openRecovery = recovery.getByRole("button", { name: "查询设置维修锁房结果" });
     await expect(openRecovery).toBeEnabled();
     await openRecovery.click({ timeout: 5_000 });
-    const resultRequest = page.waitForRequest((request) => {
-      const url = new URL(request.url());
-      return request.method() === "GET" && url.pathname === "/api/v1/command-results" && url.searchParams.get("idempotencyKey") === confirmationKey;
-    }, { timeout: 5_000 });
+    const resultResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "GET" && url.pathname === "/api/v1/command-results" && url.searchParams.get("idempotencyKey") === confirmationKey && response.status() === 200;
+    }, { timeout: 15_000 });
     const queryOriginal = page.getByRole("button", { name: "查询原操作结果" });
     await expect(queryOriginal).toBeEnabled();
     await queryOriginal.click({ timeout: 5_000 });
-    await resultRequest;
-    await expect(page.locator("dialog.modal-wide")).toBeHidden();
-    await expect(page.getByTestId("command-result-notice")).toContainText("维修锁房已设置，房态已刷新");
+    await resultResponse;
+    await expect(page.getByTestId("command-result-notice")).toContainText("维修锁房已设置，房态已刷新", { timeout: 15_000 });
+    await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
     expect(confirmCount).toBe(1);
   } finally {
     releaseConfirm?.();

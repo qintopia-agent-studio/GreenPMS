@@ -13,7 +13,7 @@ import {
   type Database
 } from "@qintopia/db";
 import { sql, type Kysely, type Transaction } from "kysely";
-import { sha256 } from "@qintopia/domain";
+import { sha256, stableHash } from "@qintopia/domain";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { demo, seedDemo } from "../../packages/db/src/seed.ts";
@@ -816,7 +816,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 027, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 028, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -828,7 +828,7 @@ describe.sequential("booking channels and external transaction references on Pos
           VALUES ('order_historical_nulls', '${demo.propertyId}', 'RESERVED', 'FREE', '2029-02-01', '2029-02-02', '{"fullName":"Historical Null Guest"}'::jsonb, '${demo.freePolicyId}', NULL, NULL, 1);
           INSERT INTO stays(id, order_id, status) VALUES ('stay_historical_nulls', 'order_historical_nulls', 'PLANNED');
           INSERT INTO amendments(id, order_id, sequence, amendment_type, reason_code, reason_note, prior_version, new_version, payload, created_at)
-          VALUES ('amend_historical_nulls', 'order_historical_nulls', 1, 'CREATE_ORDER', 'HISTORICAL', 'Created before channel capture', 0, 1, '{"quoteId":"quote_historical","inventoryUnitId":"${demo.roomId}","arrivalDate":"2029-02-01","departureDate":"2029-02-02"}'::jsonb, '2028-12-01T00:00:00Z');
+          VALUES ('amend_historical_nulls', 'order_historical_nulls', 1, 'CREATE_ORDER', 'HISTORICAL', 'Created before channel capture', 0, 1, '{"quoteId":"quote_historical","inventoryUnitId":"${demo.roomId}","arrivalDate":"2029-02-01","departureDate":"2029-02-02"}'::jsonb, '2025-12-01T00:00:00Z');
           INSERT INTO stay_segments(id, stay_id, sequence, inventory_unit_id, arrival_date, departure_date, segment_type, supersedes_segment_id, amendment_id)
           VALUES ('segment_historical_nulls', 'stay_historical_nulls', 1, '${demo.roomId}', '2029-02-01', '2029-02-02', 'INITIAL', NULL, 'amend_historical_nulls');
           INSERT INTO inventory_claims(id, property_id, room_id, inventory_unit_id, service_date, source_type, source_id, active, released_at)
@@ -987,12 +987,372 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration025 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/025_channel_order_atomic_pricing.sql"), "utf8");
         await client.query(migration025);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('025_channel_order_atomic_pricing.sql')");
+        const legacyMoney = (minorUnits: number) => ({ currency: "CNY", minorUnits });
+        const legacyPricing = {
+          coverageSet: [],
+          cashLines: [],
+          cashRemainder: legacyMoney(11_600),
+          currentContractAmount: legacyMoney(11_600)
+        };
+        const legacyPricingDecision = {
+          pricingBasis: "POLICY",
+          policyBaseAmount: legacyMoney(11_600),
+          targetCurrentContractAmount: legacyMoney(11_600),
+          differenceFromPolicy: legacyMoney(0),
+          manualAdjustmentMinor: 0,
+          differenceExceedsThreshold: false,
+          reason: { code: "STAY_CHANGE_POLICY", note: "" }
+        };
+        const legacyStayChangeEffect = {
+          operation: "RESCHEDULE_STAY",
+          orderId: "order_legacy_stage9",
+          stayId: "stay_legacy_stage9",
+          inventoryUnitId: demo.roomId,
+          before: {
+            arrivalDate: "2026-07-28",
+            departureDate: "2026-07-30",
+            nights: 2,
+            currentContractAmount: legacyMoney(11_600)
+          },
+          after: {
+            arrivalDate: "2026-07-29",
+            departureDate: "2026-07-31",
+            nights: 2,
+            stayTimeline: [
+              { serviceDate: "2026-07-29", inventoryUnitId: demo.roomId },
+              { serviceDate: "2026-07-30", inventoryUnitId: demo.roomId }
+            ],
+            pricing: legacyPricing
+          },
+          pricingDecision: legacyPricingDecision,
+          inventoryChange: {
+            preservedDates: ["2026-07-29"],
+            releasedDates: ["2026-07-28"],
+            addedDates: ["2026-07-30"]
+          },
+          entitlementChange: {
+            preservedCoverageDates: [],
+            releasedCoverageDates: [],
+            addedCoverageDates: [],
+            consumedCoverageDates: []
+          },
+          fundsSummary: {
+            netRecordedCollection: legacyMoney(0),
+            collectionDifference: legacyMoney(11_600)
+          }
+        };
+        const legacyShortenEffect = {
+          operation: "SHORTEN_STAY",
+          orderId: "order_legacy_stage10",
+          stayId: "stay_legacy_stage10",
+          inventoryUnitId: demo.roomId,
+          businessDate: "2026-07-30",
+          completionMode: "SHORTEN_IN_HOUSE",
+          before: {
+            arrivalDate: "2026-07-28",
+            departureDate: "2026-08-02",
+            nights: 5,
+            currentContractAmount: legacyMoney(29_000)
+          },
+          after: {
+            arrivalDate: "2026-07-28",
+            departureDate: "2026-07-31",
+            nights: 3,
+            stayTimeline: [
+              { serviceDate: "2026-07-28", inventoryUnitId: demo.roomId },
+              { serviceDate: "2026-07-29", inventoryUnitId: demo.roomId },
+              { serviceDate: "2026-07-30", inventoryUnitId: demo.roomId }
+            ],
+            pricing: { ...legacyPricing, cashRemainder: legacyMoney(17_400), currentContractAmount: legacyMoney(17_400) }
+          },
+          pricingDecision: {
+            ...legacyPricingDecision,
+            policyBaseAmount: legacyMoney(17_400),
+            targetCurrentContractAmount: legacyMoney(17_400)
+          },
+          inventoryChange: {
+            preservedDates: ["2026-07-28", "2026-07-29", "2026-07-30"],
+            releasedDates: ["2026-07-31", "2026-08-01"],
+            addedDates: []
+          },
+          entitlementSummary: {
+            currentConsumedCoverageDates: [],
+            retainedHistoricalConsumedCoverageDates: [],
+            ledgerWriteCount: 0
+          },
+          fundsSummary: {
+            netRecordedCollection: legacyMoney(0),
+            collectionDifference: legacyMoney(17_400),
+            factCount: 0
+          },
+          refundReferenceAmount: legacyMoney(0)
+        };
+        const legacyUnit = (id: string, code: string) => ({
+          id,
+          propertyId: demo.propertyId,
+          kind: "ROOM",
+          roomId: id,
+          code,
+          name: `Room ${code}`,
+          catalogVersion: null,
+          buildingCode: null,
+          roomTypeCode: null,
+          pricingProductCode: null,
+          inventoryBasis: null,
+          codeProvenance: null,
+          physicalBedCount: null
+        });
+        const legacyMoveEffect = {
+          orderId: "order_legacy_stage10_move",
+          fromInventoryUnit: legacyUnit(demo.roomId, "101"),
+          toInventoryUnit: legacyUnit(demo.secondRoomId, "102"),
+          effectiveDate: "2026-07-30",
+          occupantCount: 1,
+          occupancyCapacity: 4,
+          stayTimeline: [
+            { serviceDate: "2026-07-29", inventoryUnitId: demo.roomId },
+            { serviceDate: "2026-07-30", inventoryUnitId: demo.secondRoomId }
+          ],
+          pricing: legacyPricing
+        };
+        const legacyFixtures = [
+          {
+            suffix: "stage9",
+            commandType: "RESCHEDULE_STAY",
+            protocolVersion: "LEGACY_STAGE_9_10",
+            effect: legacyStayChangeEffect,
+            input: {
+              propertyId: demo.propertyId,
+              orderId: legacyStayChangeEffect.orderId,
+              newArrivalDate: legacyStayChangeEffect.after.arrivalDate,
+              newDepartureDate: legacyStayChangeEffect.after.departureDate
+            },
+            result: {
+              orderId: legacyStayChangeEffect.orderId,
+              stayId: legacyStayChangeEffect.stayId,
+              amendmentId: "amend_legacy_stage9",
+              staySegmentId: "segment_legacy_stage9",
+              pricingRevisionId: "revision_legacy_stage9",
+              arrivalDate: legacyStayChangeEffect.after.arrivalDate,
+              departureDate: legacyStayChangeEffect.after.departureDate,
+              before: legacyStayChangeEffect.before,
+              after: legacyStayChangeEffect.after,
+              pricingDecision: legacyStayChangeEffect.pricingDecision,
+              inventoryChange: legacyStayChangeEffect.inventoryChange,
+              entitlementChange: legacyStayChangeEffect.entitlementChange,
+              fundsSummary: legacyStayChangeEffect.fundsSummary
+            }
+          },
+          {
+            suffix: "stage10",
+            commandType: "SHORTEN_STAY",
+            protocolVersion: "LEGACY_STAGE_10",
+            effect: legacyShortenEffect,
+            input: {
+              propertyId: demo.propertyId,
+              orderId: legacyShortenEffect.orderId,
+              newDepartureDate: legacyShortenEffect.after.departureDate
+            },
+            result: {
+              orderId: legacyShortenEffect.orderId,
+              stayId: legacyShortenEffect.stayId,
+              arrangementAmendmentId: "amend_legacy_stage10",
+              checkoutAmendmentId: null,
+              staySegmentId: "segment_legacy_stage10",
+              pricingRevisionId: "revision_legacy_stage10",
+              completionMode: legacyShortenEffect.completionMode,
+              arrivalDate: legacyShortenEffect.after.arrivalDate,
+              departureDate: legacyShortenEffect.after.departureDate,
+              before: legacyShortenEffect.before,
+              after: legacyShortenEffect.after,
+              pricingDecision: legacyShortenEffect.pricingDecision,
+              inventoryChange: legacyShortenEffect.inventoryChange,
+              entitlementSummary: legacyShortenEffect.entitlementSummary,
+              fundsSummary: legacyShortenEffect.fundsSummary,
+              refundReferenceAmount: legacyShortenEffect.refundReferenceAmount,
+              fulfillmentTiming: null
+            }
+          },
+          {
+            suffix: "pre_stage11",
+            commandType: "MOVE_UNIT",
+            protocolVersion: "PRE_STAGE_11",
+            effect: legacyMoveEffect,
+            input: {
+              propertyId: demo.propertyId,
+              orderId: legacyMoveEffect.orderId,
+              newInventoryUnitId: legacyMoveEffect.toInventoryUnit.id,
+              effectiveDate: legacyMoveEffect.effectiveDate
+            },
+            result: {
+              orderId: legacyMoveEffect.orderId,
+              amendmentId: "amend_legacy_stage10_move",
+              staySegmentId: "segment_legacy_stage10_move",
+              pricingRevisionId: "revision_legacy_stage10_move"
+            }
+          }
+        ] as const;
+        for (const fixture of legacyFixtures) {
+          const previewId = `preview_legacy_${fixture.suffix}`;
+          const previewCommandId = `command_preview_legacy_${fixture.suffix}`;
+          const commandId = `command_legacy_${fixture.suffix}`;
+          const confirmation = {
+            propertyId: demo.propertyId,
+            commandType: fixture.commandType,
+            confirmation: true,
+            expectedEffectHash: "9".repeat(64),
+            reason: { code: "HISTORICAL_EXACT_REPLAY", note: "历史命令精确重放" }
+          };
+          const preview = {
+            previewId,
+            commandType: fixture.commandType,
+            effectHash: "9".repeat(64),
+            effect: fixture.effect,
+            expiresAt: "2035-01-01T00:00:00.000Z"
+          };
+          await client.query(`
+            INSERT INTO command_previews(
+              id, subject_id, property_id, command_type, normalized_input, input_hash,
+              effect, effect_hash, basis_versions, expires_at, status
+            ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, repeat('9', 64), '{}'::jsonb, '2035-01-01T00:00:00Z', 'OPEN')
+          `, [
+            previewId,
+            demo.agentSubjectId,
+            demo.propertyId,
+            fixture.commandType,
+            JSON.stringify(fixture.input),
+            stableHash(fixture.input),
+            JSON.stringify(fixture.effect)
+          ]);
+          await client.query(`
+            INSERT INTO command_executions(
+              id, subject_id, credential_id, property_id, command_type, idempotency_key,
+              request_hash, correlation_id, state, completed_at
+            ) VALUES
+              ($1, $2, 'token_demo_write', $3, $4, $5, $6, $5, 'APPLIED', now()),
+              ($7, $2, 'token_demo_write', $3, $8, $9, $10, $9, 'APPLIED', now())
+          `, [
+            previewCommandId,
+            demo.agentSubjectId,
+            demo.propertyId,
+            `PREVIEW:${fixture.commandType}`,
+            `legacy-preview-${fixture.suffix}`,
+            stableHash({ commandType: fixture.commandType, input: fixture.input }),
+            commandId,
+            fixture.commandType,
+            `legacy-command-${fixture.suffix}`,
+            stableHash({ previewId, confirmation })
+          ]);
+          await client.query(`
+            INSERT INTO command_receipts(
+              id, command_id, execution_status, business_committed, result, error,
+              resource_refs, fact_refs, committed_at
+            ) VALUES
+              ($1, $2, 'EXECUTED', true, $3::jsonb, NULL, '[]'::jsonb, '[]'::jsonb, now()),
+              ($4, $5, 'EXECUTED', true, $6::jsonb, NULL, '[]'::jsonb, '[]'::jsonb, now())
+          `, [
+            `receipt_preview_legacy_${fixture.suffix}`,
+            previewCommandId,
+            JSON.stringify({ preview }),
+            `receipt_legacy_${fixture.suffix}`,
+            commandId,
+            JSON.stringify(fixture.result)
+          ]);
+        }
+        await client.query(`
+          INSERT INTO command_executions(
+            id, subject_id, credential_id, property_id, command_type, idempotency_key,
+            request_hash, correlation_id, state, completed_at, created_at
+          ) VALUES (
+            'command_post_epoch_legacy_shape', $1, 'token_demo_write', $2, 'RESCHEDULE_STAY',
+            'post-epoch-legacy-shape', repeat('3', 64), 'post-epoch-legacy-shape', 'APPLIED',
+            '2099-01-01T00:00:00Z', '2099-01-01T00:00:00Z'
+          )
+        `, [demo.agentSubjectId, demo.propertyId]);
+        await client.query(`
+          INSERT INTO command_receipts(
+            id, command_id, execution_status, business_committed, result, error,
+            resource_refs, fact_refs, committed_at, created_at
+          ) VALUES (
+            'receipt_post_epoch_legacy_shape', 'command_post_epoch_legacy_shape',
+            'EXECUTED', true, $1::jsonb, NULL, '[]'::jsonb, '[]'::jsonb,
+            '2099-01-01T00:00:00Z', '2099-01-01T00:00:00Z'
+          )
+        `, [JSON.stringify(legacyFixtures[0].result)]);
+        const historicalOrderLegacyMoveEffect = {
+          ...legacyMoveEffect,
+          orderId: "order_historical_nulls",
+          effectiveDate: "2029-02-01",
+          stayTimeline: [{ serviceDate: "2029-02-01", inventoryUnitId: demo.secondRoomId }],
+          pricing: {
+            coverageSet: [],
+            cashLines: [],
+            cashRemainder: legacyMoney(0),
+            currentContractAmount: legacyMoney(0)
+          }
+        };
+        await client.query(`
+          INSERT INTO amendments(
+            id, order_id, sequence, amendment_type, reason_code, reason_note,
+            prior_version, new_version, payload, command_id, created_at
+          ) VALUES (
+            'amend_historical_legacy_move', 'order_historical_nulls', 2, 'MOVE_UNIT',
+            'ROOM_MOVE', '迁移前历史换房', 1, 2, $1::jsonb, NULL, now()
+          )
+        `, [JSON.stringify(historicalOrderLegacyMoveEffect)]);
+        await client.query(`
+          INSERT INTO stay_segments(
+            id, stay_id, sequence, inventory_unit_id, arrival_date, departure_date,
+            segment_type, supersedes_segment_id, amendment_id
+          ) VALUES (
+            'segment_historical_legacy_move', 'stay_historical_nulls', 2, $1,
+            '2029-02-01', '2029-02-02', 'MOVE', 'segment_historical_nulls',
+            'amend_historical_legacy_move'
+          )
+        `, [demo.secondRoomId]);
+        await client.query(`
+          INSERT INTO pricing_revisions(
+            id, order_id, revision_no, amendment_id, policy_version_id,
+            arrival_date, departure_date, coverage_set, cash_lines,
+            policy_base_amount_minor, pricing_basis, manual_adjustment_minor,
+            current_contract_amount_minor, currency, created_at
+          )
+          SELECT
+            'revision_historical_legacy_move', order_id, 2, 'amend_historical_legacy_move',
+            policy_version_id, arrival_date, departure_date, coverage_set, cash_lines,
+            policy_base_amount_minor, pricing_basis, manual_adjustment_minor,
+            current_contract_amount_minor, currency, now()
+          FROM pricing_revisions
+          WHERE id = 'revision_historical_nulls'
+        `);
+        await client.query(`
+          UPDATE inventory_claims
+          SET active = false, released_at = now()
+          WHERE id = 'claim_historical_nulls'
+        `);
+        await client.query(`
+          INSERT INTO inventory_claims(
+            id, property_id, room_id, inventory_unit_id, service_date,
+            source_type, source_id, active, released_at
+          ) VALUES (
+            'claim_historical_legacy_move', $1, $2, $2, '2029-02-01',
+            'ORDER_SEGMENT', 'segment_historical_legacy_move', true, NULL
+          )
+        `, [demo.propertyId, demo.secondRoomId]);
+        await client.query(`
+          UPDATE orders
+          SET current_revision_id = 'revision_historical_legacy_move', version = 2
+          WHERE id = 'order_historical_nulls'
+        `);
         const migration026 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/026_stage9_stay_change_guards.sql"), "utf8");
         await client.query(migration026);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('026_stage9_stay_change_guards.sql')");
         const migration027 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/027_stage10_stay_shortening_guards.sql"), "utf8");
         await client.query(migration027);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('027_stage10_stay_shortening_guards.sql')");
+        const migration028 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/028_stage11_move_unit_guards.sql"), "utf8");
+        await client.query(migration028);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('028_stage11_move_unit_guards.sql')");
       } finally {
         await client.end();
       }
@@ -1185,7 +1545,19 @@ describe.sequential("booking channels and external transaction references on Pos
         expect(detail.statusCode, detail.body).toBe(200);
         expect(detail.json()).toMatchObject({
           order: { booking_channel_code: null, channel_order_reference: null, free_stay_category_code: null },
-          collectionFacts: [{ transaction_reference: null }]
+          collectionFacts: [{ transaction_reference: null }],
+          amendments: [{}, {
+            id: "amend_historical_legacy_move",
+            protocolVersion: "PRE_STAGE_11",
+            recoveryMode: "HISTORICAL_READ_ONLY"
+          }],
+          effectiveArrangement: {
+            intervals: [{
+              inventoryUnitId: demo.secondRoomId,
+              arrivalDate: "2029-02-01",
+              departureDate: "2029-02-02"
+            }]
+          }
         });
         expect(Object.hasOwn(detail.json().order.primary_guest_snapshot, "nickname")).toBe(false);
         const fact = await app.inject({
@@ -1284,6 +1656,212 @@ describe.sequential("booking channels and external transaction references on Pos
         });
         expect(historicalCommand.statusCode, historicalCommand.body).toBe(200);
         expect(historicalCommand.json().result).toMatchObject({ factType: "REVERSAL", transactionReference: null });
+
+        const historicalPreviewFactsBeforeConfirm = await historicalDb.selectFrom("command_previews")
+          .select(["id", "normalized_input", "input_hash", "effect", "effect_hash", "status", "used_at"])
+          .where("id", "in", ["preview_legacy_stage9", "preview_legacy_stage10", "preview_legacy_pre_stage11"])
+          .orderBy("id")
+          .execute();
+        for (const fixture of [
+          {
+            suffix: "stage9",
+            commandType: "RESCHEDULE_STAY",
+            protocolVersion: "LEGACY_STAGE_9_10",
+            input: {
+              propertyId: demo.propertyId,
+              orderId: "order_legacy_stage9",
+              newArrivalDate: "2026-07-29",
+              newDepartureDate: "2026-07-31"
+            }
+          },
+          {
+            suffix: "stage10",
+            commandType: "SHORTEN_STAY",
+            protocolVersion: "LEGACY_STAGE_10",
+            input: {
+              propertyId: demo.propertyId,
+              orderId: "order_legacy_stage10",
+              newDepartureDate: "2026-07-31"
+            }
+          },
+          {
+            suffix: "pre_stage11",
+            commandType: "MOVE_UNIT",
+            protocolVersion: "PRE_STAGE_11",
+            input: {
+              propertyId: demo.propertyId,
+              orderId: "order_legacy_stage10_move",
+              newInventoryUnitId: demo.secondRoomId,
+              effectiveDate: "2026-07-30"
+            }
+          }
+        ] as const) {
+          const previewId = `preview_legacy_${fixture.suffix}`;
+          const replayConfirmation = {
+            propertyId: demo.propertyId,
+            commandType: fixture.commandType,
+            confirmation: true,
+            expectedEffectHash: "9".repeat(64),
+            reason: { code: "HISTORICAL_EXACT_REPLAY", note: "历史命令精确重放" }
+          };
+          const replayedPreview = await app.inject({
+            method: "POST",
+            url: "/api/v1/command-previews",
+            headers: {
+              authorization: `Bearer ${demo.writeToken}`,
+              "content-type": "application/json",
+              "idempotency-key": `legacy-preview-${fixture.suffix}`,
+              "x-correlation-id": `legacy-preview-replay-${fixture.suffix}`
+            },
+            payload: { commandType: fixture.commandType, input: fixture.input }
+          });
+          expect(replayedPreview.statusCode, replayedPreview.body).toBe(200);
+          expect(replayedPreview.json()).toMatchObject({
+            preview: { previewId, commandType: fixture.commandType },
+            receipt: {
+              protocolVersion: fixture.protocolVersion,
+              recoveryMode: "HISTORICAL_READ_ONLY"
+            }
+          });
+
+          const replayedConfirm = await app.inject({
+            method: "POST",
+            url: `/api/v1/command-previews/${previewId}/confirm`,
+            headers: {
+              authorization: `Bearer ${demo.writeToken}`,
+              "content-type": "application/json",
+              "idempotency-key": `legacy-command-${fixture.suffix}`,
+              "x-correlation-id": `legacy-command-replay-${fixture.suffix}`
+            },
+            payload: replayConfirmation
+          });
+          expect(replayedConfirm.statusCode, replayedConfirm.body).toBe(200);
+          expect(replayedConfirm.json()).toMatchObject({
+            protocolVersion: fixture.protocolVersion,
+            recoveryMode: "HISTORICAL_READ_ONLY"
+          });
+
+          const previewResponse = await app.inject({
+            method: "GET",
+            url: `/api/v1/command-previews/${previewId}`,
+            headers: { authorization: `Bearer ${demo.writeToken}` }
+          });
+          expect(previewResponse.statusCode, previewResponse.body).toBe(200);
+          expect(previewResponse.json()).toMatchObject({
+            command_type: fixture.commandType,
+            protocolVersion: fixture.protocolVersion,
+            recoveryMode: "HISTORICAL_READ_ONLY",
+            confirmable: false
+          });
+
+          for (const url of [
+            `/api/v1/receipts/receipt_legacy_${fixture.suffix}`,
+            `/api/v1/receipts/receipt_preview_legacy_${fixture.suffix}`,
+            `/api/v1/commands/command_legacy_${fixture.suffix}`,
+            `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=${fixture.commandType}&idempotencyKey=legacy-command-${fixture.suffix}`
+          ]) {
+            const response = await app.inject({
+              method: "GET",
+              url,
+              headers: { authorization: `Bearer ${demo.writeToken}` }
+            });
+            expect(response.statusCode, `${url}: ${response.body}`).toBe(200);
+            expect(response.json()).toMatchObject({
+              protocolVersion: fixture.protocolVersion,
+              recoveryMode: "HISTORICAL_READ_ONLY"
+            });
+          }
+
+          const rejectedConfirm = await app.inject({
+            method: "POST",
+            url: `/api/v1/command-previews/${previewId}/confirm`,
+            headers: {
+              authorization: `Bearer ${demo.writeToken}`,
+              "content-type": "application/json",
+              "idempotency-key": `legacy-confirm-${fixture.suffix}`,
+              "x-correlation-id": `legacy-confirm-${fixture.suffix}`
+            },
+            payload: {
+              propertyId: demo.propertyId,
+              commandType: fixture.commandType,
+              confirmation: true,
+              expectedEffectHash: "9".repeat(64),
+              reason: { code: "HISTORICAL_REPLAY_PROBE", note: "历史预览只读验证" }
+            }
+          });
+          expect(rejectedConfirm.statusCode, rejectedConfirm.body).toBe(409);
+          expect(rejectedConfirm.json().error?.code).toBe("PREVIEW_STALE");
+        }
+        const historicalPreviewFactsAfterConfirm = await historicalDb.selectFrom("command_previews")
+          .select(["id", "normalized_input", "input_hash", "effect", "effect_hash", "status", "used_at"])
+          .where("id", "in", ["preview_legacy_stage9", "preview_legacy_stage10", "preview_legacy_pre_stage11"])
+          .orderBy("id")
+          .execute();
+        expect(historicalPreviewFactsAfterConfirm).toEqual(historicalPreviewFactsBeforeConfirm);
+        expect(historicalPreviewFactsAfterConfirm.every((preview) => preview.status === "OPEN" && preview.used_at === null)).toBe(true);
+
+        const legacyStoredBefore = await historicalDb.selectFrom("command_previews")
+          .select(["id", "effect"])
+          .where("id", "in", ["preview_legacy_stage9", "preview_legacy_stage10", "preview_legacy_pre_stage11"])
+          .orderBy("id")
+          .execute();
+        const legacyEffectsById = new Map(legacyStoredBefore.map((row) => [row.id, row.effect]));
+        const postEpochLegacyEffect = legacyEffectsById.get("preview_legacy_stage9") as Record<string, unknown>;
+        expect(postEpochLegacyEffect).toMatchObject({ operation: "RESCHEDULE_STAY" });
+        expect(Object.hasOwn(postEpochLegacyEffect.before as object, "stayTimeline")).toBe(false);
+        expect(legacyEffectsById.get("preview_legacy_stage10")).toMatchObject({ operation: "SHORTEN_STAY" });
+        expect(legacyEffectsById.get("preview_legacy_pre_stage11")).toMatchObject({
+          orderId: "order_legacy_stage10_move",
+          effectiveDate: "2026-07-30"
+        });
+        const epoch = await historicalDb.selectFrom("schema_migrations")
+          .select("applied_at")
+          .where("name", "=", "028_stage11_move_unit_guards.sql")
+          .executeTakeFirstOrThrow();
+        await historicalDb.insertInto("command_previews").values({
+          id: "preview_post_epoch_legacy_shape",
+          subject_id: demo.agentSubjectId,
+          property_id: demo.propertyId,
+          command_type: "RESCHEDULE_STAY",
+          normalized_input: {},
+          input_hash: "5".repeat(64),
+          effect: postEpochLegacyEffect,
+          effect_hash: "4".repeat(64),
+          basis_versions: {},
+          expires_at: new Date("2035-01-01T00:00:00.000Z"),
+          status: "OPEN",
+          created_at: epoch.applied_at
+        }).execute();
+        for (const url of [
+          "/api/v1/command-previews/preview_post_epoch_legacy_shape",
+          "/api/v1/receipts/receipt_post_epoch_legacy_shape",
+          "/api/v1/commands/command_post_epoch_legacy_shape"
+        ]) {
+          const response = await app.inject({
+            method: "GET",
+            url,
+            headers: { authorization: `Bearer ${demo.writeToken}` }
+          });
+          expect(response.statusCode, `${url}: ${response.body}`).toBe(500);
+          expect(response.json().code).toBe("INTERNAL_ERROR");
+        }
+        await expect(historicalDb.insertInto("amendments").values({
+          id: "amend_post_epoch_legacy_shape",
+          order_id: "order_historical_nulls",
+          sequence: 3,
+          amendment_type: "MOVE_UNIT",
+          reason_code: "ROOM_MOVE",
+          reason_note: "迁移后旧协议写入探针",
+          prior_version: 2,
+          new_version: 3,
+          payload: legacyEffectsById.get("preview_legacy_pre_stage11")!,
+          command_id: null,
+          created_at: epoch.applied_at
+        }).execute()).rejects.toBeDefined();
+        expect(await historicalDb.selectFrom("amendments")
+          .select("id")
+          .where("id", "=", "amend_post_epoch_legacy_shape")
+          .executeTakeFirst()).toBeUndefined();
 
         const storedPreviews = await historicalDb.selectFrom("command_previews")
           .select(["id", "effect"])

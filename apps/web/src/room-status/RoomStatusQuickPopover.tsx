@@ -23,8 +23,12 @@ export function roomStatusPopoverMeasuredHeight(
 
 export type RoomStatusQuickPopoverCloseReason = "ACTION" | "DISMISS";
 
-export function roomStatusPopoverViewportEventShouldClose(eventType: string, targetInsidePopover: boolean): boolean {
-  return eventType !== "scroll" || !targetInsidePopover;
+export function roomStatusPopoverViewportEventShouldClose(
+  eventType: string,
+  targetInsidePopover: boolean,
+  anchorVisible: boolean
+): boolean {
+  return eventType !== "scroll" || (!targetInsidePopover && !anchorVisible);
 }
 
 export function roomStatusPopoverPosition(
@@ -199,7 +203,16 @@ export function RoomStatusQuickPopover({
     const onViewportChange = (event: Event) => {
       const target = event.target;
       const targetInsidePopover = target instanceof Node && Boolean(popoverRef.current?.contains(target));
-      if (!roomStatusPopoverViewportEventShouldClose(event.type, targetInsidePopover)) return;
+      const anchorBounds = anchor.getBoundingClientRect();
+      const anchorVisible = anchor.isConnected
+        && anchorBounds.right > 0
+        && anchorBounds.bottom > 0
+        && anchorBounds.left < window.innerWidth
+        && anchorBounds.top < window.innerHeight;
+      if (!roomStatusPopoverViewportEventShouldClose(event.type, targetInsidePopover, anchorVisible)) {
+        if (!targetInsidePopover) reposition();
+        return;
+      }
       close(false);
     };
     document.addEventListener("pointerdown", onPointerDown, true);

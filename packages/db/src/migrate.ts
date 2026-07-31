@@ -9,6 +9,7 @@ const client = new pg.Client({ connectionString: databaseUrl() });
 await client.connect();
 let transactionOpen = false;
 let migrationLockHeld = false;
+let protocolEpochLockHeld = false;
 try {
   await client.query("SELECT pg_advisory_lock(hashtextextended('qintopia:migrate', 0))");
   migrationLockHeld = true;
@@ -21,6 +22,10 @@ try {
 
   const migrationNames = (await readdir(migrationsDirectory)).filter((name) => /^\d+.*\.sql$/.test(name)).sort();
   for (const migrationName of migrationNames) {
+    if (migrationName === "028_stage11_move_unit_guards.sql") {
+      await client.query("SELECT pg_advisory_lock(hashtextextended('qintopia:protocol-epoch', 0))");
+      protocolEpochLockHeld = true;
+    }
     await client.query("BEGIN");
     transactionOpen = true;
     try {
@@ -32,6 +37,10 @@ try {
       await client.query("COMMIT");
       transactionOpen = false;
       process.stdout.write(applied.rowCount === 0 ? `Applied ${migrationName}\n` : `${migrationName} already applied\n`);
+      if (protocolEpochLockHeld) {
+        await client.query("SELECT pg_advisory_unlock(hashtextextended('qintopia:protocol-epoch', 0))");
+        protocolEpochLockHeld = false;
+      }
     } catch (error) {
       await client.query("ROLLBACK");
       transactionOpen = false;
@@ -42,6 +51,7 @@ try {
   if (transactionOpen) await client.query("ROLLBACK");
   throw error;
 } finally {
+  if (protocolEpochLockHeld) await client.query("SELECT pg_advisory_unlock(hashtextextended('qintopia:protocol-epoch', 0))");
   if (migrationLockHeld) await client.query("SELECT pg_advisory_unlock(hashtextextended('qintopia:migrate', 0))");
   await client.end();
 }

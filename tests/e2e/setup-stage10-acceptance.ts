@@ -6,6 +6,7 @@ import { createDatabase } from "../../packages/db/src/database.ts";
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { resetE2eDatabase } from "./reset-database.ts";
 
 const demo = {
   propertyId: "prop_qintopia_demo",
@@ -303,9 +304,8 @@ export async function prepareStage10Acceptance(
   databaseUrl = defaultDatabaseUrl,
   options: { reset?: boolean; suffix?: string; unitCodes?: readonly string[] } = {}
 ): Promise<Stage10AcceptanceFixture> {
-  const db = options.reset === false
-    ? createDatabase(databaseUrl)
-    : await (await import("../helpers/database.ts")).resetDatabase(databaseUrl);
+  if (options.reset !== false) await resetE2eDatabase(databaseUrl);
+  const db = createDatabase(databaseUrl);
   try {
     const businessDate = todayInTimeZone("Asia/Shanghai");
     const suffix = options.suffix ?? `manual-${businessDate.replaceAll("-", "")}`;
@@ -453,7 +453,7 @@ export async function prepareStage10Acceptance(
       propertyId: demo.propertyId,
       orderId: historicalMoveBase.orderId,
       newInventoryUnitId: historicalDestinationRow.id,
-      effectiveDate: addDays(businessDate, -1)
+      effectiveDate: businessDate
     }, `${suffix}-historical-move-command`);
     const futureDestinationRow = await unitByCode(db, futureDestination);
     await execute(db, "MOVE_UNIT", {

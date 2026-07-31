@@ -363,13 +363,15 @@ describe("whole-room occupants", () => {
     const target = capacityTwoRooms[1]!;
     const { receipt } = await createTwoOccupantOrder(source.id, "2032-08-01", "2032-08-03", "move-capacity-stale");
     const orderId = receipt.result!.orderId as string;
+    const currentAmountMinor = (await getOrderView(db, orderId)).amounts.currentContractAmount.minorUnits;
     const prepared = await createCommandPreview(db, principal, {
       commandType: "MOVE_UNIT",
       input: {
         propertyId: demo.propertyId,
         orderId,
         newInventoryUnitId: target.id,
-        effectiveDate: "2032-08-02"
+        effectiveDate: "2032-08-02",
+        targetCurrentContractAmountMinor: currentAmountMinor
       }
     }, metadata("move-capacity-stale-preview"));
     expect(prepared.preview.effect).toMatchObject({ occupantCount: 2, occupancyCapacity: 2 });
@@ -378,7 +380,10 @@ describe("whole-room occupants", () => {
       .where("id", "=", prepared.preview.previewId)
       .executeTakeFirstOrThrow()).basis_versions).toMatchObject({
       occupantCount: 2,
-      destinationOccupancyCapacity: 2
+      destinationInventoryUnit: {
+        id: target.id,
+        occupancyCapacity: 2
+      }
     });
     const before = await Promise.all([
       db.selectFrom("amendments").select(({ fn }) => fn.countAll<string>().as("count")).where("order_id", "=", orderId).executeTakeFirstOrThrow(),
@@ -449,6 +454,19 @@ describe("whole-room occupants", () => {
 
     const view = await getOrderView(db, orderId);
     await expect(db.transaction().execute(async (trx) => {
+      const moveCommandId = "command_direct_low_capacity_move";
+      await trx.insertInto("command_executions").values({
+        id: moveCommandId,
+        subject_id: principal.subjectId,
+        credential_id: principal.credentialId,
+        property_id: demo.propertyId,
+        command_type: "MOVE_UNIT",
+        idempotency_key: "direct-low-capacity-move",
+        request_hash: "a".repeat(64),
+        correlation_id: "direct-low-capacity-move",
+        state: "EXECUTING",
+        completed_at: null
+      }).execute();
       const amendmentId = "amend_direct_low_capacity_move";
       await trx.insertInto("amendments").values({
         id: amendmentId,
@@ -460,7 +478,7 @@ describe("whole-room occupants", () => {
         prior_version: 1,
         new_version: 2,
         payload: {},
-        command_id: commandId
+        command_id: moveCommandId
       }).execute();
       await trx.insertInto("stay_segments").values({
         id: "segment_direct_low_capacity_move",
@@ -473,6 +491,7 @@ describe("whole-room occupants", () => {
         supersedes_segment_id: view.currentSegment.id,
         amendment_id: amendmentId
       }).execute();
+      await sql`set constraints stay_segments_validate_occupant_set immediate`.execute(trx);
     })).rejects.toMatchObject({ constraint: "orders_occupancy_capacity_exceeded" });
     expect((await getOrderView(db, orderId)).segments).toHaveLength(1);
   });

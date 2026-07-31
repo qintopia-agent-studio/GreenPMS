@@ -631,6 +631,16 @@ export interface ShortenStayInputDto {
   manualPriceAdjustmentReason?: string;
 }
 
+export interface MoveUnitInputDto {
+  propertyId: string;
+  orderId: string;
+  newInventoryUnitId: string;
+  effectiveDate: string;
+  targetCurrentContractAmountMinor?: number;
+  channelPriceDifferenceReason?: string;
+  manualPriceAdjustmentReason?: string;
+}
+
 export interface CreateOrderPricingDecisionDto {
   pricingBasis: CreateOrderPricingBasis;
   policyBaseAmountMinor: number;

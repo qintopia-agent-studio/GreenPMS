@@ -489,7 +489,9 @@ export interface CommandRequest {
   input: Record<string, unknown>;
   title: string;
   description: string;
-  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT";
+  recoveryEffectHash?: string;
+  inventoryUnitLabels?: Record<string, string>;
   initialReason?: CommandReason;
 }
 

@@ -19,6 +19,8 @@ import {
   orderDetailBackTarget,
   orderFulfillmentNotice,
   orderStayDateRequestIsCompatible,
+  orderRefreshMustCloseEditor,
+  orderViewPayloadChanged,
   wholeYuanAmountMinor,
   orderViewMatchesPrincipalScope,
   orderedOrderOccupants,
@@ -36,6 +38,38 @@ import {
   type CommandDialogProgress,
   type PersistedCommandRecovery
 } from "../ui";
+
+describe("order detail background refresh", () => {
+  it("keeps an identical order DTO stable while detecting real fact changes", () => {
+    const previous = {
+      order: { id: "order_poll", version: 3, current_revision_id: "revision_3" },
+      effectiveArrangement: { arrivalDate: "2026-08-01", departureDate: "2026-08-04" }
+    } as OrderViewDto;
+    expect(orderViewPayloadChanged(previous, structuredClone(previous))).toBe(false);
+    const changed = structuredClone(previous);
+    changed.order.version = 4;
+    expect(orderViewPayloadChanged(previous, changed)).toBe(true);
+  });
+
+  it("uses the latest editor state when an earlier poll response arrives", () => {
+    const previous = {
+      order: { id: "order_poll_race", version: 3, current_revision_id: "revision_3" },
+      effectiveArrangement: { arrivalDate: "2026-08-01", departureDate: "2026-08-04" }
+    } as OrderViewDto;
+    const changed = structuredClone(previous);
+    changed.order.version = 4;
+
+    const editorState = { current: false };
+    const pollResponseArrives = (response: OrderViewDto) => (
+      orderRefreshMustCloseEditor(previous, response, editorState.current)
+    );
+
+    // The poll request started before the operator opened the move-unit drawer.
+    editorState.current = true;
+    expect(pollResponseArrives(changed)).toBe(true);
+    expect(pollResponseArrives(structuredClone(previous))).toBe(false);
+  });
+});
 
 describe("fulfillment result presentation", () => {
   const base = {
@@ -801,17 +835,99 @@ describe("shared Web command recovery persistence", () => {
       subjectId: context.subjectId,
       scopeId: context.scopeId,
       request
-    }, { ...confirming, confirmationKey: "web-confirm-shorten-stay" }).recovery!;
+    }, {
+      ...confirming,
+      confirmationKey: "web-confirm-shorten-stay",
+      effectHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }).recovery!;
 
     expect(recovery).toMatchObject({ commandType: "SHORTEN_STAY", presentation: "STAY_DATES" });
     expect(recoveryCommandRequest(recovery)).toMatchObject({
       commandType: "SHORTEN_STAY",
       presentation: "STAY_DATES",
       title: "恢复缩短住宿或提前退房结果",
+      recoveryEffectHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       input: { propertyId: "property_qintopia" }
     });
     expect(recovery).not.toHaveProperty("newDepartureDate");
     expect(recoveryCommandRequest(recovery).input).not.toHaveProperty("newDepartureDate");
+  });
+
+  it("retains MOVE_UNIT as a business recovery without persisting its room or pricing draft", () => {
+    const request = {
+      commandType: "MOVE_UNIT",
+      title: "换房",
+      description: "核对换房",
+      presentation: "MOVE_UNIT",
+      input: {
+        propertyId: "property_qintopia",
+        orderId: "order_internal_target",
+        newInventoryUnitId: "room_internal_target",
+        effectiveDate: "2026-07-29",
+        targetCurrentContractAmountMinor: 20_000
+      }
+    } satisfies CommandRequest;
+    const recovery = transitionPersistedCommandRecovery(undefined, {
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      request
+    }, {
+      ...confirming,
+      confirmationKey: "web-confirm-move-unit",
+      effectHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }).recovery!;
+
+    expect(recovery).toMatchObject({ commandType: "MOVE_UNIT", presentation: "MOVE_UNIT" });
+    expect(recoveryCommandRequest(recovery)).toMatchObject({
+      commandType: "MOVE_UNIT",
+      presentation: "MOVE_UNIT",
+      title: "恢复办理换房结果",
+      recoveryEffectHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      input: { propertyId: "property_qintopia" }
+    });
+    expect(JSON.stringify(recovery)).not.toMatch(/room_internal_target|2026-07-29|20000/);
+  });
+
+  it("fails closed when a stay-date or move recovery loses its bound effect hash", () => {
+    const storage = new MemoryStorage();
+    const key = commandRecoveryStorageKey(context.subjectId, context.scopeId);
+    const strictRecovery = {
+      version: 1,
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      propertyId: "property_qintopia",
+      commandType: "SHORTEN_STAY",
+      confirmationKey: "web-confirm-strict-recovery",
+      targetRefs: ["orderId=order_internal_target"],
+      presentation: "STAY_DATES",
+      state: "UNKNOWN",
+      updatedAt: "2026-07-30T10:00:00.000Z"
+    };
+
+    storage.setItem(key, JSON.stringify(strictRecovery));
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId).kind).toBe("CORRUPT");
+
+    storage.setItem(key, JSON.stringify({ ...strictRecovery, effectHash: "not-a-sha256" }));
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId).kind).toBe("CORRUPT");
+
+    expect(transitionPersistedCommandRecovery(undefined, {
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      request: {
+        commandType: "MOVE_UNIT",
+        title: "换房",
+        description: "核对换房",
+        presentation: "MOVE_UNIT",
+        input: { propertyId: "property_qintopia", orderId: "order_internal_target" }
+      }
+    }, {
+      state: "CONFIRMING",
+      previewId: confirming.previewId,
+      confirmationKey: "web-confirm-move-without-hash"
+    })).toEqual({
+      accepted: false,
+      recovery: undefined
+    });
   });
 
   it("rejects a damaged recovery record that pairs fulfillment presentation with another command", () => {

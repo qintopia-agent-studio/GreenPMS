@@ -124,7 +124,12 @@ async function showFixtureRange(page: Page, options: { clipped?: boolean; nights
   else await expect(page.getByTestId("arrival-date")).toHaveValue(rangeStart);
 }
 
-async function selectOccupiedCell(page: Page, unitId: string, serviceDate: string, orderId: string): Promise<Locator> {
+async function selectOccupiedCell(
+  page: Page,
+  unitId: string,
+  serviceDate: string,
+  orderId: string
+): Promise<Locator> {
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
@@ -134,6 +139,8 @@ async function selectOccupiedCell(page: Page, unitId: string, serviceDate: strin
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", unitId);
+  await expect(popover).toHaveAttribute("data-selection-kind", "day");
   const orderOptions = popover.locator(".room-status-quick-orders button");
   await expect(orderOptions).toHaveCount(1);
   await orderOptions.click();
@@ -207,6 +214,8 @@ test("split-bed parent refuses to guess while each expanded bed opens its own or
   await expect(page.locator(".room-status-order-context")).toHaveCount(0);
   await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
   const parentPopover = page.getByTestId("room-status-quick-popover");
+  await expect(parentPopover).toHaveAttribute("data-unit-id", fixture.splitBed.roomId);
+  await expect(parentPopover).toHaveAttribute("data-selection-kind", "day");
   await expect(parentPopover.locator(".room-status-quick-orders button")).toHaveCount(2);
   await expect(parentPopover).toContainText("山峰");
   await expect(parentPopover).toContainText("小满");
@@ -304,7 +313,7 @@ test("selecting either side of a move highlights one Stay across rows and a clip
   await expect(roomCell(page, fixture.movedStay.fromRoomId, fixture.dates.moveDate)).not.toHaveClass(/is-stay-selected/);
 });
 
-test("returning after moving the selected date restores the same Stay on its latest room", async ({ page }, testInfo) => {
+test("moving the selected Stay in room status restores it on the latest room", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7R return identity coverage");
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
@@ -322,20 +331,21 @@ test("returning after moving the selected date restores the same Stay on its lat
     selectedDate,
     fixture.movedStay.orderId
   );
+  const roomStatusUrl = page.url();
   await context.getByRole("button", { name: "换房", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "小满", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "换房", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "换房", exact: true })).toBeVisible();
-  await page.getByTestId("move-unit-id").selectOption(fixture.movedStay.fromRoomId);
-  await page.getByTestId("move-effective-date").fill(selectedDate);
-  await page.getByRole("button", { name: "继续核对", exact: true }).click();
-  await page.getByTestId("create-command-preview").click();
-  await page.getByTestId("reason-note").fill("阶段 7R 返回房态选择回归");
-  await page.getByTestId("confirm-command").click();
-  const receipt = page.getByTestId("command-receipt");
-  await expect(receipt).toContainText("操作已完成");
-  await page.getByRole("button", { name: "完成", exact: true }).click();
-  await page.getByRole("link", { name: "返回房态", exact: true }).click();
+  await expect(page).toHaveURL(roomStatusUrl);
+  const moveDrawer = page.getByRole("dialog", { name: "换房", exact: true });
+  await expect(moveDrawer).toBeVisible();
+  await expect(moveDrawer.getByTestId("move-unit-order-context")).toContainText("小满");
+  await moveDrawer.getByTestId("move-unit-id").selectOption(fixture.movedStay.fromRoomId);
+  await moveDrawer.getByTestId("move-effective-date").fill(selectedDate);
+  await moveDrawer.getByTestId("move-unit-reason").fill("阶段 7R 返回房态选择回归");
+  await expect(moveDrawer.getByTestId("move-unit-preview")).toBeVisible({ timeout: 30_000 });
+  await moveDrawer.getByRole("button", { name: "继续核对", exact: true }).click();
+  const moveReview = page.getByRole("dialog", { name: "换房", exact: true });
+  await expect(moveReview.getByTestId("command-effect")).toBeVisible({ timeout: 30_000 });
+  await moveReview.getByTestId("confirm-command").click();
+  await expect(moveReview).toBeHidden({ timeout: 30_000 });
 
   const restoredContext = orderContext(page, fixture.movedStay.orderId);
   await expect(restoredContext).toBeVisible();

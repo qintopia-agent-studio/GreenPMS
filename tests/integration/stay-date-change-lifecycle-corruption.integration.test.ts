@@ -57,14 +57,19 @@ async function execute(envelope: CommandEnvelope, prefix: string) {
   }, metadata(`${prefix}-confirm`));
 }
 
-async function createReservedOrder(prefix: string, arrivalDate: string, departureDate: string) {
+async function createReservedOrder(
+  prefix: string,
+  arrivalDate: string,
+  departureDate: string,
+  pricingPolicyVersionId: string = demo.transientPolicyId
+) {
   const quote = await createQuote(db, {
     propertyId: demo.propertyId,
     inventoryUnitId: demo.roomId,
     stayType: "TRANSIENT",
     arrivalDate,
     departureDate,
-    pricingPolicyVersionId: demo.transientPolicyId
+    pricingPolicyVersionId
   });
   const receipt = await execute({
     commandType: "CREATE_ORDER",
@@ -205,7 +210,8 @@ describe.sequential("4.2 stay-date change lifecycle corruption guards", () => {
     const orderId = await createReservedOrder(
       "lifecycle-segment",
       shiftDate(businessDate, -3),
-      shiftDate(businessDate, -1)
+      shiftDate(businessDate, -1),
+      demo.publicPricingPolicyId
     );
     await markHistoricalOrderInHouse(orderId, shiftDate(businessDate, -3));
     await execute({

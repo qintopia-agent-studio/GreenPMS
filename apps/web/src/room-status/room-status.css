@@ -766,6 +766,7 @@
 
 .room-status-bed-occupancy-tooltip {
   position: fixed;
+  box-sizing: border-box;
   z-index: 80;
   width: max-content;
   max-width: min(320px, calc(100vw - 24px));
@@ -795,7 +796,7 @@
 }
 
 .room-status-bed-occupancy-tooltip.is-above {
-  transform: translate(-50%, -100%);
+  transform: translateX(-50%);
 }
 
 .room-status-mark-available { color: var(--success); }

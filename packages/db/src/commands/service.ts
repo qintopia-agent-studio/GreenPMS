@@ -18,6 +18,11 @@ import { enumerateServiceDates, newId, paidStayTypeForNights, sha256, stableHash
 import { createQuoteInTransaction } from "../pricing-service.ts";
 import { bumpRoomStatusRevision } from "../room-status.ts";
 import type { Database } from "../schema.ts";
+import {
+  legacyEffectProtocol,
+  legacyReceiptProtocol,
+  type HistoricalProtocolVersion
+} from "../historical-command-protocol.ts";
 import { applyCommand, lockCommandResources } from "./apply.ts";
 import { buildCommandEffect, projectCommandEffectForRead, projectPrimaryGuestForRead } from "./effects.ts";
 
@@ -34,6 +39,17 @@ export interface UnknownCommandResult {
   executionStatus: "UNKNOWN";
   businessCommitted: false;
   correlationId?: string;
+}
+
+export type ReceiptReadDto = ReceiptDto & {
+  protocolVersion?: HistoricalProtocolVersion;
+  recoveryMode?: "HISTORICAL_READ_ONLY";
+};
+
+class HistoricalPreviewReadOnlyError extends DomainError {
+  constructor() {
+    super("PREVIEW_STALE", "Historical previews are read-only; request a new preview", 409);
+  }
 }
 
 type ExecutableCommandType = (typeof commandTypes)[number];
@@ -60,6 +76,17 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "COMPLETE_CLEANING"
 ]);
 
+const strictRecoveryEvidenceCommands = new Set<CommandType>([
+  "RESCHEDULE_STAY",
+  "EXTEND_STAY",
+  "SHORTEN_STAY",
+  "MOVE_UNIT"
+]);
+
+async function lockCommandProtocolEpoch(trx: Transaction<Database>): Promise<void> {
+  await sql`select pg_advisory_xact_lock_shared(hashtextextended('qintopia:protocol-epoch', 0::bigint))`.execute(trx);
+}
+
 function assertWriteMetadata(idempotencyKey: string | undefined, correlationId: string | undefined): { idempotencyKey: string; correlationId: string } {
   if (!idempotencyKey?.trim()) throw new DomainError("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required", 400);
   if (!correlationId?.trim()) throw new DomainError("CORRELATION_ID_REQUIRED", "X-Correlation-ID header is required", 400);
@@ -77,6 +104,87 @@ function asStringArray(value: unknown): string[] {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+async function stage11ProtocolEpoch(db: Kysely<Database> | Transaction<Database>): Promise<Date> {
+  const migration = await db.selectFrom("schema_migrations")
+    .select("applied_at")
+    .where("name", "=", "028_stage11_move_unit_guards.sql")
+    .executeTakeFirst();
+  if (!migration) throw new DomainError("INTERNAL_ERROR", "Stage 11 protocol epoch is unavailable", 500);
+  return asDate(migration.applied_at);
+}
+
+async function assertLegacyReadPredatesStage11(
+  db: Kysely<Database> | Transaction<Database>,
+  createdAt: Date | string,
+  resource: string
+): Promise<void> {
+  const epoch = await stage11ProtocolEpoch(db);
+  if (asDate(createdAt).getTime() >= epoch.getTime()) {
+    throw new DomainError("INTERNAL_ERROR", `${resource} uses a legacy protocol shape after the Stage 11 epoch`, 500);
+  }
+}
+
+async function bindPersistedEffectHash(
+  trx: Transaction<Database>,
+  commandId: string,
+  commandType: CommandType,
+  confirmedEffect: Record<string, unknown>,
+  rebuiltEffectHash: string
+): Promise<string> {
+  const amendments = await trx.selectFrom("amendments")
+    .select(["id", "payload"])
+    .where("command_id", "=", commandId)
+    .where("amendment_type", "=", commandType)
+    .execute();
+  if (amendments.length !== 1) {
+    throw new Error("Command effect does not have one authoritative amendment");
+  }
+  const persistedEffect = asRecord(amendments[0]!.payload);
+  if (!persistedEffect) {
+    throw new Error("Persisted command effect is malformed");
+  }
+  if (stableHash(persistedEffect) !== stableHash(confirmedEffect)) {
+    throw new Error("Persisted command effect differs from the confirmed Preview");
+  }
+  return rebuiltEffectHash;
+}
+
+export async function projectStoredPreviewForRead(
+  db: Kysely<Database> | Transaction<Database>,
+  preview: {
+    command_type: string;
+    effect: unknown;
+    created_at: Date | string;
+    [key: string]: unknown;
+  }
+): Promise<Record<string, unknown>> {
+  const response = {
+    id: preview.id,
+    property_id: preview.property_id,
+    command_type: preview.command_type,
+    input_hash: preview.input_hash,
+    effect: preview.effect,
+    effect_hash: preview.effect_hash,
+    expires_at: preview.expires_at,
+    status: preview.status,
+    created_at: preview.created_at,
+    used_at: preview.used_at
+  };
+  const effect = asRecord(preview.effect);
+  if (!effect) return response;
+  const projectedEffect = projectCommandEffectForRead(preview.command_type, effect);
+  const protocolVersion = legacyEffectProtocol(preview.command_type, projectedEffect);
+  if (!protocolVersion) return { ...response, effect: projectedEffect };
+  await assertLegacyReadPredatesStage11(db, preview.created_at, "Stored preview");
+  return {
+    ...response,
+    effect: projectedEffect,
+    protocolVersion,
+    recoveryMode: "HISTORICAL_READ_ONLY",
+    confirmable: false
+  };
 }
 
 function isTokenLifecycleCommand(commandType: string): boolean {
@@ -335,20 +443,25 @@ async function existingQuoteCommand(
   });
 }
 
-async function receiptByCommand(db: Kysely<Database> | Transaction<Database>, commandId: string): Promise<ReceiptDto | undefined> {
+async function receiptByCommand(
+  db: Kysely<Database> | Transaction<Database>,
+  commandId: string,
+  readMode: "STRICT_CURRENT" | "HISTORICAL_READ" = "STRICT_CURRENT"
+): Promise<ReceiptReadDto | undefined> {
   const row = await db.selectFrom("command_receipts")
     .innerJoin("command_executions", "command_executions.id", "command_receipts.command_id")
     .select([
       "command_receipts.id", "command_receipts.command_id", "command_receipts.execution_status", "command_receipts.business_committed",
       "command_receipts.result", "command_receipts.error", "command_receipts.resource_refs", "command_receipts.fact_refs", "command_receipts.committed_at",
-      "command_executions.correlation_id", "command_executions.command_type"
+      "command_executions.correlation_id", "command_executions.command_type",
+      "command_receipts.created_at as protocol_created_at"
     ])
     .where("command_receipts.command_id", "=", commandId).executeTakeFirst();
   if (!row) return undefined;
   const storedResult = asRecord(row.result);
   const result = storedResult ? projectReceiptResultForRead(row.command_type, storedResult) : undefined;
   const error = asRecord(row.error) as ErrorDto | undefined;
-  return {
+  const receipt: ReceiptReadDto = {
     receiptId: row.id,
     commandId: row.command_id,
     executionStatus: row.execution_status,
@@ -360,6 +473,11 @@ async function receiptByCommand(db: Kysely<Database> | Transaction<Database>, co
     factRefs: asStringArray(row.fact_refs),
     ...(row.committed_at ? { committedAt: asDate(row.committed_at).toISOString() } : {})
   };
+  if (readMode !== "HISTORICAL_READ" || !result) return receipt;
+  const protocolVersion = legacyReceiptProtocol(row.command_type, result);
+  if (!protocolVersion) return receipt;
+  await assertLegacyReadPredatesStage11(db, row.protocol_created_at, "Command receipt");
+  return { ...receipt, protocolVersion, recoveryMode: "HISTORICAL_READ_ONLY" };
 }
 
 function projectReceiptResultForRead(commandType: string, result: Record<string, unknown>): Record<string, unknown> {
@@ -408,7 +526,7 @@ async function replayOrConflict(db: Kysely<Database> | Transaction<Database>, op
     .executeTakeFirst();
   if (!existing) return undefined;
   if (existing.request_hash !== options.requestHash) throw new DomainError("IDEMPOTENCY_KEY_REUSED", "Idempotency key was already used with a different request", 409);
-  const receipt = await receiptByCommand(db, existing.id);
+  const receipt = await receiptByCommand(db, existing.id, "HISTORICAL_READ");
   if (receipt) return receipt;
   throw new DomainError("COMMAND_STATUS_UNKNOWN", "Command is still executing or its final state is unknown", 409, true, { commandId: existing.id });
 }
@@ -591,6 +709,7 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
   const commandLockKey = executionLockKey(principal.subjectId, requestedPropertyId, executionType, headers.idempotencyKey);
 
   return withExecutionLock(db, commandLockKey, (lockedDb) => lockedDb.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
+    await lockCommandProtocolEpoch(trx);
     const frozenInput = freezeCreateOrderOccupantIds(normalizedEnvelope.commandType, normalizedEnvelope.input);
     const built = await buildCommandEffect(trx, normalizedEnvelope.commandType, frozenInput);
     await assertTokenExpiryCeiling(trx, principal, normalizedEnvelope.commandType, built.effect);
@@ -722,6 +841,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
   return withExecutionLock(db, lockKey, async (lockedDb) => {
     try {
       return await lockedDb.transaction().execute(async (trx) => {
+        await lockCommandProtocolEpoch(trx);
         await revalidateConfirmWriteAccess(trx, principal, propertyId, commandType);
         const replay = await replayOrConflict(trx, {
           subjectId: principal.subjectId,
@@ -779,6 +899,15 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         if (asDate(preview.expires_at).getTime() <= Date.now()) {
           throw new DomainError("PREVIEW_STALE", "Preview has expired; request a new preview", 409, false, { causeCode: "PREVIEW_EXPIRED" });
         }
+        const storedEffect = asRecord(preview.effect);
+        if (!storedEffect) throw new DomainError("INTERNAL_ERROR", "Stored Preview effect is malformed", 500);
+        const legacyProtocolVersion = storedEffect
+          ? legacyEffectProtocol(preview.command_type, storedEffect)
+          : undefined;
+        if (legacyProtocolVersion) {
+          await assertLegacyReadPredatesStage11(trx, preview.created_at, "Stored preview");
+          throw new HistoricalPreviewReadOnlyError();
+        }
         if (preview.effect_hash !== confirmation.expectedEffectHash) throw new DomainError("CONFIRMATION_MISMATCH", "Confirmed effect hash does not match the preview", 409);
         await lockCommandResources(trx, commandType, preview.normalized_input);
         let rebuilt;
@@ -812,18 +941,24 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           reason: confirmation.reason,
           commandId: inserted.id
         });
+        const persistedEffectHash = strictRecoveryEvidenceCommands.has(commandType)
+          ? await bindPersistedEffectHash(trx, inserted.id, commandType, storedEffect, rebuilt.effectHash)
+          : undefined;
         if (roomStatusVisibleCommands.has(commandType)) {
           await bumpRoomStatusRevision(trx, propertyId);
         }
         await trx.updateTable("command_previews").set({ status: "USED", used_at: new Date() }).where("id", "=", previewId).execute();
         await trx.updateTable("command_executions").set({ state: "APPLIED", completed_at: new Date() }).where("id", "=", inserted.id).execute();
         const receiptId = newId("receipt");
+        const persistedResult = strictRecoveryEvidenceCommands.has(commandType)
+          ? { ...applied.persistedResult, effectHash: persistedEffectHash }
+          : applied.persistedResult;
         await trx.insertInto("command_receipts").values({
           id: receiptId,
           command_id: inserted.id,
           execution_status: "EXECUTED",
           business_committed: true,
-          result: applied.persistedResult,
+          result: persistedResult,
           error: null,
           resource_refs: JSON.stringify(applied.resourceRefs),
           fact_refs: JSON.stringify(applied.factRefs),
@@ -874,6 +1009,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           error: rejectionError,
           replayExisting: false,
           ...(rejectionError.code === "PREVIEW_STALE"
+            && !(rejectionError instanceof HistoricalPreviewReadOnlyError)
             ? { closePreviewId: previewId }
             : {})
         });
@@ -885,23 +1021,23 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
   });
 }
 
-export async function getReceipt(db: Kysely<Database>, principal: AuthPrincipal, receiptId: string): Promise<ReceiptDto> {
+export async function getReceipt(db: Kysely<Database>, principal: AuthPrincipal, receiptId: string): Promise<ReceiptReadDto> {
   const command = await db.selectFrom("command_receipts")
     .innerJoin("command_executions", "command_executions.id", "command_receipts.command_id")
     .select(["command_executions.id", "command_executions.subject_id", "command_executions.property_id", "command_executions.command_type"])
     .where("command_receipts.id", "=", receiptId).executeTakeFirst();
   if (!command) throw new DomainError("NOT_FOUND", "Receipt not found", 404);
   assertExecutionAccess(principal, command, "Receipt");
-  const receipt = await receiptByCommand(db, command.id);
+  const receipt = await receiptByCommand(db, command.id, "HISTORICAL_READ");
   if (!receipt) throw new DomainError("NOT_FOUND", "Receipt not found", 404);
   return receipt;
 }
 
-export async function getCommand(db: Kysely<Database>, principal: AuthPrincipal, commandId: string): Promise<ReceiptDto | UnknownCommandResult> {
+export async function getCommand(db: Kysely<Database>, principal: AuthPrincipal, commandId: string): Promise<ReceiptReadDto | UnknownCommandResult> {
   const command = await db.selectFrom("command_executions").selectAll().where("id", "=", commandId).executeTakeFirst();
   if (!command) throw new DomainError("NOT_FOUND", "Command not found", 404);
   assertExecutionAccess(principal, command, "Command");
-  return (await receiptByCommand(db, command.id)) ?? {
+  return (await receiptByCommand(db, command.id, "HISTORICAL_READ")) ?? {
     commandId: command.id,
     executionStatus: "UNKNOWN",
     businessCommitted: false,
@@ -929,7 +1065,7 @@ export async function findCommandResult(
     .executeTakeFirst();
   const toVisibleResult = async (connection: Kysely<Database>, execution: NonNullable<Awaited<ReturnType<typeof findExecution>>>) => {
     assertExecutionAccess(principal, execution, "Command result");
-    return (await receiptByCommand(connection, execution.id)) ?? {
+    return (await receiptByCommand(connection, execution.id, "HISTORICAL_READ")) ?? {
       commandId: execution.id,
       executionStatus: "UNKNOWN" as const,
       businessCommitted: false as const,

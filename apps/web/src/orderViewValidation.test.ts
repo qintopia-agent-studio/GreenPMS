@@ -28,6 +28,24 @@ function fulfillmentFact(type: "CHECK_IN" | "CHECK_OUT", plannedBusinessDate: st
   };
 }
 
+function amendment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "amendment_1",
+    order_id: "order_u2",
+    sequence: 1,
+    amendment_type: "CREATE_ORDER",
+    reason_code: "CREATE_ORDER",
+    reason_note: "",
+    prior_version: 0,
+    new_version: 1,
+    payload: { operation: "CREATE_ORDER" },
+    command_id: "command_1",
+    actor: { subjectId: "operator", displayName: "前台操作员" },
+    created_at: "2026-07-28T08:00:00.000Z",
+    ...overrides
+  };
+}
+
 function orderView() {
   const original = arrangement();
   return {
@@ -67,8 +85,19 @@ function orderView() {
     occupantCorrections: [],
     stay: { id: "stay_u2", status: "PLANNED" },
     currentSegment: { id: "segment_1", sequence: 1, inventoryUnitId: "room_101", arrivalDate: "2026-07-28", departureDate: "2026-07-30" },
-    segments: [{ segment_type: "INITIAL" }],
-    amendments: [{ payload: { temptingFallback: true } }],
+    segments: [{
+      id: "segment_1",
+      stay_id: "stay_u2",
+      sequence: 1,
+      inventory_unit_id: "room_101",
+      arrival_date: "2026-07-28",
+      departure_date: "2026-07-30",
+      segment_type: "INITIAL",
+      supersedes_segment_id: null,
+      amendment_id: "amendment_1",
+      created_at: "2026-07-28T08:00:00.000Z"
+    }],
+    amendments: [amendment()],
     originalArrangement: original,
     effectiveArrangement: {
       ...original,
@@ -128,6 +157,64 @@ function orderView() {
       refundReferenceAmount: money(0)
     }
   };
+}
+
+function memberRepriceView({
+  historyAmount = 13_000,
+  targetAmount = 11_000,
+  policyAmount = 13_000,
+  reasonCode = "MEMBER_PRICE_NEGOTIATION",
+  reasonNote = "会员现金补差协商调价"
+}: {
+  historyAmount?: number;
+  targetAmount?: number;
+  policyAmount?: number;
+  reasonCode?: string;
+  reasonNote?: string;
+} = {}) {
+  const input = orderView();
+  Object.assign(input.order, {
+    member_id: "member_1",
+    member_contract_id: "contract_1",
+    booking_channel_code: null,
+    current_revision_id: "revision_2"
+  });
+  input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.minorUnits = policyAmount;
+  input.arrangementHistory[0]!.pricingSummary.currentContractAmount.minorUnits = historyAmount;
+  input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = historyAmount - policyAmount;
+  input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = historyAmount;
+  Object.assign(input.pricingRevisions[0]!, {
+    policy_base_amount_minor: policyAmount,
+    pricing_basis: "MEMBER_ENTITLEMENT",
+    current_contract_amount_minor: historyAmount,
+    difference_from_policy_minor: historyAmount - policyAmount
+  });
+  input.amendments.push(amendment({
+    id: "amendment_2",
+    sequence: 2,
+    amendment_type: "REPRICE_ORDER",
+    reason_code: reasonCode,
+    reason_note: reasonNote,
+    prior_version: 1,
+    new_version: 2,
+    payload: { operation: "REPRICE_ORDER" },
+    command_id: "command_2",
+    created_at: "2026-07-28T08:59:00.000Z"
+  }));
+  input.pricingRevisions.push({
+    ...input.pricingRevisions[0]!,
+    id: "revision_2",
+    revision_no: 2,
+    amendment_id: "amendment_2",
+    manual_adjustment_minor: targetAmount - policyAmount,
+    current_contract_amount_minor: targetAmount,
+    difference_from_policy_minor: targetAmount - policyAmount,
+    reason: { code: reasonCode, note: reasonNote },
+    created_at: "2026-07-28T09:00:00.000Z"
+  });
+  input.amounts.currentContractAmount.minorUnits = targetAmount;
+  input.amounts.collectionDifference.minorUnits = targetAmount;
+  return input;
 }
 
 function appendHistoryTransition(
@@ -219,6 +306,33 @@ describe("parseOrderView", () => {
       { code: "SHORTEN_STAY", enabled: true, disabledReason: null }
     ];
     expect(parseOrderView(inHouse)).toBe(inHouse);
+  });
+
+  it("fails closed when MOVE_UNIT is enabled for an overdue or terminal order", () => {
+    const overdueReserved = orderView();
+    overdueReserved.effectiveArrangement.businessDate = "2026-07-29";
+    (overdueReserved as unknown as { allowedActions: unknown[] }).allowedActions = [{ code: "MOVE_UNIT", enabled: true, disabledReason: null }];
+    expect(() => parseOrderView(overdueReserved)).toThrow("换房操作与订单状态或营业日期不一致");
+
+    const overdueInHouse = orderView();
+    overdueInHouse.order.status = "CHECKED_IN";
+    overdueInHouse.stay.status = "IN_HOUSE";
+    overdueInHouse.fulfillment.state = "IN_HOUSE";
+    overdueInHouse.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    overdueInHouse.effectiveArrangement.businessDate = "2026-07-30";
+    (overdueInHouse as unknown as { allowedActions: unknown[] }).allowedActions = [{ code: "MOVE_UNIT", enabled: true, disabledReason: null }];
+    expect(() => parseOrderView(overdueInHouse)).toThrow("换房操作与订单状态或营业日期不一致");
+
+    const checkedOut = orderView();
+    checkedOut.order.status = "CHECKED_OUT";
+    checkedOut.stay.status = "COMPLETED";
+    checkedOut.effectiveArrangement.presentation = "LAST";
+    checkedOut.fulfillment.state = "CHECKED_OUT";
+    checkedOut.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    checkedOut.fulfillment.checkOut = fulfillmentFact("CHECK_OUT", "2026-07-30", "2026-07-30T08:00:00.000Z");
+    checkedOut.effectiveArrangement.businessDate = "2026-07-30";
+    (checkedOut as unknown as { allowedActions: unknown[] }).allowedActions = [{ code: "MOVE_UNIT", enabled: true, disabledReason: null }];
+    expect(() => parseOrderView(checkedOut)).toThrow("换房操作与订单状态或营业日期不一致");
   });
 
   it.each([
@@ -354,10 +468,10 @@ describe("parseOrderView", () => {
         { inventoryUnitId: "room_102", arrivalDate: "2026-07-30", departureDate: "2026-07-31" }
       ]
     });
-    expect(() => parseOrderView(reassigned)).toThrow("改期必须只改变住宿日期");
+    expect(() => parseOrderView(reassigned)).toThrow("改期后的房源安排不符合已确认的换房节点平移与首尾裁剪规则");
   });
 
-  it("allows a disjoint reschedule to retain a contiguous room sequence edge", () => {
+  it("uses the original last room when a reschedule is completely after the prior arrangement", () => {
     const input = orderView();
     const before = movedArrangement();
     input.originalArrangement = before;
@@ -366,10 +480,38 @@ describe("parseOrderView", () => {
     appendHistoryTransition(input, "RESCHEDULE", {
       arrivalDate: "2026-08-01",
       departureDate: "2026-08-02",
-      intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-08-01", departureDate: "2026-08-02" }]
+      intervals: [{ inventoryUnitId: "room_102", arrivalDate: "2026-08-01", departureDate: "2026-08-02" }]
     });
 
     expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("uses the original first room before the prior arrangement and extends the last room for a later departure", () => {
+    const before = movedArrangement();
+    const earlier = orderView();
+    earlier.originalArrangement = before;
+    earlier.effectiveArrangement = { ...before, presentation: "CURRENT", businessDate: "2026-07-28" };
+    earlier.arrangementHistory[0]!.after = before;
+    appendHistoryTransition(earlier, "RESCHEDULE", {
+      arrivalDate: "2026-07-20",
+      departureDate: "2026-07-21",
+      intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-07-20", departureDate: "2026-07-21" }]
+    });
+    expect(parseOrderView(earlier)).toBe(earlier);
+
+    const extended = orderView();
+    extended.originalArrangement = before;
+    extended.effectiveArrangement = { ...before, presentation: "CURRENT", businessDate: "2026-07-28" };
+    extended.arrangementHistory[0]!.after = before;
+    appendHistoryTransition(extended, "RESCHEDULE", {
+      arrivalDate: "2026-07-28",
+      departureDate: "2026-07-31",
+      intervals: [
+        { inventoryUnitId: "room_101", arrivalDate: "2026-07-28", departureDate: "2026-07-29" },
+        { inventoryUnitId: "room_102", arrivalDate: "2026-07-29", departureDate: "2026-07-31" }
+      ]
+    });
+    expect(parseOrderView(extended)).toBe(extended);
   });
 
   it("accepts a suffix-overlay extension but rejects appending an unrelated room after departure", () => {
@@ -424,6 +566,16 @@ describe("parseOrderView", () => {
   it("accepts a later standalone repricing when the accommodation arrangement is unchanged", () => {
     const input = orderView();
     input.order.current_revision_id = "revision_2";
+    input.amendments.push(amendment({
+      id: "amendment_2",
+      sequence: 2,
+      amendment_type: "REPRICE_ORDER",
+      reason_code: "GUEST_PRICE_NEGOTIATION",
+      reason_note: "住客协商调价",
+      prior_version: 1,
+      new_version: 2,
+      created_at: "2026-07-28T08:59:00.000Z"
+    }));
     input.pricingRevisions.push({
       ...input.pricingRevisions[0]!,
       id: "revision_2",
@@ -433,7 +585,7 @@ describe("parseOrderView", () => {
       manual_adjustment_minor: -5_000,
       current_contract_amount_minor: 15_000,
       difference_from_policy_minor: -5_000,
-      reason: { code: "REPRICE_ORDER", note: "住客协商调价" },
+      reason: { code: "GUEST_PRICE_NEGOTIATION", note: "住客协商调价" },
       created_at: "2026-07-28T09:00:00.000Z"
     });
     input.amounts.currentContractAmount.minorUnits = 15_000;
@@ -442,12 +594,115 @@ describe("parseOrderView", () => {
     expect(parseOrderView(input)).toBe(input);
   });
 
+  it("accepts a strict member repricing from 13000 to 11000 with a business reason code", () => {
+    const input = memberRepriceView();
+    expect(input.pricingRevisions[1]!.reason.code).not.toBe("REPRICE_ORDER");
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("accepts a strict zero-difference member repricing back to policy price", () => {
+    const input = memberRepriceView({ historyAmount: 11_000, targetAmount: 13_000 });
+    expect(input.pricingRevisions[1]).toMatchObject({
+      pricing_basis: "MEMBER_ENTITLEMENT",
+      manual_adjustment_minor: 0,
+      difference_from_policy_minor: 0
+    });
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it.each([
+    ["missing amendment", (input: ReturnType<typeof memberRepriceView>) => {
+      input.amendments.splice(1, 1);
+    }],
+    ["duplicate amendment id", (input: ReturnType<typeof memberRepriceView>) => {
+      input.amendments.push({ ...input.amendments[1]! });
+    }],
+    ["mismatched amendment id", (input: ReturnType<typeof memberRepriceView>) => {
+      input.pricingRevisions[1]!.amendment_id = "amendment_missing";
+    }],
+    ["cross-order amendment", (input: ReturnType<typeof memberRepriceView>) => {
+      input.amendments[1]!.order_id = "order_other";
+    }],
+    ["wrong amendment type", (input: ReturnType<typeof memberRepriceView>) => {
+      input.amendments[1]!.amendment_type = "MOVE_UNIT";
+    }],
+    ["amendment reason code mismatch", (input: ReturnType<typeof memberRepriceView>) => {
+      input.amendments[1]!.reason_code = "OTHER_BUSINESS_REASON";
+    }],
+    ["amendment reason note mismatch", (input: ReturnType<typeof memberRepriceView>) => {
+      input.amendments[1]!.reason_note = "另一份说明";
+    }],
+    ["empty reason note", (input: ReturnType<typeof memberRepriceView>) => {
+      input.pricingRevisions[1]!.reason.note = "   ";
+      input.amendments[1]!.reason_note = "   ";
+    }],
+    ["amendment created after revision", (input: ReturnType<typeof memberRepriceView>) => {
+      input.amendments[1]!.created_at = "2026-07-28T09:01:00.000Z";
+    }],
+    ["repricing is the first pricing record", (input: ReturnType<typeof memberRepriceView>) => {
+      const repricing = input.pricingRevisions[1]!;
+      repricing.revision_no = 1;
+      input.pricingRevisions = [repricing];
+    }],
+    ["revision number does not match its index", (input: ReturnType<typeof memberRepriceView>) => {
+      input.pricingRevisions[1]!.revision_no = 3;
+    }],
+    ["non-member order", (input: ReturnType<typeof memberRepriceView>) => {
+      input.order.member_id = null;
+      input.order.member_contract_id = null;
+    }],
+    ["missing member contract", (input: ReturnType<typeof memberRepriceView>) => {
+      input.order.member_contract_id = null;
+    }],
+    ["missing member", (input: ReturnType<typeof memberRepriceView>) => {
+      input.order.member_id = null;
+    }],
+    ["empty member contract", (input: ReturnType<typeof memberRepriceView>) => {
+      (input.order as unknown as { member_contract_id: string }).member_contract_id = "";
+    }],
+    ["empty member", (input: ReturnType<typeof memberRepriceView>) => {
+      (input.order as unknown as { member_id: string }).member_id = "";
+    }],
+    ["manual adjustment formula mismatch", (input: ReturnType<typeof memberRepriceView>) => {
+      input.pricingRevisions[1]!.manual_adjustment_minor += 1;
+    }]
+  ])("rejects a damaged standalone member repricing: %s", (_label, damage) => {
+    const input = memberRepriceView();
+    damage(input);
+    expect(() => parseOrderView(input)).toThrow(OrderViewValidationError);
+  });
+
+  it.each(["POLICY", "CHANNEL_CONTRACT", "FREE", "MANUAL_ADJUSTMENT"] as const)(
+    "rejects a member standalone repricing with damaged %s basis",
+    (pricingBasis) => {
+      const input = memberRepriceView();
+      input.pricingRevisions[1]!.pricing_basis = pricingBasis;
+      expect(() => parseOrderView(input)).toThrow(OrderViewValidationError);
+    }
+  );
+
+  it("rejects a zero-difference member repricing unless the same strict predicate holds", () => {
+    const input = memberRepriceView({ historyAmount: 11_000, targetAmount: 13_000 });
+    input.amendments[1]!.amendment_type = "MOVE_UNIT";
+    expect(() => parseOrderView(input)).toThrow("没有合法的后续独立调价记录");
+  });
+
   it("accepts a later standalone repricing that returns the unchanged stay to policy price", () => {
     const input = orderView();
     input.arrangementHistory[0]!.pricingSummary.currentContractAmount.minorUnits = 15_000;
     input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = -5_000;
     input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 15_000;
     input.order.current_revision_id = "revision_2";
+    input.amendments.push(amendment({
+      id: "amendment_2",
+      sequence: 2,
+      amendment_type: "REPRICE_ORDER",
+      reason_code: "RETURN_TO_POLICY",
+      reason_note: "恢复政策价",
+      prior_version: 1,
+      new_version: 2,
+      created_at: "2026-07-28T08:59:00.000Z"
+    }));
     input.pricingRevisions.push({
       ...input.pricingRevisions[0]!,
       id: "revision_2",
@@ -458,7 +713,7 @@ describe("parseOrderView", () => {
       current_contract_amount_minor: 20_000,
       difference_from_policy_minor: 0,
       manual_adjustment_minor: 0,
-      reason: { code: "REPRICE_ORDER", note: "恢复政策价" },
+      reason: { code: "RETURN_TO_POLICY", note: "恢复政策价" },
       created_at: "2026-07-28T09:00:00.000Z"
     });
 
@@ -484,13 +739,23 @@ describe("parseOrderView", () => {
     input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = -5_000;
     input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 15_000;
     input.order.current_revision_id = "revision_2";
+    input.amendments.push(amendment({
+      id: "amendment_2",
+      sequence: 2,
+      amendment_type: "REPRICE_ORDER",
+      reason_code: "RETURN_TO_POLICY",
+      reason_note: "恢复政策价",
+      prior_version: 1,
+      new_version: 2,
+      created_at: "2026-07-28T08:59:00.000Z"
+    }));
     input.pricingRevisions.push({
       ...input.pricingRevisions[0]!,
       id: "revision_2",
       revision_no: 2,
       amendment_id: "amendment_2",
       pricing_basis: "POLICY",
-      reason: { code: "REPRICE_ORDER", note: "恢复政策价" },
+      reason: { code: "RETURN_TO_POLICY", note: "恢复政策价" },
       created_at: "2026-07-28T09:00:00.000Z"
     });
     damage(input);
@@ -499,7 +764,7 @@ describe("parseOrderView", () => {
   });
 
   it.each([
-    ["wrong reason", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.reason.code = "CREATE_ORDER"; }, "没有合法的后续独立调价记录"],
+    ["amendment reason mismatch", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.reason.code = "OTHER_REASON"; }, "没有合法的后续独立调价记录"],
     ["wrong basis", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.pricing_basis = "POLICY"; }, "人工调价差额不一致"],
     ["changed arrival", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.arrival_date = "2026-07-29"; }, "与当前住宿安排日期不一致"],
     ["changed departure", (input: ReturnType<typeof orderView>) => { input.pricingRevisions[1]!.departure_date = "2026-07-31"; }, "与当前住宿安排日期不一致"],
@@ -507,6 +772,16 @@ describe("parseOrderView", () => {
   ])("rejects an amount mismatch without a valid later standalone repricing: %s", (_label, damage, expected) => {
     const input = orderView();
     input.order.current_revision_id = "revision_2";
+    input.amendments.push(amendment({
+      id: "amendment_2",
+      sequence: 2,
+      amendment_type: "REPRICE_ORDER",
+      reason_code: "GUEST_PRICE_NEGOTIATION",
+      reason_note: "住客协商调价",
+      prior_version: 1,
+      new_version: 2,
+      created_at: "2026-07-28T08:59:00.000Z"
+    }));
     input.pricingRevisions.push({
       ...input.pricingRevisions[0]!,
       id: "revision_2",
@@ -516,7 +791,7 @@ describe("parseOrderView", () => {
       manual_adjustment_minor: -5_000,
       current_contract_amount_minor: 15_000,
       difference_from_policy_minor: -5_000,
-      reason: { code: "REPRICE_ORDER", note: "住客协商调价" },
+      reason: { code: "GUEST_PRICE_NEGOTIATION", note: "住客协商调价" },
       created_at: "2026-07-28T09:00:00.000Z"
     });
     input.amounts.currentContractAmount.minorUnits = 15_000;
@@ -567,9 +842,38 @@ describe("parseOrderView", () => {
     expect(parseOrderView(input)).toBe(input);
   });
 
+  it("accepts Scheme B when an equal reschedule shifts every existing move boundary", () => {
+    const input = orderView();
+    appendHistoryTransition(input, "MOVE", movedArrangement());
+    appendHistoryTransition(input, "RESCHEDULE", {
+      arrivalDate: "2026-07-29",
+      departureDate: "2026-07-31",
+      intervals: [
+        { inventoryUnitId: "room_101", arrivalDate: "2026-07-29", departureDate: "2026-07-30" },
+        { inventoryUnitId: "room_102", arrivalDate: "2026-07-30", departureDate: "2026-07-31" }
+      ]
+    }, "2026-07-28T10:00:00.000Z");
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it.each([
+    ["RESCHEDULE_STAY", "LEGACY_STAGE_9_10"],
+    ["EXTEND_STAY", "LEGACY_STAGE_9_10"],
+    ["SHORTEN_STAY", "LEGACY_STAGE_10"],
+    ["MOVE_UNIT", "PRE_STAGE_11"]
+  ])("accepts the exact historical protocol metadata for %s", (amendmentType, protocolVersion) => {
+    const input = orderView();
+    Object.assign(input.amendments[0]!, {
+      amendment_type: amendmentType,
+      protocolVersion,
+      recoveryMode: "HISTORICAL_READ_ONLY"
+    });
+    expect(parseOrderView(input)).toBe(input);
+  });
+
   it.each([
     ["extension that changes rooms without extending", "EXTENSION", movedArrangement(), "续住必须保留原安排并延长退房日"],
-    ["reschedule that also changes rooms", "RESCHEDULE", arrangement("room_102", "2026-07-29", "2026-07-31"), "改期必须只改变住宿日期"],
+    ["reschedule that also changes rooms", "RESCHEDULE", arrangement("room_102", "2026-07-29", "2026-07-31"), "改期后的房源安排不符合已确认的换房节点平移与首尾裁剪规则"],
     ["move without an inventory change", "MOVE", arrangement(), "换房必须只改变住宿周期内的房源安排"],
     ["move containing multiple inventory transitions", "MOVE", roundTripMoveArrangement(), "换房必须只改变住宿周期内的房源安排"],
     ["second initial booking", "INITIAL_BOOKING", arrangement(), "初始预订不能包含变更前安排"]
@@ -580,10 +884,35 @@ describe("parseOrderView", () => {
   });
 
   it.each([
-    ["missing occupants", (input: ReturnType<typeof orderView>) => { delete (input as Partial<typeof input>).occupants; }, "occupants必须是数组"],
+    ["missing occupants", (input: ReturnType<typeof orderView>) => { delete (input as Partial<typeof input>).occupants; }, "根节点.occupants缺失"],
     ["malformed amount", (input: ReturnType<typeof orderView>) => { input.amounts.currentContractAmount.minorUnits = 1.5; }, "必须是安全整数"],
     ["stale current revision", (input: ReturnType<typeof orderView>) => { input.order.current_revision_id = "revision_stale"; }, "与订单当前计价指针或金额不一致"],
     ["collection total mismatch", (input: ReturnType<typeof orderView>) => { input.amounts.netRecordedCollection.minorUnits = 100; input.amounts.collectionDifference.minorUnits = 19_900; }, "净影响合计与已登记净收款不一致"],
+    ["unexpected root field", (input: ReturnType<typeof orderView>) => { Object.assign(input, { rawPayload: {} }); }, "根节点.rawPayload不是允许的字段"],
+    ["unexpected order field", (input: ReturnType<typeof orderView>) => { Object.assign(input.order, { rawStatus: "RESERVED" }); }, "order.rawStatus不是允许的字段"],
+    ["malformed segment", (input: ReturnType<typeof orderView>) => { input.segments[0]!.stay_id = "stay_other"; }, "segments[0].stay_id与住宿不一致"],
+    ["unknown historical protocol", (input: ReturnType<typeof orderView>) => {
+      Object.assign(input.amendments[0]!, { amendment_type: "MOVE_UNIT", protocolVersion: "STAGE_UNKNOWN", recoveryMode: "HISTORICAL_READ_ONLY" });
+    }, "amendments[0].protocolVersion与住宿变更类型不一致"],
+    ["historical protocol without recovery marker", (input: ReturnType<typeof orderView>) => {
+      Object.assign(input.amendments[0]!, { amendment_type: "MOVE_UNIT", protocolVersion: "PRE_STAGE_11" });
+    }, "历史协议版本与只读恢复标记必须成对提供"],
+    ["recovery marker without historical protocol", (input: ReturnType<typeof orderView>) => {
+      Object.assign(input.amendments[0]!, { amendment_type: "MOVE_UNIT", recoveryMode: "HISTORICAL_READ_ONLY" });
+    }, "历史协议版本与只读恢复标记必须成对提供"],
+    ["historical protocol for the wrong amendment type", (input: ReturnType<typeof orderView>) => {
+      Object.assign(input.amendments[0]!, { amendment_type: "SHORTEN_STAY", protocolVersion: "PRE_STAGE_11", recoveryMode: "HISTORICAL_READ_ONLY" });
+    }, "amendments[0].protocolVersion与住宿变更类型不一致"],
+    ["unsupported historical recovery marker", (input: ReturnType<typeof orderView>) => {
+      Object.assign(input.amendments[0]!, { amendment_type: "MOVE_UNIT", protocolVersion: "PRE_STAGE_11", recoveryMode: "RECOVERABLE" });
+    }, "amendments[0].recoveryMode不是支持的历史读取模式"],
+    ["unexpected collection field", (input: ReturnType<typeof orderView>) => {
+      input.collectionFacts.push({
+        fact_id: "fact_1", order_id: "order_u2", fact_type: "COLLECTION", amount_minor: 100, net_effect_minor: 100,
+        currency: "CNY", references_fact_id: null, reverses_fact_id: null, method: "CASH", note: "", transaction_reference: null,
+        pricing_revision_id: "revision_1", command_id: "command_1", created_at: "2026-07-28T08:00:00.000Z", raw: true
+      } as never);
+    }, "collectionFacts[0].raw不是允许的字段"],
     ["write action under read access", (input: ReturnType<typeof orderView>) => {
       (input as { accessLevel: string }).accessLevel = "READ";
       (input as { allowedActions: Array<{ code: string; enabled: boolean; disabledReason: string | null }> }).allowedActions = [{ code: "CHECK_IN", enabled: true, disabledReason: null }];

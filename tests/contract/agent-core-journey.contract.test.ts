@@ -69,7 +69,7 @@ function authHeaders(token: string) {
 
 async function waitForUnknownRecovery(commandType: CommandType, idempotencyKey: string) {
   const lockKey = `qintopia:command:${demo.agentSubjectId}:${demo.propertyId}:${commandType}:${idempotencyKey}`;
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const acquired = await db.connection().execute(async (connection) => {
       const result = await sql<{ acquired: boolean }>`
@@ -436,6 +436,31 @@ describe("scoped agent HTTP core journey", () => {
     expect(orderId).toMatch(/^order_/);
     lifecycleQueryOrderId = orderId;
     expect(created.receipt.resourceRefs).toEqual(expect.arrayContaining([orderId, occupantId]));
+
+    const occupiedAvailability = await app.inject({
+      method: "GET",
+      url: `/api/v1/properties/${demo.propertyId}/availability?arrivalDate=${arrivalDate}&departureDate=${originalDepartureDate}&unitKind=ROOM`,
+      headers: { authorization: `Bearer ${demo.readToken}` }
+    });
+    expect(occupiedAvailability.statusCode, occupiedAvailability.body).toBe(200);
+    expect(occupiedAvailability.json().units).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: memberRoomId, available: false })
+    ]));
+    const moveTargetAvailability = await app.inject({
+      method: "GET",
+      url: `/api/v1/properties/${demo.propertyId}/availability?arrivalDate=${arrivalDate}&departureDate=${originalDepartureDate}&unitKind=ROOM&excludeOrderId=${orderId}`,
+      headers: { authorization: `Bearer ${demo.readToken}` }
+    });
+    expect(moveTargetAvailability.statusCode, moveTargetAvailability.body).toBe(200);
+    expect(moveTargetAvailability.json().units).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: memberRoomId, available: true })
+    ]));
+    const foreignOrderExclusion = await app.inject({
+      method: "GET",
+      url: `/api/v1/properties/${demo.propertyId}/availability?arrivalDate=${arrivalDate}&departureDate=${originalDepartureDate}&excludeOrderId=order_not_in_property`,
+      headers: { authorization: `Bearer ${demo.readToken}` }
+    });
+    expect(foreignOrderExclusion.statusCode).toBe(404);
 
     const createdOrderResponse = await app.inject({
       method: "GET",

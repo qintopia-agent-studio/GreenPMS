@@ -315,64 +315,67 @@ describe("durable command protocol", () => {
   });
 
   it("expires a Preview durably and rejects confirmation with zero business writes", async () => {
-    const preview = await createCommandPreview(db, principal, {
-      commandType: "LOCK_MAINTENANCE",
-      input: {
+    const baseNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(baseNow);
+    try {
+      const preview = await createCommandPreview(db, principal, {
+        commandType: "LOCK_MAINTENANCE",
+        input: {
+          propertyId: demo.propertyId,
+          inventoryUnitId: demo.secondRoomId,
+          arrivalDate: "2028-06-01",
+          departureDate: "2028-06-02",
+          reason: "Expired Preview acceptance"
+        }
+      }, metadata("ttl-preview"));
+      now.mockReturnValue(baseNow + 601_000);
+
+      const confirmMetadata = metadata("ttl-confirm");
+      const confirmation = {
         propertyId: demo.propertyId,
-        inventoryUnitId: demo.secondRoomId,
-        arrivalDate: "2028-06-01",
-        departureDate: "2028-06-02",
-        reason: "Expired Preview acceptance"
-      }
-    }, metadata("ttl-preview"));
-    await db.updateTable("command_previews")
-      .set({ expires_at: new Date(Date.now() - 1_000) })
-      .where("id", "=", preview.preview.previewId)
-      .execute();
+        commandType: "LOCK_MAINTENANCE" as const,
+        confirmation: true as const,
+        expectedEffectHash: preview.preview.effectHash,
+        reason: { code: "TTL_ACCEPTANCE", note: "Expired Preview must never apply" }
+      };
+      const receipt = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, confirmMetadata);
+      const replay = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, confirmMetadata);
+      const secondMetadata = metadata("ttl-second-confirm");
+      const secondReceipt = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, secondMetadata);
+      const storedPreview = await db.selectFrom("command_previews")
+        .select(["status", "used_at"])
+        .where("id", "=", preview.preview.previewId)
+        .executeTakeFirstOrThrow();
+      const [maintenanceLocks, inventoryClaims] = await Promise.all([
+        db.selectFrom("maintenance_locks").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+        db.selectFrom("inventory_claims").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
+      ]);
 
-    const confirmMetadata = metadata("ttl-confirm");
-    const confirmation = {
-      propertyId: demo.propertyId,
-      commandType: "LOCK_MAINTENANCE" as const,
-      confirmation: true as const,
-      expectedEffectHash: preview.preview.effectHash,
-      reason: { code: "TTL_ACCEPTANCE", note: "Expired Preview must never apply" }
-    };
-    const receipt = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, confirmMetadata);
-    const replay = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, confirmMetadata);
-    const secondMetadata = metadata("ttl-second-confirm");
-    const secondReceipt = await confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, secondMetadata);
-    const storedPreview = await db.selectFrom("command_previews")
-      .select(["status", "used_at"])
-      .where("id", "=", preview.preview.previewId)
-      .executeTakeFirstOrThrow();
-    const [maintenanceLocks, inventoryClaims] = await Promise.all([
-      db.selectFrom("maintenance_locks").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
-      db.selectFrom("inventory_claims").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
-    ]);
-
-    expect(receipt).toMatchObject({
-      executionStatus: "NOT_EXECUTED",
-      businessCommitted: false,
-      error: { code: "PREVIEW_STALE", details: { causeCode: "PREVIEW_EXPIRED" } },
-      resourceRefs: [],
-      factRefs: []
-    });
-    expect(replay).toEqual(receipt);
-    expect(secondReceipt).toMatchObject({
-      executionStatus: "NOT_EXECUTED",
-      businessCommitted: false,
-      error: { code: "PREVIEW_STALE", details: { causeCode: "PREVIEW_EXPIRED" } },
-      resourceRefs: [],
-      factRefs: []
-    });
-    expect(secondReceipt.receiptId).not.toBe(receipt.receiptId);
-    expect(secondReceipt.commandId).not.toBe(receipt.commandId);
-    expect(await findCommandResult(db, principal, demo.propertyId, "LOCK_MAINTENANCE", confirmMetadata.idempotencyKey)).toEqual(receipt);
-    expect(await findCommandResult(db, principal, demo.propertyId, "LOCK_MAINTENANCE", secondMetadata.idempotencyKey)).toEqual(secondReceipt);
-    expect(storedPreview).toEqual({ status: "EXPIRED", used_at: null });
-    expect(Number(maintenanceLocks.count)).toBe(0);
-    expect(Number(inventoryClaims.count)).toBe(0);
+      expect(receipt).toMatchObject({
+        executionStatus: "NOT_EXECUTED",
+        businessCommitted: false,
+        error: { code: "PREVIEW_STALE", details: { causeCode: "PREVIEW_EXPIRED" } },
+        resourceRefs: [],
+        factRefs: []
+      });
+      expect(replay).toEqual(receipt);
+      expect(secondReceipt).toMatchObject({
+        executionStatus: "NOT_EXECUTED",
+        businessCommitted: false,
+        error: { code: "PREVIEW_STALE", details: { causeCode: "PREVIEW_EXPIRED" } },
+        resourceRefs: [],
+        factRefs: []
+      });
+      expect(secondReceipt.receiptId).not.toBe(receipt.receiptId);
+      expect(secondReceipt.commandId).not.toBe(receipt.commandId);
+      expect(await findCommandResult(db, principal, demo.propertyId, "LOCK_MAINTENANCE", confirmMetadata.idempotencyKey)).toEqual(receipt);
+      expect(await findCommandResult(db, principal, demo.propertyId, "LOCK_MAINTENANCE", secondMetadata.idempotencyKey)).toEqual(secondReceipt);
+      expect(storedPreview).toEqual({ status: "EXPIRED", used_at: null });
+      expect(Number(maintenanceLocks.count)).toBe(0);
+      expect(Number(inventoryClaims.count)).toBe(0);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("exposes UNKNOWN while a visible execution claim is blocked, then resolves to EXECUTED", async () => {

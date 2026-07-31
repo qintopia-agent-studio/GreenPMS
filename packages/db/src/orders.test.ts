@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { orderAllowedActions, pricingReasonFromAmendment, projectOrderFulfillment, projectOrderLifecycle } from "./orders.ts";
 
 describe("pricingReasonFromAmendment", () => {
-  it.each(["RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY"])("keeps the typed pricing reason separate from the %s stay-change reason", (amendmentType) => {
+  it.each(["RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT"])("keeps the typed pricing reason separate from the %s stay-change reason", (amendmentType) => {
     expect(pricingReasonFromAmendment({
       amendment_type: amendmentType,
       reason_code: "STAY_CHANGE",
@@ -22,6 +22,25 @@ describe("pricingReasonFromAmendment", () => {
       reason_note: "住客调整行程",
       payload: { pricingDecision: {} }
     })).toThrow("订单住宿日期变更的计价原因损坏");
+  });
+
+  it("fails closed when a MOVE_UNIT pricing reason is damaged", () => {
+    expect(() => pricingReasonFromAmendment({
+      amendment_type: "MOVE_UNIT",
+      reason_code: "ROOM_MOVE",
+      reason_note: "住客申请换房",
+      payload: { after: { stayTimeline: [] }, pricingDecision: { reason: { code: "MOVE_UNIT_POLICY" } } }
+    })).toThrow("订单住宿日期变更的计价原因损坏");
+  });
+
+  it("keeps a pre-Stage 11 MOVE_UNIT readable through its amendment reason", () => {
+    expect(pricingReasonFromAmendment({
+      amendment_type: "MOVE_UNIT",
+      reason_code: "ROOM_MOVE",
+      reason_note: "历史换房记录",
+      payload: { stayTimeline: [], pricing: {} },
+      protocolVersion: "PRE_STAGE_11"
+    })).toEqual({ code: "ROOM_MOVE", note: "历史换房记录" });
   });
 });
 
@@ -89,7 +108,7 @@ describe("orderAllowedActions", () => {
     }
   });
 
-  it("allows only post-arrival shortening and blocks a future room move with a Chinese reason", () => {
+  it("allows post-arrival shortening to crop a future room move", () => {
     const dates = { businessDate: "2026-08-03", arrivalDate: "2026-08-01", departureDate: "2026-08-06" };
     expect(action("CHECKED_IN", "SHORTEN_STAY", false, dates)).toEqual({
       code: "SHORTEN_STAY",
@@ -101,8 +120,32 @@ describe("orderAllowedActions", () => {
       disabledReason: expect.stringContaining("入住当天")
     });
     expect(action("CHECKED_IN", "SHORTEN_STAY", false, dates, true)).toMatchObject({
+      enabled: true,
+      disabledReason: null
+    });
+  });
+
+  it("disables MOVE_UNIT for overdue reserved and departure-day in-house orders", () => {
+    const reserved = { businessDate: "2026-08-02", arrivalDate: "2026-08-01", departureDate: "2026-08-04" };
+    expect(action("RESERVED", "MOVE_UNIT", false, reserved)).toEqual({
+      code: "MOVE_UNIT",
       enabled: false,
-      disabledReason: expect.stringContaining("尚未生效的换房安排")
+      disabledReason: "逾期未到订单暂不能换房，请先处理到店日期"
+    });
+    expect(action("RESERVED", "MOVE_UNIT", false, { ...reserved, businessDate: reserved.arrivalDate })).toMatchObject({
+      enabled: true,
+      disabledReason: null
+    });
+
+    const inHouse = { businessDate: "2026-08-04", arrivalDate: "2026-08-01", departureDate: "2026-08-04" };
+    expect(action("CHECKED_IN", "MOVE_UNIT", false, inHouse)).toEqual({
+      code: "MOVE_UNIT",
+      enabled: false,
+      disabledReason: "已到或超过计划退房日，请先办理续住或退房"
+    });
+    expect(action("CHECKED_IN", "MOVE_UNIT", false, { ...inHouse, businessDate: "2026-08-03" })).toMatchObject({
+      enabled: true,
+      disabledReason: null
     });
   });
 
@@ -247,6 +290,7 @@ describe("projectOrderLifecycle", () => {
     sequence: number;
     type: string;
     payload: Record<string, unknown>;
+    protocolVersion?: "PRE_STAGE_11";
   }) => ({
     id: options.id,
     order_id: "order_1",
@@ -259,7 +303,8 @@ describe("projectOrderLifecycle", () => {
     new_version: options.sequence,
     actor_subject_id: actor.subjectId,
     actor_display_name: actor.displayName,
-    created_at: new Date(`2026-08-0${options.sequence}T12:00:00.000Z`)
+    created_at: new Date(`2026-08-0${options.sequence}T12:00:00.000Z`),
+    ...(options.protocolVersion ? { protocolVersion: options.protocolVersion } : {})
   });
   const revision = (
     amendmentId: string,
@@ -324,6 +369,62 @@ describe("projectOrderLifecycle", () => {
     ]
   });
 
+  function moveInput(payload: Record<string, unknown>, protocolVersion?: "PRE_STAGE_11") {
+    const input = base();
+    input.order.version = 2;
+    input.amendments.push(amendment({
+      id: "amend_2",
+      sequence: 2,
+      type: "MOVE_UNIT",
+      payload,
+      ...(protocolVersion ? { protocolVersion } : {})
+    }));
+    input.segments.push({
+      id: "segment_2", stay_id: "stay_1", sequence: 2, inventory_unit_id: "room_b",
+      arrival_date: "2026-08-02", departure_date: "2026-08-03", segment_type: "MOVE",
+      supersedes_segment_id: "segment_1", amendment_id: "amend_2"
+    });
+    input.revisions.push(revision("amend_2", "2026-08-01", "2026-08-03"));
+    input.order.current_revision_id = "revision_2";
+    input.activeTimeline = [
+      { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+      { serviceDate: "2026-08-02", inventoryUnitId: "room_b" }
+    ];
+    return input;
+  }
+
+  it.each([
+    ["Stage 11 after payload", {
+      after: {
+        stayTimeline: [
+          { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+          { serviceDate: "2026-08-02", inventoryUnitId: "room_b" }
+        ]
+      }
+    }, undefined],
+    ["legacy top-level payload", {
+      stayTimeline: [
+        { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-02", inventoryUnitId: "room_b" }
+      ]
+    }, "PRE_STAGE_11"]
+  ] as const)("projects a MOVE_UNIT timeline from the %s", (_label, payload, protocolVersion) => {
+    expect(projectOrderLifecycle(moveInput(payload, protocolVersion)).effectiveArrangement.intervals).toEqual([
+      { inventoryUnitId: "room_a", arrivalDate: "2026-08-01", departureDate: "2026-08-02" },
+      { inventoryUnitId: "room_b", arrivalDate: "2026-08-02", departureDate: "2026-08-03" }
+    ]);
+  });
+
+  it("fails closed for a damaged Stage 11 MOVE_UNIT timeline instead of falling back to legacy data", () => {
+    expect(() => projectOrderLifecycle(moveInput({
+      after: { stayTimeline: "damaged" },
+      stayTimeline: [
+        { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },
+        { serviceDate: "2026-08-02", inventoryUnitId: "room_b" }
+      ]
+    }))).toThrow(/缺少 typed 时间线/);
+  });
+
   it("keeps the original arrangement immutable while replaying a gap-free, non-overlapping effective timeline", () => {
     const input = base();
     input.order.departure_date = "2026-08-04";
@@ -348,6 +449,7 @@ describe("projectOrderLifecycle", () => {
         id: "amend_3",
         sequence: 3,
         type: "MOVE_UNIT",
+        protocolVersion: "PRE_STAGE_11",
         payload: {
           stayTimeline: [
             { serviceDate: "2026-08-01", inventoryUnitId: "room_a" },

@@ -20,13 +20,13 @@ const desktopUnitCodeOverrides = {
   "106": "C02",
   "107": "C03",
   "108": "C04",
-  "109": "E01",
-  "201": "E02",
-  "202": "309",
-  "203": "A01",
-  "204": "A02",
-  D01: "B01",
-  D02: "206"
+  "109": "A01",
+  "201": "A02",
+  "202": "B02",
+  "203": "203",
+  "204": "204",
+  D01: "302",
+  D02: "E02"
 } as const;
 const forbiddenProtocol = /Preview|Confirm|Receipt|Command|RESCHEDULE_STAY|EXTEND_STAY|order_[a-z0-9_]+|segment_[a-z0-9_]+/i;
 let fixture: Stage9AcceptanceFixture;
@@ -40,6 +40,12 @@ function isDesktop(testInfo: TestInfo): boolean {
 
 function isMobile(testInfo: TestInfo): boolean {
   return testInfo.project.name === "mobile";
+}
+
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function roomCell(page: Page, stay: Stage9StayFixture, date: string): Locator {
@@ -194,8 +200,9 @@ async function extendHistoricalStay(page: Page, stay: Stage9ExtensionFixture, re
 test.beforeAll(async ({}, workerInfo) => {
   if (workerInfo.project.name === "mobile") {
     mobileFixture = await prepareStage9MobileAcceptance(e2eDatabaseUrl, {
+      reset: true,
       suffix: `${workerInfo.project.name}-${workerInfo.workerIndex}`,
-      unitCodeOverride: "303"
+      unitCodeOverride: "201"
     });
     return;
   }
@@ -397,20 +404,23 @@ test("4.2 desktop result-unknown recovery only queries the original idempotency 
   await expect(recovery).toContainText("调整预订日期结果需要恢复查询");
   expect(confirmRequests).toBe(1);
   await recovery.getByRole("button", { name: "查询调整预订日期结果", exact: true }).click();
+  const recoveryDialog = page.getByRole("dialog", { name: "恢复调整预订日期结果", exact: true });
+  await expect(recoveryDialog).toBeVisible();
   const recoveryRequest = page.waitForRequest((request) => request.method() === "GET"
     && new URL(request.url()).pathname === "/api/v1/command-results");
-  await page.getByRole("button", { name: "查询原操作结果", exact: true }).click();
+  await recoveryDialog.getByRole("button", { name: "查询原操作结果", exact: true }).click();
   const recoveryUrl = new URL((await recoveryRequest).url());
   expect(confirmationKey).toMatch(/^web-confirm-reschedule_stay-/);
   expect(confirmRequests).toBe(1);
   expect(recoveryUrl.searchParams.get("commandType")).toBe("RESCHEDULE_STAY");
   expect(recoveryUrl.searchParams.get("idempotencyKey")).toBe(confirmationKey);
-  await expect(review).toBeHidden({ timeout: 30_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整，订单和房态已刷新");
+  await expect(recoveryDialog).toBeHidden({ timeout: 30_000 });
+  await expect(recovery).toBeHidden();
+  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整，订单和房态已刷新", { timeout: 30_000 });
   await expect(page.getByText(`${fixture.lateArrival.newArrivalDate} 至 ${fixture.lateArrival.newDepartureDate}`, { exact: true }).first()).toBeVisible();
 });
 
-test("4.2 desktop WECOM policy reset, inventory conflict and approved multi-unit gate fail safely", async ({ page }, testInfo) => {
+test("4.2 desktop WECOM policy reset, inventory conflict, and Stage 11 multi-unit reschedule behave safely", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop Stage 9 failure-close cases");
   await login(page);
   await openOrder(page, fixture.wecomDeviation);
@@ -449,8 +459,18 @@ test("4.2 desktop WECOM policy reset, inventory conflict and approved multi-unit
   expect(conflictAfter.pricingRevisions).toHaveLength(conflictBefore.pricingRevisions.length);
 
   await openOrder(page, fixture.multiUnit);
-  await expect(page.getByTestId("stay-date-action-notice")).toContainText("该订单已有换房安排，当前版本暂不能调整预订日期");
-  await expect(page.getByRole("button", { name: "调整预订日期", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "调整预订日期", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
+  const multiForm = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  await multiForm.getByTestId("stay-date-arrival").fill(addDays(fixture.multiUnit.arrivalDate, 1));
+  await multiForm.getByTestId("stay-date-departure").fill(addDays(fixture.multiUnit.departureDate, 1));
+  await multiForm.getByTestId("stay-date-reason").fill("多房源住宿整体顺延一天");
+  await expect(multiForm.getByTestId("stay-date-price-preview")).toBeVisible({ timeout: 30_000 });
+  const multiTimeline = multiForm.getByTestId("stay-date-preview-timeline");
+  await expect(multiTimeline).toBeVisible();
+  await expect(multiTimeline).toContainText(fixture.multiUnit.unitCode);
+  await expect(multiTimeline).toContainText(fixture.multiUnit.destinationUnitCode);
+  await expect(multiForm.getByRole("button", { name: "继续核对", exact: true })).toBeEnabled();
 });
 
 test("4.2 mobile free-stay reschedule stays zero and requires no pricing input", async ({ page }, testInfo) => {

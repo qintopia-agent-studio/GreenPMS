@@ -5,6 +5,7 @@ import { confirmCommandPreview, createCommandPreview } from "../../packages/db/s
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { resetE2eDatabase } from "./reset-database.ts";
 
 const demo = {
   propertyId: "prop_qintopia_demo",
@@ -232,9 +233,8 @@ export async function prepareStage8Acceptance(
   databaseUrl = defaultDatabaseUrl,
   options: { reset?: boolean; scenario?: "desktop" | "mobile" } = {}
 ): Promise<Stage8AcceptanceFixture> {
-  const db = options.reset === false
-    ? createDatabase(databaseUrl)
-    : await (await import("../helpers/database.ts")).resetDatabase(databaseUrl);
+  if (options.reset !== false) await resetE2eDatabase(databaseUrl);
+  const db = createDatabase(databaseUrl);
   try {
     const businessDate = todayInTimeZone("Asia/Shanghai");
     const arrivalDate = businessDate;
@@ -247,7 +247,7 @@ export async function prepareStage8Acceptance(
     const scenario = options.scenario ?? "desktop";
     const unitCodes = scenario === "desktop"
       ? ["D02", "D01", "D03", "D04", "D05", "201", "202", "203", "E01", "305", "306"]
-      : ["204", "205", "301", "302", "303", "304", "B01", "E02", "E03", "307", "308"];
+      : ["204", "301", "C03", "205", "303", "304", "B01", "E02", "E03", "307", "308"];
     const key = `stage8-${scenario}-${arrivalDate.replaceAll("-", "")}-${process.pid}`;
     const [
       normalUnit,

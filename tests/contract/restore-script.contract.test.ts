@@ -5,9 +5,13 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { databaseUrl } from "../../packages/db/src/database.ts";
 
 const execFileAsync = promisify(execFile);
 const restoreScript = fileURLToPath(new URL("../../scripts/restore.sh", import.meta.url));
+const verifyBackupRestoreScript = fileURLToPath(new URL("../../scripts/verify-backup-restore.sh", import.meta.url));
+const verifyComposeColdStartScript = fileURLToPath(new URL("../../scripts/verify-compose-cold-start.sh", import.meta.url));
+const databaseModule = fileURLToPath(new URL("../../packages/db/src/database.ts", import.meta.url));
 
 async function fakeDockerEnvironment(
   targetExists: boolean,
@@ -20,6 +24,13 @@ async function fakeDockerEnvironment(
     stage10FunctionCount?: string;
     stage10TriggerCount?: string;
     stage10ImmediateTriggerCount?: string;
+    stage11FunctionCount?: string;
+    stage11ReplacementCount?: string;
+    stage11BodyMarkerCount?: string;
+    stage11TriggerCount?: string;
+    stage11ImmediateTriggerCount?: string;
+    baselineUnknownMigrationCount?: string;
+    finalUnknownMigrationCount?: string;
   } = {}
 ) {
   const workdir = await mkdtemp(join(tmpdir(), "qintopia-restore-contract-"));
@@ -42,6 +53,13 @@ case "$*" in
     printf '%s' "$count" > "$FAKE_OID_QUERY_COUNT_FILE"
     if [ "$count" -eq 1 ]; then printf '%s' "$FAKE_CREATED_TARGET_OID"; else printf '%s' "$FAKE_CLEANUP_TARGET_OID"; fi
     ;;
+  *"name NOT IN"*)
+    if [ -f "$FAKE_MIGRATION_STATE_FILE" ]; then
+      printf '%s' "$FAKE_FINAL_UNKNOWN_MIGRATION_COUNT"
+    else
+      printf '%s' "$FAKE_BASELINE_UNKNOWN_MIGRATION_COUNT"
+    fi
+    ;;
   *"schema_migrations"*)
     if [ -f "$FAKE_MIGRATION_STATE_FILE" ]; then
       printf '%s' "$FAKE_FINAL_MIGRATION_COUNT"
@@ -49,8 +67,13 @@ case "$*" in
       printf '%s' "$FAKE_BASELINE_MIGRATION_COUNT"
     fi
     ;;
+  *"reschedule_pair_valid"*) printf '%s' "$FAKE_STAGE11_REPLACEMENT_COUNT" ;;
+  *"stage11_move_order_command_chain"*) printf '%s' "$FAKE_STAGE11_BODY_MARKER_COUNT" ;;
   *"qintopia_assert_stage10_shorten_combination"*) printf '%s' "$FAKE_STAGE10_FUNCTION_COUNT" ;;
+  *"qintopia_assert_stage11_move_combination"*) printf '%s' "$FAKE_STAGE11_FUNCTION_COUNT" ;;
   *"pricing_revisions_stage10_validate"*) printf '%s' "$FAKE_STAGE10_IMMEDIATE_TRIGGER_COUNT" ;;
+  *"pricing_revisions_stage11_validate_move"*) printf '%s' "$FAKE_STAGE11_IMMEDIATE_TRIGGER_COUNT" ;;
+  *"amendments_stage11_validate_move_combination"*) printf '%s' "$FAKE_STAGE11_TRIGGER_COUNT" ;;
   *"pg_trigger"*) printf '%s' "$FAKE_STAGE10_TRIGGER_COUNT" ;;
   *" pg_restore "*) if [ "$FAKE_RESTORE_FAILURE" = "1" ]; then exit 1; fi ;;
 esac
@@ -59,6 +82,7 @@ esac
   const npm = join(bin, "npm");
   await writeFile(npm, `#!/bin/sh
 printf 'npm %s\\n' "$*" >> "$FAKE_DOCKER_LOG"
+printf 'pg user=%s password=%s host=%s port=%s database=%s\\n' "$PGUSER" "$PGPASSWORD" "$PGHOST" "$PGPORT" "$PGDATABASE" >> "$FAKE_DOCKER_LOG"
 if [ "$FAKE_MIGRATION_FAILURE" = "1" ]; then exit 1; fi
 touch "$FAKE_MIGRATION_STATE_FILE"
 `, { mode: 0o700 });
@@ -75,10 +99,17 @@ touch "$FAKE_MIGRATION_STATE_FILE"
       FAKE_RESTORE_FAILURE: failRestore ? "1" : "",
       FAKE_MIGRATION_FAILURE: options.failMigration ? "1" : "",
       FAKE_BASELINE_MIGRATION_COUNT: options.baselineMigrationCount ?? "26",
-      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? "27",
+      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? "28",
       FAKE_STAGE10_FUNCTION_COUNT: options.stage10FunctionCount ?? "3",
       FAKE_STAGE10_TRIGGER_COUNT: options.stage10TriggerCount ?? "2",
       FAKE_STAGE10_IMMEDIATE_TRIGGER_COUNT: options.stage10ImmediateTriggerCount ?? "3",
+      FAKE_STAGE11_FUNCTION_COUNT: options.stage11FunctionCount ?? "14",
+      FAKE_STAGE11_REPLACEMENT_COUNT: options.stage11ReplacementCount ?? "2",
+      FAKE_STAGE11_BODY_MARKER_COUNT: options.stage11BodyMarkerCount ?? "8",
+      FAKE_STAGE11_TRIGGER_COUNT: options.stage11TriggerCount ?? "4",
+      FAKE_STAGE11_IMMEDIATE_TRIGGER_COUNT: options.stage11ImmediateTriggerCount ?? "8",
+      FAKE_BASELINE_UNKNOWN_MIGRATION_COUNT: options.baselineUnknownMigrationCount ?? "0",
+      FAKE_FINAL_UNKNOWN_MIGRATION_COUNT: options.finalUnknownMigrationCount ?? "0",
       FAKE_CREATED_TARGET_OID: "42001",
       FAKE_CLEANUP_TARGET_OID: replacementOid ?? "42001",
       FAKE_OID_QUERY_COUNT_FILE: oidQueryCount,
@@ -103,7 +134,7 @@ describe("restore script contract", () => {
     }
   });
 
-  it("creates a new target, upgrades a stage 9 backup, and validates the complete stage 10 schema", async () => {
+  it("creates a new target, upgrades a stage 9 backup, and validates the complete stage 11 schema", async () => {
     const fixture = await fakeDockerEnvironment(false);
     try {
       await expect(execFileAsync("bash", [restoreScript, fixture.backup, "new_restore_target"], { env: fixture.env }))
@@ -133,6 +164,7 @@ describe("restore script contract", () => {
       expect(calls).toContain("025_channel_order_atomic_pricing.sql");
       expect(calls).toContain("026_stage9_stay_change_guards.sql");
       expect(calls).toContain("027_stage10_stay_shortening_guards.sql");
+      expect(calls).toContain("028_stage11_move_unit_guards.sql");
       expect(calls).toContain("pricing_revisions_stage10_validate");
       expect(calls).toContain("amendments_stage10_reject_checkout_bypass");
       expect(calls).toContain("entitlement_ledger_stage10_reject_write");
@@ -141,6 +173,22 @@ describe("restore script contract", () => {
       expect(calls).toContain("qintopia_reject_stage10_entitlement_write");
       expect(calls).toContain("qintopia_validate_stage10_shorten_combination");
       expect(calls).toContain("qintopia_validate_stage10_shorten_execution");
+      expect(calls).toContain("qintopia_assert_stage11_move_combination");
+      expect(calls).toContain("qintopia_assert_stage11_date_change_combination");
+      expect(calls).toContain("qintopia_assert_stage11_shorten_before_timeline");
+      expect(calls).toContain("qintopia_validate_stage11_shorten_before_timeline");
+      expect(calls).toContain("qintopia_preserve_stage11_preview_evidence");
+      expect(calls).toContain("qintopia_assert_stage11_protocol_evidence");
+      expect(calls).toContain("reschedule_pair_valid");
+      expect(calls).toContain("stage11_move_order_command_chain");
+      expect(calls).toContain("stage11_preview_evidence_immutable");
+      expect(calls).toContain("pricing_revisions_stage11_validate_move");
+      expect(calls).toContain("amendments_stage11_validate_move_combination");
+      expect(calls).toContain("amendments_stage11_validate_shorten_before_timeline");
+      expect(calls).toContain("command_executions_stage11_validate_shorten_before_timeline");
+      expect(calls).toContain("handler.proname = 'qintopia_validate_stage11_shorten_before_timeline'");
+      expect(calls).toContain("inventory_claims_validate_source");
+      expect(calls).toContain("handler.proname = 'qintopia_validate_inventory_claim_source'");
       expect(calls).not.toContain("dropdb");
     } finally {
       await rm(fixture.workdir, { recursive: true, force: true });
@@ -160,11 +208,35 @@ describe("restore script contract", () => {
     }
   });
 
-  it("removes the new target when migration or final stage 10 object validation fails", async () => {
+  it("rejects unknown future migrations before upgrading or accepting a restore", async () => {
+    for (const [target, options, expectsMigration] of [
+      ["future_backup_target", { baselineUnknownMigrationCount: "1" }, false],
+      ["future_after_upgrade_target", { finalUnknownMigrationCount: "1" }, true]
+    ] as const) {
+      const fixture = await fakeDockerEnvironment(false, false, undefined, options);
+      try {
+        await expect(execFileAsync("bash", [restoreScript, fixture.backup, target], { env: fixture.env }))
+          .rejects.toMatchObject({ code: 1 });
+        const calls = await readFile(fixture.log, "utf8");
+        if (expectsMigration) expect(calls).toContain("npm run db:migrate");
+        else expect(calls).not.toContain("npm run db:migrate");
+        expect(calls).toContain(`dropdb -U qintopia --if-exists ${target}`);
+      } finally {
+        await rm(fixture.workdir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("removes the new target when migration or final stage 11 object validation fails", async () => {
     for (const [target, options] of [
       ["failed_migration_target", { failMigration: true }],
       ["incomplete_stage10_target", { stage10FunctionCount: "2" }],
-      ["missing_stage10_immediate_trigger_target", { stage10ImmediateTriggerCount: "2" }]
+      ["missing_stage10_immediate_trigger_target", { stage10ImmediateTriggerCount: "2" }],
+      ["incomplete_stage11_target", { stage11FunctionCount: "13" }],
+      ["stale_stage11_replacement_target", { stage11ReplacementCount: "1" }],
+      ["damaged_stage11_function_body_target", { stage11BodyMarkerCount: "7" }],
+      ["missing_stage11_deferred_trigger_target", { stage11TriggerCount: "3" }],
+      ["missing_stage11_immediate_trigger_target", { stage11ImmediateTriggerCount: "7" }]
     ] as const) {
       const fixture = await fakeDockerEnvironment(false, false, undefined, options);
       try {
@@ -175,6 +247,85 @@ describe("restore script contract", () => {
         expect(calls).toContain(`dropdb -U qintopia --if-exists ${target}`);
       } finally {
         await rm(fixture.workdir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("builds the restore fixture from the real stage 10 migration boundary", async () => {
+    const script = await readFile(verifyBackupRestoreScript, "utf8");
+    expect(script).toContain('migration_number="${migration_name%%_*}"');
+    expect(script).toContain("10#$migration_number > 27");
+    expect(script).toContain("cat \"$migration_path\"");
+    expect(script).toContain("INSERT INTO schema_migrations(name)");
+    expect(script).toContain("027_stage10_stay_shortening_guards.sql");
+    expect(script).toContain("028_stage11_move_unit_guards.sql");
+    expect(script).not.toContain("DROP TRIGGER IF EXISTS");
+    expect(script).not.toContain("DELETE FROM schema_migrations");
+
+    const fixtureIndex = script.indexOf("tests/helpers/create-restore-fixture.ts");
+    const dumpIndex = script.indexOf('pg_dump -U "$user" -Fc "$source_database"');
+    expect(fixtureIndex).toBeGreaterThan(0);
+    expect(dumpIndex).toBeGreaterThan(fixtureIndex);
+  });
+
+  it("accepts only origin and always enabled guard triggers in readiness and restore gates", async () => {
+    const [databaseSource, restoreSource, verifyRestoreSource, composeSource] = await Promise.all([
+      readFile(databaseModule, "utf8"),
+      readFile(restoreScript, "utf8"),
+      readFile(verifyBackupRestoreScript, "utf8"),
+      readFile(verifyComposeColdStartScript, "utf8")
+    ]);
+    for (const source of [databaseSource, restoreSource, verifyRestoreSource, composeSource]) {
+      expect(source).toContain("tgenabled IN ('O','A')");
+      expect(source).not.toContain("tgenabled <> 'D'");
+    }
+  });
+
+  it("passes PostgreSQL credentials discretely so reserved password characters are not parsed as a URI", async () => {
+    const fixture = await fakeDockerEnvironment(false);
+    const password = "p@ss:/#word";
+    try {
+      await expect(execFileAsync("bash", [restoreScript, fixture.backup, "reserved_password_target"], {
+        env: { ...fixture.env, POSTGRES_PASSWORD: password }
+      })).resolves.toMatchObject({ stdout: expect.stringContaining("Restored") });
+      const calls = await readFile(fixture.log, "utf8");
+      expect(calls).toContain(`pg user=qintopia password=${password} host=127.0.0.1 port=55432 database=reserved_password_target`);
+      expect(calls).not.toContain("DATABASE_URL=postgres://");
+    } finally {
+      await rm(fixture.workdir, { recursive: true, force: true });
+    }
+
+    const [restoreSource, verifyRestoreSource] = await Promise.all([
+      readFile(restoreScript, "utf8"),
+      readFile(verifyBackupRestoreScript, "utf8")
+    ]);
+    for (const source of [restoreSource, verifyRestoreSource]) {
+      expect(source).not.toContain("DATABASE_URL=postgres://$user:$password@");
+      expect(source).toContain('DATABASE_URL=""');
+      expect(source).toContain('PGPASSWORD="$password"');
+    }
+  });
+
+  it("encodes discrete PostgreSQL connection fields without changing their values", () => {
+    const names = ["DATABASE_URL", "PGUSER", "PGPASSWORD", "PGHOST", "PGPORT", "PGDATABASE"] as const;
+    const previous = new Map(names.map((name) => [name, process.env[name]]));
+    try {
+      delete process.env.DATABASE_URL;
+      process.env.PGUSER = "restore@operator";
+      process.env.PGPASSWORD = "p@ss:/#word";
+      process.env.PGHOST = "127.0.0.1";
+      process.env.PGPORT = "55432";
+      process.env.PGDATABASE = "restore_target";
+      const parsed = new URL(databaseUrl());
+      expect(decodeURIComponent(parsed.username)).toBe("restore@operator");
+      expect(decodeURIComponent(parsed.password)).toBe("p@ss:/#word");
+      expect(parsed.hostname).toBe("127.0.0.1");
+      expect(parsed.port).toBe("55432");
+      expect(parsed.pathname).toBe("/restore_target");
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
       }
     }
   });

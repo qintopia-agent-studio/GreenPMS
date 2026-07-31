@@ -16,6 +16,7 @@ import {
   type OrderActionCode
 } from "@qintopia/contracts";
 import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
+import { legacyEffectProtocol, type HistoricalProtocolVersion } from "./historical-command-protocol.ts";
 import type { DbExecutor } from "./inventory.ts";
 import { propertyLocalToday } from "./members.ts";
 import type { Database } from "./schema.ts";
@@ -50,19 +51,34 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+type HistoricalAmendmentProtocol = HistoricalProtocolVersion;
+
+function legacyAmendmentProtocol(amendmentType: string, payloadValue: unknown): HistoricalAmendmentProtocol | undefined {
+  return legacyEffectProtocol(amendmentType, payloadValue);
+}
+
 export function pricingReasonFromAmendment(amendment: {
   amendment_type: string;
   reason_code: string;
   reason_note: string;
   payload: unknown;
+  protocolVersion?: HistoricalAmendmentProtocol;
 } | undefined): { code: string; note: string } {
   if (!amendment) return { code: "HISTORICAL", note: "" };
-  if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY"].includes(amendment.amendment_type)) {
+  if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT"].includes(amendment.amendment_type)) {
     const payload = recordValue(amendment.payload);
     const decision = recordValue(payload?.pricingDecision);
     const reason = recordValue(decision?.reason);
     if (typeof reason?.code === "string" && typeof reason.note === "string") {
       return { code: reason.code, note: reason.note };
+    }
+    // Pre-Stage 11 MOVE_UNIT facts used the amendment reason and had no
+    // structured after/pricingDecision body. Keep those records readable,
+    // while a damaged Stage 11 payload still fails closed.
+    if (amendment.amendment_type === "MOVE_UNIT"
+      && amendment.protocolVersion === "PRE_STAGE_11"
+      && payload?.after === undefined) {
+      return { code: amendment.reason_code, note: amendment.reason_note };
     }
     if (amendment.amendment_type !== "CREATE_ORDER") {
       throw new DomainError("INTERNAL_ERROR", "订单住宿日期变更的计价原因损坏", 500);
@@ -185,8 +201,6 @@ export function orderAllowedActions(
         if (fulfillmentDates.businessDate < fulfillmentDates.departureDate) {
           fulfillmentDisabledReason = "DEPARTURE_DATE_NOT_REACHED";
         }
-      } else if (code === "RESCHEDULE_STAY" && hasFutureMove) {
-        fulfillmentDisabledReason = "该订单已有换房安排，当前版本暂不能调整预订日期";
       } else if (code === "SHORTEN_STAY") {
         if (fulfillmentDates.arrivalDate >= fulfillmentDates.businessDate) {
           fulfillmentDisabledReason = "入住当天暂不办理缩短或提前退房；未实际使用房间时请使用后续的撤销入住流程";
@@ -194,8 +208,12 @@ export function orderAllowedActions(
           fulfillmentDisabledReason = fulfillmentDates.businessDate === fulfillmentDates.departureDate
             ? "已到计划退房日，请使用普通退房"
             : "已超过计划退房日，请使用迟录退房";
-        } else if (hasFutureMove) {
-          fulfillmentDisabledReason = "该订单已有尚未生效的换房安排，请在换房流程中处理后再缩短住宿";
+        }
+      } else if (code === "MOVE_UNIT") {
+        if (status === "RESERVED" && fulfillmentDates.businessDate > fulfillmentDates.arrivalDate) {
+          fulfillmentDisabledReason = "逾期未到订单暂不能换房，请先处理到店日期";
+        } else if (status === "CHECKED_IN" && fulfillmentDates.businessDate >= fulfillmentDates.departureDate) {
+          fulfillmentDisabledReason = "已到或超过计划退房日，请先办理续住或退房";
         }
       }
     }
@@ -372,6 +390,7 @@ interface LifecycleAmendmentRow extends FulfillmentAmendmentRow {
   order_id: string;
   prior_version: number;
   new_version: number;
+  protocolVersion?: HistoricalAmendmentProtocol;
 }
 
 interface LifecycleRevisionRow {
@@ -466,6 +485,12 @@ function lifecycleDate(value: unknown, field: string): string {
   return value;
 }
 
+function nextLifecycleDate(value: string): string {
+  const date = parseLocalDate(value);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 function lifecycleDateTime(value: Date | string, field: string): string {
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) lifecycleFailure(`订单住宿生命周期的${field}损坏`);
@@ -542,12 +567,42 @@ function arrangementTimeline(value: OrderArrangementDto): StayTimelineItem[] {
     .map((serviceDate) => ({ serviceDate, inventoryUnitId: interval.inventoryUnitId })));
 }
 
+function arrangementFromTimeline(timeline: readonly StayTimelineItem[]): OrderArrangementDto {
+  if (timeline.length === 0) lifecycleFailure("订单住宿变更的 typed 时间线为空");
+  const intervals: OrderArrangementIntervalDto[] = [];
+  for (const [index, item] of timeline.entries()) {
+    const serviceDate = lifecycleDate(item.serviceDate, "变更服务日期");
+    const departureDate = nextLifecycleDate(serviceDate);
+    const previous = timeline[index - 1];
+    if (previous && nextLifecycleDate(previous.serviceDate) !== serviceDate) {
+      lifecycleFailure("订单住宿变更的 typed 时间线不连续");
+    }
+    const current = intervals.at(-1);
+    if (current?.inventoryUnitId === item.inventoryUnitId && current.departureDate === serviceDate) {
+      current.departureDate = departureDate;
+    } else {
+      intervals.push({ inventoryUnitId: item.inventoryUnitId, arrivalDate: serviceDate, departureDate });
+    }
+  }
+  return arrangement(intervals);
+}
+
 function payloadTimeline(amendment: LifecycleAmendmentRow): StayTimelineItem[] {
   const payload = recordValue(amendment.payload);
   if (!payload) lifecycleFailure("订单住宿变更的 typed payload 损坏", { amendmentId: amendment.id });
   let value: unknown;
-  if (amendment.amendment_type === "MOVE_UNIT") value = payload.stayTimeline;
-  else {
+  if (amendment.amendment_type === "MOVE_UNIT") {
+    if (payload.after === undefined) {
+      if (amendment.protocolVersion !== "PRE_STAGE_11") {
+        lifecycleFailure("订单换房变更缺少当前协议时间线", { amendmentId: amendment.id });
+      }
+      value = payload.stayTimeline;
+    }
+    else {
+      const after = recordValue(payload.after);
+      value = after?.stayTimeline;
+    }
+  } else {
     const after = recordValue(payload.after);
     value = after?.stayTimeline;
   }
@@ -909,16 +964,19 @@ export function projectOrderLifecycle(input: {
       }
       before = current;
       next = segment.segment_type === "RESCHEDULE_STAY"
-        ? arrangement([{
-          inventoryUnitId: segment.inventory_unit_id,
-          arrivalDate: segment.arrival_date,
-          departureDate: segment.departure_date
-        }])
+        ? arrangementFromTimeline(payloadTimeline(amendment))
         : overlayArrangement(current, {
           inventoryUnitId: segment.inventory_unit_id,
           arrivalDate: segment.arrival_date,
           departureDate: segment.departure_date
         }, overlayType as "EXTEND_STAY" | "SHORTEN_STAY" | "MOVE");
+      const trailingInterval = next.intervals.at(-1)!;
+      if (segment.segment_type === "RESCHEDULE_STAY"
+        && (segment.inventory_unit_id !== trailingInterval.inventoryUnitId
+          || segment.arrival_date !== trailingInterval.arrivalDate
+          || segment.departure_date !== trailingInterval.departureDate)) {
+        lifecycleFailure("改期住宿安排版本没有表达最终连续房源区间", { segmentId: segment.id });
+      }
       if (!timelineMatches(payloadTimeline(amendment), arrangementTimeline(next))) {
         lifecycleFailure("订单住宿安排与 typed 变更时间线不一致", { amendmentId: amendment.id });
       }
@@ -1045,8 +1103,10 @@ function hasRefundableCollection(facts: Array<{
 
 async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel) {
   const context = await loadOrderContext(db, orderId);
-  const [businessDate, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, cleaningTasks] = await Promise.all([
+  const [businessDate, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, cleaningTasks] = await Promise.all([
     propertyLocalToday(db, context.order.property_id),
+    db.selectFrom("schema_migrations").select("applied_at")
+      .where("name", "=", "028_stage11_move_unit_guards.sql").executeTakeFirst(),
     db.selectFrom("order_occupants").selectAll().where("order_id", "=", orderId).orderBy("ordinal").execute(),
     db.selectFrom("order_occupant_corrections")
       .innerJoin("subjects", "subjects.id", "order_occupant_corrections.actor_subject_id")
@@ -1093,8 +1153,27 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       .orderBy("task.created_at")
       .execute() : Promise.resolve([])
   ]);
+  if (!protocolEpochRow) throw new DomainError("INTERNAL_ERROR", "Stage 11 protocol epoch is unavailable", 500);
+  const stage11Epoch = protocolEpochRow.applied_at instanceof Date
+    ? protocolEpochRow.applied_at
+    : new Date(protocolEpochRow.applied_at);
+  const projectedAmendments: Array<(typeof amendments)[number] & {
+    protocolVersion?: HistoricalAmendmentProtocol;
+    recoveryMode?: "HISTORICAL_READ_ONLY";
+  }> = amendments.map((amendment) => {
+    const protocolVersion = legacyAmendmentProtocol(amendment.amendment_type, amendment.payload);
+    if (!protocolVersion) return amendment;
+    const createdAt = amendment.created_at instanceof Date ? amendment.created_at : new Date(amendment.created_at);
+    if (createdAt.getTime() >= stage11Epoch.getTime()) {
+      throw new DomainError("INTERNAL_ERROR", "订单变更在 Stage 11 协议启用后仍使用历史数据形状", 500, false, {
+        amendmentId: amendment.id,
+        amendmentType: amendment.amendment_type
+      });
+    }
+    return { ...amendment, protocolVersion, recoveryMode: "HISTORICAL_READ_ONLY" as const };
+  });
   const latestByOccupant = new Map<string, (typeof correctionRows)[number]>();
-  const amendmentById = new Map(amendments.map((amendment) => [amendment.id, amendment]));
+  const amendmentById = new Map(projectedAmendments.map((amendment) => [amendment.id, amendment]));
   for (const correction of correctionRows) {
     const current = latestByOccupant.get(correction.occupant_id);
     if (!current || correction.sequence > current.sequence) latestByOccupant.set(correction.occupant_id, correction);
@@ -1127,7 +1206,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     stay: context.stay,
     businessDate,
     segments,
-    amendments,
+    amendments: projectedAmendments,
     revisions,
     facts,
     activeTimeline
@@ -1174,7 +1253,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     effectiveArrangement: lifecycle.effectiveArrangement,
     fulfillment: lifecycle.fulfillment,
     arrangementHistory: lifecycle.arrangementHistory,
-    amendments: amendments.map((amendment) => ({
+    amendments: projectedAmendments.map((amendment) => ({
       id: amendment.id,
       order_id: amendment.order_id,
       sequence: amendment.sequence,
@@ -1184,6 +1263,9 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       prior_version: amendment.prior_version,
       new_version: amendment.new_version,
       payload: amendment.payload,
+      ...(amendment.protocolVersion
+        ? { protocolVersion: amendment.protocolVersion, recoveryMode: "HISTORICAL_READ_ONLY" as const }
+        : {}),
       command_id: amendment.command_id,
       actor: amendment.actor_subject_id && amendment.actor_display_name
         ? { subjectId: amendment.actor_subject_id, displayName: amendment.actor_display_name }
@@ -1261,7 +1343,14 @@ export async function appendAmendment(trx: Transaction<Database>, options: {
     prior_version: options.priorVersion,
     new_version: options.priorVersion + 1,
     payload: options.payload,
-    command_id: options.commandId ?? null
+    command_id: options.commandId ?? null,
+    created_at: sql<Date>`greatest(
+      transaction_timestamp(),
+      coalesce(
+        (select max(created_at) from amendments where order_id = ${options.orderId}),
+        '-infinity'::timestamptz
+      )
+    )`
   }).execute();
   return id;
 }

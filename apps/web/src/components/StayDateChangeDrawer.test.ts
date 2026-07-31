@@ -144,17 +144,13 @@ describe("stay date change drawer rules", () => {
     expect(freeRequest.input).not.toHaveProperty("targetCurrentContractAmountMinor");
   });
 
-  it("fails closed visibly for a reserved order with an existing room-move arrangement", () => {
+  it("allows Scheme B rescheduling for a reserved order with an existing room-move arrangement", () => {
     const current = view();
     current.effectiveArrangement.intervals = [
       { inventoryUnitId: "room_1", arrivalDate: "2026-08-02", departureDate: "2026-08-03" },
       { inventoryUnitId: "room_2", arrivalDate: "2026-08-03", departureDate: "2026-08-04" }
     ];
-    expect(stayDateChangeActionState(current)).toEqual({
-      action: "RESCHEDULE_STAY",
-      enabled: false,
-      reason: "该订单已有换房安排，当前版本暂不能调整预订日期"
-    });
+    expect(stayDateChangeActionState(current)).toEqual({ action: "RESCHEDULE_STAY", enabled: true, reason: null });
   });
 
   it("only extends checked-in stays and rejects no-op or shortened dates", () => {

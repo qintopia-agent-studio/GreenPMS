@@ -13,16 +13,35 @@ async function setBoardRange(page: Page, arrivalDate: string, departureDate: str
 }
 
 async function selectDraft(page: Page, unitId: string, arrivalDate: string, departureDate: string) {
-  const unitSelect = page.getByTestId("room-status-unit-select");
-  await unitSelect.selectOption(unitId);
-  await page.getByLabel("入住日期", { exact: true }).fill(arrivalDate);
-  await page.getByLabel("退房日期", { exact: true }).fill(departureDate);
+  const openDrawer = page.locator("dialog.room-status-write-drawer");
+  if (await openDrawer.isVisible()) {
+    await openDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+    await expect(openDrawer).toBeHidden();
+  }
+  const cell = roomCell(page, unitId, arrivalDate);
+  await cell.scrollIntoViewIfNeeded();
+  await expect(cell).toBeVisible();
+  await cell.focus();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", unitId);
+  await expect(popover).toHaveAttribute("data-selection-kind", "day");
+  await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  const drawer = page.locator("dialog.room-status-write-drawer");
+  await expect(drawer).toBeVisible();
+  await drawer.getByLabel("入住日期", { exact: true }).fill(arrivalDate);
+  await drawer.getByLabel("退房日期", { exact: true }).fill(departureDate);
 }
 
 function roomCell(page: Page, unitId: string, serviceDate: string) {
   return page.locator(
     `[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${serviceDate}"]`
   );
+}
+
+function roomRow(page: Page, unitId: string) {
+  return page.locator(`[data-room-status-row="${unitId}"]`);
 }
 
 async function commandHeaders(scope: string) {
@@ -107,14 +126,13 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
       await route.continue();
     });
 
+    const room102 = roomRow(page, "unit_room_102");
+    await expect(room102).toContainText("整房/单床");
+    await expect(room102.getByText("拆床销售", { exact: true })).toHaveCount(0);
+    await room102.screenshot({ path: testInfo.outputPath("stage-1-room-102-sales-presentation.png") });
     await selectDraft(page, "unit_room_102", "2026-07-26", "2026-07-28");
     await firstResponseHeld;
-    const inventorySection = page.getByRole("heading", { name: "库存单元" }).locator("..").locator("..");
-    await expect(inventorySection.getByText("整房销售", { exact: true })).toBeVisible();
-    await expect(inventorySection.getByText("支持整房及单床销售", { exact: true })).toBeVisible();
-    await expect(inventorySection.getByText("拆床销售", { exact: true })).toHaveCount(0);
     expect(quotePayloads.at(-1)).toEqual(expect.objectContaining({ inventoryUnitId: "unit_room_102" }));
-    await inventorySection.screenshot({ path: testInfo.outputPath("stage-1-room-102-sales-presentation.png") });
     await page.getByLabel("退房日期", { exact: true }).fill("2026-08-01");
     await expect(page.getByTestId("quote-recovery")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /查询.*结果/ })).toHaveCount(0);
@@ -142,21 +160,32 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
 
     await login(page);
     await setBoardRange(page, "2026-07-23", "2026-08-15");
+    await page.getByTestId("date-window-mode-21").click();
+    await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
 
-    const options = page.getByTestId("room-status-unit-select").locator("option");
-    await expect(options.filter({ hasText: /^D栋 D01 / })).toHaveCount(1);
-    await expect(options.filter({ hasText: /^D栋 D05 / })).toHaveCount(1);
-    await expect(options.filter({ hasText: /^E栋 E01 / })).toHaveCount(1);
-    await expect(options.filter({ hasText: /^E栋 E03 / })).toHaveCount(1);
-    await expect(options.filter({ hasText: /^3栋 302 单人间（公卫）（房间）$/ })).toHaveCount(1);
-    await expect(options.filter({ hasText: /^302 · 302/ })).toHaveCount(0);
-    await expect(options.filter({ hasText: /D-GEN-|E-GEN-/ })).toHaveCount(0);
+    for (const [unitId, location] of [
+      ["unit_room_d_gen_01", "D栋 D01"],
+      ["unit_room_d_gen_05", "D栋 D05"],
+      ["unit_room_e_gen_01", "E栋 E01"],
+      ["unit_room_e_gen_03", "E栋 E03"]
+    ] as const) {
+      await expect(roomRow(page, unitId)).toContainText(location);
+    }
+    const room302 = roomRow(page, "unit_room_302");
+    await expect(room302).toContainText("3栋 302");
+    await expect(room302).toContainText("单人间（公卫）");
+    await expect(page.getByText(/D-GEN-|E-GEN-/)).toHaveCount(0);
 
-    await page.getByTestId("room-status-unit-select").selectOption("unit_room_302");
-    const inventorySection = page.getByRole("heading", { name: "库存单元" }).locator("..").locator("..");
-    await expect(inventorySection.getByText("3栋 302 单人间（公卫）", { exact: true })).toBeVisible();
-    await expect(page.getByText(/^302 · 302/)).toHaveCount(0);
-    await inventorySection.screenshot({ path: testInfo.outputPath("stage-1-room-302-display-name.png") });
+    const room302Cell = roomCell(page, "unit_room_302", "2026-07-26");
+    await room302Cell.scrollIntoViewIfNeeded();
+    await room302Cell.focus();
+    await page.keyboard.press("Enter");
+    const room302Popover = page.getByTestId("room-status-quick-popover");
+    await expect(room302Popover).toBeVisible();
+    await expect(room302Popover).toHaveAttribute("data-unit-id", "unit_room_302");
+    await expect(room302Popover).toContainText("3栋 302 单人间（公卫）");
+    await room302Popover.screenshot({ path: testInfo.outputPath("stage-1-room-302-display-name.png") });
+    await page.keyboard.press("Escape");
 
     await selectDraft(page, "unit_room_104", "2026-07-26", "2026-08-05");
     const quoteResult = page.getByTestId("quote-result");

@@ -56,7 +56,13 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     required: ["propertyId", "orderId", "newDepartureDate"],
     properties: ["propertyId", "orderId", "newDepartureDate", "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason"]
   },
-  MOVE_UNIT: { required: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"], properties: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"] },
+  MOVE_UNIT: {
+    required: ["propertyId", "orderId", "newInventoryUnitId", "effectiveDate"],
+    properties: [
+      "propertyId", "orderId", "newInventoryUnitId", "effectiveDate", "targetCurrentContractAmountMinor",
+      "channelPriceDifferenceReason", "manualPriceAdjustmentReason"
+    ]
+  },
   REPRICE_ORDER: { required: ["propertyId", "orderId", "targetCurrentContractAmountMinor"], properties: ["propertyId", "orderId", "targetCurrentContractAmountMinor"] },
   CANCEL_ORDER: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   MARK_NO_SHOW: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
@@ -280,7 +286,15 @@ describe("OpenAPI 3.1 command contract", () => {
     const createFreeStayCategoryVariants = createFreeStayCategory.anyOf as Array<{ enum: string[] }>;
     expect(createFreeStayCategoryVariants.map((variant) => variant.enum[0])).toEqual(["VOLUNTEER", "RECEPTION"]);
     const previewSchema = document.paths["/api/v1/command-previews"].post.responses["200"].content["application/json"].schema;
-    const previewProperties = (previewSchema.properties as Record<string, JsonSchema>).preview!.properties as Record<string, JsonSchema>;
+    const previewResponseVariants = previewSchema.anyOf as JsonSchema[];
+    expect(previewResponseVariants).toHaveLength(4);
+    expect(previewResponseVariants.every((variant) => variant.additionalProperties === false)).toBe(true);
+    const currentPreviewResponse = previewResponseVariants.find((variant) => {
+      const responseProperties = variant.properties as Record<string, JsonSchema> | undefined;
+      const previewProperties = responseProperties?.preview?.properties as Record<string, JsonSchema> | undefined;
+      return Array.isArray(previewProperties?.effect?.anyOf);
+    })!;
+    const previewProperties = ((currentPreviewResponse.properties as Record<string, JsonSchema>).preview!.properties) as Record<string, JsonSchema>;
     const createEffect = (previewProperties.effect!.anyOf as JsonSchema[]).find((variant) => {
       const properties = variant.properties as Record<string, JsonSchema> | undefined;
       return properties?.quoteId !== undefined && properties?.primaryGuest !== undefined;
@@ -714,9 +728,392 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(executions).toEqual([{ idempotency_key: historicalKey, request_hash: stableHash(historicalEnvelope) }]);
   });
 
+  it("replays exact pre-Stage 11 Preview and Confirm POST receipts but rejects legacy shapes written after the epoch", async () => {
+    const stage11Epoch = await database.selectFrom("schema_migrations")
+      .select("applied_at")
+      .where("name", "=", "028_stage11_move_unit_guards.sql")
+      .executeTakeFirstOrThrow();
+    const historicalCreatedAt = new Date(new Date(stage11Epoch.applied_at).getTime() - 1_000);
+    const money = (minorUnits: number) => ({ currency: "CNY", minorUnits });
+    const pricing = {
+      coverageSet: [],
+      cashLines: [],
+      cashRemainder: money(0),
+      currentContractAmount: money(10_000)
+    };
+    const pricingDecision = {
+      pricingBasis: "POLICY",
+      policyBaseAmount: money(10_000),
+      targetCurrentContractAmount: money(10_000),
+      differenceFromPolicy: money(0),
+      manualAdjustmentMinor: 0,
+      differenceExceedsThreshold: false,
+      reason: { code: "POLICY_DEFAULT", note: "" }
+    };
+    const before = {
+      arrivalDate: "2026-07-29",
+      departureDate: "2026-08-01",
+      nights: 3,
+      currentContractAmount: money(10_000)
+    };
+    const after = {
+      arrivalDate: "2026-07-30",
+      departureDate: "2026-08-02",
+      nights: 3,
+      stayTimeline: [
+        { serviceDate: "2026-07-30", inventoryUnitId: "unit_legacy_target" },
+        { serviceDate: "2026-07-31", inventoryUnitId: "unit_legacy_target" },
+        { serviceDate: "2026-08-01", inventoryUnitId: "unit_legacy_target" }
+      ],
+      pricing
+    };
+    const shortenBefore = {
+      arrivalDate: after.arrivalDate,
+      departureDate: "2026-08-03",
+      nights: 4,
+      currentContractAmount: money(10_000)
+    };
+    const shortenInventoryChange = {
+      preservedDates: ["2026-07-30", "2026-07-31", "2026-08-01"],
+      releasedDates: ["2026-08-02"],
+      addedDates: []
+    };
+    const unit = (id: string) => ({
+      id,
+      propertyId: demo.propertyId,
+      kind: "ROOM",
+      roomId: id,
+      code: id,
+      name: id,
+      catalogVersion: null,
+      buildingCode: null,
+      roomTypeCode: null,
+      pricingProductCode: null,
+      inventoryBasis: null,
+      codeProvenance: null,
+      physicalBedCount: null
+    });
+    const fixtures = [
+      {
+        suffix: "stage9_post_replay",
+        commandType: "RESCHEDULE_STAY",
+        protocolVersion: "LEGACY_STAGE_9_10",
+        envelope: {
+          commandType: "RESCHEDULE_STAY",
+          input: {
+            propertyId: demo.propertyId,
+            orderId: "order_legacy_stage9_post",
+            newArrivalDate: "2026-07-30",
+            newDepartureDate: "2026-08-02"
+          }
+        },
+        effect: {
+          operation: "RESCHEDULE_STAY",
+          orderId: "order_legacy_stage9_post",
+          stayId: "stay_legacy_stage9_post",
+          inventoryUnitId: "unit_legacy_target",
+          before,
+          after,
+          pricingDecision,
+          inventoryChange: { preservedDates: [], releasedDates: [], addedDates: [] },
+          entitlementChange: {
+            preservedCoverageDates: [], releasedCoverageDates: [], addedCoverageDates: [], consumedCoverageDates: []
+          },
+          fundsSummary: { netRecordedCollection: money(0), collectionDifference: money(-10_000) }
+        },
+        confirmResult: {
+          orderId: "order_legacy_stage9_post",
+          stayId: "stay_legacy_stage9_post",
+          amendmentId: "amendment_legacy_stage9_post",
+          staySegmentId: "segment_legacy_stage9_post",
+          pricingRevisionId: "revision_legacy_stage9_post",
+          arrivalDate: after.arrivalDate,
+          departureDate: after.departureDate,
+          before,
+          after,
+          pricingDecision,
+          inventoryChange: { preservedDates: [], releasedDates: [], addedDates: [] },
+          entitlementChange: {
+            preservedCoverageDates: [], releasedCoverageDates: [], addedCoverageDates: [], consumedCoverageDates: []
+          },
+          fundsSummary: { netRecordedCollection: money(0), collectionDifference: money(-10_000) }
+        }
+      },
+      {
+        suffix: "stage10_post_replay",
+        commandType: "SHORTEN_STAY",
+        protocolVersion: "LEGACY_STAGE_10",
+        envelope: {
+          commandType: "SHORTEN_STAY",
+          input: {
+            propertyId: demo.propertyId,
+            orderId: "order_legacy_stage10_post",
+            newDepartureDate: "2026-08-02"
+          }
+        },
+        effect: {
+          operation: "SHORTEN_STAY",
+          orderId: "order_legacy_stage10_post",
+          stayId: "stay_legacy_stage10_post",
+          inventoryUnitId: "unit_legacy_target",
+          businessDate: "2026-07-30",
+          completionMode: "SHORTEN_IN_HOUSE",
+          before: shortenBefore,
+          after,
+          pricingDecision,
+          inventoryChange: shortenInventoryChange,
+          entitlementSummary: {
+            currentConsumedCoverageDates: [], retainedHistoricalConsumedCoverageDates: [], ledgerWriteCount: 0
+          },
+          fundsSummary: { netRecordedCollection: money(0), collectionDifference: money(-10_000), factCount: 0 },
+          refundReferenceAmount: money(0)
+        },
+        confirmResult: {
+          orderId: "order_legacy_stage10_post",
+          stayId: "stay_legacy_stage10_post",
+          arrangementAmendmentId: "amendment_legacy_stage10_post",
+          checkoutAmendmentId: null,
+          staySegmentId: "segment_legacy_stage10_post",
+          pricingRevisionId: "revision_legacy_stage10_post",
+          completionMode: "SHORTEN_IN_HOUSE",
+          arrivalDate: after.arrivalDate,
+          departureDate: after.departureDate,
+          before: shortenBefore,
+          after,
+          pricingDecision,
+          inventoryChange: shortenInventoryChange,
+          entitlementSummary: {
+            currentConsumedCoverageDates: [], retainedHistoricalConsumedCoverageDates: [], ledgerWriteCount: 0
+          },
+          fundsSummary: { netRecordedCollection: money(0), collectionDifference: money(-10_000), factCount: 0 },
+          refundReferenceAmount: money(0),
+          fulfillmentTiming: null
+        }
+      },
+      {
+        suffix: "pre_stage11_post_replay",
+        commandType: "MOVE_UNIT",
+        protocolVersion: "PRE_STAGE_11",
+        envelope: {
+          commandType: "MOVE_UNIT",
+          input: {
+            propertyId: demo.propertyId,
+            orderId: "order_legacy_move_post",
+            newInventoryUnitId: "unit_legacy_target",
+            effectiveDate: "2026-07-30"
+          }
+        },
+        effect: {
+          orderId: "order_legacy_move_post",
+          fromInventoryUnit: unit("unit_legacy_source"),
+          toInventoryUnit: unit("unit_legacy_target"),
+          effectiveDate: "2026-07-30",
+          stayTimeline: after.stayTimeline,
+          pricing
+        },
+        confirmResult: {
+          orderId: "order_legacy_move_post",
+          amendmentId: "amendment_legacy_move_post",
+          staySegmentId: "segment_legacy_move_post",
+          pricingRevisionId: "revision_legacy_move_post"
+        }
+      }
+    ] as const;
+
+    for (const fixture of fixtures) {
+      const previewId = `preview_${fixture.suffix}`;
+      const previewEffectHash = stableHash(fixture.effect);
+      const preview = {
+        previewId,
+        commandType: fixture.commandType,
+        effectHash: previewEffectHash,
+        effect: fixture.effect,
+        expiresAt: "2030-01-01T00:00:00.000Z"
+      };
+      const previewKey = `preview-${fixture.suffix}`;
+      const confirmKey = `confirm-${fixture.suffix}`;
+      const confirmation = {
+        propertyId: demo.propertyId,
+        commandType: fixture.commandType,
+        confirmation: true,
+        expectedEffectHash: previewEffectHash,
+        reason: { code: "HISTORICAL_EXACT_REPLAY", note: "历史命令精确重放" }
+      };
+      const previewCommandId = `command_preview_${fixture.suffix}`;
+      const confirmCommandId = `command_confirm_${fixture.suffix}`;
+      const previewReceiptId = `receipt_preview_${fixture.suffix}`;
+      const confirmReceiptId = `receipt_confirm_${fixture.suffix}`;
+      await database.transaction().execute(async (trx) => {
+        await trx.insertInto("command_executions").values([
+          {
+            id: previewCommandId,
+            subject_id: demo.agentSubjectId,
+            credential_id: "token_demo_write",
+            property_id: demo.propertyId,
+            command_type: `PREVIEW:${fixture.commandType}`,
+            idempotency_key: previewKey,
+            request_hash: stableHash(fixture.envelope),
+            correlation_id: `original-${previewKey}`,
+            state: "EXECUTING",
+            created_at: historicalCreatedAt,
+            completed_at: null
+          },
+          {
+            id: confirmCommandId,
+            subject_id: demo.agentSubjectId,
+            credential_id: "token_demo_write",
+            property_id: demo.propertyId,
+            command_type: fixture.commandType,
+            idempotency_key: confirmKey,
+            request_hash: stableHash({ previewId, confirmation }),
+            correlation_id: `original-${confirmKey}`,
+            state: "EXECUTING",
+            created_at: historicalCreatedAt,
+            completed_at: null
+          }
+        ]).execute();
+        await trx.insertInto("command_receipts").values([
+          {
+            id: previewReceiptId,
+            command_id: previewCommandId,
+            execution_status: "EXECUTED",
+            business_committed: true,
+            result: { preview },
+            error: null,
+            resource_refs: JSON.stringify([previewId]),
+            fact_refs: JSON.stringify([]),
+            committed_at: historicalCreatedAt,
+            created_at: historicalCreatedAt
+          },
+          {
+            id: confirmReceiptId,
+            command_id: confirmCommandId,
+            execution_status: "EXECUTED",
+            business_committed: true,
+            result: fixture.confirmResult,
+            error: null,
+            resource_refs: JSON.stringify([fixture.confirmResult.orderId]),
+            fact_refs: JSON.stringify([]),
+            committed_at: historicalCreatedAt,
+            created_at: historicalCreatedAt
+          }
+        ]).execute();
+      });
+
+      const previewReplay = await app.inject({
+        method: "POST",
+        url: "/api/v1/command-previews",
+        headers: {
+          authorization: `Bearer ${demo.writeToken}`,
+          "content-type": "application/json",
+          "idempotency-key": previewKey,
+          "x-correlation-id": `replay-${previewKey}`
+        },
+        payload: fixture.envelope
+      });
+      expect(previewReplay.statusCode, previewReplay.body).toBe(200);
+      expect(previewReplay.json()).toEqual({
+        preview,
+        receipt: {
+          receiptId: previewReceiptId,
+          commandId: previewCommandId,
+          executionStatus: "EXECUTED",
+          businessCommitted: true,
+          correlationId: `original-${previewKey}`,
+          result: { preview },
+          resourceRefs: [previewId],
+          factRefs: [],
+          committedAt: historicalCreatedAt.toISOString(),
+          protocolVersion: fixture.protocolVersion,
+          recoveryMode: "HISTORICAL_READ_ONLY"
+        }
+      });
+
+      const confirmReplay = await app.inject({
+        method: "POST",
+        url: `/api/v1/command-previews/${previewId}/confirm`,
+        headers: {
+          authorization: `Bearer ${demo.writeToken}`,
+          "content-type": "application/json",
+          "idempotency-key": confirmKey,
+          "x-correlation-id": `replay-${confirmKey}`
+        },
+        payload: confirmation
+      });
+      expect(confirmReplay.statusCode, confirmReplay.body).toBe(200);
+      expect(confirmReplay.json()).toEqual({
+        receiptId: confirmReceiptId,
+        commandId: confirmCommandId,
+        executionStatus: "EXECUTED",
+        businessCommitted: true,
+        correlationId: `original-${confirmKey}`,
+        result: fixture.confirmResult,
+        resourceRefs: [fixture.confirmResult.orderId],
+        factRefs: [],
+        committedAt: historicalCreatedAt.toISOString(),
+        protocolVersion: fixture.protocolVersion,
+        recoveryMode: "HISTORICAL_READ_ONLY"
+      });
+    }
+
+    const postStage11Fixture = fixtures[1];
+    const postStage11Key = "preview-stage10-post-epoch-rejected";
+    const postStage11CommandId = "command_preview_stage10_post_epoch_rejected";
+    const postStage11ReceiptId = "receipt_preview_stage10_post_epoch_rejected";
+    const postStage11Preview = {
+      previewId: "preview_stage10_post_epoch_rejected",
+      commandType: postStage11Fixture.commandType,
+      effectHash: stableHash(postStage11Fixture.effect),
+      effect: postStage11Fixture.effect,
+      expiresAt: "2030-01-01T00:00:00.000Z"
+    };
+    await database.transaction().execute(async (trx) => {
+      await trx.insertInto("command_executions").values({
+        id: postStage11CommandId,
+        subject_id: demo.agentSubjectId,
+        credential_id: "token_demo_write",
+        property_id: demo.propertyId,
+        command_type: `PREVIEW:${postStage11Fixture.commandType}`,
+        idempotency_key: postStage11Key,
+        request_hash: stableHash(postStage11Fixture.envelope),
+        correlation_id: `original-${postStage11Key}`,
+        state: "EXECUTING",
+        created_at: stage11Epoch.applied_at,
+        completed_at: null
+      }).execute();
+      await trx.insertInto("command_receipts").values({
+        id: postStage11ReceiptId,
+        command_id: postStage11CommandId,
+        execution_status: "EXECUTED",
+        business_committed: true,
+        result: { preview: postStage11Preview },
+        error: null,
+        resource_refs: JSON.stringify([postStage11Preview.previewId]),
+        fact_refs: JSON.stringify([]),
+        committed_at: stage11Epoch.applied_at,
+        created_at: stage11Epoch.applied_at
+      }).execute();
+    });
+
+    const postStage11Replay = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: {
+        authorization: `Bearer ${demo.writeToken}`,
+        "content-type": "application/json",
+        "idempotency-key": postStage11Key,
+        "x-correlation-id": `replay-${postStage11Key}`
+      },
+      payload: postStage11Fixture.envelope
+    });
+    expect(postStage11Replay.statusCode, postStage11Replay.body).toBe(500);
+    expect(postStage11Replay.json()).toMatchObject({ code: "INTERNAL_ERROR", retryable: false });
+  });
+
   it("publishes every documented error status for the query and recovery surfaces", async () => {
     const document = (await app.inject({ method: "GET", url: "/api/v1/openapi.json" })).json();
     const expected: Array<[string, string, string[]]> = [
+      ["/api/v1/properties/{id}/availability", "get", ["400", "403", "404", "429"]],
       ["/api/v1/quotes", "post", ["400", "403", "404", "409", "422", "429"]],
       ["/api/v1/command-previews/{previewId}/confirm", "post", ["400", "403", "404", "409", "429"]],
       ["/api/v1/receipts/{id}", "get", ["400", "403", "404", "429"]],
@@ -754,6 +1151,16 @@ describe("OpenAPI 3.1 command contract", () => {
         if (operation) expect(operation.responses?.["500"], `${method.toUpperCase()} ${path} 500`).toBeDefined();
       }
     }
+  });
+
+  it("returns the declared 404 when an availability exclusion order is absent", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/v1/properties/${demo.propertyId}/availability?arrivalDate=2028-08-01&departureDate=2028-08-02&excludeOrderId=order_missing_availability`,
+      headers: { authorization: `Bearer ${demo.writeToken}` }
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ code: "NOT_FOUND", retryable: false });
   });
 
   it("publishes finite schemas for every core client response", async () => {

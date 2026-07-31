@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import type { RoomStatusBoardDto } from "@qintopia/contracts";
-import { sql } from "kysely";
 import { createDatabase } from "../../packages/db/src/database.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
@@ -99,19 +98,27 @@ function findMaintenanceCandidate(board: RoomStatusBoardDto): MaintenanceCandida
 }
 
 async function openMaintenanceCommand(page: Page, candidate: MaintenanceCandidate, businessReason: string) {
-  const unitSelect = page.getByTestId("room-status-unit-select");
-  await expect(unitSelect).toHaveAccessibleName("房间或床位");
-  await unitSelect.selectOption(candidate.unitId);
-  await page.getByLabel("入住日期", { exact: true }).fill(candidate.arrivalDate);
-  await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
-  await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
-  await page.getByLabel("维修原因").fill(businessReason);
+  const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${candidate.unitId}"][data-service-date="${candidate.arrivalDate}"]`);
+  await cell.scrollIntoViewIfNeeded();
+  await expect(cell).toBeVisible();
+  await cell.focus();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", candidate.unitId);
+  await expect(popover).toHaveAttribute("data-selection-kind", "day");
+  await popover.getByRole("button", { name: "维修锁房", exact: true }).click();
+  const drawer = page.locator("dialog.room-status-write-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByLabel("开始日期", { exact: true })).toHaveValue(candidate.arrivalDate);
+  await expect(drawer.getByLabel("结束日期", { exact: true })).toHaveValue(candidate.departureDate);
+  await drawer.getByLabel("维修原因").fill(businessReason);
   const responsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
       && new URL(response.url()).pathname === "/api/v1/command-previews"
       && response.status() === 200
   ));
-  await page.getByRole("button", { name: "继续核对", exact: true }).click();
+  await drawer.getByRole("button", { name: "继续核对", exact: true }).click();
   const response = await responsePromise;
   const body = await response.json() as PreviewResponseBody;
   await expect(page.getByTestId("command-effect")).toBeVisible();
@@ -193,7 +200,7 @@ async function blockCountForReason(reason: string): Promise<number> {
   }
 }
 
-test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration writes no lock", async ({ page }, testInfo) => {
+test("desktop client-expired LOCK_MAINTENANCE Preview hides confirmation and regenerates without a lock", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only room-status Preview expiry coverage");
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -205,7 +212,7 @@ test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration wri
 
   const db = createDatabase(e2eDatabaseUrl);
   try {
-    // Keep the server-built effect and Receipt, but shorten this real Preview's TTL so the UI and PostgreSQL expire together.
+    // Shorten only the browser-visible TTL. Server expiry rejection is covered by PostgreSQL integration tests.
     await page.route("**/api/v1/command-previews", async (route) => {
       const response = await route.fetch();
       expect(response.status()).toBe(200);
@@ -213,13 +220,7 @@ test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration wri
       expect(body.preview.previewId).toMatch(/^preview_/);
       expect(body.preview.commandType).toBe("LOCK_MAINTENANCE");
       expect(body.receipt.receiptId).toMatch(/^receipt_/);
-      const stored = await db.updateTable("command_previews")
-        .set({ expires_at: sql<Date>`clock_timestamp() + interval '2 seconds'` })
-        .where("id", "=", body.preview.previewId)
-        .where("command_type", "=", "LOCK_MAINTENANCE")
-        .returning("expires_at")
-        .executeTakeFirstOrThrow();
-      const preview = { ...body.preview, expiresAt: new Date(stored.expires_at).toISOString() };
+      const preview = { ...body.preview, expiresAt: new Date(Date.now() + 2_000).toISOString() };
       await route.fulfill({
         response,
         json: { ...body, preview }
@@ -245,29 +246,6 @@ test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration wri
     const regenerate = page.getByTestId("regenerate-command-preview");
     await expect(regenerate).toBeVisible();
 
-    const staleConfirmationKey = `e2e-confirm-expired-lock-maintenance-${randomUUID()}`;
-    const staleResponse = await page.request.post(`/api/v1/command-previews/${first.preview.previewId}/confirm`, {
-      headers: {
-        "Idempotency-Key": staleConfirmationKey,
-        "X-Correlation-ID": staleConfirmationKey
-      },
-      data: {
-        propertyId,
-        commandType: "LOCK_MAINTENANCE",
-        confirmation: true,
-        expectedEffectHash: first.preview.effectHash,
-        reason: { code: "E2E_EXPIRED", note: "The endpoint must reject the same Preview hidden by the UI guard" }
-      }
-    });
-    expect(staleResponse.status()).toBe(409);
-    const rejected = await staleResponse.json() as ReceiptResponseBody;
-    expect(rejected).toMatchObject({
-      executionStatus: "NOT_EXECUTED",
-      businessCommitted: false,
-      error: { code: "PREVIEW_STALE", details: { causeCode: "PREVIEW_EXPIRED" } },
-      resourceRefs: [],
-      factRefs: []
-    });
     expect(await blockCountForReason(businessReason)).toBe(0);
 
     await expect(regenerate).toBeEnabled();
@@ -289,14 +267,12 @@ test("desktop expired LOCK_MAINTENANCE Preview fails closed and regeneration wri
     await expect(page.getByTestId("confirm-command")).toBeEnabled();
 
     const previews = await db.selectFrom("command_previews")
-      .select(["id", "expires_at", "status", "used_at"])
+      .select(["id", "status", "used_at"])
       .where("id", "in", [first.preview.previewId, second.preview.previewId])
       .orderBy("id")
       .execute();
     expect(previews).toHaveLength(2);
-    const expiredPreview = previews.find((preview) => preview.id === first.preview.previewId);
-    expect(expiredPreview).toMatchObject({ status: "EXPIRED", used_at: null });
-    expect(new Date(expiredPreview!.expires_at).toISOString()).toBe(first.preview.expiresAt);
+    expect(previews.find((preview) => preview.id === first.preview.previewId)).toMatchObject({ status: "OPEN", used_at: null });
     expect(previews.find((preview) => preview.id === second.preview.previewId)).toMatchObject({ status: "OPEN", used_at: null });
     expect(await blockCountForReason(businessReason)).toBe(0);
 

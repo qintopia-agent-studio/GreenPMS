@@ -78,7 +78,8 @@ interface RenderedUnit {
 interface BedOccupancyTooltipState {
   text: string;
   left: number;
-  top: number;
+  top?: number;
+  bottom?: number;
   maxHeight: number;
   placement: "ABOVE" | "BELOW";
 }
@@ -138,6 +139,89 @@ export function roomStatusIntervalServiceDateAtPointer(
   const relative = Math.max(0, Math.min(bounds.width - Number.EPSILON, clientX - bounds.left));
   const offset = Math.min(span - 1, Math.floor(relative / (bounds.width / span)));
   return dates[startColumn + offset] ?? dates[startColumn] ?? "";
+}
+
+export function roomStatusBedOccupancyTooltipPosition(
+  bounds: Pick<DOMRect, "bottom" | "left" | "top" | "width">,
+  viewport: { height: number; width: number },
+  text: string
+): BedOccupancyTooltipState {
+  const viewportMargin = 12;
+  const gap = 7;
+  const maximumWidth = Math.max(1, Math.min(320, viewport.width - viewportMargin * 2));
+  const halfWidth = maximumWidth / 2;
+  const left = Math.min(
+    viewport.width - viewportMargin - halfWidth,
+    Math.max(viewportMargin + halfWidth, bounds.left + bounds.width / 2)
+  );
+  const estimatedLines = Math.max(2, Math.ceil(text.length / 25));
+  const estimatedHeight = 30 + estimatedLines * 18;
+  const belowAnchor = Math.max(
+    viewportMargin,
+    Math.min(viewport.height - viewportMargin, bounds.bottom + gap)
+  );
+  const aboveAnchor = Math.max(
+    viewportMargin,
+    Math.min(viewport.height - viewportMargin, bounds.top - gap)
+  );
+  const availableBelow = Math.max(1, viewport.height - viewportMargin - belowAnchor);
+  const availableAbove = Math.max(1, aboveAnchor - viewportMargin);
+  const placement = estimatedHeight <= availableBelow
+    ? "BELOW"
+    : estimatedHeight <= availableAbove || availableAbove >= availableBelow ? "ABOVE" : "BELOW";
+  const safeViewportHeight = Math.max(1, viewport.height - viewportMargin * 2);
+  const minimumUsefulHeight = Math.min(72, safeViewportHeight);
+  if (Math.max(availableAbove, availableBelow) < minimumUsefulHeight) {
+    const overlayMaxHeight = Math.min(
+      safeViewportHeight,
+      Math.max(minimumUsefulHeight, Math.floor(viewport.height * 0.6))
+    );
+    return {
+      text,
+      left,
+      ...(placement === "ABOVE" ? { bottom: viewportMargin } : { top: viewportMargin }),
+      maxHeight: overlayMaxHeight,
+      placement
+    };
+  }
+  const maxHeight = Math.floor(placement === "BELOW" ? availableBelow : availableAbove);
+
+  if (placement === "ABOVE") {
+    return {
+      text,
+      left,
+      bottom: viewport.height - aboveAnchor,
+      maxHeight,
+      placement
+    };
+  }
+  return {
+    text,
+    left,
+    top: belowAnchor,
+    maxHeight,
+    placement
+  };
+}
+
+export function roomStatusFocusRestorationTarget(
+  focusedCell: RoomStatusCellFocus | null,
+  unitIds: readonly string[],
+  dates: readonly string[]
+): RoomStatusCellFocus | null {
+  if (focusedCell) {
+    return unitIds.includes(focusedCell.unitId) && dates.includes(focusedCell.serviceDate)
+      ? focusedCell
+      : null;
+  }
+  return unitIds[0] && dates[0] ? { unitId: unitIds[0], serviceDate: dates[0] } : null;
+}
+
+export function focusAndRevealRoomStatusCell(cell: HTMLElement): boolean {
+  if (!cell.isConnected) return false;
+  cell.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
+  cell.focus({ preventScroll: true });
+  return cell.ownerDocument.activeElement === cell;
 }
 
 function intervalsForWindow(intervals: readonly RoomStatusIntervalDto[], dates: readonly string[]): PositionedInterval[] {
@@ -373,6 +457,10 @@ export function RoomStatusGrid({
   const clampedWindowStart = board.dates.indexOf(firstVisibleDate ?? "");
   const previousWindowStart = shiftDateWindowStart(board.dates.length, Math.max(0, clampedWindowStart), dateWindowSize, -1);
   const nextWindowStart = shiftDateWindowStart(board.dates.length, Math.max(0, clampedWindowStart), dateWindowSize, 1);
+  const restorationFocus = roomStatusFocusRestorationTarget(focusedCell, unitIds, dates);
+  const restorationFocusKey = restorationFocus
+    ? `${restorationFocus.unitId}:${restorationFocus.serviceDate}`
+    : null;
 
   useEffect(() => {
     scrollRestored.current = false;
@@ -398,21 +486,22 @@ export function RoomStatusGrid({
     if (isMobile) return;
     const restorationRequested = restoreFocus && !focusRestored.current;
     const explicitRequest = focusRequestToken !== lastFocusRequestToken.current;
-    if ((!restorationRequested && !explicitRequest) || !effectiveFocus) return;
-    const frame = requestAnimationFrame(() => {
-      if (restorationRequested) focusRestored.current = true;
-      lastFocusRequestToken.current = focusRequestToken;
-      const cell = cellRefs.current.get(`${effectiveFocus.unitId}:${effectiveFocus.serviceDate}`);
-      if (cell) {
-        if (!focusedCell
-          || focusedCell.unitId !== effectiveFocus.unitId
-          || focusedCell.serviceDate !== effectiveFocus.serviceDate) onFocusedCellChange(effectiveFocus);
-        cell.focus({ preventScroll: false });
-      }
-      else scrollRef.current?.focus({ preventScroll: true });
+    if ((!restorationRequested && !explicitRequest) || !restorationFocus || !restorationFocusKey) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        const cell = cellRefs.current.get(restorationFocusKey);
+        if (!cell || !focusAndRevealRoomStatusCell(cell)) return;
+        if (!focusedCell) onFocusedCellChange(restorationFocus);
+        if (restorationRequested) focusRestored.current = true;
+        lastFocusRequestToken.current = focusRequestToken;
+      });
     });
-    return () => cancelAnimationFrame(frame);
-  }, [effectiveFocus, focusRequestToken, focusedCell, isMobile, onFocusedCellChange, restoreFocus]);
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  }, [focusRequestToken, focusedCell, isMobile, onFocusedCellChange, restorationFocus, restorationFocusKey, restoreFocus]);
 
   useEffect(() => {
     if (isMobile || !pendingKeyboardFocus.current) return;
@@ -615,30 +704,11 @@ export function RoomStatusGrid({
   const showBedOccupancyTooltip = (target: HTMLElement, text: string) => {
     cancelBedOccupancyTooltipDismiss();
     bedOccupancyTooltipTriggerRef.current = target as HTMLDivElement;
-    const bounds = target.getBoundingClientRect();
-    const viewportMargin = 12;
-    const gap = 7;
-    const maximumWidth = Math.max(1, Math.min(320, window.innerWidth - viewportMargin * 2));
-    const halfWidth = maximumWidth / 2;
-    const left = Math.min(
-      window.innerWidth - viewportMargin - halfWidth,
-      Math.max(viewportMargin + halfWidth, bounds.left + bounds.width / 2)
-    );
-    const estimatedLines = Math.max(2, Math.ceil(text.length / 25));
-    const estimatedHeight = 30 + estimatedLines * 18;
-    const availableBelow = Math.max(1, window.innerHeight - bounds.bottom - gap - viewportMargin);
-    const availableAbove = Math.max(1, bounds.top - gap - viewportMargin);
-    const placement = estimatedHeight <= availableBelow
-      ? "BELOW"
-      : estimatedHeight <= availableAbove || availableAbove >= availableBelow ? "ABOVE" : "BELOW";
-    const maxHeight = Math.floor(placement === "BELOW" ? availableBelow : availableAbove);
-    setBedOccupancyTooltip({
-      text,
-      left,
-      top: placement === "BELOW" ? bounds.bottom + gap : bounds.top - gap,
-      maxHeight,
-      placement
-    });
+    setBedOccupancyTooltip(roomStatusBedOccupancyTooltipPosition(
+      target.getBoundingClientRect(),
+      { height: window.innerHeight, width: window.innerWidth },
+      text
+    ));
   };
 
   const handleScroll = () => {
@@ -988,7 +1058,12 @@ export function RoomStatusGrid({
           role="tooltip"
           tabIndex={0}
           data-testid="bed-occupancy-tooltip"
-          style={{ left: bedOccupancyTooltip.left, top: bedOccupancyTooltip.top, maxHeight: bedOccupancyTooltip.maxHeight }}
+          style={{
+            left: bedOccupancyTooltip.left,
+            top: bedOccupancyTooltip.top,
+            bottom: bedOccupancyTooltip.bottom,
+            maxHeight: bedOccupancyTooltip.maxHeight
+          }}
           onMouseEnter={cancelBedOccupancyTooltipDismiss}
           onMouseLeave={scheduleBedOccupancyTooltipDismiss}
           onBlur={(event) => {

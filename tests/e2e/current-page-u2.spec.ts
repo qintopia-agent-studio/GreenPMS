@@ -96,8 +96,21 @@ async function openWholeRoomPopover(page: Page): Promise<{ trigger: Locator; pop
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", fixture.wholeRoom.roomId);
   await expect(popover).toHaveAttribute("data-selection-kind", "day");
   return { trigger, popover };
+}
+
+async function expectDayPopover(popover: Locator, unitId: string): Promise<void> {
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", unitId);
+  await expect(popover).toHaveAttribute("data-selection-kind", "day");
+}
+
+async function selectQuickPopoverOrder(popover: Locator, nickname: string): Promise<void> {
+  const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: nickname });
+  await expect(orderOption).toHaveCount(1);
+  await orderOption.click();
 }
 
 async function dragRoomStatusRange(page: Page, unitId: string, startDate: string, endDate: string): Promise<void> {
@@ -113,6 +126,10 @@ async function dragRoomStatusRange(page: Page, unitId: string, startDate: string
   await page.mouse.down();
   await page.mouse.move(endBox!.x + endBox!.width / 2, endBox!.y + endBox!.height / 2, { steps: 8 });
   await page.mouse.up();
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", unitId);
+  await expect(popover).toHaveAttribute("data-selection-kind", "range");
 }
 
 test.beforeAll(async ({}, workerInfo) => {
@@ -158,6 +175,7 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
   const writeDrawer = page.locator("dialog.room-status-write-drawer");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", targetUnitId!);
+  await expect(popover).toHaveAttribute("data-selection-kind", "day");
   await expect(popover.locator("header strong")).toHaveText(targetUnitLabel);
   await expect(viewDrawer).toBeHidden();
   await expect(writeDrawer).toBeHidden();
@@ -216,7 +234,7 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
   });
   await upperTarget.focus();
   await page.keyboard.press("Enter");
-  await expect(popover).toBeVisible();
+  await expectDayPopover(popover, fixture.stage6.emptyCreationRoomId);
   const upperGeometry = await popover.evaluate((element) => {
     const box = element.getBoundingClientRect();
     const rowElement = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
@@ -250,7 +268,7 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
     await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(1);
     await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
     const selectedOrder = orderResponse(page, fixture.wholeRoom.orderId);
-    await popover.locator(".room-status-quick-orders button").click();
+    await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
     await selectedOrder;
 
     const drawer = page.locator("dialog.modal-drawer");
@@ -297,10 +315,12 @@ test("U2 quick popover repositions after room-row or page geometry changes witho
   const targetDate = addDays(fixture.dates.arrivalDate, 10);
   const target = page.locator(`.room-status-day-available[data-room-status-cell="true"][data-service-date="${targetDate}"]`).first();
   await target.scrollIntoViewIfNeeded();
+  const targetUnitId = await target.getAttribute("data-unit-id");
+  expect(targetUnitId).toBeTruthy();
   await target.focus();
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
-  await expect(popover).toBeVisible();
+  await expectDayPopover(popover, targetUnitId!);
   const originalRowHeight = await popover.evaluate((element) => {
     const row = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
     if (!row) throw new Error("快捷操作框缺少房源行");
@@ -375,7 +395,7 @@ test("U2 selecting a new room-status cell invalidates the old order drawer befor
   await showRange(page);
   const selectedOrder = orderResponse(page, fixture.wholeRoom.orderId);
   const { popover } = await openWholeRoomPopover(page);
-  await popover.locator(".room-status-quick-orders button").click();
+  await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
   await selectedOrder;
   const drawer = page.locator("dialog.modal-drawer");
   await expect(drawer).toBeVisible();
@@ -384,7 +404,7 @@ test("U2 selecting a new room-status cell invalidates the old order drawer befor
   await other.focus();
   await page.keyboard.press("Enter");
   const layeredPopover = page.getByTestId("room-status-quick-popover");
-  await expect(layeredPopover).toBeVisible();
+  await expectDayPopover(layeredPopover, fixture.stage6.emptyCreationRoomId);
   await expect(drawer).toBeHidden();
   await page.keyboard.press("Escape");
   await expect(layeredPopover).toBeHidden();
@@ -448,7 +468,7 @@ test("U2 a delayed response for an invalidated order cannot reopen or overwrite 
   });
 
   const { popover } = await openWholeRoomPopover(page);
-  await popover.locator(".room-status-quick-orders button").click();
+  await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
   const drawer = page.locator("dialog.room-status-view-drawer");
   await expect(drawer).toBeVisible();
   await expect(drawer).toContainText("正在载入权威订单上下文");
@@ -456,7 +476,7 @@ test("U2 a delayed response for an invalidated order cannot reopen or overwrite 
   const other = roomCell(page, fixture.stage6.emptyCreationRoomId, fixture.dates.arrivalDate);
   await other.click();
   const replacementPopover = page.getByTestId("room-status-quick-popover");
-  await expect(replacementPopover).toBeVisible();
+  await expectDayPopover(replacementPopover, fixture.stage6.emptyCreationRoomId);
   await expect(drawer).toBeHidden();
 
   releaseOldOrderResponse?.();
@@ -478,6 +498,7 @@ test("U2 desktop parent room lists each exact order and an outside click keeps t
   await parent.focus();
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
+  await expectDayPopover(popover, fixture.splitBed.roomId);
   await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(2);
   await expect(popover).toContainText("山峰");
   await expect(popover).toContainText("小满");
@@ -520,7 +541,7 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
 
   const emptyTarget = roomCell(page, emptyRoomId, emptyTargetDate);
   await emptyTarget.click();
-  await expect(popover).toBeVisible();
+  await expectDayPopover(popover, emptyRoomId);
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
   await expect(emptyTarget).toHaveClass(/is-selected/);
@@ -537,7 +558,7 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   const uniqueCell = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
   await uniqueCell.focus();
   await page.keyboard.press("Enter");
-  await expect(popover).toBeVisible();
+  await expectDayPopover(popover, fixture.wholeRoom.roomId);
   await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(1);
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
@@ -546,7 +567,7 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
       .toHaveClass(/is-stay-selected/);
   }
   const wholeRoomOrder = orderResponse(page, fixture.wholeRoom.orderId);
-  await popover.locator(".room-status-quick-orders button").click();
+  await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
   await wholeRoomOrder;
   const uniqueOrderDrawer = page.locator("dialog.room-status-view-drawer");
   await expect(uniqueOrderDrawer).toBeVisible();
@@ -556,11 +577,13 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
     await expect(roomCell(page, fixture.wholeRoom.roomId, addDays(fixture.dates.arrivalDate, dayOffset)))
       .toHaveClass(/is-stay-selected/);
   }
+  const wholeRoomSelectedCount = await page.locator(".room-status-day-cell.is-stay-selected").count();
+  expect(wholeRoomSelectedCount).toBeGreaterThan(1);
   await uniqueOrderDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(uniqueOrderDrawer).toBeHidden();
   await expect(roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate)).toHaveClass(/is-selected/);
-  await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(1);
-  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
+  await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(wholeRoomSelectedCount);
+  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(wholeRoomSelectedCount);
 
   await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
   await expect(popover).toBeVisible();
@@ -570,6 +593,7 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   const parent = roomCell(page, fixture.splitBed.roomId, fixture.dates.arrivalDate);
   await parent.focus();
   await page.keyboard.press("Enter");
+  await expectDayPopover(popover, fixture.splitBed.roomId);
   await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(2);
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
@@ -577,7 +601,7 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
 
   const selectedOrder = orderResponse(page, fixture.splitBed.bedAOrderId);
-  await popover.getByRole("button", { name: /山峰/ }).click();
+  await selectQuickPopoverOrder(popover, "山峰");
   await selectedOrder;
   const drawer = page.locator("dialog.room-status-view-drawer");
   await expect(drawer).toBeVisible();
@@ -586,13 +610,18 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
     await expect(roomCell(page, fixture.splitBed.bedAId, addDays(fixture.dates.arrivalDate, dayOffset)))
       .toHaveClass(/is-stay-selected/);
   }
+  const bedStaySelectedCount = await page.locator(".room-status-day-cell.is-stay-selected").count();
+  expect(bedStaySelectedCount).toBeGreaterThan(1);
   await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(drawer).toBeHidden();
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
   await expect(parent).toHaveClass(/is-selected/);
-  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(0);
-  await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(1);
+  await expect(page.locator(".room-status-day-cell.is-stay-selected")).toHaveCount(bedStaySelectedCount);
+  await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(bedStaySelectedCount + 1);
+  await expect(page.locator(
+    `[data-room-status-cell="true"][data-unit-id="${fixture.splitBed.bedAId}"].is-selected`
+  )).toHaveCount(bedStaySelectedCount);
 });
 
 test("U2 desktop write drawer is modal and restores its cell, selection, focus, and scroll snapshot", async ({ page }, testInfo) => {
@@ -733,7 +762,7 @@ test("U2 full order page uses four Chinese business layers and never exposes mac
   await showRange(page);
   const { popover } = await openWholeRoomPopover(page);
   const selectedOrder = orderResponse(page, fixture.wholeRoom.orderId);
-  await popover.locator(".room-status-quick-orders button").click();
+  await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
   await selectedOrder;
   await page.getByRole("button", { name: "查看完整订单", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/orders/${fixture.wholeRoom.orderId}$`));

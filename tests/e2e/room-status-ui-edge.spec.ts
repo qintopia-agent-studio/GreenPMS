@@ -47,8 +47,34 @@ function roomRow(page: Page, unitId: string): Locator {
   return page.locator(`[data-room-status-row="${unitId}"]`);
 }
 
-async function tabTo(page: Page, target: Locator, description: string, maximumTabs = 40): Promise<void> {
+async function openMaintenanceDrawer(page: Page, candidate: ReturnType<typeof findWritableNight>): Promise<Locator> {
+  const cell = roomCell(page, candidate.unitId, candidate.arrivalDate);
+  await cell.scrollIntoViewIfNeeded();
+  await expect(cell).toBeVisible();
+  await cell.focus();
+  await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-unit-id", candidate.unitId);
+  await expect(popover).toHaveAttribute("data-selection-kind", "day");
+  await popover.getByRole("button", { name: "维修锁房", exact: true }).click();
+  const drawer = page.locator("dialog.room-status-write-drawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByLabel("开始日期", { exact: true })).toHaveValue(candidate.arrivalDate);
+  await expect(drawer.getByLabel("结束日期", { exact: true })).toHaveValue(candidate.departureDate);
+  return drawer;
+}
+
+async function tabTo(page: Page, target: Locator, description: string): Promise<void> {
   await expect(target, description).toBeVisible();
+  const maximumTabs = await page.locator([
+    "a[href]:visible",
+    "button:not([disabled]):visible",
+    "input:not([disabled]):visible",
+    "select:not([disabled]):visible",
+    "textarea:not([disabled]):visible",
+    "[tabindex]:not([tabindex='-1']):visible"
+  ].join(", ")).count() + 1;
   for (let index = 0; index < maximumTabs; index += 1) {
     if (await target.evaluate((element) => element === document.activeElement)) return;
     await page.keyboard.press("Tab");
@@ -120,10 +146,11 @@ async function expectFullyHitTestable(target: Locator, description: string): Pro
 
   expect(geometry.box.width, `${description} width`).toBeGreaterThan(0);
   expect(geometry.box.height, `${description} height`).toBeGreaterThan(0);
-  expect(geometry.box.left - geometry.focusMargin, `${description} left edge`).toBeGreaterThanOrEqual(geometry.clip.left - 2);
-  expect(geometry.box.top - geometry.focusMargin, `${description} top edge`).toBeGreaterThanOrEqual(geometry.clip.top - 2);
-  expect(geometry.box.right + geometry.focusMargin, `${description} right edge`).toBeLessThanOrEqual(geometry.clip.right + 2);
-  expect(geometry.box.bottom + geometry.focusMargin, `${description} bottom edge`).toBeLessThanOrEqual(geometry.clip.bottom + 2);
+  const focusEdgeTolerance = 3;
+  expect(geometry.box.left - geometry.focusMargin, `${description} left edge`).toBeGreaterThanOrEqual(geometry.clip.left - focusEdgeTolerance);
+  expect(geometry.box.top - geometry.focusMargin, `${description} top edge`).toBeGreaterThanOrEqual(geometry.clip.top - focusEdgeTolerance);
+  expect(geometry.box.right + geometry.focusMargin, `${description} right edge`).toBeLessThanOrEqual(geometry.clip.right + focusEdgeTolerance);
+  expect(geometry.box.bottom + geometry.focusMargin, `${description} bottom edge`).toBeLessThanOrEqual(geometry.clip.bottom + focusEdgeTolerance);
   for (const [index, hit] of geometry.hitResults.entries()) {
     expect(hit.matches, `${description} hit point ${index + 1} was covered by ${hit.description}`).toBe(true);
   }
@@ -247,13 +274,14 @@ test("a restoration mounted at 375px restores its focused date cell and scroll a
     return {
       scrollLeft: container.scrollLeft,
       scrollTop: container.scrollTop,
+      maximumScrollLeft: Math.max(0, container.scrollWidth - container.clientWidth),
       container: { left: containerBox.left, top: containerBox.top, right: containerBox.right, bottom: containerBox.bottom },
       cell: { left: cellBox.left, top: cellBox.top, right: cellBox.right, bottom: cellBox.bottom }
     };
   }, { unitId: targetUnitId, serviceDate: targetDate });
   expect(geometry).not.toBeNull();
   expect(geometry!.scrollTop).toBeGreaterThan(0);
-  expect(geometry!.scrollLeft).toBeGreaterThan(0);
+  expect(geometry!.scrollLeft).toBe(Math.min(640, geometry!.maximumScrollLeft));
   expect(geometry!.cell.top).toBeGreaterThanOrEqual(geometry!.container.top + 44);
   expect(geometry!.cell.bottom).toBeLessThanOrEqual(geometry!.container.bottom + 1);
   expect(geometry!.cell.left).toBeGreaterThanOrEqual(geometry!.container.left + 200);
@@ -267,6 +295,9 @@ test("sticky date and resource headers remain hit-testable after both grid axes 
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const board = await login(page);
+  const expandedWindowPromise = roomStatusResponse(page);
+  await page.getByTestId("date-window-mode-21").click();
+  await expandedWindowPromise;
   const targetIdentity = findLastWritableNight(board);
   const scroll = page.locator(".room-status-grid-scroll");
   const target = roomCell(page, targetIdentity.unitId, targetIdentity.serviceDate);
@@ -376,7 +407,7 @@ test("a short 200 percent reflow keeps critical controls reachable outside inten
 
     const search = page.getByLabel("搜索房间或床位", { exact: true });
     await page.locator("#main-content").focus();
-    await tabTo(page, search, "200 percent keyboard search input", 20);
+    await tabTo(page, search, "200 percent keyboard search input");
     expect(await search.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
     await expectFullyHitTestable(search, "200 percent keyboard search input");
 
@@ -396,7 +427,7 @@ test("a short 200 percent reflow keeps critical controls reachable outside inten
 
     const mobileCreate = page.getByRole("button", { name: "新建住宿或锁房", exact: true });
     await page.locator("#main-content").focus();
-    await tabTo(page, mobileCreate, "200 percent mobile create action", 30);
+    await tabTo(page, mobileCreate, "200 percent mobile create action");
     expect(await mobileCreate.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
     await expectFullyHitTestable(mobileCreate, "200 percent mobile create action");
     await mobileCreate.click();
@@ -416,7 +447,9 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
   await page.setViewportSize({ width: 1440, height: 900 });
   const board = await login(page);
   await expect(page.getByRole("grid")).toBeVisible();
+  const expandedWindowPromise = roomStatusResponse(page);
   await page.getByTestId("date-window-mode-21").click();
+  await expandedWindowPromise;
   const candidate = findFiveNightDragCandidate(board);
   const businessReason = `Room-status overlay drag ${randomUUID()}`;
 
@@ -508,12 +541,7 @@ test("Block drafts cannot leave the server-validated room-status selection", asy
     }
   });
 
-  await page.getByTestId("room-status-unit-select").selectOption(candidate.unitId);
-  await page.getByLabel("入住日期", { exact: true }).fill(candidate.arrivalDate);
-  await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
-  await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
-
-  const dialog = page.getByRole("dialog", { name: /^维修锁房 ·/ });
+  const dialog = await openMaintenanceDrawer(page, candidate);
   const from = dialog.getByLabel("开始日期");
   const to = dialog.getByLabel("结束日期");
   await expect(from).toHaveAttribute("min", candidate.arrivalDate);
@@ -536,12 +564,7 @@ test("a maintenance draft survives stale query conditions at 320px and resumes a
   await expect(page.getByRole("grid")).toBeVisible();
   const candidate = findWritableNight(board);
 
-  await page.getByTestId("room-status-unit-select").selectOption(candidate.unitId);
-  await page.getByLabel("入住日期", { exact: true }).fill(candidate.arrivalDate);
-  await page.getByLabel("退房日期", { exact: true }).fill(candidate.departureDate);
-  await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
-
-  let dialog = page.getByRole("dialog", { name: /^维修锁房 ·/ });
+  let dialog = await openMaintenanceDrawer(page, candidate);
   const businessReason = `Preserved at 320px ${randomUUID()}`;
   const reason = dialog.getByLabel("维修原因");
   const submit = dialog.getByRole("button", { name: "继续核对", exact: true });

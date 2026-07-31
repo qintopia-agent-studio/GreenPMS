@@ -12,6 +12,7 @@ import {
 import { newId, parseLocalDate } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { loadActiveStayTimeline, loadOrderContext } from "../../packages/db/src/orders.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
@@ -77,6 +78,7 @@ async function createPaidOrder(options: {
   unitId?: string;
   channel?: BookingChannelCode;
   targetDeltaMinor?: number;
+  pricingPolicyVersionId?: string;
 }) {
   const channel = options.channel ?? "CTRIP";
   const priced = await createQuote(db, {
@@ -85,7 +87,8 @@ async function createPaidOrder(options: {
     stayType: "TRANSIENT",
     arrivalDate: options.arrivalDate,
     departureDate: options.departureDate,
-    pricingPolicyVersionId: testPricingPolicyForDates(options.arrivalDate, options.departureDate)
+    pricingPolicyVersionId: options.pricingPolicyVersionId
+      ?? testPricingPolicyForDates(options.arrivalDate, options.departureDate)
   });
   const target = priced.currentContractAmount.minorUnits + (options.targetDeltaMinor ?? 0);
   const receipt = await execute({
@@ -250,7 +253,8 @@ async function businessSnapshot(orderId: string) {
         .select("stay_segments.id").where("stays.order_id", "=", orderId)).orderBy("service_date").orderBy("id").execute(),
     db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("created_at").orderBy("id").execute(),
     db.selectFrom("entitlement_ledger").selectAll().where("order_id", "=", orderId).orderBy("created_at").orderBy("fact_id").execute(),
-    db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).orderBy("created_at").execute()
+    db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId)
+      .orderBy("created_at").orderBy("fact_id").execute()
   ]);
   return JSON.parse(JSON.stringify({ order, stay, amendments, segments, revisions, claims, coverage, ledger, facts }));
 }
@@ -420,12 +424,13 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
     expect(view.collectionFacts).toHaveLength(0);
   });
 
-  it("fails closed for invalid states, no-op dates, past arrivals, and multi-unit reserved arrangements", async () => {
+  it("fails closed for invalid states, no-op dates and past arrivals, then applies Plan B to a multi-unit reservation", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const created = await createPaidOrder({
       prefix: "stage9-state-matrix",
       arrivalDate: "2028-07-10",
-      departureDate: "2028-07-13"
+      departureDate: "2028-07-13",
+      channel: "WECOM"
     });
     const unchanged = await businessSnapshot(created.orderId);
     await expect(preview({
@@ -463,31 +468,296 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
         effectiveDate: "2028-07-12"
       }
     }, "stage9-existing-move");
-    const afterMove = await businessSnapshot(created.orderId);
-    await expect(preview({
+    const movedView = await getOrderView(db, created.orderId);
+    const beforePlanClaims = await db.selectFrom("inventory_claims")
+      .select(["id", "service_date", "inventory_unit_id", "active"])
+      .where("source_id", "in", movedView.segments.map((segment) => segment.id))
+      .where("active", "=", true)
+      .orderBy("service_date")
+      .execute();
+    const prepared = await preview({
       commandType: "RESCHEDULE_STAY",
       input: {
         propertyId: demo.propertyId,
         orderId: created.orderId,
         newArrivalDate: "2028-07-11",
         newDepartureDate: "2028-07-14",
-        targetCurrentContractAmountMinor: created.target
+        targetCurrentContractAmountMinor: movedView.amounts.currentContractAmount.minorUnits
       }
-    }, "multi-unit-rejected")).rejects.toMatchObject({
-      code: "INVALID_ORDER_STATE",
-      message: "该订单已有换房安排，当前版本暂不能调整预订日期"
+    }, "multi-unit-plan-b");
+    expect(prepared.preview.effect).toMatchObject({
+      before: {
+        stayTimeline: [
+          { serviceDate: "2028-07-10", inventoryUnitId: demo.roomId },
+          { serviceDate: "2028-07-11", inventoryUnitId: demo.roomId },
+          { serviceDate: "2028-07-12", inventoryUnitId: demo.secondRoomId }
+        ]
+      },
+      after: {
+        stayTimeline: [
+          { serviceDate: "2028-07-11", inventoryUnitId: demo.roomId },
+          { serviceDate: "2028-07-12", inventoryUnitId: demo.roomId },
+          { serviceDate: "2028-07-13", inventoryUnitId: demo.secondRoomId }
+        ]
+      },
+      inventoryChange: {
+        preservedDates: ["2028-07-11"],
+        releasedDates: ["2028-07-10", "2028-07-12"],
+        addedDates: ["2028-07-12", "2028-07-13"]
+      }
     });
-    expect(await businessSnapshot(created.orderId)).toEqual(afterMove);
+    const rescheduleReceipt = await confirm(prepared, "multi-unit-plan-b");
+    expect(rescheduleReceipt).toMatchObject({ businessCommitted: true, executionStatus: "EXECUTED" });
+    const rescheduled = await getOrderView(db, created.orderId);
+    expect(rescheduled.effectiveArrangement.intervals).toEqual([
+      { inventoryUnitId: demo.roomId, arrivalDate: "2028-07-11", departureDate: "2028-07-13" },
+      { inventoryUnitId: demo.secondRoomId, arrivalDate: "2028-07-13", departureDate: "2028-07-14" }
+    ]);
+    const allClaims = await db.selectFrom("inventory_claims")
+      .select(["id", "service_date", "inventory_unit_id", "active"])
+      .where("source_id", "in", rescheduled.segments.map((segment) => segment.id))
+      .orderBy("service_date")
+      .orderBy("id")
+      .execute();
+    const preserved = beforePlanClaims.find((claim) => claim.service_date === "2028-07-11")!;
+    expect(allClaims).toContainEqual(preserved);
+    expect(allClaims).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service_date: "2028-07-12",
+        inventory_unit_id: demo.secondRoomId,
+        active: false
+      }),
+      expect.objectContaining({
+        service_date: "2028-07-12",
+        inventory_unit_id: demo.roomId,
+        active: true
+      }),
+      expect.objectContaining({
+        service_date: "2028-07-13",
+        inventory_unit_id: demo.secondRoomId,
+        active: true
+      })
+    ]));
+  });
+
+  it.each([
+    {
+      label: "one-sided extension",
+      original: ["2029-01-10", "2029-01-14"],
+      moveDate: "2029-01-12",
+      changed: ["2029-01-09", "2029-01-14"],
+      expected: [
+        { inventoryUnitId: demo.roomId, arrivalDate: "2029-01-09", departureDate: "2029-01-12" },
+        { inventoryUnitId: demo.secondRoomId, arrivalDate: "2029-01-12", departureDate: "2029-01-14" }
+      ]
+    },
+    {
+      label: "unequal two-sided change",
+      original: ["2029-02-10", "2029-02-14"],
+      moveDate: "2029-02-12",
+      changed: ["2029-02-09", "2029-02-15"],
+      expected: [
+        { inventoryUnitId: demo.roomId, arrivalDate: "2029-02-09", departureDate: "2029-02-12" },
+        { inventoryUnitId: demo.secondRoomId, arrivalDate: "2029-02-12", departureDate: "2029-02-15" }
+      ]
+    },
+    {
+      label: "entirely earlier interval",
+      original: ["2029-03-10", "2029-03-14"],
+      moveDate: "2029-03-12",
+      changed: ["2029-03-01", "2029-03-03"],
+      expected: [
+        { inventoryUnitId: demo.roomId, arrivalDate: "2029-03-01", departureDate: "2029-03-03" }
+      ]
+    },
+    {
+      label: "entirely later interval",
+      original: ["2029-04-10", "2029-04-14"],
+      moveDate: "2029-04-12",
+      changed: ["2029-04-20", "2029-04-22"],
+      expected: [
+        { inventoryUnitId: demo.secondRoomId, arrivalDate: "2029-04-20", departureDate: "2029-04-22" }
+      ]
+    }
+  ])("persists the Plan B $label result exactly as previewed", async ({ label, original, moveDate, changed, expected }) => {
+    const created = await createFreeOrder({
+      prefix: `stage11-plan-b-${label}`,
+      arrivalDate: original[0]!,
+      departureDate: original[1]!,
+      unitId: demo.roomId
+    });
+    await execute({
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newInventoryUnitId: demo.secondRoomId,
+        effectiveDate: moveDate
+      }
+    }, `stage11-plan-b-${label}-move`);
+    const prepared = await preview({
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newArrivalDate: changed[0]!,
+        newDepartureDate: changed[1]!
+      }
+    }, `stage11-plan-b-${label}-reschedule`);
+    const previewTimeline = (prepared.preview.effect.after as { stayTimeline: unknown }).stayTimeline;
+    const receipt = await confirm(prepared, `stage11-plan-b-${label}-reschedule`);
+    expect(receipt).toMatchObject({ businessCommitted: true, executionStatus: "EXECUTED" });
+    const view = await getOrderView(db, created.orderId);
+    expect(view.effectiveArrangement.intervals).toEqual(expected);
+    expect(await loadActiveStayTimeline(db, await loadOrderContext(db, created.orderId))).toEqual(previewTimeline);
+  });
+
+  it("serializes two multi-unit Plan B shifts across every old and new room-day", async () => {
+    const first = await createFreeOrder({
+      prefix: "stage11-plan-b-concurrent-first",
+      arrivalDate: "2029-05-01",
+      departureDate: "2029-05-05",
+      unitId: demo.roomId
+    });
+    const second = await createFreeOrder({
+      prefix: "stage11-plan-b-concurrent-second",
+      arrivalDate: "2029-05-10",
+      departureDate: "2029-05-14",
+      unitId: demo.roomId
+    });
+    await execute({
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: first.orderId,
+        newInventoryUnitId: demo.secondRoomId,
+        effectiveDate: "2029-05-03"
+      }
+    }, "stage11-plan-b-concurrent-first-move");
+    await execute({
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: second.orderId,
+        newInventoryUnitId: demo.secondRoomId,
+        effectiveDate: "2029-05-12"
+      }
+    }, "stage11-plan-b-concurrent-second-move");
+    const firstPreview = await preview({
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: first.orderId,
+        newArrivalDate: "2029-06-01",
+        newDepartureDate: "2029-06-05"
+      }
+    }, "stage11-plan-b-concurrent-first");
+    const secondPreview = await preview({
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: second.orderId,
+        newArrivalDate: "2029-06-01",
+        newDepartureDate: "2029-06-05"
+      }
+    }, "stage11-plan-b-concurrent-second");
+    const before = new Map([
+      [first.orderId, await businessSnapshot(first.orderId)],
+      [second.orderId, await businessSnapshot(second.orderId)]
+    ]);
+    const secondConnection = createDatabase(databaseUrl);
+    try {
+      const [firstReceipt, secondReceipt] = await Promise.all([
+        confirm(firstPreview, "stage11-plan-b-concurrent-first"),
+        confirmCommandPreview(secondConnection, principal, secondPreview.preview.previewId, {
+          propertyId: demo.propertyId,
+          commandType: "RESCHEDULE_STAY",
+          confirmation: true,
+          expectedEffectHash: secondPreview.preview.effectHash,
+          reason: { code: "AUTOMATED_STAGE11", note: "4.4 多房源并发验收" }
+        }, metadata("stage11-plan-b-concurrent-second-confirm"))
+      ]);
+      const outcomes = [
+        { orderId: first.orderId, receipt: firstReceipt },
+        { orderId: second.orderId, receipt: secondReceipt }
+      ];
+      expect(outcomes.filter((item) => item.receipt.businessCommitted)).toHaveLength(1);
+      const loser = outcomes.find((item) => !item.receipt.businessCommitted)!;
+      expect(loser.receipt).toMatchObject({
+        executionStatus: "NOT_EXECUTED",
+        error: { code: "PREVIEW_STALE", details: { causeCode: "INVENTORY_CONFLICT" } }
+      });
+      expect(await businessSnapshot(loser.orderId)).toEqual(before.get(loser.orderId));
+    } finally {
+      await secondConnection.destroy();
+    }
+  });
+
+  it("rejects a PostgreSQL-tampered Plan B timeline and rolls back every business fact", async () => {
+    const created = await createFreeOrder({
+      prefix: "stage11-plan-b-tampered",
+      arrivalDate: "2029-07-01",
+      departureDate: "2029-07-05",
+      unitId: demo.roomId
+    });
+    await execute({
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newInventoryUnitId: demo.secondRoomId,
+        effectiveDate: "2029-07-03"
+      }
+    }, "stage11-plan-b-tampered-move");
+    const prepared = await preview({
+      commandType: "RESCHEDULE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newArrivalDate: "2029-07-02",
+        newDepartureDate: "2029-07-06"
+      }
+    }, "stage11-plan-b-tampered");
+    const before = await atomicBusinessSnapshot(created.orderId);
+    await sql.raw(`
+      CREATE OR REPLACE FUNCTION qintopia_test_tamper_stage11_plan_b() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.amendment_type = 'RESCHEDULE_STAY' THEN
+          NEW.payload := jsonb_set(
+            NEW.payload,
+            '{after,stayTimeline,0,inventoryUnitId}',
+            to_jsonb('unit_room_d_gen_02'::text),
+            false
+          );
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER qintopia_test_tamper_stage11_plan_b
+        BEFORE INSERT ON amendments
+        FOR EACH ROW EXECUTE FUNCTION qintopia_test_tamper_stage11_plan_b()
+    `).execute(db);
+    try {
+      const receipt = await confirm(prepared, "stage11-plan-b-tampered");
+      expect(receipt).toMatchObject({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+      expect(await atomicBusinessSnapshot(created.orderId)).toEqual(before);
+    } finally {
+      await sql.raw(`
+        DROP TRIGGER IF EXISTS qintopia_test_tamper_stage11_plan_b ON amendments;
+        DROP FUNCTION IF EXISTS qintopia_test_tamper_stage11_plan_b()
+      `).execute(db);
+    }
   });
 
   it("extends an in-house stay on its planned departure day and after the planned departure date", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const requestedDepartureDate = shiftDate(businessDate, 1);
     const departureDay = await createPaidOrder({
       prefix: "stage9-departure-day",
       arrivalDate: shiftDate(businessDate, -1),
       departureDate: businessDate,
       unitId: demo.roomId,
-      channel: "WECOM"
+      channel: "WECOM",
+      pricingPolicyVersionId: testPricingPolicyForDates(shiftDate(businessDate, -1), requestedDepartureDate)
     });
     await markHistoricalOrderInHouse(departureDay.orderId, shiftDate(businessDate, -1));
     const departureDayPreview = await preview({
@@ -495,7 +765,7 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
       input: {
         propertyId: demo.propertyId,
         orderId: departureDay.orderId,
-        newDepartureDate: shiftDate(businessDate, 1)
+        newDepartureDate: requestedDepartureDate
       }
     }, "stage9-departure-day");
     const departureDayReceipt = await confirm(departureDayPreview, "stage9-departure-day");
@@ -513,7 +783,8 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
       arrivalDate: shiftDate(businessDate, -3),
       departureDate: shiftDate(businessDate, -1),
       unitId: demo.secondRoomId,
-      channel: "WECOM"
+      channel: "WECOM",
+      pricingPolicyVersionId: testPricingPolicyForDates(shiftDate(businessDate, -3), requestedDepartureDate)
     });
     await markHistoricalOrderInHouse(overdue.orderId, shiftDate(businessDate, -3));
     const overduePreview = await preview({
@@ -521,7 +792,7 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
       input: {
         propertyId: demo.propertyId,
         orderId: overdue.orderId,
-        newDepartureDate: shiftDate(businessDate, 1)
+        newDepartureDate: requestedDepartureDate
       }
     }, "stage9-overdue");
     const overdueReceipt = await confirm(overduePreview, "stage9-overdue");
@@ -530,6 +801,60 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
       result: {
         before: { departureDate: shiftDate(businessDate, -1), nights: 2 },
         after: { departureDate: shiftDate(businessDate, 1), nights: 4 }
+      }
+    });
+  });
+
+  it("revalidates a continuation after the property business date advances", async () => {
+    await db.updateTable("properties").set({ timezone: "Etc/GMT+12" }).where("id", "=", demo.propertyId).execute();
+    const previewBusinessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftDate(previewBusinessDate, -2);
+    const requestedDepartureDate = shiftDate(previewBusinessDate, 2);
+    const created = await createPaidOrder({
+      prefix: "stage11-extend-business-date-crossing",
+      arrivalDate,
+      departureDate: previewBusinessDate,
+      unitId: demo.roomId,
+      channel: "WECOM",
+      pricingPolicyVersionId: testPricingPolicyForDates(arrivalDate, requestedDepartureDate)
+    });
+    await markHistoricalOrderInHouse(created.orderId, arrivalDate);
+    const prepared = await preview({
+      commandType: "EXTEND_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newDepartureDate: requestedDepartureDate
+      }
+    }, "stage11-extend-business-date-crossing");
+    const before = await atomicBusinessSnapshot(created.orderId);
+
+    await db.updateTable("properties").set({ timezone: "Etc/GMT-12" }).where("id", "=", demo.propertyId).execute();
+    expect(await propertyLocalToday(db, demo.propertyId)).toBe(shiftDate(previewBusinessDate, 1));
+    const staleReceipt = await confirm(prepared, "stage11-extend-business-date-crossing");
+    expect(staleReceipt).toMatchObject({
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      error: { code: "PREVIEW_STALE" }
+    });
+    expect(await atomicBusinessSnapshot(created.orderId)).toEqual(before);
+
+    const rebuilt = await preview({
+      commandType: "EXTEND_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newDepartureDate: requestedDepartureDate
+      }
+    }, "stage11-extend-business-date-current");
+    const receipt = await confirm(rebuilt, "stage11-extend-business-date-current");
+    expect(receipt).toMatchObject({
+      businessCommitted: true,
+      executionStatus: "EXECUTED",
+      result: {
+        departureDate: requestedDepartureDate,
+        before: { stayTimeline: expect.any(Array) },
+        after: { stayTimeline: expect.any(Array) }
       }
     });
   });
@@ -741,6 +1066,15 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
       }
     }, "stage9-member-reserved");
     const reservedOrderId = reserved.result!.orderId as string;
+    await execute({
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: reservedOrderId,
+        newInventoryUnitId: "unit_room_d_gen_02",
+        effectiveDate: "2028-09-02"
+      }
+    }, "stage11-member-reserved-move");
     for (const [arrivalDate, departureDate, prefix] of [
       ["2028-09-05", "2028-09-07", "to-b"],
       ["2028-09-01", "2028-09-03", "back-a"]
@@ -752,10 +1086,15 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
     }
     const allCoverage = await db.selectFrom("coverage_items")
       .selectAll().where("order_id", "=", reservedOrderId).orderBy("created_at").orderBy("id").execute();
-    expect(allCoverage).toHaveLength(6);
-    expect(allCoverage.filter((item) => item.status === "HELD").map((item) => item.service_date).sort())
-      .toEqual(["2028-09-01", "2028-09-02"]);
-    expect(allCoverage.filter((item) => item.status === "RELEASED")).toHaveLength(4);
+    expect(allCoverage).toHaveLength(7);
+    expect(allCoverage.filter((item) => item.status === "HELD")
+      .map((item) => ({ serviceDate: item.service_date, inventoryUnitId: item.inventory_unit_id }))
+      .sort((left, right) => left.serviceDate.localeCompare(right.serviceDate)))
+      .toEqual([
+        { serviceDate: "2028-09-01", inventoryUnitId: "unit_room_d_gen_01" },
+        { serviceDate: "2028-09-02", inventoryUnitId: "unit_room_d_gen_02" }
+      ]);
+    expect(allCoverage.filter((item) => item.status === "RELEASED")).toHaveLength(5);
     const balance = await db.selectFrom("entitlement_lots")
       .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
       .select(sql<string>`cast(entitlement_lots.total_units + coalesce(sum(entitlement_ledger.quantity_delta), 0) as text)`.as("available"))
@@ -1763,39 +2102,8 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
     expect(await atomicBusinessSnapshot(created.orderId)).toEqual(before);
   });
 
-  it("accepts a completed historical move but rejects a move effective on or after the business date", async () => {
+  it("crops a future move at the new departure boundary", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
-    const historical = await createPaidOrder({
-      prefix: "stage10-historical-move",
-      arrivalDate: shiftDate(businessDate, -2),
-      departureDate: shiftDate(businessDate, 2),
-      channel: "WECOM"
-    });
-    await markHistoricalOrderInHouse(historical.orderId, shiftDate(businessDate, -2));
-    await execute({
-      commandType: "MOVE_UNIT",
-      input: {
-        propertyId: demo.propertyId,
-        orderId: historical.orderId,
-        newInventoryUnitId: demo.secondRoomId,
-        effectiveDate: shiftDate(businessDate, -1)
-      }
-    }, "stage10-historical-move");
-    const historicalReceipt = await execute({
-      commandType: "SHORTEN_STAY",
-      input: {
-        propertyId: demo.propertyId,
-        orderId: historical.orderId,
-        newDepartureDate: shiftDate(businessDate, 1)
-      }
-    }, "stage10-historical-move-shorten");
-    expect(historicalReceipt).toMatchObject({
-      businessCommitted: true,
-      result: { completionMode: "SHORTEN_IN_HOUSE", departureDate: shiftDate(businessDate, 1) }
-    });
-
-    await db.destroy();
-    db = await resetDatabase(databaseUrl);
     const future = await createPaidOrder({
       prefix: "stage10-future-move",
       arrivalDate: shiftDate(businessDate, -2),
@@ -1812,19 +2120,50 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         effectiveDate: shiftDate(businessDate, 1)
       }
     }, "stage10-future-move");
-    const beforeFutureReject = atomicBusinessSnapshot(future.orderId);
-    await expect(preview({
+    const prepared = await preview({
       commandType: "SHORTEN_STAY",
       input: {
         propertyId: demo.propertyId,
         orderId: future.orderId,
         newDepartureDate: shiftDate(businessDate, 1)
       }
-    }, "stage10-future-move-reject")).rejects.toThrow("尚未生效的换房安排");
-    expect(await atomicBusinessSnapshot(future.orderId)).toEqual(await beforeFutureReject);
+    }, "stage11-future-move-crop");
+    const beforeTimeline = [
+      { serviceDate: shiftDate(businessDate, -2), inventoryUnitId: demo.roomId },
+      { serviceDate: shiftDate(businessDate, -1), inventoryUnitId: demo.roomId },
+      { serviceDate: businessDate, inventoryUnitId: demo.roomId },
+      { serviceDate: shiftDate(businessDate, 1), inventoryUnitId: demo.secondRoomId }
+    ];
+    const afterTimeline = beforeTimeline.slice(0, 3);
+    expect(prepared.preview.effect).toMatchObject({
+      before: { stayTimeline: beforeTimeline },
+      after: {
+        departureDate: shiftDate(businessDate, 1),
+        stayTimeline: afterTimeline
+      },
+      inventoryChange: { releasedDates: [shiftDate(businessDate, 1)] }
+    });
+    const receipt = await confirm(prepared, "stage11-future-move-crop");
+    expect(receipt).toMatchObject({
+      businessCommitted: true,
+      executionStatus: "EXECUTED",
+      result: {
+        businessDate,
+        before: { stayTimeline: beforeTimeline },
+        after: { stayTimeline: afterTimeline }
+      }
+    });
+    const view = await getOrderView(db, future.orderId);
+    expect(view.effectiveArrangement.intervals).toEqual([
+      {
+        inventoryUnitId: demo.roomId,
+        arrivalDate: shiftDate(businessDate, -2),
+        departureDate: shiftDate(businessDate, 1)
+      }
+    ]);
   });
 
-  it("rejects a complete direct shortening that crops a move effective on or after the business date", async () => {
+  it("allows a complete direct shortening that crops a future move at the new departure boundary", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const arrivalDate = shiftDate(businessDate, -2);
     const newDepartureDate = shiftDate(businessDate, 1);
@@ -1846,7 +2185,6 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
       }
     }, "stage10-direct-future-move");
 
-    const before = await atomicBusinessSnapshot(created.orderId);
     const order = await db.selectFrom("orders").selectAll().where("id", "=", created.orderId).executeTakeFirstOrThrow();
     const stay = await db.selectFrom("stays").selectAll().where("order_id", "=", created.orderId).executeTakeFirstOrThrow();
     const currentSegment = await db.selectFrom("stay_segments").selectAll()
@@ -1877,12 +2215,18 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
       orderId: created.orderId,
       stayId: stay.id,
       inventoryUnitId: demo.roomId,
+      businessDate,
       completionMode: "SHORTEN_IN_HOUSE",
       before: {
         arrivalDate,
         departureDate: originalDepartureDate,
         nights: 5,
-        currentContractAmount: { currency: "CNY", minorUnits: 0 }
+        currentContractAmount: { currency: "CNY", minorUnits: 0 },
+        stayTimeline: [
+          ...stayTimeline,
+          { serviceDate: newDepartureDate, inventoryUnitId: demo.secondRoomId },
+          { serviceDate: shiftDate(newDepartureDate, 1), inventoryUnitId: demo.secondRoomId }
+        ]
       },
       after: {
         arrivalDate,
@@ -1942,7 +2286,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         sequence: order.version + 1,
         amendment_type: "SHORTEN_STAY",
         reason_code: "STAGE10_DIRECT_FUTURE_MOVE",
-        reason_note: "完整伪造组合不得裁掉未来换房",
+        reason_note: "4.4 数据库组合守卫允许裁掉未来换房",
         prior_version: order.version,
         new_version: order.version + 1,
         payload: effect,
@@ -1991,9 +2335,68 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         .where("id", "=", commandId).execute();
     });
 
-    await expect(directWrite).rejects.toMatchObject({ constraint: "stage10_shorten_future_move_boundary" });
-    expect(await atomicBusinessSnapshot(created.orderId)).toEqual(before);
-    expect(await db.selectFrom("command_executions").select("id").where("id", "=", commandId).execute()).toHaveLength(0);
+    await expect(directWrite).resolves.toBeUndefined();
+    const updated = await db.selectFrom("orders")
+      .select(["departure_date", "current_revision_id", "version"])
+      .where("id", "=", created.orderId)
+      .executeTakeFirstOrThrow();
+    expect(updated).toEqual({
+      departure_date: newDepartureDate,
+      current_revision_id: revisionId,
+      version: order.version + 1
+    });
+    expect(await loadActiveStayTimeline(db, await loadOrderContext(db, created.orderId))).toEqual(stayTimeline);
+  });
+
+  it("rejects a PostgreSQL-tampered shortening before timeline and rolls back every business fact", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const created = await createPaidOrder({
+      prefix: "stage11-tampered-shorten-before",
+      arrivalDate: shiftDate(businessDate, -2),
+      departureDate: shiftDate(businessDate, 2),
+      channel: "WECOM"
+    });
+    await markHistoricalOrderInHouse(created.orderId, shiftDate(businessDate, -2));
+    const prepared = await preview({
+      commandType: "SHORTEN_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        newDepartureDate: shiftDate(businessDate, 1)
+      }
+    }, "stage11-tampered-shorten-before");
+    const before = await atomicBusinessSnapshot(created.orderId);
+    await sql.raw(`
+      CREATE OR REPLACE FUNCTION qintopia_test_tamper_stage11_shorten_before() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.amendment_type = 'SHORTEN_STAY' THEN
+          NEW.payload := jsonb_set(
+            NEW.payload,
+            '{before,stayTimeline,0,inventoryUnitId}',
+            to_jsonb('unit_room_102'::text),
+            false
+          );
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER qintopia_test_tamper_stage11_shorten_before
+        BEFORE INSERT ON amendments
+        FOR EACH ROW EXECUTE FUNCTION qintopia_test_tamper_stage11_shorten_before()
+    `).execute(db);
+    try {
+      const receipt = await confirm(prepared, "stage11-tampered-shorten-before");
+      expect(receipt).toMatchObject({
+        executionStatus: "NOT_EXECUTED",
+        businessCommitted: false,
+        error: { code: "COMMAND_INTERRUPTED" }
+      });
+      expect(await atomicBusinessSnapshot(created.orderId)).toEqual(before);
+    } finally {
+      await sql.raw(`
+        DROP TRIGGER IF EXISTS qintopia_test_tamper_stage11_shorten_before ON amendments;
+        DROP FUNCTION IF EXISTS qintopia_test_tamper_stage11_shorten_before()
+      `).execute(db);
+    }
   });
 
   it("invalidates a Preview when collection facts change even if their net total returns to the same value", async () => {

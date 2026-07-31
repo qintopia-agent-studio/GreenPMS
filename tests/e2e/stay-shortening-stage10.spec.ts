@@ -476,7 +476,7 @@ test("4.3 free and member shortening preserve their distinct zero-money and enti
   await expectNoInternalProtocol(page);
 });
 
-test("4.3 historical moves can shorten while future moves fail closed for Stage 4.4", async ({ page }, testInfo) => {
+test("4.3 historical moves can shorten and Stage 11 safely clips future moves", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop Stage 10 move boundary");
   await login(page);
   const historical = fixture.historicalMove;
@@ -501,20 +501,22 @@ test("4.3 historical moves can shorten while future moves fail closed for Stage 
   await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="${historical.destinationUnitId}"][data-service-date="${historical.newDepartureDate}"]`)).toHaveClass(/room-status-day-available/);
 
   const future = fixture.futureMoveBlocked;
-  const futureBefore = await getOrderView(page, future);
   await openOrder(page, future);
-  await expect(page.getByRole("button", { name: "缩短住宿", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "提前退房", exact: true })).toHaveCount(0);
-  const notice = page.getByTestId("stay-date-action-notice");
-  await expect(notice).toContainText("尚未生效的换房安排");
-  await expect(notice).toContainText("换房流程");
+  await expect(page.getByRole("button", { name: "调整退房日期", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "调整退房日期", exact: true }).click();
+  const futureForm = await fillShortenForm(page, future, "住客缩短住宿并取消尚未生效的换房安排");
+  const futureTimeline = futureForm.getByTestId("stay-date-preview-timeline");
+  await expect(futureTimeline).toContainText(future.unitCode);
+  await expect(futureTimeline).not.toContainText(future.destinationUnitCode);
+  await continueToReview(page, "缩短住宿");
+  await confirmReview(page, "缩短住宿");
   const futureView = await getOrderView(page, future);
-  expect(futureView.order).toMatchObject({ status: "CHECKED_IN", departure_date: future.departureDate });
-  expect(futureView.order).toEqual(futureBefore.order);
-  expect(futureView.stay).toEqual(futureBefore.stay);
-  expect(futureView.amendments).toEqual(futureBefore.amendments);
-  expect(futureView.pricingRevisions).toEqual(futureBefore.pricingRevisions);
-  expect(futureView.collectionFacts).toEqual(futureBefore.collectionFacts);
+  expect(futureView.order).toMatchObject({ status: "CHECKED_IN", departure_date: future.newDepartureDate });
+  expect(futureView.arrangementHistory.at(-1)?.type).toBe("SHORTENING");
+  const futureDestinationCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${future.destinationUnitId}"][data-service-date="${future.newDepartureDate}"]`);
+  await page.goto("/");
+  await expect(futureDestinationCell).toHaveClass(/room-status-day-available/);
+  await expect(futureDestinationCell).not.toContainText(future.nickname);
   await expectNoInternalProtocol(page);
 });
 

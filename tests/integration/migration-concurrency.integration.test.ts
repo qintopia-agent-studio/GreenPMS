@@ -3,7 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatabase, getRoomStatusBoard, listAvailability } from "@qintopia/db";
+import { createDatabase, databaseReady, getRoomStatusBoard, listAvailability } from "@qintopia/db";
 import { demo, seedDemo } from "../../packages/db/src/seed.ts";
 
 const execFileAsync = promisify(execFile);
@@ -62,7 +62,7 @@ describe("database migration concurrency", () => {
         .sort();
       const rows = await client.query<{ name: string }>("SELECT name FROM schema_migrations ORDER BY name");
       expect(rows.rows.map((row) => row.name)).toEqual(expectedMigrations);
-      expect(expectedMigrations).toHaveLength(27);
+      expect(expectedMigrations).toHaveLength(28);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -76,6 +76,19 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("025_channel_order_atomic_pricing.sql");
       expect(expectedMigrations).toContain("026_stage9_stay_change_guards.sql");
       expect(expectedMigrations).toContain("027_stage10_stay_shortening_guards.sql");
+      expect(expectedMigrations).toContain("028_stage11_move_unit_guards.sql");
+
+      const readyDatabase = createDatabase(databaseUrl.toString());
+      try {
+        expect(await databaseReady(readyDatabase)).toBe(true);
+        await client.query(`
+          CREATE OR REPLACE FUNCTION qintopia_assert_stage11_move_combination(target_command_id text)
+          RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$
+        `);
+        expect(await databaseReady(readyDatabase)).toBe(false);
+      } finally {
+        await readyDatabase.destroy();
+      }
     } finally {
       await client.end();
     }

@@ -169,8 +169,30 @@ export async function loadInventoryUnitIncludingInactive(db: DbExecutor, propert
   return loadInventoryUnitRecord(db, propertyId, unitId, false);
 }
 
-export async function listAvailability(db: DbExecutor, propertyId: string, arrivalDate: string, departureDate: string, kind?: InventoryUnitKind): Promise<UnitAvailability[]> {
+export async function listAvailability(
+  db: DbExecutor,
+  propertyId: string,
+  arrivalDate: string,
+  departureDate: string,
+  kind?: InventoryUnitKind,
+  excludeOrderId?: string
+): Promise<UnitAvailability[]> {
   const dates = enumerateServiceDates(arrivalDate, departureDate);
+  let excludedSegmentIds = new Set<string>();
+  if (excludeOrderId) {
+    const order = await db.selectFrom("orders")
+      .select("id")
+      .where("id", "=", excludeOrderId)
+      .where("property_id", "=", propertyId)
+      .executeTakeFirst();
+    if (!order) throw new DomainError("NOT_FOUND", "Order not found", 404);
+    const rows = await db.selectFrom("stays as stay")
+      .innerJoin("stay_segments as segment", "segment.stay_id", "stay.id")
+      .select("segment.id")
+      .where("stay.order_id", "=", excludeOrderId)
+      .execute();
+    excludedSegmentIds = new Set(rows.map((row) => row.id));
+  }
   let query = db.selectFrom("inventory_units")
     .select(["id", "property_id", "kind", "parent_room_id", "code", "name", "catalog_version", "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance", "physical_bed_count", "occupancy_capacity"])
     .where("property_id", "=", propertyId)
@@ -178,7 +200,7 @@ export async function listAvailability(db: DbExecutor, propertyId: string, arriv
   if (kind) query = query.where("kind", "=", kind);
   const units = await query.orderBy("code").execute();
   const claims = await db.selectFrom("inventory_claims")
-    .select(["id", "room_id", "inventory_unit_id", "service_date"])
+    .select(["id", "room_id", "inventory_unit_id", "service_date", "source_type", "source_id"])
     .where("property_id", "=", propertyId)
     .where("active", "=", true)
     .where("service_date", ">=", arrivalDate)
@@ -190,10 +212,12 @@ export async function listAvailability(db: DbExecutor, propertyId: string, arriv
   return units.map((unit) => {
     const roomId = unit.kind === "ROOM" ? unit.id : unit.parent_room_id!;
     const nights = dates.map((serviceDate) => {
-      const blocking = claims.filter((claim) => claim.service_date === serviceDate && claim.room_id === roomId && (
+      const blocking = claims.filter((claim) => (
+        claim.source_type !== "ORDER_SEGMENT" || !excludedSegmentIds.has(claim.source_id)
+      ) && claim.service_date === serviceDate && claim.room_id === roomId && (
         unit.kind === "ROOM" || claim.inventory_unit_id === roomId || claim.inventory_unit_id === unit.id
       ));
-      const blockingStays = departureDayStayBlockers.filter((blocker) => blocker.serviceDate === serviceDate && departureDayBlockerAffectsUnit(blocker, {
+      const blockingStays = departureDayStayBlockers.filter((blocker) => blocker.orderId !== excludeOrderId && blocker.serviceDate === serviceDate && departureDayBlockerAffectsUnit(blocker, {
         id: unit.id,
         kind: unit.kind,
         roomId

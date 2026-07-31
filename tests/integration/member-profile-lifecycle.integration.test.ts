@@ -27,6 +27,8 @@ const principal: AuthPrincipal = {
 
 let db: Kysely<Database>;
 let sequence = 0;
+const memberSourceUnitId = "unit_room_d_gen_01";
+const memberTargetUnitId = "unit_room_d_gen_02";
 
 function shiftDate(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -59,7 +61,7 @@ async function confirm(envelope: CommandEnvelope, prefix: string): Promise<Recei
 async function createMemberOrder(prefix: string, arrivalDate: string, departureDate: string): Promise<string> {
   const quote = await createQuote(db, {
     propertyId: demo.propertyId,
-    inventoryUnitId: demo.roomId,
+    inventoryUnitId: memberSourceUnitId,
     stayType: "TRANSIENT",
     arrivalDate,
     departureDate,
@@ -355,11 +357,24 @@ describe("check-in entitlement consumption lifecycle", () => {
     const before = await getOrderView(db, orderId);
     const moved = await confirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: shiftDate(arrivalDate, 1) }
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: memberTargetUnitId, effectiveDate: shiftDate(arrivalDate, 1) }
     }, "move-consumed-command");
+    expect(moved).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
     expect(moved.factRefs).toEqual([]);
     const after = await getOrderView(db, orderId);
-    expect(after.currentSegment.inventoryUnitId).toBe(demo.secondRoomId);
+    expect(after.effectiveArrangement).toMatchObject({
+      businessDate: arrivalDate,
+      intervals: [
+        { inventoryUnitId: memberSourceUnitId, arrivalDate, departureDate: shiftDate(arrivalDate, 1) },
+        { inventoryUnitId: memberTargetUnitId, arrivalDate: shiftDate(arrivalDate, 1), departureDate: shiftDate(arrivalDate, 2) }
+      ]
+    });
+    const currentPosition = after.effectiveArrangement.intervals.find((interval) =>
+      interval.arrivalDate <= arrivalDate && arrivalDate < interval.departureDate
+    );
+    expect(currentPosition?.inventoryUnitId).toBe(memberSourceUnitId);
+    expect(after.effectiveArrangement.intervals.find((interval) => interval.arrivalDate > arrivalDate)?.inventoryUnitId)
+      .toBe(memberTargetUnitId);
     expect(after.coverageSet.map((coverage) => ({ id: coverage.id, inventory: coverage.inventory_unit_id, status: coverage.status })))
       .toEqual(before.coverageSet.map((coverage) => ({ id: coverage.id, inventory: coverage.inventory_unit_id, status: "CONSUMED" })));
   });

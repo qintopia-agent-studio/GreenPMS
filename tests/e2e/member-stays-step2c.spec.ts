@@ -1,4 +1,4 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { todayInTimeZone } from "@qintopia/domain";
 import { createDatabase } from "../../packages/db/src/database.ts";
 
@@ -76,22 +76,40 @@ async function chooseAvailableSharedBathSingle(page: Page, arrival: string, depa
   await page.getByTestId("arrival-date").fill(arrival);
   await page.getByTestId("departure-date").fill(departure);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
-  if ((page.viewportSize()?.width ?? 0) < 576) {
-    await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
-  }
-  const unitSelect = page.getByTestId("room-status-unit-select");
   const availabilityResponse = await page.request.get(`/api/v1/properties/${e2ePropertyId}/availability?arrivalDate=${arrival}&departureDate=${departure}&unitKind=ROOM`);
   expect(availabilityResponse.ok()).toBe(true);
   const availability = await availabilityResponse.json() as {
     units: Array<{ id: string; code: string; roomTypeCode: string | null; available: boolean }>;
   };
-  const availableUnit = availability.units.find((unit) => unit.available && unit.roomTypeCode === "shared_bath_single");
+  const eligibleUnits = availability.units.filter((unit) => unit.available && unit.roomTypeCode === "shared_bath_single");
+  const availableUnit = eligibleUnits.find((unit) => unit.code === "205") ?? eligibleUnits[0];
   expect(availableUnit, "需要一间三晚连续可售的公卫单人间").toBeDefined();
-  await expect(unitSelect.locator(`option[value="${availableUnit!.id}"]`)).toContainText(availableUnit!.code);
-  await unitSelect.selectOption(availableUnit!.id);
-  await page.getByLabel("入住日期", { exact: true }).fill(arrival);
-  await page.getByLabel("退房日期", { exact: true }).fill(departure);
-  await page.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  const isMobile = (page.viewportSize()?.width ?? 0) < 576;
+  let drawer: Locator;
+  if (isMobile) {
+    await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
+    drawer = page.getByRole("dialog", { name: "新建住宿或锁房", exact: true });
+    await expect(drawer).toBeVisible();
+    const unitSelect = drawer.getByTestId("room-status-unit-select");
+    await expect(unitSelect.locator(`option[value="${availableUnit!.id}"]`)).toContainText(availableUnit!.code);
+    await unitSelect.selectOption(availableUnit!.id);
+  } else {
+    const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${availableUnit!.id}"][data-service-date="${arrival}"]`);
+    await cell.scrollIntoViewIfNeeded();
+    await expect(cell).toBeVisible();
+    await cell.focus();
+    await page.keyboard.press("Enter");
+    const popover = page.getByTestId("room-status-quick-popover");
+    await expect(popover).toBeVisible();
+    await expect(popover).toHaveAttribute("data-unit-id", availableUnit!.id);
+    await expect(popover).toHaveAttribute("data-selection-kind", "day");
+    await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
+    drawer = page.locator("dialog.room-status-write-drawer");
+  }
+  await expect(drawer).toBeVisible();
+  await drawer.getByLabel("入住日期", { exact: true }).fill(arrival);
+  await drawer.getByLabel("退房日期", { exact: true }).fill(departure);
+  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
   await expect(page.getByRole("heading", { name: "住宿金额", exact: true })).toBeVisible();
 }
 
@@ -127,7 +145,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await page.getByTestId("entitlement-adjustment-reason").fill("2C 浏览器验收调整为 1 间夜");
   await page.getByRole("button", { name: "核对余额更正", exact: true }).click();
   const effect = page.getByTestId("command-effect");
-  await expect(effect).toContainText("当前可用余额3 间夜");
+  await expect(effect).toContainText("当前可用余额3 间夜", { timeout: 30_000 });
   await expect(effect).toContainText("更正后可用余额1 间夜");
   await expect(effect).toContainText("本次变动-2");
   await expect(effect).not.toContainText("entitlementLotId");

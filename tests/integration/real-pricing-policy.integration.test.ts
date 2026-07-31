@@ -184,8 +184,8 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
     const created = await createOrder({
       prefix: "cross-product",
       unitId: demo.bedAId,
-      arrivalDate: "2026-03-01",
-      departureDate: "2026-03-15"
+      arrivalDate: "2026-09-01",
+      departureDate: "2026-09-15"
     });
     expect(created.quote.currentContractAmount.minorUnits).toBe(48_000);
 
@@ -227,7 +227,8 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
         propertyId: demo.propertyId,
         orderId: created.orderId,
         newInventoryUnitId: room201Id,
-        effectiveDate: "2026-03-08"
+        effectiveDate: "2026-09-08",
+        targetCurrentContractAmountMinor: 65_000
       }
     }, "cross-product-move");
     view = await getOrderView(db, created.orderId);

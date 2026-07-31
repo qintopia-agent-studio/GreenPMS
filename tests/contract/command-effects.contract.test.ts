@@ -25,7 +25,10 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   RESCHEDULE_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
   EXTEND_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
   SHORTEN_STAY: ["after", "before", "businessDate", "completionMode", "entitlementSummary", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "refundReferenceAmount", "stayId"],
-  MOVE_UNIT: ["effectiveDate", "fromInventoryUnit", "occupancyCapacity", "occupantCount", "orderId", "pricing", "stayTimeline", "toInventoryUnit"],
+  MOVE_UNIT: [
+    "after", "before", "businessDate", "effectiveDate", "entitlementSummary", "fundsSummary", "inventoryChange",
+    "occupancyCapacity", "occupantCount", "operation", "orderId", "pricingDecision", "stayId", "toInventoryUnit"
+  ],
   REPRICE_ORDER: ["before", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
   CANCEL_ORDER: ["currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
   MARK_NO_SHOW: ["currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "toStatus"],
@@ -155,6 +158,41 @@ afterAll(async () => {
 
 describe("Command effect HTTP contract", () => {
   it("accepts only the persisted MOVE_UNIT receipt result shape", () => {
+    const inventoryUnit = {
+      id: "unit_move_contract",
+      propertyId: "property_move_contract",
+      kind: "ROOM",
+      roomId: "room_move_contract",
+      code: "101",
+      name: "101",
+      catalogVersion: null,
+      buildingCode: null,
+      roomTypeCode: "STANDARD",
+      pricingProductCode: "STANDARD",
+      inventoryBasis: "INDEPENDENT",
+      codeProvenance: "SOURCE_EXPLICIT",
+      physicalBedCount: 1,
+      occupancyCapacity: 2
+    };
+    const stayTimeline = [
+      { serviceDate: "2028-04-10", inventoryUnitId: "unit_move_contract" },
+      { serviceDate: "2028-04-11", inventoryUnitId: "unit_move_target" }
+    ];
+    const pricing = {
+      coverageSet: [],
+      cashLines: [],
+      cashRemainder: { currency: "CNY", minorUnits: 20_000 },
+      currentContractAmount: { currency: "CNY", minorUnits: 20_000 }
+    };
+    const pricingDecision = {
+      pricingBasis: "POLICY",
+      policyBaseAmount: { currency: "CNY", minorUnits: 20_000 },
+      targetCurrentContractAmount: { currency: "CNY", minorUnits: 20_000 },
+      differenceFromPolicy: { currency: "CNY", minorUnits: 0 },
+      manualAdjustmentMinor: 0,
+      differenceExceedsThreshold: false,
+      reason: { code: "MOVE_UNIT_POLICY", note: "" }
+    };
     const receipt = {
       receiptId: "receipt_move_contract",
       commandId: "command_move_contract",
@@ -163,9 +201,49 @@ describe("Command effect HTTP contract", () => {
       correlationId: "move-unit-result-contract",
       result: {
         orderId: "order_move_contract",
+        stayId: "stay_move_contract",
         amendmentId: "amendment_move_contract",
         staySegmentId: "segment_move_contract",
-        pricingRevisionId: "pricing_revision_move_contract"
+        pricingRevisionId: "pricing_revision_move_contract",
+        effectHash: "a".repeat(64),
+        businessDate: "2028-04-10",
+        effectiveDate: "2028-04-11",
+        before: {
+          arrivalDate: "2028-04-10",
+          departureDate: "2028-04-12",
+          nights: 2,
+          currentContractAmount: { currency: "CNY", minorUnits: 20_000 },
+          stayTimeline: [
+            { serviceDate: "2028-04-10", inventoryUnitId: "unit_move_contract" },
+            { serviceDate: "2028-04-11", inventoryUnitId: "unit_move_contract" }
+          ],
+          actualCurrentInventoryUnit: null,
+          effectiveDateInventoryUnit: inventoryUnit
+        },
+        after: {
+          arrivalDate: "2028-04-10",
+          departureDate: "2028-04-12",
+          nights: 2,
+          stayTimeline,
+          pricing
+        },
+        pricingDecision,
+        inventoryChange: {
+          preservedClaims: [{ serviceDate: "2028-04-10", inventoryUnitId: "unit_move_contract" }],
+          releasedClaims: [{ serviceDate: "2028-04-11", inventoryUnitId: "unit_move_contract" }],
+          addedClaims: [{ serviceDate: "2028-04-11", inventoryUnitId: "unit_move_target" }]
+        },
+        entitlementSummary: {
+          preservedCoverageDates: [],
+          migratedHeldCoverageDates: [],
+          consumedCoverageDates: [],
+          ledgerWriteCount: 0
+        },
+        fundsSummary: {
+          netRecordedCollection: { currency: "CNY", minorUnits: 0 },
+          collectionDifference: { currency: "CNY", minorUnits: 20_000 },
+          factCount: 0
+        }
       },
       resourceRefs: [],
       factRefs: []
@@ -203,7 +281,14 @@ describe("Command effect HTTP contract", () => {
         arrivalDate: "2026-07-28",
         departureDate: "2026-08-02",
         nights: 5,
-        currentContractAmount: { currency: "CNY", minorUnits: 58_000 }
+        currentContractAmount: { currency: "CNY", minorUnits: 58_000 },
+        stayTimeline: [
+          { serviceDate: "2026-07-28", inventoryUnitId: "room_contract" },
+          { serviceDate: "2026-07-29", inventoryUnitId: "room_contract" },
+          { serviceDate: "2026-07-30", inventoryUnitId: "room_contract" },
+          { serviceDate: "2026-07-31", inventoryUnitId: "room_contract" },
+          { serviceDate: "2026-08-01", inventoryUnitId: "room_contract" }
+        ]
       },
       after: {
         arrivalDate: "2026-07-28",
@@ -249,6 +334,15 @@ describe("Command effect HTTP contract", () => {
     };
 
     expect(Value.Check(CommandEffectSchema, effect)).toBe(true);
+    expect(Value.Check(CommandEffectSchema, {
+      ...effect,
+      before: {
+        arrivalDate: effect.before.arrivalDate,
+        departureDate: effect.before.departureDate,
+        nights: effect.before.nights,
+        currentContractAmount: effect.before.currentContractAmount
+      }
+    })).toBe(false);
     expect(Value.Check(CommandEffectSchema, { ...effect, businessDate: undefined })).toBe(false);
     expect(Value.Check(CommandEffectSchema, {
       ...effect,
@@ -458,13 +552,27 @@ describe("Command effect HTTP contract", () => {
       }
     });
 
-    await capture("RESCHEDULE_STAY", {
+    const reschedule = await capture("RESCHEDULE_STAY", {
       propertyId: demo.propertyId,
       orderId,
       newArrivalDate: "2028-04-09",
       newDepartureDate: "2028-04-14",
       targetCurrentContractAmountMinor: 60_000
     });
+    expect((reschedule.effect.before as { stayTimeline: unknown }).stayTimeline).toEqual([
+      { serviceDate: "2028-04-10", inventoryUnitId: demo.roomId },
+      { serviceDate: "2028-04-11", inventoryUnitId: demo.roomId },
+      { serviceDate: "2028-04-12", inventoryUnitId: demo.roomId },
+      { serviceDate: "2028-04-13", inventoryUnitId: demo.roomId }
+    ]);
+    expect(Value.Check(CommandEffectSchema, {
+      ...reschedule.effect,
+      before: { ...(reschedule.effect.before as Record<string, unknown>), stayTimeline: undefined }
+    })).toBe(false);
+    const rescheduleResult = await confirm(reschedule);
+    expect((rescheduleResult.before as { stayTimeline: unknown }).stayTimeline).toEqual(
+      (reschedule.effect.before as { stayTimeline: unknown }).stayTimeline
+    );
     // SHORTEN_STAY remains readable as historical protocol but is no longer
     // previewable in 4.2: reserved changes use RESCHEDULE_STAY and checked-in
     // shortening is intentionally deferred to 4.3.
@@ -473,7 +581,9 @@ describe("Command effect HTTP contract", () => {
       propertyId: demo.propertyId,
       orderId,
       newInventoryUnitId: demo.secondRoomId,
-      effectiveDate: "2028-04-12"
+      effectiveDate: "2028-04-12",
+      targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits,
+      channelPriceDifferenceReason: "Effect contract channel amount reconfirmed"
     });
     await capture("REPRICE_ORDER", {
       propertyId: demo.propertyId,
@@ -544,11 +654,20 @@ describe("Command effect HTTP contract", () => {
     const checkIn = await capture("CHECK_IN", { propertyId: demo.propertyId, orderId: checkInOrderId });
     expect(checkIn.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     await confirm(checkIn);
-    await capture("EXTEND_STAY", {
+    const extension = await capture("EXTEND_STAY", {
       propertyId: demo.propertyId,
       orderId: checkInOrderId,
       newDepartureDate: shiftLocalDate(propertyToday, 2)
     });
+    expect((extension.effect.before as { stayTimeline: unknown }).stayTimeline).toHaveLength(1);
+    expect(Value.Check(CommandEffectSchema, {
+      ...extension.effect,
+      before: { ...(extension.effect.before as Record<string, unknown>), stayTimeline: undefined }
+    })).toBe(false);
+    const extensionResult = await confirm(extension);
+    expect((extensionResult.before as { stayTimeline: unknown }).stayTimeline).toEqual(
+      (extension.effect.before as { stayTimeline: unknown }).stayTimeline
+    );
     const checkoutPriced = await quote({
       arrivalDate: shiftLocalDate(propertyToday, -1),
       departureDate: propertyToday,

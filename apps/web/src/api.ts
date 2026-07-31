@@ -14,6 +14,7 @@ import type {
   TokenDto
 } from "./types";
 import { parseOrderView } from "./orderViewValidation";
+import { parseAvailability } from "./availabilityValidation";
 
 interface ErrorPayload {
   code?: unknown;
@@ -102,10 +103,18 @@ export const api = {
   },
   logout: () => request<void>("/api/v1/auth/logout", { method: "POST" }),
   meta: () => request<MetaDto>("/api/v1/meta"),
-  availability: (propertyId: string, arrivalDate: string, departureDate: string, unitKind?: "ROOM" | "BED") => {
+  availability: (
+    propertyId: string,
+    arrivalDate: string,
+    departureDate: string,
+    unitKind?: "ROOM" | "BED",
+    excludeOrderId?: string
+  ) => {
     const query = new URLSearchParams({ arrivalDate, departureDate });
     if (unitKind) query.set("unitKind", unitKind);
-    return request<AvailabilityDto>(`/api/v1/properties/${encodeURIComponent(propertyId)}/availability?${query.toString()}`);
+    if (excludeOrderId) query.set("excludeOrderId", excludeOrderId);
+    return request<unknown>(`/api/v1/properties/${encodeURIComponent(propertyId)}/availability?${query.toString()}`)
+      .then((value) => parseAvailability(value, { propertyId, arrivalDate, departureDate, ...(unitKind ? { unitKind } : {}) }));
   },
   roomStatus: (
     propertyId: string,

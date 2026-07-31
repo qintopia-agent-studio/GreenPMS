@@ -7,6 +7,24 @@ import type { Kysely } from "kysely";
 
 export const testDatabaseUrl = process.env.TEST_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_test";
 
+async function migrateAndSeedDatabase(databaseUrl: string): Promise<Kysely<Database>> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const directory = resolve(process.cwd(), "packages/db/src/migrations");
+    const migrations = (await readdir(directory)).filter((name) => /^\d+.*\.sql$/.test(name)).sort();
+    for (const migration of migrations) {
+      await client.query(await readFile(resolve(directory, migration), "utf8"));
+      await client.query("INSERT INTO schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING", [migration]);
+    }
+  } finally {
+    await client.end();
+  }
+  const db = createDatabase(databaseUrl);
+  await seedDemo(db, { includeProtocolFixturePolicy: true });
+  return db;
+}
+
 export async function resetDatabase(databaseUrl: string): Promise<Kysely<Database>> {
   const parsed = new URL(databaseUrl);
   const databaseName = parsed.pathname.slice(1);
@@ -33,21 +51,19 @@ export async function resetDatabase(databaseUrl: string): Promise<Kysely<Databas
   } finally {
     await admin.end();
   }
+  return migrateAndSeedDatabase(databaseUrl);
+}
+
+export async function resetDatabaseInPlace(databaseUrl: string): Promise<Kysely<Database>> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const directory = resolve(process.cwd(), "packages/db/src/migrations");
-    const migrations = (await readdir(directory)).filter((name) => /^\d+.*\.sql$/.test(name)).sort();
-    for (const migration of migrations) {
-      await client.query(await readFile(resolve(directory, migration), "utf8"));
-      await client.query("INSERT INTO schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING", [migration]);
-    }
+    await client.query("DROP SCHEMA public CASCADE");
+    await client.query("CREATE SCHEMA public");
   } finally {
     await client.end();
   }
-  const db = createDatabase(databaseUrl);
-  await seedDemo(db, { includeProtocolFixturePolicy: true });
-  return db;
+  return migrateAndSeedDatabase(databaseUrl);
 }
 
 export async function resetTestDatabase(): Promise<Kysely<Database>> {
