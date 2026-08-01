@@ -70,8 +70,8 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
   LOCK_MAINTENANCE: { required: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"], properties: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"] },
   RELEASE_MAINTENANCE: { required: ["propertyId", "maintenanceLockId"], properties: ["propertyId", "maintenanceLockId"] },
   COMPLETE_CLEANING: { required: ["propertyId", "cleaningTaskId"], properties: ["propertyId", "cleaningTaskId"] },
-  RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method", "transactionReference"], properties: ["propertyId", "orderId", "amountMinor", "method", "transactionReference", "note"] },
-  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference", "note"] },
+  RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method"], properties: ["propertyId", "orderId", "amountMinor", "method", "transactionReference", "note"] },
+  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference", "note"] },
   REVERSE_FACT: { required: ["propertyId", "orderId", "reversesFactId", "note"], properties: ["propertyId", "orderId", "reversesFactId", "note"] },
   CHECK_IN: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   CHECK_OUT: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
@@ -1689,8 +1689,8 @@ describe("OpenAPI 3.1 command contract", () => {
       propertyId: demo.propertyId,
       quoteId: quoteResponse.json().quote.quoteId,
       primaryGuest: { fullName: "Contract View Guest", nickname: "Contract Guest", phone: "13800000000", documentNumber: "DOC-CONTRACT-1" },
-      bookingChannelCode: "CTRIP",
-      channelOrderReference: "TEST-CONTRACT-ORDER-1",
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
       targetCurrentContractAmountMinor: quoteResponse.json().quote.currentContractAmount.minorUnits
     });
     expect(created.result.primaryGuest).toEqual({
@@ -1705,14 +1705,18 @@ describe("OpenAPI 3.1 command contract", () => {
       headers: { authorization: `Bearer ${demo.writeToken}` }
     });
     expect(listed.statusCode).toBe(200);
-    expect(listed.json().orders).toEqual(expect.arrayContaining([expect.objectContaining({ id: orderId })]));
+    expect(listed.json().orders).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: orderId,
+      current_contract_amount_minor: quoteResponse.json().quote.currentContractAmount.minorUnits,
+      currency: "CNY"
+    })]));
     const detail = await app.inject({
       method: "GET", url: `/api/v1/orders/${orderId}`,
       headers: { authorization: `Bearer ${demo.writeToken}` }
     });
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({
-      order: { id: orderId, primary_guest_snapshot: { fullName: "Contract View Guest", nickname: "Contract Guest" }, booking_channel_code: "CTRIP", channel_order_reference: "TEST-CONTRACT-ORDER-1" },
+      order: { id: orderId, primary_guest_snapshot: { fullName: "Contract View Guest", nickname: "Contract Guest" }, booking_channel_code: "WECOM", channel_order_reference: null },
       stay: { status: "PLANNED" },
       pricingRevisions: [{ revision_no: 1 }],
       cleaningTasks: []
@@ -1726,7 +1730,7 @@ describe("OpenAPI 3.1 command contract", () => {
       headers: { authorization: `Bearer ${demo.writeToken}` }
     });
     expect(fact.statusCode).toBe(200);
-    expect(fact.json()).toMatchObject({ fact_id: factId, order_id: orderId, fact_type: "COLLECTION", transaction_reference: "TEST-CONTRACT-TXN-COLLECTION-1", property_id: demo.propertyId });
+    expect(fact.json()).toMatchObject({ fact_id: factId, order_id: orderId, fact_type: "COLLECTION", transaction_reference: "TEST-CONTRACT-TXN-COLLECTION-1", pricing_revision_id: expect.any(String), property_id: demo.propertyId });
     const registeredMember = await command(demo.writeToken, "CREATE_MEMBER", {
       propertyId: demo.propertyId,
       fullName: "Contract API Member",

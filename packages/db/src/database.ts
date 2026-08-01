@@ -33,7 +33,10 @@ const currentMigrationNames = [
   "026_stage9_stay_change_guards.sql",
   "027_stage10_stay_shortening_guards.sql",
   "028_stage11_move_unit_guards.sql",
-  "029_stage12_terminal_order_guards.sql"
+  "029_stage12_terminal_order_guards.sql",
+  "030_collection_fact_historical_pricing_revision.sql",
+  "031_collection_fact_method_transaction_rules.sql",
+  "032_wecom_refund_original_route.sql"
 ] as const;
 
 export function databaseUrl(): string {

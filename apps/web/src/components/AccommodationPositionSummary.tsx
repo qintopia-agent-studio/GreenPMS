@@ -53,7 +53,7 @@ export function AccommodationPositionSummary({
         <dt>{item.label}</dt>
         <dd>
           <strong>{unit ? `${unit.code} · ${unit.name}` : "房源名称暂不可用"}</strong>
-          <small>{item.label === "当前住宿位置" ? `营业日 ${formatDate(item.effectiveDate)}` : `${formatDate(item.effectiveDate)} 起`}</small>
+          {item.label === "当前住宿位置" ? <small>营业日 {formatDate(item.effectiveDate)}</small> : items.length > 1 ? <small>{formatDate(item.effectiveDate)} 起</small> : null}
         </dd>
       </div>;
     })}

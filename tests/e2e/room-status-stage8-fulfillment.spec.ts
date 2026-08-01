@@ -339,7 +339,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   const futureNotice = page.locator(".action-band").getByTestId("fulfillment-date-notice");
   await expect(futureNotice).toBeVisible();
   await expect(futureNotice).toContainText("暂不能办理入住");
-  await expect(futureNotice).toContainText("不能提前办理入住");
+  await expect(futureNotice).toContainText("请在计划到店日办理");
 
   await openOrder(page, fixture.overdueCheckIn);
   await expect(page.getByText("已预订", { exact: true }).first()).toBeVisible();
@@ -347,7 +347,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   const overdueArrivalNotice = page.locator(".action-band").getByTestId("fulfillment-date-notice");
   await expect(overdueArrivalNotice).toBeVisible();
   await expect(overdueArrivalNotice).toContainText("暂不能办理入住");
-  await expect(overdueArrivalNotice).toContainText("不能按普通入住补办");
+  await expect(overdueArrivalNotice).toContainText("可办理改期或标记未到");
 
   for (const stay of [fixture.normal, fixture.member, fixture.free]) {
     await openOrder(page, stay);
@@ -490,8 +490,8 @@ test("阶段 8 4.1 日期门禁原因归位且逾期在住不延长当前房态"
   await login(page);
 
   for (const gated of [
-    { stay: fixture.futureCheckIn, action: "入住", noticeTestId: "fulfillment-date-notice", title: "暂不能办理入住", reason: "不能提前办理入住" },
-    { stay: fixture.overdueCheckIn, action: "入住", noticeTestId: "fulfillment-date-notice", title: "暂不能办理入住", reason: "不能按普通入住补办" },
+    { stay: fixture.futureCheckIn, action: "入住", noticeTestId: "fulfillment-date-notice", title: "暂不能办理入住", reason: "请在计划到店日办理" },
+    { stay: fixture.overdueCheckIn, action: "入住", noticeTestId: "fulfillment-date-notice", title: "暂不能办理入住", reason: "可办理改期或标记未到" },
     { stay: fixture.earlyCheckoutGate, action: "退房", noticeTestId: "stay-date-action-notice", title: "暂不能缩短住宿或提前退房", reason: "入住当天暂不办理缩短或提前退房" }
   ] as const) {
     await openOrder(page, gated.stay);

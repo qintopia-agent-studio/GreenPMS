@@ -1160,7 +1160,7 @@ function QuoteWorkbench({
                   <span>{guestCount} / {unit.occupancyCapacity} 人</span>
                 </div>
                 <fieldset className="guest-entry" data-testid="primary-guest-entry">
-                  <legend>主要入住人 <span>主要 / 联系人</span></legend>
+                  <legend>主要入住人 <span>主要联系人</span></legend>
                   <div className="form-grid">
                     <label>昵称<input value={guestNickname} onChange={(event) => setGuestNickname(event.target.value)} required maxLength={200} data-testid="primary-guest-nickname" /></label>
                     <label>姓名<input value={guestName} onChange={(event) => setGuestName(event.target.value)} required maxLength={GUEST_FULL_NAME_MAX_LENGTH} data-testid="primary-guest-name" /></label>

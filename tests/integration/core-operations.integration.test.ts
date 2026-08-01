@@ -64,8 +64,9 @@ async function quote(unitId: string, options: { member?: boolean; stayType?: "TR
   });
 }
 
-async function createOrder(unitId: string, prefix: string, options: { member?: boolean; stayType?: "TRANSIENT" | "FREE"; arrival?: string; departure?: string } = {}) {
+async function createOrder(unitId: string, prefix: string, options: { member?: boolean; stayType?: "TRANSIENT" | "FREE"; arrival?: string; departure?: string; bookingChannelCode?: "YOUMUDAO" | "CTRIP" | "MEITUAN" | "WECOM" } = {}) {
   const priced = await quote(unitId, options);
+  const bookingChannelCode = options.bookingChannelCode ?? "WECOM";
   return previewAndConfirm({
     commandType: "CREATE_ORDER",
     input: {
@@ -73,8 +74,8 @@ async function createOrder(unitId: string, prefix: string, options: { member?: b
       quoteId: priced.quoteId,
       primaryGuest: { fullName: `Guest ${prefix}`, nickname: `Guest ${prefix}` },
       ...(!options.member && options.stayType !== "FREE" ? {
-        bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `TEST-ORDER-${prefix}`,
+        bookingChannelCode,
+        channelOrderReference: bookingChannelCode === "WECOM" ? null : `TEST-ORDER-${prefix}`,
         targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits
       } : {}),
       ...(options.stayType === "FREE" ? { freeStayReason: `Automated FREE stay fixture: ${prefix}`, freeStayCategoryCode: "VOLUNTEER" } : {})
@@ -1067,7 +1068,7 @@ describe("PostgreSQL core operations", () => {
         NULL, NULL, 'CASH', 'must reject missing revision', 'TEST-TXN-MISSING-REVISION',
         NULL, 'command_missing_pricing_revision'
       )
-    `.execute(db)).rejects.toMatchObject({ code: "23502", column: "pricing_revision_id" });
+    `.execute(db)).rejects.toMatchObject({ constraint: "collection_facts_new_pricing_revision_required" });
 
     const otherCreated = await createOrder(demo.secondRoomId, "money-cross-order-revision");
     const otherOrderId = otherCreated.result!.orderId as string;
@@ -1083,6 +1084,65 @@ describe("PostgreSQL core operations", () => {
         ${otherRevisionId}, 'command_cross_order_pricing_revision'
       )
     `.execute(db)).rejects.toMatchObject({ constraint: "collection_facts_pricing_revision_order_fk" });
+  });
+
+  it("uses operator-selected collection methods for direct orders and forbids per-order funds on external channels", async () => {
+    const wecomQuote = await quote(demo.roomId, { arrival: "2026-09-01", departure: "2026-09-02" });
+    const wecomCreated = await previewAndConfirm({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: wecomQuote.quoteId,
+        primaryGuest: { fullName: "WECOM Method Guard", nickname: "WECOM Guard" },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: wecomQuote.currentContractAmount.minorUnits
+      }
+    }, "wecom-method-order");
+    const wecomOrderId = wecomCreated.result!.orderId as string;
+    const wecomCollection = await previewAndConfirm({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: wecomOrderId,
+        amountMinor: 5_000,
+        method: "CASH",
+        transactionReference: "TEST-TXN-WECOM-COLLECTION",
+        note: "cash collection by operator"
+      }
+    }, "wecom-collection");
+    await previewAndConfirm({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: wecomOrderId,
+        referencesFactId: wecomCollection.factRefs[0],
+        amountMinor: 1_000,
+        method: "BANK_TRANSFER",
+        transactionReference: "TEST-TXN-WECOM-REFUND-BANK",
+        note: "bank transfer refund reason"
+      }
+    }, "wecom-refund-bank");
+
+    const externalCreated = await createOrder(demo.secondRoomId, "external-method-guard", {
+      arrival: "2026-09-01",
+      departure: "2026-09-02",
+      bookingChannelCode: "YOUMUDAO"
+    });
+    const externalOrderId = externalCreated.result!.orderId as string;
+    await expect(createCommandPreview(db, principal, {
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: externalOrderId,
+        amountMinor: 5_000,
+        method: "WECOM",
+        transactionReference: "TEST-TXN-EXTERNAL-WECOM-REJECT"
+      }
+    }, metadata("external-wecom-reject"))).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "外部渠道订单不在 PMS 登记单笔收款或退款；请核对渠道订单号和本单渠道应结金额，由财务按渠道总账核对。"
+    });
   });
 
   it("uses the shared inventory path for maintenance and releases cancellation/no-show claims", async () => {
@@ -1151,7 +1211,7 @@ describe("PostgreSQL core operations", () => {
     }, "refund-after-reversal-reverse");
     await expect(createCommandPreview(db, principal, {
       commandType: "RECORD_REFUND",
-      input: { propertyId: demo.propertyId, orderId: reversedOrderId, referencesFactId: reversedCollection.factRefs[0], amountMinor: 1_000, method: "CASH", transactionReference: "TEST-TXN-REFUND-AFTER-REVERSAL" }
+      input: { propertyId: demo.propertyId, orderId: reversedOrderId, referencesFactId: reversedCollection.factRefs[0], amountMinor: 1_000, method: "CASH", note: "attempt refund after reversal" }
     }, metadata("refund-after-reversal-denied"))).rejects.toMatchObject({ code: "FACT_ALREADY_REVERSED" });
 
     const refundedOrder = await createOrder(demo.secondRoomId, "reversal-after-refund", { stayType: "FREE" });
@@ -1162,7 +1222,7 @@ describe("PostgreSQL core operations", () => {
     }, "reversal-after-refund-collection");
     await previewAndConfirm({
       commandType: "RECORD_REFUND",
-      input: { propertyId: demo.propertyId, orderId: refundedOrderId, referencesFactId: refundedCollection.factRefs[0], amountMinor: 1_000, method: "CASH", transactionReference: "TEST-TXN-REFUNDED-REFUND" }
+      input: { propertyId: demo.propertyId, orderId: refundedOrderId, referencesFactId: refundedCollection.factRefs[0], amountMinor: 1_000, method: "CASH", note: "partial cash refund" }
     }, "reversal-after-refund-refund");
     await expect(createCommandPreview(db, principal, {
       commandType: "REVERSE_FACT",
@@ -1183,7 +1243,7 @@ describe("PostgreSQL core operations", () => {
     const [refundPreview, reversalPreview] = await Promise.all([
       createCommandPreview(db, principal, {
         commandType: "RECORD_REFUND",
-        input: { propertyId: demo.propertyId, orderId, referencesFactId: factId, amountMinor: 1_000, method: "CASH", transactionReference: "TEST-TXN-REFUND-REVERSAL-RACE" }
+        input: { propertyId: demo.propertyId, orderId, referencesFactId: factId, amountMinor: 1_000, method: "CASH", note: "concurrent cash refund" }
       }, metadata("refund-reversal-race-refund-preview")),
       createCommandPreview(db, principal, {
         commandType: "REVERSE_FACT",

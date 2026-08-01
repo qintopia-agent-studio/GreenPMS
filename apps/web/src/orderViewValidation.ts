@@ -434,11 +434,11 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
   const expectedCollectionDifference = currentContractAmount.minorUnits - netRecordedCollection.minorUnits;
   if (!Number.isSafeInteger(expectedCollectionDifference)
     || collectionDifference.minorUnits !== expectedCollectionDifference) {
-    fail(`${path}.fundsSummary.collectionDifference`, "待收或多收差额不一致");
+    fail(`${path}.fundsSummary.collectionDifference`, "资金差额不一致");
   }
   if (refundReferenceAmount.minorUnits < 0
     || refundReferenceAmount.minorUnits !== Math.max(0, netRecordedCollection.minorUnits - currentContractAmount.minorUnits)) {
-    fail(`${path}.fundsSummary.refundReferenceAmount`, "建议退款金额不一致");
+    fail(`${path}.fundsSummary.refundReferenceAmount`, "退款参考金额不一致");
   }
   return {
     type: result.type as OrderArrangementHistoryItemDto["type"],
@@ -472,7 +472,8 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   exactKeys(order, "order", [
     "id", "property_id", "status", "stay_type", "arrival_date", "departure_date", "primary_guest_snapshot",
     "booking_channel_code", "channel_order_reference", "free_stay_reason", "free_stay_category_code",
-    "pricing_policy_version_id", "member_id", "member_contract_id", "current_revision_id", "version", "created_at", "updated_at"
+    "pricing_policy_version_id", "member_id", "member_contract_id", "current_revision_id",
+    "current_contract_amount_minor", "currency", "version", "created_at", "updated_at"
   ]);
   const stay = record(result.stay, "stay");
   exactKeys(stay, "stay", ["id", "status"]);
@@ -537,6 +538,10 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   nullableString(order.free_stay_reason, "order.free_stay_reason");
   nullableString(order.free_stay_category_code, "order.free_stay_category_code");
   nullableString(order.current_revision_id, "order.current_revision_id");
+  if (order.current_contract_amount_minor !== null) {
+    safeInteger(order.current_contract_amount_minor, "order.current_contract_amount_minor", 0);
+  }
+  nullableString(order.currency, "order.currency");
   stringValue(order.pricing_policy_version_id, "order.pricing_policy_version_id");
   safeInteger(order.version, "order.version", 1);
   dateTime(order.created_at, "order.created_at");
@@ -609,7 +614,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     || collectionDifference.minorUnits !== currentContractAmount.minorUnits - netRecordedCollection.minorUnits
     || refundReferenceAmount.minorUnits < 0
     || refundReferenceAmount.minorUnits !== Math.max(0, netRecordedCollection.minorUnits - currentContractAmount.minorUnits)) {
-    fail("amounts", "币种或待收、多收差额不一致");
+    fail("amounts", "币种或资金差额不一致");
   }
   const latestHistoryAmount = history.at(-1)!.pricingSummary.currentContractAmount;
   if (latestHistoryAmount.currency !== currentContractAmount.currency) {
@@ -855,14 +860,14 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     nullableString(fact.references_fact_id, `collectionFacts[${index}].references_fact_id`);
     nullableString(fact.reverses_fact_id, `collectionFacts[${index}].reverses_fact_id`);
     nullableString(fact.transaction_reference, `collectionFacts[${index}].transaction_reference`);
-    stringValue(fact.pricing_revision_id, `collectionFacts[${index}].pricing_revision_id`);
+    nullableString(fact.pricing_revision_id, `collectionFacts[${index}].pricing_revision_id`);
     stringValue(fact.command_id, `collectionFacts[${index}].command_id`);
     if (stringValue(fact.currency, `collectionFacts[${index}].currency`) !== currentContractAmount.currency) fail(`collectionFacts[${index}].currency`, "与订单金额币种不一致");
     dateTime(fact.created_at, `collectionFacts[${index}].created_at`);
     collectionTotal += netEffect;
     if (!Number.isSafeInteger(collectionTotal)) fail("collectionFacts", "净收款合计超出支持范围");
   });
-  if (collectionTotal !== netRecordedCollection.minorUnits) fail("collectionFacts", "净影响合计与已登记净收款不一致");
+  if (collectionTotal !== netRecordedCollection.minorUnits) fail("collectionFacts", "净影响合计与已记录净收款不一致");
 
   arrayValue(result.coverageSet, "coverageSet").forEach((item, index) => {
     const path = `coverageSet[${index}]`;

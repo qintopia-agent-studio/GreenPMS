@@ -41,8 +41,8 @@ function view(orderOverrides: Partial<OrderViewDto["order"]> = {}): OrderViewDto
       id: "order_1", property_id: "property_1", status: "RESERVED", stay_type: "TRANSIENT",
       arrival_date: "2026-08-02", departure_date: "2026-08-04", primary_guest_snapshot: { nickname: "青山" },
       booking_channel_code: "CTRIP", channel_order_reference: "CTRIP-1", free_stay_reason: null,
-      free_stay_category_code: null, pricing_policy_version_id: "policy_1", member_id: null, member_contract_id: null,
-      current_revision_id: "revision_1", version: 1, created_at: "2026-08-01T08:00:00.000Z", updated_at: "2026-08-01T08:00:00.000Z",
+     free_stay_category_code: null, pricing_policy_version_id: "policy_1", member_id: null, member_contract_id: null,
+      current_revision_id: "revision_1", current_contract_amount_minor: 10_000, currency: "CNY", version: 1, created_at: "2026-08-01T08:00:00.000Z", updated_at: "2026-08-01T08:00:00.000Z",
       ...orderOverrides
     },
     occupants: [], occupantCorrections: [], stay: { id: "stay_1", status: "PLANNED" },

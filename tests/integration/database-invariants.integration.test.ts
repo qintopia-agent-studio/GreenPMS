@@ -62,9 +62,9 @@ async function createOrder(prefix: string, options: { member?: boolean; arrival?
       propertyId: demo.propertyId,
       quoteId: quote.quoteId,
       primaryGuest: { fullName: `Invariant Guest ${prefix}`, nickname: `Invariant ${prefix}` },
-      ...(!options.member ? {
-        bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `TEST-INVARIANT-ORDER-${prefix}`,
+     ...(!options.member ? {
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
         targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
       } : {})
     }
@@ -667,7 +667,9 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       "021_defer_internal_use.sql",
       "026_stage9_stay_change_guards.sql",
       "027_stage10_stay_shortening_guards.sql",
-      "028_stage11_move_unit_guards.sql"
+      "028_stage11_move_unit_guards.sql",
+      "031_collection_fact_method_transaction_rules.sql",
+      "032_wecom_refund_original_route.sql"
     ]) {
       await db.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
       try {

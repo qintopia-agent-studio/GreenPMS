@@ -4,6 +4,7 @@ import {
   confirmCommandPreview,
   createCommandPreview,
   propertyLocalToday,
+  withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
 import type { Kysely } from "kysely";
@@ -86,12 +87,12 @@ async function createMemberOrder(prefix: string, arrivalDate: string, departureD
 
 async function fulfillmentDatePair() {
   await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
-  const arrivalDate = await propertyLocalToday(db, demo.propertyId);
-  await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
-  const departureDate = await propertyLocalToday(db, demo.propertyId);
+  const checkInClock = new Date("2026-07-10T12:00:00.000Z");
+  const checkOutClock = new Date("2026-07-11T12:00:00.000Z");
+  const arrivalDate = await withPropertyClockForTesting(checkInClock, () => propertyLocalToday(db, demo.propertyId));
+  const departureDate = shiftDate(arrivalDate, 1);
   expect(departureDate > arrivalDate).toBe(true);
-  await db.updateTable("properties").set({ timezone: "Pacific/Pago_Pago" }).where("id", "=", demo.propertyId).execute();
-  return { arrivalDate, departureDate };
+  return { arrivalDate, departureDate, checkInClock, checkOutClock };
 }
 
 function sorted(values: readonly string[]): string[] {
@@ -218,13 +219,13 @@ describe.sequential("Receipt permanent references for member entitlement facts",
   });
 
   it("ties CONSUME facts and coverage resources to the CHECK_IN command exactly once", async () => {
-    const { arrivalDate, departureDate } = await fulfillmentDatePair();
+    const { arrivalDate, departureDate, checkInClock, checkOutClock } = await fulfillmentDatePair();
     const created = await createMemberOrder("consume", arrivalDate, departureDate);
     const coverageIds = created.coverage.map((item) => item.id);
-    const checkedIn = await previewAndConfirm({
+    const checkedIn = await withPropertyClockForTesting(checkInClock, () => previewAndConfirm({
       commandType: "CHECK_IN",
       input: { propertyId: demo.propertyId, orderId: created.orderId }
-    }, "consume-check-in");
+    }, "consume-check-in"));
 
     await expectExactLedgerReferences({
       receipt: checkedIn,
@@ -233,11 +234,10 @@ describe.sequential("Receipt permanent references for member entitlement facts",
       resourceRefs: [created.orderId, checkedIn.result!.amendmentId as string, ...coverageIds]
     });
 
-    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
-    const checkedOut = await previewAndConfirm({
+    const checkedOut = await withPropertyClockForTesting(checkOutClock, () => previewAndConfirm({
       commandType: "CHECK_OUT",
       input: { propertyId: demo.propertyId, orderId: created.orderId }
-    }, "consume-check-out");
+    }, "consume-check-out"));
     expect(checkedOut.factRefs).toEqual([]);
   });
 

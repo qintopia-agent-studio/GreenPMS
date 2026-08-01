@@ -479,7 +479,7 @@ export function StayDateChangeDrawer({
               {!showPerOrderFunds ? <><span>政策基础金额</span><strong>{formatMoney(summary.policyBaseAmount)}</strong></> : null}
               <span>{showPerOrderFunds ? "调整后订单金额" : "本单渠道应结金额"}</span>
               <strong data-testid="stay-date-new-amount">{formatMoney(summary.targetAmount)}</strong>
-              {!showPerOrderFunds ? <><span>与政策基础金额差额</span><strong>{formatMoney(summary.differenceFromPolicy)}</strong><span>渠道价格差异说明</span><strong>{draft.channelPriceDifferenceReason.trim() || "无需额外说明"}</strong></> : <><span>金额变化</span><strong>{formatMoney(change)}</strong></>}
+              {!showPerOrderFunds ? <><span>与政策基础金额差额</span><strong>{formatMoney(summary.differenceFromPolicy)}</strong><span>渠道价格差异说明</span><strong>{draft.channelPriceDifferenceReason.trim() || "无"}</strong></> : <><span>金额变化</span><strong>{formatMoney(change)}</strong></>}
               {showPerOrderFunds ? <><span>已登记净收款</span><strong>{formatMoney(summary.netRecordedCollection)}</strong><span>{summary.collectionDifference.minorUnits > 0 ? "待补收参考" : summary.collectionDifference.minorUnits < 0 ? "多收差额" : "当前记录无差额"}</span><strong>{formatMoney({ ...summary.collectionDifference, minorUnits: Math.abs(summary.collectionDifference.minorUnits) })}</strong>{summary.refundReferenceAmount.minorUnits > 0 ? <><span>建议退款</span><strong data-testid="stay-date-refund-reference">{formatMoney(summary.refundReferenceAmount)}</strong></> : null}</> : null}
             </div>
             <div className="stay-date-timeline-review">

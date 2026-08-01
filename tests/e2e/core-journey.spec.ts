@@ -15,14 +15,10 @@ async function login(page: Page) {
   await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
 }
 
-async function confirmCommand(page: Page, reason: string, expectedFactTexts: string[] = []) {
-  const previewButton = page.getByTestId("create-command-preview");
-  await expect(previewButton).toBeEnabled({ timeout: 15_000 });
-  await previewButton.click();
+async function confirmCommand(page: Page, _reason: string, expectedFactTexts: string[] = []) {
   const effect = page.getByTestId("command-effect");
   await expect(effect).toBeVisible({ timeout: 15_000 });
   for (const text of expectedFactTexts) await expect(effect).toContainText(text);
-  await page.getByTestId("reason-note").fill(reason);
   const confirmButton = page.getByTestId("confirm-command");
   await expect(confirmButton).toBeEnabled({ timeout: 15_000 });
   await confirmButton.click();
@@ -275,30 +271,32 @@ async function createOrder(page: Page, options: {
 async function openFactFormAndSubmit(
   page: Page,
   actionName: "收款" | "退款",
-  amountMinor: string,
+  amountYuan: string,
   transactionReference: string,
-  expectedInitialAmountMinor = ""
+  expectedInitialAmountYuan = "",
+  note = actionName === "退款" ? "退款原因：E2E 验证" : ""
 ) {
   await page.getByRole("button", { name: actionName, exact: true }).click();
   const factDialog = page.getByRole("dialog", {
-    name: actionName === "退款" ? "引用原收款退款" : "记录收款事实",
+    name: actionName === "退款" ? "登记退款" : "登记收款",
     exact: true
   });
   await expect(factDialog).toBeVisible();
-  const amountInput = factDialog.getByTestId("fact-amount-minor");
-  const continueButton = factDialog.getByRole("button", { name: "继续核对", exact: true });
-  await expect(amountInput).toHaveValue(expectedInitialAmountMinor);
-  if (!expectedInitialAmountMinor) {
+  const amountInput = factDialog.getByTestId("fact-amount-yuan");
+  const continueButton = factDialog.getByRole("button", { name: actionName === "退款" ? "核对退款信息" : "核对收款信息", exact: true });
+  await expect(amountInput).toHaveValue(expectedInitialAmountYuan);
+  if (!expectedInitialAmountYuan) {
     await continueButton.click();
     await expect(amountInput).toBeFocused();
     expect(await amountInput.evaluate((element: HTMLInputElement) => element.validity.valueMissing)).toBe(true);
   }
-  await amountInput.fill(amountMinor);
+  await amountInput.fill(amountYuan);
   const transactionInput = factDialog.getByTestId("transaction-reference");
   await continueButton.click();
   await expect(transactionInput).toBeFocused();
   expect(await transactionInput.evaluate((element: HTMLInputElement) => element.validity.valueMissing)).toBe(true);
   await transactionInput.fill(transactionReference);
+  if (note) await factDialog.getByTestId(actionName === "退款" ? "refund-reason" : "collection-note").fill(note);
   await continueButton.click();
 }
 
@@ -552,10 +550,10 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(coverageRegion.getByText("已冻结", { exact: true })).toHaveCount(2);
   await expect(coverageRegion.getByText("已核销", { exact: true })).toHaveCount(0);
 
-  await openFactFormAndSubmit(page, "收款", "6000", "TEST-E2E-TXN-COLLECTION-001");
+  await openFactFormAndSubmit(page, "收款", "60", "TEST-E2E-TXN-COLLECTION-001");
   await confirmCommand(page, "First recorded collection", ["TEST-E2E-TXN-COLLECTION-001"]);
   await closeReceipt(page);
-  await openFactFormAndSubmit(page, "收款", "6000", "TEST-E2E-TXN-COLLECTION-002");
+  await openFactFormAndSubmit(page, "收款", "60", "TEST-E2E-TXN-COLLECTION-002");
   await confirmCommand(page, "Second recorded collection", ["TEST-E2E-TXN-COLLECTION-002"]);
   await closeReceipt(page);
 
@@ -593,7 +591,7 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(shortenedRevision.locator("td").nth(4).locator("strong")).toHaveText("¥0.00");
   await expect(shortenedRevision.locator("td").nth(5)).toHaveText("¥0.00");
 
-  await openFactFormAndSubmit(page, "退款", "3000", "TEST-E2E-TXN-REFUND-001", "6000");
+  await openFactFormAndSubmit(page, "退款", "30", "TEST-E2E-TXN-REFUND-001", "60");
   await confirmCommand(page, "Partial refund references first collection", ["TEST-E2E-TXN-REFUND-001"]);
   await closeReceipt(page);
   const fundsRegion = page.locator('.table-region[aria-label="收退款与冲销记录表格"]');
@@ -1063,18 +1061,15 @@ test("desktop order command recovery survives close refresh and navigation witho
     guest: "E2E Recovery Guest",
     arrivalDate: "2028-02-01",
     departureDate: "2028-02-02",
-    bookingChannelCode: "YOUMUDAO",
-    channelOrderReference: "TEST-E2E-RECOVERY-ORDER-001"
+    bookingChannelCode: "WECOM"
   });
   await page.goto(`/orders/${encodeURIComponent(recoveryOrderId)}`);
   await expect(page.getByRole("heading", { name: "E2E Recovery Guest" })).toBeVisible();
   const orderUrl = page.url();
   const transactionReference = "TEST-E2E-RECOVERY-COLLECTION-001";
 
-  await openFactFormAndSubmit(page, "收款", "5800", transactionReference);
-  await page.getByTestId("create-command-preview").click();
+  await openFactFormAndSubmit(page, "收款", "58", transactionReference);
   await expect(page.getByTestId("command-effect")).toContainText(transactionReference);
-  await page.getByTestId("reason-note").fill("Record collection while the Confirm response is lost");
 
   let originalConfirmationKey = "";
   await page.route("**/api/v1/command-previews/*/confirm", async (route) => {
@@ -1090,9 +1085,9 @@ test("desktop order command recovery survives close refresh and navigation witho
   await page.getByRole("button", { name: "取消", exact: true }).click();
 
   let recovery = page.getByTestId("order-command-recovery");
-  await expect(recovery).toContainText("RECORD_COLLECTION");
-  await expect(recovery).toContainText("UNKNOWN");
-  await expect(recovery).toContainText(originalConfirmationKey);
+  await expect(recovery).toContainText("登记收款结果需要恢复查询");
+  await expect(recovery).not.toContainText("RECORD_COLLECTION");
+  await expect(recovery).not.toContainText(originalConfirmationKey);
   await expect(page.getByTestId("record-collection")).toBeDisabled();
   await expect(page.getByTestId("reprice-order")).toBeDisabled();
   const retainedBeforeReload = await page.evaluate(() => {
@@ -1108,7 +1103,7 @@ test("desktop order command recovery survives close refresh and navigation witho
   await page.reload();
   await expect(page.getByRole("heading", { name: "E2E Recovery Guest" })).toBeVisible();
   recovery = page.getByTestId("order-command-recovery");
-  await expect(recovery).toContainText(originalConfirmationKey);
+  await expect(recovery).toContainText("登记收款结果需要恢复查询");
   await expect(page.getByTestId("record-collection")).toBeDisabled();
 
   await page.getByRole("link", { name: "返回订单" }).click();
@@ -1116,13 +1111,13 @@ test("desktop order command recovery survives close refresh and navigation witho
   await page.goto(orderUrl);
   await expect(page.getByRole("heading", { name: "E2E Recovery Guest" })).toBeVisible();
   recovery = page.getByTestId("order-command-recovery");
-  await expect(recovery).toContainText(originalConfirmationKey);
+  await expect(recovery).toContainText("登记收款结果需要恢复查询");
   await recovery.getByTestId("order-command-recovery-open").click();
 
   const recoveryRequest = page.waitForRequest((request) => (
     request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/command-results"
   ));
-  await page.getByRole("button", { name: "查询命令结果" }).click();
+  await page.getByRole("button", { name: "查询登记收款结果" }).click();
   const recoveryUrl = new URL((await recoveryRequest).url());
   expect(recoveryUrl.searchParams.get("commandType")).toBe("RECORD_COLLECTION");
   expect(recoveryUrl.searchParams.get("idempotencyKey")).toBe(originalConfirmationKey);

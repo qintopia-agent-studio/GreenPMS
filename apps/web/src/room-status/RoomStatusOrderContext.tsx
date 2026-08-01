@@ -21,8 +21,8 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   CANCEL_ORDER: "取消订单",
   MARK_NO_SHOW: "标记未到",
   REVOKE_CHECK_IN: "撤销入住",
-  RECORD_COLLECTION: "记录收款",
-  RECORD_REFUND: "记录退款"
+  RECORD_COLLECTION: "登记收款",
+  RECORD_REFUND: "登记退款"
 };
 
 const channelLabels = {
@@ -281,12 +281,12 @@ export function RoomStatusOrderContext({
             <dt>政策基础金额</dt><dd>{formatMinor(currentPricingRevision.policy_base_amount_minor, currentPricingRevision.currency)}</dd>
             <dt>本单渠道应结金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
             <dt>与政策基础金额差额</dt><dd>{formatMinor(currentPricingRevision.difference_from_policy_minor, currentPricingRevision.currency)}</dd>
-            <dt>渠道价格差异说明</dt><dd>{currentPricingRevision.reason.note.trim() || "无需额外说明"}</dd>
+            <dt>渠道价格差异说明</dt><dd>{currentPricingRevision.reason.note.trim() || "无"}</dd>
           </> : <>
-            <dt>订单金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
-            <dt>已登记净收款</dt><dd>{formatMoney(view.amounts.netRecordedCollection)}</dd>
-            <dt>{amountDifference.minorUnits > 0 ? "待补收参考" : amountDifference.minorUnits < 0 ? "多收差额" : "当前记录无差额"}</dt><dd>{formatMoney({ currency: amountDifference.currency, minorUnits: Math.abs(amountDifference.minorUnits) })}</dd>
-            {view.amounts.refundReferenceAmount.minorUnits > 0 ? <><dt>建议退款</dt><dd><strong>{formatMoney(view.amounts.refundReferenceAmount)}</strong><small>目前尚未登记退款</small></dd></> : null}
+            <dt>住宿金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
+            <dt>已记录净收款</dt><dd>{formatMoney(view.amounts.netRecordedCollection)}</dd>
+            <dt>差额</dt><dd>{formatMoney(amountDifference)}</dd>
+            {view.amounts.refundReferenceAmount.minorUnits > 0 ? <><dt>退款参考</dt><dd><strong>{formatMoney(view.amounts.refundReferenceAmount)}</strong><small>目前尚未登记退款</small></dd></> : null}
           </>}
           <dt>资金记录</dt><dd>{view.collectionFacts.length} 笔</dd>
         </dl>
@@ -322,7 +322,7 @@ export function RoomStatusOrderContext({
         <ol className="room-status-order-occupants">
           {[...view.occupants].sort((left, right) => left.ordinal - right.ordinal).map((occupant) => (
             <li key={occupant.id}>
-              <div><strong>{occupantLabel(occupant)}</strong><span>{occupant.role === "PRIMARY" ? "主要 / 联系人" : `同行人 ${Math.max(1, occupant.ordinal - 1)}`}</span></div>
+              <div><strong>{occupantLabel(occupant)}</strong><span>{occupant.role === "PRIMARY" ? "主要联系人" : `同行人 ${Math.max(1, occupant.ordinal - 1)}`}</span></div>
               <small>{occupant.fullName || "姓名未记录"}{occupant.phone ? ` · ${occupant.phone}` : ""}</small>
               {canCorrectOccupants ? <button type="button" className="room-status-text-button" disabled={writeBlocked} onClick={() => onCorrectOccupant(occupant)}><FilePenLine aria-hidden="true" size={15} />更正资料</button> : null}
             </li>
@@ -365,9 +365,9 @@ export function RoomStatusOrderContext({
                 <span>政策基础金额：{formatMoney(item.pricingSummary.policyBaseAmount)}</span>
                 <span>本单渠道应结金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
               </> : <>
-                <span>订单金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
-                <span>变更时已登记净收款：{formatMoney(item.fundsSummary.netRecordedCollection)} · {difference.minorUnits > 0 ? `待补收参考 ${formatMoney({ currency: difference.currency, minorUnits: difference.minorUnits })}` : difference.minorUnits < 0 ? `多收差额 ${formatMoney({ currency: difference.currency, minorUnits: Math.abs(difference.minorUnits) })}` : "当前记录无差额"}</span>
-                {item.fundsSummary.refundReferenceAmount.minorUnits > 0 ? <span>建议退款 {formatMoney(item.fundsSummary.refundReferenceAmount)} · 目前尚未登记退款</span> : null}
+                <span>住宿金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
+                <span>变更时已记录净收款：{formatMoney(item.fundsSummary.netRecordedCollection)} · 差额 {formatMoney(difference)}</span>
+                {item.fundsSummary.refundReferenceAmount.minorUnits > 0 ? <span>退款参考 {formatMoney(item.fundsSummary.refundReferenceAmount)} · 目前尚未登记退款</span> : null}
               </>}
               <small>{item.actor?.displayName ?? "系统记录"} · {formatDateTime(item.recordedAt)}</small>
               {item.after.intervals.map((interval, intervalIndex) => <button key={`${interval.inventoryUnitId}:${interval.arrivalDate}`} type="button" className="room-status-text-button" onClick={() => onLocateRange(interval)}><Crosshair aria-hidden="true" size={15} />{item.after.intervals.length > 1 ? `定位调整后第 ${intervalIndex + 1} 段` : "定位调整后安排"}</button>)}

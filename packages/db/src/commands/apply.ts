@@ -1422,7 +1422,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const amountMinor = effect.amountMinor as number;
     const factType = options.commandType === "RECORD_COLLECTION" ? "COLLECTION" : options.commandType === "RECORD_REFUND" ? "REFUND" : "REVERSAL";
     const netEffectMinor = factType === "COLLECTION" ? amountMinor : factType === "REFUND" ? -amountMinor : effect.netEffectMinor as number;
-    const transactionReference = factType === "REVERSAL" ? null : requireTransactionReference(effect.transactionReference);
+    const transactionReference = factType === "REVERSAL" ? null
+      : typeof effect.transactionReference === "string" && effect.transactionReference.trim() !== "" ? effect.transactionReference.trim() : null;
     await trx.insertInto("collection_facts").values({
       fact_id: factId, order_id: orderId, fact_type: factType, amount_minor: amountMinor,
       net_effect_minor: netEffectMinor, currency: requireString(effect, "currency"),

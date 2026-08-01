@@ -1987,7 +1987,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         currency: "CNY",
         references_fact_id: null,
         reverses_fact_id: null,
-        method: "BANK_TRANSFER",
+        method: "WECOM",
         note: "并发收款事实",
         transaction_reference: "STAGE10-CONCURRENT-COLLECTION",
         pricing_revision_id: currentRevisionId,
@@ -2422,7 +2422,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         propertyId: demo.propertyId,
         orderId: created.orderId,
         amountMinor: 100,
-        method: "CASH",
+        method: "WECOM",
         transactionReference: "STAGE10-HASH-COLLECTION",
         note: "构造净额不变的新增资金事实"
       }
@@ -2434,7 +2434,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         orderId: created.orderId,
         amountMinor: 100,
         referencesFactId: collection.factRefs[0]!,
-        method: "CASH",
+        method: "WECOM",
         transactionReference: "STAGE10-HASH-REFUND",
         note: "构造净额不变的新增退款事实"
       }
@@ -2562,7 +2562,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
           propertyId: demo.propertyId,
           orderId: created.orderId,
           amountMinor: newContractAmount + item.collectionOffsetMinor,
-          method: "CASH",
+          method: "WECOM",
           transactionReference: `STAGE10-FUNDS-${item.label.toUpperCase()}`,
           note: "4.3 资金差额三态"
         }
@@ -2749,7 +2749,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
           propertyId: demo.propertyId,
           orderId: created.orderId,
           amountMinor,
-          method: "BANK_TRANSFER",
+          method: "WECOM",
           transactionReference: `STAGE10-OVERFLOW-${index + 1}`
         }
       }, `stage10-overflow-collection-${index + 1}`);

@@ -19,6 +19,8 @@ function order(id: string, status: string, arrivalDate: string, departureDate: s
     member_id: null,
     member_contract_id: null,
     current_revision_id: "revision_1",
+    current_contract_amount_minor: 10_000,
+    currency: "CNY",
     version: 1,
     created_at: "2026-07-30T08:00:00.000Z",
     updated_at: "2026-07-30T08:00:00.000Z"

@@ -302,15 +302,23 @@ describe.sequential("booking channels and external transaction references on Pos
   });
 
   it("rejects missing references with zero command artifacts and records independent collection/refund references exactly once", async () => {
-    const created = await createChannelOrder({ code: "YOUMUDAO", channelOrderReference: "TEST-FUND-ORDER", day: 10, prefix: "fund-order" });
+    const created = await createChannelOrder({ code: "WECOM", channelOrderReference: null, day: 10, prefix: "fund-order" });
     const orderId = created.receipt.result!.orderId as string;
     const before = await commandArtifactCounts();
     for (const transactionReference of [undefined, " \t\n "]) {
       await expect(createCommandPreview(db, principal, {
         commandType: "RECORD_COLLECTION",
-        input: { propertyId: demo.propertyId, orderId, amountMinor: 100, method: "CASH", transactionReference }
-      }, metadata("missing-transaction-reference"))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+        input: { propertyId: demo.propertyId, orderId, amountMinor: 100, method: "WECOM", transactionReference }
+      }, metadata("missing-transaction-reference"))).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "必须填写企业微信交易单号" });
     }
+    await expect(createCommandPreview(db, principal, {
+      commandType: "RECORD_COLLECTION",
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 100, method: "CASH" }
+    }, metadata("missing-cash-payee"))).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "必须填写收款人" });
+    await expect(createCommandPreview(db, principal, {
+      commandType: "RECORD_COLLECTION",
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 100, method: "OTHER" }
+    }, metadata("missing-other-note"))).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "必须填写其他收款说明" });
     expect(await commandArtifactCounts()).toEqual(before);
 
     const collectionPreview = await createCommandPreview(db, principal, {
@@ -319,7 +327,7 @@ describe.sequential("booking channels and external transaction references on Pos
         propertyId: demo.propertyId,
         orderId,
         amountMinor: 5_000,
-        method: "CARD",
+        method: "WECOM",
         transactionReference: "  TEST-TXN-COLLECTION-ONE  ",
         note: "First independent collection"
       }
@@ -339,7 +347,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(collectionOne.result).toMatchObject({ transactionReference: "TEST-TXN-COLLECTION-ONE" });
 
     const beforeInvalidRefunds = await commandArtifactCounts();
-    for (const transactionReference of [undefined, " \t\n "]) {
+    for (const note of [undefined, " \t\n "]) {
       await expect(createCommandPreview(db, principal, {
         commandType: "RECORD_REFUND",
         input: {
@@ -347,10 +355,10 @@ describe.sequential("booking channels and external transaction references on Pos
           orderId,
           amountMinor: 100,
           referencesFactId: collectionOne.factRefs[0],
-          method: "CARD",
-          transactionReference
+          method: "WECOM",
+          note
         }
-      }, metadata("missing-refund-transaction-reference"))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      }, metadata("missing-refund-reason"))).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "必须填写退款原因" });
     }
     expect(await commandArtifactCounts()).toEqual(beforeInvalidRefunds);
 
@@ -372,9 +380,8 @@ describe.sequential("booking channels and external transaction references on Pos
         orderId,
         amountMinor: 1_500,
         referencesFactId: collectionOne.factRefs[0],
-        method: "CARD",
-        transactionReference: "TEST-TXN-REFUND-ONE",
-        note: "Refund with its own external transaction"
+        method: "WECOM",
+        note: "WECOM original-route refund"
       }
     }, "refund-one");
     const reversal = await previewAndConfirm({
@@ -390,7 +397,8 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(facts.find((fact) => fact.fact_id === refund.factRefs[0])).toMatchObject({
       fact_type: "REFUND",
       references_fact_id: collectionOne.factRefs[0],
-      transaction_reference: "TEST-TXN-REFUND-ONE"
+      method: "WECOM",
+      transaction_reference: null
     });
     expect(facts.find((fact) => fact.fact_id === reversal.factRefs[0])?.transaction_reference).toBeNull();
   });
@@ -588,14 +596,14 @@ describe.sequential("booking channels and external transaction references on Pos
 
     const created = await createChannelOrder({ code: "CTRIP", channelOrderReference: "TEST-IMMUTABLE-CHANNEL", day: 12, prefix: "immutable-channel" });
     const orderId = created.receipt.result!.orderId as string;
-    const secondOrder = await createChannelOrder({ code: "MEITUAN", channelOrderReference: "TEST-REFUND-OTHER-ORDER", day: 14, prefix: "refund-other-order" });
+    const secondOrder = await createChannelOrder({ code: "WECOM", channelOrderReference: null, day: 14, prefix: "refund-other-order" });
     const secondOrderId = secondOrder.receipt.result!.orderId as string;
     const pricingRevisionId = (await getOrderView(db, orderId)).order.current_revision_id!;
     const secondPricingRevisionId = (await getOrderView(db, secondOrderId)).order.current_revision_id!;
     await expect(db.updateTable("orders").set({ booking_channel_code: "MEITUAN" }).where("id", "=", orderId).execute()).rejects.toThrow(/booking channel.*immutable/);
     await expect(db.updateTable("orders").set({ channel_order_reference: "CHANGED" }).where("id", "=", orderId).execute()).rejects.toThrow(/booking channel.*immutable/);
 
-    const baseFact = {
+    const externalBaseFact = {
       order_id: orderId,
       amount_minor: 100,
       currency: "CNY",
@@ -607,19 +615,97 @@ describe.sequential("booking channels and external transaction references on Pos
       command_id: "command_direct_fact_guard"
     };
     await expect(db.insertInto("collection_facts").values({
+      ...externalBaseFact,
+      fact_id: "fact_direct_external_collection_forbidden",
+      fact_type: "COLLECTION",
+      net_effect_minor: 100,
+      method: "WECOM",
+      transaction_reference: "TEST-DIRECT-EXTERNAL-COLLECTION-FORBIDDEN"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_external_channel_money_forbidden" });
+    await expect(db.insertInto("collection_facts").values({
+      ...externalBaseFact,
+      fact_id: "fact_direct_external_refund_forbidden",
+      fact_type: "REFUND",
+      net_effect_minor: -100,
+      method: "WECOM",
+      transaction_reference: "TEST-DIRECT-EXTERNAL-REFUND-FORBIDDEN"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_external_channel_money_forbidden" });
+    const wecomOrder = await createChannelOrder({ code: "WECOM", channelOrderReference: null, day: 16, prefix: "direct-wecom-method" });
+    const wecomOrderId = wecomOrder.receipt.result!.orderId as string;
+    const wecomPricingRevisionId = (await getOrderView(db, wecomOrderId)).order.current_revision_id!;
+    const baseFact = {
+      ...externalBaseFact,
+      order_id: wecomOrderId,
+      pricing_revision_id: wecomPricingRevisionId,
+      command_id: "command_direct_wecom_fact_guard"
+    };
+    await db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_wecom_cash_collection",
+      fact_type: "COLLECTION",
+      net_effect_minor: 100,
+      method: "CASH",
+      transaction_reference: null,
+      command_id: "command_direct_wecom_cash_collection"
+    }).execute();
+    await db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_wecom_valid_collection",
+      fact_type: "COLLECTION",
+      net_effect_minor: 100,
+      method: "WECOM",
+      transaction_reference: "TEST-DIRECT-WECOM-VALID-COLLECTION",
+      command_id: "command_direct_wecom_valid_collection"
+    }).execute();
+    await db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_wecom_refund_cash_method",
+      fact_type: "REFUND",
+      net_effect_minor: -10,
+      amount_minor: 10,
+      references_fact_id: "fact_direct_wecom_valid_collection",
+      method: "CASH",
+      transaction_reference: null,
+      command_id: "command_direct_wecom_refund_cash_method"
+    }).execute();
+    await db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_wecom_refund_original_route",
+      fact_type: "REFUND",
+      net_effect_minor: -10,
+      amount_minor: 10,
+      references_fact_id: "fact_direct_wecom_valid_collection",
+      method: "WECOM",
+      transaction_reference: null,
+      command_id: "command_direct_wecom_refund_original_route"
+    }).execute();
+    await expect(db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_missing_pricing_revision",
+      fact_type: "COLLECTION",
+      net_effect_minor: 100,
+      pricing_revision_id: null,
+      transaction_reference: "TEST-DIRECT-MISSING-PRICING-REVISION"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_new_pricing_revision_required" });
+    await expect(db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_missing_transaction",
       fact_type: "COLLECTION",
       net_effect_minor: 100,
+      method: "WECOM",
       transaction_reference: null
-    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_new_transaction_reference_required" });
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_method_transaction_reference_required" });
     await expect(db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_blank_transaction",
       fact_type: "REFUND",
-      net_effect_minor: -100,
-      transaction_reference: "\t\n"
-    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_new_transaction_reference_required" });
+      amount_minor: 10,
+      net_effect_minor: -10,
+      references_fact_id: "fact_direct_wecom_valid_collection",
+      method: "BANK_TRANSFER",
+      transaction_reference: "\t\n",
+      command_id: "command_direct_blank_refund_transaction"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_method_transaction_reference_required" });
     await expect(db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_reversal_transaction",
@@ -707,6 +793,24 @@ describe.sequential("booking channels and external transaction references on Pos
       references_fact_id: "fact_direct_valid_collection",
       transaction_reference: "TEST-DIRECT-VALID-REFUND"
     });
+    await expect(db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_refund_over_remaining",
+      fact_type: "REFUND",
+      net_effect_minor: -60,
+      amount_minor: 60,
+      references_fact_id: "fact_direct_valid_collection",
+      transaction_reference: "TEST-DIRECT-REFUND-OVER-REMAINING"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_refund_remaining_amount" });
+    await expect(db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_reversal_collection_with_active_refund",
+      fact_type: "REVERSAL",
+      amount_minor: 100,
+      net_effect_minor: -100,
+      reverses_fact_id: "fact_direct_valid_collection",
+      transaction_reference: null
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_reversal_collection_has_active_refunds" });
     await expect(db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_refund_non_collection",
@@ -804,6 +908,34 @@ describe.sequential("booking channels and external transaction references on Pos
       references_fact_id: null,
       reverses_fact_id: "fact_direct_reversal_source"
     });
+    await db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_refund_after_reversal_source",
+      fact_type: "COLLECTION",
+      amount_minor: 80,
+      net_effect_minor: 80,
+      transaction_reference: "TEST-DIRECT-REFUND-AFTER-REVERSAL-SOURCE",
+      command_id: "command_direct_refund_after_reversal_source"
+    }).execute();
+    await db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_valid_source_reversal",
+      fact_type: "REVERSAL",
+      amount_minor: 80,
+      net_effect_minor: -80,
+      reverses_fact_id: "fact_direct_refund_after_reversal_source",
+      transaction_reference: null,
+      command_id: "command_direct_valid_source_reversal"
+    }).execute();
+    await expect(db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_refund_after_reversed_collection",
+      fact_type: "REFUND",
+      amount_minor: 10,
+      net_effect_minor: -10,
+      references_fact_id: "fact_direct_refund_after_reversal_source",
+      transaction_reference: "TEST-DIRECT-REFUND-AFTER-REVERSED-COLLECTION"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_refund_reference_reversed" });
     await expect(db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_reversal_of_reversal",
@@ -816,7 +948,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 029, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 032, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -1356,6 +1488,18 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration029 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/029_stage12_terminal_order_guards.sql"), "utf8");
         await client.query(migration029);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('029_stage12_terminal_order_guards.sql')");
+        const migration030 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/030_collection_fact_historical_pricing_revision.sql"), "utf8");
+        await client.query(migration030);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('030_collection_fact_historical_pricing_revision.sql')");
+        const migration031 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/031_collection_fact_method_transaction_rules.sql"), "utf8");
+        await client.query(migration031);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('031_collection_fact_method_transaction_rules.sql')");
+        const migration032 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/032_wecom_refund_original_route.sql"), "utf8");
+        await client.query(migration032);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('032_wecom_refund_original_route.sql')");
+        await client.query("ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only");
+        await client.query("UPDATE collection_facts SET pricing_revision_id = NULL WHERE fact_id = 'fact_historical_nulls'");
+        await client.query("ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only");
       } finally {
         await client.end();
       }
@@ -1533,7 +1677,8 @@ describe.sequential("booking channels and external transaction references on Pos
         amount_minor: 100,
         net_effect_minor: 90,
         currency: "USD",
-        transaction_reference: null
+        transaction_reference: null,
+        pricing_revision_id: null
       });
       expect(await databaseReady(historicalDb)).toBe(true);
 
@@ -1548,7 +1693,7 @@ describe.sequential("booking channels and external transaction references on Pos
         expect(detail.statusCode, detail.body).toBe(200);
         expect(detail.json()).toMatchObject({
           order: { booking_channel_code: null, channel_order_reference: null, free_stay_category_code: null },
-          collectionFacts: [{ transaction_reference: null }],
+          collectionFacts: [{ transaction_reference: null, pricing_revision_id: null }],
           amendments: [{}, {
             id: "amend_historical_legacy_move",
             protocolVersion: "PRE_STAGE_11",
@@ -1569,7 +1714,7 @@ describe.sequential("booking channels and external transaction references on Pos
           headers: { authorization: `Bearer ${demo.writeToken}` }
         });
         expect(fact.statusCode, fact.body).toBe(200);
-        expect(fact.json()).toMatchObject({ fact_id: "fact_historical_nulls", transaction_reference: null });
+        expect(fact.json()).toMatchObject({ fact_id: "fact_historical_nulls", transaction_reference: null, pricing_revision_id: null });
 
         const historicalCreatePreview = await app.inject({
           method: "GET",

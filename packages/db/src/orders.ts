@@ -52,6 +52,13 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
 }
 
 type HistoricalAmendmentProtocol = HistoricalProtocolVersion;
+const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
+
+function externalChannelFundsDisabledReason(bookingChannelCode: string | null): string | null {
+  return bookingChannelCode && externalChannelCodes.has(bookingChannelCode)
+    ? "外部渠道订单不在 PMS 登记单笔收款或退款；请核对渠道订单号和本单渠道应结金额，由财务按渠道总账核对"
+    : null;
+}
 
 function legacyAmendmentProtocol(amendmentType: string, payloadValue: unknown): HistoricalAmendmentProtocol | undefined {
   return legacyEffectProtocol(amendmentType, payloadValue);
@@ -170,7 +177,8 @@ export function orderAllowedActions(
   status: string,
   hasRefundableCollection: boolean,
   fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string; localTime?: string },
-  hasFutureMove = false
+  hasFutureMove = false,
+  bookingChannelCode: string | null = null
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
@@ -191,6 +199,9 @@ export function orderAllowedActions(
   return orderActionCodes.map((code) => {
     const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
     let fulfillmentDisabledReason: string | null = null;
+    const externalFundsDisabledReason = code === "RECORD_COLLECTION" || code === "RECORD_REFUND"
+      ? externalChannelFundsDisabledReason(bookingChannelCode)
+      : null;
     if (fulfillmentDates && statusAllows) {
       if (code === "CHECK_IN") {
         if (fulfillmentDates.businessDate < fulfillmentDates.arrivalDate) {
@@ -228,13 +239,14 @@ export function orderAllowedActions(
     }
     const enabled = statusAllows
       && fulfillmentDisabledReason === null
+      && externalFundsDisabledReason === null
       && (code !== "RECORD_REFUND" || hasRefundableCollection);
     return {
       code,
       enabled,
       disabledReason: enabled
         ? null
-        : fulfillmentDisabledReason ?? (code === "RECORD_REFUND" && statusAllows
+        : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? (code === "RECORD_REFUND" && statusAllows
           ? "NO_REFUNDABLE_COLLECTION"
           : "ORDER_STATE_NOT_ALLOWED")
     };
@@ -1239,15 +1251,19 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     facts,
     activeTimeline
   });
-  return {
-    accessLevel,
-    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
-      businessDate,
-      arrivalDate: context.order.arrival_date,
-      departureDate: context.order.departure_date,
-      localTime: localClock.time
-    }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate)),
-    order: context.order,
+ return {
+   accessLevel,
+   allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
+     businessDate,
+     arrivalDate: context.order.arrival_date,
+     departureDate: context.order.departure_date,
+     localTime: localClock.time
+   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code),
+    order: {
+      ...context.order,
+      current_contract_amount_minor: context.revision.currentContractAmountMinor,
+      currency: context.revision.currency
+    },
     occupants: occupantRows.map((occupant) => {
       const correction = latestByOccupant.get(occupant.id);
       return {

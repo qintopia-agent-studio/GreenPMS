@@ -375,9 +375,29 @@ export async function buildServer(db: Kysely<Database>) {
     const query = request.query as { propertyId: string; status?: string };
     const principal = await requirePrincipal(db, request);
     requirePropertyAccess(principal, query.propertyId, "READ");
-    let selection = db.selectFrom("orders").selectAll().where("property_id", "=", query.propertyId);
-    if (query.status) selection = selection.where("status", "=", query.status);
-    return { orders: await selection.orderBy("created_at", "desc").execute() };
+    let selection = db.selectFrom("orders")
+      .leftJoin("pricing_revisions as current_revision", "current_revision.id", "orders.current_revision_id")
+      .leftJoin("stays", "stays.order_id", "orders.id")
+      .leftJoin(
+        (qb) => qb.selectFrom("stay_segments")
+          .select(["stay_id", "inventory_unit_id"])
+          .distinctOn("stay_id")
+          .orderBy("stay_id")
+          .orderBy("sequence", "desc")
+          .as("current_segment"),
+        (join) => join.onRef("current_segment.stay_id", "=", "stays.id")
+      )
+      .leftJoin("inventory_units as current_unit", "current_unit.id", "current_segment.inventory_unit_id")
+      .selectAll("orders")
+      .select([
+        "current_revision.current_contract_amount_minor as current_contract_amount_minor",
+        "current_revision.currency as currency",
+        "current_unit.name as current_unit_name",
+        "current_unit.code as current_unit_code"
+      ])
+      .where("orders.property_id", "=", query.propertyId);
+    if (query.status) selection = selection.where("orders.status", "=", query.status);
+    return { orders: await selection.orderBy("orders.created_at", "desc").execute() };
   });
 
   app.get("/api/v1/orders/:id", { schema: { tags: ["queries"], params: IdParams, response: { 200: OrderDetailResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
@@ -441,7 +461,7 @@ export async function buildServer(db: Kysely<Database>) {
     const factId = (request.params as { id: string }).id;
     const principal = await requirePrincipal(db, request);
     const collection = await db.selectFrom("collection_facts").innerJoin("orders", "orders.id", "collection_facts.order_id")
-      .select(["collection_facts.fact_id", "collection_facts.order_id", "collection_facts.fact_type", "collection_facts.amount_minor", "collection_facts.net_effect_minor", "collection_facts.currency", "collection_facts.references_fact_id", "collection_facts.reverses_fact_id", "collection_facts.method", "collection_facts.note", "collection_facts.transaction_reference", "collection_facts.created_at", "orders.property_id"])
+      .select(["collection_facts.fact_id", "collection_facts.order_id", "collection_facts.fact_type", "collection_facts.amount_minor", "collection_facts.net_effect_minor", "collection_facts.currency", "collection_facts.references_fact_id", "collection_facts.reverses_fact_id", "collection_facts.method", "collection_facts.note", "collection_facts.transaction_reference", "collection_facts.pricing_revision_id", "collection_facts.created_at", "orders.property_id"])
       .where("collection_facts.fact_id", "=", factId).executeTakeFirst();
     if (collection) {
       requireScopedResourceAccess(principal, collection.property_id);

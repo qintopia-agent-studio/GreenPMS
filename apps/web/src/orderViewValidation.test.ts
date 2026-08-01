@@ -67,6 +67,8 @@ function orderView() {
       member_id: null,
       member_contract_id: null,
       current_revision_id: "revision_1",
+      current_contract_amount_minor: 46000,
+      currency: "CNY",
       version: 1,
       created_at: "2026-07-28T08:00:00.000Z",
       updated_at: "2026-07-28T08:00:00.000Z"
@@ -602,8 +604,8 @@ describe("parseOrderView", () => {
     ["pricing currency", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.currency = "USD"; }, "金额摘要币种不一致"],
     ["currency format", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.currency = "cny"; }, "必须是三位大写货币代码"],
     ["policy difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = 1; }, "与政策基础金额差额不一致"],
-    ["collection difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 19_999; }, "待收或多收差额不一致"],
-    ["refund reference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.refundReferenceAmount.minorUnits = 1; }, "建议退款金额不一致"]
+    ["collection difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 19_999; }, "资金差额不一致"],
+    ["refund reference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.refundReferenceAmount.minorUnits = 1; }, "退款参考金额不一致"]
   ])("rejects inconsistent history money for %s", (_label, damage, expected) => {
     const input = orderView();
     damage(input);
@@ -931,6 +933,29 @@ describe("parseOrderView", () => {
     expect(parseOrderView(input)).toBe(input);
   });
 
+  it("accepts historical collection facts without a pricing revision association", () => {
+    const input = orderView();
+    input.collectionFacts.push({
+      fact_id: "fact_historical_null_revision",
+      order_id: input.order.id,
+      fact_type: "COLLECTION",
+      amount_minor: 100,
+      net_effect_minor: 100,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "CASH",
+      note: "",
+      transaction_reference: "HISTORICAL-CASH-001",
+      pricing_revision_id: null,
+      command_id: "command_historical_null_revision",
+      created_at: "2026-07-28T08:00:00.000Z"
+    } as never);
+    input.amounts.netRecordedCollection.minorUnits += 100;
+    input.amounts.collectionDifference.minorUnits -= 100;
+    expect(parseOrderView(input)).toBe(input);
+  });
+
   it.each([
     ["extension that changes rooms without extending", "EXTENSION", movedArrangement(), "续住必须保留原安排并延长退房日"],
     ["reschedule that also changes rooms", "RESCHEDULE", arrangement("room_102", "2026-07-29", "2026-07-31"), "改期后的房源安排不符合已确认的换房节点平移与首尾裁剪规则"],
@@ -947,7 +972,7 @@ describe("parseOrderView", () => {
     ["missing occupants", (input: ReturnType<typeof orderView>) => { delete (input as Partial<typeof input>).occupants; }, "根节点.occupants缺失"],
     ["malformed amount", (input: ReturnType<typeof orderView>) => { input.amounts.currentContractAmount.minorUnits = 1.5; }, "必须是安全整数"],
     ["stale current revision", (input: ReturnType<typeof orderView>) => { input.order.current_revision_id = "revision_stale"; }, "与订单当前计价指针或金额不一致"],
-    ["collection total mismatch", (input: ReturnType<typeof orderView>) => { input.amounts.netRecordedCollection.minorUnits = 100; input.amounts.collectionDifference.minorUnits = 19_900; }, "净影响合计与已登记净收款不一致"],
+    ["collection total mismatch", (input: ReturnType<typeof orderView>) => { input.amounts.netRecordedCollection.minorUnits = 100; input.amounts.collectionDifference.minorUnits = 19_900; }, "净影响合计与已记录净收款不一致"],
     ["unexpected root field", (input: ReturnType<typeof orderView>) => { Object.assign(input, { rawPayload: {} }); }, "根节点.rawPayload不是允许的字段"],
     ["unexpected order field", (input: ReturnType<typeof orderView>) => { Object.assign(input.order, { rawStatus: "RESERVED" }); }, "order.rawStatus不是允许的字段"],
     ["malformed segment", (input: ReturnType<typeof orderView>) => { input.segments[0]!.stay_id = "stay_other"; }, "segments[0].stay_id与住宿不一致"],

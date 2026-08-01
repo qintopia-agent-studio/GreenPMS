@@ -614,31 +614,6 @@ describe("Command effect HTTP contract", () => {
     const memberOrderId = memberOrderResult.orderId as string;
     await capture("REFRESH_MEMBER_COVERAGE", { propertyId: demo.propertyId, orderId: memberOrderId });
 
-    const collection = await capture("RECORD_COLLECTION", {
-      propertyId: demo.propertyId,
-      orderId,
-      amountMinor: 10_000,
-      method: "CARD",
-      transactionReference: "TEST-EFFECT-TXN-COLLECTION",
-      note: "Effect contract collection"
-    });
-    const collectionFactId = (await confirm(collection)).factId as string;
-    await capture("RECORD_REFUND", {
-      propertyId: demo.propertyId,
-      orderId,
-      amountMinor: 1_000,
-      referencesFactId: collectionFactId,
-      method: "CARD",
-      transactionReference: "TEST-EFFECT-TXN-REFUND",
-      note: "Effect contract refund"
-    });
-    await capture("REVERSE_FACT", {
-      propertyId: demo.propertyId,
-      orderId,
-      reversesFactId: collectionFactId,
-      note: "Effect contract reversal"
-    });
-
     const checkInPriced = await quote({
       arrivalDate: propertyToday,
       departureDate: shiftLocalDate(propertyToday, 1),
@@ -658,6 +633,30 @@ describe("Command effect HTTP contract", () => {
     const checkIn = await capture("CHECK_IN", { propertyId: demo.propertyId, orderId: checkInOrderId });
     expect(checkIn.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     await confirm(checkIn);
+    const collection = await capture("RECORD_COLLECTION", {
+      propertyId: demo.propertyId,
+      orderId: checkInOrderId,
+      amountMinor: 10_000,
+      method: "OTHER",
+      transactionReference: "TEST-EFFECT-TXN-COLLECTION",
+      note: "Effect contract collection"
+    });
+    const collectionFactId = (await confirm(collection)).factId as string;
+    await capture("RECORD_REFUND", {
+      propertyId: demo.propertyId,
+      orderId: checkInOrderId,
+      amountMinor: 1_000,
+      referencesFactId: collectionFactId,
+      method: "OTHER",
+      transactionReference: "TEST-EFFECT-TXN-REFUND",
+      note: "Effect contract refund"
+    });
+    await capture("REVERSE_FACT", {
+      propertyId: demo.propertyId,
+      orderId: checkInOrderId,
+      reversesFactId: collectionFactId,
+      note: "Effect contract reversal"
+    });
     const extension = await capture("EXTEND_STAY", {
       propertyId: demo.propertyId,
       orderId: checkInOrderId,

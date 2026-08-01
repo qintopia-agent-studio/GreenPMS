@@ -335,6 +335,10 @@ export interface OrderRowDto {
   member_id: string | null;
   member_contract_id: string | null;
   current_revision_id: string | null;
+  current_contract_amount_minor: number | null;
+  currency: string | null;
+  current_unit_name?: string | null;
+  current_unit_code?: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -414,7 +418,7 @@ export interface CollectionFactDto {
   method: string;
   note: string;
   transaction_reference: string | null;
-  pricing_revision_id: string;
+  pricing_revision_id: string | null;
   command_id: string;
   created_at: string;
 }

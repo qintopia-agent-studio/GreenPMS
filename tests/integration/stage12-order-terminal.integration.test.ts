@@ -397,7 +397,7 @@ describe("Stage 12 cancellation, no-show, and check-in revocation", () => {
         propertyId: demo.propertyId,
         orderId,
         amountMinor: collectedMinor,
-        method: "CASH",
+        method: "WECOM",
         transactionReference: "STAGE12-CANCEL-COLLECTION"
       }
     }, "cancel-collection");

@@ -741,8 +741,8 @@ describe("HTTP security contract", () => {
         propertyId: options.propertyId,
         quoteId: quote.json().quote.quoteId,
         primaryGuest: { fullName: `Cross-property probe ${options.propertyId}`, nickname: `Cross ${options.propertyId}` },
-        bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `TEST-SECURITY-ORDER-${options.prefix}`,
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
         targetCurrentContractAmountMinor: quote.json().quote.currentContractAmount.minorUnits
       }, options.prefix);
       return created.confirmation.body.result?.orderId as string;
@@ -774,8 +774,7 @@ describe("HTTP security contract", () => {
       orderId: propertyBOrderId,
       amountMinor: 5_000,
       method: "CASH",
-      transactionReference: "TEST-SECURITY-TXN-PROPERTY-B",
-      note: "Foreign-property collection reference probe"
+      note: "Foreign-property cash collector"
     }, "cross-fact-property-b-collection");
     const propertyBFactId = propertyBCollection.confirmation.body.factRefs?.[0];
     expect(propertyBFactId).toMatch(/^fact_/);
@@ -784,8 +783,7 @@ describe("HTTP security contract", () => {
       orderId: propertyAOtherOrderId,
       amountMinor: 4_000,
       method: "CASH",
-      transactionReference: "TEST-SECURITY-TXN-PROPERTY-A-OTHER",
-      note: "Same-property cross-order reference probe"
+      note: "Same-property cash collector"
     }, "cross-fact-property-a-other-collection");
     const propertyAOtherFactId = propertyAOtherCollection.confirmation.body.factRefs?.[0];
     expect(propertyAOtherFactId).toMatch(/^fact_/);
@@ -798,9 +796,9 @@ describe("HTTP security contract", () => {
     for (const probe of [
       {
         commandType: "RECORD_REFUND" as const,
-        foreignInput: { amountMinor: 100, method: "CASH", transactionReference: "TEST-SECURITY-TXN-FOREIGN-REFUND", referencesFactId: propertyBFactId },
-        missingInput: { amountMinor: 100, method: "CASH", transactionReference: "TEST-SECURITY-TXN-MISSING-REFUND", referencesFactId: "fact_security_missing_refund_probe" },
-        samePropertyInput: { amountMinor: 100, method: "CASH", transactionReference: "TEST-SECURITY-TXN-CROSS-ORDER-REFUND", referencesFactId: propertyAOtherFactId },
+        foreignInput: { amountMinor: 100, method: "CASH", referencesFactId: propertyBFactId, note: "Foreign-property refund probe" },
+        missingInput: { amountMinor: 100, method: "CASH", referencesFactId: "fact_security_missing_refund_probe", note: "Missing refund probe" },
+        samePropertyInput: { amountMinor: 100, method: "CASH", referencesFactId: propertyAOtherFactId, note: "Same-property refund probe" },
         message: "Referenced collection fact not found"
       },
       {

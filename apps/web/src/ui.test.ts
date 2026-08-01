@@ -15,6 +15,20 @@ describe("operator-facing business errors", () => {
       correlationId: "correlation_inventory_conflict_cn"
     }))).toBe("目标房源在所选换房日期内已有占用，请选择其他房源。");
   });
+
+  it("describes refund amount limits instead of a generic state change", () => {
+    expect(businessErrorMessage(new ApiError(409, {
+      code: "REFUND_LIMIT_EXCEEDED",
+      message: "Refund exceeds the remaining referenced collection",
+      correlationId: "correlation_refund_limit"
+    }))).toBe("退款金额不能超过所选原收款的剩余可退金额，请返回修改退款金额。");
+    expect(businessErrorMessage(new ApiError(409, {
+      code: "PREVIEW_STALE",
+      message: "Preview basis changed; request a new preview",
+      correlationId: "correlation_refund_limit_preview_stale",
+      details: { causeCode: "REFUND_LIMIT_EXCEEDED" }
+    }))).toBe("退款金额不能超过所选原收款的剩余可退金额，请返回修改退款金额。");
+  });
 });
 
 describe("Fulfillment business presentation", () => {
@@ -198,6 +212,7 @@ describe("Receipt transaction reference labels", () => {
     expect(receiptTransactionReferenceLabel({ factType: "REVERSAL", transactionReference: null })).toBe("不适用");
     expect(receiptTransactionReferenceLabel({ factType: "COLLECTION", transactionReference: null })).toBe("历史未记录");
     expect(receiptTransactionReferenceLabel({ factType: "REFUND", transactionReference: "TXN-REFUND-001" })).toBe("TXN-REFUND-001");
+    expect(receiptTransactionReferenceLabel({ factType: "REFUND", method: "WECOM", transactionReference: null })).toBe("沿用原收款交易单号");
   });
 });
 
@@ -228,7 +243,7 @@ describe("Occupant command summaries", () => {
     }]);
 
     expect(summary).toEqual([
-      { key: "occupant_primary", roleLabel: "主要 / 联系人", nickname: "山风", fullName: "主要姓名" },
+      { key: "occupant_primary", roleLabel: "主要联系人", nickname: "山风", fullName: "主要姓名" },
       { key: "occupant_additional", roleLabel: "同行人 1", nickname: "小满", fullName: "同行姓名" }
     ]);
     expect(JSON.stringify(summary)).not.toMatch(/13800000000|PRIVATE-DOC/);

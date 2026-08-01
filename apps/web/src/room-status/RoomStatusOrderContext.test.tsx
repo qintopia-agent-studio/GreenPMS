@@ -26,7 +26,9 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       pricing_policy_version_id: "policy_v1",
       member_id: null,
       member_contract_id: null,
-      current_revision_id: "revision_1",
+     current_revision_id: "revision_1",
+      current_contract_amount_minor: 10_000,
+      currency: "CNY",
       version: 2,
       created_at: "2026-07-24T10:00:00.000Z",
       updated_at: "2026-07-25T10:00:00.000Z"
@@ -209,8 +211,8 @@ describe("RoomStatusOrderContext", () => {
     expect(html).toContain("住宿安排变更历史");
     expect(html).toContain("调整前：101 一栋101");
     expect(html).toContain("调整后：101 一栋101");
-    expect(html).toContain("变更时已登记净收款");
-    expect(html).toContain("待补收参考");
+    expect(html).toContain("变更时已记录净收款");
+    expect(html).toContain("差额");
     expect(html).not.toContain("已结清");
     expect(html).toContain("资金记录");
     expect(html).toContain("收款 ·");

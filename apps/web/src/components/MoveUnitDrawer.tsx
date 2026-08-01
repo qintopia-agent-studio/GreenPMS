@@ -538,7 +538,7 @@ export function MoveUnitDrawer({
               minorUnits: preview.summary.targetAmount.minorUnits - preview.summary.beforeAmount.minorUnits
             })}</strong></> : null}
             <span>与政策基础金额差额</span><strong>{formatMoney(preview.summary.differenceFromPolicy)}</strong>
-            {externalChannel ? <><span>渠道价格差异说明</span><strong>{draft.channelPriceDifferenceReason.trim() || "无需额外说明"}</strong></> : null}
+            {externalChannel ? <><span>渠道价格差异说明</span><strong>{draft.channelPriceDifferenceReason.trim() || "无"}</strong></> : null}
           </dl>
           <p>正式确认时会再次核对目标库存、订单版本和完整计价结果。</p>
         </div> : null}

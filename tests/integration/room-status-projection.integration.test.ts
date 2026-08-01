@@ -197,9 +197,9 @@ async function createOrder(options: {
       propertyId: demo.propertyId,
       quoteId: quote.quoteId,
       primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: options.nickname ?? `RS ${options.prefix}` },
-      ...(!options.memberContractId && stayType !== "FREE" ? {
-        bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `ROOM-STATUS-${options.prefix}`,
+     ...(!options.memberContractId && stayType !== "FREE" ? {
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
         targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
       } : {}),
       ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Volunteer accommodation", freeStayCategoryCode: "RECEPTION" } : {})
@@ -836,16 +836,13 @@ describe("PostgreSQL room-status projection", () => {
     });
     const movedOrderId = moved.result!.orderId as string;
     await markOrderInHouseFixture(movedOrderId);
-    const movedView = await getOrderView(db, movedOrderId);
     await execute({
       commandType: "MOVE_UNIT",
       input: {
         propertyId: demo.propertyId,
         orderId: movedOrderId,
         newInventoryUnitId: rooms[4]!.id,
-        effectiveDate: businessDate,
-        targetCurrentContractAmountMinor: movedView.amounts.currentContractAmount.minorUnits,
-        channelPriceDifferenceReason: "跨房型换房，重新确认本单渠道应结金额"
+        effectiveDate: businessDate
       }
     }, "task-move-unit");
 
@@ -2254,8 +2251,9 @@ describe("PostgreSQL room-status projection", () => {
         propertyId: demo.propertyId,
         orderId,
         amountMinor: 12_000,
-        method: "MANUAL",
-        transactionReference: "ROOM-STATUS-MONEY-REVISION"
+        method: "OTHER",
+        transactionReference: "ROOM-STATUS-MONEY-REVISION",
+        note: "room status money revision probe"
       }
     }, "money-revision");
     expect((await board({ arrivalDate: "2028-10-01", departureDate: "2028-10-02" })).revision).toBe(beforeMoney);

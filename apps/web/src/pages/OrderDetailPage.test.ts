@@ -9,15 +9,22 @@ import {
   fulfillmentResultLabel,
   initialRepriceTargetYuan,
   collectionDifferencePresentation,
+  collectionFactTransactionReferenceLabel,
   collectionFactTypeLabel,
   collectionMethodLabel,
   arrangementChangeLabel,
+  collectionAmountMinorToYuanInput,
+  collectionAmountYuanInputToMinor,
   occupantSnapshotEntries,
   OrderAmountStrip,
   OrderLifecycleSections,
   pricingBasisLabel,
   orderDetailBackTarget,
   orderFulfillmentNotice,
+  orderRefundUnavailableReason,
+  orderActionDisabledReasonText,
+  orderActionHelpRequired,
+  orderStatusIsTerminal,
   orderStayDateRequestIsCompatible,
   orderRefreshMustCloseEditor,
   orderViewPayloadChanged,
@@ -26,7 +33,8 @@ import {
   orderedOrderOccupants,
   primaryOrderOccupant,
   remainingRefundableMinor,
-  requestedOrderAction
+  requestedOrderAction,
+  terminalOrderActionCodes
 } from "./OrderDetailPage";
 import {
   clearPersistedCommandRecovery,
@@ -116,7 +124,7 @@ describe("fulfillment result presentation", () => {
       action: "CHECK_OUT",
       title: "暂不能办理退房"
     });
-    expect(notice?.body).toContain("当前订单暂不能办理提前退房");
+    expect(notice?.body).toContain("暂不能办理退房");
     expect(notice?.body).not.toContain("请先缩短");
     expect(orderFulfillmentNotice([{
       code: "CHECK_OUT",
@@ -142,7 +150,7 @@ describe("fulfillment result presentation", () => {
     }])).toMatchObject({
       action: "CHECK_IN",
       title: "暂不能办理入住",
-      body: expect.stringContaining("不能提前办理入住")
+      body: expect.stringContaining("请在计划到店日办理")
     });
     expect(orderFulfillmentNotice([{
       code: "CHECK_IN",
@@ -151,7 +159,7 @@ describe("fulfillment result presentation", () => {
     }])).toMatchObject({
       action: "CHECK_IN",
       title: "暂不能办理入住",
-      body: expect.stringContaining("不能按普通入住补办")
+      body: expect.stringContaining("可办理改期或标记未到")
     });
     expect(orderFulfillmentNotice([{
       code: "CHECK_IN",
@@ -256,8 +264,8 @@ describe("operator-facing order lifecycle presentation", () => {
     const html = renderToStaticMarkup(createElement(OrderLifecycleSections, {
       view: lifecycle,
       inventoryUnits: [
-        { id: "unit_d01", code: "D01", name: "单人间" },
-        { id: "unit_d02", code: "D02", name: "标准间" }
+        { id: "unit_d01", code: "D01", name: "D01 · 单人间", building_code: "1" },
+        { id: "unit_d02", code: "D02", name: "D02 · 标准间", building_code: "1" }
       ]
     }));
 
@@ -270,7 +278,7 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("D01 · 单人间");
     expect(html).toContain("D02 · 标准间");
     expect(html).toContain("与政策基础金额差额");
-    expect(html).toContain("待补收参考");
+    expect(html).toContain("差额");
     expect(html).not.toMatch(/INITIAL_BOOKING|MOVE_UNIT_INTERNAL|subject_internal|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision/);
   });
 
@@ -297,7 +305,7 @@ describe("operator-facing order lifecycle presentation", () => {
           }
         }
       },
-      inventoryUnits: [{ id: "unit_d01", code: "D01", name: "单人间" }]
+      inventoryUnits: [{ id: "unit_d01", code: "D01", name: "D01 · 单人间", building_code: "1" }]
     }));
     expect(html).toContain("撤销入住前安排");
     expect(html).toContain("入住结果");
@@ -337,7 +345,7 @@ describe("operator-facing order lifecycle presentation", () => {
     }));
     const historyHtml = renderToStaticMarkup(createElement(OrderLifecycleSections, {
       view: lifecycle,
-      inventoryUnits: [{ id: "unit_d01", code: "D01", name: "单人间" }],
+      inventoryUnits: [{ id: "unit_d01", code: "D01", name: "D01 · 单人间", building_code: "1" }],
       showPerOrderFunds: false,
       channelPriceDifferenceReason: "携程活动价格重新确认"
     }));
@@ -348,7 +356,7 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("与政策基础金额差额");
     expect(html).toContain("渠道价格差异说明");
     expect(html).toContain("携程活动价格重新确认");
-    expect(html).not.toMatch(/已登记净收款|待补收参考|多收差额|建议退款/);
+    expect(html).not.toMatch(/已记录净收款|待补收参考|多收差额|建议退款|退款参考/);
   });
 
   it.each(["POLICY", "MANUAL_ADJUSTMENT"] as const)("keeps external-channel semantics after a later %s repricing", (pricingBasis) => {
@@ -378,7 +386,34 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("本单渠道应结金额");
     expect(html).toContain("与政策基础金额差额");
     expect(html).toContain("渠道价格差异说明");
-    expect(html).not.toMatch(/已登记净收款|待补收参考|多收差额|建议退款/);
+    expect(html).not.toMatch(/已记录净收款|待补收参考|多收差额|建议退款|退款参考/);
+  });
+
+  it("keeps an empty channel price note visually compact", () => {
+    const html = renderToStaticMarkup(createElement(OrderAmountStrip, {
+      amounts: {
+        currentContractAmount: money(69_600),
+        netRecordedCollection: money(0),
+        collectionDifference: money(0),
+        refundReferenceAmount: money(0)
+      },
+      bookingChannelCode: "CTRIP",
+      pricingRevision: {
+        id: "revision_channel_without_note",
+        pricing_basis: "CHANNEL_CONTRACT",
+        policy_base_amount_minor: 69_600,
+        current_contract_amount_minor: 69_600,
+        difference_from_policy_minor: 0,
+        manual_adjustment_minor: 0,
+        reason: { code: "CHANNEL_PRICE_DIFFERENCE", note: "" },
+        currency: "CNY"
+      } as never
+    }));
+
+    expect(html).toContain("渠道价格差异说明");
+    expect(html).toContain("amount-strip-note");
+    expect(html).toContain(">无</strong>");
+    expect(html).not.toContain("无需额外说明");
   });
 
   it("keeps per-order collection language for non-channel pricing", () => {
@@ -400,9 +435,9 @@ describe("operator-facing order lifecycle presentation", () => {
       } as never
     }));
 
-    expect(html).toContain("订单金额");
-    expect(html).toContain("已登记净收款");
-    expect(html).toContain("待补收参考");
+    expect(html).toContain("住宿金额");
+    expect(html).toContain("已记录净收款");
+    expect(html).toContain("差额");
   });
 
   it("fails closed to a business placeholder instead of exposing an unknown inventory id", () => {
@@ -426,13 +461,13 @@ describe("operator-facing order lifecycle presentation", () => {
       "创建预订", "调整预订日期", "延长住宿", "缩短住宿", "更换房源", "提前退房"
     ]);
     expect(["COLLECTION", "REFUND", "REVERSAL"].map((value) => collectionFactTypeLabel(value as CollectionFactDto["fact_type"]))).toEqual(["收款", "退款", "冲销"]);
-    expect(["CASH", "BANK_TRANSFER", "CARD", "OTHER", "LEGACY_UNKNOWN"].map(collectionMethodLabel)).toEqual(["现金", "银行转账", "银行卡", "其他方式", "其他方式"]);
+    expect(["CASH", "BANK_TRANSFER", "CARD", "WECOM", "OTHER", "LEGACY_UNKNOWN"].map(collectionMethodLabel)).toEqual(["现金", "银行转账", "银行卡", "企业微信", "其他方式", "其他方式"]);
     expect(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"].map((value) => pricingBasisLabel(value as Parameters<typeof pricingBasisLabel>[0]))).toEqual([
       "政策价", "本单渠道应结金额", "人工调价", "会员权益计价", "免费入住"
     ]);
-    expect(collectionDifferencePresentation(money(200))).toEqual({ label: "待补收参考", amount: money(200) });
-    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "多收差额", amount: money(300) });
-    expect(collectionDifferencePresentation(money(0))).toEqual({ label: "当前记录无差额", amount: money(0) });
+    expect(collectionDifferencePresentation(money(200))).toEqual({ label: "差额", amount: money(200) });
+    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "差额", amount: money(-300) });
+    expect(collectionDifferencePresentation(money(0))).toEqual({ label: "差额", amount: money(0) });
   });
 });
 
@@ -452,6 +487,34 @@ describe("reprice form defaults", () => {
     expect(wholeYuanAmountMinor("-1")).toBeUndefined();
     expect(wholeYuanAmountMinor("not-a-number")).toBeUndefined();
   });
+});
+
+describe("lodging collection amount input", () => {
+  it("parses yuan, jiao, and fen exactly for lodging funds", () => {
+    expect(collectionAmountYuanInputToMinor("1")).toBe(100);
+    expect(collectionAmountYuanInputToMinor("1.2")).toBe(120);
+    expect(collectionAmountYuanInputToMinor("1.20")).toBe(120);
+    expect(collectionAmountYuanInputToMinor("0.01")).toBe(1);
+    expect(collectionAmountYuanInputToMinor("1280.50")).toBe(128_050);
+  });
+
+  it("rejects ambiguous or unsupported lodging fund amounts", () => {
+    expect(collectionAmountYuanInputToMinor("")).toBeUndefined();
+    expect(collectionAmountYuanInputToMinor("0")).toBeUndefined();
+    expect(collectionAmountYuanInputToMinor("-1")).toBeUndefined();
+    expect(collectionAmountYuanInputToMinor("1.234")).toBeUndefined();
+    expect(collectionAmountYuanInputToMinor("1e3")).toBeUndefined();
+    expect(collectionAmountYuanInputToMinor("1,280")).toBeUndefined();
+    expect(collectionAmountYuanInputToMinor("21474836.48")).toBeUndefined();
+  });
+
+  it("formats minor units back to a yuan input value", () => {
+    expect(collectionAmountMinorToYuanInput(100)).toBe("1");
+    expect(collectionAmountMinorToYuanInput(120)).toBe("1.20");
+    expect(collectionAmountMinorToYuanInput(1)).toBe("0.01");
+    expect(collectionAmountMinorToYuanInput(0)).toBe("");
+  });
+
 });
 
 describe("order stay date command routing", () => {
@@ -606,6 +669,72 @@ describe("server-authoritative order actions", () => {
     expect(requestedOrderAction("?action=REPRICE_ORDER", actions)).toBeUndefined();
   });
 
+  it("keeps a disabled refund action explainable when there is no refundable collection", () => {
+    expect(orderRefundUnavailableReason([
+      { code: "RECORD_REFUND", enabled: false, disabledReason: "NO_REFUNDABLE_COLLECTION" }
+    ])).toContain("当前没有可退款的收款记录");
+    expect(orderRefundUnavailableReason([
+      { code: "RECORD_REFUND", enabled: true, disabledReason: null }
+    ])).toBeUndefined();
+    expect(orderRefundUnavailableReason([
+      { code: "RECORD_REFUND", enabled: false, disabledReason: "ORDER_STATE_NOT_ALLOWED" }
+    ])).toBeUndefined();
+  });
+
+  it("keeps terminal order actions visible as disabled command affordances", () => {
+    expect(orderStatusIsTerminal("CANCELLED")).toBe(true);
+    expect(orderStatusIsTerminal("RESERVED")).toBe(false);
+    expect(terminalOrderActionCodes("CANCELLED")).toEqual([
+      "RECORD_COLLECTION",
+      "RECORD_REFUND",
+      "RESCHEDULE_STAY",
+      "MOVE_UNIT",
+      "REPRICE_ORDER",
+      "CHECK_IN",
+      "CANCEL_ORDER",
+      "MARK_NO_SHOW"
+    ]);
+    expect(terminalOrderActionCodes("CANCELLED")).not.toContain("CHECK_OUT");
+    expect(terminalOrderActionCodes("CHECKED_OUT")).toEqual([
+      "RECORD_COLLECTION",
+      "RECORD_REFUND",
+      "EXTEND_STAY",
+      "SHORTEN_STAY",
+      "MOVE_UNIT",
+      "REPRICE_ORDER",
+      "CHECK_OUT",
+      "REVOKE_CHECK_IN"
+    ]);
+  });
+
+  it("translates disabled action reasons into operator-facing copy", () => {
+    expect(orderActionDisabledReasonText({
+      code: "CANCEL_ORDER",
+      enabled: false,
+      disabledReason: "ORDER_STATE_NOT_ALLOWED"
+    })).toBe("当前订单状态不允许执行此操作。");
+    expect(orderActionDisabledReasonText({
+      code: "RECORD_REFUND",
+      enabled: false,
+      disabledReason: "NO_REFUNDABLE_COLLECTION"
+    })).toContain("当前没有可退款的收款记录");
+    expect(orderActionDisabledReasonText({
+      code: "CHECK_IN",
+      enabled: true,
+      disabledReason: null
+    })).toBeUndefined();
+  });
+
+  it("uses one shared help affordance for visible disabled actions", () => {
+    expect(orderActionHelpRequired([
+      { code: "RECORD_COLLECTION", enabled: false, disabledReason: "ORDER_STATE_NOT_ALLOWED" },
+      { code: "CHECK_IN", enabled: true, disabledReason: null }
+    ], ["RECORD_COLLECTION", "CHECK_IN"])).toBe(true);
+    expect(orderActionHelpRequired([
+      { code: "RECORD_COLLECTION", enabled: false, disabledReason: "ORDER_STATE_NOT_ALLOWED" }
+    ], ["CHECK_IN"])).toBe(false);
+  });
+
   it("returns to room status only for explicit room-status navigation state", () => {
     expect(orderDetailBackTarget({ fromRoomStatus: true })).toBe("/");
     expect(orderDetailBackTarget({ source: "room-status" })).toBe("/");
@@ -644,6 +773,26 @@ describe("server-authoritative order actions", () => {
     const reversal = fact({ fact_id: "reversal", fact_type: "REVERSAL", amount_minor: 4_000, reverses_fact_id: partialRefund.fact_id });
     expect(remainingRefundableMinor([collection, partialRefund, finalRefund, reversal], collection)).toBe(4_000);
   });
+
+  it("shows WECOM refunds as original-route references when no new transaction number is recorded", () => {
+    const fact = (values: Partial<CollectionFactDto> & Pick<CollectionFactDto, "fact_id" | "fact_type" | "amount_minor">): CollectionFactDto => ({
+      order_id: "order_refund_label",
+      net_effect_minor: values.fact_type === "REFUND" ? -values.amount_minor : values.amount_minor,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "WECOM",
+      note: "",
+      transaction_reference: null,
+      pricing_revision_id: "revision_refund_label",
+      command_id: `command_${values.fact_id}`,
+      created_at: "2026-07-25T00:00:00.000Z",
+      ...values
+    });
+    const collection = fact({ fact_id: "collection_wecom", fact_type: "COLLECTION", amount_minor: 10_000, transaction_reference: "WX-COLLECTION-001" });
+    const refund = fact({ fact_id: "refund_wecom", fact_type: "REFUND", amount_minor: 1_000, references_fact_id: collection.fact_id });
+    expect(collectionFactTransactionReferenceLabel([collection, refund], refund)).toBe("WX-COLLECTION-001（原路退回）");
+  });
 });
 
 const context = {
@@ -651,7 +800,7 @@ const context = {
   scopeId: "property:property_qintopia",
   request: {
     commandType: "RECORD_COLLECTION",
-    title: "记录收款事实",
+    title: "登记收款",
     description: "test",
     input: {
       propertyId: "property_qintopia",

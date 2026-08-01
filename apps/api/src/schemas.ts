@@ -327,8 +327,8 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("LOCK_MAINTENANCE", strictObject({ ...PropertyInput, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note })),
   commandEnvelope("RELEASE_MAINTENANCE", strictObject({ ...PropertyInput, maintenanceLockId: Id })),
   commandEnvelope("COMPLETE_CLEANING", strictObject({ ...PropertyInput, cleaningTaskId: Id })),
-  commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, amountMinor: PositiveAmount, method: ShortText, transactionReference: ShortText, note: Type.Optional(OptionalNote) })),
-  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: ShortText, note: Type.Optional(OptionalNote) })),
+  commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, amountMinor: PositiveAmount, method: ShortText, transactionReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
+  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
   commandEnvelope("REVERSE_FACT", strictObject({ ...OrderInput, reversesFactId: Id, note: Note })),
   commandEnvelope("CHECK_IN", strictObject(OrderInput)),
   commandEnvelope("CHECK_OUT", strictObject(OrderInput)),
@@ -1696,6 +1696,10 @@ export const OrderRowSchema = strictObject({
   member_id: nullable(Id),
   member_contract_id: nullable(Id),
   current_revision_id: nullable(Id),
+  current_contract_amount_minor: nullable(Type.Integer()),
+  currency: nullable(Type.String({ minLength: 1, maxLength: 16 })),
+  current_unit_name: Type.Optional(nullable(ShortText)),
+  current_unit_code: Type.Optional(nullable(ShortText)),
   version: Type.Integer({ minimum: 1 }),
   created_at: DateTime,
   updated_at: DateTime
@@ -1852,7 +1856,7 @@ export const CollectionFactRowSchema = strictObject({
   fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
   amount_minor: PositiveAmount, net_effect_minor: SafeInteger,
   currency: Type.String({ minLength: 3, maxLength: 3 }), references_fact_id: nullable(Id), reverses_fact_id: nullable(Id),
-  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), pricing_revision_id: Id, command_id: Id, created_at: DateTime
+  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), pricing_revision_id: nullable(Id), command_id: Id, created_at: DateTime
 });
 
 export const OrderDetailResponseSchema = strictObject({
@@ -2014,7 +2018,7 @@ const CollectionFactResponseSchema = strictObject({
   fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
   amount_minor: PositiveAmount, net_effect_minor: SafeInteger,
   currency: Type.String({ minLength: 3, maxLength: 3 }), references_fact_id: nullable(Id), reverses_fact_id: nullable(Id),
-  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), created_at: DateTime, property_id: Id
+  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), pricing_revision_id: nullable(Id), created_at: DateTime, property_id: Id
 });
 const EntitlementFactResponseSchema = strictObject({ ...EntitlementLedgerRowSchema.properties, property_id: Id });
 export const FactResponseSchema = Type.Union([CollectionFactResponseSchema, EntitlementFactResponseSchema]);

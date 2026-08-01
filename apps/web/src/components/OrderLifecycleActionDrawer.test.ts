@@ -27,7 +27,9 @@ function view(): OrderViewDto {
       pricing_policy_version_id: "policy_1",
       member_id: null,
       member_contract_id: null,
-      current_revision_id: "revision_1",
+     current_revision_id: "revision_1",
+      current_contract_amount_minor: 10_000,
+      currency: "CNY",
       version: 1,
       created_at: "2026-07-31T08:00:00.000Z",
       updated_at: "2026-07-31T08:00:00.000Z"

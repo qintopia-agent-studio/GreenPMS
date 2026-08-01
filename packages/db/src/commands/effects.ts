@@ -108,6 +108,40 @@ function requireNonNegativeWholeYuanMinor(input: Record<string, unknown>, field:
   return value;
 }
 
+const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
+const operatorCollectionMethods = new Set(["WECOM", "BANK_TRANSFER", "CASH", "OTHER"]);
+
+function assertOperatorFundsAllowedForOrder(context: OrderContext): void {
+  if (context.order.booking_channel_code && externalChannelCodes.has(context.order.booking_channel_code)) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      "外部渠道订单不在 PMS 登记单笔收款或退款；请核对渠道订单号和本单渠道应结金额，由财务按渠道总账核对。"
+    );
+  }
+}
+
+function requireCollectionMethod(input: Record<string, unknown>): string {
+  const method = requireString(input, "method");
+  if (!operatorCollectionMethods.has(method)) throw new DomainError("VALIDATION_ERROR", "收款方式必须是企业微信、银行转账、现金或其他");
+  return method;
+}
+
+function fundsTransactionAndNote(input: Record<string, unknown>, method: string, isRefund: boolean): { transactionReference: string | null; note: string } {
+  const rawReference = typeof input.transactionReference === "string" ? input.transactionReference.trim() : "";
+  const note = optionalString(input, "note")?.trim() ?? "";
+  const referenceRequired = method === "BANK_TRANSFER" || (!isRefund && method === "WECOM");
+  if (referenceRequired && !rawReference) {
+    throw new DomainError("VALIDATION_ERROR", method === "WECOM" ? "必须填写企业微信交易单号" : "必须填写交易单号或流水号");
+  }
+  if (isRefund && !note) {
+    throw new DomainError("VALIDATION_ERROR", "必须填写退款原因");
+  }
+  if (!isRefund && !referenceRequired && !note) {
+    throw new DomainError("VALIDATION_ERROR", method === "CASH" ? "必须填写收款人" : "必须填写其他收款说明");
+  }
+  return { transactionReference: rawReference || null, note };
+}
+
 function money(currency: string, minorUnits: number) {
   return { currency, minorUnits };
 }
@@ -1686,17 +1720,20 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   }
 
   if (commandType === "RECORD_COLLECTION") {
+    assertOperatorFundsAllowedForOrder(context);
     const amountMinor = requireInteger(input, "amountMinor", { min: 1 });
-    const method = requireString(input, "method");
-    const transactionReference = requireTransactionReference(input.transactionReference);
+    const method = requireCollectionMethod(input);
+    const { transactionReference, note } = fundsTransactionAndNote(input, method, false);
     if (!["RESERVED", "CHECKED_IN", "CHECKED_OUT"].includes(context.order.status)) throw new DomainError("INVALID_ORDER_STATE", "Cannot record a collection for this order", 409);
-    return finalize(propertyId, { orderId, amountMinor, currency: context.revision.currency, method, transactionReference, note: optionalString(input, "note") ?? "" }, baseBasis);
+    return finalize(propertyId, { orderId, amountMinor, currency: context.revision.currency, method, transactionReference, note }, baseBasis);
   }
 
   if (commandType === "RECORD_REFUND") {
+    assertOperatorFundsAllowedForOrder(context);
     const amountMinor = requireInteger(input, "amountMinor", { min: 1 });
     const referencesFactId = requireString(input, "referencesFactId");
-    const transactionReference = requireTransactionReference(input.transactionReference);
+    const method = requireCollectionMethod(input);
+    const refundFunds = fundsTransactionAndNote(input, method, true);
     const original = await db.selectFrom("collection_facts")
       .innerJoin("orders", "orders.id", "collection_facts.order_id")
       .selectAll("collection_facts")
@@ -1709,8 +1746,10 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const originalReversal = await db.selectFrom("collection_facts").select("fact_id").where("reverses_fact_id", "=", referencesFactId).executeTakeFirst();
     if (originalReversal) throw new DomainError("FACT_ALREADY_REVERSED", "Cannot refund a reversed collection", 409, false, { reversalFactId: originalReversal.fact_id });
     const activeRefunded = await activeRefundedAmount(db, referencesFactId);
-    if (activeRefunded + amountMinor > original.amount_minor) throw new DomainError("REFUND_LIMIT_EXCEEDED", "Refund exceeds the remaining referenced collection", 409);
-    return finalize(propertyId, { orderId, amountMinor, currency: original.currency, referencesFactId, method: requireString(input, "method"), transactionReference, note: optionalString(input, "note") ?? "" }, { ...baseBasis, originalFact: original, activeRefunded });
+    if (activeRefunded + amountMinor > original.amount_minor) {
+      throw new DomainError("REFUND_LIMIT_EXCEEDED", "退款金额不能超过所选原收款的剩余可退金额", 409);
+    }
+    return finalize(propertyId, { orderId, amountMinor, currency: original.currency, referencesFactId, method, transactionReference: refundFunds.transactionReference, note: refundFunds.note }, { ...baseBasis, originalFact: original, activeRefunded });
   }
 
   if (commandType === "REVERSE_FACT") {
