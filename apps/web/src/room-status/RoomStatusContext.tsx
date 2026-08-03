@@ -17,7 +17,7 @@ import type {
   RoomStatusReferenceDto,
   RoomStatusUnitDto
 } from "@qintopia/contracts";
-import { selectionFromInputs, type RoomStatusSelection } from "./roomStatusState";
+import { addLocalDateDays, isIsoLocalDate, selectionFromInputs, type RoomStatusSelection } from "./roomStatusState";
 import {
   formatRoomStatusDate,
   formatRoomStatusDateTime,
@@ -43,6 +43,7 @@ export interface RoomStatusContextProps {
   allowedActions: readonly RoomStatusActionDto[];
   onSelectedUnitChange: (unit: RoomStatusUnitDto) => void;
   onSelectionChange: (selection: RoomStatusSelection | null) => void;
+  onDraftValidityChange: (valid: boolean) => void;
   onOpenReference: (reference: RoomStatusReferenceDto) => void;
   onOpenReceipt: (receiptId: string) => void;
   onAction: (action: RoomStatusActionDto) => void;
@@ -54,6 +55,8 @@ interface SelectionDraft {
   arrivalDate: string;
   departureDate: string;
 }
+
+const MAX_STAY_SELECTION_NIGHTS = 366;
 
 function flattenUnits(rooms: readonly RoomStatusUnitDto[]): RoomStatusUnitDto[] {
   return rooms.flatMap((room) => room.salesMode === "BED_SPLIT" ? [room, ...room.children] : [room]);
@@ -81,6 +84,11 @@ function ConflictList({ conflicts }: { conflicts: readonly RoomStatusConflictDto
   );
 }
 
+function selectionNightCount(arrivalDate: string, departureDate: string): number {
+  if (!isIsoLocalDate(arrivalDate) || !isIsoLocalDate(departureDate) || departureDate <= arrivalDate) return 0;
+  return Math.round((Date.parse(`${departureDate}T00:00:00.000Z`) - Date.parse(`${arrivalDate}T00:00:00.000Z`)) / 86_400_000);
+}
+
 export function RoomStatusContext({
   board,
   selectedUnit,
@@ -92,6 +100,7 @@ export function RoomStatusContext({
   allowedActions,
   onSelectedUnitChange,
   onSelectionChange,
+  onDraftValidityChange,
   onOpenReference,
   onOpenReceipt,
   onAction,
@@ -112,18 +121,22 @@ export function RoomStatusContext({
       arrivalDate: selection?.arrivalDate ?? "",
       departureDate: selection?.departureDate ?? ""
     });
-  }, [selectedUnit?.id, selection?.arrivalDate, selection?.departureDate, selection?.unitId]);
+    onDraftValidityChange(true);
+  }, [onDraftValidityChange, selectedUnit?.id, selection?.arrivalDate, selection?.departureDate, selection?.unitId]);
 
   const candidateDraftSelection = selectionFromInputs(draft.unitId, draft.arrivalDate, draft.departureDate);
+  const draftNightCount = selectionNightCount(draft.arrivalDate, draft.departureDate);
   const draftDateError = draft.arrivalDate && draft.departureDate
     ? !candidateDraftSelection
       ? "退房日期必须晚于入住日期。"
-      : candidateDraftSelection.arrivalDate < board.range.arrivalDate
-        || candidateDraftSelection.departureDate > board.range.departureDate
-        ? `日期必须位于当前房态查询区间 [${board.range.arrivalDate}, ${board.range.departureDate}) 内。`
+      : draftNightCount > MAX_STAY_SELECTION_NIGHTS
+        ? `住宿日期最长 ${MAX_STAY_SELECTION_NIGHTS} 夜。`
         : undefined
     : undefined;
   const draftSelection = draftDateError ? null : candidateDraftSelection;
+  const draftOutsideBoard = Boolean(draftSelection
+    && (draftSelection.arrivalDate < board.range.arrivalDate
+      || draftSelection.departureDate > board.range.departureDate));
   const contextIntervals = useMemo(() => {
     const intervals = selectedInterval ? [selectedInterval, ...relatedIntervals] : [...relatedIntervals];
     return [...new Map(intervals.map((interval) => [interval.id, interval])).values()];
@@ -137,18 +150,20 @@ export function RoomStatusContext({
     const unit = units.find((candidate) => candidate.id === unitId);
     if (unit) onSelectedUnitChange(unit);
     const nextSelection = selectionFromInputs(nextDraft.unitId, nextDraft.arrivalDate, nextDraft.departureDate);
-    if (nextSelection
-      && nextSelection.arrivalDate >= board.range.arrivalDate
-      && nextSelection.departureDate <= board.range.departureDate) onSelectionChange(nextSelection);
+    const valid = Boolean(nextSelection
+      && selectionNightCount(nextSelection.arrivalDate, nextSelection.departureDate) <= MAX_STAY_SELECTION_NIGHTS);
+    onDraftValidityChange(valid);
+    if (valid && nextSelection) onSelectionChange(nextSelection);
   };
 
   const changeDraftDate = (field: "arrivalDate" | "departureDate", value: string) => {
     const nextDraft = { ...draft, [field]: value };
     setDraft(nextDraft);
     const nextSelection = selectionFromInputs(nextDraft.unitId, nextDraft.arrivalDate, nextDraft.departureDate);
-    if (nextSelection
-      && nextSelection.arrivalDate >= board.range.arrivalDate
-      && nextSelection.departureDate <= board.range.departureDate) onSelectionChange(nextSelection);
+    const valid = Boolean(nextSelection
+      && selectionNightCount(nextSelection.arrivalDate, nextSelection.departureDate) <= MAX_STAY_SELECTION_NIGHTS);
+    onDraftValidityChange(valid);
+    if (valid && nextSelection) onSelectionChange(nextSelection);
   };
 
   return (
@@ -181,8 +196,7 @@ export function RoomStatusContext({
             <input
               type="date"
               value={draft.arrivalDate}
-              min={board.range.arrivalDate}
-              max={board.range.departureDate}
+              max={draft.departureDate ? addLocalDateDays(draft.departureDate, -1) : undefined}
               aria-invalid={draftDateError ? "true" : undefined}
               aria-describedby={draftDateError ? dateErrorId : undefined}
               onChange={(event) => changeDraftDate("arrivalDate", event.target.value)}
@@ -192,8 +206,8 @@ export function RoomStatusContext({
             <input
               type="date"
               value={draft.departureDate}
-              min={draft.arrivalDate || board.range.arrivalDate}
-              max={board.range.departureDate}
+              min={draft.arrivalDate ? addLocalDateDays(draft.arrivalDate, 1) : undefined}
+              max={draft.arrivalDate ? addLocalDateDays(draft.arrivalDate, MAX_STAY_SELECTION_NIGHTS) : undefined}
               aria-invalid={draftDateError ? "true" : undefined}
               aria-describedby={draftDateError ? dateErrorId : undefined}
               onChange={(event) => changeDraftDate("departureDate", event.target.value)}
@@ -210,6 +224,8 @@ export function RoomStatusContext({
           >
             <RoomStatusWarning>{draftDateError}</RoomStatusWarning>
           </div>
+        ) : draftOutsideBoard ? (
+          <p className="room-status-selection-note">房态当前只显示其中 30 夜，住宿日期仍按完整区间核对。</p>
         ) : null}
       </section>
 

@@ -36,12 +36,14 @@ import {
 } from "../components/OrderLifecycleActionDrawer";
 import { StayDateChangeDrawer, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 import {
+  browserCommandRecoveryStorage,
   CommandDialog,
   type CommandDialogCloseContext,
   CommandResultNotice,
   type CommandDialogProgress,
   type CommandRecoveryStorage,
   CommandRecoveryBar,
+  DamagedCommandRecoveryNotice,
   EmptyState,
   formatDateTime,
   formatMoney,
@@ -49,8 +51,15 @@ import {
   isTerminalCommandRecovery,
   LoadingBlock,
   Modal,
+  propertyRecoveryCoordinationScope,
+  quoteRecoveryStorageKey,
+  readPersistedCommandRecovery,
+  RECOVERY_STORAGE_SYNC_EVENT,
   recoveryCommandRequest,
-  usePersistentCommandRecovery
+  recoveryStorageEventMatchesScope,
+  recoveryStorageSyncEventMatchesScope,
+  usePersistentCommandRecovery,
+  withRecoveryStorageLock
 } from "../ui";
 import {
   assertRoomStatusBoard,
@@ -66,7 +75,6 @@ import {
   parseRoomStatusOrderReturnTarget,
   reconcileRoomStatusRestoration,
   resolveRoomStatusOrderReturnTarget,
-  roomStatusAutoVisibleDays,
   roomStatusFactFingerprint,
   roomStatusOrderIdentityForDate,
   roomStatusOrderIdentityForInterval,
@@ -79,6 +87,7 @@ import {
   RoomStatusOrderContext,
   RoomStatusQuickPopover,
   RoomStatusToolbar,
+  ROOM_STATUS_TIMELINE_DAYS,
   roomStatusViewReducer,
   selectionFromCells,
   serializeRoomStatusRestoration,
@@ -87,7 +96,6 @@ import {
   type RoomStatusMobileFocusRequest,
   type RoomStatusMobileTab,
   type RoomStatusOrderIdentity,
-  type RoomStatusDateWindowMode,
   type RoomStatusRange,
   type RoomStatusRestorationSnapshot,
   type RoomStatusSelection,
@@ -100,6 +108,8 @@ const bookingChannelLabels: Record<BookingChannelCode, string> = {
   MEITUAN: "美团",
   WECOM: "企业微信"
 };
+
+const MAX_STAY_SELECTION_NIGHTS = 366;
 
 export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boolean): "INLINE" | "DRAWER" {
   void workspaceWidth;
@@ -136,17 +146,6 @@ export function roomStatusQuickTargetMatches(
   serviceDate: string
 ): boolean {
   return target?.unitId === unitId && target.serviceDate === serviceDate;
-}
-
-export function roomStatusAutoWindowStart(
-  dates: readonly string[],
-  currentStart: number,
-  autoSize: number,
-  focusedCell: RoomStatusViewState["focusedCell"]
-): number {
-  return focusedCell
-    ? dateWindowStartForFocus(dates, currentStart, autoSize, focusedCell.serviceDate)
-    : currentStart;
 }
 
 const roomStatusFilterKeys = [
@@ -269,23 +268,101 @@ export function effectiveQuoteMemberId(members: MemberDto[], requestedMemberId: 
   return members.some((member) => member.id === requestedMemberId) ? requestedMemberId : "";
 }
 
-interface PendingQuoteCommand {
+export interface PendingQuoteCommand {
   version: 1;
   subjectId: string;
   propertyId: string;
+  ownerTabId?: string;
   input: QuoteCommandInput;
   inputSignature: string;
   metadata: ClientCommandMetadata;
   state: "SENDING" | "UNKNOWN";
 }
 
-type QuoteRecoveryReadResult =
+export type QuoteRecoveryReadResult =
   | { kind: "ABSENT" }
   | { kind: "VALID"; pending: PendingQuoteCommand }
   | { kind: "CORRUPT"; error: Error }
   | { kind: "READ_ERROR"; error: Error };
 
-const QUOTE_RECOVERY_STORAGE_PREFIX = "qintopia.quote-command-recovery.v1";
+export function roomStatusDesktopContextKind(
+  quoteRecoveryContextOpen: boolean,
+  hasSelectedOrder: boolean
+): "QUOTE_RECOVERY" | "ORDER" | "SELECTION" {
+  if (quoteRecoveryContextOpen) return "QUOTE_RECOVERY";
+  return hasSelectedOrder ? "ORDER" : "SELECTION";
+}
+
+export function quoteRecoveryContextIdentity(
+  recoveryScope: string,
+  recovery: QuoteRecoveryReadResult
+): string | undefined {
+  if (recovery.kind === "ABSENT") return undefined;
+  if (recovery.kind === "VALID") {
+    return `${recoveryScope}:${recovery.pending.metadata.idempotencyKey}`;
+  }
+  return `${recoveryScope}:${recovery.kind}`;
+}
+
+export function shouldAutoOpenQuoteRecoveryContext({
+  recoveryIdentity,
+  dismissedIdentity,
+  recoveryOwnerId,
+  currentOwnerId,
+  isMobile,
+  hasSelectedOrder
+}: {
+  recoveryIdentity: string | undefined;
+  dismissedIdentity: string | undefined;
+  recoveryOwnerId?: string | undefined;
+  currentOwnerId?: string | undefined;
+  isMobile: boolean;
+  hasSelectedOrder: boolean;
+}): boolean {
+  return Boolean(recoveryIdentity
+    && recoveryIdentity !== dismissedIdentity
+    && (!recoveryOwnerId || recoveryOwnerId !== currentOwnerId)
+    && !isMobile
+    && !hasSelectedOrder);
+}
+
+export function shouldRenderDetachedQuoteRecoveryWorkbench(
+  hasRenderedBoard: boolean,
+  recoveryContextOpen: boolean,
+  recovery: QuoteRecoveryReadResult
+): boolean {
+  return !hasRenderedBoard && recoveryContextOpen && recovery.kind !== "ABSENT";
+}
+
+export function QuoteRecoveryPageEntry({ recovery, onOpen }: {
+  recovery: QuoteRecoveryReadResult;
+  onOpen: () => void;
+}) {
+  if (recovery.kind === "ABSENT") return null;
+  const valid = recovery.kind === "VALID";
+  return (
+    <section className="recovery-bar" role="status" aria-live="polite" data-testid="inventory-quote-recovery-entry">
+      <div>
+        <strong>{valid && recovery.pending.state === "UNKNOWN" ? "报价结果需要核对" : "有一笔报价需要处理"}</strong>
+        <p>{valid
+          ? "新的报价和订单操作已暂停，请先处理原报价。"
+          : "报价恢复记录需要核对，处理完成前不会开始新的写入。"}</p>
+      </div>
+      <button className="button button-secondary" type="button" onClick={onOpen}>打开处理入口</button>
+    </section>
+  );
+}
+
+let browserQuoteRecoveryDocumentOwnerId: string | undefined;
+
+export function browserQuoteRecoveryOwnerId(): string {
+  // sessionStorage may be cloned when a browser tab is duplicated. A document
+  // identity must never survive that operation or both tabs can claim ownership.
+  // Keep the owner stable only for the current document so same-tab navigation
+  // and component remounts can still recover their own in-flight Quote safely.
+  browserQuoteRecoveryDocumentOwnerId ??= crypto.randomUUID();
+  return browserQuoteRecoveryDocumentOwnerId;
+}
 
 export interface QuoteRequestLease {
   scope: string;
@@ -404,21 +481,32 @@ export class RoomStatusQueryAttemptGuard {
   }
 }
 
-export function quoteRecoveryStorageKey(subjectId: string, propertyId: string): string {
-  return `${QUOTE_RECOVERY_STORAGE_PREFIX}:${encodeURIComponent(subjectId)}:${encodeURIComponent(propertyId)}`;
-}
-
 function validQuoteInput(value: unknown): value is QuoteCommandInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const input = value as Record<string, unknown>;
-  return typeof input.propertyId === "string"
-    && typeof input.inventoryUnitId === "string"
-    && (input.stayType === undefined || typeof input.stayType === "string")
-    && typeof input.arrivalDate === "string"
-    && typeof input.departureDate === "string"
+  const allowedKeys = new Set([
+    "propertyId",
+    "inventoryUnitId",
+    "stayType",
+    "arrivalDate",
+    "departureDate",
+    "pricingPolicyVersionId",
+    "memberId"
+  ]);
+  return Object.keys(input).every((key) => allowedKeys.has(key))
+    && typeof input.propertyId === "string" && input.propertyId === input.propertyId.trim() && Boolean(input.propertyId)
+    && typeof input.inventoryUnitId === "string" && input.inventoryUnitId === input.inventoryUnitId.trim() && Boolean(input.inventoryUnitId)
+    && (input.stayType === undefined || input.stayType === "FREE" || input.stayType === "TRANSIENT" || input.stayType === "CUSTOM")
+    && typeof input.arrivalDate === "string" && isIsoLocalDate(input.arrivalDate)
+    && typeof input.departureDate === "string" && isIsoLocalDate(input.departureDate)
+    && input.arrivalDate < input.departureDate
+    && rangeNights({ arrivalDate: input.arrivalDate, departureDate: input.departureDate }) <= MAX_STAY_SELECTION_NIGHTS
     && typeof input.pricingPolicyVersionId === "string"
+    && input.pricingPolicyVersionId === input.pricingPolicyVersionId.trim()
+    && Boolean(input.pricingPolicyVersionId)
     && !Object.hasOwn(input, "memberContractId")
-    && (input.memberId === undefined || typeof input.memberId === "string");
+    && (input.memberId === undefined
+      || (typeof input.memberId === "string" && input.memberId === input.memberId.trim() && Boolean(input.memberId)));
 }
 
 export function readQuoteCommandRecovery(storage: CommandRecoveryStorage, subjectId: string, propertyId: string): QuoteRecoveryReadResult {
@@ -440,19 +528,26 @@ export function readQuoteCommandRecovery(storage: CommandRecoveryStorage, subjec
   }
   const record = value as Record<string, unknown>;
   const metadata = record.metadata;
+  const metadataRecord = metadata as Record<string, unknown> | undefined;
   if (record.version !== 1
     || record.subjectId !== subjectId
     || record.propertyId !== propertyId
+    || (record.ownerTabId !== undefined && (typeof record.ownerTabId !== "string" || !record.ownerTabId))
     || !validQuoteInput(record.input)
     || record.input.propertyId !== propertyId
     || typeof record.inputSignature !== "string"
     || record.inputSignature !== quoteInputSignature(record.input)
-    || !metadata
-    || typeof metadata !== "object"
+    || !metadataRecord
+    || typeof metadataRecord !== "object"
     || Array.isArray(metadata)
-    || typeof (metadata as Record<string, unknown>).idempotencyKey !== "string"
-    || !(metadata as Record<string, unknown>).idempotencyKey
-    || typeof (metadata as Record<string, unknown>).correlationId !== "string"
+    || typeof metadataRecord.idempotencyKey !== "string"
+    || !metadataRecord.idempotencyKey
+    || metadataRecord.idempotencyKey !== metadataRecord.idempotencyKey.trim()
+    || metadataRecord.idempotencyKey.length > 160
+    || typeof metadataRecord.correlationId !== "string"
+    || !metadataRecord.correlationId
+    || metadataRecord.correlationId !== metadataRecord.correlationId.trim()
+    || metadataRecord.correlationId.length > 160
     || (record.state !== "SENDING" && record.state !== "UNKNOWN")) {
     return { kind: "CORRUPT", error: new Error("本地报价恢复记录版本或字段无效；已暂停新报价和订单写入") };
   }
@@ -477,13 +572,22 @@ function clearQuoteCommandRecovery(storage: CommandRecoveryStorage, subjectId: s
   }
 }
 
-function browserQuoteRecovery(subjectId: string, propertyId: string, storageFactory: () => Storage = () => window.sessionStorage): { storage?: CommandRecoveryStorage; read: QuoteRecoveryReadResult } {
-  try {
-    const storage = storageFactory();
-    return { storage, read: readQuoteCommandRecovery(storage, subjectId, propertyId) };
-  } catch {
-    return { read: { kind: "READ_ERROR", error: new Error("无法访问浏览器 sessionStorage；已暂停新报价和订单写入") } };
+export function clearCorruptQuoteCommandRecovery(
+  storage: CommandRecoveryStorage,
+  subjectId: string,
+  propertyId: string
+): boolean {
+  const current = readQuoteCommandRecovery(storage, subjectId, propertyId);
+  return current.kind === "CORRUPT"
+    && clearQuoteCommandRecovery(storage, subjectId, propertyId);
+}
+
+function browserQuoteRecovery(subjectId: string, propertyId: string): { storage?: CommandRecoveryStorage; read: QuoteRecoveryReadResult } {
+  const access = browserCommandRecoveryStorage();
+  if (access.kind !== "AVAILABLE") {
+    return { read: { kind: "READ_ERROR", error: new Error("无法访问浏览器恢复存储；已暂停新报价和订单写入") } };
   }
+  return { storage: access.storage, read: readQuoteCommandRecovery(access.storage, subjectId, propertyId) };
 }
 
 function quoteInputSignature(input: QuoteCommandInput): string {
@@ -530,16 +634,80 @@ export function staffQuoteError(error: ApiError, unitCode: string, arrivalDate: 
   return new Error(error.message);
 }
 
-function quoteFromReceipt(receipt: ReceiptDto): QuoteDto {
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function validQuoteMoney(value: unknown): boolean {
+  const money = recordValue(value);
+  return Boolean(money
+    && typeof money.currency === "string"
+    && /^[A-Z]{3}$/.test(money.currency)
+    && Number.isSafeInteger(money.minorUnits));
+}
+
+function quoteFromReceipt(receipt: ReceiptDto, pending: PendingQuoteCommand): QuoteDto {
+  if (receipt.executionStatus !== "EXECUTED"
+    || receipt.businessCommitted !== true
+    || !receipt.receiptId
+    || !receipt.commandId
+    || !receipt.correlationId
+    || receipt.error !== undefined
+    || !receipt.committedAt
+    || Number.isNaN(Date.parse(receipt.committedAt))) {
+    throw new Error("原报价结果缺少可核对的执行凭证；已继续暂停新报价。");
+  }
   const quote = receipt.result?.quote;
   if (!quote || typeof quote !== "object" || Array.isArray(quote)) {
-    throw new Error("Recovered CREATE_QUOTE Receipt does not contain a valid Quote");
+    throw new Error("原报价结果缺少报价明细；已继续暂停新报价。");
   }
   const record = quote as Record<string, unknown>;
-  if (typeof record.quoteId !== "string") {
-    throw new Error("Recovered CREATE_QUOTE Receipt does not contain a valid Quote");
+  const expectedStayType = pending.input.stayType ?? paidStayTypeForDates(
+    pending.input.arrivalDate,
+    pending.input.departureDate
+  );
+  const memberMatches = pending.input.memberId === undefined
+    ? record.memberId === undefined
+    : record.memberId === pending.input.memberId;
+  if (typeof record.quoteId !== "string" || !record.quoteId
+    || record.propertyId !== pending.input.propertyId
+    || record.inventoryUnitId !== pending.input.inventoryUnitId
+    || record.arrivalDate !== pending.input.arrivalDate
+    || record.departureDate !== pending.input.departureDate
+    || record.pricingPolicyVersionId !== pending.input.pricingPolicyVersionId
+    || record.stayType !== expectedStayType
+    || !memberMatches
+    || !Array.isArray(record.coverageSet)
+    || !Array.isArray(record.cashLines)
+    || !validQuoteMoney(record.cashRemainder)
+    || !validQuoteMoney(record.currentContractAmount)
+    || typeof record.expiresAt !== "string"
+    || Number.isNaN(Date.parse(record.expiresAt))
+    || typeof record.inputHash !== "string"
+    || !/^[a-f0-9]{64}$/.test(record.inputHash)
+    || !Array.isArray(receipt.resourceRefs)
+    || !receipt.resourceRefs.includes(record.quoteId)
+    || !Array.isArray(receipt.factRefs)) {
+    throw new Error("原报价结果与当时选择的房源、日期或价格政策不一致；已继续暂停新报价。");
   }
   return record as unknown as QuoteDto;
+}
+
+function quoteNotExecutedReceiptIsCoherent(receipt: ReceiptDto): boolean {
+  return receipt.executionStatus === "NOT_EXECUTED"
+    && receipt.businessCommitted === false
+    && Boolean(receipt.receiptId && receipt.commandId && receipt.correlationId)
+    && receipt.result === undefined
+    && receipt.error?.code === "COMMAND_INTERRUPTED"
+    && receipt.error.retryable === false
+    && Array.isArray(receipt.resourceRefs)
+    && receipt.resourceRefs.length === 0
+    && Array.isArray(receipt.factRefs)
+    && receipt.factRefs.length === 0
+    && typeof receipt.committedAt === "string"
+    && !Number.isNaN(Date.parse(receipt.committedAt));
 }
 
 interface InventoryActionUnit {
@@ -688,9 +856,11 @@ function QuoteWorkbench({
   policies,
   initialStayType,
   commandsBlocked,
+  selectionDraftValid,
   resetToken,
   onClose,
   onRecoveryOutcome,
+  onRecoveryStateChange,
   onCommand
 }: {
   unit: InventoryActionUnit | undefined;
@@ -699,13 +869,16 @@ function QuoteWorkbench({
   policies: PricingPolicyVersionDto[];
   initialStayType?: StayType;
   commandsBlocked: boolean;
+  selectionDraftValid: boolean;
   resetToken: number;
   onClose: () => void;
   onRecoveryOutcome: (outcome: Error | undefined) => void;
+  onRecoveryStateChange: () => void;
   onCommand: (request: CommandRequest) => void;
 }) {
   const { meta, principal, propertyId } = useWorkspace();
   const quoteRecoveryScope = quoteRecoveryStorageKey(principal.subjectId, propertyId);
+  const recoveryCoordinationScope = propertyRecoveryCoordinationScope(principal.subjectId, propertyId);
   const stayType: StayType = initialStayType === "FREE" ? "FREE" : paidStayTypeForDates(arrivalDate, departureDate);
   const selectedPolicy = policies.find((policy) => stayType === "FREE"
     ? policy.calculation_kind === "FREE" && policy.stay_type === "FREE"
@@ -716,6 +889,7 @@ function QuoteWorkbench({
   const [memberSearch, setMemberSearch] = useState("");
   const [quote, setQuote] = useState<QuoteDto>();
   const [quoteSignature, setQuoteSignature] = useState("");
+  const [orphanQuoteReviewConfirmed, setOrphanQuoteReviewConfirmed] = useState(false);
   const [quoteRecoverySnapshot, setQuoteRecoverySnapshot] = useState<{ scope: string; read: QuoteRecoveryReadResult }>(() => ({
     scope: quoteRecoveryScope,
     read: browserQuoteRecovery(principal.subjectId, propertyId).read
@@ -734,6 +908,7 @@ function QuoteWorkbench({
   const [freeStayCategoryCode, setFreeStayCategoryCode] = useState<"VOLUNTEER" | "RECEPTION" | "">("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
+  const [quoteRecoveryOwnerId] = useState(browserQuoteRecoveryOwnerId);
   const latestQuoteSignature = useRef("");
   const settledQuoteSignature = useRef("");
   const nextAdditionalGuestKey = useRef(0);
@@ -749,6 +924,52 @@ function QuoteWorkbench({
   const quoteRecoveryError = quoteRecoveryRead.kind === "CORRUPT" || quoteRecoveryRead.kind === "READ_ERROR" ? quoteRecoveryRead.error : undefined;
   const quoteCommandsBlocked = commandsBlocked || !quoteRecoveryReady || quoteRecoveryRead.kind !== "ABSENT";
 
+  function updateQuoteRecoverySnapshot(read: QuoteRecoveryReadResult): void {
+    setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read });
+    onRecoveryStateChange();
+  }
+
+  async function transitionQuoteRecovery(
+    expectedIdempotencyKey: string,
+    nextState: "CLEAR" | "UNKNOWN"
+  ): Promise<{ read: QuoteRecoveryReadResult; matched: boolean; changed: boolean }> {
+    try {
+      return await withRecoveryStorageLock(recoveryCoordinationScope, () => {
+        const current = browserQuoteRecovery(principal.subjectId, propertyId);
+        if (!current.storage
+          || current.read.kind !== "VALID"
+          || current.read.pending.metadata.idempotencyKey !== expectedIdempotencyKey) {
+          return { read: current.read, matched: false, changed: false };
+        }
+        if (nextState === "CLEAR") {
+          if (!clearQuoteCommandRecovery(current.storage, principal.subjectId, propertyId)) {
+            return {
+              read: { kind: "READ_ERROR", error: new Error("无法清除已核对的本地报价恢复记录；新报价和订单写入继续暂停") } as const,
+              matched: true,
+              changed: false
+            };
+          }
+          return { read: { kind: "ABSENT" } as const, matched: true, changed: true };
+        }
+        const unknown = { ...current.read.pending, state: "UNKNOWN" as const };
+        if (!saveQuoteCommandRecovery(current.storage, unknown)) {
+          return {
+            read: { kind: "READ_ERROR", error: new Error("无法更新本地报价恢复记录；新报价和订单写入继续暂停") } as const,
+            matched: true,
+            changed: false
+          };
+        }
+        return { read: { kind: "VALID", pending: unknown } as const, matched: true, changed: true };
+      });
+    } catch {
+      return {
+        read: { kind: "READ_ERROR", error: new Error("无法取得跨标签报价协调锁；新报价和订单写入继续暂停") },
+        matched: false,
+        changed: false
+      };
+    }
+  }
+
   useEffect(() => {
     quoteRequestGuard.mount();
     return () => quoteRequestGuard.unmount();
@@ -756,10 +977,26 @@ function QuoteWorkbench({
 
   useEffect(() => {
     setBusy(false);
-    setQuoteRecoverySnapshot({
-      scope: quoteRecoveryScope,
-      read: browserQuoteRecovery(principal.subjectId, propertyId).read
-    });
+    updateQuoteRecoverySnapshot(browserQuoteRecovery(principal.subjectId, propertyId).read);
+  }, [principal.subjectId, propertyId, quoteRecoveryScope]);
+
+  useEffect(() => {
+    const access = browserCommandRecoveryStorage();
+    if (access.kind !== "AVAILABLE") return;
+    const handleStorage = (event: StorageEvent) => {
+      if (!recoveryStorageEventMatchesScope(event, quoteRecoveryScope, access.authoritativeStorage)) return;
+      updateQuoteRecoverySnapshot(browserQuoteRecovery(principal.subjectId, propertyId).read);
+    };
+    const handleSync = (event: Event) => {
+      if (!recoveryStorageSyncEventMatchesScope(event as CustomEvent<unknown>, quoteRecoveryScope)) return;
+      updateQuoteRecoverySnapshot(browserQuoteRecovery(principal.subjectId, propertyId).read);
+    };
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(RECOVERY_STORAGE_SYNC_EVENT, handleSync);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(RECOVERY_STORAGE_SYNC_EVENT, handleSync);
+    };
   }, [principal.subjectId, propertyId, quoteRecoveryScope]);
 
   useEffect(() => {
@@ -832,7 +1069,11 @@ function QuoteWorkbench({
     if (memberId && !quoteMemberId) setMemberId("");
   }, [memberId, quoteMemberId]);
 
-  const currentQuoteInput: QuoteCommandInput | undefined = unit && policyId && (!useMemberEntitlement || quoteMemberId) ? {
+  const quoteNightCount = isIsoLocalDate(arrivalDate) && isIsoLocalDate(departureDate)
+    ? rangeNights({ arrivalDate, departureDate })
+    : 0;
+  const quoteDatesValid = quoteNightCount >= 1 && quoteNightCount <= MAX_STAY_SELECTION_NIGHTS;
+  const currentQuoteInput: QuoteCommandInput | undefined = unit && policyId && selectionDraftValid && quoteDatesValid && (!useMemberEntitlement || quoteMemberId) ? {
     propertyId,
     inventoryUnitId: unit.id,
     ...(stayType === "FREE" ? { stayType } : {}),
@@ -855,41 +1096,78 @@ function QuoteWorkbench({
       version: 1,
       subjectId: principal.subjectId,
       propertyId,
+      ownerTabId: quoteRecoveryOwnerId,
       input,
       inputSignature,
       metadata,
       state: "SENDING"
     };
-    const beforeSend = browserQuoteRecovery(principal.subjectId, propertyId);
-    if (!beforeSend.storage || beforeSend.read.kind !== "ABSENT") {
-      setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: beforeSend.read });
-      setError(beforeSend.read.kind === "ABSENT" ? new Error("无法访问本地报价恢复存储，报价命令尚未发送") : undefined);
-      return;
-    }
-    if (!saveQuoteCommandRecovery(beforeSend.storage, pending)) {
-      const read = { kind: "READ_ERROR", error: new Error("无法保存本地报价恢复记录，报价命令尚未发送") } as const;
-      setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read });
-      setError(read.error);
-      return;
-    }
-    setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "VALID", pending } });
     const requestLease = quoteRequestGuard.begin(quoteRecoveryScope);
     setBusy(true);
     setError(undefined);
+    let claim:
+      | { kind: "CLAIMED" }
+      | { kind: "STALE" }
+      | { kind: "BLOCKED"; read: QuoteRecoveryReadResult; error?: Error };
+    try {
+      claim = await withRecoveryStorageLock(recoveryCoordinationScope, () => {
+        if (!quoteRequestGuard.isActive(requestLease) || signal?.aborted) return { kind: "STALE" as const };
+        const beforeSend = browserQuoteRecovery(principal.subjectId, propertyId);
+        if (!beforeSend.storage || beforeSend.read.kind !== "ABSENT") {
+          return {
+            kind: "BLOCKED" as const,
+            read: beforeSend.read,
+            ...(beforeSend.read.kind === "ABSENT" ? { error: new Error("无法访问本地报价恢复存储，报价命令尚未发送") } : {})
+          };
+        }
+        const commandRead = readPersistedCommandRecovery(
+          beforeSend.storage,
+          principal.subjectId,
+          `property:${propertyId}`
+        );
+        if (commandRead.kind !== "ABSENT") {
+          return {
+            kind: "BLOCKED" as const,
+            read: beforeSend.read,
+            error: new Error("本物业另有未收口的操作；请先核对原操作结果，报价命令尚未发送")
+          };
+        }
+        if (!saveQuoteCommandRecovery(beforeSend.storage, pending)) {
+          const error = new Error("无法保存本地报价恢复记录，报价命令尚未发送");
+          return { kind: "BLOCKED" as const, read: { kind: "READ_ERROR" as const, error }, error };
+        }
+        return { kind: "CLAIMED" as const };
+      });
+    } catch {
+      if (quoteRequestGuard.isActive(requestLease)) {
+        const error = new Error("无法取得跨标签报价协调锁，报价命令尚未发送");
+        updateQuoteRecoverySnapshot({ kind: "READ_ERROR", error });
+        setError(error);
+        setBusy(false);
+      }
+      return;
+    }
+    if (!quoteRequestGuard.isActive(requestLease)) return;
+    if (claim.kind === "STALE") {
+      setBusy(false);
+      return;
+    }
+    if (claim.kind === "BLOCKED") {
+      updateQuoteRecoverySnapshot(claim.read);
+      setError(claim.error);
+      setBusy(false);
+      return;
+    }
+    updateQuoteRecoverySnapshot({ kind: "VALID", pending });
     try {
       const response = await api.quote(input, metadata, signal);
       if (!quoteRequestGuard.isActive(requestLease)) return;
-      const completed = browserQuoteRecovery(principal.subjectId, propertyId);
-      if (completed.storage && completed.read.kind === "VALID" && completed.read.pending.metadata.idempotencyKey === metadata.idempotencyKey) {
-        if (clearQuoteCommandRecovery(completed.storage, principal.subjectId, propertyId)) {
-          setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "ABSENT" } });
-        } else {
-          setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "READ_ERROR", error: new Error("报价已返回，但无法清除本地恢复记录；新报价和订单写入继续暂停") } });
-        }
-      } else if (completed.read.kind !== "ABSENT") {
-        setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: completed.read });
-      } else {
-        setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "ABSENT" } });
+      const completed = await transitionQuoteRecovery(metadata.idempotencyKey, "CLEAR");
+      if (!quoteRequestGuard.isActive(requestLease)) return;
+      updateQuoteRecoverySnapshot(completed.read);
+      if (!completed.matched || !completed.changed) {
+        setError(new Error("报价已返回，但另一笔报价恢复记录正在处理中；当前结果未应用。"));
+        return;
       }
       if (latestQuoteSignature.current === inputSignature) {
         settledQuoteSignature.current = inputSignature;
@@ -900,28 +1178,27 @@ function QuoteWorkbench({
       }
     } catch (nextError) {
       if (!quoteRequestGuard.isActive(requestLease)) return;
-      const current = browserQuoteRecovery(principal.subjectId, propertyId);
-      if (nextError instanceof ApiError) {
-        if (current.storage && current.read.kind === "VALID" && current.read.pending.metadata.idempotencyKey === metadata.idempotencyKey) {
-          clearQuoteCommandRecovery(current.storage, principal.subjectId, propertyId);
+      const definitive = nextError instanceof ApiError
+        && nextError.status < 500
+        && nextError.code !== "COMMAND_STATUS_UNKNOWN";
+      if (definitive) {
+        const completed = await transitionQuoteRecovery(metadata.idempotencyKey, "CLEAR");
+        if (!quoteRequestGuard.isActive(requestLease)) return;
+        updateQuoteRecoverySnapshot(completed.read);
+        if (!completed.matched || !completed.changed) {
+          setError(new Error("报价处理结果已返回，但本地恢复记录已经变化；当前结果未应用。"));
+          return;
         }
-        setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "ABSENT" } });
         settledQuoteSignature.current = inputSignature;
         setError(staffQuoteError(nextError, unit?.code ?? "所选房源", arrivalDate, departureDate));
         return;
       }
       setError(nextError);
-      if (current.storage && current.read.kind === "VALID" && current.read.pending.metadata.idempotencyKey === metadata.idempotencyKey) {
-        const unknown = { ...current.read.pending, state: "UNKNOWN" as const };
-        if (saveQuoteCommandRecovery(current.storage, unknown)) {
-          setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "VALID", pending: unknown } });
-        } else {
-          setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "READ_ERROR", error: new Error("报价响应未知且无法更新本地恢复记录；写入口继续暂停") } });
-        }
-      } else if (current.read.kind !== "ABSENT") {
-        setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: current.read });
-      } else {
-        setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "ABSENT" } });
+      const unknown = await transitionQuoteRecovery(metadata.idempotencyKey, "UNKNOWN");
+      if (!quoteRequestGuard.isActive(requestLease)) return;
+      updateQuoteRecoverySnapshot(unknown.read);
+      if (!unknown.matched || !unknown.changed) {
+        setError(new Error("报价状态暂未确认，但本地恢复记录已经变化；请从当前恢复入口继续核对。"));
       }
     } finally {
       if (quoteRequestGuard.isActive(requestLease)) setBusy(false);
@@ -935,38 +1212,47 @@ function QuoteWorkbench({
     setBusy(true);
     setError(undefined);
     try {
-      const receipt = await api.commandResult(
+      const receipt = await api.resolveCommandResult(
         pendingQuote.input.propertyId,
         "CREATE_QUOTE",
         pendingQuote.metadata.idempotencyKey
       );
       if (!quoteRequestGuard.isActive(requestLease)) return;
       if (receipt.executionStatus === "UNKNOWN") {
-        const current = browserQuoteRecovery(principal.subjectId, propertyId);
-        if (current.storage && current.read.kind === "VALID" && current.read.pending.metadata.idempotencyKey === pendingQuote.metadata.idempotencyKey) {
-          const unknown = { ...current.read.pending, state: "UNKNOWN" as const };
-          if (saveQuoteCommandRecovery(current.storage, unknown)) setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "VALID", pending: unknown } });
-          else setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "READ_ERROR", error: new Error("无法更新本地报价恢复记录；写入口继续暂停") } });
-        }
-        setError(new Error("报价命令仍在执行或状态未知，请保留原幂等键后再次查询。"));
+        const unknown = await transitionQuoteRecovery(pendingQuote.metadata.idempotencyKey, "UNKNOWN");
+        if (!quoteRequestGuard.isActive(requestLease)) return;
+        updateQuoteRecoverySnapshot(unknown.read);
+        setError(new Error("原报价仍在处理，请稍后再次核对；系统不会重复报价。"));
         return;
       }
-      const completed = browserQuoteRecovery(principal.subjectId, propertyId);
-      if (!completed.storage || completed.read.kind !== "VALID" || completed.read.pending.metadata.idempotencyKey !== pendingQuote.metadata.idempotencyKey) {
-        setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: completed.read });
-        setError(new Error("命令结果已返回，但本地报价恢复记录无法安全收口"));
-        return;
-      }
-      if (!clearQuoteCommandRecovery(completed.storage, principal.subjectId, propertyId)) {
-        setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "READ_ERROR", error: new Error("无法清除已收口的本地报价恢复记录；写入口继续暂停") } });
-        return;
-      }
-      setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: { kind: "ABSENT" } });
       if (!receipt.businessCommitted) {
+        if (!quoteNotExecutedReceiptIsCoherent(receipt)) {
+          setError(new Error("原报价的未执行结果无法核对；已继续暂停新报价。"));
+          return;
+        }
+        const completed = await transitionQuoteRecovery(pendingQuote.metadata.idempotencyKey, "CLEAR");
+        if (!quoteRequestGuard.isActive(requestLease)) return;
+        updateQuoteRecoverySnapshot(completed.read);
+        if (!completed.matched || !completed.changed) {
+          setError(new Error("原报价结果已返回，但本地恢复记录已经变化；请重新核对。"));
+          return;
+        }
         onRecoveryOutcome(new Error("服务端确认该报价命令未执行，可以重新报价。"));
         return;
       }
-      const recoveredQuote = quoteFromReceipt(receipt);
+      const recoveredQuote = quoteFromReceipt(receipt, pendingQuote);
+      const recoveredQuoteExpired = Date.parse(recoveredQuote.expiresAt) <= Date.now();
+      const completed = await transitionQuoteRecovery(pendingQuote.metadata.idempotencyKey, "CLEAR");
+      if (!quoteRequestGuard.isActive(requestLease)) return;
+      updateQuoteRecoverySnapshot(completed.read);
+      if (!completed.matched || !completed.changed) {
+        setError(new Error("原报价结果已返回，但本地恢复记录已经变化；当前结果未应用。"));
+        return;
+      }
+      if (recoveredQuoteExpired) {
+        onRecoveryOutcome(new Error("原报价结果已确认，但报价已经过期；请重新报价。"));
+        return;
+      }
       if (latestQuoteSignature.current !== pendingQuote.inputSignature) {
         onRecoveryOutcome(new Error("报价已恢复，但当前筛选条件已变化；旧结果未应用，请重新报价。"));
         return;
@@ -978,17 +1264,38 @@ function QuoteWorkbench({
       if (!quoteRequestGuard.isActive(requestLease)) return;
       setError(nextError);
       const current = browserQuoteRecovery(principal.subjectId, propertyId);
-      setQuoteRecoverySnapshot({ scope: quoteRecoveryScope, read: current.read });
+      updateQuoteRecoverySnapshot(current.read);
     } finally {
       if (quoteRequestGuard.isActive(requestLease)) setBusy(false);
     }
   }
 
+  async function discardCorruptQuoteAfterReview() {
+    try {
+      const read = await withRecoveryStorageLock(recoveryCoordinationScope, () => {
+        const current = browserQuoteRecovery(principal.subjectId, propertyId);
+        if (!current.storage || current.read.kind !== "CORRUPT") return current.read;
+        if (!clearCorruptQuoteCommandRecovery(current.storage, principal.subjectId, propertyId)) {
+          return { kind: "READ_ERROR", error: new Error("无法清除损坏的本地报价恢复记录；写入口继续暂停，请联系管理员处理浏览器存储权限") } as const;
+        }
+        return { kind: "ABSENT" } as const;
+      });
+      updateQuoteRecoverySnapshot(read);
+      if (read.kind === "ABSENT") setError(undefined);
+    } catch {
+      updateQuoteRecoverySnapshot({ kind: "READ_ERROR", error: new Error("无法取得跨标签报价协调锁；写入口继续暂停") });
+    }
+  }
+
   useEffect(() => {
-    if (!pendingQuote || pendingQuote.state !== "SENDING" || busy) return;
+    setOrphanQuoteReviewConfirmed(false);
+  }, [pendingQuote?.metadata.idempotencyKey, pendingQuote?.ownerTabId, pendingQuote?.state]);
+
+  useEffect(() => {
+    if (!pendingQuote || pendingQuote.state !== "SENDING" || pendingQuote.ownerTabId !== quoteRecoveryOwnerId || busy) return;
     const timeout = window.setTimeout(() => void recoverQuote(), 500);
     return () => window.clearTimeout(timeout);
-  }, [pendingQuote?.metadata.idempotencyKey, pendingQuote?.state, busy]);
+  }, [pendingQuote?.metadata.idempotencyKey, pendingQuote?.ownerTabId, pendingQuote?.state, quoteRecoveryOwnerId, busy]);
 
   useEffect(() => {
     if (!currentQuoteInput || quoteCommandsBlocked || settledQuoteSignature.current === currentQuoteSignature) return;
@@ -1069,12 +1376,43 @@ function QuoteWorkbench({
         <button className="icon-button" type="button" onClick={onClose} disabled={busy || Boolean(pendingQuote)} title="关闭办理区域" aria-label="关闭办理区域"><X aria-hidden="true" size={18} /></button>
       </header>
       <InlineError error={error} title="报价失败" />
-      <InlineError error={quoteRecoveryError} title="本地报价恢复记录不可用" />
-      {pendingQuote?.state === "UNKNOWN" ? (
+      {quoteRecoveryRead.kind === "CORRUPT" ? (
+        <DamagedCommandRecoveryNotice
+          error={quoteRecoveryError}
+          onDiscard={discardCorruptQuoteAfterReview}
+          testId="quote-damaged-command-recovery"
+        />
+      ) : <InlineError error={quoteRecoveryError} title="本地报价恢复记录不可用" />}
+      {pendingQuote?.state === "SENDING" ? (
+        <div className="recovery-bar" data-testid="quote-recovery">
+          <div>
+            <strong>{pendingQuote.ownerTabId === quoteRecoveryOwnerId ? "报价正在提交" : "另一标签正在提交报价"}</strong>
+            <p>{pendingQuote.ownerTabId === quoteRecoveryOwnerId
+              ? "新的报价和订单写入已暂停；原提交返回或转为待查询状态后再继续。"
+              : "新的报价和订单写入已暂停。请先回到原报价标签等待；如果原标签已经关闭，可核对原报价是否完成。"}</p>
+          </div>
+          {pendingQuote.ownerTabId !== quoteRecoveryOwnerId ? <div className="recovery-damaged-actions">
+            <label>
+              <input
+                type="checkbox"
+                checked={orphanQuoteReviewConfirmed}
+                onChange={(event) => setOrphanQuoteReviewConfirmed(event.target.checked)}
+              />
+              <span>我已关闭原报价标签，需要核对原报价结果</span>
+            </label>
+            <button
+              className="button button-secondary"
+              type="button"
+              disabled={!orphanQuoteReviewConfirmed || busy}
+              onClick={() => void recoverQuote()}
+            >核对原报价结果</button>
+          </div> : null}
+        </div>
+      ) : pendingQuote?.state === "UNKNOWN" ? (
         <div className="recovery-bar" data-testid="quote-recovery">
           <div><strong>报价结果尚未确认</strong><p>系统不会重复报价；网络恢复后可重新查询本次结果。</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recoverQuote()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />重新查询报价结果
+            <RefreshCw aria-hidden="true" size={17} />核对原报价结果
           </button>
         </div>
       ) : null}
@@ -1280,7 +1618,20 @@ type PendingMobileTaskFocus = Omit<RoomStatusMobileFocusRequest, "token">;
 type RoomStatusCommandPhase = "IDLE" | "DRAFT" | "PREVIEW" | "CONFIRMING" | "SETTLED";
 
 export function roomStatusProjectionRefreshAllowed(phase: RoomStatusCommandPhase): boolean {
-  return phase !== "CONFIRMING";
+  return phase === "IDLE" || phase === "SETTLED";
+}
+
+export function roomStatusTimelineRangeFromStart(startDate: string): RoomStatusRange {
+  return {
+    arrivalDate: startDate,
+    departureDate: addLocalDateDays(startDate, ROOM_STATUS_TIMELINE_DAYS)
+  };
+}
+
+function restoredOrDefaultRoomStatusRange(restored: RoomStatusRestorationSnapshot | undefined, timeZone: string): RoomStatusRange {
+  return restored?.range.arrivalDate && isIsoLocalDate(restored.range.arrivalDate)
+    ? roomStatusTimelineRangeFromStart(restored.range.arrivalDate)
+    : defaultRoomStatusRange(timeZone);
 }
 
 function roomStatusQuery(
@@ -1324,7 +1675,7 @@ function roomStatusRestorationKey(subjectId: string, propertyId: string): string
 
 function defaultRoomStatusRange(timeZone: string): RoomStatusRange {
   const today = localDateInTimeZone(timeZone);
-  return { arrivalDate: today, departureDate: addLocalDateDays(today, 21) };
+  return roomStatusTimelineRangeFromStart(today);
 }
 
 function rangeNights(range: RoomStatusRange): number {
@@ -1404,7 +1755,9 @@ function selectionDays(unit: RoomStatusUnitDto | null, selection: RoomStatusSele
 
 function selectionActions(unit: RoomStatusUnitDto | null, selection: RoomStatusSelection | null): RoomStatusActionDto[] {
   const days = selectionDays(unit, selection);
-  if (!selection || days.length !== rangeNights(selection) || days.some((day) => !day.available || day.conflicts.length > 0)) return [];
+  const nights = selection ? rangeNights(selection) : 0;
+  if (!selection || nights < 1 || nights > MAX_STAY_SELECTION_NIGHTS) return [];
+  if (days.some((day) => !day.available || day.conflicts.length > 0)) return [];
   return unit?.allowedActions.filter((candidate) => candidate.enabled && selectionActionCodes.has(candidate.code)) ?? [];
 }
 
@@ -1533,12 +1886,39 @@ export function InventoryPage() {
   const initialRestoration = useRef(readRoomStatusRestoration(principal.subjectId, propertyId));
   const orderReturnEnvelopePresent = useRef(hasRoomStatusOrderReturnEnvelope(location.state));
   const pendingOrderReturnTarget = useRef(parseRoomStatusOrderReturnTarget(location.state));
-  const [range, setRange] = useState<RoomStatusRange>(() => initialRestoration.current?.range ?? defaultRoomStatusRange(propertyTimezone));
+  const [range, setRange] = useState<RoomStatusRange>(() => restoredOrDefaultRoomStatusRange(initialRestoration.current, propertyTimezone));
   const [viewState, dispatchView] = useReducer(
     roomStatusViewReducer,
     initialRestoration.current?.state ?? createRoomStatusViewState()
   );
-  const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
+  const pageQuoteRecoveryScope = quoteRecoveryStorageKey(principal.subjectId, propertyId);
+  const [, setPageQuoteRecoveryRevision] = useState(0);
+  useEffect(() => {
+    const access = browserCommandRecoveryStorage();
+    if (access.kind !== "AVAILABLE") return;
+    const handleStorage = (event: StorageEvent) => {
+      if (!recoveryStorageEventMatchesScope(event, pageQuoteRecoveryScope, access.authoritativeStorage)) return;
+      setPageQuoteRecoveryRevision((revision) => revision + 1);
+    };
+    const handleSync = (event: Event) => {
+      if (!recoveryStorageSyncEventMatchesScope(event as CustomEvent<unknown>, pageQuoteRecoveryScope)) return;
+      setPageQuoteRecoveryRevision((revision) => revision + 1);
+    };
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(RECOVERY_STORAGE_SYNC_EVENT, handleSync);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(RECOVERY_STORAGE_SYNC_EVENT, handleSync);
+    };
+  }, [pageQuoteRecoveryScope]);
+  const pageQuoteRecovery = browserQuoteRecovery(principal.subjectId, propertyId).read;
+  const currentQuoteRecoveryIdentity = quoteRecoveryContextIdentity(pageQuoteRecoveryScope, pageQuoteRecovery);
+  const currentQuoteRecoveryOwnerId = pageQuoteRecovery.kind === "VALID" ? pageQuoteRecovery.pending.ownerTabId : undefined;
+  const currentBrowserQuoteRecoveryOwnerId = browserQuoteRecoveryOwnerId();
+  const commandRecovery = usePersistentCommandRecovery({
+    subjectId: principal.subjectId,
+    scopeId: `property:${propertyId}`
+  });
   const [board, setBoard] = useState<RoomStatusBoardDto>();
   const boardRef = useRef<RoomStatusBoardDto | undefined>(undefined);
   const [boardQueryKey, setBoardQueryKey] = useState<string>();
@@ -1550,7 +1930,6 @@ export function InventoryPage() {
   const pendingRestoration = useRef<RoomStatusRestorationSnapshot | undefined>(initialRestoration.current);
   const orderRestorationAttempted = useRef(false);
   const orderReturnResolutionStarted = useRef(false);
-  const restorationPageAdjusted = useRef(false);
   const restorationPagesVisited = useRef(new Set<number>());
   const previousPropertyId = useRef(propertyId);
   const previousSubjectId = useRef(principal.subjectId);
@@ -1559,16 +1938,20 @@ export function InventoryPage() {
   const [queryError, setQueryError] = useState<unknown>();
   const [rangeError, setRangeError] = useState<unknown>();
   const [restorationError, setRestorationError] = useState<unknown>();
+  const [restoreGridFocus, setRestoreGridFocus] = useState(Boolean(initialRestoration.current));
   const [returnNotice, setReturnNotice] = useState<string>();
   const [actionError, setActionError] = useState<unknown>();
   const [quoteRecoveryOutcome, setQuoteRecoveryOutcome] = useState<Error>();
   const [clock, setClock] = useState(() => Date.now());
   const [refreshToken, setRefreshToken] = useState(0);
   const [quoteResetToken, setQuoteResetToken] = useState(0);
+  const [selectionDraftValid, setSelectionDraftValid] = useState(true);
   const [command, setCommand] = useState<CommandRequest>();
   const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [commandAttemptId, setCommandAttemptId] = useState(0);
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+  const [quoteRecoveryContextOpen, setQuoteRecoveryContextOpen] = useState(false);
+  const [dismissedQuoteRecoveryIdentity, setDismissedQuoteRecoveryIdentity] = useState<string>();
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [commandNotice, setCommandNotice] = useState<string>();
   const [selectedUnitId, setSelectedUnitId] = useState<string>();
@@ -1592,6 +1975,30 @@ export function InventoryPage() {
   const [selectedLifecycleRevision, setSelectedLifecycleRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
+  useEffect(() => {
+    if (queryPhase === "PERMISSION_DENIED") {
+      if (quoteRecoveryContextOpen) setQuoteRecoveryContextOpen(false);
+      if (!isMobile) setDesktopContextCollapsed(true);
+      return;
+    }
+    if (!currentQuoteRecoveryIdentity) {
+      if (quoteRecoveryContextOpen) setQuoteRecoveryContextOpen(false);
+      if (dismissedQuoteRecoveryIdentity) setDismissedQuoteRecoveryIdentity(undefined);
+      if (!isMobile && quoteRecoveryContextOpen) setDesktopContextCollapsed(true);
+      return;
+    }
+    if (shouldAutoOpenQuoteRecoveryContext({
+      recoveryIdentity: currentQuoteRecoveryIdentity,
+      dismissedIdentity: dismissedQuoteRecoveryIdentity,
+      recoveryOwnerId: currentQuoteRecoveryOwnerId,
+      currentOwnerId: currentBrowserQuoteRecoveryOwnerId,
+      isMobile,
+      hasSelectedOrder: Boolean(selectedOrderIdentity)
+    })) {
+      setQuoteRecoveryContextOpen(true);
+      setDesktopContextCollapsed(false);
+    }
+  }, [currentBrowserQuoteRecoveryOwnerId, currentQuoteRecoveryIdentity, currentQuoteRecoveryOwnerId, dismissedQuoteRecoveryIdentity, isMobile, queryPhase, quoteRecoveryContextOpen, selectedOrderIdentity]);
   const [quickPopoverTarget, setQuickPopoverTarget] = useState<{
     unitId: string;
     serviceDate: string;
@@ -1602,7 +2009,6 @@ export function InventoryPage() {
   const [orderRefreshToken, setOrderRefreshToken] = useState(0);
   const [selectedOrderCommandScope, setSelectedOrderCommandScope] = useState<string>();
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
-  const [boardColumnWidth, setBoardColumnWidth] = useState(0);
   const [maintenanceTarget, setMaintenanceTarget] = useState<InventoryActionUnit>();
   const [quoteTarget, setQuoteTarget] = useState<RoomStatusQuoteTarget>();
   const [mobileTab, setMobileTab] = useState<RoomStatusMobileTab>("ARRIVALS");
@@ -1645,15 +2051,6 @@ export function InventoryPage() {
     const observer = new ResizeObserver(([entry]) => setWorkspaceWidth(entry?.contentRect.width ?? 0));
     observer.observe(element);
     setWorkspaceWidth(element.getBoundingClientRect().width);
-    return () => observer.disconnect();
-  }, [boardQueryKey]);
-
-  useEffect(() => {
-    const element = boardColumnRef.current;
-    if (!element || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(([entry]) => setBoardColumnWidth(entry?.contentRect.width ?? 0));
-    observer.observe(element);
-    setBoardColumnWidth(element.getBoundingClientRect().width);
     return () => observer.disconnect();
   }, [boardQueryKey]);
 
@@ -1810,9 +2207,7 @@ export function InventoryPage() {
     const refreshVisible = () => {
       if (document.visibilityState !== "visible") return;
       setClock(Date.now());
-      if (!permissionDeniedRef.current
-        && roomStatusProjectionRefreshAllowed(commandPhaseRef.current)
-        && !queryAttemptGuard.isInFlight()) {
+      if (!permissionDeniedRef.current && !queryAttemptGuard.isInFlight()) {
         setRefreshToken((value) => value + 1);
       }
     };
@@ -1831,9 +2226,10 @@ export function InventoryPage() {
     const restored = readRoomStatusRestoration(principal.subjectId, propertyId);
     initialRestoration.current = restored;
     pendingRestoration.current = restored;
+    setRestoreGridFocus(Boolean(restored));
     orderRestorationAttempted.current = false;
     restorationPagesVisited.current.clear();
-    setRange(restored?.range ?? defaultRoomStatusRange(propertyTimezone));
+    setRange(restoredOrDefaultRoomStatusRange(restored, propertyTimezone));
     dispatchView({ type: "RESTORE", state: restored?.state ?? createRoomStatusViewState() });
     setBoard(undefined);
     boardRef.current = undefined;
@@ -1885,7 +2281,7 @@ export function InventoryPage() {
     const existing = boardRef.current;
     const sameQuery = existing?.propertyId === propertyId
       && boardQueryKeyRef.current === requestQueryKey;
-    const projectionRefreshPaused = commandPhaseRef.current === "CONFIRMING" && Boolean(existing);
+    const projectionRefreshPaused = !roomStatusProjectionRefreshAllowed(commandPhaseRef.current) && Boolean(existing);
     if (!sameQuery) {
       setQueryPhase(existing ? "RANGE_LOADING" : "LOADING");
       setQueryError(undefined);
@@ -1911,7 +2307,6 @@ export function InventoryPage() {
         const restored = pendingRestoration.current;
         if (restored && response.page.totalPages > 0 && response.page.index >= response.page.totalPages) {
           const pageIndex = response.page.totalPages - 1;
-          restorationPageAdjusted.current = true;
           pendingRestoration.current = {
             ...restored,
             state: { ...restored.state, roomPageIndex: pageIndex }
@@ -1930,7 +2325,6 @@ export function InventoryPage() {
           const nextPage = Array.from({ length: response.page.totalPages }, (_, index) => index)
             .find((index) => !restorationPagesVisited.current.has(index));
           if (nextPage !== undefined) {
-            restorationPageAdjusted.current = true;
             pendingRestoration.current = {
               ...restored,
               state: { ...restored.state, roomPageIndex: nextPage }
@@ -1960,8 +2354,6 @@ export function InventoryPage() {
         if (restored) {
           pendingRestoration.current = undefined;
           restorationPagesVisited.current.clear();
-          const pageAdjusted = restorationPageAdjusted.current;
-          restorationPageAdjusted.current = false;
           const resolution = reconcileRoomStatusRestoration(response.rooms, response.dates, {
             ...restored.state,
             roomPageIndex: response.page.index
@@ -1975,14 +2367,8 @@ export function InventoryPage() {
             setReturnNotice("当前筛选或日期范围已变化，已切换为当前可用的房态内容。");
           } else if (resolution.outcome === "EMPTY") {
             setReturnNotice("上次查看的位置已失效，已回到当前可用的房态内容。");
-          } else if (restored.revision === response.revision) {
-            const adjusted = pageAdjusted || resolution.dateWindowAdjusted || resolution.scrollAnchorAdjusted;
-            setReturnNotice(adjusted
-              ? "已恢复上次查看位置，并按当前房态更新。"
-              : "已恢复上次查看位置。"
-            );
           } else {
-            setReturnNotice("房态已更新，已恢复当前可用的查看位置。");
+            setReturnNotice(undefined);
           }
         }
       })
@@ -2213,39 +2599,6 @@ export function InventoryPage() {
     dispatchView({ type: "SET_SELECTION", selection: null });
     if (renderedBoard) setReturnNotice("原房态格已不在当前页面，快捷操作已关闭。请重新选择房态格。");
   }, [quickPopoverDay, quickPopoverInterval, quickPopoverTarget, quickPopoverUnit, renderedBoard]);
-
-  useEffect(() => {
-    if (!renderedBoard || viewState.dateWindowMode !== "AUTO") return;
-    const autoSize = roomStatusAutoVisibleDays(boardColumnWidth);
-    if (autoSize === viewState.dateWindowSize) return;
-    const nextStart = roomStatusAutoWindowStart(
-      renderedBoard.dates,
-      viewState.dateWindowStart,
-      autoSize,
-      viewState.focusedCell
-    );
-    dispatchView({
-      type: "SET_DATE_WINDOW_MODE",
-      mode: "AUTO",
-      autoSize,
-      totalDates: renderedBoard.dates.length
-    });
-    if (nextStart !== viewState.dateWindowStart) {
-      dispatchView({
-        type: "SET_DATE_WINDOW",
-        start: nextStart,
-        size: autoSize,
-        totalDates: renderedBoard.dates.length
-      });
-    }
-  }, [
-    boardColumnWidth,
-    renderedBoard,
-    viewState.dateWindowMode,
-    viewState.dateWindowSize,
-    viewState.dateWindowStart,
-    viewState.focusedCell
-  ]);
 
   useEffect(() => {
     if (orderRestorationAttempted.current || !initialRestoration.current || !renderedBoard) return;
@@ -2670,7 +3023,6 @@ export function InventoryPage() {
     statuses: [],
     capacities: []
   };
-  const filteredRoomCount = renderedBoard?.page.totalRooms ?? 0;
   const todayDate = localDateInTimeZone(propertyTimezone);
   const mobileGroups = useMemo(() => renderedBoard ? buildMobileGroups(renderedBoard) : { arrivals: [], inHouse: [], departures: [], exceptions: [] }, [renderedBoard]);
   const activeMobileTasks = mobileTab === "ARRIVALS"
@@ -2678,12 +3030,24 @@ export function InventoryPage() {
     : mobileTab === "IN_HOUSE"
       ? mobileGroups.inHouse
       : mobileTab === "DEPARTURES"
-        ? mobileGroups.departures
-        : mobileGroups.exceptions;
-  const quoteUnit = findRoomStatusUnit(renderedBoard, quoteTarget?.unitId);
-  const pageQuoteRecovery = browserQuoteRecovery(principal.subjectId, propertyId).read;
-  const showQuoteWorkbench = Boolean(quoteTarget) || pageQuoteRecovery.kind !== "ABSENT";
-  const quoteActionUnit = quoteTarget && quoteUnit ? actionUnit(quoteUnit, projectionWritable) : undefined;
+      ? mobileGroups.departures
+      : mobileGroups.exceptions;
+  const recoveryQuoteTarget: RoomStatusQuoteTarget | undefined = pageQuoteRecovery.kind === "VALID" ? {
+    unitId: pageQuoteRecovery.pending.input.inventoryUnitId,
+    arrivalDate: pageQuoteRecovery.pending.input.arrivalDate,
+    departureDate: pageQuoteRecovery.pending.input.departureDate,
+    initialStayType: pageQuoteRecovery.pending.input.stayType
+      ?? paidStayTypeForDates(
+        pageQuoteRecovery.pending.input.arrivalDate,
+        pageQuoteRecovery.pending.input.departureDate
+      )
+  } : undefined;
+  const activeQuoteTarget = recoveryQuoteTarget ?? quoteTarget;
+  const quoteUnit = findRoomStatusUnit(renderedBoard, activeQuoteTarget?.unitId);
+  const showQuoteWorkbench = Boolean(activeQuoteTarget) || pageQuoteRecovery.kind !== "ABSENT";
+  const quoteActionUnit = activeQuoteTarget && quoteUnit ? actionUnit(quoteUnit, projectionWritable) : undefined;
+  const quoteRecoveryDrawerOpen = quoteRecoveryContextOpen && pageQuoteRecovery.kind !== "ABSENT";
+  const desktopContextKind = roomStatusDesktopContextKind(quoteRecoveryDrawerOpen, Boolean(selectedOrderIdentity));
 
   function clearTransientRoomStatusContext() {
     returnedOrderCellFocus.current = undefined;
@@ -2697,7 +3061,9 @@ export function InventoryPage() {
     setSelectedCorrectionOccupantId(undefined);
     setOrderContextOpen(false);
     setDesktopContextCollapsed(true);
+    setQuoteRecoveryContextOpen(false);
     setQuoteTarget(undefined);
+    setSelectionDraftValid(true);
     setMaintenanceTarget(undefined);
     setMobileCreateOpen(false);
     setActionError(undefined);
@@ -2727,21 +3093,19 @@ export function InventoryPage() {
       setRangeError(new Error("结束日期必须晚于开始日期。"));
       return;
     }
-    if (nights > 90) {
-      setRangeError(new Error("房态日期范围最多为 90 夜。"));
+    if (nights > ROOM_STATUS_TIMELINE_DAYS) {
+      setRangeError(new Error(`房态首页每次显示 ${ROOM_STATUS_TIMELINE_DAYS} 夜。要建立更长住宿，请在右侧日期选区里填写完整入住和退房日期。`));
       return;
     }
     setRangeError(undefined);
     setRange(next);
     dispatchView({ type: "SET_ROOM_PAGE", index: 0, totalPages: 1 });
     dispatchView({ type: "SET_DATE_WINDOW", start: 0, totalDates: nights });
-    dispatchView({ type: "SET_SELECTION", selection: null });
-    dispatchView({ type: "SET_FOCUS", focus: null });
     clearTransientRoomStatusContext();
   }
 
   function shiftRange(direction: -1 | 1) {
-    const nights = Math.max(1, rangeNights(range));
+    const nights = ROOM_STATUS_TIMELINE_DAYS;
     applyRange({
       arrivalDate: addLocalDateDays(range.arrivalDate, direction * nights),
       departureDate: addLocalDateDays(range.departureDate, direction * nights)
@@ -2760,31 +3124,6 @@ export function InventoryPage() {
     dispatchView({ type: "SET_SELECTION", selection: null });
     dispatchView({ type: "SET_FOCUS", focus: null });
     clearTransientRoomStatusContext();
-  }
-
-  function changeDateWindowMode(mode: RoomStatusDateWindowMode) {
-    const autoSize = roomStatusAutoVisibleDays(boardColumnWidth);
-    const requestedSize = mode === "AUTO" ? autoSize : Number(mode);
-    const totalDates = renderedBoard?.dates.length ?? rangeNights(range);
-    if (requestedSize > totalDates) {
-      applyRange({
-        arrivalDate: range.arrivalDate,
-        departureDate: addLocalDateDays(range.arrivalDate, requestedSize)
-      });
-      dispatchView({
-        type: "SET_DATE_WINDOW_MODE",
-        mode,
-        autoSize,
-        totalDates: requestedSize
-      });
-      return;
-    }
-    dispatchView({
-      type: "SET_DATE_WINDOW_MODE",
-      mode,
-      autoSize,
-      totalDates
-    });
   }
 
   function persistViewNow() {
@@ -2873,7 +3212,11 @@ export function InventoryPage() {
     setDesktopContextCollapsed(false);
   }
 
-  function selectOrderContextIdentity(identity: RoomStatusOrderIdentity, serviceDate?: string) {
+  function selectOrderContextIdentity(
+    identity: RoomStatusOrderIdentity,
+    serviceDate?: string,
+    openContext = true
+  ) {
     setQuickPopoverTarget(undefined);
     const sameOrder = selectedOrderIdentity?.orderId === identity.orderId
       && selectedOrderIdentity.stayId === identity.stayId;
@@ -2886,8 +3229,8 @@ export function InventoryPage() {
     if (!sameOrder) setSelectedOrderView(undefined);
     setSelectedCorrectionOccupantId(undefined);
     setQuoteTarget(undefined);
-    setOrderContextOpen(true);
-    setDesktopContextCollapsed(false);
+    setOrderContextOpen(openContext);
+    setDesktopContextCollapsed(!openContext);
     const parentRoomId = meta.inventoryUnits.find((unit) => unit.id === identity.unitId)?.parent_room_id;
     if (parentRoomId && !viewState.expandedRoomIds.includes(parentRoomId)) {
       dispatchView({ type: "TOGGLE_ROOM", roomId: parentRoomId });
@@ -2986,6 +3329,7 @@ export function InventoryPage() {
     setActionError(undefined);
     invalidateSelectedOrderForRoomStatusInspection();
     setQuoteTarget(undefined);
+    setSelectionDraftValid(true);
     setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
@@ -3001,6 +3345,7 @@ export function InventoryPage() {
     invalidateSelectedOrderForRoomStatusInspection();
     setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
+    setSelectionDraftValid(true);
     if (selection) {
       setDesktopContextCollapsed(false);
       setSelectedUnitId(selection.unitId);
@@ -3146,6 +3491,14 @@ export function InventoryPage() {
   }
 
   function closeDesktopContext() {
+    if (quoteRecoveryContextOpen) {
+      setDismissedQuoteRecoveryIdentity(currentQuoteRecoveryIdentity);
+      setQuoteRecoveryContextOpen(false);
+      setDesktopContextCollapsed(true);
+      restoreRoomStatusInteraction();
+      return;
+    }
+    if (pageQuoteRecovery.kind !== "ABSENT") return;
     returnedOrderCellFocus.current = undefined;
     setDesktopContextCollapsed(true);
     if (selectedOrderIdentity) setOrderContextOpen(false);
@@ -3153,11 +3506,36 @@ export function InventoryPage() {
   }
 
   function reopenDesktopContext() {
+    if (pageQuoteRecovery.kind !== "ABSENT") {
+      openQuoteRecoveryContext();
+      return;
+    }
     setDesktopContextCollapsed(false);
     if (selectedOrderIdentity) {
       dispatchView({ type: "SET_SELECTION", selection: null });
       setOrderContextOpen(true);
     }
+  }
+
+  function openQuoteRecoveryContext() {
+    setQuickPopoverTarget(undefined);
+    setMobileCreateOpen(false);
+    setOrderContextOpen(false);
+    setDismissedQuoteRecoveryIdentity(undefined);
+    setQuoteRecoveryContextOpen(true);
+    setDesktopContextCollapsed(false);
+    requestAnimationFrame(() => quoteSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+  }
+
+  function closeQuoteWorkbench() {
+    if (pageQuoteRecovery.kind !== "ABSENT") {
+      setDismissedQuoteRecoveryIdentity(currentQuoteRecoveryIdentity);
+      setQuoteRecoveryContextOpen(false);
+      setDesktopContextCollapsed(true);
+      restoreRoomStatusInteraction();
+      return;
+    }
+    setQuoteTarget(undefined);
   }
 
   async function locateOrderRange(target: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) {
@@ -3335,7 +3713,7 @@ export function InventoryPage() {
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
 
-  function closeCommandDialog(context?: CommandDialogCloseContext) {
+  async function closeCommandDialog(context?: CommandDialogCloseContext) {
     let refreshAfterClose = context?.receipt.businessCommitted === true;
     const pendingAtClose = commandRecovery.pending;
     const terminalAtClose = Boolean(context || (pendingAtClose && isTerminalCommandRecovery(pendingAtClose.state)));
@@ -3345,7 +3723,7 @@ export function InventoryPage() {
         setQuoteResetToken((value) => value + 1);
         setQuoteTarget(undefined);
       }
-      if (commandRecovery.clearResolved()) setRecoveryError(undefined);
+      if (await commandRecovery.clearResolved()) setRecoveryError(undefined);
       else setRecoveryError(new Error("无法清除已收口的本地恢复记录；为避免重复库存写入，命令继续保持暂停"));
     }
     commandAttemptGuard.invalidate();
@@ -3376,7 +3754,7 @@ export function InventoryPage() {
     setCommandContextInvalidated(false);
   }
 
-  function trackCommandProgress(request: CommandRequest, progress: CommandDialogProgress, attemptId: number): boolean {
+  function trackCommandProgress(request: CommandRequest, progress: CommandDialogProgress, attemptId: number): boolean | Promise<boolean> {
     commandAttemptGuard.runIfActive(attemptId, () => {
       if (progress.state === "PREVIEWING" || progress.state === "PREVIEWED") commandPhaseRef.current = "PREVIEW";
       else if (progress.state === "CONFIRMING" || progress.state === "UNKNOWN") commandPhaseRef.current = "CONFIRMING";
@@ -3459,7 +3837,7 @@ export function InventoryPage() {
       }
       setSelectedDayDate(triggerDate);
       if (refreshedIdentity.kind === "MATCH") {
-        selectOrderContextIdentity(refreshedIdentity.identity, triggerDate);
+        selectOrderContextIdentity(refreshedIdentity.identity, triggerDate, orderContextOpen);
         returnedOrderCellFocus.current = { unitId: refreshedIdentity.identity.unitId, serviceDate: triggerDate };
         setFocusRequestToken((value) => value + 1);
       }
@@ -3469,24 +3847,16 @@ export function InventoryPage() {
 
   const roomStatusToolbar = renderedBoard ? (
     <RoomStatusToolbar
-      board={renderedBoard}
-      propertyLabel={`${property?.code ?? propertyId} · ${property?.name ?? propertyId}`}
-      principalLabel={principal.displayName}
       range={range}
       filters={viewState.filters}
       filterOptions={filterOptions}
-      filteredRoomCount={filteredRoomCount}
       loading={queryBusy}
-      rangeLoading={rangeLoading}
       rangeError={rangeError instanceof Error ? rangeError.message : undefined}
       focusSearchRequestToken={filterFocusRequestToken}
       onRangeChange={applyRange}
       onPreviousRange={() => shiftRange(-1)}
       onNextRange={() => shiftRange(1)}
-      onToday={() => {
-        const nights = Math.max(1, rangeNights(range));
-        applyRange({ arrivalDate: todayDate, departureDate: addLocalDateDays(todayDate, nights) });
-      }}
+      onToday={() => applyRange(roomStatusTimelineRangeFromStart(todayDate))}
       onFiltersChange={applyFilters}
       onClearFilters={clearFilters}
       onRefresh={() => setRefreshToken((value) => value + 1)}
@@ -3537,6 +3907,7 @@ export function InventoryPage() {
         allowedActions={contextActions}
         onSelectedUnitChange={inspectUnit}
         onSelectionChange={selectRange}
+        onDraftValidityChange={setSelectionDraftValid}
         onOpenReference={openReference}
         onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
         onAction={handleAction}
@@ -3546,14 +3917,19 @@ export function InventoryPage() {
         <div className="room-status-quote-section" ref={quoteSectionRef}>
           <QuoteWorkbench
             unit={quoteActionUnit}
-            arrivalDate={quoteTarget?.arrivalDate ?? range.arrivalDate}
-            departureDate={quoteTarget?.departureDate ?? range.departureDate}
+            arrivalDate={activeQuoteTarget?.arrivalDate ?? range.arrivalDate}
+            departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
             policies={policies}
-            {...(quoteTarget ? { initialStayType: quoteTarget.initialStayType } : {})}
+            {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
             commandsBlocked={commandsBlocked}
+            selectionDraftValid={selectionDraftValid}
             resetToken={quoteResetToken}
-            onClose={() => setQuoteTarget(undefined)}
+            onClose={closeQuoteWorkbench}
             onRecoveryOutcome={setQuoteRecoveryOutcome}
+            onRecoveryStateChange={() => {
+              if (recoveryQuoteTarget) setQuoteTarget(recoveryQuoteTarget);
+              setPageQuoteRecoveryRevision((revision) => revision + 1);
+            }}
             onCommand={startCommand}
           />
         </div>
@@ -3563,19 +3939,19 @@ export function InventoryPage() {
 
   return (
     <div className="inventory-page room-status-page">
-      <header className="page-heading page-heading-actions">
-        <div><p className="eyebrow">房态总览</p><h1>房态与可售</h1><p>房间、床位与订单的统一运营视图</p></div>
-        <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={queryBusy}>
-          <RefreshCw className={queryBusy ? "spin" : ""} aria-hidden="true" size={17} />刷新
-        </button>
-      </header>
-
       {queryPhase !== "PERMISSION_DENIED" ? <InlineError error={recoveryError} title="恢复记录未收口" /> : null}
-      {queryPhase !== "PERMISSION_DENIED" ? <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" /> : null}
+      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.canDiscardCorrupt
+        ? <DamagedCommandRecoveryNotice error={commandRecovery.error} onDiscard={commandRecovery.discardCorruptAfterReview} testId="inventory-damaged-command-recovery" />
+        : queryPhase !== "PERMISSION_DENIED"
+          ? <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" />
+          : null}
       <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       <InlineError error={restorationError} title="房态位置未保存" />
       <InlineError error={actionError} title="动作未开始" />
       <InlineError error={quoteRecoveryOutcome} title="报价恢复结果" />
+      {queryPhase !== "PERMISSION_DENIED"
+        ? <QuoteRecoveryPageEntry recovery={pageQuoteRecovery} onOpen={openQuoteRecoveryContext} />
+        : null}
       {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={inventoryRecoveryIsBusinessFacing(commandRecovery.pending.presentation)} /> : null}
       {returnNotice ? <div className="room-status-return-notice" role="status">{returnNotice}</div> : null}
       {boardStale ? <div className="room-status-stale-notice" role="alert">当前房态已陈旧或刷新失败。页面保留最后一次来源事实，但所有依赖新鲜度的写动作已暂停。</div> : null}
@@ -3618,11 +3994,9 @@ export function InventoryPage() {
                   selectedGridStayId
                 )}
                 dateWindowStart={viewState.dateWindowStart}
-                dateWindowSize={viewState.dateWindowSize}
-                dateWindowMode={viewState.dateWindowMode}
                 todayDate={todayDate}
                 initialScrollAnchor={viewState.scrollAnchor}
-                restoreFocus={Boolean(returnNotice)}
+                restoreFocus={restoreGridFocus}
                 focusRequestToken={focusRequestToken}
                 onToggleRoom={(roomId) => dispatchView({ type: "TOGGLE_ROOM", roomId })}
                 onFocusedCellChange={(focus) => dispatchView({ type: "SET_FOCUS", focus })}
@@ -3630,7 +4004,6 @@ export function InventoryPage() {
                 onInspectSelection={inspectSelection}
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}
                 onDateWindowChange={(start) => changeDateWindow(start, renderedBoard.dates.length)}
-                onDateWindowModeChange={changeDateWindowMode}
                 onInspectUnit={inspectUnit}
                 onInspectDay={inspectDay}
                 onInspectInterval={inspectInterval}
@@ -3647,10 +4020,7 @@ export function InventoryPage() {
                 onTabChange={setMobileTab}
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}
                 onRangeChange={applyRange}
-                onToday={() => {
-                  const nights = Math.max(1, rangeNights(range));
-                  applyRange({ arrivalDate: todayDate, departureDate: addLocalDateDays(todayDate, nights) });
-                }}
+                onToday={() => applyRange(roomStatusTimelineRangeFromStart(todayDate))}
                 onCreate={() => setMobileCreateOpen(true)}
                 onOpenReference={openReference}
                 onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
@@ -3742,19 +4112,19 @@ export function InventoryPage() {
             />
           ) : null}
 
-          {!command && !isMobile && !desktopContextCollapsed && !useInlineOrderContext && (selectedUnit || selectedOrderIdentity || viewState.selection) && (!selectedOrderIdentity || orderContextOpen) ? (
+          {!command && !isMobile && !desktopContextCollapsed && !useInlineOrderContext && (selectedUnit || selectedOrderIdentity || viewState.selection || showQuoteWorkbench) && (!selectedOrderIdentity || orderContextOpen || quoteRecoveryDrawerOpen) ? (
             <Modal
-              title={selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
+              title={desktopContextKind === "QUOTE_RECOVERY" ? "报价恢复" : desktopContextKind === "ORDER" ? "订单上下文" : "选中对象上下文"}
               size="drawer"
-              modal={!selectedOrderIdentity && showQuoteWorkbench}
-              className={!selectedOrderIdentity && showQuoteWorkbench ? "room-status-write-drawer" : "room-status-view-drawer"}
+              modal={desktopContextKind === "QUOTE_RECOVERY" || (desktopContextKind === "SELECTION" && showQuoteWorkbench)}
+              className={desktopContextKind === "QUOTE_RECOVERY" || (desktopContextKind === "SELECTION" && showQuoteWorkbench) ? "room-status-write-drawer" : "room-status-view-drawer"}
               onClose={closeDesktopContext}
               footer={<>
                 <button type="button" className="button button-secondary" onClick={closeDesktopContext}>关闭</button>
-                {selectedOrderIdentity ? <button type="button" className="button button-primary" onClick={() => openSelectedOrder()}>查看完整订单</button> : null}
+                {desktopContextKind === "ORDER" ? <button type="button" className="button button-primary" onClick={() => openSelectedOrder()}>查看完整订单</button> : null}
               </>}
             >
-              {selectedOrderIdentity ? selectedOrderContext : desktopSelectionContext}
+              {desktopContextKind === "ORDER" ? selectedOrderContext : desktopSelectionContext}
             </Modal>
           ) : null}
 
@@ -3770,9 +4140,9 @@ export function InventoryPage() {
             </Modal>
           ) : null}
 
-          {!isMobile && desktopContextCollapsed && !quickPopoverTarget && (selectedUnit || selectedOrderIdentity || viewState.selection) ? (
+          {!isMobile && desktopContextCollapsed && !quickPopoverTarget && (selectedUnit || selectedOrderIdentity || viewState.selection || showQuoteWorkbench) ? (
             <button type="button" className="button button-primary room-status-context-reopen" onClick={reopenDesktopContext}>
-              <PanelRightOpen aria-hidden="true" size={17} />打开{selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
+              <PanelRightOpen aria-hidden="true" size={17} />打开{pageQuoteRecovery.kind !== "ABSENT" ? "报价恢复" : selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
             </button>
           ) : null}
 
@@ -3791,6 +4161,7 @@ export function InventoryPage() {
                   inspectUnit(unit);
                 }}
                 onSelectionChange={selectRange}
+                onDraftValidityChange={setSelectionDraftValid}
                 onOpenReference={openReference}
                 onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
                 onAction={(action) => {
@@ -3804,20 +4175,56 @@ export function InventoryPage() {
             <div className="room-status-quote-section" ref={quoteSectionRef}>
               <QuoteWorkbench
                 unit={quoteActionUnit}
-                arrivalDate={quoteTarget?.arrivalDate ?? range.arrivalDate}
-                departureDate={quoteTarget?.departureDate ?? range.departureDate}
+                arrivalDate={activeQuoteTarget?.arrivalDate ?? range.arrivalDate}
+                departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
                 policies={policies}
-                {...(quoteTarget ? { initialStayType: quoteTarget.initialStayType } : {})}
+                {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
                 commandsBlocked={commandsBlocked}
+                selectionDraftValid={selectionDraftValid}
                 resetToken={quoteResetToken}
-                onClose={() => setQuoteTarget(undefined)}
+                onClose={closeQuoteWorkbench}
                 onRecoveryOutcome={setQuoteRecoveryOutcome}
+                onRecoveryStateChange={() => {
+                  if (recoveryQuoteTarget) setQuoteTarget(recoveryQuoteTarget);
+                  setPageQuoteRecoveryRevision((revision) => revision + 1);
+                }}
                 onCommand={startCommand}
               />
             </div>
           ) : null}
         </>
       )}
+
+      {queryPhase !== "PERMISSION_DENIED" && shouldRenderDetachedQuoteRecoveryWorkbench(Boolean(renderedBoard), quoteRecoveryContextOpen, pageQuoteRecovery) ? (
+        <Modal
+          title="报价恢复"
+          size={isMobile ? "mobile-fullscreen" : "drawer"}
+          modal
+          className="room-status-write-drawer"
+          onClose={closeDesktopContext}
+          footer={<button type="button" className="button button-secondary" onClick={closeDesktopContext}>关闭</button>}
+        >
+          <div className="room-status-quote-section" ref={quoteSectionRef}>
+            <QuoteWorkbench
+              unit={undefined}
+              arrivalDate={activeQuoteTarget?.arrivalDate ?? range.arrivalDate}
+              departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
+              policies={policies}
+              {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
+              commandsBlocked
+              selectionDraftValid={selectionDraftValid}
+              resetToken={quoteResetToken}
+              onClose={closeQuoteWorkbench}
+              onRecoveryOutcome={setQuoteRecoveryOutcome}
+              onRecoveryStateChange={() => {
+                if (recoveryQuoteTarget) setQuoteTarget(recoveryQuoteTarget);
+                setPageQuoteRecoveryRevision((revision) => revision + 1);
+              }}
+              onCommand={startCommand}
+            />
+          </div>
+        </Modal>
+      ) : null}
 
       {maintenanceTarget && viewState.selection && !command ? <MaintenanceDialog unit={maintenanceTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} {...(commandDraft?.commandType === "LOCK_MAINTENANCE" ? { draft: commandDraft } : {})} onClose={() => { setMaintenanceTarget(undefined); setCommandDraft(undefined); restoreRoomStatusInteraction(); }} onSubmit={startCommand} /> : null}
       {authorizedSelectedOrderView && selectedCorrectionOccupant ? <OrderOccupantCorrectionDialog
@@ -3849,6 +4256,7 @@ export function InventoryPage() {
         }))].join(" → ")}
         inventoryUnits={meta.inventoryUnits}
         writeBlocked={commandsBlocked || selectedStayDateRevision !== board?.revision}
+        runPreview={commandRecovery.runPreview}
         {...(commandDraft?.commandType === selectedStayDateAction ? { draft: commandDraft } : {})}
         onClose={() => {
           setSelectedStayDateAction(undefined);
@@ -3877,6 +4285,7 @@ export function InventoryPage() {
         view={authorizedSelectedOrderView}
         units={meta.inventoryUnits}
         writeBlocked={commandsBlocked || selectedMoveUnitRevision !== board?.revision}
+        runPreview={commandRecovery.runPreview}
         {...(commandDraft?.commandType === "MOVE_UNIT" ? { draft: commandDraft } : {})}
         onClose={() => {
           setSelectedMoveUnitOpen(false);
@@ -3930,8 +4339,8 @@ export function InventoryPage() {
         writeBlocked={!recoveryDialogOpen && activeCommandWriteBlocked}
         writeBlockedReason="当前命令绑定的门店、账号、订单、住宿、查询范围或业务版本已经变化，或者操作恢复状态异常。请关闭后重新核对。"
         onCommitted={refreshCommittedRoomStatus}
-        onBusinessSuccess={(message) => {
-          setCommandNotice(message);
+        onBusinessSuccess={() => {
+          setCommandNotice(undefined);
           setCommandDraft(undefined);
           setSelectedStayDateAction(undefined);
           setSelectedStayDateMode("DATE_CHANGE");

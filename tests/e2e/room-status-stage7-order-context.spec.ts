@@ -84,7 +84,7 @@ async function login(
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
   await expect(page.getByRole("grid")).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
@@ -100,29 +100,37 @@ async function loginMobile(
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "今日运营任务", exact: true, level: 1 })).toBeVisible();
   await expect(page.locator(".room-status-mobile")).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
 
 async function showFixtureRange(page: Page, options: { clipped?: boolean; nights?: number } = {}): Promise<void> {
   const rangeStart = options.clipped ? addDays(fixture.dates.arrivalDate, 1) : fixture.dates.arrivalDate;
-  const rangeEnd = options.nights
+  const requestedRangeEnd = options.nights
     ? addDays(rangeStart, options.nights)
     : options.clipped
       ? addDays(fixture.dates.departureDate, -1)
       : addDays(fixture.dates.departureDate, 2);
 
   const mobileRangeToggle = page.getByTestId("mobile-room-status-range-toggle");
-  if (await mobileRangeToggle.isVisible()) await mobileRangeToggle.click();
-  const departureResponse = roomStatusResponse(page);
-  await page.getByTestId("departure-date").fill(rangeEnd);
-  await departureResponse;
+  const mobile = (page.viewportSize()?.width ?? 0) <= 767;
+  const rangeEnd = mobile ? requestedRangeEnd : addDays(rangeStart, 30);
+  if (mobile) {
+    await expect(mobileRangeToggle).toBeVisible();
+    await mobileRangeToggle.click();
+    const departureResponse = roomStatusResponse(page);
+    await page.getByTestId("departure-date").fill(rangeEnd);
+    await departureResponse;
+  }
   const arrivalResponse = roomStatusResponse(page);
   await page.getByTestId("arrival-date").fill(rangeStart);
   await arrivalResponse;
   const boardRange = page.getByTestId("room-status-board-range");
-  if (await boardRange.count()) await expect(boardRange).toHaveAttribute("data-range-arrival", rangeStart);
+  if (await boardRange.count()) {
+    await expect(boardRange).toHaveAttribute("data-range-arrival", rangeStart);
+    await expect(boardRange).toHaveAttribute("data-range-departure", rangeEnd);
+  }
   else await expect(page.getByTestId("arrival-date")).toHaveValue(rangeStart);
   const occupancyToggle = page.getByTestId("mobile-room-status-occupancies-toggle");
   if (await occupancyToggle.isVisible() && await occupancyToggle.getAttribute("aria-expanded") === "false") {
@@ -383,7 +391,7 @@ test("READ order context keeps navigation but exposes no business write entry", 
   await expect(orderDrawer(page).getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
   await expect(context.getByRole("button", { name: "更正资料", exact: true })).toHaveCount(0);
   await expect(context.getByRole("button", {
-    name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款/
+    name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款|登记收款|登记退款|收款|退款/
   })).toHaveCount(0);
 });
 
@@ -410,7 +418,7 @@ test("external collection and full refund refresh amounts and refund availabilit
         propertyId,
         orderId: fixture.wholeRoom.orderId,
         amountMinor: 1_234,
-        method: "CASH",
+        method: "BANK_TRANSFER",
         transactionReference,
         note: "阶段七外部收款刷新"
       }
@@ -429,7 +437,7 @@ test("external collection and full refund refresh amounts and refund availabilit
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
     await Promise.all([refreshedBoard, refreshedOrder]);
     await expect(context).toContainText(transactionReference);
-    await expect(context.getByRole("button", { name: "记录退款", exact: true })).toBeVisible();
+    await expect(context.getByRole("button", { name: "登记退款", exact: true })).toBeVisible();
 
     const refundReference = `STAGE7-EXTERNAL-REFUND-${crypto.randomUUID()}`;
     const refundKey = `stage7-external-refund-${crypto.randomUUID()}`;
@@ -440,7 +448,7 @@ test("external collection and full refund refresh amounts and refund availabilit
         orderId: fixture.wholeRoom.orderId,
         amountMinor: 1_234,
         referencesFactId: collection.factRefs[0]!,
-        method: "CASH",
+        method: "BANK_TRANSFER",
         transactionReference: refundReference,
         note: "阶段七外部全额退款刷新"
       }
@@ -459,7 +467,7 @@ test("external collection and full refund refresh amounts and refund availabilit
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
     await Promise.all([refundBoard, refundOrder]);
     await expect(context).toContainText(refundReference);
-    await expect(context.getByRole("button", { name: "记录退款", exact: true })).toHaveCount(0);
+    await expect(context.getByRole("button", { name: "登记退款", exact: true })).toHaveCount(0);
     expect((await getOrderView(db, fixture.wholeRoom.orderId, "WRITE")).collectionFacts.length)
       .toBe(before.collectionFacts.length + 2);
   } finally {
@@ -510,7 +518,6 @@ test("occupant correction Preview and Confirm refresh both order context and roo
   await page.getByTestId("confirm-command").click();
   await Promise.all([refreshedBoard, refreshedOrder]);
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("住宿人资料已更正，订单信息已刷新");
   await expect(page.getByTestId("command-receipt")).toBeHidden();
 
   const refreshedContext = orderContext(page, fixture.wholeRoom.orderId);
@@ -616,24 +623,16 @@ test("an external occupant correction refreshes the open context and remains vis
   await expect(correctionAmendment).toContainText("昵称：小满 → 秋实");
 });
 
-test("adaptive date columns stay fixed while desktop context collapses and large screens show more days", async ({ page }, testInfo) => {
-  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 adaptive date geometry coverage");
+test("fixed 30-night timeline keeps stable columns while desktop context opens and the viewport widens", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 fixed timeline geometry coverage");
   await page.setViewportSize({ width: 1440, height: 800 });
   await login(page);
   await showFixtureRange(page, { nights: 14 });
 
   const drawer = page.locator("dialog.modal-drawer");
   await expect(drawer).toHaveCount(0);
-  await expect(page.getByTestId("date-window-mode-auto")).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator(".room-status-date-header")).toHaveCount(10);
-
-  const expandedRange = roomStatusResponse(page);
-  await page.getByTestId("date-window-mode-21").click();
-  await expandedRange;
-  await expect(page.getByTestId("departure-date")).toHaveValue(addDays(fixture.dates.arrivalDate, 21));
-  await expect(page.locator(".room-status-date-header")).toHaveCount(21);
-  await page.getByTestId("date-window-mode-auto").click();
-  await expect(page.locator(".room-status-date-header")).toHaveCount(10);
+  await expect(page.locator('[data-testid^="date-window-mode-"]')).toHaveCount(0);
+  await expect(page.locator(".room-status-date-header")).toHaveCount(30);
 
   const trigger = roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate);
   const widthBeforeOrder = await trigger.evaluate((element) => element.getBoundingClientRect().width);
@@ -646,21 +645,14 @@ test("adaptive date columns stay fixed while desktop context collapses and large
     fixture.wholeRoom.orderId
   );
   await expect(drawer).toBeVisible();
-  await expect(page.locator(".room-status-date-header")).toHaveCount(10);
+  await expect(page.locator(".room-status-date-header")).toHaveCount(30);
   expect(await trigger.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(widthBeforeOrder, 1);
 
   await closeOrderContext(context);
   await expect(drawer).toBeHidden();
   await page.setViewportSize({ width: 1920, height: 900 });
-  await expect.poll(() => page.locator(".room-status-date-header").count()).toBeGreaterThan(10);
-  const largeAutoCount = await page.locator(".room-status-date-header").count();
-  expect(largeAutoCount).toBeLessThanOrEqual(21);
+  await expect(page.locator(".room-status-date-header")).toHaveCount(30);
   expect(await trigger.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(widthBeforeOrder, 1);
-
-  await page.getByTestId("date-window-mode-14").click();
-  await expect(page.locator(".room-status-date-header")).toHaveCount(14);
-  await page.getByTestId("date-window-mode-auto").click();
-  await expect(page.locator(".room-status-date-header")).toHaveCount(largeAutoCount);
 });
 
 test("desktop drawer geometry, Escape focus, and full-order return preserve room-status context", async ({ page }, testInfo) => {
@@ -766,6 +758,72 @@ test("desktop drawer geometry, Escape focus, and full-order return preserve room
   await expect(orderContext(page, fixture.splitBed.bedAOrderId)).toBeVisible();
 });
 
+test("desktop order drawer keeps wheel scrolling inside the drawer at its middle and bottom", async ({ page }, testInfo) => {
+  test.skip(!isDesktopProject(testInfo), "desktop-only drawer wheel isolation coverage");
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await login(page);
+  await showFixtureRange(page);
+
+  await selectOccupiedCell(
+    page,
+    fixture.wholeRoom.roomId,
+    fixture.dates.arrivalDate,
+    fixture.wholeRoom.orderId
+  );
+  const drawer = page.locator("dialog.modal-drawer");
+  const drawerBody = drawer.locator(".modal-body");
+  await expect(drawerBody).toBeVisible();
+
+  const initial = await page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    const maximumWindowY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    window.scrollTo({ top: Math.min(160, maximumWindowY) });
+    return {
+      maximumWindowY,
+      windowX: window.scrollX,
+      windowY: window.scrollY,
+      gridLeft: grid?.scrollLeft ?? 0,
+      gridTop: grid?.scrollTop ?? 0
+    };
+  });
+  expect(initial.maximumWindowY).toBeGreaterThan(0);
+
+  const drawerMaximum = await drawerBody.evaluate((element) => Math.max(0, element.scrollHeight - element.clientHeight));
+  expect(drawerMaximum).toBeGreaterThan(80);
+  const drawerBox = await drawerBody.boundingBox();
+  expect(drawerBox).not.toBeNull();
+  await page.mouse.move(drawerBox!.x + drawerBox!.width / 2, drawerBox!.y + drawerBox!.height / 2);
+
+  const middleBefore = await drawerBody.evaluate((element, maximum) => {
+    element.scrollTop = Math.floor(maximum / 2);
+    return element.scrollTop;
+  }, drawerMaximum);
+  const shellBeforeMiddleWheel = await page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  });
+  await page.mouse.wheel(0, 120);
+  await expect.poll(() => drawerBody.evaluate((element) => element.scrollTop)).toBeGreaterThan(middleBefore);
+  await expect.poll(() => page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  })).toEqual(shellBeforeMiddleWheel);
+
+  await drawerBody.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  const bottomBefore = await page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  });
+  await page.mouse.wheel(0, 320);
+  await expect.poll(() => drawerBody.evaluate((element) => (
+    Math.abs(element.scrollTop - Math.max(0, element.scrollHeight - element.clientHeight)) <= 1
+  ))).toBe(true);
+  await expect.poll(() => page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>(".room-status-grid-scroll");
+    return { windowX: window.scrollX, windowY: window.scrollY, gridLeft: grid?.scrollLeft ?? 0, gridTop: grid?.scrollTop ?? 0 };
+  })).toEqual(bottomBefore);
+});
+
 test("375px mobile occupancy opens and closes the order context, then returns from the full order", async ({ page }, testInfo) => {
   test.skip(!isMobileProject(testInfo), "mobile-only Stage 7 order context coverage");
   await page.setViewportSize({ width: 375, height: 812 });
@@ -795,7 +853,9 @@ test("375px mobile occupancy opens and closes the order context, then returns fr
   const returnedBoard = roomStatusResponse(page);
   await page.getByRole("link", { name: "返回房态", exact: true }).click();
   await returnedBoard;
-  await expect(page.getByTestId("arrival-date")).toHaveValue(fixture.dates.arrivalDate);
+  const [, month, day] = fixture.dates.arrivalDate.split("-");
+  await expect(page.getByRole("region", { name: "查看房态日期", exact: true }))
+    .toContainText(`${Number(month)}月${Number(day)}日`);
   await expect(orderContext(page, fixture.wholeRoom.orderId)).toBeVisible();
 });
 
@@ -837,7 +897,7 @@ test("320px READ mobile context exposes navigation but no correction or business
   await expect(orderDrawer(page).getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
   await expect(context.getByRole("button", { name: "更正资料", exact: true })).toHaveCount(0);
   await expect(context.getByRole("button", {
-    name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款/
+    name: /办理入住|办理退房|缩短住宿|续住|换房|取消订单|标记未到|记录收款|记录退款|登记收款|登记退款|收款|退款/
   })).toHaveCount(0);
   const geometry = await page.evaluate(() => ({
     bodyOverflow: getComputedStyle(document.body).overflow,

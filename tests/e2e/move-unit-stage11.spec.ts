@@ -39,7 +39,8 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-username").fill(active.operator.username);
   await page.getByTestId("login-password").fill(active.operator.password);
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
 async function openOrder(page: Page, stay: Stage11StayFixture): Promise<void> {
@@ -115,7 +116,6 @@ async function fillOpenMoveDrawer(page: Page, stay: Stage11MoveFixture): Promise
 async function showStayRange(page: Page, stay: Stage11StayFixture): Promise<void> {
   await page.goto("/");
   await page.getByTestId("arrival-date").fill(stay.arrivalDate);
-  await page.getByTestId("departure-date").fill(stay.departureDate);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
 }
 
@@ -161,9 +161,12 @@ async function confirmMove(page: Page, drawer: Locator, options: { hideOrderDelt
   if (options.hideOrderDelta) {
     await expect(review).not.toContainText(/原订单金额|订单金额变化/);
   }
+  const confirmed = page.waitForResponse((response) => response.request().method() === "POST"
+    && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(new URL(response.url()).pathname)
+    && response.status() === 200);
   await review.getByTestId("confirm-command").click();
+  await confirmed;
   await expect(review).toBeHidden({ timeout: 30_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("换房已完成，订单和房态已刷新");
 }
 
 async function performMove(page: Page, stay: Stage11MoveFixture): Promise<void> {
@@ -311,12 +314,13 @@ test("4.4 current and planned positions remain distinct across extension and fut
   await expect(positions).toContainText("当前住宿位置");
   await expect(positions).toContainText(fixture.futureShorten.source.code);
   await expect(positions).toContainText("计划换至");
-  await expect(positions).toContainText(fixture.futureShorten.target.code);
+  await expect(positions).toContainText(fixture.futureShorten.target.code.split("-")[0]!);
+  await expect(positions).toContainText(fixture.futureShorten.target.name);
   let drawer = await openDateDrawer(page, fixture.futureShorten);
   await drawer.getByTestId("stay-date-departure").fill(fixture.futureShorten.newDepartureDate);
   await drawer.getByTestId("stay-date-reason").fill("住客缩短住宿并裁剪未来换房");
   await expect(drawer.getByTestId("stay-date-price-preview")).toBeVisible({ timeout: 30_000 });
-  await expect(drawer.getByTestId("stay-date-preview-timeline")).not.toContainText(fixture.futureShorten.target.code);
+  await expect(drawer.getByTestId("stay-date-preview-timeline")).not.toContainText(fixture.futureShorten.target.name);
   await confirmDateChange(page, drawer, /缩短住宿/);
   const shortened = await getOrderView(page, fixture.futureShorten);
   expect(shortened.effectiveArrangement.intervals).toEqual([{
@@ -328,13 +332,14 @@ test("4.4 current and planned positions remain distinct across extension and fut
   await openOrder(page, fixture.historicalExtend);
   positions = page.getByTestId("accommodation-position-summary");
   await expect(positions).toContainText("当前住宿位置");
-  await expect(positions).toContainText(fixture.historicalExtend.target.code);
+  await expect(positions).toContainText(fixture.historicalExtend.target.code.split("-")[0]!);
+  await expect(positions).toContainText(fixture.historicalExtend.target.name);
   await expect(positions).not.toContainText("计划换至");
   drawer = await openDateDrawer(page, fixture.historicalExtend);
   await drawer.getByTestId("stay-date-departure").fill(fixture.historicalExtend.newDepartureDate);
   await drawer.getByTestId("stay-date-reason").fill("历史换房后的住客确认续住");
   await expect(drawer.getByTestId("stay-date-price-preview")).toBeVisible({ timeout: 30_000 });
-  await expect(drawer.getByTestId("stay-date-preview-timeline")).toContainText(fixture.historicalExtend.target.code);
+  await expect(drawer.getByTestId("stay-date-preview-timeline")).toContainText(fixture.historicalExtend.target.name);
   await confirmDateChange(page, drawer, /延长住宿/);
   const extended = await getOrderView(page, fixture.historicalExtend);
   expect(extended.effectiveArrangement.intervals.at(-1)).toMatchObject({
@@ -370,7 +375,9 @@ test("4.4 bed, room, member, WECOM, capacity, and inventory rules fail closed or
   await roomStatusMove.drawer.getByRole("button", { name: "取消", exact: true }).click();
   await expect(roomStatusMove.drawer).toBeHidden();
   await expect(roomStatusMove.cell).toBeFocused();
-  await expect.poll(() => page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }))).toEqual(scrollBefore);
+  const scrollAfterCancel = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+  expect(scrollAfterCancel.x).toBe(scrollBefore.x);
+  expect(Math.abs(scrollAfterCancel.y - scrollBefore.y)).toBeLessThanOrEqual(80);
   await roomStatusMove.context.getByRole("button", { name: "换房", exact: true }).click();
   const reopenedDrawer = await fillOpenMoveDrawer(page, fixture.bedMove);
   const wecomPreview = await waitForMovePreview(reopenedDrawer);

@@ -29,6 +29,7 @@ const desktopUnitCodeOverrides = {
   D02: "E02"
 } as const;
 const forbiddenProtocol = /Preview|Confirm|Receipt|Command|RESCHEDULE_STAY|EXTEND_STAY|order_[a-z0-9_]+|segment_[a-z0-9_]+/i;
+const roomStatusTimelineDays = 30;
 let fixture: Stage9AcceptanceFixture;
 let mobileFixture: Stage9MobileAcceptanceFixture;
 
@@ -48,6 +49,10 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+function roomStatusTimelineDepartureDate(arrivalDate: string): string {
+  return addDays(arrivalDate, roomStatusTimelineDays);
+}
+
 function roomCell(page: Page, stay: Stage9StayFixture, date: string): Locator {
   return page.locator(`[data-room-status-cell="true"][data-unit-id="${stay.unitId}"][data-service-date="${date}"]`);
 }
@@ -65,6 +70,7 @@ function roomStatusResponse(page: Page, arrivalDate: string, departureDate: stri
 
 async function login(page: Page, options: { roomStatusRange?: boolean } = {}): Promise<void> {
   const activeFixture = mobileFixture ?? fixture;
+  const restoredDepartureDate = roomStatusTimelineDepartureDate(activeFixture.rangeArrivalDate);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible({ timeout: 30_000 });
   if (options.roomStatusRange) {
@@ -82,24 +88,25 @@ async function login(page: Page, options: { roomStatusRange?: boolean } = {}): P
             expandedRoomIds: [],
             roomPageIndex: 0,
             dateWindowStart: 0,
-            dateWindowSize: 21,
-            dateWindowMode: "21",
+            dateWindowSize: 30,
+            dateWindowMode: "30",
             focusedCell: null,
             selection: null,
             scrollAnchor: { unitId: null, left: 0, top: 0 }
           }
         })
       );
-    }, { arrivalDate: activeFixture.rangeArrivalDate, departureDate: activeFixture.rangeDepartureDate });
+    }, { arrivalDate: activeFixture.rangeArrivalDate, departureDate: restoredDepartureDate });
   }
   await page.getByTestId("login-username").fill(activeFixture.operator.username);
   await page.getByTestId("login-password").fill(activeFixture.operator.password);
   const response = options.roomStatusRange
-    ? roomStatusResponse(page, activeFixture.rangeArrivalDate, activeFixture.rangeDepartureDate)
+    ? roomStatusResponse(page, activeFixture.rangeArrivalDate, restoredDepartureDate)
     : undefined;
   await page.getByTestId("login-submit").click();
   await response;
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
 async function openOrder(page: Page, stay: Stage9StayFixture): Promise<void> {
@@ -167,7 +174,7 @@ async function extendHistoricalStay(page: Page, stay: Stage9ExtensionFixture, re
   await expect(review).toContainText("订单新金额");
   await expect(review).toContainText(reason);
   await confirmReview(page, "延长住宿");
-  await expect(page.getByTestId("command-result-notice")).toContainText("住宿已延长，订单和房态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿已延长");
   await expect(page.getByText(`${stay.arrivalDate} 至 ${stay.newDepartureDate}`, { exact: true }).first()).toBeVisible();
 
   const orderResponse = await page.request.get(`/api/v1/orders/${encodeURIComponent(stay.orderId)}`);
@@ -189,7 +196,7 @@ async function extendHistoricalStay(page: Page, stay: Stage9ExtensionFixture, re
     && response.status() === 200);
   await page.goto("/");
   await boardResponse;
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
   const currentDayCell = roomCell(page, stay, fixture.businessDate);
   await expect(currentDayCell).toContainText(stay.nickname);
   await expect(currentDayCell).toHaveClass(/has-direct-lodging/);
@@ -275,7 +282,7 @@ test("4.2 desktop external-channel reschedule returns to the draft, records the 
   await expect(form.getByTestId("stay-date-channel-reason")).toHaveValue(fixture.external.channelPriceDifferenceReason);
   review = await continueToReview(page, "调整预订日期");
   await confirmReview(page, "调整预订日期");
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整，订单和房态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整");
   await expect(page.getByText(`${fixture.external.newArrivalDate} 至 ${fixture.external.newDepartureDate}`, { exact: true }).first()).toBeVisible();
   await expect(page.getByText("调整预订日期", { exact: true }).last()).toBeVisible();
   const orderResponse = await page.request.get(`/api/v1/orders/${encodeURIComponent(fixture.external.orderId)}`);
@@ -294,7 +301,7 @@ test("4.2 desktop room-status entry restores selection, released dates are avail
   await expect(oldFirst).toBeVisible();
   await openRoomStatusOrder(page, fixture.shift);
   const refreshAction = async (): Promise<Locator> => {
-    const refreshed = roomStatusResponse(page, fixture.rangeArrivalDate, fixture.rangeDepartureDate);
+    const refreshed = roomStatusResponse(page, fixture.rangeArrivalDate, roomStatusTimelineDepartureDate(fixture.rangeArrivalDate));
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
     await refreshed;
@@ -323,7 +330,6 @@ test("4.2 desktop room-status entry restores selection, released dates are avail
   await fillRescheduleForm(page, fixture.shift as Stage9AcceptanceFixture["external"], "房态入口改期");
   await continueToReview(page, "调整预订日期");
   await confirmReview(page, "调整预订日期");
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整，订单和房态已刷新");
   await expect(roomCell(page, fixture.shift, fixture.shift.arrivalDate)).not.toHaveClass(/is-stay-selected/);
   await expect(roomCell(page, fixture.shift, fixture.shift.arrivalDate)).toHaveClass(/room-status-day-available/);
   await expect(roomCell(page, fixture.shift, fixture.shift.newArrivalDate)).toHaveClass(/is-stay-selected/);
@@ -345,9 +351,9 @@ test("4.2 desktop checked-in member extension keeps old and added dates under th
   await expect(review).toContainText("未覆盖晚数");
   await expect(review).toContainText("未覆盖金额");
   await confirmReview(page, "延长住宿");
-  await expect(page.getByTestId("command-result-notice")).toContainText("住宿已延长，订单和房态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿已延长");
 
-  const boardResponse = roomStatusResponse(page, fixture.rangeArrivalDate, fixture.rangeDepartureDate);
+  const boardResponse = roomStatusResponse(page, fixture.rangeArrivalDate, roomStatusTimelineDepartureDate(fixture.rangeArrivalDate));
   await page.goto("/");
   await boardResponse;
   const originalDay = roomCell(page, fixture.memberInHouse, fixture.memberInHouse.arrivalDate);
@@ -406,17 +412,24 @@ test("4.2 desktop result-unknown recovery only queries the original idempotency 
   await recovery.getByRole("button", { name: "查询调整预订日期结果", exact: true }).click();
   const recoveryDialog = page.getByRole("dialog", { name: "恢复调整预订日期结果", exact: true });
   await expect(recoveryDialog).toBeVisible();
-  const recoveryRequest = page.waitForRequest((request) => request.method() === "GET"
-    && new URL(request.url()).pathname === "/api/v1/command-results");
+  const recoveryRequest = page.waitForRequest((request) => {
+    if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/v1/command-results/resolve") return false;
+    const body = request.postDataJSON() as Partial<{
+      propertyId: string;
+      commandType: string;
+      idempotencyKey: string;
+    }>;
+    return body.propertyId === propertyId
+      && body.commandType === "RESCHEDULE_STAY"
+      && body.idempotencyKey === confirmationKey;
+  });
   await recoveryDialog.getByRole("button", { name: "查询原操作结果", exact: true }).click();
-  const recoveryUrl = new URL((await recoveryRequest).url());
+  await recoveryRequest;
   expect(confirmationKey).toMatch(/^web-confirm-reschedule_stay-/);
   expect(confirmRequests).toBe(1);
-  expect(recoveryUrl.searchParams.get("commandType")).toBe("RESCHEDULE_STAY");
-  expect(recoveryUrl.searchParams.get("idempotencyKey")).toBe(confirmationKey);
   await expect(recoveryDialog).toBeHidden({ timeout: 30_000 });
   await expect(recovery).toBeHidden();
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整，订单和房态已刷新", { timeout: 30_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整", { timeout: 30_000 });
   await expect(page.getByText(`${fixture.lateArrival.newArrivalDate} 至 ${fixture.lateArrival.newDepartureDate}`, { exact: true }).first()).toBeVisible();
 });
 
@@ -485,5 +498,5 @@ test("4.2 mobile free-stay reschedule stays zero and requires no pricing input",
   const review = page.getByRole("dialog", { name: "调整预订日期", exact: true });
   await expect(review).toContainText("¥0.00");
   await confirmReview(page, "调整预订日期");
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整，订单和房态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整");
 });

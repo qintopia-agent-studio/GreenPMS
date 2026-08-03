@@ -22,7 +22,8 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   MARK_NO_SHOW: "标记未到",
   REVOKE_CHECK_IN: "撤销入住",
   RECORD_COLLECTION: "登记收款",
-  RECORD_REFUND: "登记退款"
+  RECORD_REFUND: "登记退款",
+  CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: "升级会员"
 };
 
 const channelLabels = {

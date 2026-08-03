@@ -287,6 +287,7 @@ describe("stay date change drawer rules", () => {
       mode: "ADJUST_DEPARTURE",
       view: checkedIn,
       inventoryUnitLabel: "101 · 单人间",
+      runPreview: (execute) => execute(),
       onClose: () => undefined,
       onSubmit: () => undefined
     }));

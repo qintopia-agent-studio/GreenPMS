@@ -51,8 +51,9 @@ export function useWorkspace() {
 }
 
 export function LoginPage({ onLogin }: { onLogin: (principal: PrincipalDto) => void }) {
-  const [username, setUsername] = useState("operator");
-  const [password, setPassword] = useState("demo-pass-2026");
+  const demoLoginEnabled = import.meta.env.DEV || import.meta.env.VITE_DEMO_LOGIN === "true";
+  const [username, setUsername] = useState(demoLoginEnabled ? "operator" : "");
+  const [password, setPassword] = useState(demoLoginEnabled ? "demo-pass-2026" : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
   const errorRef = useRef<HTMLDivElement>(null);
@@ -94,11 +95,13 @@ export function LoginPage({ onLogin }: { onLogin: (principal: PrincipalDto) => v
           <input id="password" name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required data-testid="login-password" />
           <button className="button button-primary login-submit" type="submit" disabled={busy} data-testid="login-submit">{busy ? "正在登录..." : "进入工作台"}</button>
         </form>
-        <div className="demo-account" aria-label="演示账号">
-          <span>演示账号</span>
-          <code>operator</code>
-          <code>demo-pass-2026</code>
-        </div>
+        {demoLoginEnabled ? (
+          <div className="demo-account" aria-label="演示账号">
+            <span>演示账号</span>
+            <code>operator</code>
+            <code>demo-pass-2026</code>
+          </div>
+        ) : null}
       </section>
     </main>
   );
@@ -174,9 +177,13 @@ const navigation = [
   { to: "/", label: "房态", icon: BedDouble, end: true },
   { to: "/orders", label: "订单", icon: ClipboardList, end: false },
   { to: "/members", label: "会员", icon: BadgeCheck, end: false },
-  { to: "/tokens", label: "Token", icon: KeyRound, end: false },
-  { to: "/today", label: "移动履约", icon: Smartphone, end: false }
+  { to: "/tokens", label: "Token", icon: KeyRound, end: false, requiresWrite: true },
+  { to: "/today", label: "今日履约", icon: Smartphone, end: false }
 ] as const;
+
+export function navigationItemsForAccess(access: "READ" | "WRITE") {
+  return navigation.filter((item) => !("requiresWrite" in item && item.requiresWrite && access !== "WRITE"));
+}
 
 const sidebarStoragePrefix = "qintopia:pms:sidebar-collapsed:v1";
 
@@ -227,10 +234,10 @@ export function persistSidebarCollapsed(storage: Pick<Storage, "setItem"> | unde
   }
 }
 
-function Navigation({ mobile = false, collapsed = false }: { mobile?: boolean; collapsed?: boolean }) {
+function Navigation({ access, mobile = false, collapsed = false }: { access: "READ" | "WRITE"; mobile?: boolean; collapsed?: boolean }) {
   return (
     <nav className={mobile ? "mobile-navigation" : "primary-navigation"} aria-label={mobile ? "移动主导航" : "主导航"}>
-      {navigation.map((item) => {
+      {navigationItemsForAccess(access).map((item) => {
         const Icon = item.icon;
         return (
           <NavLink
@@ -253,6 +260,7 @@ function Navigation({ mobile = false, collapsed = false }: { mobile?: boolean; c
 export function AppShell({ onLogout }: { onLogout: () => void }) {
   const { principal, meta, propertyId, setPropertyId } = useWorkspace();
   const property = meta.properties.find((item) => item.id === propertyId);
+  const propertyAccess = principal.propertyAccess[propertyId] ?? "READ";
   const [logoutFailure, setLogoutFailure] = useState<{ error: unknown; sessionState: "ACTIVE" | "UNKNOWN" }>();
   const [loggingOut, setLoggingOut] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => storedSidebarCollapsed(
@@ -317,7 +325,7 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
             {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" size={18} /> : <PanelLeftClose aria-hidden="true" size={18} />}
           </button>
         </div>
-        <Navigation collapsed={sidebarCollapsed} />
+        <Navigation access={propertyAccess} collapsed={sidebarCollapsed} />
         <div className="sidebar-user">
           <UserRound aria-hidden="true" size={18} />
           <div><strong>{principal.displayName}</strong><span>{principal.propertyAccess[propertyId] === "WRITE" ? "可写" : "只读"}</span></div>
@@ -350,7 +358,7 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
         ) : null}
         <main id="main-content" className="main-content" tabIndex={-1}><Outlet /></main>
       </div>
-      <Navigation mobile />
+      <Navigation access={propertyAccess} mobile />
     </div>
   );
 }

@@ -1354,6 +1354,12 @@ textarea:focus-visible {
   justify-self: start;
 }
 
+.retained-secret-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .token-secret-value {
   min-width: 0;
   display: grid;
@@ -1470,6 +1476,26 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.token-actions-heading,
+.token-actions-cell {
+  text-align: center;
+}
+
+.token-row-actions {
+  justify-content: center;
+  gap: 6px;
+}
+
+.danger-text-button {
+  color: var(--danger);
+}
+
+.danger-text-button:hover:not(:disabled) {
+  border-color: #e4a0a0;
+  background: var(--danger-soft);
+  color: var(--danger-hover);
+}
+
 .maintenance-lock-count {
   color: var(--muted);
   font-size: 12px;
@@ -1518,6 +1544,12 @@ textarea:focus-visible {
   max-width: 100%;
   overflow: auto;
   overscroll-behavior: contain;
+}
+
+/* Order detail tables need horizontal containment, but their vertical wheel
+   gestures should continue scrolling the page instead of trapping the user. */
+.order-detail-page .table-region {
+  overscroll-behavior-y: auto;
 }
 
 table {
@@ -1668,6 +1700,23 @@ thead .sticky-column {
   font-weight: 700;
 }
 
+.fact-transfer-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.inline-link {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.inline-link:hover {
+  text-decoration: underline;
+}
+
 .fact-refund-button {
   min-height: 28px;
   padding: 3px 12px;
@@ -1733,6 +1782,13 @@ thead .sticky-column {
   font-weight: 620;
 }
 
+.form-field-help {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
 .form-field-note {
   min-width: 0;
   display: grid;
@@ -1749,6 +1805,75 @@ thead .sticky-column {
 .form-field-note span {
   color: var(--muted);
   font-weight: 500;
+}
+
+.conversion-transfer-card {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 90%, var(--primary) 10%);
+}
+
+.conversion-transfer-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.conversion-transfer-heading > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.conversion-transfer-heading span,
+.conversion-transfer-list small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.conversion-transfer-heading > strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.conversion-transfer-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversion-transfer-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.conversion-transfer-list li > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.conversion-transfer-list li > strong {
+  justify-self: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.conversion-transfer-list small {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .span-two {
@@ -1975,11 +2100,25 @@ thead .sticky-column {
   border-block: 0;
   border-right: 0;
   border-radius: 0;
+  overscroll-behavior: contain;
 }
 
 .modal-drawer .modal-shell {
   height: 100dvh;
   max-height: none;
+}
+
+.modal-drawer .modal-body {
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+/* The drawer body is the single vertical scroll container. Keep the quote
+   workbench in normal flow so long forms do not create a second scrollbar. */
+.room-status-write-drawer .quote-workbench {
+  position: static;
+  max-height: none;
+  overflow: visible;
 }
 
 .room-status-write-drawer .room-status-quote-section .full-width {
@@ -2222,6 +2361,26 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.effect-inline-list {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.effect-inline-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.effect-inline-list small {
+  color: var(--muted);
+}
+
 .difference-row {
   grid-column: 1 / -1;
   display: grid;
@@ -2393,6 +2552,43 @@ pre {
 .recovery-bar p {
   margin-top: 2px;
   font-size: 12px;
+}
+
+.recovery-damaged {
+  align-items: flex-start;
+}
+
+.recovery-damaged-copy {
+  min-width: 0;
+}
+
+.recovery-damaged-copy ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.recovery-damaged-actions {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 8px;
+  width: min(360px, 42%);
+}
+
+.recovery-damaged-actions label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.recovery-damaged-actions input {
+  flex: 0 0 auto;
+  margin-top: 2px;
 }
 
 .command-result-notice {
@@ -3499,7 +3695,8 @@ pre {
     z-index: 30;
     min-height: 64px;
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
     padding: 5px max(8px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
     background: var(--surface);
     border-top: 1px solid var(--border);
@@ -3782,6 +3979,10 @@ pre {
   .recovery-bar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .recovery-damaged-actions {
+    width: 100%;
   }
 
   .order-heading {

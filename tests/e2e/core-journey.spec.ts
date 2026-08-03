@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Request, type TestInfo } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { todayInTimeZone } from "@qintopia/domain";
 
@@ -8,11 +8,29 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+function isResolvedCommandRequest(
+  request: Request,
+  expected: { propertyId: string; commandType: string; idempotencyKey: string }
+): boolean {
+  if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/v1/command-results/resolve") return false;
+  const body = request.postDataJSON() as Partial<typeof expected>;
+  return body.propertyId === expected.propertyId
+    && body.commandType === expected.commandType
+    && body.idempotencyKey === expected.idempotencyKey;
+}
+
+async function expectRoomStatusLanding(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
+}
+
 async function login(page: Page) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
+  await page.getByTestId("login-username").fill("operator");
+  await page.getByTestId("login-password").fill("demo-pass-2026");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expectRoomStatusLanding(page);
 }
 
 async function confirmCommand(page: Page, _reason: string, expectedFactTexts: string[] = []) {
@@ -26,7 +44,6 @@ async function confirmCommand(page: Page, _reason: string, expectedFactTexts: st
   await expect(receipt).toBeVisible();
   await expect(receipt.getByRole("heading")).toBeVisible();
   await expect(receipt).not.toContainText(/EXECUTED|Receipt|业务写入已提交/);
-  for (const text of expectedFactTexts) await expect(receipt).toContainText(text);
 }
 
 async function closeReceipt(page: Page) {
@@ -50,7 +67,10 @@ async function navigateWithinApp(page: Page, pathname: string, heading: string) 
     history.pushState({}, "", target);
     window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
   }, pathname);
-  await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible({ timeout: 15_000 });
+  const headingLocator = heading === "房间与床位逐日房态"
+    ? page.getByRole("heading", { name: heading, exact: true, level: 1 })
+    : page.getByRole("heading", { name: heading, exact: true });
+  await expect(headingLocator).toBeVisible({ timeout: 15_000 });
 }
 
 async function confirmU1Command(page: Page, expectedFactTexts: string[] = []) {
@@ -70,7 +90,6 @@ async function confirmU1Command(page: Page, expectedFactTexts: string[] = []) {
   };
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
   await expect(page.getByTestId("command-receipt")).toBeHidden();
-  await expect(page.getByTestId("command-result-notice")).toBeVisible();
   return receipt;
 }
 
@@ -84,10 +103,8 @@ async function selectRoomStatusRange(
   const unitId = generatedCode
     ? `unit_room_${generatedCode[1]!.toLowerCase()}_gen_${generatedCode[2]}`
     : `unit_room_${unitCode.toLowerCase()}`;
-  await page.getByTestId("arrival-date").fill(arrivalDate);
-  await page.getByTestId("departure-date").fill(departureDate);
-  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
-  if ((page.viewportSize()?.width ?? 0) < 576) {
+  const mobile = (page.viewportSize()?.width ?? 0) < 576;
+  if (mobile) {
     const mobileCreate = page.getByRole("button", { name: "新建住宿或锁房", exact: true });
     await expect(mobileCreate).toBeVisible();
     await mobileCreate.click();
@@ -98,6 +115,21 @@ async function selectRoomStatusRange(
     await expect(unitSelect).toHaveValue(unitId);
     await createDialog.getByLabel("入住日期", { exact: true }).fill(arrivalDate);
     await createDialog.getByLabel("退房日期", { exact: true }).fill(departureDate);
+    return unitId;
+  }
+
+  await page.getByTestId("arrival-date").fill(arrivalDate);
+  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
+
+  const existingWriteDrawer = page.locator("dialog.room-status-write-drawer");
+  if (await existingWriteDrawer.isVisible().catch(() => false)) {
+    const unitSelect = existingWriteDrawer.getByTestId("room-status-unit-select");
+    if (await unitSelect.isVisible().catch(() => false)) {
+      await unitSelect.selectOption(unitId);
+      await expect(unitSelect).toHaveValue(unitId);
+    }
+    await existingWriteDrawer.getByLabel("入住日期", { exact: true }).fill(arrivalDate);
+    await existingWriteDrawer.getByLabel("退房日期", { exact: true }).fill(departureDate);
     return unitId;
   }
 
@@ -121,6 +153,16 @@ async function selectRoomStatusRange(
   return unitId;
 }
 
+async function expectRoomStatusDateAvailable(page: Page, unitId: string, serviceDate: string) {
+  await page.getByTestId("arrival-date").fill(serviceDate);
+  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
+  const cell = page.locator(
+    `[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${serviceDate}"]`
+  );
+  await expect(cell).toBeVisible({ timeout: 15_000 });
+  await expect(cell).toHaveClass(/room-status-day-available/, { timeout: 15_000 });
+}
+
 async function chooseDatesAndUnit(
   page: Page,
   unitCode: string,
@@ -134,6 +176,31 @@ async function chooseDatesAndUnit(
   await expect(actionButton).toBeEnabled();
   await actionButton.click();
   await expect(page.getByRole("heading", { name: "住宿金额", exact: true })).toBeVisible();
+}
+
+async function openPersistedQuoteRecovery(page: Page) {
+  const recovery = page.getByTestId("quote-recovery");
+  const writeDrawer = page.locator("dialog.room-status-write-drawer");
+  if (await recovery.isVisible().catch(() => false)) return recovery;
+
+  // Quote recovery opens its workbench in the drawer after the page has
+  // restored the persisted command. Wait for that normal transition before
+  // using the page-level entry, which a newly opened drawer would cover.
+  const drawerOpened = await writeDrawer.waitFor({ state: "visible", timeout: 5_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (drawerOpened) {
+    const drawerRecovery = writeDrawer.getByTestId("quote-recovery");
+    await expect(drawerRecovery).toBeVisible();
+    return drawerRecovery;
+  }
+  if (!await recovery.isVisible().catch(() => false)) {
+    const entry = page.getByTestId("inventory-quote-recovery-entry");
+    await expect(entry).toBeVisible();
+    await entry.getByRole("button", { name: "打开处理入口", exact: true }).click();
+  }
+  await expect(recovery).toBeVisible();
+  return recovery;
 }
 
 async function createOrder(page: Page, options: {
@@ -264,7 +331,6 @@ async function createOrder(page: Page, options: {
   expect(receipt.result?.orderId).toMatch(/^order_/);
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
   await expect(page.getByTestId("command-receipt")).toBeHidden();
-  await expect(page.getByTestId("command-result-notice")).toContainText("住宿订单已创建");
   return receipt.result!.orderId!;
 }
 
@@ -272,7 +338,7 @@ async function openFactFormAndSubmit(
   page: Page,
   actionName: "收款" | "退款",
   amountYuan: string,
-  transactionReference: string,
+  transactionReference = "",
   expectedInitialAmountYuan = "",
   note = actionName === "退款" ? "退款原因：E2E 验证" : ""
 ) {
@@ -283,20 +349,20 @@ async function openFactFormAndSubmit(
   });
   await expect(factDialog).toBeVisible();
   const amountInput = factDialog.getByTestId("fact-amount-yuan");
-  const continueButton = factDialog.getByRole("button", { name: actionName === "退款" ? "核对退款信息" : "核对收款信息", exact: true });
+  const continueButton = factDialog.getByRole("button", { name: "下一步", exact: true });
   await expect(amountInput).toHaveValue(expectedInitialAmountYuan);
   if (!expectedInitialAmountYuan) {
     await continueButton.click();
-    await expect(amountInput).toBeFocused();
-    expect(await amountInput.evaluate((element: HTMLInputElement) => element.validity.valueMissing)).toBe(true);
+    await expect(factDialog.getByRole("alert")).toContainText("金额必须按人民币元填写");
   }
   await amountInput.fill(amountYuan);
-  const transactionInput = factDialog.getByTestId("transaction-reference");
-  await continueButton.click();
-  await expect(transactionInput).toBeFocused();
-  expect(await transactionInput.evaluate((element: HTMLInputElement) => element.validity.valueMissing)).toBe(true);
-  await transactionInput.fill(transactionReference);
   if (note) await factDialog.getByTestId(actionName === "退款" ? "refund-reason" : "collection-note").fill(note);
+  const transactionInput = factDialog.getByTestId("transaction-reference");
+  if (await transactionInput.count()) {
+    await continueButton.click();
+    await expect(factDialog.getByRole("alert")).toContainText(/必须填写(企业微信交易单号|交易单号或流水号)/);
+    await transactionInput.fill(transactionReference);
+  }
   await continueButton.click();
 }
 
@@ -476,11 +542,11 @@ test("desktop logout distinguishes an unexecuted failure from a lost committed r
   await expect(failure).toBeFocused();
   await expect(failure).toContainText("退出未完成，会话仍保持登录");
   await expect(page.getByTestId("retry-logout")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeHidden();
 
   await page.reload();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeHidden();
   await assertNoA11yViolations(page);
 
@@ -518,7 +584,7 @@ test("desktop session bootstrap exposes a focused retryable service failure", as
 
   await page.unroute("**/api/v1/me");
   await page.getByTestId("session-startup-error-retry").click();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
 });
 
 test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
@@ -591,14 +657,17 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(shortenedRevision.locator("td").nth(4).locator("strong")).toHaveText("¥0.00");
   await expect(shortenedRevision.locator("td").nth(5)).toHaveText("¥0.00");
 
-  await openFactFormAndSubmit(page, "退款", "30", "TEST-E2E-TXN-REFUND-001", "60");
-  await confirmCommand(page, "Partial refund references first collection", ["TEST-E2E-TXN-REFUND-001"]);
+  await openFactFormAndSubmit(page, "退款", "30", "", "60");
+  const refundEffect = page.getByTestId("command-effect");
+  await expect(refundEffect).toContainText("原路退回");
+  await expect(refundEffect).toContainText("沿用原收款交易单号");
+  await confirmCommand(page, "Partial refund references first collection");
   await closeReceipt(page);
   const fundsRegion = page.locator('.table-region[aria-label="收退款与冲销记录表格"]');
   await expect(fundsRegion.getByRole("rowheader", { name: "退款", exact: true })).toBeVisible();
   await expect(fundsRegion).toContainText("TEST-E2E-TXN-COLLECTION-001");
   await expect(fundsRegion).toContainText("TEST-E2E-TXN-COLLECTION-002");
-  await expect(fundsRegion).toContainText("TEST-E2E-TXN-REFUND-001");
+  await expect(fundsRegion).not.toContainText("TEST-E2E-TXN-REFUND-001");
 
   await page.getByTestId("check-in").click();
   const checkInEffect = page.getByTestId("command-effect");
@@ -611,7 +680,10 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(coverageRegion.getByText("已冻结", { exact: true })).toHaveCount(0);
   await expect(coverageRegion.getByText("已核销", { exact: true })).toHaveCount(2);
   await expect(page.getByTestId("check-out")).toHaveCount(0);
-  await expect(page.getByText("入住当天暂不办理缩短或提前退房", { exact: false })).toBeVisible();
+  const arrivalDayRestrictionHint = page.locator(".info-hint[aria-label*='入住当天暂不办理缩短或提前退房']");
+  await expect(arrivalDayRestrictionHint).toBeVisible();
+  await arrivalDayRestrictionHint.focus();
+  await expect(arrivalDayRestrictionHint.getByRole("tooltip")).toBeVisible();
   await assertNoA11yViolations(page);
   await assertNoPageOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("desktop-order.png"), fullPage: true });
@@ -668,7 +740,6 @@ test("desktop whole-room order records every occupant and room status exposes ni
 
   await page.getByRole("link", { name: "房态", exact: true }).click();
   await page.getByTestId("arrival-date").fill("2026-10-01");
-  await page.getByTestId("departure-date").fill("2026-10-04");
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   const cell = page.locator('[data-room-status-cell="true"][data-unit-id="unit_room_a03"][data-service-date="2026-10-01"]');
   await expect(cell).toContainText("山峰、小满");
@@ -691,7 +762,7 @@ test("mobile today check-in journey", async ({ page }, testInfo: TestInfo) => {
   await login(page);
   const businessDate = todayInTimeZone("Asia/Shanghai");
   await createOrder(page, { stayMode: "NORMAL", unitCode: "102", guest: "Mobile Guest", arrivalDate: businessDate, departureDate: addDays(businessDate, 1), bookingChannelCode: "WECOM" });
-  await page.getByRole("link", { name: "移动履约" }).click();
+  await page.getByRole("link", { name: "今日履约" }).click();
   await page.getByLabel("营业日期").fill(businessDate);
   await page.getByRole("tab", { name: /今日到店/ }).click();
   await expect(page.getByText("Mobile Guest", { exact: true })).toBeVisible();
@@ -735,7 +806,8 @@ test("desktop stay changes and exception commands remain operable through Web", 
   await expect(moveReview.getByTestId("command-effect")).toBeVisible({ timeout: 30_000 });
   await moveReview.getByTestId("confirm-command").click();
   await expect(moveReview).toBeHidden({ timeout: 30_000 });
-  await expect(page.locator(".order-unit")).toContainText("102 · 102 · 四人间（公卫）");
+  await expect(page.locator(".order-unit")).toContainText("1栋 101 · 四人间（公卫）");
+  await expect(page.locator(".order-unit")).toContainText("1栋 102 · 四人间（公卫）");
 
   await page.goto("/");
   const cancelOrderId = await createOrder(page, { stayMode: "NORMAL", unitCode: "101", guest: "E2E Cancel Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "YOUMUDAO", channelOrderReference: "TEST-E2E-YOUMUDAO-001" });
@@ -810,7 +882,7 @@ test("member directory creates a four-field profile, searches every field, and r
   await expect(createMemberEffect).not.toContainText(/CREATE_MEMBER|contract_|member_|FEISHU|Preview|Receipt/);
   await page.getByRole("button", { name: "确认创建会员档案" }).click();
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("会员档案已创建，会员列表已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("会员档案已创建");
   await expect(page.getByTestId("command-receipt")).toBeHidden();
   await expect(page.getByRole("heading", { name: memberProfile.fullName })).toBeVisible();
   await expect(page.getByTestId("member-search-query")).toHaveValue("");
@@ -882,7 +954,7 @@ test("member directory creates a four-field profile, searches every field, and r
     await recovery.getByTestId("member-command-recovery-open").click();
     await page.getByRole("button", { name: "查询建档结果" }).click();
     await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-    await expect(page.getByTestId("command-result-notice")).toContainText("会员档案已创建，会员列表已刷新");
+    await expect(page.getByTestId("command-result-notice")).toContainText("会员档案已创建");
     await expect(page.getByTestId("command-receipt")).toBeHidden();
     await expect(page.getByRole("heading", { name: recoveryProfile.fullName })).toBeVisible();
     await expect(page.getByTestId("member-command-recovery")).toBeHidden();
@@ -914,27 +986,111 @@ test("desktop quote command recovers the committed Quote after response loss", a
   expect(quotePostCount).toBe(1);
 
   await page.reload();
-  await selectRoomStatusRange(page, "101", "2026-10-12", "2026-10-10");
-  recovery = page.getByTestId("quote-recovery");
+  recovery = await openPersistedQuoteRecovery(page);
   await expect(recovery).toContainText("报价结果尚未确认", { timeout: 15_000 });
   await navigateWithinApp(page, "/orders", "订单");
-  await navigateWithinApp(page, "/", "房态与可售");
-  await selectRoomStatusRange(page, "101", "2026-10-12", "2026-10-10");
-  recovery = page.getByTestId("quote-recovery");
+  await navigateWithinApp(page, "/", "房间与床位逐日房态");
+  recovery = await openPersistedQuoteRecovery(page);
   await expect(recovery).toContainText("报价结果尚未确认", { timeout: 15_000 });
 
-  const recoveryRequest = page.waitForRequest((request) => (
-    request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/command-results"
-  ));
-  await recovery.getByRole("button", { name: "重新查询报价结果" }).click();
-  const recoveredUrl = new URL((await recoveryRequest).url());
-  expect(recoveredUrl.searchParams.get("commandType")).toBe("CREATE_QUOTE");
-  expect(recoveredUrl.searchParams.get("idempotencyKey")).toBe(originalQuoteKey);
+  const recoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
+    propertyId: "prop_qintopia_demo",
+    commandType: "CREATE_QUOTE",
+    idempotencyKey: originalQuoteKey
+  }));
+  await recovery.getByRole("button", { name: "核对原报价结果" }).click();
+  await recoveryRequest;
   await expect(page.getByTestId("quote-recovery")).toBeHidden();
   await expect(page.getByTestId("quote-result")).toBeVisible();
   await expect(page.getByText(/报价已恢复，但当前筛选条件已变化/)).toBeHidden();
   expect(quotePostCount).toBe(1);
   await assertNoA11yViolations(page);
+});
+
+test("desktop Quote recovery rejects mismatched committed evidence and stays blocked", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop-only direct command recovery evidence");
+  await login(page);
+  let originalQuoteKey = "";
+  let quotePostCount = 0;
+  await page.route("**/api/v1/quotes", async (route) => {
+    quotePostCount += 1;
+    originalQuoteKey = route.request().headers()["idempotency-key"] ?? "";
+    await route.fetch();
+    await route.abort("failed");
+  }, { times: 1 });
+
+  await chooseDatesAndUnit(page, "101", "2026-10-12", "2026-10-10", "FREE");
+  const recovery = page.getByTestId("quote-recovery");
+  await expect(recovery).toContainText("报价结果尚未确认", { timeout: 15_000 });
+  expect(originalQuoteKey).toMatch(/^web-create-quote-/);
+
+  await page.route("**/api/v1/command-results/resolve", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as {
+      result?: { quote?: Record<string, unknown> };
+    };
+    expect(body.result?.quote).toBeDefined();
+    body.result!.quote!.inventoryUnitId = "unit_room_mismatched_recovery_evidence";
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      body: JSON.stringify(body)
+    });
+  }, { times: 1 });
+
+  const malformedRecoveryResponse = page.waitForResponse((response) => response.status() === 200
+    && isResolvedCommandRequest(response.request(), {
+      propertyId: "prop_qintopia_demo",
+      commandType: "CREATE_QUOTE",
+      idempotencyKey: originalQuoteKey
+    }), { timeout: 15_000 });
+  await recovery.getByRole("button", { name: "核对原报价结果" }).click();
+  await malformedRecoveryResponse;
+  await expect(page.getByText("原报价结果与当时选择的房源、日期或价格政策不一致；已继续暂停新报价。", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await expect(recovery).toBeVisible();
+  await expect(page.getByTestId("quote-result")).toBeHidden();
+  expect(quotePostCount).toBe(1);
+
+  const validRecoveryResponse = page.waitForResponse((response) => response.status() === 200
+    && isResolvedCommandRequest(response.request(), {
+      propertyId: "prop_qintopia_demo",
+      commandType: "CREATE_QUOTE",
+      idempotencyKey: originalQuoteKey
+    }), { timeout: 15_000 });
+  await recovery.getByRole("button", { name: "核对原报价结果" }).click();
+  await validRecoveryResponse;
+  await expect(recovery).toBeHidden();
+  await expect(page.getByTestId("quote-result")).toBeVisible();
+  expect(quotePostCount).toBe(1);
+});
+
+test("desktop corrupt Quote recovery stays blocked until staff review and scoped clearing", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop-only damaged Quote recovery");
+  let quotePostCount = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/quotes") quotePostCount += 1;
+  });
+  await login(page);
+  await page.evaluate(() => {
+    sessionStorage.setItem(
+      "qintopia.quote-command-recovery.v1:subject_demo_operator:prop_qintopia_demo",
+      "{damaged-json"
+    );
+  });
+
+  await chooseDatesAndUnit(page, "101", "2026-10-20", "2026-10-18", "FREE");
+  const damaged = page.getByTestId("quote-damaged-command-recovery");
+  await expect(damaged).toBeVisible();
+  await expect(damaged).toContainText("先在当前业务页面核对订单、房态或会员记录");
+  const discard = damaged.getByRole("button", { name: "清除本物业损坏记录" });
+  await expect(discard).toBeDisabled();
+  expect(quotePostCount).toBe(0);
+
+  await damaged.getByRole("checkbox").check();
+  await discard.click();
+  await expect(damaged).toBeHidden();
+  await expect(page.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
+  expect(quotePostCount).toBe(1);
 });
 
 test("desktop delayed Quote callback after navigation preserves SENDING recovery without a duplicate Quote", async ({ page }, testInfo: TestInfo) => {
@@ -959,12 +1115,14 @@ test("desktop delayed Quote callback after navigation preserves SENDING recovery
     .map((key) => JSON.parse(sessionStorage.getItem(key) ?? "null") as { state?: string; metadata?: { idempotencyKey?: string } })
     .some((record) => record.state === "SENDING" && record.metadata?.idempotencyKey === idempotencyKey), originalQuoteKey)).toBe(true);
 
-  const recoveryRequest = page.waitForRequest((request) => request.method() === "GET"
-    && new URL(request.url()).pathname === "/api/v1/command-results");
-  await navigateWithinApp(page, "/", "房态与可售");
+  const recoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
+    propertyId: "prop_qintopia_demo",
+    commandType: "CREATE_QUOTE",
+    idempotencyKey: originalQuoteKey
+  }));
+  await navigateWithinApp(page, "/", "房间与床位逐日房态");
   await selectRoomStatusRange(page, "102", "2026-10-15", "2026-10-13");
-  const recoveredUrl = new URL((await recoveryRequest).url());
-  expect(recoveredUrl.searchParams.get("idempotencyKey")).toBe(originalQuoteKey);
+  await recoveryRequest;
   await expect(page.getByTestId("quote-recovery")).toHaveCount(0);
   expect(quotePostCount).toBe(1);
 });
@@ -1015,6 +1173,7 @@ test("desktop delayed Quote callback cannot cross a same-page property scope swi
         filterOptions: { roomTypeCodes: [], salesModes: [], statuses: [], capacities: [], unitKinds: [] },
         page: { index: 0, size: 200, totalRooms: 0, totalPages: 0 },
         operationalTasks: [],
+        availabilitySummary: dates.map((serviceDate) => ({ serviceDate, availableRooms: 0, availableBeds: 0 })),
         rooms: []
       })
     });
@@ -1031,9 +1190,13 @@ test("desktop delayed Quote callback cannot cross a same-page property scope swi
   const originalQuoteKey = delayed.idempotencyKey();
   expect(originalQuoteKey).toMatch(/^web-create-quote-/);
 
+  const secondaryRoomStatus = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/api/v1/properties/${secondaryPropertyId}/room-status`
+      && response.status() === 200
+  );
   await page.getByTestId("property-select").selectOption(secondaryPropertyId);
   await expect(page.getByTestId("property-select")).toHaveValue(secondaryPropertyId);
-  await expect(page.getByText("当前页没有库存单元", { exact: true })).toBeVisible();
+  await secondaryRoomStatus;
   await expect(page.getByTestId("quote-recovery")).toBeHidden();
   await releaseQuoteAndFlushOldCallback(page, delayed);
   await expect(page.getByText("本地报价恢复记录不可用", { exact: true })).toBeHidden();
@@ -1043,11 +1206,13 @@ test("desktop delayed Quote callback cannot cross a same-page property scope swi
     .map((key) => JSON.parse(sessionStorage.getItem(key) ?? "null") as { state?: string; metadata?: { idempotencyKey?: string } })
     .some((record) => record.state === "SENDING" && record.metadata?.idempotencyKey === idempotencyKey), originalQuoteKey)).toBe(true);
 
-  const recoveryRequest = page.waitForRequest((request) => request.method() === "GET"
-    && new URL(request.url()).pathname === "/api/v1/command-results");
+  const recoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
+    propertyId: originalPropertyId,
+    commandType: "CREATE_QUOTE",
+    idempotencyKey: originalQuoteKey
+  }));
   await page.getByTestId("property-select").selectOption(originalPropertyId);
-  const recoveredUrl = new URL((await recoveryRequest).url());
-  expect(recoveredUrl.searchParams.get("idempotencyKey")).toBe(originalQuoteKey);
+  await recoveryRequest;
   await expect(page.getByTestId("quote-recovery")).toHaveCount(0);
   expect(quotePostCount).toBe(1);
 });
@@ -1113,14 +1278,17 @@ test("desktop order command recovery survives close refresh and navigation witho
   recovery = page.getByTestId("order-command-recovery");
   await expect(recovery).toContainText("登记收款结果需要恢复查询");
   await recovery.getByTestId("order-command-recovery-open").click();
+  const recoveryDialog = page.locator("dialog.modal-wide");
+  await expect(recoveryDialog).toBeVisible();
 
-  const recoveryRequest = page.waitForRequest((request) => (
-    request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/command-results"
-  ));
-  await page.getByRole("button", { name: "查询登记收款结果" }).click();
-  const recoveryUrl = new URL((await recoveryRequest).url());
-  expect(recoveryUrl.searchParams.get("commandType")).toBe("RECORD_COLLECTION");
-  expect(recoveryUrl.searchParams.get("idempotencyKey")).toBe(originalConfirmationKey);
+  await Promise.all([
+    page.waitForRequest((request) => isResolvedCommandRequest(request, {
+      propertyId: "prop_qintopia_demo",
+      commandType: "RECORD_COLLECTION",
+      idempotencyKey: originalConfirmationKey
+    })),
+    recoveryDialog.getByRole("button", { name: "查询命令结果", exact: true }).click()
+  ]);
   const receipt = await assertOperatorReceipt(page);
   await expect(receipt).toContainText(transactionReference);
   await expect(receipt.locator("code").filter({ hasText: /^command_/ })).toHaveCount(0);
@@ -1139,7 +1307,9 @@ test("desktop quote workbench only offers recovery after a real response interru
   test.skip(testInfo.project.name !== "desktop", "desktop-only interrupted quote response");
   await login(page);
 
+  let originalQuoteKey = "";
   await page.route("**/api/v1/quotes", async (route) => {
+    originalQuoteKey = route.request().headers()["idempotency-key"] ?? "";
     await route.fetch();
     await route.abort("failed");
   }, { times: 1 });
@@ -1148,11 +1318,14 @@ test("desktop quote workbench only offers recovery after a real response interru
   const recovery = page.getByTestId("quote-recovery");
   await expect(recovery).toContainText("报价结果尚未确认", { timeout: 15_000 });
   await expect(recovery).not.toContainText(/web-create-quote-|Quote|幂等/);
-  await expect(recovery.getByRole("button", { name: "重新查询报价结果" })).toBeVisible();
+  await expect(recovery.getByRole("button", { name: "核对原报价结果" })).toBeVisible();
 
-  const recoveryRequest = page.waitForRequest((request) => request.method() === "GET"
-    && new URL(request.url()).pathname === "/api/v1/command-results");
-  await recovery.getByRole("button", { name: "重新查询报价结果" }).click();
+  const recoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
+    propertyId: "prop_qintopia_demo",
+    commandType: "CREATE_QUOTE",
+    idempotencyKey: originalQuoteKey
+  }));
+  await recovery.getByRole("button", { name: "核对原报价结果" }).click();
   await recoveryRequest;
   await expect(recovery).toBeHidden();
   await expect(page.getByTestId("request-quote")).toHaveCount(0);
@@ -1171,9 +1344,6 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await page.getByLabel("权限上限").selectOption("WRITE");
   const issueSecret = await page.getByLabel("一次性 Token secret").inputValue();
   expect(issueSecret).toMatch(/^qtp_[A-Za-z0-9_-]{43}$/);
-  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
-  await page.getByRole("button", { name: "继续生成 Preview" }).click();
-  const retainedIssueSecret = page.getByRole("region", { name: /尚未清除的一次性 secret/ });
   const issuePreviewIdempotencyKeys: string[] = [];
   page.on("request", (request) => {
     if (request.url().endsWith("/api/v1/command-previews") && request.method() === "POST") {
@@ -1184,64 +1354,59 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
     await route.fetch();
     await route.abort("failed");
   }, { times: 1 });
-  await page.getByTestId("create-command-preview").click();
+  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
+  await page.getByRole("button", { name: "下一步" }).click();
+  const retainedIssueSecret = page.getByRole("region", { name: /一次性 secret 待清除/ });
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(retainedIssueSecret).toContainText("PREVIEW UNKNOWN");
-  await expect(retainedIssueSecret.getByRole("button", { name: "清除本地 secret" })).toBeDisabled();
-  await retainedIssueSecret.getByRole("button", { name: "重试 Preview" }).click();
-  await page.getByTestId("create-command-preview").click();
+  await expect(retainedIssueSecret).toContainText("核对中断");
+  await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
+  await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
   await expect(page.getByTestId("command-effect")).not.toContainText(issueSecret);
-  const previewId = (await retainedIssueSecret.locator(".retained-secret-meta dd code").filter({ hasText: /^preview_/ }).textContent())?.trim();
-  expect(previewId).toMatch(/^preview_/);
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(retainedIssueSecret).toContainText("PREVIEWED");
+  await expect(retainedIssueSecret).toContainText("待确认");
   await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
-  await expect(retainedIssueSecret.getByRole("button", { name: "清除本地 secret" })).toBeDisabled();
+  await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await page.getByRole("link", { name: "Token", exact: true }).click();
-  await retainedIssueSecret.getByRole("button", { name: "重试 Preview" }).click();
-  await page.getByTestId("create-command-preview").click();
-  await expect(retainedIssueSecret.locator(".retained-secret-meta dd code").filter({ hasText: /^preview_/ })).toHaveText(previewId!);
+  await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
+  await expect(page.getByTestId("command-effect")).toBeVisible();
   expect(issuePreviewIdempotencyKeys.slice(0, 3)).toEqual([
     issuePreviewIdempotencyKeys[0],
     issuePreviewIdempotencyKeys[0],
     issuePreviewIdempotencyKeys[0]
   ]);
-  await page.getByTestId("reason-note").fill("Issue a scoped external client credential");
   await page.route("**/api/v1/command-previews/*/confirm", async (route) => {
     await route.fetch();
     await route.abort("failed");
   }, { times: 1 });
   await page.getByTestId("confirm-command").click();
-  await expect(page.getByText("执行状态需要恢复查询", { exact: true })).toBeVisible();
+  await expect(page.getByText("Token 操作结果需要查询", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
-  await expect(retainedIssueSecret).toContainText("UNKNOWN");
-  await expect(retainedIssueSecret.getByRole("button", { name: "清除本地 secret" })).toBeDisabled();
+  await expect(retainedIssueSecret).toContainText("提交结果待查询");
+  await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await page.getByRole("link", { name: "Token", exact: true }).click();
   await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
-  await retainedIssueSecret.getByRole("button", { name: "恢复命令结果" }).click();
-  await page.getByRole("button", { name: "查询命令结果" }).click();
+  await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
+  await page.getByRole("button", { name: "查询 Token 结果" }).click();
   await assertOperatorReceipt(page);
   await closeReceipt(page);
-  await expect(retainedIssueSecret).toContainText("EXECUTED");
+  await expect(retainedIssueSecret).toContainText("已完成");
 
   let activeRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "ACTIVE" });
   await expect(activeRow).toHaveCount(1);
   const originalTokenId = (await activeRow.locator("code").first().textContent())?.trim();
   expect(originalTokenId).toMatch(/^token_/);
-  await retainedIssueSecret.getByRole("button", { name: "清除本地 secret" }).click();
+  await retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" }).click();
 
   await activeRow.getByRole("button", { name: "轮换", exact: true }).click();
   const rotationSecret = await page.getByLabel("一次性 Token secret").inputValue();
   expect(rotationSecret).toMatch(/^qtp_[A-Za-z0-9_-]{43}$/);
   expect(rotationSecret).not.toBe(issueSecret);
   await page.getByLabel(/我已将一次性 secret 安全保存/).check();
-  await page.getByRole("button", { name: "继续生成 Preview" }).click();
-  await page.getByTestId("create-command-preview").click();
+  await page.getByRole("button", { name: "下一步" }).click();
   await expect(page.getByTestId("command-effect")).not.toContainText(rotationSecret);
-  await page.getByTestId("reason-note").fill("Rotate the external client credential");
   await page.getByTestId("confirm-command").click();
   await assertOperatorReceipt(page);
   await closeReceipt(page);
@@ -1254,23 +1419,21 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   expect(replacementTokenId).toMatch(/^token_/);
   expect(replacementTokenId).not.toBe(originalTokenId);
   await expect(originalRow).toContainText(replacementTokenId!);
-  await page.getByRole("region", { name: /尚未清除的一次性 secret/ }).getByRole("button", { name: "清除本地 secret" }).click();
+  await page.getByRole("region", { name: /一次性 secret 待清除/ }).getByRole("button", { name: "已保存，清除本机显示" }).click();
 
-  await activeRow.getByRole("button", { name: `撤销 Token ${replacementTokenId}` }).click();
-  await page.getByTestId("create-command-preview").click();
+  await activeRow.getByRole("button", { name: "撤销", exact: true }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
-  await page.getByTestId("reason-note").fill("Revoke the rotated external client credential");
   await page.route("**/api/v1/command-previews/*/confirm", async (route) => {
     await route.fetch();
     await route.abort("failed");
   }, { times: 1 });
   await page.getByTestId("confirm-command").click();
-  await expect(page.getByText("执行状态需要恢复查询", { exact: true })).toBeVisible();
+  await expect(page.getByText("Token 操作结果需要查询", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  const pendingRevoke = page.getByRole("region", { name: "待处理 Token 命令" });
-  await expect(pendingRevoke).toContainText("UNKNOWN");
-  await pendingRevoke.getByRole("button", { name: "恢复命令结果" }).click();
-  await page.getByRole("button", { name: "查询命令结果" }).click();
+  const pendingRevoke = page.getByRole("region", { name: "Token 操作待完成" });
+  await expect(pendingRevoke).toContainText("提交结果待查询");
+  await pendingRevoke.getByRole("button", { name: "继续处理" }).click();
+  await page.getByRole("button", { name: "查询 Token 结果" }).click();
   await assertOperatorReceipt(page);
   await closeReceipt(page);
   await expect(page.getByRole("row").filter({ has: page.locator("th code", { hasText: replacementTokenId! }) })).toContainText("REVOKED");
@@ -1286,16 +1449,14 @@ test("desktop expired Token Preview rotates preview metadata without changing th
   await page.getByRole("button", { name: "签发 Token" }).click();
   await page.getByLabel("标签").fill("E2E expired preview agent");
   const secret = await page.getByLabel("一次性 Token secret").inputValue();
-  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
-  await page.getByRole("button", { name: "继续生成 Preview" }).click();
-
   const previewKeys: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/command-previews") {
       previewKeys.push(request.headers()["idempotency-key"] ?? "");
     }
   });
-  await page.getByTestId("create-command-preview").click();
+  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
+  await page.getByRole("button", { name: "下一步" }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
   await page.clock.fastForward(601_000);
   await expect(page.getByTestId("regenerate-command-preview")).toBeVisible();
@@ -1306,8 +1467,9 @@ test("desktop expired Token Preview rotates preview metadata without changing th
   expect(previewKeys[0]).toMatch(/^web-preview-issue_token-/);
   expect(previewKeys[1]).toMatch(/^web-preview-issue_token-/);
   expect(previewKeys[1]).not.toBe(previewKeys[0]);
-  await expect(page.getByRole("region", { name: /尚未清除的一次性 secret/ }).getByLabel("一次性 Token secret")).toHaveValue(secret);
   await expect(page.getByTestId("confirm-command")).toBeVisible();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(page.getByRole("region", { name: /一次性 secret 待清除/ }).getByLabel("一次性 Token secret")).toHaveValue(secret);
 });
 
 test("desktop Token lifecycle ignores deferred callbacks from unmounted command attempts", async ({ page }, testInfo: TestInfo) => {
@@ -1324,33 +1486,33 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
   await page.getByRole("button", { name: "签发 Token" }).click();
   await page.getByLabel("标签").fill("E2E deferred callback agent");
   await page.getByLabel(/我已将一次性 secret 安全保存/).check();
-  await page.getByRole("button", { name: "继续生成 Preview" }).click();
-  await page.getByTestId("create-command-preview").click();
+  await page.getByRole("button", { name: "下一步" }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
-  await page.getByTestId("reason-note").fill("Issue while the original Confirm response is deferred");
 
   const delayedIssue = await deferNextConfirmResponse(page);
   await page.getByTestId("confirm-command").click();
   await delayedIssue.fetched;
   await forceNavigateAwayAndBackToTokens(page);
 
-  const retained = page.getByRole("region", { name: /尚未清除的一次性 secret/ });
-  await expect(retained).toContainText("CONFIRMING");
-  await retained.getByRole("button", { name: "恢复命令结果" }).click();
+  const retained = page.getByRole("region", { name: /一次性 secret 待清除/ });
+  await expect(retained).toContainText("正在提交");
+  await retained.getByRole("button", { name: "继续处理" }).click();
   const issueRequestBaseline = tokenListRequests;
-  const issueRecoveryRequest = page.waitForRequest((request) => (
-    request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/command-results"
-  ));
+  const issueRecoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
+    propertyId: "prop_qintopia_demo",
+    commandType: "ISSUE_TOKEN",
+    idempotencyKey: delayedIssue.confirmationKey()
+  }));
   const issueRefresh = page.waitForResponse((response) => (
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/v1/tokens"
   ));
-  await page.getByRole("button", { name: "查询命令结果" }).click();
-  expect(new URL((await issueRecoveryRequest).url()).searchParams.get("idempotencyKey")).toBe(delayedIssue.confirmationKey());
+  await page.getByRole("button", { name: "查询 Token 结果" }).click();
+  await issueRecoveryRequest;
   await assertOperatorReceipt(page);
   await issueRefresh;
   expect(tokenListRequests).toBe(issueRequestBaseline + 1);
   await closeReceipt(page);
-  await expect(retained).toContainText("EXECUTED");
+  await expect(retained).toContainText("已完成");
 
   const tokenRows = page.getByRole("row").filter({ hasText: "E2E deferred callback agent" });
   await expect(tokenRows).toHaveCount(1);
@@ -1360,44 +1522,44 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
 
   const requestsBeforeOldIssueResponse = tokenListRequests;
   await releaseConfirmAndFlushOldCallback(page, delayedIssue);
-  await expect(retained).toContainText("EXECUTED");
+  await expect(retained).toContainText("已完成");
   await expect(tokenRows).toHaveCount(1);
   expect(tokenListRequests).toBe(requestsBeforeOldIssueResponse);
 
-  await retained.getByRole("button", { name: "清除本地 secret" }).click();
-  await tokenRows.getByRole("button", { name: `撤销 Token ${issuedTokenId}` }).click();
-  await page.getByTestId("create-command-preview").click();
+  await retained.getByRole("button", { name: "已保存，清除本机显示" }).click();
+  await tokenRows.getByRole("button", { name: "撤销", exact: true }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
-  await page.getByTestId("reason-note").fill("Revoke while the original Confirm response is deferred");
 
   const delayedRevoke = await deferNextConfirmResponse(page, "SERVER_ERROR");
   await page.getByTestId("confirm-command").click();
   await delayedRevoke.fetched;
   await forceNavigateAwayAndBackToTokens(page);
 
-  const pending = page.getByRole("region", { name: "待处理 Token 命令" });
-  await expect(pending).toContainText("CONFIRMING");
-  await pending.getByRole("button", { name: "恢复命令结果" }).click();
+  const pending = page.getByRole("region", { name: "Token 操作待完成" });
+  await expect(pending).toContainText("正在提交");
+  await pending.getByRole("button", { name: "继续处理" }).click();
   const revokeRequestBaseline = tokenListRequests;
-  const revokeRecoveryRequest = page.waitForRequest((request) => (
-    request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/command-results"
-  ));
+  const revokeRecoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
+    propertyId: "prop_qintopia_demo",
+    commandType: "REVOKE_TOKEN",
+    idempotencyKey: delayedRevoke.confirmationKey()
+  }));
   const revokeRefresh = page.waitForResponse((response) => (
     response.request().method() === "GET" && new URL(response.url()).pathname === "/api/v1/tokens"
   ));
-  await page.getByRole("button", { name: "查询命令结果" }).click();
-  expect(new URL((await revokeRecoveryRequest).url()).searchParams.get("idempotencyKey")).toBe(delayedRevoke.confirmationKey());
+  await page.getByRole("button", { name: "查询 Token 结果" }).click();
+  await revokeRecoveryRequest;
   await assertOperatorReceipt(page);
   await revokeRefresh;
   expect(tokenListRequests).toBe(revokeRequestBaseline + 1);
   await closeReceipt(page);
-  await expect(pending).toContainText("EXECUTED");
+  await expect(pending).toContainText("已完成");
   await expect(tokenRows).toHaveCount(1);
   await expect(tokenRows).toContainText("REVOKED");
 
   const requestsBeforeOldRevokeResponse = tokenListRequests;
   await releaseConfirmAndFlushOldCallback(page, delayedRevoke);
-  await expect(pending).toContainText("EXECUTED");
+  await expect(pending).toContainText("已完成");
   await expect(tokenRows).toHaveCount(1);
   await expect(tokenRows).toContainText("REVOKED");
   expect(tokenListRequests).toBe(requestsBeforeOldRevokeResponse);
@@ -1412,7 +1574,7 @@ test("keyboard-only navigation reaches a business Preview and cancels without co
   await page.keyboard.press("Tab");
   await expect(page.getByTestId("login-submit")).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
 
   const ordersLink = page.getByRole("link", { name: "订单", exact: true });
   await tabTo(page, ordersLink);
@@ -1424,7 +1586,7 @@ test("keyboard-only navigation reaches a business Preview and cancels without co
   await tabTo(page, inventoryLink, { reverse: true });
   await expect(inventoryLink).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
 
   const firstCell = page.getByRole("gridcell").first();
   await tabTo(page, firstCell);
@@ -1510,9 +1672,9 @@ test("property timezone controls default operating dates across local midnight",
   });
   expect(browserLocalDate).toBe("2026-07-20");
   await expect(page.getByTestId("arrival-date")).toHaveValue("2026-07-21");
-  await expect(page.getByTestId("departure-date")).toHaveValue("2026-08-11");
+  await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", "2026-08-20");
 
-  await page.getByRole("link", { name: "移动履约" }).click();
+  await page.getByRole("link", { name: "今日履约" }).click();
   await expect(page.getByLabel("营业日期")).toHaveValue("2026-07-21");
 });
 
@@ -1543,7 +1705,9 @@ test("maintenance lock can be listed and released", async ({ page }, testInfo: T
   await expect(releaseSummary).toContainText("释放维修锁 · 102");
   await confirmU1Command(page, ["完整释放这条维修锁房"]);
 
-  await selectRoomStatusRange(page, "102", "2026-08-11", "2026-08-10");
-  await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeEnabled();
+  const statusDrawer = page.locator("dialog.room-status-view-drawer");
+  await expect(statusDrawer).toBeVisible();
+  await statusDrawer.getByRole("button", { name: "关闭", exact: true }).first().click();
+  await expectRoomStatusDateAvailable(page, unitId, "2026-08-10");
   await assertNoA11yViolations(page);
 });

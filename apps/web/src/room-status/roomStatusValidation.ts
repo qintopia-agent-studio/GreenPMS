@@ -6,6 +6,7 @@ import {
   roomStatusStatuses,
   type RoomStatusActionCode,
   type RoomStatusActionDto,
+  type RoomStatusAvailabilitySummaryDto,
   type RoomStatusBoardDto,
   type RoomStatusConflictDto,
   type RoomStatusHistoryDto,
@@ -669,6 +670,23 @@ function assertUnit(
   } else if (childUnitIds.length) fail(`${path}.childUnitIds`, "床位不能包含子单元 ID");
 }
 
+function assertAvailabilitySummary(
+  value: unknown,
+  path: string,
+  dates: readonly string[]
+): asserts value is RoomStatusAvailabilitySummaryDto[] {
+  const items = array(value, path);
+  if (items.length !== dates.length) fail(path, "未覆盖完整查询日期");
+  items.forEach((value, index) => {
+    const item = record(value, `${path}[${index}]`);
+    if (localDate(item.serviceDate, `${path}[${index}].serviceDate`) !== dates[index]) {
+      fail(`${path}[${index}].serviceDate`, "与查询日期轴不一致");
+    }
+    integer(item.availableRooms, `${path}[${index}].availableRooms`);
+    integer(item.availableBeds, `${path}[${index}].availableBeds`);
+  });
+}
+
 export function assertRoomStatusBoard(value: unknown, expected: ExpectedRoomStatusQuery): asserts value is RoomStatusBoardDto {
   const board = record(value, "root");
   if (board.propertyId !== expected.propertyId) fail("propertyId", "与当前物业不一致");
@@ -677,7 +695,7 @@ export function assertRoomStatusBoard(value: unknown, expected: ExpectedRoomStat
   if (range.arrivalDate !== expected.range.arrivalDate || range.departureDate !== expected.range.departureDate) fail("range", "与当前查询不一致");
   const expectedDates: string[] = [];
   for (let date = expected.range.arrivalDate; date < expected.range.departureDate; date = addLocalDateDays(date, 1)) expectedDates.push(date);
-  if (expectedDates.length < 1 || expectedDates.length > 90) fail("range", "超出 1 至 90 夜范围");
+  if (expectedDates.length < 1 || expectedDates.length > 30) fail("range", "超出 1 至 30 夜范围");
   const dates = array(board.dates, "dates").map((date, index) => localDate(date, `dates[${index}]`));
   if (dates.join("|") !== expectedDates.join("|")) fail("dates", "必须连续覆盖完整半开日期范围");
   const asOf = dateTime(board.asOf, "asOf");
@@ -714,6 +732,7 @@ export function assertRoomStatusBoard(value: unknown, expected: ExpectedRoomStat
   operationalTasks.forEach((task, index) => assertOperationalTask(task, `operationalTasks[${index}]`, accessLevel, expected, businessDate));
   const taskIds = operationalTasks.map((task) => (task as RoomStatusOperationalTaskDto).id);
   if (new Set(taskIds).size !== taskIds.length) fail("operationalTasks", "包含重复任务 ID");
+  assertAvailabilitySummary(board.availabilitySummary, "availabilitySummary", dates);
   const rooms = array(board.rooms, "rooms");
   const expectedRoomCount = Math.max(0, Math.min(pageSize, totalRooms - pageIndex * pageSize));
   if (rooms.length !== expectedRoomCount) fail("rooms", "与分页元数据不一致");

@@ -10,6 +10,7 @@ import {
   roomStatusRowSalesLabel,
   roomStatusSaleCapabilityLabel,
   roomStatusSelectedSaleLabel,
+  roomStatusRoomTypeLabel,
   roomStatusUnitDescription,
   roomStatusUnitLabel,
   roomStatusUnitLocationLabel
@@ -176,6 +177,12 @@ describe("room status unit presentation", () => {
     expect(roomStatusUnitLabel(unit)).toBe("3栋 302 单人间（公卫）");
     expect(roomStatusUnitLocationLabel(unit)).toBe("3栋 302");
     expect(roomStatusUnitDescription(unit)).toBe("单人间（公卫）");
+  });
+
+  it("shows room type filter options in Chinese business language", () => {
+    expect(roomStatusRoomTypeLabel("shared_bath_single")).toBe("单人间（公卫）");
+    expect(roomStatusRoomTypeLabel("private_bath_standard")).toBe("标间（独卫）");
+    expect(roomStatusRoomTypeLabel("PUBLIC_FOUR_BED")).toBe("四人间（公卫）");
   });
 
   it("uses the parent room location for a named bed", () => {

@@ -434,7 +434,7 @@ describe("move unit drawer", () => {
 
   it("renders a covered write drawer with exact candidate facts", () => {
     const html = renderToStaticMarkup(createElement(MoveUnitDrawer, {
-      view: view(), units, onClose: () => undefined, onSubmit: () => undefined
+      view: view(), units, runPreview: (execute) => execute(), onClose: () => undefined, onSubmit: () => undefined
     }));
     expect(html).toContain("modal-drawer");
     expect(html).toContain("room-status-write-drawer");

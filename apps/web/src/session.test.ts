@@ -1,5 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { availableLocalStorage, persistSidebarCollapsed, sidebarStorageKey, storedSidebarCollapsed } from "./session";
+import { availableLocalStorage, navigationItemsForAccess, persistSidebarCollapsed, sidebarStorageKey, storedSidebarCollapsed } from "./session";
+
+describe("permission-aware staff navigation", () => {
+  it("uses staff language and exposes Token management only with write access", () => {
+    const writable = navigationItemsForAccess("WRITE").map(({ label, to }) => ({ label, to }));
+    const readonly = navigationItemsForAccess("READ").map(({ label, to }) => ({ label, to }));
+
+    expect(writable).toContainEqual({ label: "今日履约", to: "/today" });
+    expect(writable).toContainEqual({ label: "Token", to: "/tokens" });
+    expect(readonly).toContainEqual({ label: "今日履约", to: "/today" });
+    expect(readonly).not.toContainEqual({ label: "Token", to: "/tokens" });
+  });
+});
 
 describe("desktop sidebar persistence", () => {
   it("defaults to expanded unless the versioned value is exactly true", () => {

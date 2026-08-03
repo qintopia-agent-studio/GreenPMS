@@ -11,6 +11,7 @@ import {
   formatMoney,
   stayDateFundsAreOperatorFacing,
   stayDatePreviewPricingSummary,
+  type RecoveryCoordinatedPreviewRunner,
   type StayDatePreviewPricingSummary
 } from "../ui";
 
@@ -256,6 +257,7 @@ export function StayDateChangeDrawer({
   inventoryUnits = [],
   draft: recovered,
   writeBlocked = false,
+  runPreview,
   onClose,
   onSubmit
 }: {
@@ -266,6 +268,7 @@ export function StayDateChangeDrawer({
   inventoryUnits?: Array<Pick<InventoryUnitDto, "id" | "code" | "name">>;
   draft?: CommandRequest;
   writeBlocked?: boolean;
+  runPreview: RecoveryCoordinatedPreviewRunner;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
@@ -294,6 +297,8 @@ export function StayDateChangeDrawer({
   const [pricePreview, setPricePreview] = useState<PricePreviewState>({ status: "EMPTY" });
   const [previewRefresh, setPreviewRefresh] = useState(0);
   const previewGeneration = useRef(0);
+  const runPreviewRef = useRef(runPreview);
+  runPreviewRef.current = runPreview;
   const inventoryUnitLabels = useMemo(() => Object.fromEntries(
     inventoryUnits.map((unit) => [unit.id, `${unit.code} · ${unit.name}`])
   ), [inventoryUnits]);
@@ -332,11 +337,11 @@ export function StayDateChangeDrawer({
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setPricePreview({ status: "LOADING" });
-      void api.preview(
+      void runPreviewRef.current(() => api.preview(
         { commandType: resolvedAction, input: previewRequest.input },
         api.commandMetadata(`stay-date-price-${resolvedAction.toLowerCase()}`),
         controller.signal
-      ).then((response) => {
+      )).then((response) => {
         if (controller.signal.aborted || previewGeneration.current !== generation) return;
         const summary = stayDatePreviewPricingSummary(resolvedAction, response.preview, previewRequest.input);
         if (!summary) {

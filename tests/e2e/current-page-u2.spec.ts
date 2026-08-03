@@ -59,21 +59,52 @@ async function login(page: Page): Promise<RoomStatusBoardDto> {
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^(房间与床位逐日房态|今日运营任务)$/ }).first()).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
 
 async function showRange(page: Page, nights = 20, expectDesktopBoard = true): Promise<void> {
-  const departureDate = addDays(fixture.dates.arrivalDate, nights);
   const mobileRangeToggle = page.getByTestId("mobile-room-status-range-toggle");
-  if (await mobileRangeToggle.isVisible()) await mobileRangeToggle.click();
-  await page.getByTestId("departure-date").fill(departureDate);
-  const arrivalResponse = roomStatusResponse(page, { arrivalDate: fixture.dates.arrivalDate, departureDate });
-  await page.getByTestId("arrival-date").fill(fixture.dates.arrivalDate);
-  await arrivalResponse;
+  const mobile = (page.viewportSize()?.width ?? 0) <= 767;
+  const departureDate = addDays(fixture.dates.arrivalDate, mobile ? nights : 30);
+  if (mobile) {
+    await expect(mobileRangeToggle).toBeVisible();
+    await mobileRangeToggle.click();
+    const arrivalInput = page.getByTestId("arrival-date");
+    const departureInput = page.getByTestId("departure-date");
+    const currentArrivalDate = await arrivalInput.inputValue();
+    const currentDepartureDate = await departureInput.inputValue();
+    if (currentArrivalDate !== fixture.dates.arrivalDate) {
+      const currentNights = Math.round((Date.parse(`${currentDepartureDate}T00:00:00Z`)
+        - Date.parse(`${currentArrivalDate}T00:00:00Z`)) / 86_400_000);
+      const shiftedDepartureDate = addDays(fixture.dates.arrivalDate, currentNights);
+      const shiftedResponse = roomStatusResponse(page, {
+        arrivalDate: fixture.dates.arrivalDate,
+        departureDate: shiftedDepartureDate
+      });
+      await arrivalInput.fill(fixture.dates.arrivalDate);
+      await shiftedResponse;
+    }
+    if (await departureInput.inputValue() !== departureDate) {
+      const departureResponse = roomStatusResponse(page, {
+        arrivalDate: fixture.dates.arrivalDate,
+        departureDate
+      });
+      await departureInput.fill(departureDate);
+      await departureResponse;
+    }
+  }
+  const arrivalInput = page.getByTestId("arrival-date");
+  if (await arrivalInput.inputValue() !== fixture.dates.arrivalDate) {
+    const arrivalResponse = roomStatusResponse(page, { arrivalDate: fixture.dates.arrivalDate, departureDate });
+    await arrivalInput.fill(fixture.dates.arrivalDate);
+    await arrivalResponse;
+  }
   if (expectDesktopBoard) {
     await expect(page.getByTestId("room-status-board-range"))
       .toHaveAttribute("data-range-arrival", fixture.dates.arrivalDate);
+    await expect(page.getByTestId("room-status-board-range"))
+      .toHaveAttribute("data-range-departure", departureDate);
   }
   const occupancyToggle = page.getByTestId("mobile-room-status-occupancies-toggle");
   if (await occupancyToggle.isVisible() && await occupancyToggle.getAttribute("aria-expanded") === "false") {
@@ -82,17 +113,24 @@ async function showRange(page: Page, nights = 20, expectDesktopBoard = true): Pr
 }
 
 async function refreshCurrentRange(page: Page): Promise<void> {
-  const range = {
-    arrivalDate: await page.getByTestId("arrival-date").inputValue(),
-    departureDate: await page.getByTestId("departure-date").inputValue()
-  };
+  const boardRange = page.getByTestId("room-status-board-range");
+  const range = await boardRange.isVisible()
+    ? {
+        arrivalDate: (await boardRange.getAttribute("data-range-arrival"))!,
+        departureDate: (await boardRange.getAttribute("data-range-departure"))!
+      }
+    : {
+        arrivalDate: await page.getByTestId("arrival-date").inputValue(),
+        departureDate: await page.getByTestId("departure-date").inputValue()
+      };
   const refreshed = roomStatusResponse(page, range);
   await page.getByRole("button", { name: "刷新房态", exact: true })
     .evaluate((element: HTMLButtonElement) => element.click());
   await refreshed;
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
   await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
-  await expect(page.locator(".room-status-toolbar")).toContainText("投影完整");
+  await expect(boardRange).toHaveAttribute("data-range-arrival", range.arrivalDate);
+  await expect(boardRange).toHaveAttribute("data-range-departure", range.departureDate);
 }
 
 async function openWholeRoomPopover(page: Page): Promise<{ trigger: Locator; popover: Locator }> {
@@ -152,8 +190,6 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
   await page.setViewportSize({ width: 1280, height: 900 });
   await login(page);
   await showRange(page);
-  await page.getByTestId("date-window-mode-21").click();
-  await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
 
   const targetDate = addDays(fixture.dates.arrivalDate, 10);
   const target = page.locator(`.room-status-day-available[data-room-status-cell="true"][data-service-date="${targetDate}"]`).first();
@@ -316,7 +352,6 @@ test("U2 quick popover repositions after room-row or page geometry changes witho
   await page.setViewportSize({ width: 1366, height: 900 });
   await login(page);
   await showRange(page);
-  await page.getByTestId("date-window-mode-21").click();
 
   const targetDate = addDays(fixture.dates.arrivalDate, 10);
   const target = page.locator(`.room-status-day-available[data-room-status-cell="true"][data-service-date="${targetDate}"]`).first();
@@ -513,10 +548,10 @@ test("U2 desktop parent room lists each exact order and an outside click keeps t
   await page.keyboard.press("Escape");
   await expect(parent).toBeFocused();
   await page.keyboard.press("Enter");
-  const dateMode = page.getByTestId("date-window-mode-7");
-  await dateMode.click();
+  const nextRange = page.getByRole("button", { name: "查看后 30 夜", exact: true });
+  await nextRange.click();
   await expect(popover).toBeHidden();
-  await expect(dateMode).toBeFocused();
+  await expect(nextRange).toBeFocused();
 });
 
 test("U2 replaces a stale drag range with the clicked cell or exact Stay", async ({ page }, testInfo) => {
@@ -524,8 +559,6 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   await page.setViewportSize({ width: 1366, height: 768 });
   await login(page);
   await showRange(page);
-  await page.getByTestId("date-window-mode-21").click();
-  await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
 
   const emptyRoomId = fixture.stage6.emptyCreationRoomId;
   const emptyTargetDate = addDays(fixture.dates.arrivalDate, 9);
@@ -635,7 +668,6 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   await page.setViewportSize({ width: 1280, height: 720 });
   await login(page);
   await showRange(page);
-  await page.getByTestId("date-window-mode-21").click();
 
   const targetDate = addDays(fixture.dates.arrivalDate, 10);
   const rangeEndDate = addDays(targetDate, 1);
@@ -778,7 +810,7 @@ test("U2 full order page uses four Chinese business layers and never exposes mac
     await expect(main.getByRole("heading", { name: heading, exact: true })).toBeVisible();
   }
   await expect(main.getByText("订单金额", { exact: true }).first()).toBeVisible();
-  await expect(main.getByText("已登记净收款", { exact: true }).first()).toBeVisible();
+  await expect(main.getByText("已记录净收款", { exact: true }).first()).toBeVisible();
   await expect(main.getByText(fixture.wholeRoom.orderId, { exact: true })).toHaveCount(0);
   await expect(main).not.toContainText(/INITIAL|Segment ID|Amendments|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision|currentContractAmount|netRecordedCollection|collectionDifference|渠道合同价/);
 });

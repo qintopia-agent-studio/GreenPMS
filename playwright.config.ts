@@ -4,6 +4,7 @@ const e2eDatabaseUrl = process.env.E2E_DATABASE_URL ?? "postgres://qintopia:qint
 const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const e2eApiPort = process.env.E2E_API_PORT ?? "4100";
 const e2eWebPort = process.env.E2E_WEB_PORT ?? "4173";
+const e2eWebBuildOutDir = process.env.E2E_WEB_BUILD_OUT_DIR ?? "dist-e2e";
 const e2eApiUrl = `http://127.0.0.1:${e2eApiPort}`;
 const e2eWebUrl = `http://127.0.0.1:${e2eWebPort}`;
 
@@ -45,7 +46,8 @@ export default defineConfig({
       timeout: 120_000,
       env: {
         WEB_PORT: e2eWebPort,
-        API_PROXY_TARGET: e2eApiUrl
+        API_PROXY_TARGET: e2eApiUrl,
+        WEB_BUILD_OUT_DIR: e2eWebBuildOutDir
       }
     }
   ]

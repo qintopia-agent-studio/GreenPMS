@@ -9,7 +9,7 @@ import {
 
 describe("U1 command shell state", () => {
   it("freezes the approved command whitelist", () => {
-    expect(u1CommandTypes).toHaveLength(20);
+    expect(u1CommandTypes).toHaveLength(21);
     expect(isU1CommandType("SHORTEN_STAY")).toBe(true);
     for (const commandType of u1CommandTypes) {
       expect(isU1CommandType(commandType)).toBe(true);

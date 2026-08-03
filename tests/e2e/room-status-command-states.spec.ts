@@ -74,7 +74,7 @@ async function login(page: Page): Promise<RoomStatusBoardDto> {
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
   await expect(page.getByRole("grid")).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
@@ -337,7 +337,7 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     await expect(recovery).not.toContainText(originalConfirmationKey);
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
     await expect(page.getByRole("grid")).toBeVisible();
     recovery = page.getByTestId("inventory-command-recovery");
     await expect(recovery).toContainText("设置维修锁房结果需要恢复查询");
@@ -357,20 +357,30 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     await recovery.getByTestId("inventory-command-recovery-open").click();
     let recoveryQueryCount = 0;
     page.on("request", (request) => {
-      if (request.method() !== "GET") return;
+      if (request.method() !== "POST") return;
       const url = new URL(request.url());
-      if (url.pathname === "/api/v1/command-results"
-        && url.searchParams.get("propertyId") === propertyId
-        && url.searchParams.get("commandType") === "LOCK_MAINTENANCE"
-        && url.searchParams.get("idempotencyKey") === originalConfirmationKey) recoveryQueryCount += 1;
+      const body = request.postDataJSON() as Partial<{
+        propertyId: string;
+        commandType: string;
+        idempotencyKey: string;
+      }>;
+      if (url.pathname === "/api/v1/command-results/resolve"
+        && body.propertyId === propertyId
+        && body.commandType === "LOCK_MAINTENANCE"
+        && body.idempotencyKey === originalConfirmationKey) recoveryQueryCount += 1;
     });
     const recoveryResponsePromise = page.waitForResponse((response) => {
-      if (response.request().method() !== "GET") return false;
+      if (response.request().method() !== "POST") return false;
       const url = new URL(response.url());
-      return url.pathname === "/api/v1/command-results"
-        && url.searchParams.get("propertyId") === propertyId
-        && url.searchParams.get("commandType") === "LOCK_MAINTENANCE"
-        && url.searchParams.get("idempotencyKey") === originalConfirmationKey;
+      const body = response.request().postDataJSON() as Partial<{
+        propertyId: string;
+        commandType: string;
+        idempotencyKey: string;
+      }>;
+      return url.pathname === "/api/v1/command-results/resolve"
+        && body.propertyId === propertyId
+        && body.commandType === "LOCK_MAINTENANCE"
+        && body.idempotencyKey === originalConfirmationKey;
     });
     await page.getByRole("button", { name: "查询原操作结果", exact: true }).click();
     const recoveryResponse = await recoveryResponsePromise;
@@ -385,7 +395,7 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     expect(recoveryQueryCount).toBe(1);
 
     await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-    await expect(page.getByTestId("command-result-notice")).toContainText("维修锁房已设置，房态已刷新");
+    await expect(page.getByTestId("command-result-notice")).toHaveCount(0);
     await expect(page.getByTestId("command-receipt")).toBeHidden();
     const receiptId = recoveredBody.receiptId;
     const commandId = recoveredBody.commandId;
@@ -447,7 +457,7 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     await expect(interval).toHaveCount(1);
     await releaseMaintenanceForCleanup(page, blockId!);
     await page.reload();
-    await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
     await expect(interval).toHaveCount(0);
 
     const released = await db.selectFrom("maintenance_locks")

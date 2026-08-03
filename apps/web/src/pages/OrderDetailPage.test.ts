@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
 import { buildOrderOccupantCorrectionRequest, correctionDraftMatchesOccupant, restoredOptionalCorrectionValue } from "../components/OrderOccupantCorrectionDialog";
 import {
@@ -18,6 +19,7 @@ import {
   occupantSnapshotEntries,
   OrderAmountStrip,
   OrderLifecycleSections,
+  OrderMembershipCoverageSection,
   pricingBasisLabel,
   orderDetailBackTarget,
   orderFulfillmentNotice,
@@ -34,9 +36,11 @@ import {
   primaryOrderOccupant,
   remainingRefundableMinor,
   requestedOrderAction,
+  stayConversionEntitlementDisplay,
   terminalOrderActionCodes
 } from "./OrderDetailPage";
 import {
+  clearCorruptPersistedCommandRecovery,
   clearPersistedCommandRecovery,
   commandRecoveryStorageKey,
   readPersistedCommandRecovery,
@@ -76,6 +80,104 @@ describe("order detail background refresh", () => {
     editorState.current = true;
     expect(pollResponseArrives(changed)).toBe(true);
     expect(pollResponseArrives(structuredClone(previous))).toBe(false);
+  });
+});
+
+describe("upgrade membership entitlement presentation", () => {
+  function conversionOrderView(): OrderViewDto {
+    return {
+      order: {
+        id: "order_conversion",
+        property_id: "property_qintopia",
+        arrival_date: "2026-07-26",
+        departure_date: "2026-08-02"
+      },
+      amendments: [{
+        id: "amendment_conversion",
+        order_id: "order_conversion",
+        sequence: 2,
+        amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+        reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+        reason_note: "升级会员",
+        prior_version: 1,
+        new_version: 2,
+        payload: {
+          entitlement: {
+            consumedUnits: 7,
+            entitlementUnitKind: "ROOM_NIGHT",
+            serviceDates: [
+              "2026-07-26",
+              "2026-07-27",
+              "2026-07-28",
+              "2026-07-29",
+              "2026-07-30",
+              "2026-07-31",
+              "2026-08-01"
+            ]
+          },
+          member: {
+            memberId: "member_conversion",
+            fullName: "住宿转会员匹配会员-manual-20260802"
+          },
+          product: { name: "公卫单人间会员" }
+        },
+        command_id: "command_conversion",
+        actor: null,
+        created_at: "2026-08-02T00:00:00.000Z"
+      }],
+      collectionFacts: [{
+        fact_id: "collection_conversion",
+        order_id: "order_conversion",
+        fact_type: "COLLECTION",
+        amount_minor: 59_000,
+        net_effect_minor: 59_000,
+        currency: "CNY",
+        references_fact_id: null,
+        reverses_fact_id: null,
+        method: "WECOM",
+        note: "",
+        transaction_reference: "WX-STAGE13-manual-20260802-SOURCE",
+        pricing_revision_id: "revision_conversion",
+        command_id: "command_collection",
+        created_at: "2026-08-01T15:59:00.000Z",
+        transfer: {
+          id: "transfer_conversion",
+          membershipOrderId: "membership_order_conversion",
+          memberId: "member_conversion",
+          membershipPaymentFactId: "membership_payment_conversion",
+          sourceReversalFactId: "source_reversal_conversion"
+        }
+      }],
+      coverageSet: []
+    } as unknown as OrderViewDto;
+  }
+
+  it("summarizes upgrade-member entitlement consumption even when normal coverage rows are empty", () => {
+    const display = stayConversionEntitlementDisplay(conversionOrderView());
+    expect(display).toEqual({
+      serviceStart: "2026-07-26",
+      serviceEnd: "2026-08-02",
+      consumedUnits: 7,
+      unitLabel: "间夜",
+      memberName: "住宿转会员匹配会员-manual-20260802",
+      productName: "公卫单人间会员",
+      memberId: "member_conversion",
+      membershipOrderId: "membership_order_conversion"
+    });
+  });
+
+  it("does not tell operators that an upgraded stay used no membership entitlement", () => {
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(OrderMembershipCoverageSection, {
+      view: conversionOrderView(),
+      unitMap: new Map()
+    })));
+    expect(html).toContain("升级会员核销");
+    expect(html).toContain("2026-07-26 至 2026-08-02");
+    expect(html).toContain("7 间夜");
+    expect(html).toContain("公卫单人间会员");
+    expect(html).toContain("查看会员订单");
+    expect(html).not.toContain("没有会员覆盖");
+    expect(html).not.toContain("此订单未使用会员住宿权益");
   });
 });
 
@@ -160,6 +262,15 @@ describe("fulfillment result presentation", () => {
       action: "CHECK_IN",
       title: "暂不能办理入住",
       body: expect.stringContaining("可办理改期或标记未到")
+    });
+    expect(orderFulfillmentNotice([{
+      code: "CHECK_IN",
+      enabled: true,
+      disabledReason: "ARRIVAL_DATE_PASSED"
+    }])).toMatchObject({
+      action: "CHECK_IN",
+      title: "已超过计划到店日",
+      body: expect.stringContaining("可办理迟录入住")
     });
     expect(orderFulfillmentNotice([{
       code: "CHECK_IN",
@@ -698,6 +809,7 @@ describe("server-authoritative order actions", () => {
     expect(terminalOrderActionCodes("CHECKED_OUT")).toEqual([
       "RECORD_COLLECTION",
       "RECORD_REFUND",
+      "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
       "EXTEND_STAY",
       "SHORTEN_STAY",
       "MOVE_UNIT",
@@ -718,6 +830,11 @@ describe("server-authoritative order actions", () => {
       enabled: false,
       disabledReason: "NO_REFUNDABLE_COLLECTION"
     })).toContain("当前没有可退款的收款记录");
+    expect(orderActionDisabledReasonText({
+      code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      enabled: false,
+      disabledReason: "NO_TRANSFERABLE_COLLECTION"
+    })).toContain("当前订单没有可整笔用于升级会员的企业微信住宿收款");
     expect(orderActionDisabledReasonText({
       code: "CHECK_IN",
       enabled: true,
@@ -1274,5 +1391,20 @@ describe("shared Web command recovery persistence", () => {
       removeItem: () => undefined
     };
     expect(readPersistedCommandRecovery(unreadableStorage, context.subjectId, context.scopeId).kind).toBe("READ_ERROR");
+  });
+
+  it("only clears a damaged record after the caller has entered the controlled recovery path", () => {
+    const storage = new MemoryStorage();
+    const key = commandRecoveryStorageKey(context.subjectId, context.scopeId);
+
+    expect(clearCorruptPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toBe(false);
+    const valid = transitionPersistedCommandRecovery(undefined, context, confirming).recovery!;
+    expect(savePersistedCommandRecovery(storage, valid)).toBe(true);
+    expect(clearCorruptPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toBe(false);
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toMatchObject({ kind: "VALID" });
+
+    storage.setItem(key, "{\"version\":1");
+    expect(clearCorruptPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toBe(true);
+    expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toEqual({ kind: "ABSENT" });
   });
 });

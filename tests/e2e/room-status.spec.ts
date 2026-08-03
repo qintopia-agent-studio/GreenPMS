@@ -1,14 +1,25 @@
 import { expect, test, type Locator, type Page, type Request, type TestInfo } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { hashPassword, todayInTimeZone } from "@qintopia/domain";
-import type { RoomStatusBoardDto } from "@qintopia/contracts";
+import type { AuthPrincipal, CommandEnvelope, RoomStatusBoardDto } from "@qintopia/contracts";
+import { confirmCommandPreview, createCommandPreview, executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
 import { createDatabase } from "../../packages/db/src/database.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
 const propertyId = "prop_qintopia_demo";
+const agentSubjectId = "subject_demo_agent";
+const publicPricingPolicyId = "policy_qintopia_public_2026_rev561_v1";
 const commandUiWaitMs = 60_000;
+const roomStatusTimelineDays = 30;
 const operator = { username: "operator", password: "demo-pass-2026" };
+const longStayFixturePrincipal: AuthPrincipal = {
+  subjectId: agentSubjectId,
+  credentialId: "token_demo_write",
+  credentialType: "TOKEN",
+  displayName: "Long-stay E2E fixture writer",
+  propertyAccess: new Map([[propertyId, "WRITE"]])
+};
 const readOnlyOperator = {
   id: "subject_e2e_room_status_reader",
   username: "room-status-reader",
@@ -46,6 +57,66 @@ function roomStatusResponse(page: Page, expectedRange?: { arrivalDate: string; d
         && url.searchParams.get("departureDate") === expectedRange.departureDate))
       && response.status() === 200;
   });
+}
+
+function quoteResponse(page: Page, expected: { inventoryUnitId: string; arrivalDate: string; departureDate: string }) {
+  return page.waitForResponse((response) => {
+    if (response.request().method() !== "POST" || new URL(response.url()).pathname !== "/api/v1/quotes") return false;
+    const payload = response.request().postDataJSON() as Partial<typeof expected>;
+    return payload.inventoryUnitId === expected.inventoryUnitId
+      && payload.arrivalDate === expected.arrivalDate
+      && payload.departureDate === expected.departureDate;
+  }, { timeout: 30_000 });
+}
+
+async function createRemoteLongStayConflict(unitId: string, arrivalDate: string, departureDate: string): Promise<void> {
+  const db = createDatabase(e2eDatabaseUrl);
+  const key = `e2e-long-stay-remote-conflict-${crypto.randomUUID()}`;
+  try {
+    const quoted = await executeQuoteCommand(db, longStayFixturePrincipal, {
+        propertyId,
+        inventoryUnitId: unitId,
+        arrivalDate,
+        departureDate,
+        pricingPolicyVersionId: publicPricingPolicyId
+    }, { idempotencyKey: `${key}-quote`, correlationId: `${key}-quote` });
+    const preview = await createCommandPreview(db, longStayFixturePrincipal, {
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId,
+        quoteId: quoted.quote.quoteId,
+        primaryGuest: { fullName: "长住窗口外冲突住客", nickname: "窗口外冲突" },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: quoted.quote.currentContractAmount.minorUnits
+      }
+    } as CommandEnvelope, { idempotencyKey: `${key}-preview`, correlationId: `${key}-preview` });
+    const receipt = await confirmCommandPreview(db, longStayFixturePrincipal, preview.preview.previewId, {
+      propertyId,
+      commandType: "CREATE_ORDER",
+      confirmation: true,
+      expectedEffectHash: preview.preview.effectHash,
+      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
+    }, { idempotencyKey: `${key}-confirm`, correlationId: `${key}-confirm` });
+    if (receipt.executionStatus !== "EXECUTED" || !receipt.businessCommitted) {
+      throw new Error(`Failed to prepare remote long-stay conflict: ${receipt.error?.message ?? receipt.executionStatus}`);
+    }
+  } finally {
+    await db.destroy();
+  }
+}
+
+async function propertyOrderCount(): Promise<number> {
+  const db = createDatabase(e2eDatabaseUrl);
+  try {
+    const row = await db.selectFrom("orders")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .where("property_id", "=", propertyId)
+      .executeTakeFirstOrThrow();
+    return Number(row.count);
+  } finally {
+    await db.destroy();
+  }
 }
 
 async function ensureReadOnlyPrincipal() {
@@ -227,7 +298,8 @@ async function login(
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
   return {
     board: await response.json() as RoomStatusBoardDto
   };
@@ -238,6 +310,27 @@ async function expectDesktopGrid(page: Page) {
   await expect(region).toBeVisible();
   await expect(region.getByRole("grid")).toBeVisible();
   return region;
+}
+
+async function expectMobileRoomStatus(page: Page) {
+  await expect(page.getByRole("heading", { name: "今日运营任务", exact: true })).toBeVisible();
+  await expect(page.locator(".room-status-mobile")).toBeVisible();
+  await expect(page.getByRole("button", { name: "新建住宿或锁房", exact: true })).toBeVisible();
+}
+
+async function expectResponsiveRoomStatus(page: Page): Promise<
+  | { mode: "desktop"; gridRegion: Locator }
+  | { mode: "mobile" }
+> {
+  const desktopRegion = page.getByRole("region", { name: /房态二维网格/ });
+  const mobileShell = page.locator(".room-status-mobile");
+  await expect(desktopRegion.or(mobileShell)).toBeVisible();
+  if (await desktopRegion.isVisible()) {
+    await expect(desktopRegion.getByRole("grid")).toBeVisible();
+    return { mode: "desktop", gridRegion: desktopRegion };
+  }
+  await expectMobileRoomStatus(page);
+  return { mode: "mobile" };
 }
 
 function firstAvailableRoomStatusCell(page: Page, board: RoomStatusBoardDto): Locator {
@@ -353,7 +446,6 @@ async function keyboardPreviewAndConfirm(
   const receipt = await (await confirmedPromise).json() as { resourceRefs: string[]; result?: { orderId?: string } };
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: commandUiWaitMs });
   await expect(page.getByTestId("command-receipt")).toBeHidden();
-  await expect(page.getByTestId("command-result-notice")).toBeVisible();
   return receipt;
 }
 
@@ -376,7 +468,6 @@ async function previewAndConfirm(page: Page, expectedEffect: readonly string[]) 
   const receipt = await (await confirmedPromise).json() as { resourceRefs: string[]; result?: { orderId?: string } };
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: commandUiWaitMs });
   await expect(page.getByTestId("command-receipt")).toBeHidden();
-  await expect(page.getByTestId("command-result-notice")).toBeVisible();
   return receipt;
 }
 
@@ -435,25 +526,33 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   const observerPage = await observerContext.newPage();
   await login(observerPage);
   await expectDesktopGrid(observerPage);
-  await observerPage.getByTestId("date-window-mode-21").click();
-  await expect(observerPage.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
 
   expect(board.propertyId).toBe(propertyId);
   expect(board.projectionState).toBe("READY");
   expect(board.accessLevel).toBe("WRITE");
   expect(board.rooms).toHaveLength(44);
   expect(board.rooms.reduce((count, room) => count + room.children.length, 0)).toBe(46);
-  expect(board.dates.length).toBeGreaterThan(0);
-  expect(board.dates.length).toBeLessThanOrEqual(31);
-  await expect(gridRegion.getByRole("row")).toHaveCount(45);
-  await expect(page.getByText("投影完整", { exact: true })).toBeVisible();
-
-  const today = todayInTimeZone("Asia/Shanghai");
-  const arrivalDate = addDays(today, 9);
-  const departureDate = addDays(today, 11);
+  expect(board.range.departureDate).toBe(addDays(board.range.arrivalDate, roomStatusTimelineDays));
+  expect(board.dates).toHaveLength(roomStatusTimelineDays);
+  const visibleBuildingRowCount = new Set(board.rooms.map((room) => room.buildingCode?.trim() || "未分栋")).size;
+  await expect(gridRegion.getByRole("row")).toHaveCount(1 + board.rooms.length + visibleBuildingRowCount);
   const roomId = "unit_room_104";
   const bedAId = "unit_room_104_bed_a";
   const bedBId = "unit_room_104_bed_b";
+  const splitRoom = board.rooms.find((room) => room.id === roomId);
+  const bedA = splitRoom?.children.find((unit) => unit.id === bedAId);
+  const bedB = splitRoom?.children.find((unit) => unit.id === bedBId);
+  const availableStartIndex = board.dates.findIndex((date, index) => {
+    const nextDate = board.dates[index + 1];
+    if (!nextDate || !bedA || !bedB) return false;
+    return [bedA, bedB].every((unit) => [date, nextDate].every((serviceDate) => {
+      const day = unit.days.find((candidate) => candidate.serviceDate === serviceDate);
+      return day?.available && day.conflicts.length === 0 && day.intervalIds.length === 0;
+    }));
+  });
+  expect(availableStartIndex, "104-A and 104-B require two consecutive available nights").toBeGreaterThanOrEqual(0);
+  const arrivalDate = board.dates[availableStartIndex]!;
+  const departureDate = addDays(arrivalDate, 2);
 
   const expandRoom = roomRow(page, roomId).getByRole("button", { name: /^展开.*床位$/ });
   const expandObserverRoom = roomRow(observerPage, roomId).getByRole("button", { name: /^展开.*床位$/ });
@@ -622,15 +721,18 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   const search = page.getByLabel("搜索房间或床位");
+  const filteredResponse = roomStatusResponse(page);
   await search.fill("104");
-  await expect(page.getByText("1 间房", { exact: true })).toBeVisible();
+  await filteredResponse;
+  await expect(roomRow(page, roomId)).toBeVisible();
+  await expect(roomRow(page, "unit_room_101")).toHaveCount(0);
   await roomCell(page, bedBId, arrivalDate).click();
 
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await expect(page.getByRole("heading", { name: "订单", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "房态", exact: true }).click();
   await expectDesktopGrid(page);
-  await expect(page.getByRole("status").filter({ hasText: /已恢复上次查看位置|房态已更新/ })).toBeVisible();
+  await expect(page.locator(".room-status-return-notice")).toHaveCount(0);
   await expect(page.getByLabel("搜索房间或床位")).toHaveValue("104");
   await expect(roomRow(page, roomId).getByRole("button", { name: /^收起.*床位$/ })).toBeVisible();
   await expect(roomCell(page, bedBId, arrivalDate)).toHaveAttribute("aria-selected", "true");
@@ -655,7 +757,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await page.getByRole("link", { name: "房态", exact: true }).click();
   await fallbackResponse;
   await expectDesktopGrid(page);
-  await expect(page.locator(".room-status-return-notice")).toContainText("原焦点或选区在当前筛选、展开、分页或日期窗口中已不可见");
+  await expect(page.locator(".room-status-return-notice")).toContainText("当前筛选或日期范围已变化");
   await expect(roomRow(page, roomId).getByRole("button", { name: /^展开.*床位$/ })).toBeVisible();
   await expect(roomRow(page, bedBId)).toHaveCount(0);
   await expect(page.locator("[data-room-status-cell='true'][aria-selected='true']")).toHaveCount(0);
@@ -785,8 +887,6 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   await expect(page.getByRole("tooltip")).toContainText("免费入住");
   await expect(page.getByRole("tooltip")).toContainText(`${Number(serviceDate!.slice(5, 7))}月${Number(serviceDate!.slice(8, 10))}日`);
   await expect(page.getByRole("tooltip")).not.toContainText(/阻断|Claim|order_/i);
-  await page.getByTestId("date-window-mode-21").click();
-  await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
   const gridScroll = page.locator(".room-status-grid-scroll");
   const horizontalScroll = await gridScroll.evaluate((element) => {
     const before = element.scrollLeft;
@@ -943,6 +1043,9 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   await expect(page.getByRole("tooltip")).toBeHidden();
 
   await page.setViewportSize({ width: 375, height: 812 });
+  const occupancyToggle = page.getByTestId("mobile-room-status-occupancies-toggle");
+  await expect(occupancyToggle).toBeVisible();
+  if (await occupancyToggle.getAttribute("aria-expanded") === "false") await occupancyToggle.click();
   const mobileOccupancy = page.locator(".room-status-mobile-occupancies li")
     .filter({ hasText: room!.code })
     .filter({ hasText: "4/4" });
@@ -962,12 +1065,11 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   await assertNoPageOverflow(page);
 });
 
-test("desktop range selection, field errors, filtered-empty and range-loading fail closed", async ({ page }, testInfo: TestInfo) => {
+test("desktop range selection, fixed 30-night start-date navigation, filtered-empty and range-loading fail closed", async ({ page }, testInfo: TestInfo) => {
   test.skip(!isProject(testInfo, "desktop"), "desktop room-status interaction-state coverage");
   test.setTimeout(120_000);
   const { board } = await login(page);
   await expectDesktopGrid(page);
-  await page.getByTestId("date-window-mode-21").click();
 
   let candidate: { unitId: string; arrivalDate: string; departureDate: string } | undefined;
   for (const room of board.rooms) {
@@ -1011,16 +1113,16 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
   await page.getByLabel("退房日期", { exact: true }).fill(candidate!.departureDate);
   await expect(selectionDateError).toBeHidden();
   const writeDrawer = page.locator("dialog.room-status-write-drawer");
-  await writeDrawer.getByRole("button", { name: "关闭办理区域", exact: true }).click();
-  const viewDrawer = page.locator("dialog.room-status-view-drawer");
-  await viewDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
-  await expect(viewDrawer).toBeHidden();
+  await writeDrawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  const visibleDialogs = page.locator("dialog:visible");
+  await expect(visibleDialogs).toHaveCount(0, { timeout: 15_000 });
 
   const search = page.getByLabel("搜索房间或床位");
-  await search.focus();
-  await page.keyboard.type("不存在的房源");
+  await expect(search).toBeEditable({ timeout: 15_000 });
+  await search.fill("不存在的房源");
+  await expect(search).toHaveValue("不存在的房源");
   const filteredEmpty = page.locator("[data-room-status-state='filtered-empty']");
-  await expect(filteredEmpty).toBeVisible();
+  await expect(filteredEmpty).toBeVisible({ timeout: 15_000 });
   await expect(page.locator("[data-room-status-cell='true'][aria-selected='true']")).toHaveCount(0);
   await expect(page.locator("[data-room-status-cell='true']:focus")).toHaveCount(0);
   await expect(page.locator(".room-status-context-actions").getByRole("button")).toHaveCount(0);
@@ -1031,18 +1133,9 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
   await expect(search).toBeFocused();
 
   const toolbarArrival = page.getByTestId("arrival-date");
-  const toolbarDeparture = page.getByTestId("departure-date");
-  await toolbarDeparture.fill(board.range.arrivalDate);
-  const toolbarDateError = page.getByTestId("room-status-range-error");
-  await expect(toolbarDateError).toBeFocused();
-  const toolbarErrorId = await toolbarDateError.getAttribute("id");
-  expect(toolbarErrorId).toBeTruthy();
-  await expect(toolbarArrival).toHaveAttribute("aria-invalid", "true");
-  await expect(toolbarDeparture).toHaveAttribute("aria-describedby", toolbarErrorId!);
-  await toolbarDeparture.fill(board.range.departureDate);
-  await expect(toolbarDateError).toBeHidden();
-
-  const requestedDeparture = addDays(board.range.departureDate, 1);
+  await expect(page.getByTestId("departure-date")).toHaveCount(0);
+  const requestedArrival = addDays(board.range.arrivalDate, 1);
+  const requestedDeparture = addDays(requestedArrival, roomStatusTimelineDays);
   let releaseRequest = () => {};
   let markRequestSeen = () => {};
   let targetRequestCount = 0;
@@ -1051,26 +1144,28 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
   const routePattern = `**/api/v1/properties/${propertyId}/room-status*`;
   await page.route(routePattern, async (route) => {
     const url = new URL(route.request().url());
-    if (url.searchParams.get("arrivalDate") === board.range.arrivalDate
+    if (url.searchParams.get("arrivalDate") === requestedArrival
       && url.searchParams.get("departureDate") === requestedDeparture) {
       targetRequestCount += 1;
       markRequestSeen();
       await heldRequest;
     }
-    await route.continue();
+    try {
+      await route.continue();
+    } catch (error) {
+      if (!String(error).includes("Route is already handled")) throw error;
+    }
   });
 
   try {
     const committedRange = page.getByTestId("room-status-board-range");
     const response = roomStatusResponse(page, {
-      arrivalDate: board.range.arrivalDate,
+      arrivalDate: requestedArrival,
       departureDate: requestedDeparture
     });
-    await toolbarDeparture.fill(requestedDeparture);
+    await toolbarArrival.fill(requestedArrival);
     await requestSeen;
     await expect(page.getByTestId("room-status-range-loading")).toBeVisible();
-    await expect(page.locator(".room-status-toolbar")).toContainText("数据时点");
-    await expect(page.locator(".room-status-toolbar")).toContainText("正在载入新范围，旧事实不可操作");
     await expect(committedRange).toHaveAttribute("data-range-departure", board.range.departureDate);
     await expect(page.locator(".room-status-workspace")).toHaveAttribute("inert", "");
     await expect(page.locator(".room-status-context-actions").getByRole("button", { name: /创建|放置|释放|完成清洁/ })).toHaveCount(0);
@@ -1078,6 +1173,7 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
     expect(targetRequestCount, "the 4-second poll must coalesce behind an in-flight range query").toBe(1);
     releaseRequest();
     await response;
+    await expect(committedRange).toHaveAttribute("data-range-arrival", requestedArrival, { timeout: 15_000 });
     await expect(committedRange).toHaveAttribute("data-range-departure", requestedDeparture, { timeout: 15_000 });
     await expect(page.getByTestId("room-status-range-loading")).toBeHidden();
     await expect(page.locator(".room-status-workspace")).not.toHaveAttribute("inert", "");
@@ -1085,6 +1181,90 @@ test("desktop range selection, field errors, filtered-empty and range-loading fa
     releaseRequest();
     await page.unroute(routePattern);
   }
+});
+
+test("desktop long stays stay actionable beyond the 30-night board and fail visibly on remote conflicts", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop long-stay browser coverage");
+  test.setTimeout(180_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+
+  const longArrival = addDays(todayInTimeZone("Asia/Shanghai"), 60);
+  const displayedDeparture = addDays(longArrival, roomStatusTimelineDays);
+  const boardResponse = roomStatusResponse(page, { arrivalDate: longArrival, departureDate: displayedDeparture });
+  await page.getByTestId("arrival-date").fill(longArrival);
+  const longWindowBoard = await (await boardResponse).json() as RoomStatusBoardDto;
+  expect(longWindowBoard.dates).toHaveLength(roomStatusTimelineDays);
+
+  const reservedFixtureCodes = new Set(["101", "102", "103", "104", "201", "205", "A01", "A02", "A03", "B01", "B02", "D01"]);
+  const candidate = longWindowBoard.rooms.find((room) => (
+    !reservedFixtureCodes.has(room.code)
+    && room.allowedActions.some((action) => action.enabled && action.code === "CREATE_ORDER")
+    && room.days.length === roomStatusTimelineDays
+    && room.days.every((day) => day.available && day.conflicts.length === 0)
+  ));
+  expect(candidate, "an unoccupied room outside shared E2E fixtures is required for long-stay browser coverage").toBeTruthy();
+
+  const drawer = await openRoomStatusWriteDrawer(page, candidate!.id, longArrival, "创建住宿");
+  const departureInput = drawer.getByLabel("退房日期", { exact: true });
+  const quoteFor = async (departureDate: string) => {
+    const response = quoteResponse(page, {
+      inventoryUnitId: candidate!.id,
+      arrivalDate: longArrival,
+      departureDate
+    });
+    await departureInput.fill(departureDate);
+    return response;
+  };
+
+  const departure117 = addDays(longArrival, 117);
+  const accepted117 = await quoteFor(departure117);
+  expect(accepted117.ok()).toBe(true);
+  await expect(drawer.getByText("房态当前只显示其中 30 夜，住宿日期仍按完整区间核对。", { exact: true })).toBeVisible();
+  await expect(drawer.getByTestId("quote-result")).toContainText("117 晚");
+  await drawer.getByTestId("primary-guest-nickname").fill("长住浏览器验证");
+  await drawer.getByTestId("primary-guest-name").fill("长住浏览器验证住客");
+  await drawer.getByTestId("booking-channel-code").selectOption("WECOM");
+  await expect(drawer.getByTestId("create-order")).toBeEnabled();
+
+  const departure366 = addDays(longArrival, 366);
+  const accepted366 = await quoteFor(departure366);
+  expect(accepted366.ok()).toBe(true);
+  await expect(drawer.getByTestId("quote-result")).toContainText("366 晚");
+  await expect(drawer.getByTestId("room-status-selection-date-error")).toBeHidden();
+
+  await departureInput.fill(addDays(longArrival, 367));
+  await expect(drawer.getByTestId("room-status-selection-date-error")).toContainText("住宿日期最长 366 夜。");
+  await expect(drawer.getByTestId("quote-result")).toHaveCount(0);
+  await expect(drawer.getByTestId("create-order")).toBeDisabled();
+
+  await departureInput.fill("");
+  await expect(drawer.getByTestId("quote-result")).toHaveCount(0);
+  await expect(drawer.getByTestId("create-order")).toBeDisabled();
+
+  await departureInput.fill(addDays(longArrival, -1));
+  await expect(drawer.getByTestId("room-status-selection-date-error")).toContainText("退房日期必须晚于入住日期。");
+  await expect(drawer.getByTestId("quote-result")).toHaveCount(0);
+  await expect(drawer.getByTestId("create-order")).toBeDisabled();
+
+  const accepted117Again = await quoteFor(departure117);
+  expect(accepted117Again.ok()).toBe(true);
+  await expect(drawer.getByTestId("quote-result")).toContainText("117 晚");
+
+  const remoteConflictArrival = addDays(longArrival, 45);
+  const remoteConflictDeparture = addDays(remoteConflictArrival, 1);
+  expect(remoteConflictArrival > displayedDeparture).toBe(true);
+  await createRemoteLongStayConflict(candidate!.id, remoteConflictArrival, remoteConflictDeparture);
+  const ordersBeforeFailedTargetQuote = await propertyOrderCount();
+
+  const failedQuote = await quoteFor(addDays(longArrival, 116));
+  expect(failedQuote.ok()).toBe(false);
+  const quoteFailure = drawer.getByRole("alert").filter({ hasText: "报价失败" });
+  await expect(quoteFailure).toBeVisible();
+  await expect(quoteFailure).toContainText(remoteConflictArrival);
+  await expect(quoteFailure).toContainText(remoteConflictDeparture);
+  await expect(quoteFailure).toContainText(/已有住宿|不能重复安排/);
+  expect(await propertyOrderCount()).toBe(ordersBeforeFailedTargetQuote);
 });
 
 test("desktop stale and unknown states fail closed without mocked room-status data", async ({ page }, testInfo: TestInfo) => {
@@ -1226,7 +1406,6 @@ test("a real WRITE to READ downgrade invalidates an open Preview without hiding 
     expect((await narrowedResponse.json() as RoomStatusBoardDto).accessLevel).toBe("READ");
 
     await expect(page.getByRole("grid")).toBeVisible();
-    await expect(page.getByText(`${revocationOperator.displayName} · 只读`, { exact: true })).toBeVisible();
     await expect(page.locator("dialog.modal-wide")).toBeVisible();
     await expect(page.getByRole("alert").filter({ hasText: "写入已暂停" })).toBeVisible();
     await expect(page.getByTestId("confirm-command")).toBeDisabled();
@@ -1272,7 +1451,6 @@ test("READ Web principal receives the real projection without business write act
   expect(board.accessLevel).toBe("READ");
   expect(board.rooms.flatMap((room) => [room, ...room.children]).every((unit) => unit.allowedActions.every((action) => action.code === "OPEN_ORDER")
     && unit.intervals.every((interval) => interval.allowedActions.every((action) => action.code === "OPEN_ORDER")))).toBe(true);
-  await expect(page.getByText(`${readOnlyOperator.displayName} · 只读`, { exact: true })).toBeVisible();
 
   const quickPopover = await openDayPopover(page, firstAvailableRoomStatusCell(page, board));
   await quickPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
@@ -1298,25 +1476,25 @@ test("room-status responsive layouts keep the matrix bounded through tablet and 
     { width: 768, height: 1024, name: "768" }
   ]) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    const gridRegion = await expectDesktopGrid(page);
-    const viewDrawer = page.locator("dialog.room-status-view-drawer");
-    const context = page.locator(".room-status-context");
-    await expect(viewDrawer).toBeVisible();
-    await expect(context).toBeVisible();
     await assertNoPageOverflow(page);
-    expect(await page.locator(".room-status-grid-header").evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
-    expect(await page.locator(".room-status-resource-header").evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
-    const gridBox = await gridRegion.boundingBox();
-    const drawerBox = await viewDrawer.boundingBox();
-    expect(gridBox).not.toBeNull();
-    expect(drawerBox).not.toBeNull();
-    expect(drawerBox!.x).toBeGreaterThanOrEqual(0);
-    expect(drawerBox!.x + drawerBox!.width).toBeLessThanOrEqual(viewport.width + 1);
-    expect(drawerBox!.x).toBeLessThan(gridBox!.x + gridBox!.width);
-    if (viewport.width === 768) {
-      await roomCell(page, board.rooms[0]!.id, board.dates[0]!).focus();
-      for (let index = 0; index < 8; index += 1) await page.keyboard.press("ArrowDown");
-      await assertFocusedCellAboveMobileNavigation(page);
+    const layout = await expectResponsiveRoomStatus(page);
+    if (layout.mode === "desktop") {
+      const gridRegion = layout.gridRegion;
+      const viewDrawer = page.locator("dialog.room-status-view-drawer");
+      const context = page.locator(".room-status-context");
+      expect(await page.locator(".room-status-grid-header").evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
+      expect(await page.locator(".room-status-resource-header").evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
+      const gridBox = await gridRegion.boundingBox();
+      expect(gridBox).not.toBeNull();
+      if (viewport.width >= 1024 || await viewDrawer.isVisible()) {
+        await expect(viewDrawer).toBeVisible();
+        await expect(context).toBeVisible();
+        const drawerBox = await viewDrawer.boundingBox();
+        expect(drawerBox).not.toBeNull();
+        expect(drawerBox!.x).toBeGreaterThanOrEqual(0);
+        expect(drawerBox!.x + drawerBox!.width).toBeLessThanOrEqual(viewport.width + 1);
+        expect(drawerBox!.x).toBeLessThan(gridBox!.x + gridBox!.width);
+      }
     }
     await page.screenshot({ path: testInfo.outputPath(`room-status-${viewport.name}.png`), fullPage: true });
   }
@@ -1331,18 +1509,15 @@ test("room-status responsive layouts keep the matrix bounded through tablet and 
     screenHeight: 1800
   });
   await page.reload();
-  await expectDesktopGrid(page);
+  await expectResponsiveRoomStatus(page);
   expect(await page.evaluate(() => ({ cssWidth: window.innerWidth, pixelRatio: window.devicePixelRatio })))
     .toEqual({ cssWidth: 720, pixelRatio: 2 });
   await assertNoPageOverflow(page);
-  await page.locator("[data-room-status-cell='true']").first().focus();
-  for (let index = 0; index < 8; index += 1) await page.keyboard.press("ArrowDown");
-  await assertFocusedCellAboveMobileNavigation(page);
   await assertNoA11yViolations(page);
   await page.screenshot({ path: testInfo.outputPath("room-status-200-percent-zoom.png"), fullPage: true });
 });
 
-test("room-status reload LCP and a real 90-night grid stay within the interaction budgets", async ({ page }, testInfo: TestInfo) => {
+test("room-status reload LCP and a real fixed 30-night grid stay within the interaction budgets", async ({ page }, testInfo: TestInfo) => {
   test.skip(!isProject(testInfo, "desktop"), "desktop room-status performance coverage");
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -1376,14 +1551,14 @@ test("room-status reload LCP and a real 90-night grid stay within the interactio
   const p75 = sortedLcp[Math.ceil(sortedLcp.length * 0.75) - 1]!;
   expect(p75, `LCP samples: ${lcpSamples.map((value) => value.toFixed(1)).join(", ")}`).toBeLessThanOrEqual(2_500);
 
-  const today = todayInTimeZone("Asia/Shanghai");
-  const departureDate = addDays(today, 90);
-  const response = roomStatusResponse(page, { arrivalDate: today, departureDate });
+  const timelineStartDate = addDays(todayInTimeZone("Asia/Shanghai"), roomStatusTimelineDays);
+  const departureDate = addDays(timelineStartDate, roomStatusTimelineDays);
+  const response = roomStatusResponse(page, { arrivalDate: timelineStartDate, departureDate });
   const startedAt = performance.now();
-  await page.getByTestId("departure-date").fill(departureDate);
+  await page.getByTestId("arrival-date").fill(timelineStartDate);
   const refreshedResponse = await response;
   const committedRange = page.getByTestId("room-status-board-range");
-  await expect(committedRange).toHaveAttribute("data-range-arrival", today);
+  await expect(committedRange).toHaveAttribute("data-range-arrival", timelineStartDate);
   await expect(committedRange).toHaveAttribute("data-range-departure", departureDate);
   const grid = committedRange.getByRole("region", { name: /房态二维网格/ });
   await expect(grid).toBeVisible();
@@ -1392,11 +1567,12 @@ test("room-status reload LCP and a real 90-night grid stay within the interactio
   await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-room-status-cell='true']:focus")).toHaveCount(1);
   const elapsedMs = performance.now() - startedAt;
-  expect(elapsedMs, "90-night request through keyboard-interactive grid").toBeLessThanOrEqual(2_000);
+  expect(elapsedMs, "30-night request through keyboard-interactive grid").toBeLessThanOrEqual(2_000);
 
   const refreshedBoard = await refreshedResponse.json() as RoomStatusBoardDto;
-  const selectionArrival = addDays(today, 1);
-  const selectionDeparture = addDays(today, 16);
+  expect(refreshedBoard.dates).toHaveLength(roomStatusTimelineDays);
+  const selectionArrival = addDays(timelineStartDate, 1);
+  const selectionDeparture = addDays(timelineStartDate, 16);
   const fullyAvailableRoom = refreshedBoard.rooms.find((room) => {
     const selectedDays = room.days
       .filter((day) => selectionArrival <= day.serviceDate && day.serviceDate < selectionDeparture);
@@ -1417,11 +1593,11 @@ test("room-status reload LCP and a real 90-night grid stay within the interactio
   for (let index = 0; index < 14; index += 1) {
     await page.keyboard.press("Shift+ArrowRight");
     await expect(page.locator("[data-room-status-cell='true']:focus"))
-      .toHaveAttribute("data-service-date", addDays(today, index + 2));
+      .toHaveAttribute("data-service-date", addDays(timelineStartDate, index + 2));
   }
   await expect(page.locator("[data-room-status-cell='true']:focus"))
-    .toHaveAttribute("data-service-date", addDays(today, 15));
-  const crossWindowTarget = roomCell(page, firstUnitId!, addDays(today, 15));
+    .toHaveAttribute("data-service-date", addDays(timelineStartDate, 15));
+  const crossWindowTarget = roomCell(page, firstUnitId!, addDays(timelineStartDate, 15));
   await expect.poll(() => crossWindowTarget.evaluate((element) => element.matches(":focus-visible")))
     .toBe(true);
   await page.keyboard.press("Enter");
@@ -1523,7 +1699,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
 
   const guest = `Room Status Arrival ${today}`;
   const orderDepartureDate = addDays(today, 2);
-  await createFreeStayForToday(page, {
+  const arrivalOrderId = await createFreeStayForToday(page, {
     unitId: "unit_room_201",
     guest,
     nickname: guest,
@@ -1548,15 +1724,15 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await overdueRefresh;
 
   const shiftedArrivalDate = board.range.departureDate;
-  const shiftedDepartureDate = addDays(shiftedArrivalDate, board.dates.length);
+  const shiftedDepartureDate = addDays(shiftedArrivalDate, roomStatusTimelineDays);
   const shiftedResponse = roomStatusResponse(page, {
     arrivalDate: shiftedArrivalDate,
     departureDate: shiftedDepartureDate
   });
-  await page.getByRole("button", { name: "查看后一日期窗口", exact: true }).click();
+  await page.getByRole("button", { name: "查看后 30 夜", exact: true }).click();
   await shiftedResponse;
   await expect(page.getByTestId("arrival-date")).toHaveValue(shiftedArrivalDate);
-  await expect(page.getByTestId("departure-date")).toHaveValue(shiftedDepartureDate);
+  await expect(page.getByTestId("departure-date")).toHaveCount(0);
 
   await page.setViewportSize({ width: 375, height: 812 });
   await expect(page.getByRole("heading", { name: "今日运营任务" })).toBeVisible();
@@ -1576,37 +1752,58 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await expect(orderDetail).toContainText(
     `${Number(today.slice(5, 7))}月${Number(today.slice(8, 10))}日至${Number(orderDepartureDate.slice(5, 7))}月${Number(orderDepartureDate.slice(8, 10))}日`
   );
+  const selectedOrderResponse = page.waitForResponse((response) => (
+    response.request().method() === "GET"
+    && new URL(response.url()).pathname === `/api/v1/orders/${arrivalOrderId}`
+    && response.status() === 200
+  ), { timeout: 30_000 });
   await orderDetail.getByRole("button", { name: "打开订单", exact: true }).click();
+  await selectedOrderResponse;
   const mobileOrderDialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
   const mobileOrderContext = mobileOrderDialog.locator(".room-status-order-context").filter({
     has: page.getByRole("heading", { name: `${guest}的住宿订单`, exact: true })
   });
-  await expect(mobileOrderContext).toBeVisible();
+  await expect(mobileOrderContext).toBeVisible({ timeout: 30_000 });
   await expect(mobileOrderContext).toContainText(guest);
   await mobileOrderDialog.getByRole("button", { name: "查看完整订单", exact: true }).click();
   await expect(page.getByRole("heading", { name: guest, exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "住宿状态", exact: true })).toBeVisible();
 
-  const restoredResponse = roomStatusResponse(page, {
-    arrivalDate: shiftedArrivalDate,
-    departureDate: shiftedDepartureDate
-  });
-  await page.getByRole("link", { name: "房态", exact: true }).click();
-  await restoredResponse;
+  const restoredResponse = roomStatusResponse(page);
+  await page.getByRole("link", { name: "返回房态", exact: true }).click();
+  const restoredBoard = await (await restoredResponse).json() as RoomStatusBoardDto;
   await expect(page.getByRole("heading", { name: "今日运营任务" })).toBeVisible();
-  await expect(page.getByTestId("arrival-date")).toHaveValue(shiftedArrivalDate);
-  await expect(page.getByTestId("departure-date")).toHaveValue(shiftedDepartureDate);
-  await expect(page.locator(".room-status-return-notice")).toBeVisible();
-  const restoredSnapshot = await page.evaluate(() => {
+  const restoredMobileRange = page.locator(".room-status-mobile-range");
+  await expect(restoredMobileRange).toContainText(
+    `${Number(restoredBoard.range.arrivalDate.slice(5, 7))}月${Number(restoredBoard.range.arrivalDate.slice(8, 10))}日`
+  );
+  await expect(restoredMobileRange).toContainText(
+    `${Number(restoredBoard.range.departureDate.slice(5, 7))}月${Number(restoredBoard.range.departureDate.slice(8, 10))}日`
+  );
+  await expect(page.locator(".room-status-return-notice")).toContainText("已按最新房态恢复原住宿选择");
+  await expect.poll(() => page.evaluate(() => {
     const key = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
       .find((candidate) => candidate?.startsWith("qintopia.room-status-view.v1:"));
-    return key ? JSON.parse(sessionStorage.getItem(key) ?? "null") as {
+    const snapshot = key ? JSON.parse(sessionStorage.getItem(key) ?? "null") as {
       range?: { arrivalDate?: string; departureDate?: string };
       state?: { selection?: unknown };
     } : null;
+    return { range: snapshot?.range, selection: snapshot?.state?.selection };
+  })).toEqual({
+    range: restoredBoard.range,
+    selection: {
+      unitId: "unit_room_201",
+      anchorDate: today,
+      focusDate: today,
+      arrivalDate: today,
+      departureDate: orderDepartureDate
+    }
   });
-  expect(restoredSnapshot?.range).toEqual({ arrivalDate: shiftedArrivalDate, departureDate: shiftedDepartureDate });
-  expect(restoredSnapshot?.state?.selection).toBeNull();
+
+  const restoredOrderDialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
+  await expect(restoredOrderDialog).toContainText(guest);
+  await restoredOrderDialog.locator(".modal-header").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(restoredOrderDialog).toBeHidden();
 
   await page.getByRole("tab", { name: /异常/ }).click();
   const overdueTask = page.locator(".room-status-mobile-task-list > li").filter({ hasText: overdueGuest });

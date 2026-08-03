@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MemberSummaryDto, MembershipOrderSummaryDto } from "../types";
-import { effectiveMemberId, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, ledgerEntryLabel, ledgerOrderHref, memberDeepLinkSelection, normalizeMemberQuery, parseEntitlementBalance, parseMemberDeepLink, shouldClearMemberSearchAfterCommit, targetEntitlementContractId, yuanInputToMinor } from "./MembersPage";
+import { effectiveMemberId, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, ledgerEntryLabel, ledgerOrderHref, memberDeepLinkSelection, memberLedgerDisplayItems, normalizeMemberQuery, parseEntitlementBalance, parseMemberDeepLink, shouldClearMemberSearchAfterCommit, targetEntitlementContractId, yuanInputToMinor } from "./MembersPage";
 
 const members = [
   { member: { id: "member_first" } },
@@ -91,6 +91,29 @@ describe("member directory state", () => {
   it("distinguishes extension consumption from the original check-in consumption", () => {
     expect(ledgerEntryLabel("CONSUME", "CHECK_IN_ENTITLEMENT_CONSUMED")).toBe("入住核销");
     expect(ledgerEntryLabel("CONSUME", "EXTEND_STAY_ENTITLEMENT_CONSUMED")).toBe("续住核销");
+  });
+
+  it("groups one stay-to-membership conversion into a single readable ledger row", () => {
+    const entries = Array.from({ length: 7 }, (_, index) => ({
+      fact_id: `fact_${index}`,
+      lot_id: "lot_conversion",
+      entry_type: "CONVERSION_CONSUME",
+      quantity_delta: -1,
+      service_date: `2026-07-${String(25 + index).padStart(2, "0")}`,
+      order_id: "order_conversion",
+      coverage_id: null,
+      reason: "STAY_COLLECTION_TO_MEMBERSHIP_CONSUMED",
+      command_id: "command_conversion",
+      created_at: `2026-08-01T00:00:0${index}.000Z`
+    })) as never;
+    const displayItems = memberLedgerDisplayItems(entries);
+    expect(displayItems).toHaveLength(1);
+    expect(displayItems[0]).toMatchObject({
+      kind: "conversion",
+      quantity: 7,
+      serviceStart: "2026-07-25",
+      serviceEnd: "2026-08-01"
+    });
   });
 
   it("shows multiple formal product entitlements in parallel and excludes unclassified historical lots", () => {

@@ -204,7 +204,7 @@ async function main(): Promise<void> {
 
     process.stdout.write(`${JSON.stringify({
       database: new URL(databaseUrl).pathname.slice(1),
-      property: "QTP-SH · QinTopia",
+      property: "QTP-XA · QinTopia",
       room: "1栋 101 四人间（公卫）",
       wholeRoomExamples: [
         { room: "A栋 A03 大床房（独卫）", orderId: kingRoomOrder, nicknames: ["山峰", "小满"] },

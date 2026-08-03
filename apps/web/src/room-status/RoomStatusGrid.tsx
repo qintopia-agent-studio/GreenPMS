@@ -6,14 +6,13 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
-  type PointerEvent as ReactPointerEvent
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent
 } from "react";
 import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   Hand,
   Layers3,
   SearchX
@@ -33,11 +32,10 @@ import {
   intervalsRenderedOnRoomStatusGrid,
   moveRoomStatusFocus,
   roomStatusCellBelongsToStay,
+  ROOM_STATUS_TIMELINE_DAYS,
   selectionFromCells,
-  shiftDateWindowStart,
   visibleDateWindow,
   type RoomStatusCellFocus,
-  type RoomStatusDateWindowMode,
   type RoomStatusFilters,
   type RoomStatusScrollAnchor,
   type RoomStatusSelection
@@ -75,6 +73,15 @@ interface RenderedUnit {
   depth: 0 | 1;
 }
 
+type RenderedRow =
+  | { kind: "BUILDING"; buildingCode: string; id: string }
+  | ({ kind: "UNIT" } & RenderedUnit);
+
+interface BuildingOccupancyRoom {
+  room: RoomStatusUnitDto;
+  children: readonly RoomStatusUnitDto[];
+}
+
 interface BedOccupancyTooltipState {
   text: string;
   left: number;
@@ -89,6 +96,7 @@ interface PointerSelectionState {
   unitId: string;
   anchorDate: string;
   lastServiceDate: string;
+  lastClientX: number;
   selection: RoomStatusSelection;
   touch: boolean;
   row: HTMLElement;
@@ -98,6 +106,8 @@ interface PointerSelectionState {
 }
 
 const roomStatusWeekdayFormatter = new Intl.DateTimeFormat("zh-CN", { weekday: "short", timeZone: "UTC" });
+const ROOM_STATUS_DRAG_EDGE_SCROLL_ZONE_PX = 72;
+const ROOM_STATUS_DRAG_EDGE_SCROLL_MAX_STEP_PX = 22;
 
 export interface RoomStatusGridProps {
   board: RoomStatusBoardDto;
@@ -107,8 +117,6 @@ export interface RoomStatusGridProps {
   selection: RoomStatusSelection | null;
   selectedStayId?: string | null;
   dateWindowStart: number;
-  dateWindowSize: number;
-  dateWindowMode: RoomStatusDateWindowMode;
   todayDate?: string;
   initialScrollAnchor?: RoomStatusScrollAnchor | null;
   restoreFocus?: boolean;
@@ -119,7 +127,6 @@ export interface RoomStatusGridProps {
   onInspectSelection: (unit: RoomStatusUnitDto, selection: RoomStatusSelection, anchor: HTMLElement) => void;
   onPageChange: (pageIndex: number) => void;
   onDateWindowChange: (start: number) => void;
-  onDateWindowModeChange: (mode: RoomStatusDateWindowMode) => void;
   onInspectUnit: (unit: RoomStatusUnitDto) => void;
   onInspectDay: (unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement) => void;
   onInspectInterval: (unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) => void;
@@ -224,6 +231,46 @@ export function focusAndRevealRoomStatusCell(cell: HTMLElement): boolean {
   return cell.ownerDocument.activeElement === cell;
 }
 
+export function roomStatusHorizontalDragAutoScrollDelta({
+  clientX,
+  viewportLeft,
+  viewportRight,
+  scrollLeft,
+  maxScrollLeft,
+  edgeSize = ROOM_STATUS_DRAG_EDGE_SCROLL_ZONE_PX,
+  maxStep = ROOM_STATUS_DRAG_EDGE_SCROLL_MAX_STEP_PX
+}: {
+  clientX: number;
+  viewportLeft: number;
+  viewportRight: number;
+  scrollLeft: number;
+  maxScrollLeft: number;
+  edgeSize?: number;
+  maxStep?: number;
+}): number {
+  if (!Number.isFinite(clientX)
+    || !Number.isFinite(viewportLeft)
+    || !Number.isFinite(viewportRight)
+    || viewportRight <= viewportLeft
+    || maxScrollLeft <= 0
+    || maxStep <= 0) return 0;
+  const safeScrollLeft = Math.max(0, Math.min(maxScrollLeft, scrollLeft));
+  const safeEdgeSize = Math.max(1, Math.min(edgeSize, (viewportRight - viewportLeft) / 2));
+  const leftDistance = clientX - viewportLeft;
+  if (leftDistance < safeEdgeSize && safeScrollLeft > 0) {
+    const intensity = Math.min(1, Math.max(0, (safeEdgeSize - leftDistance) / safeEdgeSize));
+    const delta = -Math.max(1, Math.ceil(maxStep * intensity));
+    return Math.max(delta, -safeScrollLeft);
+  }
+  const rightDistance = viewportRight - clientX;
+  if (rightDistance < safeEdgeSize && safeScrollLeft < maxScrollLeft) {
+    const intensity = Math.min(1, Math.max(0, (safeEdgeSize - rightDistance) / safeEdgeSize));
+    const delta = Math.max(1, Math.ceil(maxStep * intensity));
+    return Math.min(delta, maxScrollLeft - safeScrollLeft);
+  }
+  return 0;
+}
+
 function intervalsForWindow(intervals: readonly RoomStatusIntervalDto[], dates: readonly string[]): PositionedInterval[] {
   const firstDate = dates[0];
   const lastDate = dates.at(-1);
@@ -269,6 +316,49 @@ function bedOccupancyDescription(
     })
     .join("；");
   return `已占 ${occupancy.occupiedBedCount}/${occupancy.totalBedCount}${occupants ? `；住宿人：${occupants}` : ""}`;
+}
+
+export interface RoomStatusBuildingOccupancySummary {
+  occupants: number;
+  capacity: number;
+}
+
+export function roomStatusBuildingOccupancySummaryLabel(summary: RoomStatusBuildingOccupancySummary): string {
+  return `今日 ${summary.occupants}人 / 总容量 ${summary.capacity} 人`;
+}
+
+export function roomStatusBuildingOccupancySummariesForDate(
+  rooms: readonly BuildingOccupancyRoom[],
+  serviceDate: string
+): Map<string, RoomStatusBuildingOccupancySummary> {
+  const summaries = new Map<string, RoomStatusBuildingOccupancySummary>();
+  for (const { room, children } of rooms) {
+    const buildingCode = room.buildingCode?.trim() || "未分栋";
+    const units = [room, ...children];
+    const visibleUnitIds = new Set(units.map((unit) => unit.id));
+    const countedIntervals = new Set<string>();
+    let occupants = 0;
+    for (const unit of units) {
+      for (const interval of unit.intervals) {
+        if ((interval.sourceKind !== "ORDER" && interval.sourceKind !== "FREE_STAY")
+          || interval.status !== "IN_HOUSE"
+          || interval.startDate > serviceDate
+          || serviceDate >= interval.endDate
+          || !visibleUnitIds.has(interval.actualInventoryUnitId)) continue;
+        const key = `${interval.id}:${interval.actualInventoryUnitId}`;
+        if (countedIntervals.has(key)) continue;
+        countedIntervals.add(key);
+        occupants += Math.max(0, interval.occupantCount);
+      }
+    }
+    const current = summaries.get(buildingCode) ?? { occupants: 0, capacity: 0 };
+    const roomCapacity = Number.isFinite(room.occupancyCapacity) ? room.occupancyCapacity : 0;
+    summaries.set(buildingCode, {
+      occupants: current.occupants + occupants,
+      capacity: current.capacity + Math.max(0, roomCapacity)
+    });
+  }
+  return summaries;
 }
 
 export function roomStatusCellAccessibleName(
@@ -342,8 +432,6 @@ export function RoomStatusGrid({
   selection,
   selectedStayId = null,
   dateWindowStart,
-  dateWindowSize,
-  dateWindowMode,
   todayDate,
   initialScrollAnchor,
   restoreFocus = false,
@@ -354,7 +442,6 @@ export function RoomStatusGrid({
   onInspectSelection,
   onPageChange,
   onDateWindowChange,
-  onDateWindowModeChange,
   onInspectUnit,
   onInspectDay,
   onInspectInterval,
@@ -366,6 +453,7 @@ export function RoomStatusGrid({
   const cellRefs = useRef(new Map<string, HTMLDivElement>());
   const pointerSelection = useRef<PointerSelectionState | null>(null);
   const scrollFrame = useRef<number | null>(null);
+  const dragAutoScrollFrame = useRef<number | null>(null);
   const scrollRestored = useRef(false);
   const focusRestored = useRef(false);
   const lastFocusRequestToken = useRef(focusRequestToken);
@@ -378,9 +466,66 @@ export function RoomStatusGrid({
   const bedOccupancyTooltipRef = useRef<HTMLDivElement>(null);
   const bedOccupancyTooltipTriggerRef = useRef<HTMLDivElement | null>(null);
   const suppressBedOccupancyTooltipFocusRef = useRef<HTMLDivElement | null>(null);
+  const stopHorizontalDragAutoScroll = useCallback(() => {
+    if (dragAutoScrollFrame.current === null) return;
+    window.cancelAnimationFrame(dragAutoScrollFrame.current);
+    dragAutoScrollFrame.current = null;
+  }, []);
+  const updatePointerSelectionAtClientX = useCallback((active: PointerSelectionState, clientX: number) => {
+    active.lastClientX = clientX;
+    const cells = [...active.row.querySelectorAll<HTMLElement>("[data-room-status-cell='true']")];
+    const firstCell = cells[0];
+    const lastCell = cells.at(-1);
+    if (!firstCell || !lastCell) return false;
+    const target = cells.find((cell) => {
+      const bounds = cell.getBoundingClientRect();
+      return clientX >= bounds.left && clientX < bounds.right;
+    }) ?? (() => {
+      const firstBounds = firstCell.getBoundingClientRect();
+      if (clientX < firstBounds.left) return firstCell;
+      const lastBounds = lastCell.getBoundingClientRect();
+      if (clientX >= lastBounds.right) return lastCell;
+      return null;
+    })();
+    const serviceDate = target?.dataset.serviceDate;
+    if (!serviceDate || serviceDate === active.lastServiceDate) return false;
+    active.lastServiceDate = serviceDate;
+    active.selection = selectionFromCells(active.unitId, active.anchorDate, serviceDate);
+    setPointerPreviewSelection(active.selection);
+    return true;
+  }, []);
+  const scheduleHorizontalDragAutoScroll = useCallback((active: PointerSelectionState) => {
+    if (dragAutoScrollFrame.current !== null) return;
+    const tick = () => {
+      const current = pointerSelection.current;
+      const scroll = scrollRef.current;
+      if (current !== active || !scroll) {
+        dragAutoScrollFrame.current = null;
+        return;
+      }
+      const bounds = scroll.getBoundingClientRect();
+      const maxScrollLeft = Math.max(0, scroll.scrollWidth - scroll.clientWidth);
+      const delta = roomStatusHorizontalDragAutoScrollDelta({
+        clientX: active.lastClientX,
+        viewportLeft: bounds.left,
+        viewportRight: bounds.right,
+        scrollLeft: scroll.scrollLeft,
+        maxScrollLeft
+      });
+      if (delta === 0) {
+        dragAutoScrollFrame.current = null;
+        return;
+      }
+      scroll.scrollLeft = Math.max(0, Math.min(maxScrollLeft, scroll.scrollLeft + delta));
+      updatePointerSelectionAtClientX(active, active.lastClientX);
+      dragAutoScrollFrame.current = window.requestAnimationFrame(tick);
+    };
+    dragAutoScrollFrame.current = window.requestAnimationFrame(tick);
+  }, [updatePointerSelectionAtClientX]);
   const finishPointerSelection = useCallback((pointerId?: number, commit = false) => {
     const active = pointerSelection.current;
     if (!active || (pointerId !== undefined && active.pointerId !== pointerId)) return false;
+    stopHorizontalDragAutoScroll();
     pointerSelection.current = null;
     if (active.sourceCell.hasPointerCapture(active.pointerId)) {
       try {
@@ -398,7 +543,7 @@ export function RoomStatusGrid({
       onInspectSelection(active.unit, active.selection, anchor);
     }
     return true;
-  }, [onInspectDay, onInspectSelection]);
+  }, [onInspectDay, onInspectSelection, stopHorizontalDragAutoScroll]);
   const cancelBedOccupancyTooltipDismiss = useCallback(() => {
     if (bedOccupancyTooltipDismissTimer.current === null) return;
     window.clearTimeout(bedOccupancyTooltipDismissTimer.current);
@@ -413,16 +558,35 @@ export function RoomStatusGrid({
   const pageRooms = useMemo(() => board.rooms.slice(0, Math.max(0, board.page.size)), [board.page.size, board.rooms]);
   const filteredRooms = useMemo(() => filterRoomStatusRooms(pageRooms, filters), [filters, pageRooms]);
   const dates = useMemo(
-    () => visibleDateWindow(board.dates, dateWindowStart, dateWindowSize),
-    [board.dates, dateWindowSize, dateWindowStart]
+    () => visibleDateWindow(board.dates, dateWindowStart, ROOM_STATUS_TIMELINE_DAYS),
+    [board.dates, dateWindowStart]
   );
-  const renderedUnits = useMemo<RenderedUnit[]>(() => filteredRooms.flatMap(({ room, children }) => {
-    const rows: RenderedUnit[] = [{ unit: room, parent: null, depth: 0 }];
-    if (room.salesMode === "BED_SPLIT" && expandedRoomIds.includes(room.id)) {
-      rows.push(...children.map((child): RenderedUnit => ({ unit: child, parent: room, depth: 1 })));
+  const availabilitySummaryByDate = useMemo(() => new Map(board.availabilitySummary
+    .map((item) => [item.serviceDate, item] as const)), [board.availabilitySummary]);
+  const showBuildingTodayOccupancy = Boolean(todayDate && dates.includes(todayDate));
+  const buildingTodayOccupancySummaries = useMemo(() => (
+    showBuildingTodayOccupancy && todayDate
+      ? roomStatusBuildingOccupancySummariesForDate(filteredRooms, todayDate)
+      : new Map<string, RoomStatusBuildingOccupancySummary>()
+  ), [filteredRooms, showBuildingTodayOccupancy, todayDate]);
+  const renderedRows = useMemo<RenderedRow[]>(() => {
+    const rows: RenderedRow[] = [];
+    let activeBuildingCode: string | null = null;
+    for (const { room, children } of filteredRooms) {
+      const buildingCode = room.buildingCode?.trim() || "未分栋";
+      if (buildingCode !== activeBuildingCode) {
+        activeBuildingCode = buildingCode;
+        rows.push({ kind: "BUILDING", buildingCode, id: `building:${buildingCode}` });
+      }
+      rows.push({ kind: "UNIT", unit: room, parent: null, depth: 0 });
+      if (room.salesMode === "BED_SPLIT" && expandedRoomIds.includes(room.id)) {
+        rows.push(...children.map((child): RenderedRow => ({ kind: "UNIT", unit: child, parent: room, depth: 1 })));
+      }
     }
     return rows;
-  }), [expandedRoomIds, filteredRooms]);
+  }, [expandedRoomIds, filteredRooms]);
+  const renderedUnits = useMemo<RenderedUnit[]>(() => renderedRows
+    .flatMap((row) => row.kind === "UNIT" ? [{ unit: row.unit, parent: row.parent, depth: row.depth }] : []), [renderedRows]);
   const positionedByUnit = useMemo(() => new Map(renderedUnits.map(({ unit }) => [
     unit.id,
     intervalsForWindow(intervalsRenderedOnRoomStatusGrid(unit, dates), dates)
@@ -453,10 +617,7 @@ export function RoomStatusGrid({
     ? focusedCell
     : firstCell;
   const firstVisibleDate = dates[0];
-  const lastVisibleDate = dates.at(-1);
   const clampedWindowStart = board.dates.indexOf(firstVisibleDate ?? "");
-  const previousWindowStart = shiftDateWindowStart(board.dates.length, Math.max(0, clampedWindowStart), dateWindowSize, -1);
-  const nextWindowStart = shiftDateWindowStart(board.dates.length, Math.max(0, clampedWindowStart), dateWindowSize, 1);
   const restorationFocus = roomStatusFocusRestorationTarget(focusedCell, unitIds, dates);
   const restorationFocusKey = restorationFocus
     ? `${restorationFocus.unitId}:${restorationFocus.serviceDate}`
@@ -477,7 +638,7 @@ export function RoomStatusGrid({
     if (initialScrollAnchor.unitId) {
       const row = [...scroll.querySelectorAll<HTMLElement>("[data-room-status-row]")]
         .find((candidate) => candidate.dataset.roomStatusRow === initialScrollAnchor.unitId);
-      if (row) top = row.offsetTop - 42;
+      if (row) top = row.offsetTop - 58;
     }
     scroll.scrollTo({ left: initialScrollAnchor.left, top, behavior: "auto" });
   }, [initialScrollAnchor, isMobile]);
@@ -520,16 +681,8 @@ export function RoomStatusGrid({
       const active = pointerSelection.current;
       if (!active || event.pointerId !== active.pointerId) return;
       event.preventDefault();
-      const target = [...active.row.querySelectorAll<HTMLElement>("[data-room-status-cell='true']")]
-        .find((cell) => {
-          const bounds = cell.getBoundingClientRect();
-          return event.clientX >= bounds.left && event.clientX < bounds.right;
-        });
-      const serviceDate = target?.dataset.serviceDate;
-      if (!serviceDate || serviceDate === active.lastServiceDate) return;
-      active.lastServiceDate = serviceDate;
-      active.selection = selectionFromCells(active.unitId, active.anchorDate, serviceDate);
-      setPointerPreviewSelection(active.selection);
+      updatePointerSelectionAtClientX(active, event.clientX);
+      scheduleHorizontalDragAutoScroll(active);
     };
     const handlePointerUp = (event: PointerEvent) => finishPointerSelection(event.pointerId, true);
     const handlePointerCancel = (event: PointerEvent) => finishPointerSelection(event.pointerId);
@@ -546,11 +699,12 @@ export function RoomStatusGrid({
       window.removeEventListener("lostpointercapture", handlePointerCancel, true);
       window.removeEventListener("blur", handleWindowBlur);
     };
-  }, [finishPointerSelection]);
+  }, [finishPointerSelection, scheduleHorizontalDragAutoScroll, updatePointerSelectionAtClientX]);
 
   useEffect(() => () => {
     pointerSelection.current = null;
     if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+    if (dragAutoScrollFrame.current !== null) cancelAnimationFrame(dragAutoScrollFrame.current);
     if (bedOccupancyTooltipDismissTimer.current !== null) {
       window.clearTimeout(bedOccupancyTooltipDismissTimer.current);
     }
@@ -583,7 +737,7 @@ export function RoomStatusGrid({
     const current = { unitId: event.currentTarget.dataset.unitId!, serviceDate: event.currentTarget.dataset.serviceDate! };
     const next = moveRoomStatusFocus(unitIds, board.dates, current, rowDelta, columnDelta);
     if (!next) return;
-    const targetWindowStart = dateWindowStartForFocus(board.dates, clampedWindowStart, dateWindowSize, next.serviceDate);
+    const targetWindowStart = dateWindowStartForFocus(board.dates, clampedWindowStart, ROOM_STATUS_TIMELINE_DAYS, next.serviceDate);
     const windowChanges = targetWindowStart !== clampedWindowStart;
     if (windowChanges) {
       pendingKeyboardFocus.current = next;
@@ -670,6 +824,7 @@ export function RoomStatusGrid({
       unitId: unit.id,
       anchorDate: serviceDate,
       lastServiceDate: serviceDate,
+      lastClientX: event.clientX,
       selection: selectionFromCells(unit.id, serviceDate, serviceDate),
       touch,
       row,
@@ -719,13 +874,19 @@ export function RoomStatusGrid({
       const scroll = scrollRef.current;
       if (!scroll) return;
       const firstVisibleRow = [...scroll.querySelectorAll<HTMLElement>("[data-room-status-row]")]
-        .find((row) => row.offsetTop + row.offsetHeight > scroll.scrollTop + 42);
+        .find((row) => row.offsetTop + row.offsetHeight > scroll.scrollTop + 58);
       onScrollAnchorChange({
         unitId: firstVisibleRow?.dataset.roomStatusRow ?? null,
         left: scroll.scrollLeft,
         top: scroll.scrollTop
       });
     });
+  };
+
+  const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    if (event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    event.preventDefault();
+    window.scrollBy({ top: event.deltaY, left: 0, behavior: "auto" });
   };
 
   if (!dates.length) {
@@ -767,12 +928,9 @@ export function RoomStatusGrid({
       data-range-arrival={board.range.arrivalDate}
       data-range-departure={board.range.departureDate}
     >
+      <h2 id="room-status-grid-heading" className="sr-only">房间与床位逐日房态</h2>
       <header className="room-status-grid-section-header">
-        <div>
-          <h2 id="room-status-grid-heading">房间与床位逐日房态</h2>
-          <p>{formatRoomStatusDate(firstVisibleDate!)}至{formatRoomStatusDate(addLocalDateDays(lastVisibleDate!, 1))}，日期为半开区间</p>
-        </div>
-        <div className="room-status-window-controls" aria-label="可见日期窗口">
+        <div className="room-status-window-controls" aria-label="房态日历辅助操作">
           <button
             type="button"
             className="room-status-button room-status-button-secondary room-status-touch-selection-toggle"
@@ -780,41 +938,6 @@ export function RoomStatusGrid({
             onClick={() => setTouchSelectionMode((enabled) => !enabled)}
           >
             <Hand aria-hidden="true" size={16} />{touchSelectionMode ? "正在选择" : "触控选区"}
-          </button>
-          <div className="room-status-window-mode-control" role="group" aria-label="每屏显示天数">
-            {(["AUTO", "7", "14", "21"] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                data-testid={`date-window-mode-${mode.toLowerCase()}`}
-                aria-pressed={dateWindowMode === mode}
-                title={mode === "AUTO" ? "根据房态表宽度自动显示" : `每屏显示 ${mode} 天`}
-                onClick={() => onDateWindowModeChange(mode)}
-              >
-                {mode === "AUTO" ? "自动" : mode}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            className="room-status-icon-button"
-            aria-label="向前移动可见日期"
-            title="向前移动可见日期"
-            disabled={previousWindowStart === Math.max(0, clampedWindowStart)}
-            onClick={() => onDateWindowChange(previousWindowStart)}
-          >
-            <ChevronsLeft aria-hidden="true" size={17} />
-          </button>
-          <span>{dates.length} 夜</span>
-          <button
-            type="button"
-            className="room-status-icon-button"
-            aria-label="向后移动可见日期"
-            title="向后移动可见日期"
-            disabled={nextWindowStart === Math.max(0, clampedWindowStart)}
-            onClick={() => onDateWindowChange(nextWindowStart)}
-          >
-            <ChevronsRight aria-hidden="true" size={17} />
           </button>
         </div>
       </header>
@@ -829,11 +952,12 @@ export function RoomStatusGrid({
         className="room-status-grid-scroll"
         ref={scrollRef}
         onScroll={handleScroll}
+        onWheel={handleWheel}
         role="region"
         aria-label="房态二维网格，可使用方向键移动，Shift 加方向键扩展选区"
         tabIndex={0}
       >
-        <div className="room-status-grid" role="grid" aria-rowcount={renderedUnits.length + 1} aria-colcount={dates.length + 1} style={gridStyle}>
+        <div className="room-status-grid" role="grid" aria-rowcount={renderedRows.length + 1} aria-colcount={dates.length + 1} style={gridStyle}>
           <div className="room-status-grid-header" role="row">
             <div className="room-status-resource-header" role="columnheader">房源</div>
             <div className="room-status-date-header-track" role="presentation">
@@ -844,13 +968,35 @@ export function RoomStatusGrid({
                   <div key={date} className={`room-status-date-header${date === todayDate ? " is-today" : ""}`} role="columnheader" aria-label={`${formatRoomStatusDate(date)} ${weekDay}`}>
                     <strong>{date.slice(5)}</strong>
                     <span>{date === todayDate ? "今天" : weekDay}</span>
+                    <small>剩 {availabilitySummaryByDate.get(date)?.availableRooms ?? 0} 间 · {availabilitySummaryByDate.get(date)?.availableBeds ?? 0} 床</small>
                   </div>
                 );
               })}
             </div>
           </div>
 
-          {renderedUnits.map(({ unit, depth }, rowIndex) => {
+          {renderedRows.map((row, rowIndex) => {
+            if (row.kind === "BUILDING") {
+              return (
+                <div
+                  className="room-status-grid-row room-status-building-row"
+                  role="row"
+                  key={row.id}
+                  aria-rowindex={rowIndex + 2}
+                >
+                  <div className="room-status-building-cell" role="rowheader">
+                    <strong>{row.buildingCode === "未分栋" || row.buildingCode.endsWith("栋") ? row.buildingCode : `${row.buildingCode}栋`}</strong>
+                    {showBuildingTodayOccupancy ? (
+                      <span className="room-status-building-occupancy">
+                        {roomStatusBuildingOccupancySummaryLabel(buildingTodayOccupancySummaries.get(row.buildingCode) ?? { occupants: 0, capacity: 0 })}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="room-status-building-day-track" role="presentation" aria-hidden="true" />
+                </div>
+              );
+            }
+            const { unit, depth } = row;
             const canExpand = depth === 0 && unit.salesMode === "BED_SPLIT" && unit.children.length > 0;
             const expanded = canExpand && expandedRoomIds.includes(unit.id);
             const positionedIntervals = positionedByUnit.get(unit.id) ?? [];
@@ -1030,27 +1176,28 @@ export function RoomStatusGrid({
         </div>
       </div>
 
-      <footer className="room-status-grid-footer">
-        <span>当前第 {board.page.index + 1} / {Math.max(1, board.page.totalPages)} 页，共 {board.page.totalRooms} 间房</span>
-        <div aria-label="房间分页">
-          <button
-            type="button"
-            className="room-status-button room-status-button-secondary"
-            disabled={board.page.index <= 0}
-            onClick={() => onPageChange(Math.max(0, board.page.index - 1))}
-          >
-            <ChevronLeft aria-hidden="true" size={16} />上一页
-          </button>
-          <button
-            type="button"
-            className="room-status-button room-status-button-secondary"
-            disabled={board.page.index >= board.page.totalPages - 1}
-            onClick={() => onPageChange(Math.min(Math.max(0, board.page.totalPages - 1), board.page.index + 1))}
-          >
-            下一页<ChevronRight aria-hidden="true" size={16} />
-          </button>
-        </div>
-      </footer>
+      {board.page.totalPages > 1 ? (
+        <footer className="room-status-grid-footer">
+          <div aria-label={`房间分页，当前第 ${board.page.index + 1} / ${board.page.totalPages} 页`}>
+            <button
+              type="button"
+              className="room-status-button room-status-button-secondary"
+              disabled={board.page.index <= 0}
+              onClick={() => onPageChange(Math.max(0, board.page.index - 1))}
+            >
+              <ChevronLeft aria-hidden="true" size={16} />上一页
+            </button>
+            <button
+              type="button"
+              className="room-status-button room-status-button-secondary"
+              disabled={board.page.index >= board.page.totalPages - 1}
+              onClick={() => onPageChange(Math.min(Math.max(0, board.page.totalPages - 1), board.page.index + 1))}
+            >
+              下一页<ChevronRight aria-hidden="true" size={16} />
+            </button>
+          </div>
+        </footer>
+      ) : null}
       {bedOccupancyTooltip ? (
         <div
           ref={bedOccupancyTooltipRef}

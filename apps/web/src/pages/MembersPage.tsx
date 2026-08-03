@@ -9,6 +9,7 @@ import {
   type CommandDialogCloseContext,
   CommandResultNotice,
   CommandRecoveryBar,
+  DamagedCommandRecoveryNotice,
   EmptyState,
   formatDate,
   formatMinor,
@@ -69,6 +70,60 @@ export function targetEntitlementContractId(view: MemberViewDto, requestedContra
 
 export function ledgerOrderHref(entry: Pick<MemberViewDto["ledger"][number], "order_id">): string | undefined {
   return entry.order_id ? `/orders/${encodeURIComponent(entry.order_id)}` : undefined;
+}
+
+function nextLedgerDate(value: string): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return value;
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+export type MemberLedgerDisplayItem =
+  | { kind: "entry"; key: string; entry: MemberViewDto["ledger"][number]; sortAt: string }
+  | {
+    kind: "conversion";
+    key: string;
+    entry: MemberViewDto["ledger"][number];
+    entries: MemberViewDto["ledger"][number][];
+    quantity: number;
+    serviceStart: string;
+    serviceEnd: string;
+    sortAt: string;
+  };
+
+export function memberLedgerDisplayItems(entries: MemberViewDto["ledger"]): MemberLedgerDisplayItem[] {
+  const groups = new Map<string, MemberViewDto["ledger"][number][]>();
+  const items: MemberLedgerDisplayItem[] = [];
+  for (const entry of entries) {
+    const canGroup = entry.entry_type === "CONVERSION_CONSUME"
+      && Boolean(entry.command_id)
+      && Boolean(entry.order_id)
+      && Boolean(entry.service_date);
+    if (!canGroup) {
+      items.push({ kind: "entry", key: entry.fact_id, entry, sortAt: entry.created_at });
+      continue;
+    }
+    const key = `conversion:${entry.command_id}:${entry.order_id}:${entry.lot_id}`;
+    groups.set(key, [...(groups.get(key) ?? []), entry]);
+  }
+  for (const [key, group] of groups) {
+    const sortedDates = group.map((entry) => entry.service_date).filter((value): value is string => Boolean(value)).sort();
+    const firstDate = sortedDates[0]!;
+    const lastDate = sortedDates[sortedDates.length - 1]!;
+    const sortAt = group.reduce((latest, entry) => entry.created_at > latest ? entry.created_at : latest, group[0]!.created_at);
+    items.push({
+      kind: "conversion",
+      key,
+      entry: group[0]!,
+      entries: group,
+      quantity: Math.abs(group.reduce((sum, entry) => sum + entry.quantity_delta, 0)),
+      serviceStart: firstDate,
+      serviceEnd: nextLedgerDate(lastDate),
+      sortAt
+    });
+  }
+  return items.sort((left, right) => right.sortAt.localeCompare(left.sortAt) || right.key.localeCompare(left.key));
 }
 
 export function yuanInputToMinor(value: string, wholeYuan = false): number | undefined {
@@ -324,6 +379,9 @@ export function ledgerEntryLabel(
   if (entryType === "HOLD") return "预订冻结";
   if (entryType === "RELEASE") return "冻结释放";
   if (entryType === "CONSUME") return reason === "EXTEND_STAY_ENTITLEMENT_CONSUMED" ? "续住核销" : "入住核销";
+  if (entryType === "CONVERSION_CONSUME") return "住宿转会员核销";
+  if (entryType === "RESTORE") return "权益恢复";
+  if (entryType === "EXPIRE") return "权益到期";
   return "权益到期";
 }
 
@@ -331,13 +389,20 @@ export function ledgerEntryDisplayQuantity(
   entryType: MemberViewDto["ledger"][number]["entry_type"],
   quantityDelta: number
 ): { label: string; quantity: number; prefix: string; tone: string } {
-  if (entryType === "CONSUME") return { label: "本次核销", quantity: 1, prefix: "", tone: "is-negative" };
+  if (entryType === "CONSUME" || entryType === "CONVERSION_CONSUME") return { label: "本次核销", quantity: Math.abs(quantityDelta) || 1, prefix: "", tone: "is-negative" };
   return {
     label: "余额",
     quantity: quantityDelta,
     prefix: quantityDelta > 0 ? "+" : "",
     tone: quantityDelta > 0 ? "is-positive" : quantityDelta < 0 ? "is-negative" : ""
   };
+}
+
+function membershipPaymentFactLabel(fact: MembershipPaymentFactDto): string {
+  if (fact.fact_type === "REVERSAL") return "冲销原收款";
+  if (fact.corrects_fact_id) return "更正后收款";
+  if (fact.source_type === "STAY_COLLECTION_TRANSFER") return "住宿收款转入";
+  return "企微收款";
 }
 
 function CorrectEntitlementBalanceDialog({ propertyId, lot, currentBalance, draft, onClose, onSubmit }: {
@@ -407,6 +472,7 @@ function MemberEntitlementsPanel({ view, disabled, targetContractId, onCorrect }
   const formalLotIds = formalEntitlementLotIds(view.membershipOrders);
   const formalLots = view.lots.filter((lot) => formalLotIds.has(lot.id));
   const formalLedger = view.ledger.filter((entry) => formalLotIds.has(entry.lot_id));
+  const ledgerItems = memberLedgerDisplayItems(formalLedger);
   const contractById = new Map(view.contracts.map((contract) => [contract.id, contract]));
   const lotById = new Map(formalLots.map((lot) => [lot.id, lot]));
   const formalBalance = formalLots.reduce((total, lot) => {
@@ -448,9 +514,21 @@ function MemberEntitlementsPanel({ view, disabled, targetContractId, onCorrect }
       })}
     </div>}
     <section className="member-ledger-history" aria-labelledby="member-ledger-heading" data-testid="member-ledger-history">
-      <div className="membership-subheading"><h3 id="member-ledger-heading">权益变动历史</h3><span>{formalLedger.length} 条</span></div>
-      {!formalLedger.length ? <p className="membership-empty-line">尚无冻结、释放、核销或更正记录</p> : <ol>
-        {[...formalLedger].reverse().map((entry) => {
+      <div className="membership-subheading"><h3 id="member-ledger-heading">权益变动历史</h3><span>{ledgerItems.length} 条</span></div>
+      {!ledgerItems.length ? <p className="membership-empty-line">尚无冻结、释放、核销或更正记录</p> : <ol>
+        {ledgerItems.map((item) => {
+          if (item.kind === "conversion") {
+            const lot = lotById.get(item.entry.lot_id);
+            const order = orderByLot.get(item.entry.lot_id)!;
+            const unit = lot?.unit_kind === "BED_NIGHT" ? "床夜" : "间夜";
+            const orderHref = ledgerOrderHref(item.entry);
+            return <li key={item.key} data-testid="member-ledger-entry-conversion-consume">
+              <div><strong>住宿升级会员</strong><span className="is-negative" data-testid="member-ledger-quantity">本次核销 {item.quantity} {unit}</span></div>
+              <small>{order.product_name} · 住宿期间 {formatDate(item.serviceStart)} 至 {formatDate(item.serviceEnd)}</small>
+              {orderHref ? <Link className="room-status-text-button" to={orderHref}>查看住宿订单</Link> : null}
+            </li>;
+          }
+          const entry = item.entry;
           const lot = lotById.get(entry.lot_id);
           const order = orderByLot.get(entry.lot_id)!;
           const unit = lot?.unit_kind === "BED_NIGHT" ? "床夜" : "间夜";
@@ -507,16 +585,17 @@ function MembershipOrdersPanel({ view, disabled, onCreate, onPayment, onCorrect,
             <small>仅提示差额，不代表自动到账、结清或改价。</small>
           </div>
           {order.status === "ACTIVE" ? <div className="membership-activation-summary" data-testid="membership-activation-summary"><BadgeCheck aria-hidden="true" size={18} /><div><strong>{formatDate(order.valid_from ?? undefined)} 至 {formatDate(order.valid_until ?? undefined)}</strong><span>已发放 {entitlementLabel(order.entitlement_unit_kind, order.entitlement_units)}</span></div></div> : null}
-          <section className="membership-payments" aria-label={`${order.product_name}企微收款`}>
-            <div className="membership-subheading"><h4>企微收款记录</h4><span>{activeCollections.length} 笔有效收款</span></div>
-            {!paymentFacts.length ? <p className="membership-empty-line">尚未登记企微收款</p> : <ol>
+          <section className="membership-payments" aria-label={`${order.product_name}收款记录`}>
+            <div className="membership-subheading"><h4>收款记录</h4><span>{activeCollections.length} 笔有效收款</span></div>
+            {!paymentFacts.length ? <p className="membership-empty-line">尚无收款记录</p> : <ol>
               {paymentFacts.map((fact) => {
                 const reversed = fact.fact_type === "COLLECTION" && reversedIds.has(fact.fact_id);
                 return <li key={fact.fact_id} className={fact.fact_type === "REVERSAL" || reversed ? "is-reversed" : ""}>
                   <div>
-                    <strong>{fact.fact_type === "REVERSAL" ? "冲销原收款" : fact.corrects_fact_id ? "更正后收款" : "企微收款"}</strong>
+                    <strong>{membershipPaymentFactLabel(fact)}</strong>
                     <span>{formatMinor(fact.net_effect_minor, fact.currency)}</span>
                     {fact.transaction_reference ? <code>{fact.transaction_reference}</code> : null}
+                    {fact.source_type === "STAY_COLLECTION_TRANSFER" && fact.source_order_id ? <Link className="inline-link" to={`/orders/${encodeURIComponent(fact.source_order_id)}`}>查看住宿订单</Link> : null}
                     {reversed ? <small>已由后续更正冲销</small> : fact.note ? <small>{fact.note}</small> : null}
                   </div>
                   {order.status === "DRAFT" && fact.fact_type === "COLLECTION" && !reversed ? <button type="button" className="button button-secondary button-small" onClick={() => onCorrect(summary, fact)} disabled={disabled}><PencilLine aria-hidden="true" size={15} />更正</button> : null}
@@ -674,12 +753,12 @@ export function MembersPage() {
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
 
-  function closeCommandDialog(context?: CommandDialogCloseContext) {
+  async function closeCommandDialog(context?: CommandDialogCloseContext) {
     let refreshAfterClose = context?.receipt.businessCommitted === true;
     if (context || (commandRecovery.pending && isTerminalCommandRecovery(commandRecovery.pending.state))) {
       refreshAfterClose ||= commandRecovery.pending?.state === "EXECUTED";
       if (context?.receipt.businessCommitted) applyCommittedReceipt(context.receipt);
-      if (commandRecovery.clearResolved()) setRecoveryError(undefined);
+      if (await commandRecovery.clearResolved()) setRecoveryError(undefined);
       else setRecoveryError(new Error("无法清除已完成操作的本地恢复记录；为避免重复建档，写入继续暂停"));
     }
     setCommand(undefined);
@@ -725,7 +804,9 @@ export function MembersPage() {
     </header>
 
     <InlineError error={recoveryError} title="恢复记录未完成" />
-    <InlineError error={commandRecovery.error} title="本地操作恢复记录不可用" />
+    {commandRecovery.canDiscardCorrupt
+      ? <DamagedCommandRecoveryNotice error={commandRecovery.error} onDiscard={commandRecovery.discardCorruptAfterReview} testId="member-damaged-command-recovery" />
+      : <InlineError error={commandRecovery.error} title="本地操作恢复记录不可用" />}
     <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
     {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="member-command-recovery" businessFacing /> : null}
 

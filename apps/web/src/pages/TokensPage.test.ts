@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RetainedTokenSecret, TokenDto } from "../types";
 import {
+  coordinateTokenPreviewProgress,
   generateTokenSecret,
   retainedTokenCommandUnresolved,
   TOKEN_SECRET_BYTES,
@@ -116,5 +117,22 @@ describe("retained Token command identity", () => {
     expect(retainedTokenCommandUnresolved({ ...retained, state: "UNKNOWN" })).toBe(true);
     expect(retainedTokenCommandUnresolved({ ...retained, state: "NOT_EXECUTED" })).toBe(false);
     expect(retainedTokenCommandUnresolved({ ...retained, state: "EXECUTED" })).toBe(false);
+  });
+
+  it("routes Token Preview through the property recovery coordinator before sending", async () => {
+    let previewCalls = 0;
+    const progress = {
+      state: "PREVIEWING" as const,
+      previewMetadata: { idempotencyKey: "preview-token", correlationId: "correlation-token" },
+      executePreview: async () => { previewCalls += 1; }
+    };
+    const accepted = await coordinateTokenPreviewProgress(
+      retained.command,
+      progress,
+      async () => false
+    );
+
+    expect(accepted).toBe(false);
+    expect(previewCalls).toBe(0);
   });
 });

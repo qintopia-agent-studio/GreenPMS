@@ -1,11 +1,14 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Eraser, RefreshCw, Search } from "lucide-react";
-import type { RoomStatusBoardDto } from "@qintopia/contracts";
 import {
+  addLocalDateDays,
   hasActiveRoomStatusFilters,
+  isIsoLocalDate,
+  ROOM_STATUS_TIMELINE_DAYS,
   type RoomStatusFilterOptions,
   type RoomStatusFilters
 } from "./roomStatusState";
+import { formatRoomStatusDate, roomStatusRoomTypeLabel } from "./roomStatusPresentation";
 
 const salesModeLabels = {
   WHOLE_ROOM: "整房销售",
@@ -30,15 +33,10 @@ export interface RoomStatusRange {
 }
 
 export interface RoomStatusToolbarProps {
-  board: RoomStatusBoardDto;
-  propertyLabel: string;
-  principalLabel: string;
   range: RoomStatusRange;
   filters: RoomStatusFilters;
   filterOptions: RoomStatusFilterOptions;
-  filteredRoomCount: number;
   loading?: boolean;
-  rangeLoading?: boolean;
   rangeError?: string | undefined;
   focusSearchRequestToken?: number;
   onRangeChange: (range: RoomStatusRange) => void;
@@ -60,15 +58,10 @@ function updateFilter<K extends keyof RoomStatusFilters>(
 }
 
 export function RoomStatusToolbar({
-  board,
-  propertyLabel,
-  principalLabel,
   range,
   filters,
   filterOptions,
-  filteredRoomCount,
   loading = false,
-  rangeLoading = false,
   rangeError,
   focusSearchRequestToken = 0,
   onRangeChange,
@@ -79,7 +72,6 @@ export function RoomStatusToolbar({
   onClearFilters,
   onRefresh
 }: RoomStatusToolbarProps) {
-  const projectionReady = board.projectionState === "READY";
   const rangeErrorId = useId();
   const rangeErrorRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -105,46 +97,44 @@ export function RoomStatusToolbar({
     setRangeDraft(nextRange);
     onRangeChange(nextRange);
   };
+  const changeStartDate = (startDate: string) => {
+    if (!isIsoLocalDate(startDate)) {
+      changeRange({ arrivalDate: startDate, departureDate: rangeDraft.departureDate });
+      return;
+    }
+    const nextRange = {
+      arrivalDate: startDate,
+      departureDate: addLocalDateDays(startDate, ROOM_STATUS_TIMELINE_DAYS)
+    };
+    changeRange(nextRange);
+  };
 
   return (
-    <section className="room-status-toolbar" aria-label="房态范围、筛选和数据新鲜度">
+    <section className="room-status-toolbar" aria-label="房态范围与筛选">
       <div className="room-status-toolbar-primary">
-        <div className="room-status-toolbar-identity">
-          <span>当前物业</span>
-          <strong>{propertyLabel}</strong>
-          <small>{principalLabel} · {board.accessLevel === "WRITE" ? "可写" : "只读"}</small>
+        <div className="room-status-toolbar-title">
+          <h1>房间与床位逐日房态</h1>
         </div>
 
-        <div className="room-status-range-controls" aria-label="房态日期范围">
-          <button type="button" className="room-status-icon-button" onClick={onPreviousRange} aria-label="查看前一日期窗口" title="前一日期窗口">
+        <div className="room-status-range-controls" aria-label="房态起始日期">
+          <button type="button" className="room-status-icon-button" onClick={onPreviousRange} aria-label="查看前 30 夜" title="前 30 夜">
             <ChevronLeft aria-hidden="true" size={18} />
           </button>
-          <label>开始日期
+          <label>起始日期
             <input
               type="date"
               value={rangeDraft.arrivalDate}
-              max={rangeDraft.departureDate}
               data-testid="arrival-date"
               aria-invalid={rangeError ? "true" : undefined}
               aria-describedby={rangeError ? rangeErrorId : undefined}
-              onChange={(event) => changeRange({ ...rangeDraft, arrivalDate: event.target.value })}
+              onChange={(event) => changeStartDate(event.target.value)}
             />
           </label>
-          <label>结束日期
-            <input
-              type="date"
-              value={rangeDraft.departureDate}
-              min={rangeDraft.arrivalDate}
-              data-testid="departure-date"
-              aria-invalid={rangeError ? "true" : undefined}
-              aria-describedby={rangeError ? rangeErrorId : undefined}
-              onChange={(event) => changeRange({ ...rangeDraft, departureDate: event.target.value })}
-            />
-          </label>
+          <span className="room-status-range-summary">{formatRoomStatusDate(rangeDraft.arrivalDate)}起，显示 30 夜</span>
           <button type="button" className="room-status-button" onClick={onToday}>
             <CalendarDays aria-hidden="true" size={17} />今天
           </button>
-          <button type="button" className="room-status-icon-button" onClick={onNextRange} aria-label="查看后一日期窗口" title="后一日期窗口">
+          <button type="button" className="room-status-icon-button" onClick={onNextRange} aria-label="查看后 30 夜" title="后 30 夜">
             <ChevronRight aria-hidden="true" size={18} />
           </button>
           {rangeError ? (
@@ -162,11 +152,6 @@ export function RoomStatusToolbar({
           ) : null}
         </div>
 
-        <div className={`room-status-freshness room-status-freshness-${projectionReady ? "ready" : "partial"}`}>
-          <span role="status" aria-live="polite">{rangeLoading ? "正在载入新范围，旧事实不可操作" : projectionReady ? "投影完整" : "投影不完整，写动作应保持阻断"}</span>
-          <strong>数据时点 {new Date(board.asOf).toLocaleString("zh-CN", { hour12: false })}</strong>
-          <small>有效至 {new Date(board.freshUntil).toLocaleString("zh-CN", { hour12: false })}</small>
-        </div>
       </div>
 
       <div className="room-status-filter-row">
@@ -185,7 +170,7 @@ export function RoomStatusToolbar({
         <label>房型
           <select value={filters.roomTypeCode} onChange={(event) => updateFilter(filters, "roomTypeCode", event.target.value, onFiltersChange)}>
             <option value="ALL">全部房型</option>
-            {filterOptions.roomTypeCodes.map((code) => <option key={code} value={code}>{code}</option>)}
+            {filterOptions.roomTypeCodes.map((code) => <option key={code} value={code}>{roomStatusRoomTypeLabel(code)}</option>)}
           </select>
         </label>
         <label>销售模式
@@ -216,8 +201,7 @@ export function RoomStatusToolbar({
             {filterOptions.capacities.map((capacity) => <option key={capacity} value={capacity}>{capacity} 人及以上</option>)}
           </select>
         </label>
-        <div className="room-status-filter-summary" aria-live="polite">
-          <span>{filteredRoomCount} 间房</span>
+        <div className="room-status-filter-summary">
           {hasActiveRoomStatusFilters(filters) ? (
             <button type="button" className="room-status-button room-status-button-secondary" onClick={onClearFilters}>
               <Eraser aria-hidden="true" size={16} />清除筛选

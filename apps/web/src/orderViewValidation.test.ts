@@ -311,6 +311,63 @@ describe("parseOrderView", () => {
     expect(parseOrderView(input)).toBe(input);
   });
 
+  it("accepts a checked-out order whose latest pricing was zeroed by member upgrade", () => {
+    const input = orderView();
+    input.order.status = "CHECKED_OUT";
+    input.order.current_revision_id = "revision_2";
+    input.order.current_contract_amount_minor = 0;
+    input.order.version = 4;
+    input.stay.status = "COMPLETED";
+    input.effectiveArrangement.presentation = "LAST";
+    input.fulfillment.state = "CHECKED_OUT";
+    input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    input.fulfillment.checkOut = fulfillmentFact("CHECK_OUT", "2026-07-30", "2026-07-30T08:00:00.000Z");
+    input.amendments.push(amendment({
+      id: "amendment_2",
+      sequence: 2,
+      amendment_type: "CHECK_IN",
+      reason_code: "CHECK_IN",
+      prior_version: 1,
+      new_version: 2,
+      command_id: "command_2",
+      created_at: "2026-07-28T08:00:00.000Z"
+    }), amendment({
+      id: "amendment_3",
+      sequence: 3,
+      amendment_type: "CHECK_OUT",
+      reason_code: "CHECK_OUT",
+      prior_version: 2,
+      new_version: 3,
+      command_id: "command_3",
+      created_at: "2026-07-30T08:00:00.000Z"
+    }), amendment({
+      id: "amendment_4",
+      sequence: 4,
+      amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+      reason_note: "升级会员",
+      prior_version: 3,
+      new_version: 4,
+      command_id: "command_4",
+      created_at: "2026-07-30T09:00:00.000Z"
+    }));
+    input.pricingRevisions.push({
+      ...input.pricingRevisions[0]!,
+      id: "revision_2",
+      revision_no: 2,
+      amendment_id: "amendment_4",
+      policy_base_amount_minor: 0,
+      pricing_basis: "MEMBER_ENTITLEMENT",
+      current_contract_amount_minor: 0,
+      difference_from_policy_minor: 0,
+      reason: { code: "STAY_COLLECTION_TO_MEMBERSHIP", note: "升级会员，住宿金额归零" },
+      created_at: "2026-07-30T09:00:00.000Z"
+    });
+    input.amounts.currentContractAmount.minorUnits = 0;
+    input.amounts.collectionDifference.minorUnits = 0;
+    expect(parseOrderView(input)).toBe(input);
+  });
+
   it.each([
     ["missing revocation record", (input: ReturnType<typeof orderView>) => { input.fulfillment.checkInRevocation = null; }],
     ["missing retained check-in", (input: ReturnType<typeof orderView>) => { input.fulfillment.checkIn = null; }],

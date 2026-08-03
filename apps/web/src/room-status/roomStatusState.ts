@@ -6,11 +6,11 @@ import {
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
 
-export const MAX_VISIBLE_DAYS = 31;
-export const DEFAULT_VISIBLE_DAYS = 14;
-export const AUTO_VISIBLE_DAYS_MIN = 7;
-export const AUTO_VISIBLE_DAYS_MAX = 21;
-export type RoomStatusDateWindowMode = "AUTO" | "7" | "14" | "21";
+export const ROOM_STATUS_TIMELINE_DAYS = 30;
+export const MAX_VISIBLE_DAYS = ROOM_STATUS_TIMELINE_DAYS;
+export const DEFAULT_VISIBLE_DAYS = ROOM_STATUS_TIMELINE_DAYS;
+/** Legacy values remain readable so saved pre-stage-14 views can be migrated once. */
+export type RoomStatusDateWindowMode = "30" | "AUTO" | "7" | "14" | "21";
 
 export type RoomStatusKindFilter = "ALL" | RoomStatusUnitDto["kind"];
 export type RoomStatusSalesModeFilter = "ALL" | RoomStatusUnitDto["salesMode"];
@@ -480,19 +480,13 @@ export function createRoomStatusViewState(overrides: Partial<RoomStatusViewState
     expandedRoomIds: [],
     roomPageIndex: 0,
     dateWindowStart: 0,
-    dateWindowSize: DEFAULT_VISIBLE_DAYS,
-    dateWindowMode: "AUTO",
+    dateWindowSize: ROOM_STATUS_TIMELINE_DAYS,
+    dateWindowMode: "30",
     focusedCell: null,
     selection: null,
     scrollAnchor: { unitId: null, left: 0, top: 0 },
     ...overrides
   };
-}
-
-export function roomStatusAutoVisibleDays(boardWidth: number): number {
-  if (!Number.isFinite(boardWidth) || boardWidth <= 0) return DEFAULT_VISIBLE_DAYS;
-  const availableDateWidth = Math.max(0, boardWidth - 218 - 12);
-  return Math.min(AUTO_VISIBLE_DAYS_MAX, Math.max(AUTO_VISIBLE_DAYS_MIN, Math.floor(availableDateWidth / 94)));
 }
 
 export function isIsoLocalDate(value: string): boolean {
@@ -668,19 +662,23 @@ export function reconcileRoomStatusRestoration(
   state: RoomStatusViewState,
   expectedFactFingerprint?: string | null
 ): RoomStatusRestorationResolution {
-  let clampedWindowStart = clampDateWindowStart(dates.length, state.dateWindowStart, state.dateWindowSize);
+  const timelineState = state.dateWindowSize === ROOM_STATUS_TIMELINE_DAYS && state.dateWindowMode === "30"
+    ? state
+    : { ...state, dateWindowSize: ROOM_STATUS_TIMELINE_DAYS, dateWindowMode: "30" as const };
+  let clampedWindowStart = clampDateWindowStart(dates.length, timelineState.dateWindowStart, ROOM_STATUS_TIMELINE_DAYS);
   const restoredFocusDate = state.focusedCell?.serviceDate ?? state.selection?.focusDate;
   if (restoredFocusDate && dates.includes(restoredFocusDate)) {
-    const tentativeWindow = visibleDateWindow(dates, clampedWindowStart, state.dateWindowSize);
+    const tentativeWindow = visibleDateWindow(dates, clampedWindowStart, ROOM_STATUS_TIMELINE_DAYS);
     if (!tentativeWindow.includes(restoredFocusDate)) {
-      clampedWindowStart = clampDateWindowStart(dates.length, dates.indexOf(restoredFocusDate), state.dateWindowSize);
+      clampedWindowStart = clampDateWindowStart(dates.length, dates.indexOf(restoredFocusDate), ROOM_STATUS_TIMELINE_DAYS);
     }
   }
-  const dateWindowAdjusted = clampedWindowStart !== state.dateWindowStart;
+  const dateWindowAdjusted = clampedWindowStart !== state.dateWindowStart
+    || timelineState !== state;
   let nextState: RoomStatusViewState = dateWindowAdjusted
-    ? { ...state, dateWindowStart: clampedWindowStart }
-    : state;
-  const visibleDates = visibleDateWindow(dates, clampedWindowStart, state.dateWindowSize);
+    ? { ...timelineState, dateWindowStart: clampedWindowStart }
+    : timelineState;
+  const visibleDates = visibleDateWindow(dates, clampedWindowStart, ROOM_STATUS_TIMELINE_DAYS);
   const visibleDateSet = new Set(visibleDates);
   const boardDateSet = new Set(dates);
   let visibleUnitIds = renderedRoomStatusUnitIds(rooms, nextState.filters, nextState.expandedRoomIds);
@@ -825,17 +823,19 @@ export function roomStatusViewReducer(state: RoomStatusViewState, action: RoomSt
     return { ...state, roomPageIndex: Math.min(maximum, Math.max(0, Math.trunc(action.index))) };
   }
   if (action.type === "SET_DATE_WINDOW") {
-    const size = Math.min(MAX_VISIBLE_DAYS, Math.max(1, Math.trunc(action.size ?? state.dateWindowSize)));
-    return { ...state, dateWindowSize: size, dateWindowStart: clampDateWindowStart(action.totalDates, action.start, size) };
-  }
-  if (action.type === "SET_DATE_WINDOW_MODE") {
-    const requestedSize = action.mode === "AUTO" ? action.autoSize : Number(action.mode);
-    const size = Math.min(MAX_VISIBLE_DAYS, Math.max(1, Math.trunc(requestedSize)));
     return {
       ...state,
-      dateWindowMode: action.mode,
-      dateWindowSize: size,
-      dateWindowStart: clampDateWindowStart(action.totalDates, state.dateWindowStart, size)
+      dateWindowMode: "30",
+      dateWindowSize: ROOM_STATUS_TIMELINE_DAYS,
+      dateWindowStart: clampDateWindowStart(action.totalDates, action.start, ROOM_STATUS_TIMELINE_DAYS)
+    };
+  }
+  if (action.type === "SET_DATE_WINDOW_MODE") {
+    return {
+      ...state,
+      dateWindowMode: "30",
+      dateWindowSize: ROOM_STATUS_TIMELINE_DAYS,
+      dateWindowStart: clampDateWindowStart(action.totalDates, state.dateWindowStart, ROOM_STATUS_TIMELINE_DAYS)
     };
   }
   if (action.type === "SHIFT_DATE_WINDOW") {
@@ -884,7 +884,9 @@ export function roomStatusViewReducer(state: RoomStatusViewState, action: RoomSt
       ? state
       : { ...state, scrollAnchor: action.anchor };
   }
-  return action.type === "RESTORE" ? action.state : state;
+  return action.type === "RESTORE"
+    ? { ...action.state, dateWindowMode: "30", dateWindowSize: ROOM_STATUS_TIMELINE_DAYS }
+    : state;
 }
 
 function validFilters(value: unknown): value is RoomStatusFilters {
@@ -948,7 +950,7 @@ function validViewState(value: unknown): value is RoomStatusViewState {
     && Number.isSafeInteger(state.dateWindowSize)
     && state.dateWindowSize >= 1
     && state.dateWindowSize <= MAX_VISIBLE_DAYS
-    && (state.dateWindowMode === "AUTO" || state.dateWindowMode === "7" || state.dateWindowMode === "14" || state.dateWindowMode === "21")
+    && (state.dateWindowMode === "30" || state.dateWindowMode === "AUTO" || state.dateWindowMode === "7" || state.dateWindowMode === "14" || state.dateWindowMode === "21")
     && validFocus(state.focusedCell)
     && validSelection(state.selection)
     && Boolean(anchor)
@@ -982,7 +984,7 @@ export function parseRoomStatusRestoration(serialized: string, expectedPropertyI
   const snapshot = value as Record<string, unknown>;
   if (snapshot.state && typeof snapshot.state === "object" && !Array.isArray(snapshot.state)) {
     const state = snapshot.state as Record<string, unknown>;
-    if (state.dateWindowMode === undefined) snapshot.state = { ...state, dateWindowMode: "AUTO" };
+    if (state.dateWindowMode === undefined) snapshot.state = { ...state, dateWindowMode: "30" };
   }
   const range = snapshot.range;
   if (snapshot.version !== 1

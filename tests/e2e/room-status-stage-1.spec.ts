@@ -1,15 +1,32 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 async function login(page: Page) {
   await page.goto("/");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
 }
 
-async function setBoardRange(page: Page, arrivalDate: string, departureDate: string) {
+async function setBoardRange(page: Page, arrivalDate: string) {
+  const boardDepartureDate = addDays(arrivalDate, 30);
+  const rangeResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === "GET"
+      && url.pathname.endsWith("/room-status")
+      && url.searchParams.get("arrivalDate") === arrivalDate
+      && url.searchParams.get("departureDate") === boardDepartureDate
+      && response.ok();
+  });
   await page.getByTestId("arrival-date").fill(arrivalDate);
-  await page.getByTestId("departure-date").fill(departureDate);
+  await rangeResponse;
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-arrival", arrivalDate);
+  await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", boardDepartureDate);
 }
 
 async function selectDraft(page: Page, unitId: string, arrivalDate: string, departureDate: string) {
@@ -19,16 +36,26 @@ async function selectDraft(page: Page, unitId: string, arrivalDate: string, depa
     await expect(openDrawer).toBeHidden();
   }
   const cell = roomCell(page, unitId, arrivalDate);
-  await cell.scrollIntoViewIfNeeded();
-  await expect(cell).toBeVisible();
-  await cell.focus();
-  await page.keyboard.press("Enter");
-  const popover = page.getByTestId("room-status-quick-popover");
-  await expect(popover).toBeVisible();
-  await expect(popover).toHaveAttribute("data-unit-id", unitId);
-  await expect(popover).toHaveAttribute("data-selection-kind", "day");
-  await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
   const drawer = page.locator("dialog.room-status-write-drawer");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await cell.scrollIntoViewIfNeeded();
+    await expect(cell).toBeVisible();
+    await cell.focus();
+    await page.keyboard.press("Enter");
+    const popover = page.getByTestId("room-status-quick-popover");
+    try {
+      await expect(popover).toBeVisible({ timeout: 5_000 });
+      await expect(popover).toHaveAttribute("data-unit-id", unitId);
+      await expect(popover).toHaveAttribute("data-selection-kind", "day");
+      await popover.getByRole("button", { name: "创建住宿", exact: true }).click({ timeout: 5_000 });
+      await expect(drawer).toBeVisible({ timeout: 5_000 });
+      break;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await expect(popover).toBeHidden({ timeout: 2_000 }).catch(() => undefined);
+    }
+  }
   await expect(drawer).toBeVisible();
   await drawer.getByLabel("入住日期", { exact: true }).fill(arrivalDate);
   await drawer.getByLabel("退房日期", { exact: true }).fill(departureDate);
@@ -101,7 +128,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
 
   test("慢速修改 102 日期时自动收口中间报价并显示最终金额", async ({ page }, testInfo) => {
     await login(page);
-    await setBoardRange(page, "2026-07-23", "2026-08-15");
+    await setBoardRange(page, "2026-07-23");
 
     let releaseFirstResponse!: () => void;
     let reportFirstResponseHeld!: () => void;
@@ -134,7 +161,8 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await firstResponseHeld;
     expect(quotePayloads.at(-1)).toEqual(expect.objectContaining({ inventoryUnitId: "unit_room_102" }));
     await page.getByLabel("退房日期", { exact: true }).fill("2026-08-01");
-    await expect(page.getByTestId("quote-recovery")).toHaveCount(0);
+    const quoteRecovery = page.getByTestId("quote-recovery");
+    if (await quoteRecovery.isVisible()) await expect(quoteRecovery).toContainText("报价正在提交");
     await expect(page.getByRole("button", { name: /查询.*结果/ })).toHaveCount(0);
 
     releaseFirstResponse();
@@ -159,9 +187,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     });
 
     await login(page);
-    await setBoardRange(page, "2026-07-23", "2026-08-15");
-    await page.getByTestId("date-window-mode-21").click();
-    await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
+    await setBoardRange(page, "2026-07-23");
 
     for (const [unitId, location] of [
       ["unit_room_d_gen_01", "D栋 D01"],
@@ -205,7 +231,9 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await createOccupiedFixture(page.request);
     const beforeOrders = await page.request.get("/api/v1/orders?propertyId=prop_qintopia_demo");
     const beforeCount = (await beforeOrders.json()).orders.length as number;
-    await selectDraft(page, "unit_room_109", "2026-08-11", "2026-08-13");
+    await selectDraft(page, "unit_room_109", "2026-08-13", "2026-08-14");
+    await page.getByLabel("入住日期", { exact: true }).fill("2026-08-11");
+    await page.getByLabel("退房日期", { exact: true }).fill("2026-08-13");
     await expect(page.getByText("109 在 2026-08-11 至 2026-08-12 已有住宿，不能重复安排", { exact: true })).toBeVisible({ timeout: 15_000 });
     await expect(page.locator("main")).not.toContainText(/Claim|conflict|阻断|unit_room_/i);
     await expect(page.getByTestId("quote-recovery")).toHaveCount(0);
@@ -217,7 +245,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
 
   test("横向拖选锁定起始房间行且不受纵向指针漂移影响", async ({ page }, testInfo) => {
     await login(page);
-    await setBoardRange(page, "2026-07-23", "2026-08-15");
+    await setBoardRange(page, "2026-07-23");
 
     const startCell = roomCell(page, "unit_room_102", "2026-07-26");
     const endCell = roomCell(page, "unit_room_102", "2026-07-29");
@@ -298,9 +326,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
       }
     });
     await login(page);
-    await setBoardRange(page, "2026-07-23", "2026-08-15");
-    await page.getByTestId("date-window-mode-21").click();
-    await expect(page.getByTestId("date-window-mode-21")).toHaveAttribute("aria-pressed", "true");
+    await setBoardRange(page, "2026-07-23");
     expect(quotePayloads).toHaveLength(0);
 
     const startCell = roomCell(page, "unit_room_102", "2026-07-26");

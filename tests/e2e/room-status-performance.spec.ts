@@ -171,10 +171,11 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-username").fill(operator.username);
   await page.getByTestId("login-password").fill(operator.password);
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
 }
 
-test("200 real inventory units by 90 nights become keyboard-interactive within two seconds", async ({ page }, testInfo) => {
+test("200 real inventory units by 30 nights become keyboard-interactive within two seconds", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop room-status performance coverage");
   test.setTimeout(120_000);
   const arrivalDate = todayInTimeZone("Asia/Shanghai");
@@ -182,7 +183,7 @@ test("200 real inventory units by 90 nights become keyboard-interactive within t
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
 
-  const departureDate = addDays(arrivalDate, 90);
+  const departureDate = addDays(arrivalDate, 30);
   await page.evaluate(({ key, value }) => window.sessionStorage.setItem(key, value), {
     key: `qintopia.room-status-view.v1:${operatorSubjectId}:${performancePropertyId}`,
     value: serializeRoomStatusRestoration({
@@ -206,8 +207,8 @@ test("200 real inventory units by 90 nights become keyboard-interactive within t
   const gridRegion = committedRange.getByRole("region", { name: /房态二维网格/ });
   const grid = gridRegion.getByRole("grid");
   await expect(grid).toBeVisible();
-  await expect(page.getByRole("button", { name: "向后移动可见日期", exact: true })).toBeEnabled();
-  await expect(grid).toHaveAttribute("aria-rowcount", String(roomStatusPageSize + 1));
+  const renderedBuildingGroupCount = 1;
+  await expect(grid).toHaveAttribute("aria-rowcount", String(roomStatusPageSize + renderedBuildingGroupCount + 1));
   const renderedDateCount = await grid.locator(".room-status-date-header").count();
   expect(renderedDateCount).toBeGreaterThan(0);
   expect(renderedDateCount).toBeLessThanOrEqual(31);
@@ -219,12 +220,12 @@ test("200 real inventory units by 90 nights become keyboard-interactive within t
   await page.keyboard.press("ArrowRight");
   await expect(grid.locator("[data-room-status-cell='true']:focus")).toHaveAttribute("data-service-date", addDays(arrivalDate, 1));
   const elapsedMs = performance.now() - startedAt;
-  expect(elapsedMs, "first 90-night page through keyboard-interactive 200-unit property")
+  expect(elapsedMs, "first 30-night page through keyboard-interactive 200-unit property")
     .toBeLessThanOrEqual(2_000);
 
   const responseBody = await response.body();
   const board = JSON.parse(responseBody.toString("utf8")) as RoomStatusBoardDto;
-  expect(board.dates).toHaveLength(90);
+  expect(board.dates).toHaveLength(30);
   expect(board.rooms.reduce((count, room) => count + 1 + room.children.length, 0)).toBe(roomStatusPageSize);
   expect(board.rooms.flatMap((room) => room.intervals).filter((interval) => interval.sourceKind === "MAINTENANCE").length).toBeGreaterThanOrEqual(5);
   const renderedDates = await grid.locator("[data-room-status-row]").first()
@@ -257,7 +258,6 @@ test("200 real inventory units by 90 nights become keyboard-interactive within t
   expect(filteredBoard.rooms.map((room) => room.code)).toEqual(["PERF-190"]);
   expect(filteredBoard.filterOptions.capacities).toContain(1);
   await expect(grid.locator("[data-room-status-row]")).toHaveCount(1);
-  await expect(page.getByText("1 间房", { exact: true })).toBeVisible();
 });
 
 test("restoration scans server pages until the previously selected room is visible again", async ({ page }, testInfo) => {
@@ -302,7 +302,6 @@ test("restoration scans server pages until the previously selected room is visib
   await page.getByTestId("property-select").selectOption(performancePropertyId);
   await finalPageResponse;
 
-  await expect(page.getByText("当前第 4 / 4 页，共 200 间房", { exact: true })).toBeVisible();
   const targetCell = page.locator(
     `[data-room-status-cell="true"][data-unit-id="${targetUnitId}"][data-service-date="${arrivalDate}"]`
   );

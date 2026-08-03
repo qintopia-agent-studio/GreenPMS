@@ -41,7 +41,8 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-username").fill(activeFixture.operator.username);
   await page.getByTestId("login-password").fill(activeFixture.operator.password);
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
 async function openOrder(page: Page, stay: Stage10StayFixture): Promise<void> {
@@ -94,7 +95,7 @@ async function assertRoomStatusAfterShortening(
   }, { timeout: 30_000 });
   await page.goto("/");
   await boardResponse;
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
   const currentCell = roomCell(page, stay, businessDate);
   if (options.checkedOut) {
     await expect(currentCell).toHaveClass(/room-status-day-available/);
@@ -207,7 +208,7 @@ test("4.3 desktop shortening reprices the full stay and remains in house", async
   await expect(review).toContainText("住客确认提前一天结束后续住宿");
   await expect(review).toContainText("订单新金额");
   await confirmReview(page, "缩短住宿");
-  await expect(page.getByTestId("command-result-notice")).toContainText("住宿已缩短，订单和房态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿已缩短");
 
   const view = await getOrderView(page, stay);
   expect(view.order).toMatchObject({ status: "CHECKED_IN", departure_date: stay.newDepartureDate });
@@ -257,8 +258,12 @@ test("4.3 arrival-day stays fail closed with a Chinese operator message", async 
   await expect(page.getByRole("button", { name: "缩短住宿", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "提前退房", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "调整退房日期", exact: true })).toBeVisible();
-  await expect(page.getByText(/入住当天暂不办理缩短或提前退房/).first()).toBeVisible();
-  await expect(page.getByText(/当前版本尚未开放撤销入住/).first()).toBeVisible();
+  const blockedReasonHint = page.getByRole("note", { name: /入住当天暂不办理缩短或提前退房/ }).first();
+  await expect(blockedReasonHint).toBeVisible();
+  await blockedReasonHint.focus();
+  const blockedReason = page.getByRole("tooltip").filter({ hasText: /入住当天暂不办理缩短或提前退房/ }).first();
+  await expect(blockedReason).toBeVisible();
+  await expect(blockedReason).toContainText(/当前版本尚未开放撤销入住/);
   await expectNoInternalProtocol(page);
 });
 

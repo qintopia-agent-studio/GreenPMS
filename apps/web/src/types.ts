@@ -173,7 +173,7 @@ export interface EntitlementLotDto {
 export interface EntitlementLedgerDto {
   fact_id: string;
   lot_id: string;
-  entry_type: "ADJUST" | "HOLD" | "RELEASE" | "CONSUME" | "EXPIRE";
+  entry_type: "ADJUST" | "HOLD" | "RELEASE" | "CONSUME" | "RESTORE" | "EXPIRE" | "CONVERSION_CONSUME";
   quantity_delta: number;
   service_date: string | null;
   order_id: string | null;
@@ -252,6 +252,9 @@ export interface MembershipPaymentFactDto {
   transaction_reference: string | null;
   corrects_fact_id: string | null;
   reverses_fact_id: string | null;
+  source_type: "DIRECT_WECOM" | "STAY_COLLECTION_TRANSFER";
+  source_order_id: string | null;
+  source_collection_fact_id: string | null;
   note: string;
   command_id: string;
   created_at: string;
@@ -274,6 +277,7 @@ export interface MetaDto {
   pricingPolicyVersions: PricingPolicyVersionDto[];
   members: MemberDto[];
   memberContracts: MemberContractDto[];
+  membershipProducts: MembershipProductDto[];
 }
 
 export interface AvailabilityNightDto {
@@ -421,6 +425,13 @@ export interface CollectionFactDto {
   pricing_revision_id: string | null;
   command_id: string;
   created_at: string;
+  transfer?: {
+    id: string;
+    membershipOrderId: string;
+    memberId: string;
+    membershipPaymentFactId: string;
+    sourceReversalFactId: string;
+  } | null;
 }
 
 export interface CleaningTaskSummaryDto {

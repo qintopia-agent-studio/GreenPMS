@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import {
   QuoteRequestGuard,
   RoomStatusCommandAttemptGuard,
@@ -8,6 +10,7 @@ import {
   applyMemberSelectionToGuestForms,
   bookingChannelRequiredForStay,
   canAddGuest,
+  clearCorruptQuoteCommandRecovery,
   createOrderGuestInputs,
   createOrderPricingDraft,
   paidStayTypeForDates,
@@ -20,25 +23,32 @@ import {
   membershipCoverageSummary,
   parseYuanAmountToMinor,
   quotePricingSummary,
+  QuoteRecoveryPageEntry,
   staffQuoteError,
-  quoteRecoveryStorageKey,
   readQuoteCommandRecovery,
   roomStatusCommandWriteGate,
   roomStatusFiltersRevealingTarget,
   roomStatusAnchorMatches,
-  roomStatusAutoWindowStart,
   roomStatusQuickTargetMatches,
   roomStatusGridSelectedStayId,
   roomStatusOrderContextMode,
+  roomStatusDesktopContextKind,
+  quoteRecoveryContextIdentity,
+  shouldAutoOpenQuoteRecoveryContext,
+  shouldRenderDetachedQuoteRecoveryWorkbench,
   roomStatusOrderCommandScope,
   roomStatusProjectionRefreshAllowed,
+  roomStatusTimelineRangeFromStart,
   selectedOrderCommandScopeIsCurrent,
   selectedOrderMemberLookup,
   selectedStayDateRequestIsCompatible,
   roomStatusBlockDraftWithinSelection,
+  browserQuoteRecoveryOwnerId,
   saveQuoteCommandRecovery
 } from "./InventoryPage";
+import { quoteRecoveryStorageKey } from "../ui";
 import { ApiError } from "../api";
+import { createSharedCommandRecoveryStorage } from "../ui";
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
@@ -63,6 +73,7 @@ const pending = {
   version: 1,
   subjectId,
   propertyId,
+  ownerTabId: "tab_quote_owner",
   input: {
     propertyId,
     inventoryUnitId: "unit_room_101",
@@ -104,6 +115,13 @@ describe("selected order command authorization scope", () => {
 });
 
 describe("room-status complete Stay selection", () => {
+  it("derives the room-status timeline from one start date and always keeps 30 nights", () => {
+    expect(roomStatusTimelineRangeFromStart("2026-08-21")).toEqual({
+      arrivalDate: "2026-08-21",
+      departureDate: "2026-09-20"
+    });
+  });
+
   it("keeps an exact cell Stay stable across quick-popover and context visibility changes", () => {
     expect(roomStatusGridSelectedStayId(false, null, { stayId: "stay_cross_room" })).toBe("stay_cross_room");
     expect(roomStatusGridSelectedStayId(true, "stay_quick", { stayId: "stay_previous" })).toBe("stay_quick");
@@ -123,25 +141,6 @@ describe("room-status complete Stay selection", () => {
     expect(roomStatusQuickTargetMatches(current, "unit_room_d_gen_04", "2026-09-12")).toBe(false);
     expect(roomStatusQuickTargetMatches(current, "unit_room_d_gen_05", "2026-09-12")).toBe(true);
     expect(roomStatusQuickTargetMatches(undefined, "unit_room_d_gen_05", "2026-09-12")).toBe(false);
-  });
-});
-
-describe("room-status automatic date window", () => {
-  const dates = Array.from({ length: 14 }, (_, index) => `2026-08-${String(index + 1).padStart(2, "0")}`);
-
-  it("keeps a restored focus visible when AUTO shrinks the date window", () => {
-    expect(roomStatusAutoWindowStart(dates, 0, 10, {
-      unitId: "unit_room_e_gen_03",
-      serviceDate: dates[10]!
-    })).toBe(1);
-  });
-
-  it("does not move an AUTO window without a focus or when the focus is already visible", () => {
-    expect(roomStatusAutoWindowStart(dates, 2, 10, null)).toBe(2);
-    expect(roomStatusAutoWindowStart(dates, 2, 10, {
-      unitId: "unit_room_e_gen_03",
-      serviceDate: dates[9]!
-    })).toBe(2);
   });
 });
 
@@ -288,6 +287,18 @@ describe("room-status command write gates", () => {
       contextInvalidated: false,
       targetScopeCurrent: true
     })).toEqual({ startBlocked: true, activeBlocked: true });
+  });
+
+  it("blocks new room-status writes while any same-property recovery is unresolved", () => {
+    expect(roomStatusCommandWriteGate({
+      projectionWritable: true,
+      activeProjectionValid: true,
+      recoveryBlocked: true,
+      recoveryReady: true,
+      recoveryError: undefined,
+      contextInvalidated: false,
+      targetScopeCurrent: true
+    }).startBlocked).toBe(true);
   });
 });
 
@@ -461,18 +472,9 @@ describe("CREATE_QUOTE request lifecycle", () => {
         arrivalDate: "2026-07-26",
         departureDate: "2026-08-05",
         inventoryUnitId: "unit_room_104",
-        description: "internal description",
+        description: "住宿费合计：10 夜按 7 夜档折算",
         pricingBandAnchorNights: 7,
-        calculationSegments: [{
-          inventoryUnitId: "unit_room_104",
-          pricingProductCode: "shared_bath_double_whole_room",
-          arrivalDate: "2026-07-26",
-          departureDate: "2026-08-05",
-          nights: 10,
-          anchorAmountMinor: 76_000,
-          numeratorMinor: 760_000,
-          denominator: 7
-        }],
+        pricingSummary: "本行最终金额 ¥1,086.00；计算依据：2026-07-26 至 2026-08-05，10 夜按 7 夜档 ¥760.00 折算；按整段住宿金额一次取整。",
         amount: { currency: "CNY", minorUnits: 108_600 }
       }],
       cashRemainder: { currency: "CNY", minorUnits: 108_600 },
@@ -536,14 +538,154 @@ describe("CREATE_QUOTE request lifecycle", () => {
     remountedGuard.mount();
     expect(remountedGuard.isActive(remountedGuard.begin(scope))).toBe(true);
   });
+
+  it("keeps the quote recovery owner stable across same-document remounts", () => {
+    const firstMountOwner = browserQuoteRecoveryOwnerId();
+    const remountedOwner = browserQuoteRecoveryOwnerId();
+
+    expect(remountedOwner).toBe(firstMountOwner);
+    expect(firstMountOwner).toMatch(/[0-9a-f-]{36}/i);
+  });
+
+  it("shares quote recovery writes and removals across tab-specific session mirrors", () => {
+    const authoritative = new MemoryStorage();
+    const firstTab = createSharedCommandRecoveryStorage(authoritative, new MemoryStorage());
+    const secondTabSession = new MemoryStorage();
+    const secondTab = createSharedCommandRecoveryStorage(authoritative, secondTabSession);
+
+    expect(saveQuoteCommandRecovery(firstTab, pending)).toBe(true);
+    expect(readQuoteCommandRecovery(secondTab, subjectId, propertyId)).toEqual({ kind: "VALID", pending });
+    expect(secondTabSession.getItem(scope)).toBe(JSON.stringify(pending));
+
+    firstTab.removeItem(scope);
+    expect(readQuoteCommandRecovery(secondTab, subjectId, propertyId)).toEqual({ kind: "ABSENT" });
+    expect(secondTabSession.getItem(scope)).toBeNull();
+  });
+
+  it("refreshes a stale quote session mirror when the same idempotency key advances state", () => {
+    const authoritative = new MemoryStorage();
+    const firstTab = createSharedCommandRecoveryStorage(authoritative, new MemoryStorage());
+    const secondTabSession = new MemoryStorage();
+    const secondTab = createSharedCommandRecoveryStorage(authoritative, secondTabSession);
+    const unknown = { ...pending, state: "UNKNOWN" as const };
+
+    expect(saveQuoteCommandRecovery(firstTab, pending)).toBe(true);
+    expect(readQuoteCommandRecovery(secondTab, subjectId, propertyId)).toEqual({ kind: "VALID", pending });
+    expect(saveQuoteCommandRecovery(firstTab, unknown)).toBe(true);
+
+    expect(readQuoteCommandRecovery(secondTab, subjectId, propertyId)).toEqual({ kind: "VALID", pending: unknown });
+    expect(secondTabSession.getItem(scope)).toBe(JSON.stringify(unknown));
+  });
+
+  it("clears only a corrupt quote recovery record after staff review", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(scope, "{damaged-json");
+    storage.setItem(quoteRecoveryStorageKey(subjectId, "property_other"), JSON.stringify(pending));
+
+    expect(clearCorruptQuoteCommandRecovery(storage, subjectId, propertyId)).toBe(true);
+    expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toEqual({ kind: "ABSENT" });
+    expect(storage.getItem(quoteRecoveryStorageKey(subjectId, "property_other"))).not.toBeNull();
+
+    expect(saveQuoteCommandRecovery(storage, pending)).toBe(true);
+    expect(clearCorruptQuoteCommandRecovery(storage, subjectId, propertyId)).toBe(false);
+    expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toEqual({ kind: "VALID", pending });
+  });
+
+  it("classifies invalid quote inputs and unusable metadata as corrupt recovery records", () => {
+    const storage = new MemoryStorage();
+    const invalidInputs = [
+      { ...pending.input, inventoryUnitId: "" },
+      { ...pending.input, stayType: "UNSUPPORTED" },
+      { ...pending.input, arrivalDate: "2026-02-30" },
+      { ...pending.input, departureDate: pending.input.arrivalDate },
+      { ...pending.input, unexpected: "field" }
+    ];
+    for (const input of invalidInputs) {
+      storage.setItem(scope, JSON.stringify({ ...pending, input, inputSignature: JSON.stringify(input) }));
+      expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toMatchObject({ kind: "CORRUPT" });
+    }
+    for (const metadata of [
+      { ...pending.metadata, idempotencyKey: "   " },
+      { ...pending.metadata, idempotencyKey: "x".repeat(161) },
+      { ...pending.metadata, correlationId: "   " },
+      { ...pending.metadata, correlationId: "x".repeat(161) }
+    ]) {
+      storage.setItem(scope, JSON.stringify({ ...pending, metadata }));
+      expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toMatchObject({ kind: "CORRUPT" });
+    }
+  });
 });
 
 describe("Room-status order context layout", () => {
-  it("keeps every desktop width on the non-compressing drawer path", () => {
+  it("keeps every desktop width on the simple drawer path", () => {
     expect(roomStatusOrderContextMode(0, false)).toBe("DRAWER");
-    expect(roomStatusOrderContextMode(1239, false)).toBe("DRAWER");
-    expect(roomStatusOrderContextMode(1240, false)).toBe("DRAWER");
+    expect(roomStatusOrderContextMode(1199, false)).toBe("DRAWER");
+    expect(roomStatusOrderContextMode(1200, false)).toBe("DRAWER");
+    expect(roomStatusOrderContextMode(1600, false)).toBe("DRAWER");
     expect(roomStatusOrderContextMode(1600, true)).toBe("DRAWER");
+  });
+
+  it("keeps the quote recovery entry reachable while an order context still exists", () => {
+    expect(roomStatusDesktopContextKind(true, true)).toBe("QUOTE_RECOVERY");
+    expect(roomStatusDesktopContextKind(false, true)).toBe("ORDER");
+    expect(roomStatusDesktopContextKind(false, false)).toBe("SELECTION");
+
+    const html = renderToStaticMarkup(createElement(QuoteRecoveryPageEntry, {
+      recovery: { kind: "VALID", pending },
+      onOpen: () => undefined
+    }));
+    expect(html).toContain('data-testid="inventory-quote-recovery-entry"');
+    expect(html).toContain("有一笔报价需要处理");
+    expect(html).toContain("打开处理入口");
+    expect(renderToStaticMarkup(createElement(QuoteRecoveryPageEntry, {
+      recovery: { kind: "ABSENT" },
+      onOpen: () => undefined
+    }))).toBe("");
+  });
+
+  it("opens each new desktop Quote recovery once and lets the operator dismiss it", () => {
+    const recovery = { kind: "VALID" as const, pending };
+    const identity = quoteRecoveryContextIdentity(scope, recovery);
+    expect(identity).toContain(pending.metadata.idempotencyKey);
+    expect(shouldAutoOpenQuoteRecoveryContext({
+      recoveryIdentity: identity,
+      dismissedIdentity: undefined,
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: "another-tab",
+      isMobile: false,
+      hasSelectedOrder: false
+    })).toBe(true);
+    expect(shouldAutoOpenQuoteRecoveryContext({
+      recoveryIdentity: identity,
+      dismissedIdentity: identity,
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: "another-tab",
+      isMobile: false,
+      hasSelectedOrder: false
+    })).toBe(false);
+    expect(shouldAutoOpenQuoteRecoveryContext({
+      recoveryIdentity: identity,
+      dismissedIdentity: undefined,
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: "another-tab",
+      isMobile: true,
+      hasSelectedOrder: false
+    })).toBe(false);
+    expect(shouldAutoOpenQuoteRecoveryContext({
+      recoveryIdentity: identity,
+      dismissedIdentity: undefined,
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: pending.ownerTabId,
+      isMobile: false,
+      hasSelectedOrder: false
+    })).toBe(false);
+  });
+
+  it("keeps the recovery workbench renderable when the first room-status Query failed", () => {
+    expect(shouldRenderDetachedQuoteRecoveryWorkbench(false, true, { kind: "VALID", pending })).toBe(true);
+    expect(shouldRenderDetachedQuoteRecoveryWorkbench(false, false, { kind: "VALID", pending })).toBe(false);
+    expect(shouldRenderDetachedQuoteRecoveryWorkbench(true, true, { kind: "VALID", pending })).toBe(false);
+    expect(shouldRenderDetachedQuoteRecoveryWorkbench(false, true, { kind: "ABSENT" })).toBe(false);
   });
 });
 
@@ -572,10 +714,10 @@ describe("Room-status command attempt lifecycle", () => {
 });
 
 describe("Room-status query attempt lifecycle", () => {
-  it("keeps projection refresh active until the command enters formal confirmation", () => {
+  it("pauses projection refresh while an operator command is active", () => {
     expect(roomStatusProjectionRefreshAllowed("IDLE")).toBe(true);
-    expect(roomStatusProjectionRefreshAllowed("DRAFT")).toBe(true);
-    expect(roomStatusProjectionRefreshAllowed("PREVIEW")).toBe(true);
+    expect(roomStatusProjectionRefreshAllowed("DRAFT")).toBe(false);
+    expect(roomStatusProjectionRefreshAllowed("PREVIEW")).toBe(false);
     expect(roomStatusProjectionRefreshAllowed("SETTLED")).toBe(true);
     expect(roomStatusProjectionRefreshAllowed("CONFIRMING")).toBe(false);
   });

@@ -88,6 +88,23 @@ function metadataHeaders(metadata: ClientCommandMetadata) {
   };
 }
 
+function normalizeCommandResult(
+  result: Partial<ReceiptDto> & Pick<ReceiptDto, "executionStatus" | "businessCommitted">
+): ReceiptDto {
+  return {
+    receiptId: result.receiptId ?? "",
+    commandId: result.commandId ?? "",
+    executionStatus: result.executionStatus,
+    businessCommitted: result.businessCommitted,
+    correlationId: result.correlationId ?? "",
+    ...(result.result ? { result: result.result } : {}),
+    ...(result.error ? { error: result.error } : {}),
+    resourceRefs: result.resourceRefs ?? [],
+    factRefs: result.factRefs ?? [],
+    ...(result.committedAt ? { committedAt: result.committedAt } : {})
+  };
+}
+
 export const api = {
   commandMetadata: (scope: string): ClientCommandMetadata => {
     const headers = commandHeaders(scope);
@@ -205,18 +222,24 @@ export const api = {
   commandResult: (propertyId: string, commandType: HistoricalRecoverableCommandType, idempotencyKey: string, signal?: AbortSignal) => {
     const query = new URLSearchParams({ propertyId, commandType, idempotencyKey });
     return request<Partial<ReceiptDto> & Pick<ReceiptDto, "executionStatus" | "businessCommitted">>(`/api/v1/command-results?${query.toString()}`, signal ? { signal } : {})
-      .then((result) => ({
-        receiptId: result.receiptId ?? "",
-        commandId: result.commandId ?? "",
-        executionStatus: result.executionStatus,
-        businessCommitted: result.businessCommitted,
-        correlationId: result.correlationId ?? "",
-        ...(result.result ? { result: result.result } : {}),
-        ...(result.error ? { error: result.error } : {}),
-        resourceRefs: result.resourceRefs ?? [],
-        factRefs: result.factRefs ?? [],
-        ...(result.committedAt ? { committedAt: result.committedAt } : {})
-      } satisfies ReceiptDto));
+      .then(normalizeCommandResult);
+  },
+  resolveCommandResult: (
+    propertyId: string,
+    commandType: HistoricalRecoverableCommandType,
+    idempotencyKey: string,
+    signal?: AbortSignal
+  ) => {
+    const metadata = api.commandMetadata("resolve-command-result");
+    return request<Partial<ReceiptDto> & Pick<ReceiptDto, "executionStatus" | "businessCommitted">>(
+      "/api/v1/command-results/resolve",
+      {
+        method: "POST",
+        headers: metadataHeaders(metadata),
+        body: JSON.stringify({ propertyId, commandType, idempotencyKey }),
+        ...(signal ? { signal } : {})
+      }
+    ).then(normalizeCommandResult);
   }
 };
 

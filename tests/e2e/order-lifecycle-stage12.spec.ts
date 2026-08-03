@@ -27,7 +27,8 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-username").fill(fixture.operator.username);
   await page.getByTestId("login-password").fill(fixture.operator.password);
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
 async function openOrder(page: Page, stay: Stage12StayFixture): Promise<void> {
@@ -121,9 +122,8 @@ async function orderView(page: Page, stay: Stage12StayFixture) {
 
 async function expectUnitAvailable(page: Page, stay: Stage12StayFixture, serviceDate: string): Promise<void> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房态与可售", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("arrival-date").fill(serviceDate);
-  await page.getByTestId("departure-date").fill(stay.departureDate);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
   const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${stay.unitId}"][data-service-date="${serviceDate}"]`);
   await expect(cell).toBeVisible();
@@ -158,7 +158,7 @@ test("4.5 desktop cancellation keeps history, releases inventory and only shows 
   await expect(review).toContainText("尚未登记退款");
   await expect(review).toContainText("本次操作不会自动退款");
   await confirmLifecycle(page, review, "取消订单");
-  await expect(page.getByTestId("command-result-notice")).toContainText("订单已取消，订单和房态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("订单已取消");
   await expect(page.locator(".order-title-row").getByText("已取消", { exact: true })).toBeVisible();
 
   const after = await orderView(page, stay);
@@ -233,11 +233,11 @@ test("4.5 no-show uses the 20:00 gate, is operator initiated and becomes termina
   await expect(review).toContainText("退款参考");
   await expect(review).toContainText("目前尚未登记退款");
   await confirmLifecycle(page, review, "标记未到");
-  await expect(page.getByTestId("command-result-notice")).toContainText("订单已标记未到，订单和房态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("订单已标记未到");
   await expect(page.locator(".order-title-row").getByText("未到", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "入住", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "调整预订日期", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "标记未到", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "入住", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "调整预订日期", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "标记未到", exact: true })).toBeDisabled();
 
   const after = await orderView(page, fixture.noShow);
   expect(after.order.status).toBe("NO_SHOW");

@@ -29,7 +29,13 @@ import {
   RoomStatusMark,
   useRoomStatusMobileViewport
 } from "./roomStatusPresentation";
-import { roomStatusOrderIdentityForInterval, type RoomStatusOrderIdentity } from "./roomStatusState";
+import {
+  addLocalDateDays,
+  isIsoLocalDate,
+  ROOM_STATUS_TIMELINE_DAYS,
+  roomStatusOrderIdentityForInterval,
+  type RoomStatusOrderIdentity
+} from "./roomStatusState";
 
 export type RoomStatusMobileTab = "ARRIVALS" | "IN_HOUSE" | "DEPARTURES" | "EXCEPTIONS";
 
@@ -88,6 +94,20 @@ const historyActionLabels: Readonly<Record<string, string>> = {
   COMPLETE_CLEANING: "完成清洁",
   LEGACY_UNAVAILABLE: "历史不可售记录"
 };
+
+function shiftedMobileRange(
+  range: Readonly<{ arrivalDate: string; departureDate: string }>,
+  arrivalDate: string
+): { arrivalDate: string; departureDate: string } {
+  if (!isIsoLocalDate(arrivalDate)) return { ...range, arrivalDate };
+  const currentNights = isIsoLocalDate(range.arrivalDate) && isIsoLocalDate(range.departureDate)
+    ? Math.round((Date.parse(`${range.departureDate}T00:00:00Z`) - Date.parse(`${range.arrivalDate}T00:00:00Z`)) / 86_400_000)
+    : ROOM_STATUS_TIMELINE_DAYS;
+  const nights = currentNights >= 1 && currentNights <= ROOM_STATUS_TIMELINE_DAYS
+    ? currentNights
+    : ROOM_STATUS_TIMELINE_DAYS;
+  return { arrivalDate, departureDate: addLocalDateDays(arrivalDate, nights) };
+}
 
 const historySourceLabels: Readonly<Record<RoomStatusOperationalTaskDto["history"][number]["source"], string>> = {
   WEB_SESSION: "前台工作台",
@@ -306,7 +326,7 @@ export function RoomStatusMobileTasks({
       <header>
         <div>
           <span>移动房态</span>
-          <h2 id={`${tabsId}-heading`}>今日运营任务</h2>
+          <h1 id={`${tabsId}-heading`}>今日运营任务</h1>
         </div>
         <div className="room-status-mobile-header-actions">
           <small>更新于 {formatRoomStatusDateTime(board.asOf)}</small>
@@ -338,7 +358,7 @@ export function RoomStatusMobileTasks({
               data-testid="arrival-date"
               type="date"
               value={range.arrivalDate}
-              onChange={(event) => onRangeChange({ ...range, arrivalDate: event.target.value })}
+              onChange={(event) => onRangeChange(shiftedMobileRange(range, event.target.value))}
             />
           </label>
           <label>
@@ -389,7 +409,7 @@ export function RoomStatusMobileTasks({
         <section className="room-status-mobile-occupancies" aria-label="当前日期范围占用明细" role="region">
           <div className="room-status-mobile-occupancies-title">
             <div>
-              <h3>当前日期范围占用明细</h3>
+              <h2>当前日期范围占用明细</h2>
               <span>共 {lodgingOccupancySummaries.length} 条占用记录</span>
             </div>
             <button
@@ -548,7 +568,7 @@ export function RoomStatusMobileTasks({
               <span>{roomStatusSourceLabels[detailInterval.sourceKind]}</span>
             </div>
             <section aria-labelledby={`${tabsId}-detail-range`}>
-              <h3 id={`${tabsId}-detail-range`}><CalendarDays aria-hidden="true" size={18} />房源与日期</h3>
+              <h2 id={`${tabsId}-detail-range`}><CalendarDays aria-hidden="true" size={18} />房源与日期</h2>
               <dl>
                 <dt>房源</dt><dd>{detailUnit ? roomStatusUnitLabel(detailUnit) : "当前查询页未包含房源名称"}</dd>
                 <dt>营业日期</dt><dd>{formatRoomStatusDate(detailInterval.businessDate)}</dd>
@@ -557,7 +577,7 @@ export function RoomStatusMobileTasks({
               </dl>
             </section>
             {!detailLodging ? <section aria-labelledby={`${tabsId}-detail-source`}>
-              <h3 id={`${tabsId}-detail-source`}><Blocks aria-hidden="true" size={18} />任务说明</h3>
+              <h2 id={`${tabsId}-detail-source`}><Blocks aria-hidden="true" size={18} />任务说明</h2>
               <dl>
                 <dt>影响可售</dt><dd>{detailInterval.blocking ? "是" : "否"}</dd>
                 <dt>原因</dt><dd>{detailInterval.reason ?? "未提供原因"}</dd>
@@ -580,7 +600,7 @@ export function RoomStatusMobileTasks({
               ) : null}
             </section> : (
               <section aria-labelledby={`${tabsId}-detail-source`}>
-                <h3 id={`${tabsId}-detail-source`}><CalendarCheck2 aria-hidden="true" size={18} />住宿信息</h3>
+                <h2 id={`${tabsId}-detail-source`}><CalendarCheck2 aria-hidden="true" size={18} />住宿信息</h2>
                 <dl>
                   <dt>住宿状态</dt><dd>{roomStatusPresentation[detailInterval.status].label}</dd>
                   <dt>住宿来源</dt><dd>{roomStatusSourceLabels[detailInterval.sourceKind]}</dd>
@@ -590,7 +610,7 @@ export function RoomStatusMobileTasks({
             )}
             {!detailLodging && detailInterval.history.length ? (
               <section aria-labelledby={`${tabsId}-detail-history`}>
-                <h3 id={`${tabsId}-detail-history`}><Clock3 aria-hidden="true" size={18} />办理历史</h3>
+                <h2 id={`${tabsId}-detail-history`}><Clock3 aria-hidden="true" size={18} />办理历史</h2>
                 <ol className="room-status-mobile-detail-history">
                   {detailInterval.history.map((item, index) => (
                     <li key={`${item.occurredAt}:${item.commandId ?? index}`}>
@@ -609,12 +629,12 @@ export function RoomStatusMobileTasks({
             ) : null}
             {detailInterval.conflicts.length ? (
               <section className="room-status-mobile-detail-conflicts" aria-labelledby={`${tabsId}-detail-conflicts`}>
-                <h3 id={`${tabsId}-detail-conflicts`}><ShieldAlert aria-hidden="true" size={18} />日期占用</h3>
+                <h2 id={`${tabsId}-detail-conflicts`}><ShieldAlert aria-hidden="true" size={18} />日期占用</h2>
                 <ul>{detailInterval.conflicts.map((conflict) => <li key={conflict.id}><strong>{roomStatusSourceLabels[conflict.sourceKind]} 已有住宿，不能重复安排</strong><span>{formatRoomStatusDate(conflict.startDate)}至{formatRoomStatusDate(conflict.endDate)}</span></li>)}</ul>
               </section>
             ) : null}
             <section aria-labelledby={`${tabsId}-detail-freshness`}>
-              <h3 id={`${tabsId}-detail-freshness`}><Clock3 aria-hidden="true" size={18} />数据新鲜度</h3>
+              <h2 id={`${tabsId}-detail-freshness`}><Clock3 aria-hidden="true" size={18} />数据新鲜度</h2>
               <dl>
                 <dt>更新时间</dt><dd>{formatRoomStatusDateTime(board.asOf)}</dd>
                 <dt>有效至</dt><dd>{formatRoomStatusDateTime(board.freshUntil)}</dd>

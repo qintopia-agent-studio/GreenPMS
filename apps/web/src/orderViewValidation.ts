@@ -524,7 +524,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const stayStatus = stringValue(stay.status, "stay.status");
   stringValue(stay.id, "stay.id");
   const stayType = stringValue(order.stay_type, "order.stay_type");
-  if (stayType !== "TRANSIENT" && stayType !== "MEMBER" && stayType !== "FREE") fail("order.stay_type", "不是支持的住宿类型");
+  if (!["TRANSIENT", "WEEKLY", "MONTHLY", "CUSTOM", "FIXED_TERM", "ROLLING", "FREE", "MEMBER"].includes(stayType)) fail("order.stay_type", "不是支持的住宿类型");
   const primaryGuest = record(order.primary_guest_snapshot, "order.primary_guest_snapshot");
   exactKeysWithOptional(primaryGuest, "order.primary_guest_snapshot", ["fullName"], ["nickname", "phone", "documentNumber"]);
   stringValue(primaryGuest.fullName, "order.primary_guest_snapshot.fullName");
@@ -776,18 +776,26 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
         : orderStatus === "CHECK_IN_REVOKED"
           ? "REVOKE_CHECK_IN"
           : undefined;
-    if (index > 0 && lifecycleAmendmentType && currentRevisionAmount === 0) {
+    const allowedZeroAmendmentTypes = new Set([
+      ...(lifecycleAmendmentType ? [lifecycleAmendmentType] : []),
+      "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    ]);
+    if (index > 0 && currentRevisionAmount === 0) {
       const matchingLifecycleAmendments = amendments.flatMap((item) => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return [];
         const candidate = item as JsonRecord;
         return candidate.id === revisionAmendmentId ? [candidate] : [];
       });
       const lifecycleAmendment = matchingLifecycleAmendments.length === 1 ? matchingLifecycleAmendments[0] : undefined;
+      const amendmentType = String(lifecycleAmendment?.amendment_type ?? "");
+      const reasonMatches = amendmentType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+        ? pricingReason.code === "STAY_COLLECTION_TO_MEMBERSHIP"
+        : lifecycleAmendment?.reason_code === pricingReason.code
+          && lifecycleAmendment?.reason_note === pricingReason.note;
       if (lifecycleAmendment
         && lifecycleAmendment.order_id === orderId
-        && lifecycleAmendment.amendment_type === lifecycleAmendmentType
-        && lifecycleAmendment.reason_code === pricingReason.code
-        && lifecycleAmendment.reason_note === pricingReason.note
+        && allowedZeroAmendmentTypes.has(String(lifecycleAmendment.amendment_type))
+        && reasonMatches
         && Date.parse(dateTime(lifecycleAmendment.created_at, "amendments[lifecycle].created_at")) <= Date.parse(revisionCreatedAt)) {
         lifecycleZeroRevisionIds.add(revisionId);
       }
@@ -846,10 +854,10 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   let collectionTotal = 0;
   arrayValue(result.collectionFacts, "collectionFacts").forEach((item, index) => {
     const fact = record(item, `collectionFacts[${index}]`);
-    exactKeys(fact, `collectionFacts[${index}]`, [
+    exactKeysWithOptional(fact, `collectionFacts[${index}]`, [
       "fact_id", "order_id", "fact_type", "amount_minor", "net_effect_minor", "currency", "references_fact_id",
       "reverses_fact_id", "method", "note", "transaction_reference", "pricing_revision_id", "command_id", "created_at"
-    ]);
+    ], ["transfer"]);
     stringValue(fact.fact_id, `collectionFacts[${index}].fact_id`);
     if (stringValue(fact.order_id, `collectionFacts[${index}].order_id`) !== orderId) fail(`collectionFacts[${index}].order_id`, "与订单不一致");
     const netEffect = safeInteger(fact.net_effect_minor, `collectionFacts[${index}].net_effect_minor`);
@@ -862,6 +870,15 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     nullableString(fact.transaction_reference, `collectionFacts[${index}].transaction_reference`);
     nullableString(fact.pricing_revision_id, `collectionFacts[${index}].pricing_revision_id`);
     stringValue(fact.command_id, `collectionFacts[${index}].command_id`);
+    if (fact.transfer !== null && fact.transfer !== undefined) {
+      const transfer = record(fact.transfer, `collectionFacts[${index}].transfer`);
+      exactKeys(transfer, `collectionFacts[${index}].transfer`, ["id", "membershipOrderId", "memberId", "membershipPaymentFactId", "sourceReversalFactId"]);
+      stringValue(transfer.id, `collectionFacts[${index}].transfer.id`);
+      stringValue(transfer.membershipOrderId, `collectionFacts[${index}].transfer.membershipOrderId`);
+      stringValue(transfer.memberId, `collectionFacts[${index}].transfer.memberId`);
+      stringValue(transfer.membershipPaymentFactId, `collectionFacts[${index}].transfer.membershipPaymentFactId`);
+      stringValue(transfer.sourceReversalFactId, `collectionFacts[${index}].transfer.sourceReversalFactId`);
+    }
     if (stringValue(fact.currency, `collectionFacts[${index}].currency`) !== currentContractAmount.currency) fail(`collectionFacts[${index}].currency`, "与订单金额币种不一致");
     dateTime(fact.created_at, `collectionFacts[${index}].created_at`);
     collectionTotal += netEffect;

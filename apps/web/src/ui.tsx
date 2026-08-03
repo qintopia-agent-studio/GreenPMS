@@ -69,6 +69,13 @@ export function formatDate(value: string | undefined): string {
   return `${match[1]}-${match[2]}-${match[3]}`;
 }
 
+function nextLocalDate(value: string): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return value;
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 export function formatDateTime(value: string | undefined): string {
   if (!value) return "-";
   const date = new Date(value);
@@ -338,7 +345,7 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
             <X aria-hidden="true" size={20} />
           </button>
         </header>
-        <div className="modal-body">{children}</div>
+        <div className="modal-body" tabIndex={0}>{children}</div>
         {footer ? <footer className="modal-footer">{footer}</footer> : null}
       </div>
     </dialog>
@@ -399,6 +406,7 @@ const membershipBusinessCommands = new Set<CommandType>([
   "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
 ]);
 const fulfillmentBusinessCommands = new Set<CommandType>(["CHECK_IN", "CHECK_OUT", "COMPLETE_CLEANING"]);
+const tokenBusinessCommands = new Set<CommandType>(["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"]);
 const fulfillmentTransitions: Partial<Record<CommandType, readonly [string, string]>> = {
   CHECK_IN: ["RESERVED", "CHECKED_IN"],
   CHECK_OUT: ["CHECKED_IN", "CHECKED_OUT"],
@@ -486,6 +494,19 @@ function membershipCommandLabel(commandType: CommandType): string {
   return "会员操作";
 }
 
+function tokenCommandLabel(commandType: HistoricalCommandType): string {
+  if (commandType === "ISSUE_TOKEN") return "签发 Token";
+  if (commandType === "ROTATE_TOKEN") return "轮换 Token";
+  if (commandType === "REVOKE_TOKEN") return "撤销 Token";
+  return "Token 操作";
+}
+
+function tokenAccessCeilingLabel(value: unknown): string {
+  if (value === "READ") return "只读";
+  if (value === "WRITE") return "可写";
+  return scalar(value);
+}
+
 function scalar(value: unknown): string {
   if (value === null || value === undefined) return "-";
   if (typeof value === "boolean") return value ? "是" : "否";
@@ -504,7 +525,10 @@ const commandBusinessLabels: Partial<Record<HistoricalCommandType, string>> = {
   REVOKE_CHECK_IN: "撤销入住",
   RECORD_COLLECTION: "登记收款",
   RECORD_REFUND: "登记退款",
-  REVERSE_FACT: "冲销收退款记录"
+  REVERSE_FACT: "冲销收退款记录",
+  ISSUE_TOKEN: "签发 Token",
+  ROTATE_TOKEN: "轮换 Token",
+  REVOKE_TOKEN: "撤销 Token"
 };
 
 const effectFieldLabels: Record<string, string> = {
@@ -1625,6 +1649,235 @@ export function orderLifecyclePreviewHasEvidence(
     && Number(entitlement.coverageCount) >= 0);
 }
 
+function exactNonblankStringList(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every(nonblankString) && new Set(value).size === value.length
+    ? value as string[]
+    : undefined;
+}
+
+function conversionIdentity(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim()
+    ? value.replaceAll(/\s/g, "").toUpperCase()
+    : undefined;
+}
+
+export function conversionPreviewHasEvidence(
+  effect: Record<string, unknown>,
+  input: Record<string, unknown>
+): boolean {
+  const expectedCollectionIds = exactNonblankStringList(input.collectionFactIds);
+  const primaryOccupant = isRecord(effect.primaryOccupant) ? effect.primaryOccupant : undefined;
+  const member = isRecord(effect.member) ? effect.member : undefined;
+  const product = isRecord(effect.product) ? effect.product : undefined;
+  const transfer = isRecord(effect.transfer) ? effect.transfer : undefined;
+  const membershipPricing = isRecord(effect.membershipPricing) ? effect.membershipPricing : undefined;
+  const entitlement = isRecord(effect.entitlement) ? effect.entitlement : undefined;
+  const before = isRecord(effect.before) ? effect.before : undefined;
+  const decision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
+  const pricing = isRecord(effect.pricing) ? effect.pricing : undefined;
+  if (effect.operation !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    || !hasExactKeys(effect, ["operation", "orderId", "stayId", "primaryOccupant", "member", "product", "transfer", "membershipPricing", "remainingPayment", "entitlement", "before", "pricingDecision", "pricing"])
+    || !nonblankString(effect.orderId) || effect.orderId !== input.orderId
+    || !nonblankString(effect.stayId)
+    || !expectedCollectionIds
+    || !primaryOccupant || !member || !product || !transfer || !membershipPricing
+    || !entitlement || !before || !decision || !pricing
+    || !hasExactKeys(primaryOccupant, ["fullName", "nickname", "identityCardNumber"])
+    || !hasExactKeys(member, ["memberId", "fullName", "identityCardNumber"])
+    || !hasExactKeys(product, ["productId", "code", "version", "name", "entitlementUnitKind", "entitlementUnits", "allowedRoomTypeCode", "allowedInventoryKind"])
+    || !hasExactKeys(transfer, ["collections", "total"])
+    || !hasExactKeys(membershipPricing, ["listedPrice", "agreedPrice", "adjustment", "adjustmentReason"])
+    || !hasExactKeys(entitlement, ["entitlementUnitKind", "entitlementUnits", "consumedUnits", "remainingUnits", "serviceDates", "validFrom", "validUntil"])
+    || !hasExactKeys(before, ["currentContractAmount", "netRecordedCollection"])
+    || !hasExactKeys(decision, ["pricingBasis", "policyBaseAmount", "targetCurrentContractAmount", "differenceFromPolicy", "manualAdjustmentMinor", "differenceExceedsThreshold", "reason"])
+    || !hasExactKeys(pricing, ["coverageSet", "cashLines", "cashRemainder", "currentContractAmount"])
+    || member.memberId !== input.memberId
+    || product.productId !== input.membershipProductId
+    || !nonblankString(member.fullName) || !nonblankString(member.identityCardNumber)
+    || !nonblankString(primaryOccupant.identityCardNumber)
+    || conversionIdentity(member.identityCardNumber) !== conversionIdentity(primaryOccupant.identityCardNumber)
+    || !nonblankString(product.code) || !nonblankString(product.name)
+    || !nonblankString(product.allowedRoomTypeCode)
+    || (product.allowedInventoryKind !== "ROOM" && product.allowedInventoryKind !== "BED")
+    || (product.entitlementUnitKind !== "ROOM_NIGHT" && product.entitlementUnitKind !== "BED_NIGHT")
+    || product.entitlementUnitKind !== entitlement.entitlementUnitKind
+    || !Number.isSafeInteger(product.version) || Number(product.version) < 1
+    || !Number.isSafeInteger(product.entitlementUnits) || Number(product.entitlementUnits) < 1
+    || product.entitlementUnits !== entitlement.entitlementUnits
+    || !hasMoney(transfer.total)
+    || !hasMoney(membershipPricing.listedPrice)
+    || !hasMoney(membershipPricing.agreedPrice)
+    || !hasMoney(membershipPricing.adjustment)
+    || !hasMoney(before.currentContractAmount)
+    || !hasMoney(before.netRecordedCollection)) return false;
+
+  const transferCollections = Array.isArray(transfer.collections) ? transfer.collections : undefined;
+  if (!transferCollections || transferCollections.length !== expectedCollectionIds.length) return false;
+  let transferSum = 0;
+  for (let index = 0; index < transferCollections.length; index += 1) {
+    const collection = isRecord(transferCollections[index]) ? transferCollections[index] as Record<string, unknown> : undefined;
+    if (!collection
+      || !hasExactKeys(collection, ["factId", "amount", "transactionReference", "recordedAt"])
+      || collection.factId !== expectedCollectionIds[index]
+      || !hasMoney(collection.amount) || collection.amount.currency !== transfer.total.currency
+      || collection.amount.minorUnits <= 0
+      || !nonblankString(collection.transactionReference)
+      || typeof collection.recordedAt !== "string" || Number.isNaN(Date.parse(collection.recordedAt))) return false;
+    transferSum += collection.amount.minorUnits;
+  }
+
+  const listedPrice = membershipPricing.listedPrice;
+  const agreedPrice = membershipPricing.agreedPrice;
+  const adjustment = membershipPricing.adjustment;
+  const agreedPriceInput = input.agreedPriceMinor;
+  const expectedAdjustmentReason = typeof input.priceAdjustmentReason === "string" && input.priceAdjustmentReason.trim()
+    ? input.priceAdjustmentReason.trim()
+    : null;
+  if (!Number.isSafeInteger(transferSum) || transferSum !== transfer.total.minorUnits
+    || !Number.isSafeInteger(agreedPriceInput) || Number(agreedPriceInput) < transferSum
+    || agreedPrice.minorUnits !== agreedPriceInput
+    || listedPrice.currency !== agreedPrice.currency
+    || adjustment.currency !== agreedPrice.currency
+    || transfer.total.currency !== agreedPrice.currency
+    || adjustment.minorUnits !== agreedPrice.minorUnits - listedPrice.minorUnits
+    || membershipPricing.adjustmentReason !== expectedAdjustmentReason
+    || !moneyMatches(before.netRecordedCollection, transfer.total)
+    || before.currentContractAmount.currency !== agreedPrice.currency) return false;
+
+  const remainingMinor = agreedPrice.minorUnits - transfer.total.minorUnits;
+  const inputRemainingReference = typeof input.remainingPaymentTransactionReference === "string"
+    ? input.remainingPaymentTransactionReference.trim()
+    : "";
+  const inputRemainingNote = typeof input.remainingPaymentNote === "string" ? input.remainingPaymentNote.trim() : "";
+  if (remainingMinor === 0) {
+    if (effect.remainingPayment !== null || inputRemainingReference) return false;
+  } else {
+    const remainingPayment = isRecord(effect.remainingPayment) ? effect.remainingPayment : undefined;
+    if (!remainingPayment
+      || !hasExactKeys(remainingPayment, ["amount", "transactionReference", "note"])
+      || !moneyMatches(remainingPayment.amount, { currency: agreedPrice.currency, minorUnits: remainingMinor })
+      || remainingPayment.transactionReference !== inputRemainingReference
+      || remainingPayment.note !== inputRemainingNote) return false;
+  }
+
+  const serviceDates = exactNonblankStringList(entitlement.serviceDates);
+  if (!serviceDates || serviceDates.some((date) => localDateEpoch(date) === undefined)
+    || !Number.isSafeInteger(entitlement.consumedUnits) || Number(entitlement.consumedUnits) < 1
+    || entitlement.consumedUnits !== serviceDates.length
+    || !Number.isSafeInteger(entitlement.remainingUnits) || Number(entitlement.remainingUnits) < 0
+    || Number(entitlement.entitlementUnits) - Number(entitlement.consumedUnits) !== entitlement.remainingUnits
+    || localDateEpoch(entitlement.validFrom) === undefined
+    || localDateEpoch(entitlement.validUntil) === undefined
+    || Number(localDateEpoch(entitlement.validUntil)) <= Number(localDateEpoch(entitlement.validFrom))) return false;
+
+  const reason = isRecord(decision.reason) ? decision.reason : undefined;
+  return decision.pricingBasis === "MEMBER_ENTITLEMENT"
+    && decision.manualAdjustmentMinor === 0
+    && decision.differenceExceedsThreshold === false
+    && reason?.code === "STAY_COLLECTION_TO_MEMBERSHIP"
+    && reason.note === "升级会员，住宿金额归零"
+    && [decision.policyBaseAmount, decision.targetCurrentContractAmount, decision.differenceFromPolicy, pricing.cashRemainder, pricing.currentContractAmount]
+      .every((money) => hasMoney(money) && money.currency === agreedPrice.currency && money.minorUnits === 0)
+    && Array.isArray(pricing.coverageSet) && pricing.coverageSet.length === 0
+    && Array.isArray(pricing.cashLines) && pricing.cashLines.length === 0;
+}
+
+export function conversionReceiptHasEvidence(
+  value: unknown,
+  input: Record<string, unknown>,
+  previewEffect?: Record<string, unknown>,
+  expectedEffectHash?: string
+): boolean {
+  const expectedOrderId = nonblankString(input.orderId) ? input.orderId : undefined;
+  const expectedMemberId = nonblankString(input.memberId) ? input.memberId : undefined;
+  const expectedCollectionIds = exactNonblankStringList(input.collectionFactIds);
+  const expectedAgreedPriceMinor = Number.isSafeInteger(input.agreedPriceMinor) && Number(input.agreedPriceMinor) >= 0
+    ? Number(input.agreedPriceMinor)
+    : undefined;
+  const hasFullInput = expectedOrderId !== undefined
+    && expectedMemberId !== undefined
+    && expectedCollectionIds !== undefined
+    && expectedAgreedPriceMinor !== undefined;
+  const hasRecoveryInput = hasExactKeys(input, ["propertyId", "orderId", "memberId"])
+    && nonblankString(input.propertyId)
+    && expectedOrderId !== undefined
+    && expectedMemberId !== undefined
+    && isEffectHash(expectedEffectHash);
+  if (!hasFullInput && !hasRecoveryInput) return false;
+
+  if (!receiptExecutionSemanticsAreCoherent(value) || !isRecord(value)
+    || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
+    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
+    || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
+    || value.error !== undefined || !isRecord(value.result)) return false;
+  const resourceRefs = exactNonblankStringList(value.resourceRefs);
+  const factRefs = exactNonblankStringList(value.factRefs);
+  const result = value.result;
+  if (!resourceRefs || !factRefs
+    || !hasExactKeys(result, ["orderId", "memberId", "amendmentId", "pricingRevisionId", "membershipOrderId", "status", "contractId", "entitlementLotId", "transferredCollectionFactIds", "lodgingReversalFactIds", "membershipPaymentFactIds", "transferIds", "conversionLedgerFactIds", "transferredAmount", "membershipAgreedPrice", "remainingPaymentAmount", "entitlementUnitKind", "convertedUnits", "remainingUnits", "effectHash"])
+    || !nonblankString(result.orderId) || !nonblankString(result.memberId)
+    || ((hasFullInput || hasRecoveryInput) && (result.orderId !== expectedOrderId || result.memberId !== expectedMemberId))
+    || result.status !== "ACTIVE"
+    || !nonblankString(result.amendmentId) || !nonblankString(result.pricingRevisionId)
+    || !nonblankString(result.membershipOrderId) || !nonblankString(result.contractId)
+    || !nonblankString(result.entitlementLotId)
+    || !isEffectHash(result.effectHash)
+    || (expectedEffectHash !== undefined && result.effectHash !== expectedEffectHash)
+    || !hasMoney(result.transferredAmount) || result.transferredAmount.minorUnits <= 0
+    || !hasMoney(result.membershipAgreedPrice)
+    || !hasMoney(result.remainingPaymentAmount)
+    || result.transferredAmount.currency !== result.membershipAgreedPrice.currency
+    || result.remainingPaymentAmount.currency !== result.membershipAgreedPrice.currency
+    || (hasFullInput && result.membershipAgreedPrice.minorUnits !== expectedAgreedPriceMinor)
+    || result.transferredAmount.minorUnits + result.remainingPaymentAmount.minorUnits !== result.membershipAgreedPrice.minorUnits
+    || (result.entitlementUnitKind !== "ROOM_NIGHT" && result.entitlementUnitKind !== "BED_NIGHT")
+    || !Number.isSafeInteger(result.convertedUnits) || Number(result.convertedUnits) < 1
+    || !Number.isSafeInteger(result.remainingUnits) || Number(result.remainingUnits) < 0) return false;
+
+  const sourceIds = exactNonblankStringList(result.transferredCollectionFactIds);
+  const reversalIds = exactNonblankStringList(result.lodgingReversalFactIds);
+  const paymentIds = exactNonblankStringList(result.membershipPaymentFactIds);
+  const transferIds = exactNonblankStringList(result.transferIds);
+  const ledgerIds = exactNonblankStringList(result.conversionLedgerFactIds);
+  if (!sourceIds || !reversalIds || !paymentIds || !transferIds || !ledgerIds
+    || (hasFullInput && !evidenceValuesEqual(sourceIds, expectedCollectionIds))
+    || reversalIds.length !== sourceIds.length
+    || transferIds.length !== sourceIds.length
+    || paymentIds.length !== sourceIds.length + (result.remainingPaymentAmount.minorUnits > 0 ? 1 : 0)
+    || ledgerIds.length !== result.convertedUnits
+    || new Set([...reversalIds, ...paymentIds, ...ledgerIds]).size !== reversalIds.length + paymentIds.length + ledgerIds.length
+    || !evidenceValuesEqual(factRefs, [...reversalIds, ...paymentIds, ...ledgerIds])) return false;
+
+  const requiredResources = [
+    result.orderId,
+    result.amendmentId,
+    result.pricingRevisionId,
+    result.membershipOrderId,
+    result.contractId,
+    result.entitlementLotId,
+    ...transferIds
+  ];
+  if (!evidenceValuesEqual(resourceRefs, requiredResources)) return false;
+
+  if (previewEffect) {
+    if (!conversionPreviewHasEvidence(previewEffect, input)) return false;
+    const transfer = previewEffect.transfer as Record<string, unknown>;
+    const membershipPricing = previewEffect.membershipPricing as Record<string, unknown>;
+    const entitlement = previewEffect.entitlement as Record<string, unknown>;
+    const previewMember = previewEffect.member as Record<string, unknown>;
+    const collections = transfer.collections as Array<Record<string, unknown>>;
+    if (previewMember.memberId !== result.memberId
+      || !evidenceValuesEqual(collections.map((collection) => collection.factId), sourceIds)
+      || !moneyMatches(transfer.total, result.transferredAmount)
+      || !moneyMatches(membershipPricing.agreedPrice, result.membershipAgreedPrice)
+      || entitlement.entitlementUnitKind !== result.entitlementUnitKind
+      || entitlement.consumedUnits !== result.convertedUnits
+      || entitlement.remainingUnits !== result.remainingUnits) return false;
+  }
+  return true;
+}
+
 export function u1PreviewHasBusinessEvidence(
   commandType: U1CommandType,
   effect: Record<string, unknown>,
@@ -1729,6 +1982,8 @@ export function u1PreviewHasBusinessEvidence(
     case "MARK_NO_SHOW":
     case "REVOKE_CHECK_IN":
       return orderLifecyclePreviewHasEvidence(commandType, effect, input);
+    case "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP":
+      return conversionPreviewHasEvidence(effect, input);
     case "CHECK_IN":
     case "CHECK_OUT":
       return fulfillmentTransitionIsExpected(commandType, effect);
@@ -1772,7 +2027,7 @@ export function StayTimelineDisplay({ timeline, labels, testId }: {
   </ol>;
 }
 
-function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode, inventoryUnitLabels, orderLifecycleContext, commandInput }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null; inventoryUnitLabels?: Record<string, string>; orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string }; commandInput?: Record<string, unknown> }) {
+export function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode, inventoryUnitLabels, orderLifecycleContext, commandInput }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null; inventoryUnitLabels?: Record<string, string>; orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string }; commandInput?: Record<string, unknown> }) {
   const effect = preview.effect;
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
@@ -1800,6 +2055,34 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
   const coverage = pricing && Array.isArray(pricing.coverageSet) ? pricing.coverageSet : [];
   const cashLines = pricing && Array.isArray(pricing.cashLines) ? pricing.cashLines : [];
 
+  if (tokenBusinessCommands.has(preview.commandType)) {
+    const label = typeof effect.label === "string" && effect.label.trim()
+      ? effect.label.trim()
+      : typeof commandInput?.label === "string" && commandInput.label.trim() ? commandInput.label.trim() : "未填写";
+    const tokenId = typeof effect.tokenId === "string" && effect.tokenId.trim()
+      ? effect.tokenId.trim()
+      : typeof commandInput?.tokenId === "string" && commandInput.tokenId.trim() ? commandInput.tokenId.trim() : undefined;
+    const accessCeiling = effect.accessCeiling ?? commandInput?.accessCeiling;
+    const expiresAt = typeof effect.expiresAt === "string" ? effect.expiresAt : typeof commandInput?.expiresAt === "string" ? commandInput.expiresAt : undefined;
+    const outcome = preview.commandType === "ISSUE_TOKEN"
+      ? "新 Token 会立即生效。"
+      : preview.commandType === "ROTATE_TOKEN"
+        ? "旧 Token 会立即失效，新 Token 会立即生效。"
+        : "该 Token 会立即失效。";
+    return <div className="effect-summary token-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="token-command-summary-heading">
+        <h3 id="token-command-summary-heading">请核对{tokenCommandLabel(preview.commandType)}</h3>
+        <dl className="difference-grid">
+          <dt>Token 标签</dt><dd><strong>{label}</strong></dd>
+          {tokenId ? <><dt>当前 Token</dt><dd><code>{tokenId}</code></dd></> : null}
+          <dt>权限</dt><dd>{tokenAccessCeilingLabel(accessCeiling)}</dd>
+          {expiresAt ? <><dt>过期时间</dt><dd>{formatDateTime(expiresAt)}</dd></> : null}
+          <dt>确认后</dt><dd>{outcome}</dd>
+        </dl>
+      </section>
+    </div>;
+  }
+
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const amountMinor = typeof effect.amountMinor === "number" ? effect.amountMinor : undefined;
     const currency = typeof effect.currency === "string" ? effect.currency : "CNY";
@@ -1818,6 +2101,66 @@ function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNo
           {businessCommand === "RECORD_REFUND" && effect.method === "WECOM" && !transactionReference ? <><dt>企业微信交易单号</dt><dd>原路退回，沿用原收款交易单号</dd></> : null}
           {businessCommand === "RECORD_REFUND" ? <><dt>对应原收款</dt><dd>{referencesFactId ? "已选择同订单原收款" : "未选择"}</dd></> : null}
           <dt>{noteLabel}</dt><dd>{reasonNote?.trim() || (businessCommand === "RECORD_REFUND" ? "未填写" : "未填写备注")}</dd>
+        </dl>
+      </section>
+    </div>;
+  }
+
+  if (businessCommand === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+    const conversionMember = isRecord(effect.member) ? effect.member : undefined;
+    const primaryOccupant = isRecord(effect.primaryOccupant) ? effect.primaryOccupant : undefined;
+    const product = isRecord(effect.product) ? effect.product : undefined;
+    const transfer = isRecord(effect.transfer) ? effect.transfer : undefined;
+    const membershipPricing = isRecord(effect.membershipPricing) ? effect.membershipPricing : undefined;
+    const remainingPayment = effect.remainingPayment === null ? null : isRecord(effect.remainingPayment) ? effect.remainingPayment : undefined;
+    const entitlement = isRecord(effect.entitlement) ? effect.entitlement : undefined;
+    const transferTotal = moneyFrom(transfer?.total);
+    const transferCollections = Array.isArray(transfer?.collections)
+      ? transfer.collections
+        .map((value) => isRecord(value) ? value : undefined)
+        .filter((value): value is Record<string, unknown> => Boolean(value))
+      : [];
+    const listedPrice = moneyFrom(membershipPricing?.listedPrice);
+    const agreedPrice = moneyFrom(membershipPricing?.agreedPrice);
+    const remainingAmount = remainingPayment ? moneyFrom(remainingPayment.amount) : undefined;
+    const consumedUnits = typeof entitlement?.consumedUnits === "number" ? entitlement.consumedUnits : undefined;
+    const remainingUnits = typeof entitlement?.remainingUnits === "number" ? entitlement.remainingUnits : undefined;
+    const unitLabel = entitlement?.entitlementUnitKind === "BED_NIGHT" ? "床夜" : "间夜";
+    const serviceDates = Array.isArray(entitlement?.serviceDates)
+      ? entitlement.serviceDates.filter((value): value is string => typeof value === "string" && value.trim().length > 0).sort()
+      : [];
+    const firstServiceDate = serviceDates[0];
+    const lastServiceDate = serviceDates[serviceDates.length - 1];
+    const servicePeriod = firstServiceDate && lastServiceDate
+      ? `${formatDate(firstServiceDate)} 至 ${formatDate(nextLocalDate(lastServiceDate))}`
+      : undefined;
+    const primaryOccupantName = typeof primaryOccupant?.fullName === "string" && primaryOccupant.fullName.trim()
+      ? primaryOccupant.fullName
+      : typeof primaryOccupant?.nickname === "string" && primaryOccupant.nickname.trim()
+        ? primaryOccupant.nickname
+        : undefined;
+    return <div className="effect-summary conversion-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-label="升级会员核对">
+        <dl className="difference-grid">
+          {servicePeriod ? <><dt>本次住宿</dt><dd>{servicePeriod}</dd></> : null}
+          {primaryOccupant ? <><dt>主要居住人</dt><dd><strong>{primaryOccupantName ?? "未填写姓名"}</strong></dd></> : null}
+          {conversionMember ? <><dt>目标会员</dt><dd><strong>{scalar(conversionMember.fullName)}</strong></dd></> : null}
+          {product ? <><dt>会员产品</dt><dd>{scalar(product.name)}</dd></> : null}
+          {transferTotal ? <><dt>用于升级的住宿收款</dt><dd><strong>{formatMoney(transferTotal)}</strong></dd></> : null}
+          {transferCollections.length ? <><dt>住宿收款明细</dt><dd><ol className="effect-inline-list">{transferCollections.map((collection, index) => {
+            const amount = moneyFrom(collection.amount);
+            const transactionReference = typeof collection.transactionReference === "string" ? collection.transactionReference : "未记录交易单号";
+            return <li key={`${transactionReference}-${index}`}><span>第 {index + 1} 笔</span><strong>{amount ? formatMoney(amount) : "-"}</strong><small>{transactionReference}</small></li>;
+          })}</ol></dd></> : null}
+          {listedPrice ? <><dt>会员标价</dt><dd>{formatMoney(listedPrice)}</dd></> : null}
+          {agreedPrice ? <><dt>会员成交价</dt><dd><strong>{formatMoney(agreedPrice)}</strong></dd></> : null}
+          {remainingPayment === null ? <><dt>差额企微收款</dt><dd>无差额</dd></> : null}
+          {remainingAmount ? <><dt>差额企微收款</dt><dd><strong>{formatMoney(remainingAmount)}</strong></dd></> : null}
+          {remainingPayment && typeof remainingPayment.transactionReference === "string" ? <><dt>新增差额交易单号</dt><dd>{remainingPayment.transactionReference}</dd></> : null}
+          {consumedUnits !== undefined ? <><dt>本次住宿核销</dt><dd>{consumedUnits} {unitLabel}</dd></> : null}
+          {remainingUnits !== undefined ? <><dt>预计剩余权益</dt><dd><strong>{remainingUnits} {unitLabel}</strong></dd></> : null}
+          <dt>住宿金额</dt><dd><strong>调整为 ¥0.00</strong></dd>
+          <dt>住宿收款处理</dt><dd>保留收款记录，作为会员订单已收款来源；住宿订单不再重复计入这笔钱。</dd>
         </dl>
       </section>
     </div>;
@@ -2289,7 +2632,7 @@ export function lodgingReceiptCopy(committed: boolean, memberStay: boolean): { h
     : { heading: "住宿订单未创建", description: "本次操作没有写入住宿订单。" };
 }
 
-function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false, bookingChannelCode: requestBookingChannelCode }: {
+export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false, bookingChannelCode: requestBookingChannelCode }: {
   receipt: ReceiptDto;
   onNavigateToResource?: () => void;
   businessCommand?: CommandType;
@@ -2391,6 +2734,32 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
       {receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
     </section>;
   }
+  if (businessCommand && tokenBusinessCommands.has(businessCommand)) {
+    const label = tokenCommandLabel(businessCommand);
+    const tokenReceiptErrorMessage = receipt.error
+      ? receipt.error.code === "COMMAND_INTERRUPTED" || receipt.error.code === "COMMAND_STATUS_UNKNOWN"
+        ? `${label} 结果暂时不确定，请查询刚才的结果。`
+        : /[\u3400-\u9fff]/.test(receipt.error.message)
+          ? receipt.error.message
+          : `${label} 未完成，请稍后重新处理。`
+      : undefined;
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{committed ? `${label} 已完成` : `${label} 未完成`}</h3>
+          <p>{committed
+            ? businessCommand === "ISSUE_TOKEN"
+              ? "Token 已生效。请确认外围客户端已保存一次性 secret。"
+              : businessCommand === "ROTATE_TOKEN"
+                ? "旧 Token 已失效，新 Token 已生效。请确认外围客户端已保存一次性 secret。"
+                : "Token 已撤销，外围客户端不能再使用它访问系统。"
+            : "本次 Token 操作没有写入。"}</p>
+        </div>
+      </div>
+      {tokenReceiptErrorMessage ? <div className="receipt-error"><p>{tokenReceiptErrorMessage}</p></div> : null}
+    </section>;
+  }
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const label = businessCommand === "RECORD_REFUND" ? "退款" : "收款";
     const transactionReference = result && typeof result.transactionReference === "string" ? result.transactionReference : undefined;
@@ -2469,6 +2838,34 @@ function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandT
       {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
     </section>;
   }
+  if (businessCommand === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+    const membershipOrderId = result && typeof result.membershipOrderId === "string" ? result.membershipOrderId : undefined;
+    const conversionMemberId = result && typeof result.memberId === "string" ? result.memberId : undefined;
+    const transferredAmount = result ? moneyFrom(result.transferredAmount) : undefined;
+    const membershipAgreedPrice = result ? moneyFrom(result.membershipAgreedPrice) : undefined;
+    const remainingPaymentAmount = result ? moneyFrom(result.remainingPaymentAmount) : undefined;
+    const convertedUnits = result && typeof result.convertedUnits === "number" ? result.convertedUnits : undefined;
+    const remainingUnits = result && typeof result.remainingUnits === "number" ? result.remainingUnits : undefined;
+    const unitLabel = result?.entitlementUnitKind === "BED_NIGHT" ? "床夜" : "间夜";
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{committed ? "升级会员已完成" : "升级会员未执行"}</h3>
+          <p>{committed ? "住宿收款已转入会员订单，住宿金额已调整为 0。" : commandShellNotExecutedMessage(businessCommand)}</p>
+        </div>
+      </div>
+      {committed ? <dl className="receipt-grid">
+        {transferredAmount ? <><dt>用于升级的住宿收款</dt><dd><strong>{formatMoney(transferredAmount)}</strong></dd></> : null}
+        {membershipAgreedPrice ? <><dt>会员成交价</dt><dd>{formatMoney(membershipAgreedPrice)}</dd></> : null}
+        {remainingPaymentAmount ? <><dt>差额企微收款</dt><dd>{remainingPaymentAmount.minorUnits > 0 ? formatMoney(remainingPaymentAmount) : "无差额"}</dd></> : null}
+        {convertedUnits !== undefined ? <><dt>本次住宿核销</dt><dd>{convertedUnits} {unitLabel}</dd></> : null}
+        {remainingUnits !== undefined ? <><dt>会员剩余权益</dt><dd><strong>{remainingUnits} {unitLabel}</strong></dd></> : null}
+      </dl> : null}
+      {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+      {committed && membershipOrderId ? <Link className="button button-secondary" to={`/members?${conversionMemberId ? `memberId=${encodeURIComponent(conversionMemberId)}&` : ""}membershipOrderId=${encodeURIComponent(membershipOrderId)}`} onClick={onNavigateToResource}>查看会员订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
+    </section>;
+  }
   if (businessCommand && isU1CommandType(businessCommand)) {
     const label = commandShellLabel(businessCommand);
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
@@ -2519,7 +2916,7 @@ interface CommandDialogProps {
   initialReceipt?: ReceiptDto;
   writeBlocked?: boolean;
   writeBlockedReason?: string;
-  onProgress?: (progress: CommandDialogProgress) => boolean | void;
+  onProgress?: (progress: CommandDialogProgress) => boolean | Promise<boolean> | void;
 }
 
 export interface CommandDialogCloseContext {
@@ -2563,11 +2960,11 @@ export async function notifyKnownCommittedCommand(input: {
 }
 
 export type CommandDialogProgress =
-  | { state: "PREVIEWING"; previewMetadata: ClientCommandMetadata }
+  | { state: "PREVIEWING"; previewMetadata: ClientCommandMetadata; executePreview?: () => Promise<void> }
   | { state: "PREVIEW_UNKNOWN"; previewMetadata: ClientCommandMetadata }
   | { state: "PREVIEW_FAILED"; previewMetadata: ClientCommandMetadata }
   | { state: "PREVIEWED"; previewId: string; previewMetadata: ClientCommandMetadata }
-  | { state: "CONFIRMING"; previewId: string; confirmationKey: string; effectHash?: string }
+  | { state: "CONFIRMING"; previewId: string; confirmationKey: string; effectHash?: string; isAttemptActive?: () => boolean }
   | { state: "FAILED_NOT_EXECUTED"; confirmationKey: string }
   | { state: "UNKNOWN"; confirmationKey: string }
   | { state: "RESOLVED"; confirmationKey: string; receipt: ReceiptDto };
@@ -2607,6 +3004,14 @@ export interface CommandRecoveryContext {
 }
 
 const COMMAND_RECOVERY_STORAGE_PREFIX = "qintopia.command-recovery.v1";
+const QUOTE_RECOVERY_STORAGE_PREFIX = "qintopia.quote-command-recovery.v1";
+const SHARED_RECOVERY_MARKER_PREFIX = "qintopia.recovery-coordination.v1";
+const SHARED_RECOVERY_MARKER_VALUE = "AUTHORITATIVE";
+const SHARED_RECOVERY_MARKER_VALUE_PREFIX = `${SHARED_RECOVERY_MARKER_VALUE}:`;
+const SHARED_RECOVERY_LOCK_PREFIX = "qintopia.recovery-lock.v1";
+export const RECOVERY_STORAGE_SYNC_EVENT = "qintopia:recovery-storage-sync";
+
+class CorruptCommandRecoveryStorageError extends Error {}
 const persistableCommandTypes = new Set<CommandType>(commandTypes.filter((commandType) => (
   commandType !== "ISSUE_TOKEN" && commandType !== "ROTATE_TOKEN" && commandType !== "REVOKE_TOKEN"
 )));
@@ -2626,6 +3031,30 @@ const recoveryReferenceKeys = [
   "entitlementLotId",
   "quoteId"
 ] as const;
+const recoveryReferenceKeySet = new Set<string>(recoveryReferenceKeys);
+
+function parsedRecoveryTargetRefs(targetRefs: readonly string[]): Record<string, string> | undefined {
+  if (targetRefs.length > recoveryReferenceKeys.length) return undefined;
+  const parsed: Record<string, string> = {};
+  for (const reference of targetRefs) {
+    const separator = reference.indexOf("=");
+    const key = separator > 0 ? reference.slice(0, separator) : "";
+    const value = separator > 0 ? reference.slice(separator + 1) : "";
+    if (!recoveryReferenceKeySet.has(key)
+      || !value
+      || value !== value.trim()
+      || Object.hasOwn(parsed, key)) return undefined;
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+function requiredRecoveryPresentation(commandType: HistoricalCommandType): PersistedCommandRecovery["presentation"] | undefined {
+  if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") return "STAY_DATES";
+  if (commandType === "MOVE_UNIT") return "MOVE_UNIT";
+  if (commandType === "CANCEL_ORDER" || commandType === "MARK_NO_SHOW" || commandType === "REVOKE_CHECK_IN") return "ORDER_LIFECYCLE";
+  return undefined;
+}
 
 function recoveryTargetRefs(input: Record<string, unknown>): string[] {
   return recoveryReferenceKeys.flatMap((key) => {
@@ -2651,6 +3080,32 @@ export function receiptExecutionSemanticsAreCoherent(value: unknown): boolean {
   return (value.executionStatus === "EXECUTED" && value.businessCommitted === true)
     || (value.executionStatus === "NOT_EXECUTED" && value.businessCommitted === false)
     || (value.executionStatus === "UNKNOWN" && value.businessCommitted === false);
+}
+
+function terminalReceiptHasDurableIdentity(value: ReceiptDto): boolean {
+  if (value.executionStatus === "UNKNOWN") return true;
+  if (!nonblankString(value.receiptId)
+    || !nonblankString(value.commandId)
+    || !nonblankString(value.correlationId)
+    || typeof value.committedAt !== "string"
+    || Number.isNaN(Date.parse(value.committedAt))
+    || !Array.isArray(value.resourceRefs)
+    || !value.resourceRefs.every(nonblankString)
+    || new Set(value.resourceRefs).size !== value.resourceRefs.length
+    || !Array.isArray(value.factRefs)
+    || !value.factRefs.every(nonblankString)
+    || new Set(value.factRefs).size !== value.factRefs.length) return false;
+  if (value.executionStatus === "EXECUTED") {
+    return isRecord(value.result) && value.error === undefined;
+  }
+  return value.result === undefined
+    && isRecord(value.error)
+    && nonblankString(value.error.code)
+    && nonblankString(value.error.message)
+    && value.error.correlationId === value.correlationId
+    && value.error.commandId === value.commandId
+    && value.error.receiptId === value.receiptId
+    && typeof value.error.retryable === "boolean";
 }
 
 function dateChangeReceiptHasEvidence(
@@ -2822,7 +3277,7 @@ export function receiptHasCommandEvidence(
   previewEffect?: Record<string, unknown>,
   expectedEffectHash?: string
 ): boolean {
-  if (!receiptExecutionSemanticsAreCoherent(receipt)) return false;
+  if (!receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
   if ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY")
     && receipt.businessCommitted) {
     return dateChangeReceiptHasEvidence(commandType, receipt, input, previewEffect, expectedEffectHash);
@@ -2834,13 +3289,190 @@ export function receiptHasCommandEvidence(
     && receipt.businessCommitted) {
     return orderLifecycleReceiptHasEvidence(commandType, receipt, input, previewEffect, expectedEffectHash);
   }
+  if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && receipt.businessCommitted) {
+    return conversionReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
   return true;
 }
 
-function browserSessionStorage(): { kind: "AVAILABLE"; storage: CommandRecoveryStorage } | { kind: "READ_ERROR"; error: Error } {
-  if (typeof window === "undefined") return { kind: "READ_ERROR", error: new Error("浏览器 sessionStorage 不可用") };
+export function sharedRecoveryMarkerKey(storageKey: string): string {
+  return `${SHARED_RECOVERY_MARKER_PREFIX}:${encodeURIComponent(storageKey)}`;
+}
+
+function sharedRecoveryMarkerValue(serialized: string): string {
+  return `${SHARED_RECOVERY_MARKER_VALUE_PREFIX}${serialized}`;
+}
+
+function sharedRecoveryMarkerPayload(marker: string): string | undefined {
+  return marker.startsWith(SHARED_RECOVERY_MARKER_VALUE_PREFIX)
+    ? marker.slice(SHARED_RECOVERY_MARKER_VALUE_PREFIX.length)
+    : undefined;
+}
+
+function serializedRecoveriesShareCommandIdentity(left: string, right: string): boolean {
   try {
-    return { kind: "AVAILABLE", storage: window.sessionStorage };
+    const leftValue: unknown = JSON.parse(left);
+    const rightValue: unknown = JSON.parse(right);
+    if (!isRecord(leftValue)
+      || !isRecord(rightValue)
+      || leftValue.version !== 1
+      || rightValue.version !== 1
+      || leftValue.subjectId !== rightValue.subjectId
+      || leftValue.propertyId !== rightValue.propertyId) return false;
+    const generalCommandIdentity = leftValue.scopeId === rightValue.scopeId
+      && leftValue.commandType === rightValue.commandType
+      && leftValue.confirmationKey === rightValue.confirmationKey
+      && nonblankString(leftValue.scopeId)
+      && nonblankString(leftValue.commandType)
+      && nonblankString(leftValue.confirmationKey);
+    const leftMetadata = isRecord(leftValue.metadata) ? leftValue.metadata : undefined;
+    const rightMetadata = isRecord(rightValue.metadata) ? rightValue.metadata : undefined;
+    const quoteCommandIdentity = leftMetadata !== undefined
+      && rightMetadata !== undefined
+      && nonblankString(leftMetadata.idempotencyKey)
+      && leftMetadata.idempotencyKey === rightMetadata.idempotencyKey
+      && leftValue.inputSignature === rightValue.inputSignature;
+    return generalCommandIdentity || quoteCommandIdentity;
+  } catch {
+    return false;
+  }
+}
+
+export function createSharedCommandRecoveryStorage(
+  authoritativeStorage: CommandRecoveryStorage,
+  compatibilityStorage: CommandRecoveryStorage
+): CommandRecoveryStorage {
+  return {
+    getItem(key) {
+      const markerKey = sharedRecoveryMarkerKey(key);
+      const authoritativeValue = authoritativeStorage.getItem(key);
+      const marker = authoritativeStorage.getItem(markerKey);
+      const compatibilityValue = compatibilityStorage.getItem(key);
+      if (marker !== null
+        && marker !== SHARED_RECOVERY_MARKER_VALUE
+        && !marker.startsWith(SHARED_RECOVERY_MARKER_VALUE_PREFIX)) {
+        throw new CorruptCommandRecoveryStorageError("恢复记录协调标记无效");
+      }
+      if (authoritativeValue !== null) {
+        const expectedMarker = sharedRecoveryMarkerValue(authoritativeValue);
+        if (marker !== null && marker !== SHARED_RECOVERY_MARKER_VALUE && marker !== expectedMarker) {
+          const markerPayload = sharedRecoveryMarkerPayload(marker);
+          if (markerPayload === undefined
+            || !serializedRecoveriesShareCommandIdentity(authoritativeValue, markerPayload)) {
+            throw new CorruptCommandRecoveryStorageError("共享恢复记录与协调标记不一致；写入口继续暂停");
+          }
+        }
+        if (compatibilityValue !== null && compatibilityValue !== authoritativeValue) {
+          if (!serializedRecoveriesShareCommandIdentity(authoritativeValue, compatibilityValue)) {
+            throw new Error("当前标签保留着另一笔未决操作；请先在原标签依次恢复，系统不会覆盖任一幂等键");
+          }
+          compatibilityStorage.setItem(key, authoritativeValue);
+        }
+        if (marker !== expectedMarker) authoritativeStorage.setItem(markerKey, expectedMarker);
+        if (compatibilityValue === null) compatibilityStorage.setItem(key, authoritativeValue);
+        return authoritativeValue;
+      }
+      if (compatibilityValue === null) return null;
+      if (marker !== null && marker.startsWith(SHARED_RECOVERY_MARKER_VALUE_PREFIX)) {
+        const markerPayload = sharedRecoveryMarkerPayload(marker);
+        if (markerPayload === compatibilityValue
+          || (markerPayload !== undefined && serializedRecoveriesShareCommandIdentity(markerPayload, compatibilityValue))) {
+          compatibilityStorage.removeItem(key);
+          return null;
+        }
+      }
+      authoritativeStorage.setItem(key, compatibilityValue);
+      authoritativeStorage.setItem(markerKey, sharedRecoveryMarkerValue(compatibilityValue));
+      return compatibilityValue;
+    },
+    setItem(key, value) {
+      const authoritativeValue = authoritativeStorage.getItem(key);
+      const compatibilityValue = compatibilityStorage.getItem(key);
+      if (authoritativeValue !== null
+        && compatibilityValue !== null
+        && authoritativeValue !== compatibilityValue) {
+        throw new Error("当前标签保留着另一笔未决操作；系统不会覆盖任一幂等键");
+      }
+      authoritativeStorage.setItem(key, value);
+      authoritativeStorage.setItem(sharedRecoveryMarkerKey(key), sharedRecoveryMarkerValue(value));
+      compatibilityStorage.setItem(key, value);
+    },
+    removeItem(key) {
+      const authoritativeValue = authoritativeStorage.getItem(key);
+      const compatibilityValue = compatibilityStorage.getItem(key);
+      if (authoritativeValue !== null) {
+        authoritativeStorage.setItem(sharedRecoveryMarkerKey(key), sharedRecoveryMarkerValue(authoritativeValue));
+      } else {
+        authoritativeStorage.removeItem(sharedRecoveryMarkerKey(key));
+      }
+      authoritativeStorage.removeItem(key);
+      if (authoritativeValue === null
+        || (compatibilityValue !== null && compatibilityValue === authoritativeValue)) {
+        compatibilityStorage.removeItem(key);
+      }
+    }
+  };
+}
+
+export function recoveryStorageEventMatchesScope(
+  event: Pick<StorageEvent, "key" | "storageArea">,
+  storageScope: string,
+  authoritativeStorage: Storage
+): boolean {
+  return event.key === storageScope && event.storageArea === authoritativeStorage;
+}
+
+export function recoveryStorageSyncEventMatchesScope(
+  event: { detail?: unknown },
+  storageScopes: string | readonly string[]
+): boolean {
+  const detail = isRecord(event.detail) ? event.detail : undefined;
+  if (!detail || typeof detail.storageKey !== "string") return false;
+  const scopes = typeof storageScopes === "string" ? [storageScopes] : storageScopes;
+  return scopes.includes(detail.storageKey);
+}
+
+function notifyRecoveryStorageChange(storageKey: string): void {
+  if (typeof window === "undefined" || typeof CustomEvent === "undefined") return;
+  window.dispatchEvent(new CustomEvent(RECOVERY_STORAGE_SYNC_EVENT, {
+    detail: { storageKey }
+  }));
+}
+
+export async function withRecoveryStorageLock<T>(storageScope: string, action: () => T | Promise<T>): Promise<T> {
+  if (typeof window === "undefined") return action();
+  if (typeof navigator === "undefined" || !navigator.locks) throw new Error("浏览器不支持安全的跨标签恢复协调");
+  return navigator.locks.request(
+    `${SHARED_RECOVERY_LOCK_PREFIX}:${encodeURIComponent(storageScope)}`,
+    { mode: "exclusive" },
+    () => action()
+  );
+}
+
+export function browserCommandRecoveryStorage():
+  | { kind: "AVAILABLE"; storage: CommandRecoveryStorage; authoritativeStorage: Storage }
+  | { kind: "READ_ERROR"; error: Error } {
+  if (typeof window === "undefined") return { kind: "READ_ERROR", error: new Error("浏览器恢复存储不可用") };
+  try {
+    const authoritativeStorage = window.localStorage;
+    const compatibilityStorage = window.sessionStorage;
+    const sharedStorage = createSharedCommandRecoveryStorage(authoritativeStorage, compatibilityStorage);
+    const storage: CommandRecoveryStorage = {
+      getItem: (key) => sharedStorage.getItem(key),
+      setItem: (key, value) => {
+        sharedStorage.setItem(key, value);
+        notifyRecoveryStorageChange(key);
+      },
+      removeItem: (key) => {
+        sharedStorage.removeItem(key);
+        notifyRecoveryStorageChange(key);
+      }
+    };
+    return {
+      kind: "AVAILABLE",
+      storage,
+      authoritativeStorage
+    };
   } catch {
     return { kind: "READ_ERROR", error: new Error("无法访问本地命令恢复记录；为避免重复写入，已暂停本物业写命令") };
   }
@@ -2850,12 +3482,139 @@ export function commandRecoveryStorageKey(subjectId: string, scopeId: string): s
   return `${COMMAND_RECOVERY_STORAGE_PREFIX}:${encodeURIComponent(subjectId)}:${encodeURIComponent(scopeId)}`;
 }
 
+export function quoteRecoveryStorageKey(subjectId: string, propertyId: string): string {
+  return `${QUOTE_RECOVERY_STORAGE_PREFIX}:${encodeURIComponent(subjectId)}:${encodeURIComponent(propertyId)}`;
+}
+
+export function propertyRecoveryCoordinationScope(subjectId: string, propertyId: string): string {
+  return `property-recovery:${encodeURIComponent(subjectId)}:${encodeURIComponent(propertyId)}`;
+}
+
+function recoveryScopePropertyId(scopeId: string): string | undefined {
+  const prefix = "property:";
+  if (!scopeId.startsWith(prefix)) return undefined;
+  const propertyId = scopeId.slice(prefix.length);
+  return propertyId || undefined;
+}
+
+export function commandRecoveryConflictStorageKeys(
+  subjectId: string,
+  scopeId: string,
+  additionalKeys: readonly string[] = []
+): string[] {
+  const propertyId = recoveryScopePropertyId(scopeId);
+  return [...new Set([
+    ...(propertyId ? [quoteRecoveryStorageKey(subjectId, propertyId)] : []),
+    ...additionalKeys
+  ])];
+}
+
+export function commandRecoveryStorageHasConflict(
+  storage: CommandRecoveryStorage,
+  subjectId: string,
+  scopeId: string,
+  additionalKeys: readonly string[] = []
+): boolean {
+  return commandRecoveryConflictStorageKeys(subjectId, scopeId, additionalKeys)
+    .some((key) => storage.getItem(key) !== null);
+}
+
+export type CommandRecoveryConflictReadResult =
+  | { kind: "ABSENT" }
+  | { kind: "PRESENT"; storageKey: string }
+  | { kind: "READ_ERROR"; error: Error };
+
+export function readCommandRecoveryConflict(
+  storage: CommandRecoveryStorage,
+  subjectId: string,
+  scopeId: string,
+  additionalKeys: readonly string[] = []
+): CommandRecoveryConflictReadResult {
+  try {
+    const storageKey = commandRecoveryConflictStorageKeys(subjectId, scopeId, additionalKeys)
+      .find((key) => storage.getItem(key) !== null);
+    return storageKey ? { kind: "PRESENT", storageKey } : { kind: "ABSENT" };
+  } catch {
+    return {
+      kind: "READ_ERROR",
+      error: new Error("无法核对本物业的其他恢复记录；为避免重复写入，写入口继续暂停")
+    };
+  }
+}
+
+export function commandRecoverySnapshotIsBlocked(
+  read: CommandRecoveryReadResult,
+  conflict: CommandRecoveryConflictReadResult
+): boolean {
+  return read.kind !== "ABSENT" || conflict.kind !== "ABSENT";
+}
+
+export type RecoveryCoordinatedPreviewRunner = <T>(execute: () => Promise<T>) => Promise<T>;
+
+export type RecoveryStorageLock = <T>(
+  storageScope: string,
+  action: () => T | Promise<T>
+) => Promise<T>;
+
+export type RecoveryCheckedPreviewResult<T> =
+  | {
+      kind: "EXECUTED";
+      value: T;
+      read: { kind: "ABSENT" };
+      conflict: { kind: "ABSENT" };
+    }
+  | {
+      kind: "BLOCKED";
+      read: CommandRecoveryReadResult;
+      conflict: CommandRecoveryConflictReadResult;
+      error: Error;
+    };
+
+export async function runRecoveryCheckedPreview<T>({
+  storage,
+  subjectId,
+  scopeId,
+  conflictingStorageKeys = [],
+  execute,
+  lock = withRecoveryStorageLock
+}: {
+  storage: CommandRecoveryStorage;
+  subjectId: string;
+  scopeId: string;
+  conflictingStorageKeys?: readonly string[];
+  execute: () => Promise<T>;
+  lock?: RecoveryStorageLock;
+}): Promise<RecoveryCheckedPreviewResult<T>> {
+  const propertyId = recoveryScopePropertyId(scopeId);
+  const coordinationScope = propertyId
+    ? propertyRecoveryCoordinationScope(subjectId, propertyId)
+    : commandRecoveryStorageKey(subjectId, scopeId);
+  return lock(coordinationScope, async () => {
+    const read = readPersistedCommandRecovery(storage, subjectId, scopeId);
+    const conflict = readCommandRecoveryConflict(storage, subjectId, scopeId, conflictingStorageKeys);
+    if (read.kind !== "ABSENT" || conflict.kind !== "ABSENT") {
+      const error = read.kind === "CORRUPT" || read.kind === "READ_ERROR"
+        ? read.error
+        : read.kind === "VALID"
+          ? new Error("本物业另有未收口的操作；请先核对原操作结果，本次核对尚未开始")
+          : conflict.kind === "READ_ERROR"
+            ? conflict.error
+            : new Error("本物业另有未收口的报价操作；请先核对原报价结果，本次核对尚未开始");
+      return { kind: "BLOCKED", read, conflict, error };
+    }
+    const value = await execute();
+    return { kind: "EXECUTED", value, read, conflict };
+  });
+}
+
 export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, subjectId: string, scopeId: string): CommandRecoveryReadResult {
   let serialized: string | null;
   try {
     serialized = storage.getItem(commandRecoveryStorageKey(subjectId, scopeId));
-  } catch {
-    return { kind: "READ_ERROR", error: new Error("无法读取本地命令恢复记录；为避免重复写入，已暂停本物业写命令") };
+  } catch (error) {
+    return error instanceof CorruptCommandRecoveryStorageError
+      ? { kind: "CORRUPT", error }
+      : { kind: "READ_ERROR", error: new Error("无法读取本地命令恢复记录；为避免重复写入，已暂停本物业写命令") };
   }
   if (serialized === null) return { kind: "ABSENT" };
 
@@ -2865,24 +3624,34 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
   } catch {
     return { kind: "CORRUPT", error: new Error("本地命令恢复记录已损坏；无法确认原命令是否执行，已暂停本物业写命令") };
   }
+  const scopedPropertyId = recoveryScopePropertyId(scopeId);
   if (!isRecord(value)
     || value.version !== 1
     || value.subjectId !== subjectId
     || value.scopeId !== scopeId
+    || scopedPropertyId === undefined
     || typeof value.propertyId !== "string"
-    || !value.propertyId
+    || value.propertyId !== scopedPropertyId
     || !isReadableRecoveryCommandType(value.commandType)
     || typeof value.confirmationKey !== "string"
     || !value.confirmationKey
+    || value.confirmationKey !== value.confirmationKey.trim()
+    || value.confirmationKey.length > 160
     || !Array.isArray(value.targetRefs)
     || !value.targetRefs.every((item) => typeof item === "string")
+    || parsedRecoveryTargetRefs(value.targetRefs as string[]) === undefined
     || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT" && value.presentation !== "ORDER_LIFECYCLE")
     || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
     || (value.presentation === "FULFILLMENT" && !isFulfillmentBusinessCommand(value.commandType))
     || (value.presentation === "STAY_DATES" && value.commandType !== "RESCHEDULE_STAY" && value.commandType !== "EXTEND_STAY" && value.commandType !== "SHORTEN_STAY")
     || (value.presentation === "MOVE_UNIT" && value.commandType !== "MOVE_UNIT")
     || (value.presentation === "ORDER_LIFECYCLE" && value.commandType !== "CANCEL_ORDER" && value.commandType !== "MARK_NO_SHOW" && value.commandType !== "REVOKE_CHECK_IN")
-    || ((value.presentation === "STAY_DATES" || value.presentation === "MOVE_UNIT" || value.presentation === "ORDER_LIFECYCLE") && !isEffectHash(value.effectHash))
+    || (requiredRecoveryPresentation(value.commandType) !== undefined
+      && value.presentation !== requiredRecoveryPresentation(value.commandType))
+    || ((value.presentation === "STAY_DATES"
+      || value.presentation === "MOVE_UNIT"
+      || value.presentation === "ORDER_LIFECYCLE"
+      || value.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") && !isEffectHash(value.effectHash))
     || (value.effectHash !== undefined && !isEffectHash(value.effectHash))
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
     || typeof value.updatedAt !== "string") {
@@ -2895,6 +3664,7 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
 }
 
 export function savePersistedCommandRecovery(storage: CommandRecoveryStorage, recovery: PersistedCommandRecovery): boolean {
+  if (recoveryScopePropertyId(recovery.scopeId) !== recovery.propertyId) return false;
   try {
     storage.setItem(commandRecoveryStorageKey(recovery.subjectId, recovery.scopeId), JSON.stringify(recovery));
     return true;
@@ -2912,6 +3682,30 @@ export function clearPersistedCommandRecovery(storage: CommandRecoveryStorage, s
   }
 }
 
+export function clearPersistedCommandRecoveryIfMatches(
+  storage: CommandRecoveryStorage,
+  expected: PersistedCommandRecovery
+): boolean {
+  try {
+    const key = commandRecoveryStorageKey(expected.subjectId, expected.scopeId);
+    if (storage.getItem(key) !== JSON.stringify(expected)) return false;
+    storage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearCorruptPersistedCommandRecovery(
+  storage: CommandRecoveryStorage,
+  subjectId: string,
+  scopeId: string
+): boolean {
+  const current = readPersistedCommandRecovery(storage, subjectId, scopeId);
+  return current.kind === "CORRUPT"
+    && clearPersistedCommandRecovery(storage, subjectId, scopeId);
+}
+
 export function transitionPersistedCommandRecovery(
   current: PersistedCommandRecovery | undefined,
   context: CommandRecoveryContext,
@@ -2923,10 +3717,13 @@ export function transitionPersistedCommandRecovery(
   }
   if (progress.state === "CONFIRMING") {
     const propertyId = context.request.input.propertyId;
-    const strictRecoveryEvidence = context.request.presentation === "STAY_DATES"
-      || context.request.presentation === "MOVE_UNIT"
-      || context.request.presentation === "ORDER_LIFECYCLE";
+    const requiredPresentation = requiredRecoveryPresentation(context.request.commandType);
+    const strictRecoveryEvidence = requiredPresentation !== undefined
+      || context.request.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
     if (!isPersistableCommandType(context.request.commandType) || typeof propertyId !== "string" || !propertyId) {
+      return { accepted: false, recovery: current };
+    }
+    if (requiredPresentation !== undefined && context.request.presentation !== requiredPresentation) {
       return { accepted: false, recovery: current };
     }
     if (strictRecoveryEvidence && !isEffectHash(progress.effectHash)) return { accepted: false, recovery: current };
@@ -2976,6 +3773,11 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const orderLifecycle = recovery.presentation === "ORDER_LIFECYCLE";
   const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
+  const restoreTargetInputs = stayDates
+    || moveUnit
+    || orderLifecycle
+    || recovery.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
+  const targetInputs = restoreTargetInputs ? parsedRecoveryTargetRefs(recovery.targetRefs) ?? {} : {};
   return {
     commandType: recovery.commandType,
     title: memberStay
@@ -3007,110 +3809,370 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
     ...(recovery.presentation ? { presentation: recovery.presentation } : {}),
     ...(recovery.effectHash ? { recoveryEffectHash: recovery.effectHash } : {}),
     input: {
+      ...targetInputs,
       propertyId: recovery.propertyId,
-      ...(orderLifecycle ? Object.fromEntries(recovery.targetRefs.map((reference) => {
-        const separator = reference.indexOf("=");
-        return separator > 0 ? [reference.slice(0, separator), reference.slice(separator + 1)] : ["", ""];
-      }).filter(([key, value]) => key && value)) : {}),
       ...(orderLifecycle && recovery.commandType === "REVOKE_CHECK_IN" ? { unusedRoomConfirmed: true } : {})
     }
   };
 }
 
-export function usePersistentCommandRecovery({ subjectId, scopeId }: { subjectId: string; scopeId: string }) {
+class RecoveryPreviewBlockedError extends Error {}
+
+export function usePersistentCommandRecovery({
+  subjectId,
+  scopeId,
+  conflictingStorageKeys = []
+}: {
+  subjectId: string;
+  scopeId: string;
+  conflictingStorageKeys?: readonly string[];
+}) {
   const storageScope = commandRecoveryStorageKey(subjectId, scopeId);
-  const activeStorageScopeRef = useRef(storageScope);
-  activeStorageScopeRef.current = storageScope;
-  const [snapshot, setSnapshot] = useState<{ storageScope: string; read: CommandRecoveryReadResult }>(() => {
-    const access = browserSessionStorage();
+  const scopedPropertyId = recoveryScopePropertyId(scopeId);
+  const effectiveConflictingStorageKeys = commandRecoveryConflictStorageKeys(subjectId, scopeId, conflictingStorageKeys);
+  const watchedStorageScopes = [storageScope, ...effectiveConflictingStorageKeys];
+  const snapshotScope = JSON.stringify(watchedStorageScopes);
+  const coordinationScope = scopedPropertyId
+    ? propertyRecoveryCoordinationScope(subjectId, scopedPropertyId)
+    : storageScope;
+  const activeSnapshotScopeRef = useRef(snapshotScope);
+  activeSnapshotScopeRef.current = snapshotScope;
+
+  function readBrowserSnapshot(): {
+    snapshotScope: string;
+    read: CommandRecoveryReadResult;
+    conflict: CommandRecoveryConflictReadResult;
+  } {
+    const access = browserCommandRecoveryStorage();
     const read = !scopeId
       ? { kind: "ABSENT" } as const
       : access.kind === "AVAILABLE"
         ? readPersistedCommandRecovery(access.storage, subjectId, scopeId)
         : access;
-    return { storageScope, read };
-  });
+    const conflict = !scopeId
+      ? { kind: "ABSENT" } as const
+      : access.kind === "AVAILABLE"
+        ? readCommandRecoveryConflict(access.storage, subjectId, scopeId, conflictingStorageKeys)
+        : { kind: "READ_ERROR", error: access.error } as const;
+    return { snapshotScope, read, conflict };
+  }
+
+  const [snapshot, setSnapshot] = useState(readBrowserSnapshot);
   const [operationError, setOperationError] = useState<Error>();
 
-  function setActiveSnapshot(read: CommandRecoveryReadResult): void {
-    if (activeStorageScopeRef.current === storageScope) setSnapshot({ storageScope, read });
+  function currentConflictRead(): CommandRecoveryConflictReadResult {
+    const access = browserCommandRecoveryStorage();
+    if (!scopeId) return { kind: "ABSENT" };
+    return access.kind === "AVAILABLE"
+      ? readCommandRecoveryConflict(access.storage, subjectId, scopeId, conflictingStorageKeys)
+      : { kind: "READ_ERROR", error: access.error };
+  }
+
+  function setActiveSnapshot(
+    read: CommandRecoveryReadResult,
+    conflict: CommandRecoveryConflictReadResult = currentConflictRead()
+  ): void {
+    if (activeSnapshotScopeRef.current === snapshotScope) {
+      setSnapshot({ snapshotScope, read, conflict });
+    }
+  }
+
+  function refreshActiveSnapshot(): void {
+    const next = readBrowserSnapshot();
+    if (activeSnapshotScopeRef.current === next.snapshotScope) setSnapshot(next);
   }
 
   useEffect(() => {
-    const access = browserSessionStorage();
-    const read = !scopeId
-      ? { kind: "ABSENT" } as const
-      : access.kind === "AVAILABLE"
-        ? readPersistedCommandRecovery(access.storage, subjectId, scopeId)
-        : access;
-    setActiveSnapshot(read);
+    refreshActiveSnapshot();
     setOperationError(undefined);
-  }, [scopeId, storageScope, subjectId]);
+  }, [scopeId, snapshotScope, subjectId]);
 
-  const ready = snapshot.storageScope === storageScope;
+  useEffect(() => {
+    if (!scopeId) return;
+    const access = browserCommandRecoveryStorage();
+    if (access.kind !== "AVAILABLE") return;
+    const handleStorage = (event: StorageEvent) => {
+      if (!watchedStorageScopes.some((scope) => recoveryStorageEventMatchesScope(event, scope, access.authoritativeStorage))) return;
+      refreshActiveSnapshot();
+      setOperationError(undefined);
+    };
+    const handleSync = (event: Event) => {
+      if (!recoveryStorageSyncEventMatchesScope(event as CustomEvent<unknown>, watchedStorageScopes)) return;
+      refreshActiveSnapshot();
+      setOperationError(undefined);
+    };
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(RECOVERY_STORAGE_SYNC_EVENT, handleSync);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(RECOVERY_STORAGE_SYNC_EVENT, handleSync);
+    };
+  }, [scopeId, snapshotScope, subjectId]);
+
+  const ready = snapshot.snapshotScope === snapshotScope;
   const read = ready ? snapshot.read : { kind: "READ_ERROR", error: new Error("正在核对本地命令恢复记录") } as const;
+  const conflict = ready ? snapshot.conflict : { kind: "READ_ERROR", error: new Error("正在核对本物业的其他恢复记录") } as const;
   const pending = read.kind === "VALID" ? read.recovery : undefined;
-  const error = operationError ?? (read.kind === "CORRUPT" || read.kind === "READ_ERROR" ? read.error : undefined);
-  const blocked = !ready || read.kind !== "ABSENT";
+  const error = operationError
+    ?? (read.kind === "CORRUPT" || read.kind === "READ_ERROR" ? read.error : undefined)
+    ?? (conflict.kind === "READ_ERROR" ? conflict.error : undefined);
+  const blocked = !ready || commandRecoverySnapshotIsBlocked(read, conflict);
 
-  function track(request: CommandRequest, progress: CommandDialogProgress): boolean {
-    if (progress.state !== "CONFIRMING" && progress.state !== "FAILED_NOT_EXECUTED" && progress.state !== "UNKNOWN" && progress.state !== "RESOLVED") return true;
-    const access = browserSessionStorage();
+  async function runPreview<T>(execute: () => Promise<T>): Promise<T> {
+    const access = browserCommandRecoveryStorage();
     if (access.kind === "READ_ERROR" || !scopeId) {
-      setActiveSnapshot(access.kind === "READ_ERROR" ? access : { kind: "READ_ERROR", error: new Error("命令恢复作用域不可用") });
-      return false;
+      const nextError = access.kind === "READ_ERROR"
+        ? access.error
+        : new Error("命令恢复作用域不可用");
+      setActiveSnapshot({ kind: "READ_ERROR", error: nextError });
+      setOperationError(nextError);
+      throw new RecoveryPreviewBlockedError(nextError.message);
     }
-    const currentRead = readPersistedCommandRecovery(access.storage, subjectId, scopeId);
-    if (currentRead.kind === "CORRUPT" || currentRead.kind === "READ_ERROR") {
-      setActiveSnapshot(currentRead);
-      return false;
+    let executeStarted = false;
+    try {
+      const result = await runRecoveryCheckedPreview({
+        storage: access.storage,
+        subjectId,
+        scopeId,
+        conflictingStorageKeys,
+        execute: async () => {
+          executeStarted = true;
+          return execute();
+        }
+      });
+      setActiveSnapshot(result.read, result.conflict);
+      if (result.kind === "BLOCKED") {
+        setOperationError(result.error);
+        throw new RecoveryPreviewBlockedError(result.error.message);
+      }
+      setOperationError(undefined);
+      return result.value;
+    } catch (nextError) {
+      if (nextError instanceof RecoveryPreviewBlockedError || executeStarted) throw nextError;
+      const lockError = new Error("无法取得跨标签恢复协调锁；写入口继续暂停");
+      setActiveSnapshot({ kind: "READ_ERROR", error: lockError });
+      setOperationError(lockError);
+      throw new RecoveryPreviewBlockedError(lockError.message);
     }
-    const current = currentRead.kind === "VALID" ? currentRead.recovery : undefined;
-    const transition = transitionPersistedCommandRecovery(current, { subjectId, scopeId, request }, progress);
-    if (!transition.accepted) return false;
-    if (progress.state === "FAILED_NOT_EXECUTED" && current && transition.recovery === undefined) {
-      if (!clearPersistedCommandRecovery(access.storage, subjectId, scopeId)) {
-        setActiveSnapshot({ kind: "READ_ERROR", error: new Error("命令已明确未执行，但无法清除本地恢复记录；写入口继续暂停") });
+  }
+
+  function track(request: CommandRequest, progress: CommandDialogProgress): boolean | Promise<boolean> {
+    if (progress.state !== "PREVIEWING" && progress.state !== "CONFIRMING" && progress.state !== "FAILED_NOT_EXECUTED" && progress.state !== "UNKNOWN" && progress.state !== "RESOLVED") return true;
+    if (progress.state === "PREVIEWING" && progress.executePreview) {
+      return runPreview(progress.executePreview)
+        .then(() => true)
+        .catch((nextError) => {
+          if (nextError instanceof RecoveryPreviewBlockedError) return false;
+          throw nextError;
+        });
+    }
+    const persistProgress = (): boolean => {
+      if (progress.state === "CONFIRMING" && progress.isAttemptActive && !progress.isAttemptActive()) return false;
+      const access = browserCommandRecoveryStorage();
+      if (access.kind === "READ_ERROR" || !scopeId) {
+        setActiveSnapshot(access.kind === "READ_ERROR" ? access : { kind: "READ_ERROR", error: new Error("命令恢复作用域不可用") });
         return false;
       }
-      setActiveSnapshot({ kind: "ABSENT" });
+      const currentRead = readPersistedCommandRecovery(access.storage, subjectId, scopeId);
+      if (currentRead.kind === "CORRUPT" || currentRead.kind === "READ_ERROR") {
+        setActiveSnapshot(currentRead);
+        return false;
+      }
+      const currentConflict = readCommandRecoveryConflict(access.storage, subjectId, scopeId, conflictingStorageKeys);
+      if (progress.state === "PREVIEWING") {
+        setActiveSnapshot(currentRead, currentConflict);
+        if (currentRead.kind !== "ABSENT") {
+          setOperationError(new Error("本物业另有未收口的操作；请先核对原操作结果，本次核对尚未开始"));
+          return false;
+        }
+        if (currentConflict.kind === "PRESENT") {
+          setOperationError(new Error("本物业另有未收口的报价操作；请先核对原报价结果，本次核对尚未开始"));
+          return false;
+        }
+        if (currentConflict.kind === "READ_ERROR") {
+          setOperationError(currentConflict.error);
+          return false;
+        }
+        setOperationError(undefined);
+        return true;
+      }
+      if (progress.state === "CONFIRMING" && currentRead.kind === "ABSENT") {
+        setActiveSnapshot(currentRead, currentConflict);
+        if (currentConflict.kind === "PRESENT") {
+          setOperationError(new Error("本物业另有未收口的报价操作；请先核对原报价结果，本次操作尚未发送"));
+          return false;
+        }
+        if (currentConflict.kind === "READ_ERROR") {
+          setOperationError(currentConflict.error);
+          return false;
+        }
+        setOperationError(undefined);
+      }
+      const current = currentRead.kind === "VALID" ? currentRead.recovery : undefined;
+      const transition = transitionPersistedCommandRecovery(current, { subjectId, scopeId, request }, progress);
+      if (!transition.accepted) return false;
+      if (progress.state === "FAILED_NOT_EXECUTED" && current && transition.recovery === undefined) {
+        if (!clearPersistedCommandRecoveryIfMatches(access.storage, current)) {
+          const latestRead = readPersistedCommandRecovery(access.storage, subjectId, scopeId);
+          setActiveSnapshot(latestRead);
+          if (latestRead.kind === "ABSENT") return true;
+          if (latestRead.kind === "VALID" && latestRead.recovery.confirmationKey !== current.confirmationKey) {
+            setOperationError(undefined);
+            return false;
+          }
+          setOperationError(new Error("命令已明确未执行，但无法清除对应的本地恢复记录；写入口继续暂停"));
+          return false;
+        }
+        setOperationError(undefined);
+        setActiveSnapshot({ kind: "ABSENT" });
+        return true;
+      }
+      if (transition.recovery && transition.recovery !== current) {
+        if (!savePersistedCommandRecovery(access.storage, transition.recovery)) {
+          setActiveSnapshot({ kind: "READ_ERROR", error: new Error("无法保存本地命令恢复记录；命令尚未发送，写入口已暂停") });
+          return false;
+        }
+        setActiveSnapshot({ kind: "VALID", recovery: transition.recovery });
+      } else if (transition.recovery) {
+        setActiveSnapshot({ kind: "VALID", recovery: transition.recovery });
+      } else {
+        setActiveSnapshot(currentRead);
+      }
       return true;
-    }
-    if (transition.recovery && transition.recovery !== current) {
-      if (!savePersistedCommandRecovery(access.storage, transition.recovery)) {
-        setActiveSnapshot({ kind: "READ_ERROR", error: new Error("无法保存本地命令恢复记录；命令尚未发送，写入口已暂停") });
-        return false;
-      }
-      setActiveSnapshot({ kind: "VALID", recovery: transition.recovery });
-    } else if (transition.recovery) {
-      setActiveSnapshot({ kind: "VALID", recovery: transition.recovery });
-    } else {
-      setActiveSnapshot(currentRead);
-    }
-    return true;
+    };
+    return withRecoveryStorageLock(coordinationScope, persistProgress).catch(() => {
+      setActiveSnapshot({ kind: "READ_ERROR", error: new Error("无法取得跨标签恢复协调锁；写入口继续暂停") });
+      return false;
+    });
   }
 
-  function clearResolved(): boolean {
-    const access = browserSessionStorage();
-    if (access.kind === "READ_ERROR" || !scopeId) {
-      setActiveSnapshot(access.kind === "READ_ERROR" ? access : { kind: "READ_ERROR", error: new Error("命令恢复作用域不可用") });
+  async function clearResolved(): Promise<boolean> {
+    try {
+      return await withRecoveryStorageLock(coordinationScope, () => {
+        const access = browserCommandRecoveryStorage();
+        if (access.kind === "READ_ERROR" || !scopeId) {
+          setActiveSnapshot(access.kind === "READ_ERROR" ? access : { kind: "READ_ERROR", error: new Error("命令恢复作用域不可用") });
+          return false;
+        }
+        const currentRead = readPersistedCommandRecovery(access.storage, subjectId, scopeId);
+        if (currentRead.kind === "ABSENT") {
+          setOperationError(undefined);
+          setActiveSnapshot(currentRead);
+          return true;
+        }
+        if (currentRead.kind !== "VALID" || !isTerminalCommandRecovery(currentRead.recovery.state)) {
+          if (currentRead.kind === "CORRUPT" || currentRead.kind === "READ_ERROR") setActiveSnapshot(currentRead);
+          return false;
+        }
+        if (!clearPersistedCommandRecoveryIfMatches(access.storage, currentRead.recovery)) {
+          const latestRead = readPersistedCommandRecovery(access.storage, subjectId, scopeId);
+          if (latestRead.kind === "ABSENT") {
+            setOperationError(undefined);
+            setActiveSnapshot(latestRead);
+            return true;
+          }
+          if (latestRead.kind === "VALID" && latestRead.recovery.confirmationKey !== currentRead.recovery.confirmationKey) {
+            setOperationError(undefined);
+            setActiveSnapshot(latestRead);
+            return false;
+          }
+          if (latestRead.kind === "CORRUPT" || latestRead.kind === "READ_ERROR") setActiveSnapshot(latestRead);
+          setOperationError(new Error("无法清除已收口的本地命令恢复记录；写入口继续暂停，可再次打开原结果重试收口"));
+          return false;
+        }
+        setOperationError(undefined);
+        setActiveSnapshot({ kind: "ABSENT" });
+        return true;
+      });
+    } catch {
+      setOperationError(new Error("无法取得跨标签恢复协调锁；写入口继续暂停"));
       return false;
     }
-    const currentRead = readPersistedCommandRecovery(access.storage, subjectId, scopeId);
-    if (currentRead.kind !== "VALID" || !isTerminalCommandRecovery(currentRead.recovery.state)) {
-      if (currentRead.kind === "CORRUPT" || currentRead.kind === "READ_ERROR") setActiveSnapshot(currentRead);
-      return false;
-    }
-    if (!clearPersistedCommandRecovery(access.storage, subjectId, scopeId)) {
-      setOperationError(new Error("无法清除已收口的本地命令恢复记录；写入口继续暂停，可再次打开原结果重试收口"));
-      return false;
-    }
-    setOperationError(undefined);
-    setActiveSnapshot({ kind: "ABSENT" });
-    return true;
   }
 
-  return { ready, pending, error, blocked, track, clearResolved };
+  async function discardCorruptAfterReview(): Promise<boolean> {
+    try {
+      return await withRecoveryStorageLock(coordinationScope, () => {
+        const access = browserCommandRecoveryStorage();
+        if (access.kind === "READ_ERROR" || !scopeId) {
+          setActiveSnapshot(access.kind === "READ_ERROR" ? access : { kind: "READ_ERROR", error: new Error("命令恢复作用域不可用") });
+          return false;
+        }
+        const currentRead = readPersistedCommandRecovery(access.storage, subjectId, scopeId);
+        if (currentRead.kind === "ABSENT") {
+          setOperationError(undefined);
+          setActiveSnapshot(currentRead);
+          return true;
+        }
+        if (currentRead.kind !== "CORRUPT") {
+          setActiveSnapshot(currentRead);
+          return false;
+        }
+        if (!clearCorruptPersistedCommandRecovery(access.storage, subjectId, scopeId)) {
+          setOperationError(new Error("无法清除损坏的本地恢复记录；写入口继续暂停，请联系管理员处理浏览器存储权限"));
+          return false;
+        }
+        setOperationError(undefined);
+        setActiveSnapshot({ kind: "ABSENT" });
+        return true;
+      });
+    } catch {
+      setOperationError(new Error("无法取得跨标签恢复协调锁；写入口继续暂停"));
+      return false;
+    }
+  }
+
+  return {
+    ready,
+    pending,
+    error,
+    blocked,
+    conflict,
+    canDiscardCorrupt: ready && read.kind === "CORRUPT",
+    runPreview,
+    track,
+    clearResolved,
+    discardCorruptAfterReview
+  };
+}
+
+export function DamagedCommandRecoveryNotice({ error, onDiscard, testId = "damaged-command-recovery" }: {
+  error: unknown;
+  onDiscard: () => void | Promise<unknown>;
+  testId?: string;
+}) {
+  const [reviewConfirmed, setReviewConfirmed] = useState(false);
+  return (
+    <section className="recovery-bar recovery-damaged" role="alert" data-testid={testId}>
+      <div className="recovery-damaged-copy">
+        <strong>本地操作记录需要人工核对</strong>
+        <p>{errorMessage(error)}</p>
+        <ol>
+          <li>先在当前业务页面核对订单、房态或会员记录，确认刚才的操作是否已经生效。</li>
+          <li>已经生效时不要重复办理；确认未生效后，才能清除本物业的损坏记录并重新操作。</li>
+        </ol>
+      </div>
+      <div className="recovery-damaged-actions">
+        <label>
+          <input
+            type="checkbox"
+            checked={reviewConfirmed}
+            onChange={(event) => setReviewConfirmed(event.target.checked)}
+          />
+          <span>我已核对服务端业务记录，并确认不会直接重复刚才的操作</span>
+        </label>
+        <button
+          className="button button-secondary"
+          type="button"
+          disabled={!reviewConfirmed}
+          onClick={() => {
+            void onDiscard();
+            setReviewConfirmed(false);
+          }}
+        >清除本物业损坏记录</button>
+      </div>
+    </section>
+  );
 }
 
 export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recovery", businessFacing = false }: {
@@ -3120,19 +4182,24 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
   businessFacing?: boolean;
 }) {
   const resolved = isTerminalCommandRecovery(recovery.state);
+  const submitting = recovery.state === "CONFIRMING";
   const memberStay = recovery.presentation === "MEMBER_STAY";
   const fulfillment = recovery.presentation === "FULFILLMENT";
   const fundBusiness = recovery.commandType === "RECORD_COLLECTION" || recovery.commandType === "RECORD_REFUND";
+  const tokenBusiness = tokenBusinessCommands.has(recovery.commandType as CommandType);
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
-  const businessMode = businessFacing || memberStay || fulfillment || fundBusiness || Boolean(u1CommandType);
+  const businessMode = businessFacing || memberStay || fulfillment || fundBusiness || tokenBusiness || Boolean(u1CommandType);
   const memberRegistration = businessMode && recovery.commandType === "CREATE_MEMBER";
   const fulfillmentLabel = isExecutableCommandType(recovery.commandType) ? fulfillmentCommandLabel(recovery.commandType) : "履约操作";
   const u1Label = u1CommandType ? commandShellLabel(u1CommandType) : undefined;
   const fundLabel = fundBusiness ? (recovery.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款") : undefined;
+  const tokenLabel = tokenBusiness ? tokenCommandLabel(recovery.commandType) : undefined;
   return (
-    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : fundLabel ? `待恢复${fundLabel}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
+    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : fundLabel ? `待恢复${fundLabel}` : tokenLabel ? `待恢复${tokenLabel}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
       <div>
-        <strong>{businessMode
+        <strong>{submitting
+          ? "原操作正在提交"
+          : businessMode
           ? memberRegistration
             ? (resolved ? "原建档结果已确认" : "会员建档结果需要恢复查询")
             : memberStay
@@ -3143,6 +4210,8 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
                   ? (resolved ? `${u1Label}结果已确认` : `${u1Label}结果需要恢复查询`)
                 : fundLabel
                   ? (resolved ? `${fundLabel}结果已确认` : `${fundLabel}结果需要恢复查询`)
+                : tokenLabel
+                  ? (resolved ? `${tokenLabel}结果已确认` : `${tokenLabel}结果需要查询`)
               : (resolved ? "原会员操作结果已确认" : "会员操作结果需要恢复查询")
           : (resolved ? "原命令结果已确认" : "原命令执行状态需要恢复查询")}</strong>
         {!businessMode ? <>
@@ -3150,7 +4219,9 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
           {recovery.targetRefs.length ? <p>业务目标 {recovery.targetRefs.map((reference) => <code key={reference}>{reference}</code>)}</p> : null}
           <p>原幂等键 <code>{recovery.confirmationKey}</code></p>
         </> : null}
-        <p>{businessMode
+        <p>{submitting
+          ? "新的写入已暂停。可以等待原标签完成；如果原标签已经关闭，可核对原操作结果，系统会阻止迟到请求重复写入。"
+          : businessMode
           ? memberRegistration
             ? (resolved ? "查看并关闭原建档结果后，可继续新建会员。" : "新的会员建档已暂停，请先恢复查询原结果。")
             : memberStay
@@ -3161,6 +4232,8 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
                   ? (resolved ? `${u1Label}结果已经确认，打开后将刷新当前页面。` : `新的${u1Label}已暂停，请先查询刚才的结果。`)
                 : fundLabel
                   ? (resolved ? `${fundLabel}结果已经确认，打开后将刷新当前页面。` : `新的${fundLabel}已暂停，请先查询刚才的结果。`)
+                : tokenLabel
+                  ? (resolved ? `${tokenLabel}结果已经确认，打开后将刷新 Token 列表。` : `新的 Token 操作已暂停，请先查询刚才的结果。`)
               : (resolved ? "查看并关闭原操作结果后，可继续处理会员业务。" : "新的会员操作已暂停，请先恢复查询原结果。")
           : (resolved ? "查看并关闭 Receipt 后恢复新的业务写入。" : "新的业务写入已暂停，必须继续查询原命令。")}</p>
       </div>
@@ -3176,6 +4249,8 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
                   ? (resolved ? `刷新${u1Label}结果` : `查询${u1Label}结果`)
                 : fundLabel
                   ? (resolved ? `刷新${fundLabel}结果` : `查询${fundLabel}结果`)
+                : tokenLabel
+                  ? (resolved ? `刷新${tokenLabel}结果` : `查询${tokenLabel}结果`)
               : (resolved ? "查看会员操作结果" : "恢复会员操作结果")
           : (resolved ? "查看已确认结果" : "恢复原命令")}
       </button>
@@ -3213,6 +4288,7 @@ export function CommandDialog({
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const fundBusiness = request.commandType === "RECORD_COLLECTION" || request.commandType === "RECORD_REFUND";
+  const tokenBusiness = Boolean(executableCommandType && tokenBusinessCommands.has(executableCommandType));
   const stayDates = request.presentation === "STAY_DATES"
     && (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY");
   const moveUnit = request.presentation === "MOVE_UNIT" && request.commandType === "MOVE_UNIT";
@@ -3224,9 +4300,9 @@ export function CommandDialog({
     : undefined;
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
   const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
-  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment || fundBusiness;
-  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : fulfillment && executableCommandType ? executableCommandType : fundBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
-  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : u1CommandType ? commandShellLabel(u1CommandType) : ""));
+  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment || fundBusiness || tokenBusiness;
+  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : fulfillment && executableCommandType ? executableCommandType : fundBusiness ? request.commandType : tokenBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : tokenBusiness ? tokenCommandLabel(request.commandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
   const recoveryOnlyRequest = Boolean(initialConfirmationKey);
   const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && !initialReceipt));
@@ -3251,7 +4327,7 @@ export function CommandDialog({
       ? `${commandShellLabel(u1CommandType)}未写入；原操作已安全收口，可以关闭后重新发起。`
       : commandShellNotExecutedMessage(u1CommandType)
     : "本次操作未执行。";
-  const summaryBusinessCommand = u1CommandType ?? (fundBusiness && executableCommandType ? executableCommandType : undefined);
+  const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || tokenBusiness) && executableCommandType ? executableCommandType : undefined);
 
   function applyShellEvent(event: CommandShellEvent): boolean {
     let accepted = false;
@@ -3283,7 +4359,7 @@ export function CommandDialog({
   const previewExpired = Boolean(preview && (!Number.isFinite(previewExpiry) || expiryClock >= previewExpiry));
   const canConfirm = Boolean(preview
     && reasonCode.trim()
-    && (createOrderBusiness || lodgingFulfillment || (fundBusiness && (request.commandType === "RECORD_COLLECTION" || reasonNote.trim())) || reasonNote.trim())
+    && (createOrderBusiness || lodgingFulfillment || tokenBusiness || (fundBusiness && (request.commandType === "RECORD_COLLECTION" || reasonNote.trim())) || reasonNote.trim())
     && !busy
     && !writeBlocked
     && !previewExpired
@@ -3291,6 +4367,7 @@ export function CommandDialog({
     && !confirmationKey
     && (!u1CommandType || u1PreviewHasBusinessEvidence(u1CommandType, preview.effect, request.input))
     && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));
+  const dialogCloseDisabled = busy && (!u1CommandType || Boolean(confirmationKey) || shellState.phase === "CONFIRMING");
   const currentKey = useMemo(() => confirmationKey ?? api.recoveryKey(request.commandType), [confirmationKey, request.commandType]);
 
   useEffect(() => {
@@ -3321,11 +4398,31 @@ export function CommandDialog({
     setError(undefined);
     setFailedNotExecuted(false);
     if (u1CommandType) applyShellEvent({ type: "PREVIEW_STARTED", attemptId: shellAttemptIdRef.current });
-    onProgress?.({ state: "PREVIEWING", previewMetadata: metadata });
     const lease = beginRequestLease();
+    let previewRequestStarted = false;
+    let response: Awaited<ReturnType<typeof api.preview>> | undefined;
+    const executePreview = async () => {
+      if (previewRequestStarted) return;
+      previewRequestStarted = true;
+      response = await api.preview(
+        { commandType: request.commandType as ExecutableCommandType, input: request.input },
+        metadata,
+        lease.controller.signal
+      );
+    };
     try {
-      const response = await api.preview({ commandType: request.commandType, input: request.input }, metadata, lease.controller.signal);
+      const accepted = await onProgress?.({ state: "PREVIEWING", previewMetadata: metadata, executePreview });
       if (!leaseIsActive(lease)) return;
+      if (accepted === false) {
+        setError(new Error("当前门店还有一项操作结果需要先核对，本次核对尚未开始。"));
+        onProgress?.({ state: "PREVIEW_FAILED", previewMetadata: metadata });
+        if (u1CommandType) applyShellEvent({ type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current });
+        setBusy(false);
+        return;
+      }
+      if (!previewRequestStarted) await executePreview();
+      if (!leaseIsActive(lease)) return;
+      if (!response) throw new Error("Preview 请求没有返回可核对结果");
       setPreview(response.preview);
       setReceipt(undefined);
       setExpiryClock(Date.now());
@@ -3333,6 +4430,12 @@ export function CommandDialog({
       onProgress?.({ state: "PREVIEWED", previewId: response.preview.previewId, previewMetadata: metadata });
     } catch (nextError) {
       if (!leaseIsActive(lease) || (nextError instanceof DOMException && nextError.name === "AbortError")) return;
+      if (!previewRequestStarted) {
+        setError(new Error("无法安全核对当前门店的操作恢复状态，本次核对尚未开始。"));
+        onProgress?.({ state: "PREVIEW_FAILED", previewMetadata: metadata });
+        if (u1CommandType) applyShellEvent({ type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current });
+        return;
+      }
       if (nextError instanceof ApiError && nextError.code === "COMMAND_STATUS_UNKNOWN" && attempt < 2) {
         await new Promise((resolve) => window.setTimeout(resolve, 350 * (attempt + 1)));
         if (!leaseIsActive(lease)) return;
@@ -3353,7 +4456,7 @@ export function CommandDialog({
   useEffect(() => {
     if (!businessFacing || receipt || confirmationKey || writeBlocked || automaticPreviewStarted.current) return;
     automaticPreviewStarted.current = true;
-    const metadata = api.commandMetadata(`preview-${request.commandType.toLowerCase()}`);
+    const metadata = initialPreviewMetadata ?? api.commandMetadata(`preview-${request.commandType.toLowerCase()}`);
     setPreviewMetadata(metadata);
     void loadPreview(metadata);
     return () => {
@@ -3373,7 +4476,7 @@ export function CommandDialog({
   }
 
   function returnToEdit() {
-    if (busy && shellState.phase === "CONFIRMING") return;
+    if (dialogCloseDisabled) return;
     requestLeaseRef.current.controller?.abort();
     if (u1CommandType && fulfillment) {
       const nextAttemptId = shellAttemptIdRef.current + 1;
@@ -3408,6 +4511,22 @@ export function CommandDialog({
     onClose();
   }
 
+  async function recordPostSendProgress(progress: CommandDialogProgress): Promise<boolean> {
+    try {
+      const accepted = await onProgress?.(progress);
+      if (accepted === false) {
+        setError(new Error("无法安全保存本次操作的恢复状态；请继续查询原操作结果。"));
+        setNetworkUncertain(true);
+        return false;
+      }
+      return true;
+    } catch {
+      setError(new Error("无法安全保存本次操作的恢复状态；请继续查询原操作结果。"));
+      setNetworkUncertain(true);
+      return false;
+    }
+  }
+
   async function finalizeCommitted(receiptValue: ReceiptDto) {
     if (successFinalizedRef.current) return;
     successFinalizedRef.current = true;
@@ -3436,7 +4555,7 @@ export function CommandDialog({
 
   async function confirm() {
     if (!preview || !reasonCode.trim()
-      || (!createOrderBusiness && !lodgingFulfillment && !(fundBusiness && (request.commandType === "RECORD_COLLECTION" || reasonNote.trim())) && !reasonNote.trim())
+      || (!createOrderBusiness && !lodgingFulfillment && !tokenBusiness && !(fundBusiness && (request.commandType === "RECORD_COLLECTION" || reasonNote.trim())) && !reasonNote.trim())
       || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
     if (!isExecutableCommandType(request.commandType)) {
       setError(new Error("该历史操作不能重新确认"));
@@ -3453,20 +4572,30 @@ export function CommandDialog({
     setError(undefined);
     setNetworkUncertain(false);
     setFailedNotExecuted(false);
+    const lease = beginRequestLease();
     try {
-      const accepted = onProgress?.({ state: "CONFIRMING", previewId: preview.previewId, confirmationKey: key, effectHash: preview.effectHash });
+      const accepted = await onProgress?.({
+        state: "CONFIRMING",
+        previewId: preview.previewId,
+        confirmationKey: key,
+        effectHash: preview.effectHash,
+        isAttemptActive: () => leaseIsActive(lease)
+      });
+      if (!leaseIsActive(lease)) return;
       if (accepted === false) {
         setError(new Error("无法安全保存本次确认的恢复信息，命令尚未发送"));
+        setConfirmationKey(undefined);
         setBusy(false);
         return;
       }
       if (u1CommandType) applyShellEvent({ type: "CONFIRM_STARTED", attemptId: shellAttemptIdRef.current, confirmationKey: key });
     } catch (progressError) {
+      if (!leaseIsActive(lease)) return;
       setError(progressError);
+      setConfirmationKey(undefined);
       setBusy(false);
       return;
     }
-    const lease = beginRequestLease();
     let result: ReceiptDto;
     try {
       const confirmedReasonNote = lodgingFulfillment
@@ -3485,9 +4614,15 @@ export function CommandDialog({
         || nextError.code === "COMMAND_STATUS_UNKNOWN";
       setNetworkUncertain(uncertain);
       setFailedNotExecuted(!uncertain);
-      onProgress?.(uncertain
+      const progressRecorded = await recordPostSendProgress(uncertain
         ? { state: "UNKNOWN", confirmationKey: key }
         : { state: "FAILED_NOT_EXECUTED", confirmationKey: key });
+      if (!progressRecorded) {
+        setFailedNotExecuted(false);
+        if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key });
+        if (leaseIsActive(lease)) setBusy(false);
+        return;
+      }
       if (u1CommandType) applyShellEvent(uncertain
         ? { type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key }
         : { type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current, confirmationKey: key });
@@ -3505,7 +4640,7 @@ export function CommandDialog({
         setReceipt(undefined);
         setError(new Error("服务端返回的操作结果无法核对；系统将只查询原操作结果，不会重复提交。"));
         setNetworkUncertain(true);
-        onProgress?.({ state: "UNKNOWN", confirmationKey: key });
+        await recordPostSendProgress({ state: "UNKNOWN", confirmationKey: key });
         if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key });
         return;
       }
@@ -3513,13 +4648,17 @@ export function CommandDialog({
         setReceipt(undefined);
         setReturnedOriginalReceipt(false);
         setNetworkUncertain(true);
-        onProgress?.({ state: "UNKNOWN", confirmationKey: key });
+        await recordPostSendProgress({ state: "UNKNOWN", confirmationKey: key });
+        if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key });
+        return;
+      }
+      const progressRecorded = await recordPostSendProgress({ state: "RESOLVED", confirmationKey: key, receipt: result });
+      if (!progressRecorded) {
         if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey: key });
         return;
       }
       if (!u1CommandType) setReceipt(result);
       setReturnedOriginalReceipt(false);
-      onProgress?.({ state: "RESOLVED", confirmationKey: key, receipt: result });
       if (u1CommandType) {
         applyShellEvent(result.businessCommitted
           ? { type: "SUCCEEDED", attemptId: shellAttemptIdRef.current, confirmationKey: key }
@@ -3551,13 +4690,13 @@ export function CommandDialog({
     const lease = beginRequestLease();
     let result: ReceiptDto;
     try {
-      result = await api.commandResult(propertyId, request.commandType, confirmationKey, lease.controller.signal);
+      result = await api.resolveCommandResult(propertyId, request.commandType, confirmationKey, lease.controller.signal);
       if (!leaseIsActive(lease)) return;
     } catch (nextError) {
       if (!leaseIsActive(lease) || (nextError instanceof DOMException && nextError.name === "AbortError")) return;
       setError(nextError);
       setNetworkUncertain(true);
-      onProgress?.({ state: "UNKNOWN", confirmationKey });
+      await recordPostSendProgress({ state: "UNKNOWN", confirmationKey });
       if (leaseIsActive(lease)) setBusy(false);
       return;
     }
@@ -3567,7 +4706,7 @@ export function CommandDialog({
         setReceipt(undefined);
         setError(new Error("服务端返回的操作结果无法核对；请继续查询原操作结果。"));
         setNetworkUncertain(true);
-        onProgress?.({ state: "UNKNOWN", confirmationKey });
+        await recordPostSendProgress({ state: "UNKNOWN", confirmationKey });
         if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey });
         return;
       }
@@ -3575,13 +4714,17 @@ export function CommandDialog({
       if (result.executionStatus === "UNKNOWN") {
         setReceipt(undefined);
         setReturnedOriginalReceipt(false);
-        onProgress?.({ state: "UNKNOWN", confirmationKey });
+        await recordPostSendProgress({ state: "UNKNOWN", confirmationKey });
         if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey });
       } else {
+        const progressRecorded = await recordPostSendProgress({ state: "RESOLVED", confirmationKey, receipt: result });
+        if (!progressRecorded) {
+          if (u1CommandType) applyShellEvent({ type: "RESULT_UNKNOWN", attemptId: shellAttemptIdRef.current, confirmationKey });
+          return;
+        }
         if (!u1CommandType) setReceipt(result);
         setReturnedOriginalReceipt(true);
         if (u1CommandType && !result.businessCommitted) setFailedNotExecuted(true);
-        onProgress?.({ state: "RESOLVED", confirmationKey, receipt: result });
         if (u1CommandType) applyShellEvent(result.businessCommitted
           ? { type: "SUCCEEDED", attemptId: shellAttemptIdRef.current, confirmationKey }
           : { type: "NOT_EXECUTED", attemptId: shellAttemptIdRef.current, confirmationKey });
@@ -3598,14 +4741,14 @@ export function CommandDialog({
       title={request.title}
       onClose={closeCommandDialog}
       size={stayDates || moveUnit || orderLifecycle ? "drawer" : "wide"}
-      closeDisabled={busy && (!u1CommandType || shellState.phase === "CONFIRMING")}
+      closeDisabled={dialogCloseDisabled}
       footer={
         <>
           <button
             className="button button-secondary"
             type="button"
             onClick={u1CommandType && !lodgingFulfillment && !networkUncertain && !recoveryOnlyRequest ? returnToEdit : () => onClose()}
-            disabled={busy && (!u1CommandType || shellState.phase === "CONFIRMING")}
+            disabled={dialogCloseDisabled}
             data-testid={u1CommandType ? (lodgingFulfillment || networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
           >
             {u1CommandType
@@ -3625,7 +4768,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }
@@ -3661,7 +4804,7 @@ export function CommandDialog({
       </div> : null}
       {!preview && !receipt ? (
         <div className="command-pending">
-          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">
@@ -3681,7 +4824,7 @@ export function CommandDialog({
       </section> : null}
       {preview && !receipt ? (
         <>
-          {u1CommandType ? <h3 className="command-shell-review-heading" ref={reviewHeadingRef} tabIndex={-1} data-testid="command-review-heading">请核对{commandShellLabel(u1CommandType)}</h3> : null}
+          {u1CommandType && u1CommandType !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" ? <h3 className="command-shell-review-heading" ref={reviewHeadingRef} tabIndex={-1} data-testid="command-review-heading">请核对{commandShellLabel(u1CommandType)}</h3> : null}
           <EffectSummary
             preview={preview}
             fulfillment={fulfillment}
@@ -3718,7 +4861,7 @@ export function CommandDialog({
           data-command-state="duplicate-returned-original-receipt"
         >
           <strong>{businessFacing ? "已找到原操作结果" : "已返回原 Receipt"}</strong>
-          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
+          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : tokenBusiness ? "系统返回了原来的 Token 操作结果，没有重复提交。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
         </div>
       ) : null}
       {receipt && !u1CommandType ? <ReceiptPanel
@@ -3731,9 +4874,9 @@ export function CommandDialog({
       /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
-          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : u1CommandType ? "系统只查询原操作使用的幂等身份，不会重复提交。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
+          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : tokenBusiness ? "Token 操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : tokenBusiness ? "系统会查询刚才的 Token 操作结果，不会重复提交。" : u1CommandType ? "系统只查询原操作使用的幂等身份，不会重复提交。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recover()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : u1CommandType ? "查询原操作结果" : "查询命令结果"}
+            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : tokenBusiness ? "查询 Token 结果" : u1CommandType ? "查询原操作结果" : "查询命令结果"}
           </button>
         </div>
       ) : null}

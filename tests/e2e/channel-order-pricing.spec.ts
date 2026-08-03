@@ -37,6 +37,14 @@ function roomCell(page: Page, unitId: string, serviceDate: string): Locator {
   return page.locator(`.room-status-day-available[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${serviceDate}"]`);
 }
 
+async function expectRoomStatusLanding(page: Page): Promise<void> {
+  const mobile = (page.viewportSize()?.width ?? 0) < 576;
+  await expect(page.getByRole("heading", {
+    name: mobile ? "今日运营任务" : "房间与床位逐日房态",
+    level: 1
+  })).toBeVisible({ timeout: 30_000 });
+}
+
 async function clickRoomStatusCell(page: Page, cell: Locator, unitId: string): Promise<void> {
   await cell.scrollIntoViewIfNeeded();
   await page.evaluate(() => new Promise<void>((resolve) => {
@@ -52,7 +60,7 @@ async function login(page: Page) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expectRoomStatusLanding(page);
 }
 
 async function openPaidOrderDraft(page: Page, options: {
@@ -61,21 +69,31 @@ async function openPaidOrderDraft(page: Page, options: {
   guest: string;
 }): Promise<OrderDraft> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expectRoomStatusLanding(page);
   const departureDate = addDays(options.arrivalDate, 1);
-  await page.getByTestId("arrival-date").fill(options.arrivalDate);
-  await page.getByTestId("departure-date").fill(departureDate);
-  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
+  const boardDepartureDate = addDays(options.arrivalDate, 30);
   const mobile = (page.viewportSize()?.width ?? 0) < 576;
+  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   if (!mobile) {
+    const rangeResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "GET"
+        && url.pathname.endsWith("/room-status")
+        && url.searchParams.get("arrivalDate") === options.arrivalDate
+        && url.searchParams.get("departureDate") === boardDepartureDate
+        && response.ok();
+    });
+    await page.getByTestId("arrival-date").fill(options.arrivalDate);
+    await rangeResponse;
+    await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
     await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-arrival", options.arrivalDate);
-    await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", departureDate);
+    await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", boardDepartureDate);
     const refreshed = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return response.request().method() === "GET"
         && url.pathname.endsWith("/room-status")
         && url.searchParams.get("arrivalDate") === options.arrivalDate
-        && url.searchParams.get("departureDate") === departureDate
+        && url.searchParams.get("departureDate") === boardDepartureDate
         && response.ok();
     });
     await page.getByRole("button", { name: "刷新房态", exact: true }).click();
@@ -137,6 +155,10 @@ async function createOrderAndOpenDetail(page: Page, options: {
   const previewRequestPromise = page.waitForRequest((request) =>
     request.method() === "POST" && requestPath(request) === "/api/v1/command-previews"
   );
+  const previewResponsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST" && requestPath(response.request()) === "/api/v1/command-previews",
+    { timeout: 60_000 }
+  );
   await page.getByTestId("create-order").click();
   const previewRequest = await previewRequestPromise;
   const previewBody = previewRequest.postDataJSON() as {
@@ -159,6 +181,8 @@ async function createOrderAndOpenDetail(page: Page, options: {
     expect(previewBody.input).not.toHaveProperty("manualPriceAdjustmentReason");
   }
 
+  const previewResponse = await previewResponsePromise;
+  expect(previewResponse.ok()).toBe(true);
   await expect(page.getByTestId("command-effect")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId("preview-policy-base-amount")).toHaveText(money(options.expectedPolicyBaseMinor));
   await expect(page.getByTestId("preview-target-contract-amount")).toHaveText(money(options.expectedTargetMinor));
@@ -180,7 +204,6 @@ async function createOrderAndOpenDetail(page: Page, options: {
   const receipt = await confirmationResponse.json() as { result?: { orderId?: string } };
   expect(receipt.result?.orderId).toMatch(/^order_/);
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("住宿订单已创建，页面已刷新");
   await expect(page.getByTestId("command-receipt")).toBeHidden();
   await page.goto(`/orders/${encodeURIComponent(receipt.result!.orderId!)}`);
   await expect(page).toHaveURL(/\/orders\/order_[^/?#]+$/, { timeout: 15_000 });

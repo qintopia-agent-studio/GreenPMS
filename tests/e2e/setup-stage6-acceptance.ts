@@ -155,7 +155,7 @@ async function main(): Promise<void> {
 
     process.stdout.write(`${JSON.stringify({
       database: new URL(databaseUrl).pathname.slice(1),
-      property: "QTP-SH · QinTopia",
+      property: "QTP-XA · QinTopia",
       dates: { today, day2, day3, day4, day5 },
       bedMaintenance: {
         room: "1栋 101 四人间（公卫）",

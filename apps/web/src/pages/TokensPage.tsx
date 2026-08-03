@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Copy, KeyRound, RefreshCw, RotateCw, ShieldOff, Trash2 } from "lucide-react";
+import { Copy, KeyRound, RefreshCw, ShieldOff, Trash2 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useWorkspace } from "../session";
 import type { ClientCommandMetadata, CommandRequest, PendingTokenCommand, RetainedTokenSecret, TokenDto, TrackedCommandState } from "../types";
-import { CommandDialog, EmptyState, formatDateTime, InlineError, LoadingBlock, Modal, StatusBadge, type CommandDialogProgress } from "../ui";
+import { CommandDialog, EmptyState, formatDateTime, InlineError, LoadingBlock, Modal, StatusBadge, usePersistentCommandRecovery, type CommandDialogProgress } from "../ui";
 
 export const TOKEN_SECRET_BYTES = 32;
 export type TokenLifecycleStatus = "ACTIVE" | "EXPIRED" | "REVOKED" | "ROTATED";
@@ -87,6 +88,15 @@ function trackedPatch(progress: CommandDialogProgress): TrackedCommandPatch {
   };
 }
 
+export async function coordinateTokenPreviewProgress(
+  request: CommandRequest,
+  progress: CommandDialogProgress,
+  coordinate: (request: CommandRequest, progress: CommandDialogProgress) => boolean | Promise<boolean>
+): Promise<boolean> {
+  if (progress.state !== "PREVIEWING") return true;
+  return coordinate(request, progress);
+}
+
 function toLocalDateTimeInput(value: Date | string): string {
   const date = typeof value === "string" ? new Date(value) : value;
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
@@ -118,6 +128,28 @@ function SecretValue({ value }: { value: string }) {
       <span className="sr-status" aria-live="polite">{copyStatus}</span>
     </div>
   );
+}
+
+function tokenOperationLabel(operation: "ISSUE" | "ROTATE"): string {
+  return operation === "ISSUE" ? "签发 Token" : "轮换 Token";
+}
+
+function tokenCommandStateText(state: TrackedCommandState): string {
+  if (state === "LOCAL_ONLY") return "待提交";
+  if (state === "PREVIEWING") return "正在核对";
+  if (state === "PREVIEW_UNKNOWN") return "核对中断，请继续处理";
+  if (state === "PREVIEWED") return "待确认";
+  if (state === "CONFIRMING") return "正在提交";
+  if (state === "UNKNOWN") return "提交结果待查询";
+  if (state === "EXECUTED") return "已完成";
+  return "未写入";
+}
+
+function tokenRequestLabel(request: CommandRequest): string {
+  if (request.commandType === "ISSUE_TOKEN") return "签发 Token";
+  if (request.commandType === "ROTATE_TOKEN") return "轮换 Token";
+  if (request.commandType === "REVOKE_TOKEN") return "撤销 Token";
+  return request.title;
 }
 
 function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }: {
@@ -158,8 +190,8 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
     }
     const request: CommandRequest = isIssue ? {
       commandType: "ISSUE_TOKEN",
-      title: "签发外围客户端 Token",
-      description: "服务端仅持久化 secret 的 SHA-256 哈希；Preview 与 Receipt 均不会返回明文 secret。",
+      title: "签发 Token",
+      description: "确认后，这个 Token 可以用于外围客户端访问本物业数据。",
       input: {
         propertyId,
         subjectId: principal.subjectId,
@@ -170,8 +202,8 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
       }
     } : {
       commandType: "ROTATE_TOKEN",
-      title: `轮换 Token · ${token?.label ?? ""}`,
-      description: "确认后旧 Token 立即撤销并形成轮换链；服务端仅持久化新 secret 的哈希。",
+      title: "轮换 Token",
+      description: "确认后，旧 Token 立即失效，新 Token 生效。",
       input: {
         propertyId,
         tokenId: token!.id,
@@ -205,7 +237,7 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
           <SecretValue value={secret} />
           <label className="token-saved-confirmation"><input type="checkbox" checked={saved} onChange={(event) => setSaved(event.target.checked)} required /><span>我已将一次性 secret 安全保存；关闭后服务端无法找回。</span></label>
         </div>
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={!saved}>继续生成 Preview</button></div>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={!saved}>下一步</button></div>
       </form>
     </Modal>
   );
@@ -218,22 +250,24 @@ function RetainedSecretPanel({ secret, onClear, onRecover }: {
 }) {
   const unresolved = retainedTokenCommandUnresolved(secret);
   const stateText: Record<RetainedTokenSecret["state"], string> = {
-    LOCAL_ONLY: "命令尚未确认；请勿生成另一个 secret。",
-    PREVIEWING: "Preview 请求已发送，正在等待服务端结果。",
-    PREVIEW_UNKNOWN: "Preview 响应中断；必须复用原幂等键重试。",
-    PREVIEWED: "Preview 已生成但尚未 Confirm。",
-    CONFIRMING: "Confirm 已发送，正在等待服务端结果。",
-    UNKNOWN: "响应中断；必须使用原幂等键恢复结果。",
-    EXECUTED: "命令已提交；请确认外围客户端已保存后再清除。",
-    NOT_EXECUTED: "服务端确认命令未执行，可以清除或重新开始。"
+    LOCAL_ONLY: "这串 secret 还没有提交。请继续完成操作，或关闭后重新开始。",
+    PREVIEWING: "正在核对本次 Token 操作。",
+    PREVIEW_UNKNOWN: "核对过程中断，请继续处理；系统不会重复生成 secret。",
+    PREVIEWED: "已完成核对，等待最终确认。",
+    CONFIRMING: "正在提交本次 Token 操作。",
+    UNKNOWN: "提交结果暂时不确定，请查询刚才的结果。",
+    EXECUTED: "Token 操作已完成。确认外围客户端已保存 secret 后，可以清除本机显示。",
+    NOT_EXECUTED: "本次 Token 操作没有写入，可以清除本机显示后重新开始。"
   };
   return (
     <section className="retained-secret-panel" aria-labelledby="retained-secret-heading">
-      <div className="retained-secret-heading"><KeyRound aria-hidden="true" size={20} /><div><h2 id="retained-secret-heading">尚未清除的一次性 secret</h2><p>{stateText[secret.state]}</p></div></div>
-      <dl className="retained-secret-meta"><div><dt>操作</dt><dd>{secret.operation}</dd></div><div><dt>状态</dt><dd><StatusBadge value={secret.state} /></dd></div><div><dt>标签</dt><dd>{secret.label}</dd></div><div><dt>物业</dt><dd><code>{secret.propertyId}</code></dd></div>{secret.previewId ? <div><dt>Preview</dt><dd><code>{secret.previewId}</code></dd></div> : null}</dl>
+      <div className="retained-secret-heading"><KeyRound aria-hidden="true" size={20} /><div><h2 id="retained-secret-heading">一次性 secret 待清除</h2><p>{stateText[secret.state]}</p></div></div>
+      <dl className="retained-secret-meta"><div><dt>操作</dt><dd>{tokenOperationLabel(secret.operation)}</dd></div><div><dt>处理状态</dt><dd>{tokenCommandStateText(secret.state)}</dd></div><div><dt>Token 标签</dt><dd>{secret.label}</dd></div></dl>
       <SecretValue value={secret.value} />
-      {unresolved && (secret.confirmationKey || secret.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />{secret.confirmationKey ? "恢复命令结果" : "重试 Preview"}</button> : null}
-      <button className="button button-danger" type="button" onClick={onClear} disabled={unresolved}><Trash2 aria-hidden="true" size={16} />清除本地 secret</button>
+      <div className="retained-secret-actions">
+        {unresolved && (secret.confirmationKey || secret.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />继续处理</button> : null}
+        <button className="button button-danger" type="button" onClick={onClear} disabled={unresolved}><Trash2 aria-hidden="true" size={16} />已保存，清除本机显示</button>
+      </div>
     </section>
   );
 }
@@ -246,10 +280,12 @@ function PendingTokenCommandPanel({ pending, onRecover, onClear }: {
   const unresolved = trackedCommandUnresolved(pending.state);
   return (
     <section className="retained-secret-panel" aria-labelledby="pending-token-command-heading">
-      <div className="retained-secret-heading"><ShieldOff aria-hidden="true" size={20} /><div><h2 id="pending-token-command-heading">待处理 Token 命令</h2><p>关闭弹窗不会丢失 Preview 或 Confirm 的恢复身份。</p></div></div>
-      <dl className="retained-secret-meta"><div><dt>命令</dt><dd>{pending.request.commandType}</dd></div><div><dt>状态</dt><dd><StatusBadge value={pending.state} /></dd></div>{pending.previewId ? <div><dt>Preview</dt><dd><code>{pending.previewId}</code></dd></div> : null}</dl>
-      {unresolved && (pending.confirmationKey || pending.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />{pending.confirmationKey ? "恢复命令结果" : "重试 Preview"}</button> : null}
-      <button className="button button-secondary" type="button" onClick={onClear} disabled={unresolved}>清除已解析命令</button>
+      <div className="retained-secret-heading"><ShieldOff aria-hidden="true" size={20} /><div><h2 id="pending-token-command-heading">Token 操作待完成</h2><p>有一项 Token 操作还需要继续处理。系统会查询原操作结果，不会重复提交。</p></div></div>
+      <dl className="retained-secret-meta"><div><dt>操作</dt><dd>{tokenRequestLabel(pending.request)}</dd></div><div><dt>处理状态</dt><dd>{tokenCommandStateText(pending.state)}</dd></div></dl>
+      <div className="retained-secret-actions">
+        {unresolved && (pending.confirmationKey || pending.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />继续处理</button> : null}
+        <button className="button button-secondary" type="button" onClick={onClear} disabled={unresolved}>清除记录</button>
+      </div>
     </section>
   );
 }
@@ -272,6 +308,10 @@ export function TokensPage() {
   const activeCommandAttemptRef = useRef<string | undefined>(undefined);
   const accessGrant = principal.propertyAccess[propertyId] ?? "READ";
   const canWrite = accessGrant === "WRITE";
+  const commandRecovery = usePersistentCommandRecovery({
+    subjectId: principal.subjectId,
+    scopeId: `property:${propertyId}`
+  });
 
   useEffect(() => {
     let current = true;
@@ -331,6 +371,14 @@ export function TokensPage() {
     }
   }
 
+  async function trackTokenProgress(
+    activeCommand: TokenCommandDialogState,
+    progress: CommandDialogProgress
+  ): Promise<boolean> {
+    applySecretProgress(activeCommand.operationId, activeCommand.attemptId, progress);
+    return coordinateTokenPreviewProgress(activeCommand.request, progress, commandRecovery.track);
+  }
+
   function recoverRetainedSecret() {
     if (!retainedTokenSecret || (!retainedTokenSecret.confirmationKey && !retainedTokenSecret.previewMetadata)) return;
     openCommand({
@@ -355,8 +403,8 @@ export function TokensPage() {
     const operationId = crypto.randomUUID();
     const request: CommandRequest = {
       commandType: "REVOKE_TOKEN",
-      title: `撤销 Token · ${token.label}`,
-      description: "确认后该 Token 立即失效；撤销事实及 Receipt 将永久保留。",
+      title: "撤销 Token",
+      description: "确认后，这个 Token 立即失效，外围客户端不能再用它访问系统。",
       input: { propertyId, tokenId: token.id }
     };
     setPendingTokenCommand({ operationId, request, state: "LOCAL_ONLY" });
@@ -367,11 +415,16 @@ export function TokensPage() {
     <div className="tokens-page">
       <header className="page-heading page-heading-actions">
         <div><p className="eyebrow">外部系统接入</p><h1>Token 生命周期</h1><p>当前主体的物业范围 Token、权限上限与轮换链</p></div>
-        <div className="token-page-actions"><button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={17} />刷新</button><button className="button button-primary" type="button" onClick={() => setSecretAction({ operation: "ISSUE" })} disabled={!canWrite || loading || Boolean(error) || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}><KeyRound aria-hidden="true" size={17} />签发 Token</button></div>
+        <div className="token-page-actions"><button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={17} />刷新</button><button className="button button-primary" type="button" onClick={() => setSecretAction({ operation: "ISSUE" })} disabled={!canWrite || loading || Boolean(error) || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}><KeyRound aria-hidden="true" size={17} />签发 Token</button></div>
       </header>
 
-      {retainedTokenSecret ? <RetainedSecretPanel secret={retainedTokenSecret} onClear={() => setRetainedTokenSecret(undefined)} onRecover={recoverRetainedSecret} /> : null}
-      {pendingTokenCommand ? <PendingTokenCommandPanel pending={pendingTokenCommand} onRecover={recoverPendingTokenCommand} onClear={() => setPendingTokenCommand(undefined)} /> : null}
+      <InlineError error={commandRecovery.error} title="本物业有操作需要先处理" />
+      {commandRecovery.blocked ? <section className="recovery-bar" role="status" aria-live="polite" data-testid="token-property-recovery-blocked">
+        <div><strong>请先处理本物业未完成的操作</strong><p>Token 操作尚未发送。处理完原操作或报价后，再返回这里继续。</p></div>
+        <Link className="button button-secondary" to="/">前往房态处理</Link>
+      </section> : null}
+      {retainedTokenSecret && !command ? <RetainedSecretPanel secret={retainedTokenSecret} onClear={() => setRetainedTokenSecret(undefined)} onRecover={recoverRetainedSecret} /> : null}
+      {pendingTokenCommand && !command ? <PendingTokenCommandPanel pending={pendingTokenCommand} onRecover={recoverPendingTokenCommand} onClear={() => setPendingTokenCommand(undefined)} /> : null}
       {!canWrite ? <div className="token-readonly-notice"><ShieldOff aria-hidden="true" size={18} /><p>当前主体在该物业只有 READ 权限，可以查看 Token，但不能签发、轮换或撤销。</p></div> : null}
 
       <section className="token-principal-band" aria-label="Token 主体与状态汇总">
@@ -384,7 +437,7 @@ export function TokensPage() {
       {loading ? <LoadingBlock label="正在载入 Token" /> : error ? null : tokens.length ? (
         <div className="table-region token-table-region" role="region" aria-label="当前主体 Token" tabIndex={0}>
           <table className="data-table token-table">
-            <thead><tr><th scope="col">Token / 标签</th><th scope="col">权限</th><th scope="col">状态</th><th scope="col">过期时间</th><th scope="col">轮换链</th><th scope="col">操作</th></tr></thead>
+            <thead><tr><th scope="col">Token / 标签</th><th scope="col">权限</th><th scope="col">状态</th><th scope="col">过期时间</th><th scope="col">轮换链</th><th scope="col" className="token-actions-heading">操作</th></tr></thead>
             <tbody>{tokens.map((token) => {
               const status = tokenLifecycleStatus(token);
               const revoked = status === "REVOKED" || status === "ROTATED";
@@ -394,7 +447,7 @@ export function TokensPage() {
                 <td><StatusBadge value={status} />{token.revoked_at ? <small>{formatDateTime(token.revoked_at)}</small> : null}</td>
                 <td>{formatDateTime(token.expires_at)}</td>
                 <td className="token-chain"><span>来自 <code>{token.rotated_from_id ?? "-"}</code></span><span>替换为 <code>{token.replaced_by_id ?? "-"}</code></span></td>
-                <td><div className="row-actions"><button className="button button-compact button-secondary" type="button" onClick={() => setSecretAction({ operation: "ROTATE", token })} disabled={!canWrite || revoked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}><RotateCw aria-hidden="true" size={16} />轮换</button><button className="icon-button danger-icon" type="button" onClick={() => revoke(token)} disabled={!canWrite || revoked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)} aria-label={`撤销 Token ${token.id}`} title="撤销"><ShieldOff aria-hidden="true" size={17} /></button></div></td>
+                <td className="token-actions-cell"><div className="row-actions token-row-actions"><button className="button button-compact button-secondary" type="button" onClick={() => setSecretAction({ operation: "ROTATE", token })} disabled={!canWrite || revoked || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}>轮换</button><button className="button button-compact button-secondary danger-text-button" type="button" onClick={() => revoke(token)} disabled={!canWrite || revoked || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)} aria-label={`撤销 Token ${token.id}`}>撤销</button></div></td>
               </tr>;
             })}</tbody>
           </table>
@@ -407,7 +460,9 @@ export function TokensPage() {
         onClose={() => closeCommand(command.attemptId)}
         {...(command.initialPreviewMetadata ? { initialPreviewMetadata: command.initialPreviewMetadata } : {})}
         {...(command.initialConfirmationKey ? { initialConfirmationKey: command.initialConfirmationKey } : {})}
-        onProgress={(progress: CommandDialogProgress) => applySecretProgress(command.operationId, command.attemptId, progress)}
+        writeBlocked={commandRecovery.blocked}
+        writeBlockedReason="本物业还有未完成的操作或报价，请先前往房态处理。"
+        onProgress={(progress: CommandDialogProgress) => trackTokenProgress(command, progress)}
       /> : null}
     </div>
   );

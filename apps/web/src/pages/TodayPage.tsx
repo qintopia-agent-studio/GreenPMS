@@ -11,6 +11,7 @@ import {
   type CommandDialogCloseContext,
   CommandResultNotice,
   CommandRecoveryBar,
+  DamagedCommandRecoveryNotice,
   businessStatusLabel,
   EmptyState,
   formatDate,
@@ -112,11 +113,11 @@ export function TodayPage() {
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
 
-  function closeCommandDialog(context?: CommandDialogCloseContext) {
+  async function closeCommandDialog(context?: CommandDialogCloseContext) {
     let refreshAfterClose = context?.receipt.businessCommitted === true;
     if (context || (commandRecovery.pending && isTerminalCommandRecovery(commandRecovery.pending.state))) {
       refreshAfterClose ||= commandRecovery.pending?.state === "EXECUTED";
-      if (commandRecovery.clearResolved()) setRecoveryError(undefined);
+      if (await commandRecovery.clearResolved()) setRecoveryError(undefined);
       else setRecoveryError(new Error("无法清除已收口的本地恢复记录；为避免重复履约，写命令继续保持暂停"));
     }
     setCommand(undefined);
@@ -133,7 +134,9 @@ export function TodayPage() {
         <div className="today-date"><CalendarDays aria-hidden="true" size={17} /><label><span className="sr-only">营业日期</span><input type="date" value={businessDate} onChange={(event) => { dateEdited.current = true; setBusinessDate(event.target.value); }} /></label><button className="icon-button" type="button" onClick={() => setRefreshToken((value) => value + 1)} aria-label="刷新今日履约" title="刷新"><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={18} /></button></div>
       </header>
       <InlineError error={recoveryError} title="恢复记录未收口" />
-      <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" />
+      {commandRecovery.canDiscardCorrupt
+        ? <DamagedCommandRecoveryNotice error={commandRecovery.error} onDiscard={commandRecovery.discardCorruptAfterReview} testId="today-damaged-command-recovery" />
+        : <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" />}
       <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
       <div className="today-tabs" role="tablist" aria-label="今日履约分类">

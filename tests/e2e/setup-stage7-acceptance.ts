@@ -347,7 +347,7 @@ export async function prepareStage7Acceptance(
 
     return {
       database: new URL(databaseUrl).pathname.slice(1),
-      property: "QTP-SH · QinTopia",
+      property: "QTP-XA · QinTopia",
       dates: { arrivalDate, moveDate, originalDepartureDate, departureDate },
       splitBed: {
         roomId: room101.id,

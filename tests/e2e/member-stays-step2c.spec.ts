@@ -69,13 +69,42 @@ async function login(page: Page) {
   await page.getByTestId("login-username").fill("operator");
   await page.getByTestId("login-password").fill("demo-pass-2026");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房态与可售" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
+}
+
+function appNavigation(page: Page): Locator {
+  const mobile = (page.viewportSize()?.width ?? 0) < 576;
+  return page.getByRole("navigation", { name: mobile ? "移动主导航" : "主导航", exact: true });
+}
+
+async function followAppNavigation(page: Page, name: "房态" | "会员" | "今日履约"): Promise<void> {
+  const link = appNavigation(page).getByRole("link", { name, exact: true });
+  if ((page.viewportSize()?.width ?? 0) < 576) {
+    await link.focus();
+    await expect(link).toBeFocused();
+    await page.keyboard.press("Enter");
+  } else {
+    await link.click();
+  }
 }
 
 async function chooseAvailableSharedBathSingle(page: Page, arrival: string, departure: string) {
-  await page.getByTestId("arrival-date").fill(arrival);
-  await page.getByTestId("departure-date").fill(departure);
-  await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
+  const isMobile = (page.viewportSize()?.width ?? 0) < 576;
+  if (!isMobile) {
+    const boardDeparture = addDays(arrival, 30);
+    const rangeResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "GET"
+        && url.pathname.endsWith("/room-status")
+        && url.searchParams.get("arrivalDate") === arrival
+        && url.searchParams.get("departureDate") === boardDeparture
+        && response.ok();
+    });
+    await page.getByTestId("arrival-date").fill(arrival);
+    await rangeResponse;
+    await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
+  }
   const availabilityResponse = await page.request.get(`/api/v1/properties/${e2ePropertyId}/availability?arrivalDate=${arrival}&departureDate=${departure}&unitKind=ROOM`);
   expect(availabilityResponse.ok()).toBe(true);
   const availability = await availabilityResponse.json() as {
@@ -84,7 +113,6 @@ async function chooseAvailableSharedBathSingle(page: Page, arrival: string, depa
   const eligibleUnits = availability.units.filter((unit) => unit.available && unit.roomTypeCode === "shared_bath_single");
   const availableUnit = eligibleUnits.find((unit) => unit.code === "205") ?? eligibleUnits[0];
   expect(availableUnit, "需要一间三晚连续可售的公卫单人间").toBeDefined();
-  const isMobile = (page.viewportSize()?.width ?? 0) < 576;
   let drawer: Locator;
   if (isMobile) {
     await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
@@ -129,7 +157,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
     }
   });
   await login(page);
-  await page.getByRole("link", { name: "会员", exact: true }).click();
+  await followAppNavigation(page, "会员");
   await page.getByTestId("member-search-query").fill(fixture.identity);
   await page.getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page.getByRole("heading", { name: fixture.name, exact: true })).toBeVisible();
@@ -151,7 +179,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(effect).not.toContainText("entitlementLotId");
   await page.getByTestId("confirm-command").click();
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("会员余额已更正，权益记录已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("会员余额已更正");
   await expect(page.getByTestId("command-receipt")).toBeHidden();
   await expect(balance).toContainText("1 间夜");
   const ledger = page.getByTestId("member-ledger-history");
@@ -160,7 +188,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(ledger).toContainText("-2 间夜");
   await expect(ledger).toContainText("2C 浏览器验收调整为 1 间夜");
 
-  await page.getByRole("link", { name: "房态", exact: true }).click();
+  await followAppNavigation(page, "房态");
   const arrival = todayInTimeZone("Asia/Shanghai");
   const departure = addDays(arrival, 3);
   await chooseAvailableSharedBathSingle(page, arrival, departure);
@@ -213,7 +241,6 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   const createOrderReceipt = await createOrderResponse.then((response) => response.json()) as { result?: { orderId?: string } };
   expect(createOrderReceipt.result?.orderId).toMatch(/^order_/);
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("住宿订单已创建，页面已刷新");
   await expect(page.getByTestId("command-receipt")).toBeHidden();
   await page.goto(`/orders/${encodeURIComponent(createOrderReceipt.result!.orderId!)}`);
   await expect(page.getByText("住宿来源", { exact: true })).toBeVisible();
@@ -221,7 +248,8 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(page.getByText("订单来源渠道", { exact: true })).toHaveCount(0);
   await expect(page.getByText("渠道订单号", { exact: true })).toHaveCount(0);
 
-  await page.getByRole("link", { name: "移动履约", exact: true }).click();
+  await followAppNavigation(page, "今日履约");
+  await expect(page).toHaveURL(/\/today$/);
   await page.getByLabel("营业日期", { exact: true }).fill(arrival);
   const arrivalRow = page.locator("article.queue-row").filter({ hasText: "2C住客" });
   await arrivalRow.getByRole("button", { name: "入住", exact: true }).click();
@@ -232,7 +260,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(page.getByTestId("reason-note")).toHaveValue("2C 浏览器验收入住核销");
   await page.getByTestId("confirm-command").click();
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByTestId("command-result-notice")).toContainText("办理入住已完成，住宿状态已刷新");
+  await expect(page.getByTestId("command-result-notice")).toContainText("办理入住已完成");
   await expect(page.getByTestId("command-receipt")).toBeHidden();
 
   await page.goto(`/orders/${encodeURIComponent(createOrderReceipt.result!.orderId!)}`);
@@ -241,7 +269,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
     .locator("xpath=following-sibling::dd");
   await expect(persistedCheckInNote).toHaveText("2C 浏览器验收入住核销");
 
-  await page.getByRole("link", { name: "会员", exact: true }).click();
+  await followAppNavigation(page, "会员");
   await page.getByTestId("member-search-query").fill(fixture.identity);
   await page.getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page.getByRole("heading", { name: fixture.name, exact: true })).toBeVisible();

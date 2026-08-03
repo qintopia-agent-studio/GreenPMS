@@ -149,6 +149,45 @@ export function roomStatusUnitLabel(unit: RoomStatusUnitIdentity): string {
   return [unit.buildingCode ? `${unit.buildingCode}栋` : null, localLabel].filter(Boolean).join(" ");
 }
 
+const roomTypeLabelByCode: Record<string, string> = {
+  private_bath_standard: "标间（独卫）",
+  private_bath_king: "大床房（独卫）",
+  private_bath_single: "单人间（独卫）",
+  private_bath_suite: "套房（独卫）",
+  shared_bath_standard: "标间（公卫）",
+  shared_bath_single: "单人间（公卫）",
+  shared_bath_double: "两人间（公卫）",
+  shared_bath_quad: "四人间（公卫）",
+  PUBLIC_FOUR_BED: "四人间（公卫）",
+  SHARED_BATH_SINGLE: "单人间（公卫）",
+  PRIVATE_BATH_SINGLE: "单人间（独卫）"
+};
+
+export function roomStatusRoomTypeLabel(code: string): string {
+  const direct = roomTypeLabelByCode[code];
+  if (direct) return direct;
+  const normalized = code.trim().toLocaleLowerCase("en-US");
+  const layout = normalized.includes("quad") || normalized.includes("four")
+    ? "四人间"
+    : normalized.includes("double")
+      ? "两人间"
+      : normalized.includes("single")
+        ? "单人间"
+        : normalized.includes("standard")
+          ? "标间"
+          : normalized.includes("king")
+            ? "大床房"
+            : normalized.includes("suite")
+              ? "套房"
+              : "未命名房型";
+  const bathroom = normalized.includes("shared") || normalized.includes("public")
+    ? "（公卫）"
+    : normalized.includes("private") || normalized.includes("ensuite")
+      ? "（独卫）"
+      : "";
+  return `${layout}${bathroom}`;
+}
+
 export function roomStatusSelectedSaleLabel(unit: RoomStatusSalesPresentationUnit): string {
   if (unit.salesMode === "UNAVAILABLE") return "不可售";
   return unit.kind === "ROOM" ? "整房销售" : "单床销售";

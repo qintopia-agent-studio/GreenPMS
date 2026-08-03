@@ -14,7 +14,6 @@ import {
   parseRoomStatusOrderReturnTarget,
   reconcileRoomStatusRestoration,
   resolveRoomStatusOrderReturnTarget,
-  roomStatusAutoVisibleDays,
   roomStatusFactFingerprint,
   roomStatusCellBelongsToStay,
   roomStatusOrderIdentityForDate,
@@ -665,44 +664,34 @@ describe("RoomStatus stable order selection", () => {
 });
 
 describe("RoomStatus date window", () => {
-  const dates = Array.from({ length: 90 }, (_, index) => {
+  const dates = Array.from({ length: 30 }, (_, index) => {
     const date = new Date(Date.UTC(2026, 6, 1 + index));
     return date.toISOString().slice(0, 10);
   });
 
-  it("never renders more than 31 visible days and clamps the trailing window", () => {
-    expect(visibleDateWindow(dates, 0, 90)).toHaveLength(MAX_VISIBLE_DAYS);
-    expect(visibleDateWindow(dates, 89, 14)).toEqual(dates.slice(76, 90));
-    expect(shiftDateWindowStart(dates.length, 76, 14, 1)).toBe(76);
-    expect(shiftDateWindowStart(dates.length, 76, 14, -1)).toBe(62);
-    expect(dateWindowStartForFocus(dates, 0, 14, dates[13]!)).toBe(0);
-    expect(dateWindowStartForFocus(dates, 0, 14, dates[14]!)).toBe(1);
-    expect(dateWindowStartForFocus(dates, 20, 14, dates[19]!)).toBe(19);
-    expect(dateWindowStartForFocus(dates, 76, 14, dates[89]!)).toBe(76);
+  it("uses one fixed 30-night date window", () => {
+    expect(MAX_VISIBLE_DAYS).toBe(30);
+    expect(visibleDateWindow(dates, 0, 90)).toEqual(dates);
+    expect(visibleDateWindow(dates, 29, 14)).toEqual(dates.slice(16, 30));
+    expect(shiftDateWindowStart(dates.length, 0, 30, 1)).toBe(0);
+    expect(shiftDateWindowStart(dates.length, 0, 30, -1)).toBe(0);
+    expect(dateWindowStartForFocus(dates, 0, 30, dates[29]!)).toBe(0);
   });
 
-  it("calculates an adaptive 7-to-21 day window from the actual board width", () => {
-    expect(roomStatusAutoVisibleDays(700)).toBe(7);
-    expect(roomStatusAutoVisibleDays(1_170)).toBe(10);
-    expect(roomStatusAutoVisibleDays(1_600)).toBe(14);
-    expect(roomStatusAutoVisibleDays(2_200)).toBe(20);
-    expect(roomStatusAutoVisibleDays(4_000)).toBe(21);
-  });
-
-  it("switches between automatic and explicit date-window sizes", () => {
-    const automatic = roomStatusViewReducer(createRoomStatusViewState(), {
+  it("migrates legacy automatic and explicit date-window modes to 30 nights", () => {
+    const automatic = roomStatusViewReducer(createRoomStatusViewState({ dateWindowMode: "AUTO", dateWindowSize: 10 }), {
       type: "SET_DATE_WINDOW_MODE",
       mode: "AUTO",
       autoSize: 10,
       totalDates: dates.length
     });
-    expect(automatic).toMatchObject({ dateWindowMode: "AUTO", dateWindowSize: 10 });
+    expect(automatic).toMatchObject({ dateWindowMode: "30", dateWindowSize: 30 });
     expect(roomStatusViewReducer(automatic, {
       type: "SET_DATE_WINDOW_MODE",
       mode: "21",
       autoSize: 10,
       totalDates: dates.length
-    })).toMatchObject({ dateWindowMode: "21", dateWindowSize: 21 });
+    })).toMatchObject({ dateWindowMode: "30", dateWindowSize: 30 });
   });
 });
 
@@ -879,7 +868,7 @@ describe("RoomStatus restoration", () => {
     expect(parseRoomStatusRestoration(serialized, snapshot.propertyId)).toEqual(snapshot);
     const legacySnapshot = JSON.parse(serialized) as { state: Record<string, unknown> };
     delete legacySnapshot.state.dateWindowMode;
-    expect(parseRoomStatusRestoration(JSON.stringify(legacySnapshot), snapshot.propertyId)?.state.dateWindowMode).toBe("AUTO");
+    expect(parseRoomStatusRestoration(JSON.stringify(legacySnapshot), snapshot.propertyId)?.state.dateWindowMode).toBe("30");
     const fullStaySelection = {
       ...snapshot,
       state: createRoomStatusViewState({
@@ -908,9 +897,9 @@ describe("RoomStatus restoration", () => {
       ...snapshot,
       state: createRoomStatusViewState({ selection: selectionFromCells("unit_room_101", "2026-07-19", "2026-07-19") })
     }), snapshot.propertyId)).toBeUndefined();
-    expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-10-18" } }), snapshot.propertyId)?.range)
-      .toEqual({ arrivalDate: "2026-07-20", departureDate: "2026-10-18" });
-    expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-10-19" } }), snapshot.propertyId)).toBeUndefined();
+    expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-08-19" } }), snapshot.propertyId)?.range)
+      .toEqual({ arrivalDate: "2026-07-20", departureDate: "2026-08-19" });
+    expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-08-20" } }), snapshot.propertyId)).toBeUndefined();
     expect(parseRoomStatusRestoration("{", snapshot.propertyId)).toBeUndefined();
   });
 

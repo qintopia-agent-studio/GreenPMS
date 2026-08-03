@@ -10,6 +10,7 @@ import {
   formatMoney,
   moveUnitPreviewSummary,
   stayDateFundsAreOperatorFacing,
+  type RecoveryCoordinatedPreviewRunner,
   type MoveUnitPreviewSummary
 } from "../ui";
 
@@ -255,6 +256,7 @@ export function MoveUnitDrawer({
   units,
   draft: recovered,
   writeBlocked = false,
+  runPreview,
   onClose,
   onSubmit
 }: {
@@ -262,6 +264,7 @@ export function MoveUnitDrawer({
   units: readonly InventoryUnitDto[];
   draft?: CommandRequest;
   writeBlocked?: boolean;
+  runPreview: RecoveryCoordinatedPreviewRunner;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
@@ -273,6 +276,8 @@ export function MoveUnitDrawer({
   const [previewRefresh, setPreviewRefresh] = useState(0);
   const [candidateAvailability, setCandidateAvailability] = useState<CandidateAvailabilityState>({ status: "LOADING" });
   const generationRef = useRef(0);
+  const runPreviewRef = useRef(runPreview);
+  runPreviewRef.current = runPreview;
   const unitMap = useMemo(() => new Map(units.map((unit) => [unit.id, unit])), [units]);
   const inventoryUnitLabels = useMemo(() => Object.fromEntries(
     units.map((unit) => [unit.id, moveUnitDisplayLabel(unit)])
@@ -380,11 +385,11 @@ export function MoveUnitDrawer({
       setPreview((current) => "summary" in current && current.signature === previewSignature
         ? { ...current, status: "REFRESHING" }
         : { status: "LOADING" });
-      void api.preview(
+      void runPreviewRef.current(() => api.preview(
         { commandType: "MOVE_UNIT", input: previewRequest.input },
         api.commandMetadata("move-unit-price"),
         controller.signal
-      ).then((response) => {
+      )).then((response) => {
         if (controller.signal.aborted || generationRef.current !== generation) return;
         const summary = moveUnitPreviewSummary(response.preview, previewRequest.input);
         setPreview(summary

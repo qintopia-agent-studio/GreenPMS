@@ -20,7 +20,8 @@ export const u1CommandTypes = [
   "MOVE_UNIT",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
-  "REVOKE_CHECK_IN"
+  "REVOKE_CHECK_IN",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
 ] as const satisfies readonly HistoricalCommandType[];
 
 export type U1CommandType = (typeof u1CommandTypes)[number];
@@ -150,6 +151,7 @@ export function commandShellSuccessMessage(commandType: U1CommandType): string {
     case "CANCEL_ORDER": return "订单已取消，订单和房态已刷新。";
     case "MARK_NO_SHOW": return "订单已标记未到，订单和房态已刷新。";
     case "REVOKE_CHECK_IN": return "入住已撤销，订单、房态和会员权益已刷新。";
+    case "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP": return "升级会员已完成，订单和会员权益已刷新。";
   }
 }
 
@@ -175,6 +177,7 @@ export function commandShellLabel(commandType: U1CommandType): string {
     case "CANCEL_ORDER": return "取消订单";
     case "MARK_NO_SHOW": return "标记未到";
     case "REVOKE_CHECK_IN": return "撤销入住";
+    case "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP": return "升级会员";
   }
 }
 

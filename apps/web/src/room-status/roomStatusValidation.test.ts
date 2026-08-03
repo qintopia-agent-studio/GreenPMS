@@ -36,6 +36,7 @@ function validBoard(): RoomStatusBoardDto {
     },
     page: { index: 0, size: 200, totalRooms: 1, totalPages: 1 },
     operationalTasks: [],
+    availabilitySummary: [{ serviceDate: "2028-01-01", availableRooms: 1, availableBeds: 0 }],
     rooms: [{
       id: "unit_validation",
       propertyId: expected.propertyId,
@@ -427,6 +428,10 @@ describe("assertRoomStatusBoard", () => {
     const missingFacets = validBoard() as unknown as Record<string, unknown>;
     delete missingFacets.filterOptions;
     expect(() => assertRoomStatusBoard(missingFacets, expected)).toThrow(/filterOptions/);
+
+    const missingSummaryDate = validBoard();
+    missingSummaryDate.availabilitySummary[0]!.serviceDate = "2028-01-02";
+    expect(() => assertRoomStatusBoard(missingSummaryDate, expected)).toThrow(/availabilitySummary\[0\]\.serviceDate/);
 
     const missingBedOccupancies = validBoard() as unknown as { rooms: Array<Record<string, unknown>> };
     delete missingBedOccupancies.rooms[0]!.bedOccupancies;
