@@ -76,11 +76,13 @@ High-risk commands are two-stage:
 
 Confirm locks and revalidates authorization, aggregate versions, inventory day slots, membership ledger state, and the locked pricing policy. A changed or expired Preview returns a durable `NOT_EXECUTED` Receipt and performs zero domain writes. Replaying the same subject/command/idempotency key and request returns the original Receipt; changing the request returns `IDEMPOTENCY_KEY_REUSED`.
 
-`CREATE_ORDER` requires one stable `bookingChannelCode`: `YOUMUDAO`, `CTRIP`, `MEITUAN`, or `WECOM`. `channelOrderReference` is optional, but must be `null` for `WECOM`. Every new `COLLECTION` and `REFUND` fact requires its own staff-entered `transactionReference`; a refund also retains its reference to the original collection Fact. This value is only the manually recorded external transaction reference. It does not prove external receipt, settlement, reconciliation, or write-off, and it is not replaced by a Fact, Receipt, Command, correlation, or idempotency identifier. Historical rows may return `null` when the value was not recorded.
+`CREATE_ORDER` requires one stable `bookingChannelCode`: `YOUMUDAO`, `CTRIP`, `MEITUAN`, or `WECOM`. `channelOrderReference` is optional, but must be `null` for `WECOM`. External-channel orders do not accept individual lodging collections or refunds; finance later reconciles their channel order reference and current channel settlement amount.
+
+For operator-recorded lodging funds, a new WeCom collection requires its WeCom transaction reference and a bank-transfer collection requires its transfer reference. Cash has no external transaction reference and instead requires the collector's name; `OTHER` has no external transaction reference and requires a collection explanation. Every refund references exactly one original collection, cannot exceed that collection's remaining refundable amount, and requires a refund reason. A WeCom refund is returned through the original route and retains the original collection transaction reference; a bank-transfer refund requires its own transfer reference. These manually recorded values do not prove external receipt, settlement, reconciliation, or write-off, and are never replaced by Fact, Receipt, Command, correlation, or idempotency identifiers. Historical rows may return `null` when no reference was recorded.
 
 Every new normal or free-stay order also requires a trimmed, nonblank `primaryGuest.nickname` of at most 200 characters. It is stored with the immutable primary-guest snapshot and returned through Preview, Receipt, order queries, amendments, and room status. Historical snapshots may return a missing or `null` nickname; the Web derives the “历史未记录” compatibility label without persisting a fabricated value.
 
-After a network interruption query either:
+After a network interruption, the following GET endpoints are observational only. A missing execution returns `UNKNOWN`; a read cannot prove that a delayed request will never arrive:
 
 ```text
 GET /api/v1/commands/{commandId}
@@ -89,7 +91,17 @@ GET /api/v1/command-results?propertyId=prop_qintopia_demo&commandType=CREATE_ORD
 GET /api/v1/receipts/{receiptId}
 ```
 
-Results are `EXECUTED`, `NOT_EXECUTED`, or `UNKNOWN`. Do not retry an `UNKNOWN` command with a new key.
+To close an interrupted request safely, call `POST /api/v1/command-results/resolve` with fresh command headers and the original request identity in the body:
+
+```json
+{
+  "propertyId": "prop_qintopia_demo",
+  "commandType": "CREATE_ORDER",
+  "idempotencyKey": "the-original-confirm-idempotency-key"
+}
+```
+
+The resolver uses the same per-command execution lock as Quote and Confirm. It returns an existing durable result when one exists; otherwise it atomically records `NOT_EXECUTED` and permanently fences that original key before allowing another attempt. Results are `EXECUTED`, `NOT_EXECUTED`, or `UNKNOWN`. Do not retry an `UNKNOWN` command with a new key.
 
 `CREATE_QUOTE` is a low-risk single-stage command: READ access is sufficient and Preview/Confirm do not apply, but both command headers, a durable Receipt, audit, idempotent replay, and recovery still apply. Expired Quotes cannot create an order, but their rows are retained and the durable Receipt permanently embeds the original Quote snapshot; only unexpired Quotes count toward the per-subject/property active quota.
 
@@ -147,7 +159,9 @@ Containerized browser runners may use an installed Chromium binary by setting `P
 
 The database suites terminate connections to, drop, and recreate dedicated databases. By default these are `qintopia_test`, `qintopia_command_protocol`, `qintopia_quote_command`, `qintopia_database_invariants`, `qintopia_pricing_policy_guard`, `qintopia_reference_catalog`, `qintopia_security_integration`, `qintopia_receipt_references`, `qintopia_operational_references`, `qintopia_operational_references_history`, `qintopia_member_profile_lifecycle`, `qintopia_member_entitlement_expiry`, `qintopia_security_contract`, `qintopia_agent_journey_contract`, `qintopia_effect_contract`, and `qintopia_e2e`. The migration-concurrency acceptance also creates and removes a PID-scoped `qintopia_migration_concurrency_*` database. Never point a test database environment variable at a database containing retained data.
 
-The public `test:integration`, `test:contract`, and `test:e2e` commands hold coordination and cleanup-guard PostgreSQL session advisory locks for their child process lifetime. The lock runner requires a POSIX host (Linux or macOS) and fails before connecting on Windows because Node cannot verify descendant process groups there. It starts the suite root in its own process group and periodically records that root plus every observed descendant PGID, including descendants that create a new session. Independent invocations using the same coordinator database and lock ID may be started concurrently; they wait and then run serially before any fixed database reset or E2E port binding can overlap. Different `TEST_SUITE_LOCK_DATABASE_URL` or `TEST_SUITE_LOCK_ID` values are separate coordination domains and do not make shared E2E ports safe.
+The reset-capable portions of the public `test:integration`, `test:contract`, and `test:e2e` commands hold coordination and cleanup-guard PostgreSQL session advisory locks for their child process lifetime. The integration command first runs the lock runner's own signal and process-group self-tests outside that runner's process tree, then acquires the shared lock for every business integration test. This prevents a self-test that intentionally sends `SIGTERM` from terminating the outer integration fence while keeping all fixed-database resets serialized.
+
+The lock runner requires a POSIX host (Linux or macOS) and fails before connecting on Windows because Node cannot verify descendant process groups there. It starts the suite root in its own process group and periodically records that root plus every observed descendant PGID, including descendants that create a new session. Independent invocations using the same coordinator database and lock ID may be started concurrently; they wait and then run serially before any fixed database reset or E2E port binding can overlap. Different `TEST_SUITE_LOCK_DATABASE_URL` or `TEST_SUITE_LOCK_ID` values are separate coordination domains and do not make shared E2E ports safe.
 
 The `*:run` scripts are private implementation details and must not be called directly. Their environment marker is an accidental-use guard, not a security capability or proof of lock ownership; a developer who controls the shell can also invoke the underlying test tools directly. The default wait limit is ten minutes and can be changed with `TEST_SUITE_LOCK_TIMEOUT_MS`. `TEST_SUITE_LOCK_DATABASE_URL` must identify a stable administrative database, with a database name distinct from every reset target, used only to own the locks. The runner never creates or drops that database.
 

@@ -7,7 +7,7 @@
 >
 > `importId/catalogVersion`：`qintopia-2026-feishu-revision-561-user-confirmed-v4`
 >
-> 物业范围：`prop_qintopia_demo` / `QTP-SH`；时区 `Asia/Shanghai`；币种 `CNY`
+> 物业范围：`prop_qintopia_demo` / `QTP-XA`；时区 `Asia/Shanghai`；币种 `CNY`
 
 ## 1. 三个不能混用的口径
 
@@ -60,7 +60,7 @@
 
 ## 4. 建筑 → 房间 → 床位运行时目录
 
-稳定 ID 仅在当前 `prop_qintopia_demo/QTP-SH` 物业范围内成立。`ROOM 基础`可独立占用；`ROOM 组合`是全部子床的整间销售入口；`BED 基础`才是可单卖床位。按间房下面列出的物理床没有 `inventory_unit.id`，不会生成 `BED` 库存。
+稳定 ID 仅在当前 `prop_qintopia_demo/QTP-XA` 物业范围内成立。`ROOM 基础`可独立占用；`ROOM 组合`是全部子床的整间销售入口；`BED 基础`才是可单卖床位。按间房下面列出的物理床没有 `inventory_unit.id`，不会生成 `BED` 库存。
 
 ```text
 秦托邦
