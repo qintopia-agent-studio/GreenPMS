@@ -12,14 +12,16 @@ const packageJsonPath = fileURLToPath(new URL("../../package.json", import.meta.
 const runnerPath = fileURLToPath(new URL("../helpers/run-database-test-suite.ts", import.meta.url));
 
 describe("database-backed test suite script contract", () => {
-  it("routes every public database-backed verification command through the non-destructive lock runner", async () => {
+  it("keeps reset-capable suites locked and runs the lock runner's signal self-tests outside its own process tree", async () => {
     const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
       scripts: Record<string, string>;
     };
     expect(packageJson.scripts["test:integration"])
-      .toBe("node --import tsx tests/helpers/run-database-test-suite.ts -- npm run test:integration:run --");
+      .toBe("npm run test:integration:lock-runner && node --import tsx tests/helpers/run-database-test-suite.ts -- npm run test:integration:run --");
+    expect(packageJson.scripts["test:integration:lock-runner"])
+      .toBe("vitest run tests/integration/test-suite-runner.integration.test.ts");
     expect(packageJson.scripts["test:integration:run"])
-      .toBe("node --import tsx tests/helpers/assert-database-test-lock.ts && vitest run tests/integration");
+      .toBe("node --import tsx tests/helpers/assert-database-test-lock.ts && vitest run tests/integration --exclude tests/integration/test-suite-runner.integration.test.ts");
     expect(packageJson.scripts["test:contract"])
       .toBe("node --import tsx tests/helpers/run-database-test-suite.ts -- npm run test:contract:run --");
     expect(packageJson.scripts["test:contract:run"])
@@ -27,7 +29,7 @@ describe("database-backed test suite script contract", () => {
     expect(packageJson.scripts["test:e2e"])
       .toBe("node --import tsx tests/helpers/run-database-test-suite.ts -- npm run test:e2e:run --");
     expect(packageJson.scripts["test:e2e:run"])
-      .toBe("node --import tsx tests/helpers/assert-database-test-lock.ts && npm run build && node --import tsx tests/e2e/setup-database.ts && playwright test");
+      .toBe("node --import tsx tests/helpers/assert-database-test-lock.ts && VITE_DEMO_LOGIN=true WEB_BUILD_OUT_DIR=dist-e2e npm run build && node --import tsx tests/e2e/setup-database.ts && playwright test");
 
     const runner = await readFile(runnerPath, "utf8");
     expect(runner).toContain("pg_try_advisory_lock");

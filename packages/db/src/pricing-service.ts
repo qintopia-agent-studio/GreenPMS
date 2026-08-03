@@ -1,5 +1,5 @@
 import { sql, type Kysely, type Transaction } from "kysely";
-import { DomainError, type InventoryUnitKind, type QuoteDto, type StayType, type StoredQuoteDto } from "@qintopia/contracts";
+import { DomainError, type InventoryUnitKind, type QuotePricingExplanationDto, type QuoteReadDto, type StayType, type StoredQuoteDto } from "@qintopia/contracts";
 import { calculatePricing, entitlementKindFor, enumerateServiceDates, isTransientDuration, newId, stableHash, type CoverageCandidate, type DurationBandAnchors, type PricingPolicy } from "@qintopia/domain";
 import { entitlementAvailableBalance, parsePostgresBigInt } from "./entitlement-balance.ts";
 import { listAvailability, loadInventoryUnit, type DbExecutor } from "./inventory.ts";
@@ -21,6 +21,113 @@ export interface QuoteRequest {
 interface MemberCoverageResolution {
   memberContractId?: string;
   coverageCandidates: CoverageCandidate[];
+}
+
+type QuotePricingExplanationInput = Pick<StoredQuoteDto,
+  "stayType" | "arrivalDate" | "departureDate" | "coverageSet" | "cashLines" | "currentContractAmount"
+>;
+
+function formatQuoteMoney(amount: { currency: string; minorUnits: number }): string {
+  const major = (amount.minorUnits / 100).toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+  return amount.currency === "CNY" ? `¥${major}` : `${amount.currency} ${major}`;
+}
+
+function quotePricingExplanation(input: QuotePricingExplanationInput): QuotePricingExplanationDto {
+  const totalNights = enumerateServiceDates(input.arrivalDate, input.departureDate).length;
+  const stayTotal = input.cashLines.find((line) => line.lineKind === "STAY_TOTAL");
+  const quoteAmount = input.currentContractAmount;
+  const quoteAmountLabel = formatQuoteMoney(quoteAmount);
+  const baseAgentInstruction = "外部系统向住客报价、创建订单和核对业务金额时，使用 quote.currentContractAmount 或 pricingExplanation.quoteAmount；cashLines[].amount 是明细行金额，pricingExplanation.durationBand.segments 只解释折算规则。";
+
+  if (stayTotal) {
+    const durationSegments = stayTotal.calculationSegments.map((segment) => {
+      const anchorAmount = { currency: quoteAmount.currency, minorUnits: segment.anchorAmountMinor };
+      return {
+        inventoryUnitId: segment.inventoryUnitId,
+        pricingProductCode: segment.pricingProductCode,
+        arrivalDate: segment.arrivalDate,
+        departureDate: segment.departureDate,
+        nights: segment.nights,
+        anchorAmount,
+        summary: `${segment.arrivalDate} 至 ${segment.departureDate}，${segment.nights} 夜按 ${stayTotal.pricingBandAnchorNights} 夜档 ${formatQuoteMoney(anchorAmount)} 折算。`
+      };
+    });
+    return {
+      pricingModel: "DURATION_BAND_TOTAL",
+      totalNights,
+      quoteAmount,
+      amountField: "currentContractAmount",
+      summary: `${totalNights} 夜按 ${stayTotal.pricingBandAnchorNights} 夜档折算，最终住宿金额 ${quoteAmountLabel}。`,
+      agentInstruction: baseAgentInstruction,
+      durationBand: {
+        anchorNights: stayTotal.pricingBandAnchorNights,
+        finalAmount: quoteAmount,
+        roundingRule: "FINAL_STAY_TOTAL_WHOLE_YUAN_HALF_UP",
+        auditCalculationFieldsAreAmounts: false,
+        segments: durationSegments
+      }
+    };
+  }
+
+  if (input.stayType === "FREE") {
+    return {
+      pricingModel: "FREE",
+      totalNights,
+      quoteAmount,
+      amountField: "currentContractAmount",
+      summary: `${totalNights} 夜免费住宿，最终住宿金额 ${quoteAmountLabel}。`,
+      agentInstruction: baseAgentInstruction
+    };
+  }
+
+  if (input.coverageSet.length > 0) {
+    return {
+      pricingModel: "MEMBER_ENTITLEMENT",
+      totalNights,
+      quoteAmount,
+      amountField: "currentContractAmount",
+      summary: `${totalNights} 夜中 ${input.coverageSet.length} 夜使用会员权益，未覆盖部分金额 ${quoteAmountLabel}。`,
+      agentInstruction: baseAgentInstruction
+    };
+  }
+
+  return {
+    pricingModel: "NIGHTLY",
+    totalNights,
+    quoteAmount,
+    amountField: "currentContractAmount",
+    summary: `${totalNights} 夜按日价计价，最终住宿金额 ${quoteAmountLabel}。`,
+    agentInstruction: baseAgentInstruction
+  };
+}
+
+export function projectQuoteForExternalRead(quote: StoredQuoteDto | QuoteReadDto): QuoteReadDto {
+  const quoteAmountCurrency = quote.currentContractAmount.currency;
+  return {
+    ...quote,
+    cashLines: quote.cashLines.map((line) => {
+      if (line.lineKind !== "STAY_TOTAL") return line;
+      if (!("calculationSegments" in line)) return line;
+      const totalNights = line.calculationSegments.reduce((sum, segment) => sum + segment.nights, 0);
+      const segmentSummaries = line.calculationSegments.map((segment) => {
+        const anchorAmount = { currency: quoteAmountCurrency, minorUnits: segment.anchorAmountMinor };
+        return `${segment.arrivalDate} 至 ${segment.departureDate}，${segment.nights} 夜按 ${line.pricingBandAnchorNights} 夜档 ${formatQuoteMoney(anchorAmount)} 折算`;
+      });
+      return {
+        lineKind: "STAY_TOTAL",
+        arrivalDate: line.arrivalDate,
+        departureDate: line.departureDate,
+        inventoryUnitId: line.inventoryUnitId,
+        description: `住宿费合计：${totalNights} 夜按 ${line.pricingBandAnchorNights} 夜档折算`,
+        pricingBandAnchorNights: line.pricingBandAnchorNights,
+        pricingSummary: `本行最终金额 ${formatQuoteMoney(line.amount)}；计算依据：${segmentSummaries.join("；")}；按整段住宿金额一次取整。`,
+        amount: line.amount
+      };
+    })
+  };
 }
 
 export async function resolveMemberCoverage(db: DbExecutor, options: {
@@ -323,7 +430,7 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
     currency: policy.currency,
     expires_at: expiresAt
   }).execute();
-  return {
+  const storedQuote: StoredQuote = {
     quoteId,
     propertyId: request.propertyId,
     inventoryUnitId: unit.id,
@@ -339,6 +446,10 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
     ...(request.memberId ? { memberId: request.memberId } : {}),
     ...(memberCoverage.memberContractId ? { memberContractId: memberCoverage.memberContractId } : {}),
     inputHash
+  };
+  return {
+    ...storedQuote,
+    pricingExplanation: quotePricingExplanation(storedQuote)
   };
 }
 
@@ -364,7 +475,7 @@ export async function loadStoredQuote(db: DbExecutor, quoteId: string, requireFr
   if (!row) throw new DomainError("NOT_FOUND", "Quote not found", 404);
   const expiresAt = row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at);
   if (requireFresh && expiresAt.getTime() <= Date.now()) throw new DomainError("QUOTE_EXPIRED", "Quote has expired", 409);
-  return {
+  const storedQuote: StoredQuote = {
     quoteId: row.id,
     propertyId: row.property_id,
     inventoryUnitId: row.inventory_unit_id,
@@ -372,14 +483,18 @@ export async function loadStoredQuote(db: DbExecutor, quoteId: string, requireFr
     arrivalDate: row.arrival_date,
     departureDate: row.departure_date,
     pricingPolicyVersionId: row.policy_version_id,
-    coverageSet: row.coverage_set as QuoteDto["coverageSet"],
-    cashLines: row.cash_lines as QuoteDto["cashLines"],
+    coverageSet: row.coverage_set as StoredQuoteDto["coverageSet"],
+    cashLines: row.cash_lines as StoredQuoteDto["cashLines"],
     cashRemainder: { currency: row.currency, minorUnits: row.cash_remainder_minor },
     currentContractAmount: { currency: row.currency, minorUnits: row.current_contract_amount_minor },
     expiresAt: expiresAt.toISOString(),
     ...(row.member_id ? { memberId: row.member_id } : {}),
     ...(row.member_contract_id ? { memberContractId: row.member_contract_id } : {}),
     inputHash: row.input_hash
+  };
+  return {
+    ...storedQuote,
+    pricingExplanation: quotePricingExplanation(storedQuote)
   };
 }
 

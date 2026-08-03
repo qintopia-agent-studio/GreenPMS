@@ -140,7 +140,7 @@ export async function seedDemo(db: Kysely<Database>, options: { includeProtocolF
         rooms: catalog.rooms.map(({ occupancy_capacity: _discarded, ...room }) => room),
         beds: catalog.beds.map(({ occupancy_capacity: _discarded, ...bed }) => bed)
       };
-  await db.insertInto("properties").values({ id: demo.propertyId, code: "QTP-SH", name: "QinTopia", timezone: "Asia/Shanghai", currency: "CNY" }).onConflict((oc) => oc.column("id").doNothing()).execute();
+  await db.insertInto("properties").values({ id: demo.propertyId, code: "QTP-XA", name: "QinTopia", timezone: "Asia/Shanghai", currency: "CNY" }).onConflict((oc) => oc.column("id").doNothing()).execute();
   await db.insertInto("inventory_units").values(inventoryRows.rooms).onConflict((oc) => oc.column("id").doNothing()).execute();
   await db.insertInto("inventory_units").values(inventoryRows.beds).onConflict((oc) => oc.column("id").doNothing()).execute();
   const pricingPolicies: Insertable<Database["pricing_policy_versions"]>[] = [

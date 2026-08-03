@@ -5,6 +5,7 @@ import {
   findCommandResult,
   getCommand,
   getReceipt,
+  resolveCommandResult,
   type Database
 } from "@qintopia/db";
 import { stableHash } from "@qintopia/domain";
@@ -88,6 +89,52 @@ afterEach(async () => {
 });
 
 describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
+  it("durably fences an absent Quote key, replays that fence, and blocks a delayed Quote", async () => {
+    const commandMetadata = metadata("quote-recovery-fence");
+    const fenced = await resolveCommandResult(
+      db,
+      readPrincipal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: commandMetadata.idempotencyKey
+      },
+      metadata("quote-recovery-fence-resolution")
+    );
+    const replay = await resolveCommandResult(
+      db,
+      readPrincipal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: commandMetadata.idempotencyKey
+      },
+      metadata("quote-recovery-fence-retry")
+    );
+
+    expect(fenced).toMatchObject({
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      correlationId: "correlation-quote-recovery-fence-resolution",
+      error: { code: "COMMAND_INTERRUPTED", retryable: false },
+      resourceRefs: [],
+      factRefs: []
+    });
+    expect(replay).toEqual(fenced);
+    expect(await artifactCounts()).toEqual([0, 1, 1, 1]);
+
+    await expect(executeQuoteCommand(db, readPrincipal, baseInput, commandMetadata))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED", retryable: false });
+    expect(await artifactCounts()).toEqual([0, 1, 1, 1]);
+    await expect(findCommandResult(
+      db,
+      readPrincipal,
+      demo.propertyId,
+      "CREATE_QUOTE",
+      commandMetadata.idempotencyKey
+    )).resolves.toEqual(fenced);
+  });
+
   it("requires both command headers before creating any artifact", async () => {
     await expect(executeQuoteCommand(db, readPrincipal, baseInput, {
       idempotencyKey: undefined,
@@ -147,6 +194,21 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
       metadata: { quoteInputHash: first.quote.inputHash }
     });
     expect(await artifactCounts()).toEqual([1, 1, 1, 1]);
+
+    await db.updateTable("api_tokens")
+      .set({ revoked_at: new Date() })
+      .where("id", "=", readPrincipal.credentialId)
+      .execute();
+    await expect(resolveCommandResult(
+      db,
+      readPrincipal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: commandMetadata.idempotencyKey
+      },
+      metadata("quote-existing-revoked-recovery")
+    )).rejects.toMatchObject({ code: "TOKEN_REVOKED", retryable: false });
   });
 
   it("canonicalizes an omitted paid stay type before hashing and persistence", async () => {
@@ -325,6 +387,17 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
       await waitForBlockedQuoteOwner();
       expect(await waitForUnknown(commandMetadata.idempotencyKey))
         .toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
+      expect(await resolveCommandResult(
+        db,
+        readPrincipal,
+        {
+          propertyId: demo.propertyId,
+          commandType: "CREATE_QUOTE",
+          idempotencyKey: commandMetadata.idempotencyKey
+        },
+        metadata("quote-in-flight-recovery")
+      )).toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
+      expect(await artifactCounts()).toEqual([0, 0, 0, 0]);
       const retryOutcomes = await Promise.race([
         Promise.allSettled(Array.from({ length: 24 }, () => (
           executeQuoteCommand(db, readPrincipal, baseInput, commandMetadata)
@@ -347,6 +420,7 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
     const result = await owner;
     expect(await findCommandResult(db, readPrincipal, demo.propertyId, "CREATE_QUOTE", commandMetadata.idempotencyKey))
       .toEqual(result.receipt);
+    expect(await artifactCounts()).toEqual([1, 1, 1, 1]);
   });
 
   it("rolls back Quote, execution, Receipt, and audit when either pricing or Receipt persistence fails", async () => {
@@ -357,7 +431,7 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
     }, pricingFailureMetadata)).rejects.toMatchObject({ code: "PRICING_POLICY_UNCONFIGURED" });
     expect(await artifactCounts()).toEqual([0, 0, 0, 0]);
     await expect(findCommandResult(db, readPrincipal, demo.propertyId, "CREATE_QUOTE", pricingFailureMetadata.idempotencyKey))
-      .resolves.toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+      .resolves.toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
 
     await sql.raw(`
       CREATE OR REPLACE FUNCTION fail_quote_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -369,7 +443,7 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
     await expect(executeQuoteCommand(db, readPrincipal, baseInput, receiptFailureMetadata)).rejects.toBeDefined();
     expect(await artifactCounts()).toEqual([0, 0, 0, 0]);
     await expect(findCommandResult(db, readPrincipal, demo.propertyId, "CREATE_QUOTE", receiptFailureMetadata.idempotencyKey))
-      .resolves.toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+      .resolves.toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
     await sql.raw("DROP TRIGGER fail_quote_receipt_before_insert ON command_receipts").execute(db);
     await expect(executeQuoteCommand(db, readPrincipal, baseInput, receiptFailureMetadata))
       .resolves.toMatchObject({ receipt: { executionStatus: "EXECUTED", businessCommitted: true } });
@@ -387,6 +461,6 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
     await expect(executeQuoteCommand(db, readPrincipal, baseInput, commandMetadata)).rejects.toBeDefined();
     expect(await artifactCounts()).toEqual([0, 0, 0, 0]);
     await expect(findCommandResult(db, readPrincipal, demo.propertyId, "CREATE_QUOTE", commandMetadata.idempotencyKey))
-      .resolves.toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+      .resolves.toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
   });
 });

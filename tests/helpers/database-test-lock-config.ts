@@ -16,7 +16,8 @@ export const resetDatabaseTargets = [
   ["OPERATIONAL_REFERENCES_INTEGRATION_DATABASE_URL", "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_operational_references"],
   ["OPERATIONAL_REFERENCES_HISTORY_DATABASE_URL", "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_operational_references_history"],
   ["MEMBER_PROFILE_LIFECYCLE_DATABASE_URL", "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_member_profile_lifecycle"],
-  ["MEMBER_ENTITLEMENT_EXPIRY_DATABASE_URL", "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_member_entitlement_expiry"]
+  ["MEMBER_ENTITLEMENT_EXPIRY_DATABASE_URL", "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_member_entitlement_expiry"],
+  ["STAY_COLLECTION_MEMBERSHIP_CONVERSION_DATABASE_URL", "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_stay_collection_membership_conversion"]
 ] as const;
 
 function databaseName(urlValue: string): string {

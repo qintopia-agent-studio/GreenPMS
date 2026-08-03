@@ -49,6 +49,7 @@ export const commandTypes = [
   "RECORD_COLLECTION",
   "RECORD_REFUND",
   "REVERSE_FACT",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "CHECK_IN",
   "CHECK_OUT",
   "REFRESH_MEMBER_COVERAGE",
@@ -271,6 +272,43 @@ export interface StayTotalCashLineDto {
 
 export type CashLineDto = NightlyCashLineDto | StayTotalCashLineDto;
 
+export interface QuoteStayTotalCashLineDto {
+  lineKind: "STAY_TOTAL";
+  arrivalDate: string;
+  departureDate: string;
+  inventoryUnitId: string;
+  description: string;
+  pricingBandAnchorNights: 1 | 7 | 14 | 30;
+  pricingSummary: string;
+  amount: MoneyDto;
+}
+
+export type QuoteCashLineDto = NightlyCashLineDto | QuoteStayTotalCashLineDto;
+
+export interface QuotePricingExplanationDto {
+  pricingModel: "NIGHTLY" | "DURATION_BAND_TOTAL" | "FREE" | "MEMBER_ENTITLEMENT";
+  totalNights: number;
+  quoteAmount: MoneyDto;
+  amountField: "currentContractAmount";
+  summary: string;
+  agentInstruction: string;
+  durationBand?: {
+    anchorNights: 1 | 7 | 14 | 30;
+    finalAmount: MoneyDto;
+    roundingRule: "FINAL_STAY_TOTAL_WHOLE_YUAN_HALF_UP";
+    auditCalculationFieldsAreAmounts: false;
+    segments: Array<{
+      inventoryUnitId: string;
+      pricingProductCode: string;
+      arrivalDate: string;
+      departureDate: string;
+      nights: number;
+      anchorAmount: MoneyDto;
+      summary: string;
+    }>;
+  };
+}
+
 export interface QuoteDto {
   quoteId: string;
   propertyId: string;
@@ -280,11 +318,13 @@ export interface QuoteDto {
   departureDate: string;
   pricingPolicyVersionId: string;
   coverageSet: CoverageItemDto[];
-  cashLines: CashLineDto[];
+  cashLines: QuoteCashLineDto[];
   cashRemainder: MoneyDto;
   currentContractAmount: MoneyDto;
+  pricingExplanation?: QuotePricingExplanationDto;
   expiresAt: string;
   memberId?: string;
+  memberContractId?: string;
 }
 
 export interface CreateQuoteCommandInputDto {
@@ -298,8 +338,13 @@ export interface CreateQuoteCommandInputDto {
   memberContractId?: string;
 }
 
-export interface StoredQuoteDto extends QuoteDto {
+export interface StoredQuoteDto extends Omit<QuoteDto, "cashLines"> {
+  cashLines: CashLineDto[];
   memberContractId?: string;
+  inputHash: string;
+}
+
+export interface QuoteReadDto extends QuoteDto {
   inputHash: string;
 }
 
@@ -322,7 +367,7 @@ export const roomStatusStatuses = [
 ] as const;
 export type RoomStatusStatus = (typeof roomStatusStatuses)[number];
 
-export const ROOM_STATUS_MAX_QUERY_NIGHTS = 90;
+export const ROOM_STATUS_MAX_QUERY_NIGHTS = 30;
 export const ROOM_STATUS_OPERATIONAL_TASK_LIMIT = 500;
 
 export const roomStatusActionCodes = [
@@ -449,6 +494,12 @@ export interface RoomStatusBedOccupancyDto {
   occupants: RoomStatusBedOccupantDto[];
 }
 
+export interface RoomStatusAvailabilitySummaryDto {
+  serviceDate: string;
+  availableRooms: number;
+  availableBeds: number;
+}
+
 export interface RoomStatusUnitDto {
   id: string;
   propertyId: string;
@@ -515,6 +566,7 @@ export interface RoomStatusBoardDto {
     totalPages: number;
   };
   operationalTasks: RoomStatusOperationalTaskDto[];
+  availabilitySummary: RoomStatusAvailabilitySummaryDto[];
   rooms: RoomStatusUnitDto[];
 }
 
@@ -550,7 +602,7 @@ export interface ReceiptDto {
 }
 
 export interface CreateQuoteCommandResponseDto {
-  quote: StoredQuoteDto;
+  quote: QuoteReadDto;
   receipt: ReceiptDto;
 }
 
@@ -690,7 +742,8 @@ export const orderActionCodes = [
   "MARK_NO_SHOW",
   "REVOKE_CHECK_IN",
   "RECORD_COLLECTION",
-  "RECORD_REFUND"
+  "RECORD_REFUND",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
 ] as const;
 export type OrderActionCode = (typeof orderActionCodes)[number];
 

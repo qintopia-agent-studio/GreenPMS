@@ -43,6 +43,33 @@ function runMigration() {
   );
 }
 
+async function installMigrationHistory(
+  rows: ReadonlyArray<{ name: string; appliedAt: string | null }>
+): Promise<void> {
+  await recreateDatabase();
+  const client = new pg.Client({ connectionString: databaseUrl.toString() });
+  await client.connect();
+  try {
+    await client.query(`
+      CREATE TABLE schema_migrations (
+        name text PRIMARY KEY,
+        applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    if (rows.some((row) => row.appliedAt === null)) {
+      await client.query("ALTER TABLE schema_migrations ALTER COLUMN applied_at DROP NOT NULL");
+    }
+    for (const row of rows) {
+      await client.query(
+        "INSERT INTO schema_migrations(name, applied_at) VALUES ($1, $2::timestamptz)",
+        [row.name, row.appliedAt]
+      );
+    }
+  } finally {
+    await client.end();
+  }
+}
+
 beforeAll(async () => {
   await recreateDatabase();
 });
@@ -52,7 +79,12 @@ afterAll(dropDatabase);
 describe("database migration concurrency", () => {
   it("serializes two fresh-database migrators and applies every migration once", async () => {
     const outcomes = await Promise.allSettled([runMigration(), runMigration()]);
-    expect(outcomes.every((outcome) => outcome.status === "fulfilled")).toBe(true);
+    const failures = outcomes.flatMap((outcome) => outcome.status === "rejected"
+      ? [(outcome.reason as { stderr?: string; message?: string }).stderr
+        ?? (outcome.reason as { message?: string }).message
+        ?? String(outcome.reason)]
+      : []);
+    expect(failures).toEqual([]);
 
     const client = new pg.Client({ connectionString: databaseUrl.toString() });
     await client.connect();
@@ -62,12 +94,21 @@ describe("database migration concurrency", () => {
         .sort();
       const rows = await client.query<{ name: string }>("SELECT name FROM schema_migrations ORDER BY name");
       expect(rows.rows.map((row) => row.name)).toEqual(expectedMigrations);
-      expect(expectedMigrations).toHaveLength(32);
+      const chronologicalRows = await client.query<{ name: string }>(
+        "SELECT name FROM schema_migrations ORDER BY applied_at, name"
+      );
+      expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
+      expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
+        .toBe(0);
+      expect(expectedMigrations).toHaveLength(35);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
       expect(expectedMigrations).toContain("018_member_stay_identity_and_coverage_guards.sql");
       expect(expectedMigrations).toContain("019_member_stay_booking_channel_rules.sql");
+      expect(expectedMigrations).toContain("033_stay_collection_membership_conversion.sql");
+      expect(expectedMigrations).toContain("034_stay_conversion_reversal_bridge_guard.sql");
+      expect(expectedMigrations).toContain("035_stage13_conversion_execution_state_guards.sql");
       expect(expectedMigrations).toContain("020_whole_room_occupants.sql");
       expect(expectedMigrations).toContain("021_defer_internal_use.sql");
       expect(expectedMigrations).toContain("022_order_occupant_corrections.sql");
@@ -97,6 +138,65 @@ describe("database migration concurrency", () => {
     }
   });
 
+  it("rejects unknown, gapped, or timestamp-reordered migration history before applying DDL", async () => {
+    const invalidHistories = [
+      {
+        label: "known migration gap",
+        rows: [
+          { name: "001_initial.sql", appliedAt: "2026-01-01T00:00:00Z" },
+          { name: "003_active_coverage_uniqueness.sql", appliedAt: "2026-01-03T00:00:00Z" }
+        ]
+      },
+      {
+        label: "unknown future migration",
+        rows: [
+          { name: "999_future_application.sql", appliedAt: "2026-01-01T00:00:00Z" }
+        ]
+      },
+      {
+        label: "applied-at order inversion",
+        rows: [
+          { name: "001_initial.sql", appliedAt: "2026-01-02T00:00:00Z" },
+          { name: "002_immutability.sql", appliedAt: "2026-01-01T00:00:00Z" }
+        ]
+      },
+      {
+        label: "future applied-at value",
+        rows: [
+          { name: "001_initial.sql", appliedAt: "2026-01-01T00:00:00Z" },
+          { name: "002_immutability.sql", appliedAt: "2099-01-01T00:00:00Z" }
+        ]
+      },
+      {
+        label: "null applied-at value",
+        rows: [
+          { name: "001_initial.sql", appliedAt: null }
+        ]
+      }
+    ] as const;
+
+    for (const history of invalidHistories) {
+      await installMigrationHistory(history.rows);
+      await expect(runMigration(), history.label).rejects.toMatchObject({
+        stderr: expect.stringContaining("exact ordered prefix")
+      });
+
+      const client = new pg.Client({ connectionString: databaseUrl.toString() });
+      await client.connect();
+      try {
+        const historyRows = await client.query<{ name: string }>(
+          "SELECT name FROM schema_migrations ORDER BY name"
+        );
+        expect(historyRows.rows.map((row) => row.name), history.label)
+          .toEqual(history.rows.map((row) => row.name).sort());
+        expect((await client.query("SELECT to_regclass('properties') AS relation")).rows[0]?.relation)
+          .toBeNull();
+      } finally {
+        await client.end();
+      }
+    }
+  });
+
   it("upgrades a populated revision-010 database with a historical maintenance lock longer than 90 nights", async () => {
     await recreateDatabase();
     const migrationNames = (await readdir("packages/db/src/migrations"))
@@ -109,6 +209,9 @@ describe("database migration concurrency", () => {
         await client.query(await readFile(`packages/db/src/migrations/${migrationName}`, "utf8"));
         await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [migrationName]);
       }
+      await client.query(
+        "UPDATE schema_migrations SET applied_at = '2026-01-01T00:00:00Z'::timestamptz"
+      );
     } finally {
       await client.end();
     }

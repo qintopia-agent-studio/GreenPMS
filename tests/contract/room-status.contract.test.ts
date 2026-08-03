@@ -134,7 +134,7 @@ describe("RoomStatus Query and Command API contract", () => {
     const responseSchema = path.get.responses["200"].content["application/json"].schema;
     expect(responseSchema).toMatchObject({
       additionalProperties: false,
-      required: ["propertyId", "businessDate", "range", "dates", "asOf", "freshUntil", "revision", "accessLevel", "projectionState", "filterOptions", "page", "operationalTasks", "rooms"]
+      required: ["propertyId", "businessDate", "range", "dates", "asOf", "freshUntil", "revision", "accessLevel", "projectionState", "filterOptions", "page", "operationalTasks", "availabilitySummary", "rooms"]
     });
     expect(path.get.parameters
       .filter((parameter: { in: string }) => parameter.in === "query")
@@ -151,6 +151,8 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(JSON.stringify(responseSchema)).toContain("claimIds");
     expect(JSON.stringify(responseSchema)).toContain("blockingFactKind");
     expect(JSON.stringify(responseSchema)).toContain("filterOptions");
+    expect(JSON.stringify(responseSchema)).toContain("availableRooms");
+    expect(JSON.stringify(responseSchema)).toContain("availableBeds");
     const responseProperties = responseSchema.properties as Record<string, JsonSchema>;
     expect(responseProperties.dates!.maxItems).toBe(ROOM_STATUS_MAX_QUERY_NIGHTS);
     expect(responseProperties.operationalTasks!.maxItems).toBe(ROOM_STATUS_OPERATIONAL_TASK_LIMIT);
@@ -442,7 +444,7 @@ describe("RoomStatus Query and Command API contract", () => {
     }
   });
 
-  it("rejects an interval over 90 nights and keeps the old availability endpoint unchanged", async () => {
+  it("rejects a room-status interval over 30 nights and keeps the old availability endpoint unchanged", async () => {
     const tooLong = await app.inject({
       method: "GET",
       url: `/api/v1/properties/${demo.propertyId}/room-status?arrivalDate=2028-01-01&departureDate=2028-04-02`,

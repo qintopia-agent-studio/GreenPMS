@@ -34,6 +34,7 @@ import {
   listMemberSummaries,
   loadReferenceCatalog,
   projectStoredPreviewForRead,
+  resolveCommandResult,
   confirmCommandPreview,
   type ConfirmRequest,
   type Database
@@ -72,6 +73,7 @@ import {
   HistoricalRecoverableCommandTypeSchema,
   RoomStatusBoardSchema,
   RoomStatusQuerySchema,
+  ResolveCommandResultSchema,
   HistoricalStoredPreviewResponseSchema,
   TokensResponseSchema,
   WriteHeaders
@@ -250,7 +252,7 @@ export async function buildServer(db: Kysely<Database>) {
   app.get("/api/v1/meta", { schema: { tags: ["queries"], response: { 200: MetaResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
     const propertyIds = [...principal.propertyAccess.keys()];
-    const [properties, units, policies, members, memberContracts] = await Promise.all([
+    const [properties, units, policies, members, memberContracts, membershipProducts] = await Promise.all([
       propertyIds.length ? db.selectFrom("properties").selectAll().where("id", "in", propertyIds).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("inventory_units").selectAll().where("property_id", "in", propertyIds).where("active", "=", true).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("pricing_policy_versions").selectAll().where("property_id", "in", propertyIds).orderBy("code").execute() : [],
@@ -261,9 +263,10 @@ export async function buildServer(db: Kysely<Database>) {
         .where("member_property_links.property_id", "in", propertyIds)
         .orderBy("members.full_name")
         .execute() : [],
-      propertyIds.length ? db.selectFrom("member_contracts").selectAll().where("property_id", "in", propertyIds).orderBy("member_name").execute() : []
+      propertyIds.length ? db.selectFrom("member_contracts").selectAll().where("property_id", "in", propertyIds).orderBy("member_name").execute() : [],
+      propertyIds.length ? db.selectFrom("membership_products").selectAll().where("status", "=", "PUBLISHED").orderBy("code").execute() : []
     ]);
-    return { properties, inventoryUnits: units, pricingPolicyVersions: policies, members, memberContracts };
+    return { properties, inventoryUnits: units, pricingPolicyVersions: policies, members, memberContracts, membershipProducts };
   });
 
   app.get("/api/v1/properties/:id/availability", {
@@ -547,6 +550,39 @@ export async function buildServer(db: Kysely<Database>) {
     const principal = await requirePrincipal(db, request);
     const query = request.query as { propertyId: string; commandType: HistoricalRecoverableCommandType; idempotencyKey: string };
     return findCommandResult(db, principal, query.propertyId, query.commandType, query.idempotencyKey);
+  });
+
+  app.post("/api/v1/command-results/resolve", {
+    config: { rateLimit: { max: positiveIntegerEnv("COMMAND_RESULT_RESOLVE_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "command-result-resolutions" } },
+    schema: {
+      tags: ["receipts"],
+      headers: WriteHeaders,
+      body: ResolveCommandResultSchema,
+      response: {
+        200: HistoricalCommandResultRecoverySchema,
+        400: ErrorResponse,
+        401: ErrorResponse,
+        403: ErrorResponse,
+        409: ErrorResponse,
+        429: ErrorResponse,
+        ...InternalErrorResponses
+      }
+    }
+  }, async (request) => {
+    const principal = await requirePrincipal(db, request);
+    return resolveCommandResult(
+      db,
+      principal,
+      request.body as {
+        propertyId: string;
+        commandType: HistoricalRecoverableCommandType;
+        idempotencyKey: string;
+      },
+      {
+        idempotencyKey: request.headers["idempotency-key"] as string | undefined,
+        correlationId: request.headers["x-correlation-id"] as string | undefined
+      }
+    );
   });
 
   app.get("/api/v1/audit", {

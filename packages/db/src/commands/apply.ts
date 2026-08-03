@@ -242,6 +242,42 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     return;
   }
 
+  if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+    const orderId = requireString(input, "orderId");
+    const memberId = requireString(input, "memberId");
+    await lockOrder(trx, orderId);
+    const context = await loadOrderContext(trx, orderId);
+    if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
+    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${memberId}`}, 0::bigint))`.execute(trx);
+    await trx.selectFrom("members").select("id").where("id", "=", memberId).forUpdate().executeTakeFirst();
+    await trx.selectFrom("membership_products").select("id")
+      .where("id", "=", requireString(input, "membershipProductId"))
+      .forShare()
+      .executeTakeFirst();
+    const rawCollectionFactIds = input.collectionFactIds;
+    if (Array.isArray(rawCollectionFactIds)) {
+      const collectionFactIds = [...new Set(rawCollectionFactIds
+        .filter((value): value is string => typeof value === "string" && value.trim() !== "")
+        .map((value) => value.trim()))].sort();
+      for (const factId of collectionFactIds) {
+        await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:stay-collection-transfer:${factId}`}, 0::bigint))`.execute(trx);
+      }
+      if (collectionFactIds.length > 0) {
+        await trx.selectFrom("collection_facts")
+          .select("fact_id")
+          .where("fact_id", "in", collectionFactIds)
+          .forUpdate()
+          .execute();
+        await trx.selectFrom("stay_collection_membership_transfers")
+          .select("id")
+          .where("source_collection_fact_id", "in", collectionFactIds)
+          .forUpdate()
+          .execute();
+      }
+    }
+    return;
+  }
+
   const orderId = requireString(input, "orderId");
   await lockOrder(trx, orderId);
   const context = await loadOrderContext(trx, orderId);
@@ -877,6 +913,285 @@ export async function applyCommand(trx: Transaction<Database>, options: {
 
   const orderId = requireString(effect, "orderId");
   const context = await loadOrderContext(trx, orderId);
+
+  if (options.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+    if (requireString(effect, "operation") !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+      throw new DomainError("INTERNAL_ERROR", "Stay collection conversion effect has an invalid operation", 500);
+    }
+    const member = nestedObject(effect, "member");
+    const product = nestedObject(effect, "product");
+    const transfer = nestedObject(effect, "transfer");
+    const membershipPricing = nestedObject(effect, "membershipPricing");
+    const entitlement = nestedObject(effect, "entitlement");
+    const pricing = pricingSnapshot(effect, {
+      stayType: context.order.stay_type,
+      memberId: null,
+      memberContractId: null
+    });
+    const listedPrice = moneyMinor(membershipPricing.listedPrice, "membershipPricing.listedPrice");
+    const agreedPrice = moneyMinor(membershipPricing.agreedPrice, "membershipPricing.agreedPrice");
+    const adjustment = moneyMinor(membershipPricing.adjustment, "membershipPricing.adjustment");
+    const adjustmentReason = typeof membershipPricing.adjustmentReason === "string" ? membershipPricing.adjustmentReason : null;
+    const transferTotal = moneyMinor(transfer.total, "transfer.total");
+    const transferCollectionsValue = transfer.collections;
+    if (!Array.isArray(transferCollectionsValue) || transferCollectionsValue.length === 0) {
+      throw new DomainError("INTERNAL_ERROR", "Stay collection conversion effect has no source collection", 500);
+    }
+    const transferCollections = transferCollectionsValue.map((value, index) => {
+      const item = requireObject(value, `transfer.collections[${index}]`);
+      return {
+        factId: requireString(item, "factId"),
+        amount: moneyMinor(item.amount, `transfer.collections[${index}].amount`)
+      };
+    });
+    const transferCollectionIds = transferCollections.map((item) => item.factId);
+    if (new Set(transferCollectionIds).size !== transferCollectionIds.length) {
+      throw new DomainError("INTERNAL_ERROR", "Stay collection conversion effect contains duplicate source collections", 500);
+    }
+    const transferAmountMinor = transferCollections.reduce((sum, item) => sum + item.amount.minorUnits, 0);
+    if (transferAmountMinor !== transferTotal.minorUnits) {
+      throw new DomainError("INTERNAL_ERROR", "Stay collection conversion transfer total is inconsistent", 500);
+    }
+    const entitlementUnitKind = requireString(entitlement, "entitlementUnitKind");
+    const allowedInventoryKind = requireString(product, "allowedInventoryKind");
+    if (entitlementUnitKind !== "ROOM_NIGHT" && entitlementUnitKind !== "BED_NIGHT") throw new DomainError("INTERNAL_ERROR", "Invalid conversion entitlement unit", 500);
+    if (allowedInventoryKind !== "ROOM" && allowedInventoryKind !== "BED") throw new DomainError("INTERNAL_ERROR", "Invalid conversion inventory kind", 500);
+    const entitlementUnits = entitlement.entitlementUnits;
+    const consumedUnits = entitlement.consumedUnits;
+    const remainingUnits = entitlement.remainingUnits;
+    const productVersion = product.version;
+    if (!Number.isInteger(entitlementUnits) || (entitlementUnits as number) <= 0
+      || !Number.isInteger(consumedUnits) || (consumedUnits as number) <= 0
+      || !Number.isInteger(remainingUnits) || (remainingUnits as number) < 0
+      || (entitlementUnits as number) - (consumedUnits as number) !== remainingUnits
+      || !Number.isInteger(productVersion) || (productVersion as number) <= 0) {
+      throw new DomainError("INTERNAL_ERROR", "Invalid conversion membership product snapshot", 500);
+    }
+    const serviceDates = stringArray(entitlement, "serviceDates");
+    if (serviceDates.length !== consumedUnits || new Set(serviceDates).size !== serviceDates.length) {
+      throw new DomainError("INTERNAL_ERROR", "Conversion consumption dates do not match consumed units", 500);
+    }
+    const validFrom = requireString(entitlement, "validFrom");
+    const validUntil = requireString(entitlement, "validUntil");
+    const remainingPayment = effect.remainingPayment === null ? null : nestedObject(effect, "remainingPayment");
+    const remainingPaymentAmount = remainingPayment ? moneyMinor(remainingPayment.amount, "remainingPayment.amount") : null;
+    if (listedPrice.currency !== agreedPrice.currency
+      || adjustment.currency !== agreedPrice.currency
+      || transferTotal.currency !== agreedPrice.currency
+      || pricing.currency !== agreedPrice.currency
+      || transferCollections.some((item) => item.amount.currency !== agreedPrice.currency)
+      || (remainingPaymentAmount && remainingPaymentAmount.currency !== agreedPrice.currency)
+      || agreedPrice.minorUnits - transferTotal.minorUnits !== (remainingPaymentAmount?.minorUnits ?? 0)
+      || adjustment.minorUnits !== agreedPrice.minorUnits - listedPrice.minorUnits) {
+      throw new DomainError("INTERNAL_ERROR", "Stay collection conversion money summary is inconsistent", 500);
+    }
+
+    const membershipOrderId = newId("membership_order");
+    await trx.insertInto("membership_orders").values({
+      id: membershipOrderId,
+      property_id: propertyId,
+      member_id: requireString(member, "memberId"),
+      product_id: requireString(product, "productId"),
+      product_code: requireString(product, "code"),
+      product_version: productVersion as number,
+      product_name: requireString(product, "name"),
+      listed_price_minor: listedPrice.minorUnits,
+      agreed_price_minor: agreedPrice.minorUnits,
+      price_adjustment_minor: adjustment.minorUnits,
+      price_adjustment_reason: adjustmentReason,
+      currency: agreedPrice.currency,
+      entitlement_unit_kind: entitlementUnitKind,
+      entitlement_units: entitlementUnits as number,
+      allowed_room_type_code: requireString(product, "allowedRoomTypeCode"),
+      allowed_inventory_kind: allowedInventoryKind,
+      status: "DRAFT",
+      activated_at: null,
+      valid_from: null,
+      valid_until: null,
+      contract_id: null,
+      entitlement_lot_id: null,
+      version: 1,
+      created_by_command_id: options.commandId,
+      activated_by_command_id: null
+    }).execute();
+
+    const membershipTransferPaymentFactIds: string[] = [];
+    const lodgingReversalFactIds: string[] = [];
+    const transferIds: string[] = [];
+    for (const item of transferCollections) {
+      const membershipPaymentFactId = newId("membership_payment");
+      await trx.insertInto("membership_payment_facts").values({
+        fact_id: membershipPaymentFactId,
+        membership_order_id: membershipOrderId,
+        fact_type: "COLLECTION",
+        amount_minor: item.amount.minorUnits,
+        net_effect_minor: item.amount.minorUnits,
+        currency: item.amount.currency,
+        transaction_reference: null,
+        corrects_fact_id: null,
+        reverses_fact_id: null,
+        source_type: "STAY_COLLECTION_TRANSFER",
+        source_order_id: orderId,
+        source_collection_fact_id: item.factId,
+        note: "升级会员：住宿收款转入",
+        command_id: options.commandId
+      }).execute();
+      const reversalFactId = newId("fact");
+      await trx.insertInto("collection_facts").values({
+        fact_id: reversalFactId,
+        order_id: orderId,
+        fact_type: "REVERSAL",
+        amount_minor: item.amount.minorUnits,
+        net_effect_minor: -item.amount.minorUnits,
+        currency: item.amount.currency,
+        references_fact_id: null,
+        reverses_fact_id: item.factId,
+        method: "REVERSAL",
+        note: "升级会员：住宿收款已用于会员订单",
+        transaction_reference: null,
+        pricing_revision_id: context.revision.id,
+        command_id: options.commandId
+      }).execute();
+      const transferId = newId("transfer");
+      await trx.insertInto("stay_collection_membership_transfers").values({
+        id: transferId,
+        property_id: propertyId,
+        order_id: orderId,
+        source_collection_fact_id: item.factId,
+        source_reversal_fact_id: reversalFactId,
+        membership_order_id: membershipOrderId,
+        membership_payment_fact_id: membershipPaymentFactId,
+        command_id: options.commandId
+      }).execute();
+      membershipTransferPaymentFactIds.push(membershipPaymentFactId);
+      lodgingReversalFactIds.push(reversalFactId);
+      transferIds.push(transferId);
+    }
+
+    const membershipPaymentFactIds = [...membershipTransferPaymentFactIds];
+    if (remainingPayment) {
+      const remainingPaymentFactId = newId("membership_payment");
+      await trx.insertInto("membership_payment_facts").values({
+        fact_id: remainingPaymentFactId,
+        membership_order_id: membershipOrderId,
+        fact_type: "COLLECTION",
+        amount_minor: remainingPaymentAmount!.minorUnits,
+        net_effect_minor: remainingPaymentAmount!.minorUnits,
+        currency: remainingPaymentAmount!.currency,
+        transaction_reference: requireTransactionReference(remainingPayment.transactionReference),
+        corrects_fact_id: null,
+        reverses_fact_id: null,
+        note: typeof remainingPayment.note === "string" ? remainingPayment.note : "",
+        command_id: options.commandId
+      }).execute();
+      membershipPaymentFactIds.push(remainingPaymentFactId);
+    }
+
+    const contractId = newId("contract");
+    const lotId = newId("lot");
+    const activatedAt = new Date();
+    await trx.insertInto("member_contracts").values({
+      id: contractId,
+      property_id: propertyId,
+      member_id: requireString(member, "memberId"),
+      member_name: requireString(member, "fullName"),
+      status: "ACTIVE",
+      valid_from: validFrom,
+      valid_until: validUntil,
+      version: 1,
+      membership_order_id: membershipOrderId
+    }).execute();
+    await trx.insertInto("entitlement_lots").values({
+      id: lotId,
+      contract_id: contractId,
+      unit_kind: entitlementUnitKind,
+      total_units: entitlementUnits as number,
+      expires_on: validUntil,
+      version: 1
+    }).execute();
+    const updatedMembershipOrder = await trx.updateTable("membership_orders").set({
+      status: "ACTIVE",
+      activated_at: activatedAt,
+      valid_from: validFrom,
+      valid_until: validUntil,
+      contract_id: contractId,
+      entitlement_lot_id: lotId,
+      version: sql`version + 1`,
+      activated_by_command_id: options.commandId,
+      updated_at: activatedAt
+    }).where("id", "=", membershipOrderId).where("status", "=", "DRAFT").returning("id").executeTakeFirst();
+    if (!updatedMembershipOrder) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "会员订单已经生效", 409);
+
+    const conversionLedgerFactIds: string[] = [];
+    for (const serviceDate of serviceDates) {
+      const factId = newId("fact");
+      await trx.insertInto("entitlement_ledger").values({
+        fact_id: factId,
+        lot_id: lotId,
+        entry_type: "CONVERSION_CONSUME",
+        quantity_delta: -1,
+        service_date: serviceDate,
+        order_id: orderId,
+        coverage_id: null,
+        reason: "STAY_COLLECTION_TO_MEMBERSHIP_CONSUMED",
+        command_id: options.commandId
+      }).execute();
+      conversionLedgerFactIds.push(factId);
+    }
+    await incrementContractAndLotVersions(trx, contractId, [lotId]);
+
+    const amendmentId = await appendAmendment(trx, {
+      orderId,
+      sequence: context.order.version + 1,
+      amendmentType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      reasonCode: options.reason.code,
+      reasonNote: options.reason.note,
+      priorVersion: context.order.version,
+      payload: effect,
+      commandId: options.commandId
+    });
+    const revisionId = await insertRevision(trx, {
+      orderId,
+      revisionNo: context.revision.revisionNo + 1,
+      amendmentId,
+      policyVersionId: context.order.pricing_policy_version_id,
+      arrivalDate: context.order.arrival_date,
+      departureDate: context.order.departure_date,
+      pricing
+    });
+    await trx.updateTable("orders").set({
+      current_revision_id: revisionId,
+      version: context.order.version + 1,
+      updated_at: new Date()
+    }).where("id", "=", orderId).execute();
+    return {
+      persistedResult: {
+        orderId,
+        memberId: requireString(member, "memberId"),
+        amendmentId,
+        pricingRevisionId: revisionId,
+        membershipOrderId,
+        status: "ACTIVE",
+        contractId,
+        entitlementLotId: lotId,
+        transferredCollectionFactIds: transferCollectionIds,
+        lodgingReversalFactIds,
+        membershipPaymentFactIds,
+        transferIds,
+        conversionLedgerFactIds,
+        transferredAmount: { currency: transferTotal.currency, minorUnits: transferTotal.minorUnits },
+        membershipAgreedPrice: { currency: agreedPrice.currency, minorUnits: agreedPrice.minorUnits },
+        remainingPaymentAmount: remainingPaymentAmount
+          ? { currency: remainingPaymentAmount.currency, minorUnits: remainingPaymentAmount.minorUnits }
+          : { currency: agreedPrice.currency, minorUnits: 0 },
+        entitlementUnitKind,
+        convertedUnits: consumedUnits,
+        remainingUnits
+      },
+      resourceRefs: [orderId, amendmentId, revisionId, membershipOrderId, contractId, lotId, ...transferIds],
+      factRefs: [...lodgingReversalFactIds, ...membershipPaymentFactIds, ...conversionLedgerFactIds]
+    };
+  }
 
   if (options.commandType === "CORRECT_ORDER_OCCUPANT") {
     const occupantId = requireString(effect, "occupantId");

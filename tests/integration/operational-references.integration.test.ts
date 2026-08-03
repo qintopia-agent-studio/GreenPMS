@@ -147,7 +147,7 @@ async function recreateDatabaseThrough008(url: string): Promise<Kysely<Database>
   const historicalDb = createDatabase(url);
   await historicalDb.insertInto("properties").values({
     id: demo.propertyId,
-    code: "QTP-SH",
+    code: "QTP-XA",
     name: "QinTopia legacy migration fixture",
     timezone: "Asia/Shanghai",
     currency: "CNY"
@@ -319,6 +319,22 @@ describe.sequential("booking channels and external transaction references on Pos
       commandType: "RECORD_COLLECTION",
       input: { propertyId: demo.propertyId, orderId, amountMinor: 100, method: "OTHER" }
     }, metadata("missing-other-note"))).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "必须填写其他收款说明" });
+    for (const method of ["CASH", "OTHER"] as const) {
+      await expect(createCommandPreview(db, principal, {
+        commandType: "RECORD_COLLECTION",
+        input: {
+          propertyId: demo.propertyId,
+          orderId,
+          amountMinor: 100,
+          method,
+          transactionReference: `MUST-NOT-ACCEPT-${method}`,
+          note: method === "CASH" ? "现金收款人" : "其他收款说明"
+        }
+      }, metadata(`forbidden-${method.toLowerCase()}-reference`))).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: method === "CASH" ? "现金收退款不填写交易单号" : "其他收退款不填写交易单号"
+      });
+    }
     expect(await commandArtifactCounts()).toEqual(before);
 
     const collectionPreview = await createCommandPreview(db, principal, {
@@ -345,6 +361,22 @@ describe.sequential("booking channels and external transaction references on Pos
     const collectionReplay = await confirmCommandPreview(db, principal, collectionPreview.preview.previewId, collectionConfirmation, collectionMetadata);
     expect(collectionReplay.receiptId).toBe(collectionOne.receiptId);
     expect(collectionOne.result).toMatchObject({ transactionReference: "TEST-TXN-COLLECTION-ONE" });
+
+    await expect(createCommandPreview(db, principal, {
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 100,
+        referencesFactId: collectionOne.factRefs[0],
+        method: "WECOM",
+        transactionReference: "MUST-NOT-ACCEPT-WECOM-REFUND",
+        note: "企业微信原路退款"
+      }
+    }, metadata("forbidden-wecom-refund-reference"))).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "企业微信退款沿用原收款交易单号，不填写新的退款交易单号"
+    });
 
     const beforeInvalidRefunds = await commandArtifactCounts();
     for (const note of [undefined, " \t\n "]) {
@@ -637,6 +669,7 @@ describe.sequential("booking channels and external transaction references on Pos
       ...externalBaseFact,
       order_id: wecomOrderId,
       pricing_revision_id: wecomPricingRevisionId,
+      method: "BANK_TRANSFER",
       command_id: "command_direct_wecom_fact_guard"
     };
     await db.insertInto("collection_facts").values({
@@ -657,7 +690,7 @@ describe.sequential("booking channels and external transaction references on Pos
       transaction_reference: "TEST-DIRECT-WECOM-VALID-COLLECTION",
       command_id: "command_direct_wecom_valid_collection"
     }).execute();
-    await db.insertInto("collection_facts").values({
+    await expect(db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_wecom_refund_cash_method",
       fact_type: "REFUND",
@@ -667,7 +700,33 @@ describe.sequential("booking channels and external transaction references on Pos
       method: "CASH",
       transaction_reference: null,
       command_id: "command_direct_wecom_refund_cash_method"
-    }).execute();
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_wecom_refund_original_route" });
+    await expect(db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_cash_transaction_reference",
+      fact_type: "COLLECTION",
+      net_effect_minor: 100,
+      method: "CASH",
+      transaction_reference: "MUST-NOT-PERSIST-CASH"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_cash_other_transaction_reference_null" });
+    await expect(db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_other_transaction_reference",
+      fact_type: "COLLECTION",
+      net_effect_minor: 100,
+      method: "OTHER",
+      transaction_reference: "MUST-NOT-PERSIST-OTHER"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_cash_other_transaction_reference_null" });
+    await expect(db.insertInto("collection_facts").values({
+      ...baseFact,
+      fact_id: "fact_direct_wecom_refund_new_reference",
+      fact_type: "REFUND",
+      net_effect_minor: -10,
+      amount_minor: 10,
+      references_fact_id: "fact_direct_wecom_valid_collection",
+      method: "WECOM",
+      transaction_reference: "MUST-NOT-PERSIST-WECOM-REFUND"
+    }).execute()).rejects.toMatchObject({ constraint: "collection_facts_wecom_refund_transaction_reference_null" });
     await db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_wecom_refund_original_route",
@@ -948,7 +1007,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 032, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 035, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -1497,6 +1556,15 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration032 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/032_wecom_refund_original_route.sql"), "utf8");
         await client.query(migration032);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('032_wecom_refund_original_route.sql')");
+        const migration033 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/033_stay_collection_membership_conversion.sql"), "utf8");
+        await client.query(migration033);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('033_stay_collection_membership_conversion.sql')");
+        const migration034 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/034_stay_conversion_reversal_bridge_guard.sql"), "utf8");
+        await client.query(migration034);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('034_stay_conversion_reversal_bridge_guard.sql')");
+        const migration035 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/035_stage13_conversion_execution_state_guards.sql"), "utf8");
+        await client.query(migration035);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('035_stage13_conversion_execution_state_guards.sql')");
         await client.query("ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only");
         await client.query("UPDATE collection_facts SET pricing_revision_id = NULL WHERE fact_id = 'fact_historical_nulls'");
         await client.query("ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only");

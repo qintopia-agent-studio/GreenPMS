@@ -8,7 +8,7 @@ import type { Database } from "./schema.ts";
 
 const bundledCatalogUrl = new URL("../catalog/qintopia-2026-reference-catalog.json", import.meta.url);
 const defaultPropertyId = "prop_qintopia_demo";
-const defaultPropertyCode = "QTP-SH";
+const defaultPropertyCode = "QTP-XA";
 const referenceOnly = "REFERENCE_ONLY" as const;
 
 type DbExecutor = Kysely<Database> | Transaction<Database>;

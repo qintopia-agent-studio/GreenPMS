@@ -281,6 +281,40 @@ afterEach(async () => {
 });
 
 describe("PostgreSQL room-status projection", () => {
+  it("returns whole-property daily availability before filtering without double-counting split beds", async () => {
+    const inventoryRows = await db.selectFrom("inventory_units")
+      .select(["id", "kind", "parent_room_id", "active"])
+      .where("property_id", "=", demo.propertyId)
+      .execute();
+    const activeRoomIds = new Set(inventoryRows
+      .filter((unit) => unit.kind === "ROOM" && unit.active)
+      .map((unit) => unit.id));
+    const roomIdsWithBeds = new Set(inventoryRows
+      .filter((unit) => unit.kind === "BED")
+      .map((unit) => unit.parent_room_id!)
+    );
+    const expectedAvailableRooms = inventoryRows
+      .filter((unit) => unit.kind === "ROOM" && unit.active && !roomIdsWithBeds.has(unit.id))
+      .length;
+    const expectedAvailableBeds = inventoryRows
+      .filter((unit) => unit.kind === "BED" && unit.active && activeRoomIds.has(unit.parent_room_id!))
+      .length;
+
+    const unfiltered = await board({ arrivalDate: "2034-01-01", departureDate: "2034-01-03" });
+    expect(unfiltered.availabilitySummary).toEqual([
+      { serviceDate: "2034-01-01", availableRooms: expectedAvailableRooms, availableBeds: expectedAvailableBeds },
+      { serviceDate: "2034-01-02", availableRooms: expectedAvailableRooms, availableBeds: expectedAvailableBeds }
+    ]);
+
+    const filteredEmpty = await board({
+      arrivalDate: "2034-01-01",
+      departureDate: "2034-01-03",
+      search: "NO-SUCH-ROOM-STATUS-UNIT"
+    });
+    expect(filteredEmpty.rooms).toEqual([]);
+    expect(filteredEmpty.availabilitySummary).toEqual(unfiltered.availabilitySummary);
+  });
+
   it("aggregates only authoritative split-bed lodging facts before filters and fails closed for ambiguous occupancy", async () => {
     const normal = await createOrder({
       unitId: demo.bedAId,
@@ -2221,7 +2255,7 @@ describe("PostgreSQL room-status projection", () => {
     expect(validateRoomStatusBoardSchema(result), JSON.stringify(validateRoomStatusBoardSchema.errors)).toBe(true);
   });
 
-  it("bumps revision for repricing and member coverage history, excludes pure money, and serves 200 units by 90 nights within 500 ms P95", async () => {
+  it("bumps revision for repricing and member coverage history, excludes pure money, and serves 200 units by 30 nights within 500 ms P95", async () => {
     const created = await createOrder({
       unitId: demo.secondRoomId,
       arrivalDate: "2028-10-01",
@@ -2251,7 +2285,7 @@ describe("PostgreSQL room-status projection", () => {
         propertyId: demo.propertyId,
         orderId,
         amountMinor: 12_000,
-        method: "OTHER",
+        method: "BANK_TRANSFER",
         transactionReference: "ROOM-STATUS-MONEY-REVISION",
         note: "room status money revision probe"
       }
@@ -2306,7 +2340,7 @@ describe("PostgreSQL room-status projection", () => {
     }))).execute();
 
     const firstPageStartedAt = performance.now();
-    const firstPage = await board({ arrivalDate: "2029-01-01", departureDate: "2029-04-01", pageSize: 50 });
+    const firstPage = await board({ arrivalDate: "2029-01-01", departureDate: "2029-01-31", pageSize: 50 });
     const firstPageElapsedMs = performance.now() - firstPageStartedAt;
     expect(firstPage.rooms).toHaveLength(50);
     expect(firstPage.page).toMatchObject({
@@ -2317,7 +2351,7 @@ describe("PostgreSQL room-status projection", () => {
     });
     expect(firstPageElapsedMs).toBeLessThanOrEqual(500);
 
-    const query = () => board({ arrivalDate: "2029-01-01", departureDate: "2029-04-01", pageSize: 200 });
+    const query = () => board({ arrivalDate: "2029-01-01", departureDate: "2029-01-31", pageSize: 200 });
     await query();
     await query();
     const samples: number[] = [];
@@ -2326,7 +2360,7 @@ describe("PostgreSQL room-status projection", () => {
       const result = await query();
       samples.push(performance.now() - start);
       expect(result.rooms.reduce((count, room) => count + 1 + room.children.length, 0)).toBe(200);
-      expect(result.dates).toHaveLength(90);
+      expect(result.dates).toHaveLength(ROOM_STATUS_MAX_QUERY_NIGHTS);
       const serialized = JSON.stringify(result);
       expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(2_100_000);
       expect(gzipSync(serialized).byteLength).toBeLessThanOrEqual(50_000);
@@ -2380,7 +2414,7 @@ describe("PostgreSQL room-status projection", () => {
     }
   });
 
-  it("keeps the 90-night query window separate from domain-valid long maintenance Blocks", async () => {
+  it("keeps the 30-night query window separate from domain-valid long maintenance Blocks", async () => {
     const blockStart = "2032-01-01";
     const longBlockNights = ROOM_STATUS_MAX_QUERY_NIGHTS + 30;
     const blockEnd = shiftLocalDate(blockStart, longBlockNights);

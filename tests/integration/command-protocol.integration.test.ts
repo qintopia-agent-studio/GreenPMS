@@ -4,9 +4,10 @@ import {
   confirmCommandPreview,
   createCommandPreview,
   findCommandResult,
+  resolveCommandResult,
   type Database
 } from "@qintopia/db";
-import { newOpaqueSecret, sha256 } from "@qintopia/domain";
+import { newOpaqueSecret, sha256, stableHash } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { resetDatabase } from "../helpers/database.ts";
@@ -109,6 +110,330 @@ afterEach(async () => {
 });
 
 describe("durable command protocol", () => {
+  it("fences an absent confirmation key and prevents its delayed Confirm from writing business facts", async () => {
+    const preview = await createCommandPreview(db, principal, {
+      commandType: "LOCK_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: demo.secondRoomId,
+        arrivalDate: "2028-05-20",
+        departureDate: "2028-05-21",
+        reason: "Delayed Confirm recovery fence acceptance"
+      }
+    }, metadata("fenced-confirm-preview"));
+    const confirmation = {
+      propertyId: demo.propertyId,
+      commandType: "LOCK_MAINTENANCE" as const,
+      confirmation: true as const,
+      expectedEffectHash: preview.preview.effectHash,
+      reason: { code: "RECOVERY_FENCE", note: "A delayed Confirm must not apply after recovery" }
+    };
+    const confirmMetadata = metadata("fenced-confirm");
+    const resolutionMetadata = metadata("fenced-confirm-recovery");
+    const businessFactsBefore = await Promise.all([
+      db.selectFrom("maintenance_locks").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+      db.selectFrom("inventory_claims").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
+    ]);
+
+    const fenced = await resolveCommandResult(
+      db,
+      principal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "LOCK_MAINTENANCE",
+        idempotencyKey: confirmMetadata.idempotencyKey
+      },
+      resolutionMetadata
+    );
+    const replay = await resolveCommandResult(
+      db,
+      principal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "LOCK_MAINTENANCE",
+        idempotencyKey: confirmMetadata.idempotencyKey
+      },
+      metadata("fenced-confirm-recovery-retry")
+    );
+
+    expect(fenced).toMatchObject({
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      correlationId: resolutionMetadata.correlationId,
+      error: { code: "COMMAND_INTERRUPTED", retryable: false },
+      resourceRefs: [],
+      factRefs: []
+    });
+    expect(replay).toEqual(fenced);
+    await expect(confirmCommandPreview(
+      db,
+      principal,
+      preview.preview.previewId,
+      confirmation,
+      confirmMetadata
+    )).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED", retryable: false });
+
+    const [businessFactsAfter, storedPreview, fencedExecution, fencedReceipts] = await Promise.all([
+      Promise.all([
+        db.selectFrom("maintenance_locks").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+        db.selectFrom("inventory_claims").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
+      ]),
+      db.selectFrom("command_previews").select(["status", "used_at"])
+        .where("id", "=", preview.preview.previewId).executeTakeFirstOrThrow(),
+      db.selectFrom("command_executions").select(["state", "request_hash"])
+        .where("command_type", "=", "LOCK_MAINTENANCE")
+        .where("idempotency_key", "=", confirmMetadata.idempotencyKey)
+        .executeTakeFirstOrThrow(),
+      db.selectFrom("command_receipts")
+        .innerJoin("command_executions", "command_executions.id", "command_receipts.command_id")
+        .select("command_receipts.id")
+        .where("command_executions.command_type", "=", "LOCK_MAINTENANCE")
+        .where("command_executions.idempotency_key", "=", confirmMetadata.idempotencyKey)
+        .execute()
+    ]);
+    expect(businessFactsAfter.map((row) => Number(row.count)))
+      .toEqual(businessFactsBefore.map((row) => Number(row.count)));
+    expect(storedPreview).toEqual({ status: "OPEN", used_at: null });
+    expect(fencedExecution.state).toBe("REJECTED");
+    expect(fencedExecution.request_hash).not.toBe(stableHash({ previewId: preview.preview.previewId, confirmation }));
+    expect(fencedReceipts).toHaveLength(1);
+  });
+
+  it("revalidates a downgraded property grant before writing a confirmation-key fence", async () => {
+    const originalCommandMetadata = metadata("resolution-downgraded-original");
+    const resolutionMetadata = metadata("resolution-downgraded-fence");
+    await db.updateTable("subject_property_grants")
+      .set({ access_level: "READ" })
+      .where("subject_id", "=", principal.subjectId)
+      .where("property_id", "=", demo.propertyId)
+      .execute();
+
+    await expect(resolveCommandResult(
+      db,
+      principal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "LOCK_MAINTENANCE",
+        idempotencyKey: originalCommandMetadata.idempotencyKey
+      },
+      resolutionMetadata
+    )).rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS", retryable: false });
+
+    await expect(db.selectFrom("command_executions")
+      .select("id")
+      .where("subject_id", "=", principal.subjectId)
+      .where("property_id", "=", demo.propertyId)
+      .where("command_type", "=", "LOCK_MAINTENANCE")
+      .where("idempotency_key", "=", originalCommandMetadata.idempotencyKey)
+      .execute()).resolves.toHaveLength(0);
+    await expect(db.selectFrom("audit_entries")
+      .select("id")
+      .where("correlation_id", "=", resolutionMetadata.correlationId)
+      .execute()).resolves.toHaveLength(0);
+  });
+
+  it("revalidates a downgraded property grant before returning an existing resolved result", async () => {
+    const originalCommandMetadata = metadata("resolution-existing-downgraded-original");
+    await resolveCommandResult(
+      db,
+      principal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "LOCK_MAINTENANCE",
+        idempotencyKey: originalCommandMetadata.idempotencyKey
+      },
+      metadata("resolution-existing-downgraded-fence")
+    );
+    await db.updateTable("subject_property_grants")
+      .set({ access_level: "READ" })
+      .where("subject_id", "=", principal.subjectId)
+      .where("property_id", "=", demo.propertyId)
+      .execute();
+
+    await expect(resolveCommandResult(
+      db,
+      principal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "LOCK_MAINTENANCE",
+        idempotencyKey: originalCommandMetadata.idempotencyKey
+      },
+      metadata("resolution-existing-downgraded-replay")
+    )).rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS", retryable: false });
+  });
+
+  it("revalidates Token revocation before writing a Quote-key fence", async () => {
+    const originalCommandMetadata = metadata("resolution-revoked-quote-original");
+    const resolutionMetadata = metadata("resolution-revoked-quote-fence");
+    await db.updateTable("api_tokens")
+      .set({ revoked_at: new Date() })
+      .where("id", "=", principal.credentialId)
+      .execute();
+
+    await expect(resolveCommandResult(
+      db,
+      principal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: originalCommandMetadata.idempotencyKey
+      },
+      resolutionMetadata
+    )).rejects.toMatchObject({ code: "TOKEN_REVOKED", retryable: false });
+
+    await expect(db.selectFrom("command_executions")
+      .select("id")
+      .where("subject_id", "=", principal.subjectId)
+      .where("property_id", "=", demo.propertyId)
+      .where("command_type", "=", "CREATE_QUOTE")
+      .where("idempotency_key", "=", originalCommandMetadata.idempotencyKey)
+      .execute()).resolves.toHaveLength(0);
+    await expect(db.selectFrom("audit_entries")
+      .select("id")
+      .where("correlation_id", "=", resolutionMetadata.correlationId)
+      .execute()).resolves.toHaveLength(0);
+  });
+
+  it.each([
+    {
+      artifact: "Receipt",
+      tableName: "command_receipts",
+      functionName: "fail_resolution_receipt",
+      triggerName: "fail_resolution_receipt_at_commit",
+      failureMessage: "forced resolution receipt failure"
+    },
+    {
+      artifact: "audit",
+      tableName: "audit_entries",
+      functionName: "fail_resolution_audit",
+      triggerName: "fail_resolution_audit_at_commit",
+      failureMessage: "forced resolution audit failure"
+    }
+  ] as const)("rolls back the entire resolution fence when $artifact persistence fails", async ({
+    artifact,
+    tableName,
+    functionName,
+    triggerName,
+    failureMessage
+  }) => {
+    const maintenanceReason = `Resolution ${artifact} rollback acceptance`;
+    const preview = await createCommandPreview(db, principal, {
+      commandType: "LOCK_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: demo.secondRoomId,
+        arrivalDate: "2028-05-22",
+        departureDate: "2028-05-23",
+        reason: maintenanceReason
+      }
+    }, metadata(`resolution-${artifact.toLowerCase()}-rollback-preview`));
+    const confirmation = {
+      propertyId: demo.propertyId,
+      commandType: "LOCK_MAINTENANCE" as const,
+      confirmation: true as const,
+      expectedEffectHash: preview.preview.effectHash,
+      reason: {
+        code: "RESOLUTION_ROLLBACK",
+        note: `Original Confirm must remain executable after ${artifact} persistence fails`
+      }
+    };
+    const confirmMetadata = metadata(`resolution-${artifact.toLowerCase()}-rollback-confirm`);
+    const resolutionMetadata = metadata(`resolution-${artifact.toLowerCase()}-rollback-fence`);
+
+    try {
+      await sql.raw(`
+        CREATE OR REPLACE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION '${failureMessage}'; END $$;
+        CREATE CONSTRAINT TRIGGER ${triggerName} AFTER INSERT ON ${tableName}
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}();
+      `).execute(db);
+
+      await expect(resolveCommandResult(
+        db,
+        principal,
+        {
+          propertyId: demo.propertyId,
+          commandType: "LOCK_MAINTENANCE",
+          idempotencyKey: confirmMetadata.idempotencyKey
+        },
+        resolutionMetadata
+      )).rejects.toThrow(failureMessage);
+
+      const [executions, receipts, audits, storedPreview] = await Promise.all([
+        db.selectFrom("command_executions")
+          .select("id")
+          .where("subject_id", "=", principal.subjectId)
+          .where("property_id", "=", demo.propertyId)
+          .where("command_type", "=", "LOCK_MAINTENANCE")
+          .where("idempotency_key", "=", confirmMetadata.idempotencyKey)
+          .execute(),
+        db.selectFrom("command_receipts")
+          .innerJoin("command_executions", "command_executions.id", "command_receipts.command_id")
+          .select("command_receipts.id")
+          .where("command_executions.subject_id", "=", principal.subjectId)
+          .where("command_executions.property_id", "=", demo.propertyId)
+          .where("command_executions.command_type", "=", "LOCK_MAINTENANCE")
+          .where("command_executions.idempotency_key", "=", confirmMetadata.idempotencyKey)
+          .execute(),
+        db.selectFrom("audit_entries")
+          .select("id")
+          .where("correlation_id", "=", resolutionMetadata.correlationId)
+          .execute(),
+        db.selectFrom("command_previews")
+          .select(["status", "used_at"])
+          .where("id", "=", preview.preview.previewId)
+          .executeTakeFirstOrThrow()
+      ]);
+      expect(executions).toHaveLength(0);
+      expect(receipts).toHaveLength(0);
+      expect(audits).toHaveLength(0);
+      expect(storedPreview).toEqual({ status: "OPEN", used_at: null });
+      await expect(findCommandResult(
+        db,
+        principal,
+        demo.propertyId,
+        "LOCK_MAINTENANCE",
+        confirmMetadata.idempotencyKey
+      )).resolves.toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
+    } finally {
+      await sql.raw(`
+        DROP TRIGGER IF EXISTS ${triggerName} ON ${tableName};
+        DROP FUNCTION IF EXISTS ${functionName}();
+      `).execute(db);
+    }
+
+    const confirmed = await confirmCommandPreview(
+      db,
+      principal,
+      preview.preview.previewId,
+      confirmation,
+      confirmMetadata
+    );
+    expect(confirmed).toMatchObject({
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: confirmMetadata.correlationId
+    });
+    await expect(findCommandResult(
+      db,
+      principal,
+      demo.propertyId,
+      "LOCK_MAINTENANCE",
+      confirmMetadata.idempotencyKey
+    )).resolves.toEqual(confirmed);
+    await expect(db.selectFrom("maintenance_locks")
+      .select(["inventory_unit_id", "arrival_date", "departure_date", "reason", "status"])
+      .where("reason", "=", maintenanceReason)
+      .executeTakeFirstOrThrow()).resolves.toEqual({
+        inventory_unit_id: demo.secondRoomId,
+        arrival_date: "2028-05-22",
+        departure_date: "2028-05-23",
+        reason: maintenanceReason,
+        status: "ACTIVE"
+      });
+  });
+
   it("sanitizes a client-generated Token secret before any persistence and replays one durable result", async () => {
     const tokenSecret = newOpaqueSecret("qtp");
     const envelope: CommandEnvelope = {

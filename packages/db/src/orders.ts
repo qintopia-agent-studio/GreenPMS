@@ -72,7 +72,7 @@ export function pricingReasonFromAmendment(amendment: {
   protocolVersion?: HistoricalAmendmentProtocol;
 } | undefined): { code: string; note: string } {
   if (!amendment) return { code: "HISTORICAL", note: "" };
-  if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT"].includes(amendment.amendment_type)) {
+  if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"].includes(amendment.amendment_type)) {
     const payload = recordValue(amendment.payload);
     const decision = recordValue(payload?.pricingDecision);
     const reason = recordValue(decision?.reason);
@@ -178,7 +178,9 @@ export function orderAllowedActions(
   hasRefundableCollection: boolean,
   fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string; localTime?: string },
   hasFutureMove = false,
-  bookingChannelCode: string | null = null
+  bookingChannelCode: string | null = null,
+  hasTransferableCollection = false,
+  hasStayMembershipTransfer = false
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
@@ -194,13 +196,21 @@ export function orderAllowedActions(
     MARK_NO_SHOW: ["RESERVED"],
     REVOKE_CHECK_IN: ["CHECKED_IN"],
     RECORD_COLLECTION: ["RESERVED", "CHECKED_IN", "CHECKED_OUT"],
-    RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]
+    RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
+    CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: ["CHECKED_OUT"]
   };
   return orderActionCodes.map((code) => {
     const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
     let fulfillmentDisabledReason: string | null = null;
     const externalFundsDisabledReason = code === "RECORD_COLLECTION" || code === "RECORD_REFUND"
       ? externalChannelFundsDisabledReason(bookingChannelCode)
+      : null;
+    const stayConversionChannelDisabledReason = code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+      ? bookingChannelCode && externalChannelCodes.has(bookingChannelCode)
+        ? "外部渠道订单不从本订单升级会员；请核对渠道订单号和本单渠道应结金额，由财务按渠道总账核对"
+        : bookingChannelCode !== "WECOM"
+          ? "只有企业微信来源的普通住宿订单可以升级会员"
+          : null
       : null;
     if (fulfillmentDates && statusAllows) {
       if (code === "CHECK_IN") {
@@ -237,17 +247,26 @@ export function orderAllowedActions(
         fulfillmentDisabledReason = "只有计划入住当天可以撤销误办入住";
       }
     }
+    const convertedFundsDisabled = hasStayMembershipTransfer
+      && (code === "RECORD_COLLECTION" || code === "RECORD_REFUND" || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
     const enabled = statusAllows
       && fulfillmentDisabledReason === null
       && externalFundsDisabledReason === null
-      && (code !== "RECORD_REFUND" || hasRefundableCollection);
+      && stayConversionChannelDisabledReason === null
+      && !convertedFundsDisabled
+      && (code !== "RECORD_REFUND" || hasRefundableCollection)
+      && (code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" || hasTransferableCollection);
     return {
       code,
       enabled,
       disabledReason: enabled
         ? null
-        : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? (code === "RECORD_REFUND" && statusAllows
+        : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? stayConversionChannelDisabledReason ?? (convertedFundsDisabled
+          ? "已完成升级会员，本订单不再追加住宿收退款；后续会员收款请在会员订单中处理"
+          : code === "RECORD_REFUND" && statusAllows
           ? "NO_REFUNDABLE_COLLECTION"
+          : code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+          ? statusAllows ? "NO_TRANSFERABLE_COLLECTION" : "请在退房完成后办理升级会员"
           : "ORDER_STATE_NOT_ALLOWED")
     };
   });
@@ -446,6 +465,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
   "SHORTEN_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
@@ -461,6 +481,7 @@ const pricingRevisionAmendmentTypes = new Set<string>([
   "SHORTEN_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
@@ -474,6 +495,7 @@ const requiredPricingRevisionAmendmentTypes = new Set<string>([
   "SHORTEN_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
@@ -805,7 +827,10 @@ function validateLifecycleStatus(
       continue;
     }
 
+    const terminalPricingOnlyAllowed = amendmentType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+      && projectedStatus === "CHECKED_OUT";
     if (amendmentType !== "CORRECT_ORDER_OCCUPANT"
+      && !terminalPricingOnlyAllowed
       && projectedStatus !== "RESERVED"
       && projectedStatus !== "CHECKED_IN") {
       lifecycleFailure("终态订单包含不允许的住宿或计价变更", {
@@ -1139,9 +1164,40 @@ function hasRefundableCollection(facts: Array<{
     && (activeRefunded.get(fact.fact_id) ?? 0) < fact.amount_minor);
 }
 
+function hasTransferableCollection(facts: Array<{
+  fact_id: string;
+  fact_type: string;
+  amount_minor: number;
+  net_effect_minor: number;
+  references_fact_id: string | null;
+  reverses_fact_id: string | null;
+  method: string;
+  transaction_reference: string | null;
+}>, transfers: Array<{ source_collection_fact_id: string }>): boolean {
+  if (transfers.length > 0) return false;
+  const reversed = new Set(facts.filter((fact) => fact.fact_type === "REVERSAL" && fact.reverses_fact_id)
+    .map((fact) => fact.reverses_fact_id!));
+  const transferred = new Set(transfers.map((transfer) => transfer.source_collection_fact_id));
+  const activeRefunded = new Map<string, number>();
+  for (const fact of facts) {
+    if (fact.fact_type !== "REFUND" || !fact.references_fact_id || reversed.has(fact.fact_id)) continue;
+    activeRefunded.set(fact.references_fact_id, (activeRefunded.get(fact.references_fact_id) ?? 0) + fact.amount_minor);
+  }
+  const transferableTotalMinor = facts.reduce((sum, fact) => fact.fact_type === "COLLECTION"
+    && fact.method === "WECOM"
+    && Boolean(fact.transaction_reference)
+    && !reversed.has(fact.fact_id)
+    && !transferred.has(fact.fact_id)
+    && (activeRefunded.get(fact.fact_id) ?? 0) === 0
+    ? sum + fact.amount_minor
+    : sum, 0);
+  const netRecordedMinor = facts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
+  return transferableTotalMinor > 0 && transferableTotalMinor === netRecordedMinor;
+}
+
 async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel) {
   const context = await loadOrderContext(db, orderId);
-  const [localClock, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, cleaningTasks] = await Promise.all([
+  const [localClock, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks] = await Promise.all([
     propertyLocalClock(db, context.order.property_id),
     db.selectFrom("schema_migrations").select("applied_at")
       .where("name", "=", "028_stage11_move_unit_guards.sql").executeTakeFirst(),
@@ -1169,6 +1225,14 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     db.selectFrom("pricing_revisions").selectAll().where("order_id", "=", orderId).orderBy("revision_no").execute(),
     db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("service_date").execute(),
     db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).orderBy("created_at").orderBy("fact_id").execute(),
+    db.selectFrom("stay_collection_membership_transfers")
+      .innerJoin("membership_orders", "membership_orders.id", "stay_collection_membership_transfers.membership_order_id")
+      .selectAll("stay_collection_membership_transfers")
+      .select("membership_orders.member_id as membership_member_id")
+      .where("stay_collection_membership_transfers.order_id", "=", orderId)
+      .orderBy("stay_collection_membership_transfers.created_at")
+      .orderBy("stay_collection_membership_transfers.id")
+      .execute(),
     currentReleaseFeatures.cleaningWorkflow ? db.selectFrom("cleaning_tasks as task")
       .leftJoin("command_executions as created_command", "created_command.id", "task.created_by_command_id")
       .leftJoin("subjects as created_subject", "created_subject.id", "created_command.subject_id")
@@ -1223,6 +1287,20 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     phone: correction[`${prefix}_phone`],
     documentNumber: correction[`${prefix}_document_number`]
   });
+  const transferByCollectionFactId = new Map(transfers.map((transfer) => [transfer.source_collection_fact_id, transfer]));
+  const factsWithTransfer = facts.map((fact) => {
+    const transfer = transferByCollectionFactId.get(fact.fact_id);
+    return {
+      ...fact,
+      transfer: transfer ? {
+        id: transfer.id,
+        membershipOrderId: transfer.membership_order_id,
+        memberId: transfer.membership_member_id,
+        membershipPaymentFactId: transfer.membership_payment_fact_id,
+        sourceReversalFactId: transfer.source_reversal_fact_id
+      } : null
+    };
+  });
   const terminal = context.order.status === "CHECKED_OUT"
     || context.order.status === "CANCELLED"
     || context.order.status === "NO_SHOW"
@@ -1258,7 +1336,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
      arrivalDate: context.order.arrival_date,
      departureDate: context.order.departure_date,
      localTime: localClock.time
-   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code),
+   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code, hasTransferableCollection(facts, transfers), transfers.length > 0),
     order: {
       ...context.order,
       current_contract_amount_minor: context.revision.currentContractAmountMinor,
@@ -1323,7 +1401,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       reason: pricingReasonFromAmendment(amendmentById.get(revision.amendment_id))
     })),
     coverageSet: coverage,
-    collectionFacts: facts,
+    collectionFacts: factsWithTransfer,
     cleaningTasks: cleaningTasks.map((task) => ({
       id: task.id,
       inventoryUnitId: task.inventory_unit_id,

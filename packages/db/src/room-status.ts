@@ -9,6 +9,7 @@ import {
   type AccessLevel,
   type RoomStatusActionCode,
   type RoomStatusActionDto,
+  type RoomStatusAvailabilitySummaryDto,
   type RoomStatusBedOccupancyDto,
   type RoomStatusBoardDto,
   type RoomStatusBoardQueryDto,
@@ -659,6 +660,41 @@ function buildUnitStatuses(
     statusesByUnit.set(unit.id, statuses);
   }
   return statusesByUnit;
+}
+
+function unitAvailableOnDate(
+  unit: RoomStatusUnitDto,
+  serviceDate: string,
+  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>
+): boolean {
+  if (!unit.active) return false;
+  const intervals = intervalsByUnit.get(unit.id) ?? [];
+  const dayIntervals = intervals.filter((interval) => interval.startDate <= serviceDate && serviceDate < interval.endDate);
+  return !dayIntervals.some((interval) => interval.blocking || interval.status === "UNKNOWN");
+}
+
+function buildAvailabilitySummary(
+  rooms: RoomStatusUnitDto[],
+  unitsById: Map<string, RoomStatusUnitDto>,
+  dates: string[],
+  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>
+): RoomStatusAvailabilitySummaryDto[] {
+  return dates.map((serviceDate) => {
+    let availableRooms = 0;
+    let availableBeds = 0;
+    for (const room of rooms) {
+      if (room.salesMode === "WHOLE_ROOM") {
+        if (unitAvailableOnDate(room, serviceDate, intervalsByUnit)) availableRooms += 1;
+        continue;
+      }
+      if (room.salesMode !== "BED_SPLIT" || !room.active) continue;
+      for (const childId of room.childUnitIds) {
+        const child = unitsById.get(childId);
+        if (child && unitAvailableOnDate(child, serviceDate, intervalsByUnit)) availableBeds += 1;
+      }
+    }
+    return { serviceDate, availableRooms, availableBeds };
+  });
 }
 
 function assembleUnit(
@@ -1667,6 +1703,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
 
     const baseRooms = roomRows.map((roomRow) => unitsById.get(roomRow.id)!);
     const statusesByUnit = buildUnitStatuses(unitsById, dates, builtIntervals.byUnit);
+    const availabilitySummary = buildAvailabilitySummary(baseRooms, unitsById, dates, builtIntervals.byUnit);
     const filterOptions = roomStatusFilterOptions(baseRooms, unitsById, statusesByUnit);
     const filteredRooms = filterRoomSelections(baseRooms, unitsById, filters, statusesByUnit);
     const totalRooms = filteredRooms.length;
@@ -1708,6 +1745,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         totalPages: totalRooms === 0 ? 0 : Math.ceil(totalRooms / pageSize)
       },
       operationalTasks,
+      availabilitySummary,
       rooms
     };
   });

@@ -72,6 +72,13 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
   COMPLETE_CLEANING: { required: ["propertyId", "cleaningTaskId"], properties: ["propertyId", "cleaningTaskId"] },
   RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method"], properties: ["propertyId", "orderId", "amountMinor", "method", "transactionReference", "note"] },
   RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference", "note"] },
+  CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: {
+    required: ["propertyId", "orderId", "memberId", "membershipProductId", "collectionFactIds", "agreedPriceMinor"],
+    properties: [
+      "propertyId", "orderId", "memberId", "membershipProductId", "collectionFactIds", "agreedPriceMinor",
+      "priceAdjustmentReason", "remainingPaymentTransactionReference", "remainingPaymentNote"
+    ]
+  },
   REVERSE_FACT: { required: ["propertyId", "orderId", "reversesFactId", "note"], properties: ["propertyId", "orderId", "reversesFactId", "note"] },
   CHECK_IN: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   CHECK_OUT: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
@@ -188,6 +195,7 @@ describe("OpenAPI 3.1 command contract", () => {
       "/api/v1/command-previews/{previewId}/confirm",
       "/api/v1/commands/{id}",
       "/api/v1/command-results",
+      "/api/v1/command-results/resolve",
       "/api/v1/receipts/{id}",
       "/api/v1/facts/{id}",
       "/api/v1/members",
@@ -206,6 +214,9 @@ describe("OpenAPI 3.1 command contract", () => {
     ]));
     const quoteResponse = document.paths["/api/v1/quotes"].post.responses["200"].content["application/json"].schema;
     expect(quoteResponse).toMatchObject({ additionalProperties: false, required: ["quote", "receipt"] });
+    expect(quoteResponse.properties.quote.properties.pricingExplanation).toBeDefined();
+    expect(JSON.stringify(quoteResponse.properties.quote)).not.toContain("numeratorMinor");
+    expect(JSON.stringify(quoteResponse.properties.quote)).not.toContain("anchorAmountMinor");
     const quoteRequest = document.paths["/api/v1/quotes"].post.requestBody.content["application/json"].schema;
     expect(quoteRequest.required).toEqual([
       "propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "pricingPolicyVersionId"
@@ -214,6 +225,18 @@ describe("OpenAPI 3.1 command contract", () => {
     const recoveryCommandType = document.paths["/api/v1/command-results"].get.parameters
       .find((parameter: { name: string }) => parameter.name === "commandType").schema;
     expect(recoveryCommandType.anyOf.map((variant: { enum: string[] }) => variant.enum[0]).sort())
+      .toEqual([...historicalRecoverableCommandTypes].sort());
+    const resolveOperation = document.paths["/api/v1/command-results/resolve"].post;
+    expect(resolveOperation.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "idempotency-key", in: "header", required: true }),
+      expect.objectContaining({ name: "x-correlation-id", in: "header", required: true })
+    ]));
+    const resolveRequest = resolveOperation.requestBody.content["application/json"].schema;
+    expect(resolveRequest).toMatchObject({
+      additionalProperties: false,
+      required: ["propertyId", "commandType", "idempotencyKey"]
+    });
+    expect(resolveRequest.properties.commandType.anyOf.map((variant: { enum: string[] }) => variant.enum[0]).sort())
       .toEqual([...historicalRecoverableCommandTypes].sort());
     const commandSchema = document.paths["/api/v1/command-previews"].post.requestBody.content["application/json"].schema;
     expect(commandSchema.anyOf).toHaveLength(commandTypes.length);
@@ -1119,7 +1142,8 @@ describe("OpenAPI 3.1 command contract", () => {
       ["/api/v1/command-previews/{previewId}/confirm", "post", ["400", "403", "404", "409", "429"]],
       ["/api/v1/receipts/{id}", "get", ["400", "403", "404", "429"]],
       ["/api/v1/commands/{id}", "get", ["400", "403", "404", "429"]],
-      ["/api/v1/command-results", "get", ["400", "403", "404", "429"]]
+      ["/api/v1/command-results", "get", ["400", "403", "404", "429"]],
+      ["/api/v1/command-results/resolve", "post", ["400", "403", "409", "429"]]
     ];
     for (const [path, method, statuses] of expected) {
       const responses = document.paths[path][method].responses;
@@ -1177,6 +1201,7 @@ describe("OpenAPI 3.1 command contract", () => {
       ["/api/v1/facts/{id}", "get"],
       ["/api/v1/maintenance-locks", "get"],
       ["/api/v1/command-results", "get"],
+      ["/api/v1/command-results/resolve", "post"],
       ["/api/v1/quotes", "post"],
       ["/api/v1/receipts/{id}", "get"],
       ["/api/v1/audit", "get"],
@@ -1523,6 +1548,64 @@ describe("OpenAPI 3.1 command contract", () => {
       stayType: "CUSTOM",
       currentContractAmount: { currency: "CNY", minorUnits: 108_600 }
     });
+    expect(omitted.json().quote.pricingExplanation).toMatchObject({
+      pricingModel: "DURATION_BAND_TOTAL",
+      totalNights: 10,
+      quoteAmount: { currency: "CNY", minorUnits: 108_600 },
+      amountField: "currentContractAmount",
+      durationBand: {
+        anchorNights: 7,
+        finalAmount: { currency: "CNY", minorUnits: 108_600 },
+        auditCalculationFieldsAreAmounts: false
+      }
+    });
+
+    const halfMonth = await app.inject({
+      method: "POST",
+      url: "/api/v1/quotes",
+      headers: {
+        authorization: `Bearer ${demo.writeToken}`,
+        "content-type": "application/json",
+        "idempotency-key": "contract-duration-band-15-night-explanation",
+        "x-correlation-id": "contract-duration-band-15-night-explanation"
+      },
+      payload: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: demo.bedAId,
+        arrivalDate: "2026-08-15",
+        departureDate: "2026-08-30",
+        pricingPolicyVersionId: demo.publicPricingPolicyId
+      }
+    });
+    expect(halfMonth.statusCode, halfMonth.body).toBe(200);
+    const halfMonthQuote = halfMonth.json().quote;
+    expect(halfMonthQuote).toMatchObject({
+      stayType: "CUSTOM",
+      currentContractAmount: { currency: "CNY", minorUnits: 51_400 },
+      pricingExplanation: {
+        pricingModel: "DURATION_BAND_TOTAL",
+        totalNights: 15,
+        quoteAmount: { currency: "CNY", minorUnits: 51_400 },
+        amountField: "currentContractAmount",
+        durationBand: {
+          anchorNights: 14,
+          finalAmount: { currency: "CNY", minorUnits: 51_400 },
+          auditCalculationFieldsAreAmounts: false
+        }
+      }
+    });
+    expect(halfMonthQuote.pricingExplanation.summary).toContain("15 夜按 14 夜档折算");
+    expect(halfMonthQuote.pricingExplanation.agentInstruction).toContain("currentContractAmount");
+    expect(halfMonthQuote.pricingExplanation.agentInstruction).toContain("cashLines[].amount 是明细行金额");
+    expect(halfMonthQuote.cashLines[0]).toMatchObject({
+      lineKind: "STAY_TOTAL",
+      pricingBandAnchorNights: 14,
+      amount: { currency: "CNY", minorUnits: 51_400 }
+    });
+    expect(halfMonthQuote.cashLines[0].pricingSummary).toContain("本行最终金额 ¥514.00");
+    expect(JSON.stringify(halfMonthQuote)).not.toContain("numeratorMinor");
+    expect(JSON.stringify(halfMonthQuote)).not.toContain("anchorAmountMinor");
+    expect(JSON.stringify(halfMonth.json().receipt.result.quote)).not.toContain("numeratorMinor");
 
     const before = await database.selectFrom("command_executions")
       .select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow();
@@ -1566,14 +1649,14 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(me.json()).toMatchObject({ subjectId: demo.operatorSubjectId, credentialType: "SESSION", propertyAccess: { [demo.propertyId]: "WRITE" } });
   });
 
-  it("distinguishes a command that was never executed", async () => {
+  it("does not claim a missing command is durably not executed from a read-only lookup", async () => {
     const response = await app.inject({
       method: "GET",
       url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=CREATE_ORDER&idempotencyKey=never-arrived`,
       headers: { authorization: `Bearer ${demo.writeToken}` }
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+    expect(response.json()).toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
   });
 
   it("serializes and recovers a committed terminal order result", async () => {
@@ -1722,7 +1805,7 @@ describe("OpenAPI 3.1 command contract", () => {
       cleaningTasks: []
     });
     const collection = await command(demo.writeToken, "RECORD_COLLECTION", {
-      propertyId: demo.propertyId, orderId, amountMinor: 6_000, method: "CASH", transactionReference: "TEST-CONTRACT-TXN-COLLECTION-1", note: "Contract fact"
+      propertyId: demo.propertyId, orderId, amountMinor: 6_000, method: "BANK_TRANSFER", transactionReference: "TEST-CONTRACT-TXN-COLLECTION-1", note: "Contract fact"
     });
     const factId = collection.result.factId as string;
     const fact = await app.inject({

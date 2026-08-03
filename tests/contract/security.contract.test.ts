@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readdir, readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { sql, type Kysely } from "kysely";
 import { Value } from "@sinclair/typebox/value";
@@ -217,6 +219,31 @@ afterAll(async () => {
 });
 
 describe("HTTP security contract", () => {
+  it("does not publish demo credentials in production and isolates the E2E Web build", async () => {
+    const webDist = resolve(process.cwd(), "apps/web/dist");
+    const assetNames = await readdir(resolve(webDist, "assets"));
+    const publicFiles = [
+      resolve(webDist, "index.html"),
+      ...assetNames
+        .filter((name) => /[.](?:js|css|map)$/.test(name))
+        .map((name) => resolve(webDist, "assets", name))
+    ];
+    const published = (await Promise.all(publicFiles.map((file) => readFile(file, "utf8")))).join("\n");
+
+    expect(published).not.toContain("demo-pass-2026");
+    expect(assetNames.some((name) => name.endsWith(".map"))).toBe(false);
+
+    const [rootPackageSource, viteConfigSource, playwrightConfigSource] = await Promise.all([
+      readFile(resolve(process.cwd(), "package.json"), "utf8"),
+      readFile(resolve(process.cwd(), "apps/web/vite.config.ts"), "utf8"),
+      readFile(resolve(process.cwd(), "playwright.config.ts"), "utf8")
+    ]);
+    const rootPackage = JSON.parse(rootPackageSource) as { scripts?: Record<string, string> };
+    expect(rootPackage.scripts?.["test:e2e:run"]).toContain("VITE_DEMO_LOGIN=true WEB_BUILD_OUT_DIR=dist-e2e npm run build");
+    expect(viteConfigSource).toContain("Refusing to write a demo-login Web build into the production dist directory");
+    expect(playwrightConfigSource).toContain("WEB_BUILD_OUT_DIR: e2eWebBuildOutDir");
+  });
+
   it("fails readiness for unknown migrations and non-operational guard trigger states", async () => {
     await db.insertInto("schema_migrations").values({ name: "999_future_application.sql" }).execute();
     try {
@@ -434,6 +461,73 @@ describe("HTTP security contract", () => {
     }, "read-denied");
     expect(denied.response.statusCode).toBe(403);
     expect(denied.body).toMatchObject({ code: "INSUFFICIENT_ACCESS", retryable: false });
+  });
+
+  it("keeps GET recovery read-only and lets READ credentials fence only CREATE_QUOTE", async () => {
+    const missingKey = `security-missing-command-${sequence += 1}`;
+    const beforeGet = await commandArtifactCounts();
+    const missing = await app.inject({
+      method: "GET",
+      url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=CREATE_ORDER&idempotencyKey=${missingKey}`,
+      headers: { authorization: `Bearer ${demo.writeToken}` }
+    });
+    expect(missing.statusCode, missing.body).toBe(200);
+    expect(missing.json()).toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
+    expect(await commandArtifactCounts()).toEqual(beforeGet);
+
+    const deniedKey = `security-read-fence-write-${sequence += 1}`;
+    const beforeDenied = await commandArtifactCounts();
+    const denied = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-results/resolve",
+      headers: writeHeaders(demo.readToken, "security-read-fence-write"),
+      payload: {
+        propertyId: demo.propertyId,
+        commandType: "LOCK_MAINTENANCE",
+        idempotencyKey: deniedKey
+      }
+    });
+    expect(denied.statusCode, denied.body).toBe(403);
+    expect(denied.json()).toMatchObject({ code: "INSUFFICIENT_ACCESS", retryable: false });
+    expect(await commandArtifactCounts()).toEqual(beforeDenied);
+
+    const quoteKey = `security-read-fence-quote-${sequence += 1}`;
+    const fenced = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-results/resolve",
+      headers: writeHeaders(demo.readToken, "security-read-fence-quote"),
+      payload: {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: quoteKey
+      }
+    });
+    expect(fenced.statusCode, fenced.body).toBe(200);
+    expect(fenced.json()).toMatchObject({
+      receiptId: expect.any(String),
+      commandId: expect.any(String),
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      error: { code: "COMMAND_INTERRUPTED", retryable: false },
+      resourceRefs: [],
+      factRefs: []
+    });
+    const afterFence = await commandArtifactCounts();
+    expect(afterFence).toEqual([
+      beforeDenied[0]! + 1,
+      beforeDenied[1]!,
+      beforeDenied[2]! + 1,
+      beforeDenied[3]! + 1
+    ]);
+
+    const recovered = await app.inject({
+      method: "GET",
+      url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=CREATE_QUOTE&idempotencyKey=${quoteKey}`,
+      headers: { authorization: `Bearer ${demo.readToken}` }
+    });
+    expect(recovered.statusCode, recovered.body).toBe(200);
+    expect(recovered.json()).toEqual(fenced.json());
+    expect(await commandArtifactCounts()).toEqual(afterFence);
   });
 
   it("runs query, quote, Preview/Confirm, idempotent replay, and interruption recovery", async () => {

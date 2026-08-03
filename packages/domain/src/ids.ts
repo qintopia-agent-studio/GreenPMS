@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
-export type IdPrefix = "prop" | "unit" | "policy" | "quote" | "order" | "occupant" | "stay" | "segment" | "amend" | "revision" | "claim" | "maint" | "block" | "cleaning" | "member" | "membership_order" | "membership_payment" | "membership_payment_reversal" | "contract" | "memberref" | "lot" | "coverage" | "fact" | "subject" | "token" | "session" | "preview" | "command" | "receipt" | "audit";
+export type IdPrefix = "prop" | "unit" | "policy" | "quote" | "order" | "occupant" | "stay" | "segment" | "amend" | "revision" | "claim" | "maint" | "block" | "cleaning" | "member" | "membership_order" | "membership_payment" | "membership_payment_reversal" | "contract" | "memberref" | "lot" | "coverage" | "fact" | "transfer" | "subject" | "token" | "session" | "preview" | "command" | "receipt" | "audit";
 
 export function newId(prefix: IdPrefix): string {
   return `${prefix}_${randomUUID()}`;

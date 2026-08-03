@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: qintopia
       POSTGRES_DB: qintopia
     ports:
-      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U qintopia -d qintopia"]
       interval: 2s
@@ -27,7 +27,7 @@ services:
       IMPORT_2026_REFERENCE_CATALOG: ${IMPORT_2026_REFERENCE_CATALOG:-false}
       BEARER_AUTH_RATE_LIMIT_MAX: ${BEARER_AUTH_RATE_LIMIT_MAX:-600}
     ports:
-      - "127.0.0.1:${APP_HOST_PORT:-4100}:4100"
+      - "${APP_BIND:-127.0.0.1}:${APP_HOST_PORT:-4100}:4100"
     depends_on:
       postgres:
         condition: service_healthy

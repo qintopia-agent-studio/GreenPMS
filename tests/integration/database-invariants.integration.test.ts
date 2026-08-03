@@ -630,7 +630,7 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
 
     const collection = await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "CASH", transactionReference: "TEST-INVARIANT-TXN-ORIGINAL", note: "Original collection" }
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "CASH", note: "Original collection payee" }
     }, "reverse-original-collection");
     const reversal = await previewAndConfirm({
       commandType: "REVERSE_FACT",

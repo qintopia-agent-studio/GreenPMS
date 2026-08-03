@@ -405,26 +405,30 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("creates a new permanent coverage and HOLD fact when a released night is extended back", async () => {
+    const arrivalDate = addDays(await propertyLocalToday(db, demo.propertyId), 1);
+    const shortenedDepartureDate = addDays(arrivalDate, 2);
+    const departureDate = addDays(arrivalDate, 3);
+    const returnedServiceDate = addDays(arrivalDate, 2);
     await previewAndConfirm({
       commandType: "ADJUST_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 1, adjustmentReason: "Three-night re-hold acceptance" }
     }, "rehold-adjust");
     const created = await createOrder(demo.roomId, "rehold", {
       member: true,
-      arrival: "2026-08-01",
-      departure: "2026-08-04"
+      arrival: arrivalDate,
+      departure: departureDate
     });
     const orderId = created.result!.orderId as string;
     const initialView = await getOrderView(db, orderId);
-    const initialCoverage = initialView.coverageSet.find((item) => item.service_date === "2026-08-03")!;
+    const initialCoverage = initialView.coverageSet.find((item) => item.service_date === returnedServiceDate)!;
 
     await previewAndConfirm({
       commandType: "RESCHEDULE_STAY",
       input: {
         propertyId: demo.propertyId,
         orderId,
-        newArrivalDate: "2026-08-01",
-        newDepartureDate: "2026-08-03"
+        newArrivalDate: arrivalDate,
+        newDepartureDate: shortenedDepartureDate
       }
     }, "rehold-shorten");
     expect((await getOrderView(db, orderId)).coverageSet.find((item) => item.id === initialCoverage.id)?.status).toBe("RELEASED");
@@ -434,19 +438,19 @@ describe("PostgreSQL core operations", () => {
       input: {
         propertyId: demo.propertyId,
         orderId,
-        newArrivalDate: "2026-08-01",
-        newDepartureDate: "2026-08-04"
+        newArrivalDate: arrivalDate,
+        newDepartureDate: departureDate
       }
     }, "rehold-extend");
     expect(extended.businessCommitted).toBe(true);
     const view = await getOrderView(db, orderId);
-    const coverageForReturnedNight = view.coverageSet.filter((item) => item.service_date === "2026-08-03");
+    const coverageForReturnedNight = view.coverageSet.filter((item) => item.service_date === returnedServiceDate);
     expect(coverageForReturnedNight).toHaveLength(2);
     expect(coverageForReturnedNight.map((item) => item.status).sort()).toEqual(["HELD", "RELEASED"]);
     const activeCoverage = coverageForReturnedNight.find((item) => item.status === "HELD")!;
     expect(activeCoverage.id).not.toBe(initialCoverage.id);
     const ledger = await db.selectFrom("entitlement_ledger").select(["fact_id", "entry_type", "coverage_id", "quantity_delta"])
-      .where("order_id", "=", orderId).where("service_date", "=", "2026-08-03").execute();
+      .where("order_id", "=", orderId).where("service_date", "=", returnedServiceDate).execute();
     expect(ledger.filter((entry) => entry.entry_type === "HOLD")).toHaveLength(2);
     expect(ledger.filter((entry) => entry.entry_type === "HOLD").map((entry) => entry.coverage_id)).toContain(activeCoverage.id);
     expect(new Set(ledger.map((entry) => entry.fact_id)).size).toBe(ledger.length);
@@ -572,7 +576,7 @@ describe("PostgreSQL core operations", () => {
     const orderId = created.result!.orderId as string;
     const firstCollection = await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId, amountMinor: 6_000, method: "CASH", transactionReference: "TEST-TXN-COLLECTION-ONE", note: "first installment" }
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 6_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-COLLECTION-ONE", note: "first installment" }
     }, "collection-one");
     await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
@@ -585,7 +589,7 @@ describe("PostgreSQL core operations", () => {
     expect(shortened.businessCommitted).toBe(true);
     const refund = await previewAndConfirm({
       commandType: "RECORD_REFUND",
-      input: { propertyId: demo.propertyId, orderId, amountMinor: 3_000, referencesFactId: firstCollection.factRefs[0], method: "CASH", transactionReference: "TEST-TXN-REFUND-ONE", note: "referenced partial refund" }
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 3_000, referencesFactId: firstCollection.factRefs[0], method: "BANK_TRANSFER", transactionReference: "TEST-TXN-REFUND-ONE", note: "referenced partial refund" }
     }, "refund");
     expect(refund.factRefs).toHaveLength(1);
     await previewAndConfirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "check-in");
@@ -636,26 +640,30 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("appends extension and move revisions while retaining the locked policy", async () => {
-    const created = await createOrder(demo.roomId, "move", { stayType: "FREE", arrival: "2026-08-01", departure: "2026-08-02" });
+    const arrivalDate = addDays(await propertyLocalToday(db, demo.propertyId), 1);
+    const originalDepartureDate = addDays(arrivalDate, 1);
+    const moveDate = addDays(arrivalDate, 1);
+    const extendedDepartureDate = addDays(arrivalDate, 3);
+    const created = await createOrder(demo.roomId, "move", { stayType: "FREE", arrival: arrivalDate, departure: originalDepartureDate });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
       commandType: "RESCHEDULE_STAY",
-      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-04" }
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: arrivalDate, newDepartureDate: extendedDepartureDate }
     }, "extend");
-    await previewAndConfirm({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-08-02" } }, "move");
+    await previewAndConfirm({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: moveDate } }, "move");
     const view = await getOrderView(db, orderId);
     expect(view.segments).toHaveLength(3);
     expect(view.pricingRevisions).toHaveLength(3);
     expect(view.pricingRevisions.every((revision) => revision.policy_version_id === demo.freePolicyId)).toBe(true);
     expect(view.currentSegment.inventoryUnitId).toBe(demo.secondRoomId);
-    const availability = await listAvailability(db, demo.propertyId, "2026-08-02", "2026-08-04");
+    const availability = await listAvailability(db, demo.propertyId, moveDate, extendedDepartureDate);
     expect(availability.find((unit) => unit.id === demo.roomId)?.available).toBe(true);
     expect(availability.find((unit) => unit.id === demo.secondRoomId)?.available).toBe(false);
     const moveTargetAvailability = await listAvailability(
       db,
       demo.propertyId,
-      "2026-08-02",
-      "2026-08-04",
+      moveDate,
+      extendedDepartureDate,
       undefined,
       orderId
     );
@@ -675,37 +683,43 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("recalculates each service date from the active inventory timeline across repeated moves", async () => {
+    const arrivalDate = addDays(await propertyLocalToday(db, demo.propertyId), 1);
+    const day1 = addDays(arrivalDate, 1);
+    const moveDate = addDays(arrivalDate, 2);
+    const day3 = addDays(arrivalDate, 3);
+    const shortenedDepartureDate = addDays(arrivalDate, 3);
+    const departureDate = addDays(arrivalDate, 4);
     await previewAndConfirm({
       commandType: "ADJUST_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 2, adjustmentReason: "Four-night timeline acceptance" }
     }, "timeline-adjust");
-    const created = await createOrder(memberSourceUnitId, "timeline", { member: true, arrival: "2026-08-01", departure: "2026-08-05" });
+    const created = await createOrder(memberSourceUnitId, "timeline", { member: true, arrival: arrivalDate, departure: departureDate });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
       commandType: "RESCHEDULE_STAY",
-      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-04" }
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: arrivalDate, newDepartureDate: shortenedDepartureDate }
     }, "timeline-shorten");
 
     let context = await loadOrderContext(db, orderId);
     expect(await loadActiveStayTimeline(db, context)).toEqual([
-      { serviceDate: "2026-08-01", inventoryUnitId: memberSourceUnitId },
-      { serviceDate: "2026-08-02", inventoryUnitId: memberSourceUnitId },
-      { serviceDate: "2026-08-03", inventoryUnitId: memberSourceUnitId }
+      { serviceDate: arrivalDate, inventoryUnitId: memberSourceUnitId },
+      { serviceDate: day1, inventoryUnitId: memberSourceUnitId },
+      { serviceDate: moveDate, inventoryUnitId: memberSourceUnitId }
     ]);
     let view = await getOrderView(db, orderId);
     let activeCoverage = view.coverageSet.filter((item) => item.status === "HELD");
     expect(activeCoverage).toHaveLength(3);
     expect(new Set(activeCoverage.map((item) => item.service_date)).size).toBe(3);
-    expect(activeCoverage.find((item) => item.service_date === "2026-08-01")?.inventory_unit_id).toBe(memberSourceUnitId);
-    expect(activeCoverage.find((item) => item.service_date === "2026-08-03")?.inventory_unit_id).toBe(memberSourceUnitId);
+    expect(activeCoverage.find((item) => item.service_date === arrivalDate)?.inventory_unit_id).toBe(memberSourceUnitId);
+    expect(activeCoverage.find((item) => item.service_date === moveDate)?.inventory_unit_id).toBe(memberSourceUnitId);
 
     await previewAndConfirm({
       commandType: "RESCHEDULE_STAY",
-      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-05" }
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: arrivalDate, newDepartureDate: departureDate }
     }, "timeline-extend");
     const movedToTarget = await previewAndConfirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: memberTargetUnitId, effectiveDate: "2026-08-03" }
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: memberTargetUnitId, effectiveDate: moveDate }
     }, "timeline-move-one");
     expect(movedToTarget).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
     await previewAndConfirm({
@@ -718,15 +732,15 @@ describe("PostgreSQL core operations", () => {
 
     const movedBackToSource = await previewAndConfirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: memberSourceUnitId, effectiveDate: "2026-08-03" }
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: memberSourceUnitId, effectiveDate: moveDate }
     }, "timeline-move-two");
     expect(movedBackToSource).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
     context = await loadOrderContext(db, orderId);
     expect(await loadActiveStayTimeline(db, context)).toEqual([
-      { serviceDate: "2026-08-01", inventoryUnitId: memberSourceUnitId },
-      { serviceDate: "2026-08-02", inventoryUnitId: memberSourceUnitId },
-      { serviceDate: "2026-08-03", inventoryUnitId: memberSourceUnitId },
-      { serviceDate: "2026-08-04", inventoryUnitId: memberSourceUnitId }
+      { serviceDate: arrivalDate, inventoryUnitId: memberSourceUnitId },
+      { serviceDate: day1, inventoryUnitId: memberSourceUnitId },
+      { serviceDate: moveDate, inventoryUnitId: memberSourceUnitId },
+      { serviceDate: day3, inventoryUnitId: memberSourceUnitId }
     ]);
     view = await getOrderView(db, orderId);
     activeCoverage = view.coverageSet.filter((item) => item.status === "HELD");
@@ -736,17 +750,17 @@ describe("PostgreSQL core operations", () => {
     expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(0);
     expect(view.amounts.currentContractAmount.minorUnits).toBe(0);
     expect(view.pricingRevisions.every((revision) => revision.policy_version_id === demo.transientPolicyId)).toBe(true);
-    expect(view.currentSegment.arrivalDate).toBe("2026-08-03");
+    expect(view.currentSegment.arrivalDate).toBe(moveDate);
     expect(view.originalArrangement).toEqual({
-      arrivalDate: "2026-08-01",
-      departureDate: "2026-08-05",
-      intervals: [{ inventoryUnitId: memberSourceUnitId, arrivalDate: "2026-08-01", departureDate: "2026-08-05" }]
+      arrivalDate,
+      departureDate,
+      intervals: [{ inventoryUnitId: memberSourceUnitId, arrivalDate, departureDate }]
     });
     expect(view.effectiveArrangement).toMatchObject({
       presentation: "CURRENT",
-      arrivalDate: "2026-08-01",
-      departureDate: "2026-08-05",
-      intervals: [{ inventoryUnitId: memberSourceUnitId, arrivalDate: "2026-08-01", departureDate: "2026-08-05" }]
+      arrivalDate,
+      departureDate,
+      intervals: [{ inventoryUnitId: memberSourceUnitId, arrivalDate, departureDate }]
     });
     expect(view.arrangementHistory.map((item) => item.type)).toEqual([
       "INITIAL_BOOKING", "RESCHEDULE", "RESCHEDULE", "MOVE", "MOVE"
@@ -758,24 +772,29 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("crops a reserved multi-unit arrangement with Plan B while preserving the in-range unit", async () => {
+    const arrivalDate = addDays(await propertyLocalToday(db, demo.propertyId), 1);
+    const day1 = addDays(arrivalDate, 1);
+    const moveDate = addDays(arrivalDate, 2);
+    const departureDate = addDays(arrivalDate, 4);
+    const croppedDepartureDate = addDays(arrivalDate, 2);
     const created = await createOrder(demo.roomId, "shorten-move-boundary", {
       stayType: "FREE",
-      arrival: "2026-08-01",
-      departure: "2026-08-05"
+      arrival: arrivalDate,
+      departure: departureDate
     });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: "2026-08-03" }
+      input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: demo.secondRoomId, effectiveDate: moveDate }
     }, "shorten-move-boundary-move");
     await previewAndConfirm({
       commandType: "RESCHEDULE_STAY",
-      input: { propertyId: demo.propertyId, orderId, newArrivalDate: "2026-08-01", newDepartureDate: "2026-08-03" }
+      input: { propertyId: demo.propertyId, orderId, newArrivalDate: arrivalDate, newDepartureDate: croppedDepartureDate }
     }, "reschedule-after-move-plan-b");
     const context = await loadOrderContext(db, orderId);
     expect(await loadActiveStayTimeline(db, context)).toEqual([
-      { serviceDate: "2026-08-01", inventoryUnitId: demo.roomId },
-      { serviceDate: "2026-08-02", inventoryUnitId: demo.roomId }
+      { serviceDate: arrivalDate, inventoryUnitId: demo.roomId },
+      { serviceDate: day1, inventoryUnitId: demo.roomId }
     ]);
     expect(context.currentSegment.inventoryUnitId).toBe(demo.roomId);
   });
@@ -1006,9 +1025,12 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("keeps a manual adjustment in one revision and does not inherit it", async () => {
+    const arrivalDate = addDays(await propertyLocalToday(db, demo.propertyId), 1);
+    const departureDate = addDays(arrivalDate, 3);
+    const shortenedDepartureDate = addDays(arrivalDate, 2);
     const created = await createOrder(demo.roomId, "manual-adjustment", {
-      arrival: "2026-08-01",
-      departure: "2026-08-04"
+      arrival: arrivalDate,
+      departure: departureDate
     });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
@@ -1023,8 +1045,8 @@ describe("PostgreSQL core operations", () => {
       input: {
         propertyId: demo.propertyId,
         orderId,
-        newArrivalDate: "2026-08-01",
-        newDepartureDate: "2026-08-03",
+        newArrivalDate: arrivalDate,
+        newDepartureDate: shortenedDepartureDate,
         targetCurrentContractAmountMinor: 24_000
       }
     }, "shorten-after-reprice");
@@ -1039,7 +1061,7 @@ describe("PostgreSQL core operations", () => {
     const initialRevisionId = (await getOrderView(db, orderId)).order.current_revision_id!;
     await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "CASH", transactionReference: "TEST-TXN-BEFORE-REPRICE", note: "before repricing" }
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-BEFORE-REPRICE", note: "before repricing" }
     }, "money-before-reprice");
     await previewAndConfirm({
       commandType: "REPRICE_ORDER",
@@ -1065,7 +1087,7 @@ describe("PostgreSQL core operations", () => {
         pricing_revision_id, command_id
       ) VALUES (
         'fact_missing_pricing_revision', ${orderId}, 'COLLECTION', 1, 1, 'CNY',
-        NULL, NULL, 'CASH', 'must reject missing revision', 'TEST-TXN-MISSING-REVISION',
+        NULL, NULL, 'CASH', 'must reject missing revision', NULL,
         NULL, 'command_missing_pricing_revision'
       )
     `.execute(db)).rejects.toMatchObject({ constraint: "collection_facts_new_pricing_revision_required" });
@@ -1080,7 +1102,7 @@ describe("PostgreSQL core operations", () => {
         pricing_revision_id, command_id
       ) VALUES (
         'fact_cross_order_pricing_revision', ${orderId}, 'COLLECTION', 1, 1, 'CNY',
-        NULL, NULL, 'CASH', 'must reject cross-order revision', 'TEST-TXN-CROSS-ORDER-REVISION',
+        NULL, NULL, 'CASH', 'must reject cross-order revision', NULL,
         ${otherRevisionId}, 'command_cross_order_pricing_revision'
       )
     `.execute(db)).rejects.toMatchObject({ constraint: "collection_facts_pricing_revision_order_fk" });
@@ -1107,7 +1129,6 @@ describe("PostgreSQL core operations", () => {
         orderId: wecomOrderId,
         amountMinor: 5_000,
         method: "CASH",
-        transactionReference: "TEST-TXN-WECOM-COLLECTION",
         note: "cash collection by operator"
       }
     }, "wecom-collection");
@@ -1185,7 +1206,7 @@ describe("PostgreSQL core operations", () => {
     const orderId = created.result!.orderId as string;
     const collection = await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "CASH", transactionReference: "TEST-TXN-REVERSAL-SOURCE", note: "recorded manually" }
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-REVERSAL-SOURCE", note: "recorded manually" }
     }, "reversal-collection");
     await previewAndConfirm({
       commandType: "REVERSE_FACT",
@@ -1203,7 +1224,7 @@ describe("PostgreSQL core operations", () => {
     const reversedOrderId = reversedOrder.result!.orderId as string;
     const reversedCollection = await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId: reversedOrderId, amountMinor: 5_000, method: "CASH", transactionReference: "TEST-TXN-REFUND-AFTER-REVERSAL-SOURCE", note: "to reverse" }
+      input: { propertyId: demo.propertyId, orderId: reversedOrderId, amountMinor: 5_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-REFUND-AFTER-REVERSAL-SOURCE", note: "to reverse" }
     }, "refund-after-reversal-collection");
     await previewAndConfirm({
       commandType: "REVERSE_FACT",
@@ -1218,7 +1239,7 @@ describe("PostgreSQL core operations", () => {
     const refundedOrderId = refundedOrder.result!.orderId as string;
     const refundedCollection = await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId: refundedOrderId, amountMinor: 5_000, method: "CASH", transactionReference: "TEST-TXN-REFUNDED-COLLECTION", note: "partially refunded" }
+      input: { propertyId: demo.propertyId, orderId: refundedOrderId, amountMinor: 5_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-REFUNDED-COLLECTION", note: "partially refunded" }
     }, "reversal-after-refund-collection");
     await previewAndConfirm({
       commandType: "RECORD_REFUND",
@@ -1237,7 +1258,7 @@ describe("PostgreSQL core operations", () => {
     const orderId = created.result!.orderId as string;
     const collection = await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "CASH", transactionReference: "TEST-TXN-REFUND-REVERSAL-RACE-SOURCE", note: "race source" }
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 5_000, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-REFUND-REVERSAL-RACE-SOURCE", note: "race source" }
     }, "refund-reversal-race-collection");
     const factId = collection.factRefs[0]!;
     const [refundPreview, reversalPreview] = await Promise.all([
@@ -1283,7 +1304,7 @@ describe("PostgreSQL core operations", () => {
     const orderId = created.result!.orderId as string;
     const collection = await previewAndConfirm({
       commandType: "RECORD_COLLECTION",
-      input: { propertyId: demo.propertyId, orderId, amountMinor: 100, method: "CASH", transactionReference: "TEST-TXN-IMMUTABLE", note: "immutable fact" }
+      input: { propertyId: demo.propertyId, orderId, amountMinor: 100, method: "BANK_TRANSFER", transactionReference: "TEST-TXN-IMMUTABLE", note: "immutable fact" }
     }, "immutable-collection");
     await expect(db.updateTable("pricing_policy_versions").set({ nightly_rate_minor: 1 }).where("id", "=", demo.freePolicyId).execute()).rejects.toThrow(/append-only/);
     await expect(db.updateTable("orders").set({ primary_guest_snapshot: { fullName: "Changed" } }).where("id", "=", orderId).execute()).rejects.toThrow(/immutable/);
@@ -1310,7 +1331,7 @@ describe("PostgreSQL core operations", () => {
     expect(replay.receiptId).toBe(first.receiptId);
     await expect(confirmCommandPreview(db, principal, preview.preview.previewId, { ...confirmation, expectedEffectHash: `${confirmation.expectedEffectHash}-different` }, { idempotencyKey: "recovery-confirm", correlationId: "recovery" })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
     expect(await findCommandResult(db, principal, demo.propertyId, "CREATE_ORDER", "recovery-confirm")).toMatchObject({ executionStatus: "EXECUTED", receiptId: first.receiptId });
-    expect(await findCommandResult(db, principal, demo.propertyId, "CREATE_ORDER", "never-executed")).toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+    expect(await findCommandResult(db, principal, demo.propertyId, "CREATE_ORDER", "never-executed")).toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
 
     const recoveryCommandType = "CHECK_IN";
     const recoveryIdempotencyKey = "recovery-unknown";
@@ -1335,6 +1356,6 @@ describe("PostgreSQL core operations", () => {
     }
     await lockOwner;
     expect(await findCommandResult(db, principal, demo.propertyId, recoveryCommandType, recoveryIdempotencyKey))
-      .toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+      .toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
   });
 });

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,10 @@ const restoreScript = fileURLToPath(new URL("../../scripts/restore.sh", import.m
 const verifyBackupRestoreScript = fileURLToPath(new URL("../../scripts/verify-backup-restore.sh", import.meta.url));
 const verifyComposeColdStartScript = fileURLToPath(new URL("../../scripts/verify-compose-cold-start.sh", import.meta.url));
 const databaseModule = fileURLToPath(new URL("../../packages/db/src/database.ts", import.meta.url));
+const migrationsDirectory = fileURLToPath(new URL("../../packages/db/src/migrations/", import.meta.url));
+const currentMigrationNames = (await readdir(migrationsDirectory))
+  .filter((name) => /^\d+.*\.sql$/.test(name))
+  .sort();
 
 async function fakeDockerEnvironment(
   targetExists: boolean,
@@ -20,6 +24,7 @@ async function fakeDockerEnvironment(
   options: {
     baselineMigrationCount?: string;
     failMigration?: boolean;
+    failReadiness?: boolean;
     finalMigrationCount?: string;
     stage10FunctionCount?: string;
     stage10TriggerCount?: string;
@@ -31,6 +36,7 @@ async function fakeDockerEnvironment(
     stage11ImmediateTriggerCount?: string;
     baselineUnknownMigrationCount?: string;
     finalUnknownMigrationCount?: string;
+    restoredMigrationNames?: string[];
   } = {}
 ) {
   const workdir = await mkdtemp(join(tmpdir(), "qintopia-restore-contract-"));
@@ -60,6 +66,9 @@ case "$*" in
       printf '%s' "$FAKE_BASELINE_UNKNOWN_MIGRATION_COUNT"
     fi
     ;;
+  *"string_agg(name, ',' ORDER BY name)"*)
+    printf '%s' "$FAKE_RESTORED_MIGRATION_MANIFEST"
+    ;;
   *"schema_migrations"*)
     if [ -f "$FAKE_MIGRATION_STATE_FILE" ]; then
       printf '%s' "$FAKE_FINAL_MIGRATION_COUNT"
@@ -79,12 +88,19 @@ case "$*" in
 esac
 `, { mode: 0o700 });
   await chmod(docker, 0o700);
-  const npm = join(bin, "npm");
+const npm = join(bin, "npm");
   await writeFile(npm, `#!/bin/sh
 printf 'npm %s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 printf 'pg user=%s password=%s host=%s port=%s database=%s\\n' "$PGUSER" "$PGPASSWORD" "$PGHOST" "$PGPORT" "$PGDATABASE" >> "$FAKE_DOCKER_LOG"
-if [ "$FAKE_MIGRATION_FAILURE" = "1" ]; then exit 1; fi
-touch "$FAKE_MIGRATION_STATE_FILE"
+case "$*" in
+  *"run db:migrate"*)
+    if [ "$FAKE_MIGRATION_FAILURE" = "1" ]; then exit 1; fi
+    touch "$FAKE_MIGRATION_STATE_FILE"
+    ;;
+  *"run db:ready"*)
+    if [ "$FAKE_READINESS_FAILURE" = "1" ]; then exit 1; fi
+    ;;
+esac
 `, { mode: 0o700 });
   await chmod(npm, 0o700);
   return {
@@ -98,8 +114,9 @@ touch "$FAKE_MIGRATION_STATE_FILE"
       FAKE_TARGET_EXISTS: targetExists ? "1" : "",
       FAKE_RESTORE_FAILURE: failRestore ? "1" : "",
       FAKE_MIGRATION_FAILURE: options.failMigration ? "1" : "",
+      FAKE_READINESS_FAILURE: options.failReadiness ? "1" : "",
       FAKE_BASELINE_MIGRATION_COUNT: options.baselineMigrationCount ?? "26",
-      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? "28",
+      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? "35",
       FAKE_STAGE10_FUNCTION_COUNT: options.stage10FunctionCount ?? "3",
       FAKE_STAGE10_TRIGGER_COUNT: options.stage10TriggerCount ?? "2",
       FAKE_STAGE10_IMMEDIATE_TRIGGER_COUNT: options.stage10ImmediateTriggerCount ?? "3",
@@ -110,6 +127,7 @@ touch "$FAKE_MIGRATION_STATE_FILE"
       FAKE_STAGE11_IMMEDIATE_TRIGGER_COUNT: options.stage11ImmediateTriggerCount ?? "8",
       FAKE_BASELINE_UNKNOWN_MIGRATION_COUNT: options.baselineUnknownMigrationCount ?? "0",
       FAKE_FINAL_UNKNOWN_MIGRATION_COUNT: options.finalUnknownMigrationCount ?? "0",
+      FAKE_RESTORED_MIGRATION_MANIFEST: `${(options.restoredMigrationNames ?? currentMigrationNames.slice(0, 26)).length}:${(options.restoredMigrationNames ?? currentMigrationNames.slice(0, 26)).join(",")}`,
       FAKE_CREATED_TARGET_OID: "42001",
       FAKE_CLEANUP_TARGET_OID: replacementOid ?? "42001",
       FAKE_OID_QUERY_COUNT_FILE: oidQueryCount,
@@ -134,7 +152,7 @@ describe("restore script contract", () => {
     }
   });
 
-  it("creates a new target, upgrades a stage 9 backup, and validates the complete stage 11 schema", async () => {
+  it("creates a new target, upgrades a stage 9 backup, and validates the current stage 13 schema", async () => {
     const fixture = await fakeDockerEnvironment(false);
     try {
       await expect(execFileAsync("bash", [restoreScript, fixture.backup, "new_restore_target"], { env: fixture.env }))
@@ -165,6 +183,14 @@ describe("restore script contract", () => {
       expect(calls).toContain("026_stage9_stay_change_guards.sql");
       expect(calls).toContain("027_stage10_stay_shortening_guards.sql");
       expect(calls).toContain("028_stage11_move_unit_guards.sql");
+      expect(calls).toContain("029_stage12_terminal_order_guards.sql");
+      expect(calls).toContain("030_collection_fact_historical_pricing_revision.sql");
+      expect(calls).toContain("031_collection_fact_method_transaction_rules.sql");
+      expect(calls).toContain("032_wecom_refund_original_route.sql");
+      expect(calls).toContain("033_stay_collection_membership_conversion.sql");
+      expect(calls).toContain("034_stay_conversion_reversal_bridge_guard.sql");
+      expect(calls).toContain("035_stage13_conversion_execution_state_guards.sql");
+      expect(calls).toContain("npm run db:ready");
       expect(calls).toContain("pricing_revisions_stage10_validate");
       expect(calls).toContain("amendments_stage10_reject_checkout_bypass");
       expect(calls).toContain("entitlement_ledger_stage10_reject_write");
@@ -195,14 +221,14 @@ describe("restore script contract", () => {
     }
   });
 
-  it("rejects a backup below the supported stage 9 baseline before running migrations", async () => {
+  it("rejects a backup below the supported stage 9 baseline and retains the failed target", async () => {
     const fixture = await fakeDockerEnvironment(false, false, undefined, { baselineMigrationCount: "25" });
     try {
       await expect(execFileAsync("bash", [restoreScript, fixture.backup, "unsupported_restore_target"], { env: fixture.env }))
         .rejects.toMatchObject({ code: 1 });
       const calls = await readFile(fixture.log, "utf8");
       expect(calls).not.toContain("npm run db:migrate");
-      expect(calls).toContain("dropdb -U qintopia --if-exists unsupported_restore_target");
+      expect(calls).not.toContain("dropdb");
     } finally {
       await rm(fixture.workdir, { recursive: true, force: true });
     }
@@ -220,16 +246,32 @@ describe("restore script contract", () => {
         const calls = await readFile(fixture.log, "utf8");
         if (expectsMigration) expect(calls).toContain("npm run db:migrate");
         else expect(calls).not.toContain("npm run db:migrate");
-        expect(calls).toContain(`dropdb -U qintopia --if-exists ${target}`);
+        expect(calls).not.toContain("dropdb");
       } finally {
         await rm(fixture.workdir, { recursive: true, force: true });
       }
     }
   });
 
-  it("removes the new target when migration or final stage 11 object validation fails", async () => {
+  it("rejects a restored migration history with a gap before running newer migrations", async () => {
+    const fixture = await fakeDockerEnvironment(false, false, undefined, {
+      restoredMigrationNames: [...currentMigrationNames.slice(0, 26), currentMigrationNames[27]!]
+    });
+    try {
+      await expect(execFileAsync("bash", [restoreScript, fixture.backup, "gapped_restore_target"], { env: fixture.env }))
+        .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("non-contiguous migration history") });
+      const calls = await readFile(fixture.log, "utf8");
+      expect(calls).not.toContain("npm run db:migrate");
+      expect(calls).not.toContain("dropdb");
+    } finally {
+      await rm(fixture.workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the new target when migration or current readiness validation fails", async () => {
     for (const [target, options] of [
       ["failed_migration_target", { failMigration: true }],
+      ["failed_readiness_target", { failReadiness: true }],
       ["incomplete_stage10_target", { stage10FunctionCount: "2" }],
       ["missing_stage10_immediate_trigger_target", { stage10ImmediateTriggerCount: "2" }],
       ["incomplete_stage11_target", { stage11FunctionCount: "13" }],
@@ -244,7 +286,7 @@ describe("restore script contract", () => {
           .rejects.toMatchObject({ code: 1 });
         const calls = await readFile(fixture.log, "utf8");
         expect(calls).toContain("npm run db:migrate");
-        expect(calls).toContain(`dropdb -U qintopia --if-exists ${target}`);
+        expect(calls).not.toContain("dropdb");
       } finally {
         await rm(fixture.workdir, { recursive: true, force: true });
       }
@@ -330,7 +372,7 @@ describe("restore script contract", () => {
     }
   });
 
-  it("drops only the newly created partial target when restore fails", async () => {
+  it("retains the newly created partial target when restore fails", async () => {
     const fixture = await fakeDockerEnvironment(false, true);
     try {
       await expect(execFileAsync("bash", [restoreScript, fixture.backup, "failed_restore_target"], { env: fixture.env }))
@@ -338,22 +380,23 @@ describe("restore script contract", () => {
       const calls = await readFile(fixture.log, "utf8");
       expect(calls).toContain("createdb -U qintopia failed_restore_target");
       expect(calls).toContain("pg_restore");
-      expect(calls).toContain("dropdb -U qintopia --if-exists failed_restore_target");
+      expect(calls).not.toContain("dropdb");
     } finally {
       await rm(fixture.workdir, { recursive: true, force: true });
     }
   });
 
-  it("does not drop a same-name database whose identity changed before failure cleanup", async () => {
+  it("never queries identity or drops a same-name database during failure cleanup", async () => {
     const fixture = await fakeDockerEnvironment(false, true, "42002");
     try {
       const failure = await execFileAsync("bash", [restoreScript, fixture.backup, "replaced_restore_target"], { env: fixture.env })
         .then(() => undefined, (error: unknown) => error as { code?: number; stderr?: string });
       expect(failure).toMatchObject({ code: 1 });
-      expect(failure?.stderr).toContain("no longer has the OID created by this restore");
+      expect(failure?.stderr).toContain("retained for manual inspection");
       const calls = await readFile(fixture.log, "utf8");
       expect(calls).toContain("createdb -U qintopia replaced_restore_target");
-      expect(calls).not.toContain("dropdb -U qintopia --if-exists replaced_restore_target");
+      expect(calls).not.toContain("SELECT oid FROM pg_database");
+      expect(calls).not.toContain("dropdb");
     } finally {
       await rm(fixture.workdir, { recursive: true, force: true });
     }

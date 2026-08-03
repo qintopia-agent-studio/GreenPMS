@@ -1,6 +1,6 @@
 import type { AuthPrincipal, CommandEnvelope, CommandType } from "@qintopia/contracts";
 import { confirmCommandPreview, createCommandPreview, createDatabase, executeQuoteCommand, type Database } from "@qintopia/db";
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import { pathToFileURL } from "node:url";
 import { newId, sha256 } from "@qintopia/domain";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -26,6 +26,7 @@ async function runCommand(db: Kysely<Database>, principal: AuthPrincipal, comman
 
 export async function createRestoreFixture(reference: string): Promise<void> {
   const db = createDatabase();
+  let createdLegacyTransferCompatibilityTable = false;
   try {
     const credentialId = newId("token");
     await db.insertInto("api_tokens").values({
@@ -88,12 +89,24 @@ export async function createRestoreFixture(reference: string): Promise<void> {
       propertyId: demo.propertyId,
       quoteId: quote.quote.quoteId,
       primaryGuest: { fullName: "Restore Verification Guest", nickname: "Restore Guest", documentNumber: reference },
-      bookingChannelCode: "CTRIP",
-      channelOrderReference: reference,
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
       targetCurrentContractAmountMinor: quote.quote.currentContractAmount.minorUnits
     }, `${reference}-create-order`);
     const orderId = created.result?.orderId;
     if (typeof orderId !== "string") throw new Error("Restore fixture CREATE_ORDER returned no orderId");
+    const transferTable = await sql<{ exists: boolean }>`
+      SELECT to_regclass('stay_collection_membership_transfers') IS NOT NULL AS exists
+    `.execute(db);
+    if (!transferTable.rows[0]?.exists) {
+      await sql`
+        CREATE TABLE stay_collection_membership_transfers (
+          id text PRIMARY KEY,
+          order_id text NOT NULL
+        )
+      `.execute(db);
+      createdLegacyTransferCompatibilityTable = true;
+    }
     const firstCollection = await runCommand(db, principal, "RECORD_COLLECTION", {
       propertyId: demo.propertyId,
       orderId,
@@ -106,7 +119,7 @@ export async function createRestoreFixture(reference: string): Promise<void> {
       propertyId: demo.propertyId,
       orderId,
       amountMinor: 4_000,
-      method: "CASH",
+      method: "WECOM",
       transactionReference: `${reference}-COLLECTION-2`,
       note: "Restore verification second collection"
     }, `${reference}-collection-2`);
@@ -122,6 +135,9 @@ export async function createRestoreFixture(reference: string): Promise<void> {
       note: "Restore verification referenced refund"
     }, `${reference}-refund-1`);
   } finally {
+    if (createdLegacyTransferCompatibilityTable) {
+      await sql`DROP TABLE IF EXISTS stay_collection_membership_transfers`.execute(db);
+    }
     await db.destroy();
   }
 }

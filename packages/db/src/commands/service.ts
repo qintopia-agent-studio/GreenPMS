@@ -10,12 +10,14 @@ import {
   type CreateQuoteCommandInputDto,
   type CreateQuoteCommandResponseDto,
   type ErrorDto,
+  type HistoricalRecoverableCommandType,
   type PreviewDto,
+  type QuoteReadDto,
   type ReceiptDto,
   type StoredQuoteDto
 } from "@qintopia/contracts";
 import { enumerateServiceDates, newId, paidStayTypeForNights, sha256, stableHash } from "@qintopia/domain";
-import { createQuoteInTransaction } from "../pricing-service.ts";
+import { createQuoteInTransaction, projectQuoteForExternalRead } from "../pricing-service.ts";
 import { bumpRoomStatusRevision } from "../room-status.ts";
 import type { Database } from "../schema.ts";
 import {
@@ -39,6 +41,12 @@ export interface UnknownCommandResult {
   executionStatus: "UNKNOWN";
   businessCommitted: false;
   correlationId?: string;
+}
+
+export interface ResolveCommandResultRequest {
+  propertyId: string;
+  commandType: HistoricalRecoverableCommandType;
+  idempotencyKey: string;
 }
 
 export type ReceiptReadDto = ReceiptDto & {
@@ -70,6 +78,7 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
   "REVOKE_CHECK_IN",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "CHECK_IN",
   "CHECK_OUT",
   "LOCK_MAINTENANCE",
@@ -84,7 +93,8 @@ const strictRecoveryEvidenceCommands = new Set<CommandType>([
   "MOVE_UNIT",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
-  "REVOKE_CHECK_IN"
+  "REVOKE_CHECK_IN",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
 ]);
 
 async function lockCommandProtocolEpoch(trx: Transaction<Database>): Promise<void> {
@@ -228,7 +238,7 @@ async function revalidateConfirmWriteAccess(
   trx: Transaction<Database>,
   principal: AuthPrincipal,
   propertyId: string,
-  commandType: CommandType
+  commandType: HistoricalRecoverableCommandType
 ): Promise<void> {
   let subjectQuery = trx.selectFrom("subjects")
     .select(["id", "status"])
@@ -506,6 +516,14 @@ function projectReceiptResultForRead(commandType: string, result: Record<string,
       freeStayCategoryCode: Object.hasOwn(result, "freeStayCategoryCode") ? result.freeStayCategoryCode : null
     };
   }
+  if (commandType === "CREATE_QUOTE") {
+    const quote = asRecord(result.quote);
+    if (!quote) return result;
+    return {
+      ...result,
+      quote: projectQuoteForExternalRead(quote as unknown as StoredQuoteDto | QuoteReadDto)
+    };
+  }
   if (commandType === "RECORD_COLLECTION" || commandType === "RECORD_REFUND" || commandType === "REVERSE_FACT") {
     return {
       ...result,
@@ -535,12 +553,12 @@ async function replayOrConflict(db: Kysely<Database> | Transaction<Database>, op
   throw new DomainError("COMMAND_STATUS_UNKNOWN", "Command is still executing or its final state is unknown", 409, true, { commandId: existing.id });
 }
 
-function quoteFromReceipt(receipt: ReceiptDto): StoredQuoteDto {
+function quoteFromReceipt(receipt: ReceiptDto): QuoteReadDto {
   const quote = asRecord(receipt.result)?.quote;
   if (!quote || typeof quote !== "object" || Array.isArray(quote)) {
     throw new DomainError("INTERNAL_ERROR", "Quote receipt is malformed", 500);
   }
-  return quote as unknown as StoredQuoteDto;
+  return projectQuoteForExternalRead(quote as unknown as StoredQuoteDto | QuoteReadDto);
 }
 
 export async function executeQuoteCommand(
@@ -634,6 +652,7 @@ export async function executeQuoteCommand(
         ...normalizedInput,
         requesterSubjectId: principal.subjectId
       });
+      const readableQuote = projectQuoteForExternalRead(quote);
       const receiptId = newId("receipt");
       const committedAt = new Date();
       await trx.updateTable("command_executions")
@@ -645,7 +664,7 @@ export async function executeQuoteCommand(
         command_id: commandId,
         execution_status: "EXECUTED",
         business_committed: true,
-        result: { quote },
+        result: { quote: readableQuote },
         error: null,
         resource_refs: JSON.stringify([quote.quoteId]),
         fact_refs: JSON.stringify([]),
@@ -665,7 +684,7 @@ export async function executeQuoteCommand(
       }).execute();
       const receipt = await receiptByCommand(trx, commandId);
       if (!receipt) throw new DomainError("INTERNAL_ERROR", "Quote receipt was not persisted", 500);
-      return { quote, receipt };
+      return { quote: readableQuote, receipt };
       })
     ));
   });
@@ -932,6 +951,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
             || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
             || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
             || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
+            || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
             throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });
           }
@@ -1078,24 +1098,144 @@ export async function findCommandResult(
   };
 
   const execution = await findExecution(db);
-  if (execution) {
-    return toVisibleResult(db, execution);
+  if (execution) return toVisibleResult(db, execution);
+
+  // A read-only lookup cannot prove that a request still in transit will never
+  // arrive. Only resolveCommandResult may publish durable NOT_EXECUTED.
+  return { executionStatus: "UNKNOWN" as const, businessCommitted: false as const };
+}
+
+export async function resolveCommandResult(
+  db: Kysely<Database>,
+  principal: AuthPrincipal,
+  request: ResolveCommandResultRequest,
+  metadata: { idempotencyKey: string | undefined; correlationId: string | undefined }
+): Promise<ReceiptReadDto | UnknownCommandResult> {
+  const headers = assertWriteMetadata(metadata.idempotencyKey, metadata.correlationId);
+  const propertyId = request.propertyId.trim();
+  const originalIdempotencyKey = request.idempotencyKey.trim();
+  if (!propertyId) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
+  if (!originalIdempotencyKey) throw new DomainError("VALIDATION_ERROR", "idempotencyKey is required");
+
+  const access = principal.propertyAccess.get(propertyId);
+  if (!access) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the credential scope", 403);
+  if (request.commandType !== "CREATE_QUOTE" && access !== "WRITE") {
+    throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
   }
 
-  const lockKey = executionLockKey(principal.subjectId, propertyId, commandType, normalizedIdempotencyKey);
-  return db.connection().execute(async (connection) => {
+  const findExecution = (connection: Kysely<Database> | Transaction<Database>) => connection
+    .selectFrom("command_executions")
+    .selectAll()
+    .where("subject_id", "=", principal.subjectId)
+    .where("property_id", "=", propertyId)
+    .where("command_type", "=", request.commandType)
+    .where("idempotency_key", "=", originalIdempotencyKey)
+    .executeTakeFirst();
+  const visibleResult = async (
+    connection: Kysely<Database> | Transaction<Database>,
+    execution: NonNullable<Awaited<ReturnType<typeof findExecution>>>
+  ): Promise<ReceiptReadDto | UnknownCommandResult> => {
+    assertExecutionAccess(principal, execution, "Command result");
+    return (await receiptByCommand(connection, execution.id, "HISTORICAL_READ")) ?? {
+      commandId: execution.id,
+      executionStatus: "UNKNOWN",
+      businessCommitted: false,
+      correlationId: execution.correlation_id
+    };
+  };
+
+  const lockKey = executionLockKey(
+    principal.subjectId,
+    propertyId,
+    request.commandType,
+    originalIdempotencyKey
+  );
+  return db.transaction().execute(async (trx) => {
     const lockResult = await sql<{ acquired: boolean }>`
-      select pg_try_advisory_lock(hashtextextended(${lockKey}, 0::bigint)) as acquired
-    `.execute(connection);
+      select pg_try_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint)) as acquired
+    `.execute(trx);
     if (!lockResult.rows[0]?.acquired) {
       return { executionStatus: "UNKNOWN" as const, businessCommitted: false as const };
     }
-    try {
-      const committedExecution = await findExecution(connection);
-      if (committedExecution) return toVisibleResult(connection, committedExecution);
-      return { executionStatus: "NOT_EXECUTED" as const, businessCommitted: false as const };
-    } finally {
-      await sql`select pg_advisory_unlock(hashtextextended(${lockKey}, 0::bigint))`.execute(connection);
+
+    if (request.commandType === "CREATE_QUOTE") {
+      await revalidateQuoteReadAccess(trx, principal, propertyId);
+    } else {
+      await revalidateConfirmWriteAccess(trx, principal, propertyId, request.commandType);
     }
+
+    const raced = await findExecution(trx);
+    if (raced) return visibleResult(trx, raced);
+
+    const commandId = newId("command");
+    const receiptId = newId("receipt");
+    const completedAt = new Date();
+    const fenceHash = stableHash({
+      protocol: "COMMAND_RESULT_RESOLUTION_FENCE_V1",
+      subjectId: principal.subjectId,
+      propertyId,
+      commandType: request.commandType,
+      idempotencyKey: originalIdempotencyKey
+    });
+    const inserted = await trx.insertInto("command_executions").values({
+      id: commandId,
+      subject_id: principal.subjectId,
+      credential_id: principal.credentialId,
+      property_id: propertyId,
+      command_type: request.commandType,
+      idempotency_key: originalIdempotencyKey,
+      request_hash: fenceHash,
+      correlation_id: headers.correlationId,
+      state: "REJECTED",
+      completed_at: completedAt
+    }).onConflict((oc) => oc
+      .columns(["subject_id", "property_id", "command_type", "idempotency_key"])
+      .doNothing())
+      .returning("id")
+      .executeTakeFirst();
+    if (!inserted) {
+      const concurrent = await findExecution(trx);
+      if (concurrent) return visibleResult(trx, concurrent);
+      throw new DomainError("COMMAND_STATUS_UNKNOWN", "Command resolution state is unknown", 409, true);
+    }
+
+    const error: ErrorDto = {
+      code: "COMMAND_INTERRUPTED",
+      message: "The original request was not executed and its idempotency key is now closed",
+      correlationId: headers.correlationId,
+      retryable: false,
+      commandId,
+      receiptId
+    };
+    await trx.insertInto("command_receipts").values({
+      id: receiptId,
+      command_id: commandId,
+      execution_status: "NOT_EXECUTED",
+      business_committed: false,
+      result: null,
+      error,
+      resource_refs: JSON.stringify([]),
+      fact_refs: JSON.stringify([]),
+      committed_at: completedAt
+    }).execute();
+    await trx.insertInto("audit_entries").values({
+      id: newId("audit"),
+      subject_id: principal.subjectId,
+      credential_id: principal.credentialId,
+      action: `RESOLVE_COMMAND_RESULT:${request.commandType}`,
+      decision: "DENIED",
+      command_id: commandId,
+      correlation_id: headers.correlationId,
+      reason: { code: "COMMAND_RESULT_RESOLUTION", note: "Original request fenced as not executed" },
+      target_refs: JSON.stringify([]),
+      metadata: {
+        errorCode: error.code,
+        resolutionFence: true,
+        resolutionRequestHash: sha256(headers.idempotencyKey)
+      }
+    }).execute();
+    const receipt = await receiptByCommand(trx, commandId);
+    if (!receipt) throw new DomainError("INTERNAL_ERROR", "Command resolution receipt was not persisted", 500);
+    return receipt;
   });
 }

@@ -2,9 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { commandTypes, type CommandType } from "@qintopia/contracts";
+import { commandTypes, type AuthPrincipal, type CommandType } from "@qintopia/contracts";
 import { newOpaqueSecret, parseLocalDate, todayInTimeZone } from "@qintopia/domain";
-import { withPropertyClockForTesting, type Database } from "@qintopia/db";
+import {
+  confirmCommandPreview as confirmCommandPreviewDirect,
+  createCommandPreview as createCommandPreviewDirect,
+  withPropertyClockForTesting,
+  type Database
+} from "@qintopia/db";
 import type { Kysely } from "kysely";
 import { CommandEffectSchema, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
@@ -38,6 +43,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   COMPLETE_CLEANING: ["cleaningTaskId", "fromStatus", "inventoryUnitId", "orderId", "roomId", "serviceDate", "stayId", "toStatus"],
   RECORD_COLLECTION: ["amountMinor", "currency", "method", "note", "orderId", "transactionReference"],
   RECORD_REFUND: ["amountMinor", "currency", "method", "note", "orderId", "referencesFactId", "transactionReference"],
+  CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: ["before", "entitlement", "member", "membershipPricing", "operation", "orderId", "pricing", "pricingDecision", "primaryOccupant", "product", "remainingPayment", "stayId", "transfer"],
   REVERSE_FACT: ["amountMinor", "currency", "netEffectMinor", "note", "orderId", "reversesFactId"],
   CHECK_IN: ["businessDate", "effectiveDate", "entitlementTransition", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
   CHECK_OUT: ["amounts", "businessDate", "effectiveDate", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
@@ -61,6 +67,13 @@ type Preview = {
 let app: FastifyInstance;
 let db: Kysely<Database>;
 let sequence = 0;
+const directPrincipal: AuthPrincipal = {
+  subjectId: demo.agentSubjectId,
+  credentialId: "token_demo_write",
+  credentialType: "TOKEN",
+  displayName: "Demo Agent",
+  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+};
 
 function shiftLocalDate(value: string, days: number): string {
   const date = parseLocalDate(value);
@@ -76,6 +89,30 @@ function headers(prefix: string) {
     "idempotency-key": `${prefix}-${sequence}`,
     "x-correlation-id": `${prefix}-${sequence}`
   };
+}
+
+function metadata(prefix: string) {
+  const values = headers(prefix);
+  return {
+    idempotencyKey: values["idempotency-key"],
+    correlationId: values["x-correlation-id"]
+  };
+}
+
+async function executeSetupCommand(commandType: CommandType, input: Record<string, unknown>, prefix: string): Promise<Record<string, unknown>> {
+  const { preview } = await createCommandPreviewDirect(db, directPrincipal, { commandType, input }, metadata(`${prefix}-preview`));
+  const receipt = await confirmCommandPreviewDirect(db, directPrincipal, preview.previewId, {
+    propertyId: demo.propertyId,
+    commandType,
+    confirmation: true,
+    expectedEffectHash: preview.effectHash,
+    reason: commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : { code: "EFFECT_CONTRACT_SETUP", note: `Prepare state for ${commandType} effect coverage` }
+  }, metadata(`${prefix}-confirm`));
+  const result = receipt.result;
+  expect(result, `${commandType}: setup command result`).toBeDefined();
+  return result as Record<string, unknown>;
 }
 
 async function requestPreview(commandType: CommandType, input: Record<string, unknown>): Promise<Preview> {
@@ -637,7 +674,7 @@ describe("Command effect HTTP contract", () => {
       propertyId: demo.propertyId,
       orderId: checkInOrderId,
       amountMinor: 10_000,
-      method: "OTHER",
+      method: "BANK_TRANSFER",
       transactionReference: "TEST-EFFECT-TXN-COLLECTION",
       note: "Effect contract collection"
     });
@@ -647,7 +684,7 @@ describe("Command effect HTTP contract", () => {
       orderId: checkInOrderId,
       amountMinor: 1_000,
       referencesFactId: collectionFactId,
-      method: "OTHER",
+      method: "BANK_TRANSFER",
       transactionReference: "TEST-EFFECT-TXN-REFUND",
       note: "Effect contract refund"
     });
@@ -690,12 +727,88 @@ describe("Command effect HTTP contract", () => {
       targetCurrentContractAmountMinor: checkoutPriced.currentContractAmount.minorUnits
     });
     const checkoutOrderId = (await confirm(checkoutOrder)).orderId as string;
-    await db.updateTable("orders").set({ status: "CHECKED_IN" }).where("id", "=", checkoutOrderId).execute();
-    await db.updateTable("stays").set({ status: "IN_HOUSE" }).where("order_id", "=", checkoutOrderId).execute();
+    await withPropertyClockForTesting(new Date(`${shiftLocalDate(propertyToday, -1)}T12:00:00.000Z`), () => executeSetupCommand(
+      "CHECK_IN",
+      { propertyId: demo.propertyId, orderId: checkoutOrderId },
+      "effect-checkout-setup-checkin"
+    ));
     const checkOut = await capture("CHECK_OUT", { propertyId: demo.propertyId, orderId: checkoutOrderId });
     expect(checkOut.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     const checkOutResult = await confirm(checkOut);
     expect(checkOutResult).not.toHaveProperty("cleaningTaskId");
+
+    const conversionMember = await capture("CREATE_MEMBER", {
+      propertyId: demo.propertyId,
+      fullName: "Effect Contract Conversion Member",
+      identityCardNumber: "TEST-EFFECT-CONVERSION-ID-001",
+      phone: "13800000002",
+      wechat: "effect-contract-conversion"
+    });
+    const conversionMemberId = (await confirm(conversionMember)).memberId as string;
+    const conversionArrivalDate = shiftLocalDate(propertyToday, -1);
+    const conversionDepartureDate = propertyToday;
+    const conversionPriced = await quote({
+      arrivalDate: conversionArrivalDate,
+      departureDate: conversionDepartureDate,
+      inventoryUnitId: "unit_room_d_gen_01"
+    });
+    const conversionOrder = await capture("CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: conversionPriced.quoteId,
+      primaryGuest: {
+        fullName: "Effect Contract Conversion Guest",
+        nickname: "Effect Conversion",
+        documentNumber: "TEST-EFFECT-CONVERSION-ID-001"
+      },
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: conversionPriced.currentContractAmount.minorUnits
+    });
+    const conversionOrderId = (await confirm(conversionOrder)).orderId as string;
+    await withPropertyClockForTesting(new Date(`${conversionArrivalDate}T12:00:00.000Z`), () => executeSetupCommand(
+      "CHECK_IN",
+      { propertyId: demo.propertyId, orderId: conversionOrderId },
+      "effect-conversion-setup-checkin"
+    ));
+    await executeSetupCommand(
+      "CHECK_OUT",
+      { propertyId: demo.propertyId, orderId: conversionOrderId },
+      "effect-conversion-setup-checkout"
+    );
+    const conversionCollection = await capture("RECORD_COLLECTION", {
+      propertyId: demo.propertyId,
+      orderId: conversionOrderId,
+      amountMinor: 59_000,
+      method: "WECOM",
+      transactionReference: "WX-EFFECT-CONVERSION-SOURCE-001",
+      note: "Effect contract conversion source"
+    });
+    const conversionCollectionFactId = (await confirm(conversionCollection)).factId as string;
+    const conversion = await capture("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", {
+      propertyId: demo.propertyId,
+      orderId: conversionOrderId,
+      memberId: conversionMemberId,
+      membershipProductId: "membership_product_shared_bath_single_v1",
+      collectionFactIds: [conversionCollectionFactId],
+      agreedPriceMinor: 162_000,
+      remainingPaymentTransactionReference: "WX-EFFECT-CONVERSION-REMAINING-001"
+    });
+    expect(conversion.effect).toMatchObject({
+      operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      transfer: { total: { currency: "CNY", minorUnits: 59_000 } },
+      membershipPricing: { agreedPrice: { currency: "CNY", minorUnits: 162_000 } },
+      remainingPayment: { amount: { currency: "CNY", minorUnits: 103_000 } },
+      entitlement: { consumedUnits: 1, remainingUnits: 29 }
+    });
+    const conversionResult = await confirm(conversion);
+    expect(conversionResult).toMatchObject({
+      orderId: conversionOrderId,
+      status: "ACTIVE",
+      transferredCollectionFactIds: [conversionCollectionFactId],
+      convertedUnits: 1,
+      remainingUnits: 29,
+      effectHash: expect.stringMatching(/^[a-f0-9]{64}$/)
+    });
     const disabledCleaning = await app.inject({
       method: "POST",
       url: "/api/v1/command-previews",

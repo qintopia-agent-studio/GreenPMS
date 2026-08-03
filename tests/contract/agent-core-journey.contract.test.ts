@@ -531,7 +531,7 @@ describe("scoped agent HTTP core journey", () => {
       propertyId: demo.propertyId,
       orderId,
       amountMinor: 6_000,
-      method: "CASH",
+      method: "BANK_TRANSFER",
       transactionReference: "TEST-AGENT-TXN-COLLECTION-ONE",
       note: "First independent installment"
     }, "collection-one");
@@ -566,7 +566,7 @@ describe("scoped agent HTTP core journey", () => {
       orderId,
       amountMinor: 3_000,
       referencesFactId: firstCollectionFactId,
-      method: "CASH",
+      method: "BANK_TRANSFER",
       transactionReference: "TEST-AGENT-TXN-REFUND-ONE",
       note: "Partial refund referencing the first installment"
     }, "refund-first-collection");
@@ -702,7 +702,7 @@ describe("scoped agent HTTP core journey", () => {
       headers: { authorization: `Bearer ${foreignToken}` }
     });
     expect(foreignRecovery.statusCode, foreignRecovery.body).toBe(200);
-    expect(foreignRecovery.json()).toEqual({ executionStatus: "NOT_EXECUTED", businessCommitted: false });
+    expect(foreignRecovery.json()).toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
   });
 
   it("reports UNKNOWN only while an HTTP command owner is active and then returns its durable Receipt", async () => {
