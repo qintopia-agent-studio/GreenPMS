@@ -3,47 +3,44 @@
 <INSTRUCTIONS>
 在条件允许的前提下，我批准你使用多个Subagent来完成任务。
 
-## Sub-agent 模型路由规则
+## Sub-agent 使用与模型路由
 
-主任务（根代理）始终使用当前父代理配置的模型，不要切换。
+### 调度能力和范围
 
-通过 `spawn_agent` 派发子任务时，必须按"角色定基线、复杂度做微调"的原则显式设置 `model` 覆盖。
+- 根代理始终使用当前父代理配置的模型，不主动切换；本规则只决定是否以及如何派发 sub-agent。
+- 是否能够派发 sub-agent 取决于当前 Codex 环境是否暴露 `spawn_agent` 工具，以及用户或本文件是否授权派发，不取决于模型名称本身。
+- `gpt-5.5`、`gpt-5.6-sol`、`gpt-5.6-terra` 和 `gpt-5.6-luna` 都可以作为 sub-agent 的 `model` 覆盖值；GPT-5.5 Extra High 并不限制 sub-agent 调度能力。
+- 角色名 `worker`、`explorer`、`awaiter` 只是任务分类，不是 `spawn_agent` 的参数；实际调用必须传入可用的 `model`，必要时传入 `reasoning_effort`。
+- 派发时应显式设置模型和推理档位，不要无意中继承根代理模型；只有任务确实需要继承时才省略覆盖值。
 
-### 角色基线
+### 按任务选择模型
 
-- 规划/任务拆解类（无论用什么 agent_type 实现）：`gpt-5.6-sol`，不主动降级
-- 审计/code review 类：`gpt-5.6-sol`，不主动降级
-- `default`（worker，执行代码修改）：`gpt-5.4`
-- `explorer`（只读代码探索）：`gpt-5.4-mini`
-- `awaiter`（等待任务完成）：`gpt-5.4-mini`，永不升级
+- 需要重新判断资金事务、并发、幂等、数据库边界或其他核心业务不变量：model `gpt-5.6-sol` + reasoning effort `ultra`。
+- 已有明确、冻结实施规格的核心代码实现，即使跨模块：model `gpt-5.5` + reasoning effort `xhigh`。界面显示的 `Extra High` 对应传入值仍是 `xhigh`。
+- 只要实现过程中需要修改原规格，或自行决定核心业务不变量，就使用 `gpt-5.6-sol` + `ultra`，不按普通实现处理。
+- 最终安全、契约、回归和高风险边界审查：model `gpt-5.6-sol` + reasoning effort `ultra`。
+- 局部测试补充、普通修复、UI 调整和机械性工作：model `gpt-5.6-terra` 或 `gpt-5.6-luna`，推理档位按任务复杂度选择。
+- 只读代码探索：默认使用 model `gpt-5.6-luna` + reasoning effort `low`；涉及跨模块架构判断时升级为 `gpt-5.6-sol` + `ultra`。
+- 等待或轮询任务状态：使用 model `gpt-5.6-luna` + reasoning effort `low`，不升级模型。
 
-### 复杂度微调
+### 委派与并行规则
 
-- worker 遇到复杂执行（跨模块改动、疑难 bug 修复）：升到 `gpt-5.6-sol`
-- worker 遇到纯机械执行（样板代码、格式化、简单重命名）：降到 `gpt-5.4-mini`
-- explorer 遇到跨模块架构级问题：升到 `gpt-5.6-sol`
+- 先判断当前任务的直接阻塞点；不要把下一步立即依赖的工作委派出去后原地等待。
+- 委派任务必须具体、独立、可验收，并且确实推进主任务；不得把同一未解决问题重复委派给多个 sub-agent。
+- 多个 worker 并行时，必须先做 ownership 检查，为每个 worker 分配互不重叠的文件或模块范围。
+- 每个并行 worker 的任务描述必须说明代码库中有其他 agent 同时工作，不得回滚或覆盖他人的改动，冲突时适应已有改动。
+- explorer 和 awaiter 只读，可并行；worker 只有在修改范围互不重叠时才可并行。
+- 委派的代码任务必须要求 sub-agent 直接修改其工作区，并在完成时列出修改过的文件。
+- 所有并行 worker 完成后，根代理必须对合并后的整体代码执行构建、测试或审查，不能只采信各 worker 的局部结果。
+- 委派完成后不要重复实现同一任务；根代理负责审查、整合和处理不重叠的工作。
 
 ### 失败降级链
 
-指定的模型调用失败（不可用/报错）时，改用 `gpt-5.6-terra` 重新 spawn，不得直接放弃：
+指定模型调用失败（不可用或报错）时，优先使用可用的 `gpt-5.6-terra` 重新派发，并在最终汇报中说明模型切换；如果 Terra 也不可用，停止继续猜测模型 ID 并报告阻塞原因。
 
-- `gpt-5.4` → `gpt-5.6-terra`
-- `gpt-5.4-mini` → `gpt-5.6-terra`
+- `gpt-5.5` → `gpt-5.6-terra`
 - `gpt-5.6-sol` → `gpt-5.6-terra`
-
-发生切换时，必须在最终汇报中说明哪个 sub-agent 从什么模型切换到了 `gpt-5.6-terra`。
-
-不要对所有 sub-agent 一律使用继承模型；spawn 前先确定角色、再按复杂度微调，然后选择对应模型。
-
-## 并行 sub-agent 协作规则
-
-鼓励派发多个 sub-agent 并行工作以提升效率，但必须遵守：
-
-- `explorer` 和 `awaiter` 只读，可随意并行，无需冲突检查。
-- 派发多个执行型（worker）sub-agent 前，必须先做所有权检查：为每个 worker 明确划分互不重叠的文件/模块范围，并在任务描述中写清各自的 ownership。
-- 若两个任务无法划分出不重叠的修改范围，必须串行执行（等前一个完成再派下一个），不得并行派发。
-- 每个并行 worker 的任务描述中必须注明：代码库中有其他 agent 在同时工作，不得回滚或覆盖他人的改动，遇到冲突时以适应他人改动为准。
-- 所有并行 worker 完成后，主任务必须做一次整体验证（构建/测试/审查合并后的代码），不得默认各部分能自动拼合。
+- `gpt-5.6-luna` → `gpt-5.6-terra`
 
 ## 分级开发流程（2026-07-29 起生效）
 
