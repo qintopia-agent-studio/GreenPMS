@@ -61,7 +61,8 @@ describe.sequential("authoritative database readiness", () => {
       "032_wecom_refund_original_route.sql",
       "033_stay_collection_membership_conversion.sql",
       "034_stay_conversion_reversal_bridge_guard.sql",
-      "035_stage13_conversion_execution_state_guards.sql"
+      "035_stage13_conversion_execution_state_guards.sql",
+      "036_qintopia_prelaunch_room_catalog_corrections.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();

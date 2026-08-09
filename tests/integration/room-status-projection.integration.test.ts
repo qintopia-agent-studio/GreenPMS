@@ -1358,6 +1358,335 @@ describe("PostgreSQL room-status projection", () => {
     }
   });
 
+  it("uses only active rooms and beds for the sellable tree while retaining inactive-bed audit references", async () => {
+    const arrivalDate = "2031-03-01";
+    const departureDate = "2031-03-03";
+    const before = await board({ arrivalDate, departureDate, pageSize: 200 });
+    const correctedRooms = [
+      { id: "unit_room_105", code: "105", buildingCode: "1" },
+      { id: "unit_room_108", code: "108", buildingCode: "1" },
+      { id: "unit_room_206", code: "206", buildingCode: "2" }
+    ] as const;
+    const inactiveBedIds = correctedRooms.flatMap(({ id, code, buildingCode }) => ["C", "D"].map((suffix) => ({
+      id: `${id}_bed_${suffix.toLowerCase()}`,
+      property_id: demo.propertyId,
+      kind: "BED" as const,
+      parent_room_id: id,
+      code: `${code}-${suffix}`,
+      name: `${code} · 床位 ${suffix}（已下线）`,
+      active: false,
+      catalog_version: "test-active-tree",
+      building_code: buildingCode,
+      room_type_code: "shared_bath_double",
+      pricing_product_code: "shared_bath_double_bed",
+      inventory_basis: "INDEPENDENT" as const,
+      code_provenance: "SOURCE_EXPLICIT" as const,
+      physical_bed_count: null,
+      occupancy_capacity: 1
+    })));
+    await db.insertInto("inventory_units").values(inactiveBedIds).execute();
+
+    const activeTree = await board({ arrivalDate, departureDate, pageSize: 200 });
+    expect(activeTree.projectionState).toBe("READY");
+    expect(activeTree.page).toEqual(before.page);
+    expect(activeTree.availabilitySummary).toEqual(before.availabilitySummary);
+    expect(activeTree.rooms.flatMap((room) => [room, ...room.children])
+      .filter((unit) => inactiveBedIds.some((bed) => bed.id === unit.id))).toEqual([]);
+    for (const { id, code } of correctedRooms) {
+      const room = unitIn(activeTree, id);
+      expect(room.capacity).toBe(2);
+      expect(room.occupancyCapacity).toBe(2);
+      expect(room.childUnitIds).toEqual([`${id}_bed_a`, `${id}_bed_b`]);
+      expect(room.children.map((child) => child.id)).toEqual([`${id}_bed_a`, `${id}_bed_b`]);
+      expect(room.children.every((child) => child.active)).toBe(true);
+      expect(activeTree.operationalTasks.filter((task) => task.actualInventoryUnitId.startsWith(`${id}_bed_`)))
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            actualInventoryUnitId: `${id}_bed_c`,
+            sourceKind: "UNIT_UNSELLABLE",
+            references: expect.arrayContaining([expect.objectContaining({ type: "INVENTORY_UNIT", id: `${id}_bed_c` })])
+          }),
+          expect.objectContaining({
+            actualInventoryUnitId: `${id}_bed_d`,
+            sourceKind: "UNIT_UNSELLABLE",
+            references: expect.arrayContaining([expect.objectContaining({ type: "INVENTORY_UNIT", id: `${id}_bed_d` })])
+          })
+        ]));
+      const inactiveBedSearch = await board({
+        arrivalDate,
+        departureDate,
+        pageSize: 200,
+        search: `${code}-C`
+      });
+      expect(inactiveBedSearch.rooms).toEqual([]);
+    }
+    expect(() => assertRoomStatusBoard(activeTree, {
+      propertyId: demo.propertyId,
+      range: { arrivalDate, departureDate },
+      pageIndex: 0
+    })).not.toThrow();
+
+    const activeBedFact = await execute({
+      commandType: "LOCK_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: "unit_room_105_bed_a",
+        arrivalDate,
+        departureDate,
+        reason: "An active bed fact must remain visible on its parent room"
+      }
+    }, "active-tree-active-bed-propagation");
+    const propagatedBedFact = await board({ arrivalDate, departureDate, pageSize: 200 });
+    for (const unitId of ["unit_room_105", "unit_room_105_bed_a"]) {
+      expect(unitIn(propagatedBedFact, unitId).intervals).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          actualInventoryUnitId: "unit_room_105_bed_a",
+          sourceKind: "MAINTENANCE",
+          references: expect.arrayContaining([
+            expect.objectContaining({ type: "BLOCK", id: activeBedFact.result!.maintenanceLockId })
+          ])
+        })
+      ]));
+    }
+    await execute({
+      commandType: "LOCK_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: "unit_room_105",
+        arrivalDate: "2031-03-03",
+        departureDate: "2031-03-05",
+        reason: "A parent fact must fan out only to active displayed beds"
+      }
+    }, "active-tree-parent-propagation");
+    const propagatedParentFact = await board({
+      arrivalDate: "2031-03-03",
+      departureDate: "2031-03-05",
+      pageSize: 200
+    });
+    for (const unitId of ["unit_room_105", "unit_room_105_bed_a", "unit_room_105_bed_b"]) {
+      expect(unitIn(propagatedParentFact, unitId).intervals)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ actualInventoryUnitId: "unit_room_105" })]));
+    }
+    expect(propagatedParentFact.rooms.flatMap((room) => [room, ...room.children])
+      .some((unit) => unit.id === "unit_room_105_bed_c" || unit.id === "unit_room_105_bed_d")).toBe(false);
+
+    const hiddenBedId = inactiveBedIds[0]!.id;
+    await db.updateTable("inventory_units").set({ active: true }).where("id", "=", hiddenBedId).execute();
+    const hiddenMaintenance = await execute({
+      commandType: "LOCK_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: hiddenBedId,
+        arrivalDate,
+        departureDate,
+        reason: "Hidden inactive bed must remain fail closed while a current fact exists"
+      }
+    }, "active-tree-hidden-maintenance");
+    await db.updateTable("inventory_units").set({ active: false }).where("id", "=", hiddenBedId).execute();
+    const hiddenCurrentFact = await board({ arrivalDate, departureDate, pageSize: 200 });
+    expect(hiddenCurrentFact.projectionState).toBe("PARTIAL");
+    expect(hiddenCurrentFact.rooms.flatMap((room) => [room, ...room.children]).some((unit) => unit.id === hiddenBedId)).toBe(false);
+    expect(hiddenCurrentFact.operationalTasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        taskKind: "EXCEPTION",
+        actualInventoryUnitId: hiddenBedId,
+        sourceKind: "MAINTENANCE",
+        sourceStartDate: arrivalDate,
+        sourceEndDate: departureDate,
+        references: expect.arrayContaining([
+          expect.objectContaining({ type: "BLOCK", id: hiddenMaintenance.result!.maintenanceLockId }),
+          expect.objectContaining({ type: "CLAIM" })
+        ])
+      })
+    ]));
+    expect(hiddenCurrentFact.operationalTasks.filter((task) => task.actualInventoryUnitId === hiddenBedId
+      && task.sourceKind === "UNIT_UNSELLABLE")).toHaveLength(1);
+
+    await db.updateTable("inventory_units").set({ active: true }).where("id", "=", hiddenBedId).execute();
+    await execute({
+      commandType: "RELEASE_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        maintenanceLockId: hiddenMaintenance.result!.maintenanceLockId as string
+      }
+    }, "active-tree-hidden-maintenance-release");
+    await db.updateTable("inventory_units").set({ active: false }).where("id", "=", hiddenBedId).execute();
+    expect((await board({ arrivalDate, departureDate, pageSize: 200 })).projectionState).toBe("READY");
+
+    const malformedRoomId = "unit_room_status_active_tree_incomplete";
+    await db.insertInto("inventory_units").values({
+      id: malformedRoomId,
+      property_id: demo.propertyId,
+      kind: "ROOM",
+      parent_room_id: null,
+      code: "ACTIVE-TREE-INCOMPLETE",
+      name: "Active tree incomplete room",
+      active: true,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "WHOLE_ROOM_COMBINATION",
+      code_provenance: "PMS_GENERATED",
+      physical_bed_count: 4,
+      occupancy_capacity: 4
+    }).execute();
+    await db.insertInto("inventory_units").values(["A", "B"].map((suffix) => ({
+      id: `${malformedRoomId}_bed_${suffix.toLowerCase()}`,
+      property_id: demo.propertyId,
+      kind: "BED" as const,
+      parent_room_id: malformedRoomId,
+      code: `ACTIVE-TREE-INCOMPLETE-${suffix}`,
+      name: `Active tree incomplete bed ${suffix}`,
+      active: true,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "INDEPENDENT" as const,
+      code_provenance: "PMS_GENERATED" as const,
+      physical_bed_count: null,
+      occupancy_capacity: 1
+    }))).execute();
+    const malformed = await board({ arrivalDate, departureDate, pageSize: 200 });
+    expect(malformed.projectionState).toBe("PARTIAL");
+    expect(unitIn(malformed, malformedRoomId).bedOccupancies).toEqual([]);
+  });
+
+  it("derives the sellable bed catalog from active children and closes occupancy only when every active capacity agrees", async () => {
+    const arrivalDate = "2031-04-01";
+    const departureDate = "2031-04-03";
+    const legacyRoomId = "unit_room_status_legacy_active_children";
+    const legacyBeds = ["A", "B", "C", "D"].map((suffix, index) => ({
+      id: `${legacyRoomId}_bed_${suffix.toLowerCase()}`,
+      property_id: demo.propertyId,
+      kind: "BED" as const,
+      parent_room_id: legacyRoomId,
+      code: `LEGACY-ACTIVE-${suffix}`,
+      name: `Legacy active child ${suffix}`,
+      active: index < 2,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "INDEPENDENT" as const,
+      code_provenance: "PMS_GENERATED" as const,
+      physical_bed_count: null,
+      occupancy_capacity: 1
+    }));
+    await db.insertInto("inventory_units").values({
+      id: legacyRoomId,
+      property_id: demo.propertyId,
+      kind: "ROOM",
+      parent_room_id: null,
+      code: "LEGACY-ACTIVE",
+      name: "Legacy active room",
+      active: true,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "WHOLE_ROOM_COMBINATION",
+      code_provenance: "PMS_GENERATED",
+      physical_bed_count: null,
+      occupancy_capacity: 2
+    }).execute();
+    await db.insertInto("inventory_units").values(legacyBeds).execute();
+
+    const legacy = await board({ arrivalDate, departureDate, pageSize: 200 });
+    const legacyRoom = unitIn(legacy, legacyRoomId);
+    expect(legacy.projectionState).toBe("READY");
+    expect(legacyRoom).toMatchObject({ salesMode: "BED_SPLIT", capacity: 2, occupancyCapacity: 2 });
+    expect(legacyRoom.childUnitIds).toEqual(legacyBeds.slice(0, 2).map((bed) => bed.id));
+    expect(legacyRoom.children.map((bed) => bed.id)).toEqual(legacyBeds.slice(0, 2).map((bed) => bed.id));
+    expect(legacy.rooms.flatMap((room) => [room, ...room.children])
+      .some((unit) => legacyBeds.slice(2).some((bed) => bed.id === unit.id))).toBe(false);
+
+    const retiredRoomId = "unit_room_status_all_historical_beds";
+    await db.insertInto("inventory_units").values({
+      id: retiredRoomId,
+      property_id: demo.propertyId,
+      kind: "ROOM",
+      parent_room_id: null,
+      code: "HISTORICAL-BEDS",
+      name: "Historical beds only room",
+      active: true,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "WHOLE_ROOM_COMBINATION",
+      code_provenance: "PMS_GENERATED",
+      physical_bed_count: null,
+      occupancy_capacity: 1
+    }).execute();
+    await db.insertInto("inventory_units").values(["A", "B"].map((suffix) => ({
+      id: `${retiredRoomId}_bed_${suffix.toLowerCase()}`,
+      property_id: demo.propertyId,
+      kind: "BED" as const,
+      parent_room_id: retiredRoomId,
+      code: `HISTORICAL-BEDS-${suffix}`,
+      name: `Historical bed ${suffix}`,
+      active: false,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "INDEPENDENT" as const,
+      code_provenance: "PMS_GENERATED" as const,
+      physical_bed_count: null,
+      occupancy_capacity: 1
+    }))).execute();
+    const allHistorical = await board({ arrivalDate, departureDate, pageSize: 200 });
+    expect(allHistorical.projectionState).toBe("READY");
+    expect(unitIn(allHistorical, retiredRoomId)).toMatchObject({
+      salesMode: "WHOLE_ROOM",
+      capacity: 1,
+      childUnitIds: [],
+      children: [],
+      bedOccupancies: []
+    });
+
+    const occupancyMismatchRoomId = "unit_room_status_active_occupancy_mismatch";
+    await db.insertInto("inventory_units").values({
+      id: occupancyMismatchRoomId,
+      property_id: demo.propertyId,
+      kind: "ROOM",
+      parent_room_id: null,
+      code: "ACTIVE-OCCUPANCY-MISMATCH",
+      name: "Active occupancy mismatch room",
+      active: true,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "WHOLE_ROOM_COMBINATION",
+      code_provenance: "PMS_GENERATED",
+      physical_bed_count: 2,
+      occupancy_capacity: 3
+    }).execute();
+    await db.insertInto("inventory_units").values(["A", "B"].map((suffix) => ({
+      id: `${occupancyMismatchRoomId}_bed_${suffix.toLowerCase()}`,
+      property_id: demo.propertyId,
+      kind: "BED" as const,
+      parent_room_id: occupancyMismatchRoomId,
+      code: `ACTIVE-OCCUPANCY-MISMATCH-${suffix}`,
+      name: `Active occupancy mismatch bed ${suffix}`,
+      active: true,
+      catalog_version: null,
+      building_code: "TEST",
+      room_type_code: null,
+      pricing_product_code: null,
+      inventory_basis: "INDEPENDENT" as const,
+      code_provenance: "PMS_GENERATED" as const,
+      physical_bed_count: null,
+      occupancy_capacity: 1
+    }))).execute();
+    const occupancyMismatch = await board({ arrivalDate, departureDate, pageSize: 200 });
+    expect(occupancyMismatch.projectionState).toBe("PARTIAL");
+    expect(unitIn(occupancyMismatch, occupancyMismatchRoomId).bedOccupancies).toEqual([]);
+  });
+
   it("publishes a cross-window Block as safely releasable while preserving the complete source range and zero writes", async () => {
     const baseline = await board({ arrivalDate: "2030-04-01", departureDate: "2030-04-02" });
     const fullStart = shiftLocalDate(baseline.businessDate, 40);
@@ -2076,9 +2405,11 @@ describe("PostgreSQL room-status projection", () => {
 
     await db.updateTable("inventory_units").set({ active: false }).where("id", "=", demo.roomId).execute();
     const inactive = await board({ arrivalDate: "2028-09-05", departureDate: "2028-09-06" });
-    expect(unitIn(inactive, demo.roomId).days[0]).toMatchObject({
-      status: "UNAVAILABLE",
-      available: false,
+    expect(inactive.rooms.flatMap((room) => [room, ...room.children])
+      .filter((unit) => unit.id === demo.roomId || unit.id === demo.bedAId)).toEqual([]);
+    expect(inactive.operationalTasks.find((task) => task.sourceKind === "UNIT_UNSELLABLE"
+      && task.actualInventoryUnitId === demo.roomId)).toMatchObject({
+      allowedActions: [],
       conflicts: [expect.objectContaining({
         blockingFactKind: "UNIT_UNSELLABLE",
         claimId: null,
@@ -2086,9 +2417,6 @@ describe("PostgreSQL room-status projection", () => {
         sourceReference: expect.objectContaining({ type: "INVENTORY_UNIT", id: demo.roomId })
       })]
     });
-    expect(unitIn(inactive, demo.roomId).allowedActions).toEqual([]);
-    expect(unitIn(inactive, demo.bedAId).days[0]).toMatchObject({ status: "UNAVAILABLE", available: false });
-    expect(unitIn(inactive, demo.bedAId).allowedActions).toEqual([]);
 
     await sql`alter table inventory_claims disable trigger inventory_claims_validate_source`.execute(db);
     try {

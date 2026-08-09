@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -30,6 +31,7 @@ import {
   filterRoomStatusRooms,
   hasActiveRoomStatusFilters,
   intervalsRenderedOnRoomStatusGrid,
+  isIsoLocalDate,
   moveRoomStatusFocus,
   roomStatusCellBelongsToStay,
   ROOM_STATUS_TIMELINE_DAYS,
@@ -111,6 +113,7 @@ const ROOM_STATUS_DRAG_EDGE_SCROLL_MAX_STEP_PX = 22;
 
 export interface RoomStatusGridProps {
   board: RoomStatusBoardDto;
+  range: { arrivalDate: string; departureDate: string };
   filters: RoomStatusFilters;
   expandedRoomIds: readonly string[];
   focusedCell: RoomStatusCellFocus | null;
@@ -118,9 +121,14 @@ export interface RoomStatusGridProps {
   selectedStayId?: string | null;
   dateWindowStart: number;
   todayDate?: string;
+  rangeError?: string | undefined;
   initialScrollAnchor?: RoomStatusScrollAnchor | null;
   restoreFocus?: boolean;
   focusRequestToken?: number;
+  onRangeChange: (range: { arrivalDate: string; departureDate: string }) => void;
+  onPreviousRange: () => void;
+  onNextRange: () => void;
+  onToday: () => void;
   onToggleRoom: (roomId: string) => void;
   onFocusedCellChange: (focus: RoomStatusCellFocus) => void;
   onSelectionPreviewChange: (selection: RoomStatusSelection | null) => void;
@@ -426,6 +434,7 @@ function focusNextTabStop(trigger: HTMLElement, excludedRoot: HTMLElement | null
 
 export function RoomStatusGrid({
   board,
+  range,
   filters,
   expandedRoomIds,
   focusedCell,
@@ -433,9 +442,14 @@ export function RoomStatusGrid({
   selectedStayId = null,
   dateWindowStart,
   todayDate,
+  rangeError,
   initialScrollAnchor,
   restoreFocus = false,
   focusRequestToken = 0,
+  onRangeChange,
+  onPreviousRange,
+  onNextRange,
+  onToday,
   onToggleRoom,
   onFocusedCellChange,
   onSelectionPreviewChange,
@@ -448,8 +462,11 @@ export function RoomStatusGrid({
   onClearFilters,
   onScrollAnchorChange
 }: RoomStatusGridProps) {
+  const rangeErrorId = useId();
+  const rangeInputId = useId();
   const isMobile = useRoomStatusMobileViewport();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const headerScrollRef = useRef<HTMLDivElement>(null);
   const cellRefs = useRef(new Map<string, HTMLDivElement>());
   const pointerSelection = useRef<PointerSelectionState | null>(null);
   const scrollFrame = useRef<number | null>(null);
@@ -461,11 +478,37 @@ export function RoomStatusGrid({
   const [touchSelectionMode, setTouchSelectionMode] = useState(false);
   const [draggingUnitId, setDraggingUnitId] = useState<string | null>(null);
   const [pointerPreviewSelection, setPointerPreviewSelection] = useState<RoomStatusSelection | null>(null);
+  const [rangeDraft, setRangeDraft] = useState(range);
   const [bedOccupancyTooltip, setBedOccupancyTooltip] = useState<BedOccupancyTooltipState | null>(null);
+  const rangeErrorRef = useRef<HTMLDivElement>(null);
   const bedOccupancyTooltipDismissTimer = useRef<number | null>(null);
   const bedOccupancyTooltipRef = useRef<HTMLDivElement>(null);
   const bedOccupancyTooltipTriggerRef = useRef<HTMLDivElement | null>(null);
   const suppressBedOccupancyTooltipFocusRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    setRangeDraft(range);
+  }, [range.arrivalDate, range.departureDate]);
+
+  useEffect(() => {
+    if (rangeError) rangeErrorRef.current?.focus();
+  }, [rangeError]);
+
+  const changeRange = (nextRange: { arrivalDate: string; departureDate: string }) => {
+    setRangeDraft(nextRange);
+    onRangeChange(nextRange);
+  };
+
+  const changeStartDate = (startDate: string) => {
+    if (!isIsoLocalDate(startDate)) {
+      changeRange({ arrivalDate: startDate, departureDate: rangeDraft.departureDate });
+      return;
+    }
+    changeRange({
+      arrivalDate: startDate,
+      departureDate: addLocalDateDays(startDate, ROOM_STATUS_TIMELINE_DAYS)
+    });
+  };
+
   const stopHorizontalDragAutoScroll = useCallback(() => {
     if (dragAutoScrollFrame.current === null) return;
     window.cancelAnimationFrame(dragAutoScrollFrame.current);
@@ -868,6 +911,9 @@ export function RoomStatusGrid({
 
   const handleScroll = () => {
     closeBedOccupancyTooltip();
+    if (headerScrollRef.current && scrollRef.current && headerScrollRef.current.scrollLeft !== scrollRef.current.scrollLeft) {
+      headerScrollRef.current.scrollLeft = scrollRef.current.scrollLeft;
+    }
     if (!scrollRef.current || !onScrollAnchorChange || scrollFrame.current !== null) return;
     scrollFrame.current = requestAnimationFrame(() => {
       scrollFrame.current = null;
@@ -881,6 +927,12 @@ export function RoomStatusGrid({
         top: scroll.scrollTop
       });
     });
+  };
+
+  const handleHeaderScroll = () => {
+    if (scrollRef.current && headerScrollRef.current && scrollRef.current.scrollLeft !== headerScrollRef.current.scrollLeft) {
+      scrollRef.current.scrollLeft = headerScrollRef.current.scrollLeft;
+    }
   };
 
   const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
@@ -948,18 +1000,44 @@ export function RoomStatusGrid({
         </div>
       ) : null}
 
-      <div
-        className="room-status-grid-scroll"
-        ref={scrollRef}
-        onScroll={handleScroll}
-        onWheel={handleWheel}
-        role="region"
-        aria-label="房态二维网格，可使用方向键移动，Shift 加方向键扩展选区"
-        tabIndex={0}
-      >
-        <div className="room-status-grid" role="grid" aria-rowcount={renderedRows.length + 1} aria-colcount={dates.length + 1} style={gridStyle}>
-          <div className="room-status-grid-header" role="row">
-            <div className="room-status-resource-header" role="columnheader">房源</div>
+      <div className="room-status-grid" role="grid" aria-rowcount={renderedRows.length + 1} aria-colcount={dates.length + 1} style={gridStyle}>
+          <div className="room-status-grid-header-scroll" ref={headerScrollRef} onScroll={handleHeaderScroll} role="presentation">
+            <div className="room-status-grid-header" role="row">
+            <div className="room-status-resource-header" role="columnheader">
+              <div className="room-status-grid-range-controls" aria-label="房态起始日期">
+                <button type="button" className="room-status-grid-range-button" onClick={onPreviousRange} aria-label="查看前 30 夜" title="前 30 夜">
+                  <ChevronLeft aria-hidden="true" size={16} />
+                </button>
+                <label className="sr-only" htmlFor={rangeInputId}>起始日期</label>
+                <input
+                  id={rangeInputId}
+                  className="room-status-grid-date-input"
+                  type="date"
+                  value={rangeDraft.arrivalDate}
+                  data-testid="arrival-date"
+                  aria-invalid={rangeError ? "true" : undefined}
+                  aria-describedby={rangeError ? rangeErrorId : undefined}
+                  onChange={(event) => changeStartDate(event.target.value)}
+                />
+                <button type="button" className="room-status-grid-today-button" onClick={onToday}>今天</button>
+                <button type="button" className="room-status-grid-range-button" onClick={onNextRange} aria-label="查看后 30 夜" title="后 30 夜">
+                  <ChevronRight aria-hidden="true" size={16} />
+                </button>
+              </div>
+              {rangeError ? (
+                <div
+                  id={rangeErrorId}
+                  ref={rangeErrorRef}
+                  className="room-status-grid-range-error"
+                  role="alert"
+                  tabIndex={-1}
+                  data-testid="room-status-range-error"
+                >
+                  <strong>日期无效</strong>
+                  <span>{rangeError}</span>
+                </div>
+              ) : null}
+            </div>
             <div className="room-status-date-header-track" role="presentation">
               {dates.map((date) => {
                 const parsed = new Date(`${date}T00:00:00Z`);
@@ -974,7 +1052,17 @@ export function RoomStatusGrid({
               })}
             </div>
           </div>
+          </div>
 
+          <div className="room-status-grid-scroll"
+            ref={scrollRef}
+            onScroll={handleScroll}
+            onWheel={handleWheel}
+            role="region"
+            aria-label="房态二维网格，可使用方向键移动，Shift 加方向键扩展选区"
+            tabIndex={0}
+          >
+            <div className="room-status-grid-body" role="presentation">
           {renderedRows.map((row, rowIndex) => {
             if (row.kind === "BUILDING") {
               return (
@@ -1173,8 +1261,9 @@ export function RoomStatusGrid({
               </div>
             );
           })}
+            </div>
+          </div>
         </div>
-      </div>
 
       {board.page.totalPages > 1 ? (
         <footer className="room-status-grid-footer">

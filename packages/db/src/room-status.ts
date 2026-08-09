@@ -106,6 +106,11 @@ function dateAfter(serviceDate: string): string {
   return date.toISOString().slice(0, 10);
 }
 
+function isSyntheticInactiveUnitEvent(event: ProjectionEvent): boolean {
+  return event.sourceKind === "UNIT_UNSELLABLE"
+    && event.sourceKey === `unsellable:${event.actualInventoryUnitId}`;
+}
+
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
@@ -434,15 +439,17 @@ function conflictForDay(conflict: RoomStatusConflictDto, serviceDate: string, cl
 function buildIntervals(
   events: ProjectionEvent[],
   unitsById: Map<string, RoomStatusUnitDto>,
+  displayUnitsById: Map<string, RoomStatusUnitDto>,
   accessLevel: AccessLevel
 ): BuiltIntervals {
   const expanded = events.flatMap((event) => {
     const actual = unitsById.get(event.actualInventoryUnitId);
-    if (!actual) return [{ event, displayInventoryUnitId: event.actualInventoryUnitId }];
+    if (!actual || !displayUnitsById.has(actual.id)) return [];
     const displayIds = new Set([actual.id]);
     if (actual.kind === "BED" && actual.parentRoomId) displayIds.add(actual.parentRoomId);
     if (actual.kind === "ROOM") actual.childUnitIds.forEach((id) => displayIds.add(id));
-    return [...displayIds].filter((id) => unitsById.has(id)).map((displayInventoryUnitId) => ({ event, displayInventoryUnitId }));
+    return [...displayIds].filter((id) => displayUnitsById.has(id))
+      .map((displayInventoryUnitId) => ({ event, displayInventoryUnitId }));
   }).sort((left, right) => {
     const keyOrder = intervalGroupKey(left.event, left.displayInventoryUnitId)
       .localeCompare(intervalGroupKey(right.event, right.displayInventoryUnitId));
@@ -520,6 +527,7 @@ function buildIntervals(
 function buildBedOccupancies(
   events: ProjectionEvent[],
   unitsById: Map<string, RoomStatusUnitDto>,
+  displayUnitsById: Map<string, RoomStatusUnitDto>,
   dates: string[]
 ): BuiltBedOccupancies {
   const dateSet = new Set(dates);
@@ -527,12 +535,13 @@ function buildBedOccupancies(
   for (const event of events) {
     if (!dateSet.has(event.serviceDate)) continue;
     const actualUnit = unitsById.get(event.actualInventoryUnitId);
+    if (actualUnit && !displayUnitsById.has(actualUnit.id)) continue;
     const roomId = actualUnit?.kind === "BED"
       ? actualUnit.parentRoomId
       : actualUnit?.kind === "ROOM"
         ? actualUnit.id
         : event.roomId;
-    if (!roomId) continue;
+    if (!roomId || !displayUnitsById.has(roomId)) continue;
     const key = `${roomId}:${event.serviceDate}`;
     const dayEvents = eventsByRoomAndDate.get(key) ?? [];
     dayEvents.push(event);
@@ -541,13 +550,16 @@ function buildBedOccupancies(
 
   const byRoom = new Map<string, RoomStatusBedOccupancyDto[]>();
   let partial = false;
-  for (const room of unitsById.values()) {
+  for (const room of displayUnitsById.values()) {
     if (room.kind !== "ROOM" || room.salesMode !== "BED_SPLIT") continue;
     const uniqueChildIds = [...new Set(room.childUnitIds)];
-    const children = uniqueChildIds.map((id) => unitsById.get(id));
+    const children = uniqueChildIds.map((id) => displayUnitsById.get(id));
+    const activeChildOccupancyCapacity = children.reduce((total, child) => total + (child?.occupancyCapacity ?? 0), 0);
     const catalogClosed = uniqueChildIds.length > 0
       && uniqueChildIds.length === room.childUnitIds.length
       && uniqueChildIds.length === room.capacity
+      && room.occupancyCapacity === room.capacity
+      && activeChildOccupancyCapacity === room.occupancyCapacity
       && children.every((child) => child?.kind === "BED"
         && child.parentRoomId === room.id
         && child.roomId === room.id);
@@ -595,7 +607,7 @@ function buildBedOccupancies(
 
       let invalidReference = false;
       const occupants = [...eventsByBed.entries()].map(([inventoryUnitId, [event]]) => {
-        const unit = unitsById.get(inventoryUnitId)!;
+        const unit = displayUnitsById.get(inventoryUnitId)!;
         const projectedOccupant = event!.occupants?.[0];
         const sourceReference = event!.references.find(
           (item): item is RoomStatusReferenceDto & { type: "ORDER" } => item.type === "ORDER"
@@ -1084,6 +1096,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     }
 
     const unitsById = new Map<string, RoomStatusUnitDto>();
+    const displayUnitsById = new Map<string, RoomStatusUnitDto>();
     for (const room of roomRows) {
       const children = childrenByRoom.get(room.id) ?? [];
       const roomUnit: RoomStatusUnitDto = {
@@ -1134,6 +1147,19 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           conflicts: [],
           allowedActions: []
         });
+      }
+      if (!room.active) continue;
+      const activeChildren = children.filter((bed) => bed.active);
+      const activeChildUnitIds = activeChildren.map((bed) => bed.id);
+      displayUnitsById.set(room.id, {
+        ...roomUnit,
+        // The full map preserves historical children for audit, while this map is the sellable tree.
+        salesMode: activeChildUnitIds.length > 0 ? "BED_SPLIT" : "WHOLE_ROOM",
+        capacity: room.physical_bed_count ?? Math.max(activeChildUnitIds.length, 1),
+        childUnitIds: activeChildUnitIds
+      });
+      for (const childId of activeChildUnitIds) {
+        displayUnitsById.set(childId, unitsById.get(childId)!);
       }
     }
 
@@ -1674,13 +1700,21 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     ])];
     const commandProjections = await loadCommandProjections(trx, commandIds, options.requestingSubjectId);
     const projectedEvents = eventsWithAmendments.map((event) => attachCommandProjection(event, commandProjections));
+    const isHiddenCurrentBlockingFact = (event: ProjectionEvent) => event.current
+      && event.blocking
+      && !displayUnitsById.has(event.actualInventoryUnitId)
+      && !isSyntheticInactiveUnitEvent(event);
+    if (projectedEvents.some(isHiddenCurrentBlockingFact)) {
+      partial = true;
+    }
     const gridEvents = projectedEvents.filter((event) => options.arrivalDate <= event.serviceDate && event.serviceDate < options.departureDate);
     const taskExceptionEvents = projectedEvents.filter((event) => event.current
-      && (event.serviceDate === businessDate || event.sourceKind === "CLEANING" && event.serviceDate < businessDate)
-      && event.sourceKind !== "UNIT_UNSELLABLE"
-      && (event.sourceKind !== "ORDER" && event.sourceKind !== "FREE_STAY" || event.status === "UNKNOWN"));
-    const builtIntervals = buildIntervals(gridEvents, unitsById, options.accessLevel);
-    const builtBedOccupancies = buildBedOccupancies(gridEvents, unitsById, dates);
+      && !isSyntheticInactiveUnitEvent(event)
+      && (isHiddenCurrentBlockingFact(event)
+        || ((event.serviceDate === businessDate || event.sourceKind === "CLEANING" && event.serviceDate < businessDate)
+          && (event.sourceKind !== "ORDER" && event.sourceKind !== "FREE_STAY" || event.status === "UNKNOWN"))));
+    const builtIntervals = buildIntervals(gridEvents, unitsById, displayUnitsById, options.accessLevel);
+    const builtBedOccupancies = buildBedOccupancies(gridEvents, unitsById, displayUnitsById, dates);
     if (builtBedOccupancies.partial) partial = true;
     const uniqueTaskExceptionEvents = [...new Map(taskExceptionEvents.map((event) => [
       `${event.sourceKey}:${event.actualInventoryUnitId}`,
@@ -1701,16 +1735,17 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     if (sortedOperationalTasks.length > ROOM_STATUS_OPERATIONAL_TASK_LIMIT) partial = true;
     const operationalTasks = sortedOperationalTasks.slice(0, ROOM_STATUS_OPERATIONAL_TASK_LIMIT);
 
-    const baseRooms = roomRows.map((roomRow) => unitsById.get(roomRow.id)!);
-    const statusesByUnit = buildUnitStatuses(unitsById, dates, builtIntervals.byUnit);
-    const availabilitySummary = buildAvailabilitySummary(baseRooms, unitsById, dates, builtIntervals.byUnit);
-    const filterOptions = roomStatusFilterOptions(baseRooms, unitsById, statusesByUnit);
-    const filteredRooms = filterRoomSelections(baseRooms, unitsById, filters, statusesByUnit);
+    const baseRooms = roomRows.filter((roomRow) => roomRow.active)
+      .map((roomRow) => displayUnitsById.get(roomRow.id)!);
+    const statusesByUnit = buildUnitStatuses(displayUnitsById, dates, builtIntervals.byUnit);
+    const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit);
+    const filterOptions = roomStatusFilterOptions(baseRooms, displayUnitsById, statusesByUnit);
+    const filteredRooms = filterRoomSelections(baseRooms, displayUnitsById, filters, statusesByUnit);
     const totalRooms = filteredRooms.length;
     const pageSelections = filteredRooms.slice(page * pageSize, (page + 1) * pageSize);
     const rooms = pageSelections.map(({ room: baseRoom, childUnitIds }) => {
       const children = childUnitIds.map((childId) => {
-        const child = unitsById.get(childId)!;
+        const child = displayUnitsById.get(childId)!;
         return assembleUnit(child, dates, builtIntervals.byUnit.get(child.id) ?? [],
           builtIntervals.claimIdsByIntervalAndDate, options.accessLevel);
       });

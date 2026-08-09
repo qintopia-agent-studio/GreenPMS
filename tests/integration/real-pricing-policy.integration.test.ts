@@ -131,9 +131,21 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
       pricingPolicyVersionId: demo.publicPricingPolicyId
     });
 
-    expect(quote.currentContractAmount.minorUnits).toBe(108_600);
+    expect(quote.currentContractAmount.minorUnits).toBe(176_000);
     expect(quote.cashLines).toEqual([
-      expect.objectContaining({ lineKind: "STAY_TOTAL", pricingBandAnchorNights: 7 })
+      expect.objectContaining({
+        lineKind: "STAY_TOTAL",
+        pricingBandAnchorNights: 7,
+        amount: { currency: "CNY", minorUnits: 176_000 },
+        calculationSegments: [expect.objectContaining({
+          inventoryUnitId: "unit_room_104",
+          pricingProductCode: "shared_bath_quad_whole_room",
+          nights: 10,
+          anchorAmountMinor: 123_200,
+          numeratorMinor: 1_232_000,
+          denominator: 7
+        })]
+      })
     ]);
 
     await expect(createQuoteForTesting(db, {

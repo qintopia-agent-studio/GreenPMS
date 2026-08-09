@@ -17,7 +17,7 @@ import { resetDatabase } from "../helpers/database.ts";
 const databaseUrl = process.env.MOVE_UNIT_STAGE11_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_move_unit_stage11";
 const memberSourceUnitId = "unit_room_d_gen_01";
-const memberTargetUnitId = "unit_room_d_gen_02";
+const memberTargetUnitId = "unit_room_d_gen_04";
 
 const principal: AuthPrincipal = {
   subjectId: demo.agentSubjectId,

@@ -100,7 +100,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(35);
+      expect(expectedMigrations).toHaveLength(36);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -109,6 +109,7 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("033_stay_collection_membership_conversion.sql");
       expect(expectedMigrations).toContain("034_stay_conversion_reversal_bridge_guard.sql");
       expect(expectedMigrations).toContain("035_stage13_conversion_execution_state_guards.sql");
+      expect(expectedMigrations).toContain("036_qintopia_prelaunch_room_catalog_corrections.sql");
       expect(expectedMigrations).toContain("020_whole_room_occupants.sql");
       expect(expectedMigrations).toContain("021_defer_internal_use.sql");
       expect(expectedMigrations).toContain("022_order_occupant_corrections.sql");
@@ -245,6 +246,174 @@ describe("database migration concurrency", () => {
             physical_bed_count = NULL
         WHERE id IN ('unit_room_101', 'unit_room_102', 'unit_room_101_bed_a', 'unit_room_101_bed_b')
       `);
+      await legacy.query(`
+        UPDATE inventory_units
+        SET catalog_version = 'qintopia-2026-feishu-revision-561-user-confirmed-v4',
+            room_type_code = CASE id
+              WHEN 'unit_room_104' THEN 'shared_bath_double'
+              WHEN 'unit_room_105' THEN 'shared_bath_quad'
+              WHEN 'unit_room_106' THEN 'shared_bath_double'
+              WHEN 'unit_room_108' THEN 'shared_bath_quad'
+              WHEN 'unit_room_204' THEN 'shared_bath_double'
+              WHEN 'unit_room_206' THEN 'shared_bath_quad'
+              WHEN 'unit_room_301' THEN 'shared_bath_single'
+              WHEN 'unit_room_303' THEN 'shared_bath_single'
+              WHEN 'unit_room_305' THEN 'shared_bath_standard'
+              WHEN 'unit_room_308' THEN 'shared_bath_standard'
+              WHEN 'unit_room_d_gen_02' THEN 'shared_bath_single'
+              WHEN 'unit_room_d_gen_04' THEN 'shared_bath_standard'
+              ELSE room_type_code
+            END,
+            pricing_product_code = CASE id
+              WHEN 'unit_room_104' THEN 'shared_bath_double_whole_room'
+              WHEN 'unit_room_105' THEN 'shared_bath_quad_whole_room'
+              WHEN 'unit_room_106' THEN 'shared_bath_double_whole_room'
+              WHEN 'unit_room_108' THEN 'shared_bath_quad_whole_room'
+              WHEN 'unit_room_204' THEN 'shared_bath_double_whole_room'
+              WHEN 'unit_room_206' THEN 'shared_bath_quad_whole_room'
+              WHEN 'unit_room_301' THEN 'shared_bath_single_room'
+              WHEN 'unit_room_303' THEN 'shared_bath_single_room'
+              WHEN 'unit_room_305' THEN 'shared_bath_standard_room'
+              WHEN 'unit_room_308' THEN 'shared_bath_standard_room'
+              WHEN 'unit_room_d_gen_02' THEN 'shared_bath_single_room'
+              WHEN 'unit_room_d_gen_04' THEN 'shared_bath_standard_room'
+              ELSE pricing_product_code
+            END,
+            physical_bed_count = CASE id
+              WHEN 'unit_room_104' THEN 2
+              WHEN 'unit_room_105' THEN 4
+              WHEN 'unit_room_106' THEN 2
+              WHEN 'unit_room_108' THEN 4
+              WHEN 'unit_room_204' THEN 2
+              WHEN 'unit_room_206' THEN 4
+              WHEN 'unit_room_301' THEN 1
+              WHEN 'unit_room_303' THEN 1
+              WHEN 'unit_room_305' THEN 2
+              WHEN 'unit_room_308' THEN 2
+              WHEN 'unit_room_d_gen_02' THEN 1
+              WHEN 'unit_room_d_gen_04' THEN 2
+              ELSE physical_bed_count
+            END,
+            name = CASE id
+              WHEN 'unit_room_104' THEN '104 · 两人间（公卫）'
+              WHEN 'unit_room_105' THEN '105 · 四人间（公卫）'
+              WHEN 'unit_room_106' THEN '106 · 两人间（公卫）'
+              WHEN 'unit_room_108' THEN '108 · 四人间（公卫）'
+              WHEN 'unit_room_204' THEN '204 · 两人间（公卫）'
+              WHEN 'unit_room_206' THEN '206 · 四人间（公卫）'
+              WHEN 'unit_room_301' THEN '301 · 单人间（公卫）'
+              WHEN 'unit_room_303' THEN '303 · 单人间（公卫）'
+              WHEN 'unit_room_305' THEN '305 · 标间（公卫）'
+              WHEN 'unit_room_308' THEN '308 · 标间（公卫）'
+              WHEN 'unit_room_d_gen_02' THEN 'D02 · 单人间（公卫）'
+              WHEN 'unit_room_d_gen_04' THEN 'D04 · 标间（公卫）'
+              ELSE name
+            END
+        WHERE id IN (
+          'unit_room_104',
+          'unit_room_105',
+          'unit_room_106',
+          'unit_room_108',
+          'unit_room_204',
+          'unit_room_206',
+          'unit_room_301',
+          'unit_room_303',
+          'unit_room_305',
+          'unit_room_308',
+          'unit_room_d_gen_02',
+          'unit_room_d_gen_04'
+        )
+      `);
+      await legacy.query(`
+        UPDATE inventory_units
+        SET catalog_version = 'qintopia-2026-feishu-revision-561-user-confirmed-v4',
+            active = false,
+            room_type_code = CASE parent_room_id
+              WHEN 'unit_room_104' THEN 'shared_bath_double'
+              WHEN 'unit_room_106' THEN 'shared_bath_double'
+              WHEN 'unit_room_204' THEN 'shared_bath_double'
+              ELSE room_type_code
+            END,
+            pricing_product_code = CASE parent_room_id
+              WHEN 'unit_room_104' THEN 'shared_bath_double_bed'
+              WHEN 'unit_room_106' THEN 'shared_bath_double_bed'
+              WHEN 'unit_room_204' THEN 'shared_bath_double_bed'
+              ELSE pricing_product_code
+            END
+        WHERE id IN (
+          'unit_room_104_bed_c',
+          'unit_room_104_bed_d',
+          'unit_room_106_bed_c',
+          'unit_room_106_bed_d',
+          'unit_room_204_bed_c',
+          'unit_room_204_bed_d'
+        )
+      `);
+      await legacy.query(`
+        UPDATE inventory_units
+        SET catalog_version = 'qintopia-2026-feishu-revision-561-user-confirmed-v4',
+            room_type_code = CASE parent_room_id
+              WHEN 'unit_room_104' THEN 'shared_bath_double'
+              WHEN 'unit_room_105' THEN 'shared_bath_quad'
+              WHEN 'unit_room_106' THEN 'shared_bath_double'
+              WHEN 'unit_room_108' THEN 'shared_bath_quad'
+              WHEN 'unit_room_204' THEN 'shared_bath_double'
+              WHEN 'unit_room_206' THEN 'shared_bath_quad'
+              ELSE room_type_code
+            END,
+            pricing_product_code = CASE parent_room_id
+              WHEN 'unit_room_104' THEN 'shared_bath_double_bed'
+              WHEN 'unit_room_105' THEN 'shared_bath_quad_bed'
+              WHEN 'unit_room_106' THEN 'shared_bath_double_bed'
+              WHEN 'unit_room_108' THEN 'shared_bath_quad_bed'
+              WHEN 'unit_room_204' THEN 'shared_bath_double_bed'
+              WHEN 'unit_room_206' THEN 'shared_bath_quad_bed'
+              ELSE pricing_product_code
+            END
+        WHERE id IN (
+          'unit_room_104_bed_a',
+          'unit_room_104_bed_b',
+          'unit_room_105_bed_a',
+          'unit_room_105_bed_b',
+          'unit_room_106_bed_a',
+          'unit_room_106_bed_b',
+          'unit_room_108_bed_a',
+          'unit_room_108_bed_b',
+          'unit_room_204_bed_a',
+          'unit_room_204_bed_b',
+          'unit_room_206_bed_a',
+          'unit_room_206_bed_b'
+        )
+      `);
+      await legacy.query(`
+        INSERT INTO inventory_units (
+          id,
+          property_id,
+          kind,
+          parent_room_id,
+          code,
+          name,
+          active,
+          catalog_version,
+          building_code,
+          room_type_code,
+          pricing_product_code,
+          inventory_basis,
+          code_provenance,
+          physical_bed_count
+        ) VALUES
+          ('unit_room_105_bed_c', 'prop_qintopia_demo', 'BED', 'unit_room_105', '105-C', '105 · 床位 C', true, 'qintopia-2026-feishu-revision-561-user-confirmed-v4', '1', 'shared_bath_quad', 'shared_bath_quad_bed', 'INDEPENDENT', 'SOURCE_EXPLICIT', NULL),
+          ('unit_room_105_bed_d', 'prop_qintopia_demo', 'BED', 'unit_room_105', '105-D', '105 · 床位 D', true, 'qintopia-2026-feishu-revision-561-user-confirmed-v4', '1', 'shared_bath_quad', 'shared_bath_quad_bed', 'INDEPENDENT', 'SOURCE_EXPLICIT', NULL),
+          ('unit_room_108_bed_c', 'prop_qintopia_demo', 'BED', 'unit_room_108', '108-C', '108 · 床位 C', true, 'qintopia-2026-feishu-revision-561-user-confirmed-v4', '1', 'shared_bath_quad', 'shared_bath_quad_bed', 'INDEPENDENT', 'SOURCE_EXPLICIT', NULL),
+          ('unit_room_108_bed_d', 'prop_qintopia_demo', 'BED', 'unit_room_108', '108-D', '108 · 床位 D', true, 'qintopia-2026-feishu-revision-561-user-confirmed-v4', '1', 'shared_bath_quad', 'shared_bath_quad_bed', 'INDEPENDENT', 'SOURCE_EXPLICIT', NULL),
+          ('unit_room_206_bed_c', 'prop_qintopia_demo', 'BED', 'unit_room_206', '206-C', '206 · 床位 C', true, 'qintopia-2026-feishu-revision-561-user-confirmed-v4', '2', 'shared_bath_quad', 'shared_bath_quad_bed', 'INDEPENDENT', 'SOURCE_EXPLICIT', NULL),
+          ('unit_room_206_bed_d', 'prop_qintopia_demo', 'BED', 'unit_room_206', '206-D', '206 · 床位 D', true, 'qintopia-2026-feishu-revision-561-user-confirmed-v4', '2', 'shared_bath_quad', 'shared_bath_quad_bed', 'INDEPENDENT', 'SOURCE_EXPLICIT', NULL)
+        ON CONFLICT (id) DO UPDATE SET
+          active = EXCLUDED.active,
+          catalog_version = EXCLUDED.catalog_version,
+          room_type_code = EXCLUDED.room_type_code,
+          pricing_product_code = EXCLUDED.pricing_product_code
+      `);
       await legacy.query("ALTER TABLE inventory_units ENABLE TRIGGER inventory_units_protect_identity");
       await legacy.query(`
         INSERT INTO maintenance_locks (
@@ -288,6 +457,58 @@ describe("database migration concurrency", () => {
         "SELECT catalog_version FROM inventory_units WHERE id = 'unit_room_101'"
       );
       expect(catalog.rows[0]?.catalog_version).not.toBeNull();
+      const correctedRooms = await upgraded.query<{
+        code: string;
+        name: string;
+        room_type_code: string;
+        physical_bed_count: number;
+        occupancy_capacity: number;
+        pricing_product_code: string;
+      }>(`
+        SELECT code, name, room_type_code, physical_bed_count, occupancy_capacity, pricing_product_code
+        FROM inventory_units
+        WHERE property_id = 'prop_qintopia_demo'
+          AND kind = 'ROOM'
+          AND code IN ('104','105','106','108','204','206','301','303','305','308','D02','D04')
+        ORDER BY code
+      `);
+      expect(correctedRooms.rows).toEqual([
+        { code: "104", name: "104 · 四人间（公卫）", room_type_code: "shared_bath_quad", physical_bed_count: 4, occupancy_capacity: 4, pricing_product_code: "shared_bath_quad_whole_room" },
+        { code: "105", name: "105 · 两人间（公卫）", room_type_code: "shared_bath_double", physical_bed_count: 2, occupancy_capacity: 2, pricing_product_code: "shared_bath_double_whole_room" },
+        { code: "106", name: "106 · 四人间（公卫）", room_type_code: "shared_bath_quad", physical_bed_count: 4, occupancy_capacity: 4, pricing_product_code: "shared_bath_quad_whole_room" },
+        { code: "108", name: "108 · 两人间（公卫）", room_type_code: "shared_bath_double", physical_bed_count: 2, occupancy_capacity: 2, pricing_product_code: "shared_bath_double_whole_room" },
+        { code: "204", name: "204 · 四人间（公卫）", room_type_code: "shared_bath_quad", physical_bed_count: 4, occupancy_capacity: 4, pricing_product_code: "shared_bath_quad_whole_room" },
+        { code: "206", name: "206 · 两人间（公卫）", room_type_code: "shared_bath_double", physical_bed_count: 2, occupancy_capacity: 2, pricing_product_code: "shared_bath_double_whole_room" },
+        { code: "301", name: "301 · 标间（公卫）", room_type_code: "shared_bath_standard", physical_bed_count: 2, occupancy_capacity: 2, pricing_product_code: "shared_bath_standard_room" },
+        { code: "303", name: "303 · 标间（公卫）", room_type_code: "shared_bath_standard", physical_bed_count: 2, occupancy_capacity: 2, pricing_product_code: "shared_bath_standard_room" },
+        { code: "305", name: "305 · 单人间（公卫）", room_type_code: "shared_bath_single", physical_bed_count: 1, occupancy_capacity: 1, pricing_product_code: "shared_bath_single_room" },
+        { code: "308", name: "308 · 单人间（公卫）", room_type_code: "shared_bath_single", physical_bed_count: 1, occupancy_capacity: 1, pricing_product_code: "shared_bath_single_room" },
+        { code: "D02", name: "D02 · 标间（公卫）", room_type_code: "shared_bath_standard", physical_bed_count: 2, occupancy_capacity: 2, pricing_product_code: "shared_bath_standard_room" },
+        { code: "D04", name: "D04 · 单人间（公卫）", room_type_code: "shared_bath_single", physical_bed_count: 1, occupancy_capacity: 1, pricing_product_code: "shared_bath_single_room" }
+      ]);
+      const correctedBedSets = await upgraded.query<{
+        parent_room_id: string;
+        active_beds: string;
+        active_codes: string[];
+      }>(`
+        SELECT parent_room_id,
+               count(*) FILTER (WHERE active)::text AS active_beds,
+               array_agg(code ORDER BY code) FILTER (WHERE active) AS active_codes
+        FROM inventory_units
+        WHERE property_id = 'prop_qintopia_demo'
+          AND kind = 'BED'
+          AND parent_room_id IN ('unit_room_104','unit_room_105','unit_room_106','unit_room_108','unit_room_204','unit_room_206')
+        GROUP BY parent_room_id
+        ORDER BY parent_room_id
+      `);
+      expect(correctedBedSets.rows).toEqual([
+        { parent_room_id: "unit_room_104", active_beds: "4", active_codes: ["104-A", "104-B", "104-C", "104-D"] },
+        { parent_room_id: "unit_room_105", active_beds: "2", active_codes: ["105-A", "105-B"] },
+        { parent_room_id: "unit_room_106", active_beds: "4", active_codes: ["106-A", "106-B", "106-C", "106-D"] },
+        { parent_room_id: "unit_room_108", active_beds: "2", active_codes: ["108-A", "108-B"] },
+        { parent_room_id: "unit_room_204", active_beds: "4", active_codes: ["204-A", "204-B", "204-C", "204-D"] },
+        { parent_room_id: "unit_room_206", active_beds: "2", active_codes: ["206-A", "206-B"] }
+      ]);
       expect((await upgraded.query("SELECT 1 FROM room_status_revisions LIMIT 1")).rowCount).toBe(1);
       const memberLinks = await upgraded.query<{ member_id: string; property_id: string }>(
         "SELECT member_id, property_id FROM member_property_links WHERE member_id = $1 AND property_id = $2",
@@ -342,6 +563,46 @@ describe("database migration concurrency", () => {
       expect(longMaintenance.rows[0]?.nights).toBeGreaterThan(90);
     } finally {
       await upgraded.end();
+    }
+  });
+
+  it("rejects prelaunch room catalog correction when a reclassified unit has active usage", async () => {
+    await recreateDatabase();
+    const migrationNames = (await readdir("packages/db/src/migrations"))
+      .filter((name) => /^\d+.*\.sql$/.test(name))
+      .sort();
+    const client = new pg.Client({ connectionString: databaseUrl.toString() });
+    await client.connect();
+    try {
+      for (const migrationName of migrationNames.filter((name) => name !== "036_qintopia_prelaunch_room_catalog_corrections.sql")) {
+        await client.query(await readFile(`packages/db/src/migrations/${migrationName}`, "utf8"));
+        await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [migrationName]);
+      }
+
+      const seeded = createDatabase(databaseUrl.toString());
+      try {
+        await seedDemo(seeded);
+      } finally {
+        await seeded.destroy();
+      }
+
+      await client.query("ALTER TABLE inventory_claims DISABLE TRIGGER USER");
+      await client.query(`
+        INSERT INTO inventory_claims (
+          id, property_id, room_id, inventory_unit_id, service_date,
+          source_type, source_id, active, released_at
+        ) VALUES (
+          'claim_reclassified_unit_guard', '${demo.propertyId}', 'unit_room_104', 'unit_room_104_bed_a',
+          '2030-01-01', 'ORDER_SEGMENT', 'segment_reclassified_unit_guard', true, NULL
+        )
+      `);
+      await client.query("ALTER TABLE inventory_claims ENABLE TRIGGER USER");
+
+      await expect(client.query(await readFile("packages/db/src/migrations/036_qintopia_prelaunch_room_catalog_corrections.sql", "utf8")))
+        .rejects.toThrow(/cannot reclassify inventory units with active claims or held coverage/);
+    } finally {
+      await client.query("ALTER TABLE inventory_claims ENABLE TRIGGER USER").catch(() => undefined);
+      await client.end();
     }
   });
 

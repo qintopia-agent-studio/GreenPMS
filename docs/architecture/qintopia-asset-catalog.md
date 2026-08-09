@@ -1,11 +1,11 @@
 # 秦托邦资产与销售库存目录
 
-> 状态：`CONFIRMED_CATALOG_V3`  
+> 状态：`CONFIRMED_CATALOG_V5`
 > 业务来源：飞书工作簿 revision `561` 与用户逐房纠错  
 > 机器可执行目录：`packages/db/catalog/qintopia-2026-reference-catalog.json`
 > `schemaVersion`：`2.0.0`
 >
-> `importId/catalogVersion`：`qintopia-2026-feishu-revision-561-user-confirmed-v4`
+> `importId/catalogVersion`：`qintopia-2026-feishu-revision-561-user-confirmed-v5`
 >
 > 物业范围：`prop_qintopia_demo` / `QTP-XA`；时区 `Asia/Shanghai`；币种 `CNY`
 
@@ -44,11 +44,11 @@
 | A | A01 标间 2、A02 标间 2、A03 大床 1、A04 大床 1 | 4 | 6 |
 | B | B01 单人 1、B02 单人 1、B03 标间 2、B04 标间 2 | 4 | 6 |
 | C | C01-C04 独卫单人间，各 1 | 4 | 4 |
-| D | D01/02 公卫单人间，各 1；D03/04/05 公卫标间，各 2 | 5 | 8 |
+| D | D01/D04 公卫单人间，各 1；D02/D03/D05 公卫标间，各 2 | 5 | 8 |
 | E | E01 独卫标间 2、E02 独卫单人 1、E03 独卫套房 2 | 3 | 5 |
-| 1栋 | 101/102/103/105/107/108/109 四人间，各 4；104/106 两人间，各 2 | 9 | 32 |
-| 2栋 | 201/205 公卫单人间，各 1；202/203/206 四人间，各 4；204 两人间 2 | 6 | 16 |
-| 3栋 | 301-304 公卫单人间，各 1；305-309 公卫标间，各 2 | 9 | 14 |
+| 1栋 | 101/102/103/104/106/107/109 四人间，各 4；105/108 两人间，各 2 | 9 | 32 |
+| 2栋 | 201/205 公卫单人间，各 1；202/203/204 四人间，各 4；206 两人间 2 | 6 | 16 |
+| 3栋 | 302/304/305/308 公卫单人间，各 1；301/303/306/307/309 公卫标间，各 2 | 9 | 14 |
 | **合计** |  | **44** | **91** |
 
 ### 编码来源
@@ -94,12 +94,12 @@
 ├── D栋（5房 / 8实体床；源标签“养蜂”）
 │   ├── D01 单人间公卫 [ROOM基础: unit_room_d_gen_01; shared_bath_single_room]
 │   │   └── 实体床 1张 [无BED库存]
-│   ├── D02 单人间公卫 [ROOM基础: unit_room_d_gen_02; shared_bath_single_room]
-│   │   └── 实体床 1张 [无BED库存]
+│   ├── D02 标间公卫 [ROOM基础: unit_room_d_gen_02; shared_bath_standard_room]
+│   │   └── 物理床 A/B [仅标签，无BED库存]
 │   ├── D03 标间公卫 [ROOM基础: unit_room_d_gen_03; shared_bath_standard_room]
 │   │   └── 物理床 A/B [仅标签，无BED库存]
-│   ├── D04 标间公卫 [ROOM基础: unit_room_d_gen_04; shared_bath_standard_room]
-│   │   └── 物理床 A/B [仅标签，无BED库存]
+│   ├── D04 单人间公卫 [ROOM基础: unit_room_d_gen_04; shared_bath_single_room]
+│   │   └── 实体床 1张 [无BED库存]
 │   └── D05 标间公卫 [ROOM基础: unit_room_d_gen_05; shared_bath_standard_room]
 │       └── 物理床 A/B [仅标签，无BED库存]
 ├── E栋（3房 / 5实体床；源标签“蝴蝶”）
@@ -125,27 +125,27 @@
 │   │   ├── 103-B [BED基础: unit_room_103_bed_b; shared_bath_quad_bed]
 │   │   ├── 103-C [BED基础: unit_room_103_bed_c; shared_bath_quad_bed]
 │   │   └── 103-D [BED基础: unit_room_103_bed_d; shared_bath_quad_bed]
-│   ├── 104 两人间公卫 [ROOM组合: unit_room_104; shared_bath_double_whole_room]
-│   │   ├── 104-A [BED基础: unit_room_104_bed_a; shared_bath_double_bed]
-│   │   └── 104-B [BED基础: unit_room_104_bed_b; shared_bath_double_bed]
-│   ├── 105 四人间公卫 [ROOM组合: unit_room_105; shared_bath_quad_whole_room]
-│   │   ├── 105-A [BED基础: unit_room_105_bed_a; shared_bath_quad_bed]
-│   │   ├── 105-B [BED基础: unit_room_105_bed_b; shared_bath_quad_bed]
-│   │   ├── 105-C [BED基础: unit_room_105_bed_c; shared_bath_quad_bed]
-│   │   └── 105-D [BED基础: unit_room_105_bed_d; shared_bath_quad_bed]
-│   ├── 106 两人间公卫 [ROOM组合: unit_room_106; shared_bath_double_whole_room]
-│   │   ├── 106-A [BED基础: unit_room_106_bed_a; shared_bath_double_bed]
-│   │   └── 106-B [BED基础: unit_room_106_bed_b; shared_bath_double_bed]
+│   ├── 104 四人间公卫 [ROOM组合: unit_room_104; shared_bath_quad_whole_room]
+│   │   ├── 104-A [BED基础: unit_room_104_bed_a; shared_bath_quad_bed]
+│   │   ├── 104-B [BED基础: unit_room_104_bed_b; shared_bath_quad_bed]
+│   │   ├── 104-C [BED基础: unit_room_104_bed_c; shared_bath_quad_bed]
+│   │   └── 104-D [BED基础: unit_room_104_bed_d; shared_bath_quad_bed]
+│   ├── 105 两人间公卫 [ROOM组合: unit_room_105; shared_bath_double_whole_room]
+│   │   ├── 105-A [BED基础: unit_room_105_bed_a; shared_bath_double_bed]
+│   │   └── 105-B [BED基础: unit_room_105_bed_b; shared_bath_double_bed]
+│   ├── 106 四人间公卫 [ROOM组合: unit_room_106; shared_bath_quad_whole_room]
+│   │   ├── 106-A [BED基础: unit_room_106_bed_a; shared_bath_quad_bed]
+│   │   ├── 106-B [BED基础: unit_room_106_bed_b; shared_bath_quad_bed]
+│   │   ├── 106-C [BED基础: unit_room_106_bed_c; shared_bath_quad_bed]
+│   │   └── 106-D [BED基础: unit_room_106_bed_d; shared_bath_quad_bed]
 │   ├── 107 四人间公卫 [ROOM组合: unit_room_107; shared_bath_quad_whole_room]
 │   │   ├── 107-A [BED基础: unit_room_107_bed_a; shared_bath_quad_bed]
 │   │   ├── 107-B [BED基础: unit_room_107_bed_b; shared_bath_quad_bed]
 │   │   ├── 107-C [BED基础: unit_room_107_bed_c; shared_bath_quad_bed]
 │   │   └── 107-D [BED基础: unit_room_107_bed_d; shared_bath_quad_bed]
-│   ├── 108 四人间公卫 [ROOM组合: unit_room_108; shared_bath_quad_whole_room]
-│   │   ├── 108-A [BED基础: unit_room_108_bed_a; shared_bath_quad_bed]
-│   │   ├── 108-B [BED基础: unit_room_108_bed_b; shared_bath_quad_bed]
-│   │   ├── 108-C [BED基础: unit_room_108_bed_c; shared_bath_quad_bed]
-│   │   └── 108-D [BED基础: unit_room_108_bed_d; shared_bath_quad_bed]
+│   ├── 108 两人间公卫 [ROOM组合: unit_room_108; shared_bath_double_whole_room]
+│   │   ├── 108-A [BED基础: unit_room_108_bed_a; shared_bath_double_bed]
+│   │   └── 108-B [BED基础: unit_room_108_bed_b; shared_bath_double_bed]
 │   └── 109 四人间公卫 [ROOM组合: unit_room_109; shared_bath_quad_whole_room]
 │       ├── 109-A [BED基础: unit_room_109_bed_a; shared_bath_quad_bed]
 │       ├── 109-B [BED基础: unit_room_109_bed_b; shared_bath_quad_bed]
@@ -164,33 +164,33 @@
 │   │   ├── 203-B [BED基础: unit_room_203_bed_b; shared_bath_quad_bed]
 │   │   ├── 203-C [BED基础: unit_room_203_bed_c; shared_bath_quad_bed]
 │   │   └── 203-D [BED基础: unit_room_203_bed_d; shared_bath_quad_bed]
-│   ├── 204 两人间公卫 [ROOM组合: unit_room_204; shared_bath_double_whole_room]
-│   │   ├── 204-A [BED基础: unit_room_204_bed_a; shared_bath_double_bed]
-│   │   └── 204-B [BED基础: unit_room_204_bed_b; shared_bath_double_bed]
+│   ├── 204 四人间公卫 [ROOM组合: unit_room_204; shared_bath_quad_whole_room]
+│   │   ├── 204-A [BED基础: unit_room_204_bed_a; shared_bath_quad_bed]
+│   │   ├── 204-B [BED基础: unit_room_204_bed_b; shared_bath_quad_bed]
+│   │   ├── 204-C [BED基础: unit_room_204_bed_c; shared_bath_quad_bed]
+│   │   └── 204-D [BED基础: unit_room_204_bed_d; shared_bath_quad_bed]
 │   ├── 205 单人间公卫 [ROOM基础: unit_room_205; shared_bath_single_room]
 │   │   └── 实体床 1张 [无BED库存]
-│   └── 206 四人间公卫 [ROOM组合: unit_room_206; shared_bath_quad_whole_room]
-│       ├── 206-A [BED基础: unit_room_206_bed_a; shared_bath_quad_bed]
-│       ├── 206-B [BED基础: unit_room_206_bed_b; shared_bath_quad_bed]
-│       ├── 206-C [BED基础: unit_room_206_bed_c; shared_bath_quad_bed]
-│       └── 206-D [BED基础: unit_room_206_bed_d; shared_bath_quad_bed]
+│   └── 206 两人间公卫 [ROOM组合: unit_room_206; shared_bath_double_whole_room]
+│       ├── 206-A [BED基础: unit_room_206_bed_a; shared_bath_double_bed]
+│       └── 206-B [BED基础: unit_room_206_bed_b; shared_bath_double_bed]
 └── 3栋（9房 / 14实体床）
-    ├── 301 单人间公卫 [ROOM基础: unit_room_301; shared_bath_single_room]
-    │   └── 实体床 1张 [无BED库存]
+    ├── 301 标间公卫 [ROOM基础: unit_room_301; shared_bath_standard_room]
+    │   └── 物理床 A/B [仅标签，无BED库存]
     ├── 302 单人间公卫 [ROOM基础: unit_room_302; shared_bath_single_room]
     │   └── 实体床 1张 [无BED库存]
-    ├── 303 单人间公卫 [ROOM基础: unit_room_303; shared_bath_single_room]
-    │   └── 实体床 1张 [无BED库存]
+    ├── 303 标间公卫 [ROOM基础: unit_room_303; shared_bath_standard_room]
+    │   └── 物理床 A/B [仅标签，无BED库存]
     ├── 304 单人间公卫 [ROOM基础: unit_room_304; shared_bath_single_room]
     │   └── 实体床 1张 [无BED库存]
-    ├── 305 标间公卫 [ROOM基础: unit_room_305; shared_bath_standard_room]
-    │   └── 物理床 A/B [仅标签，无BED库存]
+    ├── 305 单人间公卫 [ROOM基础: unit_room_305; shared_bath_single_room]
+    │   └── 实体床 1张 [无BED库存]
     ├── 306 标间公卫 [ROOM基础: unit_room_306; shared_bath_standard_room]
     │   └── 物理床 A/B [仅标签，无BED库存]
     ├── 307 标间公卫 [ROOM基础: unit_room_307; shared_bath_standard_room]
     │   └── 物理床 A/B [仅标签，无BED库存]
-    ├── 308 标间公卫 [ROOM基础: unit_room_308; shared_bath_standard_room]
-    │   └── 物理床 A/B [仅标签，无BED库存]
+    ├── 308 单人间公卫 [ROOM基础: unit_room_308; shared_bath_single_room]
+    │   └── 实体床 1张 [无BED库存]
     └── 309 标间公卫 [ROOM基础: unit_room_309; shared_bath_standard_room]
         └── 物理床 A/B [仅标签，无BED库存]
 ```

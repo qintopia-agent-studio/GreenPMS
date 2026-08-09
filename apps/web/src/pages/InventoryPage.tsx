@@ -1711,36 +1711,28 @@ function findRoomStatusUnit(board: RoomStatusBoardDto | undefined, unitId: strin
   return flattenRoomStatusUnits(board).find((unit) => unit.id === unitId) ?? null;
 }
 
-function withoutRoomStatusWriteActions(unit: RoomStatusUnitDto, stale: boolean): RoomStatusUnitDto {
-  const status = stale ? "STALE" as const : undefined;
+function withoutRoomStatusWriteActions(unit: RoomStatusUnitDto): RoomStatusUnitDto {
   const readActions = (actions: readonly RoomStatusActionDto[]) => actions.filter((action) => action.code === "OPEN_ORDER");
   return {
     ...unit,
-    days: unit.days.map((day) => ({
-      ...day,
-      ...(status ? { status, available: false } : {})
-    })),
     intervals: unit.intervals.map((interval) => ({
       ...interval,
-      ...(status ? { status, available: false } : {}),
       allowedActions: readActions(interval.allowedActions)
     })),
     allowedActions: readActions(unit.allowedActions),
-    children: unit.children.map((child) => withoutRoomStatusWriteActions(child, stale))
+    children: unit.children.map(withoutRoomStatusWriteActions)
   };
 }
 
-function displayRoomStatusBoard(board: RoomStatusBoardDto, commandsBlocked: boolean, stale: boolean): RoomStatusBoardDto {
-  if (!commandsBlocked && !stale) return board;
+function displayRoomStatusBoard(board: RoomStatusBoardDto, commandsBlocked: boolean): RoomStatusBoardDto {
+  if (!commandsBlocked) return board;
   return {
     ...board,
-    projectionState: stale ? "PARTIAL" : board.projectionState,
     operationalTasks: board.operationalTasks.map((task) => ({
       ...task,
-      ...(stale ? { status: "STALE" as const, available: false } : {}),
       allowedActions: task.allowedActions.filter((action) => action.code === "OPEN_ORDER")
     })),
-    rooms: board.rooms.map((room) => withoutRoomStatusWriteActions(room, stale))
+    rooms: board.rooms.map(withoutRoomStatusWriteActions)
   };
 }
 
@@ -2473,7 +2465,7 @@ export function InventoryPage() {
 
   const boardForCurrentProperty = boardMatchesCurrentProperty ? board : undefined;
   const boardExpired = Boolean(boardForCurrentProperty && clock > Date.parse(boardForCurrentProperty.freshUntil));
-  const boardStale = Boolean(boardForCurrentProperty && (boardExpired || queryError));
+  const boardRefreshFailed = Boolean(boardForCurrentProperty && queryError);
   const rangeLoading = queryPhase === "RANGE_LOADING"
     || Boolean(boardForCurrentProperty && !boardMatchesCurrentQuery);
   const queryBusy = queryPhase === "LOADING"
@@ -2510,9 +2502,9 @@ export function InventoryPage() {
   }, [command, currentBoardQueryKey]);
   const renderedBoard = useMemo(
     () => boardForCurrentProperty
-      ? displayRoomStatusBoard(boardForCurrentProperty, commandsBlocked && !command, boardStale)
+      ? displayRoomStatusBoard(boardForCurrentProperty, commandsBlocked && !command)
       : undefined,
-    [boardForCurrentProperty, boardStale, command, commandsBlocked]
+    [boardForCurrentProperty, command, commandsBlocked]
   );
   const filteredViewHasNoRooms = Boolean(renderedBoard
     && hasActiveRoomStatusFilters(viewState.filters)
@@ -3847,16 +3839,10 @@ export function InventoryPage() {
 
   const roomStatusToolbar = renderedBoard ? (
     <RoomStatusToolbar
-      range={range}
       filters={viewState.filters}
       filterOptions={filterOptions}
       loading={queryBusy}
-      rangeError={rangeError instanceof Error ? rangeError.message : undefined}
       focusSearchRequestToken={filterFocusRequestToken}
-      onRangeChange={applyRange}
-      onPreviousRange={() => shiftRange(-1)}
-      onNextRange={() => shiftRange(1)}
-      onToday={() => applyRange(roomStatusTimelineRangeFromStart(todayDate))}
       onFiltersChange={applyFilters}
       onClearFilters={clearFilters}
       onRefresh={() => setRefreshToken((value) => value + 1)}
@@ -3954,8 +3940,8 @@ export function InventoryPage() {
         : null}
       {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={inventoryRecoveryIsBusinessFacing(commandRecovery.pending.presentation)} /> : null}
       {returnNotice ? <div className="room-status-return-notice" role="status">{returnNotice}</div> : null}
-      {boardStale ? <div className="room-status-stale-notice" role="alert">当前房态已陈旧或刷新失败。页面保留最后一次来源事实，但所有依赖新鲜度的写动作已暂停。</div> : null}
-      {queryError ? <InlineError error={queryError} title={board ? "房态刷新失败" : "无法查询房态"} /> : null}
+      {boardRefreshFailed ? <div className="room-status-stale-notice" role="alert">房态刷新未完成，当前继续显示上次成功结果。新的创建和锁房操作已暂时关闭；刷新成功后会自动恢复。</div> : null}
+      {queryError && !boardForCurrentProperty ? <InlineError error={queryError} title="无法查询房态" /> : null}
 
       {!renderedBoard ? (
         queryPhase === "LOADING" || (board !== undefined && !boardMatchesCurrentProperty)
@@ -3983,6 +3969,7 @@ export function InventoryPage() {
             <div className="room-status-board-column" ref={boardColumnRef}>
               <RoomStatusGrid
                 board={renderedBoard}
+                range={range}
                 filters={viewState.filters}
                 expandedRoomIds={viewState.expandedRoomIds}
                 focusedCell={viewState.focusedCell}
@@ -3995,9 +3982,14 @@ export function InventoryPage() {
                 )}
                 dateWindowStart={viewState.dateWindowStart}
                 todayDate={todayDate}
+                rangeError={rangeError instanceof Error ? rangeError.message : undefined}
                 initialScrollAnchor={viewState.scrollAnchor}
                 restoreFocus={restoreGridFocus}
                 focusRequestToken={focusRequestToken}
+                onRangeChange={applyRange}
+                onPreviousRange={() => shiftRange(-1)}
+                onNextRange={() => shiftRange(1)}
+                onToday={() => applyRange(roomStatusTimelineRangeFromStart(todayDate))}
                 onToggleRoom={(roomId) => dispatchView({ type: "TOGGLE_ROOM", roomId })}
                 onFocusedCellChange={(focus) => dispatchView({ type: "SET_FOCUS", focus })}
                 onSelectionPreviewChange={previewSelection}

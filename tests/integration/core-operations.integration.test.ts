@@ -9,7 +9,7 @@ import { resetTestDatabase } from "../helpers/database.ts";
 
 let db: Kysely<Database>;
 const memberSourceUnitId = "unit_room_d_gen_01";
-const memberTargetUnitId = "unit_room_d_gen_02";
+const memberTargetUnitId = "unit_room_d_gen_04";
 const principal: AuthPrincipal = {
   subjectId: demo.agentSubjectId,
   credentialId: "token_demo_write",

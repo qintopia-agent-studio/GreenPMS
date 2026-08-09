@@ -98,7 +98,7 @@ type CanonicalPricingProductTuple = readonly [
   derivation: PricingProductSnapshot["derivation"]
 ];
 
-const revision561ImportId = "qintopia-2026-feishu-revision-561-user-confirmed-v4";
+const revision561ImportId = "qintopia-2026-feishu-revision-561-user-confirmed-v5";
 const revision561SourceRevision = 561;
 
 // These tuples are the independent data seal for the user-confirmed revision, not derived totals.
@@ -116,9 +116,9 @@ const revision561RoomTuples = [
   ["C03", "C", "private_bath_single", "I03", "I03", "USER_CONFIRMED_RENAMED", 1, null, "INDEPENDENT_ROOM"],
   ["C04", "C", "private_bath_single", "I04", "I04", "USER_CONFIRMED_RENAMED", 1, null, "INDEPENDENT_ROOM"],
   ["D01", "D", "shared_bath_single", null, "养蜂 单", "PMS_GENERATED", 1, null, "INDEPENDENT_ROOM"],
-  ["D02", "D", "shared_bath_single", null, "养蜂 单", "PMS_GENERATED", 1, null, "INDEPENDENT_ROOM"],
+  ["D02", "D", "shared_bath_standard", null, "养蜂 双", "PMS_GENERATED", 2, ["A", "B"], "INDEPENDENT_ROOM"],
   ["D03", "D", "shared_bath_standard", null, "养蜂 双", "PMS_GENERATED", 2, ["A", "B"], "INDEPENDENT_ROOM"],
-  ["D04", "D", "shared_bath_standard", null, "养蜂 双", "PMS_GENERATED", 2, ["A", "B"], "INDEPENDENT_ROOM"],
+  ["D04", "D", "shared_bath_single", null, "养蜂 单", "PMS_GENERATED", 1, null, "INDEPENDENT_ROOM"],
   ["D05", "D", "shared_bath_standard", null, "养蜂 双", "PMS_GENERATED", 2, ["A", "B"], "INDEPENDENT_ROOM"],
   ["E01", "E", "private_bath_standard", null, "蝴蝶 标间", "PMS_GENERATED", 2, ["A", "B"], "INDEPENDENT_ROOM"],
   ["E02", "E", "private_bath_single", null, "蝴蝶 单人间", "PMS_GENERATED", 1, null, "INDEPENDENT_ROOM"],
@@ -126,26 +126,26 @@ const revision561RoomTuples = [
   ["101", "1", "shared_bath_quad", "101", "101", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
   ["102", "1", "shared_bath_quad", "102", "102", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
   ["103", "1", "shared_bath_quad", "103", "103", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
-  ["104", "1", "shared_bath_double", "104", "104", "SOURCE_EXPLICIT", 2, ["A", "B"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
-  ["105", "1", "shared_bath_quad", "105", "105", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
-  ["106", "1", "shared_bath_double", "106", "106", "SOURCE_EXPLICIT", 2, ["A", "B"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
+  ["104", "1", "shared_bath_quad", "104", "104", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
+  ["105", "1", "shared_bath_double", "105", "105", "SOURCE_EXPLICIT", 2, ["A", "B"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
+  ["106", "1", "shared_bath_quad", "106", "106", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
   ["107", "1", "shared_bath_quad", "107", "107", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
-  ["108", "1", "shared_bath_quad", "108", "108", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
+  ["108", "1", "shared_bath_double", "108", "108", "SOURCE_EXPLICIT", 2, ["A", "B"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
   ["109", "1", "shared_bath_quad", "109", "109", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
   ["201", "2", "shared_bath_single", "201", "201", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
   ["202", "2", "shared_bath_quad", "202", "202", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
   ["203", "2", "shared_bath_quad", "203", "203", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
-  ["204", "2", "shared_bath_double", "204", "204", "SOURCE_EXPLICIT", 2, ["A", "B"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
+  ["204", "2", "shared_bath_quad", "204", "204", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
   ["205", "2", "shared_bath_single", "205", "205", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
-  ["206", "2", "shared_bath_quad", "206", "206", "SOURCE_EXPLICIT", 4, ["A", "B", "C", "D"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
-  ["301", "3", "shared_bath_single", "301", "301 单", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
+  ["206", "2", "shared_bath_double", "206", "206", "SOURCE_EXPLICIT", 2, ["A", "B"], "BED_WITH_WHOLE_ROOM_COMBINATION"],
+  ["301", "3", "shared_bath_standard", "301", "301 双", "SOURCE_EXPLICIT", 2, ["A", "B"], "INDEPENDENT_ROOM"],
   ["302", "3", "shared_bath_single", "302", "302 单", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
-  ["303", "3", "shared_bath_single", "303", "303 单", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
+  ["303", "3", "shared_bath_standard", "303", "303 双", "SOURCE_EXPLICIT", 2, ["A", "B"], "INDEPENDENT_ROOM"],
   ["304", "3", "shared_bath_single", "304", "304 单", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
-  ["305", "3", "shared_bath_standard", "305", "305 双", "SOURCE_EXPLICIT", 2, ["A", "B"], "INDEPENDENT_ROOM"],
+  ["305", "3", "shared_bath_single", "305", "305 单", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
   ["306", "3", "shared_bath_standard", "306", "306 双", "SOURCE_EXPLICIT", 2, ["A", "B"], "INDEPENDENT_ROOM"],
   ["307", "3", "shared_bath_standard", "307", "307 双", "SOURCE_EXPLICIT", 2, ["A", "B"], "INDEPENDENT_ROOM"],
-  ["308", "3", "shared_bath_standard", "308", "308 双", "SOURCE_EXPLICIT", 2, ["A", "B"], "INDEPENDENT_ROOM"],
+  ["308", "3", "shared_bath_single", "308", "308 单", "SOURCE_EXPLICIT", 1, null, "INDEPENDENT_ROOM"],
   ["309", "3", "shared_bath_standard", "309", "309 双", "SOURCE_EXPLICIT", 2, ["A", "B"], "INDEPENDENT_ROOM"]
 ] satisfies readonly CanonicalRoomTuple[];
 

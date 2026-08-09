@@ -1071,7 +1071,7 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
       input: {
         propertyId: demo.propertyId,
         orderId: reservedOrderId,
-        newInventoryUnitId: "unit_room_d_gen_02",
+        newInventoryUnitId: "unit_room_d_gen_04",
         effectiveDate: "2028-09-02"
       }
     }, "stage11-member-reserved-move");
@@ -1092,7 +1092,7 @@ describe.sequential("4.2 RESCHEDULE_STAY and checked-in EXTEND_STAY", () => {
       .sort((left, right) => left.serviceDate.localeCompare(right.serviceDate)))
       .toEqual([
         { serviceDate: "2028-09-01", inventoryUnitId: "unit_room_d_gen_01" },
-        { serviceDate: "2028-09-02", inventoryUnitId: "unit_room_d_gen_02" }
+        { serviceDate: "2028-09-02", inventoryUnitId: "unit_room_d_gen_04" }
       ]);
     expect(allCoverage.filter((item) => item.status === "RELEASED")).toHaveLength(5);
     const balance = await db.selectFrom("entitlement_lots")

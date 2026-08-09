@@ -456,6 +456,7 @@ textarea:focus-visible {
 .sidebar-is-collapsed .sidebar-brand-full,
 .sidebar-is-collapsed .sidebar-brand-product,
 .sidebar-is-collapsed .nav-link span,
+.sidebar-is-collapsed .sidebar-property select,
 .sidebar-is-collapsed .sidebar-user div {
   display: none;
 }
@@ -465,6 +466,11 @@ textarea:focus-visible {
 }
 
 .sidebar-is-collapsed .primary-navigation .nav-link {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.sidebar-is-collapsed .sidebar-property {
   justify-content: center;
   padding-inline: 0;
 }
@@ -501,8 +507,36 @@ textarea:focus-visible {
   color: var(--brand-hover);
 }
 
-.sidebar-user {
+.sidebar-property {
+  min-width: 0;
   margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 5px 9px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.sidebar-property select {
+  min-width: 0;
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 24px 3px 0;
+  border-color: transparent;
+  background-color: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sidebar-property select:hover,
+.sidebar-property select:focus {
+  color: var(--text);
+}
+
+.sidebar-user {
+  margin-top: 8px;
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) 40px;
   align-items: center;
@@ -3619,7 +3653,7 @@ pre {
 
 @media (max-width: 860px) {
   html {
-    scroll-padding-top: 116px;
+    scroll-padding-top: 60px;
     scroll-padding-bottom: calc(76px + env(safe-area-inset-bottom));
   }
 
@@ -3664,6 +3698,7 @@ pre {
   }
 
   .primary-navigation,
+  .sidebar-property,
   .sidebar-user {
     display: none;
   }

@@ -28,7 +28,7 @@ const principal: AuthPrincipal = {
 let db: Kysely<Database>;
 let sequence = 0;
 const memberSourceUnitId = "unit_room_d_gen_01";
-const memberTargetUnitId = "unit_room_d_gen_02";
+const memberTargetUnitId = "unit_room_d_gen_04";
 
 function shiftDate(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00.000Z`);

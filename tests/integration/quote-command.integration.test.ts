@@ -220,7 +220,24 @@ describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
       pricingPolicyVersionId: demo.publicPricingPolicyId
     };
     const result = await executeQuoteCommand(db, readPrincipal, input, metadata("quote-derived-type"));
-    expect(result.quote).toMatchObject({ stayType: "CUSTOM", currentContractAmount: { minorUnits: 108_600 } });
+    expect(result.quote).toMatchObject({
+      stayType: "CUSTOM",
+      currentContractAmount: { minorUnits: 176_000 },
+      cashLines: [expect.objectContaining({
+        lineKind: "STAY_TOTAL",
+        pricingBandAnchorNights: 7,
+        amount: { currency: "CNY", minorUnits: 176_000 }
+      })],
+      pricingExplanation: {
+        durationBand: {
+          segments: [expect.objectContaining({
+            pricingProductCode: "shared_bath_quad_whole_room",
+            nights: 10,
+            anchorAmount: { currency: "CNY", minorUnits: 123_200 }
+          })]
+        }
+      }
+    });
     const execution = await db.selectFrom("command_executions").select("request_hash").executeTakeFirstOrThrow();
     expect(execution.request_hash).toBe(stableHash({ ...input, stayType: "CUSTOM" }));
   });

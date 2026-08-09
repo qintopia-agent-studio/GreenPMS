@@ -284,7 +284,7 @@ describe("step 2C member balances and stays", () => {
     const cancelledArrival = shiftDate(today, 20);
     const cancelledDeparture = shiftDate(cancelledArrival, 2);
     const d01 = await unitId("D01");
-    const d02 = await unitId("D02");
+    const d04 = await unitId("D04");
 
     const checkedInMember = "member_step2c_checked_in";
     await createMember(checkedInMember);
@@ -305,7 +305,7 @@ describe("step 2C member balances and stays", () => {
     const cancelledMember = "member_step2c_cancelled";
     await createMember(cancelledMember);
     const cancelledMembership = await activateProduct(cancelledMember, products.sharedSingle, "cancelled");
-    const cancelledQuote = await memberQuote(cancelledMember, d02, cancelledArrival, cancelledDeparture);
+    const cancelledQuote = await memberQuote(cancelledMember, d04, cancelledArrival, cancelledDeparture);
     const cancelled = await createStay(cancelledQuote.quoteId, "cancelled");
     const cancelledOrderId = cancelled.result!.orderId as string;
     await confirm({ commandType: "CANCEL_ORDER", input: { propertyId: demo.propertyId, orderId: cancelledOrderId } }, "cancel-before-arrival");
@@ -360,10 +360,10 @@ describe("step 2C member balances and stays", () => {
       commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
       input: { propertyId: demo.propertyId, entitlementLotId: membership.lotId, expectedAvailableBalance: 30, targetAvailableBalance: 1, adjustmentReason: "并发只保留最后一间夜" }
     }, "last-night-balance");
-    const [d01, d02] = await Promise.all([unitId("D01"), unitId("D02")]);
+    const [d01, d04] = await Promise.all([unitId("D01"), unitId("D04")]);
     const [quoteA, quoteB] = await Promise.all([
       memberQuote(memberId, d01, arrival, departure),
-      memberQuote(memberId, d02, arrival, departure)
+      memberQuote(memberId, d04, arrival, departure)
     ]);
     const [previewA, previewB] = await Promise.all([
       preview({ commandType: "CREATE_ORDER", input: { propertyId: demo.propertyId, quoteId: quoteA.quoteId, primaryGuest: { fullName: "并发甲", nickname: "甲" } } }, "last-night-a"),

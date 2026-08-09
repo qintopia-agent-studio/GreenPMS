@@ -193,6 +193,40 @@ describe("room status unit presentation", () => {
     expect(roomStatusUnitDescription(unit)).toBe("床位 A");
   });
 
+  it("falls back from legacy English room names to the catalog room type", () => {
+    const room = {
+      kind: "ROOM",
+      code: "101",
+      name: "Room 101",
+      buildingCode: "1",
+      roomTypeCode: "shared_bath_quad"
+    } as const;
+    const bed = {
+      kind: "BED",
+      code: "101-A",
+      name: "Room 101 / Bed A",
+      buildingCode: "1",
+      roomTypeCode: "shared_bath_quad"
+    } as const;
+
+    expect(roomStatusUnitDescription(room)).toBe("四人间（公卫）");
+    expect(roomStatusUnitLabel(room)).toBe("1栋 101 四人间（公卫）");
+    expect(roomStatusUnitDescription(bed)).toBe("床位 A");
+    expect(roomStatusUnitLabel(bed)).toBe("1栋 101 床位 A");
+  });
+
+  it("does not expose legacy English room names when the catalog type is missing", () => {
+    const room = {
+      kind: "ROOM",
+      code: "101",
+      name: "Room 101",
+      buildingCode: "1"
+    } as const;
+
+    expect(roomStatusUnitDescription(room)).toBe("房间");
+    expect(roomStatusUnitLabel(room)).toBe("1栋 101 房间");
+  });
+
   it("keeps the stable code when a custom name does not contain it", () => {
     const unit = { kind: "ROOM", code: "D01", name: "养蜂单人间", buildingCode: "D" } as const;
 

@@ -38,7 +38,7 @@ async function login(page: Page): Promise<RoomStatusBoardDto> {
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 2 })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
@@ -467,6 +467,43 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
     const startCell = roomCell(page, candidate.unitId, candidate.dragStart);
     const endCell = roomCell(page, candidate.unitId, candidate.dragEnd);
     await expect(interval).toHaveCount(1);
+    const gridScroller = page.locator(".room-status-grid-scroll");
+    const resourceCell = row.locator(".room-status-resource-cell");
+    const initialIntervalBox = await interval.boundingBox();
+    const initialResourceBox = await resourceCell.boundingBox();
+    expect(initialIntervalBox).not.toBeNull();
+    expect(initialResourceBox).not.toBeNull();
+    const scrollDelta = Math.max(1, Math.ceil(
+      initialIntervalBox!.x + initialIntervalBox!.width / 2
+      - (initialResourceBox!.x + initialResourceBox!.width / 2)
+    ));
+    await gridScroller.evaluate((element, delta) => {
+      element.scrollLeft = Math.min(element.scrollWidth - element.clientWidth, element.scrollLeft + delta);
+    }, scrollDelta);
+    await expect.poll(async () => {
+      const intervalBox = await interval.boundingBox();
+      const frozenBox = await resourceCell.boundingBox();
+      if (!intervalBox || !frozenBox) return 0;
+      return Math.min(intervalBox.x + intervalBox.width, frozenBox.x + frozenBox.width)
+        - Math.max(intervalBox.x, frozenBox.x);
+    }).toBeGreaterThan(4);
+    const overlappedIntervalBox = await interval.boundingBox();
+    const frozenResourceBox = await resourceCell.boundingBox();
+    expect(overlappedIntervalBox).not.toBeNull();
+    expect(frozenResourceBox).not.toBeNull();
+    const overlapLeft = Math.max(overlappedIntervalBox!.x, frozenResourceBox!.x);
+    const overlapRight = Math.min(
+      overlappedIntervalBox!.x + overlappedIntervalBox!.width,
+      frozenResourceBox!.x + frozenResourceBox!.width
+    );
+    const frozenColumnOwnsOverlap = await page.evaluate(({ x, y }) => (
+      document.elementFromPoint(x, y)?.closest(".room-status-resource-cell") !== null
+    ), {
+      x: (overlapLeft + overlapRight) / 2,
+      y: overlappedIntervalBox!.y + overlappedIntervalBox!.height / 2
+    });
+    expect(frozenColumnOwnsOverlap, "the frozen room column must cover and own hits over an overlapping interval").toBe(true);
+
     await expect(startCell).toHaveAccessibleName(/可售.*可以安排/);
     await expect(endCell).toHaveAccessibleName(/可售.*可以安排/);
 

@@ -1565,6 +1565,9 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration035 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/035_stage13_conversion_execution_state_guards.sql"), "utf8");
         await client.query(migration035);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('035_stage13_conversion_execution_state_guards.sql')");
+        const migration036 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/036_qintopia_prelaunch_room_catalog_corrections.sql"), "utf8");
+        await client.query(migration036);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('036_qintopia_prelaunch_room_catalog_corrections.sql')");
         await client.query("ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only");
         await client.query("UPDATE collection_facts SET pricing_revision_id = NULL WHERE fact_id = 'fact_historical_nulls'");
         await client.query("ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only");
@@ -1663,7 +1666,7 @@ describe.sequential("booking channels and external transaction references on Pos
       expect(upgradedLegacyUnits).toEqual([
         {
           id: demo.roomId,
-          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v4",
+          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v5",
           building_code: "1",
           room_type_code: "shared_bath_quad",
           pricing_product_code: "shared_bath_quad_whole_room",
@@ -1674,7 +1677,7 @@ describe.sequential("booking channels and external transaction references on Pos
         },
         {
           id: demo.bedAId,
-          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v4",
+          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v5",
           building_code: "1",
           room_type_code: "shared_bath_quad",
           pricing_product_code: "shared_bath_quad_bed",
@@ -1685,7 +1688,7 @@ describe.sequential("booking channels and external transaction references on Pos
         },
         {
           id: demo.bedBId,
-          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v4",
+          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v5",
           building_code: "1",
           room_type_code: "shared_bath_quad",
           pricing_product_code: "shared_bath_quad_bed",
@@ -1696,7 +1699,7 @@ describe.sequential("booking channels and external transaction references on Pos
         },
         {
           id: demo.secondRoomId,
-          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v4",
+          catalog_version: "qintopia-2026-feishu-revision-561-user-confirmed-v5",
           building_code: "1",
           room_type_code: "shared_bath_quad",
           pricing_product_code: "shared_bath_quad_whole_room",

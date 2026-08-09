@@ -124,17 +124,45 @@ export const roomStatusActionLabels: Record<RoomStatusActionCode, string> = {
 };
 
 type RoomStatusSalesPresentationUnit = Pick<RoomStatusUnitDto, "kind" | "salesMode">;
-type RoomStatusUnitIdentity = Pick<RoomStatusUnitDto, "kind" | "code" | "name" | "buildingCode">;
+type RoomStatusUnitIdentity = Pick<RoomStatusUnitDto, "kind" | "code" | "name" | "buildingCode"> & Partial<Pick<RoomStatusUnitDto, "roomTypeCode">>;
 
 function roomStatusUnitNameParts(unit: RoomStatusUnitIdentity): string[] {
   return unit.name.split(/\s*·\s*/).map((part) => part.trim()).filter(Boolean);
 }
 
-export function roomStatusUnitDescription(unit: RoomStatusUnitIdentity): string {
+function roomStatusNameDescription(unit: RoomStatusUnitIdentity): string {
   const parts = roomStatusUnitNameParts(unit);
   const roomCode = unit.kind === "BED" ? unit.code.replace(/-[^-]+$/, "") : unit.code;
   if (parts[0] === unit.code || parts[0] === roomCode) parts.shift();
-  return parts.join(" ") || (unit.kind === "ROOM" ? "房间" : "床位");
+  return parts.join(" ");
+}
+
+function roomStatusLegacyBedDescription(unit: RoomStatusUnitIdentity): string | null {
+  if (unit.kind !== "BED") return null;
+  const legacyBed = /^Room\s+\S+\s*\/\s*Bed\s+([A-Za-z0-9]+)$/i.exec(unit.name.trim());
+  if (legacyBed) return `床位 ${legacyBed[1]!.toUpperCase()}`;
+  return null;
+}
+
+function roomStatusShouldUseRoomTypeDescription(unit: RoomStatusUnitIdentity, description: string): boolean {
+  return unit.kind === "ROOM"
+    && Boolean(unit.roomTypeCode)
+    && (!description || description === "房间" || /^Room\s+\S+$/i.test(description));
+}
+
+function roomStatusIsGenericRoomDescription(unit: RoomStatusUnitIdentity, description: string): boolean {
+  return unit.kind === "ROOM"
+    && (!description || description === "房间" || /^Room\s+\S+$/i.test(description));
+}
+
+export function roomStatusUnitDescription(unit: RoomStatusUnitIdentity): string {
+  const legacyBedDescription = roomStatusLegacyBedDescription(unit);
+  if (legacyBedDescription) return legacyBedDescription;
+
+  const description = roomStatusNameDescription(unit);
+  if (roomStatusShouldUseRoomTypeDescription(unit, description)) return roomStatusRoomTypeLabel(unit.roomTypeCode!);
+  if (roomStatusIsGenericRoomDescription(unit, description)) return "房间";
+  return description || (unit.kind === "ROOM" ? "房间" : "床位");
 }
 
 export function roomStatusUnitLocationLabel(unit: RoomStatusUnitIdentity): string {
@@ -145,7 +173,15 @@ export function roomStatusUnitLabel(unit: RoomStatusUnitIdentity): string {
   const parts = roomStatusUnitNameParts(unit);
   const roomCode = unit.kind === "BED" ? unit.code.replace(/-[^-]+$/, "") : unit.code;
   const nameCarriesLocation = parts[0] === unit.code || parts[0] === roomCode;
-  const localLabel = nameCarriesLocation ? parts.join(" ") : [unit.code, ...parts].join(" ");
+  const description = roomStatusNameDescription(unit);
+  const legacyBedDescription = roomStatusLegacyBedDescription(unit);
+  const localLabel = legacyBedDescription
+    ? [roomCode, legacyBedDescription].join(" ")
+    : roomStatusShouldUseRoomTypeDescription(unit, description)
+    ? [unit.code, roomStatusRoomTypeLabel(unit.roomTypeCode!)].join(" ")
+    : roomStatusIsGenericRoomDescription(unit, description)
+    ? [unit.code, "房间"].join(" ")
+    : nameCarriesLocation ? parts.join(" ") : [unit.code, ...parts].join(" ");
   return [unit.buildingCode ? `${unit.buildingCode}栋` : null, localLabel].filter(Boolean).join(" ");
 }
 

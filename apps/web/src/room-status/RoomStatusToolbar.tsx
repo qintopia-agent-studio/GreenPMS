@@ -1,14 +1,11 @@
-import { useEffect, useId, useRef, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Eraser, RefreshCw, Search } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { Eraser, RefreshCw, Search } from "lucide-react";
 import {
-  addLocalDateDays,
   hasActiveRoomStatusFilters,
-  isIsoLocalDate,
-  ROOM_STATUS_TIMELINE_DAYS,
   type RoomStatusFilterOptions,
   type RoomStatusFilters
 } from "./roomStatusState";
-import { formatRoomStatusDate, roomStatusRoomTypeLabel } from "./roomStatusPresentation";
+import { roomStatusRoomTypeLabel } from "./roomStatusPresentation";
 
 const salesModeLabels = {
   WHOLE_ROOM: "整房销售",
@@ -33,16 +30,10 @@ export interface RoomStatusRange {
 }
 
 export interface RoomStatusToolbarProps {
-  range: RoomStatusRange;
   filters: RoomStatusFilters;
   filterOptions: RoomStatusFilterOptions;
   loading?: boolean;
-  rangeError?: string | undefined;
   focusSearchRequestToken?: number;
-  onRangeChange: (range: RoomStatusRange) => void;
-  onPreviousRange: () => void;
-  onNextRange: () => void;
-  onToday: () => void;
   onFiltersChange: (filters: RoomStatusFilters) => void;
   onClearFilters: () => void;
   onRefresh: () => void;
@@ -58,33 +49,16 @@ function updateFilter<K extends keyof RoomStatusFilters>(
 }
 
 export function RoomStatusToolbar({
-  range,
   filters,
   filterOptions,
   loading = false,
-  rangeError,
   focusSearchRequestToken = 0,
-  onRangeChange,
-  onPreviousRange,
-  onNextRange,
-  onToday,
   onFiltersChange,
   onClearFilters,
   onRefresh
 }: RoomStatusToolbarProps) {
-  const rangeErrorId = useId();
-  const rangeErrorRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastFocusSearchRequestToken = useRef(focusSearchRequestToken);
-  const [rangeDraft, setRangeDraft] = useState(range);
-
-  useEffect(() => {
-    setRangeDraft(range);
-  }, [range.arrivalDate, range.departureDate]);
-
-  useEffect(() => {
-    if (rangeError) rangeErrorRef.current?.focus();
-  }, [rangeError]);
 
   useEffect(() => {
     if (focusSearchRequestToken === lastFocusSearchRequestToken.current) return;
@@ -93,67 +67,8 @@ export function RoomStatusToolbar({
     return () => cancelAnimationFrame(frame);
   }, [focusSearchRequestToken]);
 
-  const changeRange = (nextRange: RoomStatusRange) => {
-    setRangeDraft(nextRange);
-    onRangeChange(nextRange);
-  };
-  const changeStartDate = (startDate: string) => {
-    if (!isIsoLocalDate(startDate)) {
-      changeRange({ arrivalDate: startDate, departureDate: rangeDraft.departureDate });
-      return;
-    }
-    const nextRange = {
-      arrivalDate: startDate,
-      departureDate: addLocalDateDays(startDate, ROOM_STATUS_TIMELINE_DAYS)
-    };
-    changeRange(nextRange);
-  };
-
   return (
     <section className="room-status-toolbar" aria-label="房态范围与筛选">
-      <div className="room-status-toolbar-primary">
-        <div className="room-status-toolbar-title">
-          <h1>房间与床位逐日房态</h1>
-        </div>
-
-        <div className="room-status-range-controls" aria-label="房态起始日期">
-          <button type="button" className="room-status-icon-button" onClick={onPreviousRange} aria-label="查看前 30 夜" title="前 30 夜">
-            <ChevronLeft aria-hidden="true" size={18} />
-          </button>
-          <label>起始日期
-            <input
-              type="date"
-              value={rangeDraft.arrivalDate}
-              data-testid="arrival-date"
-              aria-invalid={rangeError ? "true" : undefined}
-              aria-describedby={rangeError ? rangeErrorId : undefined}
-              onChange={(event) => changeStartDate(event.target.value)}
-            />
-          </label>
-          <span className="room-status-range-summary">{formatRoomStatusDate(rangeDraft.arrivalDate)}起，显示 30 夜</span>
-          <button type="button" className="room-status-button" onClick={onToday}>
-            <CalendarDays aria-hidden="true" size={17} />今天
-          </button>
-          <button type="button" className="room-status-icon-button" onClick={onNextRange} aria-label="查看后 30 夜" title="后 30 夜">
-            <ChevronRight aria-hidden="true" size={18} />
-          </button>
-          {rangeError ? (
-            <div
-              id={rangeErrorId}
-              ref={rangeErrorRef}
-              className="room-status-range-error"
-              role="alert"
-              tabIndex={-1}
-              data-testid="room-status-range-error"
-            >
-              <strong>日期范围无效</strong>
-              <span>{rangeError}</span>
-            </div>
-          ) : null}
-        </div>
-
-      </div>
-
       <div className="room-status-filter-row">
         <label className="room-status-search-field">搜索房间或床位
           <span>

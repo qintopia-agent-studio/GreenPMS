@@ -10,7 +10,7 @@ describe("QinTopia 2026 reference catalog snapshot", () => {
   it("preserves the verified inventory and published-price totals", async () => {
     const snapshot = await loadBundledQintopia2026Catalog();
     expect(referenceCatalogSummary(snapshot)).toMatchObject({
-      importId: "qintopia-2026-feishu-revision-561-user-confirmed-v4",
+      importId: "qintopia-2026-feishu-revision-561-user-confirmed-v5",
       sourceRevision: 561,
       physicalRoomCount: 44,
       physicalBedCount: 91,
@@ -65,6 +65,25 @@ describe("QinTopia 2026 reference catalog snapshot", () => {
     expect(catalog.beds).toHaveLength(46);
   });
 
+  it("applies the prelaunch room-type corrections without changing totals", async () => {
+    const snapshot = await loadBundledQintopia2026Catalog();
+    const rooms = new Map(snapshot.inventory.rooms.map((room) => [room.operationalCode, room]));
+
+    expect(rooms.get("104")).toMatchObject({ roomTypeKey: "shared_bath_quad", physicalBedCount: 4, physicalBedCodes: ["A", "B", "C", "D"] });
+    expect(rooms.get("105")).toMatchObject({ roomTypeKey: "shared_bath_double", physicalBedCount: 2, physicalBedCodes: ["A", "B"] });
+    expect(rooms.get("106")).toMatchObject({ roomTypeKey: "shared_bath_quad", physicalBedCount: 4, physicalBedCodes: ["A", "B", "C", "D"] });
+    expect(rooms.get("108")).toMatchObject({ roomTypeKey: "shared_bath_double", physicalBedCount: 2, physicalBedCodes: ["A", "B"] });
+    expect(rooms.get("204")).toMatchObject({ roomTypeKey: "shared_bath_quad", physicalBedCount: 4, physicalBedCodes: ["A", "B", "C", "D"] });
+    expect(rooms.get("206")).toMatchObject({ roomTypeKey: "shared_bath_double", physicalBedCount: 2, physicalBedCodes: ["A", "B"] });
+    expect(rooms.get("301")).toMatchObject({ roomTypeKey: "shared_bath_standard", physicalBedCount: 2, physicalBedCodes: ["A", "B"] });
+    expect(rooms.get("303")).toMatchObject({ roomTypeKey: "shared_bath_standard", physicalBedCount: 2, physicalBedCodes: ["A", "B"] });
+    expect(rooms.get("305")).toMatchObject({ roomTypeKey: "shared_bath_single", physicalBedCount: 1, physicalBedCodes: null });
+    expect(rooms.get("308")).toMatchObject({ roomTypeKey: "shared_bath_single", physicalBedCount: 1, physicalBedCodes: null });
+    expect(rooms.get("D02")).toMatchObject({ roomTypeKey: "shared_bath_standard", physicalBedCount: 2, physicalBedCodes: ["A", "B"] });
+    expect(rooms.get("D04")).toMatchObject({ roomTypeKey: "shared_bath_single", physicalBedCount: 1, physicalBedCodes: null });
+    expect(referenceCatalogSummary(snapshot)).toMatchObject({ physicalRoomCount: 44, physicalBedCount: 91 });
+  });
+
   it("rejects malformed operating facts instead of coercing them", async () => {
     const source = await loadBundledQintopia2026Catalog();
 
@@ -98,7 +117,7 @@ describe("QinTopia 2026 reference catalog snapshot", () => {
 
     const wrongImportId = structuredClone(source);
     wrongImportId.importId = "qintopia-2026-feishu-revision-561-rewritten";
-    expect(() => validateQintopia2026ReferenceCatalogSnapshot(wrongImportId)).toThrow(/importId must remain .*revision-561-user-confirmed-v4/);
+    expect(() => validateQintopia2026ReferenceCatalogSnapshot(wrongImportId)).toThrow(/importId must remain .*revision-561-user-confirmed-v5/);
 
     const wrongRevision = structuredClone(source);
     wrongRevision.source.revision = 562;

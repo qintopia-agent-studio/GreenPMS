@@ -9,7 +9,7 @@ function addDays(value: string, days: number): string {
 async function login(page: Page) {
   await page.goto("/");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 2 })).toBeVisible();
 }
 
 async function setBoardRange(page: Page, arrivalDate: string) {
@@ -126,6 +126,43 @@ async function createOccupiedFixture(request: APIRequestContext) {
 test.describe("第 1 步 / 阶段 1 自动报价", () => {
   test.skip(({ isMobile }) => isMobile, "阶段 1 人工停点使用桌面房态；移动完整旅程在发布阶段验收");
 
+  test("有效库存目录 READY 时恢复床位连续选区的创建住宿入口", async ({ page }) => {
+    await login(page);
+    await setBoardRange(page, "2026-07-23");
+    await expect(page.getByText(/投影不完整/)).toHaveCount(0);
+
+    const drawer = page.locator("dialog.room-status-write-drawer");
+    const expandBeds = roomRow(page, "unit_room_102").getByRole("button", { name: /展开.*床位/ });
+    await expandBeds.click();
+    await expect(roomRow(page, "unit_room_102").getByRole("button", { name: /收起.*床位/ }))
+      .toHaveAttribute("aria-expanded", "true");
+    const startCell = roomCell(page, "unit_room_102_bed_b", "2026-07-26");
+    const endCell = roomCell(page, "unit_room_102_bed_b", "2026-07-29");
+    await startCell.scrollIntoViewIfNeeded();
+    const startBox = await startCell.boundingBox();
+    const endBox = await endCell.boundingBox();
+    expect(startBox).not.toBeNull();
+    expect(endBox).not.toBeNull();
+    await page.mouse.move(startBox!.x + startBox!.width / 2, startBox!.y + startBox!.height - 8);
+    await page.mouse.down();
+    await page.mouse.move(endBox!.x + endBox!.width / 2, endBox!.y + endBox!.height - 8, { steps: 4 });
+    await page.mouse.up();
+
+    const rangePopover = page.getByTestId("room-status-quick-popover");
+    await expect(rangePopover).toBeVisible();
+    await expect(rangePopover).toHaveAttribute("data-unit-id", "unit_room_102_bed_b");
+    await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
+    await expect(rangePopover).toContainText("4晚");
+    await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByLabel("入住日期", { exact: true })).toHaveValue("2026-07-26");
+    await expect(drawer.getByLabel("退房日期", { exact: true })).toHaveValue("2026-07-30");
+    for (const action of ["创建正常住宿订单", "创建免费入住", "放置维修锁房"]) {
+      await expect(drawer.getByRole("button", { name: action, exact: true })).toBeVisible();
+      await expect(drawer.getByRole("button", { name: action, exact: true })).toBeEnabled();
+    }
+  });
+
   test("慢速修改 102 日期时自动收口中间报价并显示最终金额", async ({ page }, testInfo) => {
     await login(page);
     await setBoardRange(page, "2026-07-23");
@@ -218,7 +255,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await expect(quoteResult).toBeVisible({ timeout: 15_000 });
     await expect(quoteResult).toContainText("10 晚");
     await expect(quoteResult).toContainText("按 7 夜价格档");
-    await expect(quoteResult).toContainText("¥1,086");
+    await expect(quoteResult).toContainText("¥1,760");
     await expect(page.getByRole("button", { name: "应用选区", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "清除选区", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "获取服务端报价", exact: true })).toHaveCount(0);
@@ -348,7 +385,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     expect(startBox).not.toBeNull();
     await page.mouse.move(startBox!.x + startBox!.width / 2, startBox!.y + startBox!.height / 2);
     await page.mouse.down();
-    for (const date of ["2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31"]) {
+    for (const date of ["2026-07-27", "2026-07-28", "2026-07-29"]) {
       const cell = roomCell(page, "unit_room_102", date);
       const box = await cell.boundingBox();
       expect(box).not.toBeNull();
@@ -373,18 +410,18 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     const rangePopover = page.getByTestId("room-status-quick-popover");
     await expect(rangePopover).toBeVisible();
     await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
-    await expect(rangePopover).toContainText("6晚");
+    await expect(rangePopover).toContainText("4晚");
     expect(quotePayloads).toHaveLength(0);
     await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
     await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue("2026-07-26");
-    await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue("2026-08-01");
-    await expect(page.getByTestId("quote-result")).toContainText("6 晚", { timeout: 15_000 });
-    await expect(page.getByTestId("quote-result")).toContainText("¥1,392");
+    await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue("2026-07-30");
+    await expect(page.getByTestId("quote-result")).toContainText("4 晚", { timeout: 15_000 });
+    await expect(page.getByTestId("quote-result")).toContainText("¥928");
     expect(quotePayloads).toHaveLength(1);
     expect(quotePayloads[0]).toEqual(expect.objectContaining({
       inventoryUnitId: "unit_room_102",
       arrivalDate: "2026-07-26",
-      departureDate: "2026-08-01"
+      departureDate: "2026-07-30"
     }));
     await page.screenshot({ path: testInfo.outputPath("stage-1-stable-grid-during-drag.png"), fullPage: true });
   });

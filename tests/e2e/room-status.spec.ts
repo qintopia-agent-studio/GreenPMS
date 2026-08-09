@@ -298,7 +298,7 @@ async function login(
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 2 })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
   return {
     board: await response.json() as RoomStatusBoardDto
@@ -308,7 +308,7 @@ async function login(
 async function expectDesktopGrid(page: Page) {
   const region = page.getByRole("region", { name: /房态二维网格/ });
   await expect(region).toBeVisible();
-  await expect(region.getByRole("grid")).toBeVisible();
+  await expect(page.getByRole("grid")).toBeVisible();
   return region;
 }
 
@@ -1271,7 +1271,51 @@ test("desktop stale and unknown states fail closed without mocked room-status da
   test.skip(!isProject(testInfo, "desktop"), "desktop room-status network-state coverage");
   const { board } = await login(page);
   await expectDesktopGrid(page);
-  const quickPopover = await openDayPopover(page, firstAvailableRoomStatusCell(page, board));
+
+  const preservedCell = firstAvailableRoomStatusCell(page, board);
+  const preservedAccessibleName = await preservedCell.getAttribute("aria-label");
+  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  let releaseRefresh!: () => void;
+  let markRefreshIntercepted!: () => void;
+  let markRefreshFulfilled!: () => void;
+  const heldRefresh = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  const refreshIntercepted = new Promise<void>((resolve) => { markRefreshIntercepted = resolve; });
+  const refreshFulfilled = new Promise<void>((resolve) => { markRefreshFulfilled = resolve; });
+  let holdNextRefresh = true;
+  await page.route(roomStatusRoutePattern, async (route) => {
+    if (!holdNextRefresh) {
+      await route.continue();
+      return;
+    }
+    holdNextRefresh = false;
+    const response = await route.fetch();
+    markRefreshIntercepted();
+    await heldRefresh;
+    await route.fulfill({ response });
+    markRefreshFulfilled();
+  });
+  try {
+    await page.getByRole("button", { name: "刷新房态", exact: true }).click();
+    await refreshIntercepted;
+    await expect(page.getByRole("button", { name: "正在刷新", exact: true })).toBeVisible();
+    await page.waitForTimeout(Math.max(0, Date.parse(board.freshUntil) - Date.now() + 200));
+
+    await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
+    await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+    await expect(preservedCell).toHaveAttribute("aria-label", preservedAccessibleName!);
+    const refreshingPopover = await openDayPopover(page, preservedCell);
+    await expect(refreshingPopover).toContainText("可售");
+    await expect(refreshingPopover.getByRole("button", { name: "创建住宿", exact: true })).toHaveCount(0);
+    await expect(refreshingPopover.getByRole("button", { name: "维修锁房", exact: true })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+  } finally {
+    releaseRefresh();
+    await refreshFulfilled;
+    await page.unroute(roomStatusRoutePattern);
+  }
+  await expect(page.getByRole("button", { name: "刷新房态", exact: true })).toBeVisible();
+
+  const quickPopover = await openDayPopover(page, preservedCell);
   await quickPopover.getByRole("button", { name: "创建住宿", exact: true }).click();
   await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeVisible();
 
@@ -1279,7 +1323,8 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await page.context().setOffline(true);
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
-    await expect(page.getByRole("alert").filter({ hasText: "当前房态已陈旧或刷新失败" })).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "房态刷新未完成" })).toBeVisible();
+    await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "选中对象上下文" })).toBeVisible();
     await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toHaveCount(0);
 
@@ -1288,7 +1333,7 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
     await refreshed;
-    await expect(page.getByRole("alert").filter({ hasText: "当前房态已陈旧或刷新失败" })).toBeHidden();
+    await expect(page.getByRole("alert").filter({ hasText: "房态刷新未完成" })).toBeHidden();
     const restoredContext = page.getByRole("dialog", { name: "选中对象上下文" });
     await restoredContext.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
     await expect(restoredContext).toBeHidden();

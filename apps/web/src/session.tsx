@@ -5,6 +5,12 @@ import { api, ApiError } from "./api";
 import type { MetaDto, PendingTokenCommand, PrincipalDto, RetainedTokenSecret } from "./types";
 import { errorMessage, LoadingBlock } from "./ui";
 
+function propertyDisplayName(property: MetaDto["properties"][number] | undefined) {
+  if (!property) return "";
+  if (property.code === "QTP-XA") return "QinTopia·西安";
+  return property.name;
+}
+
 export function ServiceFailureState({ error, title, onRetry, testId }: {
   error: unknown;
   title: string;
@@ -260,6 +266,7 @@ function Navigation({ access, mobile = false, collapsed = false }: { access: "RE
 export function AppShell({ onLogout }: { onLogout: () => void }) {
   const { principal, meta, propertyId, setPropertyId } = useWorkspace();
   const property = meta.properties.find((item) => item.id === propertyId);
+  const propertyLabel = propertyDisplayName(property);
   const propertyAccess = principal.propertyAccess[propertyId] ?? "READ";
   const [logoutFailure, setLogoutFailure] = useState<{ error: unknown; sessionState: "ACTIVE" | "UNKNOWN" }>();
   const [loggingOut, setLoggingOut] = useState(false);
@@ -324,8 +331,16 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
           >
             {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" size={18} /> : <PanelLeftClose aria-hidden="true" size={18} />}
           </button>
+          <button className="mobile-logout icon-button" type="button" onClick={() => void logout()} disabled={loggingOut} aria-label="退出登录" title="退出登录"><LogOut aria-hidden="true" size={19} /></button>
         </div>
         <Navigation access={propertyAccess} collapsed={sidebarCollapsed} />
+        <div className="sidebar-property" title={propertyLabel}>
+          <Building2 aria-hidden="true" size={15} />
+          <label className="sr-only" htmlFor="property-select">门店</label>
+          <select id="property-select" value={propertyId} onChange={(event) => setPropertyId(event.target.value)} data-testid="property-select" aria-label="门店">
+            {meta.properties.map((item) => <option key={item.id} value={item.id}>{propertyDisplayName(item)}</option>)}
+          </select>
+        </div>
         <div className="sidebar-user">
           <UserRound aria-hidden="true" size={18} />
           <div><strong>{principal.displayName}</strong><span>{principal.propertyAccess[propertyId] === "WRITE" ? "可写" : "只读"}</span></div>
@@ -333,17 +348,6 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
         </div>
       </aside>
       <div className="workspace">
-        <header className="workspace-header">
-          <div className="property-control">
-            <Building2 aria-hidden="true" size={17} />
-            <label className="sr-only" htmlFor="property-select">门店</label>
-            <select id="property-select" value={propertyId} onChange={(event) => setPropertyId(event.target.value)} data-testid="property-select">
-              {meta.properties.map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name}</option>)}
-            </select>
-          </div>
-          <div className="property-meta"><span>{property?.timezone}</span><span>{property?.currency}</span></div>
-          <button className="mobile-logout icon-button" type="button" onClick={() => void logout()} disabled={loggingOut} aria-label="退出登录" title="退出登录"><LogOut aria-hidden="true" size={19} /></button>
-        </header>
         {logoutFailure ? (
           <section className="session-action-error" role="alert" tabIndex={-1} ref={logoutErrorRef} data-testid="logout-error">
             <AlertCircle aria-hidden="true" size={20} />

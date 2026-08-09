@@ -361,7 +361,7 @@ export async function prepareStage7Acceptance(
       },
       wholeRoom: {
         roomId: room104.id,
-        room: "1栋 104 两人间（公卫）",
+        room: "1栋 104 四人间（公卫）",
         orderId: wholeRoom.orderId,
         primaryOccupantId: wholeRoom.primaryOccupantId,
         nicknames: ["小川", "阿宁"]
