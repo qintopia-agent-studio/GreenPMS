@@ -2547,10 +2547,14 @@ export function InventoryPage() {
   }, [selectedDay?.intervalIds, selectedInterval, selectedSelectionDays, selectedUnit, viewState.selection]);
   const contextConflicts = uniqueConflicts(selectedInterval?.conflicts
     ?? (viewState.selection ? relatedIntervals.flatMap((interval) => interval.conflicts) : selectedDay?.conflicts ?? []));
+  // A cell click always leaves a one-day selection behind; when that selection
+  // covers unavailable days (locks, stays) selectionActions is empty by design,
+  // so fall back to the clicked day's own interval actions (e.g. release lock).
+  const selectionContextActions = viewState.selection ? selectionActions(selectedUnit, viewState.selection) : [];
   const candidateContextActions = selectedInterval
       ? intervalActions(selectedInterval, viewState.selection)
-      : viewState.selection
-        ? selectionActions(selectedUnit, viewState.selection)
+      : viewState.selection && selectionContextActions.length > 0
+        ? selectionContextActions
         : dayActions(selectedUnit, selectedDay).filter((action) => action.enabled);
   const contextActions = projectionWritable || Boolean(command)
     ? candidateContextActions
@@ -4083,6 +4087,13 @@ export function InventoryPage() {
                 selectRange(selection);
                 handleAction(action, quickPopoverUnit, selection);
                 setQuoteTarget(undefined);
+              }}
+              onReleaseMaintenance={(action) => {
+                setSelectedUnitId(quickPopoverUnit.id);
+                setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
+                setSelectedIntervalId(quickPopoverTarget.intervalId);
+                setQuoteTarget(undefined);
+                handleAction(action, quickPopoverUnit);
               }}
               onViewStatus={() => {
                 setSelectedOrderIdentity(undefined);
