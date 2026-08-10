@@ -20,7 +20,6 @@ import type {
 import { addLocalDateDays, isIsoLocalDate, selectionFromInputs, type RoomStatusSelection } from "./roomStatusState";
 import {
   formatRoomStatusDate,
-  formatRoomStatusDateTime,
   roomStatusActionLabels,
   roomStatusIntervalBusinessLabel,
   roomStatusOccupancyCapacity,
@@ -87,6 +86,18 @@ function ConflictList({ conflicts }: { conflicts: readonly RoomStatusConflictDto
 function selectionNightCount(arrivalDate: string, departureDate: string): number {
   if (!isIsoLocalDate(arrivalDate) || !isIsoLocalDate(departureDate) || departureDate <= arrivalDate) return 0;
   return Math.round((Date.parse(`${departureDate}T00:00:00.000Z`) - Date.parse(`${arrivalDate}T00:00:00.000Z`)) / 86_400_000);
+}
+
+function relatedSourceSummary(interval: RoomStatusIntervalDto): string {
+  const dates = `${formatRoomStatusDate(interval.sourceStartDate)}至${formatRoomStatusDate(interval.sourceEndDate)}`;
+  const source = roomStatusSourceLabels[interval.sourceKind];
+  if (interval.sourceKind === "MAINTENANCE") {
+    return `${source} · ${dates} · 原因：${interval.reason ?? "未提供原因"}`;
+  }
+  if (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY") {
+    return `${source} · ${roomStatusIntervalBusinessLabel(interval)} · ${dates}`;
+  }
+  return `${source} · ${dates}`;
 }
 
 export function RoomStatusContext({
@@ -279,13 +290,10 @@ export function RoomStatusContext({
             <ShieldAlert aria-hidden="true" size={17} />
             <h3 id="room-status-related-sources-heading">选区内住宿或锁房</h3>
           </div>
-          <ol className="room-status-related-source-list">
+      <ol className="room-status-related-source-list">
             {contextIntervals.map((interval) => (
               <li key={interval.id}>
-                <strong>{roomStatusSourceLabels[interval.sourceKind]} · {interval.label}</strong>
-                <dl className="room-status-context-facts">
-                  <dt>住宿日期</dt><dd>{formatRoomStatusDate(interval.sourceStartDate)}至{formatRoomStatusDate(interval.sourceEndDate)}</dd>
-                </dl>
+                <strong>{relatedSourceSummary(interval)}</strong>
               </li>
             ))}
           </ol>
@@ -312,7 +320,6 @@ export function RoomStatusContext({
                 <button type="button" className="room-status-button" disabled={!action.enabled} onClick={() => onAction(action)}>
                   {roomStatusActionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} />
                 </button>
-                {action.requiresFullInterval ? <small>只允许针对完整有效区间执行。</small> : null}
                 {!action.enabled && action.disabledReason ? <small className="room-status-action-disabled"><AlertTriangle aria-hidden="true" size={14} />{action.disabledReason}</small> : null}
               </li>
             ))}
@@ -320,11 +327,6 @@ export function RoomStatusContext({
         ) : <p className="room-status-context-empty">服务端未为当前对象下发可执行动作。</p>}
       </section>
 
-      <footer className="room-status-context-freshness">
-        <Clock3 aria-hidden="true" size={15} />
-        <span>数据时点 {formatRoomStatusDateTime(board.asOf)}</span>
-        <span>有效至 {formatRoomStatusDateTime(board.freshUntil)}</span>
-      </footer>
     </aside>
   );
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { CalendarPlus2, ClipboardList, FileClock, LockKeyhole, X } from "lucide-react";
+import { CalendarPlus2, ClipboardList, FileClock, LockKeyhole, LockKeyholeOpen, X } from "lucide-react";
 import type { RoomStatusActionDto, RoomStatusStatus } from "@qintopia/contracts";
 import { formatRoomStatusDate, roomStatusUnitLabel, RoomStatusMark } from "./roomStatusPresentation";
 import type { RoomStatusOrderOptionsResult, RoomStatusSelection } from "./roomStatusState";
@@ -69,6 +69,7 @@ export function RoomStatusQuickPopover({
   selection,
   onCreate,
   onLockMaintenance,
+  onReleaseMaintenance,
   onViewStatus,
   onOpenOrder,
   onClose
@@ -82,6 +83,7 @@ export function RoomStatusQuickPopover({
   selection?: RoomStatusSelection;
   onCreate: () => void;
   onLockMaintenance: (action: RoomStatusActionDto) => void;
+  onReleaseMaintenance: (action: RoomStatusActionDto) => void;
   onViewStatus: () => void;
   onOpenOrder: (option: Extract<RoomStatusOrderOptionsResult, { kind: "READY" }>["orders"][number]) => void;
   onClose: (reason: RoomStatusQuickPopoverCloseReason) => void;
@@ -107,6 +109,7 @@ export function RoomStatusQuickPopover({
   const createAvailable = actions.some((action) => action.enabled
     && (action.code === "CREATE_ORDER" || action.code === "CREATE_FREE_STAY"));
   const maintenanceAction = actions.find((action) => action.enabled && action.code === "LOCK_MAINTENANCE");
+  const releaseAction = actions.find((action) => action.enabled && action.code === "RELEASE_MAINTENANCE");
   const dateLabel = selection
     ? `${formatRoomStatusDate(selection.arrivalDate)}至${formatRoomStatusDate(selection.departureDate)}`
     : formatRoomStatusDate(serviceDate);
@@ -271,10 +274,11 @@ export function RoomStatusQuickPopover({
           ))}
         </div>
       ) : (
-        createAvailable || maintenanceAction ? (
+        createAvailable || maintenanceAction || releaseAction ? (
           <div className="room-status-quick-actions">
             {createAvailable ? <button type="button" className="button button-primary" onClick={() => { onClose("ACTION"); onCreate(); }}><CalendarPlus2 aria-hidden="true" size={17} />创建住宿</button> : null}
             {maintenanceAction ? <button type="button" className="button button-secondary" onClick={() => { onClose("ACTION"); onLockMaintenance(maintenanceAction); }}><LockKeyhole aria-hidden="true" size={17} />维修锁房</button> : null}
+            {releaseAction ? <button type="button" className="button button-secondary" onClick={() => { onClose("ACTION"); onReleaseMaintenance(releaseAction); }}><LockKeyholeOpen aria-hidden="true" size={17} />释放维修锁房</button> : null}
           </div>
         ) : <p className="room-status-quick-empty">当前选区暂无可执行操作。</p>
       )}
