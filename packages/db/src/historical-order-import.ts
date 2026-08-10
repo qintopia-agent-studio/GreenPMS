@@ -389,6 +389,11 @@ const frozenImportBaseline: HistoricalOrderImportManifest["expected"] = {
   totalAccommodationAmountFen: 28_140_438
 };
 
+const frozenOperationalLifecycleBaseline = {
+  inHouse: 37,
+  reserved: 7
+} as const;
+
 function persistedMappedChannel(record: HistoricalOrderImportRecord): string | null {
   return record.disposition === "OPERATIONAL"
     && (record.pricing.basis === "MEMBER_ENTITLEMENT" || record.pricing.basis === "FREE")
@@ -426,8 +431,8 @@ function assertFrozenImportBaseline(manifest: HistoricalOrderImportManifest): vo
     throw new Error("Historical import frozen channel mapping no longer matches the approved baseline");
   }
   const operational = manifest.records.filter((record) => record.disposition === "OPERATIONAL");
-  if (operational.filter((record) => record.observedLifecycle === "IN_HOUSE").length !== 36
-    || operational.filter((record) => record.observedLifecycle === "RESERVED").length !== 8
+  if (operational.filter((record) => record.observedLifecycle === "IN_HOUSE").length !== frozenOperationalLifecycleBaseline.inHouse
+    || operational.filter((record) => record.observedLifecycle === "RESERVED").length !== frozenOperationalLifecycleBaseline.reserved
     || operational.filter((record) => record.guest.nicknameProvenance === "FULL_NAME_DISPLAY_FALLBACK").length !== 38
     || manifest.records.filter((record) => record.channel.externalOrderNoStatus === "HISTORICAL_NOT_RECORDED").length !== 24
     || operational.filter((record) => record.channel.externalOrderNoStatus === "HISTORICAL_NOT_RECORDED").length !== 1) {

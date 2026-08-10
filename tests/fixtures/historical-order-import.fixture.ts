@@ -12,6 +12,7 @@ const MEMBER_SOURCE_ID = historicalImportFixtureSourceIds.member;
 const OVERDUE_SOURCE_ID = historicalImportFixtureSourceIds.overdue;
 const SPARSE_SOURCE_ID = historicalImportFixtureSourceIds.sparse;
 const DUAL_UNIT_SOURCE_ID = historicalImportFixtureSourceIds.dualUnit;
+const FROZEN_IN_HOUSE_OPERATIONAL_COUNT = 37;
 
 const operationalUnits: ReadonlyArray<string | readonly string[]> = [
   "D01",
@@ -53,7 +54,7 @@ function segment(sequence: number, unit: string, arrivalDate: string, departureD
 
 function operationalRecord(index: number) {
   const sourceId = syntheticSourceId(index);
-  const lifecycle = index < 36 ? "IN_HOUSE" : "RESERVED";
+  const lifecycle = index < FROZEN_IN_HOUSE_OPERATIONAL_COUNT ? "IN_HOUSE" : "RESERVED";
   const isMember = index === 0;
   const isOverdue = index === 1;
   const isSparse = index === 2;

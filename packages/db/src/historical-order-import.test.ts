@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Kysely } from "kysely";
 import { stableHash } from "@qintopia/domain";
 import {
+  dryRunHistoricalOrderImport,
   historicalOperationalTupleHash,
   manifestStableHash,
   loadHistoricalOrderImportManifest,
   parseHistoricalOrderImportManifest
 } from "./historical-order-import.ts";
+import type { Database } from "./schema.ts";
+import { buildHistoricalOrderImportSyntheticManifest } from "../../../tests/fixtures/historical-order-import.fixture.ts";
 
 const emptyHash = "a".repeat(64);
 const CUTOVER_AT = "2026-08-09T13:31:00+08:00";
@@ -106,7 +110,50 @@ function rehashRecordAndManifest(manifest: Record<string, unknown>): void {
   manifest.manifestHash = manifestStableHash(manifest);
 }
 
+function rehashEveryRecordAndManifest(manifest: Record<string, unknown>): void {
+  const records = manifest.records as Array<Record<string, unknown>>;
+  for (const record of records) {
+    const canonical = { ...record };
+    delete canonical.canonicalPayloadHash;
+    record.canonicalPayloadHash = stableHash(canonical);
+  }
+  manifest.approvedOperationalTuplesSha256 = historicalOperationalTupleHash(records as never);
+  manifest.manifestHash = manifestStableHash(manifest);
+}
+
 describe("historical order import manifest", () => {
+  it("freezes the V6 operational lifecycle distribution at 37 in-house and 7 reserved", async () => {
+    const continuedAfterFrozenValidation = new Error("frozen baseline accepted");
+    const noDatabaseAccess = {
+      transaction: () => ({ execute: async () => { throw continuedAfterFrozenValidation; } })
+    } as unknown as Kysely<Database>;
+
+    const approvedDistribution = parseHistoricalOrderImportManifest(buildHistoricalOrderImportSyntheticManifest());
+    const approvedOperationalRecords = approvedDistribution.records.filter((record) => record.disposition === "OPERATIONAL");
+    expect(approvedOperationalRecords.filter((record) => record.observedLifecycle === "IN_HOUSE")).toHaveLength(37);
+    expect(approvedOperationalRecords.filter((record) => record.observedLifecycle === "RESERVED")).toHaveLength(7);
+    await expect(dryRunHistoricalOrderImport(noDatabaseAccess, approvedDistribution)).rejects.toBe(continuedAfterFrozenValidation);
+
+    const supersededDistribution = buildHistoricalOrderImportSyntheticManifest();
+    const records = supersededDistribution.records as Array<Record<string, any>>;
+    const record = records.find((candidate) => candidate.disposition === "OPERATIONAL"
+      && candidate.observedLifecycle === "IN_HOUSE"
+      && candidate.flags.length === 0
+      && candidate.pricing.basis === "POLICY"
+      && candidate.segments.length === 1)!;
+    record.observedLifecycle = "RESERVED";
+    record.sourceStay.arrivalDate = "2026-08-10";
+    record.sourceStay.departureDate = "2026-08-14";
+    record.segments[0].arrivalDate = "2026-08-10";
+    record.segments[0].departureDate = "2026-08-14";
+    rehashEveryRecordAndManifest(supersededDistribution);
+
+    const oldLifecycleDistribution = parseHistoricalOrderImportManifest(supersededDistribution);
+    await expect(dryRunHistoricalOrderImport(noDatabaseAccess, oldLifecycleDistribution)).rejects.toThrow(
+      /frozen lifecycle, guest provenance, or channel-reference baseline changed/i
+    );
+  });
+
   it("uses a stable key-sorted hash and accepts a validated fixture", () => {
     const fixture = manifestFixture();
     expect(manifestStableHash(fixture)).toBe((fixture as { manifestHash: string }).manifestHash);
