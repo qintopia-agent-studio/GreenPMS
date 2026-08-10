@@ -26,6 +26,26 @@ const SOURCE_FILE_ROLES = new Set([
   "REVIEW_WORKBOOK"
 ]);
 const RAW_EXPORT_ROLES = new Set(["ORDER_EXPORT", "COST_EXPORT", "CHECKOUT_EXPORT"]);
+const CONTROLLED_STALE_RAW_EXPORT = {
+  type: "USER_CONFIRMED_NO_CHANGE_THROUGH_CUTOVER",
+  sourceRole: "COST_EXPORT",
+  sourceFileName: "Accommodation Cost Details.xlsx",
+  sourceSha256: "eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789",
+  sourceExportedAt: "2026-08-08T21:30:14+08:00",
+  confirmedOn: "2026-08-10",
+  cutoverAt: "2026-08-09T13:31:00+08:00",
+  evidenceText: "用户于2026-08-10确认今天数据无变化，沿用昨日提供数据"
+} as const;
+const SOURCE_UNCHANGED_CONFIRMATION_FIELDS = [
+  "type",
+  "sourceRole",
+  "sourceFileName",
+  "sourceSha256",
+  "sourceExportedAt",
+  "confirmedOn",
+  "cutoverAt",
+  "evidenceText"
+] as const;
 const validatedManifestObjects = new WeakSet<object>();
 
 type ObjectRecord = Record<string, unknown>;
@@ -49,6 +69,26 @@ export interface HistoricalOrderImportRecord {
   stayType: "STANDARD" | "FREE" | "FREE_RECEPTION" | "MEMBER_ENTITLEMENT";
 }
 
+export interface HistoricalSourceUnchangedConfirmation {
+  type: typeof CONTROLLED_STALE_RAW_EXPORT.type;
+  sourceRole: string;
+  sourceFileName: string;
+  sourceSha256: string;
+  sourceExportedAt: string;
+  confirmedOn: string;
+  cutoverAt: string;
+  evidenceText: string;
+}
+
+export interface HistoricalOrderImportSourceFile {
+  role: string;
+  fileName: string;
+  sha256: string;
+  rowCount: number | null;
+  exportedAt: string | null;
+  unchangedConfirmation: HistoricalSourceUnchangedConfirmation | null;
+}
+
 export interface HistoricalOrderImportManifest {
   approvedOperationalTuplesSha256: string;
   currency: "CNY";
@@ -70,7 +110,7 @@ export interface HistoricalOrderImportManifest {
   manifestVersion: 1;
   propertyCode: string;
   records: HistoricalOrderImportRecord[];
-  source: { sourceFiles: Array<{ role: string; fileName: string; sha256: string; rowCount: number | null; exportedAt: string | null }>; workbook: { fileName: string; sha256: string } };
+  source: { sourceFiles: HistoricalOrderImportSourceFile[]; workbook: { fileName: string; sha256: string } };
   sourceSystem: "ORDER_LAILE";
 }
 
@@ -136,6 +176,56 @@ function timestamp(value: unknown, field: string): string {
 }
 function exact<T extends string | number>(value: unknown, expected: T, field: string): T { if (value !== expected) fail(`${field} must equal ${expected}`); return expected; }
 function oneOf<T extends string>(value: unknown, allowed: ReadonlySet<T>, field: string): T { const result = string(value, field) as T; if (!allowed.has(result)) fail(`${field} has an unsupported value`); return result; }
+
+function parseSourceUnchangedConfirmation(
+  value: unknown,
+  field: string,
+  source: Omit<HistoricalOrderImportSourceFile, "unchangedConfirmation">,
+  cutoverAt: string
+): HistoricalSourceUnchangedConfirmation | null {
+  if (value === undefined || value === null) return null;
+  const confirmation = object(value, field);
+  const actualFields = Object.keys(confirmation).sort();
+  const expectedFields = [...SOURCE_UNCHANGED_CONFIRMATION_FIELDS].sort();
+  if (actualFields.length !== expectedFields.length || actualFields.some((key, index) => key !== expectedFields[index])) {
+    fail(`${field} must contain the exact source-bound confirmation fields`);
+  }
+  const type = exact(confirmation.type, CONTROLLED_STALE_RAW_EXPORT.type, `${field}.type`);
+  const sourceRole = string(confirmation.sourceRole, `${field}.sourceRole`);
+  const sourceFileName = string(confirmation.sourceFileName, `${field}.sourceFileName`);
+  const sourceSha256 = sha(confirmation.sourceSha256, `${field}.sourceSha256`);
+  const sourceExportedAt = timestamp(confirmation.sourceExportedAt, `${field}.sourceExportedAt`);
+  const confirmedOn = date(confirmation.confirmedOn, `${field}.confirmedOn`);
+  const confirmationCutoverAt = timestamp(confirmation.cutoverAt, `${field}.cutoverAt`);
+  const evidenceText = string(confirmation.evidenceText, `${field}.evidenceText`);
+  if (sourceRole !== source.role
+    || sourceFileName !== source.fileName
+    || sourceSha256 !== source.sha256
+    || sourceExportedAt !== source.exportedAt
+    || confirmationCutoverAt !== cutoverAt) {
+    fail(`${field} is not bound to its exact source file and cutover`);
+  }
+  if (sourceRole !== CONTROLLED_STALE_RAW_EXPORT.sourceRole
+    || sourceFileName !== CONTROLLED_STALE_RAW_EXPORT.sourceFileName
+    || sourceSha256 !== CONTROLLED_STALE_RAW_EXPORT.sourceSha256
+    || sourceExportedAt !== CONTROLLED_STALE_RAW_EXPORT.sourceExportedAt
+    || confirmationCutoverAt !== CONTROLLED_STALE_RAW_EXPORT.cutoverAt) {
+    fail(`${field} is not the exact approved stale raw export confirmation`);
+  }
+  if (confirmedOn !== CONTROLLED_STALE_RAW_EXPORT.confirmedOn) fail(`${field}.confirmedOn does not match the frozen confirmation date`);
+  if (confirmedOn <= cutoverAt.slice(0, 10)) fail(`${field}.confirmedOn must postdate the cutover local date`);
+  if (evidenceText !== CONTROLLED_STALE_RAW_EXPORT.evidenceText) fail(`${field}.evidenceText does not match the approved no-change confirmation semantics`);
+  return {
+    type,
+    sourceRole,
+    sourceFileName,
+    sourceSha256,
+    sourceExportedAt,
+    confirmedOn,
+    cutoverAt: confirmationCutoverAt,
+    evidenceText
+  };
+}
 
 function deepFreezeJson<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
@@ -362,15 +452,42 @@ export function parseHistoricalOrderImportManifest(raw: string | unknown): Histo
   const sourceKeys = new Set<string>(); for (const record of records) { const key = `${record.source.system}:${record.source.orderId}`; if (sourceKeys.has(key)) fail("duplicate source key"); sourceKeys.add(key); }
   const expectedObject = object(manifest.expected, "manifest.expected"); const actual = expectedReconciliation(records);
   for (const [key, observed] of Object.entries(actual)) { if (integer(expectedObject[key], `manifest.expected.${key}`) !== observed) fail(`reconciliation mismatch for ${key}`); }
-  const source = object(manifest.source, "manifest.source"); const sourceFiles = array(source.sourceFiles, "manifest.source.sourceFiles").map((entry, index) => { const file = object(entry, `manifest.source.sourceFiles[${index}]`); return { role: oneOf(file.role, SOURCE_FILE_ROLES, `manifest.source.sourceFiles[${index}].role`), fileName: string(file.fileName, `manifest.source.sourceFiles[${index}].fileName`), sha256: sha(file.sha256, `manifest.source.sourceFiles[${index}].sha256`), rowCount: file.rowCount === null ? null : integer(file.rowCount, `manifest.source.sourceFiles[${index}].rowCount`), exportedAt: file.exportedAt === null ? null : timestamp(file.exportedAt, `manifest.source.sourceFiles[${index}].exportedAt`) }; });
+  const source = object(manifest.source, "manifest.source");
+  const sourceFiles = array(source.sourceFiles, "manifest.source.sourceFiles").map((entry, index): HistoricalOrderImportSourceFile => {
+    const field = `manifest.source.sourceFiles[${index}]`;
+    const file = object(entry, field);
+    const parsedSource = {
+      role: oneOf(file.role, SOURCE_FILE_ROLES, `${field}.role`),
+      fileName: string(file.fileName, `${field}.fileName`),
+      sha256: sha(file.sha256, `${field}.sha256`),
+      rowCount: file.rowCount === null ? null : integer(file.rowCount, `${field}.rowCount`),
+      exportedAt: file.exportedAt === null ? null : timestamp(file.exportedAt, `${field}.exportedAt`)
+    };
+    if (RAW_EXPORT_ROLES.has(parsedSource.role)
+      && parsedSource.exportedAt !== null
+      && new Date(parsedSource.exportedAt).getTime() > new Date(cutoverAt).getTime()) {
+      fail(`${parsedSource.role} cannot be exported later than manifest cutoverAt`);
+    }
+    if (!RAW_EXPORT_ROLES.has(parsedSource.role) && file.unchangedConfirmation !== undefined && file.unchangedConfirmation !== null) {
+      fail(`${field}.unchangedConfirmation is only valid for raw exports`);
+    }
+    return {
+      ...parsedSource,
+      unchangedConfirmation: RAW_EXPORT_ROLES.has(parsedSource.role)
+        ? parseSourceUnchangedConfirmation(file.unchangedConfirmation, `${field}.unchangedConfirmation`, parsedSource, cutoverAt)
+        : null
+    };
+  });
   if (new Set(sourceFiles.map((file) => file.role)).size !== sourceFiles.length) fail("source file roles must be unique");
   if (sourceFiles.length !== SOURCE_FILE_ROLES.size || [...SOURCE_FILE_ROLES].some((role) => !sourceFiles.some((file) => file.role === role))) fail("source file roles must contain the complete approved role set");
   for (const file of sourceFiles.filter((entry) => RAW_EXPORT_ROLES.has(entry.role))) {
     if (file.rowCount === null || file.rowCount <= 0) fail(`${file.role}.rowCount must be a positive integer`);
     if (file.exportedAt === null) fail(`${file.role}.exportedAt must be present`);
     if (!file.exportedAt.endsWith("+08:00")) fail(`${file.role}.exportedAt must use the Asia/Shanghai +08:00 offset`);
-    if (file.exportedAt.slice(0, 10) !== cutoverAt.slice(0, 10)) fail(`${file.role} must be exported on the manifest cutover date`);
     if (new Date(file.exportedAt).getTime() > new Date(cutoverAt).getTime()) fail(`${file.role} cannot be exported later than manifest cutoverAt`);
+    if (file.exportedAt.slice(0, 10) !== cutoverAt.slice(0, 10) && file.unchangedConfirmation === null) {
+      fail(`${file.role} was exported before the manifest cutover date without a source-bound no-change confirmation`);
+    }
   }
   const workbook = object(source.workbook, "manifest.source.workbook");
   const parsed = { approvedOperationalTuplesSha256, currency: "CNY" as const, cutoverAt, expected: actual, generatorVersion: "historical-order-manifest-v1" as const, idempotencyKey: string(manifest.idempotencyKey, "manifest.idempotencyKey"), importStartDate: "2026-03-13" as const, manifestHash, manifestVersion: 1 as const, propertyCode: string(manifest.propertyCode, "manifest.propertyCode"), records, source: { sourceFiles, workbook: { fileName: string(workbook.fileName, "manifest.source.workbook.fileName"), sha256: sha(workbook.sha256, "manifest.source.workbook.sha256") } }, sourceSystem: "ORDER_LAILE" as const };

@@ -33,6 +33,19 @@ function usage() {
 
 const SHANGHAI_TIMESTAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\+08:00$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+// This is a one-time, reviewed exception for the only raw export that predates
+// the agreed cutover. A later rebuild must not repurpose the user's statement
+// for a different role, file, hash, timestamp, or cutover.
+const CONTROLLED_STALE_RAW_EXPORT = Object.freeze({
+  type: "USER_CONFIRMED_NO_CHANGE_THROUGH_CUTOVER",
+  sourceRole: "COST_EXPORT",
+  sourceFileName: "Accommodation Cost Details.xlsx",
+  sourceSha256: "eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789",
+  sourceExportedAt: "2026-08-08T21:30:14+08:00",
+  confirmedOn: "2026-08-10",
+  cutoverAt: "2026-08-09T13:31:00+08:00",
+  evidenceText: "用户于2026-08-10确认今天数据无变化，沿用昨日提供数据"
+});
 
 function strictShanghaiTimestamp(value, label, { minutePrecision = false } = {}) {
   const text = String(value ?? "").trim();
@@ -990,10 +1003,31 @@ function optionalTimestamp(value) {
   return strictShanghaiTimestamp(timestamp, "Source evidence").text;
 }
 
+function structuredSourceUnchangedConfirmation(value, live, cutover) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const evidenceText = String(value).trim();
+  if (evidenceText !== CONTROLLED_STALE_RAW_EXPORT.evidenceText) {
+    throw new Error(`Source ${live.role} has an unsupported generalized no-change confirmation`);
+  }
+  if (live.role !== CONTROLLED_STALE_RAW_EXPORT.sourceRole
+    || live.fileName !== CONTROLLED_STALE_RAW_EXPORT.sourceFileName
+    || live.sha256 !== CONTROLLED_STALE_RAW_EXPORT.sourceSha256
+    || live.exportedAt !== CONTROLLED_STALE_RAW_EXPORT.sourceExportedAt
+    || cutover.text !== CONTROLLED_STALE_RAW_EXPORT.cutoverAt) {
+    throw new Error(`Source ${live.role} is not the controlled stale raw export approved for this cutover`);
+  }
+  const confirmedOn = strictShanghaiTimestamp(`${CONTROLLED_STALE_RAW_EXPORT.confirmedOn}T00:00:00+08:00`, `Source ${live.role} confirmation`).datePart;
+  if (confirmedOn <= cutover.datePart) {
+    throw new Error(`Source ${live.role} no-change confirmation must postdate the cutover local date`);
+  }
+  return { ...CONTROLLED_STALE_RAW_EXPORT };
+}
+
 export function reconcileSourceFiles({ evidence, workbookFileName, workbookHash, cutoverAt, liveExports }) {
   const cutover = strictShanghaiTimestamp(cutoverAt, "Cutover");
   const cutoverTime = cutover.epoch;
   const evidenceByName = new Map(evidence.map((entry) => [String(entry["来源文件"] ?? "").trim(), entry]));
+  if (evidenceByName.size !== evidence.length) throw new Error("Review workbook has duplicate source-file evidence");
   const files = [];
   for (const live of liveExports) {
     const sourceEvidence = evidenceByName.get(live.fileName);
@@ -1010,13 +1044,19 @@ export function reconcileSourceFiles({ evidence, workbookFileName, workbookHash,
     const exported = strictShanghaiTimestamp(live.exportedAt, `Source ${live.role}`);
     const exportedTime = exported.epoch;
     if (exportedTime > cutoverTime) throw new Error(`Source ${live.role} was exported later than cutover`);
-    if (exported.datePart !== cutover.datePart) throw new Error(`Source ${live.role} was not exported on the cutover local date`);
+    const unchangedConfirmation = exported.datePart === cutover.datePart
+      ? null
+      : structuredSourceUnchangedConfirmation(sourceEvidence["数据无变化确认"], live, cutover);
+    if (exported.datePart !== cutover.datePart && !unchangedConfirmation) {
+      throw new Error(`Source ${live.role} was exported before the cutover local date without a source-bound no-change confirmation`);
+    }
     files.push({
       role: live.role,
       fileName: live.fileName,
       sha256: live.sha256,
       rowCount: live.rowCount,
-      exportedAt: live.exportedAt
+      exportedAt: live.exportedAt,
+      unchangedConfirmation
     });
     evidenceByName.delete(live.fileName);
   }
@@ -1225,8 +1265,8 @@ export function reviewMarkdown(manifest, manifestHash) {
     "",
     "## 正式导入前",
     "",
-    "- [ ] 冻结旧系统写入，并重新导出三张源表。",
-    "- [ ] 用最新导出重新生成 manifest；只要数量、金额、在住状态、房间或日期有变化，就停止并重新复核。",
+    "- [ ] 冻结旧系统写入；只有已审核的早期 COST_EXPORT 可引用 2026-08-10 用户无变化确认，且必须绑定文件哈希、原导出时间和本次割接时间。",
+    "- [ ] 用已冻结来源重新生成 manifest；只要数量、金额、在住状态、房间或日期有变化，就停止并重新复核。",
     "- [ ] 完成正式数据库备份，并实际验证该备份可以恢复。",
     "- [ ] 在备份恢复出来的候选数据库运行 dry-run，确认零库存冲突、零业务写入。",
     "- [ ] 重点确认：逾期在住修正单继续锁定 306；会员权益单仍在住 D01 且恰好使用 19 晚权益；零元未排房占位单只保留 A03 / 1020 元；双房订单同时占用 108-A 和 108-B；间断订单没有补出不存在的 5 天住宿。",

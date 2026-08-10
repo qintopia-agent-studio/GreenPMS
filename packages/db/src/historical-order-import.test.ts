@@ -11,6 +11,15 @@ import {
 } from "./historical-order-import.ts";
 
 const emptyHash = "a".repeat(64);
+const CUTOVER_AT = "2026-08-09T13:31:00+08:00";
+const CONTROLLED_STALE_COST_EXPORT = {
+  role: "COST_EXPORT",
+  fileName: "Accommodation Cost Details.xlsx",
+  sha256: "eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789",
+  rowCount: 7162,
+  exportedAt: "2026-08-08T21:30:14+08:00"
+};
+const CURRENT_CUTOVER_CONFIRMATION = "用户于2026-08-10确认今天数据无变化，沿用昨日提供数据";
 
 function completeSourceFiles() {
   return [
@@ -22,6 +31,23 @@ function completeSourceFiles() {
     { role: "BUSINESS_CONFIRMATION_REVIEW", fileName: "business-review.xlsx", sha256: emptyHash, rowCount: null, exportedAt: null },
     { role: "REVIEW_WORKBOOK", fileName: "review.xlsx", sha256: emptyHash, rowCount: 1, exportedAt: "2026-08-09T13:30:00+08:00" }
   ];
+}
+
+function sourceBoundNoChangeConfirmation(file: Record<string, unknown>, cutoverAt: string): Record<string, unknown> {
+  return {
+    type: "USER_CONFIRMED_NO_CHANGE_THROUGH_CUTOVER",
+    sourceRole: file.role,
+    sourceFileName: file.fileName,
+    sourceSha256: file.sha256,
+    sourceExportedAt: file.exportedAt,
+    confirmedOn: "2026-08-10",
+    cutoverAt,
+    evidenceText: CURRENT_CUTOVER_CONFIRMATION
+  };
+}
+
+function applyControlledStaleCostSource(file: Record<string, unknown>): void {
+  Object.assign(file, CONTROLLED_STALE_COST_EXPORT);
 }
 
 function manifestFixture(): Record<string, unknown> {
@@ -46,7 +72,7 @@ function manifestFixture(): Record<string, unknown> {
   const manifest = {
     approvedOperationalTuplesSha256: historicalOperationalTupleHash([]),
     currency: "CNY",
-    cutoverAt: "2026-08-09T13:30:00+08:00",
+    cutoverAt: CUTOVER_AT,
     expected: {
       candidateCount: 1,
       historicalAccommodationAmountFen: 0,
@@ -142,7 +168,7 @@ describe("historical order import manifest", () => {
     expect(() => parseHistoricalOrderImportManifest(JSON.stringify(invalidOperational))).toThrow(/operational.*segment/i);
   });
 
-  it("requires the complete source-role set and fresh nonempty raw exports", () => {
+  it("requires the complete source-role set and source-bound confirmation for an earlier raw export", () => {
     const missingRole = manifestFixture();
     const files = ((missingRole.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
     files.splice(files.findIndex((file) => file.role === "COST_EXPORT"), 1);
@@ -157,9 +183,86 @@ describe("historical order import manifest", () => {
 
     const stale = manifestFixture();
     const staleFiles = ((stale.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
-    staleFiles.find((file) => file.role === "CHECKOUT_EXPORT")!.exportedAt = "2026-08-08T23:59:59+08:00";
+    const costFile = staleFiles.find((file) => file.role === "COST_EXPORT")!;
+    applyControlledStaleCostSource(costFile);
     stale.manifestHash = manifestStableHash(stale);
-    expect(() => parseHistoricalOrderImportManifest(stale)).toThrow(/cutover date/i);
+    expect(() => parseHistoricalOrderImportManifest(stale)).toThrow(/source-bound no-change confirmation/i);
+  });
+
+  it("accepts only the frozen COST_EXPORT confirmation after every structured binding matches", () => {
+    const stale = manifestFixture();
+    const staleFiles = ((stale.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
+    const costFile = staleFiles.find((file) => file.role === "COST_EXPORT")!;
+    applyControlledStaleCostSource(costFile);
+    costFile.unchangedConfirmation = sourceBoundNoChangeConfirmation(costFile, stale.cutoverAt as string);
+    stale.manifestHash = manifestStableHash(stale);
+
+    const parsed = parseHistoricalOrderImportManifest(stale);
+    expect(parsed.source.sourceFiles.find((file) => file.role === "COST_EXPORT")?.unchangedConfirmation).toMatchObject({
+      sourceRole: "COST_EXPORT",
+      sourceFileName: "Accommodation Cost Details.xlsx",
+      sourceExportedAt: "2026-08-08T21:30:14+08:00",
+      confirmedOn: "2026-08-10",
+      cutoverAt: CUTOVER_AT,
+      evidenceText: CURRENT_CUTOVER_CONFIRMATION
+    });
+  });
+
+  it("rejects generalized confirmations and every stale-source binding mismatch", () => {
+    const generalized = manifestFixture();
+    const generalizedFiles = ((generalized.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
+    generalizedFiles.find((file) => file.role === "ORDER_EXPORT")!.unchangedConfirmation = "用户确认数据无变化";
+    generalized.manifestHash = manifestStableHash(generalized);
+    expect(() => parseHistoricalOrderImportManifest(generalized)).toThrow(/unchangedConfirmation.*object/i);
+
+    const mutations: Array<[string, unknown]> = [
+      ["type", "GENERAL_NO_CHANGE"],
+      ["sourceRole", "ORDER_EXPORT"],
+      ["sourceFileName", "other-costs.xlsx"],
+      ["sourceSha256", "b".repeat(64)],
+      ["sourceExportedAt", "2026-08-08T21:30:15+08:00"],
+      ["confirmedOn", "2026-08-08"],
+      ["cutoverAt", "2026-08-09T13:29:00+08:00"],
+      ["evidenceText", "数据无变化"]
+    ];
+    for (const [field, value] of mutations) {
+      const candidate = manifestFixture();
+      const files = ((candidate.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
+      const costFile = files.find((file) => file.role === "COST_EXPORT")!;
+      applyControlledStaleCostSource(costFile);
+      const confirmation = sourceBoundNoChangeConfirmation(costFile, candidate.cutoverAt as string);
+      confirmation[field] = value;
+      costFile.unchangedConfirmation = confirmation;
+      candidate.manifestHash = manifestStableHash(candidate);
+      expect(() => parseHistoricalOrderImportManifest(candidate), field).toThrow(/unchangedConfirmation/i);
+    }
+
+    const extraField = manifestFixture();
+    const extraFiles = ((extraField.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
+    const extraCost = extraFiles.find((file) => file.role === "COST_EXPORT")!;
+    applyControlledStaleCostSource(extraCost);
+    extraCost.unchangedConfirmation = { ...sourceBoundNoChangeConfirmation(extraCost, extraField.cutoverAt as string), note: "general" };
+    extraField.manifestHash = manifestStableHash(extraField);
+    expect(() => parseHistoricalOrderImportManifest(extraField)).toThrow(/exact source-bound confirmation fields/i);
+  });
+
+  it("rejects another earlier raw source and a future raw export even with structured confirmations", () => {
+    const staleCheckout = manifestFixture();
+    const staleFiles = ((staleCheckout.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
+    const checkoutFile = staleFiles.find((file) => file.role === "CHECKOUT_EXPORT")!;
+    checkoutFile.exportedAt = "2026-08-08T21:30:14+08:00";
+    checkoutFile.unchangedConfirmation = sourceBoundNoChangeConfirmation(checkoutFile, staleCheckout.cutoverAt as string);
+    staleCheckout.manifestHash = manifestStableHash(staleCheckout);
+    expect(() => parseHistoricalOrderImportManifest(staleCheckout)).toThrow(/exact approved stale raw export/i);
+
+    const future = manifestFixture();
+    const files = ((future.source as Record<string, unknown>).sourceFiles as Array<Record<string, unknown>>);
+    const costFile = files.find((file) => file.role === "COST_EXPORT")!;
+    applyControlledStaleCostSource(costFile);
+    costFile.exportedAt = "2026-08-09T13:31:01+08:00";
+    costFile.unchangedConfirmation = sourceBoundNoChangeConfirmation(costFile, future.cutoverAt as string);
+    future.manifestHash = manifestStableHash(future);
+    expect(() => parseHistoricalOrderImportManifest(future)).toThrow(/cannot be exported later/i);
   });
 
   it("rejects timestamps that JavaScript would normalize past their written business date", () => {

@@ -22,11 +22,13 @@ import {
 } from "./build-historical-order-import-manifest.mjs";
 
 const hash = (character: string) => character.repeat(64);
+const CUTOVER_AT = "2026-08-09T13:31:00+08:00";
+const currentCutoverConfirmation = "用户于2026-08-10确认今天数据无变化，沿用昨日提供数据";
 
 const evidence = [
-  { "来源文件": "orders.xlsx", "SHA-256": hash("a"), "用途": "orders", "数据行数": 675, "导出时间": "2026-08-10T09:00:00+08:00" },
-  { "来源文件": "costs.xlsx", "SHA-256": hash("b"), "用途": "costs", "数据行数": 6852, "导出时间": "2026-08-10T09:01:00+08:00" },
-  { "来源文件": "checkouts.xlsx", "SHA-256": hash("c"), "用途": "checkouts", "数据行数": 253, "导出时间": "2026-08-10T09:02:00+08:00" },
+  { "来源文件": "Accommodation Order Aug 9 2026.xlsx", "SHA-256": "201c43d254ac65365fa8c1adf8a4892944c264e915830462562aa53daf42ea77", "用途": "orders", "数据行数": 675, "导出时间": "2026-08-09T13:30:31+08:00", "数据无变化确认": currentCutoverConfirmation },
+  { "来源文件": "Accommodation Cost Details.xlsx", "SHA-256": "eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789", "用途": "costs", "数据行数": 7162, "导出时间": "2026-08-08T21:30:14+08:00", "数据无变化确认": currentCutoverConfirmation },
+  { "来源文件": "Order Checkout Details Aug 09 2026.xlsx", "SHA-256": "ad65f78b54ec862029420ae3dfe6508e08730926556585bf569eaf721b2f5ff4", "用途": "checkouts", "数据行数": 284, "导出时间": "2026-08-09T12:33:39+08:00", "数据无变化确认": currentCutoverConfirmation },
   { "来源文件": "QinTopia-order-import-review-from-2026-03-13-v0.xlsx", "SHA-256": hash("d"), "用途": "feishu" },
   { "来源文件": "QinTopia-order-import-review-from-2026-03-13-v2-simple.xlsx", "SHA-256": hash("e"), "用途": "user review" },
   { "来源文件": "QinTopia-order-import-review-from-2026-03-13-v3-business-confirmed.xlsx", "SHA-256": hash("f"), "用途": "business review" }
@@ -34,13 +36,13 @@ const evidence = [
 
 function liveExports() {
   return [
-    { role: "ORDER_EXPORT", fileName: "orders.xlsx", sha256: hash("a"), rowCount: 675, exportedAt: "2026-08-10T09:00:00+08:00" },
-    { role: "COST_EXPORT", fileName: "costs.xlsx", sha256: hash("b"), rowCount: 6852, exportedAt: "2026-08-10T09:01:00+08:00" },
-    { role: "CHECKOUT_EXPORT", fileName: "checkouts.xlsx", sha256: hash("c"), rowCount: 253, exportedAt: "2026-08-10T09:02:00+08:00" }
+    { role: "ORDER_EXPORT", fileName: "Accommodation Order Aug 9 2026.xlsx", sha256: "201c43d254ac65365fa8c1adf8a4892944c264e915830462562aa53daf42ea77", rowCount: 675, exportedAt: "2026-08-09T13:30:31+08:00" },
+    { role: "COST_EXPORT", fileName: "Accommodation Cost Details.xlsx", sha256: "eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789", rowCount: 7162, exportedAt: "2026-08-08T21:30:14+08:00" },
+    { role: "CHECKOUT_EXPORT", fileName: "Order Checkout Details Aug 09 2026.xlsx", sha256: "ad65f78b54ec862029420ae3dfe6508e08730926556585bf569eaf721b2f5ff4", rowCount: 284, exportedAt: "2026-08-09T12:33:39+08:00" }
   ];
 }
 
-function validArgs(cutoverAt = "2026-08-10T10:00:00+08:00") {
+function validArgs(cutoverAt = CUTOVER_AT) {
   return [
     "--workbook", "/tmp/review.xlsx",
     "--orders", "/tmp/orders.xlsx",
@@ -207,7 +209,7 @@ function reviewedSpecialInput(overrides: Record<string, unknown> = {}) {
 describe("historical-order manifest source freeze", () => {
   it("requires all source files and an explicit cutover timestamp", () => {
     expect(parseArgs(validArgs())).toMatchObject({
-      cutoverAt: "2026-08-10T10:00:00+08:00",
+      cutoverAt: CUTOVER_AT,
       approvedOperationalTuplesSha256: hash("a")
     });
 
@@ -231,7 +233,7 @@ describe("historical-order manifest source freeze", () => {
 
   it("records live hashes, row counts and export timestamps only after evidence reconciliation", () => {
     const files = reconcileSourceFiles({
-      cutoverAt: "2026-08-10T10:00:00+08:00",
+      cutoverAt: CUTOVER_AT,
       evidence,
       liveExports: liveExports(),
       workbookFileName: "review.xlsx",
@@ -240,15 +242,27 @@ describe("historical-order manifest source freeze", () => {
 
     expect(files).toHaveLength(7);
     expect(files.find((file) => file.role === "ORDER_EXPORT")).toMatchObject({
-      sha256: hash("a"),
+      sha256: "201c43d254ac65365fa8c1adf8a4892944c264e915830462562aa53daf42ea77",
       rowCount: 675,
-      exportedAt: "2026-08-10T09:00:00+08:00"
+      exportedAt: "2026-08-09T13:30:31+08:00",
+      unchangedConfirmation: null
+    });
+    expect(files.find((file) => file.role === "CHECKOUT_EXPORT")?.unchangedConfirmation).toBeNull();
+    expect(files.find((file) => file.role === "COST_EXPORT")?.unchangedConfirmation).toEqual({
+      type: "USER_CONFIRMED_NO_CHANGE_THROUGH_CUTOVER",
+      sourceRole: "COST_EXPORT",
+      sourceFileName: "Accommodation Cost Details.xlsx",
+      sourceSha256: "eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789",
+      sourceExportedAt: "2026-08-08T21:30:14+08:00",
+      confirmedOn: "2026-08-10",
+      cutoverAt: CUTOVER_AT,
+      evidenceText: currentCutoverConfirmation
     });
   });
 
-  it("fails closed on hash, row-count, export-time or cutover-date drift", () => {
+  it("fails closed on hash, row-count, export-time, future-source, or missing-confirmation drift", () => {
     const base = {
-      cutoverAt: "2026-08-10T10:00:00+08:00",
+      cutoverAt: CUTOVER_AT,
       evidence,
       liveExports: liveExports(),
       workbookFileName: "review.xlsx",
@@ -264,19 +278,99 @@ describe("historical-order manifest source freeze", () => {
     expect(() => reconcileSourceFiles({ ...base, liveExports: changedRows })).toThrow(/row count.*drift/i);
 
     const late = liveExports();
-    late[2]!.exportedAt = "2026-08-10T10:00:01+08:00";
-    const lateEvidence = evidence.map((entry) => entry["来源文件"] === "checkouts.xlsx" ? { ...entry, "导出时间": late[2]!.exportedAt } : entry);
+    late[2]!.exportedAt = "2026-08-09T13:31:01+08:00";
+    const lateEvidence = evidence.map((entry) => entry["来源文件"] === "Order Checkout Details Aug 09 2026.xlsx"
+      ? { ...entry, "导出时间": late[2]!.exportedAt }
+      : entry);
     expect(() => reconcileSourceFiles({ ...base, evidence: lateEvidence, liveExports: late })).toThrow(/later than cutover/i);
 
-    const stale = liveExports();
-    stale[1]!.exportedAt = "2026-08-09T23:59:59+08:00";
-    const staleEvidence = evidence.map((entry) => entry["来源文件"] === "costs.xlsx" ? { ...entry, "导出时间": stale[1]!.exportedAt } : entry);
-    expect(() => reconcileSourceFiles({ ...base, evidence: staleEvidence, liveExports: stale })).toThrow(/cutover local date/i);
+    const missingConfirmationEvidence = evidence.map((entry) => entry["来源文件"] === "Accommodation Cost Details.xlsx"
+      ? { ...entry, "数据无变化确认": undefined }
+      : entry);
+    expect(() => reconcileSourceFiles({ ...base, evidence: missingConfirmationEvidence, liveExports: liveExports() })).toThrow(/source-bound no-change confirmation/i);
 
     const invalid = liveExports();
     invalid[0]!.exportedAt = "2026-08-10T24:00:00+08:00";
-    const invalidEvidence = evidence.map((entry) => entry["来源文件"] === "orders.xlsx" ? { ...entry, "导出时间": invalid[0]!.exportedAt } : entry);
+    const invalidEvidence = evidence.map((entry) => entry["来源文件"] === "Accommodation Order Aug 9 2026.xlsx" ? { ...entry, "导出时间": invalid[0]!.exportedAt } : entry);
     expect(() => reconcileSourceFiles({ ...base, evidence: invalidEvidence, liveExports: invalid })).toThrow(/timestamp.*invalid/i);
+  });
+
+  it("accepts only the frozen COST_EXPORT exception and suppresses same-day confirmation text", () => {
+    const files = reconcileSourceFiles({
+      cutoverAt: CUTOVER_AT,
+      evidence,
+      liveExports: liveExports(),
+      workbookFileName: "review.xlsx",
+      workbookHash: hash("9")
+    });
+
+    expect(files.find((file) => file.role === "COST_EXPORT")?.unchangedConfirmation).toEqual({
+      type: "USER_CONFIRMED_NO_CHANGE_THROUGH_CUTOVER",
+      sourceRole: "COST_EXPORT",
+      sourceFileName: "Accommodation Cost Details.xlsx",
+      sourceSha256: "eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789",
+      sourceExportedAt: "2026-08-08T21:30:14+08:00",
+      confirmedOn: "2026-08-10",
+      cutoverAt: CUTOVER_AT,
+      evidenceText: currentCutoverConfirmation
+    });
+  });
+
+  it("rejects missing, generalized, wrong-source, wrong-cutover, and future no-change confirmations", () => {
+    const base = {
+      cutoverAt: CUTOVER_AT,
+      evidence,
+      liveExports: liveExports(),
+      workbookFileName: "review.xlsx",
+      workbookHash: hash("9")
+    };
+    const evidenceFor = (confirmation: string | undefined) => evidence.map((entry) => {
+      if (entry["来源文件"] === "Accommodation Cost Details.xlsx") {
+        return { ...entry, ...(confirmation === undefined ? { "数据无变化确认": undefined } : { "数据无变化确认": confirmation }) };
+      }
+      return entry;
+    });
+
+    expect(() => reconcileSourceFiles({ ...base, evidence: evidenceFor(undefined), liveExports: liveExports() })).toThrow(/source-bound no-change confirmation/i);
+    expect(() => reconcileSourceFiles({ ...base, evidence: evidenceFor("用户确认数据无变化"), liveExports: liveExports() })).toThrow(/generalized no-change confirmation/i);
+    expect(() => reconcileSourceFiles({ ...base, evidence: evidenceFor("用户于2026-08-09确认今天数据无变化，沿用昨日提供数据"), liveExports: liveExports() })).toThrow(/generalized no-change confirmation/i);
+    expect(() => reconcileSourceFiles({ ...base, evidence: [...evidenceFor(currentCutoverConfirmation), evidenceFor(currentCutoverConfirmation)[1]!], liveExports: liveExports() })).toThrow(/duplicate source-file evidence/i);
+
+    const staleOrder = liveExports();
+    staleOrder[0]!.exportedAt = "2026-08-08T21:30:14+08:00";
+    const staleOrderEvidence = evidence.map((entry) => entry["来源文件"] === "Accommodation Order Aug 9 2026.xlsx"
+      ? { ...entry, "导出时间": staleOrder[0]!.exportedAt, "数据无变化确认": currentCutoverConfirmation }
+      : entry);
+    expect(() => reconcileSourceFiles({ ...base, evidence: staleOrderEvidence, liveExports: staleOrder })).toThrow(/controlled stale raw export/i);
+
+    expect(() => reconcileSourceFiles({ ...base, cutoverAt: "2026-08-10T00:00:00+08:00", evidence, liveExports: liveExports() })).toThrow(/controlled stale raw export/i);
+
+    const identityDrifts: Array<["fileName" | "sha256" | "exportedAt", string]> = [
+      ["fileName", "other-costs.xlsx"],
+      ["sha256", hash("0")],
+      ["exportedAt", "2026-08-08T21:30:15+08:00"]
+    ];
+    for (const [field, value] of identityDrifts) {
+      const drifted = liveExports();
+      const cost = drifted[1]!;
+      cost[field] = value;
+      const driftedEvidence = evidence.map((entry) => entry["来源文件"] === "Accommodation Cost Details.xlsx"
+        ? {
+            ...entry,
+            ...(field === "fileName" ? { "来源文件": value } : {}),
+            ...(field === "sha256" ? { "SHA-256": value } : {}),
+            ...(field === "exportedAt" ? { "导出时间": value } : {})
+          }
+        : entry);
+      expect(() => reconcileSourceFiles({ ...base, evidence: driftedEvidence, liveExports: drifted }), field).toThrow(/controlled stale raw export/i);
+    }
+
+    const future = liveExports();
+    future[1]!.exportedAt = "2026-08-09T13:31:01+08:00";
+    const futureEvidence = evidence.map((entry) => entry["来源文件"] === "Accommodation Cost Details.xlsx"
+      ? { ...entry, "导出时间": future[1]!.exportedAt, "数据无变化确认": currentCutoverConfirmation }
+      : entry);
+    expect(() => reconcileSourceFiles({ ...base, evidence: futureEvidence, liveExports: future })).toThrow(/later than cutover/i);
   });
 
   it("compares every raw source field with the review workbook copy", () => {
@@ -705,6 +799,7 @@ describe("historical-order manifest reviewed business rules", () => {
 
     expect(markdown).toContain("逾期在住修正单继续锁定 306");
     expect(markdown).toContain("会员权益单仍在住 D01");
+    expect(markdown).toContain("只有已审核的早期 COST_EXPORT 可引用 2026-08-10 用户无变化确认");
     expect(markdown).toContain(hash("7"));
     expect(markdown).not.toContain("Synthetic Review Guest");
   });
