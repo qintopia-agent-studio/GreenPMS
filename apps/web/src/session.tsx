@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from "react";
-import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, UserRound } from "lucide-react";
+import { AlertCircle, Archive, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, UserRound } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, ApiError } from "./api";
 import type { MetaDto, PendingTokenCommand, PrincipalDto, RetainedTokenSecret } from "./types";
@@ -182,6 +182,7 @@ export function WorkspaceProvider({ principal, children }: {
 const navigation = [
   { to: "/", label: "房态", icon: BedDouble, end: true },
   { to: "/orders", label: "订单", icon: ClipboardList, end: false },
+  { to: "/historical-order-archives", label: "历史归档", icon: Archive, end: false },
   { to: "/members", label: "会员", icon: BadgeCheck, end: false },
   { to: "/tokens", label: "Token", icon: KeyRound, end: false, requiresWrite: true },
   { to: "/today", label: "今日履约", icon: Smartphone, end: false }

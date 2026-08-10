@@ -40,7 +40,8 @@ const currentMigrationNames = [
   "033_stay_collection_membership_conversion.sql",
   "034_stay_conversion_reversal_bridge_guard.sql",
   "035_stage13_conversion_execution_state_guards.sql",
-  "036_qintopia_prelaunch_room_catalog_corrections.sql"
+  "036_qintopia_prelaunch_room_catalog_corrections.sql",
+  "037_historical_order_import.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -955,6 +956,233 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
         ) AS function_bodies_ready
       FROM pg_trigger AS trigger
     `.execute(db);
+    const historicalImportObjects = await sql<{
+      table_count: string;
+      column_shapes_ready: boolean;
+      critical_constraints_ready: boolean;
+      immediate_triggers_ready: boolean;
+      deferred_triggers_ready: boolean;
+      active_hold_index_ready: boolean;
+      function_count: string;
+      body_marker_count: string;
+      stage9_branch_ready: boolean;
+      stage11_branch_ready: boolean;
+    }>`
+      SELECT
+        (
+          (to_regclass('migration_import_runs') IS NOT NULL)::integer
+          + (to_regclass('migration_import_files') IS NOT NULL)::integer
+          + (to_regclass('migration_order_sources') IS NOT NULL)::integer
+          + (to_regclass('historical_order_archives') IS NOT NULL)::integer
+          + (to_regclass('migration_order_targets') IS NOT NULL)::integer
+          + (to_regclass('migration_overdue_inventory_holds') IS NOT NULL)::integer
+          + (to_regclass('migration_overdue_inventory_hold_releases') IS NOT NULL)::integer
+        )::text AS table_count,
+        (
+          EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('orders')
+            AND attname = 'migration_source_id' AND NOT attisdropped AND NOT attnotnull)
+          AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('member_contracts')
+            AND attname = 'migration_source_id' AND NOT attisdropped AND NOT attnotnull)
+          AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('entitlement_lots')
+            AND attname = 'migration_source_id' AND NOT attisdropped AND NOT attnotnull)
+          AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('pricing_revisions')
+            AND attname = 'policy_base_amount_minor' AND NOT attisdropped AND NOT attnotnull)
+          AND EXISTS (SELECT 1 FROM pg_attribute AS attribute
+            JOIN pg_attrdef AS default_row
+              ON default_row.adrelid = attribute.attrelid AND default_row.adnum = attribute.attnum
+            WHERE attribute.attrelid = to_regclass('pricing_revisions')
+              AND attribute.attname = 'pricing_origin'
+              AND NOT attribute.attisdropped
+              AND attribute.attnotnull
+              AND pg_get_expr(default_row.adbin, default_row.adrelid) = '''STANDARD''::text')
+        ) AS column_shapes_ready,
+        NOT EXISTS (
+          SELECT 1
+          FROM (
+            VALUES
+              ('migration_import_runs', 'migration_import_runs_identity_key', 'u', 'UNIQUE (property_id, source_system, idempotency_key)', false, false),
+              ('migration_import_files', 'migration_import_files_run_role_key', 'u', 'UNIQUE (run_id, source_role)', false, false),
+              ('migration_order_sources', 'migration_order_sources_source_key', 'u', 'UNIQUE (property_id, source_system, source_order_id)', false, false),
+              ('migration_order_sources', 'migration_order_sources_run_property_fk', 'f', 'FOREIGN KEY (run_id, property_id)', false, false),
+              ('historical_order_archives', 'historical_order_archives_source_unique', 'u', 'UNIQUE (source_id)', false, false),
+              ('historical_order_archives', 'historical_order_archives_source_property_fk', 'f', 'FOREIGN KEY (source_id, property_id)', false, false),
+              ('migration_order_targets', 'migration_order_targets_source_unique', 'u', 'UNIQUE (source_id)', false, false),
+              ('migration_order_targets', 'migration_order_targets_exactly_one_target', 'c', 'archive_id IS NOT NULL', false, false),
+              ('migration_order_targets', 'migration_order_targets_archive_fk', 'f', 'FOREIGN KEY (archive_id)', true, true),
+              ('migration_order_targets', 'migration_order_targets_order_fk', 'f', 'FOREIGN KEY (order_id)', true, true),
+              ('orders', 'orders_migration_source_unique', 'u', 'UNIQUE (migration_source_id)', false, false),
+              ('orders', 'orders_migration_source_fk', 'f', 'FOREIGN KEY (migration_source_id)', false, false),
+              ('member_contracts', 'member_contracts_migration_source_unique', 'u', 'UNIQUE (migration_source_id)', false, false),
+              ('member_contracts', 'member_contracts_migration_source_fk', 'f', 'FOREIGN KEY (migration_source_id)', false, false),
+              ('entitlement_lots', 'entitlement_lots_migration_source_unique', 'u', 'UNIQUE (migration_source_id)', false, false),
+              ('entitlement_lots', 'entitlement_lots_migration_source_fk', 'f', 'FOREIGN KEY (migration_source_id)', false, false),
+              ('pricing_revisions', 'pricing_revisions_pricing_origin_shape', 'c', 'MIGRATED_ACTUAL_PLUS_POST_CUTOVER', false, false),
+              ('migration_overdue_inventory_holds', 'migration_overdue_holds_source_unique', 'u', 'UNIQUE (source_id)', false, false),
+              ('migration_overdue_inventory_holds', 'migration_overdue_holds_order_unique', 'u', 'UNIQUE (order_id)', false, false),
+              ('migration_overdue_inventory_hold_releases', 'migration_overdue_releases_hold_unique', 'u', 'UNIQUE (hold_id)', false, false),
+              ('migration_overdue_inventory_hold_releases', 'migration_overdue_releases_command_unique', 'u', 'UNIQUE (command_id)', false, false),
+              ('migration_overdue_inventory_hold_releases', 'migration_overdue_releases_segment_fk', 'f', 'FOREIGN KEY (extension_segment_id)', true, true),
+              ('migration_overdue_inventory_hold_releases', 'migration_overdue_releases_revision_fk', 'f', 'FOREIGN KEY (pricing_revision_id)', true, true)
+          ) AS expected(table_name, constraint_name, constraint_type, definition_marker, is_deferrable, initially_deferred)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM pg_constraint AS constraint_row
+            WHERE constraint_row.conrelid = to_regclass(expected.table_name)
+              AND constraint_row.conname = expected.constraint_name
+              AND constraint_row.contype::text = expected.constraint_type
+              AND constraint_row.convalidated
+              AND constraint_row.condeferrable = expected.is_deferrable
+              AND constraint_row.condeferred = expected.initially_deferred
+              AND position(expected.definition_marker IN pg_get_constraintdef(constraint_row.oid, false)) > 0
+          )
+        ) AS critical_constraints_ready,
+        NOT EXISTS (
+          SELECT 1
+          FROM (
+            VALUES
+              ('migration_import_runs', 'migration_import_runs_protect_state', 'qintopia_protect_migration_import_run()', 27),
+              ('migration_import_files', 'migration_import_files_append_only', 'qintopia_prevent_fact_mutation()', 27),
+              ('migration_order_sources', 'migration_order_sources_append_only', 'qintopia_prevent_fact_mutation()', 27),
+              ('historical_order_archives', 'historical_order_archives_append_only', 'qintopia_prevent_fact_mutation()', 27),
+              ('migration_order_targets', 'migration_order_targets_append_only', 'qintopia_prevent_fact_mutation()', 27),
+              ('migration_overdue_inventory_holds', 'migration_overdue_holds_append_only', 'qintopia_prevent_fact_mutation()', 27),
+              ('migration_overdue_inventory_hold_releases', 'migration_overdue_releases_append_only', 'qintopia_prevent_fact_mutation()', 27),
+              ('migration_order_sources', 'migration_order_sources_validate_insert', 'qintopia_validate_migration_order_source()', 7),
+              ('historical_order_archives', 'historical_order_archives_validate_insert', 'qintopia_validate_historical_order_archive()', 7),
+              ('orders', 'orders_validate_migration_source', 'qintopia_validate_migrated_order_source()', 23),
+              ('orders', 'orders_validate_new_channel', 'qintopia_validate_new_order_channel()', 7),
+              ('member_contracts', 'member_contracts_validate_new_member', 'qintopia_validate_new_member_contract()', 7),
+              ('member_contracts', 'member_contracts_protect_owner', 'qintopia_protect_member_contract_owner()', 19),
+              ('entitlement_lots', 'entitlement_lots_validate_migration', 'qintopia_validate_entitlement_lot_migration()', 31),
+              ('order_occupants', 'order_occupants_validate_new', 'qintopia_validate_new_order_occupant()', 7),
+              ('amendments', 'amendments_validate_migration_shape', 'qintopia_validate_migration_amendment()', 7),
+              ('stay_segments', 'stay_segments_validate_migration_shape', 'qintopia_validate_migration_segment()', 7),
+              ('pricing_revisions', 'pricing_revisions_validate', 'qintopia_validate_pricing_revision()', 7),
+              ('migration_overdue_inventory_holds', 'migration_overdue_holds_validate_insert', 'qintopia_validate_migration_overdue_hold()', 7),
+              ('orders', 'orders_migration_overdue_status_guard', 'qintopia_reject_active_migration_overdue_status_change()', 19),
+              ('inventory_claims', 'inventory_claims_reject_active_migration_overdue_hold', 'qintopia_reject_active_migration_overdue_hold()', 23)
+          ) AS expected(table_name, trigger_name, function_signature, trigger_type)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM pg_trigger AS trigger
+            WHERE trigger.tgrelid = to_regclass(expected.table_name)
+              AND trigger.tgname = expected.trigger_name
+              AND NOT trigger.tgisinternal
+              AND NOT trigger.tgdeferrable
+              AND NOT trigger.tginitdeferred
+              AND trigger.tgenabled IN ('O','A')
+              AND trigger.tgtype = expected.trigger_type
+              AND trigger.tgfoid = to_regprocedure(expected.function_signature)
+              AND trigger.tgnargs = 0
+              AND trigger.tgqual IS NULL
+          )
+        ) AS immediate_triggers_ready,
+        NOT EXISTS (
+          SELECT 1
+          FROM (
+            VALUES
+              ('migration_order_sources', 'migration_order_sources_validate_target', 'qintopia_validate_migration_source_target()', 5),
+              ('migration_order_targets', 'migration_order_targets_validate_source', 'qintopia_validate_migration_source_target()', 5),
+              ('migration_overdue_inventory_hold_releases', 'migration_overdue_releases_validate_complete', 'qintopia_validate_migration_overdue_release()', 5)
+          ) AS expected(table_name, trigger_name, function_signature, trigger_type)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM pg_trigger AS trigger
+            WHERE trigger.tgrelid = to_regclass(expected.table_name)
+              AND trigger.tgname = expected.trigger_name
+              AND NOT trigger.tgisinternal
+              AND trigger.tgdeferrable
+              AND trigger.tginitdeferred
+              AND trigger.tgenabled IN ('O','A')
+              AND trigger.tgtype = expected.trigger_type
+              AND trigger.tgfoid = to_regprocedure(expected.function_signature)
+              AND trigger.tgnargs = 0
+              AND trigger.tgqual IS NULL
+          )
+        ) AS deferred_triggers_ready,
+        EXISTS (
+          SELECT 1 FROM pg_index AS index_row
+          JOIN pg_class AS index_relation ON index_relation.oid = index_row.indexrelid
+          WHERE index_row.indrelid = to_regclass('migration_overdue_inventory_holds')
+            AND index_relation.relname = 'migration_overdue_holds_active_lookup_idx'
+            AND index_row.indisvalid AND index_row.indisready
+            AND pg_get_indexdef(index_row.indexrelid) LIKE '%(property_id, room_id, starts_on, inventory_unit_id)%'
+        ) AS active_hold_index_ready,
+        (
+          (to_regprocedure('qintopia_protect_migration_import_run()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_migration_order_source()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_historical_order_archive()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_migrated_order_source()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_new_order_channel()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_protect_order_identity()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_new_member_contract()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_protect_member_contract_owner()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_entitlement_lot_migration()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_new_order_occupant()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_migration_amendment()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_migration_segment()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_pricing_revision()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_inventory_claim_source()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_migration_overdue_hold()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_reject_active_migration_overdue_status_change()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_reject_active_migration_overdue_hold()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_migration_overdue_release()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_assert_migration_source_target(text)') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_migration_source_target()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_assert_stage12_terminal_command(text)') IS NOT NULL)::integer
+        )::text AS function_count,
+        (
+          COALESCE(position('migration_order_sources_snapshot_exact_keys'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_migration_order_source()'))) > 0, false)::integer
+          + COALESCE(position('migration_order_sources_guest_provenance_match'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_migration_order_source()'))) > 0, false)::integer
+          + COALESCE(position('migration_order_sources_current_component_match'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_migration_order_source()'))) > 0, false)::integer
+          + COALESCE(position('orders_migrated_channel_reference_exception'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_new_order_channel()'))) > 0, false)::integer
+          + COALESCE(position('NEW.migration_source_id IS DISTINCT FROM OLD.migration_source_id'
+            IN pg_get_functiondef(to_regprocedure('qintopia_protect_order_identity()'))) > 0, false)::integer
+          + COALESCE(position('member_contracts_migration_source_match'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_new_member_contract()'))) > 0, false)::integer
+          + COALESCE(position('member_contracts_migrated_immutable'
+            IN pg_get_functiondef(to_regprocedure('qintopia_protect_member_contract_owner()'))) > 0, false)::integer
+          + COALESCE(position('order_occupants_migration_primary_match'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_new_order_occupant()'))) > 0, false)::integer
+          + COALESCE(position('pricing_revisions_migrated_actual_match'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_pricing_revision()'))) > 0, false)::integer
+          + COALESCE(position('migrated_pair_valid'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_inventory_claim_source()'))) > 0, false)::integer
+          + COALESCE(position('migration_overdue_order_status_requires_resolution'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_active_migration_overdue_status_change()'))) > 0, false)::integer
+          + COALESCE(position('qintopia:migration-overdue-room:'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_migration_overdue_hold()'))) > 0, false)::integer
+          + COALESCE(position('qintopia:migration-overdue-room:'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_active_migration_overdue_hold()'))) > 0, false)::integer
+          + COALESCE(position('inventory_claims_migration_overdue_hold_conflict'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_active_migration_overdue_hold()'))) > 0, false)::integer
+          + COALESCE(position('migration_overdue_releases_complete'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_migration_overdue_release()'))) > 0, false)::integer
+          + COALESCE(position('migration_order_targets_operational_complete'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_migration_source_target(text)'))) > 0, false)::integer
+          + COALESCE(position('migration_member_entitlement_complete'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_migration_source_target(text)'))) > 0, false)::integer
+          + COALESCE(position('stage12_migrated_terminal_pricing_preserved'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage12_terminal_command(text)'))) > 0, false)::integer
+        )::text AS body_marker_count,
+        EXISTS (
+          SELECT 1 FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('pricing_revisions')
+            AND trigger.tgname = 'pricing_revisions_stage9_validate'
+            AND trigger.tgfoid = to_regprocedure('qintopia_validate_stage9_pricing_revision()')
+            AND position('MIGRATED_ACTUAL_PLUS_POST_CUTOVER' IN pg_get_triggerdef(trigger.oid, false)) > 0
+        ) AS stage9_branch_ready,
+        EXISTS (
+          SELECT 1 FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('amendments')
+            AND trigger.tgname = 'amendments_stage11_validate_move_combination'
+            AND trigger.tgfoid = to_regprocedure('qintopia_validate_stage11_move_combination()')
+            AND trigger.tgdeferrable AND trigger.tginitdeferred
+            AND position('RESOLVE_MIGRATED_OVERDUE_STAY' IN pg_get_triggerdef(trigger.oid, false)) > 0
+        ) AS stage11_branch_ready
+    `.execute(db);
+
     return foundationalObjects.rows[0]?.function_count === "5"
       && foundationalObjects.rows[0]?.trigger_count === "13"
       && foundationalObjects.rows[0]?.function_bodies_ready === true
@@ -992,7 +1220,17 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       && stage13Objects.rows[0]?.child_wrapper_body_ready === true
       && stage13Objects.rows[0]?.membership_order_wrapper_body_ready === true
       && stage13Objects.rows[0]?.trigger_bindings_ready === true
-      && stage13Objects.rows[0]?.function_bodies_ready === true;
+      && stage13Objects.rows[0]?.function_bodies_ready === true
+      && historicalImportObjects.rows[0]?.table_count === "7"
+      && historicalImportObjects.rows[0]?.column_shapes_ready === true
+      && historicalImportObjects.rows[0]?.critical_constraints_ready === true
+      && historicalImportObjects.rows[0]?.immediate_triggers_ready === true
+      && historicalImportObjects.rows[0]?.deferred_triggers_ready === true
+      && historicalImportObjects.rows[0]?.active_hold_index_ready === true
+      && historicalImportObjects.rows[0]?.function_count === "21"
+      && historicalImportObjects.rows[0]?.body_marker_count === "18"
+      && historicalImportObjects.rows[0]?.stage9_branch_ready === true
+      && historicalImportObjects.rows[0]?.stage11_branch_ready === true;
   } catch {
     return false;
   }

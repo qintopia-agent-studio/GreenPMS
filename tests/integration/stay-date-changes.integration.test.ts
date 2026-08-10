@@ -283,6 +283,10 @@ async function expectDirectStage9RevisionRejected(options: {
     : order;
   const currentRevision = await db.selectFrom("pricing_revisions").selectAll()
     .where("id", "=", order.current_revision_id!).executeTakeFirstOrThrow();
+  if (currentRevision.policy_base_amount_minor === null) {
+    throw new Error("Stage 9 direct-write guard fixture requires a STANDARD pricing revision");
+  }
+  const policyBaseAmountMinor = currentRevision.policy_base_amount_minor;
   const beforeCounts = await Promise.all([
     db.selectFrom("amendments").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
     db.selectFrom("pricing_revisions").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
@@ -311,10 +315,10 @@ async function expectDirectStage9RevisionRejected(options: {
       departure_date: order.departure_date,
       coverage_set: JSON.stringify(currentRevision.coverage_set),
       cash_lines: JSON.stringify(currentRevision.cash_lines),
-      policy_base_amount_minor: currentRevision.policy_base_amount_minor,
+      policy_base_amount_minor: policyBaseAmountMinor,
       pricing_basis: options.pricingBasis as "POLICY",
       manual_adjustment_minor: options.manualAdjustmentMinor,
-      current_contract_amount_minor: currentRevision.policy_base_amount_minor + options.manualAdjustmentMinor,
+      current_contract_amount_minor: policyBaseAmountMinor + options.manualAdjustmentMinor,
       currency: currentRevision.currency
     }).execute();
   });
@@ -3170,6 +3174,10 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
 
     const currentRevision = await db.selectFrom("pricing_revisions").selectAll()
       .where("id", "=", order.current_revision_id!).executeTakeFirstOrThrow();
+    if (currentRevision.policy_base_amount_minor === null) {
+      throw new Error("Stage 10 WECOM guard fixture requires a STANDARD pricing revision");
+    }
+    const policyBaseAmountMinor = currentRevision.policy_base_amount_minor;
     const wrongBasisCommandId = "command_stage10_wrong_basis";
     const wrongBasis = db.transaction().execute(async (trx) => {
       await trx.insertInto("command_executions").values(directCommand(wrongBasisCommandId, "SHORTEN_STAY")).execute();
@@ -3196,10 +3204,10 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         departure_date: shiftDate(businessDate, 1),
         coverage_set: JSON.stringify(currentRevision.coverage_set),
         cash_lines: JSON.stringify(currentRevision.cash_lines),
-        policy_base_amount_minor: currentRevision.policy_base_amount_minor,
+        policy_base_amount_minor: policyBaseAmountMinor,
         pricing_basis: "CHANNEL_CONTRACT",
         manual_adjustment_minor: 0,
-        current_contract_amount_minor: currentRevision.policy_base_amount_minor,
+        current_contract_amount_minor: policyBaseAmountMinor,
         currency: currentRevision.currency
       }).execute();
     });

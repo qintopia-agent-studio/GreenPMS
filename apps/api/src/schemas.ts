@@ -109,6 +109,24 @@ const StayTotalCashLine = strictObject({
   amount: Money
 });
 export const CashLine = Type.Union([NightlyCashLine, StayTotalCashLine]);
+const MigratedActualCashLine = strictObject({
+  lineKind: Type.Literal("MIGRATED_ACTUAL"),
+  historicalActualAmountMinor: SafeInteger,
+  currency: Type.String({ minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" })
+});
+const MigratedActualPlusPostCutoverCashLine = strictObject({
+  lineKind: Type.Literal("MIGRATED_ACTUAL_PLUS_POST_CUTOVER"),
+  historicalActualAmountMinor: SafeInteger,
+  postCutoverIncrementAmountMinor: SafeInteger,
+  newContractAmountMinor: SafeInteger,
+  currency: Type.String({ minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" })
+});
+const PricingRevisionCashLine = Type.Union([
+  NightlyCashLine,
+  StayTotalCashLine,
+  MigratedActualCashLine,
+  MigratedActualPlusPostCutoverCashLine
+]);
 const QuoteStayTotalCashLine = strictObject({
   lineKind: Type.Literal("STAY_TOTAL"),
   arrivalDate: LocalDate,
@@ -315,6 +333,12 @@ export const CommandEnvelopeSchema = Type.Union([
     targetCurrentContractAmountMinor: Type.Optional(StayChangeTargetAmount),
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note)
+  })),
+  commandEnvelope("RESOLVE_MIGRATED_OVERDUE_STAY", strictObject({
+    ...OrderInput,
+    holdId: Id,
+    newDepartureDate: LocalDate,
+    postCutoverIncrementAmountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
   })),
   commandEnvelope("SHORTEN_STAY", strictObject({
     ...OrderInput,
@@ -793,6 +817,16 @@ export const CommandEffectSchema = Type.Union([
     fundsSummary: StayChangeFundsSummarySchema
   }),
   strictObject({
+    operation: Type.Literal("RESOLVE_MIGRATED_OVERDUE_STAY"),
+    orderId: Id,
+    sourceId: Id,
+    holdId: Id,
+    historicalActualAmountMinor: SafeInteger,
+    postCutoverIncrementAmountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
+    newContractAmountMinor: SafeInteger,
+    newDepartureDate: LocalDate
+  }),
+  strictObject({
     operation: Type.Literal("SHORTEN_STAY"),
     orderId: Id,
     stayId: Id,
@@ -1239,6 +1273,19 @@ const StayCollectionMembershipConversionResultSchema = strictObject({
   remainingUnits: Type.Integer({ minimum: 0 }),
   effectHash: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }))
 });
+const ResolveMigratedOverdueStayResultSchema = strictObject({
+  orderId: Id,
+  amendmentId: Id,
+  staySegmentId: Id,
+  pricingRevisionId: Id,
+  holdId: Id,
+  holdReleaseId: Id,
+  historicalActualAmountMinor: SafeInteger,
+  postCutoverIncrementAmountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
+  newContractAmountMinor: SafeInteger,
+  newDepartureDate: LocalDate,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+});
 
 export const ExecutedCommandResultSchema = Type.Union([
   QuoteReceiptResultSchema,
@@ -1248,6 +1295,7 @@ export const ExecutedCommandResultSchema = Type.Union([
   MembershipPaymentCorrectedResultSchema,
   MembershipOrderActivatedResultSchema,
   StayCollectionMembershipConversionResultSchema,
+  ResolveMigratedOverdueStayResultSchema,
   CreateOrderResultSchema,
   CorrectOrderOccupantResultSchema,
   MaintenanceLockResultSchema,
@@ -1863,6 +1911,73 @@ export const OrderRowSchema = strictObject({
 });
 export const OrdersListResponseSchema = strictObject({ orders: Type.Array(OrderRowSchema) });
 
+const HistoricalOrderArchiveRecordKindSchema = Type.Union([
+  Type.Literal("MIGRATED_ARCHIVE"), Type.Literal("NON_ACCOMMODATION_ARCHIVE")
+]);
+const HistoricalOrderArchiveListRowSchema = strictObject({
+  id: Id,
+  property_id: Id,
+  record_kind: HistoricalOrderArchiveRecordKindSchema,
+  source_order_id: ShortText,
+  guest_full_name: nullable(ShortText),
+  guest_nickname: nullable(ShortText),
+  mapped_channel_code: nullable(BookingChannelCodeSchema),
+  channel_order_reference: nullable(ShortText),
+  channel_reference_missing_reason: nullable(Type.Literal("HISTORICAL_NOT_RECORDED")),
+  arrival_date: nullable(LocalDate),
+  departure_date: nullable(LocalDate),
+  stay_type: nullable(ShortText),
+  source_status: nullable(ShortText),
+  historical_actual_amount_minor: Type.Integer({ minimum: 0 }),
+  lodging_subtotal_minor: nullable(Type.Integer({ minimum: 0 })),
+  checkout_amount_minor: nullable(Type.Integer({ minimum: 0 })),
+  amount_difference_reason: nullable(Note),
+  currency: Type.String({ minLength: 3, maxLength: 3 }),
+  created_at: DateTime
+});
+export const HistoricalOrderArchivesQuerySchema = strictObject({
+  propertyId: Id,
+  query: Type.Optional(Type.String({ maxLength: 200 })),
+  recordKind: Type.Optional(HistoricalOrderArchiveRecordKindSchema),
+  channelCode: Type.Optional(BookingChannelCodeSchema),
+  sourceStatus: Type.Optional(Type.String({ maxLength: 200 })),
+  arrivalDate: Type.Optional(LocalDate),
+  departureDate: Type.Optional(LocalDate)
+});
+export const HistoricalOrderArchivesListResponseSchema = strictObject({
+  archives: Type.Array(HistoricalOrderArchiveListRowSchema),
+  truncated: Type.Boolean()
+});
+export const HistoricalOrderArchiveDetailResponseSchema = strictObject({
+  ...HistoricalOrderArchiveListRowSchema.properties,
+  guest_phone: nullable(ShortText),
+  sourceEvidence: strictObject({
+    sourceSystem: ShortText,
+    sourceRow: Type.Integer({ minimum: 1 }),
+    rawChannel: nullable(ShortText),
+    guestNameProvenance: nullable(ShortText),
+    guestNicknameProvenance: nullable(ShortText),
+    guestPhoneProvenance: nullable(ShortText),
+    reviewConclusion: nullable(ShortText),
+    reviewWorkbookHash: nullable(Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })),
+    manualConfirmation: strictObject({
+      businessType: nullable(ShortText), correctionSource: nullable(ShortText), latestCorrection: nullable(ShortText),
+      observedLifecycle: nullable(ShortText), reason: nullable(Note), room: nullable(ShortText)
+    }),
+    files: Type.Array(strictObject({
+      sourceRole: ShortText, fileName: ShortText,
+      sha256: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+      exportedAt: nullable(DateTime), rowCount: nullable(Type.Integer({ minimum: 0 }))
+    }))
+  }),
+  pricingEvidence: strictObject({
+    auditHistoricalAmountMinor: nullable(Type.Integer({ minimum: 0 })),
+    checkoutAccommodationAmountMinor: nullable(Type.Integer({ minimum: 0 })),
+    checkoutTotalAmountMinor: nullable(Type.Integer({ minimum: 0 })),
+    unsettledConsumptionAmountMinor: nullable(Type.Integer({ minimum: 0 }))
+  })
+});
+
 const StaySegmentRowSchema = strictObject({
   id: Id, stay_id: Id, sequence: Type.Integer({ minimum: 1 }), inventory_unit_id: Id,
   arrival_date: LocalDate, departure_date: LocalDate, segment_type: ShortText,
@@ -1894,6 +2009,26 @@ const CurrentAmendmentRowSchema = strictObject({
   amendment_type: CommandTypeSchema,
   payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema])
 });
+const MigratedOperationalSnapshotAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("MIGRATED_OPERATIONAL_SNAPSHOT"),
+  payload: strictObject({
+    sourceId: Id,
+    sourceOrderId: ShortText,
+    cutoverObservedAt: DateTime,
+    observedStatus: Type.Union([Type.Literal("RESERVED"), Type.Literal("CHECKED_IN")]),
+    observedStayStatus: Type.Union([Type.Literal("PLANNED"), Type.Literal("IN_HOUSE")]),
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    stayType: StayTypeSchema,
+    pricingOrigin: Type.Literal("MIGRATED_ACTUAL"),
+    historicalActualAmountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
+    currency: Type.String({ minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" }),
+    stayTimeline: StayTimelineSchema,
+    inventoryUnitId: Id,
+    overdueHoldStartsOn: Type.Optional(LocalDate)
+  })
+});
 const LegacyStayChangeAmendmentRowSchema = strictObject({
   ...AmendmentRowBase,
   amendment_type: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
@@ -1917,18 +2052,24 @@ const LegacyMoveAmendmentRowSchema = strictObject({
 });
 const AmendmentRowSchema = Type.Union([
   CurrentAmendmentRowSchema,
+  MigratedOperationalSnapshotAmendmentRowSchema,
   LegacyStayChangeAmendmentRowSchema,
   LegacyShortenAmendmentRowSchema,
   LegacyMoveAmendmentRowSchema
 ]);
 const PricingRevisionRowSchema = strictObject({
   id: Id, order_id: Id, revision_no: Type.Integer({ minimum: 1 }), amendment_id: Id, policy_version_id: Id,
-  arrival_date: LocalDate, departure_date: LocalDate, coverage_set: Type.Array(CoverageItem), cash_lines: Type.Array(CashLine),
-  policy_base_amount_minor: SafeInteger,
+  arrival_date: LocalDate, departure_date: LocalDate, coverage_set: Type.Array(CoverageItem), cash_lines: Type.Array(PricingRevisionCashLine),
+  policy_base_amount_minor: nullable(SafeInteger),
+  pricing_origin: Type.Union([
+    Type.Literal("STANDARD"),
+    Type.Literal("MIGRATED_ACTUAL"),
+    Type.Literal("MIGRATED_ACTUAL_PLUS_POST_CUTOVER")
+  ]),
   pricing_basis: Type.Union(createOrderPricingBasisCodes.map((code) => Type.Literal(code))),
   manual_adjustment_minor: SafeInteger,
   current_contract_amount_minor: SafeInteger,
-  difference_from_policy_minor: SafeInteger,
+  difference_from_policy_minor: nullable(SafeInteger),
   reason: RecordedCommandReasonSchema,
   currency: Type.String({ minLength: 3, maxLength: 3 }), created_at: DateTime
 });
@@ -1997,9 +2138,9 @@ const OrderArrangementHistoryItemSchema = strictObject({
   actor: nullable(strictObject({ subjectId: Id, displayName: ShortText })),
   recordedAt: DateTime,
   pricingSummary: strictObject({
-    policyBaseAmount: Money,
+    policyBaseAmount: nullable(Money),
     currentContractAmount: Money,
-    differenceFromPolicy: Money
+    differenceFromPolicy: nullable(Money)
   }),
   fundsSummary: strictObject({
     netRecordedCollection: Money,
@@ -2029,6 +2170,10 @@ export const OrderDetailResponseSchema = strictObject({
     code: Type.Union(orderActionCodes.map((code) => Type.Literal(code))),
     enabled: Type.Boolean(),
     disabledReason: nullable(ShortText)
+  })),
+  migrationOverdueHold: nullable(strictObject({
+    id: Id,
+    startsOn: LocalDate
   })),
   order: OrderRowSchema,
   occupants: Type.Array(OrderOccupantSchema, { minItems: 1, maxItems: 1000 }),

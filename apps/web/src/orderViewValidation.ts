@@ -1,4 +1,5 @@
 import type {
+  MoneyDto,
   OrderArrangementDto,
   OrderArrangementHistoryItemDto,
   OrderEffectiveArrangementDto,
@@ -10,7 +11,7 @@ import type { OrderViewDto } from "./types";
 type JsonRecord = Record<string, unknown>;
 
 const localDatePattern = /^\d{4}-\d{2}-\d{2}$/;
-const arrangementChangeTypes = new Set(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT"]);
+const arrangementChangeTypes = new Set(["INITIAL_BOOKING", "MIGRATED_SNAPSHOT", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT"]);
 const effectivePresentations = new Set(["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER", "BEFORE_CHECK_IN_REVOCATION"]);
 const fulfillmentStates = new Set(["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"]);
 const recordingModes = new Set(["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"]);
@@ -300,7 +301,7 @@ function isSingleSuffixExtension(before: OrderArrangementDto, after: OrderArrang
 }
 
 function validateArrangementChange(item: OrderArrangementHistoryItemDto, path: string) {
-  if (item.type === "INITIAL_BOOKING") {
+  if (item.type === "INITIAL_BOOKING" || item.type === "MIGRATED_SNAPSHOT") {
     if (item.before !== null) fail(path, "初始预订不能包含变更前安排");
     return;
   }
@@ -416,20 +417,30 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
   const funds = record(result.fundsSummary, `${path}.fundsSummary`);
   exactKeys(funds, `${path}.fundsSummary`, ["netRecordedCollection", "collectionDifference", "refundReferenceAmount", "factCount"]);
   if (!Number.isSafeInteger(funds.factCount) || Number(funds.factCount) < 0) fail(`${path}.fundsSummary.factCount`, "必须是非负整数");
-  const policyBaseAmount = money(pricing.policyBaseAmount, `${path}.pricingSummary.policyBaseAmount`);
+  const policyBaseAmount = pricing.policyBaseAmount === null
+    ? null
+    : money(pricing.policyBaseAmount, `${path}.pricingSummary.policyBaseAmount`);
   const currentContractAmount = money(pricing.currentContractAmount, `${path}.pricingSummary.currentContractAmount`);
-  const differenceFromPolicy = money(pricing.differenceFromPolicy, `${path}.pricingSummary.differenceFromPolicy`);
+  const differenceFromPolicy = pricing.differenceFromPolicy === null
+    ? null
+    : money(pricing.differenceFromPolicy, `${path}.pricingSummary.differenceFromPolicy`);
   const netRecordedCollection = money(funds.netRecordedCollection, `${path}.fundsSummary.netRecordedCollection`);
   const collectionDifference = money(funds.collectionDifference, `${path}.fundsSummary.collectionDifference`);
   const refundReferenceAmount = money(funds.refundReferenceAmount, `${path}.fundsSummary.refundReferenceAmount`);
-  const amounts = [policyBaseAmount, currentContractAmount, differenceFromPolicy, netRecordedCollection, collectionDifference, refundReferenceAmount];
+  if ((policyBaseAmount === null) !== (differenceFromPolicy === null)) {
+    fail(`${path}.pricingSummary`, "政策基础金额和差额必须同时存在或同时缺失");
+  }
+  const amounts = [policyBaseAmount, currentContractAmount, differenceFromPolicy, netRecordedCollection, collectionDifference, refundReferenceAmount]
+    .filter((amount): amount is MoneyDto => amount !== null);
   if (amounts.some((amount) => amount.currency !== currentContractAmount.currency)) {
     fail(path, "金额摘要币种不一致");
   }
-  const expectedDifferenceFromPolicy = currentContractAmount.minorUnits - policyBaseAmount.minorUnits;
-  if (!Number.isSafeInteger(expectedDifferenceFromPolicy)
-    || differenceFromPolicy.minorUnits !== expectedDifferenceFromPolicy) {
-    fail(`${path}.pricingSummary.differenceFromPolicy`, "与政策基础金额差额不一致");
+  if (policyBaseAmount && differenceFromPolicy) {
+    const expectedDifferenceFromPolicy = currentContractAmount.minorUnits - policyBaseAmount.minorUnits;
+    if (!Number.isSafeInteger(expectedDifferenceFromPolicy)
+      || differenceFromPolicy.minorUnits !== expectedDifferenceFromPolicy) {
+      fail(`${path}.pricingSummary.differenceFromPolicy`, "与政策基础金额差额不一致");
+    }
   }
   const expectedCollectionDifference = currentContractAmount.minorUnits - netRecordedCollection.minorUnits;
   if (!Number.isSafeInteger(expectedCollectionDifference)
@@ -466,7 +477,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   exactKeys(result, "根节点", [
     "accessLevel", "allowedActions", "order", "occupants", "occupantCorrections", "stay", "currentSegment",
     "segments", "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory", "amendments",
-    "pricingRevisions", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
+    "pricingRevisions", "coverageSet", "collectionFacts", "cleaningTasks", "amounts", "migrationOverdueHold"
   ]);
   const order = record(result.order, "order");
   exactKeys(order, "order", [
@@ -482,6 +493,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const seenActionCodes = new Set<string>();
   const enabledDateActions: string[] = [];
   let moveUnitEnabled = false;
+  let migratedOverdueResolutionEnabled = false;
   const enabledLifecycleActions: string[] = [];
   arrayValue(result.allowedActions, "allowedActions").forEach((item, index) => {
     const action = record(item, `allowedActions[${index}]`);
@@ -495,6 +507,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     if (accessLevel === "READ" && action.enabled) fail(`allowedActions[${index}]`, "只读权限不能包含可执行写操作");
     if (action.enabled && (code === "RESCHEDULE_STAY" || code === "EXTEND_STAY" || code === "SHORTEN_STAY")) enabledDateActions.push(code);
     if (action.enabled && code === "MOVE_UNIT") moveUnitEnabled = true;
+    if (action.enabled && code === "RESOLVE_MIGRATED_OVERDUE_STAY") migratedOverdueResolutionEnabled = true;
     if (action.enabled && (code === "CANCEL_ORDER" || code === "MARK_NO_SHOW" || code === "REVOKE_CHECK_IN")) enabledLifecycleActions.push(code);
   });
   const orderId = stringValue(order.id, "order.id");
@@ -520,7 +533,21 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const expectation = orderProjectionExpectations[orderStatus as keyof typeof orderProjectionExpectations];
   const orderArrivalDate = localDate(order.arrival_date, "order.arrival_date");
   const orderDepartureDate = localDate(order.departure_date, "order.departure_date");
+  const migrationOverdueHold = result.migrationOverdueHold === null
+    ? null
+    : record(result.migrationOverdueHold, "migrationOverdueHold");
+  if (migrationOverdueHold) {
+    exactKeys(migrationOverdueHold, "migrationOverdueHold", ["id", "startsOn"]);
+    stringValue(migrationOverdueHold.id, "migrationOverdueHold.id");
+    localDate(migrationOverdueHold.startsOn, "migrationOverdueHold.startsOn");
+  }
   if (orderDepartureDate <= orderArrivalDate) fail("order", "日期区间无效");
+  if (migrationOverdueHold && orderStatus !== "CHECKED_IN") {
+    fail("migrationOverdueHold", "历史逾期在住占房锁只能出现在在住订单");
+  }
+  if (migratedOverdueResolutionEnabled && !migrationOverdueHold) {
+    fail("allowedActions", "历史逾期在住处理必须关联有效占房锁");
+  }
   const stayStatus = stringValue(stay.status, "stay.status");
   stringValue(stay.id, "stay.id");
   const stayType = stringValue(order.stay_type, "order.stay_type");
@@ -581,7 +608,9 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     fail("arrangementHistory", "必须包含初始预订记录");
   }
   const history = result.arrangementHistory.map((item, index) => historyItem(item, `arrangementHistory[${index}]`));
-  if (history[0]?.type !== "INITIAL_BOOKING" || history[0].before !== null || !sameArrangement(history[0].after, original)) {
+  if ((history[0]?.type !== "INITIAL_BOOKING" && history[0]?.type !== "MIGRATED_SNAPSHOT")
+    || history[0].before !== null
+    || !sameArrangement(history[0].after, original)) {
     fail("arrangementHistory[0]", "必须与原始预订安排一致");
   }
   history.forEach((item, index) => {
@@ -719,7 +748,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     const revision = record(item, path);
     exactKeys(revision, path, [
       "id", "order_id", "revision_no", "amendment_id", "policy_version_id", "arrival_date", "departure_date",
-      "coverage_set", "cash_lines", "policy_base_amount_minor", "pricing_basis", "manual_adjustment_minor",
+      "coverage_set", "cash_lines", "policy_base_amount_minor", "pricing_basis", "pricing_origin", "manual_adjustment_minor",
       "current_contract_amount_minor", "difference_from_policy_minor", "reason", "currency", "created_at"
     ]);
     const revisionId = stringValue(revision.id, `${path}.id`);
@@ -732,13 +761,27 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     const arrivalDate = localDate(revision.arrival_date, `${path}.arrival_date`);
     const departureDate = localDate(revision.departure_date, `${path}.departure_date`);
     if (departureDate <= arrivalDate) fail(path, "日期区间无效");
-    const policyBaseAmount = safeInteger(revision.policy_base_amount_minor, `${path}.policy_base_amount_minor`);
+    const pricingOrigin = stringValue(revision.pricing_origin, `${path}.pricing_origin`);
+    if (!["STANDARD", "MIGRATED_ACTUAL", "MIGRATED_ACTUAL_PLUS_POST_CUTOVER"].includes(pricingOrigin)) {
+      fail(`${path}.pricing_origin`, "不是支持的计价来源");
+    }
+    const policyBaseAmount = revision.policy_base_amount_minor === null
+      ? null
+      : safeInteger(revision.policy_base_amount_minor, `${path}.policy_base_amount_minor`);
     const currentRevisionAmount = safeInteger(revision.current_contract_amount_minor, `${path}.current_contract_amount_minor`);
-    if (policyBaseAmount < 0) fail(`${path}.policy_base_amount_minor`, "必须是非负金额");
+    if (policyBaseAmount !== null && policyBaseAmount < 0) fail(`${path}.policy_base_amount_minor`, "必须是非负金额");
     if (currentRevisionAmount < 0) fail(`${path}.current_contract_amount_minor`, "必须是非负金额");
     const manualAdjustment = safeInteger(revision.manual_adjustment_minor, `${path}.manual_adjustment_minor`);
-    const differenceFromPolicy = safeInteger(revision.difference_from_policy_minor, `${path}.difference_from_policy_minor`);
-    if (differenceFromPolicy !== currentRevisionAmount - policyBaseAmount) {
+    const differenceFromPolicy = revision.difference_from_policy_minor === null
+      ? null
+      : safeInteger(revision.difference_from_policy_minor, `${path}.difference_from_policy_minor`);
+    const migratedPricing = pricingOrigin !== "STANDARD";
+    if (migratedPricing) {
+      if (policyBaseAmount !== null || differenceFromPolicy !== null || manualAdjustment !== 0) {
+        fail(path, "历史实价不得伪造政策基础金额或人工调价差额");
+      }
+    } else if (policyBaseAmount === null || differenceFromPolicy === null
+      || differenceFromPolicy !== currentRevisionAmount - policyBaseAmount) {
       fail(`${path}.difference_from_policy_minor`, "与政策基础金额差额不一致");
     }
     const pricingBasis = stringValue(revision.pricing_basis, `${path}.pricing_basis`);

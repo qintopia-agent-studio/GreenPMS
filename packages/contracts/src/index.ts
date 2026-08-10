@@ -37,6 +37,7 @@ export const commandTypes = [
   "CORRECT_ORDER_OCCUPANT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
+  "RESOLVE_MIGRATED_OVERDUE_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
@@ -736,6 +737,7 @@ export const orderActionCodes = [
   "RESCHEDULE_STAY",
   "SHORTEN_STAY",
   "EXTEND_STAY",
+  "RESOLVE_MIGRATED_OVERDUE_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
   "CANCEL_ORDER",
@@ -764,6 +766,7 @@ export type OrderEffectiveArrangementPresentation = (typeof orderEffectiveArrang
 
 export const orderArrangementChangeTypes = [
   "INITIAL_BOOKING",
+  "MIGRATED_SNAPSHOT",
   "RESCHEDULE",
   "EXTENSION",
   "SHORTENING",
@@ -790,9 +793,9 @@ export interface OrderEffectiveArrangementDto extends OrderArrangementDto {
 }
 
 export interface OrderArrangementPricingSummaryDto {
-  policyBaseAmount: MoneyDto;
+  policyBaseAmount: MoneyDto | null;
   currentContractAmount: MoneyDto;
-  differenceFromPolicy: MoneyDto;
+  differenceFromPolicy: MoneyDto | null;
 }
 
 export interface OrderArrangementFundsSummaryDto {

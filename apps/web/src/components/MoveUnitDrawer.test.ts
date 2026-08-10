@@ -37,6 +37,7 @@ function view(orderOverrides: Partial<OrderViewDto["order"]> = {}): OrderViewDto
   return {
     accessLevel: "WRITE",
     allowedActions: [{ code: "MOVE_UNIT", enabled: true, disabledReason: null }],
+    migrationOverdueHold: null,
     order: {
       id: "order_1", property_id: "property_1", status: "RESERVED", stay_type: "TRANSIENT",
       arrival_date: "2026-08-02", departure_date: "2026-08-04", primary_guest_snapshot: { nickname: "青山" },

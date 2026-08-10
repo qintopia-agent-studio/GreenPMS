@@ -5,6 +5,7 @@ import { AppShell, LoginPage, ServiceFailureState, WorkspaceProvider } from "./s
 import type { PrincipalDto } from "./types";
 import { LoadingBlock } from "./ui";
 import { InventoryPage } from "./pages/InventoryPage";
+import { HistoricalOrderArchiveDetailPage, HistoricalOrderArchivesPage } from "./pages/HistoricalOrderArchivesPage";
 import { MembersPage } from "./pages/MembersPage";
 import { OrderDetailPage } from "./pages/OrderDetailPage";
 import { OrdersPage } from "./pages/OrdersPage";
@@ -57,6 +58,8 @@ export default function App() {
             <Route path="members" element={<MembersPage />} />
             <Route path="orders" element={<OrdersPage />} />
             <Route path="orders/:orderId" element={<OrderDetailPage />} />
+            <Route path="historical-order-archives" element={<HistoricalOrderArchivesPage />} />
+            <Route path="historical-order-archives/:archiveId" element={<HistoricalOrderArchiveDetailPage />} />
             <Route path="today" element={<TodayPage />} />
             <Route path="tokens" element={<TokensPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />

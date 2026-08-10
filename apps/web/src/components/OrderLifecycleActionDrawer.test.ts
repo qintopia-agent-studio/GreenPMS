@@ -12,6 +12,7 @@ function view(): OrderViewDto {
   return {
     accessLevel: "WRITE",
     allowedActions: [{ code: "CANCEL_ORDER", enabled: true, disabledReason: null }],
+    migrationOverdueHold: null,
     order: {
       id: "order_45",
       property_id: "property_qintopia",

@@ -876,6 +876,36 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     const roomRows = inventoryRows.filter((unit) => unit.kind === "ROOM");
     const bedRows = inventoryRows.filter((unit) => unit.kind === "BED");
 
+    const activeMigrationOverdueHolds = await trx
+      .selectFrom("migration_overdue_inventory_holds as hold")
+      .innerJoin("orders as order", "order.id", "hold.order_id")
+      .innerJoin("stays as stay", "stay.order_id", "order.id")
+      .innerJoin("inventory_units as unit", "unit.id", "hold.inventory_unit_id")
+      .leftJoin("migration_overdue_inventory_hold_releases as release", "release.hold_id", "hold.id")
+      .select([
+        "hold.id",
+        "hold.order_id",
+        "hold.source_id",
+        "hold.room_id",
+        "hold.inventory_unit_id",
+        "hold.starts_on",
+        "hold.created_at",
+        "order.status as order_status",
+        "order.stay_type",
+        "order.primary_guest_snapshot",
+        "order.free_stay_reason",
+        "stay.id as stay_id",
+        "stay.status as stay_status",
+        "unit.code as unit_code",
+        "unit.name as unit_name"
+      ])
+      .where("hold.property_id", "=", options.propertyId)
+      .where("hold.starts_on", "<", options.departureDate)
+      .where("release.id", "is", null)
+      .orderBy("hold.id")
+      .execute();
+    const activeMigrationOverdueHoldOrderIds = new Set(activeMigrationOverdueHolds.map((hold) => hold.order_id));
+
     const operationalOrderCandidates = await trx.selectFrom("orders as order")
       .select("order.id")
       .where("order.property_id", "=", options.propertyId)
@@ -1029,7 +1059,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           event: taskEvent
         });
       }
-      if (departureDayInHouse) {
+      if (departureDayInHouse && !activeMigrationOverdueHoldOrderIds.has(order.order_id)) {
         syntheticOccupancyEvents.push({
           ...taskEvent,
           sourceStartDate: businessDate,
@@ -1347,7 +1377,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
 
     const orderIdsForHistory = [...new Set([
       ...operationalOrderRows.map((row) => row.order_id),
-      ...claimRows.flatMap((row) => row.order_id ? [row.order_id] : [])
+      ...claimRows.flatMap((row) => row.order_id ? [row.order_id] : []),
+      ...activeMigrationOverdueHolds.map((hold) => hold.order_id)
     ])];
     const amendmentRows = orderIdsForHistory.length === 0 ? [] : await trx.selectFrom("amendments")
       .select(["order_id", "amendment_type", "command_id", "created_at"])
@@ -1552,6 +1583,56 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         commandIds: [],
         targetReference: null
       });
+    }
+
+    for (const hold of activeMigrationOverdueHolds) {
+      const lifecycleConsistent = hold.order_status === "CHECKED_IN" && hold.stay_status === "IN_HOUSE";
+      if (!lifecycleConsistent) partial = true;
+      const orderRef = reference("ORDER", hold.order_id, `Order ${hold.order_id}`, `/orders/${hold.order_id}`);
+      const stayRef = reference("STAY", hold.stay_id, `Stay ${hold.stay_id}`);
+      const holdRef = reference("BLOCK", hold.id, `Migrated overdue hold ${hold.id}`);
+      const projectedOccupants = occupantsByOrder.get(hold.order_id) ?? [];
+      const sourceKind: RoomStatusSourceKind = hold.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
+      for (const serviceDate of dates) {
+        if (serviceDate < hold.starts_on) continue;
+        events.push({
+          actualInventoryUnitId: hold.inventory_unit_id,
+          roomId: hold.room_id,
+          serviceDate,
+          sourceStartDate: hold.starts_on,
+          sourceEndDate: options.departureDate,
+          sourceKey: `migrated-overdue-hold:${hold.id}`,
+          sourceKind,
+          status: lifecycleConsistent ? "IN_HOUSE" : "UNKNOWN",
+          label: `历史逾期在住订单 ${hold.order_id}`,
+          primaryOccupantLabel: lifecycleConsistent
+            ? projectedOccupants[0]?.nickname ?? primaryOccupantLabel(hold.primary_guest_snapshot)
+            : null,
+          occupants: lifecycleConsistent ? projectedOccupants : [],
+          reason: lifecycleConsistent
+            ? sourceKind === "FREE_STAY" && hold.free_stay_reason
+              ? `真实离店日待确认；免费入住原因：${hold.free_stay_reason}`
+              : "历史导入订单的真实离店日待确认"
+            : `订单状态 ${hold.order_status} 与 Stay 状态 ${hold.stay_status} 不一致`,
+          blocking: true,
+          current: true,
+          blockingFactKind: "OVERDUE_IN_HOUSE",
+          claimId: null,
+          references: [holdRef, orderRef, stayRef, reference("INVENTORY_UNIT", hold.inventory_unit_id, `${hold.unit_code} · ${hold.unit_name}`)],
+          histories: [{
+            action: "MIGRATED_OVERDUE_HOLD",
+            actorId: null,
+            source: "SYSTEM",
+            occurredAt: iso(hold.created_at),
+            commandId: null,
+            receiptId: null,
+            correlationId: null
+          }],
+          commandIds: [],
+          targetReference: orderRef,
+          orderId: hold.order_id
+        });
+      }
     }
 
     const activeDeferredClaimDates = new Set(claimRows.flatMap((row) => (

@@ -22,6 +22,16 @@ export interface AppliedCommand {
   factRefs: string[];
 }
 
+const migratedOrderRepricingCommands = new Set<CommandType>([
+  "RESCHEDULE_STAY",
+  "EXTEND_STAY",
+  "SHORTEN_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "REFRESH_MEMBER_COVERAGE",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+]);
+
 function rethrowTokenSecretConflict(error: unknown): never {
   const databaseError = error as { code?: unknown; constraint?: unknown };
   if (databaseError.code === "23505" && databaseError.constraint === "api_tokens_secret_hash_key") {
@@ -144,6 +154,22 @@ async function roomDatesForTimeline(trx: Transaction<Database>, propertyId: stri
   const unitIds = [...new Set(timeline.map((item) => item.inventoryUnitId))];
   const units = new Map((await Promise.all(unitIds.map((unitId) => loadInventoryUnit(trx, propertyId, unitId)))).map((unit) => [unit.id, unit]));
   return timeline.map((item) => ({ roomId: units.get(item.inventoryUnitId)!.roomId, serviceDate: item.serviceDate }));
+}
+
+async function assertNoActiveMigrationOverdueHold(trx: Transaction<Database>, orderId: string): Promise<void> {
+  const activeHold = await trx.selectFrom("migration_overdue_inventory_holds as hold")
+    .leftJoin("migration_overdue_inventory_hold_releases as release", "release.hold_id", "hold.id")
+    .select("hold.id")
+    .where("hold.order_id", "=", orderId)
+    .where("release.id", "is", null)
+    .executeTakeFirst();
+  if (activeHold) {
+    throw new DomainError(
+      "INVALID_ORDER_STATE",
+      "请先确认历史逾期在住的真实离店日和续住金额",
+      409
+    );
+  }
 }
 
 export async function lockCommandResources(trx: Transaction<Database>, commandType: CommandType, rawInput: unknown): Promise<void> {
@@ -278,10 +304,53 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     return;
   }
 
+  if (commandType === "RESOLVE_MIGRATED_OVERDUE_STAY") {
+    const orderId = requireString(input, "orderId");
+    const holdId = requireString(input, "holdId");
+    const newDepartureDate = requireString(input, "newDepartureDate");
+    parseLocalDate(newDepartureDate);
+    const hold = await trx.selectFrom("migration_overdue_inventory_holds")
+      .selectAll()
+      .where("id", "=", holdId)
+      .where("property_id", "=", propertyId)
+      .executeTakeFirst();
+    if (!hold) throw new DomainError("NOT_FOUND", "Migrated overdue inventory hold not found", 404);
+    if (hold.order_id !== orderId) {
+      throw new DomainError("RESOURCE_SCOPE_DENIED", "Migrated overdue inventory hold belongs to another order", 403);
+    }
+    const dates = enumerateServiceDates(hold.starts_on, newDepartureDate);
+    await lockRoomDays(trx, dates.map((serviceDate) => ({ roomId: hold.room_id, serviceDate })));
+    await trx.selectFrom("migration_overdue_inventory_holds")
+      .select("id")
+      .where("id", "=", hold.id)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    await trx.selectFrom("migration_order_sources")
+      .select("id")
+      .where("id", "=", hold.source_id)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    await lockOrder(trx, orderId);
+    const release = await trx.selectFrom("migration_overdue_inventory_hold_releases")
+      .select("id")
+      .where("hold_id", "=", hold.id)
+      .executeTakeFirst();
+    if (release) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Migrated overdue inventory hold has already been resolved", 409);
+    const order = await trx.selectFrom("orders")
+      .select(["id", "property_id", "migration_source_id"])
+      .where("id", "=", orderId)
+      .executeTakeFirstOrThrow();
+    if (order.property_id !== propertyId || order.migration_source_id !== hold.source_id) {
+      throw new DomainError("RESOURCE_SCOPE_DENIED", "Migrated overdue inventory hold does not match the order source", 403);
+    }
+    return;
+  }
+
   const orderId = requireString(input, "orderId");
   await lockOrder(trx, orderId);
   const context = await loadOrderContext(trx, orderId);
   if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
+  if (commandType === "CHECK_OUT") await assertNoActiveMigrationOverdueHold(trx, orderId);
   if (context.order.member_id) {
     await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${context.order.member_id}`}, 0::bigint))`.execute(trx);
     await lockMemberEntitlementLots(trx, propertyId, context.order.member_id);
@@ -913,6 +982,143 @@ export async function applyCommand(trx: Transaction<Database>, options: {
 
   const orderId = requireString(effect, "orderId");
   const context = await loadOrderContext(trx, orderId);
+  const migrationSourceId = (context.order as typeof context.order & { migration_source_id?: string | null }).migration_source_id ?? null;
+  if (migrationSourceId && migratedOrderRepricingCommands.has(options.commandType)) {
+    throw new DomainError("VALIDATION_ERROR", "历史实价订单需使用迁移更正流程", 409);
+  }
+  if (options.commandType === "CHECK_OUT") await assertNoActiveMigrationOverdueHold(trx, orderId);
+
+  if (options.commandType === "RESOLVE_MIGRATED_OVERDUE_STAY") {
+    if (requireString(effect, "operation") !== "RESOLVE_MIGRATED_OVERDUE_STAY") {
+      throw new DomainError("INTERNAL_ERROR", "Migrated overdue resolution effect has an invalid operation", 500);
+    }
+    const holdId = requireString(effect, "holdId");
+    const sourceId = requireString(effect, "sourceId");
+    const newDepartureDate = requireString(effect, "newDepartureDate");
+    const historicalActualAmountMinor = effect.historicalActualAmountMinor;
+    const postCutoverIncrementAmountMinor = effect.postCutoverIncrementAmountMinor;
+    const newContractAmountMinor = effect.newContractAmountMinor;
+    if (!Number.isSafeInteger(historicalActualAmountMinor)
+      || !Number.isSafeInteger(postCutoverIncrementAmountMinor)
+      || !Number.isSafeInteger(newContractAmountMinor)) {
+      throw new DomainError("INTERNAL_ERROR", "Migrated overdue resolution effect has invalid amounts", 500);
+    }
+    const historicalAmount = historicalActualAmountMinor as number;
+    const incrementAmount = postCutoverIncrementAmountMinor as number;
+    const contractAmount = newContractAmountMinor as number;
+    const hold = await trx.selectFrom("migration_overdue_inventory_holds as hold")
+      .leftJoin("migration_overdue_inventory_hold_releases as release", "release.hold_id", "hold.id")
+      .selectAll("hold")
+      .where("hold.id", "=", holdId)
+      .where("hold.order_id", "=", orderId)
+      .where("hold.source_id", "=", sourceId)
+      .where("release.id", "is", null)
+      .executeTakeFirst();
+    if (!hold || migrationSourceId !== sourceId) {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Migrated overdue inventory hold is no longer active", 409);
+    }
+    const priorRevision = await trx.selectFrom("pricing_revisions")
+      .selectAll()
+      .where("id", "=", context.revision.id)
+      .executeTakeFirstOrThrow();
+    if (priorRevision.pricing_origin !== "MIGRATED_ACTUAL"
+      || priorRevision.current_contract_amount_minor !== historicalAmount
+      || contractAmount !== historicalAmount + incrementAmount) {
+      throw new DomainError("INTERNAL_ERROR", "Migrated overdue resolution no longer matches the historical pricing source", 500);
+    }
+    const amendmentId = await appendAmendment(trx, {
+      orderId,
+      sequence: context.order.version + 1,
+      amendmentType: "EXTEND_STAY",
+      reasonCode: options.reason.code,
+      reasonNote: options.reason.note,
+      priorVersion: context.order.version,
+      payload: effect,
+      commandId: options.commandId
+    });
+    const segmentId = newId("segment");
+    await trx.insertInto("stay_segments").values({
+      id: segmentId,
+      stay_id: context.stay.id,
+      sequence: context.currentSegment.sequence + 1,
+      inventory_unit_id: hold.inventory_unit_id,
+      arrival_date: context.currentSegment.arrivalDate,
+      departure_date: newDepartureDate,
+      segment_type: "EXTEND_STAY",
+      supersedes_segment_id: context.currentSegment.id,
+      amendment_id: amendmentId
+    }).execute();
+    const revisionId = newId("revision");
+    await trx.insertInto("pricing_revisions").values({
+      id: revisionId,
+      order_id: orderId,
+      revision_no: priorRevision.revision_no + 1,
+      amendment_id: amendmentId,
+      policy_version_id: context.order.pricing_policy_version_id,
+      arrival_date: context.order.arrival_date,
+      departure_date: newDepartureDate,
+      coverage_set: JSON.stringify(priorRevision.coverage_set),
+      cash_lines: JSON.stringify([{
+        lineKind: "MIGRATED_ACTUAL_PLUS_POST_CUTOVER",
+        historicalActualAmountMinor: historicalAmount,
+        postCutoverIncrementAmountMinor: incrementAmount,
+        newContractAmountMinor: contractAmount,
+        currency: priorRevision.currency
+      }]),
+      policy_base_amount_minor: null,
+      pricing_basis: priorRevision.pricing_basis,
+      pricing_origin: "MIGRATED_ACTUAL_PLUS_POST_CUTOVER",
+      manual_adjustment_minor: 0,
+      current_contract_amount_minor: contractAmount,
+      currency: priorRevision.currency
+    }).execute();
+    const holdReleaseId = newId("fact");
+    await trx.insertInto("migration_overdue_inventory_hold_releases").values({
+      id: holdReleaseId,
+      hold_id: hold.id,
+      source_id: sourceId,
+      order_id: orderId,
+      command_id: options.commandId,
+      extension_segment_id: segmentId,
+      pricing_revision_id: revisionId,
+      new_departure_date: newDepartureDate
+    }).execute();
+    const dates = enumerateServiceDates(hold.starts_on, newDepartureDate);
+    const unit = await loadInventoryUnit(trx, propertyId, hold.inventory_unit_id);
+    const claimIds = await createInventoryClaims(trx, {
+      propertyId,
+      unit,
+      dates,
+      sourceType: "ORDER_SEGMENT",
+      sourceId: segmentId,
+      excludeSourceIds: [...context.segmentIds, segmentId]
+    });
+    if (claimIds.length !== dates.length) {
+      throw new DomainError("INTERNAL_ERROR", "Migrated overdue resolution did not create the complete inventory interval", 500);
+    }
+    await trx.updateTable("orders").set({
+      departure_date: newDepartureDate,
+      current_revision_id: revisionId,
+      version: context.order.version + 1,
+      updated_at: new Date()
+    }).where("id", "=", orderId).executeTakeFirstOrThrow();
+    return {
+      persistedResult: {
+        orderId,
+        amendmentId,
+        staySegmentId: segmentId,
+        pricingRevisionId: revisionId,
+        holdId,
+        holdReleaseId,
+        historicalActualAmountMinor: historicalAmount,
+        postCutoverIncrementAmountMinor: incrementAmount,
+        newContractAmountMinor: contractAmount,
+        newDepartureDate
+      },
+      resourceRefs: [orderId, context.stay.id, amendmentId, segmentId, revisionId, holdId, ...claimIds],
+      factRefs: [holdReleaseId]
+    };
+  }
 
   if (options.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
     if (requireString(effect, "operation") !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
@@ -1770,7 +1976,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     let coverageRefs = { coverageIds: [] as string[], factIds: [] as string[] };
     let statusPricingRevisionId: string | undefined;
     let cleaningTaskId: string | undefined;
-    if (options.commandType === "CANCEL_ORDER" || options.commandType === "MARK_NO_SHOW" || options.commandType === "REVOKE_CHECK_IN") {
+    if (!migrationSourceId
+      && (options.commandType === "CANCEL_ORDER" || options.commandType === "MARK_NO_SHOW" || options.commandType === "REVOKE_CHECK_IN")) {
       const prior = await trx.selectFrom("pricing_revisions").selectAll().where("id", "=", context.revision.id).executeTakeFirstOrThrow();
       const pricingRevision = nestedObject(effect, "pricingRevision");
       const pricingBasis = requireString(pricingRevision, "pricingBasis");

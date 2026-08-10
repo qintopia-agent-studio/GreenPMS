@@ -16,6 +16,7 @@ import {
   arrangementChangeLabel,
   collectionAmountMinorToYuanInput,
   collectionAmountYuanInputToMinor,
+  nonNegativeYuanInputToMinor,
   occupantSnapshotEntries,
   OrderAmountStrip,
   OrderLifecycleSections,
@@ -442,6 +443,7 @@ describe("operator-facing order lifecycle presentation", () => {
       coverage_set: [],
       cash_lines: [],
       policy_base_amount_minor: 69_600,
+      pricing_origin: "STANDARD" as const,
       pricing_basis: "CHANNEL_CONTRACT" as const,
       manual_adjustment_minor: 0,
       current_contract_amount_minor: 81_600,
@@ -626,6 +628,16 @@ describe("lodging collection amount input", () => {
     expect(collectionAmountMinorToYuanInput(0)).toBe("");
   });
 
+});
+
+describe("historical overdue-stay increment input", () => {
+  it("allows zero and exact yuan-jiao-fen amounts only", () => {
+    expect(nonNegativeYuanInputToMinor("0")).toBe(0);
+    expect(nonNegativeYuanInputToMinor("1280.50")).toBe(128_050);
+    expect(nonNegativeYuanInputToMinor("1280.5")).toBe(128_050);
+    expect(nonNegativeYuanInputToMinor("-1")).toBeUndefined();
+    expect(nonNegativeYuanInputToMinor("1.001")).toBeUndefined();
+  });
 });
 
 describe("order stay date command routing", () => {
@@ -1190,6 +1202,45 @@ describe("shared Web command recovery persistence", () => {
       input: { propertyId: "property_qintopia" }
     });
     expect(JSON.stringify(recovery)).not.toMatch(/room_internal_target|2026-07-29|20000/);
+  });
+
+  it("keeps the historical overdue-stay recovery in its dedicated operator flow", () => {
+    const request = {
+      commandType: "RESOLVE_MIGRATED_OVERDUE_STAY",
+      title: "确认历史在住处理",
+      description: "核对真实离店日和切换后续住金额",
+      presentation: "MIGRATED_OVERDUE_STAY",
+      input: {
+        propertyId: "property_qintopia",
+        orderId: "order_zhou_huiling",
+        holdId: "hold_zhou_huiling",
+        newDepartureDate: "2026-08-15",
+        postCutoverIncrementAmountMinor: 12345
+      },
+      initialReason: { code: "RESOLVE_MIGRATED_OVERDUE_STAY", note: "人工确认续住" }
+    } satisfies CommandRequest;
+    const recovery = transitionPersistedCommandRecovery(undefined, {
+      subjectId: context.subjectId,
+      scopeId: context.scopeId,
+      request
+    }, {
+      ...confirming,
+      confirmationKey: "web-confirm-overdue-stay",
+      effectHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }).recovery!;
+
+    expect(recovery).toMatchObject({
+      commandType: "RESOLVE_MIGRATED_OVERDUE_STAY",
+      presentation: "MIGRATED_OVERDUE_STAY"
+    });
+    expect(recoveryCommandRequest(recovery)).toMatchObject({
+      commandType: "RESOLVE_MIGRATED_OVERDUE_STAY",
+      presentation: "MIGRATED_OVERDUE_STAY",
+      title: "恢复历史在住处理结果",
+      recoveryEffectHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      input: { propertyId: "property_qintopia" }
+    });
+    expect(JSON.stringify(recovery)).not.toMatch(/hold_zhou_huiling|12345|人工确认续住/);
   });
 
   it("retains lifecycle recovery identity and acknowledgement without persisting the operator reason", () => {

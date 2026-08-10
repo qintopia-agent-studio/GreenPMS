@@ -116,7 +116,7 @@ esac
       FAKE_MIGRATION_FAILURE: options.failMigration ? "1" : "",
       FAKE_READINESS_FAILURE: options.failReadiness ? "1" : "",
       FAKE_BASELINE_MIGRATION_COUNT: options.baselineMigrationCount ?? "26",
-      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? "35",
+      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? String(currentMigrationNames.length),
       FAKE_STAGE10_FUNCTION_COUNT: options.stage10FunctionCount ?? "3",
       FAKE_STAGE10_TRIGGER_COUNT: options.stage10TriggerCount ?? "2",
       FAKE_STAGE10_IMMEDIATE_TRIGGER_COUNT: options.stage10ImmediateTriggerCount ?? "3",
@@ -152,7 +152,7 @@ describe("restore script contract", () => {
     }
   });
 
-  it("creates a new target, upgrades a stage 9 backup, and validates the current stage 13 schema", async () => {
+  it("creates a new target, upgrades a stage 9 backup, and validates the current schema", async () => {
     const fixture = await fakeDockerEnvironment(false);
     try {
       await expect(execFileAsync("bash", [restoreScript, fixture.backup, "new_restore_target"], { env: fixture.env }))
@@ -190,6 +190,8 @@ describe("restore script contract", () => {
       expect(calls).toContain("033_stay_collection_membership_conversion.sql");
       expect(calls).toContain("034_stay_conversion_reversal_bridge_guard.sql");
       expect(calls).toContain("035_stage13_conversion_execution_state_guards.sql");
+      expect(calls).toContain("036_qintopia_prelaunch_room_catalog_corrections.sql");
+      expect(calls).toContain("037_historical_order_import.sql");
       expect(calls).toContain("npm run db:ready");
       expect(calls).toContain("pricing_revisions_stage10_validate");
       expect(calls).toContain("amendments_stage10_reject_checkout_bypass");

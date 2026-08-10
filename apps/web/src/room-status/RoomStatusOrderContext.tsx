@@ -16,6 +16,7 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   RESCHEDULE_STAY: "调整预订日期",
   SHORTEN_STAY: "缩短住宿",
   EXTEND_STAY: "延长住宿",
+  RESOLVE_MIGRATED_OVERDUE_STAY: "确认离店日并续住",
   MOVE_UNIT: "换房",
   REPRICE_ORDER: "调整订单金额",
   CANCEL_ORDER: "取消订单",
@@ -35,6 +36,7 @@ const channelLabels = {
 
 const arrangementChangeLabels: Record<OrderViewDto["arrangementHistory"][number]["type"], string> = {
   INITIAL_BOOKING: "初始预订",
+  MIGRATED_SNAPSHOT: "历史导入快照",
   RESCHEDULE: "改期",
   EXTENSION: "续住",
   SHORTENING: "缩短住宿",
@@ -278,10 +280,13 @@ export function RoomStatusOrderContext({
           <dt>日期</dt><dd>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</dd>
           <dt>夜数</dt><dd>{nightsBetween(view.effectiveArrangement.arrivalDate, view.effectiveArrangement.departureDate)} 夜</dd>
           <dt>来源</dt><dd>{source}</dd>
-          {!showPerOrderFunds && currentPricingRevision ? <>
-            <dt>政策基础金额</dt><dd>{formatMinor(currentPricingRevision.policy_base_amount_minor, currentPricingRevision.currency)}</dd>
+          {currentPricingRevision?.pricing_origin !== undefined && currentPricingRevision.pricing_origin !== "STANDARD" ? <>
+            <dt>计价来源</dt><dd>{currentPricingRevision.pricing_origin === "MIGRATED_ACTUAL" ? "历史实价（无历史政策基准）" : "历史实价 + 切换后续住金额"}</dd>
+            <dt>订单金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
+          </> : !showPerOrderFunds && currentPricingRevision ? <>
+            <dt>政策基础金额</dt><dd>{formatMinor(currentPricingRevision.policy_base_amount_minor!, currentPricingRevision.currency)}</dd>
             <dt>本单渠道应结金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
-            <dt>与政策基础金额差额</dt><dd>{formatMinor(currentPricingRevision.difference_from_policy_minor, currentPricingRevision.currency)}</dd>
+            <dt>与政策基础金额差额</dt><dd>{formatMinor(currentPricingRevision.difference_from_policy_minor!, currentPricingRevision.currency)}</dd>
             <dt>渠道价格差异说明</dt><dd>{currentPricingRevision.reason.note.trim() || "无"}</dd>
           </> : <>
             <dt>住宿金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd>
@@ -363,10 +368,10 @@ export function RoomStatusOrderContext({
               <span>调整后：{arrangementSummary(item.after, unitMap)}</span>
               <span>说明：{item.reason.note || (item.type === "INITIAL_BOOKING" ? "按原始预订建立" : "未填写说明")}</span>
               {!showPerOrderFunds ? <>
-                <span>政策基础金额：{formatMoney(item.pricingSummary.policyBaseAmount)}</span>
-                <span>本单渠道应结金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
+                <span>{item.pricingSummary.policyBaseAmount ? `政策基础金额：${formatMoney(item.pricingSummary.policyBaseAmount)}` : "历史实价（无历史政策基准）"}</span>
+                <span>本单渠道应结金额：{formatMoney(item.pricingSummary.currentContractAmount)}{item.pricingSummary.differenceFromPolicy ? ` · 与政策基础金额差额 ${formatMoney(item.pricingSummary.differenceFromPolicy)}` : ""}</span>
               </> : <>
-                <span>住宿金额：{formatMoney(item.pricingSummary.currentContractAmount)} · 与政策基础金额差额 {formatMoney(item.pricingSummary.differenceFromPolicy)}</span>
+                <span>住宿金额：{formatMoney(item.pricingSummary.currentContractAmount)}{item.pricingSummary.differenceFromPolicy ? ` · 与政策基础金额差额 ${formatMoney(item.pricingSummary.differenceFromPolicy)}` : " · 历史实价（无历史政策基准）"}</span>
                 <span>变更时已记录净收款：{formatMoney(item.fundsSummary.netRecordedCollection)} · 差额 {formatMoney(difference)}</span>
                 {item.fundsSummary.refundReferenceAmount.minorUnits > 0 ? <span>退款参考 {formatMoney(item.fundsSummary.refundReferenceAmount)} · 目前尚未登记退款</span> : null}
               </>}

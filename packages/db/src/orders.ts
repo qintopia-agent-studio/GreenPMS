@@ -72,6 +72,11 @@ export function pricingReasonFromAmendment(amendment: {
   protocolVersion?: HistoricalAmendmentProtocol;
 } | undefined): { code: string; note: string } {
   if (!amendment) return { code: "HISTORICAL", note: "" };
+  if (amendment.amendment_type === "MIGRATED_OPERATIONAL_SNAPSHOT") {
+    return { code: amendment.reason_code, note: amendment.reason_note };
+  }
+  const migratedResolution = recordValue(amendment.payload)?.operation === "RESOLVE_MIGRATED_OVERDUE_STAY";
+  if (migratedResolution) return { code: amendment.reason_code, note: amendment.reason_note };
   if (["CREATE_ORDER", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"].includes(amendment.amendment_type)) {
     const payload = recordValue(amendment.payload);
     const decision = recordValue(payload?.pricingDecision);
@@ -151,14 +156,20 @@ export async function loadActiveStayTimeline(db: DbExecutor, context: OrderConte
   }
   return expectedDates.map((serviceDate) => {
     const matches = byDate.get(serviceDate) ?? [];
-    if (matches.length !== 1) {
-      throw new DomainError("INTERNAL_ERROR", `Stay inventory timeline is invalid on ${serviceDate}`, 500, false, {
-        orderId: context.order.id,
-        serviceDate,
-        activeClaimIds: matches.map((claim) => claim.id)
-      });
+    if (matches.length === 1) {
+      return { serviceDate, inventoryUnitId: matches[0]!.inventory_unit_id };
     }
-    return { serviceDate, inventoryUnitId: matches[0]!.inventory_unit_id };
+    if (matches.length > 1 && context.order.migration_source_id) {
+      const primaryMatches = matches.filter((claim) => claim.inventory_unit_id === context.currentSegment.inventoryUnitId);
+      if (primaryMatches.length === 1) {
+        return { serviceDate, inventoryUnitId: primaryMatches[0]!.inventory_unit_id };
+      }
+    }
+    throw new DomainError("INTERNAL_ERROR", `Stay inventory timeline is invalid on ${serviceDate}`, 500, false, {
+      orderId: context.order.id,
+      serviceDate,
+      activeClaimIds: matches.map((claim) => claim.id)
+    });
   });
 }
 
@@ -180,7 +191,9 @@ export function orderAllowedActions(
   hasFutureMove = false,
   bookingChannelCode: string | null = null,
   hasTransferableCollection = false,
-  hasStayMembershipTransfer = false
+  hasStayMembershipTransfer = false,
+  migratedOrder = false,
+  hasActiveMigrationOverdueHold = false
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
@@ -190,6 +203,7 @@ export function orderAllowedActions(
     RESCHEDULE_STAY: ["RESERVED"],
     SHORTEN_STAY: ["CHECKED_IN"],
     EXTEND_STAY: ["CHECKED_IN"],
+    RESOLVE_MIGRATED_OVERDUE_STAY: ["CHECKED_IN"],
     MOVE_UNIT: ["RESERVED", "CHECKED_IN"],
     REPRICE_ORDER: ["RESERVED", "CHECKED_IN"],
     CANCEL_ORDER: ["RESERVED"],
@@ -211,6 +225,26 @@ export function orderAllowedActions(
         : bookingChannelCode !== "WECOM"
           ? "只有企业微信来源的普通住宿订单可以升级会员"
           : null
+      : null;
+    const migrationPricingDisabledReason = migratedOrder && [
+      "RESCHEDULE_STAY",
+      "EXTEND_STAY",
+      "SHORTEN_STAY",
+      "MOVE_UNIT",
+      "REPRICE_ORDER",
+      "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    ].includes(code)
+      ? "历史实价订单需使用迁移更正流程"
+      : null;
+    const migrationResolveDisabledReason = code === "RESOLVE_MIGRATED_OVERDUE_STAY"
+      ? !migratedOrder
+        ? "仅历史导入的逾期在住订单可使用此操作"
+        : !hasActiveMigrationOverdueHold
+          ? "该订单没有待处理的逾期在住占房锁"
+          : null
+      : null;
+    const migrationOverdueCheckoutDisabledReason = code === "CHECK_OUT" && hasActiveMigrationOverdueHold
+      ? "请先确认历史逾期在住的真实离店日和续住金额"
       : null;
     if (fulfillmentDates && statusAllows) {
       if (code === "CHECK_IN") {
@@ -253,6 +287,9 @@ export function orderAllowedActions(
       && fulfillmentDisabledReason === null
       && externalFundsDisabledReason === null
       && stayConversionChannelDisabledReason === null
+      && migrationPricingDisabledReason === null
+      && migrationResolveDisabledReason === null
+      && migrationOverdueCheckoutDisabledReason === null
       && !convertedFundsDisabled
       && (code !== "RECORD_REFUND" || hasRefundableCollection)
       && (code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" || hasTransferableCollection);
@@ -261,7 +298,9 @@ export function orderAllowedActions(
       enabled,
       disabledReason: enabled
         ? null
-        : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? stayConversionChannelDisabledReason ?? (convertedFundsDisabled
+        : migrationPricingDisabledReason ?? migrationResolveDisabledReason ?? migrationOverdueCheckoutDisabledReason
+          ?? fulfillmentDisabledReason ?? externalFundsDisabledReason ?? stayConversionChannelDisabledReason
+          ?? (convertedFundsDisabled
           ? "已完成升级会员，本订单不再追加住宿收退款；后续会员收款请在会员订单中处理"
           : code === "RECORD_REFUND" && statusAllows
           ? "NO_REFUNDABLE_COLLECTION"
@@ -411,6 +450,7 @@ interface LifecycleOrderRow {
   departure_date: string;
   current_revision_id: string | null;
   version: number;
+  migration_source_id?: string | null;
 }
 
 interface LifecycleStayRow {
@@ -445,9 +485,10 @@ interface LifecycleRevisionRow {
   amendment_id: string;
   arrival_date: string;
   departure_date: string;
-  policy_base_amount_minor: number;
+  policy_base_amount_minor: number | null;
   current_contract_amount_minor: number;
   currency: string;
+  pricing_origin?: "STANDARD" | "MIGRATED_ACTUAL" | "MIGRATED_ACTUAL_PLUS_POST_CUTOVER";
 }
 
 interface LifecycleCollectionFactRow {
@@ -459,6 +500,7 @@ interface LifecycleCollectionFactRow {
 
 const orderLifecycleAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
+  "MIGRATED_OPERATIONAL_SNAPSHOT",
   "CORRECT_ORDER_OCCUPANT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
@@ -476,6 +518,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
 
 const pricingRevisionAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
+  "MIGRATED_OPERATIONAL_SNAPSHOT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
@@ -490,6 +533,7 @@ const pricingRevisionAmendmentTypes = new Set<string>([
 
 const requiredPricingRevisionAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
+  "MIGRATED_OPERATIONAL_SNAPSHOT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
@@ -504,6 +548,7 @@ const requiredPricingRevisionAmendmentTypes = new Set<string>([
 
 const staySegmentAmendmentTypes = new Set<string>([
   "CREATE_ORDER",
+  "MIGRATED_OPERATIONAL_SNAPSHOT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
@@ -635,11 +680,34 @@ function arrangementFromTimeline(timeline: readonly StayTimelineItem[]): OrderAr
   return arrangement(intervals);
 }
 
+function migratedPrimaryTimeline(
+  timeline: readonly StayTimelineItem[],
+  primaryInventoryUnitId: string,
+  amendmentId: string
+): StayTimelineItem[] {
+  const byDate = new Map<string, StayTimelineItem[]>();
+  for (const item of timeline) {
+    const rows = byDate.get(item.serviceDate) ?? [];
+    rows.push(item);
+    byDate.set(item.serviceDate, rows);
+  }
+  return [...byDate.entries()].map(([serviceDate, rows]) => {
+    if (rows.length === 1) return rows[0]!;
+    const primaryRows = rows.filter((row) => row.inventoryUnitId === primaryInventoryUnitId);
+    if (primaryRows.length !== 1) {
+      lifecycleFailure("迁移订单的同期多房快照无法确定唯一主展示房源", { amendmentId, serviceDate });
+    }
+    return primaryRows[0]!;
+  });
+}
+
 function payloadTimeline(amendment: LifecycleAmendmentRow): StayTimelineItem[] {
   const payload = recordValue(amendment.payload);
   if (!payload) lifecycleFailure("订单住宿变更的 typed payload 损坏", { amendmentId: amendment.id });
   let value: unknown;
-  if (amendment.amendment_type === "MOVE_UNIT") {
+  if (amendment.amendment_type === "MIGRATED_OPERATIONAL_SNAPSHOT") {
+    value = payload.stayTimeline;
+  } else if (amendment.amendment_type === "MOVE_UNIT") {
     if (payload.after === undefined) {
       if (amendment.protocolVersion !== "PRE_STAGE_11") {
         lifecycleFailure("订单换房变更缺少当前协议时间线", { amendmentId: amendment.id });
@@ -730,6 +798,7 @@ function lifecycleActor(amendment: LifecycleAmendmentRow): { subjectId: string; 
 function arrangementChangeType(amendment: LifecycleAmendmentRow): OrderArrangementHistoryItemDto["type"] {
   const amendmentType = amendment.amendment_type;
   if (amendmentType === "CREATE_ORDER") return "INITIAL_BOOKING";
+  if (amendmentType === "MIGRATED_OPERATIONAL_SNAPSHOT") return "MIGRATED_SNAPSHOT";
   if (amendmentType === "RESCHEDULE_STAY") return "RESCHEDULE";
   if (amendmentType === "EXTEND_STAY") return "EXTENSION";
   if (amendmentType === "SHORTEN_STAY") {
@@ -784,6 +853,7 @@ function validateLifecycleStatus(
   }
 
   let projectedStatus: LifecycleOrderStatus | null = null;
+  let migratedSnapshotStatus: "RESERVED" | "CHECKED_IN" | null = null;
   for (const [index, amendment] of amendments.entries()) {
     const amendmentType = amendment.amendment_type;
     if (!orderLifecycleAmendmentTypes.has(amendmentType)) {
@@ -793,13 +863,22 @@ function validateLifecycleStatus(
       });
     }
     if (index === 0) {
+      if (amendmentType === "MIGRATED_OPERATIONAL_SNAPSHOT") {
+        const payload = recordValue(amendment.payload);
+        if (payload?.observedStatus !== "RESERVED" && payload?.observedStatus !== "CHECKED_IN") {
+          lifecycleFailure("历史导入订单缺少有效的切换状态", { amendmentId: amendment.id });
+        }
+        projectedStatus = payload.observedStatus;
+        migratedSnapshotStatus = payload.observedStatus;
+        continue;
+      }
       if (amendmentType !== "CREATE_ORDER") {
         lifecycleFailure("订单住宿生命周期必须从创建订单开始", { amendmentId: amendment.id, amendmentType });
       }
       projectedStatus = "RESERVED";
       continue;
     }
-    if (amendmentType === "CREATE_ORDER") {
+    if (amendmentType === "CREATE_ORDER" || amendmentType === "MIGRATED_OPERATIONAL_SNAPSHOT") {
       lifecycleFailure("订单住宿生命周期重复创建订单", { amendmentId: amendment.id });
     }
 
@@ -847,7 +926,13 @@ function validateLifecycleStatus(
       projectedStatus
     });
   }
-  const validFulfillment = finalStatus === "RESERVED" || finalStatus === "CANCELLED" || finalStatus === "NO_SHOW"
+  const validFulfillment = migratedSnapshotStatus === "CHECKED_IN" && finalStatus === "CHECKED_IN"
+    ? !fulfillment.checkIn && !fulfillment.checkOut && !fulfillment.checkInRevocation
+    : migratedSnapshotStatus === "CHECKED_IN" && finalStatus === "CHECKED_OUT"
+      ? !fulfillment.checkIn && Boolean(fulfillment.checkOut) && !fulfillment.checkInRevocation
+    : migratedSnapshotStatus === "CHECKED_IN" && finalStatus === "CHECK_IN_REVOKED"
+      ? !fulfillment.checkIn && !fulfillment.checkOut && Boolean(fulfillment.checkInRevocation)
+    : finalStatus === "RESERVED" || finalStatus === "CANCELLED" || finalStatus === "NO_SHOW"
     ? !fulfillment.checkIn && !fulfillment.checkOut && !fulfillment.checkInRevocation
     : finalStatus === "CHECKED_IN"
       ? Boolean(fulfillment.checkIn) && !fulfillment.checkOut && !fulfillment.checkInRevocation
@@ -869,6 +954,7 @@ export function projectOrderLifecycle(input: {
   activeTimeline: readonly StayTimelineItem[];
 }): OrderLifecycleProjection {
   lifecycleDate(input.businessDate, "营业日期");
+  const migratedOrder = Boolean(input.order.migration_source_id);
   if (input.amendments.length !== input.order.version) lifecycleFailure("订单版本与不可变变更记录数量不一致");
   const amendmentIds = new Set<string>();
   let priorAmendmentCreatedAt: string | undefined;
@@ -915,12 +1001,17 @@ export function projectOrderLifecycle(input: {
         amendmentId: revision.amendment_id
       });
     }
-    if (!Number.isSafeInteger(revision.policy_base_amount_minor)
+    const migratedOrigin = revision.pricing_origin === "MIGRATED_ACTUAL"
+      || revision.pricing_origin === "MIGRATED_ACTUAL_PLUS_POST_CUTOVER";
+    if ((!migratedOrigin && !Number.isSafeInteger(revision.policy_base_amount_minor))
+      || (migratedOrigin && revision.policy_base_amount_minor !== null)
       || !Number.isSafeInteger(revision.current_contract_amount_minor)
       || ((amendment.amendment_type === "CANCEL_ORDER"
         || amendment.amendment_type === "MARK_NO_SHOW"
         || amendment.amendment_type === "REVOKE_CHECK_IN")
         && (revision.policy_base_amount_minor !== 0 || revision.current_contract_amount_minor !== 0))
+      || (migratedOrigin && !migratedOrder)
+      || (migratedOrder && !migratedOrigin)
       || !revision.currency
       || (revisionCurrency !== undefined && revision.currency !== revisionCurrency)) {
       lifecycleFailure("订单计价版本金额或币种链损坏", { revisionId: revision.id });
@@ -938,7 +1029,10 @@ export function projectOrderLifecycle(input: {
   }
   for (const amendment of input.amendments) {
     const matches = input.revisions.filter((revision) => revision.amendment_id === amendment.id);
-    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type);
+    const migratedTerminalWithoutReprice = migratedOrder
+      && ["CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN"].includes(amendment.amendment_type);
+    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type)
+      && !migratedTerminalWithoutReprice;
     if (requiresRevision && matches.length !== 1) {
       lifecycleFailure("订单计价变更没有唯一计价版本", {
         amendmentId: amendment.id,
@@ -994,21 +1088,36 @@ export function projectOrderLifecycle(input: {
     let next: OrderArrangementDto;
     let before: OrderArrangementDto | null;
     if (index === 0) {
-      if (segment.segment_type !== "INITIAL" || segment.supersedes_segment_id !== null || amendment.amendment_type !== "CREATE_ORDER") {
+      const standardInitial = segment.segment_type === "INITIAL" && amendment.amendment_type === "CREATE_ORDER";
+      const migratedInitial = migratedOrder
+        && segment.segment_type === "MIGRATED_INITIAL"
+        && amendment.amendment_type === "MIGRATED_OPERATIONAL_SNAPSHOT";
+      if ((!standardInitial && !migratedInitial) || segment.supersedes_segment_id !== null) {
         lifecycleFailure("订单原始预订安排版本损坏", { segmentId: segment.id });
       }
       const payload = recordValue(amendment.payload);
-      if (!payload
-        || payload.inventoryUnitId !== segment.inventory_unit_id
-        || payload.arrivalDate !== segment.arrival_date
-        || payload.departureDate !== segment.departure_date) {
-        lifecycleFailure("订单原始预订安排与 CREATE_ORDER 事实不一致", { segmentId: segment.id });
+      if (!payload) {
+        lifecycleFailure("订单原始预订安排与首个事实不一致", { segmentId: segment.id });
       }
-      next = arrangement([{
-        inventoryUnitId: segment.inventory_unit_id,
-        arrivalDate: segment.arrival_date,
-        departureDate: segment.departure_date
-      }]);
+      next = migratedInitial
+        ? arrangementFromTimeline(migratedPrimaryTimeline(
+            payloadTimeline(amendment),
+            segment.inventory_unit_id,
+            amendment.id
+          ))
+        : arrangement([{
+            inventoryUnitId: segment.inventory_unit_id,
+            arrivalDate: segment.arrival_date,
+            departureDate: segment.departure_date
+          }]);
+      if (payload.inventoryUnitId !== segment.inventory_unit_id
+        || payload.arrivalDate !== segment.arrival_date
+        || payload.departureDate !== segment.departure_date
+        || next.arrivalDate !== segment.arrival_date
+        || next.departureDate !== segment.departure_date
+        || next.intervals.at(-1)?.inventoryUnitId !== segment.inventory_unit_id) {
+        lifecycleFailure("订单原始预订安排与首个事实不一致", { segmentId: segment.id });
+      }
       original = next;
       before = null;
     } else {
@@ -1030,6 +1139,10 @@ export function projectOrderLifecycle(input: {
           arrivalDate: segment.arrival_date,
           departureDate: segment.departure_date
         }, overlayType as "EXTEND_STAY" | "SHORTEN_STAY" | "MOVE");
+      const amendmentPayload = recordValue(amendment.payload);
+      const migratedOverdueResolution = migratedOrder
+        && amendment.amendment_type === "EXTEND_STAY"
+        && amendmentPayload?.operation === "RESOLVE_MIGRATED_OVERDUE_STAY";
       const trailingInterval = next.intervals.at(-1)!;
       if (segment.segment_type === "RESCHEDULE_STAY"
         && (segment.inventory_unit_id !== trailingInterval.inventoryUnitId
@@ -1037,20 +1150,53 @@ export function projectOrderLifecycle(input: {
           || segment.departure_date !== trailingInterval.departureDate)) {
         lifecycleFailure("改期住宿安排版本没有表达最终连续房源区间", { segmentId: segment.id });
       }
-      if (!timelineMatches(payloadTimeline(amendment), arrangementTimeline(next))) {
+      if (migratedOverdueResolution) {
+        const expectedKeys = [
+          "operation", "orderId", "sourceId", "holdId", "historicalActualAmountMinor",
+          "postCutoverIncrementAmountMinor", "newContractAmountMinor", "newDepartureDate"
+        ];
+        const historicalAmount = amendmentPayload?.historicalActualAmountMinor;
+        const incrementAmount = amendmentPayload?.postCutoverIncrementAmountMinor;
+        const newAmount = amendmentPayload?.newContractAmountMinor;
+        if (!amendmentPayload
+          || Object.keys(amendmentPayload).length !== expectedKeys.length
+          || expectedKeys.some((key) => !Object.hasOwn(amendmentPayload, key))
+          || amendmentPayload.orderId !== input.order.id
+          || amendmentPayload.sourceId !== input.order.migration_source_id
+          || typeof amendmentPayload.holdId !== "string"
+          || amendmentPayload.holdId.trim() === ""
+          || amendmentPayload.newDepartureDate !== segment.departure_date
+          || segment.inventory_unit_id !== priorSegment.inventory_unit_id
+          || segment.arrival_date !== priorSegment.arrival_date
+          || !Number.isSafeInteger(historicalAmount)
+          || !Number.isSafeInteger(incrementAmount)
+          || Number(incrementAmount) < 0
+          || !Number.isSafeInteger(newAmount)
+          || Number(newAmount) !== Number(historicalAmount) + Number(incrementAmount)) {
+          lifecycleFailure("历史逾期在住更正记录与来源、金额或住宿安排不一致", { amendmentId: amendment.id });
+        }
+      } else if (!timelineMatches(payloadTimeline(amendment), arrangementTimeline(next))) {
         lifecycleFailure("订单住宿安排与 typed 变更时间线不一致", { amendmentId: amendment.id });
       }
     }
     const revisionMatches = input.revisions.filter((revision) => revision.amendment_id === amendment.id);
     if (revisionMatches.length !== 1) lifecycleFailure("订单住宿变更没有唯一计价摘要", { amendmentId: amendment.id });
     const revision = revisionMatches[0]!;
+    const migratedRevision = revision.pricing_origin === "MIGRATED_ACTUAL"
+      || revision.pricing_origin === "MIGRATED_ACTUAL_PLUS_POST_CUTOVER";
     if (revision.order_id !== input.order.id
       || revision.arrival_date !== next.arrivalDate
       || revision.departure_date !== next.departureDate
-      || !Number.isSafeInteger(revision.policy_base_amount_minor)
+      || (migratedRevision ? revision.policy_base_amount_minor !== null : !Number.isSafeInteger(revision.policy_base_amount_minor))
       || !Number.isSafeInteger(revision.current_contract_amount_minor)
       || !revision.currency) {
       lifecycleFailure("订单住宿变更的计价摘要损坏", { amendmentId: amendment.id });
+    }
+    const amendmentPayload = recordValue(amendment.payload);
+    if (amendmentPayload?.operation === "RESOLVE_MIGRATED_OVERDUE_STAY"
+      && (revision.pricing_origin !== "MIGRATED_ACTUAL_PLUS_POST_CUTOVER"
+        || revision.current_contract_amount_minor !== amendmentPayload.newContractAmountMinor)) {
+      lifecycleFailure("历史逾期在住更正的计价版本与确认金额不一致", { amendmentId: amendment.id });
     }
     const recordedAt = lifecycleDateTime(amendment.created_at, "变更记录时间");
     const factsAtChange = input.facts.filter((fact) => {
@@ -1088,12 +1234,16 @@ export function projectOrderLifecycle(input: {
       actor: lifecycleActor(amendment),
       recordedAt,
       pricingSummary: {
-        policyBaseAmount: { currency: revision.currency, minorUnits: revision.policy_base_amount_minor },
+        policyBaseAmount: revision.policy_base_amount_minor === null
+          ? null
+          : { currency: revision.currency, minorUnits: revision.policy_base_amount_minor },
         currentContractAmount: { currency: revision.currency, minorUnits: revision.current_contract_amount_minor },
-        differenceFromPolicy: {
-          currency: revision.currency,
-          minorUnits: revision.current_contract_amount_minor - revision.policy_base_amount_minor
-        }
+        differenceFromPolicy: revision.policy_base_amount_minor === null
+          ? null
+          : {
+              currency: revision.currency,
+              minorUnits: revision.current_contract_amount_minor - revision.policy_base_amount_minor
+            }
       },
       fundsSummary
     });
@@ -1197,7 +1347,7 @@ function hasTransferableCollection(facts: Array<{
 
 async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel) {
   const context = await loadOrderContext(db, orderId);
-  const [localClock, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks] = await Promise.all([
+  const [localClock, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks, activeMigrationOverdueHold] = await Promise.all([
     propertyLocalClock(db, context.order.property_id),
     db.selectFrom("schema_migrations").select("applied_at")
       .where("name", "=", "028_stage11_move_unit_guards.sql").executeTakeFirst(),
@@ -1253,7 +1403,13 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       .where("task.order_id", "=", orderId)
       .orderBy("task.service_date")
       .orderBy("task.created_at")
-      .execute() : Promise.resolve([])
+      .execute() : Promise.resolve([]),
+    db.selectFrom("migration_overdue_inventory_holds as hold")
+      .leftJoin("migration_overdue_inventory_hold_releases as release", "release.hold_id", "hold.id")
+      .select(["hold.id", "hold.starts_on"])
+      .where("hold.order_id", "=", orderId)
+      .where("release.id", "is", null)
+      .executeTakeFirst()
   ]);
   const businessDate = localClock.date;
   if (!protocolEpochRow) throw new DomainError("INTERNAL_ERROR", "Stage 11 protocol epoch is unavailable", 500);
@@ -1336,7 +1492,10 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
      arrivalDate: context.order.arrival_date,
      departureDate: context.order.departure_date,
      localTime: localClock.time
-   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code, hasTransferableCollection(facts, transfers), transfers.length > 0),
+   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code, hasTransferableCollection(facts, transfers), transfers.length > 0, Boolean(context.order.migration_source_id), Boolean(activeMigrationOverdueHold)),
+    migrationOverdueHold: activeMigrationOverdueHold
+      ? { id: activeMigrationOverdueHold.id, startsOn: activeMigrationOverdueHold.starts_on }
+      : null,
     order: {
       ...context.order,
       current_contract_amount_minor: context.revision.currentContractAmountMinor,
@@ -1397,7 +1556,9 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
     })),
     pricingRevisions: revisions.map((revision) => ({
       ...revision,
-      difference_from_policy_minor: revision.current_contract_amount_minor - revision.policy_base_amount_minor,
+      difference_from_policy_minor: revision.policy_base_amount_minor === null
+        ? null
+        : revision.current_contract_amount_minor - revision.policy_base_amount_minor,
       reason: pricingReasonFromAmendment(amendmentById.get(revision.amendment_id))
     })),
     coverageSet: coverage,

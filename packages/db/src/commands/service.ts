@@ -72,6 +72,7 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "RESCHEDULE_STAY",
   "SHORTEN_STAY",
   "EXTEND_STAY",
+  "RESOLVE_MIGRATED_OVERDUE_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
   "REFRESH_MEMBER_COVERAGE",
@@ -89,6 +90,7 @@ const roomStatusVisibleCommands = new Set<CommandType>([
 const strictRecoveryEvidenceCommands = new Set<CommandType>([
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
+  "RESOLVE_MIGRATED_OVERDUE_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
   "CANCEL_ORDER",
@@ -147,10 +149,13 @@ async function bindPersistedEffectHash(
   confirmedEffect: Record<string, unknown>,
   rebuiltEffectHash: string
 ): Promise<string> {
+  const authoritativeAmendmentType = commandType === "RESOLVE_MIGRATED_OVERDUE_STAY"
+    ? "EXTEND_STAY"
+    : commandType;
   const amendments = await trx.selectFrom("amendments")
     .select(["id", "payload"])
     .where("command_id", "=", commandId)
-    .where("amendment_type", "=", commandType)
+    .where("amendment_type", "=", authoritativeAmendmentType)
     .execute();
   if (amendments.length !== 1) {
     throw new Error("Command effect does not have one authoritative amendment");
@@ -949,7 +954,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           ].includes(error.code)
             || (isTokenLifecycleCommand(commandType) && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
-            || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
+            || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "RESOLVE_MIGRATED_OVERDUE_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
             || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
             || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {

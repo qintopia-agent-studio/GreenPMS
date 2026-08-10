@@ -50,7 +50,8 @@ function orderView() {
   const original = arrangement();
   return {
     accessLevel: "WRITE",
-    allowedActions: [],
+    allowedActions: [] as Array<{ code: string; enabled: boolean; disabledReason: null }>,
+    migrationOverdueHold: null as { id: string; startsOn: string } | null,
     order: {
       id: "order_u2",
       property_id: "property_qintopia",
@@ -141,11 +142,12 @@ function orderView() {
       departure_date: "2026-07-30",
       coverage_set: [],
       cash_lines: [],
-      policy_base_amount_minor: 20_000,
+      policy_base_amount_minor: 20_000 as number | null,
+      pricing_origin: "STANDARD" as const,
       pricing_basis: "POLICY",
       manual_adjustment_minor: 0,
       current_contract_amount_minor: 20_000,
-      difference_from_policy_minor: 0,
+      difference_from_policy_minor: 0 as number | null,
       reason: { code: "CREATE_ORDER", note: "" },
       currency: "CNY",
       created_at: "2026-07-28T08:00:00.000Z"
@@ -182,9 +184,9 @@ function memberRepriceView({
     booking_channel_code: null,
     current_revision_id: "revision_2"
   });
-  input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.minorUnits = policyAmount;
+  input.arrangementHistory[0]!.pricingSummary.policyBaseAmount!.minorUnits = policyAmount;
   input.arrangementHistory[0]!.pricingSummary.currentContractAmount.minorUnits = historyAmount;
-  input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = historyAmount - policyAmount;
+  input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy!.minorUnits = historyAmount - policyAmount;
   input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = historyAmount;
   Object.assign(input.pricingRevisions[0]!, {
     policy_base_amount_minor: policyAmount,
@@ -278,6 +280,53 @@ function roundTripMoveArrangement(): OrderArrangementDto {
 }
 
 describe("parseOrderView", () => {
+  it("accepts the minimal active historical overdue hold for the dedicated resolution action", () => {
+    const input = orderView();
+    input.order.status = "CHECKED_IN";
+    input.stay.status = "IN_HOUSE";
+    input.fulfillment = {
+      ...input.fulfillment,
+      state: "IN_HOUSE",
+      checkIn: fulfillmentFact("CHECK_IN", input.order.arrival_date, "2026-07-28T08:00:00.000Z")
+    };
+    input.migrationOverdueHold = { id: "hold_migrated_overdue_fixture", startsOn: "2026-08-09" };
+    input.allowedActions = [{
+      code: "RESOLVE_MIGRATED_OVERDUE_STAY",
+      enabled: true,
+      disabledReason: null
+    }];
+
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("rejects a missing or malformed historical overdue hold", () => {
+    const missing = orderView();
+    delete (missing as Partial<typeof missing>).migrationOverdueHold;
+    expect(() => parseOrderView(missing)).toThrow("migrationOverdueHold");
+
+    const malformed = orderView();
+    malformed.migrationOverdueHold = { id: "hold_migrated_overdue_fixture", startsOn: "not-a-date" };
+    expect(() => parseOrderView(malformed)).toThrow("migrationOverdueHold.startsOn");
+  });
+
+  it("rejects an enabled historical overdue resolution when there is no active hold", () => {
+    const input = orderView();
+    input.order.status = "CHECKED_IN";
+    input.stay.status = "IN_HOUSE";
+    input.fulfillment = {
+      ...input.fulfillment,
+      state: "IN_HOUSE",
+      checkIn: fulfillmentFact("CHECK_IN", input.order.arrival_date, "2026-07-28T08:00:00.000Z")
+    };
+    input.allowedActions = [{
+      code: "RESOLVE_MIGRATED_OVERDUE_STAY",
+      enabled: true,
+      disabledReason: null
+    }];
+
+    expect(() => parseOrderView(input)).toThrow("历史逾期在住处理必须关联有效占房锁");
+  });
+
   it("accepts a complete typed lifecycle projection without reading raw facts", () => {
     const input = orderView();
     expect(parseOrderView(input)).toBe(input);
@@ -658,9 +707,9 @@ describe("parseOrderView", () => {
   });
 
   it.each([
-    ["pricing currency", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.currency = "USD"; }, "金额摘要币种不一致"],
-    ["currency format", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount.currency = "cny"; }, "必须是三位大写货币代码"],
-    ["policy difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = 1; }, "与政策基础金额差额不一致"],
+    ["pricing currency", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount!.currency = "USD"; }, "金额摘要币种不一致"],
+    ["currency format", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.policyBaseAmount!.currency = "cny"; }, "必须是三位大写货币代码"],
+    ["policy difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy!.minorUnits = 1; }, "与政策基础金额差额不一致"],
     ["collection difference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 19_999; }, "资金差额不一致"],
     ["refund reference", (input: ReturnType<typeof orderView>) => { input.arrangementHistory[0]!.fundsSummary.refundReferenceAmount.minorUnits = 1; }, "退款参考金额不一致"]
   ])("rejects inconsistent history money for %s", (_label, damage, expected) => {
@@ -673,9 +722,9 @@ describe("parseOrderView", () => {
     const input = orderView();
     appendHistoryTransition(input, "MOVE", movedArrangement());
     const changed = input.arrangementHistory[1]!;
-    changed.pricingSummary.policyBaseAmount.currency = "USD";
+    changed.pricingSummary.policyBaseAmount!.currency = "USD";
     changed.pricingSummary.currentContractAmount.currency = "USD";
-    changed.pricingSummary.differenceFromPolicy.currency = "USD";
+    changed.pricingSummary.differenceFromPolicy!.currency = "USD";
     changed.fundsSummary.netRecordedCollection.currency = "USD";
     changed.fundsSummary.collectionDifference.currency = "USD";
     changed.fundsSummary.refundReferenceAmount.currency = "USD";
@@ -809,7 +858,7 @@ describe("parseOrderView", () => {
   it("accepts a later standalone repricing that returns the unchanged stay to policy price", () => {
     const input = orderView();
     input.arrangementHistory[0]!.pricingSummary.currentContractAmount.minorUnits = 15_000;
-    input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = -5_000;
+    input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy!.minorUnits = -5_000;
     input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 15_000;
     input.order.current_revision_id = "revision_2";
     input.amendments.push(amendment({
@@ -855,7 +904,7 @@ describe("parseOrderView", () => {
   ])("rejects a damaged standalone policy repricing: %s", (_label, damage) => {
     const input = orderView();
     input.arrangementHistory[0]!.pricingSummary.currentContractAmount.minorUnits = 15_000;
-    input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy.minorUnits = -5_000;
+    input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy!.minorUnits = -5_000;
     input.arrangementHistory[0]!.fundsSummary.collectionDifference.minorUnits = 15_000;
     input.order.current_revision_id = "revision_2";
     input.amendments.push(amendment({
@@ -923,9 +972,9 @@ describe("parseOrderView", () => {
   it("rejects a standalone repricing whose current currency differs from the accommodation history", () => {
     const input = orderView();
     const history = input.arrangementHistory[0]!;
-    history.pricingSummary.policyBaseAmount.currency = "USD";
+    history.pricingSummary.policyBaseAmount!.currency = "USD";
     history.pricingSummary.currentContractAmount.currency = "USD";
-    history.pricingSummary.differenceFromPolicy.currency = "USD";
+    history.pricingSummary.differenceFromPolicy!.currency = "USD";
     history.fundsSummary.netRecordedCollection.currency = "USD";
     history.fundsSummary.collectionDifference.currency = "USD";
     history.fundsSummary.refundReferenceAmount.currency = "USD";
@@ -1011,6 +1060,57 @@ describe("parseOrderView", () => {
     input.amounts.netRecordedCollection.minorUnits += 100;
     input.amounts.collectionDifference.minorUnits -= 100;
     expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("accepts a migrated operational snapshot with historical actual pricing and no policy baseline", () => {
+    const input = orderView();
+    Object.assign(input.amendments[0]!, {
+      amendment_type: "MIGRATED_OPERATIONAL_SNAPSHOT",
+      reason_code: "HISTORICAL_IMPORT",
+      reason_note: "从订单来了迁移",
+      payload: {
+        sourceId: "migration_source_1",
+        sourceOrderId: "fixture-operational-overdue-hold",
+        cutoverObservedAt: "2026-08-09T00:00:00.000Z",
+        observedStatus: "RESERVED",
+        observedStayStatus: "PLANNED",
+        arrivalDate: input.order.arrival_date,
+        departureDate: input.order.departure_date,
+        stayType: input.order.stay_type,
+        pricingOrigin: "MIGRATED_ACTUAL",
+        historicalActualAmountMinor: 20_000,
+        currency: "CNY",
+        stayTimeline: [
+          { serviceDate: "2026-07-28", inventoryUnitId: "room_101" },
+          { serviceDate: "2026-07-29", inventoryUnitId: "room_101" }
+        ],
+        inventoryUnitId: "room_101"
+      },
+      command_id: null,
+      actor: null
+    });
+    input.segments[0]!.segment_type = "MIGRATED_INITIAL";
+    input.arrangementHistory[0]!.type = "MIGRATED_SNAPSHOT";
+    input.arrangementHistory[0]!.reason = { code: "HISTORICAL_IMPORT", note: "从订单来了迁移" };
+    input.arrangementHistory[0]!.actor = null;
+    input.arrangementHistory[0]!.pricingSummary.policyBaseAmount = null;
+    input.arrangementHistory[0]!.pricingSummary.differenceFromPolicy = null;
+    Object.assign(input.pricingRevisions[0]!, {
+      pricing_origin: "MIGRATED_ACTUAL",
+      policy_base_amount_minor: null,
+      difference_from_policy_minor: null,
+      cash_lines: [{ lineKind: "MIGRATED_ACTUAL", historicalActualAmountMinor: 20_000, currency: "CNY" }],
+      reason: { code: "HISTORICAL_IMPORT", note: "从订单来了迁移" }
+    });
+
+    expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("rejects a standard pricing revision without its policy baseline", () => {
+    const input = orderView();
+    input.pricingRevisions[0]!.policy_base_amount_minor = null;
+    input.pricingRevisions[0]!.difference_from_policy_minor = null;
+    expect(() => parseOrderView(input)).toThrow("与政策基础金额差额不一致");
   });
 
   it.each([

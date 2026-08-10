@@ -156,6 +156,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       coverage_set: [],
       cash_lines: [],
       policy_base_amount_minor: 60000,
+      pricing_origin: "STANDARD",
       pricing_basis: "POLICY",
       manual_adjustment_minor: 0,
       current_contract_amount_minor: 60000,
@@ -188,7 +189,8 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       collectionDifference: { currency: "CNY", minorUnits: 30000 },
       refundReferenceAmount: { currency: "CNY", minorUnits: 0 }
     },
-    ...overrides
+    ...overrides,
+    migrationOverdueHold: overrides.migrationOverdueHold ?? null
   };
 }
 

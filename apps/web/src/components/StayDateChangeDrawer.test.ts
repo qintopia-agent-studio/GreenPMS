@@ -66,7 +66,8 @@ function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       collectionDifference: { currency: "CNY", minorUnits: 10_000 },
       refundReferenceAmount: { currency: "CNY", minorUnits: 0 }
     },
-    ...overrides
+    ...overrides,
+    migrationOverdueHold: overrides.migrationOverdueHold ?? null
   };
 }
 

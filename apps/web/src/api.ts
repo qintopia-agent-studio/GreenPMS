@@ -11,6 +11,8 @@ import type {
   OrderRowDto,
   PrincipalDto,
   HistoricalRecoverableCommandType,
+  HistoricalOrderArchiveDetailDto,
+  HistoricalOrderArchiveDto,
   TokenDto
 } from "./types";
 import { parseOrderView } from "./orderViewValidation";
@@ -182,6 +184,38 @@ export const api = {
     `/api/v1/orders/${encodeURIComponent(orderId)}`,
     signal ? { signal } : {}
   ).then(parseOrderView),
+  historicalOrderArchives: (propertyId: string, filters: {
+    query?: string;
+    recordKind?: "MIGRATED_ARCHIVE" | "NON_ACCOMMODATION_ARCHIVE";
+    channelCode?: "YOUMUDAO" | "CTRIP" | "MEITUAN" | "WECOM";
+    sourceStatus?: string;
+    arrivalDate?: string;
+    departureDate?: string;
+  } = {}, signal?: AbortSignal) => {
+    return request<{ archives: HistoricalOrderArchiveDto[]; truncated: boolean }>(
+      "/api/v1/historical-order-archives",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          propertyId,
+          ...(filters.query?.trim() ? { query: filters.query.trim() } : {}),
+          ...(filters.recordKind ? { recordKind: filters.recordKind } : {}),
+          ...(filters.channelCode ? { channelCode: filters.channelCode } : {}),
+          ...(filters.sourceStatus ? { sourceStatus: filters.sourceStatus } : {}),
+          ...(filters.arrivalDate ? { arrivalDate: filters.arrivalDate } : {}),
+          ...(filters.departureDate ? { departureDate: filters.departureDate } : {})
+        }),
+        ...(signal ? { signal } : {})
+      }
+    );
+  },
+  historicalOrderArchive: (archiveId: string, propertyId: string, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ propertyId });
+    return request<HistoricalOrderArchiveDetailDto>(
+      `/api/v1/historical-order-archives/${encodeURIComponent(archiveId)}?${query.toString()}`,
+      signal ? { signal } : {}
+    );
+  },
   members: (propertyId: string, memberQuery?: string) => {
     const query = new URLSearchParams({ propertyId });
     if (memberQuery?.trim()) query.set("query", memberQuery.trim());

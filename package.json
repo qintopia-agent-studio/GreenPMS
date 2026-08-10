@@ -16,6 +16,8 @@
     "db:migrate": "npm run migrate -w @qintopia/db",
     "db:ready": "npm run ready -w @qintopia/db",
     "db:import:2026": "npm run import:reference-catalog -w @qintopia/db --",
+    "db:import:historical-orders": "npm run import:historical-orders -w @qintopia/db --",
+    "db:purge:production-acceptance": "node --import tsx scripts/purge-production-acceptance-data.ts",
     "db:seed": "npm run seed -w @qintopia/db",
     "db:reset": "npm run reset -w @qintopia/db",
     "typecheck": "tsc --noEmit",

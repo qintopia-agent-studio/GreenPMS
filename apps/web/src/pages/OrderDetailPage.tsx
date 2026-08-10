@@ -65,7 +65,7 @@ import {
   StatusBadge
 } from "../ui";
 
-type FormAction = "RECORD_COLLECTION" | "RECORD_REFUND" | "SHORTEN_STAY" | "EXTEND_STAY" | "REPRICE_ORDER";
+type FormAction = "RECORD_COLLECTION" | "RECORD_REFUND" | "SHORTEN_STAY" | "EXTEND_STAY" | "REPRICE_ORDER" | "RESOLVE_MIGRATED_OVERDUE_STAY";
 const ORDER_DETAIL_POLL_MS = 4_000;
 
 export function orderViewPayloadChanged(previous: OrderViewDto, next: OrderViewDto): boolean {
@@ -119,6 +119,7 @@ const formTitles: Record<FormAction, string> = {
   RECORD_REFUND: "登记退款",
   SHORTEN_STAY: "缩短住宿",
   EXTEND_STAY: "续住",
+  RESOLVE_MIGRATED_OVERDUE_STAY: "确认历史在住处理",
   REPRICE_ORDER: "调整订单金额"
 };
 
@@ -318,6 +319,7 @@ export function effectiveArrangementTitle(presentation: OrderEffectiveArrangemen
 export function arrangementChangeLabel(type: OrderArrangementHistoryItemDto["type"]): string {
   switch (type) {
     case "INITIAL_BOOKING": return "创建预订";
+    case "MIGRATED_SNAPSHOT": return "历史导入快照";
     case "RESCHEDULE": return "调整预订日期";
     case "EXTENSION": return "延长住宿";
     case "SHORTENING": return "缩短住宿";
@@ -374,6 +376,21 @@ export function collectionAmountYuanInputToMinor(value: string): number | undefi
   return Number(minor);
 }
 
+export function nonNegativeYuanInputToMinor(value: string): number | undefined {
+  const normalized = value.trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return undefined;
+  const [yuanPart, fractionPart = ""] = normalized.split(".");
+  const minor = BigInt(yuanPart!) * 100n + BigInt(fractionPart.padEnd(2, "0") || "0");
+  if (minor > BigInt(MAX_AMOUNT_MINOR)) return undefined;
+  return Number(minor);
+}
+
+function nonNegativeMinorToYuanInput(minorUnits: unknown): string {
+  return typeof minorUnits === "number" && Number.isSafeInteger(minorUnits) && minorUnits >= 0
+    ? String(minorUnits / 100)
+    : "0";
+}
+
 export function collectionAmountMinorToYuanInput(minorUnits: number): string {
   if (!Number.isSafeInteger(minorUnits) || minorUnits <= 0) return "";
   const yuan = Math.trunc(minorUnits / 100);
@@ -415,9 +432,10 @@ function ArrangementHistoryAmounts({ item, showPerOrderFunds, isLatest = false }
   const difference = collectionDifferencePresentation(item.fundsSummary.collectionDifference);
   const contractAmountLabel = showPerOrderFunds ? "订单金额" : isLatest ? "本单渠道应结金额" : "当时应结金额";
   return <dl className="detail-list">
-    <div><dt>政策基础金额</dt><dd>{formatMoney(item.pricingSummary.policyBaseAmount)}</dd></div>
+    <div><dt>计价来源</dt><dd>{item.pricingSummary.policyBaseAmount ? "有政策基础金额" : "历史实价（无历史政策基准）"}</dd></div>
+    {item.pricingSummary.policyBaseAmount ? <div><dt>政策基础金额</dt><dd>{formatMoney(item.pricingSummary.policyBaseAmount)}</dd></div> : null}
     <div><dt>{contractAmountLabel}{!showPerOrderFunds && !isLatest ? <span className="superseded-tag">已被后续调整取代</span> : null}</dt><dd>{formatMoney(item.pricingSummary.currentContractAmount)}</dd></div>
-    <div><dt>与政策基础金额差额</dt><dd>{formatMoney(item.pricingSummary.differenceFromPolicy)}</dd></div>
+    {item.pricingSummary.differenceFromPolicy ? <div><dt>与政策基础金额差额</dt><dd>{formatMoney(item.pricingSummary.differenceFromPolicy)}</dd></div> : null}
     {showPerOrderFunds ? <>
       <div><dt>已记录净收款</dt><dd>{formatMoney(item.fundsSummary.netRecordedCollection)}</dd></div>
       <div><dt>{difference.label}</dt><dd>{formatMoney(difference.amount)}</dd></div>
@@ -517,11 +535,21 @@ export function OrderAmountStrip({ amounts, pricingRevision, bookingChannelCode 
 }) {
   const showPerOrderFunds = stayDateFundsAreOperatorFacing(bookingChannelCode, pricingRevision?.pricing_basis);
   const difference = collectionDifferencePresentation(amounts.collectionDifference);
+  if (pricingRevision?.pricing_origin !== undefined && pricingRevision.pricing_origin !== "STANDARD") {
+    const originLabel = pricingRevision.pricing_origin === "MIGRATED_ACTUAL"
+      ? "历史实价（无历史政策基准）"
+      : "历史实价 + 切换后续住金额";
+    return <section className="amount-strip amount-strip-channel" aria-label="历史导入金额" data-testid="order-amounts">
+      <div><span>计价来源</span><strong>{originLabel}</strong></div>
+      <div><span>订单金额</span><strong>{formatMoney(amounts.currentContractAmount)}</strong></div>
+      <div><span>说明</span><strong className="amount-strip-note">历史导入金额不按当前政策重算</strong></div>
+    </section>;
+  }
   if (!showPerOrderFunds && pricingRevision) {
     return <section className="amount-strip amount-strip-channel" aria-label="订单可复算金额" data-testid="order-amounts">
-      <div><span>政策基础金额</span><strong>{formatMinor(pricingRevision.policy_base_amount_minor, pricingRevision.currency)}</strong></div>
+      <div><span>政策基础金额</span><strong>{formatMinor(pricingRevision.policy_base_amount_minor!, pricingRevision.currency)}</strong></div>
       <div><span>本单渠道应结金额</span><strong>{formatMoney(amounts.currentContractAmount)}</strong></div>
-      <div><span>与政策基础金额差额</span><strong>{formatMinor(pricingRevision.difference_from_policy_minor, pricingRevision.currency)}</strong></div>
+      <div><span>与政策基础金额差额</span><strong>{formatMinor(pricingRevision.difference_from_policy_minor!, pricingRevision.currency)}</strong></div>
       <div><span>渠道价格差异说明</span><strong className="amount-strip-note">{pricingRevision.reason.note.trim() || "无"}</strong></div>
     </section>;
   }
@@ -889,7 +917,13 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
   const transactionReferenceRequired = action === "RECORD_COLLECTION"
     ? method === "WECOM" || method === "BANK_TRANSFER"
     : method === "BANK_TRANSFER";
-  const [newDepartureDate, setNewDepartureDate] = useState(action === "SHORTEN_STAY" ? shiftDate(view.order.departure_date, -1) : shiftDate(view.order.departure_date, 1));
+  const [newDepartureDate, setNewDepartureDate] = useState(() => {
+    const draftDate = typeof draft?.input.newDepartureDate === "string" ? draft.input.newDepartureDate : undefined;
+    if (action === "RESOLVE_MIGRATED_OVERDUE_STAY") return draftDate ?? shiftDate(view.migrationOverdueHold?.startsOn ?? view.order.departure_date, 1);
+    return action === "SHORTEN_STAY" ? shiftDate(view.order.departure_date, -1) : shiftDate(view.order.departure_date, 1);
+  });
+  const [postCutoverIncrementYuan, setPostCutoverIncrementYuan] = useState(() => nonNegativeMinorToYuanInput(draft?.input.postCutoverIncrementAmountMinor));
+  const [migratedOverdueReason, setMigratedOverdueReason] = useState(draft?.initialReason?.note ?? "");
   const [targetContractYuan, setTargetContractYuan] = useState(() => initialRepriceTargetYuan(
     view.amounts.currentContractAmount.minorUnits,
     draft?.input.targetCurrentContractAmountMinor
@@ -950,6 +984,32 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
       Object.assign(base, { newDepartureDate });
       description = "订单金额将按原房价标准重新计算，并保留调整记录。";
     }
+    if (action === "RESOLVE_MIGRATED_OVERDUE_STAY") {
+      const hold = view.migrationOverdueHold;
+      if (!hold) {
+        setValidationError(new Error("这笔历史在住订单的占房信息已变化，请刷新后重新核对。"));
+        return;
+      }
+      if (!newDepartureDate || newDepartureDate <= hold.startsOn) {
+        setValidationError(new Error("实际离店日期必须晚于历史占房开始日期。"));
+        return;
+      }
+      const increment = nonNegativeYuanInputToMinor(postCutoverIncrementYuan);
+      if (increment === undefined) {
+        setValidationError(new Error("切换后续住金额必须按人民币元填写，可以为 0，且最多保留两位小数。"));
+        return;
+      }
+      if (!migratedOverdueReason.trim()) {
+        setValidationError(new Error("请填写确认依据。"));
+        return;
+      }
+      Object.assign(base, {
+        holdId: hold.id,
+        newDepartureDate,
+        postCutoverIncrementAmountMinor: increment
+      });
+      description = "请核对历史实价、切换后续住金额和实际离店日期。确认后会解除这笔历史占房锁。";
+    }
     if (action === "REPRICE_ORDER") {
       const targetCurrentContractAmountMinor = wholeYuanAmountMinor(targetContractYuan);
       if (targetCurrentContractAmountMinor === undefined) {
@@ -968,7 +1028,12 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
       title: formTitles[action],
       description,
       input: base,
-      ...(action === "REPRICE_ORDER" ? { initialReason: { code: "REPRICE_ORDER", note: repriceReason.trim() } } : {}),
+      ...((action === "REPRICE_ORDER" || action === "RESOLVE_MIGRATED_OVERDUE_STAY") ? {
+        initialReason: {
+          code: action,
+          note: action === "REPRICE_ORDER" ? repriceReason.trim() : migratedOverdueReason.trim()
+        }
+      } : {}),
       ...((action === "RECORD_COLLECTION" || action === "RECORD_REFUND") ? {
         initialReason: {
           code: action,
@@ -1011,6 +1076,14 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
         {(action === "SHORTEN_STAY" || action === "EXTEND_STAY") ? (
           <div className="form-grid">
             <label>新离店日期<input type="date" value={newDepartureDate} min={view.order.arrival_date} onChange={(event) => setNewDepartureDate(event.target.value)} required data-testid="new-departure-date" /></label>
+          </div>
+        ) : null}
+        {action === "RESOLVE_MIGRATED_OVERDUE_STAY" ? (
+          <div className="form-grid">
+            <div className="form-field-note" role="status"><strong>确认真实在住信息</strong><span>确认后会按实际离店日期保留本次住宿，并解除这笔历史占房锁。</span></div>
+            <label>实际离店日期<input type="date" value={newDepartureDate} min={view.migrationOverdueHold?.startsOn} onChange={(event) => { setNewDepartureDate(event.target.value); setValidationError(undefined); }} required data-testid="migrated-overdue-departure-date" /></label>
+            <label>切换后续住金额（元）<input type="text" value={postCutoverIncrementYuan} onChange={(event) => { setPostCutoverIncrementYuan(event.target.value); setValidationError(undefined); }} required inputMode="decimal" placeholder="例如 0 或 1280.50" data-testid="migrated-overdue-increment-yuan" /></label>
+            <label className="span-two">确认依据<textarea value={migratedOverdueReason} onChange={(event) => { setMigratedOverdueReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="migrated-overdue-reason" /></label>
           </div>
         ) : null}
         {action === "REPRICE_ORDER" ? (
@@ -1270,6 +1343,10 @@ export function OrderDetailPage() {
       setFormAction("REPRICE_ORDER");
       return;
     }
+    if (request.commandType === "RESOLVE_MIGRATED_OVERDUE_STAY") {
+      setFormAction("RESOLVE_MIGRATED_OVERDUE_STAY");
+      return;
+    }
     if (request.commandType === "CORRECT_ORDER_OCCUPANT") {
       const occupantId = request.input.occupantId;
       const occupant = typeof occupantId === "string" ? viewRef.current?.occupants.find((item) => item.id === occupantId) : undefined;
@@ -1375,6 +1452,7 @@ export function OrderDetailPage() {
             {showDepartureAdjustmentButton ? <OrderActionButton action={visibleDepartureAdjustmentAction} blocked={orderActionsBlocked} showWhenDisabled={Boolean(departureAdjustmentDisabledAction)} dataOrderAction="ADJUST_DEPARTURE" onClick={() => { if (!departureAdjustmentAction) return; setCommandDraft(undefined); setStayDateMode("ADJUST_DEPARTURE"); setStayDateAction(departureAdjustmentAction); }}><CalendarRange aria-hidden="true" size={17} />调整退房日期</OrderActionButton> : null}
             <OrderActionButton action={actionByCode.get("MOVE_UNIT")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("MOVE_UNIT")} onClick={() => { setCommandDraft(undefined); setMovingUnit(true); }}><ArrowRightLeft aria-hidden="true" size={17} />换房</OrderActionButton>
             <OrderActionButton action={actionByCode.get("REPRICE_ORDER")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("REPRICE_ORDER")} onClick={() => openForm("REPRICE_ORDER")} testId="reprice-order"><CircleDollarSign aria-hidden="true" size={17} />调整金额</OrderActionButton>
+            <OrderActionButton action={actionByCode.get("RESOLVE_MIGRATED_OVERDUE_STAY")} blocked={orderActionsBlocked} onClick={() => openForm("RESOLVE_MIGRATED_OVERDUE_STAY")} testId="resolve-migrated-overdue-stay"><CalendarRange aria-hidden="true" size={17} />确认历史在住</OrderActionButton>
             <OrderActionButton action={actionByCode.get("CHECK_IN")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CHECK_IN")} className="button button-primary" onClick={() => directCommand("CHECK_IN", "办理入住", "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。")} testId="check-in"><LogIn aria-hidden="true" size={17} />入住</OrderActionButton>
             <OrderActionButton action={actionByCode.get("CHECK_OUT")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CHECK_OUT")} className="button button-primary" onClick={() => directCommand("CHECK_OUT", "办理退房", "核对后将住宿状态更新为已退房并释放后续住宿库存；退房不会重复核销会员权益。")} testId="check-out"><LogOut aria-hidden="true" size={17} />退房</OrderActionButton>
             {showLifecycleSeparator ? <div className="action-separator" aria-hidden="true" /> : null}
@@ -1448,10 +1526,14 @@ export function OrderDetailPage() {
                 <td>{meta.pricingPolicyVersions.some((policy) => policy.id === revision.policy_version_id) ? "已锁定政策" : "历史锁定政策"}</td>
                 <td>{formatDate(revision.arrival_date)} 至 {formatDate(revision.departure_date)}</td>
                 <td>{countArray(revision.coverage_set)}</td>
-                <td>{formatMinor(revision.policy_base_amount_minor, revision.currency)}</td>
-                <td><strong>{formatMinor(revision.difference_from_policy_minor, revision.currency)}</strong></td>
+                <td>{revision.policy_base_amount_minor === null ? "无历史政策基准" : formatMinor(revision.policy_base_amount_minor, revision.currency)}</td>
+                <td><strong>{revision.difference_from_policy_minor === null ? "不适用" : formatMinor(revision.difference_from_policy_minor, revision.currency)}</strong></td>
                 <td><strong>{formatMinor(revision.current_contract_amount_minor, revision.currency)}</strong></td>
-                <td><strong>{pricingBasisLabel(revision.pricing_basis)}</strong><small>{revision.reason.note || "无需说明"}</small></td>
+                <td><strong>{revision.pricing_origin === "MIGRATED_ACTUAL"
+                  ? "历史实价"
+                  : revision.pricing_origin === "MIGRATED_ACTUAL_PLUS_POST_CUTOVER"
+                    ? "历史实价 + 切换后续住金额"
+                    : pricingBasisLabel(revision.pricing_basis)}</strong><small>{revision.reason.note || "无需说明"}</small></td>
               </tr>;
             })}</tbody>
           </table>

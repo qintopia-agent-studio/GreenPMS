@@ -42,6 +42,23 @@ describe("pricingReasonFromAmendment", () => {
       protocolVersion: "PRE_STAGE_11"
     })).toEqual({ code: "ROOM_MOVE", note: "历史换房记录" });
   });
+
+  it("uses the audited amendment reason for a migrated overdue-stay resolution", () => {
+    expect(pricingReasonFromAmendment({
+      amendment_type: "EXTEND_STAY",
+      reason_code: "MIGRATED_OVERDUE_RESOLVED",
+      reason_note: "已确认真实离店日和续住金额",
+      payload: {
+        operation: "RESOLVE_MIGRATED_OVERDUE_STAY",
+        orderId: "order_migrated",
+        sourceId: "source_migrated",
+        holdId: "hold_migrated"
+      }
+    })).toEqual({
+      code: "MIGRATED_OVERDUE_RESOLVED",
+      note: "已确认真实离店日和续住金额"
+    });
+  });
 });
 
 function action(
@@ -177,6 +194,36 @@ describe("orderAllowedActions", () => {
       code: "RECORD_REFUND",
       enabled: true,
       disabledReason: null
+    });
+  });
+
+  it("fails closed for migrated repricing and exposes only the active overdue resolution", () => {
+    const dates = { businessDate: "2026-08-09", arrivalDate: "2026-08-08", departureDate: "2026-08-09" };
+    const actions = orderAllowedActions(
+      "WRITE",
+      "CHECKED_IN",
+      false,
+      dates,
+      false,
+      "WECOM",
+      false,
+      false,
+      true,
+      true
+    );
+    for (const code of ["EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT", "REPRICE_ORDER"] as const) {
+      expect(actions.find((candidate) => candidate.code === code)).toMatchObject({
+        enabled: false,
+        disabledReason: "历史实价订单需使用迁移更正流程"
+      });
+    }
+    expect(actions.find((candidate) => candidate.code === "RESOLVE_MIGRATED_OVERDUE_STAY")).toMatchObject({
+      enabled: true,
+      disabledReason: null
+    });
+    expect(actions.find((candidate) => candidate.code === "CHECK_OUT")).toMatchObject({
+      enabled: false,
+      disabledReason: "请先确认历史逾期在住的真实离店日和续住金额"
     });
   });
 });

@@ -52,6 +52,10 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     required: ["propertyId", "orderId", "newDepartureDate"],
     properties: ["propertyId", "orderId", "newDepartureDate", "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason"]
   },
+  RESOLVE_MIGRATED_OVERDUE_STAY: {
+    required: ["propertyId", "orderId", "holdId", "newDepartureDate", "postCutoverIncrementAmountMinor"],
+    properties: ["propertyId", "orderId", "holdId", "newDepartureDate", "postCutoverIncrementAmountMinor"]
+  },
   SHORTEN_STAY: {
     required: ["propertyId", "orderId", "newDepartureDate"],
     properties: ["propertyId", "orderId", "newDepartureDate", "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason"]
@@ -200,6 +204,8 @@ describe("OpenAPI 3.1 command contract", () => {
       "/api/v1/facts/{id}",
       "/api/v1/members",
       "/api/v1/members/{id}",
+      "/api/v1/historical-order-archives",
+      "/api/v1/historical-order-archives/{id}",
       "/api/v1/maintenance-locks"
     ]) expect(document.paths[path]).toBeDefined();
     const headerParameters = document.paths["/api/v1/command-previews"].post.parameters;
@@ -1198,6 +1204,8 @@ describe("OpenAPI 3.1 command contract", () => {
       ["/api/v1/orders/{id}", "get"],
       ["/api/v1/members", "get"],
       ["/api/v1/members/{id}", "get"],
+      ["/api/v1/historical-order-archives", "post"],
+      ["/api/v1/historical-order-archives/{id}", "get"],
       ["/api/v1/facts/{id}", "get"],
       ["/api/v1/maintenance-locks", "get"],
       ["/api/v1/command-results", "get"],
@@ -1546,16 +1554,16 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(omitted.statusCode, omitted.body).toBe(200);
     expect(omitted.json().quote).toMatchObject({
       stayType: "CUSTOM",
-      currentContractAmount: { currency: "CNY", minorUnits: 108_600 }
+      currentContractAmount: { currency: "CNY", minorUnits: 176_000 }
     });
     expect(omitted.json().quote.pricingExplanation).toMatchObject({
       pricingModel: "DURATION_BAND_TOTAL",
       totalNights: 10,
-      quoteAmount: { currency: "CNY", minorUnits: 108_600 },
+      quoteAmount: { currency: "CNY", minorUnits: 176_000 },
       amountField: "currentContractAmount",
       durationBand: {
         anchorNights: 7,
-        finalAmount: { currency: "CNY", minorUnits: 108_600 },
+        finalAmount: { currency: "CNY", minorUnits: 176_000 },
         auditCalculationFieldsAreAmounts: false
       }
     });

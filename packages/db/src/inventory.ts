@@ -50,6 +50,47 @@ interface DeferredUnavailableBlocker {
   departureDate: string;
 }
 
+interface MigrationOverdueHoldBlocker {
+  id: string;
+  sourceId: string;
+  orderId: string;
+  inventoryUnitId: string;
+  roomId: string;
+  startsOn: string;
+}
+
+async function loadActiveMigrationOverdueHoldBlockers(
+  db: DbExecutor,
+  propertyId: string,
+  dates: readonly string[]
+): Promise<MigrationOverdueHoldBlocker[]> {
+  if (dates.length === 0) return [];
+  const lastDate = [...dates].sort().at(-1)!;
+  const rows = await db.selectFrom("migration_overdue_inventory_holds as hold")
+    .leftJoin("migration_overdue_inventory_hold_releases as release", "release.hold_id", "hold.id")
+    .select([
+      "hold.id",
+      "hold.source_id",
+      "hold.order_id",
+      "hold.inventory_unit_id",
+      "hold.room_id",
+      "hold.starts_on"
+    ])
+    .where("hold.property_id", "=", propertyId)
+    .where("hold.starts_on", "<=", lastDate)
+    .where("release.id", "is", null)
+    .orderBy("hold.id")
+    .execute();
+  return rows.map((row) => ({
+    id: row.id,
+    sourceId: row.source_id,
+    orderId: row.order_id,
+    inventoryUnitId: row.inventory_unit_id,
+    roomId: row.room_id,
+    startsOn: row.starts_on
+  }));
+}
+
 async function loadDeferredUnavailableBlockers(
   db: DbExecutor,
   propertyId: string,
@@ -135,6 +176,14 @@ function deferredUnavailableBlockerAffectsUnit(
     && (unit.kind === "ROOM" || blocker.inventoryUnitId === blocker.roomId || blocker.inventoryUnitId === unit.id);
 }
 
+function migrationOverdueHoldAffectsUnit(
+  blocker: MigrationOverdueHoldBlocker,
+  unit: Pick<InventoryUnitRecord, "id" | "kind" | "roomId">
+): boolean {
+  return blocker.roomId === unit.roomId
+    && (unit.kind === "ROOM" || blocker.inventoryUnitId === blocker.roomId || blocker.inventoryUnitId === unit.id);
+}
+
 async function loadInventoryUnitRecord(db: DbExecutor, propertyId: string, unitId: string, requireActive: boolean): Promise<InventoryUnitRecord> {
   let query = db.selectFrom("inventory_units")
     .select(["id", "property_id", "kind", "parent_room_id", "code", "name", "catalog_version", "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance", "physical_bed_count", "occupancy_capacity"])
@@ -208,6 +257,7 @@ export async function listAvailability(
     .execute();
   const departureDayStayBlockers = await loadDepartureDayStayBlockers(db, propertyId, dates);
   const deferredUnavailableBlockers = await loadDeferredUnavailableBlockers(db, propertyId, dates);
+  const migrationOverdueHolds = await loadActiveMigrationOverdueHoldBlockers(db, propertyId, dates);
 
   return units.map((unit) => {
     const roomId = unit.kind === "ROOM" ? unit.id : unit.parent_room_id!;
@@ -227,9 +277,17 @@ export async function listAvailability(
         && serviceDate < blocker.departureDate
         && deferredUnavailableBlockerAffectsUnit(blocker, { id: unit.id, kind: unit.kind, roomId })
       ));
+      const blockingMigrationOverdueHolds = migrationOverdueHolds.filter((blocker) => (
+        blocker.startsOn <= serviceDate
+        && blocker.orderId !== excludeOrderId
+        && migrationOverdueHoldAffectsUnit(blocker, { id: unit.id, kind: unit.kind, roomId })
+      ));
       return {
         serviceDate,
-        available: blocking.length === 0 && blockingStays.length === 0 && blockingDeferredUnavailable.length === 0,
+        available: blocking.length === 0
+          && blockingStays.length === 0
+          && blockingDeferredUnavailable.length === 0
+          && blockingMigrationOverdueHolds.length === 0,
         blockingClaimIds: blocking.map((claim) => claim.id)
       };
     });
@@ -277,7 +335,12 @@ export async function inventoryFingerprint(db: DbExecutor, propertyId: string, u
     .flatMap((blocker) => dates
       .filter((serviceDate) => blocker.arrivalDate <= serviceDate && serviceDate < blocker.departureDate)
       .map((serviceDate) => `${serviceDate}:LEGACY_UNAVAILABLE:${blocker.inventoryUnitId}:${blocker.id}`));
-  return [...claimFingerprint, ...stayFingerprint, ...deferredUnavailableFingerprint];
+  const migrationOverdueFingerprint = (await loadActiveMigrationOverdueHoldBlockers(db, propertyId, dates))
+    .filter((blocker) => !excludeSourceIds.includes(blocker.id) && migrationOverdueHoldAffectsUnit(blocker, unit))
+    .flatMap((blocker) => dates
+      .filter((serviceDate) => blocker.startsOn <= serviceDate)
+      .map((serviceDate) => `${serviceDate}:MIGRATED_OVERDUE_HOLD:${blocker.inventoryUnitId}:${blocker.id}`));
+  return [...claimFingerprint, ...stayFingerprint, ...deferredUnavailableFingerprint, ...migrationOverdueFingerprint];
 }
 
 export async function lockRoomDays(trx: Transaction<Database>, roomDates: Array<{ roomId: string; serviceDate: string }>): Promise<void> {
@@ -310,6 +373,8 @@ export async function assertUnitAvailable(trx: Transaction<Database>, unit: Inve
     .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && departureDayBlockerAffectsUnit(blocker, unit));
   const deferredUnavailableBlockers = (await loadDeferredUnavailableBlockers(trx, unit.propertyId, dates))
     .filter((blocker) => !excludeSourceIds.includes(blocker.id) && deferredUnavailableBlockerAffectsUnit(blocker, unit));
+  const migrationOverdueHolds = (await loadActiveMigrationOverdueHoldBlockers(trx, unit.propertyId, dates))
+    .filter((blocker) => !excludeSourceIds.includes(blocker.id) && migrationOverdueHoldAffectsUnit(blocker, unit));
   for (const serviceDate of dates) {
     const blockingStay = departureDayStayBlockers.find((blocker) => blocker.serviceDate === serviceDate);
     if (blockingStay) {
@@ -320,6 +385,16 @@ export async function assertUnitAvailable(trx: Transaction<Database>, unit: Inve
     ));
     if (blockingDeferredUnavailable) {
       throw new DomainError("INVENTORY_CONFLICT", `Inventory is unavailable on ${serviceDate}`, 409);
+    }
+    const blockingMigrationOverdueHold = migrationOverdueHolds.find((blocker) => blocker.startsOn <= serviceDate);
+    if (blockingMigrationOverdueHold) {
+      throw new DomainError(
+        "INVENTORY_CONFLICT",
+        `A migrated in-house Stay remains open on ${serviceDate}`,
+        409,
+        false,
+        { serviceDate, holdId: blockingMigrationOverdueHold.id, orderId: blockingMigrationOverdueHold.orderId }
+      );
     }
     const roomDay = await trx.selectFrom("inventory_room_days")
       .select("whole_claim_id")

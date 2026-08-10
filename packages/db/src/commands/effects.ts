@@ -111,6 +111,15 @@ function requireNonNegativeWholeYuanMinor(input: Record<string, unknown>, field:
 
 const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 const operatorCollectionMethods = new Set(["WECOM", "BANK_TRANSFER", "CASH", "OTHER"]);
+const migratedOrderRepricingCommands = new Set<CommandType>([
+  "RESCHEDULE_STAY",
+  "EXTEND_STAY",
+  "SHORTEN_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "REFRESH_MEMBER_COVERAGE",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+]);
 
 function assertOperatorFundsAllowedForOrder(context: OrderContext): void {
   if (context.order.booking_channel_code && externalChannelCodes.has(context.order.booking_channel_code)) {
@@ -1104,12 +1113,101 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   const orderId = requireString(input, "orderId");
   const context = await loadOrderContext(db, orderId);
   if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
+  const migrationSourceId = (context.order as typeof context.order & { migration_source_id?: string | null }).migration_source_id ?? null;
+  if (migrationSourceId && migratedOrderRepricingCommands.has(commandType)) {
+    throw new DomainError("VALIDATION_ERROR", "历史实价订单需使用迁移更正流程", 409);
+  }
   const baseBasis: Record<string, unknown> = {
     orderVersion: context.order.version,
     orderStatus: context.order.status,
     policyVersionId: context.order.pricing_policy_version_id,
     membership: await memberBasis(db, context.order.member_contract_id, context.order.member_id)
   };
+
+  if (commandType === "RESOLVE_MIGRATED_OVERDUE_STAY") {
+    if (!migrationSourceId || context.order.status !== "CHECKED_IN" || context.stay.status !== "IN_HOUSE") {
+      throw new DomainError("INVALID_ORDER_STATE", "只有历史导入且仍在住的逾期订单可以确认真实离店日", 409);
+    }
+    const holdId = requireString(input, "holdId");
+    const hold = await db.selectFrom("migration_overdue_inventory_holds as hold")
+      .innerJoin("migration_order_sources as source", "source.id", "hold.source_id")
+      .leftJoin("migration_overdue_inventory_hold_releases as release", "release.hold_id", "hold.id")
+      .select([
+        "hold.id",
+        "hold.source_id",
+        "hold.order_id",
+        "hold.inventory_unit_id",
+        "hold.starts_on",
+        "source.historical_actual_amount_minor",
+        "source.currency"
+      ])
+      .where("hold.id", "=", holdId)
+      .where("hold.order_id", "=", orderId)
+      .where("hold.property_id", "=", propertyId)
+      .where("release.id", "is", null)
+      .executeTakeFirst();
+    if (!hold || hold.source_id !== migrationSourceId) {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "历史逾期在住占房锁不存在或已处理", 409);
+    }
+    const newDepartureDate = requireString(input, "newDepartureDate");
+    parseLocalDate(newDepartureDate);
+    const businessDate = await propertyLocalToday(db, propertyId);
+    if (newDepartureDate <= hold.starts_on) {
+      throw new DomainError("VALIDATION_ERROR", "新的退房日期必须晚于历史占房锁开始日期");
+    }
+    if (newDepartureDate <= businessDate) {
+      throw new DomainError("VALIDATION_ERROR", "仍在住订单的新退房日期必须晚于当前营业日期");
+    }
+    const postCutoverIncrementAmountMinor = requireInteger(input, "postCutoverIncrementAmountMinor", { min: 0 });
+    const historicalActualAmountMinor = hold.historical_actual_amount_minor;
+    const newContractAmountMinor = historicalActualAmountMinor + postCutoverIncrementAmountMinor;
+    if (!Number.isSafeInteger(newContractAmountMinor) || newContractAmountMinor > 2_147_483_647) {
+      throw new DomainError("VALIDATION_ERROR", "确认后的订单总金额超出支持范围");
+    }
+    const priorRevision = await db.selectFrom("pricing_revisions")
+      .select(["id", "pricing_origin", "policy_base_amount_minor", "manual_adjustment_minor", "current_contract_amount_minor", "currency"])
+      .where("id", "=", context.revision.id)
+      .executeTakeFirstOrThrow();
+    if (priorRevision.pricing_origin !== "MIGRATED_ACTUAL"
+      || priorRevision.policy_base_amount_minor !== null
+      || priorRevision.manual_adjustment_minor !== 0
+      || priorRevision.current_contract_amount_minor !== historicalActualAmountMinor
+      || priorRevision.currency !== hold.currency) {
+      throw new DomainError("INTERNAL_ERROR", "历史逾期在住订单的实价来源不一致", 500);
+    }
+    const inventory = await inventoryFingerprint(
+      db,
+      propertyId,
+      hold.inventory_unit_id,
+      hold.starts_on,
+      newDepartureDate,
+      [...context.segmentIds, hold.id]
+    );
+    if (inventory.length > 0) {
+      throw new DomainError("INVENTORY_CONFLICT", "确认的续住日期存在其他库存冲突", 409);
+    }
+    return finalize(propertyId, {
+      operation: "RESOLVE_MIGRATED_OVERDUE_STAY",
+      orderId,
+      sourceId: hold.source_id,
+      holdId: hold.id,
+      historicalActualAmountMinor,
+      postCutoverIncrementAmountMinor,
+      newContractAmountMinor,
+      newDepartureDate
+    }, {
+      ...baseBasis,
+      businessDate,
+      hold: {
+        id: hold.id,
+        sourceId: hold.source_id,
+        inventoryUnitId: hold.inventory_unit_id,
+        startsOn: hold.starts_on
+      },
+      priorRevision,
+      inventory
+    });
+  }
 
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
     if (context.order.status !== "CHECKED_OUT" || context.stay.status !== "COMPLETED") {
@@ -2165,6 +2263,19 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 
   if (commandType === "CHECK_OUT") {
     if (context.order.status !== "CHECKED_IN") throw new DomainError("INVALID_ORDER_STATE", "Only an in-house order can check out", 409);
+    const activeMigratedOverdueHold = await db.selectFrom("migration_overdue_inventory_holds as hold")
+      .leftJoin("migration_overdue_inventory_hold_releases as release", "release.hold_id", "hold.id")
+      .select("hold.id")
+      .where("hold.order_id", "=", orderId)
+      .where("release.id", "is", null)
+      .executeTakeFirst();
+    if (activeMigratedOverdueHold) {
+      throw new DomainError(
+        "INVALID_ORDER_STATE",
+        "请先确认历史逾期在住的真实离店日和续住金额",
+        409
+      );
+    }
     const businessDate = await propertyLocalToday(db, propertyId);
     if (businessDate < context.order.departure_date) {
       throw new DomainError("INVALID_ORDER_STATE", "未到计划退房日，不能办理普通退房；当前版本暂不支持提前退房", 409, false, {

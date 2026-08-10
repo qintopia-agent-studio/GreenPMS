@@ -30,7 +30,9 @@ import {
   getOrderView,
   getReceipt,
   getRoomStatusBoard,
+  getHistoricalOrderArchive,
   listAvailability,
+  listHistoricalOrderArchives,
   listMemberSummaries,
   loadReferenceCatalog,
   projectStoredPreviewForRead,
@@ -50,6 +52,9 @@ import {
   ErrorResponse,
   FactResponseSchema,
   HistoricalCreateOrderReplayEnvelopeSchema,
+  HistoricalOrderArchiveDetailResponseSchema,
+  HistoricalOrderArchivesListResponseSchema,
+  HistoricalOrderArchivesQuerySchema,
   Id,
   IdParams,
   LocalDate,
@@ -410,6 +415,27 @@ export async function buildServer(db: Kysely<Database>) {
     if (!order) throw new DomainError("NOT_FOUND", "Order not found", 404);
     requireScopedResourceAccess(principal, order.property_id);
     return getOrderView(db, orderId, principal.propertyAccess.get(order.property_id)!);
+  });
+
+  app.post("/api/v1/historical-order-archives", {
+    schema: { tags: ["queries"], body: HistoricalOrderArchivesQuerySchema, response: { 200: HistoricalOrderArchivesListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+  }, async (request, reply) => {
+    const query = request.body as { propertyId: string; query?: string; recordKind?: "MIGRATED_ARCHIVE" | "NON_ACCOMMODATION_ARCHIVE"; channelCode?: "YOUMUDAO" | "CTRIP" | "MEITUAN" | "WECOM"; sourceStatus?: string; arrivalDate?: string; departureDate?: string };
+    const principal = await requirePrincipal(db, request);
+    requirePropertyAccess(principal, query.propertyId, "READ");
+    reply.header("cache-control", "private, no-store");
+    return listHistoricalOrderArchives(db, query.propertyId, query);
+  });
+
+  app.get("/api/v1/historical-order-archives/:id", {
+    schema: { tags: ["queries"], params: IdParams, querystring: Type.Object({ propertyId: Id }, { additionalProperties: false }), response: { 200: HistoricalOrderArchiveDetailResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+  }, async (request, reply) => {
+    const archiveId = (request.params as { id: string }).id;
+    const propertyId = (request.query as { propertyId: string }).propertyId;
+    const principal = await requirePrincipal(db, request);
+    requirePropertyAccess(principal, propertyId, "READ");
+    reply.header("cache-control", "private, no-store");
+    return getHistoricalOrderArchive(db, propertyId, archiveId);
   });
 
   app.get("/api/v1/members", { schema: { tags: ["queries"], querystring: MembersQuerySchema, response: { 200: MembersListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "import:reference-catalog": "tsx src/reference-catalog.ts",
+    "import:historical-orders": "tsx src/import-historical-orders.ts",
     "migrate": "tsx src/migrate.ts",
     "ready": "tsx src/ready.ts",
     "seed": "tsx src/seed.ts",

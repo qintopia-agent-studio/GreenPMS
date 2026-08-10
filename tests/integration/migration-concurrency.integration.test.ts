@@ -100,7 +100,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(36);
+      expect(expectedMigrations).toHaveLength(37);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -110,6 +110,7 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("034_stay_conversion_reversal_bridge_guard.sql");
       expect(expectedMigrations).toContain("035_stage13_conversion_execution_state_guards.sql");
       expect(expectedMigrations).toContain("036_qintopia_prelaunch_room_catalog_corrections.sql");
+      expect(expectedMigrations).toContain("037_historical_order_import.sql");
       expect(expectedMigrations).toContain("020_whole_room_occupants.sql");
       expect(expectedMigrations).toContain("021_defer_internal_use.sql");
       expect(expectedMigrations).toContain("022_order_occupant_corrections.sql");
@@ -671,6 +672,10 @@ describe("database migration concurrency", () => {
           ON claim.source_type = 'INTERNAL_USE' AND claim.source_id = block.id
         WHERE block.id = 'block_historical_internal_use'
       `)).rows).toEqual(before.rows);
+
+      // The room-status projection is current-schema code, so finish the
+      // upgrade after asserting migration 021 preserved the historical fact.
+      await runMigration();
 
       const projectedDb = createDatabase(databaseUrl.toString());
       try {

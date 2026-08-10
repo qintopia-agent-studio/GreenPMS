@@ -923,6 +923,39 @@ function dateChangePreviewHasEvidence(
   return true;
 }
 
+export function resolveMigratedOverdueStayPreviewHasEvidence(
+  effect: Record<string, unknown>,
+  input: Record<string, unknown>
+): boolean {
+  const historicalActualAmountMinor = effect.historicalActualAmountMinor;
+  const postCutoverIncrementAmountMinor = effect.postCutoverIncrementAmountMinor;
+  const newContractAmountMinor = effect.newContractAmountMinor;
+  if (!hasExactKeys(effect, [
+    "operation", "orderId", "sourceId", "holdId", "historicalActualAmountMinor",
+    "postCutoverIncrementAmountMinor", "newContractAmountMinor", "newDepartureDate"
+  ])
+    || effect.operation !== "RESOLVE_MIGRATED_OVERDUE_STAY"
+    || !nonblankString(effect.orderId)
+    || effect.orderId !== input.orderId
+    || !nonblankString(effect.sourceId)
+    || !nonblankString(effect.holdId)
+    || effect.holdId !== input.holdId
+    || typeof effect.newDepartureDate !== "string"
+    || effect.newDepartureDate !== input.newDepartureDate
+    || localDateEpoch(effect.newDepartureDate) === undefined
+    || typeof historicalActualAmountMinor !== "number"
+    || !Number.isSafeInteger(historicalActualAmountMinor)
+    || historicalActualAmountMinor < 0
+    || typeof postCutoverIncrementAmountMinor !== "number"
+    || !Number.isSafeInteger(postCutoverIncrementAmountMinor)
+    || postCutoverIncrementAmountMinor < 0
+    || postCutoverIncrementAmountMinor !== input.postCutoverIncrementAmountMinor
+    || typeof newContractAmountMinor !== "number"
+    || !Number.isSafeInteger(newContractAmountMinor)
+    || newContractAmountMinor < 0) return false;
+  return newContractAmountMinor === historicalActualAmountMinor + postCutoverIncrementAmountMinor;
+}
+
 export interface StayDatePreviewPricingSummary {
   beforeArrivalDate: string;
   beforeDepartureDate: string;
@@ -2032,6 +2065,31 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
   const pricing = pricingFromEffect(effect);
+  if (businessCommand === "RESOLVE_MIGRATED_OVERDUE_STAY") {
+    const input = commandInput ?? {};
+    if (!resolveMigratedOverdueStayPreviewHasEvidence(effect, input)) {
+      return <div className="effect-summary" data-testid="command-effect">
+        <section className="effect-section" aria-labelledby="migrated-overdue-stay-heading">
+          <h3 id="migrated-overdue-stay-heading">无法核对历史在住处理</h3>
+          <p>服务端返回的金额、日期或占房解除信息不完整，不能确认。请返回修改后重新核对。</p>
+        </section>
+      </div>;
+    }
+    return <div className="effect-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="migrated-overdue-stay-heading">
+        <h3 id="migrated-overdue-stay-heading">请核对历史在住处理</h3>
+        <dl className="difference-grid">
+          <dt>历史实际金额</dt><dd>{formatMinor(effect.historicalActualAmountMinor as number, "CNY")}</dd>
+          <dt>切换后续住金额</dt><dd>{formatMinor(effect.postCutoverIncrementAmountMinor as number, "CNY")}</dd>
+          <dt>新的订单总金额</dt><dd><strong>{formatMinor(effect.newContractAmountMinor as number, "CNY")}</strong></dd>
+          <dt>实际离店日期</dt><dd>{formatDate(effect.newDepartureDate as string)}</dd>
+          <dt>占房状态</dt><dd>确认后将解除历史占房锁</dd>
+          <dt>确认依据</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+        </dl>
+        <p className="muted compact">本次只确认历史在住信息和切换后续住金额，不会自动登记收款或退款。</p>
+      </section>
+    </div>;
+  }
   const createPricingDecision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
   const inventoryUnit = isRecord(effect.inventoryUnit) ? effect.inventoryUnit : undefined;
   const fromUnit = isRecord(effect.fromInventoryUnit) ? effect.fromInventoryUnit : undefined;
@@ -2979,7 +3037,7 @@ export interface PersistedCommandRecovery {
   commandType: HistoricalCommandType;
   confirmationKey: string;
   targetRefs: string[];
-  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE" | "MIGRATED_OVERDUE_STAY";
   effectHash?: string;
   state: PersistedCommandRecoveryState;
   updatedAt: string;
@@ -3052,6 +3110,7 @@ function parsedRecoveryTargetRefs(targetRefs: readonly string[]): Record<string,
 function requiredRecoveryPresentation(commandType: HistoricalCommandType): PersistedCommandRecovery["presentation"] | undefined {
   if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") return "STAY_DATES";
   if (commandType === "MOVE_UNIT") return "MOVE_UNIT";
+  if (commandType === "RESOLVE_MIGRATED_OVERDUE_STAY") return "MIGRATED_OVERDUE_STAY";
   if (commandType === "CANCEL_ORDER" || commandType === "MARK_NO_SHOW" || commandType === "REVOKE_CHECK_IN") return "ORDER_LIFECYCLE";
   return undefined;
 }
@@ -3270,6 +3329,84 @@ function orderLifecycleReceiptHasEvidence(
   return true;
 }
 
+export function resolveMigratedOverdueStayReceiptHasEvidence(
+  value: unknown,
+  input: Record<string, unknown>,
+  previewEffect?: Record<string, unknown>,
+  expectedEffectHash?: string
+): boolean {
+  const fullInput = typeof input.orderId === "string"
+    && typeof input.holdId === "string"
+    && typeof input.newDepartureDate === "string"
+    && Number.isSafeInteger(input.postCutoverIncrementAmountMinor)
+    && Number(input.postCutoverIncrementAmountMinor) >= 0;
+  const recoveryInput = typeof input.orderId === "string" && isEffectHash(expectedEffectHash);
+  if (!fullInput && !recoveryInput) return false;
+
+  if (!receiptExecutionSemanticsAreCoherent(value) || !isRecord(value)
+    || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
+    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
+    || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
+    || value.error !== undefined
+    || !Array.isArray(value.resourceRefs) || !value.resourceRefs.every(nonblankString)
+    || new Set(value.resourceRefs).size !== value.resourceRefs.length
+    || !Array.isArray(value.factRefs) || !value.factRefs.every(nonblankString)
+    || new Set(value.factRefs).size !== value.factRefs.length
+    || !isRecord(value.result)) return false;
+
+  const result = value.result;
+  const requiredResultKeys = [
+    "orderId", "amendmentId", "staySegmentId", "pricingRevisionId", "holdId", "holdReleaseId",
+    "historicalActualAmountMinor", "postCutoverIncrementAmountMinor", "newContractAmountMinor",
+    "newDepartureDate", "effectHash"
+  ];
+  const historicalActualAmountMinor = result.historicalActualAmountMinor;
+  const postCutoverIncrementAmountMinor = result.postCutoverIncrementAmountMinor;
+  const newContractAmountMinor = result.newContractAmountMinor;
+  if (!hasExactKeys(result, requiredResultKeys)
+    || !nonblankString(result.orderId)
+    || result.orderId !== input.orderId
+    || !nonblankString(result.amendmentId)
+    || !nonblankString(result.staySegmentId)
+    || !nonblankString(result.pricingRevisionId)
+    || !nonblankString(result.holdId)
+    || !nonblankString(result.holdReleaseId)
+    || typeof result.newDepartureDate !== "string"
+    || localDateEpoch(result.newDepartureDate) === undefined
+    || typeof historicalActualAmountMinor !== "number"
+    || !Number.isSafeInteger(historicalActualAmountMinor)
+    || historicalActualAmountMinor < 0
+    || typeof postCutoverIncrementAmountMinor !== "number"
+    || !Number.isSafeInteger(postCutoverIncrementAmountMinor)
+    || postCutoverIncrementAmountMinor < 0
+    || typeof newContractAmountMinor !== "number"
+    || !Number.isSafeInteger(newContractAmountMinor)
+    || newContractAmountMinor !== historicalActualAmountMinor + postCutoverIncrementAmountMinor
+    || !isEffectHash(result.effectHash)
+    || !isEffectHash(expectedEffectHash)
+    || result.effectHash !== expectedEffectHash) return false;
+
+  if (fullInput && (result.holdId !== input.holdId
+    || result.newDepartureDate !== input.newDepartureDate
+    || postCutoverIncrementAmountMinor !== input.postCutoverIncrementAmountMinor)) return false;
+
+  const resourceRefs = value.resourceRefs as string[];
+  const factRefs = value.factRefs as string[];
+  if (![result.orderId, result.amendmentId, result.staySegmentId, result.pricingRevisionId, result.holdId]
+    .every((id) => resourceRefs.includes(id as string))
+    || !factRefs.includes(result.holdReleaseId)) return false;
+
+  if (previewEffect) {
+    if (!fullInput || !resolveMigratedOverdueStayPreviewHasEvidence(previewEffect, input)
+      || ![
+        "orderId", "holdId", "historicalActualAmountMinor", "postCutoverIncrementAmountMinor",
+        "newContractAmountMinor", "newDepartureDate"
+      ].every((key) => evidenceValuesEqual(result[key], previewEffect[key]))) return false;
+  }
+  return true;
+}
+
 export function receiptHasCommandEvidence(
   commandType: HistoricalCommandType,
   receipt: ReceiptDto,
@@ -3284,6 +3421,9 @@ export function receiptHasCommandEvidence(
   }
   if (commandType === "MOVE_UNIT" && receipt.businessCommitted) {
     return moveUnitReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
+  if (commandType === "RESOLVE_MIGRATED_OVERDUE_STAY" && receipt.businessCommitted) {
+    return resolveMigratedOverdueStayReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
   }
   if ((commandType === "CANCEL_ORDER" || commandType === "MARK_NO_SHOW" || commandType === "REVOKE_CHECK_IN")
     && receipt.businessCommitted) {
@@ -3640,17 +3780,19 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || !Array.isArray(value.targetRefs)
     || !value.targetRefs.every((item) => typeof item === "string")
     || parsedRecoveryTargetRefs(value.targetRefs as string[]) === undefined
-    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT" && value.presentation !== "ORDER_LIFECYCLE")
+    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT" && value.presentation !== "ORDER_LIFECYCLE" && value.presentation !== "MIGRATED_OVERDUE_STAY")
     || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
     || (value.presentation === "FULFILLMENT" && !isFulfillmentBusinessCommand(value.commandType))
     || (value.presentation === "STAY_DATES" && value.commandType !== "RESCHEDULE_STAY" && value.commandType !== "EXTEND_STAY" && value.commandType !== "SHORTEN_STAY")
     || (value.presentation === "MOVE_UNIT" && value.commandType !== "MOVE_UNIT")
+    || (value.presentation === "MIGRATED_OVERDUE_STAY" && value.commandType !== "RESOLVE_MIGRATED_OVERDUE_STAY")
     || (value.presentation === "ORDER_LIFECYCLE" && value.commandType !== "CANCEL_ORDER" && value.commandType !== "MARK_NO_SHOW" && value.commandType !== "REVOKE_CHECK_IN")
     || (requiredRecoveryPresentation(value.commandType) !== undefined
       && value.presentation !== requiredRecoveryPresentation(value.commandType))
     || ((value.presentation === "STAY_DATES"
       || value.presentation === "MOVE_UNIT"
       || value.presentation === "ORDER_LIFECYCLE"
+      || value.presentation === "MIGRATED_OVERDUE_STAY"
       || value.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") && !isEffectHash(value.effectHash))
     || (value.effectHash !== undefined && !isEffectHash(value.effectHash))
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
@@ -3771,11 +3913,13 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const stayDates = recovery.presentation === "STAY_DATES";
   const moveUnit = recovery.presentation === "MOVE_UNIT";
   const orderLifecycle = recovery.presentation === "ORDER_LIFECYCLE";
+  const migratedOverdueStay = recovery.presentation === "MIGRATED_OVERDUE_STAY";
   const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
   const restoreTargetInputs = stayDates
     || moveUnit
     || orderLifecycle
+    || migratedOverdueStay
     || recovery.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
   const targetInputs = restoreTargetInputs ? parsedRecoveryTargetRefs(recovery.targetRefs) ?? {} : {};
   return {
@@ -3790,6 +3934,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
           ? `恢复${commandShellLabel(u1CommandType)}结果`
         : moveUnit && u1CommandType
           ? `恢复${commandShellLabel(u1CommandType)}结果`
+          : migratedOverdueStay
+            ? "恢复历史在住处理结果"
         : u1CommandType
           ? `查询${commandShellLabel(u1CommandType)}结果`
         : `${recovery.commandType} · 原命令恢复`,
@@ -3803,6 +3949,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : moveUnit && u1CommandType
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
+          : migratedOverdueStay
+            ? "系统只查询刚才的历史在住处理结果，不会重复提交。"
         : u1CommandType
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : "仅使用已保存的原幂等键查询服务端命令结果，不会发起新的业务写入。",
@@ -4294,13 +4442,15 @@ export function CommandDialog({
   const moveUnit = request.presentation === "MOVE_UNIT" && request.commandType === "MOVE_UNIT";
   const orderLifecycle = request.presentation === "ORDER_LIFECYCLE"
     && (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN");
+  const migratedOverdueStay = request.presentation === "MIGRATED_OVERDUE_STAY"
+    && request.commandType === "RESOLVE_MIGRATED_OVERDUE_STAY";
   const requestBookingChannelValue = (request as unknown as { bookingChannelCode?: unknown }).bookingChannelCode;
   const requestBookingChannelCode = typeof requestBookingChannelValue === "string" || requestBookingChannelValue === null
     ? requestBookingChannelValue
     : undefined;
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
   const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
-  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment || fundBusiness || tokenBusiness;
+  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment || fundBusiness || tokenBusiness || migratedOverdueStay;
   const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : fulfillment && executableCommandType ? executableCommandType : fundBusiness ? request.commandType : tokenBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
   const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : tokenBusiness ? tokenCommandLabel(request.commandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
@@ -4327,7 +4477,7 @@ export function CommandDialog({
       ? `${commandShellLabel(u1CommandType)}未写入；原操作已安全收口，可以关闭后重新发起。`
       : commandShellNotExecutedMessage(u1CommandType)
     : "本次操作未执行。";
-  const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || tokenBusiness) && executableCommandType ? executableCommandType : undefined);
+  const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || tokenBusiness || migratedOverdueStay) && executableCommandType ? executableCommandType : undefined);
 
   function applyShellEvent(event: CommandShellEvent): boolean {
     let accepted = false;
@@ -4366,6 +4516,7 @@ export function CommandDialog({
     && !networkUncertain
     && !confirmationKey
     && (!u1CommandType || u1PreviewHasBusinessEvidence(u1CommandType, preview.effect, request.input))
+    && (!migratedOverdueStay || resolveMigratedOverdueStayPreviewHasEvidence(preview.effect, request.input))
     && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));
   const dialogCloseDisabled = busy && (!u1CommandType || Boolean(confirmationKey) || shellState.phase === "CONFIRMING");
   const currentKey = useMemo(() => confirmationKey ?? api.recoveryKey(request.commandType), [confirmationKey, request.commandType]);
@@ -4740,18 +4891,18 @@ export function CommandDialog({
     <Modal
       title={request.title}
       onClose={closeCommandDialog}
-      size={stayDates || moveUnit || orderLifecycle ? "drawer" : "wide"}
+      size={stayDates || moveUnit || orderLifecycle || migratedOverdueStay ? "drawer" : "wide"}
       closeDisabled={dialogCloseDisabled}
       footer={
         <>
           <button
             className="button button-secondary"
             type="button"
-            onClick={u1CommandType && !lodgingFulfillment && !networkUncertain && !recoveryOnlyRequest ? returnToEdit : () => onClose()}
+            onClick={(u1CommandType || migratedOverdueStay) && !lodgingFulfillment && !networkUncertain && !recoveryOnlyRequest ? returnToEdit : () => onClose()}
             disabled={dialogCloseDisabled}
-            data-testid={u1CommandType ? (lodgingFulfillment || networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
+            data-testid={u1CommandType || migratedOverdueStay ? (lodgingFulfillment || networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
           >
-            {u1CommandType
+            {u1CommandType || migratedOverdueStay
               ? networkUncertain || recoveryOnlyRequest
                 ? "关闭"
                 : lodgingFulfillment
@@ -4768,7 +4919,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : migratedOverdueStay ? "确认历史在住处理" : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }

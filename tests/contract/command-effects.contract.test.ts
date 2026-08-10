@@ -29,6 +29,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
   RESCHEDULE_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
   EXTEND_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
+  RESOLVE_MIGRATED_OVERDUE_STAY: ["historicalActualAmountMinor", "holdId", "newContractAmountMinor", "newDepartureDate", "operation", "orderId", "postCutoverIncrementAmountMinor", "sourceId"],
   SHORTEN_STAY: ["after", "before", "businessDate", "completionMode", "entitlementSummary", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "refundReferenceAmount", "stayId"],
   MOVE_UNIT: [
     "after", "before", "businessDate", "effectiveDate", "entitlementSummary", "fundsSummary", "inventoryChange",
@@ -836,6 +837,23 @@ describe("Command effect HTTP contract", () => {
     expect(Value.Check(CommandEffectSchema, historicalCleaningEffect)).toBe(true);
     expect(Object.keys(historicalCleaningEffect).sort()).toEqual(expectedEffectKeys.COMPLETE_CLEANING);
     covered.add("COMPLETE_CLEANING");
+
+    // A real migrated-overdue Preview requires the private cutover manifest.
+    // Its Preview/Confirm path is exercised by the historical import integration
+    // suite; keep the public contract suite independent of that PII-bearing file.
+    const migratedOverdueEffect = {
+      operation: "RESOLVE_MIGRATED_OVERDUE_STAY",
+      orderId: "order_migrated_overdue_contract",
+      sourceId: "migration_source_contract",
+      holdId: "migration_overdue_hold_contract",
+      historicalActualAmountMinor: 13_000,
+      postCutoverIncrementAmountMinor: 26_000,
+      newContractAmountMinor: 39_000,
+      newDepartureDate: "2026-08-13"
+    };
+    expect(Value.Check(CommandEffectSchema, migratedOverdueEffect)).toBe(true);
+    expect(Object.keys(migratedOverdueEffect).sort()).toEqual(expectedEffectKeys.RESOLVE_MIGRATED_OVERDUE_STAY);
+    covered.add("RESOLVE_MIGRATED_OVERDUE_STAY");
 
     expect([...covered].sort()).toEqual([...commandTypes].sort());
   }, 120_000);

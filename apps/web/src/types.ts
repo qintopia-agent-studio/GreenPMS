@@ -348,6 +348,57 @@ export interface OrderRowDto {
   updated_at: string;
 }
 
+export interface HistoricalOrderArchiveDto {
+  id: string;
+  property_id: string;
+  record_kind: "MIGRATED_ARCHIVE" | "NON_ACCOMMODATION_ARCHIVE";
+  source_order_id: string;
+  guest_full_name: string | null;
+  guest_nickname: string | null;
+  mapped_channel_code: BookingChannelCode | null;
+  channel_order_reference: string | null;
+  channel_reference_missing_reason: "HISTORICAL_NOT_RECORDED" | null;
+  arrival_date: string | null;
+  departure_date: string | null;
+  stay_type: string | null;
+  source_status: string | null;
+  historical_actual_amount_minor: number;
+  lodging_subtotal_minor: number | null;
+  checkout_amount_minor: number | null;
+  amount_difference_reason: string | null;
+  currency: string;
+  created_at: string;
+}
+
+export interface HistoricalOrderArchiveDetailDto extends HistoricalOrderArchiveDto {
+  guest_phone: string | null;
+  sourceEvidence: {
+    sourceSystem: string;
+    sourceRow: number;
+    rawChannel: string | null;
+    guestNameProvenance: string | null;
+    guestNicknameProvenance: string | null;
+    guestPhoneProvenance: string | null;
+    reviewConclusion: string | null;
+    reviewWorkbookHash: string | null;
+    manualConfirmation: {
+      businessType: string | null;
+      correctionSource: string | null;
+      latestCorrection: string | null;
+      observedLifecycle: string | null;
+      reason: string | null;
+      room: string | null;
+    };
+    files: Array<{ sourceRole: string; fileName: string; sha256: string; exportedAt: string | null; rowCount: number | null }>;
+  };
+  pricingEvidence: {
+    auditHistoricalAmountMinor: number | null;
+    checkoutAccommodationAmountMinor: number | null;
+    checkoutTotalAmountMinor: number | null;
+    unsettledConsumptionAmountMinor: number | null;
+  };
+}
+
 export interface StaySegmentDto {
   id: string;
   stay_id: string;
@@ -386,11 +437,12 @@ export interface PricingRevisionDto {
   departure_date: string;
   coverage_set: unknown;
   cash_lines: unknown;
-  policy_base_amount_minor: number;
+  policy_base_amount_minor: number | null;
+  pricing_origin: "STANDARD" | "MIGRATED_ACTUAL" | "MIGRATED_ACTUAL_PLUS_POST_CUTOVER";
   pricing_basis: "POLICY" | "CHANNEL_CONTRACT" | "MANUAL_ADJUSTMENT" | "MEMBER_ENTITLEMENT" | "FREE";
   manual_adjustment_minor: number;
   current_contract_amount_minor: number;
-  difference_from_policy_minor: number;
+  difference_from_policy_minor: number | null;
   reason: { code: string; note: string };
   currency: string;
   created_at: string;
@@ -448,6 +500,7 @@ export interface CleaningTaskSummaryDto {
 export interface OrderViewDto {
   accessLevel: AccessLevel;
   allowedActions: OrderAllowedActionDto[];
+  migrationOverdueHold: { id: string; startsOn: string } | null;
   order: OrderRowDto;
   occupants: Array<{
     id: string;
@@ -504,7 +557,7 @@ export interface CommandRequest {
   input: Record<string, unknown>;
   title: string;
   description: string;
-  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
+  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE" | "MIGRATED_OVERDUE_STAY";
   recoveryEffectHash?: string;
   inventoryUnitLabels?: Record<string, string>;
   orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string };

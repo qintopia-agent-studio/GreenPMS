@@ -632,8 +632,8 @@ describe.sequential("booking channels and external transaction references on Pos
     const secondOrderId = secondOrder.receipt.result!.orderId as string;
     const pricingRevisionId = (await getOrderView(db, orderId)).order.current_revision_id!;
     const secondPricingRevisionId = (await getOrderView(db, secondOrderId)).order.current_revision_id!;
-    await expect(db.updateTable("orders").set({ booking_channel_code: "MEITUAN" }).where("id", "=", orderId).execute()).rejects.toThrow(/booking channel.*immutable/);
-    await expect(db.updateTable("orders").set({ channel_order_reference: "CHANGED" }).where("id", "=", orderId).execute()).rejects.toThrow(/booking channel.*immutable/);
+    await expect(db.updateTable("orders").set({ booking_channel_code: "MEITUAN" }).where("id", "=", orderId).execute()).rejects.toThrow(/(?:booking )?channel.*immutable/);
+    await expect(db.updateTable("orders").set({ channel_order_reference: "CHANGED" }).where("id", "=", orderId).execute()).rejects.toThrow(/(?:booking )?channel.*immutable/);
 
     const externalBaseFact = {
       order_id: orderId,
@@ -1007,7 +1007,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 035, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 037, preserves historical facts, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -1568,6 +1568,9 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration036 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/036_qintopia_prelaunch_room_catalog_corrections.sql"), "utf8");
         await client.query(migration036);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('036_qintopia_prelaunch_room_catalog_corrections.sql')");
+        const migration037 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/037_historical_order_import.sql"), "utf8");
+        await client.query(migration037);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('037_historical_order_import.sql')");
         await client.query("ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only");
         await client.query("UPDATE collection_facts SET pricing_revision_id = NULL WHERE fact_id = 'fact_historical_nulls'");
         await client.query("ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only");

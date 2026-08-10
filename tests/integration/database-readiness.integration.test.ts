@@ -62,12 +62,109 @@ describe.sequential("authoritative database readiness", () => {
       "033_stay_collection_membership_conversion.sql",
       "034_stay_conversion_reversal_bridge_guard.sql",
       "035_stage13_conversion_execution_state_guards.sql",
-      "036_qintopia_prelaunch_room_catalog_corrections.sql"
+      "036_qintopia_prelaunch_room_catalog_corrections.sql",
+      "037_historical_order_import.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
       });
     }
+  });
+
+  it("rejects damaged historical-import provenance, pricing, and overdue-inventory controls", async () => {
+    await expectReadinessFailure("migration source key", async (trx) => {
+      await sql`
+        ALTER TABLE migration_order_sources
+        DROP CONSTRAINT migration_order_sources_source_key
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("migration target XOR", async (trx) => {
+      await sql`
+        ALTER TABLE migration_order_targets
+        DROP CONSTRAINT migration_order_targets_exactly_one_target
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("migration source append-only trigger", async (trx) => {
+      await sql`
+        DROP TRIGGER migration_order_sources_append_only
+        ON migration_order_sources
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("migration primary occupant guard", async (trx) => {
+      await sql`
+        DROP TRIGGER order_occupants_validate_new
+        ON order_occupants
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("migration run state trigger", async (trx) => {
+      await sql`
+        DROP TRIGGER migration_import_runs_protect_state
+        ON migration_import_runs
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("order migration source uniqueness", async (trx) => {
+      await sql`
+        ALTER TABLE orders
+        DROP CONSTRAINT orders_migration_source_unique
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("pricing origin shape", async (trx) => {
+      await sql`
+        ALTER TABLE pricing_revisions
+        DROP CONSTRAINT pricing_revisions_pricing_origin_shape
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("overdue hold active lookup index", async (trx) => {
+      await sql`
+        DROP INDEX migration_overdue_holds_active_lookup_idx
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("overdue hold claim conflict trigger", async (trx) => {
+      await sql`
+        DROP TRIGGER inventory_claims_reject_active_migration_overdue_hold
+        ON inventory_claims
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("overdue order status guard trigger", async (trx) => {
+      await sql`
+        DROP TRIGGER orders_migration_overdue_status_guard
+        ON orders
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("overdue hold room serialization lock", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_validate_migration_overdue_hold()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$ BEGIN RETURN NEW; END $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("overdue claim room serialization lock", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_reject_active_migration_overdue_hold()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$ BEGIN RETURN NEW; END $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("overdue release completeness trigger", async (trx) => {
+      await sql`
+        DROP TRIGGER migration_overdue_releases_validate_complete
+        ON migration_overdue_inventory_hold_releases
+      `.execute(trx);
+    });
   });
 
   it("rejects damaged foundational audit, identity, and idempotency controls", async () => {
