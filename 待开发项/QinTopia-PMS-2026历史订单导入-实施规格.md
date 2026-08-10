@@ -226,6 +226,13 @@ Expected commands:
 - `npm run db:purge:production-acceptance -- --mode dry-run`
 - `git diff --check`
 
+## Web room-status projection contract
+
+- Web 的 `assertRoomStatusBoard` 只在一个阻断 `IN_HOUSE` interval 同时具备 `ORDER` 或 `FREE_STAY` 来源、零 Claim/`CLAIM` 引用、唯一 `ORDER`/`STAY`/专用 `BLOCK`、唯一且匹配实际库存单元的 `INVENTORY_UNIT` 稳定引用，以及唯一匹配的 `SYSTEM / MIGRATED_OVERDUE_HOLD` history 时接受 `OVERDUE_IN_HOUSE`。
+- 该匹配 history 的 actor、command、Receipt 和 correlation 都必须为空；interval 与 conflict 必须公开同一非空原因。除迁移 snapshot 外不得混入其他 history，迁移 snapshot 也不能替代、复制或放宽上述专用 hold 证据。
+- `MIGRATED_OVERDUE_HOLD` marker 与 `OVERDUE_IN_HOUSE` conflict 必须同时存在；active hold interval 必须完整覆盖 `max(sourceStartDate, query.arrivalDate)..query.departureDate`，不能在查询窗口内提前结束并漏出可售日期。
+- 日级 conflict、interval conflict 和单元汇总仍由既有 DTO validator 精确交叉核对；普通逾期在住订单和运营任务不获得此例外，仍不自动延长当前或未来库存。
+
 ## Status Log
 
 - 2026-08-09：用户确认从 2026-03-13 开始同步，采用历史实价方案，并完成 4 项 P0 人工确认。
@@ -242,3 +249,4 @@ Expected commands:
 - 2026-08-10：生产只读审计发现 7 条上线验收住宿订单及完整 demo 会员/认证数据。用户明确选择保留当前生产数据库、不新建正式库，并授权删除这些验收和演示数据；清理必须先停服、关闭 `SEED_DEMO_DATA`、完成备份恢复验证，再用精确快照、单事务 `TRUNCATE ... RESTRICT` 和正式操作员密码轮换执行。
 - 2026-08-10：真实割接时间固定为 `2026-08-09T13:31:00+08:00`；唯一允许使用早期导出例外的来源固定为 `COST_EXPORT / Accommodation Cost Details.xlsx / eca5cd18eed450aaa457ac2e2bb1cd085650a59417da684a066c0f695045c789 / 2026-08-08T21:30:14+08:00`。它只能绑定用户于 `2026-08-10` 的原文“用户于2026-08-10确认今天数据无变化，沿用昨日提供数据”；确认日必须晚于割接日。生成器与导入器双重拒绝未来来源、缺确认、错误 role/文件名/SHA-256/导出时间/cutoverAt、泛化文本或日期，以及 confirmation 的额外字段；同日来源不携带该例外证明。
 - 2026-08-10：用户确认思甜（`12520971356466554848`，202-B，`2026-07-19..2026-08-18`）在割接日已入住、在住。V6 manifest 因此冻结为 37 在住、7 预订；候选数、归档/运营数、50 段、金额、渠道分布和住客字段来源约束保持不变。44 单运营事实人工批准 SHA-256 更新为 `54503a37fb85d18867456b91081510b6e52ebfd0ccaa1454c8349a9af07d304f`。
+- 2026-08-10：修复 active migration overdue hold 被 Web room-status validator 全局拒绝的问题。前端仅接受专用 `BLOCK` 与唯一无主体 `SYSTEM / MIGRATED_OVERDUE_HOLD` evidence 支撑的 `OVERDUE_IN_HOUSE`；真实导入 Resolve 前 hold 和 Resolve 后 Claim board 均通过同一 DTO 校验，未修改数据库、后端投影、DTO/schema、库存、订单或金额事实。

@@ -391,3 +391,9 @@ U2 人工验收通过口令为 `U2 通过`。未收到该口令前，不得进�
 | 4.7 | 已通过 | 2026-08-02 用户明确回复 `4.7 通过`；住宿收款整笔升级会员、防重复、专用核销、原子回滚及订单/会员双向追溯均完成人工验收，技术收口与自动门禁此前已通过 |
 | 5 | 已通过 | 2026-08-02 用户完成人工验收：30 夜连续跨月、楼栋/房间/床位层级、整页滚动、超长住宿完整日期校验、冲突日期提示及右侧抽屉滚动均通过；阶段 14 收口 |
 | 6 | 已通过 | 2026-08-03 用户完成最终集中人工验收并确认通过。四个小步骤的开发、A/B 浏览器证据、机器发布门禁、最终独立审计与两条共存金标旅程均已收口；迁移 035、readiness、备份恢复、冷启动、Compose、Token/API 和报价外部字段表达通过发布级抽查 |
+
+### 2026-08-10 迁移逾期在住房态投影修复记录
+
+- 线上故障：V6 历史订单导入后，周慧玲 306 的 active migration overdue hold 被后端正确投影为 `OVERDUE_IN_HOUSE`，但 Web DTO validator 全局拒绝该事实，导致整张房态日历失败关闭。
+- 修复边界：仅在前端接受同时具有唯一 `ORDER`/`STAY`/专用 `BLOCK` 引用、唯一匹配实际库存单元的 `INVENTORY_UNIT`、零 Claim/`CLAIM`、一致非空原因，以及唯一无 actor/command/Receipt/correlation 的 `SYSTEM / MIGRATED_OVERDUE_HOLD` evidence 的阻断 `IN_HOUSE` interval；普通逾期订单、运营任务及任一缺失或不一致聚合继续失败关闭。
+- 验证：表驱动 Web validator 单测覆盖有效 hold、缺 `BLOCK`、缺迁移 history、带操作人/command history、错误状态/Claim 和普通逾期；历史导入集成在真实 PostgreSQL 中使用 synthetic manifest，把 Resolve 前的 hold board 与 Resolve 后的 Claim board 都送入 Web validator。`npx vitest run apps/web/src/room-status/roomStatusValidation.test.ts`、`npx vitest run tests/integration/historical-order-import.integration.test.ts`、`npm run typecheck` 和 `npm run build` 于 2026-08-10 通过。

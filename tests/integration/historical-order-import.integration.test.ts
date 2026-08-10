@@ -34,6 +34,7 @@ import {
   issueHistoricalImportApproval,
   issueHistoricalImportRecoveryAttestation
 } from "../../packages/db/src/historical-import-approval.ts";
+import { assertRoomStatusBoard } from "../../apps/web/src/room-status/roomStatusValidation.ts";
 
 const databaseUrl = process.env.HISTORICAL_ORDER_IMPORT_INTEGRATION_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_historical_order_import";
@@ -286,16 +287,26 @@ function allUnits(units: RoomStatusUnitDto[]): RoomStatusUnitDto[] {
   return units.flatMap((unit) => [unit, ...allUnits(unit.children)]);
 }
 
-async function roomStatusForResolution(hold: ActiveOverdueHold) {
-  const board = await getRoomStatusBoard(db, {
+function roomStatusExpectedQuery(hold: ActiveOverdueHold, arrivalDate = hold.starts_on) {
+  return {
     propertyId: hold.property_id,
-    arrivalDate: hold.starts_on,
+    range: { arrivalDate, departureDate: resolvedDepartureDate },
+    pageIndex: 0
+  };
+}
+
+async function roomStatusBoardForResolution(hold: ActiveOverdueHold, arrivalDate = hold.starts_on) {
+  return getRoomStatusBoard(db, {
+    propertyId: hold.property_id,
+    arrivalDate,
     departureDate: resolvedDepartureDate,
     accessLevel: "WRITE",
     requestingSubjectId: principal.subjectId,
-    pageSize: 200,
-    search: hold.inventory_unit_code
+    pageSize: 200
   });
+}
+
+function roomStatusUnitForResolution(board: Awaited<ReturnType<typeof getRoomStatusBoard>>, hold: ActiveOverdueHold) {
   const unit = allUnits(board.rooms).find((candidate) => candidate.id === hold.inventory_unit_id);
   expect(unit).toBeDefined();
   return unit!;
@@ -880,7 +891,9 @@ describe.sequential("historical order import", () => {
     const heldUnitAvailability = beforeAvailability.find((unit) => unit.id === hold.inventory_unit_id);
     expect(heldUnitAvailability).toMatchObject({ available: false });
     expect(heldUnitAvailability?.nights.every((night) => !night.available)).toBe(true);
-    const overdueUnit = await roomStatusForResolution(hold);
+    const overdueBoard = await roomStatusBoardForResolution(hold);
+    expect(() => assertRoomStatusBoard(overdueBoard, roomStatusExpectedQuery(hold))).not.toThrow();
+    const overdueUnit = roomStatusUnitForResolution(overdueBoard, hold);
     const overdueInterval = overdueUnit.intervals.find((interval) => (
       interval.references.some((reference) => reference.type === "BLOCK" && reference.id === hold.id)
     ));
@@ -900,6 +913,17 @@ describe.sequential("historical order import", () => {
         endDate: resolvedDepartureDate
       })
     ]);
+    const truncatedArrivalDate = "2026-08-10";
+    const truncatedBoard = await roomStatusBoardForResolution(hold, truncatedArrivalDate);
+    expect(() => assertRoomStatusBoard(truncatedBoard, roomStatusExpectedQuery(hold, truncatedArrivalDate))).not.toThrow();
+    expect(roomStatusUnitForResolution(truncatedBoard, hold).intervals.find((interval) => (
+      interval.references.some((reference) => reference.type === "BLOCK" && reference.id === hold.id)
+    ))).toMatchObject({
+      startDate: truncatedArrivalDate,
+      sourceStartDate: hold.starts_on,
+      status: "IN_HOUSE",
+      available: false
+    });
 
     const originalRevision = await db.selectFrom("pricing_revisions")
       .selectAll()
@@ -1040,11 +1064,17 @@ describe.sequential("historical order import", () => {
       });
     expect(afterView.allowedActions.find((action) => action.code === "CHECK_OUT"))
       .toEqual({ code: "CHECK_OUT", enabled: false, disabledReason: "DEPARTURE_DATE_NOT_REACHED" });
-    const resolvedUnit = await roomStatusForResolution(hold);
+    const resolvedBoard = await roomStatusBoardForResolution(hold);
+    expect(() => assertRoomStatusBoard(resolvedBoard, roomStatusExpectedQuery(hold))).not.toThrow();
+    const resolvedUnit = roomStatusUnitForResolution(resolvedBoard, hold);
     expect(resolvedUnit.days.every((day) => day.status === "IN_HOUSE" && !day.available)).toBe(true);
     expect(resolvedUnit.days.every((day) => (
       day.conflicts.some((conflict) => conflict.blockingFactKind === "CLAIM")
       && day.conflicts.every((conflict) => conflict.blockingFactKind !== "OVERDUE_IN_HOUSE")
+    ))).toBe(true);
+    expect(resolvedUnit.intervals.every((interval) => (
+      interval.references.every((reference) => !(reference.type === "BLOCK" && reference.id === hold.id))
+      && interval.history.every((history) => history.action !== "MIGRATED_OVERDUE_HOLD")
     ))).toBe(true);
 
     const committedState = await overdueResolutionBusinessState(hold);

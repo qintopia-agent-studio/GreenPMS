@@ -219,6 +219,64 @@ function assertHistory(value: unknown, path: string): asserts value is RoomStatu
   if (item.correlationId !== null) string(item.correlationId, `${path}.correlationId`);
 }
 
+function assertMigratedOverdueHoldProvenance(
+  path: string,
+  interval: Pick<RoomStatusIntervalDto,
+    "actualInventoryUnitId" | "startDate" | "endDate" | "sourceStartDate"
+    | "sourceKind" | "status" | "available" | "blocking" | "reason" | "claimIds">,
+  references: readonly RoomStatusReferenceDto[],
+  conflicts: readonly RoomStatusConflictDto[],
+  histories: readonly RoomStatusHistoryDto[],
+  expectedRange: ExpectedRoomStatusQuery["range"]
+): void {
+  const hasOverdueConflict = conflicts.some((conflict) => conflict.blockingFactKind === "OVERDUE_IN_HOUSE");
+  const hasMigrationMarker = histories.some((history) => history.action === "MIGRATED_OVERDUE_HOLD");
+  if (hasOverdueConflict !== hasMigrationMarker) fail(path, "迁移锁与逾期阻断事实不一致");
+  if (!hasOverdueConflict) return;
+
+  const referenceCount = (type: RoomStatusReferenceDto["type"]) => (
+    references.filter((reference) => reference.type === type).length
+  );
+  const permittedReferenceTypes = new Set<RoomStatusReferenceDto["type"]>([
+    "BLOCK", "ORDER", "STAY", "INVENTORY_UNIT"
+  ]);
+  const permittedHistoryActions = new Set([
+    "MIGRATED_OVERDUE_HOLD", "MIGRATED_OPERATIONAL_SNAPSHOT"
+  ]);
+  const migratedOverdueHistories = histories.filter((history) => history.action === "MIGRATED_OVERDUE_HOLD");
+  const migratedOverdueHistory = migratedOverdueHistories[0];
+  const inventoryReference = references.find((reference) => reference.type === "INVENTORY_UNIT");
+  const expectedStartDate = interval.sourceStartDate > expectedRange.arrivalDate
+    ? interval.sourceStartDate
+    : expectedRange.arrivalDate;
+  const valid = (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+    && interval.startDate === expectedStartDate
+    && interval.endDate === expectedRange.departureDate
+    && interval.status === "IN_HOUSE"
+    && interval.blocking
+    && !interval.available
+    && typeof interval.reason === "string"
+    && interval.reason.length > 0
+    && interval.claimIds.length === 0
+    && conflicts.length === 1
+    && conflicts[0]?.blockingFactKind === "OVERDUE_IN_HOUSE"
+    && conflicts[0].reason === interval.reason
+    && references.every((reference) => permittedReferenceTypes.has(reference.type))
+    && referenceCount("ORDER") === 1
+    && referenceCount("STAY") === 1
+    && referenceCount("BLOCK") === 1
+    && referenceCount("INVENTORY_UNIT") === 1
+    && inventoryReference?.id === interval.actualInventoryUnitId
+    && histories.every((history) => permittedHistoryActions.has(history.action))
+    && migratedOverdueHistories.length === 1
+    && migratedOverdueHistory?.source === "SYSTEM"
+    && migratedOverdueHistory.actorId === null
+    && migratedOverdueHistory.commandId === null
+    && migratedOverdueHistory.receiptId === null
+    && migratedOverdueHistory.correlationId === null;
+  if (!valid) fail(path, "迁移逾期在住证据不完整");
+}
+
 function assertConflict(value: unknown, path: string): asserts value is RoomStatusConflictDto {
   const item = record(value, path);
   string(item.id, `${path}.id`);
@@ -265,7 +323,8 @@ function assertInterval(
   accessLevel: "READ" | "WRITE",
   expectedRange: ExpectedRoomStatusQuery["range"],
   constrainToRange = true,
-  constrainConflictDatesToInterval = true
+  constrainConflictDatesToInterval = true,
+  acceptMigratedOverdueHold = true
 ): asserts value is RoomStatusIntervalDto {
   const item = record(value, path);
   string(item.id, `${path}.id`);
@@ -333,9 +392,25 @@ function assertInterval(
   const conflicts = array(item.conflicts, `${path}.conflicts`);
   conflicts.forEach((conflict, index) => assertConflict(conflict, `${path}.conflicts[${index}]`));
   const typedConflicts = conflicts as RoomStatusConflictDto[];
-  if (typedConflicts.some((conflict) => conflict.blockingFactKind === "OVERDUE_IN_HOUSE")) {
+  const histories = array(item.history, `${path}.history`);
+  histories.forEach((history, index) => assertHistory(history, `${path}.history[${index}]`));
+  const typedHistories = histories as RoomStatusHistoryDto[];
+  const hasOverdueConflict = typedConflicts.some((conflict) => conflict.blockingFactKind === "OVERDUE_IN_HOUSE");
+  if (hasOverdueConflict && !acceptMigratedOverdueHold) {
     fail(`${path}.conflicts`, "不能用逾期在住事实自动延长当前或未来房态");
   }
+  assertMigratedOverdueHoldProvenance(`${path}.conflicts`, {
+    actualInventoryUnitId: item.actualInventoryUnitId as string,
+    startDate,
+    endDate,
+    sourceStartDate,
+    sourceKind,
+    status: status as RoomStatusIntervalDto["status"],
+    available,
+    blocking,
+    reason: item.reason as string | null,
+    claimIds
+  }, typedReferences, typedConflicts, typedHistories, expectedRange);
   const intervalShape = {
     displayInventoryUnitId: item.displayInventoryUnitId as string,
     actualInventoryUnitId: item.actualInventoryUnitId as string,
@@ -356,7 +431,6 @@ function assertInterval(
   if (blocking && typedConflicts.length !== 1) {
     fail(`${path}.conflicts`, "阻断区间必须公开一个精确冲突事实");
   }
-  array(item.history, `${path}.history`).forEach((history, index) => assertHistory(history, `${path}.history[${index}]`));
   const actions = array(item.allowedActions, `${path}.allowedActions`);
   actions.forEach((action, index) => assertAction(action, `${path}.allowedActions[${index}]`, accessLevel));
   const typedActions = actions as RoomStatusActionDto[];
@@ -385,7 +459,7 @@ function assertOperationalTask(
   const taskKind = string(item.taskKind, `${path}.taskKind`)!;
   if (!taskKinds.has(taskKind)) fail(`${path}.taskKind`, "不是允许的运营任务类型");
   if (localDate(item.businessDate, `${path}.businessDate`) !== businessDate) fail(`${path}.businessDate`, "与房态营业日期不一致");
-  assertInterval(value, path, accessLevel, expected.range, false, false);
+  assertInterval(value, path, accessLevel, expected.range, false, false, false);
   if (item.displayInventoryUnitId !== item.actualInventoryUnitId) fail(path, "运营任务必须引用实际库存单元");
   if (item.startDate !== item.sourceStartDate || item.endDate !== item.sourceEndDate) fail(path, "运营任务必须公开来源完整区间");
   const sourceKind = item.sourceKind as RoomStatusSourceKind;

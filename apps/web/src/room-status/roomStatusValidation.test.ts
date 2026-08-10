@@ -284,6 +284,85 @@ function boardWithWholeRoomLodging(): RoomStatusBoardDto {
   return board;
 }
 
+function migratedOverdueHoldInterval(overrides: Partial<RoomStatusIntervalDto> = {}): RoomStatusIntervalDto {
+  const blockReference = { type: "BLOCK" as const, id: "block_migrated_overdue_validation", label: "Migrated overdue hold", href: null };
+  const orderReference = { type: "ORDER" as const, id: "order_migrated_overdue_validation", label: "Migrated overdue order", href: "/orders/order_migrated_overdue_validation" };
+  const stayReference = { type: "STAY" as const, id: "stay_migrated_overdue_validation", label: "Migrated overdue stay", href: null };
+  const inventoryReference = { type: "INVENTORY_UNIT" as const, id: "unit_validation", label: "V01", href: null };
+  return {
+    id: "interval_migrated_overdue_validation",
+    displayInventoryUnitId: "unit_validation",
+    actualInventoryUnitId: "unit_validation",
+    roomId: "unit_validation",
+    startDate: "2028-01-01",
+    endDate: "2028-01-02",
+    sourceStartDate: "2028-01-01",
+    sourceEndDate: "2028-01-02",
+    status: "IN_HOUSE",
+    available: false,
+    blocking: true,
+    sourceKind: "ORDER",
+    label: "Migrated overdue order",
+    primaryOccupantLabel: "Validation guest",
+    occupantCount: 1,
+    occupants: [{ occupantId: "occupant_migrated_overdue_validation", nickname: "Validation guest" }],
+    reason: "Historical departure requires confirmation",
+    claimIds: [],
+    references: [blockReference, orderReference, stayReference, inventoryReference],
+    conflicts: [{
+      id: "conflict_migrated_overdue_validation",
+      blockingFactKind: "OVERDUE_IN_HOUSE",
+      claimId: null,
+      claimIds: [],
+      requestedInventoryUnitId: "unit_validation",
+      actualInventoryUnitId: "unit_validation",
+      roomId: "unit_validation",
+      startDate: "2028-01-01",
+      endDate: "2028-01-02",
+      sourceKind: "ORDER",
+      sourceReference: orderReference,
+      reason: "Historical departure requires confirmation",
+      blocking: true
+    }],
+    history: [{
+      action: "MIGRATED_OVERDUE_HOLD",
+      actorId: null,
+      source: "SYSTEM",
+      occurredAt: "2028-01-01T00:00:00.000Z",
+      commandId: null,
+      receiptId: null,
+      correlationId: null
+    }],
+    allowedActions: [{
+      code: "OPEN_ORDER",
+      enabled: true,
+      disabledReason: null,
+      requiresFullInterval: false,
+      targetReference: orderReference
+    }],
+    ...overrides
+  };
+}
+
+function boardWithMigratedOverdueHold(): RoomStatusBoardDto {
+  const board = validBoard();
+  const interval = migratedOverdueHoldInterval();
+  const room = board.rooms[0]!;
+  room.days = [{
+    serviceDate: "2028-01-01",
+    status: "IN_HOUSE",
+    available: false,
+    intervalIds: [interval.id],
+    conflicts: [dayConflict(interval)]
+  }];
+  room.intervals = [interval];
+  room.conflicts = interval.conflicts;
+  room.allowedActions = interval.allowedActions;
+  board.filterOptions.statuses = ["IN_HOUSE"];
+  board.availabilitySummary = [{ serviceDate: "2028-01-01", availableRooms: 0, availableBeds: 0 }];
+  return board;
+}
+
 function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomStatusOperationalTaskDto {
   const claimReference = { type: "CLAIM" as const, id: "claim_order_validation", label: "Order claim", href: null };
   const orderReference = { type: "ORDER" as const, id: "order_validation", label: "Order", href: "/orders/order_validation" };
@@ -399,6 +478,204 @@ function normalLodgingTask(taskKind: "ARRIVAL" | "IN_HOUSE" | "DEPARTURE"): Room
 describe("assertRoomStatusBoard", () => {
   it("accepts a complete authoritative board", () => {
     expect(() => assertRoomStatusBoard(validBoard(), expected)).not.toThrow();
+  });
+
+  it("accepts only a complete migrated overdue hold provenance and rejects ordinary overdue projections", () => {
+    expect(() => assertRoomStatusBoard(boardWithMigratedOverdueHold(), expected)).not.toThrow();
+
+    const freeStay = boardWithMigratedOverdueHold();
+    const freeStayInterval = freeStay.rooms[0]!.intervals[0]!;
+    freeStayInterval.sourceKind = "FREE_STAY";
+    freeStayInterval.conflicts[0]!.sourceKind = "FREE_STAY";
+    freeStay.rooms[0]!.conflicts = freeStayInterval.conflicts;
+    freeStay.rooms[0]!.days[0]!.conflicts = [dayConflict(freeStayInterval)];
+    expect(() => assertRoomStatusBoard(freeStay, expected)).not.toThrow();
+
+    const withSnapshotAudit = boardWithMigratedOverdueHold();
+    withSnapshotAudit.rooms[0]!.intervals[0]!.history.push({
+      action: "MIGRATED_OPERATIONAL_SNAPSHOT",
+      actorId: null,
+      source: "UNKNOWN",
+      occurredAt: "2028-01-01T00:00:00.000Z",
+      commandId: null,
+      receiptId: null,
+      correlationId: null
+    });
+    expect(() => assertRoomStatusBoard(withSnapshotAudit, expected)).not.toThrow();
+
+    const invalidCases: Array<{
+      name: string;
+      mutate: (board: RoomStatusBoardDto) => void;
+      error: RegExp;
+    }> = [
+      {
+        name: "missing dedicated BLOCK reference",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.references = board.rooms[0]!.intervals[0]!.references
+            .filter((reference) => reference.type !== "BLOCK");
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      {
+        name: "missing migration SYSTEM history",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.history = [];
+        },
+        error: /迁移锁与逾期阻断事实不一致/
+      },
+      {
+        name: "migration history with an operator provenance",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.history[0] = {
+            ...board.rooms[0]!.intervals[0]!.history[0]!,
+            actorId: "operator_validation"
+          };
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      ...(["commandId", "receiptId", "correlationId"] as const).map((field) => ({
+        name: `migration history with ${field} provenance`,
+        mutate: (board: RoomStatusBoardDto) => {
+          board.rooms[0]!.intervals[0]!.history[0] = {
+            ...board.rooms[0]!.intervals[0]!.history[0]!,
+            [field]: `${field}_validation`
+          };
+        },
+        error: /迁移逾期在住证据不完整/
+      })),
+      {
+        name: "unexpected extra history action",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.history.push({
+            action: "OVERDUE_CHECKOUT",
+            actorId: "operator_validation",
+            source: "WEB_SESSION",
+            occurredAt: "2028-01-01T00:00:00.000Z",
+            commandId: "command_validation",
+            receiptId: "receipt_validation",
+            correlationId: "correlation_validation"
+          });
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      {
+        name: "missing matching inventory reference",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.references = board.rooms[0]!.intervals[0]!.references
+            .filter((reference) => reference.type !== "INVENTORY_UNIT");
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      {
+        name: "mismatched inventory reference",
+        mutate: (board) => {
+          const reference = board.rooms[0]!.intervals[0]!.references
+            .find((candidate) => candidate.type === "INVENTORY_UNIT")!;
+          reference.id = "unit_other";
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      {
+        name: "mismatched interval and conflict reasons",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.reason = "Different reason";
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      {
+        name: "wrong in-house status",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.status = "RESERVED";
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      {
+        name: "claim-backed shape",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.claimIds = ["claim_forged_migrated_overdue"];
+        },
+        error: /迁移逾期在住证据不完整/
+      },
+      {
+        name: "ordinary overdue projection without migration provenance",
+        mutate: (board) => {
+          board.rooms[0]!.intervals[0]!.references = board.rooms[0]!.intervals[0]!.references
+            .filter((reference) => reference.type !== "BLOCK");
+          board.rooms[0]!.intervals[0]!.history = [{
+            action: "OVERDUE_CHECKOUT",
+            actorId: "operator_validation",
+            source: "WEB_SESSION",
+            occurredAt: "2028-01-01T00:00:00.000Z",
+            commandId: "command_validation",
+            receiptId: "receipt_validation",
+            correlationId: "correlation_validation"
+          }];
+        },
+        error: /迁移锁与逾期阻断事实不一致/
+      },
+      {
+        name: "mismatched unit conflict aggregation",
+        mutate: (board) => {
+          board.rooms[0]!.conflicts = [{
+            ...board.rooms[0]!.conflicts[0]!,
+            actualInventoryUnitId: "unit_other"
+          }];
+        },
+        error: /必须精确汇总所属区间冲突/
+      }
+    ];
+
+    for (const { name, mutate, error } of invalidCases) {
+      const board = boardWithMigratedOverdueHold();
+      mutate(board);
+      expect(() => assertRoomStatusBoard(board, expected), name).toThrow(error);
+    }
+
+    const markerWithoutConflict = boardWithMigratedOverdueHold();
+    const markerOnlyInterval = markerWithoutConflict.rooms[0]!.intervals[0]!;
+    markerOnlyInterval.blocking = false;
+    markerOnlyInterval.available = true;
+    markerOnlyInterval.conflicts = [];
+    markerWithoutConflict.rooms[0]!.days[0]!.available = true;
+    markerWithoutConflict.rooms[0]!.days[0]!.conflicts = [];
+    markerWithoutConflict.rooms[0]!.conflicts = [];
+    markerWithoutConflict.availabilitySummary = [{ serviceDate: "2028-01-01", availableRooms: 1, availableBeds: 0 }];
+    expect(() => assertRoomStatusBoard(markerWithoutConflict, expected))
+      .toThrow(/迁移锁与逾期阻断事实不一致/);
+
+    const twoDayExpected = {
+      ...expected,
+      range: { arrivalDate: "2028-01-01", departureDate: "2028-01-03" }
+    };
+    const incompleteCoverage = boardWithMigratedOverdueHold();
+    incompleteCoverage.range = twoDayExpected.range;
+    incompleteCoverage.dates = ["2028-01-01", "2028-01-02"];
+    const incompleteRoom = incompleteCoverage.rooms[0]!;
+    const incompleteInterval = incompleteRoom.intervals[0]!;
+    incompleteInterval.sourceEndDate = "2028-01-03";
+    incompleteRoom.days.push({
+      serviceDate: "2028-01-02",
+      status: "AVAILABLE",
+      available: true,
+      intervalIds: [],
+      conflicts: []
+    });
+    incompleteCoverage.filterOptions.statuses = ["IN_HOUSE", "AVAILABLE"];
+    incompleteCoverage.availabilitySummary = [
+      { serviceDate: "2028-01-01", availableRooms: 0, availableBeds: 0 },
+      { serviceDate: "2028-01-02", availableRooms: 1, availableBeds: 0 }
+    ];
+    expect(() => assertRoomStatusBoard(incompleteCoverage, twoDayExpected))
+      .toThrow(/迁移逾期在住证据不完整/);
+
+    const operationalTask = boardWithMigratedOverdueHold();
+    operationalTask.operationalTasks = [{
+      ...migratedOverdueHoldInterval(),
+      taskKind: "EXCEPTION",
+      businessDate: "2028-01-01"
+    }];
+    expect(() => assertRoomStatusBoard(operationalTask, expected))
+      .toThrow(/不能用逾期在住事实自动延长当前或未来房态/);
   });
 
   it("requires READY child-bed lodging intervals to have matching occupancy while PARTIAL stays fail closed", () => {
