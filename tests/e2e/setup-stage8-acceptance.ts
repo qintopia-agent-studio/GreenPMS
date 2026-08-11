@@ -130,6 +130,7 @@ async function createMemberWithCoverage(db: Kysely<Database>, key: string): Prom
   await db.insertInto("members").values({
     id: memberId,
     identity_card_number: `STAGE8-ID-${key}`,
+    nickname: "星河",
     full_name: "星河",
     phone: "13800008018",
     wechat: `wx-${key}`

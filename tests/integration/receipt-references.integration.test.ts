@@ -144,6 +144,7 @@ beforeAll(async () => {
   await db.insertInto("members").values({
     id: "member_profile_receipt_references",
     identity_card_number: "TEST-RECEIPT-REFERENCES-ID",
+    nickname: "回执引用会员",
     full_name: "Receipt Reference Member",
     phone: "13800000002",
     wechat: "receipt-reference-member"

@@ -100,7 +100,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(36);
+      expect(expectedMigrations).toHaveLength(37);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -528,9 +528,9 @@ describe("database migration concurrency", () => {
       expect(historicalFactsAfter).toEqual(historicalFactsBefore);
 
       await upgraded.query(`
-        INSERT INTO members (id, identity_card_number, full_name, phone, wechat) VALUES
-          ('member_contract_during_cutover', 'CONTRACT-DURING-CUTOVER', 'Contract cutover', '13900009992', 'contract-cutover'),
-          ('member_reference_during_cutover', 'REFERENCE-DURING-CUTOVER', 'Reference cutover', '13900009993', 'reference-cutover')
+        INSERT INTO members (id, identity_card_number, nickname, full_name, phone, wechat) VALUES
+          ('member_contract_during_cutover', 'CONTRACT-DURING-CUTOVER', 'Contract cutover', 'Contract cutover', '13900009992', 'contract-cutover'),
+          ('member_reference_during_cutover', 'REFERENCE-DURING-CUTOVER', 'Reference cutover', 'Reference cutover', '13900009993', 'reference-cutover')
       `);
       await upgraded.query(`
         INSERT INTO member_contracts (

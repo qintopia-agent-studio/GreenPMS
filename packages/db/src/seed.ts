@@ -180,13 +180,31 @@ export async function seedDemo(db: Kysely<Database>, options: { includeProtocolF
     { id: "token_demo_read", subject_id: demo.agentSubjectId, label: "Demo read-only agent", secret_hash: sha256(demo.readToken), access_ceiling: "READ", property_scope: demo.propertyId, expires_at: "2030-01-01T00:00:00.000Z", revoked_at: null, rotated_from_id: null, replaced_by_id: null },
     { id: "token_demo_write", subject_id: demo.agentSubjectId, label: "Demo write agent", secret_hash: sha256(demo.writeToken), access_ceiling: "WRITE", property_scope: demo.propertyId, expires_at: "2030-01-01T00:00:00.000Z", revoked_at: null, rotated_from_id: null, replaced_by_id: null }
   ]).onConflict((oc) => oc.column("id").doNothing()).execute();
-  await db.insertInto("members").values({
-    id: demo.memberId,
-    identity_card_number: "DEMO-ID-310000199001010001",
-    full_name: "Demo Member",
-    phone: "13800000000",
-    wechat: "qintopia-demo-member"
-  }).onConflict((oc) => oc.column("id").doNothing()).execute();
+  const nicknameColumn = await sql<{ present: boolean }>`
+    select exists (
+      select 1 from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = 'members'
+        and column_name = 'nickname'
+    ) as present
+  `.execute(db);
+  const demoMemberRow = nicknameColumn.rows[0]?.present
+    ? {
+        id: demo.memberId,
+        identity_card_number: null as string | null,
+        nickname: "演示会员",
+        full_name: "Demo Member",
+        phone: "13800000000",
+        wechat: "qintopia-demo-member"
+      }
+    : {
+        id: demo.memberId,
+        identity_card_number: "DEMO-ID-310000199001010001" as string | null,
+        full_name: "Demo Member",
+        phone: "13800000000",
+        wechat: "qintopia-demo-member"
+      };
+  await db.insertInto("members").values(demoMemberRow as Insertable<Database["members"]>).onConflict((oc) => oc.column("id").doNothing()).execute();
   await db.insertInto("member_contracts").values({
     id: demo.memberContractId,
     property_id: demo.propertyId,

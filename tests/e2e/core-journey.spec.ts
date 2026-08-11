@@ -20,7 +20,7 @@ function isResolvedCommandRequest(
 }
 
 async function expectRoomStatusLanding(page: Page): Promise<void> {
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
@@ -67,9 +67,7 @@ async function navigateWithinApp(page: Page, pathname: string, heading: string) 
     history.pushState({}, "", target);
     window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
   }, pathname);
-  const headingLocator = heading === "房间与床位逐日房态"
-    ? page.getByRole("heading", { name: heading, exact: true, level: 1 })
-    : page.getByRole("heading", { name: heading, exact: true });
+  const headingLocator = page.getByRole("heading", { name: heading, exact: true });
   await expect(headingLocator).toBeVisible({ timeout: 15_000 });
 }
 
@@ -368,13 +366,17 @@ async function openFactFormAndSubmit(
 
 async function submitMemberRegistration(page: Page, options: {
   fullName: string;
-  identityCardNumber: string;
+  nickname: string;
+  identityCardNumber?: string;
   phone: string;
   wechat: string;
 }) {
   await page.getByTestId("create-member").click();
   await page.getByTestId("member-full-name").fill(options.fullName);
-  await page.getByTestId("member-identity-card").fill(options.identityCardNumber);
+  await page.getByTestId("member-nickname").fill(options.nickname);
+  if (options.identityCardNumber !== undefined) {
+    await page.getByTestId("member-identity-card").fill(options.identityCardNumber);
+  }
   await page.getByTestId("member-phone").fill(options.phone);
   await page.getByTestId("member-wechat").fill(options.wechat);
   await page.getByRole("button", { name: "核对并创建" }).click();
@@ -542,11 +544,11 @@ test("desktop logout distinguishes an unexecuted failure from a lost committed r
   await expect(failure).toBeFocused();
   await expect(failure).toContainText("退出未完成，会话仍保持登录");
   await expect(page.getByTestId("retry-logout")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeHidden();
 
   await page.reload();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeHidden();
   await assertNoA11yViolations(page);
 
@@ -584,7 +586,7 @@ test("desktop session bootstrap exposes a focused retryable service failure", as
 
   await page.unroute("**/api/v1/me");
   await page.getByTestId("session-startup-error-retry").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
 });
 
 test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
@@ -850,7 +852,7 @@ test("desktop stay changes and exception commands remain operable through Web", 
   await assertNoA11yViolations(page);
 });
 
-test("member directory creates a four-field profile, searches every field, and rejects duplicate identity", async ({ page }, testInfo: TestInfo) => {
+test("member directory creates a five-field profile without identity, searches current fields, and rejects duplicate phone", async ({ page }, testInfo: TestInfo) => {
   await login(page);
   await page.getByRole("link", { name: "会员" }).click();
   await expect(page.getByRole("heading", { name: "会员档案" })).toBeVisible();
@@ -862,9 +864,7 @@ test("member directory creates a four-field profile, searches every field, and r
 
   const memberProfile = {
     fullName: testInfo.project.name === "desktop" ? "周明月" : "孙晓岚",
-    identityCardNumber: testInfo.project.name === "desktop"
-      ? "E2E-ID-310000199202020002"
-      : "E2E-ID-310000199202020003",
+    nickname: testInfo.project.name === "desktop" ? "明月" : "晓岚",
     phone: testInfo.project.name === "desktop" ? "13900001111" : "13900001112",
     wechat: `qintopia-e2e-member-${testInfo.project.name}`
   };
@@ -876,7 +876,6 @@ test("member directory creates a four-field profile, searches every field, and r
   const createMemberEffect = page.getByTestId("command-effect");
   await expect(createMemberEffect).toContainText("请核对会员资料", { timeout: 15_000 });
   await expect(createMemberEffect).toContainText(memberProfile.fullName);
-  await expect(createMemberEffect).toContainText(memberProfile.identityCardNumber);
   await expect(createMemberEffect).toContainText(memberProfile.phone);
   await expect(createMemberEffect).toContainText(memberProfile.wechat);
   await expect(createMemberEffect).not.toContainText(/CREATE_MEMBER|contract_|member_|FEISHU|Preview|Receipt/);
@@ -891,7 +890,7 @@ test("member directory creates a four-field profile, searches every field, and r
   const searchInput = page.getByTestId("member-search-query");
   for (const query of [
     memberProfile.fullName.slice(1),
-    memberProfile.identityCardNumber.slice(-6),
+    memberProfile.nickname,
     memberProfile.phone.slice(-6),
     `member-${testInfo.project.name}`
   ]) {
@@ -900,7 +899,7 @@ test("member directory creates a four-field profile, searches every field, and r
     await expect(page.getByText("正在载入会员列表", { exact: true })).toBeHidden();
     await expect(page.getByRole("heading", { name: memberProfile.fullName })).toBeVisible();
     const detail = page.locator(".member-profile-fields");
-    await expect(detail).toContainText(memberProfile.identityCardNumber);
+    await expect(detail.locator("div").filter({ hasText: "身份证号" }).getByText("-", { exact: true })).toBeVisible();
     await expect(detail).toContainText(memberProfile.phone);
     await expect(detail).toContainText(memberProfile.wechat);
   }
@@ -918,16 +917,17 @@ test("member directory creates a four-field profile, searches every field, and r
   await expect(page.getByTestId("member-list-item")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: memberProfile.fullName })).toHaveCount(0);
 
-  await submitMemberRegistration(page, { ...memberProfile, fullName: "重复身份证会员", identityCardNumber: ` ${memberProfile.identityCardNumber.toLowerCase()} ` });
-  await expect(page.getByText("该身份证号已登记，不能重复创建会员档案", { exact: true })).toBeVisible();
+  await submitMemberRegistration(page, { ...memberProfile, fullName: "重复手机号会员", nickname: "重复手机号会员", phone: ` ${memberProfile.phone} ` });
+  await expect(page.getByText("该手机号已登记，不能重复创建会员档案", { exact: true })).toBeVisible();
   await page.getByTestId("command-return-to-edit").click();
-  await expect(page.getByTestId("member-full-name")).toHaveValue("重复身份证会员");
+  await expect(page.getByTestId("member-full-name")).toHaveValue("重复手机号会员");
   await page.getByRole("button", { name: "取消" }).click();
   await expect(page.getByRole("dialog", { name: "新建会员" })).toBeHidden();
 
   if (testInfo.project.name === "desktop") {
     const recoveryProfile = {
       fullName: "恢复验收会员",
+      nickname: "恢复验收会员",
       identityCardNumber: "E2E-ID-MEMBER-RECOVERY-001",
       phone: "13900001119",
       wechat: "qintopia-e2e-member-recovery"
@@ -1574,7 +1574,7 @@ test("keyboard-only navigation reaches a business Preview and cancels without co
   await page.keyboard.press("Tab");
   await expect(page.getByTestId("login-submit")).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
 
   const ordersLink = page.getByRole("link", { name: "订单", exact: true });
   await tabTo(page, ordersLink);
@@ -1586,7 +1586,7 @@ test("keyboard-only navigation reaches a business Preview and cancels without co
   await tabTo(page, inventoryLink, { reverse: true });
   await expect(inventoryLink).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
 
   const firstCell = page.getByRole("gridcell").first();
   await tabTo(page, firstCell);

@@ -557,8 +557,8 @@ function FulfillmentResult({ type, record }: {
   );
 }
 
-function normalizeIdentityCard(value: string | null | undefined): string {
-  return value?.replace(/\s+/g, "").toUpperCase() ?? "";
+function normalizePhoneNumber(value: string | null | undefined): string {
+  return value?.replace(/\s+/g, "") ?? "";
 }
 
 function conversionTransferableCollections(facts: readonly CollectionFactDto[]): CollectionFactDto[] {
@@ -686,7 +686,7 @@ function membershipProductOptionLabel(product: MembershipProductDto): string {
 }
 
 function memberOptionLabel(member: MemberDto): string {
-  return `${member.full_name} · ${member.identity_card_number}`;
+  return `${member.full_name} · ${member.phone}`;
 }
 
 function conversionCollectionTimeLabel(value: string): string {
@@ -703,9 +703,9 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
   onSubmit: (request: CommandRequest) => void;
 }) {
   const primary = primaryOrderOccupant(orderedOrderOccupants(view.occupants));
-  const primaryIdentity = normalizeIdentityCard(primary?.documentNumber);
-  const matchedMembers = primaryIdentity
-    ? members.filter((member) => normalizeIdentityCard(member.identity_card_number) === primaryIdentity)
+  const primaryPhone = normalizePhoneNumber(primary?.phone);
+  const matchedMembers = primaryPhone
+    ? members.filter((member) => normalizePhoneNumber(member.phone) === primaryPhone)
     : [];
   const eligibleProducts = membershipProducts.filter((product) => productMatchesCurrentStay(product, view, unitMap));
   const transferableCollections = conversionTransferableCollections(view.collectionFacts);
@@ -732,8 +732,8 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
     .filter((fact) => fact.fact_type === "COLLECTION")
     .map((fact) => fact.transaction_reference)
     .filter((value): value is string => Boolean(value)));
-  const disabledReason = !primaryIdentity ? "主要住宿人缺少身份证号，不能升级会员。"
-    : matchedMembers.length === 0 ? "没有找到身份证号一致的会员，请先创建或核对会员档案。"
+  const disabledReason = !primaryPhone ? "主要住宿人缺少手机号，不能升级会员。"
+    : matchedMembers.length === 0 ? "没有找到手机号一致的会员，请先创建或核对会员档案。"
       : eligibleProducts.length === 0 ? "当前住宿房型没有匹配的会员产品。"
         : transferableCollections.length === 0 ? "当前订单没有可用于升级会员的企业微信住宿收款。"
           : transferTotalMinor !== netRecordedMinor ? "当前可转入企微收款无法覆盖全部已记录净收款，请先核对住宿收退款记录。"
@@ -757,7 +757,7 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
       return;
     }
     if (!memberId) {
-      setValidationError(new Error("请选择身份证号一致的会员"));
+      setValidationError(new Error("请选择手机号一致的会员"));
       return;
     }
     if (!selectedProduct) {

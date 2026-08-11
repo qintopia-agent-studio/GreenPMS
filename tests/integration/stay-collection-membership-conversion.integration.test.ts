@@ -83,12 +83,19 @@ async function createMember(identityCardNumber: string, prefix: string): Promise
     input: {
       propertyId: demo.propertyId,
       fullName: `Stage 47 Member ${prefix}`,
+      nickname: `Stage47 ${prefix}`,
       identityCardNumber,
-      phone: "13800000002",
+      phone: fixturePhone(prefix),
       wechat: `stage47-${prefix}`
     }
   }, `${prefix}-member`);
   return receipt.result!.memberId as string;
+}
+
+function fixturePhone(seed: string): string {
+  let hash = 0;
+  for (const ch of seed) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return `139${String(hash % 100_000_000).padStart(8, "0")}`;
 }
 
 async function createDraftMembershipOrder(memberId: string, prefix: string): Promise<string> {
@@ -198,6 +205,7 @@ async function conversionCommandArtifactCounts(commandId: string) {
 async function createCheckedOutStay(options: {
   prefix: string;
   documentNumber: string;
+  guestPhone?: string;
   unitId?: string;
   bookingChannelCode?: "WECOM" | "MEITUAN";
   skipCollection?: boolean;
@@ -221,6 +229,7 @@ async function createCheckedOutStay(options: {
       primaryGuest: {
         fullName: `Stage 47 Guest ${options.prefix}`,
         nickname: `Stage47 ${options.prefix}`,
+        phone: options.guestPhone ?? fixturePhone(options.prefix),
         documentNumber: options.documentNumber
       },
       bookingChannelCode: options.bookingChannelCode ?? "WECOM",
@@ -407,6 +416,7 @@ describe("4.7 stay collection conversion to membership", () => {
     const stay = await createCheckedOutStay({
       prefix: "gold",
       documentNumber: "STAGE47-GOLD-ID",
+      guestPhone: "139 0317 8592",
       collectionAmountMinor: 59_000,
       transactionReference: "WX-STAGE47-GOLD-SOURCE"
     });
@@ -420,6 +430,8 @@ describe("4.7 stay collection conversion to membership", () => {
     expect(prepared.preview.effect).toMatchObject({
       operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
       orderId: stay.orderId,
+      primaryOccupant: { phone: "13903178592" },
+      member: { phone: "13903178592" },
       transfer: {
         total: { currency: "CNY", minorUnits: 59_000 },
         collections: [{ factId: stay.collectionFactId, transactionReference: "WX-STAGE47-GOLD-SOURCE" }]
@@ -1172,6 +1184,7 @@ describe("4.7 stay collection conversion to membership", () => {
     const mismatchMemberId = await createMember("STAGE47-MEMBER-ID", "identity-mismatch");
     const mismatchStay = await createCheckedOutStay({
       prefix: "identity-mismatch",
+      guestPhone: "13999990001",
       documentNumber: "STAGE47-GUEST-ID",
       transactionReference: "WX-STAGE47-IDENTITY-SOURCE"
     });
@@ -1182,7 +1195,7 @@ describe("4.7 stay collection conversion to membership", () => {
       remainingPaymentTransactionReference: "WX-STAGE47-IDENTITY-REMAINING"
     }), "identity-mismatch-conversion")).rejects.toMatchObject({
       code: "VALIDATION_ERROR",
-      message: expect.stringContaining("身份证号必须与主要住宿人一致")
+      message: expect.stringContaining("手机号必须与主要住宿人一致")
     });
     expect(await db.selectFrom("stay_collection_membership_transfers").select("id").execute()).toHaveLength(0);
 

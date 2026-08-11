@@ -20,7 +20,7 @@ async function seedMember(testInfo: TestInfo) {
   const identity = `E2E-2C-${suffix.toUpperCase()}-001`;
   const db = createDatabase(e2eDatabaseUrl);
   try {
-    await db.insertInto("members").values({ id: memberId, identity_card_number: identity, full_name: `2C住宿会员-${suffix}`, phone: suffix === "desktop" ? "13923000001" : "13923000002", wechat: `qintopia-2c-${suffix}` }).execute();
+    await db.insertInto("members").values({ id: memberId, identity_card_number: identity, nickname: `2C住宿会员-${suffix}`, full_name: `2C住宿会员-${suffix}`, phone: suffix === "desktop" ? "13923000001" : "13923000002", wechat: `qintopia-2c-${suffix}` }).execute();
     await db.insertInto("member_property_links").values({ member_id: memberId, property_id: e2ePropertyId }).execute();
     await db.insertInto("member_contracts").values({ id: contractId, property_id: e2ePropertyId, member_id: memberId, member_name: `2C住宿会员-${suffix}`, status: "ACTIVE", valid_from: "2026-07-24", valid_until: "2027-07-24", version: 1 }).execute();
     await db.insertInto("entitlement_lots").values({ id: lotId, contract_id: contractId, unit_kind: "ROOM_NIGHT", total_units: 3, expires_on: "2027-07-24", version: 1 }).execute();
@@ -69,7 +69,7 @@ async function login(page: Page) {
   await page.getByTestId("login-username").fill("operator");
   await page.getByTestId("login-password").fill("demo-pass-2026");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
 }
 
@@ -158,7 +158,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   });
   await login(page);
   await followAppNavigation(page, "会员");
-  await page.getByTestId("member-search-query").fill(fixture.identity);
+  await page.getByTestId("member-search-query").fill(fixture.phone);
   await page.getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page.getByRole("heading", { name: fixture.name, exact: true })).toBeVisible();
   const balance = page.getByTestId("member-balance-summary");
@@ -199,7 +199,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(page.getByTestId("member-search")).toHaveCount(0);
   await expect(page.getByText("覆盖晚数", { exact: true })).toHaveCount(0);
   await page.getByTestId("use-member-entitlement").check();
-  await page.getByTestId("member-search").fill(fixture.identity);
+  await page.getByTestId("member-search").fill(fixture.phone);
   await page.getByTestId("member-profile-select").selectOption(fixture.memberId);
   await expect(page.getByTestId("booking-channel-code")).toHaveCount(0);
   const quote = page.getByTestId("quote-result");
@@ -211,11 +211,11 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(page.getByTestId("primary-guest-nickname")).toHaveValue(fixture.name);
   await expect(page.getByTestId("primary-guest-name")).toHaveValue(fixture.name);
   await expect(page.getByLabel("联系电话", { exact: true })).toHaveValue(fixture.phone);
-  await expect(page.getByLabel("证件号码", { exact: true })).toHaveValue(fixture.identity);
+  await expect(page.getByLabel("证件号码（选填）", { exact: true })).toHaveValue(fixture.identity);
   await page.getByTestId("primary-guest-nickname").fill("2C住客");
   await page.getByTestId("primary-guest-name").fill("2C 会员住客");
   await page.getByLabel("联系电话", { exact: true }).fill("13923000999");
-  await page.getByLabel("证件号码", { exact: true }).fill("2C-STAY-SNAPSHOT-EDITED");
+  await page.getByLabel("证件号码（选填）", { exact: true }).fill("2C-STAY-SNAPSHOT-EDITED");
   await page.screenshot({ path: testInfo.outputPath("member-stay-form-step2c.png"), fullPage: true });
   await page.getByRole("button", { name: "核对并创建订单", exact: true }).click();
   const memberStayEffect = page.getByTestId("command-effect");
@@ -270,7 +270,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(persistedCheckInNote).toHaveText("2C 浏览器验收入住核销");
 
   await followAppNavigation(page, "会员");
-  await page.getByTestId("member-search-query").fill(fixture.identity);
+  await page.getByTestId("member-search-query").fill(fixture.phone);
   await page.getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page.getByRole("heading", { name: fixture.name, exact: true })).toBeVisible();
   await expect(page.getByTestId("member-balance-summary")).toContainText("0 间夜");

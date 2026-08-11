@@ -566,12 +566,12 @@ describe("stay collection upgrade membership evidence", () => {
     primaryOccupant: {
       fullName: "住宿转会员住客",
       nickname: "住宿转会员住客",
-      identityCardNumber: "STAGE15-CONVERSION-ID-001"
+      phone: " 13800006666 "
     },
     member: {
       memberId: input.memberId,
       fullName: "住宿转会员会员",
-      identityCardNumber: "stage15-conversion-id-001"
+      phone: "13800006666"
     },
     product: {
       productId: input.membershipProductId,

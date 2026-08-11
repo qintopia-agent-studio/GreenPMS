@@ -20,7 +20,7 @@ export interface Database {
   subject_property_grants: { subject_id: string; property_id: string; access_level: "READ" | "WRITE"; created_at: GeneratedTimestamp };
   api_tokens: { id: string; subject_id: string; label: string; secret_hash: string; access_ceiling: "READ" | "WRITE"; property_scope: string; expires_at: Timestamp; revoked_at: Timestamp | null; rotated_from_id: string | null; replaced_by_id: string | null; created_at: GeneratedTimestamp };
   web_sessions: { id: string; subject_id: string; secret_hash: string; expires_at: Timestamp; revoked_at: Timestamp | null; created_at: GeneratedTimestamp };
-  members: { id: string; identity_card_number: string; full_name: string; phone: string; wechat: string; created_at: GeneratedTimestamp };
+  members: { id: string; identity_card_number: string | null; nickname: string; full_name: string; phone: string; wechat: string; created_at: GeneratedTimestamp };
   member_property_links: { member_id: string; property_id: string; created_at: GeneratedTimestamp };
   member_external_references: { id: string; member_id: string; property_id: string; provider: "FEISHU_BASE"; source_container_id: string; source_table_id: string; external_record_id: string; created_at: GeneratedTimestamp };
   membership_products: { id: string; code: string; version: number; name: string; list_price_minor: number; currency: string; entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT"; entitlement_units: number; validity_period: "P1Y"; allowed_room_type_code: string; allowed_inventory_kind: "ROOM" | "BED"; status: "PUBLISHED"; created_at: GeneratedTimestamp };

@@ -84,7 +84,7 @@ async function login(
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await expect(page.getByRole("grid")).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }

@@ -111,7 +111,7 @@ export function OrderOccupantCorrectionDialog({ view, occupant, onClose, onSubmi
           <label>昵称<input value={nickname} onChange={(event) => setNickname(event.target.value)} required maxLength={200} data-testid="occupant-correction-nickname" /></label>
           <label>姓名<input value={fullName} onChange={(event) => setFullName(event.target.value)} required maxLength={200} data-testid="occupant-correction-full-name" /></label>
           <label>联系电话<input value={phone} onChange={(event) => setPhone(event.target.value)} maxLength={80} data-testid="occupant-correction-phone" /></label>
-          <label>证件号码<input value={documentNumber} onChange={(event) => setDocumentNumber(event.target.value)} maxLength={120} data-testid="occupant-correction-document-number" /></label>
+          <label>证件号码（选填）<input value={documentNumber} onChange={(event) => setDocumentNumber(event.target.value)} maxLength={120} data-testid="occupant-correction-document-number" /></label>
           <label className="span-two">更正原因<textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} data-testid="occupant-correction-reason" /></label>
         </div>
         <div className="form-actions">

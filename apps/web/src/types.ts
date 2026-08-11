@@ -131,7 +131,8 @@ export interface MemberContractDto {
 
 export interface MemberDto {
   id: string;
-  identity_card_number: string;
+  identity_card_number: string | null;
+  nickname: string;
   full_name: string;
   phone: string;
   wechat: string;

@@ -248,7 +248,8 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("CREATE_MEMBER", strictObject({
     ...PropertyInput,
     fullName: ShortText,
-    identityCardNumber: ShortText,
+    nickname: Nickname,
+    identityCardNumber: Type.Optional(nullable(ShortText)),
     phone: ShortText,
     wechat: ShortText
   })),
@@ -633,7 +634,8 @@ export const CommandEffectSchema = Type.Union([
     memberId: Type.Null(),
     member: strictObject({
       fullName: ShortText,
-      identityCardNumber: ShortText,
+      nickname: Nickname,
+      identityCardNumber: nullable(ShortText),
       phone: ShortText,
       wechat: ShortText
     }),
@@ -862,9 +864,9 @@ export const CommandEffectSchema = Type.Union([
     primaryOccupant: strictObject({
       fullName: nullable(ShortText),
       nickname: nullable(ShortText),
-      identityCardNumber: ShortText
+      phone: nullable(ShortText)
     }),
-    member: strictObject({ memberId: Id, fullName: ShortText, identityCardNumber: ShortText }),
+    member: strictObject({ memberId: Id, fullName: ShortText, phone: ShortText }),
     product: strictObject({
       productId: Id,
       code: ShortText,
@@ -1679,7 +1681,8 @@ const MemberContractRowSchema = strictObject({
 });
 const MemberRowSchema = strictObject({
   id: Id,
-  identity_card_number: ShortText,
+  identity_card_number: nullable(ShortText),
+  nickname: ShortText,
   full_name: ShortText,
   phone: ShortText,
   wechat: ShortText,

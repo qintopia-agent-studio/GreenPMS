@@ -27,7 +27,7 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-username").fill(fixture.operator.username);
   await page.getByTestId("login-password").fill(fixture.operator.password);
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
@@ -122,7 +122,7 @@ async function orderView(page: Page, stay: Stage12StayFixture) {
 
 async function expectUnitAvailable(page: Page, stay: Stage12StayFixture, serviceDate: string): Promise<void> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("arrival-date").fill(serviceDate);
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
   const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${stay.unitId}"][data-service-date="${serviceDate}"]`);

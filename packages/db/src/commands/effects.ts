@@ -56,9 +56,18 @@ export function optionalString(input: Record<string, unknown>, field: string): s
   return normalized === "" ? undefined : normalized;
 }
 
-export function normalizeIdentityCardNumber(value: unknown): string {
-  if (typeof value !== "string" || value.trim() === "") throw new DomainError("VALIDATION_ERROR", "identityCardNumber is required");
-  return value.trim().toUpperCase();
+export function optionalIdentityCardNumber(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new DomainError("VALIDATION_ERROR", "identityCardNumber must be a string");
+  const normalized = value.trim().toUpperCase();
+  return normalized === "" ? null : normalized;
+}
+
+export function normalizePhoneNumber(value: unknown): string {
+  if (typeof value !== "string") throw new DomainError("VALIDATION_ERROR", "phone must be a string");
+  const normalized = value.replace(/\s+/g, "");
+  if (normalized === "") throw new DomainError("VALIDATION_ERROR", "phone is required");
+  return normalized;
 }
 
 const strictDateTime = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -547,15 +556,16 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   if (commandType === "CREATE_MEMBER") {
     const member = {
       fullName: requireString(input, "fullName"),
-      identityCardNumber: normalizeIdentityCardNumber(input.identityCardNumber),
-      phone: requireString(input, "phone"),
+      nickname: requireString(input, "nickname"),
+      identityCardNumber: optionalIdentityCardNumber(input.identityCardNumber),
+      phone: normalizePhoneNumber(input.phone),
       wechat: requireString(input, "wechat")
     };
     const existingMember = await db.selectFrom("members").selectAll()
-      .where("identity_card_number", "=", member.identityCardNumber)
+      .where("phone", "=", member.phone)
       .executeTakeFirst();
     if (existingMember) {
-      throw new DomainError("VALIDATION_ERROR", "该身份证号已登记，不能重复创建会员档案", 409);
+      throw new DomainError("VALIDATION_ERROR", "该手机号已登记，不能重复创建会员档案", 409);
     }
 
     return finalize(propertyId, {
@@ -1151,7 +1161,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const [member, product] = await Promise.all([
       db.selectFrom("members")
         .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
-        .select(["members.id", "members.full_name", "members.identity_card_number"])
+        .select(["members.id", "members.full_name", "members.phone"])
         .where("members.id", "=", memberId)
         .where("member_property_links.property_id", "=", propertyId)
         .executeTakeFirst(),
@@ -1182,12 +1192,14 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       .where("occupant_id", "=", primaryOccupant.id)
       .orderBy("sequence", "desc")
       .executeTakeFirst();
-    const primaryDocumentNumber = latestCorrection ? latestCorrection.corrected_document_number : primaryOccupant.document_number;
     const primaryFullName = latestCorrection?.corrected_full_name ?? primaryOccupant.full_name;
     const primaryNickname = latestCorrection?.corrected_nickname ?? primaryOccupant.nickname;
-    if (!primaryDocumentNumber) throw new DomainError("VALIDATION_ERROR", "主要住宿人缺少身份证号，不能升级会员");
-    if (normalizeIdentityCardNumber(primaryDocumentNumber) !== normalizeIdentityCardNumber(member.identity_card_number)) {
-      throw new DomainError("VALIDATION_ERROR", "目标会员身份证号必须与主要住宿人一致");
+    const primaryPhone = latestCorrection ? latestCorrection.corrected_phone : primaryOccupant.phone;
+    if (!primaryPhone || primaryPhone.trim() === "") throw new DomainError("VALIDATION_ERROR", "主要住宿人缺少手机号，不能升级会员");
+    const normalizedPrimaryPhone = normalizePhoneNumber(primaryPhone);
+    const normalizedMemberPhone = normalizePhoneNumber(member.phone);
+    if (normalizedPrimaryPhone !== normalizedMemberPhone) {
+      throw new DomainError("VALIDATION_ERROR", "目标会员手机号必须与主要住宿人一致");
     }
 
     const businessDate = await propertyLocalToday(db, propertyId);
@@ -1299,12 +1311,12 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       primaryOccupant: {
         fullName: primaryFullName,
         nickname: primaryNickname,
-        identityCardNumber: primaryDocumentNumber
+        phone: normalizedPrimaryPhone
       },
       member: {
         memberId: member.id,
         fullName: member.full_name,
-        identityCardNumber: member.identity_card_number
+        phone: normalizedMemberPhone
       },
       product: {
         productId: product.id,
@@ -1366,7 +1378,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     }, {
       ...baseBasis,
       businessDate,
-      member: { id: member.id, identityCardNumber: member.identity_card_number },
+      member: { id: member.id, phone: normalizedMemberPhone },
       product: { id: product.id, version: product.version, status: product.status },
       stayTimeline,
       allOrderFunds: allOrderFunds.map((fact) => ({

@@ -137,6 +137,7 @@ async function createMemberProfile(memberId: string): Promise<void> {
   await db.insertInto("members").values({
     id: memberId,
     identity_card_number: `STAGE9-${memberId}`,
+    nickname: memberId,
     full_name: memberId,
     phone: "13800009009",
     wechat: `wx-${memberId}`

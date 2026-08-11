@@ -105,7 +105,7 @@ async function login(page: Page, options: { roomStatusRange?: boolean } = {}): P
     : undefined;
   await page.getByTestId("login-submit").click();
   await response;
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
@@ -196,7 +196,7 @@ async function extendHistoricalStay(page: Page, stay: Stage9ExtensionFixture, re
     && response.status() === 200);
   await page.goto("/");
   await boardResponse;
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   const currentDayCell = roomCell(page, stay, fixture.businessDate);
   await expect(currentDayCell).toContainText(stay.nickname);
   await expect(currentDayCell).toHaveClass(/has-direct-lodging/);

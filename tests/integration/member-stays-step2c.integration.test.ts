@@ -25,6 +25,7 @@ const products = {
 
 let db: Kysely<Database>;
 let sequence = 0;
+let memberPhoneSequence = 0;
 
 function shiftDate(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -55,11 +56,13 @@ async function confirm(envelope: CommandEnvelope, prefix: string): Promise<Recei
 }
 
 async function createMember(memberId: string) {
+  memberPhoneSequence += 1;
   await db.insertInto("members").values({
     id: memberId,
     identity_card_number: `STEP2C-${memberId.toUpperCase()}`,
+    nickname: `2C ${memberId}`,
     full_name: `2C ${memberId}`,
-    phone: `139${String(sequence).padStart(8, "0")}`,
+    phone: `139${String(memberPhoneSequence).padStart(8, "0")}`,
     wechat: `wx-${memberId}`
   }).execute();
   await db.insertInto("member_property_links").values({ member_id: memberId, property_id: demo.propertyId }).execute();

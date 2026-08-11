@@ -14,7 +14,7 @@ import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLot
 import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from "../pricing-service.ts";
 import type { Database } from "../schema.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
-import { normalizeIdentityCardNumber, requireObject, requireString } from "./effects.ts";
+import { normalizePhoneNumber, optionalIdentityCardNumber, requireObject, requireString } from "./effects.ts";
 
 export interface AppliedCommand {
   persistedResult: Record<string, unknown>;
@@ -32,8 +32,8 @@ function rethrowTokenSecretConflict(error: unknown): never {
 
 function rethrowMemberRegistrationConflict(error: unknown): never {
   const databaseError = error as { code?: unknown; constraint?: unknown };
-  if (databaseError.code === "23505" && databaseError.constraint === "members_identity_card_number_key") {
-    throw new DomainError("VALIDATION_ERROR", "该身份证号已登记，不能重复创建会员档案", 409);
+  if (databaseError.code === "23505" && databaseError.constraint === "members_phone_unique") {
+    throw new DomainError("VALIDATION_ERROR", "该手机号已登记，不能重复创建会员档案", 409);
   }
   throw error;
 }
@@ -151,10 +151,10 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   const propertyId = requireString(input, "propertyId");
 
   if (commandType === "CREATE_MEMBER") {
-    const identityCardNumber = normalizeIdentityCardNumber(input.identityCardNumber);
-    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-identity:${identityCardNumber}`}, 0::bigint))`.execute(trx);
+    const phone = normalizePhoneNumber(input.phone);
+    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-phone:${phone}`}, 0::bigint))`.execute(trx);
     await trx.selectFrom("members").select("id")
-      .where("identity_card_number", "=", identityCardNumber).forUpdate().executeTakeFirst();
+      .where("phone", "=", phone).forUpdate().executeTakeFirst();
     return;
   }
 
@@ -411,9 +411,10 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     try {
       await trx.insertInto("members").values({
         id: memberId,
-        identity_card_number: normalizeIdentityCardNumber(memberProfile.identityCardNumber),
+        identity_card_number: optionalIdentityCardNumber(memberProfile.identityCardNumber),
+        nickname: requireString(memberProfile, "nickname"),
         full_name: requireString(memberProfile, "fullName"),
-        phone: requireString(memberProfile, "phone"),
+        phone: normalizePhoneNumber(memberProfile.phone),
         wechat: requireString(memberProfile, "wechat")
       }).execute();
       await trx.insertInto("member_property_links").values({

@@ -7,7 +7,7 @@ async function login(page: Page) {
   await page.getByTestId("login-username").fill("operator");
   await page.getByTestId("login-password").fill("demo-pass-2026");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
 }
 
@@ -47,6 +47,7 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   const memberName = `2B验收会员-${suffix}`;
   await page.getByTestId("create-member").click();
   await page.getByTestId("member-full-name").fill(memberName);
+  await page.getByTestId("member-nickname").fill(memberName);
   await page.getByTestId("member-identity-card").fill(`E2E-2B-${suffix}-001`);
   await page.getByTestId("member-phone").fill(suffix === "desktop" ? "13922000001" : "13922000002");
   await page.getByTestId("member-wechat").fill(`qintopia-2b-${suffix}`);

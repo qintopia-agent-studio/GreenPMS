@@ -116,7 +116,7 @@ esac
       FAKE_MIGRATION_FAILURE: options.failMigration ? "1" : "",
       FAKE_READINESS_FAILURE: options.failReadiness ? "1" : "",
       FAKE_BASELINE_MIGRATION_COUNT: options.baselineMigrationCount ?? "26",
-      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? "35",
+      FAKE_FINAL_MIGRATION_COUNT: options.finalMigrationCount ?? String(currentMigrationNames.length),
       FAKE_STAGE10_FUNCTION_COUNT: options.stage10FunctionCount ?? "3",
       FAKE_STAGE10_TRIGGER_COUNT: options.stage10TriggerCount ?? "2",
       FAKE_STAGE10_IMMEDIATE_TRIGGER_COUNT: options.stage10ImmediateTriggerCount ?? "3",
@@ -301,6 +301,7 @@ describe("restore script contract", () => {
     expect(script).toContain("INSERT INTO schema_migrations(name)");
     expect(script).toContain("027_stage10_stay_shortening_guards.sql");
     expect(script).toContain("028_stage11_move_unit_guards.sql");
+    expect(script).toContain("037_member_phone_identity_and_nickname.sql");
     expect(script).not.toContain("DROP TRIGGER IF EXISTS");
     expect(script).not.toContain("DELETE FROM schema_migrations");
 
@@ -320,6 +321,9 @@ describe("restore script contract", () => {
     for (const source of [databaseSource, restoreSource, verifyRestoreSource, composeSource]) {
       expect(source).toContain("tgenabled IN ('O','A')");
       expect(source).not.toContain("tgenabled <> 'D'");
+    }
+    for (const source of [verifyRestoreSource, composeSource]) {
+      expect(source).toContain("037_member_phone_identity_and_nickname.sql");
     }
   });
 

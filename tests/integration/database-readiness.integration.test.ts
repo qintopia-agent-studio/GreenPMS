@@ -52,7 +52,7 @@ afterAll(async () => {
 });
 
 describe.sequential("authoritative database readiness", () => {
-  it("requires every migration from terminal-order handling through stay conversion", async () => {
+  it("requires every migration from terminal-order handling through member phone identity", async () => {
     expect(await databaseReady(db)).toBe(true);
     for (const migrationName of [
       "029_stage12_terminal_order_guards.sql",
@@ -62,7 +62,8 @@ describe.sequential("authoritative database readiness", () => {
       "033_stay_collection_membership_conversion.sql",
       "034_stay_conversion_reversal_bridge_guard.sql",
       "035_stage13_conversion_execution_state_guards.sql",
-      "036_qintopia_prelaunch_room_catalog_corrections.sql"
+      "036_qintopia_prelaunch_room_catalog_corrections.sql",
+      "037_member_phone_identity_and_nickname.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
@@ -104,6 +105,62 @@ describe.sequential("authoritative database readiness", () => {
           IF false THEN
             RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = '55000';
           END IF;
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+  });
+
+  it("rejects damaged member phone identity columns, constraints, normalization, and trigger bindings", async () => {
+    await expectReadinessFailure("member identity card remains nullable", async (trx) => {
+      await sql`DROP TRIGGER members_protect_identity ON members`.execute(trx);
+      await sql`
+        UPDATE members
+        SET identity_card_number = 'READINESS-' || id
+        WHERE identity_card_number IS NULL
+      `.execute(trx);
+      await sql`ALTER TABLE members ALTER COLUMN identity_card_number SET NOT NULL`.execute(trx);
+      await sql`
+        CREATE TRIGGER members_protect_identity
+        BEFORE UPDATE OR DELETE ON members
+        FOR EACH ROW EXECUTE FUNCTION qintopia_protect_member_identity()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("member nickname remains required", async (trx) => {
+      await sql`ALTER TABLE members ALTER COLUMN nickname DROP NOT NULL`.execute(trx);
+    });
+
+    await expectReadinessFailure("member phone uniqueness", async (trx) => {
+      await sql`ALTER TABLE members DROP CONSTRAINT members_phone_unique`.execute(trx);
+    });
+
+    await expectReadinessFailure("member optional identity nonblank constraint", async (trx) => {
+      await sql`ALTER TABLE members DROP CONSTRAINT members_identity_card_number_nonblank`.execute(trx);
+      await sql`
+        ALTER TABLE members ADD CONSTRAINT members_identity_card_number_nonblank CHECK (true)
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("member nickname nonblank constraint", async (trx) => {
+      await sql`ALTER TABLE members DROP CONSTRAINT members_nickname_nonblank`.execute(trx);
+      await sql`
+        ALTER TABLE members ADD CONSTRAINT members_nickname_nonblank CHECK (true)
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("member normalization trigger binding", async (trx) => {
+      await sql`DROP TRIGGER members_normalize_new_identity ON members`.execute(trx);
+    });
+
+    await expectReadinessFailure("member normalization function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_normalize_new_member_identity()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
           RETURN NEW;
         END;
         $$

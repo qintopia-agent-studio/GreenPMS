@@ -41,7 +41,7 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-username").fill(activeFixture.operator.username);
   await page.getByTestId("login-password").fill(activeFixture.operator.password);
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
@@ -95,7 +95,7 @@ async function assertRoomStatusAfterShortening(
   }, { timeout: 30_000 });
   await page.goto("/");
   await boardResponse;
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   const currentCell = roomCell(page, stay, businessDate);
   if (options.checkedOut) {
     await expect(currentCell).toHaveClass(/room-status-day-available/);

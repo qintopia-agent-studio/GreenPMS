@@ -74,7 +74,7 @@ async function login(page: Page): Promise<RoomStatusBoardDto> {
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
   await expect(page.getByRole("grid")).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
@@ -337,7 +337,7 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     await expect(recovery).not.toContainText(originalConfirmationKey);
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
     await expect(page.getByRole("grid")).toBeVisible();
     recovery = page.getByTestId("inventory-command-recovery");
     await expect(recovery).toContainText("设置维修锁房结果需要恢复查询");
@@ -457,7 +457,7 @@ test("desktop LOCK_MAINTENANCE recovery keeps the original key and resolves one 
     await expect(interval).toHaveCount(1);
     await releaseMaintenanceForCleanup(page, blockId!);
     await page.reload();
-    await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })).toBeVisible();
     await expect(interval).toHaveCount(0);
 
     const released = await db.selectFrom("maintenance_locks")

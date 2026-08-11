@@ -53,7 +53,7 @@ async function login(page: Page) {
   await page.getByTestId("login-username").fill("operator");
   await page.getByTestId("login-password").fill("demo-pass-2026");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
@@ -392,7 +392,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   }
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   const checkoutRange = {
     arrivalDate: addDays(fixture.businessDate, -2),
     departureDate: addDays(fixture.businessDate, 1)
@@ -439,7 +439,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   await expect(page.getByText("待清洁", { exact: true })).toHaveCount(0);
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await showFixtureRange(page);
   await filterRoomStatus(page, fixture.overdueCheckout.unitCode, fixture.arrivalDate, addDays(fixture.departureDate, 1));
   const overdueAvailableCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueCheckout.unitId}"][data-service-date="${fixture.businessDate}"]`);
@@ -472,7 +472,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   await expect(page.getByTestId("order-cleaning-tasks")).toHaveCount(0);
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await showFixtureRange(page);
   await filterRoomStatus(page, fixture.plannedCheckout.unitCode, fixture.arrivalDate, addDays(fixture.departureDate, 1));
   const releasedCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.plannedCheckout.unitId}"][data-service-date="${fixture.businessDate}"]`);
@@ -494,7 +494,7 @@ test("阶段 8 4.1 保留的前一日待清洁历史不影响次日房态和订�
   await expect(page.getByText("待清洁", { exact: true })).toHaveCount(0);
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await showFixtureRange(page);
   expect(fixture.arrivalDate).toBe(addDays(fixture.legacyCleaning.serviceDate, 1));
   const nextDayCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.legacyCleaning.unitId}"][data-service-date="${fixture.arrivalDate}"]`);
@@ -528,7 +528,7 @@ test("阶段 8 4.1 日期门禁原因归位且逾期在住不延长当前房态"
   await expect(page.locator(".action-band").getByTestId("fulfillment-date-notice")).toHaveCount(0);
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await showFixtureRange(page);
   const overdueCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueGrid.unitId}"][data-service-date="${fixture.businessDate}"]`);
   await expect(overdueCell).toContainText("可售");
@@ -551,7 +551,7 @@ test("阶段 8 4.1 日期门禁原因归位且逾期在住不延长当前房态"
   await page.getByRole("tab", { name: /异常/ }).click();
   await expect(page.locator(".queue-row").filter({ hasText: fixture.overdueGrid.nickname })).toHaveCount(0);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await showFixtureRange(page);
   await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueGrid.unitId}"][data-service-date="${fixture.businessDate}"]`)).toContainText("可售");
 });

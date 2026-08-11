@@ -258,7 +258,7 @@ export function eligibleMemberProfiles(
   return members.filter((member) => propertyMemberIds.has(member.id) && (
     !normalizedQuery
     || member.full_name.toUpperCase().includes(normalizedQuery)
-    || member.identity_card_number.toUpperCase().includes(normalizedQuery)
+    || member.nickname.toUpperCase().includes(normalizedQuery)
     || member.phone.toUpperCase().includes(normalizedQuery)
     || member.wechat.toUpperCase().includes(normalizedQuery)
   ));
@@ -753,14 +753,14 @@ export function guestFormInput(guest: GuestFormValue): CreateOrderAdditionalGues
 
 export function applyMemberSelectionToGuestForms<T extends GuestFormValue>(
   additionalGuests: T[],
-  member: Pick<MemberDto, "full_name" | "phone" | "identity_card_number">
+  member: Pick<MemberDto, "full_name" | "nickname" | "phone" | "identity_card_number">
 ): { primaryGuest: GuestFormValue; additionalGuests: T[] } {
   return {
     primaryGuest: {
       fullName: member.full_name,
-      nickname: member.full_name,
+      nickname: member.nickname,
       phone: member.phone,
-      documentNumber: member.identity_card_number
+      documentNumber: member.identity_card_number ?? ""
     },
     additionalGuests
   };
@@ -1439,7 +1439,7 @@ function QuoteWorkbench({
             />本次住宿使用会员权益</label>
             {useMemberEntitlement ? <div className="form-grid quote-form" data-testid="member-benefit-picker">
               <label>搜索会员
-                <input value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} placeholder="姓名、身份证号、手机号或微信号" disabled={busy || quoteRecoveryRead.kind !== "ABSENT"} data-testid="member-search" />
+                <input value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} placeholder="昵称、姓名、手机号或微信号" disabled={busy || quoteRecoveryRead.kind !== "ABSENT"} data-testid="member-search" />
               </label>
               <label>会员档案
                 <select
@@ -1460,7 +1460,7 @@ function QuoteWorkbench({
                   data-testid="member-profile-select"
                 >
                   <option value="">请选择会员</option>
-                  {memberProfiles.map((member) => <option key={member.id} value={member.id}>{member.full_name} · {member.identity_card_number} · {member.phone}</option>)}
+                  {memberProfiles.map((member) => <option key={member.id} value={member.id}>{member.nickname} · {member.full_name} · {member.phone}</option>)}
                 </select>
               </label>
             </div> : null}
@@ -1503,7 +1503,7 @@ function QuoteWorkbench({
                     <label>昵称<input value={guestNickname} onChange={(event) => setGuestNickname(event.target.value)} required maxLength={200} data-testid="primary-guest-nickname" /></label>
                     <label>姓名<input value={guestName} onChange={(event) => setGuestName(event.target.value)} required maxLength={GUEST_FULL_NAME_MAX_LENGTH} data-testid="primary-guest-name" /></label>
                     <label>联系电话<input value={guestPhone} onChange={(event) => setGuestPhone(event.target.value)} inputMode="tel" maxLength={80} data-testid="primary-guest-phone" /></label>
-                    <label>证件号码<input value={guestDocument} onChange={(event) => setGuestDocument(event.target.value)} maxLength={120} data-testid="primary-guest-document" /></label>
+                    <label>证件号码（选填）<input value={guestDocument} onChange={(event) => setGuestDocument(event.target.value)} maxLength={120} data-testid="primary-guest-document" /></label>
                   </div>
                 </fieldset>
                 {additionalGuests.map((guest, index) => (
@@ -1518,7 +1518,7 @@ function QuoteWorkbench({
                       <label>昵称<input value={guest.nickname} onChange={(event) => updateAdditionalGuest(guest.key, "nickname", event.target.value)} required maxLength={200} data-testid={`additional-guest-${index}-nickname`} /></label>
                       <label>姓名<input value={guest.fullName} onChange={(event) => updateAdditionalGuest(guest.key, "fullName", event.target.value)} required maxLength={GUEST_FULL_NAME_MAX_LENGTH} data-testid={`additional-guest-${index}-name`} /></label>
                       <label>联系电话<input value={guest.phone} onChange={(event) => updateAdditionalGuest(guest.key, "phone", event.target.value)} inputMode="tel" maxLength={80} data-testid={`additional-guest-${index}-phone`} /></label>
-                      <label>证件号码<input value={guest.documentNumber} onChange={(event) => updateAdditionalGuest(guest.key, "documentNumber", event.target.value)} maxLength={120} data-testid={`additional-guest-${index}-document`} /></label>
+                      <label>证件号码（选填）<input value={guest.documentNumber} onChange={(event) => updateAdditionalGuest(guest.key, "documentNumber", event.target.value)} maxLength={120} data-testid={`additional-guest-${index}-document`} /></label>
                     </div>
                   </fieldset>
                 ))}

@@ -328,6 +328,7 @@ describe("CREATE_QUOTE request lifecycle", () => {
   it("prefills only the member primary guest and preserves companions through member reselection and quote refresh", () => {
     const member = {
       full_name: "会员主档姓名",
+      nickname: "会员昵称",
       phone: "13900000001",
       identity_card_number: "MEMBER-ID-001"
     };
@@ -342,7 +343,7 @@ describe("CREATE_QUOTE request lifecycle", () => {
     const refreshed = applyMemberSelectionToGuestForms(selected.additionalGuests, member);
     expect(refreshed.primaryGuest).toEqual({
       fullName: "会员主档姓名",
-      nickname: "会员主档姓名",
+      nickname: "会员昵称",
       phone: "13900000001",
       documentNumber: "MEMBER-ID-001"
     });
@@ -353,6 +354,7 @@ describe("CREATE_QUOTE request lifecycle", () => {
     });
     expect(member).toEqual({
       full_name: "会员主档姓名",
+      nickname: "会员昵称",
       phone: "13900000001",
       identity_card_number: "MEMBER-ID-001"
     });

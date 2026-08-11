@@ -38,7 +38,7 @@ async function login(page: Page): Promise<void> {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 async function waitForOrder(page: Page, nickname: string): Promise<void> {

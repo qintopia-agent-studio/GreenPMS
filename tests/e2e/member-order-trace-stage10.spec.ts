@@ -15,7 +15,7 @@ async function login(page: Page, activeFixture: Stage10MemberTraceFixture): Prom
   await page.getByTestId("login-username").fill(activeFixture.operator.username);
   await page.getByTestId("login-password").fill(activeFixture.operator.password);
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true, level: 1 })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 test.beforeAll(async ({}, workerInfo) => {

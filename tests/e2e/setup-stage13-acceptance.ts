@@ -96,6 +96,7 @@ async function createMember(db: Kysely<Database>, options: {
   const receipt = await execute(db, "CREATE_MEMBER", {
     propertyId: demo.propertyId,
     fullName: options.fullName,
+    nickname: options.fullName,
     identityCardNumber: options.identityCardNumber,
     phone: "13800001313",
     wechat: `stage13-${options.key}`

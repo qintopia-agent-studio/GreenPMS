@@ -299,6 +299,7 @@ describe("Command effect HTTP contract", () => {
       memberId: "member_leaked",
       member: {
         fullName: "Contract Member",
+        nickname: "Contract Member",
         identityCardNumber: "CONTRACT-MEMBER-ID",
         phone: "13800000000",
         wechat: "contract-member"
@@ -407,6 +408,7 @@ describe("Command effect HTTP contract", () => {
     await capture("CREATE_MEMBER", {
       propertyId: demo.propertyId,
       fullName: "Effect Contract Member",
+      nickname: "Effect Contract Member",
       identityCardNumber: "TEST-EFFECT-MEMBER-ID-001",
       phone: "13800000001",
       wechat: "effect-contract-member"
@@ -740,6 +742,7 @@ describe("Command effect HTTP contract", () => {
     const conversionMember = await capture("CREATE_MEMBER", {
       propertyId: demo.propertyId,
       fullName: "Effect Contract Conversion Member",
+      nickname: "Effect Contract Conversion Member",
       identityCardNumber: "TEST-EFFECT-CONVERSION-ID-001",
       phone: "13800000002",
       wechat: "effect-contract-conversion"
@@ -758,6 +761,7 @@ describe("Command effect HTTP contract", () => {
       primaryGuest: {
         fullName: "Effect Contract Conversion Guest",
         nickname: "Effect Conversion",
+        phone: "13800000002",
         documentNumber: "TEST-EFFECT-CONVERSION-ID-001"
       },
       bookingChannelCode: "WECOM",

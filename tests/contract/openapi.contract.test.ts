@@ -16,8 +16,8 @@ type JsonSchema = Record<string, unknown>;
 
 const commandInputContract: Record<(typeof commandTypes)[number], { required: string[]; properties: string[] }> = {
   CREATE_MEMBER: {
-    required: ["propertyId", "fullName", "identityCardNumber", "phone", "wechat"],
-    properties: ["propertyId", "fullName", "identityCardNumber", "phone", "wechat"]
+    required: ["propertyId", "fullName", "nickname", "phone", "wechat"],
+    properties: ["propertyId", "fullName", "nickname", "identityCardNumber", "phone", "wechat"]
   },
   CREATE_MEMBERSHIP_ORDER: {
     required: ["propertyId", "memberId", "membershipProductId", "agreedPriceMinor"],
@@ -341,7 +341,7 @@ describe("OpenAPI 3.1 command contract", () => {
       "targetCurrentContractAmount"
     ]);
     const createMemberInput = (variants.get("CREATE_MEMBER")!.properties as Record<string, JsonSchema>).input!;
-    expect((createMemberInput.properties as Record<string, JsonSchema>).identityCardNumber).toMatchObject({ minLength: 1, maxLength: 200 });
+    expect((createMemberInput.properties as Record<string, JsonSchema>).nickname).toMatchObject({ minLength: 1, maxLength: 200 });
     expect(createMemberInput.properties).not.toHaveProperty("validFrom");
     expect(createMemberInput.properties).not.toHaveProperty("sourceApplicationRecordId");
     const expiryInput = (variants.get("EXPIRE_MEMBER_ENTITLEMENT")!.properties as Record<string, JsonSchema>).input!;
@@ -1546,16 +1546,16 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(omitted.statusCode, omitted.body).toBe(200);
     expect(omitted.json().quote).toMatchObject({
       stayType: "CUSTOM",
-      currentContractAmount: { currency: "CNY", minorUnits: 108_600 }
+      currentContractAmount: { currency: "CNY", minorUnits: 176_000 }
     });
     expect(omitted.json().quote.pricingExplanation).toMatchObject({
       pricingModel: "DURATION_BAND_TOTAL",
       totalNights: 10,
-      quoteAmount: { currency: "CNY", minorUnits: 108_600 },
+      quoteAmount: { currency: "CNY", minorUnits: 176_000 },
       amountField: "currentContractAmount",
       durationBand: {
         anchorNights: 7,
-        finalAmount: { currency: "CNY", minorUnits: 108_600 },
+        finalAmount: { currency: "CNY", minorUnits: 176_000 },
         auditCalculationFieldsAreAmounts: false
       }
     });
@@ -1817,7 +1817,7 @@ describe("OpenAPI 3.1 command contract", () => {
     const registeredMember = await command(demo.writeToken, "CREATE_MEMBER", {
       propertyId: demo.propertyId,
       fullName: "Contract API Member",
-      identityCardNumber: "test-contract-api-member-id",
+      nickname: "契约会员",
       phone: "13800000333",
       wechat: "contract-api-member"
     });
@@ -1832,7 +1832,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(memberSearch.statusCode).toBe(200);
     expect(memberSearch.json()).toMatchObject({
       members: [{
-        member: { id: memberId, identity_card_number: "TEST-CONTRACT-API-MEMBER-ID", full_name: "Contract API Member" }
+        member: { id: memberId, identity_card_number: null, nickname: "契约会员", full_name: "Contract API Member" }
       }]
     });
     expect(Object.keys((memberSearch.json() as { members: Array<Record<string, unknown>> }).members[0]!)).toEqual(["member"]);
@@ -1858,7 +1858,7 @@ describe("OpenAPI 3.1 command contract", () => {
     });
     expect(member.statusCode).toBe(200);
     expect(member.json()).toMatchObject({
-      member: { id: memberId, identity_card_number: "TEST-CONTRACT-API-MEMBER-ID" },
+      member: { id: memberId, identity_card_number: null, nickname: "契约会员" },
       contracts: [],
       lots: [],
       ledger: [],
@@ -1879,14 +1879,14 @@ describe("OpenAPI 3.1 command contract", () => {
         input: {
           propertyId: demo.propertyId,
           fullName: "Duplicate Contract API Member",
-          identityCardNumber: " test-contract-api-member-id ",
-          phone: "13800000999",
+          nickname: "重复契约会员",
+          phone: " 13800000333 ",
           wechat: "duplicate-contract-member"
         }
       }
     });
     expect(duplicateMember.statusCode).toBe(409);
-    expect(duplicateMember.json()).toMatchObject({ code: "VALIDATION_ERROR", message: "该身份证号已登记，不能重复创建会员档案" });
+    expect(duplicateMember.json()).toMatchObject({ code: "VALIDATION_ERROR", message: "该手机号已登记，不能重复创建会员档案" });
     const audit = await app.inject({
       method: "GET", url: `/api/v1/audit?propertyId=${demo.propertyId}`,
       headers: { authorization: `Bearer ${demo.writeToken}` }

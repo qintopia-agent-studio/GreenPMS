@@ -16,7 +16,7 @@ function mobileOnly(testInfo: TestInfo): boolean {
 }
 
 async function expectRoomStatusLanding(page: Page) {
-  await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 1 })
+  await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
 }
 
@@ -684,6 +684,7 @@ test("U1 mobile member draft survives review and success closes without a receip
     wechat: `wx-u1-${suffix.toLowerCase()}`
   };
   await page.getByTestId("member-full-name").fill(values.fullName);
+  await page.getByTestId("member-nickname").fill(values.fullName);
   await page.getByTestId("member-identity-card").fill(values.identity);
   await page.getByTestId("member-phone").fill(values.phone);
   await page.getByTestId("member-wechat").fill(values.wechat);

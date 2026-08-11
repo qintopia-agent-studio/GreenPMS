@@ -1682,8 +1682,8 @@ export function conversionPreviewHasEvidence(
     || !expectedCollectionIds
     || !primaryOccupant || !member || !product || !transfer || !membershipPricing
     || !entitlement || !before || !decision || !pricing
-    || !hasExactKeys(primaryOccupant, ["fullName", "nickname", "identityCardNumber"])
-    || !hasExactKeys(member, ["memberId", "fullName", "identityCardNumber"])
+    || !hasExactKeys(primaryOccupant, ["fullName", "nickname", "phone"])
+    || !hasExactKeys(member, ["memberId", "fullName", "phone"])
     || !hasExactKeys(product, ["productId", "code", "version", "name", "entitlementUnitKind", "entitlementUnits", "allowedRoomTypeCode", "allowedInventoryKind"])
     || !hasExactKeys(transfer, ["collections", "total"])
     || !hasExactKeys(membershipPricing, ["listedPrice", "agreedPrice", "adjustment", "adjustmentReason"])
@@ -1693,9 +1693,9 @@ export function conversionPreviewHasEvidence(
     || !hasExactKeys(pricing, ["coverageSet", "cashLines", "cashRemainder", "currentContractAmount"])
     || member.memberId !== input.memberId
     || product.productId !== input.membershipProductId
-    || !nonblankString(member.fullName) || !nonblankString(member.identityCardNumber)
-    || !nonblankString(primaryOccupant.identityCardNumber)
-    || conversionIdentity(member.identityCardNumber) !== conversionIdentity(primaryOccupant.identityCardNumber)
+    || !nonblankString(member.fullName) || !nonblankString(member.phone)
+    || !nonblankString(primaryOccupant.phone)
+    || conversionIdentity(member.phone) !== conversionIdentity(primaryOccupant.phone)
     || !nonblankString(product.code) || !nonblankString(product.name)
     || !nonblankString(product.allowedRoomTypeCode)
     || (product.allowedInventoryKind !== "ROOM" && product.allowedInventoryKind !== "BED")
@@ -1903,7 +1903,7 @@ export function u1PreviewHasBusinessEvidence(
     case "CREATE_MEMBER":
       return Boolean(member
         && nonblankString(member.fullName)
-        && nonblankString(member.identityCardNumber)
+        && nonblankString(member.nickname)
         && nonblankString(member.phone)
         && nonblankString(member.wechat));
     case "CREATE_MEMBERSHIP_ORDER":
@@ -2367,6 +2367,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
         <h3 id="member-create-summary-heading">请核对会员资料</h3>
         <dl className="difference-grid">
           <dt>姓名</dt><dd>{scalar(member.fullName)}</dd>
+          <dt>昵称</dt><dd>{scalar(member.nickname)}</dd>
           <dt>身份证号</dt><dd>{scalar(member.identityCardNumber)}</dd>
           <dt>手机号</dt><dd>{scalar(member.phone)}</dd>
           <dt>微信号</dt><dd>{scalar(member.wechat)}</dd>
@@ -2571,7 +2572,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
         <h3 id="effect-difference-heading">请核对{commandBusinessLabels[preview.commandType] ?? "本次操作"}</h3>
         <dl className="difference-grid">
           {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
-          {member ? <><dt>会员档案动作</dt><dd>{scalar(effect.operation)}</dd><dt>会员姓名 / 身份证</dt><dd>{scalar(member.fullName)} · <code>{scalar(member.identityCardNumber)}</code></dd><dt>手机号 / 微信号</dt><dd>{scalar(member.phone)} · {scalar(member.wechat)}</dd></> : null}
+          {member ? <><dt>会员档案动作</dt><dd>{scalar(effect.operation)}</dd><dt>会员姓名</dt><dd>{scalar(member.fullName)}</dd><dt>手机号 / 微信号</dt><dd>{scalar(member.phone)} · {scalar(member.wechat)}</dd></> : null}
           {submittedProfile && effect.profileMatch === false ? <><dt>申请资料差异</dt><dd>申请资料与现有档案不一致；本命令保留现有档案，仅关联申请记录。</dd></> : null}
           {memberContract ? <><dt>会员合同动作</dt><dd>{scalar(memberContract.operation)}</dd><dt>合同周期</dt><dd>{scalar(memberContract.validFrom)} 至 {scalar(memberContract.validUntil)}</dd></> : null}
           {externalReference ? <><dt>外部申请关联</dt><dd>{scalar(externalReference.operation)} · {scalar(externalReference.provider)} · <code>{scalar(externalReference.externalRecordId)}</code></dd></> : null}
@@ -4804,7 +4805,7 @@ export function CommandDialog({
       </div> : null}
       {!preview && !receipt ? (
         <div className="command-pending">
-          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查身份证号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查身份证号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">

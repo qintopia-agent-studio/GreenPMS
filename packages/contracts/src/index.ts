@@ -877,7 +877,8 @@ export interface CreateOrderResultDto {
 export interface CreateMemberInput {
   propertyId: string;
   fullName: string;
-  identityCardNumber: string;
+  nickname: string;
+  identityCardNumber?: string | null;
   phone: string;
   wechat: string;
 }

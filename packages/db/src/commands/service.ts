@@ -26,7 +26,7 @@ import {
   type HistoricalProtocolVersion
 } from "../historical-command-protocol.ts";
 import { applyCommand, lockCommandResources } from "./apply.ts";
-import { buildCommandEffect, projectCommandEffectForRead, projectPrimaryGuestForRead } from "./effects.ts";
+import { buildCommandEffect, normalizePhoneNumber, projectCommandEffectForRead, projectPrimaryGuestForRead } from "./effects.ts";
 
 export interface ConfirmRequest {
   propertyId: string;
@@ -367,8 +367,9 @@ function normalizeCommandEnvelope(envelope: CommandEnvelope): CommandEnvelope {
       input: {
         ...envelope.input,
         fullName: trim("fullName"),
+        nickname: trim("nickname"),
         identityCardNumber: trim("identityCardNumber", true),
-        phone: trim("phone"),
+        phone: typeof envelope.input.phone === "string" ? normalizePhoneNumber(envelope.input.phone) : envelope.input.phone,
         wechat: trim("wechat")
       }
     };

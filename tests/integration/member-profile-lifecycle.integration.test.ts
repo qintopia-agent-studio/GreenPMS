@@ -98,19 +98,20 @@ afterEach(async () => {
 });
 
 describe("member profile registration and directory", () => {
-  const memberEnvelope = (identityCardNumber: string, fullName = "张三"): CommandEnvelope => ({
+  const memberEnvelope = (phone: string, fullName = "张三", identityCardNumber?: string): CommandEnvelope => ({
     commandType: "CREATE_MEMBER",
     input: {
       propertyId: demo.propertyId,
       fullName,
-      identityCardNumber,
-      phone: "13800000088",
+      nickname: fullName,
+      ...(identityCardNumber === undefined ? {} : { identityCardNumber }),
+      phone,
       wechat: "zhangsan-wechat"
     }
   });
 
   it("atomically creates only a member profile and current-property link", async () => {
-    const envelope = memberEnvelope("31000019900101001x");
+    const envelope = memberEnvelope("13800000088", "张三", "31000019900101001x");
     const before = {
       members: await db.selectFrom("members").select("id").execute(),
       links: await db.selectFrom("member_property_links").selectAll().execute(),
@@ -125,6 +126,7 @@ describe("member profile registration and directory", () => {
       memberId: null,
       member: {
         fullName: "张三",
+        nickname: "张三",
         identityCardNumber: "31000019900101001X",
         phone: "13800000088",
         wechat: "zhangsan-wechat"
@@ -161,7 +163,7 @@ describe("member profile registration and directory", () => {
   it("rolls back the member row when the property link cannot be inserted", async () => {
     const identityCardNumber = "TEST-MEMBER-LINK-ROLLBACK";
     const linksBefore = await db.selectFrom("member_property_links").select("member_id").execute();
-    const created = await preview(memberEnvelope(identityCardNumber, "回滚会员"), "member-link-rollback");
+    const created = await preview(memberEnvelope("13800000777", "回滚会员", identityCardNumber), "member-link-rollback");
     await sql`
       CREATE FUNCTION qintopia_reject_test_member_link() RETURNS trigger
       LANGUAGE plpgsql AS $$
@@ -198,13 +200,21 @@ describe("member profile registration and directory", () => {
     }
   });
 
-  it("rejects a normalized duplicate identity while allowing repeated phone and WeChat values", async () => {
-    const first = await confirm(memberEnvelope("TEST-UNIQUE-MEMBER-ID", "第一位会员"), "unique-member-first");
-    await expect(preview(memberEnvelope(" test-unique-member-id ", "重复会员"), "unique-member-duplicate"))
-      .rejects.toThrow("该身份证号已登记，不能重复创建会员档案");
-    const second = await confirm(memberEnvelope("TEST-SECOND-MEMBER-ID", "第二位会员"), "unique-member-second");
+  it("rejects a duplicate phone while allowing missing identity card numbers", async () => {
+    const first = await confirm(memberEnvelope("13800000088", "第一位会员"), "unique-member-first");
+    await db.updateTable("members")
+      .set({ phone: " 138 0000 0088 " })
+      .where("id", "=", first.result!.memberId as string)
+      .execute();
+    expect(await db.selectFrom("members").select("phone").where("id", "=", first.result!.memberId as string).executeTakeFirstOrThrow())
+      .toEqual({ phone: "13800000088" });
+    await expect(preview(memberEnvelope(" 138 0000 0088 ", "重复会员"), "unique-member-duplicate"))
+      .rejects.toThrow("该手机号已登记，不能重复创建会员档案");
+    const second = await confirm(memberEnvelope("13800000089", "第二位会员"), "unique-member-second");
     expect(first.result!.memberId).not.toBe(second.result!.memberId);
-    expect(await db.selectFrom("members").select("id").where("phone", "=", "13800000088").execute()).toHaveLength(2);
+    expect(await db.selectFrom("members").select("phone").where("id", "=", first.result!.memberId as string).executeTakeFirstOrThrow())
+      .toEqual({ phone: "13800000088" });
+    expect(await db.selectFrom("members").select("id").where("wechat", "=", "zhangsan-wechat").where("identity_card_number", "is", null).execute()).toHaveLength(2);
     expect(await db.selectFrom("members").select("id").where("wechat", "=", "zhangsan-wechat").execute()).toHaveLength(2);
   });
 
@@ -214,18 +224,20 @@ describe("member profile registration and directory", () => {
       input: {
         propertyId: demo.propertyId,
         fullName: "李晓云",
+        nickname: "云朵",
         identityCardNumber: "SEARCH-ID-998877X",
         phone: "13912345678",
         wechat: "cloud-search-wechat"
       }
     }, "search-member");
     const memberId = created.result!.memberId as string;
-    for (const query of ["晓云", "998877x", "123456", "search-wechat"]) {
+    for (const query of ["晓云", "云朵", "123456", "search-wechat"]) {
       expect(await listMemberSummaries(db, demo.propertyId, query)).toEqual([
         expect.objectContaining({ member: expect.objectContaining({ id: memberId }) })
       ]);
     }
     expect(await listMemberSummaries(db, demo.propertyId, "%")).toEqual([]);
+    expect(await listMemberSummaries(db, demo.propertyId, "998877x")).toEqual([]);
 
     const otherPropertyId = "prop_member_isolation";
     await db.insertInto("properties").values({
@@ -243,7 +255,7 @@ describe("member profile registration and directory", () => {
   });
 
   it("replays the original confirmation without duplicating the member", async () => {
-    const envelope = memberEnvelope("TEST-IDEMPOTENT-MEMBER-ID", "幂等会员");
+    const envelope = memberEnvelope("13800000111", "幂等会员", "TEST-IDEMPOTENT-MEMBER-ID");
     const created = await preview(envelope, "idempotent-member");
     const confirmationInput = {
       propertyId: demo.propertyId,
@@ -269,6 +281,7 @@ describe("member profile registration and directory", () => {
       input: {
         propertyId: demo.propertyId,
         fullName: "Concurrent Member",
+        nickname: "Concurrent Member",
         identityCardNumber: "TEST-CONCURRENT-MEMBER-ID",
         phone: "13800000222",
         wechat: "concurrent-member"

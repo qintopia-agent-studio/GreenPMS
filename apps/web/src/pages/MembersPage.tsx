@@ -170,6 +170,7 @@ function CreateMemberDialog({ propertyId, draft, onClose, onSubmit }: {
   onSubmit: (request: CommandRequest) => void;
 }) {
   const [fullName, setFullName] = useState(() => typeof draft?.input.fullName === "string" ? draft.input.fullName : "");
+  const [nickname, setNickname] = useState(() => typeof draft?.input.nickname === "string" ? draft.input.nickname : "");
   const [identityCardNumber, setIdentityCardNumber] = useState(() => typeof draft?.input.identityCardNumber === "string" ? draft.input.identityCardNumber : "");
   const [phone, setPhone] = useState(() => typeof draft?.input.phone === "string" ? draft.input.phone : "");
   const [wechat, setWechat] = useState(() => typeof draft?.input.wechat === "string" ? draft.input.wechat : "");
@@ -183,7 +184,8 @@ function CreateMemberDialog({ propertyId, draft, onClose, onSubmit }: {
       input: {
         propertyId,
         fullName: fullName.trim(),
-        identityCardNumber: identityCardNumber.trim().toUpperCase(),
+        nickname: nickname.trim(),
+        identityCardNumber: identityCardNumber.trim() === "" ? null : identityCardNumber.trim().toUpperCase(),
         phone: phone.trim(),
         wechat: wechat.trim()
       }
@@ -194,7 +196,8 @@ function CreateMemberDialog({ propertyId, draft, onClose, onSubmit }: {
     <form className="modal-form" onSubmit={submit}>
       <div className="form-grid">
         <label htmlFor="member-full-name">姓名<input id="member-full-name" value={fullName} onChange={(event) => setFullName(event.target.value)} required maxLength={200} autoFocus data-testid="member-full-name" autoComplete="name" /></label>
-        <label htmlFor="member-identity-card">身份证号<input id="member-identity-card" value={identityCardNumber} onChange={(event) => setIdentityCardNumber(event.target.value)} required maxLength={200} data-testid="member-identity-card" autoComplete="off" /></label>
+        <label htmlFor="member-nickname">昵称<input id="member-nickname" value={nickname} onChange={(event) => setNickname(event.target.value)} required maxLength={200} data-testid="member-nickname" autoComplete="off" /></label>
+        <label htmlFor="member-identity-card">身份证号（选填）<input id="member-identity-card" value={identityCardNumber} onChange={(event) => setIdentityCardNumber(event.target.value)} maxLength={200} data-testid="member-identity-card" autoComplete="off" /></label>
         <label htmlFor="member-phone">手机号<input id="member-phone" value={phone} onChange={(event) => setPhone(event.target.value)} required maxLength={200} inputMode="tel" autoComplete="tel" data-testid="member-phone" /></label>
         <label htmlFor="member-wechat">微信号<input id="member-wechat" value={wechat} onChange={(event) => setWechat(event.target.value)} required maxLength={200} autoComplete="off" data-testid="member-wechat" /></label>
       </div>
@@ -364,7 +367,8 @@ function MemberProfile({ member }: { member: MemberViewDto }) {
     </div>
     <dl className="member-profile-fields">
       <div><dt>姓名</dt><dd>{member.member.full_name}</dd></div>
-      <div><dt>身份证号</dt><dd>{member.member.identity_card_number}</dd></div>
+      <div><dt>昵称</dt><dd>{member.member.nickname}</dd></div>
+      <div><dt>身份证号</dt><dd>{member.member.identity_card_number ?? "-"}</dd></div>
       <div><dt>手机号</dt><dd>{member.member.phone}</dd></div>
       <div><dt>微信号</dt><dd>{member.member.wechat}</dd></div>
     </dl>
@@ -811,7 +815,7 @@ export function MembersPage() {
     {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="member-command-recovery" businessFacing /> : null}
 
     <form className="member-search" role="search" aria-label="搜索会员" onSubmit={search}>
-      <label htmlFor="member-search-query">搜索会员<input id="member-search-query" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="姓名、身份证号、手机号或微信号" data-testid="member-search-query" /></label>
+      <label htmlFor="member-search-query">搜索会员<input id="member-search-query" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="昵称、姓名、手机号或微信号" data-testid="member-search-query" /></label>
       <button className="button button-secondary" type="submit" disabled={loadingList}><Search aria-hidden="true" size={17} />搜索</button>
       {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); setTargetContractId(undefined); navigate("/members", { replace: true }); }}>清除</button> : null}
     </form>

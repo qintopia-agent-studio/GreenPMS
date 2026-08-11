@@ -228,6 +228,7 @@ async function createMember(
   const profile = await execute(db, "CREATE_MEMBER", {
     propertyId: demo.propertyId,
     fullName: `阶段九会员-${key}`,
+    nickname: `阶段九会员-${key}`,
     identityCardNumber: `STAGE9-ID-${key}`,
     phone: "13800009019",
     wechat: `wx-stage9-${key}`

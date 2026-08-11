@@ -40,7 +40,8 @@ const currentMigrationNames = [
   "033_stay_collection_membership_conversion.sql",
   "034_stay_conversion_reversal_bridge_guard.sql",
   "035_stage13_conversion_execution_state_guards.sql",
-  "036_qintopia_prelaunch_room_catalog_corrections.sql"
+  "036_qintopia_prelaunch_room_catalog_corrections.sql",
+  "037_member_phone_identity_and_nickname.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -85,6 +86,123 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
     const migrationsReady = rows.length === currentMigrationNames.length
       && rows.every((row, index) => row.name === currentMigrationNames[index]);
     if (!migrationsReady) return false;
+
+    const memberProfileObjects = await sql<{
+      columns_ready: boolean;
+      constraints_ready: boolean;
+      trigger_ready: boolean;
+      function_body_ready: boolean;
+    }>`
+      SELECT
+        (
+          COALESCE((
+            SELECT NOT attribute.attnotnull
+              AND attribute.atttypid = 'text'::regtype
+              AND NOT attribute.attisdropped
+            FROM pg_attribute AS attribute
+            WHERE attribute.attrelid = to_regclass('members')
+              AND attribute.attname = 'identity_card_number'
+          ), false)
+          AND COALESCE((
+            SELECT attribute.attnotnull
+              AND attribute.atttypid = 'text'::regtype
+              AND NOT attribute.attisdropped
+            FROM pg_attribute AS attribute
+            WHERE attribute.attrelid = to_regclass('members')
+              AND attribute.attname = 'nickname'
+          ), false)
+          AND COALESCE((
+            SELECT attribute.attnotnull
+              AND attribute.atttypid = 'text'::regtype
+              AND NOT attribute.attisdropped
+            FROM pg_attribute AS attribute
+            WHERE attribute.attrelid = to_regclass('members')
+              AND attribute.attname = 'phone'
+          ), false)
+        ) AS columns_ready,
+        (
+          COALESCE((
+            SELECT constraint_row.contype = 'u'
+              AND constraint_row.convalidated
+              AND constraint_row.conkey = ARRAY[
+                (SELECT attnum FROM pg_attribute
+                  WHERE attrelid = to_regclass('members') AND attname = 'phone')
+              ]::smallint[]
+            FROM pg_constraint AS constraint_row
+            WHERE constraint_row.conrelid = to_regclass('members')
+              AND constraint_row.conname = 'members_phone_unique'
+          ), false)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint AS constraint_row
+            WHERE constraint_row.conrelid = to_regclass('members')
+              AND constraint_row.contype = 'u'
+              AND constraint_row.conkey = ARRAY[
+                (SELECT attnum FROM pg_attribute
+                  WHERE attrelid = to_regclass('members') AND attname = 'identity_card_number')
+              ]::smallint[]
+          )
+          AND COALESCE((
+            SELECT constraint_row.contype = 'c'
+              AND constraint_row.convalidated
+              AND position('identity_card_number IS NULL' IN pg_get_constraintdef(constraint_row.oid, false)) > 0
+              AND position('identity_card_number !~' IN pg_get_constraintdef(constraint_row.oid, false)) > 0
+            FROM pg_constraint AS constraint_row
+            WHERE constraint_row.conrelid = to_regclass('members')
+              AND constraint_row.conname = 'members_identity_card_number_nonblank'
+          ), false)
+          AND COALESCE((
+            SELECT constraint_row.contype = 'c'
+              AND constraint_row.convalidated
+              AND position('nickname !~' IN pg_get_constraintdef(constraint_row.oid, false)) > 0
+            FROM pg_constraint AS constraint_row
+            WHERE constraint_row.conrelid = to_regclass('members')
+              AND constraint_row.conname = 'members_nickname_nonblank'
+          ), false)
+        ) AS constraints_ready,
+        COALESCE((
+          SELECT NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgnargs = 0
+            AND trigger.tgfoid = to_regprocedure('qintopia_normalize_new_member_identity()')
+            AND pg_get_triggerdef(trigger.oid, false) =
+              'CREATE TRIGGER members_normalize_new_identity BEFORE INSERT OR UPDATE OF identity_card_number, phone, nickname ON public.members FOR EACH ROW EXECUTE FUNCTION qintopia_normalize_new_member_identity()'
+          FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('members')
+            AND trigger.tgname = 'members_normalize_new_identity'
+        ), false) AS trigger_ready,
+        COALESCE((
+          SELECT regexp_replace(
+              btrim(procedure_row.prosrc),
+              '[[:space:]]+',
+              ' ',
+              'g'
+            ) = regexp_replace(
+              btrim($readiness$
+                BEGIN
+                  IF NEW.identity_card_number IS NOT NULL THEN
+                    NEW.identity_card_number := upper(btrim(NEW.identity_card_number));
+                  END IF;
+                  NEW.phone := regexp_replace(NEW.phone, '[[:space:]]+', '', 'g');
+                  NEW.nickname := btrim(NEW.nickname);
+                  RETURN NEW;
+                END;
+              $readiness$),
+              '[[:space:]]+',
+              ' ',
+              'g'
+            )
+            AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+            AND NOT procedure_row.prosecdef
+            AND procedure_row.provolatile = 'v'
+            AND procedure_row.proconfig IS NULL
+            AND procedure_row.prokind = 'f'
+          FROM pg_proc AS procedure_row
+          WHERE procedure_row.oid = to_regprocedure('qintopia_normalize_new_member_identity()')
+        ), false) AS function_body_ready
+    `.execute(db);
 
     const foundationalObjects = await sql<{
       function_count: string;
@@ -926,7 +1044,7 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
             FROM (
               VALUES
                 ('qintopia_assert_stage13_stay_conversion_command(text)', '9f9d7311054a9c99b68999dcd799cd662996d0496573cdd783fc747ca1466459'),
-                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '72e08c61c35d33b04001544771f0b3a3c3de51b6c531aa6aeed751d7bbf44f0b'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '534138437609d79583bcd6208c27a7e1cf0230a5afa62900d29438427ca53ef7'),
                 ('qintopia_reject_lodging_funds_after_membership_transfer()', 'b05cc0f8a8d15980d17a6188079afcd1dff96d4f14df7e7957c4a6c2f36005a6'),
                 ('qintopia_reject_membership_funds_after_stay_transfer()', '4660b0b24df455e1ce047f8eeca3070216ca85ecf711df6bbcb98e9b2fbcd73d'),
                 ('qintopia_require_stage13_conversion_reversal_bridge()', '5f73c20a3019cdc3810ae4484eec1a898e700e954c20d6c6a65fe8493b8f5c2e'),
@@ -955,7 +1073,11 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
         ) AS function_bodies_ready
       FROM pg_trigger AS trigger
     `.execute(db);
-    return foundationalObjects.rows[0]?.function_count === "5"
+    return memberProfileObjects.rows[0]?.columns_ready === true
+      && memberProfileObjects.rows[0]?.constraints_ready === true
+      && memberProfileObjects.rows[0]?.trigger_ready === true
+      && memberProfileObjects.rows[0]?.function_body_ready === true
+      && foundationalObjects.rows[0]?.function_count === "5"
       && foundationalObjects.rows[0]?.trigger_count === "13"
       && foundationalObjects.rows[0]?.function_bodies_ready === true
       && foundationalObjects.rows[0]?.membership_order_identity_body_ready === true

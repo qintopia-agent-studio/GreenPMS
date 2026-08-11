@@ -196,6 +196,7 @@ async function createMember(db: Kysely<Database>, key: string): Promise<string> 
   const profile = await execute(db, "CREATE_MEMBER", {
     propertyId: demo.propertyId,
     fullName: `阶段十一会员-${key}`,
+    nickname: `阶段十一会员-${key}`,
     identityCardNumber: `STAGE11-ID-${key}`,
     phone: "13800001119",
     wechat: `wx-stage11-${key}`

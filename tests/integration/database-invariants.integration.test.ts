@@ -79,6 +79,7 @@ async function insertLot(suffix: string, totalUnits: number): Promise<{ memberId
   await db.insertInto("members").values({
     id: memberId,
     identity_card_number: `TEST-INVARIANT-ID-${suffix}`.toUpperCase(),
+    nickname: `Invariant member ${suffix}`,
     full_name: `Invariant member ${suffix}`,
     phone: `TEST-PHONE-${suffix}`,
     wechat: `test-wechat-${suffix}`

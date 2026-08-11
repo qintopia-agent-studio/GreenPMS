@@ -161,7 +161,7 @@ export async function listMemberSummaries(db: DbExecutor, propertyId: string, qu
     const pattern = `%${escapeLikePattern(normalizedQuery)}%`;
     selection = selection.where(sql<boolean>`(
       members.full_name ILIKE ${pattern} ESCAPE '\\'
-      OR members.identity_card_number ILIKE ${pattern} ESCAPE '\\'
+      OR members.nickname ILIKE ${pattern} ESCAPE '\\'
       OR members.phone ILIKE ${pattern} ESCAPE '\\'
       OR members.wechat ILIKE ${pattern} ESCAPE '\\'
     )`);

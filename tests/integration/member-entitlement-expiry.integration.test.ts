@@ -75,6 +75,7 @@ beforeEach(async () => {
   await db.insertInto("members").values({
     id: memberId,
     identity_card_number: "EXPIRY-CONSISTENCY-ID",
+    nickname: "到期一致性会员",
     full_name: "Expiry Consistency Member",
     phone: "13800000999",
     wechat: "expiry-consistency-member"
@@ -285,7 +286,7 @@ describe("member entitlement natural expiry", () => {
       "fact_natural_expiry_history",
       "fact_inactive_contract_history"
     ]));
-    expect(await listMemberSummaries(db, demo.propertyId, "expiry-consistency-id")).toEqual([
+    expect(await listMemberSummaries(db, demo.propertyId, "expiry-consistency-member")).toEqual([
       { member: expect.objectContaining({ id: "member_expiry_consistency" }) }
     ]);
   });
