@@ -370,31 +370,88 @@ describe("8.3 completed-stay backfill", () => {
     expect(await db.selectFrom("collection_facts").select("fact_id").where("order_id", "=", orderId).execute()).toHaveLength(1);
   });
 
-  it("rejects a cross-today backfill with no Preview or business writes and keeps the obsolete command closed", async () => {
+  it("atomically records a cross-today stay as in-house and keeps the whole interval claimed", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const arrivalDate = addDays(businessDate, -2);
     const departureDate = addDays(businessDate, 2);
+    const reason = "8.4 跨今天在住补录真实原因";
     const prepared = await backfillEnvelope({
       unitId: demo.secondRoomId,
       arrivalDate,
       departureDate,
       prefix: "cross-today",
+      reason,
+      collection: { amountMinor: 100, method: "WECOM", transactionReference: "WX-CROSS-TODAY" }
     });
-    const before = await Promise.all([
-      db.selectFrom("orders").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
-      db.selectFrom("command_previews").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
-    ]);
-    await expect(createCommandPreview(db, principal, prepared.envelope, metadata("backfill-cross-today"))).rejects.toMatchObject({
-      code: "VALIDATION_ERROR",
-      statusCode: 409,
-      message: "跨今天的在住补录将在 8.4 开放"
-    });
-    const after = await Promise.all([
-      db.selectFrom("orders").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
-      db.selectFrom("command_previews").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
-    ]);
-    expect(after).toEqual(before);
 
+    const receipt = await previewAndConfirm(prepared.envelope, "backfill-cross-today", reason);
+    const orderId = receipt.result!.orderId as string;
+    expect(receipt).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+    expect(receipt.result).toMatchObject({
+      orderId,
+      status: "CHECKED_IN",
+      effectHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      backfill: {
+        checkInAmendmentId: expect.stringMatching(/^amend_/),
+        checkOutAmendmentId: null,
+        settlementStatus: "ARREARS",
+        collectedAmountMinor: 100,
+        balanceDueMinor: prepared.contractAmountMinor - 100,
+        collectionFactId: expect.stringMatching(/^fact_/)
+      }
+    });
+
+    const [order, stay, amendments, claims, facts, detail] = await Promise.all([
+      db.selectFrom("orders").selectAll().where("id", "=", orderId).executeTakeFirstOrThrow(),
+      db.selectFrom("stays").selectAll().where("order_id", "=", orderId).executeTakeFirstOrThrow(),
+      db.selectFrom("amendments").selectAll().where("order_id", "=", orderId).orderBy("sequence").execute(),
+      db.selectFrom("inventory_claims").selectAll().where("source_id", "in",
+        db.selectFrom("stay_segments").select("id").where("stay_id", "=", receipt.result!.stayId as string)).orderBy("service_date").execute(),
+      db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).execute(),
+      getOrderView(db, orderId)
+    ]);
+    expect(order).toMatchObject({ status: "CHECKED_IN", version: 2 });
+    expect(stay.status).toBe("IN_HOUSE");
+    expect(amendments.map((amendment) => amendment.amendment_type)).toEqual(["CREATE_ORDER", "CHECK_IN"]);
+    expect(amendments.every((amendment) => amendment.reason_code === "BACKFILL_STAY" && amendment.reason_note === reason)).toBe(true);
+    expect(claims.map((claim) => claim.service_date)).toEqual([
+      arrivalDate,
+      addDays(arrivalDate, 1),
+      businessDate,
+      addDays(businessDate, 1)
+    ]);
+    expect(claims.every((claim) => claim.active === true && claim.released_at === null)).toBe(true);
+    expect(facts).toEqual([expect.objectContaining({
+      amount_minor: 100,
+      net_effect_minor: 100,
+      method: "WECOM",
+      transaction_reference: "WX-CROSS-TODAY"
+    })]);
+    expect(detail.order.status).toBe("CHECKED_IN");
+    expect(detail.allowedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "EXTEND_STAY", enabled: true }),
+      expect.objectContaining({ code: "SHORTEN_STAY", enabled: true }),
+      expect.objectContaining({ code: "MOVE_UNIT", enabled: true })
+    ]));
+    expect(detail.allowedActions.find((action) => action.code === "CHECK_OUT")).toMatchObject({
+      enabled: false,
+      disabledReason: "DEPARTURE_DATE_NOT_REACHED"
+    });
+    expect(await projectedStatus(orderId, demo.secondRoomId, arrivalDate, departureDate)).toBe("IN_HOUSE");
+
+    const result = await board(arrivalDate, departureDate);
+    const interval = unitIn(result, demo.secondRoomId).intervals.find((candidate) =>
+      candidate.references.some((reference) => reference.type === "ORDER" && reference.id === orderId)
+    );
+    expect(interval).toMatchObject({
+      status: "IN_HOUSE",
+      sourceStartDate: arrivalDate,
+      sourceEndDate: departureDate,
+      blocking: true
+    });
+  });
+
+  it("keeps the obsolete two-step completed-stay backfill command closed", async () => {
     await expect(createCommandPreview(db, principal, {
       commandType: "BACKFILL_COMPLETED_STAY",
       input: { propertyId: demo.propertyId, orderId: "order_obsolete" }

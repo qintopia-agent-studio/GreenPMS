@@ -1145,7 +1145,7 @@ const CreateOrderResultSchema = strictObject({
   backfill: Type.Optional(strictObject({
     businessDate: LocalDate,
     checkInAmendmentId: Id,
-    checkOutAmendmentId: Id,
+    checkOutAmendmentId: nullable(Id),
     settlementStatus: Type.Union([Type.Literal("SETTLED"), Type.Literal("ARREARS")]),
     collectedAmountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
     balanceDueMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, Check, ChevronRight, CircleHelp, Clock3, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
@@ -239,11 +239,13 @@ interface ModalProps {
   className?: string;
 }
 
+const useDialogVisibilityEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
 export function Modal({ title, onClose, children, footer, size = "default", closeDisabled = false, modal = true, className }: ModalProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
 
-  useEffect(() => {
+  useDialogVisibilityEffect(() => {
     const dialog = dialogRef.current;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (dialog) {
@@ -1905,9 +1907,6 @@ export function completedStayBackfillPreviewHasEvidence(
     || departureEpoch === undefined
     || businessEpoch === undefined
     || arrivalEpoch >= departureEpoch
-    || departureEpoch > businessEpoch
-    || backfill.resultingOrderStatus !== "CHECKED_OUT"
-    || backfill.resultingStayStatus !== "COMPLETED"
     || !reason
     || backfill.reason !== reason
     || !nonblankString(input.quoteId)
@@ -1920,6 +1919,14 @@ export function completedStayBackfillPreviewHasEvidence(
     || !inputAdditionalGuests
     || !effectOccupants
     || effectOccupants.length !== inputAdditionalGuests.length + 1) return false;
+  const completedBackfill = departureEpoch <= businessEpoch
+    && backfill.resultingOrderStatus === "CHECKED_OUT"
+    && backfill.resultingStayStatus === "COMPLETED";
+  const inHouseBackfill = arrivalEpoch < businessEpoch
+    && businessEpoch < departureEpoch
+    && backfill.resultingOrderStatus === "CHECKED_IN"
+    && backfill.resultingStayStatus === "IN_HOUSE";
+  if (!completedBackfill && !inHouseBackfill) return false;
 
   const submittedGuests = [inputGuest, ...inputAdditionalGuests];
   if (!effectOccupants.every((value, index) => {
@@ -2457,23 +2464,24 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     if (!completedStayBackfillPreviewHasEvidence(effect, commandInput)) {
       return <div className="effect-summary backfill-command-summary" data-testid="command-effect">
         <section className="effect-section" aria-labelledby="completed-backfill-summary-heading">
-          <h3 id="completed-backfill-summary-heading">无法核对已完成住宿补录</h3>
-          <p>服务端返回的日期、退房状态或收款事实与本次填写不一致，不能确认。请返回房态后重新核对。</p>
+          <h3 id="completed-backfill-summary-heading">无法核对住宿补录</h3>
+          <p>服务端返回的日期、履约状态或收款事实与本次填写不一致，不能确认。请返回房态后重新核对。</p>
         </section>
       </div>;
     }
     const backfill = effect.backfill as Record<string, unknown>;
+    const inHouseBackfill = backfill.resultingOrderStatus === "CHECKED_IN" && backfill.resultingStayStatus === "IN_HOUSE";
     const collection = isRecord(backfill.collection) ? backfill.collection : undefined;
     const collectionAmountMinor = typeof collection?.amountMinor === "number" ? collection.amountMinor : 0;
     const contractAmount = moneyFrom(createPricingDecision?.targetCurrentContractAmount ?? pricing?.currentContractAmount);
     const externalChannel = backfill.externalChannel === true;
-    const settled = isFreeStay || externalChannel || Boolean(contractAmount && collectionAmountMinor >= contractAmount.minorUnits);
+    const settled = inHouseBackfill || isFreeStay || externalChannel || Boolean(contractAmount && collectionAmountMinor >= contractAmount.minorUnits);
     const outstandingAmount = contractAmount
       ? { ...contractAmount, minorUnits: Math.max(0, contractAmount.minorUnits - collectionAmountMinor) }
       : undefined;
     return <div className="effect-summary backfill-command-summary" data-testid="command-effect">
       <section className="effect-section" aria-labelledby="completed-backfill-summary-heading">
-        <h3 id="completed-backfill-summary-heading">请核对已完成住宿补录</h3>
+        <h3 id="completed-backfill-summary-heading">{inHouseBackfill ? "请核对在住住宿补录" : "请核对已完成住宿补录"}</h3>
         <dl className="difference-grid">
           {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>住客昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要住客姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
           {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
@@ -2489,7 +2497,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
               <dt>资金处理</dt><dd>不登记门店单笔收款，后续按渠道总账核对。</dd>
             </> : <>
               {contractAmount ? <><dt>订单金额</dt><dd><strong>{formatMoney(contractAmount)}</strong></dd></> : null}
-              <dt>补录实收</dt><dd><strong>{formatMinor(collectionAmountMinor, contractAmount?.currency ?? "CNY")}</strong></dd>
+              <dt>{inHouseBackfill ? "已发生实收" : "补录实收"}</dt><dd><strong>{formatMinor(collectionAmountMinor, contractAmount?.currency ?? "CNY")}</strong></dd>
               {collection ? <>
                 <dt>收款方式</dt><dd>{fundMethodLabel(collection.method)}</dd>
                 {collection.method === "CASH" ? <>
@@ -2497,13 +2505,13 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
                   <dt>现金备注</dt><dd>{scalar(collection.note)}</dd>
                 </> : <><dt>{collection.method === "WECOM" ? "企业微信交易单号" : "银行转账单号 / 流水号"}</dt><dd>{scalar(collection.transactionReference)}</dd></>}
               </> : null}
-              {!settled && outstandingAmount ? <><dt>尚欠金额</dt><dd><strong>{formatMoney(outstandingAmount)}</strong></dd></> : null}
+              {!inHouseBackfill && !settled && outstandingAmount ? <><dt>尚欠金额</dt><dd><strong>{formatMoney(outstandingAmount)}</strong></dd></> : null}
             </>}
           </>}
           <dt>补录原因</dt><dd>{String(backfill.reason)}</dd>
-          <dt>确认后</dt><dd><strong>{settled ? "提交后直接成为已结单" : "提交后直接成为欠款"}</strong></dd>
+          <dt>确认后</dt><dd><strong>{inHouseBackfill ? "提交后直接成为在住" : settled ? "提交后直接成为已结单" : "提交后直接成为欠款"}</strong></dd>
         </dl>
-        <p className="muted compact">一次确认会原子写入订单、历史入住、历史退房及本次真实收款；无需再逐步处理履约状态。</p>
+        <p className="muted compact">{inHouseBackfill ? "一次确认会原子写入订单、历史入住、完整住宿区间库存占用及本次真实收款；后续可继续续住、缩短、换房和退房。" : "一次确认会原子写入订单、历史入住、历史退房及本次真实收款；无需再逐步处理履约状态。"}</p>
       </section>
     </div>;
   }
@@ -2895,6 +2903,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
   const committed = receipt.businessCommitted;
   if (backfillStay && commandType === "CREATE_ORDER") {
     const backfillResult = result && isRecord(result.backfill) ? result.backfill : undefined;
+    const inHouse = result?.status === "CHECKED_IN" || backfillResult?.checkOutAmendmentId === null;
     const arrears = backfillResult?.settlementStatus === "ARREARS";
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
       <div className="receipt-title-row">
@@ -2902,15 +2911,17 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
         <div>
           <h3 id="receipt-heading">{committed ? "住宿补录已完成" : "住宿补录未完成"}</h3>
           <p>{committed
-            ? arrears
-              ? "历史入住和退房已经记录，当前订单仍有欠款。"
-              : "历史入住和退房已经记录，订单已结单。"
+            ? inHouse
+              ? "历史入住已经记录，订单已在住。"
+              : arrears
+                ? "历史入住和退房已经记录，当前订单仍有欠款。"
+                : "历史入住和退房已经记录，订单已结单。"
             : "本次操作没有写入订单、履约或收款事实。"}</p>
         </div>
       </div>
       {committed ? <dl className="receipt-grid">
-        <dt>当前状态</dt><dd><strong>{arrears ? "欠款" : "已结单"}</strong></dd>
-        {typeof backfillResult?.balanceDueMinor === "number" && backfillResult.balanceDueMinor > 0
+        <dt>当前状态</dt><dd><strong>{inHouse ? "订单已在住" : arrears ? "欠款" : "已结单"}</strong></dd>
+        {!inHouse && typeof backfillResult?.balanceDueMinor === "number" && backfillResult.balanceDueMinor > 0
           ? <><dt>尚欠金额</dt><dd><strong>{formatMinor(backfillResult.balanceDueMinor, "CNY")}</strong></dd></>
           : null}
       </dl> : null}
@@ -3598,7 +3609,7 @@ export function completedStayBackfillReceiptHasEvidence(
     || !nonblankString(result.pricingPolicyVersionId)
     || !isEffectHash(result.effectHash)
     || result.effectHash !== expectedEffectHash
-    || result.status !== "CHECKED_OUT"
+    || (result.status !== "CHECKED_OUT" && result.status !== "CHECKED_IN")
     || !isRecord(result.primaryGuest)
     || !Array.isArray(result.occupants)
     || result.occupants.length < 1
@@ -3618,13 +3629,15 @@ export function completedStayBackfillReceiptHasEvidence(
   ])
     || localDateEpoch(backfill.businessDate) === undefined
     || !nonblankString(backfill.checkInAmendmentId)
-    || !nonblankString(backfill.checkOutAmendmentId)
     || (backfill.settlementStatus !== "SETTLED" && backfill.settlementStatus !== "ARREARS")
     || !Number.isSafeInteger(backfill.collectedAmountMinor)
     || Number(backfill.collectedAmountMinor) < 0
     || !Number.isSafeInteger(backfill.balanceDueMinor)
     || Number(backfill.balanceDueMinor) < 0
     || !targetAmount) return false;
+  const completedBackfill = result.status === "CHECKED_OUT" && nonblankString(backfill.checkOutAmendmentId);
+  const inHouseBackfill = result.status === "CHECKED_IN" && backfill.checkOutAmendmentId === null;
+  if (!completedBackfill && !inHouseBackfill) return false;
 
   const occupants = result.occupants as unknown[];
   const occupantIds: string[] = [];
@@ -3648,7 +3661,7 @@ export function completedStayBackfillReceiptHasEvidence(
     result.segmentId,
     result.pricingRevisionId,
     backfill.checkInAmendmentId,
-    backfill.checkOutAmendmentId,
+    ...(completedBackfill ? [backfill.checkOutAmendmentId] : []),
     ...occupantIds
   ];
   if (!evidenceValuesEqual(resourceRefs, requiredResourceRefs)) return false;
@@ -3725,6 +3738,7 @@ export function completedStayBackfillReceiptHasEvidence(
       || result.freeStayCategoryCode !== previewEffect.freeStayCategoryCode
       || result.pricingPolicyVersionId !== previewEffect.pricingPolicyVersionId
       || !evidenceValuesEqual(result.pricingDecision, previewEffect.pricingDecision)
+      || result.status !== previewBackfill.resultingOrderStatus
       || backfill.businessDate !== previewBackfill.businessDate
       || backfill.settlementStatus !== previewBackfill.settlementStatus
       || backfill.collectedAmountMinor !== previewBackfill.collectedAmountMinor

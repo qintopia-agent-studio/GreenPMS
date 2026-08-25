@@ -622,8 +622,19 @@ describe("completed-stay backfill presentation and recovery", () => {
     }
   };
 
-  it("accepts only the completed historical Preview and presents one Chinese business review", () => {
+  it("accepts completed and cross-today in-house Previews and presents one Chinese business review", () => {
+    const inHouseEffect = {
+      ...effect,
+      arrivalDate: "2026-08-13",
+      departureDate: "2026-08-16",
+      backfill: {
+        ...effect.backfill,
+        resultingOrderStatus: "CHECKED_IN",
+        resultingStayStatus: "IN_HOUSE"
+      }
+    };
     expect(completedStayBackfillPreviewHasEvidence(effect, input)).toBe(true);
+    expect(completedStayBackfillPreviewHasEvidence(inHouseEffect, input)).toBe(true);
     expect(completedStayBackfillPreviewHasEvidence({ ...effect, quoteId: "quote_other" }, input)).toBe(false);
     expect(completedStayBackfillPreviewHasEvidence({
       ...effect,
@@ -645,6 +656,10 @@ describe("completed-stay backfill presentation and recovery", () => {
     expect(completedStayBackfillPreviewHasEvidence({
       ...effect,
       backfill: { ...effect.backfill, resultingOrderStatus: "CHECKED_IN", resultingStayStatus: "IN_HOUSE" }
+    }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...inHouseEffect,
+      backfill: { ...inHouseEffect.backfill, resultingOrderStatus: "CHECKED_OUT", resultingStayStatus: "COMPLETED" }
     }, input)).toBe(false);
     expect(completedStayBackfillPreviewHasEvidence({
       ...effect,
@@ -682,6 +697,23 @@ describe("completed-stay backfill presentation and recovery", () => {
     expect(html).toContain("补录原因");
     expect(html).not.toContain("创建预订");
     expect(html).not.toContain("逐步办理入住");
+
+    const inHousePreview: PreviewDto = {
+      previewId: "preview_backfill_in_house",
+      commandType: "CREATE_ORDER",
+      effectHash,
+      effect: inHouseEffect,
+      expiresAt: "2026-08-14T10:00:00.000Z"
+    };
+    const inHouseHtml = renderToStaticMarkup(createElement(EffectSummary, {
+      preview: inHousePreview,
+      commandInput: input,
+      reasonNote: input.backfillReason
+    }));
+    expect(inHouseHtml).toContain("请核对在住住宿补录");
+    expect(inHouseHtml).toContain("提交后直接成为在住");
+    expect(inHouseHtml).toContain("已发生实收");
+    expect(inHouseHtml).not.toContain("历史退房");
   });
 
   it("fails closed when free or external-channel Preview evidence is changed", () => {
@@ -935,6 +967,54 @@ describe("completed-stay backfill presentation and recovery", () => {
     expect(html).toContain("住宿补录已完成");
     expect(html).toContain("欠款");
     expect(html).toContain("查看订单");
+
+    const inHouseEffect = {
+      ...effect,
+      arrivalDate: "2026-08-13",
+      departureDate: "2026-08-16",
+      backfill: {
+        ...effect.backfill,
+        resultingOrderStatus: "CHECKED_IN",
+        resultingStayStatus: "IN_HOUSE"
+      }
+    };
+    const inHouseReceipt: ReceiptDto = {
+      ...receipt,
+      result: {
+        ...(receipt.result as Record<string, unknown>),
+        status: "CHECKED_IN",
+        backfill: {
+          businessDate: "2026-08-14",
+          checkInAmendmentId: "amend_backfill_check_in",
+          checkOutAmendmentId: null,
+          settlementStatus: "ARREARS",
+          collectedAmountMinor: 8_450,
+          balanceDueMinor: 1_550,
+          collectionFactId: "fact_backfill_collection"
+        }
+      },
+      resourceRefs: [
+        "order_backfill_completed",
+        "stay_backfill_completed",
+        "segment_backfill_completed",
+        "revision_backfill_completed",
+        "amend_backfill_check_in",
+        "occupant_backfill_primary"
+      ]
+    };
+    expect(completedStayBackfillReceiptHasEvidence(inHouseReceipt, input, inHouseEffect, effectHash)).toBe(true);
+    expect(completedStayBackfillReceiptHasEvidence({
+      ...inHouseReceipt,
+      resourceRefs: [...inHouseReceipt.resourceRefs, "unexpected_check_out"]
+    }, input, inHouseEffect, effectHash)).toBe(false);
+    const inHouseHtml = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(ReceiptPanel, {
+      receipt: inHouseReceipt,
+      commandType: "CREATE_ORDER",
+      backfillStay: true
+    })));
+    expect(inHouseHtml).toContain("住宿补录已完成");
+    expect(inHouseHtml).toContain("订单已在住");
+    expect(inHouseHtml).not.toContain("退房已经记录");
   });
 });
 

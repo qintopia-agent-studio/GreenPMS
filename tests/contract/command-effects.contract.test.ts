@@ -423,7 +423,7 @@ describe("Command effect HTTP contract", () => {
     const arrivalDate = shiftLocalDate(propertyToday, -5);
     const departureDate = shiftLocalDate(propertyToday, -2);
     const reason = "契约测试补录原因";
-    const priced = await quote({ arrivalDate, departureDate, inventoryUnitId: demo.secondRoomId });
+    const priced = await quote({ arrivalDate, departureDate, inventoryUnitId: "unit_room_d_gen_01" });
     const previewResponse = await app.inject({
       method: "POST",
       url: "/api/v1/command-previews",
@@ -495,6 +495,86 @@ describe("Command effect HTTP contract", () => {
       }
     });
     expect(receipt.resourceRefs).toEqual(expect.arrayContaining([backfill.checkInAmendmentId, backfill.checkOutAmendmentId]));
+    expect(receipt.factRefs).toEqual([backfill.collectionFactId]);
+  });
+
+  it("publishes the cross-today in-house backfill CREATE_ORDER effect and receipt evidence", async () => {
+    const propertyToday = todayInTimeZone("Asia/Shanghai");
+    const arrivalDate = shiftLocalDate(propertyToday, -1);
+    const departureDate = shiftLocalDate(propertyToday, 2);
+    const reason = "契约测试跨今天在住补录";
+    const priced = await quote({ arrivalDate, departureDate, inventoryUnitId: "unit_room_d_gen_02" });
+    const previewResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: headers("effect-create-in-house-backfill-preview"),
+      payload: {
+        commandType: "CREATE_ORDER",
+        input: {
+          propertyId: demo.propertyId,
+          quoteId: priced.quoteId,
+          primaryGuest: { fullName: "契约在住补录住客", nickname: "契约在住" },
+          bookingChannelCode: "WECOM",
+          channelOrderReference: null,
+          targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits,
+          backfill: true,
+          backfillReason: reason,
+          backfillCollection: {
+            amountMinor: 100,
+            method: "WECOM",
+            transactionReference: "WX-EFFECT-IN-HOUSE-BACKFILL"
+          }
+        }
+      }
+    });
+    expect(previewResponse.statusCode, previewResponse.body).toBe(200);
+    const preview = (previewResponse.json() as { preview: Preview }).preview;
+    expect(Value.Check(CommandEffectSchema, preview.effect)).toBe(true);
+    expect(preview.effect.backfill).toMatchObject({
+      reason,
+      businessDate: propertyToday,
+      resultingOrderStatus: "CHECKED_IN",
+      resultingStayStatus: "IN_HOUSE",
+      settlementStatus: "ARREARS",
+      collectedAmountMinor: 100,
+      balanceDueMinor: priced.currentContractAmount.minorUnits - 100,
+      collection: { method: "WECOM", transactionReference: "WX-EFFECT-IN-HOUSE-BACKFILL" }
+    });
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: `/api/v1/command-previews/${preview.previewId}/confirm`,
+      headers: headers("effect-create-in-house-backfill-confirm"),
+      payload: {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_ORDER",
+        confirmation: true,
+        expectedEffectHash: preview.effectHash,
+        reason: { code: "BACKFILL_STAY", note: reason }
+      }
+    });
+    expect(confirmed.statusCode, confirmed.body).toBe(200);
+    const receipt = confirmed.json() as { result: Record<string, unknown>; resourceRefs: string[]; factRefs: string[] };
+    expect(Value.Check(ReceiptSchema, receipt)).toBe(true);
+    const backfill = receipt.result.backfill as {
+      checkInAmendmentId: string;
+      checkOutAmendmentId: null;
+      collectionFactId: string;
+    };
+    expect(receipt.result).toMatchObject({
+      status: "CHECKED_IN",
+      backfill: {
+        businessDate: propertyToday,
+        checkInAmendmentId: expect.stringMatching(/^amend_/),
+        checkOutAmendmentId: null,
+        settlementStatus: "ARREARS",
+        collectedAmountMinor: 100,
+        balanceDueMinor: priced.currentContractAmount.minorUnits - 100,
+        collectionFactId: expect.stringMatching(/^fact_/)
+      }
+    });
+    expect(receipt.resourceRefs).toEqual(expect.arrayContaining([backfill.checkInAmendmentId]));
+    expect(receipt.resourceRefs).not.toContainEqual(expect.stringMatching(/^amend_backfill_check_out/));
     expect(receipt.factRefs).toEqual([backfill.collectionFactId]);
   });
 

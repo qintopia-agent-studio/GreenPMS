@@ -886,9 +886,6 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     if (backfill && quote.arrivalDate >= businessDate) {
       throw new DomainError("VALIDATION_ERROR", "补录住宿必须从今天以前开始", 409);
     }
-    if (backfill && quote.departureDate > businessDate) {
-      throw new DomainError("VALIDATION_ERROR", "跨今天的在住补录将在 8.4 开放", 409);
-    }
     if (!backfill && quote.arrivalDate < businessDate) {
       throw new DomainError("VALIDATION_ERROR", "今天以前的住宿必须使用补录住宿入口", 409);
     }

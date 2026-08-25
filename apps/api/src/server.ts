@@ -81,11 +81,21 @@ import {
 
 const InternalErrorResponses = { 500: ErrorResponse } as const;
 const commandPreviewRequestBodies = new WeakMap<object, unknown>();
-const localWebOrigins = ["http://127.0.0.1:4173", "http://localhost:4173"] as const;
+const defaultLocalWebPort = 4173;
 
-export function webOriginAllowlist(configuredOrigin = process.env.WEB_ORIGIN): readonly string[] {
+export function webOriginAllowlist(
+  configuredOrigin = process.env.WEB_ORIGIN,
+  configuredWebPort = process.env.WEB_PORT
+): readonly string[] {
   const configured = configuredOrigin?.trim();
-  return configured ? [configured] : localWebOrigins;
+  if (configured) return [configured];
+
+  const configuredPort = configuredWebPort?.trim();
+  const localWebPort = configuredPort ? Number(configuredPort) : defaultLocalWebPort;
+  const safeLocalWebPort = Number.isInteger(localWebPort) && localWebPort > 0 && localWebPort <= 65_535
+    ? localWebPort
+    : defaultLocalWebPort;
+  return [`http://127.0.0.1:${safeLocalWebPort}`, `http://localhost:${safeLocalWebPort}`];
 }
 
 function correlationId(request: { headers: Record<string, unknown>; id: string }): string {

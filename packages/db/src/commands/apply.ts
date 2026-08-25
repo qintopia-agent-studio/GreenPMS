@@ -676,8 +676,16 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     }
     if (backfill) {
       const lockedReason = requireString(backfill, "reason");
-      if (backfillStatus !== "CHECKED_OUT" || backfillStayStatus !== "COMPLETED") {
-        throw new DomainError("VALIDATION_ERROR", "跨今天的在住补录将在 8.4 开放", 409);
+      const businessDate = requireString(backfill, "businessDate");
+      const completedBackfill = backfillStatus === "CHECKED_OUT" && backfillStayStatus === "COMPLETED";
+      const inHouseBackfill = backfillStatus === "CHECKED_IN" && backfillStayStatus === "IN_HOUSE";
+      if (!completedBackfill && !inHouseBackfill) {
+        throw new DomainError("INTERNAL_ERROR", "Create order backfill lifecycle pair is invalid", 500);
+      }
+      if (arrivalDate >= businessDate
+        || (completedBackfill && departureDate > businessDate)
+        || (inHouseBackfill && departureDate <= businessDate)) {
+        throw new DomainError("INTERNAL_ERROR", "Create order backfill dates do not match the locked lifecycle", 500);
       }
       if (options.reason.code !== "BACKFILL_STAY" || options.reason.note.trim() !== lockedReason) {
         throw new DomainError("CONFIRMATION_MISMATCH", "补录确认原因必须与核对页锁定的原因一致", 409);
@@ -806,8 +814,11 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         }
       }
     }
-    if (backfill && (!backfillCheckInAmendmentId || !backfillCheckOutAmendmentId)) {
-      throw new DomainError("INTERNAL_ERROR", "Completed-stay backfill amendment evidence is incomplete", 500);
+    if (backfill && (!backfillCheckInAmendmentId || (backfillStatus === "CHECKED_OUT" && !backfillCheckOutAmendmentId))) {
+      throw new DomainError("INTERNAL_ERROR", "Backfill stay amendment evidence is incomplete", 500);
+    }
+    if (backfill && backfillStatus === "CHECKED_IN" && backfillCheckOutAmendmentId) {
+      throw new DomainError("INTERNAL_ERROR", "In-house backfill must not include checkout evidence", 500);
     }
     const backfillResult = backfill ? {
       businessDate: requireString(backfill, "businessDate"),

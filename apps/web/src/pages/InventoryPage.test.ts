@@ -43,10 +43,14 @@ import {
   roomStatusAuthorizedQuoteAction,
   roomStatusHistoricalSelectionNeedsRefresh,
   roomStatusOrderContextVisible,
+  roomStatusOrderIdentityKey,
   roomStatusOrderContextMode,
   roomStatusDesktopContextKind,
+  roomStatusQuoteRecoveryDrawerOpen,
   roomStatusOwnQuoteRecoveryMatchesTarget,
   roomStatusOwnQuoteRecoveryVisible,
+  roomStatusQuoteRecoveryNeedsPagePresentation,
+  roomStatusRecoveryBlocksNewWrites,
   quoteRecoveryContextIdentity,
   shouldAutoOpenQuoteRecoveryContext,
   shouldAutoResolveOwnSendingQuoteRecovery,
@@ -475,11 +479,11 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(backfillReviewDetailsComplete({ ...free, freeStayReason: " " })).toBe(false);
   });
 
-  it("opens only completed historical backfills in 8.3 and leaves cross-today stays closed for 8.4", () => {
+  it("opens completed and cross-today backfills while keeping today-start stays on ordinary creation", () => {
     expect(completedStayBackfillSubmissionError("2026-08-06", "2026-08-11", "2026-08-14")).toBeUndefined();
     expect(completedStayBackfillSubmissionError("2026-08-06", "2026-08-14", "2026-08-14")).toBeUndefined();
     expect(completedStayBackfillSubmissionError("2026-08-13", "2026-08-15", "2026-08-14"))
-      .toContain("8.4");
+      .toBeUndefined();
     expect(completedStayBackfillSubmissionError("2026-08-14", "2026-08-15", "2026-08-14"))
       .toContain("创建订单");
   });
@@ -796,6 +800,9 @@ describe("Room-status order context layout", () => {
     expect(roomStatusDesktopContextKind(true, true)).toBe("QUOTE_RECOVERY");
     expect(roomStatusDesktopContextKind(false, true)).toBe("ORDER");
     expect(roomStatusDesktopContextKind(false, false)).toBe("SELECTION");
+    expect(roomStatusQuoteRecoveryDrawerOpen(false, false)).toBe(false);
+    expect(roomStatusQuoteRecoveryDrawerOpen(true, false)).toBe(true);
+    expect(roomStatusQuoteRecoveryDrawerOpen(false, true)).toBe(true);
 
     const html = renderToStaticMarkup(createElement(QuoteRecoveryPageEntry, {
       recovery: { kind: "VALID", pending },
@@ -958,6 +965,76 @@ describe("Room-status order context layout", () => {
     expect(roomStatusOwnQuoteRecoveryVisible(false, identity, undefined)).toBe(false);
   });
 
+  it("keys pending order drawer openings by stable order and stay identity", () => {
+    expect(roomStatusOrderIdentityKey(undefined)).toBeUndefined();
+    expect(roomStatusOrderIdentityKey({
+      orderId: "order_1",
+      stayId: "stay_1"
+    })).toBe("order_1:stay_1");
+    expect(roomStatusOrderIdentityKey({
+      orderId: "order_1",
+      stayId: "stay_2"
+    })).not.toBe(roomStatusOrderIdentityKey({
+      orderId: "order_1",
+      stayId: "stay_1"
+    }));
+  });
+
+  it("blocks new room-status writes while Quote recovery has not closed", () => {
+    expect(roomStatusRecoveryBlocksNewWrites(false, { kind: "ABSENT" })).toBe(false);
+    expect(roomStatusRecoveryBlocksNewWrites(true, { kind: "ABSENT" })).toBe(true);
+    expect(roomStatusRecoveryBlocksNewWrites(false, { kind: "VALID", pending })).toBe(true);
+    expect(roomStatusRecoveryBlocksNewWrites(false, {
+      kind: "READ_ERROR",
+      error: new Error("storage unavailable")
+    })).toBe(true);
+  });
+
+  it("presents an own current SENDING Quote as recovery only after its workbench closes", () => {
+    const currentTarget = {
+      unitId: pending.input.inventoryUnitId,
+      arrivalDate: pending.input.arrivalDate,
+      departureDate: pending.input.departureDate,
+      initialStayType: "FREE" as const
+    };
+    const recovery = { kind: "VALID" as const, pending };
+    const activeInput = {
+      recovery,
+      currentOwnerId: pending.ownerTabId,
+      activeSubmissionIdentity: pending.metadata.idempotencyKey,
+      recoveryTarget: currentTarget,
+      currentTarget,
+      workbenchOpen: true
+    };
+
+    expect(roomStatusQuoteRecoveryNeedsPagePresentation(activeInput)).toBe(false);
+    expect(roomStatusQuoteRecoveryNeedsPagePresentation({
+      ...activeInput,
+      workbenchOpen: false
+    })).toBe(true);
+    expect(roomStatusQuoteRecoveryNeedsPagePresentation({
+      ...activeInput,
+      recovery: { kind: "VALID", pending: { ...pending, state: "UNKNOWN" } }
+    })).toBe(true);
+    expect(roomStatusQuoteRecoveryNeedsPagePresentation({
+      ...activeInput,
+      currentOwnerId: "another-tab"
+    })).toBe(true);
+    expect(roomStatusQuoteRecoveryNeedsPagePresentation({
+      ...activeInput,
+      currentTarget: { ...currentTarget, departureDate: "2026-10-13" }
+    })).toBe(false);
+    expect(roomStatusQuoteRecoveryNeedsPagePresentation({
+      ...activeInput,
+      activeSubmissionIdentity: undefined,
+      currentTarget: { ...currentTarget, departureDate: "2026-10-13" }
+    })).toBe(true);
+    expect(roomStatusQuoteRecoveryNeedsPagePresentation({
+      ...activeInput,
+      recovery: { kind: "READ_ERROR", error: new Error("storage unavailable") }
+    })).toBe(true);
+  });
+
   it("retains an authoritative recovered Quote until its room-status target is ready", () => {
     expect(recoveredQuoteWaitsForCurrentTarget(false, "")).toBe(true);
     expect(recoveredQuoteWaitsForCurrentTarget(false, pending.inputSignature)).toBe(false);
@@ -1107,7 +1184,7 @@ describe("Room-status backfill entry routing", () => {
     intervals: []
   } as unknown as NonNullable<Parameters<typeof selectionActions>[0]>;
 
-  it("offers backfill only for completed historical selections in 8.3", () => {
+  it("offers backfill for completed historical and cross-today selections", () => {
     expect(selectionActions(unit, {
       unitId: "unit_backfill",
       anchorDate: "2026-08-12",
@@ -1122,7 +1199,7 @@ describe("Room-status backfill entry routing", () => {
       focusDate: "2026-08-14",
       arrivalDate: "2026-08-13",
       departureDate: "2026-08-15"
-    }, "2026-08-14")).toEqual([]);
+    }, "2026-08-14").map((candidate) => candidate.code)).toEqual(["BACKFILL_ORDER"]);
 
     expect(selectionActions(unit, {
       unitId: "unit_backfill",
@@ -1334,7 +1411,11 @@ describe("Room-status backfill entry routing", () => {
       focusDate: "2026-08-14",
       arrivalDate: "2026-08-13",
       departureDate: "2026-08-15"
-    }, "2026-08-14")).toBeUndefined();
+    }, "2026-08-14")).toMatchObject({
+      actionCode: "BACKFILL_ORDER",
+      arrivalDate: "2026-08-13",
+      departureDate: "2026-08-15"
+    });
 
     const occupied = {
       ...unit!,

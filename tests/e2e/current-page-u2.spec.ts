@@ -511,8 +511,8 @@ test("U2 a delayed response for an invalidated order cannot reopen or overwrite 
   const { popover } = await openWholeRoomPopover(page);
   await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
   const drawer = page.locator("dialog.room-status-view-drawer");
-  await expect(drawer).toBeVisible();
-  await expect(drawer).toContainText("正在载入权威订单上下文");
+  await expect(drawer).toBeHidden();
+  await expect(page.getByText("正在载入权威订单上下文", { exact: true })).toHaveCount(0);
 
   const other = roomCell(page, fixture.stage6.emptyCreationRoomId, fixture.dates.arrivalDate);
   await other.click();
@@ -762,6 +762,21 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   await expect(drawer).toHaveClass(/room-status-view-drawer/);
   expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(false);
   await other.click({ trial: true });
+
+  await drawer.evaluate((element) => {
+    element.setAttribute("data-drawer-instance", "selection-before-write");
+  });
+  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  await expect(drawer).toHaveClass(/room-status-write-drawer/);
+  await expect(drawer).not.toHaveAttribute("data-drawer-instance", "selection-before-write");
+  expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
+
+  await drawer.evaluate((element) => {
+    element.setAttribute("data-drawer-instance", "write-before-selection");
+  });
+  await drawer.getByRole("button", { name: "关闭办理区域", exact: true }).click();
+  await expect(drawer).toHaveClass(/room-status-view-drawer/);
+  await expect(drawer).not.toHaveAttribute("data-drawer-instance", "write-before-selection");
 
   await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(drawer).toBeHidden();

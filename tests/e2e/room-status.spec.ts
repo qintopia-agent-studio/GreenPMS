@@ -1065,6 +1065,87 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   await assertNoPageOverflow(page);
 });
 
+test("desktop delays the range-loading notice without delaying write blocking", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop range-loading presentation coverage");
+  const { board } = await login(page);
+  await expectDesktopGrid(page);
+
+  const toolbarArrival = page.getByTestId("arrival-date");
+  const committedRange = page.getByTestId("room-status-board-range");
+  const fastRequestedArrival = addDays(board.range.arrivalDate, 1);
+  const fastRequestedDeparture = addDays(fastRequestedArrival, roomStatusTimelineDays);
+  await page.evaluate(() => {
+    const root = document.documentElement;
+    root.removeAttribute("data-range-loading-observed");
+    const observer = new MutationObserver(() => {
+      if (!document.querySelector("[data-testid='room-status-range-loading']")) return;
+      root.setAttribute("data-range-loading-observed", "true");
+      observer.disconnect();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.setTimeout(() => observer.disconnect(), 2_000);
+  });
+  const fastResponse = roomStatusResponse(page, {
+    arrivalDate: fastRequestedArrival,
+    departureDate: fastRequestedDeparture
+  });
+  await toolbarArrival.fill(fastRequestedArrival);
+  await fastResponse;
+  await expect(committedRange).toHaveAttribute("data-range-arrival", fastRequestedArrival, { timeout: 15_000 });
+  await expect(committedRange).toHaveAttribute("data-range-departure", fastRequestedDeparture, { timeout: 15_000 });
+  await page.waitForTimeout(300);
+  expect(
+    await page.locator("html").getAttribute("data-range-loading-observed"),
+    "a fast range query must not mount the delayed loading notice for even one frame"
+  ).toBeNull();
+
+  const requestedArrival = addDays(fastRequestedArrival, 1);
+  const requestedDeparture = addDays(requestedArrival, roomStatusTimelineDays);
+  let releaseRequest = () => {};
+  let markRequestSeen = () => {};
+  const requestSeen = new Promise<void>((resolve) => { markRequestSeen = resolve; });
+  const heldRequest = new Promise<void>((resolve) => { releaseRequest = resolve; });
+  const routePattern = `**/api/v1/properties/${propertyId}/room-status*`;
+  await page.route(routePattern, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("arrivalDate") === requestedArrival
+      && url.searchParams.get("departureDate") === requestedDeparture) {
+      markRequestSeen();
+      await heldRequest;
+    }
+    try {
+      await route.continue();
+    } catch (error) {
+      if (!String(error).includes("Route is already handled")) throw error;
+    }
+  });
+
+  try {
+    const response = roomStatusResponse(page, {
+      arrivalDate: requestedArrival,
+      departureDate: requestedDeparture
+    });
+    await toolbarArrival.fill(requestedArrival);
+    await requestSeen;
+    await expect(page.locator(".room-status-workspace")).toHaveAttribute("inert", "");
+    expect(
+      await page.getByTestId("room-status-range-loading").count(),
+      "write blocking must start before the delayed loading notice is presented"
+    ).toBe(0);
+    await expect(page.getByTestId("room-status-range-loading")).toBeVisible();
+    await expect(committedRange).toHaveAttribute("data-range-departure", fastRequestedDeparture);
+    releaseRequest();
+    await response;
+    await expect(committedRange).toHaveAttribute("data-range-arrival", requestedArrival, { timeout: 15_000 });
+    await expect(committedRange).toHaveAttribute("data-range-departure", requestedDeparture, { timeout: 15_000 });
+    await expect(page.getByTestId("room-status-range-loading")).toBeHidden();
+    await expect(page.locator(".room-status-workspace")).not.toHaveAttribute("inert", "");
+  } finally {
+    releaseRequest();
+    await page.unroute(routePattern);
+  }
+});
+
 test("desktop range selection, fixed 30-night start-date navigation, filtered-empty and range-loading fail closed", async ({ page }, testInfo: TestInfo) => {
   test.skip(!isProject(testInfo, "desktop"), "desktop room-status interaction-state coverage");
   test.setTimeout(120_000);

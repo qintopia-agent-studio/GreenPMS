@@ -277,6 +277,16 @@
   display: none;
 }
 
+.room-status-write-drawer .room-status-pricing-progress {
+  display: block;
+  min-height: 21px;
+}
+
+.room-status-write-drawer .room-status-pricing-progress.is-idle {
+  display: block;
+  visibility: hidden;
+}
+
 .room-status-grid-section {
   min-width: 0;
   border: 1px solid var(--border);
