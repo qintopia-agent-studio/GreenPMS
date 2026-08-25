@@ -16,9 +16,10 @@ import {
   type ReceiptDto,
   type StoredQuoteDto
 } from "@qintopia/contracts";
-import { enumerateServiceDates, newId, paidStayTypeForNights, sha256, stableHash } from "@qintopia/domain";
+import { amountSummary, enumerateServiceDates, newId, paidStayTypeForNights, sha256, stableHash } from "@qintopia/domain";
 import { createQuoteInTransaction, projectQuoteForExternalRead } from "../pricing-service.ts";
 import { bumpRoomStatusRevision } from "../room-status.ts";
+import { getOrderViewSnapshot } from "../orders.ts";
 import type { Database } from "../schema.ts";
 import {
   legacyEffectProtocol,
@@ -81,6 +82,7 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "CHECK_IN",
   "CHECK_OUT",
+  "COMPLETE_STAY",
   "LOCK_MAINTENANCE",
   "RELEASE_MAINTENANCE",
   "COMPLETE_CLEANING"
@@ -94,8 +96,14 @@ const strictRecoveryEvidenceCommands = new Set<CommandType>([
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
   "REVOKE_CHECK_IN",
-  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+  "COMPLETE_STAY"
 ]);
+
+function requiresStrictRecoveryEvidence(commandType: CommandType, effect: Record<string, unknown>): boolean {
+  return strictRecoveryEvidenceCommands.has(commandType)
+    || (commandType === "CREATE_ORDER" && asRecord(effect.backfill) !== undefined);
+}
 
 async function lockCommandProtocolEpoch(trx: Transaction<Database>): Promise<void> {
   await sql`select pg_advisory_xact_lock_shared(hashtextextended('qintopia:protocol-epoch', 0::bigint))`.execute(trx);
@@ -115,6 +123,24 @@ function asDate(value: Date | string): Date {
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
+
+function strictStoredStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)
+    || value.some((entry) => typeof entry !== "string" || entry.trim() === "")
+    || new Set(value).size !== value.length) {
+    throw new Error(`Persisted complete-stay ${field} is malformed`);
+  }
+  return value as string[];
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+const completeStayExternalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -152,6 +178,230 @@ async function bindPersistedEffectHash(
     .where("command_id", "=", commandId)
     .where("amendment_type", "=", commandType)
     .execute();
+  if (commandType === "COMPLETE_STAY") {
+    const fulfillment = await trx.selectFrom("amendments")
+      .select([
+        "id",
+        "order_id",
+        "sequence",
+        "amendment_type",
+        "reason_code",
+        "reason_note",
+        "prior_version",
+        "new_version",
+        "payload"
+      ])
+      .where("command_id", "=", commandId)
+      .orderBy("sequence")
+      .execute();
+    const effectOrderId = typeof confirmedEffect.orderId === "string" ? confirmedEffect.orderId : null;
+    const effectStayId = typeof confirmedEffect.stayId === "string" ? confirmedEffect.stayId : null;
+    const reasonNote = typeof confirmedEffect.reasonNote === "string" ? confirmedEffect.reasonNote : null;
+    if (fulfillment.length !== 2
+      || fulfillment[0]!.amendment_type !== "CHECK_IN"
+      || fulfillment[1]!.amendment_type !== "CHECK_OUT"
+      || !effectOrderId
+      || !effectStayId
+      || !reasonNote
+      || fulfillment.some((amendment) => amendment.order_id !== effectOrderId
+        || amendment.reason_code !== "COMPLETE_STAY"
+        || amendment.reason_note !== reasonNote)
+      || fulfillment[1]!.sequence !== fulfillment[0]!.sequence + 1
+      || fulfillment[0]!.prior_version !== fulfillment[0]!.sequence - 1
+      || fulfillment[0]!.new_version !== fulfillment[0]!.sequence
+      || fulfillment[1]!.prior_version !== fulfillment[0]!.new_version
+      || fulfillment[1]!.new_version !== fulfillment[1]!.sequence) {
+      throw new Error("Complete-stay effect does not have the authoritative CHECK_IN and CHECK_OUT amendments");
+    }
+    const persistedCheckIn = asRecord(fulfillment[0]!.payload);
+    const persistedCheckOut = asRecord(fulfillment[1]!.payload);
+    const confirmedCheckIn = asRecord(confirmedEffect.checkIn);
+    const confirmedCheckOut = asRecord(confirmedEffect.checkOut);
+    if (!persistedCheckIn || !persistedCheckOut || !confirmedCheckIn || !confirmedCheckOut
+      || stableHash(persistedCheckIn) !== stableHash(confirmedCheckIn)
+      || stableHash(persistedCheckOut) !== stableHash(confirmedCheckOut)) {
+      throw new Error("Persisted complete-stay effect differs from the confirmed Preview");
+    }
+
+    const orderState = await trx.selectFrom("orders")
+      .innerJoin("stays", "stays.order_id", "orders.id")
+      .innerJoin("pricing_revisions", "pricing_revisions.id", "orders.current_revision_id")
+      .select([
+        "orders.status as order_status",
+        "orders.version as order_version",
+        "orders.stay_type",
+        "orders.booking_channel_code",
+        "orders.channel_order_reference",
+        "orders.member_id",
+        "orders.member_contract_id",
+        "orders.current_revision_id",
+        "stays.id as stay_id",
+        "stays.status as stay_status",
+        "pricing_revisions.current_contract_amount_minor",
+        "pricing_revisions.currency",
+        "pricing_revisions.pricing_basis"
+      ])
+      .where("orders.id", "=", effectOrderId)
+      .executeTakeFirst();
+    if (!orderState
+      || orderState.stay_id !== effectStayId
+      || orderState.order_status !== "CHECKED_OUT"
+      || orderState.stay_status !== "COMPLETED"
+      || orderState.order_version !== fulfillment[1]!.new_version) {
+      throw new Error("Persisted complete-stay order or Stay state differs from the confirmed effect");
+    }
+
+    const lifecycle = await getOrderViewSnapshot(trx, effectOrderId);
+    if (lifecycle.order.status !== "CHECKED_OUT"
+      || lifecycle.stay.status !== "COMPLETED"
+      || lifecycle.fulfillment.checkIn?.reason.code !== "COMPLETE_STAY"
+      || lifecycle.fulfillment.checkOut?.reason.code !== "COMPLETE_STAY"
+      || lifecycle.fulfillment.checkIn.reason.note !== reasonNote
+      || lifecycle.fulfillment.checkOut.reason.note !== reasonNote) {
+      throw new Error("Persisted complete-stay lifecycle does not match the confirmed effect");
+    }
+
+    const inventoryRelease = asRecord(confirmedEffect.inventoryRelease);
+    const expectedClaimIds = strictStoredStringArray(inventoryRelease?.claimIds, "Claim evidence");
+    if (!inventoryRelease
+      || !Number.isSafeInteger(inventoryRelease.claimCount)
+      || inventoryRelease.claimCount !== expectedClaimIds.length) {
+      throw new Error("Persisted complete-stay Claim evidence is malformed");
+    }
+    const segmentIds = (await trx.selectFrom("stay_segments")
+      .select("id")
+      .where("stay_id", "=", effectStayId)
+      .orderBy("sequence")
+      .execute()).map((segment) => segment.id);
+    const claims = await trx.selectFrom("inventory_claims")
+      .select(["id", "active", "released_at"])
+      .where("source_type", "=", "ORDER_SEGMENT")
+      .where("source_id", "in", segmentIds)
+      .orderBy("id")
+      .execute();
+    const releasedClaimIds = claims
+      .filter((claim) => !claim.active && claim.released_at !== null && expectedClaimIds.includes(claim.id))
+      .map((claim) => claim.id);
+    if (!sameStringSet(releasedClaimIds, expectedClaimIds) || claims.some((claim) => claim.active)) {
+      throw new Error("Persisted complete-stay Claim releases differ from the confirmed effect");
+    }
+
+    const entitlementTransition = asRecord(confirmedEffect.entitlementTransition);
+    const expectedCoverageIds = strictStoredStringArray(entitlementTransition?.coverageIds, "coverage evidence");
+    if (!entitlementTransition
+      || entitlementTransition.from !== "HELD"
+      || entitlementTransition.to !== "CONSUMED"
+      || !Number.isSafeInteger(entitlementTransition.coverageCount)
+      || entitlementTransition.coverageCount !== expectedCoverageIds.length) {
+      throw new Error("Persisted complete-stay coverage evidence is malformed");
+    }
+    const coverage = await trx.selectFrom("coverage_items")
+      .select(["id", "status"])
+      .where("order_id", "=", effectOrderId)
+      .orderBy("id")
+      .execute();
+    const consumedCoverageIds = coverage.filter((item) => item.status === "CONSUMED").map((item) => item.id);
+    const entitlementFacts = await trx.selectFrom("entitlement_ledger")
+      .select(["entry_type", "quantity_delta", "order_id", "coverage_id", "reason"])
+      .where("command_id", "=", commandId)
+      .orderBy("fact_id")
+      .execute();
+    if (!sameStringSet(consumedCoverageIds, expectedCoverageIds)
+      || coverage.some((item) => item.status === "HELD")
+      || entitlementFacts.length !== expectedCoverageIds.length
+      || entitlementFacts.some((fact) => fact.entry_type !== "CONSUME"
+        || fact.quantity_delta !== 0
+        || fact.order_id !== effectOrderId
+        || fact.coverage_id === null
+        || !expectedCoverageIds.includes(fact.coverage_id)
+        || fact.reason !== "CHECK_IN_ENTITLEMENT_CONSUMED")) {
+      throw new Error("Persisted complete-stay entitlement results differ from the confirmed effect");
+    }
+
+    const collectionFacts = await trx.selectFrom("collection_facts")
+      .selectAll()
+      .where("order_id", "=", effectOrderId)
+      .orderBy("created_at")
+      .orderBy("fact_id")
+      .execute();
+    const commandCollections = collectionFacts.filter((fact) => fact.command_id === commandId);
+    const confirmedCollection = confirmedEffect.collection === null
+      ? null
+      : asRecord(confirmedEffect.collection);
+    if (confirmedEffect.collection === null) {
+      if (commandCollections.length !== 0) {
+        throw new Error("Persisted complete-stay unexpectedly appended a collection fact");
+      }
+    } else {
+      if (!confirmedCollection) {
+        throw new Error("Persisted complete-stay collection effect is malformed");
+      }
+      const expectedAmountMinor = confirmedCollection.amountMinor;
+      const expectedCurrency = confirmedCollection.currency;
+      const expectedMethod = confirmedCollection.method;
+      const expectedReference = typeof confirmedCollection.transactionReference === "string"
+        ? confirmedCollection.transactionReference
+        : null;
+      const expectedCollector = typeof confirmedCollection.cashCollector === "string"
+        ? confirmedCollection.cashCollector
+        : null;
+      const expectedNote = typeof confirmedCollection.note === "string" ? confirmedCollection.note : null;
+      const persistedCollection = commandCollections[0];
+      if (commandCollections.length !== 1
+        || !persistedCollection
+        || !Number.isSafeInteger(expectedAmountMinor)
+        || typeof expectedCurrency !== "string"
+        || typeof expectedMethod !== "string"
+        || expectedNote === null
+        || persistedCollection.fact_type !== "COLLECTION"
+        || persistedCollection.amount_minor !== expectedAmountMinor
+        || persistedCollection.net_effect_minor !== expectedAmountMinor
+        || persistedCollection.currency !== expectedCurrency
+        || persistedCollection.method !== expectedMethod
+        || persistedCollection.transaction_reference !== expectedReference
+        || persistedCollection.cash_collector !== expectedCollector
+        || persistedCollection.note !== expectedNote
+        || persistedCollection.pricing_revision_id !== orderState.current_revision_id) {
+        throw new Error("Persisted complete-stay collection differs from the confirmed effect");
+      }
+    }
+
+    if (collectionFacts.some((fact) => fact.currency !== orderState.currency)) {
+      throw new Error("Persisted complete-stay collection currency is inconsistent");
+    }
+    const persistedAmounts = amountSummary(
+      orderState.currency,
+      orderState.current_contract_amount_minor,
+      collectionFacts.map((fact) => fact.net_effect_minor)
+    );
+    const confirmedAmounts = asRecord(confirmedEffect.amounts);
+    const isExternalChannel = Boolean(orderState.booking_channel_code
+      && completeStayExternalChannelCodes.has(orderState.booking_channel_code));
+    const specialSettlement = orderState.stay_type === "FREE"
+      || Boolean(orderState.member_id || orderState.member_contract_id)
+      || isExternalChannel;
+    const expectedSettlementStatus = specialSettlement
+      || persistedAmounts.netRecordedCollection.minorUnits >= orderState.current_contract_amount_minor
+      ? "SETTLED"
+      : "ARREARS";
+    if (!confirmedAmounts
+      || stableHash(confirmedAmounts) !== stableHash(persistedAmounts)
+      || confirmedEffect.settlementStatus !== expectedSettlementStatus
+      || (specialSettlement && collectionFacts.length > 0)
+      || (isExternalChannel && (orderState.pricing_basis !== "CHANNEL_CONTRACT"
+        || !orderState.channel_order_reference?.trim()
+        || orderState.current_contract_amount_minor <= 0))) {
+      throw new Error("Persisted complete-stay settlement differs from the confirmed effect");
+    }
+    const cleaningTask = await trx.selectFrom("cleaning_tasks")
+      .select("id")
+      .where("order_id", "=", effectOrderId)
+      .executeTakeFirst();
+    if (cleaningTask) {
+      throw new Error("Persisted complete-stay unexpectedly created a cleaning task");
+    }
+    return rebuiltEffectHash;
+  }
   if (amendments.length !== 1) {
     throw new Error("Command effect does not have one authoritative amendment");
   }
@@ -159,7 +409,10 @@ async function bindPersistedEffectHash(
   if (!persistedEffect) {
     throw new Error("Persisted command effect is malformed");
   }
-  if (stableHash(persistedEffect) !== stableHash(confirmedEffect)) {
+  const authoritativeEffect = commandType === "CREATE_ORDER" && asRecord(confirmedEffect.backfill)
+    ? asRecord(persistedEffect.confirmedEffect)
+    : persistedEffect;
+  if (!authoritativeEffect || stableHash(authoritativeEffect) !== stableHash(confirmedEffect)) {
     throw new Error("Persisted command effect differs from the confirmed Preview");
   }
   return rebuiltEffectHash;
@@ -849,10 +1102,11 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
     throw new DomainError("REASON_REQUIRED", "A structured reason is required");
   }
   if (confirmation.commandType === "CREATE_ORDER"
-    && (confirmation.reason.code !== "CREATE_STANDARD_ORDER" || confirmation.reason.note !== "")) {
+    && confirmation.reason.code !== "CREATE_STANDARD_ORDER"
+    && confirmation.reason.code !== "BACKFILL_STAY") {
     throw new DomainError(
       "VALIDATION_ERROR",
-      "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER with an empty note"
+      "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER or BACKFILL_STAY"
     );
   }
   const requestHash = stableHash({ previewId, confirmation });
@@ -932,6 +1186,35 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           await assertLegacyReadPredatesStage11(trx, preview.created_at, "Stored preview");
           throw new HistoricalPreviewReadOnlyError();
         }
+        if (commandType === "CREATE_ORDER") {
+          const backfill = asRecord(storedEffect.backfill);
+          if (backfill) {
+            const lockedReason = typeof backfill.reason === "string" ? backfill.reason.trim() : "";
+            if (!lockedReason
+              || confirmation.reason.code !== "BACKFILL_STAY"
+              || confirmation.reason.note.trim() !== lockedReason) {
+              throw new DomainError(
+                "CONFIRMATION_MISMATCH",
+                "补录确认原因必须与核对页锁定的原因一致",
+                409
+              );
+            }
+          } else if (confirmation.reason.code !== "CREATE_STANDARD_ORDER") {
+            throw new DomainError("CONFIRMATION_MISMATCH", "普通创建订单必须使用标准建单确认原因", 409);
+          }
+        }
+        if (commandType === "COMPLETE_STAY") {
+          const lockedReason = typeof storedEffect.reasonNote === "string" ? storedEffect.reasonNote.trim() : "";
+          if (confirmation.reason.code !== "COMPLETE_STAY"
+            || !lockedReason
+            || confirmation.reason.note.trim() !== lockedReason) {
+            throw new DomainError(
+              "CONFIRMATION_MISMATCH",
+              "完成住宿确认原因必须与核对页锁定的说明一致",
+              409
+            );
+          }
+        }
         if (preview.effect_hash !== confirmation.expectedEffectHash) throw new DomainError("CONFIRMATION_MISMATCH", "Confirmed effect hash does not match the preview", 409);
         await lockCommandResources(trx, commandType, preview.normalized_input);
         let rebuilt;
@@ -952,6 +1235,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
             || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
             || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
             || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
+            || (commandType === "COMPLETE_STAY" && error.code === "VALIDATION_ERROR")
             || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
             || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
             throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });
@@ -966,7 +1250,8 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           reason: confirmation.reason,
           commandId: inserted.id
         });
-        const persistedEffectHash = strictRecoveryEvidenceCommands.has(commandType)
+        const strictRecoveryEvidence = requiresStrictRecoveryEvidence(commandType, storedEffect);
+        const persistedEffectHash = strictRecoveryEvidence
           ? await bindPersistedEffectHash(trx, inserted.id, commandType, storedEffect, rebuilt.effectHash)
           : undefined;
         if (roomStatusVisibleCommands.has(commandType)) {
@@ -975,7 +1260,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         await trx.updateTable("command_previews").set({ status: "USED", used_at: new Date() }).where("id", "=", previewId).execute();
         await trx.updateTable("command_executions").set({ state: "APPLIED", completed_at: new Date() }).where("id", "=", inserted.id).execute();
         const receiptId = newId("receipt");
-        const persistedResult = strictRecoveryEvidenceCommands.has(commandType)
+        const persistedResult = strictRecoveryEvidence
           ? { ...applied.persistedResult, effectHash: persistedEffectHash }
           : applied.persistedResult;
         await trx.insertInto("command_receipts").values({

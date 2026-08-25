@@ -95,9 +95,33 @@ export const roomStatusPresentation: Record<RoomStatusStatus, RoomStatusPresenta
   CLEANING: { label: "待清洁", Icon: Sparkles },
   MAINTENANCE: { label: "维修 / 锁房", Icon: Wrench },
   UNAVAILABLE: { label: "不可售", Icon: Ban },
+  SETTLED: { label: "已结单", Icon: CheckCircle2 },
+  ARREARS: { label: "欠款", Icon: AlertTriangle },
   STALE: { label: "数据陈旧", Icon: RefreshCw },
   UNKNOWN: { label: "状态未知", Icon: CircleHelp }
 };
+
+type ReservedTimingSource = Pick<RoomStatusIntervalDto,
+  "sourceKind" | "status" | "sourceStartDate" | "orderArrivalDate">;
+
+export function roomStatusIntervalIsOverdueReserved(
+  interval: ReservedTimingSource,
+  businessDate?: string
+): boolean {
+  return Boolean(businessDate
+    && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+    && interval.status === "RESERVED"
+    && (interval.orderArrivalDate ?? interval.sourceStartDate) < businessDate);
+}
+
+export function roomStatusIntervalStatusLabel(
+  interval: ReservedTimingSource,
+  businessDate?: string
+): string {
+  return roomStatusIntervalIsOverdueReserved(interval, businessDate)
+    ? "逾期预订"
+    : roomStatusPresentation[interval.status].label;
+}
 
 export const roomStatusSourceLabels: Record<RoomStatusSourceKind, string> = {
   ORDER: "正常订单",
@@ -117,6 +141,7 @@ export const roomStatusBlockingFactLabels: Record<RoomStatusBlockingFactKind, st
 export const roomStatusActionLabels: Record<RoomStatusActionCode, string> = {
   CREATE_ORDER: "创建正常住宿订单",
   CREATE_FREE_STAY: "创建免费入住",
+  BACKFILL_ORDER: "补录住宿",
   LOCK_MAINTENANCE: "放置维修锁房",
   OPEN_ORDER: "打开订单",
   RELEASE_MAINTENANCE: "释放维修锁房",
@@ -265,13 +290,13 @@ export function formatRoomStatusDateTime(value: string): string {
   }).format(parsed);
 }
 
-export function RoomStatusMark({ status, compact = false }: { status: RoomStatusStatus; compact?: boolean }) {
+export function RoomStatusMark({ status, compact = false, label }: { status: RoomStatusStatus; compact?: boolean; label?: string }) {
   const presentation = roomStatusPresentation[status];
   const Icon = presentation.Icon;
   return (
     <span className={`room-status-mark room-status-mark-${status.toLowerCase().replaceAll("_", "-")}${compact ? " room-status-mark-compact" : ""}`}>
       <Icon aria-hidden="true" size={compact ? 14 : 16} />
-      <span>{presentation.label}</span>
+      <span>{label ?? presentation.label}</span>
     </span>
   );
 }

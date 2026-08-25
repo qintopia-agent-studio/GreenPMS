@@ -4,6 +4,7 @@ import {
   confirmCommandPreview,
   createCommandPreview,
   propertyLocalToday,
+  withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
 import { newId, parseLocalDate } from "@qintopia/domain";
@@ -40,6 +41,13 @@ function metadata(prefix: string) {
   };
 }
 
+async function withOrdinaryOrderCreationClock<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
+  const businessDate = await propertyLocalToday(db, demo.propertyId);
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), operation)
+    : operation();
+}
+
 async function preview(envelope: CommandEnvelope, prefix: string) {
   return createCommandPreview(db, principal, envelope, metadata(`${prefix}-preview`));
 }
@@ -63,25 +71,27 @@ async function createReservedOrder(
   departureDate: string,
   pricingPolicyVersionId: string = demo.transientPolicyId
 ) {
-  const quote = await createQuote(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: demo.roomId,
-    stayType: "TRANSIENT",
-    arrivalDate,
-    departureDate,
-    pricingPolicyVersionId
-  });
-  const receipt = await execute({
-    commandType: "CREATE_ORDER",
-    input: {
+  return withOrdinaryOrderCreationClock(arrivalDate, async () => {
+    const quote = await createQuote(db, {
       propertyId: demo.propertyId,
-      quoteId: quote.quoteId,
-      primaryGuest: { fullName: prefix, nickname: prefix },
-      bookingChannelCode: "WECOM",
-      channelOrderReference: null
-    }
-  }, `${prefix}-create`);
-  return receipt.result!.orderId as string;
+      inventoryUnitId: demo.roomId,
+      stayType: "TRANSIENT",
+      arrivalDate,
+      departureDate,
+      pricingPolicyVersionId
+    });
+    const receipt = await execute({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: prefix, nickname: prefix },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null
+      }
+    }, `${prefix}-create`);
+    return receipt.result!.orderId as string;
+  });
 }
 
 async function markHistoricalOrderInHouse(orderId: string, businessDate: string): Promise<void> {

@@ -520,6 +520,17 @@
   font-weight: 650;
 }
 
+.room-status-date-header.is-cell-selection-column {
+  background: color-mix(in srgb, var(--brand) 9%, var(--surface-muted));
+  box-shadow:
+    inset 0 -3px 0 color-mix(in srgb, var(--focus) 68%, transparent),
+    0 8px 18px -16px var(--focus);
+}
+
+.room-status-date-header.is-cell-selection-column small {
+  color: var(--brand-hover);
+}
+
 .room-status-grid-row {
   min-height: var(--room-status-row-height);
 }
@@ -576,6 +587,13 @@
 
 .room-status-grid-row-depth-1 .room-status-resource-cell {
   background: var(--surface-muted);
+}
+
+.room-status-resource-cell.is-cell-selection-row {
+  background: color-mix(in srgb, var(--brand) 8%, var(--surface));
+  box-shadow:
+    inset -3px 0 0 color-mix(in srgb, var(--focus) 68%, transparent),
+    8px 0 18px -16px var(--focus);
 }
 
 .room-status-resource-cell {
@@ -724,6 +742,14 @@
   background: var(--brand-soft);
 }
 
+.room-status-day-settled {
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.room-status-day-arrears {
+  background: var(--warning-soft);
+}
+
 .room-status-day-cleaning,
 .room-status-day-stale {
   background: var(--warning-soft);
@@ -750,17 +776,21 @@
   color: var(--muted);
 }
 
+.room-status-day-cell.is-historical-blank {
+  background: var(--surface);
+  color: var(--muted);
+}
+
 .room-status-day-cell.has-blocking-conflict {
-  box-shadow: inset 0 0 0 2px var(--danger);
-  background: var(--danger-soft);
+  box-shadow: none;
 }
 
 .room-status-day-cell.has-blocking-conflict.is-selected {
-  box-shadow: inset 0 0 0 3px var(--focus), inset 0 -5px 0 var(--danger);
+  box-shadow: inset 0 0 0 3px var(--focus);
 }
 
 .room-status-day-cell.has-blocking-conflict:focus-visible {
-  box-shadow: inset 0 0 0 3px var(--focus), inset 0 -5px 0 var(--danger);
+  box-shadow: inset 0 0 0 3px var(--focus);
 }
 
 .room-status-mark {
@@ -826,6 +856,21 @@
   padding: 0 4px 4px;
 }
 
+.room-status-day-cell.has-bed-occupancy::after,
+.room-status-day-cell.has-direct-lodging::after {
+  position: absolute;
+  z-index: 1;
+  inset: 1px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
+  border-radius: 3px;
+  content: "";
+  pointer-events: none;
+}
+
+.room-status-day-cell.has-attention-occupancy::after {
+  border-color: var(--danger);
+}
+
 .room-status-bed-occupancy-summary,
 .room-status-direct-occupancy-summary {
   z-index: 2;
@@ -838,6 +883,37 @@
   pointer-events: none;
 }
 
+.room-status-bed-occupancy-summary {
+  gap: 4px;
+}
+
+.room-status-bed-attention-tags {
+  position: absolute;
+  z-index: 4;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.room-status-bed-attention-tag {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 15px;
+  border: 1px solid color-mix(in srgb, var(--danger) 62%, transparent);
+  border-radius: 3px;
+  padding: 0 2px;
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+  color: var(--danger);
+  font-size: 9px;
+  font-weight: 720;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .room-status-direct-count {
   min-width: 28px;
   color: var(--text);
@@ -848,8 +924,8 @@
 }
 
 .room-status-bed-state {
+  flex: 0 0 auto;
   min-width: 0;
-  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 10px;
   font-weight: 680;
@@ -893,6 +969,8 @@
 .room-status-mark-available { color: var(--success); }
 .room-status-mark-reserved { color: var(--accent); }
 .room-status-mark-in-house { color: var(--brand); }
+.room-status-mark-settled { color: var(--success); }
+.room-status-mark-arrears { color: var(--warning); }
 .room-status-mark-cleaning,
 .room-status-mark-stale { color: var(--warning); }
 .room-status-mark-maintenance,
@@ -923,7 +1001,6 @@
   gap: 5px;
   overflow: hidden;
   border: 1px solid var(--accent);
-  border-left-width: 4px;
   border-radius: 4px;
   padding: 1px 6px;
   background: var(--accent-soft);
@@ -953,12 +1030,14 @@
 
 .room-status-interval.is-blocking {
   border-bottom-style: solid;
-  border-bottom-width: 2px;
 }
 
 .room-status-interval.has-blocking-conflict {
+  box-shadow: none;
+}
+
+.room-status-interval.has-attention-interval {
   border-color: var(--danger);
-  background: var(--danger-soft);
 }
 
 .room-status-interval-in-house { border-color: var(--brand); background: var(--brand-soft); }
@@ -1107,6 +1186,42 @@
 .room-status-context-empty {
   color: var(--muted);
   font-size: 13px;
+}
+
+.room-status-action-gate,
+.room-status-quick-gate {
+  display: grid;
+  gap: 8px;
+  border-left: 3px solid var(--warning);
+  padding: 8px 9px;
+  background: var(--warning-soft);
+}
+
+.room-status-action-gate {
+  margin-bottom: 10px;
+}
+
+.room-status-action-gate p,
+.room-status-quick-gate p {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.room-status-action-gate p svg,
+.room-status-quick-gate p svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.room-status-action-gate .button,
+.room-status-quick-gate .button {
+  justify-self: start;
 }
 
 .room-status-reference-list,
@@ -1426,6 +1541,11 @@
   padding: 6px 9px;
 }
 
+.room-status-action-with-reason {
+  display: grid;
+  gap: 4px;
+}
+
 .room-status-quick-orders > button,
 .room-status-quick-history {
   display: flex;
@@ -1475,6 +1595,10 @@
   margin: 7px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.room-status-quick-gate {
+  margin-top: 7px;
 }
 
 .room-status-quick-error {

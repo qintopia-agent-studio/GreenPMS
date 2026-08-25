@@ -111,6 +111,9 @@ export function errorMessage(error: unknown): string {
 
 export function businessErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === "RESOURCE_SCOPE_DENIED" && /Cross-origin session write/i.test(error.message)) {
+      return "当前页面地址与系统登录地址不一致，本次没有写入。请从系统提供的地址重新打开并登录。";
+    }
     if (error.code === "INVENTORY_CONFLICT") {
       return /[\u3400-\u9fff]/.test(error.message)
         ? error.message
@@ -639,6 +642,11 @@ function evidenceValuesEqual(left: unknown, right: unknown): boolean {
   const rightKeys = Object.keys(right).sort();
   return leftKeys.length === rightKeys.length
     && leftKeys.every((key, index) => key === rightKeys[index] && evidenceValuesEqual(left[key], right[key]));
+}
+
+function optionalGuestEvidenceValueMatches(left: unknown, right: unknown): boolean {
+  return left === right
+    || ((left === null || left === undefined) && (right === null || right === undefined));
 }
 
 type EvidenceMoney = { minorUnits: number; currency: string };
@@ -1878,6 +1886,132 @@ export function conversionReceiptHasEvidence(
   return true;
 }
 
+export function completedStayBackfillPreviewHasEvidence(
+  effect: Record<string, unknown>,
+  input: Record<string, unknown>
+): boolean {
+  if (input.backfill !== true) return false;
+  const backfill = isRecord(effect.backfill) ? effect.backfill : undefined;
+  const arrivalEpoch = localDateEpoch(effect.arrivalDate);
+  const departureEpoch = localDateEpoch(effect.departureDate);
+  const businessEpoch = localDateEpoch(backfill?.businessDate);
+  const reason = typeof input.backfillReason === "string" ? input.backfillReason.trim() : "";
+  const inputGuest = isRecord(input.primaryGuest) ? input.primaryGuest : undefined;
+  const effectGuest = isRecord(effect.primaryGuest) ? effect.primaryGuest : undefined;
+  const inputAdditionalGuests = Array.isArray(input.additionalGuests) ? input.additionalGuests : undefined;
+  const effectOccupants = Array.isArray(effect.occupants) ? effect.occupants : undefined;
+  if (!backfill
+    || arrivalEpoch === undefined
+    || departureEpoch === undefined
+    || businessEpoch === undefined
+    || arrivalEpoch >= departureEpoch
+    || departureEpoch > businessEpoch
+    || backfill.resultingOrderStatus !== "CHECKED_OUT"
+    || backfill.resultingStayStatus !== "COMPLETED"
+    || !reason
+    || backfill.reason !== reason
+    || !nonblankString(input.quoteId)
+    || effect.quoteId !== input.quoteId
+    || !inputGuest
+    || !effectGuest
+    || !nonblankString(inputGuest.fullName)
+    || !nonblankString(inputGuest.nickname)
+    || !evidenceValuesEqual(effectGuest, inputGuest)
+    || !inputAdditionalGuests
+    || !effectOccupants
+    || effectOccupants.length !== inputAdditionalGuests.length + 1) return false;
+
+  const submittedGuests = [inputGuest, ...inputAdditionalGuests];
+  if (!effectOccupants.every((value, index) => {
+    const occupant = isRecord(value) ? value : undefined;
+    const submitted = isRecord(submittedGuests[index]) ? submittedGuests[index] as Record<string, unknown> : undefined;
+    if (!occupant || !submitted
+      || occupant.ordinal !== index + 1
+      || occupant.role !== (index === 0 ? "PRIMARY" : "ADDITIONAL")) return false;
+    return ["fullName", "nickname", "phone", "documentNumber"].every((key) => (
+      occupant[key] === submitted[key]
+      || (occupant[key] === undefined && submitted[key] === undefined)
+    ));
+  })) return false;
+
+  const bookingChannelCode = typeof effect.bookingChannelCode === "string" ? effect.bookingChannelCode : null;
+  const inputBookingChannelCode = typeof input.bookingChannelCode === "string" ? input.bookingChannelCode : null;
+  const channelOrderReference = typeof effect.channelOrderReference === "string" ? effect.channelOrderReference : null;
+  const inputChannelOrderReference = typeof input.channelOrderReference === "string" ? input.channelOrderReference : null;
+  const externalChannel = Boolean(bookingChannelCode && externalBookingChannels.has(bookingChannelCode));
+  const freeStay = effect.stayType === "FREE";
+  if (backfill.externalChannel !== externalChannel
+    || bookingChannelCode !== inputBookingChannelCode
+    || channelOrderReference !== inputChannelOrderReference) return false;
+  const inputCollection = isRecord(input.backfillCollection) ? input.backfillCollection : undefined;
+  const effectCollection = isRecord(backfill.collection) ? backfill.collection : undefined;
+  const pricingDecision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
+  const targetAmount = pricingDecision ? moneyFrom(pricingDecision.targetCurrentContractAmount) : undefined;
+  if (!targetAmount) return false;
+  if (freeStay) {
+    return input.bookingChannelCode === undefined
+      && input.channelOrderReference === undefined
+      && input.targetCurrentContractAmountMinor === undefined
+      && (input.freeStayCategoryCode === "VOLUNTEER" || input.freeStayCategoryCode === "RECEPTION")
+      && nonblankString(input.freeStayReason)
+      && effect.freeStayCategoryCode === input.freeStayCategoryCode
+      && effect.freeStayReason === input.freeStayReason
+      && targetAmount.minorUnits === 0
+      && inputCollection === undefined
+      && effectCollection === undefined
+      && backfill.collection === null
+      && backfill.settlementStatus === "SETTLED"
+      && backfill.collectedAmountMinor === 0
+      && backfill.balanceDueMinor === 0;
+  }
+  if (effect.freeStayCategoryCode !== null || effect.freeStayReason !== null
+    || input.freeStayCategoryCode !== undefined || input.freeStayReason !== undefined) return false;
+  if (externalChannel) {
+    return nonblankString(input.channelOrderReference)
+      && Number.isSafeInteger(input.targetCurrentContractAmountMinor)
+      && Number(input.targetCurrentContractAmountMinor) > 0
+      && targetAmount.minorUnits === input.targetCurrentContractAmountMinor
+      && inputCollection === undefined
+      && effectCollection === undefined
+      && backfill.collection === null
+      && backfill.settlementStatus === "SETTLED"
+      && backfill.collectedAmountMinor === 0
+      && backfill.balanceDueMinor === 0;
+  }
+  if (bookingChannelCode !== "WECOM" || !inputCollection) return false;
+  const amountMinor = inputCollection.amountMinor;
+  if (!Number.isSafeInteger(amountMinor) || Number(amountMinor) < 0) return false;
+  if (!Number.isSafeInteger(input.targetCurrentContractAmountMinor)
+    || targetAmount.minorUnits !== input.targetCurrentContractAmountMinor
+    || Number(amountMinor) > targetAmount.minorUnits) return false;
+  const balanceDueMinor = targetAmount.minorUnits - Number(amountMinor);
+  if (backfill.collectedAmountMinor !== amountMinor
+    || backfill.balanceDueMinor !== balanceDueMinor
+    || backfill.settlementStatus !== (balanceDueMinor > 0 ? "ARREARS" : "SETTLED")) return false;
+  if (amountMinor === 0) {
+    return inputCollection.method === "WECOM"
+      && hasExactKeys(inputCollection, ["amountMinor", "method"])
+      && effectCollection === undefined
+      && backfill.collection === null;
+  }
+  if (!effectCollection
+    || effectCollection.amountMinor !== amountMinor
+    || effectCollection.method !== inputCollection.method) return false;
+  if (inputCollection.method === "CASH") {
+    return hasExactKeys(inputCollection, ["amountMinor", "method", "cashCollector", "note"])
+      && nonblankString(inputCollection.cashCollector)
+      && nonblankString(inputCollection.note)
+      && effectCollection.cashCollector === inputCollection.cashCollector
+      && effectCollection.note === inputCollection.note
+      && effectCollection.transactionReference === undefined;
+  }
+  return (inputCollection.method === "WECOM" || inputCollection.method === "BANK_TRANSFER")
+    && hasExactKeys(inputCollection, ["amountMinor", "method", "transactionReference"])
+    && nonblankString(inputCollection.transactionReference)
+    && effectCollection.transactionReference === inputCollection.transactionReference
+    && effectCollection.cashCollector === undefined;
+}
+
 export function u1PreviewHasBusinessEvidence(
   commandType: U1CommandType,
   effect: Record<string, unknown>,
@@ -2319,6 +2453,99 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
   const freeStayCategoryCode = typeof effect.freeStayCategoryCode === "string" ? effect.freeStayCategoryCode : null;
   const freeStayReason = typeof effect.freeStayReason === "string" ? effect.freeStayReason : null;
 
+  if (preview.commandType === "CREATE_ORDER" && commandInput?.backfill === true) {
+    if (!completedStayBackfillPreviewHasEvidence(effect, commandInput)) {
+      return <div className="effect-summary backfill-command-summary" data-testid="command-effect">
+        <section className="effect-section" aria-labelledby="completed-backfill-summary-heading">
+          <h3 id="completed-backfill-summary-heading">无法核对已完成住宿补录</h3>
+          <p>服务端返回的日期、退房状态或收款事实与本次填写不一致，不能确认。请返回房态后重新核对。</p>
+        </section>
+      </div>;
+    }
+    const backfill = effect.backfill as Record<string, unknown>;
+    const collection = isRecord(backfill.collection) ? backfill.collection : undefined;
+    const collectionAmountMinor = typeof collection?.amountMinor === "number" ? collection.amountMinor : 0;
+    const contractAmount = moneyFrom(createPricingDecision?.targetCurrentContractAmount ?? pricing?.currentContractAmount);
+    const externalChannel = backfill.externalChannel === true;
+    const settled = isFreeStay || externalChannel || Boolean(contractAmount && collectionAmountMinor >= contractAmount.minorUnits);
+    const outstandingAmount = contractAmount
+      ? { ...contractAmount, minorUnits: Math.max(0, contractAmount.minorUnits - collectionAmountMinor) }
+      : undefined;
+    return <div className="effect-summary backfill-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="completed-backfill-summary-heading">
+        <h3 id="completed-backfill-summary-heading">请核对已完成住宿补录</h3>
+        <dl className="difference-grid">
+          {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>住客昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要住客姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
+          {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          <dt>实际住宿日期</dt><dd>{formatDate(String(effect.arrivalDate))} 至 {formatDate(String(effect.departureDate))}</dd>
+          {isFreeStay ? <>
+            <dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd>
+            <dt>免费入住原因</dt><dd>{freeStayReason}</dd>
+          </> : <>
+            <dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "未记录"}</dd>
+            {externalChannel ? <>
+              <dt>渠道订单号</dt><dd>{channelOrderReference}</dd>
+              {contractAmount ? <><dt>本单渠道应结金额</dt><dd><strong>{formatMoney(contractAmount)}</strong></dd></> : null}
+              <dt>资金处理</dt><dd>不登记门店单笔收款，后续按渠道总账核对。</dd>
+            </> : <>
+              {contractAmount ? <><dt>订单金额</dt><dd><strong>{formatMoney(contractAmount)}</strong></dd></> : null}
+              <dt>补录实收</dt><dd><strong>{formatMinor(collectionAmountMinor, contractAmount?.currency ?? "CNY")}</strong></dd>
+              {collection ? <>
+                <dt>收款方式</dt><dd>{fundMethodLabel(collection.method)}</dd>
+                {collection.method === "CASH" ? <>
+                  <dt>收款人</dt><dd>{scalar(collection.cashCollector)}</dd>
+                  <dt>现金备注</dt><dd>{scalar(collection.note)}</dd>
+                </> : <><dt>{collection.method === "WECOM" ? "企业微信交易单号" : "银行转账单号 / 流水号"}</dt><dd>{scalar(collection.transactionReference)}</dd></>}
+              </> : null}
+              {!settled && outstandingAmount ? <><dt>尚欠金额</dt><dd><strong>{formatMoney(outstandingAmount)}</strong></dd></> : null}
+            </>}
+          </>}
+          <dt>补录原因</dt><dd>{String(backfill.reason)}</dd>
+          <dt>确认后</dt><dd><strong>{settled ? "提交后直接成为已结单" : "提交后直接成为欠款"}</strong></dd>
+        </dl>
+        <p className="muted compact">一次确认会原子写入订单、历史入住、历史退房及本次真实收款；无需再逐步处理履约状态。</p>
+      </section>
+    </div>;
+  }
+
+  if (preview.commandType === "COMPLETE_STAY") {
+    const completeStay = effect as Record<string, unknown>;
+    const amounts = isRecord(completeStay.amounts) ? completeStay.amounts : undefined;
+    const collection = isRecord(completeStay.collection) ? completeStay.collection : undefined;
+    const collectionAmountMinor = typeof collection?.amountMinor === "number" ? collection.amountMinor : 0;
+    const contractAmount = moneyFrom(amounts?.currentContractAmount);
+    const netRecorded = moneyFrom(amounts?.netRecordedCollection);
+    const balanceDue = moneyFrom(amounts?.collectionDifference);
+    const entitlementTransition = isRecord(completeStay.entitlementTransition) ? completeStay.entitlementTransition : undefined;
+    const coverageCount = typeof entitlementTransition?.coverageCount === "number" ? entitlementTransition.coverageCount : 0;
+    const settled = completeStay.settlementStatus === "SETTLED";
+    const reasonNote = typeof completeStay.reasonNote === "string" ? completeStay.reasonNote : "";
+    return <div className="effect-summary complete-stay-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="complete-stay-summary-heading">
+        <h3 id="complete-stay-summary-heading">请核对完成住宿</h3>
+        <dl className="difference-grid">
+          <dt>住宿日期</dt><dd>{formatDate(String(completeStay.arrivalDate))} 至 {formatDate(String(completeStay.departureDate))}</dd>
+          <dt>办理营业日</dt><dd>{formatDate(String(completeStay.businessDate))}</dd>
+          {contractAmount ? <><dt>订单金额</dt><dd><strong>{formatMoney(contractAmount)}</strong></dd></> : null}
+          {netRecorded ? <><dt>已记录净收款</dt><dd>{formatMoney(netRecorded)}</dd></> : null}
+          <dt>本次补记实收</dt><dd><strong>{formatMinor(collectionAmountMinor, contractAmount?.currency ?? "CNY")}</strong></dd>
+          {collection ? <>
+            <dt>收款方式</dt><dd>{fundMethodLabel(collection.method)}</dd>
+            {collection.method === "CASH" ? <>
+              <dt>收款人</dt><dd>{scalar(collection.cashCollector)}</dd>
+              <dt>现金备注</dt><dd>{scalar(collection.note)}</dd>
+            </> : <><dt>{collection.method === "WECOM" ? "企业微信交易单号" : "银行转账单号 / 流水号"}</dt><dd>{scalar(collection.transactionReference)}</dd></>}
+          </> : null}
+          {balanceDue && balanceDue.minorUnits > 0 ? <><dt>尚欠金额</dt><dd><strong>{formatMoney(balanceDue)}</strong></dd></> : null}
+          {coverageCount > 0 ? <><dt>会员权益核销</dt><dd>{coverageCount} 晚冻结权益将转为已核销</dd></> : null}
+          <dt>说明</dt><dd>{reasonNote || "未填写"}</dd>
+          <dt>确认后</dt><dd><strong>{settled ? "订单直接成为已结单" : "订单显示欠款"}</strong></dd>
+        </dl>
+        <p className="muted compact">确认后，订单将直接完成；已收清显示“已结单”，未收清显示“欠款”。已有收款不会重复登记。</p>
+      </section>
+    </div>;
+  }
+
   if (fulfillment) {
     if (!fulfillmentTransitionIsExpected(preview.commandType, effect)) {
       return <div className="effect-summary fulfillment-command-summary" data-testid="command-effect">
@@ -2633,12 +2860,14 @@ export function lodgingReceiptCopy(committed: boolean, memberStay: boolean): { h
     : { heading: "住宿订单未创建", description: "本次操作没有写入住宿订单。" };
 }
 
-export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false, bookingChannelCode: requestBookingChannelCode }: {
+export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false, backfillStay = false, completeStay = false, bookingChannelCode: requestBookingChannelCode }: {
   receipt: ReceiptDto;
   onNavigateToResource?: () => void;
   businessCommand?: CommandType;
   commandType?: CommandType;
   memberStay?: boolean;
+  backfillStay?: boolean;
+  completeStay?: boolean;
   bookingChannelCode?: string | null;
 }) {
   const result = isRecord(receipt.result) ? receipt.result : undefined;
@@ -2664,6 +2893,55 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
   const differenceFromPolicy = result ? moneyFrom(pricingDecision?.differenceFromPolicy) : undefined;
   const pricingReason = pricingDecision && isRecord(pricingDecision.reason) ? pricingDecision.reason : undefined;
   const committed = receipt.businessCommitted;
+  if (backfillStay && commandType === "CREATE_ORDER") {
+    const backfillResult = result && isRecord(result.backfill) ? result.backfill : undefined;
+    const arrears = backfillResult?.settlementStatus === "ARREARS";
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{committed ? "住宿补录已完成" : "住宿补录未完成"}</h3>
+          <p>{committed
+            ? arrears
+              ? "历史入住和退房已经记录，当前订单仍有欠款。"
+              : "历史入住和退房已经记录，订单已结单。"
+            : "本次操作没有写入订单、履约或收款事实。"}</p>
+        </div>
+      </div>
+      {committed ? <dl className="receipt-grid">
+        <dt>当前状态</dt><dd><strong>{arrears ? "欠款" : "已结单"}</strong></dd>
+        {typeof backfillResult?.balanceDueMinor === "number" && backfillResult.balanceDueMinor > 0
+          ? <><dt>尚欠金额</dt><dd><strong>{formatMinor(backfillResult.balanceDueMinor, "CNY")}</strong></dd></>
+          : null}
+      </dl> : null}
+      {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+      {orderId && committed ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
+    </section>;
+  }
+  if (completeStay && commandType === "COMPLETE_STAY") {
+    const arrears = result && result.settlementStatus === "ARREARS";
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{committed ? "完成住宿已记录" : "完成住宿未记录"}</h3>
+          <p>{committed
+            ? arrears
+              ? "历史入住和退房已经记录，订单仍有欠款。"
+              : "历史入住和退房已经记录，订单已结单。"
+            : "本次操作没有写入入住、退房或收款事实。"}</p>
+        </div>
+      </div>
+      {committed ? <dl className="receipt-grid">
+        <dt>当前状态</dt><dd><strong>{arrears ? "欠款" : "已结单"}</strong></dd>
+        {result && isRecord(result.fulfillmentTiming) && typeof result.fulfillmentTiming.recordedBusinessDate === "string"
+          ? <><dt>办理营业日</dt><dd>{formatDate(result.fulfillmentTiming.recordedBusinessDate)}</dd></>
+          : null}
+      </dl> : null}
+      {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+      {orderId && committed ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
+    </section>;
+  }
   if (businessCommand && fulfillmentBusinessCommands.has(businessCommand)) {
     const entitlementTransition = result && isRecord(result.entitlementTransition) ? result.entitlementTransition : undefined;
     const consumedCoverageCount = entitlementTransition && typeof entitlementTransition.coverageCount === "number" ? entitlementTransition.coverageCount : 0;
@@ -2980,7 +3258,7 @@ export interface PersistedCommandRecovery {
   commandType: HistoricalCommandType;
   confirmationKey: string;
   targetRefs: string[];
-  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
+  presentation?: "MEMBER_STAY" | "BACKFILL_STAY" | "COMPLETE_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
   effectHash?: string;
   state: PersistedCommandRecoveryState;
   updatedAt: string;
@@ -3050,10 +3328,18 @@ function parsedRecoveryTargetRefs(targetRefs: readonly string[]): Record<string,
   return parsed;
 }
 
+function recoveryTargetRefsAreValid(commandType: unknown, targetRefs: readonly string[]): boolean {
+  const parsed = parsedRecoveryTargetRefs(targetRefs);
+  if (!parsed) return false;
+  return commandType !== "COMPLETE_STAY"
+    || (targetRefs.length === 1 && typeof parsed.orderId === "string");
+}
+
 function requiredRecoveryPresentation(commandType: HistoricalCommandType): PersistedCommandRecovery["presentation"] | undefined {
   if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") return "STAY_DATES";
   if (commandType === "MOVE_UNIT") return "MOVE_UNIT";
   if (commandType === "CANCEL_ORDER" || commandType === "MARK_NO_SHOW" || commandType === "REVOKE_CHECK_IN") return "ORDER_LIFECYCLE";
+  if (commandType === "COMPLETE_STAY") return "COMPLETE_STAY";
   return undefined;
 }
 
@@ -3271,6 +3557,190 @@ function orderLifecycleReceiptHasEvidence(
   return true;
 }
 
+export function completedStayBackfillReceiptHasEvidence(
+  value: ReceiptDto,
+  input: Record<string, unknown>,
+  previewEffect?: Record<string, unknown>,
+  expectedEffectHash?: string
+): boolean {
+  if (input.backfill !== true
+    || !isEffectHash(expectedEffectHash)
+    || !receiptExecutionSemanticsAreCoherent(value)
+    || !terminalReceiptHasDurableIdentity(value)
+    || value.executionStatus !== "EXECUTED"
+    || value.businessCommitted !== true
+    || !hasOnlyKeys(value as unknown as Record<string, unknown>, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || value.error !== undefined
+    || !isRecord(value.result)) return false;
+
+  const result = value.result;
+  if (!hasExactKeys(result, [
+    "orderId",
+    "stayId",
+    "segmentId",
+    "pricingRevisionId",
+    "pricingPolicyVersionId",
+    "primaryGuest",
+    "occupants",
+    "bookingChannelCode",
+    "channelOrderReference",
+    "freeStayReason",
+    "freeStayCategoryCode",
+    "pricingDecision",
+    "status",
+    "backfill",
+    "effectHash"
+  ])
+    || !nonblankString(result.orderId)
+    || !nonblankString(result.stayId)
+    || !nonblankString(result.segmentId)
+    || !nonblankString(result.pricingRevisionId)
+    || !nonblankString(result.pricingPolicyVersionId)
+    || !isEffectHash(result.effectHash)
+    || result.effectHash !== expectedEffectHash
+    || result.status !== "CHECKED_OUT"
+    || !isRecord(result.primaryGuest)
+    || !Array.isArray(result.occupants)
+    || result.occupants.length < 1
+    || !isRecord(result.pricingDecision)
+    || !isRecord(result.backfill)) return false;
+
+  const backfill = result.backfill;
+  const targetAmount = moneyFrom(result.pricingDecision.targetCurrentContractAmount);
+  if (!hasExactKeys(backfill, [
+    "businessDate",
+    "checkInAmendmentId",
+    "checkOutAmendmentId",
+    "settlementStatus",
+    "collectedAmountMinor",
+    "balanceDueMinor",
+    "collectionFactId"
+  ])
+    || localDateEpoch(backfill.businessDate) === undefined
+    || !nonblankString(backfill.checkInAmendmentId)
+    || !nonblankString(backfill.checkOutAmendmentId)
+    || (backfill.settlementStatus !== "SETTLED" && backfill.settlementStatus !== "ARREARS")
+    || !Number.isSafeInteger(backfill.collectedAmountMinor)
+    || Number(backfill.collectedAmountMinor) < 0
+    || !Number.isSafeInteger(backfill.balanceDueMinor)
+    || Number(backfill.balanceDueMinor) < 0
+    || !targetAmount) return false;
+
+  const occupants = result.occupants as unknown[];
+  const occupantIds: string[] = [];
+  for (let index = 0; index < occupants.length; index += 1) {
+    const occupant = isRecord(occupants[index]) ? occupants[index] as Record<string, unknown> : undefined;
+    if (!occupant
+      || !nonblankString(occupant.id)
+      || occupant.orderId !== result.orderId
+      || occupant.ordinal !== index + 1
+      || occupant.role !== (index === 0 ? "PRIMARY" : "ADDITIONAL")
+      || !nonblankString(occupant.fullName)
+      || !nonblankString(occupant.nickname)) return false;
+    occupantIds.push(occupant.id);
+  }
+  if (new Set(occupantIds).size !== occupantIds.length) return false;
+
+  const resourceRefs = value.resourceRefs;
+  const requiredResourceRefs = [
+    result.orderId,
+    result.stayId,
+    result.segmentId,
+    result.pricingRevisionId,
+    backfill.checkInAmendmentId,
+    backfill.checkOutAmendmentId,
+    ...occupantIds
+  ];
+  if (!evidenceValuesEqual(resourceRefs, requiredResourceRefs)) return false;
+
+  const bookingChannelCode = typeof result.bookingChannelCode === "string" ? result.bookingChannelCode : null;
+  const externalChannel = Boolean(bookingChannelCode && externalBookingChannels.has(bookingChannelCode));
+  const freeStay = result.freeStayCategoryCode !== null || result.freeStayReason !== null;
+  const collectedAmountMinor = Number(backfill.collectedAmountMinor);
+  const balanceDueMinor = Number(backfill.balanceDueMinor);
+  if (freeStay) {
+    if (bookingChannelCode !== null
+      || result.channelOrderReference !== null
+      || (result.freeStayCategoryCode !== "VOLUNTEER" && result.freeStayCategoryCode !== "RECEPTION")
+      || !nonblankString(result.freeStayReason)
+      || targetAmount.minorUnits !== 0
+      || collectedAmountMinor !== 0
+      || balanceDueMinor !== 0
+      || backfill.settlementStatus !== "SETTLED") return false;
+  } else if (externalChannel) {
+    if (!nonblankString(result.channelOrderReference)
+      || result.freeStayCategoryCode !== null
+      || result.freeStayReason !== null
+      || targetAmount.minorUnits <= 0
+      || collectedAmountMinor !== 0
+      || balanceDueMinor !== 0
+      || backfill.settlementStatus !== "SETTLED") return false;
+  } else if (bookingChannelCode !== "WECOM"
+    || result.channelOrderReference !== null
+    || result.freeStayCategoryCode !== null
+    || result.freeStayReason !== null
+    || collectedAmountMinor + balanceDueMinor !== targetAmount.minorUnits
+    || backfill.settlementStatus !== (balanceDueMinor > 0 ? "ARREARS" : "SETTLED")) return false;
+
+  if (collectedAmountMinor > 0) {
+    if (!nonblankString(backfill.collectionFactId)
+      || value.factRefs.length !== 1
+      || value.factRefs[0] !== backfill.collectionFactId) return false;
+  } else if (backfill.collectionFactId !== null || value.factRefs.length !== 0) return false;
+
+  const fullInput = nonblankString(input.quoteId) && isRecord(input.primaryGuest) && Array.isArray(input.additionalGuests);
+  if (fullInput) {
+    const submittedGuests = [input.primaryGuest, ...(input.additionalGuests as unknown[])];
+    if (!evidenceValuesEqual(result.primaryGuest, input.primaryGuest)
+      || submittedGuests.length !== occupants.length
+      || !occupants.every((value, index) => {
+        const occupant = value as Record<string, unknown>;
+        const guest = isRecord(submittedGuests[index]) ? submittedGuests[index] as Record<string, unknown> : undefined;
+        return Boolean(guest
+          && ["fullName", "nickname"].every((key) => occupant[key] === guest[key])
+          && ["phone", "documentNumber"].every((key) => optionalGuestEvidenceValueMatches(occupant[key], guest[key])));
+      })) return false;
+    const inputBookingChannelCode = typeof input.bookingChannelCode === "string" ? input.bookingChannelCode : null;
+    const inputChannelOrderReference = typeof input.channelOrderReference === "string" ? input.channelOrderReference : null;
+    if (bookingChannelCode !== inputBookingChannelCode || result.channelOrderReference !== inputChannelOrderReference) return false;
+    if (freeStay) {
+      if (result.freeStayCategoryCode !== input.freeStayCategoryCode
+        || result.freeStayReason !== input.freeStayReason) return false;
+    } else if (!Number.isSafeInteger(input.targetCurrentContractAmountMinor)
+      || targetAmount.minorUnits !== input.targetCurrentContractAmountMinor) return false;
+  }
+
+  if (previewEffect) {
+    const previewBackfill = isRecord(previewEffect.backfill) ? previewEffect.backfill : undefined;
+    const previewOccupants = Array.isArray(previewEffect.occupants) ? previewEffect.occupants : undefined;
+    if (!completedStayBackfillPreviewHasEvidence(previewEffect, input)
+      || !previewBackfill
+      || !previewOccupants
+      || previewOccupants.length !== occupants.length
+      || result.primaryGuest === null
+      || !evidenceValuesEqual(result.primaryGuest, previewEffect.primaryGuest)
+      || result.bookingChannelCode !== previewEffect.bookingChannelCode
+      || result.channelOrderReference !== previewEffect.channelOrderReference
+      || result.freeStayReason !== previewEffect.freeStayReason
+      || result.freeStayCategoryCode !== previewEffect.freeStayCategoryCode
+      || result.pricingPolicyVersionId !== previewEffect.pricingPolicyVersionId
+      || !evidenceValuesEqual(result.pricingDecision, previewEffect.pricingDecision)
+      || backfill.businessDate !== previewBackfill.businessDate
+      || backfill.settlementStatus !== previewBackfill.settlementStatus
+      || backfill.collectedAmountMinor !== previewBackfill.collectedAmountMinor
+      || backfill.balanceDueMinor !== previewBackfill.balanceDueMinor
+      || !previewOccupants.every((value, index) => {
+        const previewOccupant = isRecord(value) ? value as Record<string, unknown> : undefined;
+        const resultOccupant = occupants[index] as Record<string, unknown>;
+        return Boolean(previewOccupant
+          && resultOccupant.id === previewOccupant.id
+          && ["fullName", "nickname", "ordinal", "role"].every((key) => resultOccupant[key] === previewOccupant[key])
+          && ["phone", "documentNumber"].every((key) => optionalGuestEvidenceValueMatches(resultOccupant[key], previewOccupant[key])));
+      })) return false;
+  }
+  return true;
+}
+
 export function receiptHasCommandEvidence(
   commandType: HistoricalCommandType,
   receipt: ReceiptDto,
@@ -3279,6 +3749,38 @@ export function receiptHasCommandEvidence(
   expectedEffectHash?: string
 ): boolean {
   if (!receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
+  if (commandType === "CREATE_ORDER" && input.backfill === true) {
+    if (receipt.businessCommitted) {
+      return completedStayBackfillReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+    }
+    if (receipt.executionStatus === "UNKNOWN") {
+      return hasExactKeys(receipt as unknown as Record<string, unknown>, [
+        "receiptId",
+        "commandId",
+        "executionStatus",
+        "businessCommitted",
+        "correlationId",
+        "resourceRefs",
+        "factRefs"
+      ])
+        && receipt.resourceRefs.length === 0
+        && receipt.factRefs.length === 0;
+    }
+    return receipt.executionStatus === "NOT_EXECUTED"
+      && hasExactKeys(receipt as unknown as Record<string, unknown>, [
+        "receiptId",
+        "commandId",
+        "executionStatus",
+        "businessCommitted",
+        "correlationId",
+        "error",
+        "resourceRefs",
+        "factRefs",
+        "committedAt"
+      ])
+      && receipt.resourceRefs.length === 0
+      && receipt.factRefs.length === 0;
+  }
   if ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY")
     && receipt.businessCommitted) {
     return dateChangeReceiptHasEvidence(commandType, receipt, input, previewEffect, expectedEffectHash);
@@ -3292,6 +3794,58 @@ export function receiptHasCommandEvidence(
   }
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && receipt.businessCommitted) {
     return conversionReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
+  if (commandType === "COMPLETE_STAY" && receipt.businessCommitted) {
+    return completeStayReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
+  return true;
+}
+
+function completeStayReceiptHasEvidence(
+  receipt: ReceiptDto,
+  input: Record<string, unknown>,
+  previewEffect?: Record<string, unknown>,
+  expectedEffectHash?: string
+): boolean {
+  const value = receipt as unknown as Record<string, unknown>;
+  const result = isRecord(receipt.result) ? receipt.result : undefined;
+  if (!result || result.orderId !== input.orderId) return false;
+  if (!nonblankString(result.stayId)
+    || !nonblankString(result.checkInAmendmentId)
+    || !nonblankString(result.checkOutAmendmentId)) return false;
+  if (![result.orderId, result.stayId, result.checkInAmendmentId, result.checkOutAmendmentId]
+    .every((reference) => typeof reference === "string" && receipt.resourceRefs.includes(reference))) return false;
+  if (result.status !== "CHECKED_OUT"
+    || (result.settlementStatus !== "SETTLED" && result.settlementStatus !== "ARREARS")) return false;
+  const timing = isRecord(result.fulfillmentTiming) ? result.fulfillmentTiming : undefined;
+  if (!timing
+    || typeof timing.effectiveDate !== "string"
+    || typeof timing.recordedBusinessDate !== "string"
+    || (timing.recordingMode !== "ON_SCHEDULE" && timing.recordingMode !== "LATE_RECORDED")) return false;
+  const inputCollection = isRecord(input.collection) ? input.collection : undefined;
+  const previewCollection = previewEffect && isRecord(previewEffect.collection) ? previewEffect.collection : undefined;
+  if (!previewEffect && !isEffectHash(expectedEffectHash)) return false;
+  if (inputCollection || previewCollection) {
+    if (typeof result.collectionFactId !== "string" || !result.collectionFactId) return false;
+    if (!Array.isArray(value.factRefs) || !value.factRefs.includes(result.collectionFactId)) return false;
+  } else if (previewEffect) {
+    if (result.collectionFactId !== null) return false;
+  } else if (result.collectionFactId !== null
+    && (!nonblankString(result.collectionFactId)
+      || !Array.isArray(value.factRefs)
+      || !value.factRefs.includes(result.collectionFactId))) return false;
+  if (!isEffectHash(result.effectHash)
+    || (expectedEffectHash !== undefined
+      && (!isEffectHash(expectedEffectHash) || result.effectHash !== expectedEffectHash))) return false;
+  if (previewEffect) {
+    const previewCheckOut = isRecord(previewEffect.checkOut) ? previewEffect.checkOut : undefined;
+    if (previewEffect.operation !== "COMPLETE_STAY"
+      || previewEffect.settlementStatus !== result.settlementStatus
+      || !previewCheckOut
+      || previewCheckOut.effectiveDate !== timing.effectiveDate
+      || previewCheckOut.businessDate !== timing.recordedBusinessDate
+      || previewCheckOut.recordingMode !== timing.recordingMode
+      || previewEffect.reasonNote !== input.reasonNote) return false;
   }
   return true;
 }
@@ -3640,16 +4194,20 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || value.confirmationKey.length > 160
     || !Array.isArray(value.targetRefs)
     || !value.targetRefs.every((item) => typeof item === "string")
-    || parsedRecoveryTargetRefs(value.targetRefs as string[]) === undefined
-    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT" && value.presentation !== "ORDER_LIFECYCLE")
+    || !recoveryTargetRefsAreValid(value.commandType, value.targetRefs as string[])
+    || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "BACKFILL_STAY" && value.presentation !== "COMPLETE_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT" && value.presentation !== "ORDER_LIFECYCLE")
     || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
+    || (value.presentation === "BACKFILL_STAY" && value.commandType !== "CREATE_ORDER")
+    || (value.presentation === "COMPLETE_STAY" && value.commandType !== "COMPLETE_STAY")
     || (value.presentation === "FULFILLMENT" && !isFulfillmentBusinessCommand(value.commandType))
     || (value.presentation === "STAY_DATES" && value.commandType !== "RESCHEDULE_STAY" && value.commandType !== "EXTEND_STAY" && value.commandType !== "SHORTEN_STAY")
     || (value.presentation === "MOVE_UNIT" && value.commandType !== "MOVE_UNIT")
     || (value.presentation === "ORDER_LIFECYCLE" && value.commandType !== "CANCEL_ORDER" && value.commandType !== "MARK_NO_SHOW" && value.commandType !== "REVOKE_CHECK_IN")
     || (requiredRecoveryPresentation(value.commandType) !== undefined
       && value.presentation !== requiredRecoveryPresentation(value.commandType))
-    || ((value.presentation === "STAY_DATES"
+    || ((value.presentation === "BACKFILL_STAY"
+      || value.presentation === "COMPLETE_STAY"
+      || value.presentation === "STAY_DATES"
       || value.presentation === "MOVE_UNIT"
       || value.presentation === "ORDER_LIFECYCLE"
       || value.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") && !isEffectHash(value.effectHash))
@@ -3665,7 +4223,8 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
 }
 
 export function savePersistedCommandRecovery(storage: CommandRecoveryStorage, recovery: PersistedCommandRecovery): boolean {
-  if (recoveryScopePropertyId(recovery.scopeId) !== recovery.propertyId) return false;
+  if (recoveryScopePropertyId(recovery.scopeId) !== recovery.propertyId
+    || !recoveryTargetRefsAreValid(recovery.commandType, recovery.targetRefs)) return false;
   try {
     storage.setItem(commandRecoveryStorageKey(recovery.subjectId, recovery.scopeId), JSON.stringify(recovery));
     return true;
@@ -3718,8 +4277,10 @@ export function transitionPersistedCommandRecovery(
   }
   if (progress.state === "CONFIRMING") {
     const propertyId = context.request.input.propertyId;
+    const targetRefs = recoveryTargetRefs(context.request.input);
     const requiredPresentation = requiredRecoveryPresentation(context.request.commandType);
-    const strictRecoveryEvidence = requiredPresentation !== undefined
+    const strictRecoveryEvidence = context.request.presentation === "BACKFILL_STAY"
+      || requiredPresentation !== undefined
       || context.request.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
     if (!isPersistableCommandType(context.request.commandType) || typeof propertyId !== "string" || !propertyId) {
       return { accepted: false, recovery: current };
@@ -3727,6 +4288,7 @@ export function transitionPersistedCommandRecovery(
     if (requiredPresentation !== undefined && context.request.presentation !== requiredPresentation) {
       return { accepted: false, recovery: current };
     }
+    if (!recoveryTargetRefsAreValid(context.request.commandType, targetRefs)) return { accepted: false, recovery: current };
     if (strictRecoveryEvidence && !isEffectHash(progress.effectHash)) return { accepted: false, recovery: current };
     if (current && current.confirmationKey !== progress.confirmationKey) return { accepted: false, recovery: current };
     if (current?.effectHash !== undefined && current.effectHash !== progress.effectHash) return { accepted: false, recovery: current };
@@ -3740,7 +4302,7 @@ export function transitionPersistedCommandRecovery(
         propertyId,
         commandType: context.request.commandType,
         confirmationKey: progress.confirmationKey,
-        targetRefs: recoveryTargetRefs(context.request.input),
+        targetRefs,
         ...(context.request.presentation ? { presentation: context.request.presentation } : {}),
         ...(strictRecoveryEvidence ? { effectHash: progress.effectHash } : {}),
         state: "CONFIRMING",
@@ -3768,13 +4330,16 @@ export function transitionPersistedCommandRecovery(
 
 export function recoveryCommandRequest(recovery: PersistedCommandRecovery): CommandRequest {
   const memberStay = recovery.presentation === "MEMBER_STAY";
+  const backfillStay = recovery.presentation === "BACKFILL_STAY";
+  const completeStay = recovery.presentation === "COMPLETE_STAY";
   const fulfillment = recovery.presentation === "FULFILLMENT";
   const stayDates = recovery.presentation === "STAY_DATES";
   const moveUnit = recovery.presentation === "MOVE_UNIT";
   const orderLifecycle = recovery.presentation === "ORDER_LIFECYCLE";
   const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
-  const restoreTargetInputs = stayDates
+  const restoreTargetInputs = completeStay
+    || stayDates
     || moveUnit
     || orderLifecycle
     || recovery.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
@@ -3783,6 +4348,10 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
     commandType: recovery.commandType,
     title: memberStay
       ? "恢复会员住宿结果"
+      : backfillStay
+        ? "恢复补录住宿结果"
+      : completeStay
+        ? "恢复完成住宿结果"
       : fulfillment && commandType
         ? `恢复${fulfillmentCommandLabel(commandType)}结果`
         : stayDates && u1CommandType
@@ -3796,6 +4365,10 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
         : `${recovery.commandType} · 原命令恢复`,
     description: memberStay
       ? "系统只查询原住宿办理结果，不会重复创建订单或冻结会员权益。"
+      : backfillStay
+        ? "系统只查询原补录住宿结果，不会重复创建订单、退房记录或收款事实。"
+      : completeStay
+        ? "系统只查询刚才的办理结果，不会重复完成订单或重复登记收款。"
       : fulfillment
         ? "系统只查询刚才的操作结果，不会重复办理。"
         : stayDates && u1CommandType
@@ -3812,6 +4385,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
     input: {
       ...targetInputs,
       propertyId: recovery.propertyId,
+      ...(backfillStay ? { backfill: true } : {}),
+      ...(completeStay ? { actualStayCompletedConfirmed: true } : {}),
       ...(orderLifecycle && recovery.commandType === "REVOKE_CHECK_IN" ? { unusedRoomConfirmed: true } : {})
     }
   };
@@ -4185,18 +4760,20 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
   const resolved = isTerminalCommandRecovery(recovery.state);
   const submitting = recovery.state === "CONFIRMING";
   const memberStay = recovery.presentation === "MEMBER_STAY";
+  const backfillStay = recovery.presentation === "BACKFILL_STAY";
+  const completeStay = recovery.presentation === "COMPLETE_STAY";
   const fulfillment = recovery.presentation === "FULFILLMENT";
   const fundBusiness = recovery.commandType === "RECORD_COLLECTION" || recovery.commandType === "RECORD_REFUND";
   const tokenBusiness = tokenBusinessCommands.has(recovery.commandType as CommandType);
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
-  const businessMode = businessFacing || memberStay || fulfillment || fundBusiness || tokenBusiness || Boolean(u1CommandType);
+  const businessMode = businessFacing || memberStay || backfillStay || completeStay || fulfillment || fundBusiness || tokenBusiness || Boolean(u1CommandType);
   const memberRegistration = businessMode && recovery.commandType === "CREATE_MEMBER";
   const fulfillmentLabel = isExecutableCommandType(recovery.commandType) ? fulfillmentCommandLabel(recovery.commandType) : "履约操作";
   const u1Label = u1CommandType ? commandShellLabel(u1CommandType) : undefined;
   const fundLabel = fundBusiness ? (recovery.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款") : undefined;
   const tokenLabel = tokenBusiness ? tokenCommandLabel(recovery.commandType) : undefined;
   return (
-    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : fundLabel ? `待恢复${fundLabel}` : tokenLabel ? `待恢复${tokenLabel}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
+    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : backfillStay ? "待恢复补录住宿" : completeStay ? "待恢复完成住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : fundLabel ? `待恢复${fundLabel}` : tokenLabel ? `待恢复${tokenLabel}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
       <div>
         <strong>{submitting
           ? "原操作正在提交"
@@ -4205,6 +4782,10 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
             ? (resolved ? "原建档结果已确认" : "会员建档结果需要恢复查询")
             : memberStay
               ? (resolved ? "原会员住宿结果已确认" : "会员住宿结果需要恢复查询")
+              : backfillStay
+                ? (resolved ? "原补录住宿结果已确认" : "补录住宿结果需要查询")
+              : completeStay
+                ? (resolved ? "原完成住宿结果已确认" : "完成住宿结果需要查询")
               : fulfillment
                 ? (resolved ? `原${fulfillmentLabel}结果已确认` : `${fulfillmentLabel}结果需要恢复查询`)
                 : u1Label
@@ -4227,6 +4808,10 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
             ? (resolved ? "查看并关闭原建档结果后，可继续新建会员。" : "新的会员建档已暂停，请先恢复查询原结果。")
             : memberStay
               ? (resolved ? "查看并关闭原住宿结果后，可继续办理住宿。" : "新的会员住宿已暂停，请先恢复查询原结果。")
+              : backfillStay
+                ? (resolved ? "查看并关闭原补录结果后，可继续办理住宿。" : "新的住宿写入已暂停，请先查询原补录结果。")
+              : completeStay
+                ? (resolved ? "查看并关闭原完成住宿结果后，可继续办理住宿。" : "新的住宿写入已暂停，请先查询原完成住宿结果。")
               : fulfillment
                 ? (resolved ? `查看并关闭原${fulfillmentLabel}结果后，可继续操作。` : `新的${fulfillmentLabel}操作已暂停，请先查询刚才的结果。`)
                 : u1Label
@@ -4244,6 +4829,10 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
             ? (resolved ? "查看建档结果" : "恢复建档结果")
             : memberStay
               ? (resolved ? "查看住宿结果" : "恢复住宿结果")
+              : backfillStay
+                ? (resolved ? "查看补录结果" : "查询补录结果")
+              : completeStay
+                ? (resolved ? "查看完成住宿结果" : "查询完成住宿结果")
               : fulfillment
                 ? (resolved ? `查看${fulfillmentLabel}结果` : `查询${fulfillmentLabel}结果`)
                 : u1Label
@@ -4278,12 +4867,17 @@ export function CommandDialog({
   writeBlockedReason = "当前事实不再满足安全写入条件。请关闭后刷新并重新生成 Preview。",
   onProgress
 }: CommandDialogProps) {
+  const backfillStay = request.commandType === "CREATE_ORDER" && request.presentation === "BACKFILL_STAY";
+  const completeStay = request.commandType === "COMPLETE_STAY" && request.presentation === "COMPLETE_STAY";
+  const initialReceiptHasEvidence = (!backfillStay && !completeStay)
+    || !initialReceipt
+    || receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, undefined, request.recoveryEffectHash);
   const [preview, setPreview] = useState<PreviewDto>();
-  const [receipt, setReceipt] = useState<ReceiptDto | undefined>(initialReceipt);
+  const [receipt, setReceipt] = useState<ReceiptDto | undefined>(initialReceiptHasEvidence ? initialReceipt : undefined);
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const executableCommandType = isExecutableCommandType(request.commandType) ? request.commandType : undefined;
-  const u1CommandType = isU1CommandType(request.commandType) ? request.commandType : undefined;
+  const u1CommandType = !backfillStay && isU1CommandType(request.commandType) ? request.commandType : undefined;
   const memberProfile = request.commandType === "CREATE_MEMBER";
   const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
@@ -4295,20 +4889,20 @@ export function CommandDialog({
   const moveUnit = request.presentation === "MOVE_UNIT" && request.commandType === "MOVE_UNIT";
   const orderLifecycle = request.presentation === "ORDER_LIFECYCLE"
     && (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN");
-  const requestBookingChannelValue = (request as unknown as { bookingChannelCode?: unknown }).bookingChannelCode;
+  const requestBookingChannelValue = request.input.bookingChannelCode;
   const requestBookingChannelCode = typeof requestBookingChannelValue === "string" || requestBookingChannelValue === null
     ? requestBookingChannelValue
     : undefined;
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
   const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
-  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || fulfillment || fundBusiness || tokenBusiness;
-  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : fulfillment && executableCommandType ? executableCommandType : fundBusiness ? request.commandType : tokenBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
-  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : tokenBusiness ? tokenCommandLabel(request.commandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
+  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || completeStay || fulfillment || fundBusiness || tokenBusiness;
+  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : completeStay ? "COMPLETE_STAY" : fulfillment && executableCommandType ? executableCommandType : fundBusiness ? request.commandType : tokenBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment || completeStay ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : tokenBusiness ? tokenCommandLabel(request.commandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
   const recoveryOnlyRequest = Boolean(initialConfirmationKey);
-  const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && !initialReceipt));
-  const [failedNotExecuted, setFailedNotExecuted] = useState(Boolean(initialReceipt && initialReceipt.executionStatus === "NOT_EXECUTED"));
-  const [returnedOriginalReceipt, setReturnedOriginalReceipt] = useState(Boolean(initialReceipt));
+  const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && (!initialReceipt || !initialReceiptHasEvidence)));
+  const [failedNotExecuted, setFailedNotExecuted] = useState(Boolean(initialReceiptHasEvidence && initialReceipt && initialReceipt.executionStatus === "NOT_EXECUTED"));
+  const [returnedOriginalReceipt, setReturnedOriginalReceipt] = useState(Boolean(initialReceiptHasEvidence && initialReceipt));
   const [expiryClock, setExpiryClock] = useState(() => Date.now());
   const [previewMetadata, setPreviewMetadata] = useState<ClientCommandMetadata>(() => initialPreviewMetadata ?? api.commandMetadata(`preview-${request.commandType.toLowerCase()}`));
   const automaticPreviewStarted = useRef(false);
@@ -4316,8 +4910,8 @@ export function CommandDialog({
   const [shellState, setShellState] = useState(() => initialCommandShellState({
     attemptId: shellAttemptIdRef.current,
     ...(initialConfirmationKey ? { confirmationKey: initialConfirmationKey } : {}),
-    succeeded: initialReceipt?.businessCommitted === true,
-    notExecuted: Boolean(initialReceipt && initialReceipt.executionStatus !== "UNKNOWN" && !initialReceipt.businessCommitted)
+    succeeded: initialReceiptHasEvidence && initialReceipt?.businessCommitted === true,
+    notExecuted: Boolean(initialReceiptHasEvidence && initialReceipt && initialReceipt.executionStatus !== "UNKNOWN" && !initialReceipt.businessCommitted)
   }));
   const requestLeaseRef = useRef<{ id: number; controller?: AbortController }>({ id: 0 });
   const successFinalizedRef = useRef(false);
@@ -4367,6 +4961,7 @@ export function CommandDialog({
     && !networkUncertain
     && !confirmationKey
     && (!u1CommandType || u1PreviewHasBusinessEvidence(u1CommandType, preview.effect, request.input))
+    && (!backfillStay || completedStayBackfillPreviewHasEvidence(preview.effect, request.input))
     && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));
   const dialogCloseDisabled = busy && (!u1CommandType || Boolean(confirmationKey) || shellState.phase === "CONFIRMING");
   const currentKey = useMemo(() => confirmationKey ?? api.recoveryKey(request.commandType), [confirmationKey, request.commandType]);
@@ -4545,8 +5140,9 @@ export function CommandDialog({
   }
 
   useEffect(() => {
-    if (!initialReceipt?.businessCommitted || !u1CommandType) return;
+    if (!initialReceipt?.businessCommitted || (!u1CommandType && !backfillStay && !completeStay)) return;
     if (!receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, preview?.effect, request.recoveryEffectHash ?? preview?.effectHash)) {
+      setReceipt(undefined);
       setError(new Error("服务端返回的操作结果无法核对；系统将只查询原操作结果，不会重复提交。"));
       setNetworkUncertain(true);
       return;
@@ -4558,6 +5154,10 @@ export function CommandDialog({
     if (!preview || !reasonCode.trim()
       || (!createOrderBusiness && !lodgingFulfillment && !tokenBusiness && !(fundBusiness && (request.commandType === "RECORD_COLLECTION" || reasonNote.trim())) && !reasonNote.trim())
       || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
+    if (backfillStay && !completedStayBackfillPreviewHasEvidence(preview.effect, request.input)) {
+      setError(new Error("补录日期、退房状态或收款事实与本次填写不一致，本次没有提交。"));
+      return;
+    }
     if (!isExecutableCommandType(request.commandType)) {
       setError(new Error("该历史操作不能重新确认"));
       return;
@@ -4760,7 +5360,7 @@ export function CommandDialog({
                 : shellState.phase === "AUTO_PREVIEWING"
                   ? "取消核对"
                   : "返回修改"
-              : receipt ? "完成" : "取消"}
+              : receipt ? "完成" : backfillStay ? "返回修改" : "取消"}
           </button>
           {!preview && !receipt && !networkUncertain && (!businessFacing || Boolean(error) || shellState.phase === "EDITING") ? <button className="button button-primary" type="button" onClick={() => void loadPreview()} disabled={busy || writeBlocked} data-testid="create-command-preview">
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : null}{shellState.phase === "EDITING" ? "继续核对" : businessFacing ? "重新载入核对信息" : "生成服务端预览"}
@@ -4769,7 +5369,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : backfillStay ? "确认补录住宿" : completeStay ? "确认完成住宿" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }
@@ -4779,11 +5379,7 @@ export function CommandDialog({
       <InlineError
         error={fulfillment && error ? new Error(networkUncertain
           ? "暂时无法确认本次操作结果。请使用下方按钮查询刚才的结果，系统不会重复办理。"
-          : error instanceof ApiError && (error.status === 401 || error.status === 403)
-            ? "当前账号无权完成这项操作，本次没有写入。"
-            : error instanceof ApiError && (error.status === 409 || error.code === "PREVIEW_STALE" || error.code === "INVALID_ORDER_STATE")
-              ? "当前业务状态已经变化，本次没有写入。请刷新后重新核对。"
-              : "暂时无法载入本次操作信息，请稍后重试。") : error}
+          : businessErrorMessage(error)) : error}
         title={failedNotExecuted ? "操作未执行" : "操作处理失败"}
         hideTechnicalDetails={businessFacing}
       />
@@ -4805,7 +5401,7 @@ export function CommandDialog({
       </div> : null}
       {!preview && !receipt ? (
         <div className="command-pending">
-          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">
@@ -4862,22 +5458,24 @@ export function CommandDialog({
           data-command-state="duplicate-returned-original-receipt"
         >
           <strong>{businessFacing ? "已找到原操作结果" : "已返回原 Receipt"}</strong>
-          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : tokenBusiness ? "系统返回了原来的 Token 操作结果，没有重复提交。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
+          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : backfillStay ? "系统返回了原补录住宿结果，没有重复创建订单、退房记录或收款事实。" : completeStay ? "系统返回了刚才的办理结果，没有重复完成订单或重复登记收款。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : tokenBusiness ? "系统返回了原来的 Token 操作结果，没有重复提交。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
         </div>
       ) : null}
       {receipt && !u1CommandType ? <ReceiptPanel
         receipt={receipt}
         onNavigateToResource={onClose}
         memberStay={memberLodging}
+        backfillStay={backfillStay}
+        completeStay={completeStay}
         {...(requestBookingChannelCode !== undefined ? { bookingChannelCode: requestBookingChannelCode } : {})}
         {...(executableCommandType ? { commandType: executableCommandType } : {})}
         {...(businessFacing && executableCommandType ? { businessCommand: executableCommandType } : {})}
       /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
-          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : tokenBusiness ? "Token 操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : tokenBusiness ? "系统会查询刚才的 Token 操作结果，不会重复提交。" : u1CommandType ? "系统只查询原操作使用的幂等身份，不会重复提交。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
+          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : backfillStay ? "补录住宿结果需要恢复查询" : completeStay ? "完成住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : tokenBusiness ? "Token 操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : backfillStay ? "系统会查询原补录结果，不会重复创建订单、退房记录或收款事实。" : completeStay ? "系统只查询刚才的办理结果，不会重复完成订单或重复登记收款。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : tokenBusiness ? "系统会查询刚才的 Token 操作结果，不会重复提交。" : u1CommandType ? "系统只查询原操作使用的幂等身份，不会重复提交。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recover()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : tokenBusiness ? "查询 Token 结果" : u1CommandType ? "查询原操作结果" : "查询命令结果"}
+            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : backfillStay ? "查询补录结果" : completeStay ? "查询完成住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : tokenBusiness ? "查询 Token 结果" : u1CommandType ? "查询原操作结果" : "查询命令结果"}
           </button>
         </div>
       ) : null}

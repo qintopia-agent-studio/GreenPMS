@@ -4,6 +4,8 @@ import {
   confirmCommandPreview,
   createCommandPreview,
   getOrderView,
+  propertyLocalToday,
+  withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
 import type { Kysely } from "kysely";
@@ -31,6 +33,13 @@ function metadata(prefix: string) {
   };
 }
 
+async function withOrdinaryOrderCreationClock<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
+  const businessDate = await propertyLocalToday(db, demo.propertyId);
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), operation)
+    : operation();
+}
+
 async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Promise<ReceiptDto> {
   const preview = await createCommandPreview(db, principal, envelope, metadata(`${prefix}-preview`));
   return confirmCommandPreview(db, principal, preview.preview.previewId, {
@@ -52,30 +61,32 @@ async function createOrder(options: {
   stayType?: StayType;
   freeStayReason?: string;
 }) {
-  const stayType = options.stayType ?? paidStayTypeForNights(enumerateServiceDates(options.arrivalDate, options.departureDate).length);
-  const quote = await createQuoteForTesting(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: options.unitId,
-    stayType,
-    arrivalDate: options.arrivalDate,
-    departureDate: options.departureDate,
-    pricingPolicyVersionId: stayType === "FREE" ? demo.freePolicyId : demo.publicPricingPolicyId
-  });
-  const receipt = await previewAndConfirm({
-    commandType: "CREATE_ORDER",
-    input: {
+  return withOrdinaryOrderCreationClock(options.arrivalDate, async () => {
+    const stayType = options.stayType ?? paidStayTypeForNights(enumerateServiceDates(options.arrivalDate, options.departureDate).length);
+    const quote = await createQuoteForTesting(db, {
       propertyId: demo.propertyId,
-      quoteId: quote.quoteId,
-      primaryGuest: { fullName: `Pricing Guest ${options.prefix}`, nickname: `Pricing ${options.prefix}` },
-      ...(stayType !== "FREE" ? {
-        bookingChannelCode: "YOUMUDAO",
-        channelOrderReference: `REAL-PRICE-${options.prefix}`,
-        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
-      } : {}),
-      ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Confirmed complimentary stay", freeStayCategoryCode: "VOLUNTEER" } : {})
-    }
-  }, `${options.prefix}-create`);
-  return { quote, orderId: receipt.result!.orderId as string };
+      inventoryUnitId: options.unitId,
+      stayType,
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate,
+      pricingPolicyVersionId: stayType === "FREE" ? demo.freePolicyId : demo.publicPricingPolicyId
+    });
+    const receipt = await previewAndConfirm({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: `Pricing Guest ${options.prefix}`, nickname: `Pricing ${options.prefix}` },
+        ...(stayType !== "FREE" ? {
+          bookingChannelCode: "YOUMUDAO",
+          channelOrderReference: `REAL-PRICE-${options.prefix}`,
+          targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+        } : {}),
+        ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Confirmed complimentary stay", freeStayCategoryCode: "VOLUNTEER" } : {})
+      }
+    }, `${options.prefix}-create`);
+    return { quote, orderId: receipt.result!.orderId as string };
+  });
 }
 
 beforeEach(async () => {

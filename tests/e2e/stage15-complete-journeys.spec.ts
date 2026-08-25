@@ -74,7 +74,7 @@ async function createWecomOrder(
 
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
-  await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  await popover.getByRole("button", { name: "创建订单", exact: true }).click();
   const drawer = page.locator("dialog.room-status-write-drawer");
   await expect(drawer).toBeVisible();
   await drawer.getByLabel("入住日期", { exact: true }).fill(fixture.arrivalDate);

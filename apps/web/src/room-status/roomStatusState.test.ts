@@ -18,6 +18,7 @@ import {
   roomStatusCellBelongsToStay,
   roomStatusOrderIdentityForDate,
   roomStatusOrderOptionsForDate,
+  roomStatusOrderOptionsForSelection,
   roomStatusUniqueOrderStayId,
   roomStatusOrderIdentityForReturnTarget,
   roomStatusViewReducer,
@@ -100,7 +101,7 @@ function lodgingInterval(overrides: Partial<RoomStatusIntervalDto> = {}): RoomSt
 }
 
 describe("RoomStatus grid intervals", () => {
-  it("replaces represented active lodging while retaining unresolved and block intervals", () => {
+  it("renders only non-lodging bars while every lodging status stays in the daily cells", () => {
     const childBed = lodgingInterval();
     const wholeRoom = lodgingInterval({
       id: "interval_whole_room_order",
@@ -108,7 +109,9 @@ describe("RoomStatus grid intervals", () => {
       label: "order_whole_room",
       primaryOccupantLabel: "北辰"
     });
-    const unresolvedChild = lodgingInterval({ id: "interval_unknown", status: "UNKNOWN" });
+    const unresolvedChild = lodgingInterval({ id: "interval_unknown", status: "UNKNOWN", occupants: [], occupantCount: 0 });
+    const settled = lodgingInterval({ id: "interval_settled", status: "SETTLED", blocking: false });
+    const arrears = lodgingInterval({ id: "interval_arrears", status: "ARREARS", blocking: false });
     const maintenance = lodgingInterval({ id: "interval_maintenance", sourceKind: "MAINTENANCE" });
     const rendered = intervalsRenderedOnRoomStatusGrid(unit({
       bedOccupancies: [{
@@ -123,21 +126,18 @@ describe("RoomStatus grid intervals", () => {
           sourceReference: orderReference
         }]
       }],
-      intervals: [childBed, wholeRoom, unresolvedChild, maintenance]
+      intervals: [childBed, wholeRoom, unresolvedChild, settled, arrears, maintenance]
     }), ["2026-07-20"]);
 
     expect(rendered.map((interval) => interval.id)).toEqual([
-      "interval_unknown",
       "interval_maintenance"
     ]);
 
     const aggregationMissing = intervalsRenderedOnRoomStatusGrid(unit({
       bedOccupancies: [],
-      intervals: [childBed, wholeRoom, unresolvedChild, maintenance]
+      intervals: [childBed, wholeRoom, unresolvedChild, settled, arrears, maintenance]
     }), ["2026-07-20"]);
     expect(aggregationMissing.map((interval) => interval.id)).toEqual([
-      "interval_bed_order",
-      "interval_unknown",
       "interval_maintenance"
     ]);
 
@@ -149,9 +149,7 @@ describe("RoomStatus grid intervals", () => {
         occupantCount: 0
       })]
     }), ["2026-07-20"]);
-    expect(missingWholeRoomOccupants.map((interval) => interval.id)).toEqual([
-      "interval_whole_room_without_occupants"
-    ]);
+    expect(missingWholeRoomOccupants.map((interval) => interval.id)).toEqual([]);
   });
 
   it("hides typed lodging bars on concrete room and bed rows", () => {
@@ -173,6 +171,39 @@ describe("RoomStatus grid intervals", () => {
 });
 
 describe("RoomStatus quick order options", () => {
+  it("keeps a split-bed parent cell distinct from its only child order", () => {
+    const parentDisplay = lodgingInterval({
+      id: "interval_parent_display",
+      displayInventoryUnitId: "unit_room_101",
+      actualInventoryUnitId: "unit_bed_101_a"
+    });
+    const childInterval = lodgingInterval({
+      id: "interval_child_canonical",
+      displayInventoryUnitId: "unit_bed_101_a",
+      actualInventoryUnitId: "unit_bed_101_a"
+    });
+    const child = unit({
+      id: "unit_bed_101_a",
+      roomId: "unit_room_101",
+      parentRoomId: "unit_room_101",
+      kind: "BED",
+      salesMode: "BED_SPLIT",
+      intervals: [childInterval],
+      children: []
+    });
+    const parent = unit({
+      intervals: [parentDisplay],
+      children: [child]
+    });
+
+    expect(roomStatusOrderOptionsForDate(parent, "2026-07-20")).toMatchObject({
+      kind: "READY",
+      orders: [{ identity: { stayId: "stay_bed" } }]
+    });
+    expect(roomStatusOrderIdentityForDate(parent, "2026-07-20")).toBeNull();
+    expect(roomStatusOrderIdentityForDate(child, "2026-07-20")).toMatchObject({ stayId: "stay_bed" });
+  });
+
   it("lists every exact bed order from a parent room without guessing a single order", () => {
     const bedAInterval = lodgingInterval({
       label: "订单 order_bed",
@@ -216,6 +247,55 @@ describe("RoomStatus quick order options", () => {
     }
   });
 
+  it("lists every existing order touched by a dragged date selection", () => {
+    const firstOrder = lodgingInterval({
+      startDate: "2026-07-18",
+      endDate: "2026-07-21",
+      sourceStartDate: "2026-07-18",
+      sourceEndDate: "2026-07-21"
+    });
+    const secondOrder = lodgingInterval({
+      id: "interval_bed_order_b",
+      actualInventoryUnitId: "unit_bed_101_a",
+      startDate: "2026-07-22",
+      endDate: "2026-07-25",
+      sourceStartDate: "2026-07-22",
+      sourceEndDate: "2026-07-25",
+      primaryOccupantLabel: "青岚",
+      references: [
+        { ...orderReference, id: "order_bed_b", href: "/orders/order_bed_b" },
+        { ...stayReference, id: "stay_bed_b" }
+      ]
+    });
+    const bed = unit({
+      id: "unit_bed_101_a",
+      roomId: "unit_room_101",
+      parentRoomId: "unit_room_101",
+      kind: "BED",
+      salesMode: "BED_SPLIT",
+      intervals: [firstOrder, secondOrder],
+      children: []
+    });
+
+    const result = roomStatusOrderOptionsForSelection(bed, {
+      unitId: bed.id,
+      arrivalDate: "2026-07-20",
+      departureDate: "2026-07-24"
+    });
+    expect(result).toMatchObject({
+      kind: "READY",
+      orders: [
+        { label: "山风", identity: { orderId: "order_bed" } },
+        { label: "青岚", identity: { orderId: "order_bed_b" } }
+      ]
+    });
+    expect(roomStatusOrderOptionsForSelection(bed, {
+      unitId: bed.id,
+      arrivalDate: "2026-07-25",
+      departureDate: "2026-07-27"
+    })).toEqual({ kind: "READY", orders: [] });
+  });
+
   it("never falls back to a machine interval label when occupant labels are unavailable", () => {
     const interval = lodgingInterval({
       label: "订单 order_internal_123",
@@ -233,6 +313,47 @@ describe("RoomStatus quick order options", () => {
     });
     const result = roomStatusOrderOptionsForDate(bed, "2026-07-20");
     expect(result).toMatchObject({ kind: "READY", orders: [{ label: "住宿订单" }] });
+  });
+
+  it("opens completed settled and arrears lodging from the same daily-cell order path", () => {
+    for (const status of ["SETTLED", "ARREARS"] as const) {
+      const completed = lodgingInterval({
+        status,
+        blocking: false,
+        actualInventoryUnitId: "unit_bed_102_c",
+        displayInventoryUnitId: "unit_bed_102_c",
+        roomId: "unit_room_102",
+        startDate: "2026-08-06",
+        endDate: "2026-08-11",
+        sourceStartDate: "2026-08-06",
+        sourceEndDate: "2026-08-11"
+      });
+      const bed = unit({
+        id: "unit_bed_102_c",
+        roomId: "unit_room_102",
+        parentRoomId: "unit_room_102",
+        kind: "BED",
+        code: "102-C",
+        salesMode: "BED_SPLIT",
+        days: [
+          { ...day("2026-08-06", status), available: false, intervalIds: [completed.id] },
+          { ...day("2026-08-07", status), available: false, intervalIds: [completed.id] }
+        ],
+        intervals: [completed],
+        children: []
+      });
+
+      expect(roomStatusOrderIdentityForDate(bed, "2026-08-06")).toMatchObject({
+        orderId: "order_bed",
+        stayId: "stay_bed",
+        arrivalDate: "2026-08-06",
+        departureDate: "2026-08-11"
+      });
+      expect(roomStatusCellBelongsToStay(bed, "2026-08-07", "stay_bed")).toBe(true);
+      const result = roomStatusOrderOptionsForDate(bed, "2026-08-06");
+      expect(result.kind).toBe("READY");
+      if (result.kind === "READY") expect(result.orders).toHaveLength(1);
+    }
   });
 
   it("fails closed when any visible lodging lacks a stable order and Stay pair", () => {

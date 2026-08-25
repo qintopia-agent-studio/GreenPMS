@@ -23,8 +23,13 @@ export type CreateOrderPricingBasis = (typeof createOrderPricingBasisCodes)[numb
 export const freeStayCategoryCodes = ["VOLUNTEER", "RECEPTION"] as const;
 export type FreeStayCategoryCode = (typeof freeStayCategoryCodes)[number];
 
+export const backfillCollectionMethods = ["WECOM", "BANK_TRANSFER", "CASH"] as const;
+export type BackfillCollectionMethod = (typeof backfillCollectionMethods)[number];
+
 export const currentReleaseFeatures = {
-  cleaningWorkflow: false
+  cleaningWorkflow: false,
+  stayBackfillSubmission: false,
+  completedStayBackfillCreation: true
 } as const;
 
 export const commandTypes = [
@@ -52,6 +57,7 @@ export const commandTypes = [
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "CHECK_IN",
   "CHECK_OUT",
+  "COMPLETE_STAY",
   "REFRESH_MEMBER_COVERAGE",
   "ADD_MEMBER_ENTITLEMENT_LOT",
   "ADJUST_MEMBER_ENTITLEMENT",
@@ -62,8 +68,9 @@ export const commandTypes = [
   "REVOKE_TOKEN"
 ] as const;
 export type DeferredCommandType = "PLACE_INTERNAL_USE" | "RELEASE_INTERNAL_USE";
+export type ObsoleteCommandType = "BACKFILL_COMPLETED_STAY";
 export type CommandType = (typeof commandTypes)[number];
-export type HistoricalCommandType = CommandType | DeferredCommandType;
+export type HistoricalCommandType = CommandType | DeferredCommandType | ObsoleteCommandType;
 
 export const directCommandTypes = ["CREATE_QUOTE"] as const;
 export type DirectCommandType = (typeof directCommandTypes)[number];
@@ -72,7 +79,8 @@ export type RecoverableCommandType = (typeof recoverableCommandTypes)[number];
 export const historicalRecoverableCommandTypes = [
   ...recoverableCommandTypes,
   "PLACE_INTERNAL_USE",
-  "RELEASE_INTERNAL_USE"
+  "RELEASE_INTERNAL_USE",
+  "BACKFILL_COMPLETED_STAY"
 ] as const;
 export type HistoricalRecoverableCommandType = (typeof historicalRecoverableCommandTypes)[number];
 
@@ -362,6 +370,8 @@ export const roomStatusStatuses = [
   "CLEANING",
   "MAINTENANCE",
   "UNAVAILABLE",
+  "SETTLED",
+  "ARREARS",
   "STALE",
   "UNKNOWN"
 ] as const;
@@ -373,6 +383,7 @@ export const ROOM_STATUS_OPERATIONAL_TASK_LIMIT = 500;
 export const roomStatusActionCodes = [
   "CREATE_ORDER",
   "CREATE_FREE_STAY",
+  "BACKFILL_ORDER",
   "LOCK_MAINTENANCE",
   "OPEN_ORDER",
   "RELEASE_MAINTENANCE",
@@ -453,6 +464,8 @@ export interface RoomStatusIntervalDto {
   endDate: string;
   sourceStartDate: string;
   sourceEndDate: string;
+  /** Original order arrival date. Omitted for non-lodging and legacy projections. */
+  orderArrivalDate?: string;
   status: RoomStatusStatus;
   available: boolean;
   blocking: boolean;
@@ -498,6 +511,9 @@ export interface RoomStatusAvailabilitySummaryDto {
   serviceDate: string;
   availableRooms: number;
   availableBeds: number;
+  paidOccupiedUnits: number;
+  totalSellableUnits: number;
+  occupantCount: number;
 }
 
 export interface RoomStatusUnitDto {
@@ -654,6 +670,9 @@ export interface CreateOrderInputDto {
   manualPriceAdjustmentReason?: string;
   freeStayReason?: string;
   freeStayCategoryCode?: FreeStayCategoryCode;
+  backfill?: true;
+  backfillCollection?: BackfillCompletedStayCollectionInputDto;
+  backfillReason?: string;
 }
 
 export interface RescheduleStayInputDto {
@@ -700,6 +719,52 @@ export interface RevokeCheckInInputDto {
   unusedRoomConfirmed: true;
 }
 
+export type CompleteStayCollectionInputDto =
+  | {
+      amountMinor: number;
+      method: "WECOM" | "BANK_TRANSFER";
+      transactionReference?: string;
+      note?: string;
+      cashCollector?: never;
+    }
+  | {
+      amountMinor: number;
+      method: "CASH";
+      cashCollector?: string;
+      note?: string;
+      transactionReference?: never;
+    };
+
+export interface CompleteStayInputDto {
+  propertyId: string;
+  orderId: string;
+  actualStayCompletedConfirmed: true;
+  reasonNote: string;
+  collection?: CompleteStayCollectionInputDto;
+}
+
+export type BackfillCompletedStayCollectionInputDto =
+  | {
+      amountMinor: number;
+      method: "WECOM" | "BANK_TRANSFER";
+      transactionReference?: string;
+      note?: string;
+      cashCollector?: never;
+    }
+  | {
+      amountMinor: number;
+      method: "CASH";
+      cashCollector?: string;
+      note?: string;
+      transactionReference?: never;
+    };
+
+export interface BackfillCompletedStayInputDto {
+  propertyId: string;
+  orderId: string;
+  collection?: BackfillCompletedStayCollectionInputDto;
+}
+
 export interface CreateOrderPricingDecisionDto {
   pricingBasis: CreateOrderPricingBasis;
   policyBaseAmountMinor: number;
@@ -733,6 +798,7 @@ export const orderActionCodes = [
   "CORRECT_ORDER_OCCUPANT",
   "CHECK_IN",
   "CHECK_OUT",
+  "COMPLETE_STAY",
   "RESCHEDULE_STAY",
   "SHORTEN_STAY",
   "EXTEND_STAY",

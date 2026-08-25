@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderArrangementDto, OrderArrangementHistoryItemDto } from "@qintopia/contracts";
+import type { CollectionFactDto } from "./types";
 import { OrderViewValidationError, parseOrderView } from "./orderViewValidation";
 
 type TestHistoryItem = Omit<OrderArrangementHistoryItemDto, "type"> & { type: string };
@@ -1004,6 +1005,7 @@ describe("parseOrderView", () => {
       method: "CASH",
       note: "",
       transaction_reference: "HISTORICAL-CASH-001",
+      cash_collector: null,
       pricing_revision_id: null,
       command_id: "command_historical_null_revision",
       created_at: "2026-07-28T08:00:00.000Z"
@@ -1011,6 +1013,37 @@ describe("parseOrderView", () => {
     input.amounts.netRecordedCollection.minorUnits += 100;
     input.amounts.collectionDifference.minorUnits -= 100;
     expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("accepts the cash collector evidence on collection facts", () => {
+    const input = orderView();
+    const collectionFact: CollectionFactDto = {
+      fact_id: "fact_backfill_cash",
+      order_id: input.order.id,
+      fact_type: "COLLECTION",
+      amount_minor: 100,
+      net_effect_minor: 100,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "CASH",
+      cash_collector: "前台甲",
+      note: "补录现金收款",
+      transaction_reference: null,
+      pricing_revision_id: "revision_1",
+      command_id: "command_backfill_cash",
+      created_at: "2026-07-28T08:00:00.000Z"
+    };
+    input.collectionFacts.push(collectionFact as never);
+    input.amounts.netRecordedCollection.minorUnits += 100;
+    input.amounts.collectionDifference.minorUnits -= 100;
+    expect(parseOrderView(input)).toBe(input);
+
+    collectionFact.cash_collector = null;
+    expect(parseOrderView(input)).toBe(input);
+
+    collectionFact.cash_collector = 123 as never;
+    expect(() => parseOrderView(input)).toThrow("collectionFacts[0].cash_collector必须是非空文字");
   });
 
   it.each([
@@ -1051,7 +1084,7 @@ describe("parseOrderView", () => {
     ["unexpected collection field", (input: ReturnType<typeof orderView>) => {
       input.collectionFacts.push({
         fact_id: "fact_1", order_id: "order_u2", fact_type: "COLLECTION", amount_minor: 100, net_effect_minor: 100,
-        currency: "CNY", references_fact_id: null, reverses_fact_id: null, method: "CASH", note: "", transaction_reference: null,
+        currency: "CNY", references_fact_id: null, reverses_fact_id: null, method: "CASH", note: "", transaction_reference: null, cash_collector: null,
         pricing_revision_id: "revision_1", command_id: "command_1", created_at: "2026-07-28T08:00:00.000Z", raw: true
       } as never);
     }, "collectionFacts[0].raw不是允许的字段"],

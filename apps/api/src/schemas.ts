@@ -1,5 +1,6 @@
 import { Type, type TObject, type TProperties } from "@sinclair/typebox";
 import {
+  backfillCollectionMethods,
   bookingChannelCodes,
   commandTypes,
   createOrderPricingBasisCodes,
@@ -53,12 +54,14 @@ export const EntitlementUnitKindSchema = Type.Union([Type.Literal("ROOM_NIGHT"),
 export const StayTypeSchema = Type.Union(stayTypes.map((stayType) => Type.Literal(stayType)));
 export const BookingChannelCodeSchema = Type.Union(bookingChannelCodes.map((code) => Type.Literal(code)));
 export const FreeStayCategoryCodeSchema = Type.Union(freeStayCategoryCodes.map((code) => Type.Literal(code)));
+export const BackfillCollectionMethodSchema = Type.Union(backfillCollectionMethods.map((method) => Type.Literal(method)));
 export const CommandTypeSchema = Type.Union(commandTypes.map((commandType) => Type.Literal(commandType)));
 export const RecoverableCommandTypeSchema = Type.Union(recoverableCommandTypes.map((commandType) => Type.Literal(commandType)));
 export const HistoricalCommandTypeSchema = Type.Union([
   CommandTypeSchema,
   Type.Literal("PLACE_INTERNAL_USE"),
-  Type.Literal("RELEASE_INTERNAL_USE")
+  Type.Literal("RELEASE_INTERNAL_USE"),
+  Type.Literal("BACKFILL_COMPLETED_STAY")
 ]);
 export const HistoricalRecoverableCommandTypeSchema = Type.Union(
   historicalRecoverableCommandTypes.map((commandType) => Type.Literal(commandType))
@@ -134,6 +137,76 @@ const RecordedCommandReasonSchema = strictObject({
   code: Type.String({ minLength: 1, maxLength: 80 }),
   note: OptionalNote
 });
+
+const BackfillNonCashCollectionMethodSchema = Type.Union([
+  Type.Literal("WECOM"),
+  Type.Literal("BANK_TRANSFER")
+]);
+const BackfillPositiveAmount = Type.Integer({ minimum: 1, maximum: 2_147_483_647 });
+const BackfillCollectionInputSchema = Type.Intersect([
+  strictObject({
+    amountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
+    method: BackfillCollectionMethodSchema,
+    transactionReference: Type.Optional(ShortText),
+    cashCollector: Type.Optional(ShortText),
+    note: Type.Optional(OptionalNote)
+  }),
+  Type.Union([
+    Type.Object({
+      amountMinor: Type.Literal(0),
+      method: BackfillNonCashCollectionMethodSchema,
+      cashCollector: Type.Optional(Type.Never())
+    }),
+    Type.Object({
+      amountMinor: Type.Literal(0),
+      method: Type.Literal("CASH"),
+      transactionReference: Type.Optional(Type.Never())
+    }),
+    Type.Object({
+      amountMinor: BackfillPositiveAmount,
+      method: BackfillNonCashCollectionMethodSchema,
+      transactionReference: ShortText,
+      cashCollector: Type.Optional(Type.Never())
+    }),
+    Type.Object({
+      amountMinor: BackfillPositiveAmount,
+      method: Type.Literal("CASH"),
+      transactionReference: Type.Optional(Type.Never()),
+      cashCollector: ShortText,
+      note: Note
+    })
+  ])
+]);
+const BackfillCollectionEffectSchema = Type.Union([
+  strictObject({
+    amountMinor: BackfillPositiveAmount,
+    method: BackfillNonCashCollectionMethodSchema,
+    transactionReference: ShortText,
+    note: OptionalNote
+  }),
+  strictObject({
+    amountMinor: BackfillPositiveAmount,
+    method: Type.Literal("CASH"),
+    cashCollector: ShortText,
+    note: Note
+  })
+]);
+const BackfillCompletedStayCollectionEffectSchema = Type.Union([
+  strictObject({
+    amountMinor: BackfillPositiveAmount,
+    currency: Type.String({ minLength: 3, maxLength: 3 }),
+    method: BackfillNonCashCollectionMethodSchema,
+    transactionReference: ShortText,
+    note: OptionalNote
+  }),
+  strictObject({
+    amountMinor: BackfillPositiveAmount,
+    currency: Type.String({ minLength: 3, maxLength: 3 }),
+    method: Type.Literal("CASH"),
+    cashCollector: ShortText,
+    note: Note
+  })
+]);
 
 const ErrorDetailsSchema = Type.Union([
   strictObject({ serviceDate: LocalDate, claimId: Id }),
@@ -294,7 +367,10 @@ export const CommandEnvelopeSchema = Type.Union([
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note),
     freeStayReason: Type.Optional(Note),
-    freeStayCategoryCode: Type.Optional(FreeStayCategoryCodeSchema)
+    freeStayCategoryCode: Type.Optional(FreeStayCategoryCodeSchema),
+    backfill: Type.Optional(Type.Literal(true)),
+    backfillReason: Type.Optional(Note),
+    backfillCollection: Type.Optional(BackfillCollectionInputSchema)
   })),
   commandEnvelope("CORRECT_ORDER_OCCUPANT", strictObject({
     ...OrderInput,
@@ -346,7 +422,7 @@ export const CommandEnvelopeSchema = Type.Union([
     ...OrderInput,
     memberId: Id,
     membershipProductId: Id,
-    collectionFactIds: Type.Array(Id, { minItems: 1 }),
+    collectionFactIds: Type.Array(Id),
     agreedPriceMinor: NonNegativeWholeYuanAmount,
     priceAdjustmentReason: Type.Optional(Note),
     remainingPaymentTransactionReference: Type.Optional(ShortText),
@@ -354,6 +430,12 @@ export const CommandEnvelopeSchema = Type.Union([
   })),
   commandEnvelope("CHECK_IN", strictObject(OrderInput)),
   commandEnvelope("CHECK_OUT", strictObject(OrderInput)),
+  commandEnvelope("COMPLETE_STAY", strictObject({
+    ...OrderInput,
+    actualStayCompletedConfirmed: Type.Literal(true),
+    reasonNote: Note,
+    collection: Type.Optional(BackfillCollectionInputSchema)
+  })),
   commandEnvelope("REFRESH_MEMBER_COVERAGE", strictObject(OrderInput)),
   commandEnvelope("ADD_MEMBER_ENTITLEMENT_LOT", strictObject({
     ...PropertyInput,
@@ -397,7 +479,10 @@ export const ConfirmSchema = Type.Union([
   strictObject({
     ...ConfirmBaseProperties,
     commandType: Type.Literal("CREATE_ORDER"),
-    reason: strictObject({ code: Type.Literal("CREATE_STANDARD_ORDER"), note: Type.Literal("") })
+    reason: Type.Union([
+      strictObject({ code: Type.Literal("CREATE_STANDARD_ORDER"), note: Type.Literal("") }),
+      strictObject({ code: Type.Literal("BACKFILL_STAY"), note: Note })
+    ])
   }),
   strictObject({
     ...ConfirmBaseProperties,
@@ -713,6 +798,17 @@ export const CommandEffectSchema = Type.Union([
     pricingPolicyVersionId: Id,
     memberId: nullable(Id),
     memberContractId: nullable(Id),
+    backfill: Type.Optional(strictObject({
+      reason: Note,
+      businessDate: LocalDate,
+      resultingOrderStatus: Type.Union([Type.Literal("CHECKED_IN"), Type.Literal("CHECKED_OUT")]),
+      resultingStayStatus: Type.Union([Type.Literal("IN_HOUSE"), Type.Literal("COMPLETED")]),
+      collection: nullable(BackfillCollectionEffectSchema),
+      externalChannel: Type.Boolean(),
+      settlementStatus: Type.Union([Type.Literal("SETTLED"), Type.Literal("ARREARS")]),
+      collectedAmountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
+      balanceDueMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
+    })),
     pricingDecision: Type.Optional(CreateOrderPricingDecisionSchema),
     pricing: PricingResultSchema
   }),
@@ -878,7 +974,7 @@ export const CommandEffectSchema = Type.Union([
       allowedInventoryKind: InventoryUnitKindSchema
     }),
     transfer: strictObject({
-      collections: Type.Array(StayCollectionTransferItemSchema, { minItems: 1 }),
+      collections: Type.Array(StayCollectionTransferItemSchema),
       total: Money
     }),
     membershipPricing: strictObject({
@@ -907,6 +1003,92 @@ export const CommandEffectSchema = Type.Union([
     }),
     pricingDecision: CreateOrderPricingDecisionSchema,
     pricing: PricingResultSchema
+  }),
+  strictObject({
+    operation: Type.Literal("BACKFILL_COMPLETED_STAY"),
+    orderId: Id,
+    stayId: Id,
+    inventoryUnitId: Id,
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    businessDate: LocalDate,
+    amounts: AmountSummarySchema,
+    checkIn: strictObject({
+      orderId: Id,
+      fromStatus: Type.Literal("RESERVED"),
+      toStatus: Type.Literal("CHECKED_IN"),
+      inventoryUnitId: Id,
+      businessDate: LocalDate,
+      effectiveDate: LocalDate,
+      recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")]),
+      entitlementTransition: strictObject({
+        from: Type.Literal("HELD"),
+        to: Type.Literal("CONSUMED"),
+        coverageCount: Type.Integer({ minimum: 0 })
+      })
+    }),
+    checkOut: strictObject({
+      orderId: Id,
+      fromStatus: Type.Literal("CHECKED_IN"),
+      toStatus: Type.Literal("CHECKED_OUT"),
+      inventoryUnitId: Id,
+      businessDate: LocalDate,
+      effectiveDate: LocalDate,
+      recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
+    }),
+    entitlementTransition: strictObject({
+      from: Type.Literal("HELD"),
+      to: Type.Literal("CONSUMED"),
+      coverageCount: Type.Integer({ minimum: 0 })
+    }),
+    collection: nullable(BackfillCompletedStayCollectionEffectSchema)
+  }),
+  strictObject({
+    operation: Type.Literal("COMPLETE_STAY"),
+    orderId: Id,
+    stayId: Id,
+    inventoryUnitId: Id,
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    businessDate: LocalDate,
+    reasonNote: Note,
+    stayTimeline: StayTimelineSchema,
+    settlementStatus: Type.Union([Type.Literal("SETTLED"), Type.Literal("ARREARS")]),
+    amounts: AmountSummarySchema,
+    inventoryRelease: strictObject({
+      claimIds: Type.Array(Id),
+      claimCount: Type.Integer({ minimum: 0 })
+    }),
+    checkIn: strictObject({
+      orderId: Id,
+      fromStatus: Type.Literal("RESERVED"),
+      toStatus: Type.Literal("CHECKED_IN"),
+      inventoryUnitId: Id,
+      businessDate: LocalDate,
+      effectiveDate: LocalDate,
+      recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")]),
+      entitlementTransition: strictObject({
+        from: Type.Literal("HELD"),
+        to: Type.Literal("CONSUMED"),
+        coverageCount: Type.Integer({ minimum: 0 })
+      })
+    }),
+    checkOut: strictObject({
+      orderId: Id,
+      fromStatus: Type.Literal("CHECKED_IN"),
+      toStatus: Type.Literal("CHECKED_OUT"),
+      inventoryUnitId: Id,
+      businessDate: LocalDate,
+      effectiveDate: LocalDate,
+      recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
+    }),
+    entitlementTransition: strictObject({
+      from: Type.Literal("HELD"),
+      to: Type.Literal("CONSUMED"),
+      coverageCount: Type.Integer({ minimum: 0 }),
+      coverageIds: Type.Array(Id)
+    }),
+    collection: nullable(BackfillCompletedStayCollectionEffectSchema)
   }),
   strictObject({
     orderId: Id,
@@ -958,6 +1140,17 @@ const CreateOrderResultSchema = strictObject({
   channelOrderReference: nullable(ShortText),
   freeStayReason: nullable(Note),
   freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema),
+  effectHash: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })),
+  status: Type.Optional(Type.Union([Type.Literal("RESERVED"), Type.Literal("CHECKED_IN"), Type.Literal("CHECKED_OUT")])),
+  backfill: Type.Optional(strictObject({
+    businessDate: LocalDate,
+    checkInAmendmentId: Id,
+    checkOutAmendmentId: Id,
+    settlementStatus: Type.Union([Type.Literal("SETTLED"), Type.Literal("ARREARS")]),
+    collectedAmountMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
+    balanceDueMinor: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
+    collectionFactId: nullable(Id)
+  })),
   pricingDecision: Type.Optional(CreateOrderPricingDecisionSchema)
 });
 const CorrectOrderOccupantResultSchema = strictObject({
@@ -1194,6 +1387,37 @@ const OrderStatusResultSchema = strictObject({
 });
 const PreviewReceiptResultSchema = strictObject({ preview: PreviewSchema });
 const QuoteReceiptResultSchema = strictObject({ quote: QuoteSchema });
+const BackfillCompletedStayResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  checkInAmendmentId: Id,
+  checkOutAmendmentId: Id,
+  collectionFactId: nullable(Id),
+  status: Type.Literal("CHECKED_OUT"),
+  settlementStatus: Type.Union([Type.Literal("SETTLED"), Type.Literal("ARREARS")]),
+  fulfillmentTiming: strictObject({
+    effectiveDate: LocalDate,
+    recordedBusinessDate: LocalDate,
+    recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
+  })
+});
+export const CompleteStayResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  checkInAmendmentId: Id,
+  checkOutAmendmentId: Id,
+  collectionFactId: nullable(Id),
+  releasedClaimIds: Type.Array(Id, { minItems: 1 }),
+  consumedCoverageIds: Type.Array(Id),
+  status: Type.Literal("CHECKED_OUT"),
+  settlementStatus: Type.Union([Type.Literal("SETTLED"), Type.Literal("ARREARS")]),
+  fulfillmentTiming: strictObject({
+    effectiveDate: LocalDate,
+    recordedBusinessDate: LocalDate,
+    recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
+  }),
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+});
 const MembershipOrderCreatedResultSchema = strictObject({
   membershipOrderId: Id,
   status: Type.Literal("DRAFT")
@@ -1228,10 +1452,10 @@ const StayCollectionMembershipConversionResultSchema = strictObject({
   status: Type.Literal("ACTIVE"),
   contractId: Id,
   entitlementLotId: Id,
-  transferredCollectionFactIds: Type.Array(Id, { minItems: 1 }),
-  lodgingReversalFactIds: Type.Array(Id, { minItems: 1 }),
-  membershipPaymentFactIds: Type.Array(Id, { minItems: 1 }),
-  transferIds: Type.Array(Id, { minItems: 1 }),
+  transferredCollectionFactIds: Type.Array(Id),
+  lodgingReversalFactIds: Type.Array(Id),
+  membershipPaymentFactIds: Type.Array(Id),
+  transferIds: Type.Array(Id),
   conversionLedgerFactIds: Type.Array(Id, { minItems: 1 }),
   transferredAmount: Money,
   membershipAgreedPrice: Money,
@@ -1270,6 +1494,8 @@ export const ExecutedCommandResultSchema = Type.Union([
   CoverageRefreshResultSchema,
   CollectionFactResultSchema,
   OrderStatusResultSchema,
+  BackfillCompletedStayResultSchema,
+  CompleteStayResultSchema,
   PreviewReceiptResultSchema
 ]);
 
@@ -1508,6 +1734,7 @@ export const RoomStatusIntervalSchema = strictObject({
   endDate: LocalDate,
   sourceStartDate: LocalDate,
   sourceEndDate: LocalDate,
+  orderArrivalDate: Type.Optional(LocalDate),
   status: RoomStatusStatusSchema,
   available: Type.Boolean(),
   blocking: Type.Boolean(),
@@ -1534,6 +1761,7 @@ export const RoomStatusOperationalTaskSchema = strictObject({
   endDate: LocalDate,
   sourceStartDate: LocalDate,
   sourceEndDate: LocalDate,
+  orderArrivalDate: Type.Optional(LocalDate),
   status: RoomStatusStatusSchema,
   available: Type.Boolean(),
   blocking: Type.Boolean(),
@@ -1577,7 +1805,10 @@ export const RoomStatusBedOccupancySchema = strictObject({
 export const RoomStatusAvailabilitySummarySchema = strictObject({
   serviceDate: LocalDate,
   availableRooms: Type.Integer({ minimum: 0 }),
-  availableBeds: Type.Integer({ minimum: 0 })
+  availableBeds: Type.Integer({ minimum: 0 }),
+  paidOccupiedUnits: Type.Integer({ minimum: 0 }),
+  totalSellableUnits: Type.Integer({ minimum: 0 }),
+  occupantCount: Type.Integer({ minimum: 0 })
 });
 const RoomStatusUnitBase = {
   id: Id,
@@ -1897,6 +2128,32 @@ const CurrentAmendmentRowSchema = strictObject({
   amendment_type: CommandTypeSchema,
   payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema])
 });
+const BackfillCheckInAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("CHECK_IN"),
+  reason_code: Type.Literal("BACKFILL_STAY"),
+  payload: strictObject({
+    fromStatus: Type.Literal("RESERVED"),
+    toStatus: Type.Literal("CHECKED_IN"),
+    inventoryUnitId: Id,
+    businessDate: LocalDate,
+    effectiveDate: LocalDate,
+    recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
+  })
+});
+const BackfillCheckOutAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("CHECK_OUT"),
+  reason_code: Type.Literal("BACKFILL_STAY"),
+  payload: strictObject({
+    fromStatus: Type.Literal("CHECKED_IN"),
+    toStatus: Type.Literal("CHECKED_OUT"),
+    inventoryUnitId: Id,
+    businessDate: LocalDate,
+    effectiveDate: LocalDate,
+    recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
+  })
+});
 const LegacyStayChangeAmendmentRowSchema = strictObject({
   ...AmendmentRowBase,
   amendment_type: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
@@ -1919,6 +2176,8 @@ const LegacyMoveAmendmentRowSchema = strictObject({
   ...HistoricalReadOnlyMetadata
 });
 const AmendmentRowSchema = Type.Union([
+  BackfillCheckInAmendmentRowSchema,
+  BackfillCheckOutAmendmentRowSchema,
   CurrentAmendmentRowSchema,
   LegacyStayChangeAmendmentRowSchema,
   LegacyShortenAmendmentRowSchema,
@@ -2016,7 +2275,7 @@ export const CollectionFactRowSchema = strictObject({
   fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
   amount_minor: PositiveAmount, net_effect_minor: SafeInteger,
   currency: Type.String({ minLength: 3, maxLength: 3 }), references_fact_id: nullable(Id), reverses_fact_id: nullable(Id),
-  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), pricing_revision_id: nullable(Id), command_id: Id, created_at: DateTime,
+  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), cash_collector: nullable(ShortText), pricing_revision_id: nullable(Id), command_id: Id, created_at: DateTime,
   transfer: Type.Optional(nullable(strictObject({
     id: Id,
     membershipOrderId: Id,
@@ -2181,7 +2440,7 @@ const CollectionFactResponseSchema = strictObject({
   fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
   amount_minor: PositiveAmount, net_effect_minor: SafeInteger,
   currency: Type.String({ minLength: 3, maxLength: 3 }), references_fact_id: nullable(Id), reverses_fact_id: nullable(Id),
-  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), pricing_revision_id: nullable(Id), created_at: DateTime, property_id: Id
+  method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), cash_collector: nullable(ShortText), pricing_revision_id: nullable(Id), created_at: DateTime, property_id: Id
 });
 const EntitlementFactResponseSchema = strictObject({ ...EntitlementLedgerRowSchema.properties, property_id: Id });
 export const FactResponseSchema = Type.Union([CollectionFactResponseSchema, EntitlementFactResponseSchema]);

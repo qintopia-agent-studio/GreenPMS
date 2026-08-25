@@ -1,5 +1,23 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+interface RoomStatusFixtureUnit {
+  id: string;
+  allowedActions: Array<{ code: string; enabled: boolean }>;
+  days: Array<{
+    serviceDate: string;
+    status: string;
+    available: boolean;
+    intervalIds: string[];
+    conflicts: unknown[];
+  }>;
+  children: RoomStatusFixtureUnit[];
+}
+
+interface RoomStatusFixtureBoard {
+  businessDate: string;
+  rooms: RoomStatusFixtureUnit[];
+}
+
 function addDays(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
@@ -12,7 +30,7 @@ async function login(page: Page) {
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 2 })).toBeVisible();
 }
 
-async function setBoardRange(page: Page, arrivalDate: string) {
+async function setBoardRange(page: Page, arrivalDate: string): Promise<RoomStatusFixtureBoard> {
   const boardDepartureDate = addDays(arrivalDate, 30);
   const rangeResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -23,10 +41,31 @@ async function setBoardRange(page: Page, arrivalDate: string) {
       && response.ok();
   });
   await page.getByTestId("arrival-date").fill(arrivalDate);
-  await rangeResponse;
+  const response = await rangeResponse;
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-arrival", arrivalDate);
   await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", boardDepartureDate);
+  return await response.json() as RoomStatusFixtureBoard;
+}
+
+function roomStatusUnits(units: readonly RoomStatusFixtureUnit[]): RoomStatusFixtureUnit[] {
+  return units.flatMap((unit) => [unit, ...roomStatusUnits(unit.children)]);
+}
+
+function recoveryQuoteCandidate(
+  board: RoomStatusFixtureBoard,
+  arrivalDate: string,
+  actionCode: "BACKFILL_ORDER" | "CREATE_ORDER"
+): RoomStatusFixtureUnit | undefined {
+  return roomStatusUnits(board.rooms).find((unit) => {
+    const day = unit.days.find((candidate) => candidate.serviceDate === arrivalDate);
+    const historical = actionCode === "BACKFILL_ORDER";
+    return Boolean(day
+      && day.conflicts.length === 0
+      && day.intervalIds.length === 0
+      && (historical ? day.status === "AVAILABLE" : day.available)
+      && unit.allowedActions.some((action) => action.code === actionCode && action.enabled));
+  });
 }
 
 async function selectDraft(page: Page, unitId: string, arrivalDate: string, departureDate: string) {
@@ -47,7 +86,7 @@ async function selectDraft(page: Page, unitId: string, arrivalDate: string, depa
       await expect(popover).toBeVisible({ timeout: 5_000 });
       await expect(popover).toHaveAttribute("data-unit-id", unitId);
       await expect(popover).toHaveAttribute("data-selection-kind", "day");
-      await popover.getByRole("button", { name: "创建住宿", exact: true }).click({ timeout: 5_000 });
+      await popover.getByRole("button", { name: "创建订单", exact: true }).click({ timeout: 5_000 });
       await expect(drawer).toBeVisible({ timeout: 5_000 });
       break;
     } catch (error) {
@@ -153,7 +192,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await expect(rangePopover).toHaveAttribute("data-unit-id", "unit_room_102_bed_b");
     await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
     await expect(rangePopover).toContainText("4晚");
-    await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+    await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
     await expect(drawer).toBeVisible();
     await expect(drawer.getByLabel("入住日期", { exact: true })).toHaveValue("2026-07-26");
     await expect(drawer.getByLabel("退房日期", { exact: true })).toHaveValue("2026-07-30");
@@ -412,7 +451,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
     await expect(rangePopover).toContainText("4晚");
     expect(quotePayloads).toHaveLength(0);
-    await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+    await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
     await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue("2026-07-26");
     await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue("2026-07-30");
     await expect(page.getByTestId("quote-result")).toContainText("4 晚", { timeout: 15_000 });
@@ -424,5 +463,172 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
       departureDate: "2026-07-30"
     }));
     await page.screenshot({ path: testInfo.outputPath("stage-1-stable-grid-during-drag.png"), fullPage: true });
+  });
+
+  test("历史补录和未来预订的报价恢复抽屉关闭后不重开，并且自动核对失败只执行一次", async ({ page }) => {
+    await login(page);
+    const propertyId = "prop_qintopia_demo";
+    const storageKey = "qintopia.quote-command-recovery.v1:subject_demo_operator:prop_qintopia_demo";
+    const storageMarkerKey = `qintopia.recovery-coordination.v1:${encodeURIComponent(storageKey)}`;
+    const probe = await page.request.get(
+      `/api/v1/properties/${propertyId}/room-status?arrivalDate=2026-01-01&departureDate=2026-01-31&page=0&pageSize=50`
+    );
+    expect(probe.ok(), await probe.text()).toBe(true);
+    const { businessDate } = await probe.json() as Pick<RoomStatusFixtureBoard, "businessDate">;
+    const scenarios = [
+      {
+        name: "历史补录",
+        arrivalDate: addDays(businessDate, -3),
+        actionCode: "BACKFILL_ORDER" as const,
+        actionLabel: "补录住宿"
+      },
+      {
+        name: "未来预订",
+        arrivalDate: addDays(businessDate, 7),
+        actionCode: "CREATE_ORDER" as const,
+        actionLabel: "创建订单"
+      }
+    ];
+    let recoveryResolveCalls = 0;
+    let failRecoveryResolve = true;
+    let quoteRequestCalls = 0;
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/api/v1/quotes")) quoteRequestCalls += 1;
+    });
+    await page.route("**/api/v1/command-results/resolve", async (route) => {
+      recoveryResolveCalls += 1;
+      if (failRecoveryResolve) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ code: "RECOVERY_CHECK_UNAVAILABLE", message: "模拟恢复查询失败" })
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    for (const scenario of scenarios) {
+      const callsBeforeScenario = recoveryResolveCalls;
+      const quoteCallsBeforeScenario = quoteRequestCalls;
+      failRecoveryResolve = true;
+      const board = await setBoardRange(page, scenario.arrivalDate);
+      const unit = recoveryQuoteCandidate(board, scenario.arrivalDate, scenario.actionCode);
+      expect(unit, `${scenario.name}需要一个可报价房源`).toBeDefined();
+      if (!unit) throw new Error(`${scenario.name}缺少可报价房源`);
+
+      let releaseQuoteResponse!: () => void;
+      let quoteResponseHeld!: () => void;
+      let quoteResponseSettled!: () => void;
+      const quoteResponseGate = new Promise<void>((resolve) => { releaseQuoteResponse = resolve; });
+      const quoteResponseHeldGate = new Promise<void>((resolve) => { quoteResponseHeld = resolve; });
+      const quoteResponseSettledGate = new Promise<void>((resolve) => { quoteResponseSettled = resolve; });
+      await page.route("**/api/v1/quotes", async (route) => {
+        quoteResponseHeld();
+        await quoteResponseGate;
+        const response = await route.fetch();
+        await route.fulfill({ response });
+        quoteResponseSettled();
+      }, { times: 1 });
+
+      const cell = roomCell(page, unit.id, scenario.arrivalDate);
+      await cell.scrollIntoViewIfNeeded();
+      await cell.focus();
+      await page.keyboard.press("Enter");
+      const popover = page.getByTestId("room-status-quick-popover");
+      await expect(popover).toBeVisible();
+      await popover.getByRole("button", { name: scenario.actionLabel, exact: true }).click();
+      const drawer = page.locator("dialog.room-status-write-drawer");
+      await expect(drawer).toBeVisible();
+      await drawer.evaluate(
+        (element, name) => element.setAttribute("data-recovery-test-instance", name),
+        scenario.name
+      );
+      await quoteResponseHeldGate;
+
+      const entry = page.getByTestId("inventory-quote-recovery-entry");
+      await expect(entry).toBeVisible();
+      await expect(entry).toContainText("新的报价和订单操作已暂停");
+      await expect(drawer).toBeVisible();
+      await expect(drawer).toHaveAttribute("data-recovery-test-instance", scenario.name);
+      await expect(drawer.getByTestId("quote-recovery")).toContainText("报价正在提交");
+      await expect(page.locator("dialog.room-status-view-drawer")).toHaveCount(0);
+      await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+      await expect(drawer).toBeHidden();
+      await expect(entry).toBeVisible();
+      expect(recoveryResolveCalls).toBe(callsBeforeScenario);
+
+      const pollResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === "GET"
+          && url.pathname.endsWith("/room-status")
+          && url.searchParams.get("arrivalDate") === scenario.arrivalDate
+          && response.ok();
+      }, { timeout: 10_000 });
+
+      await cell.focus();
+      await page.keyboard.press("Enter");
+      await expect(popover).toBeVisible();
+      const blockedAction = popover.getByRole("button", { name: scenario.actionLabel, exact: true });
+      await expect(blockedAction).toBeDisabled();
+      await page.waitForTimeout(350);
+      expect(quoteRequestCalls).toBe(quoteCallsBeforeScenario + 1);
+      await page.keyboard.press("Escape");
+      await expect(popover).toBeHidden();
+
+      await pollResponse;
+      await expect(drawer).toBeHidden();
+
+      await page.evaluate(({ key }) => {
+        window.dispatchEvent(new CustomEvent("qintopia:recovery-storage-sync", {
+          detail: { storageKey: key }
+        }));
+      }, { key: storageKey });
+      await page.waitForTimeout(700);
+      await expect(drawer).toBeHidden();
+
+      await entry.getByRole("button", { name: "打开处理入口", exact: true }).click();
+      await expect(drawer).toBeVisible();
+      await expect.poll(async () => await page.evaluate(({ key }) => {
+        const value = window.localStorage.getItem(key);
+        return value ? (JSON.parse(value) as { state?: string }).state : undefined;
+      }, { key: storageKey })).toBe("UNKNOWN");
+      expect(recoveryResolveCalls).toBe(callsBeforeScenario + 1);
+      await expect(drawer.getByTestId("quote-recovery")).toContainText("报价结果尚未确认");
+      await expect(drawer.getByRole("button", { name: "核对原报价结果", exact: true })).toBeVisible();
+
+      for (let sync = 0; sync < 3; sync += 1) {
+        await page.evaluate(({ key }) => {
+          window.dispatchEvent(new CustomEvent("qintopia:recovery-storage-sync", {
+            detail: { storageKey: key }
+          }));
+        }, { key: storageKey });
+      }
+      await page.waitForTimeout(700);
+      expect(recoveryResolveCalls).toBe(callsBeforeScenario + 1);
+
+      failRecoveryResolve = false;
+      releaseQuoteResponse();
+      await quoteResponseSettledGate;
+      await drawer.getByRole("button", { name: "核对原报价结果", exact: true }).click();
+      await expect(entry).toBeHidden();
+      await expect(drawer.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
+      expect(recoveryResolveCalls).toBe(callsBeforeScenario + 2);
+      expect(quoteRequestCalls).toBe(quoteCallsBeforeScenario + 1);
+
+      await expect.poll(async () => await page.evaluate(({ key }) => (
+        window.localStorage.getItem(key) ?? window.sessionStorage.getItem(key)
+      ), { key: storageKey })).toBeNull();
+      await page.evaluate(({ key, markerKey }) => {
+        window.localStorage.removeItem(key);
+        window.sessionStorage.removeItem(key);
+        window.localStorage.removeItem(markerKey);
+        window.dispatchEvent(new CustomEvent("qintopia:recovery-storage-sync", {
+          detail: { storageKey: key }
+        }));
+      }, { key: storageKey, markerKey: storageMarkerKey });
+      await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+      await expect(drawer).toBeHidden();
+    }
   });
 });

@@ -14,7 +14,7 @@ import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLot
 import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from "../pricing-service.ts";
 import type { Database } from "../schema.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
-import { normalizePhoneNumber, optionalIdentityCardNumber, requireObject, requireString } from "./effects.ts";
+import { normalizePhoneNumber, optionalIdentityCardNumber, requireInteger, requireObject, requireString } from "./effects.ts";
 
 export interface AppliedCommand {
   persistedResult: Record<string, unknown>;
@@ -119,6 +119,13 @@ function stringArray(record: Record<string, unknown>, field: string): string[] {
     throw new DomainError("INTERNAL_ERROR", `${field} is invalid`, 500);
   }
   return value as string[];
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
 function inventoryClaimSummaries(record: Record<string, unknown>, field: string): Array<{ serviceDate: string; inventoryUnitId: string }> {
@@ -289,7 +296,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     await lockEntitlementLots(trx, context.order.member_contract_id ?? undefined);
   }
 
-  if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_OUT"].includes(commandType)) {
+  if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"].includes(commandType)) {
     const timeline = await loadActiveStayTimeline(trx, context);
     const roomDates = await roomDatesForTimeline(trx, propertyId, timeline);
     if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") {
@@ -655,6 +662,27 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const memberId = typeof effect.memberId === "string" ? effect.memberId : null;
     const memberContractId = typeof effect.memberContractId === "string" ? effect.memberContractId : null;
     const memberStay = Boolean(memberId || memberContractId);
+    const backfill = effect.backfill && typeof effect.backfill === "object" && !Array.isArray(effect.backfill)
+      ? effect.backfill as Record<string, unknown>
+      : null;
+    if (backfill && !currentReleaseFeatures.completedStayBackfillCreation) {
+      throw new DomainError("VALIDATION_ERROR", "补录提交将在 8.3 开放", 409);
+    }
+    const backfillStatus = backfill ? requireString(backfill, "resultingOrderStatus") : "RESERVED";
+    const backfillStayStatus = backfill ? requireString(backfill, "resultingStayStatus") : "PLANNED";
+    if (!(["RESERVED", "CHECKED_IN", "CHECKED_OUT"] as string[]).includes(backfillStatus)
+      || !(["PLANNED", "IN_HOUSE", "COMPLETED"] as string[]).includes(backfillStayStatus)) {
+      throw new DomainError("INTERNAL_ERROR", "Create order backfill status is invalid", 500);
+    }
+    if (backfill) {
+      const lockedReason = requireString(backfill, "reason");
+      if (backfillStatus !== "CHECKED_OUT" || backfillStayStatus !== "COMPLETED") {
+        throw new DomainError("VALIDATION_ERROR", "跨今天的在住补录将在 8.4 开放", 409);
+      }
+      if (options.reason.code !== "BACKFILL_STAY" || options.reason.note.trim() !== lockedReason) {
+        throw new DomainError("CONFIRMATION_MISMATCH", "补录确认原因必须与核对页锁定的原因一致", 409);
+      }
+    }
     if (memberStay && (effect.bookingChannelCode !== null || effect.channelOrderReference !== null)) {
       throw new DomainError("VALIDATION_ERROR", "会员住宿不得写入订单来源渠道或渠道订单号");
     }
@@ -667,7 +695,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const freeStayReason = stayType === "FREE" ? requireString(effect, "freeStayReason") : null;
     const freeStayCategoryCode = stayType === "FREE" ? requireString(effect, "freeStayCategoryCode") : null;
     await trx.insertInto("orders").values({
-      id: orderId, property_id: propertyId, status: "RESERVED", stay_type: stayType,
+      id: orderId, property_id: propertyId, status: backfillStatus, stay_type: stayType,
       arrival_date: arrivalDate, departure_date: departureDate, primary_guest_snapshot: primaryGuest,
       booking_channel_code: bookingChannelCode, channel_order_reference: channelOrderReference, free_stay_reason: freeStayReason,
       free_stay_category_code: freeStayCategoryCode,
@@ -694,11 +722,24 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       created_by_command_id: options.commandId,
       created_at: occupantCreatedAt
     }))).execute();
-    await trx.insertInto("stays").values({ id: stayId, order_id: orderId, status: "PLANNED" }).execute();
+    await trx.insertInto("stays").values({ id: stayId, order_id: orderId, status: backfillStayStatus }).execute();
     await trx.insertInto("amendments").values({
       id: amendmentId, order_id: orderId, sequence: 1, amendment_type: "CREATE_ORDER",
       reason_code: options.reason.code, reason_note: options.reason.note, prior_version: 0, new_version: 1,
-      payload: { quoteId: effect.quoteId, inventoryUnitId: unitId, arrivalDate, departureDate, primaryGuest, occupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode, pricingDecision: effect.pricingDecision },
+      payload: {
+        quoteId: effect.quoteId,
+        inventoryUnitId: unitId,
+        arrivalDate,
+        departureDate,
+        primaryGuest,
+        occupants,
+        bookingChannelCode,
+        channelOrderReference,
+        freeStayReason,
+        freeStayCategoryCode,
+        pricingDecision: effect.pricingDecision,
+        ...(backfill ? { confirmedEffect: effect } : {})
+      },
       command_id: options.commandId
     }).execute();
     await trx.insertInto("stay_segments").values({
@@ -715,10 +756,72 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     if (memberContractId) {
       await bumpMembershipForCoverage(trx, memberContractId, pricing.coverageSet);
     }
+    const backfillAmendmentIds: string[] = [];
+    let backfillCheckInAmendmentId: string | null = null;
+    let backfillCheckOutAmendmentId: string | null = null;
+    let backfillCollectionFactId: string | null = null;
+    if (backfill) {
+      const businessDate = requireString(backfill, "businessDate");
+      const checkInId = newId("amend");
+      await trx.insertInto("amendments").values({
+        id: checkInId, order_id: orderId, sequence: 2, amendment_type: "CHECK_IN",
+        reason_code: options.reason.code, reason_note: options.reason.note, prior_version: 1, new_version: 2,
+        payload: { fromStatus: "RESERVED", toStatus: "CHECKED_IN", inventoryUnitId: unitId, businessDate, effectiveDate: arrivalDate, recordingMode: businessDate === arrivalDate ? "ON_SCHEDULE" : "LATE_RECORDED" },
+        command_id: options.commandId
+      }).execute();
+      backfillCheckInAmendmentId = checkInId;
+      backfillAmendmentIds.push(checkInId);
+      if (backfillStatus === "CHECKED_OUT") {
+        const checkOutId = newId("amend");
+        await trx.insertInto("amendments").values({
+          id: checkOutId, order_id: orderId, sequence: 3, amendment_type: "CHECK_OUT",
+          reason_code: options.reason.code, reason_note: options.reason.note, prior_version: 2, new_version: 3,
+          payload: { fromStatus: "CHECKED_IN", toStatus: "CHECKED_OUT", inventoryUnitId: unitId, businessDate, effectiveDate: departureDate, recordingMode: businessDate === departureDate ? "ON_SCHEDULE" : "LATE_RECORDED" },
+          command_id: options.commandId
+        }).execute();
+        backfillCheckOutAmendmentId = checkOutId;
+        backfillAmendmentIds.push(checkOutId);
+        await releaseInventoryClaims(trx, "ORDER_SEGMENT", [segmentId]);
+        if (memberContractId) await consumeCoverage(trx, orderId, options.commandId);
+      }
+      await trx.updateTable("orders").set({
+        version: backfillStatus === "CHECKED_OUT" ? 3 : 2,
+        updated_at: new Date()
+      }).where("id", "=", orderId).execute();
+      const rawCollection = backfill.collection;
+      if (rawCollection !== null && rawCollection !== undefined) {
+        const collection = requireObject(rawCollection, "collection");
+        const amountMinor = requireInteger(collection, "amountMinor", { min: 0 });
+        if (amountMinor > 0) {
+          const factId = newId("fact");
+          await trx.insertInto("collection_facts").values({
+            fact_id: factId, order_id: orderId, fact_type: "COLLECTION", amount_minor: amountMinor,
+            net_effect_minor: amountMinor, currency: pricing.currency, references_fact_id: null, reverses_fact_id: null,
+            method: requireString(collection, "method"), note: typeof collection.note === "string" ? collection.note : options.reason.note,
+            transaction_reference: typeof collection.transactionReference === "string" ? collection.transactionReference : null,
+            cash_collector: typeof collection.cashCollector === "string" ? collection.cashCollector : null,
+            pricing_revision_id: revisionId, command_id: options.commandId
+          }).execute();
+          backfillCollectionFactId = factId;
+        }
+      }
+    }
+    if (backfill && (!backfillCheckInAmendmentId || !backfillCheckOutAmendmentId)) {
+      throw new DomainError("INTERNAL_ERROR", "Completed-stay backfill amendment evidence is incomplete", 500);
+    }
+    const backfillResult = backfill ? {
+      businessDate: requireString(backfill, "businessDate"),
+      checkInAmendmentId: backfillCheckInAmendmentId,
+      checkOutAmendmentId: backfillCheckOutAmendmentId,
+      settlementStatus: requireString(backfill, "settlementStatus"),
+      collectedAmountMinor: requireInteger(backfill, "collectedAmountMinor", { min: 0 }),
+      balanceDueMinor: requireInteger(backfill, "balanceDueMinor", { min: 0 }),
+      collectionFactId: backfillCollectionFactId
+    } : undefined;
     return {
-      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode, pricingPolicyVersionId: policyVersionId, pricingDecision: effect.pricingDecision },
-      resourceRefs: [orderId, stayId, segmentId, revisionId, ...persistedOccupants.map((occupant) => occupant.id), ...coverageRefs.coverageIds],
-      factRefs: coverageRefs.factIds
+      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode, pricingPolicyVersionId: policyVersionId, pricingDecision: effect.pricingDecision, ...(backfill ? { status: backfillStatus, backfill: backfillResult } : {}) },
+      resourceRefs: [orderId, stayId, segmentId, revisionId, ...backfillAmendmentIds, ...persistedOccupants.map((occupant) => occupant.id), ...coverageRefs.coverageIds],
+      factRefs: [...coverageRefs.factIds, ...(backfillCollectionFactId ? [backfillCollectionFactId] : [])]
     };
   }
 
@@ -935,7 +1038,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const adjustmentReason = typeof membershipPricing.adjustmentReason === "string" ? membershipPricing.adjustmentReason : null;
     const transferTotal = moneyMinor(transfer.total, "transfer.total");
     const transferCollectionsValue = transfer.collections;
-    if (!Array.isArray(transferCollectionsValue) || transferCollectionsValue.length === 0) {
+    if (!Array.isArray(transferCollectionsValue)) {
       throw new DomainError("INTERNAL_ERROR", "Stay collection conversion effect has no source collection", 500);
     }
     const transferCollections = transferCollectionsValue.map((value, index) => {
@@ -1162,6 +1265,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     });
     await trx.updateTable("orders").set({
       current_revision_id: revisionId,
+      member_id: requireString(member, "memberId"),
+      member_contract_id: contractId,
       version: context.order.version + 1,
       updated_at: new Date()
     }).where("id", "=", orderId).execute();
@@ -1762,6 +1867,267 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     REVOKE_CHECK_IN: { orderStatus: "CHECK_IN_REVOKED", stayStatus: "CHECK_IN_REVOKED" }
   };
   const target = statusCommands[options.commandType];
+  if (options.commandType === "COMPLETE_STAY") {
+    if (requireString(effect, "operation") !== "COMPLETE_STAY") {
+      throw new DomainError("INTERNAL_ERROR", "Complete-stay effect has an invalid operation", 500);
+    }
+    if (options.reason.code !== "COMPLETE_STAY") {
+      throw new DomainError("VALIDATION_ERROR", "完成住宿确认原因必须是 COMPLETE_STAY");
+    }
+    if (options.reason.note.trim() === "") {
+      throw new DomainError("VALIDATION_ERROR", "完成住宿必须填写说明");
+    }
+    if (requireString(effect, "reasonNote") !== options.reason.note.trim()) {
+      throw new DomainError("VALIDATION_ERROR", "完成住宿说明与核对页锁定内容不一致");
+    }
+    const checkIn = nestedObject(effect, "checkIn");
+    const checkOut = nestedObject(effect, "checkOut");
+    const stayTimeline = stayTimelineFromEffect(effect);
+    const inventoryRelease = nestedObject(effect, "inventoryRelease");
+    const expectedClaimIds = stringArray(inventoryRelease, "claimIds");
+    const expectedClaimCount = requireInteger(inventoryRelease, "claimCount", { min: 1 });
+    const entitlementTransition = nestedObject(effect, "entitlementTransition");
+    const expectedCoverageIds = stringArray(entitlementTransition, "coverageIds");
+    const expectedCoverageCount = requireInteger(entitlementTransition, "coverageCount", { min: 0 });
+    const effectBusinessDate = requireString(effect, "businessDate");
+    if (requireString(checkIn, "fromStatus") !== "RESERVED"
+      || requireString(checkIn, "toStatus") !== "CHECKED_IN"
+      || requireString(checkOut, "fromStatus") !== "CHECKED_IN"
+      || requireString(checkOut, "toStatus") !== "CHECKED_OUT"
+      || requireString(checkIn, "orderId") !== orderId
+      || requireString(checkOut, "orderId") !== orderId
+      || requireString(checkIn, "inventoryUnitId") !== stayTimeline[0]!.inventoryUnitId
+      || requireString(checkOut, "inventoryUnitId") !== stayTimeline.at(-1)!.inventoryUnitId
+      || requireString(checkIn, "businessDate") !== effectBusinessDate
+      || requireString(checkOut, "businessDate") !== effectBusinessDate
+      || requireString(checkIn, "effectiveDate") !== context.order.arrival_date
+      || requireString(checkOut, "effectiveDate") !== context.order.departure_date
+      || expectedClaimCount !== expectedClaimIds.length
+      || expectedClaimIds.length !== stayTimeline.length
+      || expectedCoverageCount !== expectedCoverageIds.length) {
+      throw new DomainError("INTERNAL_ERROR", "Complete-stay transition payload is inconsistent", 500);
+    }
+    const settlementStatus = requireString(effect, "settlementStatus");
+    if (settlementStatus !== "SETTLED" && settlementStatus !== "ARREARS") {
+      throw new DomainError("INTERNAL_ERROR", "Complete-stay settlement status is invalid", 500);
+    }
+    const checkInAmendmentId = await appendAmendment(trx, {
+      orderId,
+      sequence: context.order.version + 1,
+      amendmentType: "CHECK_IN",
+      reasonCode: "COMPLETE_STAY",
+      reasonNote: options.reason.note,
+      priorVersion: context.order.version,
+      payload: checkIn,
+      commandId: options.commandId
+    });
+    const coverageRefs = expectedCoverageIds.length > 0
+      ? await consumeCoverage(trx, orderId, options.commandId, {
+          serviceDates: stayTimeline.map((item) => item.serviceDate)
+        })
+      : { coverageIds: [], factIds: [] };
+    if (!sameStringSet(coverageRefs.coverageIds, expectedCoverageIds)) {
+      throw new DomainError("INTERNAL_ERROR", "Complete-stay did not consume the exact confirmed coverage set", 500);
+    }
+    const checkOutAmendmentId = await appendAmendment(trx, {
+      orderId,
+      sequence: context.order.version + 2,
+      amendmentType: "CHECK_OUT",
+      reasonCode: "COMPLETE_STAY",
+      reasonNote: options.reason.note,
+      priorVersion: context.order.version + 1,
+      payload: checkOut,
+      commandId: options.commandId
+    });
+    const releasedClaimIds = await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds);
+    if (!sameStringSet(releasedClaimIds, expectedClaimIds)) {
+      throw new DomainError("INTERNAL_ERROR", "Complete-stay did not release the exact confirmed inventory Claim set", 500);
+    }
+    const orderUpdate = await trx.updateTable("orders").set({
+      status: "CHECKED_OUT",
+      version: context.order.version + 2,
+      updated_at: new Date()
+    })
+      .where("id", "=", orderId)
+      .where("status", "=", "RESERVED")
+      .where("version", "=", context.order.version)
+      .executeTakeFirst();
+    if (orderUpdate.numUpdatedRows !== 1n) {
+      throw new DomainError("INTERNAL_ERROR", "Complete-stay did not update the exact confirmed order state", 500);
+    }
+    const stayUpdate = await trx.updateTable("stays")
+      .set({ status: "COMPLETED" })
+      .where("id", "=", context.stay.id)
+      .where("status", "=", "PLANNED")
+      .executeTakeFirst();
+    if (stayUpdate.numUpdatedRows !== 1n) {
+      throw new DomainError("INTERNAL_ERROR", "Complete-stay did not update the exact confirmed Stay state", 500);
+    }
+    let collectionFactId: string | null = null;
+    const collection = effect.collection;
+    if (collection !== null && collection !== undefined) {
+      const collectionInput = requireObject(collection, "collection");
+      const amountMinor = requireInteger(collectionInput, "amountMinor", { min: 1 });
+      const currency = requireString(collectionInput, "currency");
+      if (currency !== context.revision.currency) {
+        throw new DomainError("INTERNAL_ERROR", "Complete-stay collection currency mismatch", 500);
+      }
+      const method = requireString(collectionInput, "method");
+      const transactionReference = typeof collectionInput.transactionReference === "string" && collectionInput.transactionReference.trim() !== ""
+        ? collectionInput.transactionReference.trim()
+        : null;
+      const cashCollector = method === "CASH"
+        ? requireString(collectionInput, "cashCollector").trim()
+        : null;
+      const note = method === "CASH"
+        ? requireString(collectionInput, "note").trim()
+        : typeof collectionInput.note === "string" ? collectionInput.note.trim() : options.reason.note;
+      collectionFactId = newId("fact");
+      await trx.insertInto("collection_facts").values({
+        fact_id: collectionFactId,
+        order_id: orderId,
+        fact_type: "COLLECTION",
+        amount_minor: amountMinor,
+        net_effect_minor: amountMinor,
+        currency,
+        references_fact_id: null,
+        reverses_fact_id: null,
+        method,
+        note,
+        transaction_reference: transactionReference,
+        cash_collector: cashCollector,
+        pricing_revision_id: context.revision.id,
+        command_id: options.commandId
+      }).execute();
+    }
+    return {
+      persistedResult: {
+        orderId,
+        stayId: context.stay.id,
+        checkInAmendmentId,
+        checkOutAmendmentId,
+        collectionFactId,
+        releasedClaimIds,
+        consumedCoverageIds: coverageRefs.coverageIds,
+        status: "CHECKED_OUT",
+        settlementStatus,
+        fulfillmentTiming: {
+          effectiveDate: requireString(checkOut, "effectiveDate"),
+          recordedBusinessDate: requireString(checkOut, "businessDate"),
+          recordingMode: requireString(checkOut, "recordingMode")
+        }
+      },
+      resourceRefs: [...new Set([
+        orderId,
+        context.stay.id,
+        checkInAmendmentId,
+        checkOutAmendmentId,
+        ...releasedClaimIds,
+        ...coverageRefs.coverageIds
+      ])],
+      factRefs: [...coverageRefs.factIds, ...(collectionFactId ? [collectionFactId] : [])]
+    };
+  }
+  if ((options.commandType as string) === "BACKFILL_COMPLETED_STAY") {
+    if (!currentReleaseFeatures.stayBackfillSubmission) {
+      throw new DomainError("VALIDATION_ERROR", "补录已改为创建时一次完成，请使用“补录住宿”入口", 409);
+    }
+    if (requireString(effect, "operation") !== "BACKFILL_COMPLETED_STAY") {
+      throw new DomainError("INTERNAL_ERROR", "Backfill effect has an invalid operation", 500);
+    }
+    if (options.reason.note.trim() === "") {
+      throw new DomainError("VALIDATION_ERROR", "补录完成住宿必须填写补录原因");
+    }
+    const checkIn = nestedObject(effect, "checkIn");
+    const checkOut = nestedObject(effect, "checkOut");
+    if (requireString(checkIn, "fromStatus") !== "RESERVED"
+      || requireString(checkIn, "toStatus") !== "CHECKED_IN"
+      || requireString(checkOut, "fromStatus") !== "CHECKED_IN"
+      || requireString(checkOut, "toStatus") !== "CHECKED_OUT") {
+      throw new DomainError("INTERNAL_ERROR", "Backfill transition payload is inconsistent", 500);
+    }
+    const checkInAmendmentId = await appendAmendment(trx, {
+      orderId,
+      sequence: context.order.version + 1,
+      amendmentType: "CHECK_IN",
+      reasonCode: options.reason.code,
+      reasonNote: options.reason.note,
+      priorVersion: context.order.version,
+      payload: checkIn,
+      commandId: options.commandId
+    });
+    const coverageRefs = await consumeCoverage(trx, orderId, options.commandId);
+    const checkOutAmendmentId = await appendAmendment(trx, {
+      orderId,
+      sequence: context.order.version + 2,
+      amendmentType: "CHECK_OUT",
+      reasonCode: options.reason.code,
+      reasonNote: options.reason.note,
+      priorVersion: context.order.version + 1,
+      payload: checkOut,
+      commandId: options.commandId
+    });
+    const releasedClaimIds = await releaseInventoryClaims(trx, "ORDER_SEGMENT", context.segmentIds);
+    await trx.updateTable("orders").set({
+      status: "CHECKED_OUT",
+      version: context.order.version + 2,
+      updated_at: new Date()
+    }).where("id", "=", orderId).execute();
+    await trx.updateTable("stays").set({ status: "COMPLETED" }).where("id", "=", context.stay.id).execute();
+    let collectionFactId: string | null = null;
+    const collection = effect.collection;
+    if (collection !== null && collection !== undefined) {
+      const collectionInput = requireObject(collection, "collection");
+      const amountMinor = requireInteger(collectionInput, "amountMinor", { min: 1 });
+      const currency = requireString(collectionInput, "currency");
+      if (currency !== context.revision.currency) {
+        throw new DomainError("INTERNAL_ERROR", "Backfill collection currency mismatch", 500);
+      }
+      const transactionReference = typeof collectionInput.transactionReference === "string" && collectionInput.transactionReference.trim() !== ""
+        ? collectionInput.transactionReference.trim()
+        : null;
+      collectionFactId = newId("fact");
+      await trx.insertInto("collection_facts").values({
+        fact_id: collectionFactId,
+        order_id: orderId,
+        fact_type: "COLLECTION",
+        amount_minor: amountMinor,
+        net_effect_minor: amountMinor,
+        currency,
+        references_fact_id: null,
+        reverses_fact_id: null,
+        method: requireString(collectionInput, "method"),
+        note: typeof collectionInput.note === "string" ? collectionInput.note : options.reason.note,
+        transaction_reference: transactionReference,
+        pricing_revision_id: context.revision.id,
+        command_id: options.commandId
+      }).execute();
+    }
+    return {
+      persistedResult: {
+        orderId,
+        stayId: context.stay.id,
+        checkInAmendmentId,
+        checkOutAmendmentId,
+        collectionFactId,
+        status: "CHECKED_OUT",
+        fulfillmentTiming: {
+          effectiveDate: requireString(checkOut, "effectiveDate"),
+          recordedBusinessDate: requireString(checkOut, "businessDate"),
+          recordingMode: requireString(checkOut, "recordingMode")
+        }
+      },
+      resourceRefs: [...new Set([
+        orderId,
+        context.stay.id,
+        checkInAmendmentId,
+        checkOutAmendmentId,
+        ...releasedClaimIds,
+        ...coverageRefs.coverageIds
+      ])],
+      factRefs: [...coverageRefs.factIds, ...(collectionFactId ? [collectionFactId] : [])]
+    };
+  }
   if (target) {
     const amendmentId = await appendAmendment(trx, {
       orderId, sequence: context.order.version + 1, amendmentType: options.commandType,

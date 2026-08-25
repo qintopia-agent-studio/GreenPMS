@@ -1,10 +1,12 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   CalendarRange,
   Clock3,
   Layers3,
+  RefreshCw,
+  Search,
   ShieldAlert,
   X
 } from "lucide-react";
@@ -40,12 +42,15 @@ export interface RoomStatusContextProps {
   selection: RoomStatusSelection | null;
   conflicts: readonly RoomStatusConflictDto[];
   allowedActions: readonly RoomStatusActionDto[];
+  writeBlock?: { kind: "REFRESH" | "RECOVERY" | "PERMISSION"; reason: string; actionLabel?: string };
   onSelectedUnitChange: (unit: RoomStatusUnitDto) => void;
   onSelectionChange: (selection: RoomStatusSelection | null) => void;
   onDraftValidityChange: (valid: boolean) => void;
   onOpenReference: (reference: RoomStatusReferenceDto) => void;
   onOpenReceipt: (receiptId: string) => void;
   onAction: (action: RoomStatusActionDto) => void;
+  onRefresh?: () => void;
+  onOpenRecovery?: () => void;
   onClose?: () => void;
 }
 
@@ -88,6 +93,17 @@ function selectionNightCount(arrivalDate: string, departureDate: string): number
   return Math.round((Date.parse(`${departureDate}T00:00:00.000Z`) - Date.parse(`${arrivalDate}T00:00:00.000Z`)) / 86_400_000);
 }
 
+export function roomStatusDraftSelection(input: {
+  unitId: string;
+  arrivalDate: string;
+  departureDate: string;
+}): { selection: RoomStatusSelection | null; valid: boolean } {
+  const selection = selectionFromInputs(input.unitId, input.arrivalDate, input.departureDate);
+  const valid = Boolean(selection
+    && selectionNightCount(selection.arrivalDate, selection.departureDate) <= MAX_STAY_SELECTION_NIGHTS);
+  return { selection: valid ? selection : null, valid };
+}
+
 function relatedSourceSummary(interval: RoomStatusIntervalDto): string {
   const dates = `${formatRoomStatusDate(interval.sourceStartDate)}至${formatRoomStatusDate(interval.sourceEndDate)}`;
   const source = roomStatusSourceLabels[interval.sourceKind];
@@ -109,16 +125,21 @@ export function RoomStatusContext({
   selection,
   conflicts,
   allowedActions,
+  writeBlock,
   onSelectedUnitChange,
   onSelectionChange,
   onDraftValidityChange,
   onOpenReference,
   onOpenReceipt,
   onAction,
+  onRefresh,
+  onOpenRecovery,
   onClose
 }: RoomStatusContextProps) {
   const units = useMemo(() => flattenUnits(board.rooms), [board.rooms]);
   const dateErrorId = useId();
+  const actionReasonIdPrefix = useId();
+  const preserveInvalidDraft = useRef(false);
   const initialUnitId = selection?.unitId ?? selectedUnit?.id ?? "";
   const [draft, setDraft] = useState<SelectionDraft>({
     unitId: initialUnitId,
@@ -127,6 +148,14 @@ export function RoomStatusContext({
   });
 
   useEffect(() => {
+    // Clearing the upstream selection is required to stop actions targeting the
+    // previous range. Keep the typed invalid dates locally so the operator can
+    // correct them without having to re-enter the whole range.
+    if (selection === null && preserveInvalidDraft.current) {
+      onDraftValidityChange(false);
+      return;
+    }
+    preserveInvalidDraft.current = false;
     setDraft({
       unitId: selection?.unitId ?? selectedUnit?.id ?? "",
       arrivalDate: selection?.arrivalDate ?? "",
@@ -160,21 +189,29 @@ export function RoomStatusContext({
     setDraft(nextDraft);
     const unit = units.find((candidate) => candidate.id === unitId);
     if (unit) onSelectedUnitChange(unit);
-    const nextSelection = selectionFromInputs(nextDraft.unitId, nextDraft.arrivalDate, nextDraft.departureDate);
-    const valid = Boolean(nextSelection
-      && selectionNightCount(nextSelection.arrivalDate, nextSelection.departureDate) <= MAX_STAY_SELECTION_NIGHTS);
-    onDraftValidityChange(valid);
-    if (valid && nextSelection) onSelectionChange(nextSelection);
+    const next = roomStatusDraftSelection(nextDraft);
+    onDraftValidityChange(next.valid);
+    if (next.valid && next.selection) {
+      preserveInvalidDraft.current = false;
+      onSelectionChange(next.selection);
+    } else {
+      preserveInvalidDraft.current = true;
+      onSelectionChange(null);
+    }
   };
 
   const changeDraftDate = (field: "arrivalDate" | "departureDate", value: string) => {
     const nextDraft = { ...draft, [field]: value };
     setDraft(nextDraft);
-    const nextSelection = selectionFromInputs(nextDraft.unitId, nextDraft.arrivalDate, nextDraft.departureDate);
-    const valid = Boolean(nextSelection
-      && selectionNightCount(nextSelection.arrivalDate, nextSelection.departureDate) <= MAX_STAY_SELECTION_NIGHTS);
-    onDraftValidityChange(valid);
-    if (valid && nextSelection) onSelectionChange(nextSelection);
+    const next = roomStatusDraftSelection(nextDraft);
+    onDraftValidityChange(next.valid);
+    if (next.valid && next.selection) {
+      preserveInvalidDraft.current = false;
+      onSelectionChange(next.selection);
+    } else {
+      preserveInvalidDraft.current = true;
+      onSelectionChange(null);
+    }
   };
 
   return (
@@ -313,18 +350,32 @@ export function RoomStatusContext({
           <ArrowRight aria-hidden="true" size={17} />
           <h3 id="room-status-actions-heading">可执行操作</h3>
         </div>
+        {writeBlock ? <div className="room-status-action-gate" role="status">
+          <p><AlertTriangle aria-hidden="true" size={15} />{writeBlock.reason}</p>
+          {writeBlock.kind === "REFRESH" && onRefresh && writeBlock.actionLabel
+            ? <button type="button" className="button button-secondary" onClick={onRefresh}><RefreshCw aria-hidden="true" size={16} />{writeBlock.actionLabel}</button>
+            : writeBlock.kind === "RECOVERY" && onOpenRecovery && writeBlock.actionLabel
+              ? <button type="button" className="button button-secondary" onClick={onOpenRecovery}><Search aria-hidden="true" size={16} />{writeBlock.actionLabel}</button>
+              : null}
+        </div> : null}
         {allowedActions.length ? (
           <ul>
-            {allowedActions.map((action) => (
-              <li key={`${action.code}:${action.targetReference?.type ?? "none"}:${action.targetReference?.id ?? "none"}`}>
-                <button type="button" className="room-status-button" disabled={!action.enabled} onClick={() => onAction(action)}>
+            {allowedActions.map((action) => {
+              const actionKey = `${action.code}:${action.targetReference?.type ?? "none"}:${action.targetReference?.id ?? "none"}`;
+              const disabledReason = !action.enabled ? action.disabledReason ?? writeBlock?.reason : undefined;
+              const disabledReasonId = `${actionReasonIdPrefix}-${actionKey}`;
+              return <li key={actionKey}>
+                <button type="button" className="room-status-button" disabled={!action.enabled} aria-describedby={disabledReason ? disabledReasonId : undefined} onClick={() => {
+                  if (!action.enabled) return;
+                  onAction(action);
+                }}>
                   {roomStatusActionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} />
                 </button>
-                {!action.enabled && action.disabledReason ? <small className="room-status-action-disabled"><AlertTriangle aria-hidden="true" size={14} />{action.disabledReason}</small> : null}
-              </li>
-            ))}
+                {disabledReason ? <small id={disabledReasonId} className="room-status-action-disabled" role="status"><AlertTriangle aria-hidden="true" size={14} />{disabledReason}</small> : null}
+              </li>;
+            })}
           </ul>
-        ) : <p className="room-status-context-empty">服务端未为当前对象下发可执行动作。</p>}
+        ) : <p className="room-status-context-empty">{writeBlock ? "服务端未授权当前操作。" : "服务端未为当前对象下发可执行动作。"}</p>}
       </section>
 
     </aside>

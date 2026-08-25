@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
-import { businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+import { businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
@@ -362,6 +362,19 @@ describe("cross-tab command recovery storage", () => {
 });
 
 describe("operator-facing business errors", () => {
+  it("distinguishes a mismatched page origin from a read-only account", () => {
+    expect(businessErrorMessage(new ApiError(403, {
+      code: "RESOURCE_SCOPE_DENIED",
+      message: "Cross-origin session write is not allowed",
+      correlationId: "correlation_origin_mismatch"
+    }))).toBe("当前页面地址与系统登录地址不一致，本次没有写入。请从系统提供的地址重新打开并登录。");
+    expect(businessErrorMessage(new ApiError(403, {
+      code: "INSUFFICIENT_ACCESS",
+      message: "WRITE access is required",
+      correlationId: "correlation_read_only"
+    }))).toBe("当前账号无权完成这项操作，本次没有写入。");
+  });
+
   it("does not misreport an inventory conflict as a generic state change", () => {
     expect(businessErrorMessage(new ApiError(409, {
       code: "INVENTORY_CONFLICT",
@@ -542,6 +555,648 @@ describe("Token command presentation", () => {
     expect(html).toContain("外围客户端不能再使用它访问系统");
     expect(html).not.toContain("Receipt");
     expect(html).not.toContain("Confirm");
+  });
+});
+
+describe("completed-stay backfill presentation and recovery", () => {
+  const effectHash = "8".repeat(64);
+  const input = {
+    propertyId: "property_green",
+    quoteId: "quote_backfill_completed",
+    primaryGuest: { fullName: "测试住客", nickname: "测试" },
+    additionalGuests: [],
+    bookingChannelCode: "WECOM",
+    channelOrderReference: null,
+    targetCurrentContractAmountMinor: 10_000,
+    backfill: true,
+    backfillReason: "前台漏录",
+    backfillCollection: {
+      amountMinor: 8_450,
+      method: "CASH",
+      cashCollector: "前台甲",
+      note: "现金已核对"
+    }
+  };
+  const effect = {
+    quoteId: input.quoteId,
+    primaryGuest: input.primaryGuest,
+    occupants: [{ id: "occupant_backfill_primary", ...input.primaryGuest, role: "PRIMARY", ordinal: 1 }],
+    inventoryUnit: { id: "unit_102_b", code: "102-B", name: "102 · 床位 B" },
+    stayType: "TRANSIENT",
+    bookingChannelCode: "WECOM",
+    channelOrderReference: null,
+    freeStayReason: null,
+    freeStayCategoryCode: null,
+    arrivalDate: "2026-08-06",
+    departureDate: "2026-08-11",
+    pricingPolicyVersionId: "policy_backfill_completed",
+    pricingDecision: {
+      pricingBasis: "POLICY",
+      policyBaseAmount: { currency: "CNY", minorUnits: 10_000 },
+      targetCurrentContractAmount: { currency: "CNY", minorUnits: 10_000 },
+      differenceFromPolicy: { currency: "CNY", minorUnits: 0 },
+      manualAdjustmentMinor: 0,
+      reason: null
+    },
+    pricing: {
+      coverageSet: [],
+      cashLines: [],
+      cashRemainder: { currency: "CNY", minorUnits: 10_000 },
+      currentContractAmount: { currency: "CNY", minorUnits: 10_000 }
+    },
+    backfill: {
+      reason: "前台漏录",
+      businessDate: "2026-08-14",
+      resultingOrderStatus: "CHECKED_OUT",
+      resultingStayStatus: "COMPLETED",
+      collection: {
+        amountMinor: 8_450,
+        method: "CASH",
+        cashCollector: "前台甲",
+        note: "现金已核对"
+      },
+      externalChannel: false,
+      settlementStatus: "ARREARS",
+      collectedAmountMinor: 8_450,
+      balanceDueMinor: 1_550
+    }
+  };
+
+  it("accepts only the completed historical Preview and presents one Chinese business review", () => {
+    expect(completedStayBackfillPreviewHasEvidence(effect, input)).toBe(true);
+    expect(completedStayBackfillPreviewHasEvidence({ ...effect, quoteId: "quote_other" }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...effect,
+      primaryGuest: { ...effect.primaryGuest, nickname: "被替换的住客" }
+    }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({ ...effect, bookingChannelCode: "CTRIP" }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({ ...effect, channelOrderReference: "CHANNEL-TAMPERED" }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...effect,
+      pricingDecision: {
+        ...effect.pricingDecision,
+        targetCurrentContractAmount: { currency: "CNY", minorUnits: 9_900 }
+      }
+    }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...effect,
+      backfill: { ...effect.backfill, reason: "被替换的补录原因" }
+    }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...effect,
+      backfill: { ...effect.backfill, resultingOrderStatus: "CHECKED_IN", resultingStayStatus: "IN_HOUSE" }
+    }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...effect,
+      departureDate: "2026-08-15"
+    }, input)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...effect,
+      backfill: {
+        ...effect.backfill,
+        collection: null,
+        collectedAmountMinor: 0,
+        balanceDueMinor: 10_000
+      }
+    }, {
+      ...input,
+      backfillCollection: { amountMinor: 0, method: "CASH" }
+    })).toBe(false);
+
+    const preview: PreviewDto = {
+      previewId: "preview_backfill_completed",
+      commandType: "CREATE_ORDER",
+      effectHash,
+      effect,
+      expiresAt: "2026-08-14T10:00:00.000Z"
+    };
+    const html = renderToStaticMarkup(createElement(EffectSummary, {
+      preview,
+      commandInput: input,
+      reasonNote: input.backfillReason
+    }));
+    expect(html).toContain("请核对已完成住宿补录");
+    expect(html).toContain("收款人");
+    expect(html).toContain("前台甲");
+    expect(html).toContain("提交后直接成为欠款");
+    expect(html).toContain("补录原因");
+    expect(html).not.toContain("创建预订");
+    expect(html).not.toContain("逐步办理入住");
+  });
+
+  it("fails closed when free or external-channel Preview evidence is changed", () => {
+    const freeInput = {
+      ...input,
+      bookingChannelCode: undefined,
+      channelOrderReference: undefined,
+      targetCurrentContractAmountMinor: undefined,
+      backfillCollection: undefined,
+      freeStayCategoryCode: "VOLUNTEER",
+      freeStayReason: "义工值班住宿"
+    };
+    const freeEffect = {
+      ...effect,
+      stayType: "FREE",
+      bookingChannelCode: null,
+      channelOrderReference: null,
+      freeStayCategoryCode: "VOLUNTEER",
+      freeStayReason: "义工值班住宿",
+      pricingDecision: {
+        ...effect.pricingDecision,
+        targetCurrentContractAmount: { currency: "CNY", minorUnits: 0 }
+      },
+      backfill: {
+        ...effect.backfill,
+        collection: null,
+        settlementStatus: "SETTLED",
+        collectedAmountMinor: 0,
+        balanceDueMinor: 0
+      }
+    };
+    expect(completedStayBackfillPreviewHasEvidence(freeEffect, freeInput)).toBe(true);
+    expect(completedStayBackfillPreviewHasEvidence({ ...freeEffect, stayType: "TRANSIENT" }, freeInput)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence(freeEffect, { ...freeInput, freeStayCategoryCode: "INTERNAL" })).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({ ...freeEffect, freeStayCategoryCode: "RECEPTION" }, freeInput)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({ ...freeEffect, freeStayReason: "被替换的免费原因" }, freeInput)).toBe(false);
+
+    const channelInput = {
+      ...input,
+      bookingChannelCode: "CTRIP",
+      channelOrderReference: "CTRIP-20260806",
+      targetCurrentContractAmountMinor: 12_300,
+      backfillCollection: undefined
+    };
+    const channelEffect = {
+      ...effect,
+      bookingChannelCode: "CTRIP",
+      channelOrderReference: "CTRIP-20260806",
+      pricingDecision: {
+        ...effect.pricingDecision,
+        targetCurrentContractAmount: { currency: "CNY", minorUnits: 12_300 }
+      },
+      backfill: {
+        ...effect.backfill,
+        collection: null,
+        externalChannel: true,
+        settlementStatus: "SETTLED",
+        collectedAmountMinor: 0,
+        balanceDueMinor: 0
+      }
+    };
+    expect(completedStayBackfillPreviewHasEvidence(channelEffect, channelInput)).toBe(true);
+    expect(completedStayBackfillPreviewHasEvidence({ ...channelEffect, channelOrderReference: "CTRIP-TAMPERED" }, channelInput)).toBe(false);
+    expect(completedStayBackfillPreviewHasEvidence({
+      ...channelEffect,
+      pricingDecision: {
+        ...channelEffect.pricingDecision,
+        targetCurrentContractAmount: { currency: "CNY", minorUnits: 12_301 }
+      }
+    }, channelInput)).toBe(false);
+  });
+
+  it("persists a dedicated backfill recovery with the Preview effect hash", () => {
+    const transition = transitionPersistedCommandRecovery(undefined, {
+      subjectId: "subject_backfill",
+      scopeId: "property:property_green",
+      request: {
+        commandType: "CREATE_ORDER",
+        title: "补录住宿",
+        description: "核对已完成住宿补录",
+        presentation: "BACKFILL_STAY",
+        input
+      }
+    }, {
+      state: "CONFIRMING",
+      previewId: "preview_backfill_completed",
+      confirmationKey: "confirm_backfill_completed",
+      effectHash
+    }, "2026-08-14T09:00:00.000Z");
+    expect(transition).toMatchObject({
+      accepted: true,
+      recovery: {
+        commandType: "CREATE_ORDER",
+        presentation: "BACKFILL_STAY",
+        effectHash
+      }
+    });
+    if (!transition.recovery) throw new Error("Expected backfill recovery");
+    expect(recoveryCommandRequest(transition.recovery)).toMatchObject({
+      commandType: "CREATE_ORDER",
+      title: "恢复补录住宿结果",
+      presentation: "BACKFILL_STAY",
+      recoveryEffectHash: effectHash,
+      input: { propertyId: "property_green", backfill: true }
+    });
+  });
+
+  it("shows the completed backfill result and keeps a direct order-detail link", () => {
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_backfill_completed",
+      commandId: "command_backfill_completed",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_backfill_completed",
+      result: {
+        orderId: "order_backfill_completed",
+        stayId: "stay_backfill_completed",
+        segmentId: "segment_backfill_completed",
+        pricingRevisionId: "revision_backfill_completed",
+        pricingPolicyVersionId: "policy_backfill_completed",
+        primaryGuest: input.primaryGuest,
+        occupants: [{
+          id: "occupant_backfill_primary",
+          orderId: "order_backfill_completed",
+          ordinal: 1,
+          role: "PRIMARY",
+          ...input.primaryGuest,
+          phone: null,
+          documentNumber: null,
+          createdAt: "2026-08-14T09:00:00.000Z"
+        }],
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        freeStayReason: null,
+        freeStayCategoryCode: null,
+        pricingDecision: effect.pricingDecision,
+        status: "CHECKED_OUT",
+        effectHash,
+        backfill: {
+          businessDate: "2026-08-14",
+          checkInAmendmentId: "amend_backfill_check_in",
+          checkOutAmendmentId: "amend_backfill_check_out",
+          settlementStatus: "ARREARS",
+          collectedAmountMinor: 8_450,
+          balanceDueMinor: 1_550,
+          collectionFactId: "fact_backfill_collection"
+        }
+      },
+      resourceRefs: [
+        "order_backfill_completed",
+        "stay_backfill_completed",
+        "segment_backfill_completed",
+        "revision_backfill_completed",
+        "amend_backfill_check_in",
+        "amend_backfill_check_out",
+        "occupant_backfill_primary"
+      ],
+      factRefs: ["fact_backfill_collection"],
+      committedAt: "2026-08-14T09:00:00.000Z"
+    };
+    expect(completedStayBackfillReceiptHasEvidence(receipt, input, effect, effectHash)).toBe(true);
+    expect(receiptHasCommandEvidence("CREATE_ORDER", receipt, input, effect, effectHash)).toBe(true);
+    expect(completedStayBackfillReceiptHasEvidence({
+      ...receipt,
+      result: {
+        ...receipt.result,
+        occupants: [{
+          ...((receipt.result?.occupants as Array<Record<string, unknown>>)[0]),
+          documentNumber: "unexpected-document"
+        }]
+      }
+    }, input, effect, effectHash)).toBe(false);
+    expect(completedStayBackfillReceiptHasEvidence(receipt, {
+      propertyId: "property_green",
+      backfill: true
+    }, undefined, effectHash)).toBe(true);
+    expect(completedStayBackfillReceiptHasEvidence({
+      ...receipt,
+      resourceRefs: receipt.resourceRefs.filter((reference) => reference !== "amend_backfill_check_out")
+    }, input, effect, effectHash)).toBe(false);
+    expect(completedStayBackfillReceiptHasEvidence({
+      ...receipt,
+      resourceRefs: [...receipt.resourceRefs, "unexpected_resource"]
+    }, input, effect, effectHash)).toBe(false);
+    expect(completedStayBackfillReceiptHasEvidence({
+      ...receipt,
+      factRefs: []
+    }, input, effect, effectHash)).toBe(false);
+    expect(completedStayBackfillReceiptHasEvidence({
+      ...receipt,
+      result: {
+        ...receipt.result,
+        backfill: {
+          ...(receipt.result?.backfill as Record<string, unknown>),
+          settlementStatus: "SETTLED"
+        }
+      }
+    }, input, effect, effectHash)).toBe(false);
+    expect(completedStayBackfillReceiptHasEvidence(receipt, input, effect, "invalid-effect-hash")).toBe(false);
+    expect(completedStayBackfillReceiptHasEvidence({
+      ...receipt,
+      result: { ...receipt.result, effectHash: "7".repeat(64) }
+    }, input, effect, effectHash)).toBe(false);
+    const rejected: ReceiptDto = {
+      receiptId: "receipt_backfill_rejected",
+      commandId: "command_backfill_rejected",
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      correlationId: "correlation_backfill_rejected",
+      error: {
+        code: "PREVIEW_STALE",
+        message: "Preview stale",
+        correlationId: "correlation_backfill_rejected",
+        commandId: "command_backfill_rejected",
+        receiptId: "receipt_backfill_rejected",
+        retryable: false
+      },
+      resourceRefs: [],
+      factRefs: [],
+      committedAt: "2026-08-14T09:00:00.000Z"
+    };
+    expect(receiptHasCommandEvidence("CREATE_ORDER", rejected, input, effect, effectHash)).toBe(true);
+    expect(receiptHasCommandEvidence("CREATE_ORDER", {
+      ...rejected,
+      resourceRefs: ["unexpected_partial_write"]
+    }, input, effect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence("CREATE_ORDER", {
+      receiptId: "",
+      commandId: "",
+      executionStatus: "UNKNOWN",
+      businessCommitted: false,
+      correlationId: "",
+      resourceRefs: [],
+      factRefs: []
+    }, input, effect, effectHash)).toBe(true);
+    expect(receiptHasCommandEvidence("CREATE_ORDER", {
+      receiptId: "",
+      commandId: "",
+      executionStatus: "UNKNOWN",
+      businessCommitted: false,
+      correlationId: "",
+      result: { orderId: "unexpected_partial_write" },
+      resourceRefs: [],
+      factRefs: []
+    }, input, effect, effectHash)).toBe(false);
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(ReceiptPanel, {
+      receipt,
+      commandType: "CREATE_ORDER",
+      backfillStay: true
+    })));
+    expect(html).toContain("住宿补录已完成");
+    expect(html).toContain("欠款");
+    expect(html).toContain("查看订单");
+  });
+});
+
+describe("complete-stay presentation and recovery", () => {
+  const effectHash = "c".repeat(64);
+  const input = {
+    propertyId: "property_green",
+    orderId: "order_complete_stay",
+    actualStayCompletedConfirmed: true,
+    reasonNote: "客人已经实际入住并离店"
+  };
+  const effect = {
+    operation: "COMPLETE_STAY",
+    arrivalDate: "2026-07-20",
+    departureDate: "2026-07-27",
+    businessDate: "2026-08-25",
+    settlementStatus: "SETTLED",
+    reasonNote: input.reasonNote,
+    amounts: {
+      currentContractAmount: { currency: "CNY", minorUnits: 123_200 },
+      netRecordedCollection: { currency: "CNY", minorUnits: 123_200 },
+      collectionDifference: { currency: "CNY", minorUnits: 0 }
+    },
+    collection: null,
+    checkOut: {
+      effectiveDate: "2026-07-27",
+      businessDate: "2026-08-25",
+      recordingMode: "LATE_RECORDED"
+    }
+  };
+  const receipt: ReceiptDto = {
+    receiptId: "receipt_complete_stay",
+    commandId: "command_complete_stay",
+    executionStatus: "EXECUTED",
+    businessCommitted: true,
+    correlationId: "correlation_complete_stay",
+    result: {
+      orderId: input.orderId,
+      stayId: "stay_complete_stay",
+      checkInAmendmentId: "amendment_complete_stay_check_in",
+      checkOutAmendmentId: "amendment_complete_stay_check_out",
+      status: "CHECKED_OUT",
+      settlementStatus: "SETTLED",
+      collectionFactId: null,
+      fulfillmentTiming: {
+        effectiveDate: "2026-07-27",
+        recordedBusinessDate: "2026-08-25",
+        recordingMode: "LATE_RECORDED"
+      },
+      effectHash
+    },
+    resourceRefs: [
+      input.orderId,
+      "stay_complete_stay",
+      "amendment_complete_stay_check_in",
+      "amendment_complete_stay_check_out"
+    ],
+    factRefs: [],
+    committedAt: "2026-08-25T09:00:00.000Z"
+  };
+
+  function confirmingRecovery(requestInput: Record<string, unknown> = input) {
+    const request = {
+      commandType: "COMPLETE_STAY" as const,
+      title: "完成住宿",
+      description: "确认实际住宿情况后，订单将直接完成",
+      presentation: "COMPLETE_STAY" as const,
+      input: requestInput
+    };
+    const transition = transitionPersistedCommandRecovery(undefined, {
+      subjectId: "subject_complete_stay",
+      scopeId: "property:property_green",
+      request
+    }, {
+      state: "CONFIRMING",
+      previewId: "preview_complete_stay",
+      confirmationKey: "confirm_complete_stay",
+      effectHash
+    }, "2026-08-25T08:59:00.000Z");
+    if (!transition.recovery) throw new Error("Expected complete-stay recovery");
+    return { request, recovery: transition.recovery };
+  }
+
+  it("keeps a successful completion queryable instead of classifying its saved recovery as corrupt", () => {
+    const { recovery } = confirmingRecovery();
+    const authoritative = new MemoryStorage();
+    const compatibility = new MemoryStorage();
+    const storage = createSharedCommandRecoveryStorage(authoritative, compatibility);
+
+    expect(recovery.targetRefs).toEqual([`orderId=${input.orderId}`]);
+    expect(savePersistedCommandRecovery(storage, recovery)).toBe(true);
+    expect(readPersistedCommandRecovery(storage, recovery.subjectId, recovery.scopeId)).toEqual({
+      kind: "VALID",
+      recovery
+    });
+
+    const recoveryRequest = recoveryCommandRequest(recovery);
+    expect(recoveryRequest).toMatchObject({
+      commandType: "COMPLETE_STAY",
+      presentation: "COMPLETE_STAY",
+      recoveryEffectHash: effectHash,
+      input: {
+        propertyId: input.propertyId,
+        orderId: input.orderId,
+        actualStayCompletedConfirmed: true
+      }
+    });
+    expect(recoveryRequest.description).toBe("系统只查询刚才的办理结果，不会重复完成订单或重复登记收款。");
+    expect(receiptHasCommandEvidence(
+      "COMPLETE_STAY",
+      receipt,
+      recoveryRequest.input,
+      undefined,
+      recoveryRequest.recoveryEffectHash
+    )).toBe(true);
+
+    const resolved = transitionPersistedCommandRecovery(recovery, {
+      subjectId: recovery.subjectId,
+      scopeId: recovery.scopeId,
+      request: recoveryRequest
+    }, {
+      state: "RESOLVED",
+      confirmationKey: recovery.confirmationKey,
+      receipt
+    }, "2026-08-25T09:00:01.000Z");
+    expect(resolved).toMatchObject({ accepted: true, recovery: { state: "EXECUTED" } });
+    expect(savePersistedCommandRecovery(storage, resolved.recovery!)).toBe(true);
+    expect(readPersistedCommandRecovery(storage, recovery.subjectId, recovery.scopeId)).toMatchObject({
+      kind: "VALID",
+      recovery: { confirmationKey: recovery.confirmationKey, state: "EXECUTED", effectHash }
+    });
+  });
+
+  it("uses the persisted effect hash to verify a recovered completion that recorded a new collection", () => {
+    const collectionInput = {
+      ...input,
+      collection: {
+        amountMinor: 10_000,
+        method: "WECOM",
+        transactionReference: "WX-COMPLETE-STAY"
+      }
+    };
+    const { recovery } = confirmingRecovery(collectionInput);
+    const recoveryRequest = recoveryCommandRequest(recovery);
+    const receiptWithCollection: ReceiptDto = {
+      ...receipt,
+      receiptId: "receipt_complete_stay_collection",
+      commandId: "command_complete_stay_collection",
+      correlationId: "correlation_complete_stay_collection",
+      result: {
+        ...receipt.result,
+        collectionFactId: "collection_complete_stay"
+      },
+      factRefs: ["collection_complete_stay"]
+    };
+
+    expect(recoveryRequest.input).not.toHaveProperty("collection");
+    expect(receiptHasCommandEvidence(
+      "COMPLETE_STAY",
+      receiptWithCollection,
+      recoveryRequest.input,
+      undefined,
+      effectHash
+    )).toBe(true);
+    expect(receiptHasCommandEvidence(
+      "COMPLETE_STAY",
+      receiptWithCollection,
+      recoveryRequest.input,
+      undefined
+    )).toBe(false);
+    expect(receiptHasCommandEvidence(
+      "COMPLETE_STAY",
+      { ...receiptWithCollection, factRefs: [] },
+      recoveryRequest.input,
+      undefined,
+      effectHash
+    )).toBe(false);
+  });
+
+  it("still rejects incomplete or mismatched completion recovery identities", () => {
+    const { recovery } = confirmingRecovery();
+    const storage = new MemoryStorage();
+    const key = commandRecoveryStorageKey(recovery.subjectId, recovery.scopeId);
+    const { effectHash: _effectHash, ...withoutEffectHash } = recovery;
+    storage.setItem(key, JSON.stringify(withoutEffectHash));
+    expect(readPersistedCommandRecovery(storage, recovery.subjectId, recovery.scopeId)).toMatchObject({ kind: "CORRUPT" });
+
+    expect(receiptHasCommandEvidence(
+      "COMPLETE_STAY",
+      receipt,
+      { ...recoveryCommandRequest(recovery).input, orderId: "order_other" },
+      undefined,
+      effectHash
+    )).toBe(false);
+
+    for (const missingResourceRef of receipt.resourceRefs) {
+      expect(receiptHasCommandEvidence(
+        "COMPLETE_STAY",
+        { ...receipt, resourceRefs: receipt.resourceRefs.filter((reference) => reference !== missingResourceRef) },
+        recoveryCommandRequest(recovery).input,
+        undefined,
+        effectHash
+      ), missingResourceRef).toBe(false);
+    }
+    expect(receiptHasCommandEvidence(
+      "COMPLETE_STAY",
+      { ...receipt, result: { ...receipt.result, effectHash: undefined } },
+      recoveryCommandRequest(recovery).input,
+      undefined,
+      effectHash
+    )).toBe(false);
+  });
+
+  it("fails closed unless a saved completion has exactly one nonblank order target", () => {
+    const { request, recovery } = confirmingRecovery();
+    const storage = new MemoryStorage();
+    const key = commandRecoveryStorageKey(recovery.subjectId, recovery.scopeId);
+    const invalidTargetRefs = [
+      [],
+      ["inventoryUnitId=unit_room_202"],
+      ["orderId="],
+      [`orderId=${input.orderId}`, "inventoryUnitId=unit_room_202"]
+    ];
+
+    for (const targetRefs of invalidTargetRefs) {
+      storage.setItem(key, JSON.stringify({ ...recovery, targetRefs }));
+      expect(readPersistedCommandRecovery(storage, recovery.subjectId, recovery.scopeId), JSON.stringify(targetRefs))
+        .toMatchObject({ kind: "CORRUPT" });
+      expect(savePersistedCommandRecovery(storage, { ...recovery, targetRefs })).toBe(false);
+    }
+
+    const missingOrderTransition = transitionPersistedCommandRecovery(undefined, {
+      subjectId: recovery.subjectId,
+      scopeId: recovery.scopeId,
+      request: { ...request, input: { propertyId: input.propertyId, actualStayCompletedConfirmed: true } }
+    }, {
+      state: "CONFIRMING",
+      previewId: "preview_complete_stay_missing_order",
+      confirmationKey: "confirm_complete_stay_missing_order",
+      effectHash
+    });
+    expect(missingOrderTransition).toEqual({ accepted: false, recovery: undefined });
+  });
+
+  it("shows the agreed operator language without internal transaction terminology", () => {
+    const preview: PreviewDto = {
+      previewId: "preview_complete_stay",
+      commandType: "COMPLETE_STAY",
+      effectHash,
+      effect,
+      expiresAt: "2026-08-25T09:10:00.000Z"
+    };
+    const html = renderToStaticMarkup(createElement(EffectSummary, {
+      preview,
+      commandInput: input,
+      reasonNote: input.reasonNote
+    }));
+
+    expect(html).toContain("确认后，订单将直接完成");
+    expect(html).toContain("已有收款不会重复登记");
+    expect(html).not.toContain("原子写入历史入住");
+    expect(html).not.toContain("库存释放");
   });
 });
 

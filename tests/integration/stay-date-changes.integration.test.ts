@@ -12,6 +12,7 @@ import {
 import { newId, parseLocalDate } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { loadActiveStayTimeline, loadOrderContext } from "../../packages/db/src/orders.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { resetDatabase } from "../helpers/database.ts";
@@ -71,6 +72,15 @@ async function execute(envelope: CommandEnvelope, prefix: string) {
   return confirm(await preview(envelope, prefix), prefix);
 }
 
+async function createAtArrivalBusinessDate<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
+  const currentBusinessDate = await propertyLocalToday(db, demo.propertyId);
+  if (arrivalDate >= currentBusinessDate) return operation();
+
+  // These scenarios need an ordinary order that was validly created on its arrival date,
+  // before the test advances back to the current business date and marks it in house.
+  return withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), operation);
+}
+
 async function createPaidOrder(options: {
   prefix: string;
   arrivalDate: string;
@@ -80,30 +90,32 @@ async function createPaidOrder(options: {
   targetDeltaMinor?: number;
   pricingPolicyVersionId?: string;
 }) {
-  const channel = options.channel ?? "CTRIP";
-  const priced = await createQuote(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: options.unitId ?? demo.roomId,
-    stayType: "TRANSIENT",
-    arrivalDate: options.arrivalDate,
-    departureDate: options.departureDate,
-    pricingPolicyVersionId: options.pricingPolicyVersionId
-      ?? testPricingPolicyForDates(options.arrivalDate, options.departureDate)
-  });
-  const target = priced.currentContractAmount.minorUnits + (options.targetDeltaMinor ?? 0);
-  const receipt = await execute({
-    commandType: "CREATE_ORDER",
-    input: {
+  return createAtArrivalBusinessDate(options.arrivalDate, async () => {
+    const channel = options.channel ?? "CTRIP";
+    const priced = await createQuote(db, {
       propertyId: demo.propertyId,
-      quoteId: priced.quoteId,
-      primaryGuest: { fullName: options.prefix, nickname: options.prefix },
-      bookingChannelCode: channel,
-      channelOrderReference: channel === "WECOM" ? null : `${channel}-${options.prefix}`,
-      ...(channel === "WECOM" && options.targetDeltaMinor === undefined ? {} : { targetCurrentContractAmountMinor: target }),
-      ...(options.targetDeltaMinor ? { manualPriceAdjustmentReason: "创建时主动偏价" } : {})
-    }
-  }, `${options.prefix}-create`);
-  return { orderId: receipt.result!.orderId as string, priced, target };
+      inventoryUnitId: options.unitId ?? demo.roomId,
+      stayType: "TRANSIENT",
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate,
+      pricingPolicyVersionId: options.pricingPolicyVersionId
+        ?? testPricingPolicyForDates(options.arrivalDate, options.departureDate)
+    });
+    const target = priced.currentContractAmount.minorUnits + (options.targetDeltaMinor ?? 0);
+    const receipt = await execute({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: priced.quoteId,
+        primaryGuest: { fullName: options.prefix, nickname: options.prefix },
+        bookingChannelCode: channel,
+        channelOrderReference: channel === "WECOM" ? null : `${channel}-${options.prefix}`,
+        ...(channel === "WECOM" && options.targetDeltaMinor === undefined ? {} : { targetCurrentContractAmountMinor: target }),
+        ...(options.targetDeltaMinor ? { manualPriceAdjustmentReason: "创建时主动偏价" } : {})
+      }
+    }, `${options.prefix}-create`);
+    return { orderId: receipt.result!.orderId as string, priced, target };
+  });
 }
 
 async function createFreeOrder(options: {
@@ -112,25 +124,27 @@ async function createFreeOrder(options: {
   departureDate: string;
   unitId: string;
 }) {
-  const priced = await createQuote(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: options.unitId,
-    stayType: "FREE",
-    arrivalDate: options.arrivalDate,
-    departureDate: options.departureDate,
-    pricingPolicyVersionId: demo.freePolicyId
-  });
-  const receipt = await execute({
-    commandType: "CREATE_ORDER",
-    input: {
+  return createAtArrivalBusinessDate(options.arrivalDate, async () => {
+    const priced = await createQuote(db, {
       propertyId: demo.propertyId,
-      quoteId: priced.quoteId,
-      primaryGuest: { fullName: options.prefix, nickname: options.prefix },
-      freeStayReason: "4.2 房床并发测试",
-      freeStayCategoryCode: "RECEPTION"
-    }
-  }, `${options.prefix}-create`);
-  return { orderId: receipt.result!.orderId as string };
+      inventoryUnitId: options.unitId,
+      stayType: "FREE",
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate,
+      pricingPolicyVersionId: demo.freePolicyId
+    });
+    const receipt = await execute({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: priced.quoteId,
+        primaryGuest: { fullName: options.prefix, nickname: options.prefix },
+        freeStayReason: "4.2 房床并发测试",
+        freeStayCategoryCode: "RECEPTION"
+      }
+    }, `${options.prefix}-create`);
+    return { orderId: receipt.result!.orderId as string };
+  });
 }
 
 async function createMemberProfile(memberId: string): Promise<void> {

@@ -3,11 +3,13 @@ import type { AuthPrincipal, CommandEnvelope, ReceiptDto } from "@qintopia/contr
 import { confirmCommandPreview, createCommandPreview, findCommandResult, getOrderView, listAvailability, loadActiveStayTimeline, loadOrderContext, propertyLocalToday, type Database } from "@qintopia/db";
 import { newOpaqueSecret } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
+import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
 
 let db: Kysely<Database>;
+let testBusinessDate: string;
 const memberSourceUnitId = "unit_room_d_gen_01";
 const memberTargetUnitId = "unit_room_d_gen_04";
 const principal: AuthPrincipal = {
@@ -51,8 +53,8 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
 
 async function quote(unitId: string, options: { member?: boolean; stayType?: "TRANSIENT" | "FREE"; arrival?: string; departure?: string } = {}) {
   const stayType = options.stayType ?? "TRANSIENT";
-  const arrivalDate = options.arrival ?? "2026-07-21";
-  const departureDate = options.departure ?? "2026-07-24";
+  const arrivalDate = options.arrival ?? addDays(testBusinessDate, 1);
+  const departureDate = options.departure ?? addDays(testBusinessDate, 4);
   return createQuote(db, {
     propertyId: demo.propertyId,
     inventoryUnitId: unitId,
@@ -99,6 +101,7 @@ async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T> 
 
 beforeEach(async () => {
   db = await resetTestDatabase();
+  testBusinessDate = await propertyLocalToday(db, demo.propertyId);
 });
 
 afterEach(async () => {
@@ -107,7 +110,7 @@ afterEach(async () => {
 
 describe("PostgreSQL core operations", () => {
   it("requires a nonblank guest nickname before Preview and produces zero command or business writes", async () => {
-    const priced = await quote(demo.roomId, { arrival: "2026-08-01", departure: "2026-08-02" });
+    const priced = await quote(demo.roomId, { arrival: addDays(testBusinessDate, 1), departure: addDays(testBusinessDate, 2) });
     const artifactCounts = async () => Promise.all([
       db.selectFrom("orders").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
       db.selectFrom("stays").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
@@ -140,7 +143,7 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("requires a nonblank guest nickname for FREE stays before Preview and produces zero command or business writes", async () => {
-    const priced = await quote(demo.roomId, { stayType: "FREE", arrival: "2026-08-01", departure: "2026-08-02" });
+    const priced = await quote(demo.roomId, { stayType: "FREE", arrival: addDays(testBusinessDate, 1), departure: addDays(testBusinessDate, 2) });
     const artifactCounts = async () => Promise.all([
       db.selectFrom("orders").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
       db.selectFrom("stays").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
@@ -181,7 +184,7 @@ describe("PostgreSQL core operations", () => {
     ]).then((rows) => rows.map((row) => Number(row.count)));
     const before = await artifactCounts();
 
-    const rejectedQuote = await quote(demo.roomId, { stayType: "FREE", arrival: "2026-08-05", departure: "2026-08-06" });
+    const rejectedQuote = await quote(demo.roomId, { stayType: "FREE", arrival: addDays(testBusinessDate, 1), departure: addDays(testBusinessDate, 2) });
     for (const [label, fields] of [
       ["missing-category", { freeStayReason: "Missing category fixture" }],
       ["invalid-category", { freeStayReason: "Invalid category fixture", freeStayCategoryCode: "SPONSORED" }],
@@ -190,7 +193,7 @@ describe("PostgreSQL core operations", () => {
     ] as const) {
       const isTransient = label === "category-on-transient";
       const target = isTransient
-        ? await quote(demo.roomId, { arrival: "2026-08-07", departure: "2026-08-08" })
+        ? await quote(demo.roomId, { arrival: addDays(testBusinessDate, 3), departure: addDays(testBusinessDate, 4) })
         : rejectedQuote;
       await expect(createCommandPreview(db, principal, {
         commandType: "CREATE_ORDER",
@@ -206,8 +209,8 @@ describe("PostgreSQL core operations", () => {
     expect(await artifactCounts()).toEqual(before);
 
     for (const [freeStayCategoryCode, arrival, departure] of [
-      ["VOLUNTEER", "2026-08-10", "2026-08-11"],
-      ["RECEPTION", "2026-08-12", "2026-08-13"]
+      ["VOLUNTEER", addDays(testBusinessDate, 5), addDays(testBusinessDate, 6)],
+      ["RECEPTION", addDays(testBusinessDate, 7), addDays(testBusinessDate, 8)]
     ] as const) {
       const priced = await quote(demo.roomId, { stayType: "FREE", arrival, departure });
       const receipt = await previewAndConfirm({
@@ -230,7 +233,7 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("trims and traces the guest nickname through Preview, Receipt, order query, and amendment", async () => {
-    const priced = await quote(demo.roomId, { arrival: "2026-08-03", departure: "2026-08-04" });
+    const priced = await quote(demo.roomId, { arrival: addDays(testBusinessDate, 1), departure: addDays(testBusinessDate, 2) });
     const previewMetadata = metadata("nickname-trace-preview");
     const prepared = await createCommandPreview(db, principal, {
       commandType: "CREATE_ORDER",
@@ -350,21 +353,24 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("enforces one active coverage per order date and moves coverage with a new permanent ID", async () => {
+    const arrivalDate = addDays(testBusinessDate, 7);
+    const serviceDate = addDays(testBusinessDate, 8);
+    const departureDate = addDays(testBusinessDate, 9);
     const created = await createOrder(memberSourceUnitId, "coverage-unique", {
       member: true,
-      arrival: "2026-08-21",
-      departure: "2026-08-23"
+      arrival: arrivalDate,
+      departure: departureDate
     });
     const orderId = created.result!.orderId as string;
     const before = await getOrderView(db, orderId);
-    const oldCoverage = before.coverageSet.find((item) => item.service_date === "2026-08-22" && item.status === "HELD")!;
+    const oldCoverage = before.coverageSet.find((item) => item.service_date === serviceDate && item.status === "HELD")!;
     await expect(db.insertInto("coverage_items").values({
       id: "coverage_duplicate_order_date",
       order_id: orderId,
       contract_id: demo.memberContractId,
       lot_id: demo.roomLotId,
       inventory_unit_id: oldCoverage.inventory_unit_id,
-      service_date: "2026-08-22",
+      service_date: serviceDate,
       unit_kind: "ROOM_NIGHT",
       status: "HELD",
       held_by_revision_id: before.order.current_revision_id!
@@ -376,11 +382,11 @@ describe("PostgreSQL core operations", () => {
         propertyId: demo.propertyId,
         orderId,
         newInventoryUnitId: memberTargetUnitId,
-        effectiveDate: "2026-08-22"
+        effectiveDate: serviceDate
       }
     }, "coverage-unique-move");
     expect(moved).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
-    const movedCoverage = (await getOrderView(db, orderId)).coverageSet.filter((item) => item.service_date === "2026-08-22");
+    const movedCoverage = (await getOrderView(db, orderId)).coverageSet.filter((item) => item.service_date === serviceDate);
     expect(movedCoverage).toHaveLength(2);
     expect(movedCoverage.find((item) => item.id === oldCoverage.id)?.status).toBe("RELEASED");
     const active = movedCoverage.find((item) => item.status === "HELD")!;
@@ -457,6 +463,8 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("serializes whole-room versus child-bed claims while allowing different beds", async () => {
+    const arrivalDate = addDays(testBusinessDate, 1);
+    const departureDate = addDays(testBusinessDate, 4);
     const roomQuote = await quote(demo.roomId, { stayType: "FREE" });
     const bedQuote = await quote(demo.bedAId, { stayType: "FREE" });
     const [roomPreview, bedPreview] = await Promise.all([
@@ -468,7 +476,7 @@ describe("PostgreSQL core operations", () => {
       confirmCommandPreview(db, principal, bedPreview.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: bedPreview.preview.effectHash, reason: { code: "CREATE_STANDARD_ORDER", note: "" } }, metadata("bed-confirm"))
     ]);
     expect([roomResult.businessCommitted, bedResult.businessCommitted].filter(Boolean)).toHaveLength(1);
-    const availability = await listAvailability(db, demo.propertyId, "2026-07-21", "2026-07-24");
+    const availability = await listAvailability(db, demo.propertyId, arrivalDate, departureDate);
     expect(availability.find((unit) => unit.id === demo.roomId)?.available).toBe(false);
 
     await db.destroy();
@@ -479,7 +487,7 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("completes concurrent member order creation and entitlement adjustment without a lock-order deadlock", async () => {
-    const priced = await quote(demo.secondRoomId, { member: true, arrival: "2026-08-01", departure: "2026-08-02" });
+    const priced = await quote(demo.secondRoomId, { member: true, arrival: addDays(testBusinessDate, 1), departure: addDays(testBusinessDate, 2) });
     const createPreview = await createCommandPreview(db, principal, {
       commandType: "CREATE_ORDER",
       input: { propertyId: demo.propertyId, quoteId: priced.quoteId, primaryGuest: { fullName: "Lock Order Guest", nickname: "Lock Guest" } }
@@ -985,15 +993,22 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("records a zero-quantity expiration marker and prevents release or adjustment from reviving the lot", async () => {
-    const created = await createOrder(demo.roomId, "expire-held", { member: true, arrival: "2026-01-01", departure: "2026-01-03" });
+    const arrivalDate = "2026-01-01";
+    const expirationDate = "2026-01-02";
+    const departureDate = "2026-01-03";
+    const afterExpirationDate = "2026-01-04";
+    const created = await withPropertyClockForTesting(
+      new Date("2025-12-31T12:00:00.000Z"),
+      () => createOrder(demo.roomId, "expire-held", { member: true, arrival: arrivalDate, departure: departureDate })
+    );
     const orderId = created.result!.orderId as string;
     await db.updateTable("entitlement_lots")
-      .set({ expires_on: "2026-01-02" })
+      .set({ expires_on: expirationDate })
       .where("id", "=", demo.roomLotId)
       .execute();
     const expired = await previewAndConfirm({
       commandType: "EXPIRE_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, asOfDate: "2026-01-03" }
+      input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, asOfDate: departureDate }
     }, "expire-held-marker");
     expect(expired.result).toMatchObject({ expiredUnits: 0, remainingAvailable: 0 });
     const marker = await db.selectFrom("entitlement_ledger").selectAll().where("fact_id", "=", expired.factRefs[0]!).executeTakeFirstOrThrow();
@@ -1003,7 +1018,7 @@ describe("PostgreSQL core operations", () => {
       commandType: "ADJUST_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 1, adjustmentReason: "Must not revive expired lot" }
     }, metadata("expired-adjust-denied"))).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT" });
-    const laterQuote = await quote(demo.secondRoomId, { member: true, arrival: "2026-01-04", departure: "2026-01-05" });
+    const laterQuote = await quote(demo.secondRoomId, { member: true, arrival: afterExpirationDate, departure: addDays(afterExpirationDate, 1) });
     expect(laterQuote.coverageSet).toHaveLength(0);
     expect(laterQuote.cashRemainder.minorUnits).toBe(12_000);
 
@@ -1075,10 +1090,10 @@ describe("PostgreSQL core operations", () => {
     }, "money-after-reprice");
 
     const facts = (await getOrderView(db, orderId)).collectionFacts;
-    expect(facts.map((fact) => ({ reference: fact.transaction_reference, revisionId: fact.pricing_revision_id }))).toEqual([
-      { reference: "TEST-TXN-BEFORE-REPRICE", revisionId: initialRevisionId },
-      { reference: "TEST-TXN-AFTER-REPRICE", revisionId: repricedRevisionId }
-    ]);
+    expect(Object.fromEntries(facts.map((fact) => [fact.transaction_reference, fact.pricing_revision_id]))).toEqual({
+      "TEST-TXN-BEFORE-REPRICE": initialRevisionId,
+      "TEST-TXN-AFTER-REPRICE": repricedRevisionId
+    });
 
     await expect(sql`
       INSERT INTO collection_facts (
@@ -1167,17 +1182,19 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("uses the shared inventory path for maintenance and releases cancellation/no-show claims", async () => {
+    const maintenanceArrivalDate = addDays(testBusinessDate, 1);
+    const maintenanceDepartureDate = addDays(testBusinessDate, 3);
     const locked = await previewAndConfirm({
       commandType: "LOCK_MAINTENANCE",
-      input: { propertyId: demo.propertyId, inventoryUnitId: demo.roomId, arrivalDate: "2026-07-21", departureDate: "2026-07-23", reason: "Planned electrical inspection" }
+      input: { propertyId: demo.propertyId, inventoryUnitId: demo.roomId, arrivalDate: maintenanceArrivalDate, departureDate: maintenanceDepartureDate, reason: "Planned electrical inspection" }
     }, "maintenance-lock");
-    let availability = await listAvailability(db, demo.propertyId, "2026-07-21", "2026-07-23");
+    let availability = await listAvailability(db, demo.propertyId, maintenanceArrivalDate, maintenanceDepartureDate);
     expect(availability.find((unit) => unit.id === demo.bedAId)?.available).toBe(false);
     await previewAndConfirm({
       commandType: "RELEASE_MAINTENANCE",
       input: { propertyId: demo.propertyId, maintenanceLockId: locked.result!.maintenanceLockId }
     }, "maintenance-release");
-    availability = await listAvailability(db, demo.propertyId, "2026-07-21", "2026-07-23");
+    availability = await listAvailability(db, demo.propertyId, maintenanceArrivalDate, maintenanceDepartureDate);
     expect(availability.find((unit) => unit.id === demo.bedAId)?.available).toBe(true);
 
     const cancelled = await createOrder(demo.roomId, "cancel", { member: true });
@@ -1190,7 +1207,15 @@ describe("PostgreSQL core operations", () => {
     expect(cancelledView.effectiveArrangement.presentation).toBe("BEFORE_CANCELLATION");
     expect(cancelledView.effectiveArrangement.intervals).toEqual(cancelledView.originalArrangement.intervals);
 
-    const noShow = await createOrder(demo.secondRoomId, "no-show", { stayType: "FREE" });
+    const noShowArrivalDate = addDays(testBusinessDate, -1);
+    const noShow = await withPropertyClockForTesting(
+      new Date(`${noShowArrivalDate}T12:00:00.000Z`),
+      () => createOrder(demo.secondRoomId, "no-show", {
+        stayType: "FREE",
+        arrival: noShowArrivalDate,
+        departure: addDays(testBusinessDate, 2)
+      })
+    );
     const noShowOrderId = noShow.result!.orderId as string;
     await previewAndConfirm({ commandType: "MARK_NO_SHOW", input: { propertyId: demo.propertyId, orderId: noShowOrderId } }, "no-show");
     const noShowView = await getOrderView(db, noShowOrderId);
@@ -1357,5 +1382,50 @@ describe("PostgreSQL core operations", () => {
     await lockOwner;
     expect(await findCommandResult(db, principal, demo.propertyId, recoveryCommandType, recoveryIdempotencyKey))
       .toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
+  });
+
+  it("fails closed for historical ordinary orders and the obsolete two-step backfill command during 8.2", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const fixture = await createOrder(demo.roomId, "backfill-release-gate-fixture", {
+      arrival: addDays(businessDate, 1),
+      departure: addDays(businessDate, 2)
+    });
+    const orderId = fixture.result!.orderId as string;
+    const historicalQuote = await quote(demo.roomId, {
+      arrival: addDays(businessDate, -5),
+      departure: addDays(businessDate, -2)
+    });
+    const businessCounts = async () => Promise.all([
+      db.selectFrom("orders").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+      db.selectFrom("stays").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+      db.selectFrom("amendments").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+      db.selectFrom("pricing_revisions").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+      db.selectFrom("inventory_claims").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
+    ]).then((rows) => rows.map((row) => Number(row.count)));
+    const before = await businessCounts();
+
+    await expect(createCommandPreview(db, principal, {
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: historicalQuote.quoteId,
+        primaryGuest: { fullName: "Historical ordinary guest", nickname: "Historical ordinary" },
+        bookingChannelCode: "WECOM",
+        targetCurrentContractAmountMinor: historicalQuote.currentContractAmount.minorUnits
+      }
+    }, metadata("historical-ordinary-release-gate"))).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "今天以前的住宿必须使用补录住宿入口"
+    });
+
+    await expect(createCommandPreview(db, principal, {
+      commandType: "BACKFILL_COMPLETED_STAY",
+      input: { propertyId: demo.propertyId, orderId }
+    } as unknown as CommandEnvelope, metadata("obsolete-backfill-release-gate"))).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Unsupported command type"
+    });
+
+    expect(await businessCounts()).toEqual(before);
   });
 });

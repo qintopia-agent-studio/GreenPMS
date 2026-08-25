@@ -81,6 +81,12 @@ import {
 
 const InternalErrorResponses = { 500: ErrorResponse } as const;
 const commandPreviewRequestBodies = new WeakMap<object, unknown>();
+const localWebOrigins = ["http://127.0.0.1:4173", "http://localhost:4173"] as const;
+
+export function webOriginAllowlist(configuredOrigin = process.env.WEB_ORIGIN): readonly string[] {
+  const configured = configuredOrigin?.trim();
+  return configured ? [configured] : localWebOrigins;
+}
 
 function correlationId(request: { headers: Record<string, unknown>; id: string }): string {
   const header = request.headers["x-correlation-id"];
@@ -152,10 +158,11 @@ async function replayHistoricalCreateOrderPreview(
 }
 
 export async function buildServer(db: Kysely<Database>) {
+  const allowedWebOrigins = webOriginAllowlist();
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" }, genReqId: () => crypto.randomUUID() });
   await app.register(compress, { global: true, threshold: 1_024 });
   await app.register(cookie);
-  await app.register(cors, { origin: process.env.WEB_ORIGIN ?? "http://127.0.0.1:4173", credentials: true });
+  await app.register(cors, { origin: [...allowedWebOrigins], credentials: true });
   await app.register(rateLimit, {
     global: false,
     errorResponseBuilder: (_request, context) => new DomainError("RATE_LIMITED", `Rate limit exceeded; retry after ${context.after}`, 429, true)
@@ -192,8 +199,7 @@ export async function buildServer(db: Kysely<Database>) {
     }
     if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) && request.cookies.qintopia_session) {
       const origin = request.headers.origin;
-      const allowed = process.env.WEB_ORIGIN ?? "http://127.0.0.1:4173";
-      if (origin && origin !== allowed) {
+      if (origin && !allowedWebOrigins.includes(origin)) {
         throw new DomainError("RESOURCE_SCOPE_DENIED", "Cross-origin session write is not allowed", 403);
       }
     }
@@ -464,7 +470,7 @@ export async function buildServer(db: Kysely<Database>) {
     const factId = (request.params as { id: string }).id;
     const principal = await requirePrincipal(db, request);
     const collection = await db.selectFrom("collection_facts").innerJoin("orders", "orders.id", "collection_facts.order_id")
-      .select(["collection_facts.fact_id", "collection_facts.order_id", "collection_facts.fact_type", "collection_facts.amount_minor", "collection_facts.net_effect_minor", "collection_facts.currency", "collection_facts.references_fact_id", "collection_facts.reverses_fact_id", "collection_facts.method", "collection_facts.note", "collection_facts.transaction_reference", "collection_facts.pricing_revision_id", "collection_facts.created_at", "orders.property_id"])
+      .select(["collection_facts.fact_id", "collection_facts.order_id", "collection_facts.fact_type", "collection_facts.amount_minor", "collection_facts.net_effect_minor", "collection_facts.currency", "collection_facts.references_fact_id", "collection_facts.reverses_fact_id", "collection_facts.method", "collection_facts.note", "collection_facts.transaction_reference", "collection_facts.cash_collector", "collection_facts.pricing_revision_id", "collection_facts.created_at", "orders.property_id"])
       .where("collection_facts.fact_id", "=", factId).executeTakeFirst();
     if (collection) {
       requireScopedResourceAccess(principal, collection.property_id);

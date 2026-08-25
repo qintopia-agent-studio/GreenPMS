@@ -5,6 +5,7 @@ import {
   roomStatusBedOccupantLabels,
   roomStatusIntervalBusinessLabel,
   roomStatusIntervalGridLabel,
+  roomStatusIntervalStatusLabel,
   roomStatusOccupancyCapacity,
   roomStatusOccupantLabelLines,
   roomStatusRowSalesLabel,
@@ -79,6 +80,33 @@ describe("room status lodging presentation", () => {
     })).toBe("状态未知");
   });
 
+  it("calls past-arrival reserved lodging an overdue reservation without changing the raw status", () => {
+    expect(roomStatusIntervalStatusLabel({
+      sourceKind: "ORDER",
+      status: "RESERVED",
+      sourceStartDate: "2026-08-06"
+    }, "2026-08-14")).toBe("逾期预订");
+
+    expect(roomStatusIntervalStatusLabel({
+      sourceKind: "ORDER",
+      status: "RESERVED",
+      sourceStartDate: "2026-08-14"
+    }, "2026-08-14")).toBe("已预订");
+
+    expect(roomStatusIntervalStatusLabel({
+      sourceKind: "FREE_STAY",
+      status: "RESERVED",
+      sourceStartDate: "2026-08-06"
+    }, "2026-08-14")).toBe("逾期预订");
+
+    expect(roomStatusIntervalStatusLabel({
+      sourceKind: "ORDER",
+      status: "RESERVED",
+      sourceStartDate: "2026-08-16",
+      orderArrivalDate: "2026-08-06"
+    }, "2026-08-14")).toBe("逾期预订");
+  });
+
   it("derives room-status copy only from nicknames even if an unsafe runtime object has extra personal fields", () => {
     const label = roomStatusIntervalBusinessLabel({
       sourceKind: "ORDER",
@@ -127,6 +155,66 @@ describe("room status lodging presentation", () => {
     const accessibleName = roomStatusCellAccessibleName(unit, day.serviceDate, day, null);
     expect(accessibleName).toMatch(/山风、小满 · 2人/);
     expect(accessibleName).not.toMatch(/隐私姓名|13800000000|PRIVATE-DOC|order_private_test/);
+  });
+
+  it("uses overdue reservation copy in historical reserved accessible names", () => {
+    const interval = {
+      id: "interval_overdue_reserved",
+      sourceKind: "ORDER",
+      status: "RESERVED",
+      sourceStartDate: "2026-08-06",
+      label: "order_overdue_reserved",
+      primaryOccupantLabel: "324",
+      occupantCount: 1,
+      occupants: [{ occupantId: "occupant_324", nickname: "324" }]
+    } as unknown as RoomStatusUnitDto["intervals"][number];
+    const unit = {
+      kind: "ROOM",
+      code: "106",
+      name: "106 · 四人间（公卫）",
+      buildingCode: "1",
+      intervals: [interval]
+    } as unknown as RoomStatusUnitDto;
+    const day = {
+      serviceDate: "2026-08-06",
+      status: "RESERVED",
+      available: false,
+      intervalIds: [interval.id],
+      conflicts: []
+    } satisfies RoomStatusDayDto;
+
+    const accessibleName = roomStatusCellAccessibleName(unit, day.serviceDate, day, null, "2026-08-14");
+    expect(accessibleName).toContain("逾期预订");
+    expect(accessibleName).not.toContain("已预订");
+  });
+
+  it("keeps past blank days neutral without calling them sellable", () => {
+    const unit = {
+      kind: "ROOM",
+      code: "201",
+      name: "大床房",
+      buildingCode: "2",
+      intervals: []
+    } as unknown as RoomStatusUnitDto;
+    const day = {
+      serviceDate: "2026-08-09",
+      status: "AVAILABLE",
+      available: false,
+      intervalIds: [],
+      conflicts: []
+    } satisfies RoomStatusDayDto;
+
+    const historical = roomStatusCellAccessibleName(unit, day.serviceDate, day, null, "2026-08-13");
+    expect(historical).toContain("历史空白");
+    expect(historical).toContain("不能创建普通住宿");
+    expect(historical).not.toContain("可售");
+    expect(historical).not.toContain("可以安排");
+    expect(historical).not.toContain("无住宿");
+
+    const current = roomStatusCellAccessibleName(unit, "2026-08-13", { ...day, serviceDate: "2026-08-13", available: true }, null, "2026-08-13");
+    expect(current).toContain("可售");
+    expect(current).toContain("可以安排");
+    expect(current).not.toContain("无住宿");
   });
 
   it("uses a compact bed-specific maintenance label in a parent room row", () => {

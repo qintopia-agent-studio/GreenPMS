@@ -175,6 +175,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       references_fact_id: null,
       reverses_fact_id: null,
       method: "WECOM",
+      cash_collector: null,
       note: "定金",
       transaction_reference: "PAY-1",
       pricing_revision_id: "revision_2",

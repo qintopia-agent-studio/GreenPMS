@@ -52,7 +52,7 @@ afterAll(async () => {
 });
 
 describe.sequential("authoritative database readiness", () => {
-  it("requires every migration from terminal-order handling through member phone identity", async () => {
+  it("requires every migration from terminal-order handling through completed-stay backfill", async () => {
     expect(await databaseReady(db)).toBe(true);
     for (const migrationName of [
       "029_stage12_terminal_order_guards.sql",
@@ -63,7 +63,13 @@ describe.sequential("authoritative database readiness", () => {
       "034_stay_conversion_reversal_bridge_guard.sql",
       "035_stage13_conversion_execution_state_guards.sql",
       "036_qintopia_prelaunch_room_catalog_corrections.sql",
-      "037_member_phone_identity_and_nickname.sql"
+      "037_member_phone_identity_and_nickname.sql",
+      "038_backfill_completed_stay_checkout_guard.sql",
+      "039_inhouse_zero_collection_conversion.sql",
+      "040_conversion_order_membership_link.sql",
+      "041_completed_stay_backfill_atomicity.sql",
+      "042_complete_overdue_reserved_stay.sql",
+      "043_complete_stay_guard_hardening.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
@@ -316,6 +322,49 @@ describe.sequential("authoritative database readiness", () => {
   it("rejects damaged collection and terminal-order guards even when migration history is intact", async () => {
     await expectReadinessFailure("collection transaction-reference trigger", async (trx) => {
       await sql`DROP TRIGGER collection_facts_validate_new_transaction_reference ON collection_facts`.execute(trx);
+    });
+
+    await expectReadinessFailure("completed-stay backfill cash evidence trigger", async (trx) => {
+      await sql`DROP TRIGGER collection_facts_validate_backfill_cash ON collection_facts`.execute(trx);
+    });
+
+    await expectReadinessFailure("completed-stay backfill checkout chain guard", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_reject_stage10_checkout_bypass() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("complete-stay fulfillment uniqueness index", async (trx) => {
+      await sql`DROP INDEX amendments_one_fulfillment_type_per_command`.execute(trx);
+      await sql`
+        CREATE INDEX amendments_one_fulfillment_type_per_command
+        ON amendments (command_id)
+        WHERE command_id IS NOT NULL
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("complete-stay command exact-pair trigger", async (trx) => {
+      await sql`
+        DROP TRIGGER command_executions_complete_stay_exact_pair
+        ON command_executions
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("complete-stay amendment exact-pair trigger binding", async (trx) => {
+      await sql`DROP TRIGGER amendments_complete_stay_exact_pair ON amendments`.execute(trx);
+      await sql`
+        CREATE TRIGGER amendments_complete_stay_exact_pair
+        AFTER INSERT ON amendments
+        FOR EACH ROW EXECUTE FUNCTION qintopia_validate_complete_stay_execution_chain()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("complete-stay exact-pair function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_validate_complete_stay_execution_chain() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$
+      `.execute(trx);
     });
 
     await expectReadinessFailure("terminal order status constraint", async (trx) => {

@@ -856,7 +856,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     const fact = record(item, `collectionFacts[${index}]`);
     exactKeysWithOptional(fact, `collectionFacts[${index}]`, [
       "fact_id", "order_id", "fact_type", "amount_minor", "net_effect_minor", "currency", "references_fact_id",
-      "reverses_fact_id", "method", "note", "transaction_reference", "pricing_revision_id", "command_id", "created_at"
+      "reverses_fact_id", "method", "note", "transaction_reference", "cash_collector", "pricing_revision_id", "command_id", "created_at"
     ], ["transfer"]);
     stringValue(fact.fact_id, `collectionFacts[${index}].fact_id`);
     if (stringValue(fact.order_id, `collectionFacts[${index}].order_id`) !== orderId) fail(`collectionFacts[${index}].order_id`, "与订单不一致");
@@ -868,6 +868,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     nullableString(fact.references_fact_id, `collectionFacts[${index}].references_fact_id`);
     nullableString(fact.reverses_fact_id, `collectionFacts[${index}].reverses_fact_id`);
     nullableString(fact.transaction_reference, `collectionFacts[${index}].transaction_reference`);
+    nullableString(fact.cash_collector, `collectionFacts[${index}].cash_collector`);
     nullableString(fact.pricing_revision_id, `collectionFacts[${index}].pricing_revision_id`);
     stringValue(fact.command_id, `collectionFacts[${index}].command_id`);
     if (fact.transfer !== null && fact.transfer !== undefined) {

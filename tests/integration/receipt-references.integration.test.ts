@@ -44,6 +44,13 @@ function metadata(prefix: string) {
   };
 }
 
+async function withOrdinaryOrderCreationClock<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
+  const businessDate = await propertyLocalToday(db, demo.propertyId);
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), operation)
+    : operation();
+}
+
 async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Promise<ReceiptDto> {
   const preview = await createCommandPreview(db, principal, envelope, metadata(`${prefix}-preview`));
   return confirmCommandPreview(db, principal, preview.preview.previewId, {
@@ -58,31 +65,33 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
 }
 
 async function createMemberOrder(prefix: string, arrivalDate: string, departureDate: string) {
-  const quote = await createQuote(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: demo.roomId,
-    stayType: "TRANSIENT",
-    arrivalDate,
-    departureDate,
-    pricingPolicyVersionId: demo.transientPolicyId,
-    memberContractId: contractId
-  });
-  const receipt = await previewAndConfirm({
-    commandType: "CREATE_ORDER",
-    input: {
+  return withOrdinaryOrderCreationClock(arrivalDate, async () => {
+    const quote = await createQuote(db, {
       propertyId: demo.propertyId,
-      quoteId: quote.quoteId,
-      primaryGuest: { fullName: `Receipt reference guest ${prefix}`, nickname: `Receipt ${prefix}` }
-    }
-  }, `${prefix}-create`);
-  const orderId = receipt.result?.orderId;
-  if (typeof orderId !== "string") throw new Error("CREATE_ORDER receipt did not contain orderId");
-  const coverage = await db.selectFrom("coverage_items")
-    .select(["id", "service_date", "status"])
-    .where("order_id", "=", orderId)
-    .orderBy("service_date")
-    .execute();
-  return { receipt, orderId, coverage };
+      inventoryUnitId: demo.roomId,
+      stayType: "TRANSIENT",
+      arrivalDate,
+      departureDate,
+      pricingPolicyVersionId: demo.transientPolicyId,
+      memberContractId: contractId
+    });
+    const receipt = await previewAndConfirm({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: `Receipt reference guest ${prefix}`, nickname: `Receipt ${prefix}` }
+      }
+    }, `${prefix}-create`);
+    const orderId = receipt.result?.orderId;
+    if (typeof orderId !== "string") throw new Error("CREATE_ORDER receipt did not contain orderId");
+    const coverage = await db.selectFrom("coverage_items")
+      .select(["id", "service_date", "status"])
+      .where("order_id", "=", orderId)
+      .orderBy("service_date")
+      .execute();
+    return { receipt, orderId, coverage };
+  });
 }
 
 async function fulfillmentDatePair() {

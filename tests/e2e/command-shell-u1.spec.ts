@@ -97,7 +97,7 @@ async function openQuoteWorkbench(page: Page, candidate: ReturnType<typeof avail
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", candidate.unitId);
-  await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  await popover.getByRole("button", { name: "创建订单", exact: true }).click();
   const drawer = page.locator("dialog.room-status-write-drawer");
   await expect(drawer).toBeVisible();
   await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
@@ -311,7 +311,7 @@ test("U1 pending command coordinates and clears across tabs without reload", asy
     await peer.waitForTimeout(250);
     if (await peerPopover.isVisible()) {
       await expect(peerPopover).toContainText("当前选区暂无可执行操作");
-      await expect(peerPopover.getByRole("button", { name: "创建住宿", exact: true })).toHaveCount(0);
+      await expect(peerPopover.getByRole("button", { name: "创建订单", exact: true })).toHaveCount(0);
       await expect(peerPopover.getByRole("button", { name: "维修锁房", exact: true })).toHaveCount(0);
       await expect(peerPopover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
       await peerPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();

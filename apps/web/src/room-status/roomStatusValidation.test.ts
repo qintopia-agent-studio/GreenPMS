@@ -36,7 +36,14 @@ function validBoard(): RoomStatusBoardDto {
     },
     page: { index: 0, size: 200, totalRooms: 1, totalPages: 1 },
     operationalTasks: [],
-    availabilitySummary: [{ serviceDate: "2028-01-01", availableRooms: 1, availableBeds: 0 }],
+    availabilitySummary: [{
+      serviceDate: "2028-01-01",
+      availableRooms: 1,
+      availableBeds: 0,
+      paidOccupiedUnits: 0,
+      totalSellableUnits: 1,
+      occupantCount: 0
+    }],
     rooms: [{
       id: "unit_validation",
       propertyId: expected.propertyId,
@@ -399,6 +406,38 @@ function normalLodgingTask(taskKind: "ARRIVAL" | "IN_HOUSE" | "DEPARTURE"): Room
 describe("assertRoomStatusBoard", () => {
   it("accepts a complete authoritative board", () => {
     expect(() => assertRoomStatusBoard(validBoard(), expected)).not.toThrow();
+  });
+
+  it("accepts an original order arrival date only for lodging intervals", () => {
+    const lodging = boardWithWholeRoomLodging();
+    lodging.rooms[0]!.intervals[0]!.orderArrivalDate = "2027-12-30";
+    expect(() => assertRoomStatusBoard(lodging, expected)).not.toThrow();
+
+    const afterSourceStart = boardWithWholeRoomLodging();
+    afterSourceStart.rooms[0]!.intervals[0]!.orderArrivalDate = "2028-01-02";
+    expect(() => assertRoomStatusBoard(afterSourceStart, expected)).toThrow(/不能晚于来源完整区间/);
+
+    const maintenance = boardWithMaintenance();
+    maintenance.rooms[0]!.intervals[0]!.orderArrivalDate = "2028-01-01";
+    expect(() => assertRoomStatusBoard(maintenance, expected)).toThrow(/只能由住宿订单来源提供/);
+  });
+
+  it("accepts backfill only for an authoritative historical blank day", () => {
+    const historical = validBoard();
+    historical.businessDate = "2028-01-02";
+    historical.rooms[0]!.days[0]!.available = false;
+    historical.rooms[0]!.allowedActions = [{
+      code: "BACKFILL_ORDER",
+      enabled: true,
+      disabledReason: null,
+      requiresFullInterval: false,
+      targetReference: { type: "INVENTORY_UNIT", id: "unit_validation", label: "Validation room", href: null }
+    }];
+    expect(() => assertRoomStatusBoard(historical, expected)).not.toThrow();
+
+    historical.businessDate = "2028-01-01";
+    historical.rooms[0]!.days[0]!.available = true;
+    expect(() => assertRoomStatusBoard(historical, expected)).toThrow(/补录动作必须指向对应日期可办理的库存单元/);
   });
 
   it("requires READY child-bed lodging intervals to have matching occupancy while PARTIAL stays fail closed", () => {

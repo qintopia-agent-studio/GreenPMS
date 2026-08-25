@@ -34,11 +34,12 @@ const taskKinds = new Set<string>(roomStatusOperationalTaskKinds);
 const referenceTypes = new Set(["CLAIM", "ORDER", "STAY", "OPERATIONS", "BLOCK", "INVENTORY_UNIT", "RECEIPT"]);
 const historySources = new Set(["WEB_SESSION", "API_TOKEN", "SYSTEM", "UNKNOWN"]);
 const writeActionCodes = new Set<string>(roomStatusActionCodes.filter((code) => code !== "OPEN_ORDER"));
-const createActionCodes = new Set<RoomStatusActionCode>(["CREATE_ORDER", "CREATE_FREE_STAY", "LOCK_MAINTENANCE"]);
+const createActionCodes = new Set<RoomStatusActionCode>(["CREATE_ORDER", "CREATE_FREE_STAY", "BACKFILL_ORDER", "LOCK_MAINTENANCE"]);
 const fullIntervalActionCodes = new Set<RoomStatusActionCode>(["RELEASE_MAINTENANCE"]);
 const actionTargetTypes: Record<RoomStatusActionCode, RoomStatusReferenceDto["type"]> = {
   CREATE_ORDER: "INVENTORY_UNIT",
   CREATE_FREE_STAY: "INVENTORY_UNIT",
+  BACKFILL_ORDER: "INVENTORY_UNIT",
   LOCK_MAINTENANCE: "INVENTORY_UNIT",
   OPEN_ORDER: "ORDER",
   RELEASE_MAINTENANCE: "BLOCK",
@@ -287,6 +288,15 @@ function assertInterval(
   const sourceKindValue = string(item.sourceKind, `${path}.sourceKind`)!;
   if (!sourceKinds.has(sourceKindValue)) fail(`${path}.sourceKind`, "不是允许的 typed source");
   const sourceKind = sourceKindValue as RoomStatusSourceKind;
+  if (item.orderArrivalDate !== undefined) {
+    const orderArrivalDate = localDate(item.orderArrivalDate, `${path}.orderArrivalDate`);
+    if (sourceKind !== "ORDER" && sourceKind !== "FREE_STAY") {
+      fail(`${path}.orderArrivalDate`, "只能由住宿订单来源提供");
+    }
+    if (orderArrivalDate > sourceStartDate) {
+      fail(`${path}.orderArrivalDate`, "不能晚于来源完整区间的开始日期");
+    }
+  }
   string(item.label, `${path}.label`);
   if (item.primaryOccupantLabel !== null) string(item.primaryOccupantLabel, `${path}.primaryOccupantLabel`);
   const occupantCount = integer(item.occupantCount, `${path}.occupantCount`);
@@ -459,7 +469,8 @@ function assertUnit(
   projectionState: RoomStatusBoardDto["projectionState"],
   expected: ExpectedRoomStatusQuery,
   dates: readonly string[],
-  expectedParentRoomId: string | null
+  expectedParentRoomId: string | null,
+  businessDate: string
 ): asserts value is RoomStatusUnitDto {
   const item = record(value, path);
   const id = string(item.id, `${path}.id`)!;
@@ -543,11 +554,13 @@ function assertUnit(
       assertReference(occupant.sourceReference, `${occupantPath}.sourceReference`);
       const sourceReference = occupant.sourceReference as RoomStatusReferenceDto;
       if (sourceReference.type !== "ORDER") fail(`${occupantPath}.sourceReference.type`, "住客占用必须追溯到 Order");
+      // 今天及未来必须是有权的阻断住宿来源；历史日期允许已退房的非阻断住宿记录作为来源，
+      // 这样历史床位占用才能与当前在住以同一方式展示。
       const backingIntervals = typedIntervals.filter((interval) => interval.actualInventoryUnitId === inventoryUnitId
         && interval.startDate <= serviceDate
         && serviceDate < interval.endDate
-        && interval.blocking
-        && (interval.status === "RESERVED" || interval.status === "IN_HOUSE")
+        && (interval.blocking || serviceDate < businessDate)
+        && (interval.status === "RESERVED" || interval.status === "IN_HOUSE" || interval.status === "SETTLED" || interval.status === "ARREARS")
         && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
         && interval.references.some((reference) => referenceKey(reference) === referenceKey(sourceReference)));
       if (backingIntervals.length !== 1) fail(occupantPath, "必须精确对应一个当天有效的床位住宿来源");
@@ -600,7 +613,9 @@ function assertUnit(
       || !sameStringSet([...new Set(actualConflictFacts)], expectedConflictFacts)) {
       fail(`${dayPath}.conflicts`, "必须精确对应覆盖该营业日的 blocking intervals");
     }
-    const expectedAvailable = active && !coveringIntervals.some((interval) => interval.blocking || interval.status === "UNKNOWN");
+    const expectedAvailable = active
+      && serviceDate >= businessDate
+      && !coveringIntervals.some((interval) => interval.blocking || interval.status === "UNKNOWN");
     if (dayAvailable !== expectedAvailable) fail(`${dayPath}.available`, "必须与覆盖该日的 blocking/UNKNOWN 区间一致");
     if ((dayStatus === "UNKNOWN" || dayStatus === "STALE" || dayStatus === "UNAVAILABLE")
       && dayAvailable) {
@@ -618,10 +633,21 @@ function assertUnit(
   if (new Set(typedUnitActions.map(actionKey)).size !== typedUnitActions.length) fail(`${path}.allowedActions`, "不能包含重复动作");
   const intervalActionKeys = new Set(typedIntervals.flatMap((interval) => interval.allowedActions.map(actionKey)));
   const hasAvailableDay = (days as Array<{ available: boolean }>).some((day) => day.available);
+  const hasPastBlankDay = (days as Array<{
+    serviceDate: string;
+    status: string;
+    intervalIds: unknown[];
+    conflicts: unknown[];
+  }>).some((day) => day.serviceDate < businessDate
+    && day.status === "AVAILABLE"
+    && day.intervalIds.length === 0
+    && day.conflicts.length === 0);
   typedUnitActions.forEach((action, index) => {
     if (createActionCodes.has(action.code)) {
-      if (!active || !hasAvailableDay || action.targetReference?.id !== id) {
-        fail(`${path}.allowedActions[${index}]`, "创建动作必须指向当前可售库存单元");
+      if (!active
+        || action.targetReference?.id !== id
+        || (action.code === "BACKFILL_ORDER" ? !hasPastBlankDay : !hasAvailableDay)) {
+        fail(`${path}.allowedActions[${index}]`, "创建或补录动作必须指向对应日期可办理的库存单元");
       }
     } else if (!intervalActionKeys.has(actionKey(action))) {
       fail(`${path}.allowedActions[${index}]`, "来源动作必须来自当前单元公开的区间事实");
@@ -630,7 +656,7 @@ function assertUnit(
   const children = array(item.children, `${path}.children`);
   if (kind === "BED" && children.length) fail(`${path}.children`, "床位不能再包含子单元");
   if (kind === "ROOM") {
-    children.forEach((child, index) => assertUnit(child, `${path}.children[${index}]`, accessLevel, projectionState, expected, dates, id));
+    children.forEach((child, index) => assertUnit(child, `${path}.children[${index}]`, accessLevel, projectionState, expected, dates, id, businessDate));
     const childIds = children.map((child) => (child as RoomStatusUnitDto).id);
     const childPositions = childIds.map((childId) => childUnitIds.indexOf(childId));
     if (new Set(childUnitIds).size !== childUnitIds.length
@@ -684,6 +710,9 @@ function assertAvailabilitySummary(
     }
     integer(item.availableRooms, `${path}[${index}].availableRooms`);
     integer(item.availableBeds, `${path}[${index}].availableBeds`);
+    integer(item.paidOccupiedUnits, `${path}[${index}].paidOccupiedUnits`);
+    integer(item.totalSellableUnits, `${path}[${index}].totalSellableUnits`);
+    integer(item.occupantCount, `${path}[${index}].occupantCount`);
   });
 }
 
@@ -736,7 +765,7 @@ export function assertRoomStatusBoard(value: unknown, expected: ExpectedRoomStat
   const rooms = array(board.rooms, "rooms");
   const expectedRoomCount = Math.max(0, Math.min(pageSize, totalRooms - pageIndex * pageSize));
   if (rooms.length !== expectedRoomCount) fail("rooms", "与分页元数据不一致");
-  rooms.forEach((room, index) => assertUnit(room, `rooms[${index}]`, accessLevel, projectionState, expected, dates, null));
+  rooms.forEach((room, index) => assertUnit(room, `rooms[${index}]`, accessLevel, projectionState, expected, dates, null, businessDate));
   const roomIds = rooms.map((room) => (room as RoomStatusUnitDto).id);
   if (new Set(roomIds).size !== roomIds.length) fail("rooms", "包含重复房间 ID");
 }

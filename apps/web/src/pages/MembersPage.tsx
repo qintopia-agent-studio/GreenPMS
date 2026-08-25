@@ -347,8 +347,9 @@ function MemberList({ members, selectedMemberId, onSelect }: {
           onClick={() => onSelect(member.id)}
           data-testid="member-list-item"
         >
-          <strong>{member.full_name}</strong>
+          <strong>{member.nickname}</strong>
           <span>{member.phone}</span>
+          <small>姓名：{member.full_name}</small>
           <small>{member.identity_card_number}</small>
           <small>微信：{member.wechat}</small>
         </button>

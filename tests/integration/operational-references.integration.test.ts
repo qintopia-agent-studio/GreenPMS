@@ -1007,7 +1007,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 037, preserves historical facts, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 043, preserves historical facts and identity guards, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -1571,6 +1571,24 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration037 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/037_member_phone_identity_and_nickname.sql"), "utf8");
         await client.query(migration037);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('037_member_phone_identity_and_nickname.sql')");
+        const migration038 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/038_backfill_completed_stay_checkout_guard.sql"), "utf8");
+        await client.query(migration038);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('038_backfill_completed_stay_checkout_guard.sql')");
+        const migration039 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/039_inhouse_zero_collection_conversion.sql"), "utf8");
+        await client.query(migration039);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('039_inhouse_zero_collection_conversion.sql')");
+        const migration040 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/040_conversion_order_membership_link.sql"), "utf8");
+        await client.query(migration040);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('040_conversion_order_membership_link.sql')");
+        const migration041 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/041_completed_stay_backfill_atomicity.sql"), "utf8");
+        await client.query(migration041);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('041_completed_stay_backfill_atomicity.sql')");
+        const migration042 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/042_complete_overdue_reserved_stay.sql"), "utf8");
+        await client.query(migration042);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('042_complete_overdue_reserved_stay.sql')");
+        const migration043 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/043_complete_stay_guard_hardening.sql"), "utf8");
+        await client.query(migration043);
+        await client.query("INSERT INTO schema_migrations(name) VALUES ('043_complete_stay_guard_hardening.sql')");
         await client.query("ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only");
         await client.query("UPDATE collection_facts SET pricing_revision_id = NULL WHERE fact_id = 'fact_historical_nulls'");
         await client.query("ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only");
@@ -1626,6 +1644,86 @@ describe.sequential("booking channels and external transaction references on Pos
       expect(await historicalDb.selectFrom("quotes").select(["id", "member_id"])
         .where("id", "=", "quote_historical_member_identity").executeTakeFirstOrThrow())
         .toEqual({ id: "quote_historical_member_identity", member_id: "member_historical_identity" });
+      await expect(historicalDb.updateTable("orders")
+        .set({ booking_channel_code: "WECOM" })
+        .where("id", "=", "order_historical_nulls")
+        .execute()).rejects.toMatchObject({ code: "55000" });
+      await expect(historicalDb.updateTable("orders")
+        .set({ channel_order_reference: "IMMUTABLE-CHANNEL-REFERENCE" })
+        .where("id", "=", "order_historical_nulls")
+        .execute()).rejects.toMatchObject({ code: "55000" });
+      await expect(historicalDb.updateTable("orders")
+        .set({ free_stay_reason: "Immutable free-stay reason" })
+        .where("id", "=", "order_historical_nulls")
+        .execute()).rejects.toMatchObject({ code: "55000" });
+      await expect(historicalDb.updateTable("orders")
+        .set({ free_stay_category_code: "VOLUNTEER" })
+        .where("id", "=", "order_historical_nulls")
+        .execute()).rejects.toMatchObject({ code: "55000" });
+      expect(await historicalDb.selectFrom("orders")
+        .select(["booking_channel_code", "channel_order_reference", "free_stay_reason", "free_stay_category_code"])
+        .where("id", "=", "order_historical_nulls")
+        .executeTakeFirstOrThrow()).toEqual({
+        booking_channel_code: null,
+        channel_order_reference: null,
+        free_stay_reason: null,
+        free_stay_category_code: null
+      });
+      const forgedConversionRollback = new Error("rollback forged conversion amendment probe");
+      await expect(historicalDb.transaction().execute(async (trx) => {
+        await trx.insertInto("amendments").values({
+          id: "amend_forged_conversion_without_command",
+          order_id: "order_historical_nulls",
+          sequence: 3,
+          amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+          reason_code: "FORGED_CONVERSION_PROBE",
+          reason_note: "A typed amendment without its conversion command must not authorize identity linkage",
+          prior_version: 2,
+          new_version: 3,
+          payload: {},
+          command_id: null
+        }).execute();
+        await expect(trx.updateTable("orders").set({
+          member_id: "member_historical_identity",
+          member_contract_id: "contract_historical_identity",
+          version: 3
+        }).where("id", "=", "order_historical_nulls").execute()).rejects.toMatchObject({ code: "55000" });
+        throw forgedConversionRollback;
+      })).rejects.toBe(forgedConversionRollback);
+
+      const unboundConversionRollback = new Error("rollback unbound conversion command probe");
+      await expect(historicalDb.transaction().execute(async (trx) => {
+        await trx.insertInto("command_executions").values({
+          id: "command_unbound_conversion_probe",
+          subject_id: demo.agentSubjectId,
+          credential_id: "token_demo_write",
+          property_id: demo.propertyId,
+          command_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+          idempotency_key: "unbound-conversion-probe",
+          request_hash: "5".repeat(64),
+          correlation_id: "unbound-conversion-probe",
+          state: "EXECUTING",
+          completed_at: null
+        }).execute();
+        await trx.insertInto("amendments").values({
+          id: "amend_unbound_conversion_command",
+          order_id: "order_historical_nulls",
+          sequence: 3,
+          amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+          reason_code: "UNBOUND_CONVERSION_PROBE",
+          reason_note: "A conversion command cannot link an unrelated membership contract",
+          prior_version: 2,
+          new_version: 3,
+          payload: {},
+          command_id: "command_unbound_conversion_probe"
+        }).execute();
+        await expect(trx.updateTable("orders").set({
+          member_id: "member_historical_identity",
+          member_contract_id: "contract_historical_identity",
+          version: 3
+        }).where("id", "=", "order_historical_nulls").execute()).rejects.toMatchObject({ code: "55000" });
+        throw unboundConversionRollback;
+      })).rejects.toBe(unboundConversionRollback);
       const historicalOrderCountBeforeRejectedInsert = await historicalDb.selectFrom("orders")
         .select(({ fn }) => fn.countAll<number>().as("count"))
         .executeTakeFirstOrThrow();

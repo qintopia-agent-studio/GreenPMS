@@ -5,6 +5,7 @@ import {
   ArrowRightLeft,
   CalendarRange,
   CircleDollarSign,
+  ClipboardCheck,
   LogIn,
   LogOut,
   Pencil,
@@ -66,7 +67,15 @@ import {
 } from "../ui";
 
 type FormAction = "RECORD_COLLECTION" | "RECORD_REFUND" | "SHORTEN_STAY" | "EXTEND_STAY" | "REPRICE_ORDER";
+const completeStayExternalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 const ORDER_DETAIL_POLL_MS = 4_000;
+
+export const completeStayOperatorCopy = {
+  contextTitle: "请确认实际住宿情况",
+  contextDetail: "客人已经实际入住并离店。确认后订单会直接完成住宿：已收清显示“已结单”，未收清显示“欠款”。",
+  confirmationLabel: "我已确认客人实际入住，且现在已经离店",
+  reviewDescription: "确认实际住宿情况后，订单将直接完成；已收清显示“已结单”，未收清显示“欠款”。"
+} as const;
 
 export function orderViewPayloadChanged(previous: OrderViewDto, next: OrderViewDto): boolean {
   return JSON.stringify(previous) !== JSON.stringify(next);
@@ -658,11 +667,21 @@ export function OrderMembershipCoverageSection({ view, unitMap }: {
   );
 }
 
-function CollectionFactNote({ fact }: { fact: CollectionFactDto }) {
+export function CollectionFactNote({ fact }: { fact: CollectionFactDto }) {
   if (fact.transfer) {
     return <span className="fact-transfer-note">
       已用于升级会员
       <Link className="inline-link" to={`/members?memberId=${encodeURIComponent(fact.transfer.memberId)}&membershipOrderId=${encodeURIComponent(fact.transfer.membershipOrderId)}`}>查看会员订单</Link>
+    </span>;
+  }
+  if (fact.method === "CASH") {
+    const collector = fact.cash_collector?.trim();
+    if (!collector) {
+      return <span className="fact-cash-note">收款人：{fact.note?.trim() || "历史未记录"}</span>;
+    }
+    return <span className="fact-cash-note">
+      <span>收款人：{collector}</span>
+      <span>备注：{fact.note || "未填写"}</span>
     </span>;
   }
   return <>{fact.note || "未填写"}</>;
@@ -732,10 +751,11 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
     .filter((fact) => fact.fact_type === "COLLECTION")
     .map((fact) => fact.transaction_reference)
     .filter((value): value is string => Boolean(value)));
+  const zeroCollectionOrder = netRecordedMinor === 0 && transferableCollections.length === 0;
   const disabledReason = !primaryPhone ? "主要住宿人缺少手机号，不能升级会员。"
     : matchedMembers.length === 0 ? "没有找到手机号一致的会员，请先创建或核对会员档案。"
       : eligibleProducts.length === 0 ? "当前住宿房型没有匹配的会员产品。"
-        : transferableCollections.length === 0 ? "当前订单没有可用于升级会员的企业微信住宿收款。"
+        : transferableCollections.length === 0 && netRecordedMinor !== 0 ? "当前订单没有可用于升级会员的企业微信住宿收款。"
           : transferTotalMinor !== netRecordedMinor ? "当前可转入企微收款无法覆盖全部已记录净收款，请先核对住宿收退款记录。"
             : undefined;
 
@@ -842,7 +862,9 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
               <small>企业微信交易单号：{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</small>
               <small>登记时间：{conversionCollectionTimeLabel(fact.created_at)}</small>
             </li>)}
-          </ol> : <span className="muted">没有可用于升级会员的企业微信住宿收款。</span>}
+          </ol> : <span className="muted">{zeroCollectionOrder
+            ? "本订单没有已登记收款，升级会员将按会员成交价全额收取差额。"
+            : "没有可用于升级会员的企业微信住宿收款。"}</span>}
         </div>
         <label>会员成交价（元）<input type="number" min="0" step="1" inputMode="numeric" value={agreedPriceYuan} onChange={(event) => { setAgreedPriceYuan(event.target.value); setValidationError(undefined); }} required disabled={Boolean(disabledReason)} /></label>
         <div className="form-calculated-field"><span>差额企微收款</span><strong>{remainingMinor === undefined ? "-" : formatMinor(Math.max(0, remainingMinor), view.amounts.netRecordedCollection.currency)}</strong></div>
@@ -853,6 +875,157 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
         </> : null}
       </div>
       <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={Boolean(disabledReason)}>下一步</button></div>
+    </form>
+  </Modal>;
+}
+
+function completeStayDraftCollection(draft: CommandRequest | undefined): Record<string, unknown> | undefined {
+  const value = draft?.input.collection;
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function CompleteStayDialog({ view, draft, onClose, onSubmit }: {
+  view: OrderViewDto;
+  draft?: CommandRequest;
+  onClose: () => void;
+  onSubmit: (request: CommandRequest) => void;
+}) {
+  const operatorFacingDirectOrder = view.order.stay_type !== "FREE"
+    && !view.order.member_id
+    && !view.order.member_contract_id
+    && !(view.order.booking_channel_code && completeStayExternalChannelCodes.has(view.order.booking_channel_code));
+  const outstandingMinor = view.amounts.collectionDifference.minorUnits;
+  const canRecordCollection = operatorFacingDirectOrder && outstandingMinor > 0;
+  const draftCollection = completeStayDraftCollection(draft);
+  const [confirmed, setConfirmed] = useState(draft?.input.actualStayCompletedConfirmed === true);
+  const [reasonNote, setReasonNote] = useState(typeof draft?.initialReason?.note === "string" ? draft.initialReason.note : "");
+  const [recordCollection, setRecordCollection] = useState(Boolean(draftCollection));
+  const [amountYuan, setAmountYuan] = useState(
+    draftCollection && typeof draftCollection.amountMinor === "number"
+      ? collectionAmountMinorToYuanInput(draftCollection.amountMinor)
+      : ""
+  );
+  const [method, setMethod] = useState(
+    draftCollection && typeof draftCollection.method === "string" ? draftCollection.method : "WECOM"
+  );
+  const [transactionReference, setTransactionReference] = useState(
+    draftCollection && typeof draftCollection.transactionReference === "string" ? draftCollection.transactionReference : ""
+  );
+  const [cashCollector, setCashCollector] = useState(
+    draftCollection && typeof draftCollection.cashCollector === "string" ? draftCollection.cashCollector : ""
+  );
+  const [note, setNote] = useState(
+    draftCollection && typeof draftCollection.note === "string" ? draftCollection.note : ""
+  );
+  const [validationError, setValidationError] = useState<unknown>();
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setValidationError(undefined);
+    if (!confirmed) {
+      setValidationError(new Error("请先确认客人实际入住且已经离店"));
+      return;
+    }
+    const trimmedReason = reasonNote.trim();
+    if (!trimmedReason) {
+      setValidationError(new Error("请填写完成住宿的说明"));
+      return;
+    }
+    let collection: Record<string, unknown> | undefined;
+    if (canRecordCollection && recordCollection) {
+      const amountMinor = collectionAmountYuanInputToMinor(amountYuan);
+      if (!amountMinor) {
+        setValidationError(new Error("请填写有效的实收金额"));
+        return;
+      }
+      if (amountMinor > outstandingMinor) {
+        setValidationError(new Error("实收金额不能超过订单未结余额"));
+        return;
+      }
+      if (method === "CASH") {
+        if (!cashCollector.trim()) {
+          setValidationError(new Error("现金收款必须填写收款人"));
+          return;
+        }
+        if (!note.trim()) {
+          setValidationError(new Error("现金收款必须填写备注"));
+          return;
+        }
+        collection = {
+          amountMinor,
+          method,
+          cashCollector: cashCollector.trim(),
+          note: note.trim()
+        };
+      } else {
+        if (!transactionReference.trim()) {
+          setValidationError(new Error(method === "WECOM" ? "请填写企业微信交易单号" : "请填写银行转账交易单号或流水号"));
+          return;
+        }
+        collection = {
+          amountMinor,
+          method,
+          transactionReference: transactionReference.trim(),
+          ...(note.trim() ? { note: note.trim() } : {})
+        };
+      }
+    }
+    onSubmit({
+      commandType: "COMPLETE_STAY",
+      title: "完成住宿",
+      description: completeStayOperatorCopy.reviewDescription,
+      presentation: "COMPLETE_STAY",
+      input: {
+        propertyId: view.order.property_id,
+        orderId: view.order.id,
+        actualStayCompletedConfirmed: true,
+        reasonNote: trimmedReason,
+        ...(collection ? { collection } : {})
+      },
+      initialReason: { code: "COMPLETE_STAY", note: trimmedReason }
+    });
+  }
+
+  return <Modal title="完成住宿" onClose={onClose} footer={null}>
+    <form className="modal-form" onSubmit={submit} noValidate>
+      <InlineError error={validationError} title="无法继续" />
+      <div className="form-grid">
+        <div className="span-two form-field-note" role="status">
+          <strong>{completeStayOperatorCopy.contextTitle}</strong>
+          <span>{completeStayOperatorCopy.contextDetail}</span>
+        </div>
+        <label className="span-two check-row">
+          <input type="checkbox" checked={confirmed} onChange={(event) => { setConfirmed(event.target.checked); setValidationError(undefined); }} required data-testid="complete-stay-confirmed" />
+          <span>{completeStayOperatorCopy.confirmationLabel}</span>
+        </label>
+        <label className="span-two">说明
+          <textarea value={reasonNote} onChange={(event) => { setReasonNote(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} placeholder="例如：客人实际入住 8/6–8/11，8/11 已离店，当时忘记办理退房。" data-testid="complete-stay-reason" />
+        </label>
+        {canRecordCollection ? (
+          <label className="span-two check-row">
+            <input type="checkbox" checked={recordCollection} onChange={(event) => { setRecordCollection(event.target.checked); setValidationError(undefined); }} data-testid="complete-stay-record-collection" />
+            <span>同时登记本次实际收到的款项（可跳过；未收清将显示“欠款”）</span>
+          </label>
+        ) : null}
+        {canRecordCollection && recordCollection ? (
+          <div className="form-grid span-two">
+            <label>实收金额（元）<input type="text" value={amountYuan} onChange={(event) => { setAmountYuan(event.target.value); setValidationError(undefined); }} required inputMode="decimal" placeholder="例如 1280.50" data-testid="complete-stay-amount" /></label>
+            <label>收款方式<select value={method} onChange={(event) => { setMethod(event.target.value); setTransactionReference(""); setValidationError(undefined); }}><option value="WECOM">企业微信</option><option value="BANK_TRANSFER">银行转账</option><option value="CASH">现金</option></select></label>
+            {method === "CASH" ? <>
+              <label>收款人<input value={cashCollector} onChange={(event) => { setCashCollector(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="complete-stay-cash-collector" /></label>
+              <label className="span-two">现金备注<textarea rows={2} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} required maxLength={1000} data-testid="complete-stay-cash-note" /></label>
+            </> : <>
+              <label className="span-two">{method === "WECOM" ? "企业微信交易单号" : "银行转账单号 / 流水号"}<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="complete-stay-transaction-reference" /></label>
+              <label className="span-two">备注（选填）<textarea rows={2} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} maxLength={1000} /></label>
+            </>}
+          </div>
+        ) : null}
+        {canRecordCollection && !recordCollection && outstandingMinor > 0 ? <div className="span-two form-field-note" role="status">
+          <strong>未收清将显示“欠款”</strong>
+          <span>本次不登记收款；订单完成住宿后仍保留欠款，可在订单详情后续补收。</span>
+        </div> : null}
+      </div>
+      <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" data-testid="complete-stay-submit">核对并完成住宿</button></div>
     </form>
   </Modal>;
 }
@@ -1054,6 +1227,7 @@ function OrderActionButton({ action, blocked, showWhenDisabled = false, classNam
       type="button"
       onClick={onClick}
       disabled={blocked || !action.enabled}
+      title={!action.enabled ? orderActionDisabledReasonText(action) : undefined}
       data-order-action={dataOrderAction ?? action.code}
       {...(testId ? { "data-testid": testId } : {})}
     >
@@ -1076,6 +1250,7 @@ export function OrderDetailPage() {
   const [error, setError] = useState<unknown>();
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [formAction, setFormAction] = useState<FormAction>();
+  const [completeStayAction, setCompleteStayAction] = useState(false);
   const [stayDateAction, setStayDateAction] = useState<StayDateChangeAction>();
   const [movingUnit, setMovingUnit] = useState(false);
   const [convertingToMembership, setConvertingToMembership] = useState(false);
@@ -1093,7 +1268,7 @@ export function OrderDetailPage() {
   const editorIsOpenRef = useRef(false);
   const focusedActionKeyRef = useRef<string | undefined>(undefined);
 
-  editorIsOpenRef.current = Boolean(formAction || stayDateAction || movingUnit || convertingToMembership || correctingOccupant || lifecycleAction);
+  editorIsOpenRef.current = Boolean(formAction || completeStayAction || stayDateAction || movingUnit || convertingToMembership || correctingOccupant || lifecycleAction);
 
   const pendingRecovery = commandRecovery.pending;
   const orderActionsBlocked = commandRecovery.blocked;
@@ -1107,6 +1282,7 @@ export function OrderDetailPage() {
   useEffect(() => {
     setRecoveryError(undefined);
     setFormAction(undefined);
+    setCompleteStayAction(false);
     setStayDateAction(undefined);
     setMovingUnit(false);
     setConvertingToMembership(false);
@@ -1151,6 +1327,7 @@ export function OrderDetailPage() {
         if (prior && orderRefreshMustCloseEditor(prior, response, editorIsOpenRef.current)) {
           editorIsOpenRef.current = false;
           setFormAction(undefined);
+          setCompleteStayAction(false);
           setStayDateAction(undefined);
           setMovingUnit(false);
           setConvertingToMembership(false);
@@ -1199,6 +1376,15 @@ export function OrderDetailPage() {
       focusedActionKeyRef.current = focusKey;
     });
     return () => window.cancelAnimationFrame(frame);
+  }, [orderId, requestedAction, view]);
+
+  useEffect(() => {
+    if (!requestedAction || requestedAction !== "COMPLETE_STAY") return;
+    const focusKey = `${orderId}:COMPLETE_STAY:OPEN`;
+    if (focusedActionKeyRef.current === focusKey) return;
+    focusedActionKeyRef.current = focusKey;
+    setCompleteStayAction(true);
+    setCommandDraft(undefined);
   }, [orderId, requestedAction, view]);
 
   const unitMap = useMemo(() => new Map(meta.inventoryUnits.map((unit) => [unit.id, unit])), [meta.inventoryUnits]);
@@ -1266,6 +1452,10 @@ export function OrderDetailPage() {
       setConvertingToMembership(true);
       return;
     }
+    if (request.commandType === "COMPLETE_STAY") {
+      setCompleteStayAction(true);
+      return;
+    }
     if (request.commandType === "REPRICE_ORDER") {
       setFormAction("REPRICE_ORDER");
       return;
@@ -1301,6 +1491,11 @@ export function OrderDetailPage() {
   const terminalActionVisible = (code: OrderActionCode): boolean => showDisabledTerminalActions && terminalActions.includes(code);
   const actionVisible = (code: OrderActionCode): boolean => Boolean(actionByCode.get(code)?.enabled || terminalActionVisible(code));
   const refundActionVisible = actionVisible("RECORD_REFUND") || Boolean(refundUnavailableReason);
+  // Pre-arrival orders cannot convert yet, but the greyed button with a hover
+  // explanation tells staff the action exists and when it becomes available.
+  const convertAction = actionByCode.get("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
+  const convertActionVisible = actionVisible("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
+    || Boolean(convertAction && !convertAction.enabled && view.order.status === "RESERVED" && view.allowedActions.length > 0);
   const departureAdjustmentDisabledAction = terminalActionVisible("EXTEND_STAY")
     ? actionByCode.get("EXTEND_STAY")
     : terminalActionVisible("SHORTEN_STAY")
@@ -1320,10 +1515,13 @@ export function OrderDetailPage() {
     "REPRICE_ORDER",
     "CHECK_IN",
     "CHECK_OUT",
+    "COMPLETE_STAY",
     "CANCEL_ORDER",
     "MARK_NO_SHOW",
     "REVOKE_CHECK_IN"
-  ] as const).filter((code) => actionVisible(code) || (code === "RECORD_REFUND" && refundActionVisible));
+  ] as const).filter((code) => actionVisible(code)
+    || (code === "RECORD_REFUND" && refundActionVisible)
+    || (code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && convertActionVisible));
   const showOrderActionHelp = orderActionHelpRequired(view.allowedActions, visibleActionCodes);
 
   return (
@@ -1370,13 +1568,14 @@ export function OrderDetailPage() {
             ) : null}
             <OrderActionButton action={actionByCode.get("RECORD_COLLECTION")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("RECORD_COLLECTION")} onClick={() => openForm("RECORD_COLLECTION")} testId="record-collection"><CircleDollarSign aria-hidden="true" size={17} />收款</OrderActionButton>
             <OrderActionButton action={actionByCode.get("RECORD_REFUND")} blocked={orderActionsBlocked} showWhenDisabled={refundActionVisible} onClick={() => openForm("RECORD_REFUND")}><Undo2 aria-hidden="true" size={17} />退款</OrderActionButton>
-            <OrderActionButton action={actionByCode.get("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")} blocked={orderActionsBlocked} showWhenDisabled={actionVisible("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")} onClick={() => { if (!enabledActions.has("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")) return; setCommandDraft(undefined); setConvertingToMembership(true); }} testId="convert-stay-collections-to-membership"><Sparkles aria-hidden="true" size={17} />升级会员</OrderActionButton>
+            <OrderActionButton action={actionByCode.get("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")} blocked={orderActionsBlocked} showWhenDisabled={convertActionVisible} onClick={() => { if (!enabledActions.has("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")) return; setCommandDraft(undefined); setConvertingToMembership(true); }} testId="convert-stay-collections-to-membership"><Sparkles aria-hidden="true" size={17} />升级会员</OrderActionButton>
             <OrderActionButton action={actionByCode.get("RESCHEDULE_STAY")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("RESCHEDULE_STAY")} onClick={() => { setCommandDraft(undefined); setStayDateMode("DATE_CHANGE"); setStayDateAction("RESCHEDULE_STAY"); }}><CalendarRange aria-hidden="true" size={17} />调整预订日期</OrderActionButton>
             {showDepartureAdjustmentButton ? <OrderActionButton action={visibleDepartureAdjustmentAction} blocked={orderActionsBlocked} showWhenDisabled={Boolean(departureAdjustmentDisabledAction)} dataOrderAction="ADJUST_DEPARTURE" onClick={() => { if (!departureAdjustmentAction) return; setCommandDraft(undefined); setStayDateMode("ADJUST_DEPARTURE"); setStayDateAction(departureAdjustmentAction); }}><CalendarRange aria-hidden="true" size={17} />调整退房日期</OrderActionButton> : null}
             <OrderActionButton action={actionByCode.get("MOVE_UNIT")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("MOVE_UNIT")} onClick={() => { setCommandDraft(undefined); setMovingUnit(true); }}><ArrowRightLeft aria-hidden="true" size={17} />换房</OrderActionButton>
             <OrderActionButton action={actionByCode.get("REPRICE_ORDER")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("REPRICE_ORDER")} onClick={() => openForm("REPRICE_ORDER")} testId="reprice-order"><CircleDollarSign aria-hidden="true" size={17} />调整金额</OrderActionButton>
             <OrderActionButton action={actionByCode.get("CHECK_IN")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CHECK_IN")} className="button button-primary" onClick={() => directCommand("CHECK_IN", "办理入住", "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。")} testId="check-in"><LogIn aria-hidden="true" size={17} />入住</OrderActionButton>
             <OrderActionButton action={actionByCode.get("CHECK_OUT")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CHECK_OUT")} className="button button-primary" onClick={() => directCommand("CHECK_OUT", "办理退房", "核对后将住宿状态更新为已退房并释放后续住宿库存；退房不会重复核销会员权益。")} testId="check-out"><LogOut aria-hidden="true" size={17} />退房</OrderActionButton>
+            <OrderActionButton action={actionByCode.get("COMPLETE_STAY")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("COMPLETE_STAY")} className="button button-primary" onClick={() => { setCommandDraft(undefined); setCompleteStayAction(true); }} testId="complete-stay"><ClipboardCheck aria-hidden="true" size={17} />完成住宿</OrderActionButton>
             {showLifecycleSeparator ? <div className="action-separator" aria-hidden="true" /> : null}
             <OrderActionButton action={actionByCode.get("CANCEL_ORDER")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CANCEL_ORDER")} className="button button-secondary danger-button" onClick={() => openLifecycleAction("CANCEL_ORDER")}><XCircle aria-hidden="true" size={18} />取消订单</OrderActionButton>
             <OrderActionButton action={actionByCode.get("MARK_NO_SHOW")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("MARK_NO_SHOW")} className="button button-secondary danger-button" onClick={() => openLifecycleAction("MARK_NO_SHOW")}><UserX aria-hidden="true" size={18} />标记未到</OrderActionButton>
@@ -1463,6 +1662,7 @@ export function OrderDetailPage() {
       <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{view.collectionFacts.length}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
 
       {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
+      {completeStayAction ? <CompleteStayDialog view={view} {...(commandDraft?.commandType === "COMPLETE_STAY" ? { draft: commandDraft } : {})} onClose={() => { setCompleteStayAction(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("COMPLETE_STAY")) return; setCompleteStayAction(false); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {convertingToMembership ? <StayCollectionConversionDialog
         view={view}
         members={meta.members}

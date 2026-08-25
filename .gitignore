@@ -1,6 +1,8 @@
 node_modules/
 apps/web/dist/
 apps/web/dist-e2e/
+apps/web/dist-e2e-ui-fixes/
+apps/web/dist-local-preview/
 playwright-report/
 test-results/
 .env

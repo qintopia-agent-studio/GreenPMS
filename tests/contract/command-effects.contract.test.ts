@@ -47,6 +47,11 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   REVERSE_FACT: ["amountMinor", "currency", "netEffectMinor", "note", "orderId", "reversesFactId"],
   CHECK_IN: ["businessDate", "effectiveDate", "entitlementTransition", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
   CHECK_OUT: ["amounts", "businessDate", "effectiveDate", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
+  COMPLETE_STAY: [
+    "amounts", "arrivalDate", "businessDate", "checkIn", "checkOut", "collection", "departureDate",
+    "entitlementTransition", "inventoryRelease", "inventoryUnitId", "operation", "orderId", "reasonNote",
+    "settlementStatus", "stayId", "stayTimeline"
+  ],
   REFRESH_MEMBER_COVERAGE: ["before", "inventoryUnitId", "orderId", "pricing", "stayTimeline"],
   ADD_MEMBER_ENTITLEMENT_LOT: ["contractId", "expiresOn", "unitKind", "units"],
   ADJUST_MEMBER_ENTITLEMENT: ["adjustmentReason", "availableAfter", "availableBefore", "contractId", "entitlementLotId", "quantityDelta", "unitKind"],
@@ -62,6 +67,14 @@ type Preview = {
   commandType: CommandType;
   effectHash: string;
   effect: Record<string, unknown>;
+};
+
+type ConfirmedReceipt = {
+  receiptId: string;
+  commandId: string;
+  result: Record<string, unknown>;
+  resourceRefs: string[];
+  factRefs: string[];
 };
 
 let app: FastifyInstance;
@@ -130,11 +143,12 @@ async function requestPreview(commandType: CommandType, input: Record<string, un
   return preview;
 }
 
-async function confirm(preview: Preview): Promise<Record<string, unknown>> {
+async function confirmReceipt(preview: Preview): Promise<{ receipt: ConfirmedReceipt; idempotencyKey: string }> {
+  const confirmHeaders = headers(`effect-${preview.commandType.toLowerCase()}-confirm`);
   const response = await app.inject({
     method: "POST",
     url: `/api/v1/command-previews/${preview.previewId}/confirm`,
-    headers: headers(`effect-${preview.commandType.toLowerCase()}-confirm`),
+    headers: confirmHeaders,
     payload: {
       propertyId: demo.propertyId,
       commandType: preview.commandType,
@@ -142,11 +156,19 @@ async function confirm(preview: Preview): Promise<Record<string, unknown>> {
       expectedEffectHash: preview.effectHash,
       reason: preview.commandType === "CREATE_ORDER"
         ? { code: "CREATE_STANDARD_ORDER", note: "" }
-        : { code: "EFFECT_CONTRACT", note: `Prepare state for ${preview.commandType} effect coverage` }
+        : preview.commandType === "COMPLETE_STAY"
+          ? { code: "COMPLETE_STAY", note: (preview.effect as { reasonNote?: string }).reasonNote ?? "" }
+          : { code: "EFFECT_CONTRACT", note: `Prepare state for ${preview.commandType} effect coverage` }
     }
   });
   expect(response.statusCode, `${preview.commandType}: ${response.body}`).toBe(200);
-  return (response.json() as { result: Record<string, unknown> }).result;
+  const receipt = response.json() as ConfirmedReceipt;
+  expect(Value.Check(ReceiptSchema, receipt), `${preview.commandType}: ${JSON.stringify(receipt)}`).toBe(true);
+  return { receipt, idempotencyKey: confirmHeaders["idempotency-key"] };
+}
+
+async function confirm(preview: Preview): Promise<Record<string, unknown>> {
+  return (await confirmReceipt(preview)).receipt.result;
 }
 
 async function quote(options: {
@@ -394,6 +416,86 @@ describe("Command effect HTTP contract", () => {
       ...effect,
       fundsSummary: { ...effect.fundsSummary, factCount: -1 }
     })).toBe(false);
+  });
+
+  it("publishes the completed-stay CREATE_ORDER effect and receipt evidence", async () => {
+    const propertyToday = todayInTimeZone("Asia/Shanghai");
+    const arrivalDate = shiftLocalDate(propertyToday, -5);
+    const departureDate = shiftLocalDate(propertyToday, -2);
+    const reason = "契约测试补录原因";
+    const priced = await quote({ arrivalDate, departureDate, inventoryUnitId: demo.secondRoomId });
+    const previewResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: headers("effect-create-completed-backfill-preview"),
+      payload: {
+        commandType: "CREATE_ORDER",
+        input: {
+          propertyId: demo.propertyId,
+          quoteId: priced.quoteId,
+          primaryGuest: { fullName: "契约补录住客", nickname: "契约补录" },
+          bookingChannelCode: "WECOM",
+          channelOrderReference: null,
+          targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits,
+          backfill: true,
+          backfillReason: reason,
+          backfillCollection: {
+            amountMinor: priced.currentContractAmount.minorUnits,
+            method: "CASH",
+            cashCollector: "契约前台",
+            note: "契约现金凭据"
+          }
+        }
+      }
+    });
+    expect(previewResponse.statusCode, previewResponse.body).toBe(200);
+    const preview = (previewResponse.json() as { preview: Preview }).preview;
+    expect(Value.Check(CommandEffectSchema, preview.effect)).toBe(true);
+    expect(preview.effect.backfill).toMatchObject({
+      reason,
+      businessDate: propertyToday,
+      resultingOrderStatus: "CHECKED_OUT",
+      resultingStayStatus: "COMPLETED",
+      settlementStatus: "SETTLED",
+      collectedAmountMinor: priced.currentContractAmount.minorUnits,
+      balanceDueMinor: 0,
+      collection: { method: "CASH", cashCollector: "契约前台", note: "契约现金凭据" }
+    });
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: `/api/v1/command-previews/${preview.previewId}/confirm`,
+      headers: headers("effect-create-completed-backfill-confirm"),
+      payload: {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_ORDER",
+        confirmation: true,
+        expectedEffectHash: preview.effectHash,
+        reason: { code: "BACKFILL_STAY", note: reason }
+      }
+    });
+    expect(confirmed.statusCode, confirmed.body).toBe(200);
+    const receipt = confirmed.json() as { result: Record<string, unknown>; resourceRefs: string[]; factRefs: string[] };
+    expect(Value.Check(ReceiptSchema, receipt)).toBe(true);
+    const backfill = receipt.result.backfill as {
+      checkInAmendmentId: string;
+      checkOutAmendmentId: string;
+      collectionFactId: string;
+    };
+    expect(receipt.result).toMatchObject({
+      status: "CHECKED_OUT",
+      backfill: {
+        businessDate: propertyToday,
+        checkInAmendmentId: expect.stringMatching(/^amend_/),
+        checkOutAmendmentId: expect.stringMatching(/^amend_/),
+        settlementStatus: "SETTLED",
+        collectedAmountMinor: priced.currentContractAmount.minorUnits,
+        balanceDueMinor: 0,
+        collectionFactId: expect.stringMatching(/^fact_/)
+      }
+    });
+    expect(receipt.resourceRefs).toEqual(expect.arrayContaining([backfill.checkInAmendmentId, backfill.checkOutAmendmentId]));
+    expect(receipt.factRefs).toEqual([backfill.collectionFactId]);
   });
 
   it("serializes and validates the real Preview effect for every command type", async () => {
@@ -720,15 +822,16 @@ describe("Command effect HTTP contract", () => {
       departureDate: propertyToday,
       inventoryUnitId: demo.secondRoomId
     });
-    const checkoutOrder = await capture("CREATE_ORDER", {
+    const checkoutCreationClock = new Date(`${shiftLocalDate(propertyToday, -1)}T12:00:00.000Z`);
+    const checkoutOrder = await withPropertyClockForTesting(checkoutCreationClock, () => capture("CREATE_ORDER", {
       propertyId: demo.propertyId,
       quoteId: checkoutPriced.quoteId,
       primaryGuest: { fullName: "Effect Contract Checkout Guest", nickname: "Effect Checkout" },
       bookingChannelCode: "WECOM",
       channelOrderReference: null,
       targetCurrentContractAmountMinor: checkoutPriced.currentContractAmount.minorUnits
-    });
-    const checkoutOrderId = (await confirm(checkoutOrder)).orderId as string;
+    }));
+    const checkoutOrderId = (await withPropertyClockForTesting(checkoutCreationClock, () => confirm(checkoutOrder))).orderId as string;
     await withPropertyClockForTesting(new Date(`${shiftLocalDate(propertyToday, -1)}T12:00:00.000Z`), () => executeSetupCommand(
       "CHECK_IN",
       { propertyId: demo.propertyId, orderId: checkoutOrderId },
@@ -738,6 +841,149 @@ describe("Command effect HTTP contract", () => {
     expect(checkOut.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     const checkOutResult = await confirm(checkOut);
     expect(checkOutResult).not.toHaveProperty("cleaningTaskId");
+
+    // 逾期已预订订单完成住宿：一次补记入住与退房并按真实结算显示。
+    const completeStayArrival = shiftLocalDate(propertyToday, -5);
+    const completeStayDeparture = shiftLocalDate(propertyToday, -3);
+    const completeStayPriced = await quote({
+      arrivalDate: completeStayArrival,
+      departureDate: completeStayDeparture,
+      inventoryUnitId: "unit_room_305"
+    });
+    const completeStayCreationClock = new Date(`${completeStayArrival}T12:00:00.000Z`);
+    const completeStayOrder = await withPropertyClockForTesting(completeStayCreationClock, () => capture("CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: completeStayPriced.quoteId,
+      primaryGuest: { fullName: "Effect Contract Complete Stay Guest", nickname: "Effect Complete Stay" },
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: completeStayPriced.currentContractAmount.minorUnits
+    }));
+    const completeStayOrderId = (await withPropertyClockForTesting(completeStayCreationClock, () => confirm(completeStayOrder))).orderId as string;
+    const completeStay = await withPropertyClockForTesting(new Date(`${propertyToday}T12:00:00.000Z`), () => capture("COMPLETE_STAY", {
+      propertyId: demo.propertyId,
+      orderId: completeStayOrderId,
+      actualStayCompletedConfirmed: true,
+      reasonNote: "客人实际住过且已离店，一次补记入住与退房"
+    }));
+    expect(completeStay.effect).toMatchObject({
+      operation: "COMPLETE_STAY",
+      arrivalDate: completeStayArrival,
+      departureDate: completeStayDeparture,
+      businessDate: propertyToday,
+      settlementStatus: "ARREARS",
+      checkIn: {
+        fromStatus: "RESERVED",
+        toStatus: "CHECKED_IN",
+        effectiveDate: completeStayArrival,
+        recordingMode: "LATE_RECORDED"
+      },
+      checkOut: {
+        fromStatus: "CHECKED_IN",
+        toStatus: "CHECKED_OUT",
+        effectiveDate: completeStayDeparture,
+        recordingMode: "LATE_RECORDED"
+      }
+    });
+    expect(Object.keys(completeStay.effect).sort()).toEqual(expectedEffectKeys.COMPLETE_STAY);
+    expect(Value.Check(CommandEffectSchema, completeStay.effect)).toBe(true);
+    const completeStayConfirmation = await withPropertyClockForTesting(
+      new Date(`${propertyToday}T12:00:00.000Z`),
+      () => confirmReceipt(completeStay)
+    );
+    const completeStayResult = completeStayConfirmation.receipt.result;
+    expect(completeStayResult).toMatchObject({
+      orderId: completeStayOrderId,
+      status: "CHECKED_OUT",
+      settlementStatus: "ARREARS",
+      effectHash: expect.stringMatching(/^[a-f0-9]{64}$/)
+    });
+    const completeStayReferences = completeStayResult as {
+      stayId: string;
+      checkInAmendmentId: string;
+      checkOutAmendmentId: string;
+    };
+    expect(completeStayConfirmation.receipt.resourceRefs).toEqual(expect.arrayContaining([
+      completeStayOrderId,
+      completeStayReferences.stayId,
+      completeStayReferences.checkInAmendmentId,
+      completeStayReferences.checkOutAmendmentId
+    ]));
+
+    const recoveredCompleteStay = await app.inject({
+      method: "GET",
+      url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=COMPLETE_STAY&idempotencyKey=${encodeURIComponent(completeStayConfirmation.idempotencyKey)}`,
+      headers: { authorization: `Bearer ${demo.writeToken}` }
+    });
+    expect(recoveredCompleteStay.statusCode, recoveredCompleteStay.body).toBe(200);
+    expect(recoveredCompleteStay.json()).toMatchObject({
+      receiptId: completeStayConfirmation.receipt.receiptId,
+      commandId: completeStayConfirmation.receipt.commandId,
+      result: {
+        orderId: completeStayOrderId,
+        effectHash: completeStayResult.effectHash
+      },
+      resourceRefs: expect.arrayContaining([
+        completeStayOrderId,
+        completeStayReferences.stayId,
+        completeStayReferences.checkInAmendmentId,
+        completeStayReferences.checkOutAmendmentId
+      ])
+    });
+
+    const disabledBackfill = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: headers("effect-backfill-disabled"),
+      payload: {
+        commandType: "BACKFILL_COMPLETED_STAY",
+        input: { propertyId: demo.propertyId, orderId }
+      }
+    });
+    expect(disabledBackfill.statusCode, disabledBackfill.body).toBe(400);
+    const backfillArrivalDate = shiftLocalDate(propertyToday, -4);
+    const backfillDepartureDate = shiftLocalDate(propertyToday, -2);
+    const historicalBackfillEffect = {
+      operation: "BACKFILL_COMPLETED_STAY",
+      orderId,
+      stayId: "stay_historical_backfill",
+      inventoryUnitId: demo.roomId,
+      arrivalDate: backfillArrivalDate,
+      departureDate: backfillDepartureDate,
+      businessDate: propertyToday,
+      amounts: {
+        currentContractAmount: { currency: "CNY", minorUnits: 0 },
+        netRecordedCollection: { currency: "CNY", minorUnits: 0 },
+        collectionDifference: { currency: "CNY", minorUnits: 0 },
+        refundReferenceAmount: { currency: "CNY", minorUnits: 0 }
+      },
+      checkIn: {
+        orderId,
+        fromStatus: "RESERVED",
+        toStatus: "CHECKED_IN",
+        inventoryUnitId: demo.roomId,
+        businessDate: propertyToday,
+        effectiveDate: backfillArrivalDate,
+        recordingMode: "LATE_RECORDED",
+        entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: 0 }
+      },
+      checkOut: {
+        orderId,
+        fromStatus: "CHECKED_IN",
+        toStatus: "CHECKED_OUT",
+        inventoryUnitId: demo.roomId,
+        businessDate: propertyToday,
+        effectiveDate: backfillDepartureDate,
+        recordingMode: "LATE_RECORDED"
+      },
+      entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: 0 },
+      collection: null
+    };
+    expect(Value.Check(CommandEffectSchema, historicalBackfillEffect)).toBe(true);
+    expect(Object.keys(historicalBackfillEffect).sort()).toEqual([
+      "amounts", "arrivalDate", "businessDate", "checkIn", "checkOut", "collection", "departureDate",
+      "entitlementTransition", "inventoryUnitId", "operation", "orderId", "stayId"
+    ]);
 
     const conversionMember = await capture("CREATE_MEMBER", {
       propertyId: demo.propertyId,
@@ -755,7 +1001,8 @@ describe("Command effect HTTP contract", () => {
       departureDate: conversionDepartureDate,
       inventoryUnitId: "unit_room_d_gen_01"
     });
-    const conversionOrder = await capture("CREATE_ORDER", {
+    const conversionCreationClock = new Date(`${conversionArrivalDate}T12:00:00.000Z`);
+    const conversionOrder = await withPropertyClockForTesting(conversionCreationClock, () => capture("CREATE_ORDER", {
       propertyId: demo.propertyId,
       quoteId: conversionPriced.quoteId,
       primaryGuest: {
@@ -767,8 +1014,8 @@ describe("Command effect HTTP contract", () => {
       bookingChannelCode: "WECOM",
       channelOrderReference: null,
       targetCurrentContractAmountMinor: conversionPriced.currentContractAmount.minorUnits
-    });
-    const conversionOrderId = (await confirm(conversionOrder)).orderId as string;
+    }));
+    const conversionOrderId = (await withPropertyClockForTesting(conversionCreationClock, () => confirm(conversionOrder))).orderId as string;
     await withPropertyClockForTesting(new Date(`${conversionArrivalDate}T12:00:00.000Z`), () => executeSetupCommand(
       "CHECK_IN",
       { propertyId: demo.propertyId, orderId: conversionOrderId },
@@ -812,6 +1059,57 @@ describe("Command effect HTTP contract", () => {
       convertedUnits: 1,
       remainingUnits: 29,
       effectHash: expect.stringMatching(/^[a-f0-9]{64}$/)
+    });
+
+    // 零收款订单升级：空转入列表，会员费全额作为差额收款。
+    const zeroCollectionPriced = await quote({
+      arrivalDate: conversionArrivalDate,
+      departureDate: conversionDepartureDate,
+      inventoryUnitId: "unit_room_305"
+    });
+    const zeroCollectionOrder = await withPropertyClockForTesting(conversionCreationClock, () => capture("CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: zeroCollectionPriced.quoteId,
+      primaryGuest: {
+        fullName: "Effect Contract Zero Collection Guest",
+        nickname: "Effect Zero Collection",
+        phone: "13800000002",
+        documentNumber: "TEST-EFFECT-CONVERSION-ID-001"
+      },
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: zeroCollectionPriced.currentContractAmount.minorUnits
+    }));
+    const zeroCollectionOrderId = (await withPropertyClockForTesting(conversionCreationClock, () => confirm(zeroCollectionOrder))).orderId as string;
+    await withPropertyClockForTesting(new Date(`${conversionArrivalDate}T12:00:00.000Z`), () => executeSetupCommand(
+      "CHECK_IN",
+      { propertyId: demo.propertyId, orderId: zeroCollectionOrderId },
+      "effect-zero-conversion-setup-checkin"
+    ));
+    const zeroConversion = await capture("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", {
+      propertyId: demo.propertyId,
+      orderId: zeroCollectionOrderId,
+      memberId: conversionMemberId,
+      membershipProductId: "membership_product_shared_bath_single_v1",
+      collectionFactIds: [],
+      agreedPriceMinor: 162_000,
+      remainingPaymentTransactionReference: "WX-EFFECT-CONVERSION-ZERO-001"
+    });
+    expect(zeroConversion.effect).toMatchObject({
+      operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      transfer: { total: { currency: "CNY", minorUnits: 0 }, collections: [] },
+      remainingPayment: {
+        amount: { currency: "CNY", minorUnits: 162_000 },
+        transactionReference: "WX-EFFECT-CONVERSION-ZERO-001"
+      }
+    });
+    const zeroConversionResult = await confirm(zeroConversion);
+    expect(zeroConversionResult).toMatchObject({
+      orderId: zeroCollectionOrderId,
+      status: "ACTIVE",
+      transferredCollectionFactIds: [],
+      transferredAmount: { currency: "CNY", minorUnits: 0 },
+      remainingPaymentAmount: { currency: "CNY", minorUnits: 162_000 }
     });
     const disabledCleaning = await app.inject({
       method: "POST",

@@ -208,6 +208,7 @@ async function createCheckedOutStay(options: {
   guestPhone?: string;
   unitId?: string;
   bookingChannelCode?: "WECOM" | "MEITUAN";
+  skipCheckOut?: boolean;
   skipCollection?: boolean;
   collectionAmountMinor?: number;
   transactionReference?: string;
@@ -244,10 +245,12 @@ async function createCheckedOutStay(options: {
     commandType: "CHECK_IN",
     input: { propertyId: demo.propertyId, orderId }
   }, `${options.prefix}-checkin`));
-  await withPropertyClockForTesting(new Date(`${stayDates.departure}T12:00:00.000Z`), () => execute({
-    commandType: "CHECK_OUT",
-    input: { propertyId: demo.propertyId, orderId }
-  }, `${options.prefix}-checkout`));
+  if (!options.skipCheckOut) {
+    await withPropertyClockForTesting(new Date(`${stayDates.departure}T12:00:00.000Z`), () => execute({
+      commandType: "CHECK_OUT",
+      input: { propertyId: demo.propertyId, orderId }
+    }, `${options.prefix}-checkout`));
+  }
 
   const collectionAmountMinor = options.collectionAmountMinor ?? 59_000;
   if (options.skipCollection) {
@@ -598,6 +601,151 @@ describe("4.7 stay collection conversion to membership", () => {
       code: "AGGREGATE_VERSION_CONFLICT",
       message: expect.stringContaining("已完成升级会员")
     });
+  });
+
+  it("converts an in-house stay, keeping the order checked in while zeroing lodging funds", async () => {
+    const memberId = await createMember("STAGE47-INHOUSE-ID", "inhouse");
+    const stay = await createCheckedOutStay({
+      prefix: "inhouse",
+      documentNumber: "STAGE47-INHOUSE-ID",
+      skipCheckOut: true,
+      collectionAmountMinor: 59_000,
+      transactionReference: "WX-STAGE47-INHOUSE-SOURCE"
+    });
+    const envelope = conversionEnvelope({
+      orderId: stay.orderId,
+      memberId,
+      collectionFactId: stay.collectionFactId,
+      remainingPaymentTransactionReference: "WX-STAGE47-INHOUSE-REMAINING"
+    });
+    const receipt = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), async () => {
+      const prepared = await preview(envelope, "inhouse-conversion");
+      return confirmPrepared(envelope, prepared, "inhouse-conversion");
+    });
+    expect(receipt.businessCommitted).toBe(true);
+    expect(receipt.result).toMatchObject({
+      status: "ACTIVE",
+      transferredCollectionFactIds: [stay.collectionFactId],
+      transferredAmount: { currency: "CNY", minorUnits: 59_000 },
+      remainingPaymentAmount: { currency: "CNY", minorUnits: 103_000 },
+      convertedUnits: 7,
+      remainingUnits: 23
+    });
+
+    // 在住升级后订单保持在住，住宿金额归零，权益按整段住宿夜核销。
+    const orderState = await db.selectFrom("orders")
+      .innerJoin("stays", "stays.order_id", "orders.id")
+      .innerJoin("pricing_revisions", "pricing_revisions.id", "orders.current_revision_id")
+      .select([
+        "orders.status as orderStatus",
+        "stays.status as stayStatus",
+        "pricing_revisions.current_contract_amount_minor as currentContractAmountMinor"
+      ])
+      .where("orders.id", "=", stay.orderId)
+      .executeTakeFirstOrThrow();
+    expect(orderState).toEqual({
+      orderStatus: "CHECKED_IN",
+      stayStatus: "IN_HOUSE",
+      currentContractAmountMinor: 0
+    });
+    const conversionLedger = await db.selectFrom("entitlement_ledger")
+      .select(["service_date"])
+      .where("order_id", "=", stay.orderId)
+      .where("entry_type", "=", "CONVERSION_CONSUME")
+      .orderBy("service_date")
+      .execute();
+    expect(conversionLedger.map((item) => item.service_date)).toEqual(serviceDates(stayDates.arrival, stayDates.departure));
+
+    // 升级会员后的在住订单到计划退房日仍能正常退房。
+    await withPropertyClockForTesting(new Date(`${stayDates.departure}T12:00:00.000Z`), () => execute({
+      commandType: "CHECK_OUT",
+      input: { propertyId: demo.propertyId, orderId: stay.orderId }
+    }, "inhouse-checkout-after-conversion"));
+    const checkedOut = await db.selectFrom("orders")
+      .select("status")
+      .where("id", "=", stay.orderId)
+      .executeTakeFirstOrThrow();
+    expect(checkedOut.status).toBe("CHECKED_OUT");
+  });
+
+  it("converts a stay with zero recorded collections by charging the full membership price directly", async () => {
+    const memberId = await createMember("STAGE47-NOCOL-ID", "nocol");
+    const stay = await createCheckedOutStay({
+      prefix: "nocol",
+      documentNumber: "STAGE47-NOCOL-ID",
+      skipCollection: true
+    });
+
+    // 零收款升级时会员费全额作为差额收款，必须填写新的企微交易单号。
+    await expect(preview(conversionEnvelope({
+      orderId: stay.orderId,
+      memberId,
+      collectionFactId: "",
+      collectionFactIds: []
+    }), "nocol-conversion-no-ref")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+    const envelope = conversionEnvelope({
+      orderId: stay.orderId,
+      memberId,
+      collectionFactId: "",
+      collectionFactIds: [],
+      remainingPaymentTransactionReference: "WX-STAGE47-NOCOL-FULL"
+    });
+    const prepared = await preview(envelope, "nocol-conversion");
+    expect(prepared.preview.effect).toMatchObject({
+      transfer: { total: { currency: "CNY", minorUnits: 0 }, collections: [] },
+      remainingPayment: {
+        amount: { currency: "CNY", minorUnits: 162_000 },
+        transactionReference: "WX-STAGE47-NOCOL-FULL"
+      }
+    });
+    const receipt = await confirmPrepared(envelope, prepared, "nocol-conversion");
+    expect(receipt.businessCommitted).toBe(true);
+    expect(receipt.result).toMatchObject({
+      status: "ACTIVE",
+      transferredCollectionFactIds: [],
+      lodgingReversalFactIds: [],
+      transferIds: [],
+      transferredAmount: { currency: "CNY", minorUnits: 0 },
+      remainingPaymentAmount: { currency: "CNY", minorUnits: 162_000 }
+    });
+
+    const transfers = await db.selectFrom("stay_collection_membership_transfers")
+      .selectAll()
+      .where("order_id", "=", stay.orderId)
+      .execute();
+    expect(transfers).toEqual([]);
+    const lodgingFacts = await db.selectFrom("collection_facts")
+      .selectAll()
+      .where("order_id", "=", stay.orderId)
+      .execute();
+    expect(lodgingFacts).toEqual([]);
+    const payments = await db.selectFrom("membership_payment_facts")
+      .select(["fact_type", "amount_minor", "source_type", "transaction_reference"])
+      .where("membership_order_id", "=", receipt.result!.membershipOrderId as string)
+      .execute();
+    expect(payments).toEqual([expect.objectContaining({
+      fact_type: "COLLECTION",
+      amount_minor: 162_000,
+      source_type: "DIRECT_WECOM",
+      transaction_reference: "WX-STAGE47-NOCOL-FULL"
+    })]);
+
+    // 订单还有未转入的已记录净收款时，不允许提交空收款列表。
+    const mixedMemberId = await createMember("STAGE47-NOCOLMIX-ID", "nocolmix");
+    const mixedStay = await createCheckedOutStay({
+      prefix: "nocolmix",
+      documentNumber: "STAGE47-NOCOLMIX-ID",
+      collectionAmountMinor: 59_000,
+      transactionReference: "WX-STAGE47-NOCOLMIX-SOURCE"
+    });
+    await expect(preview(conversionEnvelope({
+      orderId: mixedStay.orderId,
+      memberId: mixedMemberId,
+      collectionFactId: "",
+      collectionFactIds: [],
+      remainingPaymentTransactionReference: "WX-STAGE47-NOCOLMIX-FULL"
+    }), "nocolmix-conversion")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
   it("allows exactly zero direct WeCom facts when the transferred lodging funds cover the agreed membership price", async () => {

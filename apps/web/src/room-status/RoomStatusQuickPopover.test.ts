@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { RoomStatusActionDto } from "@qintopia/contracts";
 import {
+  roomStatusQuickActionVisible,
+  roomStatusQuickActionCanRun,
+  runRoomStatusQuickAction,
+  runRoomStatusWriteBlockAction,
   roomStatusPopoverMeasuredHeight,
   roomStatusPopoverPosition,
   roomStatusPopoverViewportEventShouldClose
@@ -70,5 +75,53 @@ describe("roomStatusPopoverViewportEventShouldClose", () => {
     expect(roomStatusPopoverViewportEventShouldClose("scroll", false, true)).toBe(false);
     expect(roomStatusPopoverViewportEventShouldClose("scroll", false, false)).toBe(true);
     expect(roomStatusPopoverViewportEventShouldClose("resize", true, true)).toBe(true);
+  });
+});
+
+describe("roomStatusQuickActionVisible", () => {
+  it("replaces only creation actions with backfill for historical and cross-today selections", () => {
+    const action = (code: Parameters<typeof roomStatusQuickActionVisible>[0]["code"]) => ({ code, enabled: true });
+
+    expect(roomStatusQuickActionVisible(action("BACKFILL_ORDER"), "2026-08-12", "2026-08-13")).toBe(true);
+    expect(roomStatusQuickActionVisible(action("CREATE_ORDER"), "2026-08-12", "2026-08-13")).toBe(false);
+    expect(roomStatusQuickActionVisible(action("CREATE_FREE_STAY"), "2026-08-12", "2026-08-13")).toBe(false);
+    expect(roomStatusQuickActionVisible(action("LOCK_MAINTENANCE"), "2026-08-12", "2026-08-13")).toBe(true);
+    expect(roomStatusQuickActionVisible(action("RELEASE_MAINTENANCE"), "2026-08-12", "2026-08-13")).toBe(true);
+    expect(roomStatusQuickActionVisible(action("OPEN_ORDER"), "2026-08-12", "2026-08-13")).toBe(true);
+
+    expect(roomStatusQuickActionVisible(action("BACKFILL_ORDER"), "2026-08-13", "2026-08-13")).toBe(false);
+    expect(roomStatusQuickActionVisible(action("CREATE_ORDER"), "2026-08-13", "2026-08-13")).toBe(true);
+    expect(roomStatusQuickActionVisible({ code: "CREATE_ORDER", enabled: false }, "2026-08-13", "2026-08-13")).toBe(true);
+    expect(roomStatusQuickActionVisible({ code: "BACKFILL_ORDER", enabled: false }, "2026-08-12", "2026-08-13")).toBe(true);
+  });
+
+  it("never treats a disabled server action as runnable", () => {
+    expect(roomStatusQuickActionCanRun({ enabled: true })).toBe(true);
+    expect(roomStatusQuickActionCanRun({ enabled: false })).toBe(false);
+  });
+
+  it("does not dispatch a disabled server action to the write callback", () => {
+    const calls: RoomStatusActionDto[] = [];
+    const action = { code: "BACKFILL_ORDER", enabled: false, disabledReason: "正在恢复", requiresFullInterval: false, targetReference: null } satisfies RoomStatusActionDto;
+    expect(runRoomStatusQuickAction(action, (received) => calls.push(received))).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it("routes refresh and recovery buttons only to their matching callback", () => {
+    let refreshed = 0;
+    let recovered = 0;
+    expect(runRoomStatusWriteBlockAction({ kind: "REFRESH" }, {
+      onRefresh: () => { refreshed += 1; },
+      onOpenRecovery: () => { recovered += 1; }
+    })).toBe(true);
+    expect(runRoomStatusWriteBlockAction({ kind: "RECOVERY" }, {
+      onRefresh: () => { refreshed += 1; },
+      onOpenRecovery: () => { recovered += 1; }
+    })).toBe(true);
+    expect(runRoomStatusWriteBlockAction({ kind: "PERMISSION" }, {
+      onRefresh: () => { refreshed += 1; },
+      onOpenRecovery: () => { recovered += 1; }
+    })).toBe(false);
+    expect({ refreshed, recovered }).toEqual({ refreshed: 1, recovered: 1 });
   });
 });

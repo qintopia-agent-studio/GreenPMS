@@ -113,6 +113,11 @@ describe.sequential("channel order amount and atomic CREATE_ORDER on PostgreSQL"
       .rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(preview(createInput(quote.quoteId, {}), "missing-target"))
       .rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(preview(createInput(quote.quoteId, {
+      target: 0,
+      channelReason: "即使填写差异说明，普通付费渠道订单也不能为零元"
+    }), "zero-target"))
+      .rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "普通付费渠道订单的本单渠道应结金额必须大于 0" });
     expect(await businessCounts()).toEqual(before);
   });
 
@@ -247,6 +252,117 @@ describe.sequential("channel order amount and atomic CREATE_ORDER on PostgreSQL"
       }
     }, "member-target")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     expect(await businessCounts()).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it("keeps backfill-only fields out of ordinary, free, and member-entitlement order inputs", async () => {
+    const ordinaryQuote = await transientQuote(2);
+    await expect(preview({
+      commandType: "CREATE_ORDER",
+      input: {
+        ...createInput(ordinaryQuote.quoteId, {
+          channel: "WECOM",
+          reference: null,
+          target: 12_000
+        }).input,
+        backfillReason: "不应串入普通开单",
+        backfillCollection: { amountMinor: 0, method: "WECOM" }
+      }
+    }, "ordinary-backfill-fields")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "普通创建订单不应填写补录原因或补录收款"
+    });
+
+    const freeQuote = await createQuote(db, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.roomId,
+      stayType: "FREE",
+      arrivalDate: "2026-07-01",
+      departureDate: "2026-07-02",
+      pricingPolicyVersionId: demo.freePolicyId
+    });
+    await expect(preview({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: freeQuote.quoteId,
+        primaryGuest: { fullName: "免费补录住客", nickname: "免费补录" },
+        freeStayReason: "接待",
+        freeStayCategoryCode: "RECEPTION",
+        backfill: true,
+        backfillReason: "前台漏录",
+        backfillCollection: { amountMinor: 0, method: "CASH" }
+      }
+    }, "free-backfill-collection")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+    const memberQuote = await createQuote(db, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.roomId,
+      stayType: "TRANSIENT",
+      arrivalDate: "2026-07-03",
+      departureDate: "2026-07-04",
+      pricingPolicyVersionId: demo.transientPolicyId,
+      memberContractId: demo.memberContractId
+    });
+    await expect(preview({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: memberQuote.quoteId,
+        primaryGuest: { fullName: "会员补录住客", nickname: "会员补录" },
+        backfill: true,
+        backfillReason: "前台漏录"
+      }
+    }, "member-backfill")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "当前补录只支持普通住宿或免费入住，不支持会员权益住宿"
+    });
+    expect(await businessCounts()).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it("opens only the atomic CREATE_ORDER historical backfill path in 8.3", async () => {
+    const quote = await createQuote(db, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.roomId,
+      stayType: "TRANSIENT",
+      arrivalDate: "2026-07-01",
+      departureDate: "2026-07-03",
+      pricingPolicyVersionId: demo.transientPolicyId
+    });
+    const before = await businessCounts();
+
+    await expect(preview({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: "历史普通开单住客", nickname: "历史普通" },
+        bookingChannelCode: "WECOM",
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+      }
+    }, "historical-ordinary-release-gate")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "今天以前的住宿必须使用补录住宿入口"
+    });
+
+    const backfill = await preview({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: "补录门禁住客", nickname: "补录门禁" },
+        bookingChannelCode: "WECOM",
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits,
+        backfill: true,
+        backfillReason: "8.2 只开放入口与表单",
+        backfillCollection: { amountMinor: 0, method: "WECOM" }
+      }
+    }, "backfill-release-gate");
+    expect(backfill.preview.effect.backfill).toMatchObject({
+      resultingOrderStatus: "CHECKED_OUT",
+      resultingStayStatus: "COMPLETED",
+      settlementStatus: "ARREARS"
+    });
+    expect(await businessCounts()).toEqual(before);
   });
 
   it("keeps FREE and MEMBER_ENTITLEMENT as database-owned pricing categories for every revision", async () => {

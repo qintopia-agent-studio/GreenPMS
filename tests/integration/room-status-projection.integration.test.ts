@@ -19,6 +19,7 @@ import {
   getRoomStatusBoard,
   listAvailability,
   propertyLocalToday,
+  withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
 import { sql, type Kysely } from "kysely";
@@ -48,6 +49,13 @@ const validateRoomStatusBoardSchema = roomStatusSchemaValidator.compile(RoomStat
 function metadata(prefix: string) {
   sequence += 1;
   return { idempotencyKey: `${prefix}-${sequence}`, correlationId: `${prefix}-${sequence}` };
+}
+
+async function withOrdinaryOrderCreationClock<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
+  const businessDate = await propertyLocalToday(db, demo.propertyId);
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), operation)
+    : operation();
 }
 
 async function prepare(envelope: CommandEnvelope, prefix: string) {
@@ -179,32 +187,34 @@ async function createOrder(options: {
     memberContractId?: string;
     nickname?: string;
 }) {
-  const stayType = options.stayType ?? "TRANSIENT";
-  const quote = await createQuote(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: options.unitId,
-    stayType,
-    arrivalDate: options.arrivalDate,
-    departureDate: options.departureDate,
-    pricingPolicyVersionId: stayType === "FREE"
-      ? demo.freePolicyId
-      : testPricingPolicyForDates(options.arrivalDate, options.departureDate),
-    ...(options.memberContractId ? { memberContractId: options.memberContractId } : {})
-  });
-  return execute({
-    commandType: "CREATE_ORDER",
-    input: {
+  return withOrdinaryOrderCreationClock(options.arrivalDate, async () => {
+    const stayType = options.stayType ?? "TRANSIENT";
+    const quote = await createQuote(db, {
       propertyId: demo.propertyId,
-      quoteId: quote.quoteId,
-      primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: options.nickname ?? `RS ${options.prefix}` },
-     ...(!options.memberContractId && stayType !== "FREE" ? {
-        bookingChannelCode: "WECOM",
-        channelOrderReference: null,
-        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
-      } : {}),
-      ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Volunteer accommodation", freeStayCategoryCode: "RECEPTION" } : {})
-    }
-  }, `${options.prefix}-create`);
+      inventoryUnitId: options.unitId,
+      stayType,
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate,
+      pricingPolicyVersionId: stayType === "FREE"
+        ? demo.freePolicyId
+        : testPricingPolicyForDates(options.arrivalDate, options.departureDate),
+      ...(options.memberContractId ? { memberContractId: options.memberContractId } : {})
+    });
+    return execute({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: options.nickname ?? `RS ${options.prefix}` },
+        ...(!options.memberContractId && stayType !== "FREE" ? {
+          bookingChannelCode: "WECOM",
+          channelOrderReference: null,
+          targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+        } : {}),
+        ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Volunteer accommodation", freeStayCategoryCode: "RECEPTION" } : {})
+      }
+    }, `${options.prefix}-create`);
+  });
 }
 
 async function markOrderInHouseFixture(orderId: string) {
@@ -299,11 +309,26 @@ describe("PostgreSQL room-status projection", () => {
     const expectedAvailableBeds = inventoryRows
       .filter((unit) => unit.kind === "BED" && unit.active && activeRoomIds.has(unit.parent_room_id!))
       .length;
+    const expectedTotalSellableUnits = expectedAvailableRooms + expectedAvailableBeds;
 
     const unfiltered = await board({ arrivalDate: "2034-01-01", departureDate: "2034-01-03" });
     expect(unfiltered.availabilitySummary).toEqual([
-      { serviceDate: "2034-01-01", availableRooms: expectedAvailableRooms, availableBeds: expectedAvailableBeds },
-      { serviceDate: "2034-01-02", availableRooms: expectedAvailableRooms, availableBeds: expectedAvailableBeds }
+      {
+        serviceDate: "2034-01-01",
+        availableRooms: expectedAvailableRooms,
+        availableBeds: expectedAvailableBeds,
+        paidOccupiedUnits: 0,
+        totalSellableUnits: expectedTotalSellableUnits,
+        occupantCount: 0
+      },
+      {
+        serviceDate: "2034-01-02",
+        availableRooms: expectedAvailableRooms,
+        availableBeds: expectedAvailableBeds,
+        paidOccupiedUnits: 0,
+        totalSellableUnits: expectedTotalSellableUnits,
+        occupantCount: 0
+      }
     ]);
 
     const filteredEmpty = await board({
@@ -313,6 +338,20 @@ describe("PostgreSQL room-status projection", () => {
     });
     expect(filteredEmpty.rooms).toEqual([]);
     expect(filteredEmpty.availabilitySummary).toEqual(unfiltered.availabilitySummary);
+  });
+
+  it("counts whole-room business occupancy in split-bed rooms by the room's occupied bed sellable units", async () => {
+    await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: "2029-03-01",
+      departureDate: "2029-03-02",
+      prefix: "split-room-business-units"
+    });
+
+    const occupied = await board({ arrivalDate: "2029-03-01", departureDate: "2029-03-02" });
+    expect(unitIn(occupied, demo.roomId).children).toHaveLength(4);
+    expect(occupied.availabilitySummary.find((item) => item.serviceDate === "2029-03-01"))
+      .toMatchObject({ paidOccupiedUnits: 4, occupantCount: 1 });
   });
 
   it("aggregates only authoritative split-bed lodging facts before filters and fails closed for ambiguous occupancy", async () => {
@@ -370,6 +409,18 @@ describe("PostgreSQL room-status projection", () => {
     }, "occupancy-internal-use");
 
     const occupied = await board({ arrivalDate: "2029-02-01", departureDate: "2029-02-03" });
+    expect(occupied.availabilitySummary).toEqual([
+      expect.objectContaining({
+        serviceDate: "2029-02-01",
+        paidOccupiedUnits: 1,
+        occupantCount: 1
+      }),
+      expect.objectContaining({
+        serviceDate: "2029-02-02",
+        paidOccupiedUnits: 1,
+        occupantCount: 1
+      })
+    ]);
     const parent = unitIn(occupied, demo.roomId);
     expect(unitIn(occupied, demo.bedCId).days.find((day) => day.serviceDate === "2029-02-02"))
       .toMatchObject({ status: "AVAILABLE", available: true });
@@ -1159,6 +1210,82 @@ describe("PostgreSQL room-status projection", () => {
     })).not.toThrow();
   });
 
+  it("projects the original arrival date across an overdue reserved prearranged bed move", async () => {
+    const baseline = await board({ arrivalDate: "2030-02-01", departureDate: "2030-02-02" });
+    const businessDate = baseline.businessDate;
+    const orderArrivalDate = shiftLocalDate(businessDate, -2);
+    const moveDate = shiftLocalDate(businessDate, 1);
+    const departureDate = shiftLocalDate(businessDate, 3);
+    const created = await createOrder({
+      unitId: demo.bedAId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "overdue-prearranged-bed-move"
+    });
+    const orderId = created.result!.orderId as string;
+
+    const moved = await execute({
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newInventoryUnitId: demo.bedBId,
+        effectiveDate: moveDate
+      }
+    }, "overdue-prearranged-bed-move");
+    expect(moved.executionStatus).toBe("EXECUTED");
+    await db.updateTable("orders")
+      .set({ arrival_date: orderArrivalDate })
+      .where("id", "=", orderId)
+      .execute();
+
+    const activeClaims = await db.selectFrom("inventory_claims as claim")
+      .innerJoin("stay_segments as segment", "segment.id", "claim.source_id")
+      .innerJoin("stays as stay", "stay.id", "segment.stay_id")
+      .select(["claim.service_date", "claim.inventory_unit_id"])
+      .where("stay.order_id", "=", orderId)
+      .where("claim.active", "=", true)
+      .orderBy("claim.service_date")
+      .execute();
+    expect(activeClaims).toEqual([
+      { service_date: businessDate, inventory_unit_id: demo.bedAId },
+      { service_date: moveDate, inventory_unit_id: demo.bedBId },
+      { service_date: shiftLocalDate(moveDate, 1), inventory_unit_id: demo.bedBId }
+    ]);
+
+    const result = await board({
+      arrivalDate: businessDate,
+      departureDate,
+      pageSize: 200
+    });
+    const belongsToOrder = (interval: RoomStatusUnitDto["intervals"][number]) => interval.references
+      .some((reference) => reference.type === "ORDER" && reference.id === orderId);
+    const originalRun = unitIn(result, demo.bedAId).intervals.find(belongsToOrder);
+    const movedRun = unitIn(result, demo.bedBId).intervals.find(belongsToOrder);
+    const parentRuns = unitIn(result, demo.roomId).intervals.filter(belongsToOrder);
+
+    expect(originalRun).toMatchObject({
+      actualInventoryUnitId: demo.bedAId,
+      startDate: businessDate,
+      endDate: moveDate,
+      sourceStartDate: businessDate,
+      sourceEndDate: moveDate,
+      orderArrivalDate,
+      status: "RESERVED"
+    });
+    expect(movedRun).toMatchObject({
+      actualInventoryUnitId: demo.bedBId,
+      startDate: moveDate,
+      endDate: departureDate,
+      sourceStartDate: moveDate,
+      sourceEndDate: departureDate,
+      orderArrivalDate,
+      status: "RESERVED"
+    });
+    expect(parentRuns).toHaveLength(2);
+    expect(parentRuns.map((interval) => interval.actualInventoryUnitId).sort()).toEqual([demo.bedAId, demo.bedBId].sort());
+  });
+
   it("fails closed consistently in the grid and task projection when a current lodging Claim is missing", async () => {
     const baseline = await board({ arrivalDate: "2030-02-01", departureDate: "2030-02-02" });
     const businessDate = baseline.businessDate;
@@ -1765,8 +1892,7 @@ describe("PostgreSQL room-status projection", () => {
         propertyId: demo.propertyId,
         orderId,
         newArrivalDate: arrivalDate,
-        newDepartureDate: shortenedDepartureDate,
-        targetCurrentContractAmountMinor: 24_000
+        newDepartureDate: shortenedDepartureDate
       }
     }, "authoritative-stay-shorten");
     const afterShorten = await board({ arrivalDate, departureDate: extendedDepartureDate });
@@ -1797,8 +1923,7 @@ describe("PostgreSQL room-status projection", () => {
         propertyId: demo.propertyId,
         orderId,
         newArrivalDate: arrivalDate,
-        newDepartureDate: extendedDepartureDate,
-        targetCurrentContractAmountMinor: 60_000
+        newDepartureDate: extendedDepartureDate
       }
     }, "authoritative-stay-extend");
     const afterExtend = await board({ arrivalDate, departureDate: extendedDepartureDate });
@@ -1882,17 +2007,23 @@ describe("PostgreSQL room-status projection", () => {
 
     const afterCheckout = await board({ arrivalDate, departureDate: shiftLocalDate(businessDate, 1) });
     expect(afterCheckout.revision).toBe("3");
+    expect(afterCheckout.availabilitySummary.find((item) => item.serviceDate === arrivalDate))
+      .toMatchObject({ paidOccupiedUnits: 4, occupantCount: 1 });
     const room = unitIn(afterCheckout, demo.secondRoomId);
-    const historical = room.intervals.find((interval) => interval.sourceKind === "ORDER");
+    const historical = room.intervals.find((interval) => interval.references.some((item) => item.type === "ORDER" && item.id === orderId));
     expect(historical).toMatchObject({
-      status: "IN_HOUSE",
+      sourceKind: "ORDER",
+      status: "ARREARS",
       startDate: arrivalDate,
       endDate: businessDate,
       available: true,
-      blocking: false
+      blocking: false,
+      conflicts: []
     });
     const departureDay = room.days.find((day) => day.serviceDate === businessDate)!;
     expect(departureDay).toMatchObject({ status: "AVAILABLE", available: true, conflicts: [] });
+    const stayNight = room.days.find((day) => day.serviceDate === arrivalDate)!;
+    expect(stayNight).toMatchObject({ status: "ARREARS", available: false, intervalIds: [historical!.id], conflicts: [] });
     expect(room.intervals.some((interval) => interval.sourceKind === "CLEANING")).toBe(false);
     expect(afterCheckout.operationalTasks.flatMap((task) => task.allowedActions)
       .some((action) => action.code === "COMPLETE_CLEANING")).toBe(false);
@@ -1944,6 +2075,42 @@ describe("PostgreSQL room-status projection", () => {
     expect(unitIn(cancelledBoard, demo.roomId).intervals.some((interval) => interval.references.some((item) => item.id === cancelledOrderId))).toBe(false);
   });
 
+  it("does not project a completed bed stay as a current in-house occupancy", async () => {
+    const { arrivalDate, departureDate: businessDate } = await distinctBusinessDatesAcrossTimezones();
+    const created = await createOrder({
+      unitId: demo.bedCId,
+      arrivalDate,
+      departureDate: businessDate,
+      prefix: "historical-bed-stay"
+    });
+    const orderId = created.result!.orderId as string;
+    await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "historical-bed-stay-check-in");
+    await db.updateTable("properties").set({ timezone: "Pacific/Kiritimati" }).where("id", "=", demo.propertyId).execute();
+    await execute({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, "historical-bed-stay-check-out");
+
+    const afterCheckout = await board({ arrivalDate, departureDate: shiftLocalDate(businessDate, 1) });
+    expect(afterCheckout.availabilitySummary.find((item) => item.serviceDate === arrivalDate))
+      .toMatchObject({ paidOccupiedUnits: 1, occupantCount: 1 });
+    const parentRoom = unitIn(afterCheckout, demo.roomId);
+    const bed = unitIn(afterCheckout, demo.bedCId);
+    const historical = bed.intervals.find((interval) => interval.references.some((item) => item.type === "ORDER" && item.id === orderId));
+    expect(historical).toMatchObject({
+      status: "ARREARS",
+      startDate: arrivalDate,
+      endDate: businessDate,
+      available: true,
+      blocking: false,
+      conflicts: []
+    });
+    expect(bed.days.find((day) => day.serviceDate === arrivalDate)).toMatchObject({ status: "ARREARS", available: false, intervalIds: [historical!.id] });
+    expect(parentRoom.days.find((day) => day.serviceDate === arrivalDate)).toMatchObject({ status: "ARREARS", available: false });
+    expect(parentRoom.bedOccupancies.find((item) => item.serviceDate === arrivalDate)).toMatchObject({
+      occupiedBedCount: 1,
+      occupants: [expect.objectContaining({ inventoryUnitId: demo.bedCId })]
+    });
+    expect(bed.days.find((day) => day.serviceDate === businessDate)).toMatchObject({ status: "AVAILABLE", available: true });
+  });
+
   it("checks out a free stay without creating a cleaning task", async () => {
     const { arrivalDate, departureDate: businessDate } = await distinctBusinessDatesAcrossTimezones();
     const created = await createOrder({
@@ -1965,6 +2132,9 @@ describe("PostgreSQL room-status projection", () => {
       checkOut: { plannedBusinessDate: businessDate, recordedBusinessDate: businessDate, recordingMode: "ON_SCHEDULE" }
     });
     expect(await db.selectFrom("cleaning_tasks").select("id").where("order_id", "=", orderId).execute()).toHaveLength(0);
+    expect((await board({ arrivalDate, departureDate: shiftLocalDate(businessDate, 1) }))
+      .availabilitySummary.find((item) => item.serviceDate === arrivalDate))
+      .toMatchObject({ paidOccupiedUnits: 0, occupantCount: 0 });
   });
 
   it("enforces future-arrival and early-checkout gates while late-recording overdue fulfillment", async () => {

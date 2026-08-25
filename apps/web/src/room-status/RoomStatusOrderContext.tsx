@@ -13,6 +13,7 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
   CHECK_IN: "办理入住",
   CHECK_OUT: "办理退房",
+  COMPLETE_STAY: "完成住宿",
   RESCHEDULE_STAY: "调整预订日期",
   SHORTEN_STAY: "缩短住宿",
   EXTEND_STAY: "延长住宿",

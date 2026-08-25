@@ -1,5 +1,5 @@
 import { sql } from "kysely";
-import { currentReleaseFeatures, DomainError, freeStayCategoryCodes, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType } from "@qintopia/contracts";
+import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType } from "@qintopia/contracts";
 import {
   amountSummary,
   calculatePricing,
@@ -20,6 +20,7 @@ import {
   activeCoverageCandidates,
   loadActiveStayTimeline,
   loadOrderContext,
+  getOrderViewSnapshot,
   orderAmountSummary,
   projectOrderLifecycle,
   type OrderContext,
@@ -120,6 +121,7 @@ function requireNonNegativeWholeYuanMinor(input: Record<string, unknown>, field:
 
 const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 const operatorCollectionMethods = new Set(["WECOM", "BANK_TRANSFER", "CASH", "OTHER"]);
+const backfillCollectionMethodSet = new Set<string>(backfillCollectionMethods);
 
 function assertOperatorFundsAllowedForOrder(context: OrderContext): void {
   if (context.order.booking_channel_code && externalChannelCodes.has(context.order.booking_channel_code)) {
@@ -174,6 +176,125 @@ function fundsTransactionAndNote(input: Record<string, unknown>, method: string,
     throw new DomainError("VALIDATION_ERROR", method === "CASH" ? "必须填写收款人" : "必须填写其他收款说明");
   }
   return { transactionReference: rawReference || null, note };
+}
+
+export type NormalizedBackfillCollection =
+  | {
+      amountMinor: number;
+      method: "WECOM" | "BANK_TRANSFER";
+      transactionReference?: string;
+      note: string;
+    }
+  | {
+      amountMinor: number;
+      method: "CASH";
+      cashCollector?: string;
+      note?: string;
+    };
+
+export function normalizeBackfillCollectionInput(
+  value: unknown,
+  field = "backfillCollection",
+  actionLabel = "补录"
+): NormalizedBackfillCollection {
+  const input = requireObject(value, field);
+  const amountMinor = requireInteger(input, "amountMinor", { min: 0 });
+  const submittedMethod = requireString(input, "method");
+  if (!backfillCollectionMethodSet.has(submittedMethod)) {
+    throw new DomainError("VALIDATION_ERROR", `${actionLabel}收款方式必须是企业微信、银行转账或现金`);
+  }
+  const method = submittedMethod as BackfillCollectionMethod;
+  const transactionReference = optionalString(input, "transactionReference");
+  const cashCollector = optionalString(input, "cashCollector");
+  const note = optionalString(input, "note");
+
+  if (method === "CASH") {
+    if (input.transactionReference !== undefined && input.transactionReference !== null) {
+      throw new DomainError("VALIDATION_ERROR", `现金${actionLabel}收款不填写交易单号`);
+    }
+    if (amountMinor > 0 && !cashCollector) {
+      throw new DomainError("VALIDATION_ERROR", `现金${actionLabel}收款必须填写收款人`);
+    }
+    if (amountMinor > 0 && !note) {
+      throw new DomainError("VALIDATION_ERROR", `现金${actionLabel}收款必须填写备注`);
+    }
+    return {
+      amountMinor,
+      method,
+      ...(cashCollector ? { cashCollector } : {}),
+      ...(note ? { note } : {})
+    };
+  }
+
+  if (input.cashCollector !== undefined && input.cashCollector !== null) {
+    throw new DomainError("VALIDATION_ERROR", `企业微信或银行转账${actionLabel}收款不填写现金收款人`);
+  }
+  if (amountMinor > 0 && !transactionReference) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      method === "WECOM" ? "必须填写企业微信交易单号" : "必须填写银行转账交易单号或流水号"
+    );
+  }
+  return {
+    amountMinor,
+    method,
+    ...(transactionReference ? { transactionReference } : {}),
+    note: note ?? ""
+  };
+}
+
+async function assertNoCompletedStayOverlap(
+  db: DbExecutor,
+  options: {
+    propertyId: string;
+    inventoryUnitId: string;
+    roomId: string;
+    inventoryKind: InventoryUnitKind;
+    arrivalDate: string;
+    departureDate: string;
+  }
+): Promise<void> {
+  const candidates = await db.selectFrom("inventory_claims as claim")
+    .innerJoin("stay_segments as segment", (join) => join
+      .onRef("segment.id", "=", "claim.source_id")
+      .on("claim.source_type", "=", "ORDER_SEGMENT"))
+    .innerJoin("stays as stay", "stay.id", "segment.stay_id")
+    .innerJoin("orders as order", "order.id", "stay.order_id")
+    .select("order.id")
+    .distinct()
+    .where("claim.property_id", "=", options.propertyId)
+    .where("claim.room_id", "=", options.roomId)
+    .where("claim.service_date", ">=", options.arrivalDate)
+    .where("claim.service_date", "<", options.departureDate)
+    .where("order.status", "=", "CHECKED_OUT")
+    .where("stay.status", "=", "COMPLETED")
+    .orderBy("order.id")
+    .execute();
+  const units = new Map<string, Awaited<ReturnType<typeof loadInventoryUnit>>>();
+  for (const candidate of candidates) {
+    const lifecycle = await getOrderViewSnapshot(db, candidate.id);
+    for (const interval of lifecycle.effectiveArrangement.intervals) {
+      if (interval.arrivalDate >= options.departureDate || interval.departureDate <= options.arrivalDate) continue;
+      let intervalUnit = units.get(interval.inventoryUnitId);
+      if (!intervalUnit) {
+        intervalUnit = await loadInventoryUnit(db, options.propertyId, interval.inventoryUnitId);
+        units.set(interval.inventoryUnitId, intervalUnit);
+      }
+      const overlapsRequestedUnit = options.inventoryKind === "ROOM"
+        ? intervalUnit.roomId === options.roomId
+        : intervalUnit.id === options.inventoryUnitId
+          || (intervalUnit.kind === "ROOM" && intervalUnit.roomId === options.roomId);
+      if (overlapsRequestedUnit) {
+        throw new DomainError(
+          "INVENTORY_CONFLICT",
+          "所选历史房源与已有住宿记录重叠，请先核对原订单",
+          409,
+          false,
+          { orderId: candidate.id, inventoryUnitId: interval.inventoryUnitId }
+        );
+      }
+    }
+  }
 }
 
 function money(currency: string, minorUnits: number) {
@@ -754,8 +875,32 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     });
     const quote = await loadStoredQuote(db, quoteId);
     if (quote.propertyId !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Quote belongs to another property", 403);
+    if (input.backfill !== undefined && input.backfill !== true) {
+      throw new DomainError("VALIDATION_ERROR", "backfill must be true when submitted");
+    }
+    const backfill = input.backfill === true;
+    if (!backfill && (input.backfillReason !== undefined || input.backfillCollection !== undefined)) {
+      throw new DomainError("VALIDATION_ERROR", "普通创建订单不应填写补录原因或补录收款");
+    }
+    const businessDate = await propertyLocalToday(db, propertyId);
+    if (backfill && quote.arrivalDate >= businessDate) {
+      throw new DomainError("VALIDATION_ERROR", "补录住宿必须从今天以前开始", 409);
+    }
+    if (backfill && quote.departureDate > businessDate) {
+      throw new DomainError("VALIDATION_ERROR", "跨今天的在住补录将在 8.4 开放", 409);
+    }
+    if (!backfill && quote.arrivalDate < businessDate) {
+      throw new DomainError("VALIDATION_ERROR", "今天以前的住宿必须使用补录住宿入口", 409);
+    }
+    const backfillReason = backfill ? requireString(input, "backfillReason") : null;
+    if (backfill && input.backfillCollection !== undefined && input.backfillCollection !== null && typeof input.backfillCollection !== "object") {
+      throw new DomainError("VALIDATION_ERROR", "backfillCollection must be an object");
+    }
     const memberStay = Boolean(quote.memberId || quote.memberContractId);
     const freeStay = quote.stayType === "FREE";
+    if (backfill && memberStay) {
+      throw new DomainError("VALIDATION_ERROR", "当前补录只支持普通住宿或免费入住，不支持会员权益住宿");
+    }
     const channelSubmitted = (input.bookingChannelCode !== undefined && input.bookingChannelCode !== null)
       || (input.channelOrderReference !== undefined && input.channelOrderReference !== null && input.channelOrderReference !== "");
     if (memberStay && channelSubmitted) {
@@ -767,6 +912,17 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const { bookingChannelCode, channelOrderReference } = memberStay || freeStay
       ? { bookingChannelCode: null, channelOrderReference: null }
       : validateBookingChannel(input.bookingChannelCode, input.channelOrderReference);
+    const externalChannel = Boolean(bookingChannelCode && externalChannelCodes.has(bookingChannelCode));
+    let backfillCollection: Record<string, unknown> | null = null;
+    if (backfill && !memberStay && !freeStay && !externalChannel) {
+      const raw = input.backfillCollection;
+      if (raw !== undefined && raw !== null) {
+        const normalizedCollection = normalizeBackfillCollectionInput(raw);
+        backfillCollection = normalizedCollection.amountMinor > 0 ? normalizedCollection : null;
+      }
+    } else if (backfill && input.backfillCollection !== undefined && input.backfillCollection !== null) {
+      throw new DomainError("VALIDATION_ERROR", "会员、免费住宿和外部渠道补录不登记 PMS 住宿收款");
+    }
     const freeStayReason = freeStay ? requireString(input, "freeStayReason") : null;
     if (!freeStay && input.freeStayReason !== undefined && input.freeStayReason !== null) {
       throw new DomainError("VALIDATION_ERROR", "freeStayReason is only allowed for FREE stays");
@@ -779,6 +935,16 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       throw new DomainError("VALIDATION_ERROR", "免费入住类型必须是义工或接待");
     }
     const unit = await loadInventoryUnit(db, propertyId, quote.inventoryUnitId);
+    if (backfill) {
+      await assertNoCompletedStayOverlap(db, {
+        propertyId,
+        inventoryUnitId: unit.id,
+        roomId: unit.roomId,
+        inventoryKind: unit.kind,
+        arrivalDate: quote.arrivalDate,
+        departureDate: quote.departureDate
+      });
+    }
     const guestSnapshots = [guest, ...additionalGuests];
     if (guestSnapshots.length > unit.occupancyCapacity) {
       throw new DomainError(
@@ -820,10 +986,19 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       channelPriceDifferenceReason: input.channelPriceDifferenceReason,
       manualPriceAdjustmentReason: input.manualPriceAdjustmentReason
     });
+    if (externalChannel && pricingDecision.currentContractAmountMinor <= 0) {
+      throw new DomainError("VALIDATION_ERROR", "普通付费渠道订单的本单渠道应结金额必须大于 0");
+    }
     const pricing = {
       ...policyPricing,
       currentContractAmount: money(policyPricing.currentContractAmount.currency, pricingDecision.currentContractAmountMinor)
     };
+    if (backfillCollection) {
+      const amountMinor = requireInteger(backfillCollection, "amountMinor", { min: 0 });
+      if (!Number.isSafeInteger(amountMinor) || amountMinor < 0 || amountMinor > pricing.currentContractAmount.minorUnits) {
+        throw new DomainError("VALIDATION_ERROR", "补录实收金额不能超过本单应收金额");
+      }
+    }
     const pricingDecisionEffect = {
       pricingBasis: pricingDecision.pricingBasis,
       policyBaseAmount: money(pricing.currentContractAmount.currency, pricingDecision.policyBaseAmountMinor),
@@ -833,6 +1008,15 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       differenceExceedsThreshold: pricingDecision.differenceExceedsThreshold,
       reason: pricingDecision.reason
     };
+    if (backfill && !currentReleaseFeatures.completedStayBackfillCreation) {
+      throw new DomainError("VALIDATION_ERROR", "补录提交将在 8.3 开放", 409);
+    }
+    const backfillCollectedAmountMinor = backfillCollection
+      ? requireInteger(backfillCollection, "amountMinor", { min: 0 })
+      : 0;
+    const backfillBalanceDueMinor = freeStay || externalChannel
+      ? 0
+      : pricing.currentContractAmount.minorUnits - backfillCollectedAmountMinor;
     const effect = {
       quoteId,
       primaryGuest: guest,
@@ -850,7 +1034,20 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       memberId: quote.memberId ?? null,
       memberContractId: quote.memberContractId ?? null,
       pricingDecision: pricingDecisionEffect,
-      pricing
+      pricing,
+      ...(backfill ? {
+        backfill: {
+          reason: backfillReason,
+          businessDate,
+          resultingOrderStatus: quote.departureDate <= businessDate ? "CHECKED_OUT" : "CHECKED_IN",
+          resultingStayStatus: quote.departureDate <= businessDate ? "COMPLETED" : "IN_HOUSE",
+          collection: backfillCollection,
+          externalChannel,
+          settlementStatus: backfillBalanceDueMinor > 0 ? "ARREARS" : "SETTLED",
+          collectedAmountMinor: backfillCollectedAmountMinor,
+          balanceDueMinor: backfillBalanceDueMinor
+        }
+      } : {})
     };
     return finalize(propertyId, effect, {
       quoteInputHash: quote.inputHash,
@@ -1111,6 +1308,10 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     });
   }
 
+  if ((commandType as string) === "BACKFILL_COMPLETED_STAY" && !currentReleaseFeatures.stayBackfillSubmission) {
+    throw new DomainError("VALIDATION_ERROR", "补录已改为创建时一次完成，请使用“补录住宿”入口", 409);
+  }
+
   const orderId = requireString(input, "orderId");
   const context = await loadOrderContext(db, orderId);
   if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
@@ -1122,8 +1323,10 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   };
 
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
-    if (context.order.status !== "CHECKED_OUT" || context.stay.status !== "COMPLETED") {
-      throw new DomainError("INVALID_ORDER_STATE", "升级会员需在退房完成后办理", 409);
+    const conversionStateAllowed = context.order.status === "CHECKED_OUT" && context.stay.status === "COMPLETED"
+      || context.order.status === "CHECKED_IN" && context.stay.status === "IN_HOUSE";
+    if (!conversionStateAllowed) {
+      throw new DomainError("INVALID_ORDER_STATE", "升级会员需在入住或退房完成后办理", 409);
     }
     if (context.order.stay_type === "FREE" || context.order.member_id || context.order.member_contract_id) {
       throw new DomainError("VALIDATION_ERROR", "只有企业微信来源的普通住宿订单可以升级会员");
@@ -1146,9 +1349,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const membershipProductId = requireString(input, "membershipProductId");
     const rawCollectionFactIds = input.collectionFactIds;
     if (!Array.isArray(rawCollectionFactIds)
-      || rawCollectionFactIds.length === 0
       || rawCollectionFactIds.some((value) => typeof value !== "string" || value.trim() === "")) {
-      throw new DomainError("VALIDATION_ERROR", "请选择用于升级会员的住宿收款");
+      throw new DomainError("VALIDATION_ERROR", "住宿收款列表无效");
     }
     const collectionFactIds = rawCollectionFactIds.map((value) => (value as string).trim());
     if (new Set(collectionFactIds).size !== collectionFactIds.length) {
@@ -1220,25 +1422,31 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       throw new DomainError("ENTITLEMENT_CONFLICT", "所选会员产品不适用于本次住宿房型", 409);
     }
 
-    const collectionRows = await db.selectFrom("collection_facts").selectAll()
-      .where("fact_id", "in", collectionFactIds)
-      .orderBy("created_at")
-      .orderBy("fact_id")
-      .execute();
+    const collectionRows = collectionFactIds.length > 0
+      ? await db.selectFrom("collection_facts").selectAll()
+        .where("fact_id", "in", collectionFactIds)
+        .orderBy("created_at")
+        .orderBy("fact_id")
+        .execute()
+      : [];
     if (collectionRows.length !== collectionFactIds.length) {
       throw new DomainError("NOT_FOUND", "选中的住宿收款不存在", 404);
     }
     const collectionById = new Map(collectionRows.map((fact) => [fact.fact_id, fact]));
     const orderedCollections = collectionFactIds.map((factId) => collectionById.get(factId)!);
     const [existingReversals, existingTransfers, activeRefundedByFact, allOrderFunds] = await Promise.all([
-      db.selectFrom("collection_facts")
-        .select(["fact_id", "reverses_fact_id"])
-        .where("reverses_fact_id", "in", collectionFactIds)
-        .execute(),
-      db.selectFrom("stay_collection_membership_transfers")
-        .select(["id", "source_collection_fact_id"])
-        .where("source_collection_fact_id", "in", collectionFactIds)
-        .execute(),
+      collectionFactIds.length > 0
+        ? db.selectFrom("collection_facts")
+          .select(["fact_id", "reverses_fact_id"])
+          .where("reverses_fact_id", "in", collectionFactIds)
+          .execute()
+        : Promise.resolve([] as Array<{ fact_id: string; reverses_fact_id: string | null }>),
+      collectionFactIds.length > 0
+        ? db.selectFrom("stay_collection_membership_transfers")
+          .select(["id", "source_collection_fact_id"])
+          .where("source_collection_fact_id", "in", collectionFactIds)
+          .execute()
+        : Promise.resolve([] as Array<{ id: string; source_collection_fact_id: string }>),
       Promise.all(collectionFactIds.map(async (factId) => [factId, await activeRefundedAmount(db, factId)] as const)),
       db.selectFrom("collection_facts")
         .select(["fact_id", "fact_type", "amount_minor", "net_effect_minor", "currency", "method", "transaction_reference", "references_fact_id", "reverses_fact_id", "command_id", "pricing_revision_id"])
@@ -1269,12 +1477,15 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       }
     }
     const transferTotalMinor = orderedCollections.reduce((sum, fact) => sum + fact.amount_minor, 0);
-    if (!Number.isSafeInteger(transferTotalMinor) || transferTotalMinor <= 0) {
+    if (!Number.isSafeInteger(transferTotalMinor)
+      || (collectionFactIds.length > 0 && transferTotalMinor <= 0)) {
       throw new DomainError("VALIDATION_ERROR", "转入住宿收款合计无效");
     }
     const oldAmountSummary = await orderAmountSummary(db, context);
     if (oldAmountSummary.netRecordedCollection.minorUnits !== transferTotalMinor) {
-      throw new DomainError("VALIDATION_ERROR", "升级会员必须一次转入当前全部已记录净收款；如需排除某笔记录，请先核对住宿收退款记录");
+      throw new DomainError("VALIDATION_ERROR", collectionFactIds.length === 0
+        ? "本订单还有已登记净收款，请先选择全部住宿收款或先核对住宿收退款记录"
+        : "升级会员必须一次转入当前全部已记录净收款；如需排除某笔记录，请先核对住宿收退款记录");
     }
     if (agreedPriceMinor < transferTotalMinor) {
       throw new DomainError("VALIDATION_ERROR", "会员成交价不能低于本次用于升级的住宿收款合计");
@@ -2212,6 +2423,371 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         status: "PENDING"
       } } : {})
     }, { ...baseBasis, heldCoverageIds: [], cleaningTask: null, businessDate });
+  }
+
+  if (commandType === "COMPLETE_STAY") {
+    if (input.actualStayCompletedConfirmed !== true) {
+      throw new DomainError("CONFIRMATION_REQUIRED", "必须确认客人的确实际入住且已经离店", 409);
+    }
+    const reasonNote = requireString(input, "reasonNote").trim();
+    if (reasonNote === "") {
+      throw new DomainError("REASON_REQUIRED", "完成住宿必须填写说明（例如实际入住与离店情况）", 409);
+    }
+    if (context.order.status !== "RESERVED" || context.stay.status !== "PLANNED") {
+      throw new DomainError("INVALID_ORDER_STATE", "只有已预订且未办理入住的订单可以完成住宿", 409);
+    }
+    const businessDate = await propertyLocalToday(db, propertyId);
+    if (businessDate < context.order.departure_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "订单未到计划退房日，请使用普通入住流程", 409, false, {
+        businessDate,
+        departureDate: context.order.departure_date
+      });
+    }
+    const stayTimeline = await loadActiveStayTimeline(db, context);
+    await assertStayDateChangeLifecycle(db, context, businessDate, stayTimeline);
+    const fulfillmentAmendments = await db.selectFrom("amendments")
+      .select("amendment_type")
+      .where("order_id", "=", orderId)
+      .where("amendment_type", "in", ["CHECK_IN", "CHECK_OUT"])
+      .execute();
+    if (fulfillmentAmendments.length > 0) {
+      throw new DomainError("INVALID_ORDER_STATE", "订单已有入住或退房记录，不能再次完成住宿", 409, false, {
+        existingFulfillmentAmendments: fulfillmentAmendments.map((amendment) => amendment.amendment_type)
+      });
+    }
+    const activeClaims = await db.selectFrom("inventory_claims")
+      .select(["id", "service_date", "inventory_unit_id", "source_id"])
+      .where("source_type", "=", "ORDER_SEGMENT")
+      .where("source_id", "in", context.segmentIds)
+      .where("active", "=", true)
+      .orderBy("service_date")
+      .orderBy("id")
+      .execute();
+    if (activeClaims.length !== stayTimeline.length
+      || activeClaims.some((claim, index) => claim.service_date !== stayTimeline[index]!.serviceDate
+        || claim.inventory_unit_id !== stayTimeline[index]!.inventoryUnitId)) {
+      throw new DomainError("INTERNAL_ERROR", "完成住宿的活动 Claim 与完整住宿时间线不一致", 500, false, {
+        orderId,
+        activeClaimIds: activeClaims.map((claim) => claim.id)
+      });
+    }
+    const isMemberStay = Boolean(context.order.member_id || context.order.member_contract_id);
+    const activeCoverage = await db.selectFrom("coverage_items")
+      .select(["id", "service_date", "inventory_unit_id", "status"])
+      .where("order_id", "=", orderId)
+      .where("status", "in", ["HELD", "CONSUMED"])
+      .orderBy("service_date")
+      .orderBy("id")
+      .execute();
+    const heldCoverage = activeCoverage.filter((item) => item.status === "HELD");
+    const consumedCoverage = activeCoverage.filter((item) => item.status === "CONSUMED");
+    if (isMemberStay) {
+      if (consumedCoverage.length > 0) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能完成住宿", 409);
+      }
+      const heldByDate = new Map(heldCoverage.map((item) => [item.service_date, item.inventory_unit_id]));
+      if (stayTimeline.length !== heldCoverage.length
+        || stayTimeline.some((item) => heldByDate.get(item.serviceDate) !== item.inventoryUnitId)) {
+        throw new DomainError(
+          "ENTITLEMENT_CONFLICT",
+          "会员权益冻结与完整住宿时间线不一致，不能完成住宿；请先核对会员覆盖或联系管理员",
+          409,
+          false,
+          {
+            orderId,
+            timelineDates: stayTimeline.map((item) => item.serviceDate),
+            heldCoverageDates: heldCoverage.map((item) => item.service_date)
+          }
+        );
+      }
+    } else if (activeCoverage.length > 0) {
+      throw new DomainError(
+        "ENTITLEMENT_CONFLICT",
+        "非会员订单存在冻结或已核销会员权益，当前数据状态异常，不能完成住宿",
+        409,
+        false,
+        { orderId, coverageIds: activeCoverage.map((item) => item.id) }
+      );
+    }
+    // 完成住宿时按真实结算核清：免费/会员/渠道订单不登记住宿收款；
+    // 普通订单可以补记不超过未结余额的真实收款；0 元不写事实。
+    const freeStay = context.order.stay_type === "FREE";
+    const memberStay = isMemberStay;
+    const externalChannel = Boolean(context.order.booking_channel_code && externalChannelCodes.has(context.order.booking_channel_code));
+    let channelPricingBasis: string | null = null;
+    if (externalChannel) {
+      const revisionBasis = await db.selectFrom("pricing_revisions")
+        .select("pricing_basis")
+        .where("id", "=", context.revision.id)
+        .executeTakeFirstOrThrow();
+      channelPricingBasis = revisionBasis.pricing_basis;
+      if (revisionBasis.pricing_basis !== "CHANNEL_CONTRACT") {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "外部渠道订单缺少本单渠道应结金额的计价记录，不能完成住宿；请先核对渠道资料",
+          409
+        );
+      }
+    }
+    if (externalChannel && (
+      !context.order.channel_order_reference?.trim()
+      || context.revision.currentContractAmountMinor <= 0
+    )) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "外部渠道订单缺少渠道订单号或本单渠道应结金额，不能完成住宿；请先核对渠道资料",
+        409,
+        false,
+        {
+          currentContractAmountMinor: context.revision.currentContractAmountMinor
+        }
+      );
+    }
+    const rawCollection = input.collection;
+    const collectionFacts = await db.selectFrom("collection_facts")
+      .select(["fact_id", "fact_type", "net_effect_minor", "currency"])
+      .where("order_id", "=", orderId)
+      .orderBy("created_at")
+      .orderBy("fact_id")
+      .execute();
+    if (collectionFacts.some((fact) => fact.currency !== context.revision.currency)) {
+      throw new DomainError("VALIDATION_ERROR", "订单住宿收款币种与当前计价币种不一致，不能完成住宿", 409);
+    }
+    if ((freeStay || memberStay || externalChannel) && collectionFacts.length > 0) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        freeStay
+          ? "免费住宿已存在住宿收款记录，不能完成住宿；请先核对资金事实"
+          : memberStay
+            ? "会员住宿已存在住宿收款记录，不能完成住宿；请先核对资金事实"
+            : "外部渠道订单已存在 PMS 住宿收款记录，不能完成住宿；请先核对渠道资金事实",
+        409,
+        false,
+        { orderId, collectionFactIds: collectionFacts.map((fact) => fact.fact_id) }
+      );
+    }
+    const preCollectionAmounts = amountSummary(
+      context.revision.currency,
+      context.revision.currentContractAmountMinor,
+      collectionFacts.map((fact) => fact.net_effect_minor)
+    );
+    const outstandingMinor = preCollectionAmounts.collectionDifference.minorUnits;
+    let collection: ({
+      amountMinor: number;
+      currency: string;
+      method: "WECOM" | "BANK_TRANSFER";
+      transactionReference: string;
+      note: string;
+    } | {
+      amountMinor: number;
+      currency: string;
+      method: "CASH";
+      cashCollector: string;
+      note: string;
+    }) | null = null;
+    if (freeStay || memberStay || externalChannel) {
+      if (rawCollection !== undefined && rawCollection !== null) {
+        throw new DomainError("VALIDATION_ERROR", freeStay
+          ? "免费住宿不需要登记住宿收款"
+          : memberStay
+            ? "会员住宿通过会员权益核销结清，不需要登记住宿收款"
+            : "外部渠道订单不在 PMS 登记单笔住宿收款；请核对渠道订单号和本单渠道应结金额");
+      }
+    } else if (outstandingMinor > 0 && rawCollection !== undefined && rawCollection !== null) {
+      const normalizedCollection = normalizeBackfillCollectionInput(rawCollection, "collection", "完成住宿");
+      if (normalizedCollection.amountMinor > outstandingMinor) {
+        throw new DomainError("VALIDATION_ERROR", "完成住宿补记实收金额不能超过订单未结余额");
+      }
+      if (normalizedCollection.amountMinor > 0) {
+        collection = normalizedCollection.method === "CASH"
+          ? {
+              amountMinor: normalizedCollection.amountMinor,
+              currency: context.revision.currency,
+              method: normalizedCollection.method,
+              cashCollector: normalizedCollection.cashCollector!,
+              note: normalizedCollection.note!
+            }
+          : {
+              amountMinor: normalizedCollection.amountMinor,
+              currency: context.revision.currency,
+              method: normalizedCollection.method,
+              transactionReference: normalizedCollection.transactionReference!,
+              note: normalizedCollection.note
+            };
+      }
+    } else if (rawCollection !== undefined && rawCollection !== null) {
+      throw new DomainError("VALIDATION_ERROR", "订单已结清，不需要随完成住宿登记收款");
+    }
+    const effectiveCollectedMinor = preCollectionAmounts.netRecordedCollection.minorUnits + (collection?.amountMinor ?? 0);
+    const settlementStatus = freeStay || memberStay || externalChannel
+      || effectiveCollectedMinor >= context.revision.currentContractAmountMinor
+      ? "SETTLED"
+      : "ARREARS";
+    const checkInInventoryUnitId = stayTimeline[0]!.inventoryUnitId;
+    const checkOutInventoryUnitId = stayTimeline.at(-1)!.inventoryUnitId;
+    return finalize(propertyId, {
+      operation: "COMPLETE_STAY",
+      orderId,
+      stayId: context.stay.id,
+      inventoryUnitId: checkOutInventoryUnitId,
+      arrivalDate: context.order.arrival_date,
+      departureDate: context.order.departure_date,
+      businessDate,
+      reasonNote,
+      stayTimeline,
+      settlementStatus,
+      amounts: collection
+        ? amountSummary(context.revision.currency, context.revision.currentContractAmountMinor, [preCollectionAmounts.netRecordedCollection.minorUnits + collection.amountMinor])
+        : preCollectionAmounts,
+      collection,
+      inventoryRelease: {
+        claimIds: activeClaims.map((claim) => claim.id),
+        claimCount: activeClaims.length
+      },
+      checkIn: {
+        orderId,
+        fromStatus: "RESERVED",
+        toStatus: "CHECKED_IN",
+        inventoryUnitId: checkInInventoryUnitId,
+        businessDate,
+        effectiveDate: context.order.arrival_date,
+        recordingMode: businessDate === context.order.arrival_date ? "ON_SCHEDULE" : "LATE_RECORDED",
+        entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: heldCoverage.length }
+      },
+      checkOut: {
+        orderId,
+        fromStatus: "CHECKED_IN",
+        toStatus: "CHECKED_OUT",
+        inventoryUnitId: checkOutInventoryUnitId,
+        businessDate,
+        effectiveDate: context.order.departure_date,
+        recordingMode: businessDate === context.order.departure_date ? "ON_SCHEDULE" : "LATE_RECORDED"
+      },
+      entitlementTransition: {
+        from: "HELD",
+        to: "CONSUMED",
+        coverageCount: heldCoverage.length,
+        coverageIds: heldCoverage.map((coverage) => coverage.id)
+      }
+    }, {
+      ...baseBasis,
+      heldCoverageIds: heldCoverage.map((coverage) => coverage.id),
+      activeCoverage: activeCoverage.map((coverage) => ({ id: coverage.id, status: coverage.status })),
+      activeClaims: activeClaims.map((claim) => ({ id: claim.id, serviceDate: claim.service_date, sourceId: claim.source_id })),
+      collectionFacts: collectionFacts.map((fact) => ({ id: fact.fact_id, type: fact.fact_type, netEffectMinor: fact.net_effect_minor })),
+      channelPricingBasis,
+      businessDate
+    });
+  }
+
+  if ((commandType as string) === "BACKFILL_COMPLETED_STAY") {
+    if (!currentReleaseFeatures.stayBackfillSubmission) {
+      throw new DomainError("VALIDATION_ERROR", "补录已改为创建时一次完成，请使用“补录住宿”入口", 409);
+    }
+    if (context.order.status !== "RESERVED" || context.stay.status !== "PLANNED") {
+      throw new DomainError("INVALID_ORDER_STATE", "只有已预订且未办理入住的订单可以补录完成住宿", 409);
+    }
+    const businessDate = await propertyLocalToday(db, propertyId);
+    if (businessDate < context.order.departure_date) {
+      throw new DomainError("INVALID_ORDER_STATE", "订单未到计划退房日，请使用普通入住流程", 409, false, {
+        businessDate,
+        departureDate: context.order.departure_date
+      });
+    }
+    // 补录的是已经完全发生的住宿，结清方式必须在补录时一次性核清：
+    // 免费住宿/会员住宿本身不需要收款；外部渠道订单的房款按渠道总账核对（渠道订单号创建时必填）；
+    // 企微或无渠道普通住宿有未结余额时，必须随补录登记等额收款（企微/转账必填交易单号，现金必填收款人）。
+    const freeStay = context.order.stay_type === "FREE";
+    const memberStay = Boolean(context.order.member_id || context.order.member_contract_id);
+    const externalChannel = Boolean(context.order.booking_channel_code && externalChannelCodes.has(context.order.booking_channel_code));
+    const rawCollection = input.collection;
+    const preCollectionAmounts = await orderAmountSummary(db, context);
+    const outstandingMinor = preCollectionAmounts.collectionDifference.minorUnits;
+    let collection: ({
+      amountMinor: number;
+      currency: string;
+      method: "WECOM" | "BANK_TRANSFER";
+      transactionReference: string;
+      note: string;
+    } | {
+      amountMinor: number;
+      currency: string;
+      method: "CASH";
+      cashCollector: string;
+      note: string;
+    }) | null = null;
+    if (freeStay || memberStay || externalChannel) {
+      if (rawCollection !== undefined && rawCollection !== null) {
+        throw new DomainError("VALIDATION_ERROR", freeStay
+          ? "免费住宿不需要登记住宿收款"
+          : memberStay
+            ? "会员住宿通过会员权益核销结清，不需要登记住宿收款"
+            : "外部渠道订单不在 PMS 登记单笔住宿收款；请核对渠道订单号和本单渠道应结金额");
+      }
+    } else if (outstandingMinor > 0 && rawCollection !== undefined && rawCollection !== null) {
+      const normalizedCollection = normalizeBackfillCollectionInput(rawCollection, "collection");
+      if (normalizedCollection.amountMinor > outstandingMinor) {
+        throw new DomainError("VALIDATION_ERROR", "补录实收金额不能超过订单未结余额");
+      }
+      if (normalizedCollection.amountMinor > 0) {
+        collection = normalizedCollection.method === "CASH"
+          ? {
+              amountMinor: normalizedCollection.amountMinor,
+              currency: context.revision.currency,
+              method: normalizedCollection.method,
+              cashCollector: normalizedCollection.cashCollector!,
+              note: normalizedCollection.note!
+            }
+          : {
+              amountMinor: normalizedCollection.amountMinor,
+              currency: context.revision.currency,
+              method: normalizedCollection.method,
+              transactionReference: normalizedCollection.transactionReference!,
+              note: normalizedCollection.note
+            };
+      }
+    } else if (rawCollection !== undefined && rawCollection !== null) {
+      throw new DomainError("VALIDATION_ERROR", "订单已结清，不需要随补录登记收款");
+    }
+    const heldCoverage = await db.selectFrom("coverage_items").select("id")
+      .where("order_id", "=", orderId).where("status", "=", "HELD").orderBy("id").execute();
+    return finalize(propertyId, {
+      operation: "BACKFILL_COMPLETED_STAY",
+      orderId,
+      stayId: context.stay.id,
+      inventoryUnitId: context.currentSegment.inventoryUnitId,
+      arrivalDate: context.order.arrival_date,
+      departureDate: context.order.departure_date,
+      businessDate,
+      amounts: collection
+        ? amountSummary(context.revision.currency, context.revision.currentContractAmountMinor, [preCollectionAmounts.netRecordedCollection.minorUnits + collection.amountMinor])
+        : preCollectionAmounts,
+      collection,
+      checkIn: {
+        orderId,
+        fromStatus: "RESERVED",
+        toStatus: "CHECKED_IN",
+        inventoryUnitId: context.currentSegment.inventoryUnitId,
+        businessDate,
+        effectiveDate: context.order.arrival_date,
+        recordingMode: businessDate === context.order.arrival_date ? "ON_SCHEDULE" : "LATE_RECORDED",
+        entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: heldCoverage.length }
+      },
+      checkOut: {
+        orderId,
+        fromStatus: "CHECKED_IN",
+        toStatus: "CHECKED_OUT",
+        inventoryUnitId: context.currentSegment.inventoryUnitId,
+        businessDate,
+        effectiveDate: context.order.departure_date,
+        recordingMode: businessDate === context.order.departure_date ? "ON_SCHEDULE" : "LATE_RECORDED"
+      },
+      entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: heldCoverage.length }
+    }, {
+      ...baseBasis,
+      heldCoverageIds: heldCoverage.map((coverage) => coverage.id),
+      businessDate
+    });
   }
 
   if (commandType === "CANCEL_ORDER" || commandType === "MARK_NO_SHOW") {

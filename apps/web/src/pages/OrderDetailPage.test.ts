@@ -10,7 +10,9 @@ import {
   fulfillmentResultLabel,
   initialRepriceTargetYuan,
   collectionDifferencePresentation,
+  completeStayOperatorCopy,
   collectionFactTransactionReferenceLabel,
+  CollectionFactNote,
   collectionFactTypeLabel,
   collectionMethodLabel,
   arrangementChangeLabel,
@@ -137,6 +139,7 @@ describe("upgrade membership entitlement presentation", () => {
         method: "WECOM",
         note: "",
         transaction_reference: "WX-STAGE13-manual-20260802-SOURCE",
+        cash_collector: null,
         pricing_revision_id: "revision_conversion",
         command_id: "command_collection",
         created_at: "2026-08-01T15:59:00.000Z",
@@ -582,6 +585,17 @@ describe("operator-facing order lifecycle presentation", () => {
   });
 });
 
+describe("complete-stay operator presentation", () => {
+  it("uses a concise business explanation without implementation terminology", () => {
+    expect(completeStayOperatorCopy.contextTitle).toBe("请确认实际住宿情况");
+    expect(completeStayOperatorCopy.contextDetail).toContain("客人已经实际入住并离店");
+    expect(completeStayOperatorCopy.contextDetail).toContain("已收清显示“已结单”");
+    expect(completeStayOperatorCopy.contextDetail).toContain("未收清显示“欠款”");
+    expect(completeStayOperatorCopy.confirmationLabel).toBe("我已确认客人实际入住，且现在已经离店");
+    expect(completeStayOperatorCopy.reviewDescription).not.toMatch(/原子|补记|库存/);
+  });
+});
+
 describe("reprice form defaults", () => {
   it("starts from the current order amount unless an exact draft value is restored", () => {
     expect(initialRepriceTargetYuan(13_000, undefined)).toBe("130");
@@ -873,6 +887,7 @@ describe("server-authoritative order actions", () => {
       references_fact_id: null,
       reverses_fact_id: null,
       method: "CASH",
+      cash_collector: null,
       note: "",
       transaction_reference: "REF",
       pricing_revision_id: "revision_refund",
@@ -899,6 +914,7 @@ describe("server-authoritative order actions", () => {
       references_fact_id: null,
       reverses_fact_id: null,
       method: "WECOM",
+      cash_collector: null,
       note: "",
       transaction_reference: null,
       pricing_revision_id: "revision_refund_label",
@@ -909,6 +925,56 @@ describe("server-authoritative order actions", () => {
     const collection = fact({ fact_id: "collection_wecom", fact_type: "COLLECTION", amount_minor: 10_000, transaction_reference: "WX-COLLECTION-001" });
     const refund = fact({ fact_id: "refund_wecom", fact_type: "REFUND", amount_minor: 1_000, references_fact_id: collection.fact_id });
     expect(collectionFactTransactionReferenceLabel([collection, refund], refund)).toBe("WX-COLLECTION-001（原路退回）");
+  });
+
+  it("shows both the collector and note for a historical cash collection", () => {
+    const fact: CollectionFactDto = {
+      fact_id: "collection_backfill_cash",
+      order_id: "order_backfill_cash",
+      fact_type: "COLLECTION",
+      amount_minor: 8_450,
+      net_effect_minor: 8_450,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "CASH",
+      cash_collector: "前台甲",
+      note: "现金已核对",
+      transaction_reference: null,
+      pricing_revision_id: "revision_backfill_cash",
+      command_id: "command_backfill_cash",
+      created_at: "2026-08-14T09:00:00.000Z"
+    };
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(CollectionFactNote, { fact })));
+    expect(html).toContain("收款人");
+    expect(html).toContain("前台甲");
+    expect(html).toContain("备注");
+    expect(html).toContain("现金已核对");
+  });
+
+  it("keeps an ordinary cash collection note displayed as its collector", () => {
+    const fact: CollectionFactDto = {
+      fact_id: "collection_ordinary_cash",
+      order_id: "order_ordinary_cash",
+      fact_type: "COLLECTION",
+      amount_minor: 3_000,
+      net_effect_minor: 3_000,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "CASH",
+      cash_collector: null,
+      note: "前台乙",
+      transaction_reference: null,
+      pricing_revision_id: "revision_ordinary_cash",
+      command_id: "command_ordinary_cash",
+      created_at: "2026-08-14T10:00:00.000Z"
+    };
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(CollectionFactNote, { fact })));
+    expect(html).toContain("收款人");
+    expect(html).toContain("前台乙");
+    expect(html).not.toContain("历史未记录");
+    expect(html).not.toContain("备注：前台乙");
   });
 });
 

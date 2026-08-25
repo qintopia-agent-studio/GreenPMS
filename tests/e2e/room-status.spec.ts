@@ -368,7 +368,7 @@ async function openRoomStatusWriteDrawer(
   page: Page,
   unitId: string,
   serviceDate: string,
-  action: "创建住宿" | "维修锁房"
+  action: "创建订单" | "维修锁房"
 ): Promise<Locator> {
   const cell = roomCell(page, unitId, serviceDate);
   await cell.scrollIntoViewIfNeeded();
@@ -478,7 +478,7 @@ async function createFreeStayForToday(page: Page, options: {
   arrivalDate: string;
   departureDate: string;
 }) {
-  const drawer = await openRoomStatusWriteDrawer(page, options.unitId, options.arrivalDate, "创建住宿");
+  const drawer = await openRoomStatusWriteDrawer(page, options.unitId, options.arrivalDate, "创建订单");
   await drawer.getByLabel("入住日期", { exact: true }).fill(options.arrivalDate);
   await drawer.getByLabel("退房日期", { exact: true }).fill(options.departureDate);
   await expect(page.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
@@ -1099,7 +1099,7 @@ test("desktop range selection, fixed 30-night start-date navigation, filtered-em
   const rangePopover = page.getByTestId("room-status-quick-popover");
   await expect(rangePopover).toBeVisible();
   await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
-  await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(candidate!.arrivalDate);
   await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(candidate!.departureDate);
 
@@ -1205,7 +1205,7 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   ));
   expect(candidate, "an unoccupied room outside shared E2E fixtures is required for long-stay browser coverage").toBeTruthy();
 
-  const drawer = await openRoomStatusWriteDrawer(page, candidate!.id, longArrival, "创建住宿");
+  const drawer = await openRoomStatusWriteDrawer(page, candidate!.id, longArrival, "创建订单");
   const departureInput = drawer.getByLabel("退房日期", { exact: true });
   const quoteFor = async (departureDate: string) => {
     const response = quoteResponse(page, {
@@ -1305,7 +1305,7 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await expect(preservedCell).toHaveAttribute("aria-label", preservedAccessibleName!);
     const refreshingPopover = await openDayPopover(page, preservedCell);
     await expect(refreshingPopover).toContainText("可售");
-    await expect(refreshingPopover.getByRole("button", { name: "创建住宿", exact: true })).toHaveCount(0);
+    await expect(refreshingPopover.getByRole("button", { name: "创建订单", exact: true })).toHaveCount(0);
     await expect(refreshingPopover.getByRole("button", { name: "维修锁房", exact: true })).toHaveCount(0);
     await page.keyboard.press("Escape");
   } finally {
@@ -1316,7 +1316,7 @@ test("desktop stale and unknown states fail closed without mocked room-status da
   await expect(page.getByRole("button", { name: "刷新房态", exact: true })).toBeVisible();
 
   const quickPopover = await openDayPopover(page, preservedCell);
-  await quickPopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  await quickPopover.getByRole("button", { name: "创建订单", exact: true }).click();
   await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeVisible();
 
   try {
@@ -1649,7 +1649,7 @@ test("room-status reload LCP and a real fixed 30-night grid stay within the inte
   const rangePopover = page.getByTestId("room-status-quick-popover");
   await expect(rangePopover).toBeVisible();
   await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
-  const createButton = rangePopover.getByRole("button", { name: "创建住宿", exact: true });
+  const createButton = rangePopover.getByRole("button", { name: "创建订单", exact: true });
   await expect(createButton).toBeVisible();
   await createButton.click();
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(selectionArrival);
@@ -1722,7 +1722,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   const touchPopover = page.getByTestId("room-status-quick-popover");
   await expect(touchPopover).toBeVisible();
   await expect(touchPopover).toHaveAttribute("data-selection-kind", "range");
-  await touchPopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  await touchPopover.getByRole("button", { name: "创建订单", exact: true }).click();
   const touchDrawer = page.locator("dialog.room-status-write-drawer");
   await expect(touchDrawer.getByLabel("入住日期", { exact: true })).toHaveValue(touchCandidate!.startDate);
   await expect(touchDrawer.getByLabel("退房日期", { exact: true })).toHaveValue(addDays(touchCandidate!.endDate, 1));

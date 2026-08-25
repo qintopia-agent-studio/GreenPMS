@@ -131,7 +131,7 @@ async function chooseAvailableSharedBathSingle(page: Page, arrival: string, depa
     await expect(popover).toBeVisible();
     await expect(popover).toHaveAttribute("data-unit-id", availableUnit!.id);
     await expect(popover).toHaveAttribute("data-selection-kind", "day");
-    await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
+    await popover.getByRole("button", { name: "创建订单", exact: true }).click();
     drawer = page.locator("dialog.room-status-write-drawer");
   }
   await expect(drawer).toBeVisible();

@@ -115,9 +115,15 @@ function stableReferenceId(interval: RoomStatusIntervalDto, type: "ORDER" | "STA
   return ids.length === 1 ? ids[0]! : null;
 }
 
+const lodgingStatuses = new Set<RoomStatusStatus>(["RESERVED", "IN_HOUSE", "SETTLED", "ARREARS", "UNKNOWN"]);
+
+function isLodgingInterval(interval: RoomStatusIntervalDto): boolean {
+  return (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+    && lodgingStatuses.has(interval.status);
+}
+
 export function roomStatusOrderIdentityForInterval(interval: RoomStatusIntervalDto): RoomStatusOrderIdentity | null {
-  if ((interval.sourceKind !== "ORDER" && interval.sourceKind !== "FREE_STAY")
-    || (interval.status !== "RESERVED" && interval.status !== "IN_HOUSE")) return null;
+  if (!isLodgingInterval(interval)) return null;
   const orderId = stableReferenceId(interval, "ORDER");
   const stayId = stableReferenceId(interval, "STAY");
   return orderId && stayId ? {
@@ -140,8 +146,7 @@ export function roomStatusOrderIdentityForDate(
     interval.actualInventoryUnitId === unit.id
     && interval.startDate <= serviceDate
     && serviceDate < interval.endDate
-    && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
-    && (interval.status === "RESERVED" || interval.status === "IN_HOUSE")
+    && isLodgingInterval(interval)
   )).flatMap((interval) => roomStatusOrderIdentityForInterval(interval) ?? []);
   const identities = new Set(matches.map((match) => `${match.orderId}:${match.stayId}`));
   return identities.size === 1 ? matches[0]! : null;
@@ -162,18 +167,15 @@ export function roomStatusUniqueOrderStayId(options: RoomStatusOrderOptionsResul
     : null;
 }
 
-export function roomStatusOrderOptionsForDate(
+function roomStatusOrderOptions(
   unit: RoomStatusUnitDto,
-  serviceDate: string
+  includesInterval: (interval: RoomStatusIntervalDto) => boolean
 ): RoomStatusOrderOptionsResult {
   const candidates = unit.kind === "ROOM" && unit.salesMode === "BED_SPLIT"
     ? [unit, ...unit.children]
     : [unit];
   const intervals = candidates.flatMap((candidate) => candidate.intervals)
-    .filter((interval) => interval.startDate <= serviceDate
-      && serviceDate < interval.endDate
-      && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
-      && (interval.status === "RESERVED" || interval.status === "IN_HOUSE"));
+    .filter((interval) => includesInterval(interval) && isLodgingInterval(interval));
   const options: RoomStatusOrderOption[] = [];
   for (const interval of intervals) {
     const identity = roomStatusOrderIdentityForInterval(interval);
@@ -204,6 +206,27 @@ export function roomStatusOrderOptionsForDate(
     if (!existing) unique.set(key, option);
   }
   return { kind: "READY", orders: [...unique.values()] };
+}
+
+export function roomStatusOrderOptionsForDate(
+  unit: RoomStatusUnitDto,
+  serviceDate: string
+): RoomStatusOrderOptionsResult {
+  return roomStatusOrderOptions(unit, (interval) => (
+    interval.startDate <= serviceDate && serviceDate < interval.endDate
+  ));
+}
+
+export function roomStatusOrderOptionsForSelection(
+  unit: RoomStatusUnitDto,
+  selection: Pick<RoomStatusSelection, "unitId" | "arrivalDate" | "departureDate">
+): RoomStatusOrderOptionsResult {
+  if (selection.unitId !== unit.id || selection.arrivalDate >= selection.departureDate) {
+    return { kind: "READY", orders: [] };
+  }
+  return roomStatusOrderOptions(unit, (interval) => (
+    interval.startDate < selection.departureDate && selection.arrivalDate < interval.endDate
+  ));
 }
 
 export function createRoomStatusOrderReturnState(
@@ -316,28 +339,9 @@ export function intervalsRenderedOnRoomStatusGrid(
   unit: RoomStatusUnitDto,
   serviceDates: readonly string[] = unit.days.map((day) => day.serviceDate)
 ): readonly RoomStatusIntervalDto[] {
-  const occupancyByDate = new Map(unit.bedOccupancies.map((occupancy) => [occupancy.serviceDate, occupancy]));
+  void serviceDates;
   return unit.intervals.filter((interval) => {
-    const activeLodging = interval.blocking
-      && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
-      && (interval.status === "RESERVED" || interval.status === "IN_HOUSE");
-    if (!activeLodging) return true;
-    if (interval.occupantCount > 0 && interval.actualInventoryUnitId === unit.id) return false;
-    if (unit.kind !== "ROOM") return true;
-    const coveredDates = serviceDates.filter((serviceDate) => interval.startDate <= serviceDate && serviceDate < interval.endDate);
-    if (coveredDates.length === 0) return true;
-    if (interval.actualInventoryUnitId === unit.id) {
-      return interval.occupantCount <= 0;
-    }
-    if (unit.salesMode !== "BED_SPLIT") return true;
-    const orderReferenceIds = new Set(interval.references
-      .filter((reference) => reference.type === "ORDER")
-      .map((reference) => reference.id));
-    const representedOnEveryDate = coveredDates.every((serviceDate) => occupancyByDate.get(serviceDate)?.occupants.some(
-      (occupant) => occupant.inventoryUnitId === interval.actualInventoryUnitId
-        && orderReferenceIds.has(occupant.sourceReference.id)
-    ));
-    return !representedOnEveryDate;
+    return !isLodgingInterval(interval);
   });
 }
 
@@ -611,7 +615,9 @@ function unitMatchesFilters(unit: RoomStatusUnitDto, room: RoomStatusUnitDto, fi
   if (filters.salesMode !== "ALL" && effective.salesMode !== filters.salesMode) return false;
   if (filters.kind !== "ALL" && unit.kind !== filters.kind) return false;
   if (filters.minimumCapacity !== null && effective.capacity < filters.minimumCapacity) return false;
-  if (filters.status !== "ALL" && !unit.days.some((day) => day.status === filters.status)) return false;
+  if (filters.status !== "ALL" && !unit.days.some((day) => filters.status === "AVAILABLE"
+    ? day.status === "AVAILABLE" && day.available
+    : day.status === filters.status)) return false;
   return true;
 }
 

@@ -40,7 +40,7 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     properties: [
       "propertyId", "quoteId", "primaryGuest", "additionalGuests", "bookingChannelCode", "channelOrderReference",
       "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason",
-      "freeStayReason", "freeStayCategoryCode"
+      "freeStayReason", "freeStayCategoryCode", "backfill", "backfillReason", "backfillCollection"
     ]
   },
   CORRECT_ORDER_OCCUPANT: { required: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"], properties: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"] },
@@ -82,6 +82,10 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
   REVERSE_FACT: { required: ["propertyId", "orderId", "reversesFactId", "note"], properties: ["propertyId", "orderId", "reversesFactId", "note"] },
   CHECK_IN: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   CHECK_OUT: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
+  COMPLETE_STAY: {
+    required: ["propertyId", "orderId", "actualStayCompletedConfirmed", "reasonNote"],
+    properties: ["propertyId", "orderId", "actualStayCompletedConfirmed", "reasonNote", "collection"]
+  },
   REFRESH_MEMBER_COVERAGE: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   ADD_MEMBER_ENTITLEMENT_LOT: {
     required: ["propertyId", "memberContractId", "unitKind", "units", "expiresOn"],
@@ -112,6 +116,13 @@ function arbitraryRecordLocations(schema: unknown, path = "schema"): string[] {
     else if (value && typeof value === "object") result.push(...arbitraryRecordLocations(value, `${path}.${key}`));
   }
   return result;
+}
+
+function nestedSchemaObjects(schema: unknown): JsonSchema[] {
+  if (!schema || typeof schema !== "object") return [];
+  if (Array.isArray(schema)) return schema.flatMap(nestedSchemaObjects);
+  const record = schema as JsonSchema;
+  return [record, ...Object.values(record).flatMap(nestedSchemaObjects)];
 }
 
 beforeAll(async () => {
@@ -259,6 +270,24 @@ describe("OpenAPI 3.1 command contract", () => {
       expect((input.required as string[]).sort(), commandType).toEqual([...commandInputContract[commandType].required].sort());
       expect(Object.keys(input.properties as object).sort(), commandType).toEqual([...commandInputContract[commandType].properties].sort());
     }
+    const confirmReceiptSchema = document.paths["/api/v1/command-previews/{previewId}/confirm"]
+      .post.responses["200"].content["application/json"].schema;
+    const completeStayResultSchema = nestedSchemaObjects(confirmReceiptSchema).find((candidate) => {
+      const properties = candidate.properties as Record<string, JsonSchema> | undefined;
+      return properties?.orderId !== undefined
+        && properties?.stayId !== undefined
+        && properties?.checkInAmendmentId !== undefined
+        && properties?.checkOutAmendmentId !== undefined
+        && properties?.effectHash !== undefined;
+    });
+    expect(completeStayResultSchema).toBeDefined();
+    expect(completeStayResultSchema!.required).toContain("effectHash");
+    expect((completeStayResultSchema!.properties as Record<string, JsonSchema>).effectHash).toMatchObject({
+      type: "string",
+      minLength: 64,
+      maxLength: 64,
+      pattern: "^[a-f0-9]{64}$"
+    });
     const createInput = (variants.get("CREATE_ORDER")!.properties as Record<string, JsonSchema>).input!;
     const createGuest = ((createInput.properties as Record<string, JsonSchema>).primaryGuest)!;
     expect(createGuest).toMatchObject({ additionalProperties: false, required: ["fullName", "nickname"] });
@@ -1168,6 +1197,8 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(JSON.stringify(receiptSchema)).toContain("transactionReference");
     expect(JSON.stringify(receiptSchema)).toContain("pricingDecision");
     expect(JSON.stringify(receiptSchema)).toContain("pricingPolicyVersionId");
+    expect(JSON.stringify(receiptSchema)).toContain("checkInAmendmentId");
+    expect(JSON.stringify(receiptSchema)).toContain("settlementStatus");
 
     for (const [path, pathItem] of Object.entries(document.paths) as Array<[string, Record<string, unknown>]>) {
       if (!path.startsWith("/api/v1/")) continue;
@@ -1224,6 +1255,9 @@ describe("OpenAPI 3.1 command contract", () => {
     ]));
     expect(pricingRevisionSchema.properties).not.toHaveProperty("channel_contract_amount_minor");
     expect(pricingRevisionSchema.properties).not.toHaveProperty("channel_settlement_amount_minor");
+    const collectionFactSchema = (((orderDetailSchema.properties as Record<string, JsonSchema>).collectionFacts!.items) as JsonSchema);
+    expect(collectionFactSchema.required).toContain("cash_collector");
+    expect((collectionFactSchema.properties as Record<string, JsonSchema>).cash_collector).toBeDefined();
     const fulfillmentSchema = (orderDetailSchema.properties as Record<string, JsonSchema>).fulfillment!;
     expect(fulfillmentSchema.additionalProperties).toBe(false);
     expect(Object.keys(fulfillmentSchema.properties as Record<string, JsonSchema>).sort()).toEqual(["checkIn", "checkInRevocation", "checkOut", "state"]);

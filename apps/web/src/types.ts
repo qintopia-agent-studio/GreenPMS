@@ -421,6 +421,7 @@ export interface CollectionFactDto {
   references_fact_id: string | null;
   reverses_fact_id: string | null;
   method: string;
+  cash_collector: string | null;
   note: string;
   transaction_reference: string | null;
   pricing_revision_id: string | null;
@@ -505,7 +506,7 @@ export interface CommandRequest {
   input: Record<string, unknown>;
   title: string;
   description: string;
-  presentation?: "MEMBER_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
+  presentation?: "MEMBER_STAY" | "BACKFILL_STAY" | "COMPLETE_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
   recoveryEffectHash?: string;
   inventoryUnitLabels?: Record<string, string>;
   orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string };

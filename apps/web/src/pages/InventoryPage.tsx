@@ -79,6 +79,7 @@ import {
   roomStatusOrderIdentityForDate,
   roomStatusOrderIdentityForInterval,
   roomStatusOrderOptionsForDate,
+  roomStatusOrderOptionsForSelection,
   roomStatusUniqueOrderStayId,
   roomStatusUnitLabel,
   RoomStatusContext,
@@ -117,8 +118,15 @@ export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boo
   return "DRAWER";
 }
 
+export function roomStatusOrderContextVisible(
+  selectedOrder: Pick<RoomStatusOrderIdentity, "orderId" | "stayId"> | undefined,
+  orderContextOpen: boolean
+): boolean {
+  return Boolean(selectedOrder && orderContextOpen);
+}
+
 export function inventoryRecoveryIsBusinessFacing(presentation: CommandRequest["presentation"]): boolean {
-  return presentation === "MEMBER_STAY" || presentation === "FULFILLMENT" || presentation === "STAY_DATES" || presentation === "MOVE_UNIT";
+  return presentation === "MEMBER_STAY" || presentation === "BACKFILL_STAY" || presentation === "FULFILLMENT" || presentation === "STAY_DATES" || presentation === "MOVE_UNIT";
 }
 
 export function roomStatusGridSelectedStayId(
@@ -128,8 +136,19 @@ export function roomStatusGridSelectedStayId(
   stableSelectedStayId?: string
 ): string | null {
   return quickPopoverOpen
-    ? quickPopoverStayId ?? stableSelectedStayId ?? null
+    ? quickPopoverStayId ?? null
     : selectedOrder?.stayId ?? stableSelectedStayId ?? null;
+}
+
+export function roomStatusQuickPopoverPreviewStayId(
+  unit: Pick<RoomStatusUnitDto, "kind" | "salesMode"> | null | undefined,
+  directStayId: string | null | undefined,
+  uniqueOrderStayId: string | null
+): string | null {
+  if (directStayId) return directStayId;
+  return unit?.kind === "ROOM" && unit.salesMode === "BED_SPLIT"
+    ? null
+    : uniqueOrderStayId;
 }
 
 export function roomStatusAnchorMatches(
@@ -190,6 +209,104 @@ export function parseYuanAmountToMinor(value: string): number | undefined {
   return minor <= 2_147_483_600n ? Number(minor) : undefined;
 }
 
+export function parseBackfillCollectionYuanToMinor(value: string): number | undefined {
+  const normalized = value.trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return undefined;
+  const [yuanPart, fractionPart = ""] = normalized.split(".");
+  const minor = BigInt(yuanPart!) * 100n + BigInt(fractionPart.padEnd(2, "0") || "0");
+  return minor <= 2_147_483_600n ? Number(minor) : undefined;
+}
+
+export function backfillReviewDetailsComplete(input: {
+  stayType: StayType;
+  backfillReason: string;
+  freeStayCategoryCode: "VOLUNTEER" | "RECEPTION" | "";
+  freeStayReason: string;
+  bookingChannelCode: BookingChannelCode | "";
+  paidPricingComplete: boolean;
+  contractAmountMinor: number | undefined;
+  collectionAmountMinor: number | undefined;
+  collectionMethod: string;
+  transactionReference: string;
+  cashCollector: string;
+  cashNote: string;
+}): boolean {
+  if (!input.backfillReason.trim()) return false;
+  if (input.stayType === "FREE") {
+    return Boolean(input.freeStayCategoryCode && input.freeStayReason.trim());
+  }
+  if (!input.bookingChannelCode || !input.paidPricingComplete) return false;
+  if (input.bookingChannelCode !== "WECOM") return true;
+  if (input.collectionAmountMinor === undefined) return false;
+  if (input.contractAmountMinor === undefined || input.collectionAmountMinor > input.contractAmountMinor) return false;
+  if (input.collectionAmountMinor === 0) return true;
+  if (input.collectionMethod === "WECOM" || input.collectionMethod === "BANK_TRANSFER") {
+    return Boolean(input.transactionReference.trim());
+  }
+  if (input.collectionMethod === "CASH") {
+    return Boolean(input.cashCollector.trim() && input.cashNote.trim());
+  }
+  return false;
+}
+
+export function completedStayBackfillSubmissionError(
+  arrivalDate: string,
+  departureDate: string,
+  businessDate: string | undefined
+): string | undefined {
+  if (!businessDate || !isIsoLocalDate(arrivalDate) || !isIsoLocalDate(departureDate) || !isIsoLocalDate(businessDate)) {
+    return "当前营业日尚未载入，不能安全提交补录住宿";
+  }
+  if (arrivalDate >= departureDate) return "住宿日期不完整，请重新选择入住日和离店日";
+  if (arrivalDate >= businessDate) return "今天及未来的住宿请使用“创建订单”";
+  if (departureDate > businessDate) return "跨越今天的在住住宿将在 8.4 开放，本次没有提交";
+  return undefined;
+}
+
+export function backfillCollectionCommandInput(input: {
+  amountMinor: number;
+  method: string;
+  transactionReference: string;
+  cashCollector: string;
+  cashNote: string;
+}): Record<string, unknown> | undefined {
+  if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor < 0) return undefined;
+  if (input.amountMinor === 0) return { amountMinor: 0, method: "WECOM" };
+  if (input.method === "WECOM" || input.method === "BANK_TRANSFER") {
+    const transactionReference = input.transactionReference.trim();
+    return transactionReference
+      ? { amountMinor: input.amountMinor, method: input.method, transactionReference }
+      : undefined;
+  }
+  if (input.method === "CASH") {
+    const cashCollector = input.cashCollector.trim();
+    const note = input.cashNote.trim();
+    return cashCollector && note
+      ? { amountMinor: input.amountMinor, method: "CASH", cashCollector, note }
+      : undefined;
+  }
+  return undefined;
+}
+
+export function completedStayBackfillCommandRequest(
+  orderInput: Record<string, unknown>,
+  backfillReason: string
+): CommandRequest {
+  const normalizedReason = backfillReason.trim();
+  return {
+    commandType: "CREATE_ORDER",
+    title: "补录住宿",
+    description: "请核对已完成住宿、真实收款与补录原因。确认后订单将直接退房。",
+    presentation: "BACKFILL_STAY",
+    initialReason: { code: "BACKFILL_STAY", note: normalizedReason },
+    input: {
+      ...orderInput,
+      backfill: true,
+      backfillReason: normalizedReason
+    }
+  };
+}
+
 export function formatMinorForYuanInput(minorUnits: number): string {
   return String(minorUnits / 100);
 }
@@ -224,6 +341,7 @@ export function createOrderPricingDraft(input: {
     manualReasonRequired,
     complete: Boolean(input.bookingChannelCode)
       && targetCurrentContractAmountMinor !== undefined
+      && (!externalChannel || targetCurrentContractAmountMinor > 0)
       && (!externalChannel || Boolean(input.channelOrderReference.trim()))
       && (!channelReasonRequired || Boolean(input.channelPriceDifferenceReason.trim()))
       && (!manualReasonRequired || Boolean(input.manualPriceAdjustmentReason.trim()))
@@ -243,6 +361,18 @@ interface QuoteCommandInput {
   departureDate: string;
   pricingPolicyVersionId: string;
   memberId?: string;
+}
+
+export type RoomStatusQuoteActionCode = "CREATE_ORDER" | "CREATE_FREE_STAY" | "BACKFILL_ORDER";
+
+const roomStatusQuoteActionCodes = new Set<RoomStatusQuoteActionCode>([
+  "CREATE_ORDER",
+  "CREATE_FREE_STAY",
+  "BACKFILL_ORDER"
+]);
+
+function isRoomStatusQuoteActionCode(value: unknown): value is RoomStatusQuoteActionCode {
+  return typeof value === "string" && roomStatusQuoteActionCodes.has(value as RoomStatusQuoteActionCode);
 }
 
 export function eligibleMemberProfiles(
@@ -275,6 +405,7 @@ export interface PendingQuoteCommand {
   ownerTabId?: string;
   input: QuoteCommandInput;
   inputSignature: string;
+  actionCode?: RoomStatusQuoteActionCode;
   metadata: ClientCommandMetadata;
   state: "SENDING" | "UNKNOWN";
 }
@@ -307,6 +438,7 @@ export function quoteRecoveryContextIdentity(
 export function shouldAutoOpenQuoteRecoveryContext({
   recoveryIdentity,
   dismissedIdentity,
+  autoOpenedIdentity,
   recoveryOwnerId,
   currentOwnerId,
   isMobile,
@@ -314,6 +446,7 @@ export function shouldAutoOpenQuoteRecoveryContext({
 }: {
   recoveryIdentity: string | undefined;
   dismissedIdentity: string | undefined;
+  autoOpenedIdentity: string | undefined;
   recoveryOwnerId?: string | undefined;
   currentOwnerId?: string | undefined;
   isMobile: boolean;
@@ -321,9 +454,53 @@ export function shouldAutoOpenQuoteRecoveryContext({
 }): boolean {
   return Boolean(recoveryIdentity
     && recoveryIdentity !== dismissedIdentity
+    && recoveryIdentity !== autoOpenedIdentity
     && (!recoveryOwnerId || recoveryOwnerId !== currentOwnerId)
     && !isMobile
     && !hasSelectedOrder);
+}
+
+export function shouldAutoResolveOwnSendingQuoteRecovery({
+  recoveryIdentity,
+  attemptedIdentity,
+  recoveryState,
+  recoveryOwnerId,
+  currentOwnerId,
+  busy
+}: {
+  recoveryIdentity: string | undefined;
+  attemptedIdentity: string | undefined;
+  recoveryState?: PendingQuoteCommand["state"] | undefined;
+  recoveryOwnerId?: string | undefined;
+  currentOwnerId?: string | undefined;
+  busy: boolean;
+}): boolean {
+  return Boolean(recoveryIdentity
+    && recoveryIdentity !== attemptedIdentity
+    && recoveryState === "SENDING"
+    && recoveryOwnerId
+    && recoveryOwnerId === currentOwnerId
+    && !busy);
+}
+
+export function shouldOfferManualOwnSendingQuoteRecovery({
+  recoveryIdentity,
+  attemptedIdentity,
+  recoveryState,
+  recoveryOwnerId,
+  currentOwnerId
+}: {
+  recoveryIdentity: string | undefined;
+  attemptedIdentity: string | undefined;
+  recoveryState?: PendingQuoteCommand["state"] | undefined;
+  recoveryOwnerId?: string | undefined;
+  currentOwnerId?: string | undefined;
+}): boolean {
+  return Boolean(recoveryIdentity
+    && recoveryIdentity === attemptedIdentity
+    && recoveryState === "SENDING"
+    && recoveryOwnerId
+    && recoveryOwnerId === currentOwnerId);
 }
 
 export function shouldRenderDetachedQuoteRecoveryWorkbench(
@@ -354,6 +531,9 @@ export function QuoteRecoveryPageEntry({ recovery, onOpen }: {
 }
 
 let browserQuoteRecoveryDocumentOwnerId: string | undefined;
+const browserDismissedQuoteRecoveryIdentities = new Set<string>();
+const browserAutoOpenedQuoteRecoveryIdentities = new Set<string>();
+const browserAutoResolvedQuoteRecoveryIdentities = new Set<string>();
 
 export function browserQuoteRecoveryOwnerId(): string {
   // sessionStorage may be cloned when a browser tab is duplicated. A document
@@ -537,6 +717,7 @@ export function readQuoteCommandRecovery(storage: CommandRecoveryStorage, subjec
     || record.input.propertyId !== propertyId
     || typeof record.inputSignature !== "string"
     || record.inputSignature !== quoteInputSignature(record.input)
+    || (record.actionCode !== undefined && !isRoomStatusQuoteActionCode(record.actionCode))
     || !metadataRecord
     || typeof metadataRecord !== "object"
     || Array.isArray(metadata)
@@ -853,11 +1034,15 @@ function QuoteWorkbench({
   unit,
   arrivalDate,
   departureDate,
+  businessDate,
   policies,
   initialStayType,
+  quoteActionCode,
+  backfill = false,
   commandsBlocked,
   selectionDraftValid,
   resetToken,
+  autoResolvedRecoveryIdentities,
   onClose,
   onRecoveryOutcome,
   onRecoveryStateChange,
@@ -866,11 +1051,15 @@ function QuoteWorkbench({
   unit: InventoryActionUnit | undefined;
   arrivalDate: string;
   departureDate: string;
+  businessDate?: string;
   policies: PricingPolicyVersionDto[];
   initialStayType?: StayType;
+  quoteActionCode?: RoomStatusQuoteActionCode;
+  backfill?: boolean;
   commandsBlocked: boolean;
   selectionDraftValid: boolean;
   resetToken: number;
+  autoResolvedRecoveryIdentities: { current: Set<string> };
   onClose: () => void;
   onRecoveryOutcome: (outcome: Error | undefined) => void;
   onRecoveryStateChange: () => void;
@@ -879,7 +1068,12 @@ function QuoteWorkbench({
   const { meta, principal, propertyId } = useWorkspace();
   const quoteRecoveryScope = quoteRecoveryStorageKey(principal.subjectId, propertyId);
   const recoveryCoordinationScope = propertyRecoveryCoordinationScope(principal.subjectId, propertyId);
-  const stayType: StayType = initialStayType === "FREE" ? "FREE" : paidStayTypeForDates(arrivalDate, departureDate);
+  const [backfillStayKind, setBackfillStayKind] = useState<"PAID" | "FREE">(() => initialStayType === "FREE" ? "FREE" : "PAID");
+  const stayType: StayType = backfill && backfillStayKind === "FREE"
+    ? "FREE"
+    : initialStayType === "FREE" && !backfill
+      ? "FREE"
+      : paidStayTypeForDates(arrivalDate, departureDate);
   const selectedPolicy = policies.find((policy) => stayType === "FREE"
     ? policy.calculation_kind === "FREE" && policy.stay_type === "FREE"
     : policy.calculation_kind === "DURATION_BAND_TOTAL" && policy.stay_type === null);
@@ -906,6 +1100,12 @@ function QuoteWorkbench({
   const [manualPriceAdjustmentReason, setManualPriceAdjustmentReason] = useState("");
   const [freeStayReason, setFreeStayReason] = useState("");
   const [freeStayCategoryCode, setFreeStayCategoryCode] = useState<"VOLUNTEER" | "RECEPTION" | "">("");
+  const [backfillReason, setBackfillReason] = useState("");
+  const [backfillAmountYuan, setBackfillAmountYuan] = useState("");
+  const [backfillMethod, setBackfillMethod] = useState("WECOM");
+  const [backfillTransactionReference, setBackfillTransactionReference] = useState("");
+  const [backfillCashCollector, setBackfillCashCollector] = useState("");
+  const [backfillCashNote, setBackfillCashNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
   const [quoteRecoveryOwnerId] = useState(browserQuoteRecoveryOwnerId);
@@ -921,6 +1121,18 @@ function QuoteWorkbench({
     ? quoteRecoverySnapshot.read
     : { kind: "READ_ERROR", error: new Error("正在核对本地报价恢复记录") } as const;
   const pendingQuote = quoteRecoveryRead.kind === "VALID" ? quoteRecoveryRead.pending : undefined;
+  const currentQuoteRecoveryIdentity = quoteRecoveryContextIdentity(quoteRecoveryScope, quoteRecoveryRead);
+  const attemptedQuoteRecoveryIdentity = currentQuoteRecoveryIdentity
+    && autoResolvedRecoveryIdentities.current.has(currentQuoteRecoveryIdentity)
+    ? currentQuoteRecoveryIdentity
+    : undefined;
+  const manualOwnSendingRecoveryAvailable = shouldOfferManualOwnSendingQuoteRecovery({
+    recoveryIdentity: currentQuoteRecoveryIdentity,
+    attemptedIdentity: attemptedQuoteRecoveryIdentity,
+    recoveryState: pendingQuote?.state,
+    recoveryOwnerId: pendingQuote?.ownerTabId,
+    currentOwnerId: quoteRecoveryOwnerId
+  });
   const quoteRecoveryError = quoteRecoveryRead.kind === "CORRUPT" || quoteRecoveryRead.kind === "READ_ERROR" ? quoteRecoveryRead.error : undefined;
   const quoteCommandsBlocked = commandsBlocked || !quoteRecoveryReady || quoteRecoveryRead.kind !== "ABSENT";
 
@@ -1016,11 +1228,18 @@ function QuoteWorkbench({
     setManualPriceAdjustmentReason("");
     setFreeStayReason("");
     setFreeStayCategoryCode("");
+    setBackfillReason("");
+    setBackfillAmountYuan("");
+    setBackfillMethod("WECOM");
+    setBackfillTransactionReference("");
+    setBackfillCashCollector("");
+    setBackfillCashNote("");
+    setBackfillStayKind(initialStayType === "FREE" ? "FREE" : "PAID");
     setUseMemberEntitlement(false);
     setMemberId("");
     setMemberSearch("");
     setError(undefined);
-  }, [resetToken]);
+  }, [initialStayType, resetToken]);
 
   useEffect(() => {
     if (stayType === "FREE") {
@@ -1029,6 +1248,13 @@ function QuoteWorkbench({
       setMemberSearch("");
     }
   }, [stayType]);
+
+  useEffect(() => {
+    if (!backfill) return;
+    setUseMemberEntitlement(false);
+    setMemberId("");
+    setMemberSearch("");
+  }, [backfill]);
 
   useEffect(() => {
     setUseMemberEntitlement(false);
@@ -1046,8 +1272,27 @@ function QuoteWorkbench({
     setManualPriceAdjustmentReason("");
     setFreeStayReason("");
     setFreeStayCategoryCode("");
+    setBackfillReason("");
+    setBackfillAmountYuan("");
+    setBackfillMethod("WECOM");
+    setBackfillTransactionReference("");
+    setBackfillCashCollector("");
+    setBackfillCashNote("");
     setError(undefined);
-  }, [unit?.id, arrivalDate, departureDate, stayType, policyId]);
+  }, [unit?.id, arrivalDate, departureDate]);
+
+  useEffect(() => {
+    setBookingChannelCode("");
+    setChannelOrderReference("");
+    setTargetContractAmountYuan("");
+    setChannelPriceDifferenceReason("");
+    setManualPriceAdjustmentReason("");
+    setBackfillAmountYuan("");
+    setBackfillMethod("WECOM");
+    setBackfillTransactionReference("");
+    setBackfillCashCollector("");
+    setBackfillCashNote("");
+  }, [stayType]);
 
   useEffect(() => {
     setError(undefined);
@@ -1099,6 +1344,7 @@ function QuoteWorkbench({
       ownerTabId: quoteRecoveryOwnerId,
       input,
       inputSignature,
+      ...(quoteActionCode ? { actionCode: quoteActionCode } : {}),
       metadata,
       state: "SENDING"
     };
@@ -1205,7 +1451,7 @@ function QuoteWorkbench({
     }
   }
 
-  async function recoverQuote() {
+  async function recoverQuote(options: { automatic?: boolean } = {}) {
     if (!pendingQuote) return;
     onRecoveryOutcome(undefined);
     const requestLease = quoteRequestGuard.begin(quoteRecoveryScope);
@@ -1242,6 +1488,10 @@ function QuoteWorkbench({
       }
       const recoveredQuote = quoteFromReceipt(receipt, pendingQuote);
       const recoveredQuoteExpired = Date.parse(recoveredQuote.expiresAt) <= Date.now();
+      if (recoveredQuoteWaitsForCurrentTarget(recoveredQuoteExpired, currentQuoteSignature)) {
+        setError(new Error("已确认原报价结果，但当前房态与报价目标尚未载入；恢复记录继续保留，待房态恢复后再应用原结果。"));
+        return;
+      }
       const completed = await transitionQuoteRecovery(pendingQuote.metadata.idempotencyKey, "CLEAR");
       if (!quoteRequestGuard.isActive(requestLease)) return;
       updateQuoteRecoverySnapshot(completed.read);
@@ -1263,6 +1513,15 @@ function QuoteWorkbench({
     } catch (nextError) {
       if (!quoteRequestGuard.isActive(requestLease)) return;
       setError(nextError);
+      if (options.automatic && pendingQuote.state === "SENDING" && pendingQuote.ownerTabId === quoteRecoveryOwnerId) {
+        const unknown = await transitionQuoteRecovery(pendingQuote.metadata.idempotencyKey, "UNKNOWN");
+        if (!quoteRequestGuard.isActive(requestLease)) return;
+        updateQuoteRecoverySnapshot(unknown.read);
+        if (unknown.matched && unknown.changed) {
+          setError(new Error("自动核对原报价结果失败，已改为人工核对；新的报价和订单写入继续暂停。"));
+        }
+        return;
+      }
       const current = browserQuoteRecovery(principal.subjectId, propertyId);
       updateQuoteRecoverySnapshot(current.read);
     } finally {
@@ -1292,10 +1551,23 @@ function QuoteWorkbench({
   }, [pendingQuote?.metadata.idempotencyKey, pendingQuote?.ownerTabId, pendingQuote?.state]);
 
   useEffect(() => {
-    if (!pendingQuote || pendingQuote.state !== "SENDING" || pendingQuote.ownerTabId !== quoteRecoveryOwnerId || busy) return;
-    const timeout = window.setTimeout(() => void recoverQuote(), 500);
+    if (quoteRecoveryRead.kind === "ABSENT") return;
+    if (!pendingQuote || !shouldAutoResolveOwnSendingQuoteRecovery({
+      recoveryIdentity: currentQuoteRecoveryIdentity,
+      attemptedIdentity: attemptedQuoteRecoveryIdentity,
+      recoveryState: pendingQuote.state,
+      recoveryOwnerId: pendingQuote.ownerTabId,
+      currentOwnerId: quoteRecoveryOwnerId,
+      busy
+    })) return;
+    const recoveryIdentity = currentQuoteRecoveryIdentity!;
+    const timeout = window.setTimeout(() => {
+      if (autoResolvedRecoveryIdentities.current.has(recoveryIdentity)) return;
+      autoResolvedRecoveryIdentities.current.add(recoveryIdentity);
+      void recoverQuote({ automatic: true });
+    }, 500);
     return () => window.clearTimeout(timeout);
-  }, [pendingQuote?.metadata.idempotencyKey, pendingQuote?.ownerTabId, pendingQuote?.state, quoteRecoveryOwnerId, busy]);
+  }, [attemptedQuoteRecoveryIdentity, autoResolvedRecoveryIdentities, currentQuoteRecoveryIdentity, pendingQuote?.metadata.idempotencyKey, pendingQuote?.ownerTabId, pendingQuote?.state, quoteRecoveryOwnerId, busy, quoteRecoveryRead.kind]);
 
   useEffect(() => {
     if (!currentQuoteInput || quoteCommandsBlocked || settledQuoteSignature.current === currentQuoteSignature) return;
@@ -1321,6 +1593,7 @@ function QuoteWorkbench({
         manualPriceAdjustmentReason
       })
     : undefined;
+  const backfillCollectionAmountMinor = parseBackfillCollectionYuanToMinor(backfillAmountYuan);
 
   function addAdditionalGuest() {
     if (!unit || !canAddGuest(unit.occupancyCapacity, additionalGuests.length)) return;
@@ -1342,40 +1615,94 @@ function QuoteWorkbench({
     setAdditionalGuests((current) => current.filter((guest) => guest.key !== key));
   }
 
-  function createOrder() {
+  function clearBackfillCollectionDraft() {
+    setBackfillAmountYuan("");
+    setBackfillMethod("WECOM");
+    setBackfillTransactionReference("");
+    setBackfillCashCollector("");
+    setBackfillCashNote("");
+  }
+
+  function createOrder(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
     const channelRequired = bookingChannelRequiredForStay(useMemberEntitlement, quote?.stayType);
     if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestsComplete || guestCount > (unit?.occupancyCapacity ?? 0) || (channelRequired && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))) return;
     const guestInputs = createOrderGuestInputs(primaryGuestForm, additionalGuests);
+    const orderInput: Record<string, unknown> = {
+      propertyId,
+      quoteId: quote.quoteId,
+      primaryGuest: guestInputs.primaryGuest,
+      additionalGuests: guestInputs.additionalGuests,
+      ...(!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode ? {
+        bookingChannelCode,
+        channelOrderReference: bookingChannelCode === "WECOM" ? null : channelOrderReference.trim(),
+        targetCurrentContractAmountMinor: paidPricingDraft!.targetCurrentContractAmountMinor,
+        ...(paidPricingDraft!.channelReasonRequired ? { channelPriceDifferenceReason: channelPriceDifferenceReason.trim() } : {}),
+        ...(paidPricingDraft!.manualReasonRequired ? { manualPriceAdjustmentReason: manualPriceAdjustmentReason.trim() } : {})
+      } : {}),
+      ...(quote.stayType === "FREE" ? { freeStayReason: freeStayReason.trim(), freeStayCategoryCode } : {})
+    };
+    if (backfill) {
+      const reviewReady = backfillReviewDetailsComplete({
+        stayType: quote.stayType,
+        backfillReason,
+        freeStayCategoryCode,
+        freeStayReason,
+        bookingChannelCode,
+        paidPricingComplete: Boolean(paidPricingDraft?.complete),
+        contractAmountMinor: paidPricingDraft?.targetCurrentContractAmountMinor,
+        collectionAmountMinor: backfillCollectionAmountMinor,
+        collectionMethod: backfillMethod,
+        transactionReference: backfillTransactionReference,
+        cashCollector: backfillCashCollector,
+        cashNote: backfillCashNote
+      });
+      if (!reviewReady) {
+        setError(new Error("请完整填写补录原因、订单来源及对应的真实收款凭据"));
+        return;
+      }
+      const submissionError = completedStayBackfillSubmissionError(arrivalDate, departureDate, businessDate);
+      if (submissionError) {
+        setError(new Error(submissionError));
+        return;
+      }
+      const backfillCollection = bookingChannelCode === "WECOM" && backfillCollectionAmountMinor !== undefined
+        ? backfillCollectionCommandInput({
+            amountMinor: backfillCollectionAmountMinor,
+            method: backfillMethod,
+            transactionReference: backfillTransactionReference,
+            cashCollector: backfillCashCollector,
+            cashNote: backfillCashNote
+          })
+        : undefined;
+      if (bookingChannelCode === "WECOM" && !backfillCollection) {
+        setError(new Error("请核对补录实收金额及对应的真实收款凭据"));
+        return;
+      }
+      setError(undefined);
+      onCommand(completedStayBackfillCommandRequest({
+        ...orderInput,
+        ...(backfillCollection ? { backfillCollection } : {})
+      }, backfillReason));
+      return;
+    }
     onCommand({
       commandType: "CREATE_ORDER",
       title: "创建订单",
       description: "确认住宿人名单、锁定计价政策版本、库存及会员覆盖差异。",
       initialReason: { code: "CREATE_STANDARD_ORDER", note: "" },
       ...(useMemberEntitlement ? { presentation: "MEMBER_STAY" as const } : {}),
-      input: {
-        propertyId,
-        quoteId: quote.quoteId,
-        primaryGuest: guestInputs.primaryGuest,
-        additionalGuests: guestInputs.additionalGuests,
-        ...(!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode ? {
-          bookingChannelCode,
-          channelOrderReference: bookingChannelCode === "WECOM" ? null : channelOrderReference.trim(),
-          targetCurrentContractAmountMinor: paidPricingDraft!.targetCurrentContractAmountMinor,
-          ...(paidPricingDraft!.channelReasonRequired ? { channelPriceDifferenceReason: channelPriceDifferenceReason.trim() } : {}),
-          ...(paidPricingDraft!.manualReasonRequired ? { manualPriceAdjustmentReason: manualPriceAdjustmentReason.trim() } : {})
-        } : {}),
-        ...(quote.stayType === "FREE" ? { freeStayReason: freeStayReason.trim(), freeStayCategoryCode } : {})
-      }
+      input: orderInput
     });
   }
 
   return (
     <aside className="quote-workbench" aria-labelledby="quote-heading">
       <header className="panel-heading">
-        <div><p className="eyebrow">办理住宿</p><h2 id="quote-heading">住宿金额</h2></div>
-        <button className="icon-button" type="button" onClick={onClose} disabled={busy || Boolean(pendingQuote)} title="关闭办理区域" aria-label="关闭办理区域"><X aria-hidden="true" size={18} /></button>
+        <div><p className="eyebrow">{backfill ? "补录住宿" : "办理住宿"}</p><h2 id="quote-heading">{backfill ? "补录住宿" : "住宿金额"}</h2></div>
+        <button className="icon-button" type="button" onClick={onClose} title="关闭办理区域" aria-label="关闭办理区域"><X aria-hidden="true" size={18} /></button>
       </header>
-      <InlineError error={error} title="报价失败" />
+      <InlineError error={error} title={backfill ? "无法进入补录核对" : "报价失败"} />
       {quoteRecoveryRead.kind === "CORRUPT" ? (
         <DamagedCommandRecoveryNotice
           error={quoteRecoveryError}
@@ -1406,7 +1733,12 @@ function QuoteWorkbench({
               disabled={!orphanQuoteReviewConfirmed || busy}
               onClick={() => void recoverQuote()}
             >核对原报价结果</button>
-          </div> : null}
+          </div> : manualOwnSendingRecoveryAvailable ? <button
+            className="button button-secondary"
+            type="button"
+            disabled={busy}
+            onClick={() => void recoverQuote()}
+          ><RefreshCw aria-hidden="true" size={17} />核对原报价结果</button> : null}
         </div>
       ) : pendingQuote?.state === "UNKNOWN" ? (
         <div className="recovery-bar" data-testid="quote-recovery">
@@ -1419,7 +1751,14 @@ function QuoteWorkbench({
       {!unit ? <EmptyState title="选择可售库存" detail="在房态表中选择整房或床位后开始报价。" /> : (
         <>
           <div className="selected-unit"><strong>{unitName(unit)}</strong><span>{arrivalDate} 至 {departureDate}</span></div>
-          {stayType !== "FREE" ? <div className="member-benefit-controls">
+          {backfill ? <fieldset className="backfill-stay-kind" data-testid="backfill-stay-kind">
+            <legend>住宿类型</legend>
+            <div className="segmented-control">
+              <label><input type="radio" name="backfill-stay-kind" value="PAID" checked={backfillStayKind === "PAID"} onChange={() => setBackfillStayKind("PAID")} /><span>普通住宿</span></label>
+              <label><input type="radio" name="backfill-stay-kind" value="FREE" checked={backfillStayKind === "FREE"} onChange={() => { setBackfillStayKind("FREE"); setBookingChannelCode(""); setChannelOrderReference(""); clearBackfillCollectionDraft(); }} /><span>免费入住</span></label>
+            </div>
+          </fieldset> : null}
+          {!backfill && stayType !== "FREE" ? <div className="member-benefit-controls">
             <label className="checkbox-label"><input
               type="checkbox"
               checked={useMemberEntitlement}
@@ -1492,7 +1831,7 @@ function QuoteWorkbench({
               </div>
                 );
               })()}
-              <section className="guest-section" aria-labelledby="guest-heading">
+              <form className="guest-section" aria-labelledby="guest-heading" onSubmit={createOrder}>
                 <div className="guest-section-heading">
                   <h3 id="guest-heading">住宿人</h3>
                   <span>{guestCount} / {unit.occupancyCapacity} 人</span>
@@ -1536,7 +1875,9 @@ function QuoteWorkbench({
                         setTargetContractAmountYuan(code === "WECOM" ? formatMinorForYuanInput(quote.currentContractAmount.minorUnits) : "");
                         setChannelPriceDifferenceReason("");
                         setManualPriceAdjustmentReason("");
+                        if (backfill) clearBackfillCollectionDraft();
                       }}
+                      required
                       data-testid="booking-channel-code"
                     >
                       <option value="">请选择渠道</option>
@@ -1551,7 +1892,8 @@ function QuoteWorkbench({
                         onChange={(event) => setTargetContractAmountYuan(event.target.value)}
                         inputMode="numeric"
                         placeholder="0"
-                        pattern="[0-9]+(?:\\.00)?"
+                        min={bookingChannelCode === "WECOM" ? 0 : 1}
+                        pattern={bookingChannelCode === "WECOM" ? "[0-9]+(?:\\.00)?" : "[1-9][0-9]*(?:\\.00)?"}
                         required
                         data-testid="target-contract-amount"
                       />
@@ -1567,9 +1909,23 @@ function QuoteWorkbench({
                       <textarea value={manualPriceAdjustmentReason} onChange={(event) => setManualPriceAdjustmentReason(event.target.value)} required maxLength={1000} rows={2} data-testid="manual-price-adjustment-reason" />
                     </label> : null}
                   </> : null}
+                  {backfill ? <>
+                    <label className="span-two">补录原因<textarea rows={2} value={backfillReason} onChange={(event) => setBackfillReason(event.target.value)} required maxLength={1000} data-testid="backfill-reason" /></label>
+                    {!useMemberEntitlement && quote.stayType !== "FREE" && bookingChannelCode === "WECOM" ? <>
+                      <label>补录实收金额（元）<input inputMode="decimal" min="0" max={targetContractAmountYuan || undefined} step="0.01" pattern={"[0-9]+(?:\\.[0-9]{1,2})?"} value={backfillAmountYuan} onChange={(event) => { const value = event.target.value; setBackfillAmountYuan(value); const amountMinor = parseBackfillCollectionYuanToMinor(value); if (amountMinor === undefined || amountMinor === 0) { setBackfillMethod("WECOM"); setBackfillTransactionReference(""); setBackfillCashCollector(""); setBackfillCashNote(""); } }} placeholder="可填 0" required data-testid="backfill-amount" /></label>
+                      {backfillCollectionAmountMinor !== undefined && backfillCollectionAmountMinor > 0 ? <>
+                        <label>收款方式<select value={backfillMethod} onChange={(event) => { setBackfillMethod(event.target.value); setBackfillTransactionReference(""); setBackfillCashCollector(""); setBackfillCashNote(""); }} data-testid="backfill-method"><option value="WECOM">企业微信</option><option value="BANK_TRANSFER">银行转账</option><option value="CASH">现金</option></select></label>
+                        {backfillMethod === "WECOM" || backfillMethod === "BANK_TRANSFER" ? <label>交易单号<input value={backfillTransactionReference} onChange={(event) => setBackfillTransactionReference(event.target.value)} required data-testid="backfill-transaction-reference" /></label> : null}
+                        {backfillMethod === "CASH" ? <>
+                          <label>收款人<input value={backfillCashCollector} onChange={(event) => setBackfillCashCollector(event.target.value)} required maxLength={200} data-testid="backfill-cash-collector" /></label>
+                          <label className="span-two">现金收款备注<textarea rows={2} value={backfillCashNote} onChange={(event) => setBackfillCashNote(event.target.value)} required maxLength={1000} data-testid="backfill-cash-note" /></label>
+                        </> : null}
+                      </> : null}
+                    </> : null}
+                  </> : null}
                   {quote.stayType === "FREE" ? <>
                     <label>免费入住类型
-                      <select value={freeStayCategoryCode} onChange={(event) => setFreeStayCategoryCode(event.target.value as "VOLUNTEER" | "RECEPTION")} data-testid="free-stay-category-code">
+                      <select value={freeStayCategoryCode} onChange={(event) => setFreeStayCategoryCode(event.target.value as "VOLUNTEER" | "RECEPTION")} required data-testid="free-stay-category-code">
                         <option value="">请选择类型</option>
                         {Object.entries(freeStayCategoryLabels).map(([code, label]) => <option key={code} value={code}>{label}</option>)}
                       </select>
@@ -1577,10 +1933,10 @@ function QuoteWorkbench({
                     <label className="span-two">免费入住原因<textarea rows={3} value={freeStayReason} onChange={(event) => setFreeStayReason(event.target.value)} required maxLength={1000} data-testid="free-stay-reason" /></label>
                   </> : null}
                 </div>
-                <button className="button button-primary full-width" type="button" onClick={createOrder} disabled={quoteCommandsBlocked || !quoteIsCurrent || !guestsComplete || guestCount > unit.occupancyCapacity || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid="create-order">
-                  <FilePlus2 aria-hidden="true" size={17} />核对并创建订单
+                <button className="button button-primary full-width" type="submit" disabled={quoteCommandsBlocked || !quoteIsCurrent || guestCount > unit.occupancyCapacity || (!backfill && (!guestsComplete || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))))} data-testid={backfill ? "backfill-submit" : "create-order"}>
+                  <FilePlus2 aria-hidden="true" size={17} />{backfill ? "核对并补录住宿" : "核对并创建订单"}
                 </button>
-              </section>
+              </form>
             </div>
           ) : null}
         </>
@@ -1593,7 +1949,7 @@ const ROOM_STATUS_PAGE_SIZE = 50;
 const ROOM_STATUS_POLL_MS = 4_000;
 const ROOM_STATUS_QUERY_TIMEOUT_MS = 15_000;
 const ROOM_STATUS_RESTORATION_PREFIX = "qintopia.room-status-view.v1";
-const selectionActionCodes = new Set(["CREATE_ORDER", "CREATE_FREE_STAY", "LOCK_MAINTENANCE"]);
+const selectionActionCodes = new Set(["CREATE_ORDER", "CREATE_FREE_STAY", "BACKFILL_ORDER", "LOCK_MAINTENANCE"]);
 
 interface RoomStatusInteractionSnapshot {
   anchor: HTMLElement;
@@ -1606,11 +1962,170 @@ interface RoomStatusInteractionSnapshot {
   gridTop: number;
 }
 
-interface RoomStatusQuoteTarget {
+export interface RoomStatusQuoteTarget {
   unitId: string;
   arrivalDate: string;
   departureDate: string;
   initialStayType: StayType;
+  actionCode?: RoomStatusQuoteActionCode;
+  backfill?: boolean;
+}
+
+export function roomStatusQuoteTargetsEqual(
+  left: RoomStatusQuoteTarget | undefined,
+  right: RoomStatusQuoteTarget | undefined
+): boolean {
+  return left?.unitId === right?.unitId
+    && left?.arrivalDate === right?.arrivalDate
+    && left?.departureDate === right?.departureDate
+    && left?.initialStayType === right?.initialStayType
+    && left?.actionCode === right?.actionCode
+    && Boolean(left?.backfill) === Boolean(right?.backfill);
+}
+
+export function roomStatusOwnQuoteRecoveryMatchesTarget(input: {
+  recoveryState?: PendingQuoteCommand["state"] | undefined;
+  recoveryOwnerId?: string | undefined;
+  currentOwnerId?: string | undefined;
+  recoveryTarget: RoomStatusQuoteTarget | undefined;
+  currentTarget: RoomStatusQuoteTarget | undefined;
+}): boolean {
+  const normalizedRecoveryTarget = input.recoveryTarget ? {
+    ...input.recoveryTarget,
+    initialStayType: input.recoveryTarget.initialStayType === "FREE" ? "FREE" as const : "TRANSIENT" as const
+  } : undefined;
+  const normalizedCurrentTarget = input.currentTarget ? {
+    ...input.currentTarget,
+    initialStayType: input.currentTarget.initialStayType === "FREE" ? "FREE" as const : "TRANSIENT" as const
+  } : undefined;
+  return Boolean((input.recoveryState === "SENDING" || input.recoveryState === "UNKNOWN")
+    && input.recoveryOwnerId
+    && input.recoveryOwnerId === input.currentOwnerId
+    && normalizedRecoveryTarget
+    && normalizedCurrentTarget
+    && roomStatusQuoteTargetsEqual(normalizedRecoveryTarget, normalizedCurrentTarget));
+}
+
+export function roomStatusOwnQuoteRecoveryVisible(
+  matchesCurrentTarget: boolean,
+  recoveryIdentity: string | undefined,
+  dismissedIdentity: string | undefined
+): boolean {
+  return matchesCurrentTarget
+    && Boolean(recoveryIdentity)
+    && recoveryIdentity !== dismissedIdentity;
+}
+
+export function recoveredQuoteWaitsForCurrentTarget(
+  recoveredQuoteExpired: boolean,
+  currentQuoteSignature: string
+): boolean {
+  return !recoveredQuoteExpired && !currentQuoteSignature;
+}
+
+export function roomStatusQuoteRequiresBackfill(arrivalDate: string, businessDate: string): boolean {
+  return arrivalDate < businessDate;
+}
+
+export function roomStatusQuoteTargetForBusinessDate(
+  target: RoomStatusQuoteTarget,
+  businessDate: string
+): RoomStatusQuoteTarget | undefined {
+  if (!target.actionCode) return undefined;
+  const historical = roomStatusQuoteRequiresBackfill(target.arrivalDate, businessDate);
+  if (target.actionCode === "BACKFILL_ORDER") {
+    return historical && target.departureDate <= businessDate
+      ? { ...target, backfill: true }
+      : undefined;
+  }
+  if (historical) return undefined;
+  const { backfill: _staleMode, ...normalTarget } = target;
+  return normalTarget;
+}
+
+export function roomStatusQuoteActionCodeForUnit(
+  action: RoomStatusActionDto,
+  unitId: string
+): RoomStatusQuoteActionCode | undefined {
+  return action.enabled
+    && isRoomStatusQuoteActionCode(action.code)
+    && action.targetReference?.type === "INVENTORY_UNIT"
+    && action.targetReference.id === unitId
+    ? action.code
+    : undefined;
+}
+
+export function roomStatusAuthorizedQuoteAction(
+  unit: RoomStatusUnitDto | null,
+  target: RoomStatusQuoteTarget | undefined,
+  businessDate: string
+): RoomStatusActionDto | undefined {
+  if (!unit || !target || unit.id !== target.unitId) return undefined;
+  const validTarget = roomStatusQuoteTargetForBusinessDate(target, businessDate);
+  if (!validTarget?.actionCode) return undefined;
+  const selection: RoomStatusSelection = {
+    unitId: validTarget.unitId,
+    anchorDate: validTarget.arrivalDate,
+    focusDate: addLocalDateDays(validTarget.departureDate, -1),
+    arrivalDate: validTarget.arrivalDate,
+    departureDate: validTarget.departureDate
+  };
+  return selectionActions(unit, selection, businessDate).find((action) => (
+    action.enabled
+    && action.code === validTarget.actionCode
+    && action.targetReference?.type === "INVENTORY_UNIT"
+    && action.targetReference.id === unit.id
+  ));
+}
+
+export function roomStatusQuoteTargetFromAction(
+  action: RoomStatusActionDto,
+  unit: RoomStatusUnitDto | null,
+  selection: RoomStatusSelection | null,
+  businessDate: string
+): RoomStatusQuoteTarget | undefined {
+  if (!unit || !selection || selection.unitId !== unit.id) return undefined;
+  const actionCode = roomStatusQuoteActionCodeForUnit(action, unit.id);
+  if (!actionCode) return undefined;
+  const candidate: RoomStatusQuoteTarget = {
+    unitId: unit.id,
+    arrivalDate: selection.arrivalDate,
+    departureDate: selection.departureDate,
+    initialStayType: actionCode === "CREATE_FREE_STAY" ? "FREE" : "TRANSIENT",
+    actionCode,
+    ...(actionCode === "BACKFILL_ORDER" ? { backfill: true } : {})
+  };
+  return roomStatusAuthorizedQuoteAction(unit, candidate, businessDate) ? candidate : undefined;
+}
+
+export function updateRoomStatusQuoteTargetSelection(
+  current: RoomStatusQuoteTarget | undefined,
+  unit: RoomStatusUnitDto | null,
+  selection: RoomStatusSelection,
+  businessDate: string
+): RoomStatusQuoteTarget | undefined {
+  if (!current?.actionCode || !unit || unit.id !== selection.unitId) return undefined;
+  const candidate = roomStatusQuoteTargetForBusinessDate({
+    unitId: selection.unitId,
+    arrivalDate: selection.arrivalDate,
+    departureDate: selection.departureDate,
+    initialStayType: current.initialStayType === "FREE" ? "FREE" : "TRANSIENT",
+    actionCode: current.actionCode,
+    ...(current.actionCode === "BACKFILL_ORDER" ? { backfill: true } : {})
+  }, businessDate);
+  return candidate && roomStatusAuthorizedQuoteAction(unit, candidate, businessDate)
+    ? candidate
+    : undefined;
+}
+
+export function roomStatusQuoteCommandMatchesTarget(
+  request: CommandRequest,
+  target: RoomStatusQuoteTarget | undefined
+): boolean {
+  if (request.commandType !== "CREATE_ORDER" || !target?.actionCode) return false;
+  const input = request.input as Record<string, unknown>;
+  const requestIsBackfill = request.presentation === "BACKFILL_STAY" || input.backfill === true;
+  return target.actionCode === "BACKFILL_ORDER" ? requestIsBackfill : !requestIsBackfill;
 }
 
 type PendingMobileTaskFocus = Omit<RoomStatusMobileFocusRequest, "token">;
@@ -1711,19 +2226,6 @@ function findRoomStatusUnit(board: RoomStatusBoardDto | undefined, unitId: strin
   return flattenRoomStatusUnits(board).find((unit) => unit.id === unitId) ?? null;
 }
 
-function withoutRoomStatusWriteActions(unit: RoomStatusUnitDto): RoomStatusUnitDto {
-  const readActions = (actions: readonly RoomStatusActionDto[]) => actions.filter((action) => action.code === "OPEN_ORDER");
-  return {
-    ...unit,
-    intervals: unit.intervals.map((interval) => ({
-      ...interval,
-      allowedActions: readActions(interval.allowedActions)
-    })),
-    allowedActions: readActions(unit.allowedActions),
-    children: unit.children.map(withoutRoomStatusWriteActions)
-  };
-}
-
 function displayRoomStatusBoard(board: RoomStatusBoardDto, commandsBlocked: boolean): RoomStatusBoardDto {
   if (!commandsBlocked) return board;
   return {
@@ -1731,9 +2233,82 @@ function displayRoomStatusBoard(board: RoomStatusBoardDto, commandsBlocked: bool
     operationalTasks: board.operationalTasks.map((task) => ({
       ...task,
       allowedActions: task.allowedActions.filter((action) => action.code === "OPEN_ORDER")
-    })),
-    rooms: board.rooms.map(withoutRoomStatusWriteActions)
+    }))
   };
+}
+
+export interface RoomStatusActionPresentationBlock {
+  kind: "REFRESH" | "RECOVERY" | "PERMISSION";
+  reason: string;
+  actionLabel?: string;
+}
+
+export function roomStatusActionPresentationBlock(input: {
+  refreshFailed: boolean;
+  accessLevel: RoomStatusBoardDto["accessLevel"];
+  projectionWritable: boolean;
+  projectionExpired: boolean;
+  projectionReady: boolean;
+  recoveryBlocked: boolean;
+  recoveryReady: boolean;
+  recoveryError: unknown;
+  hasRecoveryEntry: boolean;
+  recoveryActionLabel?: string;
+}): RoomStatusActionPresentationBlock | undefined {
+  if (input.refreshFailed) {
+    return {
+      kind: "REFRESH",
+      reason: "房态刷新失败，当前仍显示上次成功结果。刷新成功前不能发起补录或其他写入。",
+      actionLabel: "重试刷新"
+    };
+  }
+  if (input.accessLevel !== "WRITE") {
+    return { kind: "PERMISSION", reason: "当前账号只有查看权限，不能补录住宿或执行其他写入。" };
+  }
+  if (!input.projectionWritable) {
+    return {
+      kind: "REFRESH",
+      reason: input.projectionExpired
+        ? "房态已过期，正在刷新。刷新成功前不能发起补录或其他写入。"
+        : input.projectionReady
+          ? "房态正在刷新。刷新完成前不能发起补录或其他写入。"
+          : "房态投影尚未就绪。请刷新房态；就绪前不能发起补录或其他写入。",
+      actionLabel: "刷新房态"
+    };
+  }
+  if (!input.recoveryReady || input.recoveryError) {
+    return {
+      kind: "RECOVERY",
+      reason: "命令恢复记录暂不可用。确认原操作结果前不能发起新的补录或其他写入。",
+      ...(input.hasRecoveryEntry ? { actionLabel: input.recoveryActionLabel ?? "处理恢复记录" } : {})
+    };
+  }
+  if (input.recoveryBlocked) {
+    return {
+      kind: "RECOVERY",
+      reason: "上一笔操作结果尚未收口。请先查询原操作结果；处理完成前不能发起新的补录。",
+      ...(input.hasRecoveryEntry ? { actionLabel: input.recoveryActionLabel ?? "查询原操作结果" } : {})
+    };
+  }
+  return undefined;
+}
+
+export function roomStatusActionsForPresentation(
+  actions: readonly RoomStatusActionDto[],
+  block: RoomStatusActionPresentationBlock | undefined
+): RoomStatusActionDto[] {
+  if (!block) return [...actions];
+  return actions.map((action) => action.code === "OPEN_ORDER" || !action.enabled
+    ? action
+    : { ...action, enabled: false, disabledReason: block.reason });
+}
+
+export function roomStatusHistoricalSelectionNeedsRefresh(input: {
+  boardExpired: boolean;
+  historicalSelectionOpen: boolean;
+  queryInFlight: boolean;
+}): boolean {
+  return input.boardExpired && input.historicalSelectionOpen && !input.queryInFlight;
 }
 
 function uniqueConflicts(conflicts: readonly RoomStatusConflictDto[]): RoomStatusConflictDto[] {
@@ -1745,18 +2320,30 @@ function selectionDays(unit: RoomStatusUnitDto | null, selection: RoomStatusSele
   return unit.days.filter((day) => day.serviceDate >= selection.arrivalDate && day.serviceDate < selection.departureDate);
 }
 
-function selectionActions(unit: RoomStatusUnitDto | null, selection: RoomStatusSelection | null): RoomStatusActionDto[] {
+export function selectionActions(unit: RoomStatusUnitDto | null, selection: RoomStatusSelection | null, businessDate?: string): RoomStatusActionDto[] {
   const days = selectionDays(unit, selection);
   const nights = selection ? rangeNights(selection) : 0;
-  if (!selection || nights < 1 || nights > MAX_STAY_SELECTION_NIGHTS) return [];
-  if (days.some((day) => !day.available || day.conflicts.length > 0)) return [];
-  return unit?.allowedActions.filter((candidate) => candidate.enabled && selectionActionCodes.has(candidate.code)) ?? [];
+  if (!selection || nights < 1 || nights > MAX_STAY_SELECTION_NIGHTS || days.length !== nights) return [];
+  const historical = businessDate !== undefined && selection.arrivalDate < businessDate;
+  if (historical && selection.departureDate > businessDate!) return [];
+  const eligible = historical
+    ? days.every((day) => day.conflicts.length === 0
+      && day.intervalIds.length === 0
+      && (day.serviceDate < businessDate! ? day.status === "AVAILABLE" : day.available))
+    : days.every((day) => day.available && day.conflicts.length === 0);
+  if (!eligible) return [];
+  return unit?.allowedActions.filter((candidate) => selectionActionCodes.has(candidate.code)
+    && (historical ? candidate.code === "BACKFILL_ORDER" : candidate.code !== "BACKFILL_ORDER")) ?? [];
 }
 
-function dayActions(unit: RoomStatusUnitDto | null, day: RoomStatusDayDto | null): RoomStatusActionDto[] {
+export function dayActions(unit: RoomStatusUnitDto | null, day: RoomStatusDayDto | null, businessDate?: string): RoomStatusActionDto[] {
   if (!unit || !day) return [];
-  const create = day.available && day.conflicts.length === 0
-    ? unit.allowedActions.filter((candidate) => candidate.enabled && selectionActionCodes.has(candidate.code))
+  const historical = businessDate !== undefined && day.serviceDate < businessDate;
+  const historicalBlank = historical && day.status === "AVAILABLE" && day.intervalIds.length === 0 && day.conflicts.length === 0;
+  const canCreateFromDay = (historicalBlank || (!historical && day.available)) && day.conflicts.length === 0;
+  const create = canCreateFromDay
+    ? unit.allowedActions.filter((candidate) => selectionActionCodes.has(candidate.code)
+      && (historical ? candidate.code === "BACKFILL_ORDER" : candidate.code !== "BACKFILL_ORDER"))
     : [];
   const sourceActions = unit.intervals
     .filter((interval) => day.intervalIds.includes(interval.id))
@@ -1857,6 +2444,18 @@ export function roomStatusCommandWriteGate(input: {
   };
 }
 
+export function roomStatusProjectionWritable(input: {
+  projectionReady: boolean;
+  projectionExpired: boolean;
+  boardAccess: string | undefined;
+  principalAccess: string | undefined;
+}): boolean {
+  return input.projectionReady
+    && !input.projectionExpired
+    && input.boardAccess === "WRITE"
+    && input.principalAccess === "WRITE";
+}
+
 function buildMobileGroups(board: RoomStatusBoardDto): RoomStatusMobileGroups {
   const tasks = board.operationalTasks.filter((task) => task.businessDate === board.businessDate);
   return {
@@ -1874,7 +2473,8 @@ export function InventoryPage() {
   const { meta, principal, propertyId } = useWorkspace();
   const property = meta.properties.find((item) => item.id === propertyId);
   const propertyTimezone = property?.timezone ?? "UTC";
-  const orderPrincipalScope = `${propertyId}:${principal.subjectId}:${principal.credentialType}:${principal.propertyAccess[propertyId] ?? "NONE"}`;
+  const principalPropertyAccess = principal.propertyAccess[propertyId];
+  const orderPrincipalScope = `${propertyId}:${principal.subjectId}:${principal.credentialType}:${principalPropertyAccess ?? "NONE"}`;
   const initialRestoration = useRef(readRoomStatusRestoration(principal.subjectId, propertyId));
   const orderReturnEnvelopePresent = useRef(hasRoomStatusOrderReturnEnvelope(location.state));
   const pendingOrderReturnTarget = useRef(parseRoomStatusOrderReturnTarget(location.state));
@@ -1936,6 +2536,7 @@ export function InventoryPage() {
   const [quoteRecoveryOutcome, setQuoteRecoveryOutcome] = useState<Error>();
   const [clock, setClock] = useState(() => Date.now());
   const [refreshToken, setRefreshToken] = useState(0);
+  const [querySettledToken, setQuerySettledToken] = useState(0);
   const [quoteResetToken, setQuoteResetToken] = useState(0);
   const [selectionDraftValid, setSelectionDraftValid] = useState(true);
   const [command, setCommand] = useState<CommandRequest>();
@@ -1944,6 +2545,8 @@ export function InventoryPage() {
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [quoteRecoveryContextOpen, setQuoteRecoveryContextOpen] = useState(false);
   const [dismissedQuoteRecoveryIdentity, setDismissedQuoteRecoveryIdentity] = useState<string>();
+  const [autoOpenedQuoteRecoveryIdentity, setAutoOpenedQuoteRecoveryIdentity] = useState<string>();
+  const autoResolvedQuoteRecoveryIdentities = useRef(browserAutoResolvedQuoteRecoveryIdentities);
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [commandNotice, setCommandNotice] = useState<string>();
   const [selectedUnitId, setSelectedUnitId] = useState<string>();
@@ -1967,6 +2570,14 @@ export function InventoryPage() {
   const [selectedLifecycleRevision, setSelectedLifecycleRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
+  const effectiveDismissedQuoteRecoveryIdentity = currentQuoteRecoveryIdentity
+    && browserDismissedQuoteRecoveryIdentities.has(currentQuoteRecoveryIdentity)
+    ? currentQuoteRecoveryIdentity
+    : dismissedQuoteRecoveryIdentity;
+  const effectiveAutoOpenedQuoteRecoveryIdentity = currentQuoteRecoveryIdentity
+    && browserAutoOpenedQuoteRecoveryIdentities.has(currentQuoteRecoveryIdentity)
+    ? currentQuoteRecoveryIdentity
+    : autoOpenedQuoteRecoveryIdentity;
   useEffect(() => {
     if (queryPhase === "PERMISSION_DENIED") {
       if (quoteRecoveryContextOpen) setQuoteRecoveryContextOpen(false);
@@ -1975,22 +2586,23 @@ export function InventoryPage() {
     }
     if (!currentQuoteRecoveryIdentity) {
       if (quoteRecoveryContextOpen) setQuoteRecoveryContextOpen(false);
-      if (dismissedQuoteRecoveryIdentity) setDismissedQuoteRecoveryIdentity(undefined);
-      if (!isMobile && quoteRecoveryContextOpen) setDesktopContextCollapsed(true);
       return;
     }
     if (shouldAutoOpenQuoteRecoveryContext({
       recoveryIdentity: currentQuoteRecoveryIdentity,
-      dismissedIdentity: dismissedQuoteRecoveryIdentity,
+      dismissedIdentity: effectiveDismissedQuoteRecoveryIdentity,
+      autoOpenedIdentity: effectiveAutoOpenedQuoteRecoveryIdentity,
       recoveryOwnerId: currentQuoteRecoveryOwnerId,
       currentOwnerId: currentBrowserQuoteRecoveryOwnerId,
       isMobile,
-      hasSelectedOrder: Boolean(selectedOrderIdentity)
+      hasSelectedOrder: roomStatusOrderContextVisible(selectedOrderIdentity, orderContextOpen)
     })) {
+      browserAutoOpenedQuoteRecoveryIdentities.add(currentQuoteRecoveryIdentity);
+      setAutoOpenedQuoteRecoveryIdentity(currentQuoteRecoveryIdentity);
       setQuoteRecoveryContextOpen(true);
       setDesktopContextCollapsed(false);
     }
-  }, [currentBrowserQuoteRecoveryOwnerId, currentQuoteRecoveryIdentity, currentQuoteRecoveryOwnerId, dismissedQuoteRecoveryIdentity, isMobile, queryPhase, quoteRecoveryContextOpen, selectedOrderIdentity]);
+  }, [currentBrowserQuoteRecoveryOwnerId, currentQuoteRecoveryIdentity, currentQuoteRecoveryOwnerId, effectiveAutoOpenedQuoteRecoveryIdentity, effectiveDismissedQuoteRecoveryIdentity, isMobile, orderContextOpen, queryPhase, quoteRecoveryContextOpen, selectedOrderIdentity]);
   const [quickPopoverTarget, setQuickPopoverTarget] = useState<{
     unitId: string;
     serviceDate: string;
@@ -2008,8 +2620,10 @@ export function InventoryPage() {
   const [mobileFocusRequest, setMobileFocusRequest] = useState<RoomStatusMobileFocusRequest>();
   const [commandContextInvalidated, setCommandContextInvalidated] = useState(false);
   const [focusRequestToken, setFocusRequestToken] = useState(0);
+  const [todayResetToken, setTodayResetToken] = useState(0);
   const [filterFocusRequestToken, setFilterFocusRequestToken] = useState(0);
   const quoteSectionRef = useRef<HTMLDivElement>(null);
+  const quoteSectionScrollFrameRef = useRef<number | undefined>(undefined);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const boardColumnRef = useRef<HTMLDivElement>(null);
   const roomStatusInteractionSnapshotRef = useRef<RoomStatusInteractionSnapshot | undefined>(undefined);
@@ -2023,6 +2637,7 @@ export function InventoryPage() {
   const commandRevisionRef = useRef<string | undefined>(undefined);
   const commandQueryKeyRef = useRef<string | undefined>(undefined);
   const refreshedReceiptIdRef = useRef<string | undefined>(undefined);
+  const historicalRefreshRequestRef = useRef<string | undefined>(undefined);
   const focusAfterNextBoard = useRef(false);
   const returnedOrderCellFocus = useRef<{ unitId: string; serviceDate: string } | undefined>(undefined);
   const pendingMobileTaskFocus = useRef<PendingMobileTaskFocus | undefined>(undefined);
@@ -2032,6 +2647,22 @@ export function InventoryPage() {
     snapshot: RoomStatusRestorationSnapshot;
   } | undefined>(undefined);
   const currentSelectedOrderCommandScope = roomStatusOrderCommandScope(orderPrincipalScope, selectedOrderIdentity);
+
+  function cancelQuoteSectionScroll(): void {
+    if (quoteSectionScrollFrameRef.current === undefined) return;
+    cancelAnimationFrame(quoteSectionScrollFrameRef.current);
+    quoteSectionScrollFrameRef.current = undefined;
+  }
+
+  function scheduleQuoteSectionScroll(): void {
+    cancelQuoteSectionScroll();
+    quoteSectionScrollFrameRef.current = requestAnimationFrame(() => {
+      quoteSectionScrollFrameRef.current = undefined;
+      quoteSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }
+
+  useEffect(() => () => cancelQuoteSectionScroll(), []);
 
   useEffect(() => {
     boardRef.current = board;
@@ -2227,6 +2858,7 @@ export function InventoryPage() {
     boardRef.current = undefined;
     setBoardQueryKey(undefined);
     boardQueryKeyRef.current = undefined;
+    historicalRefreshRequestRef.current = undefined;
     setQuickPopoverTarget(undefined);
     roomStatusInteractionSnapshotRef.current = undefined;
     setSelectedUnitId(undefined);
@@ -2412,7 +3044,9 @@ export function InventoryPage() {
       })
       .finally(() => {
         window.clearTimeout(timeout);
-        queryAttemptGuard.finish(requestId);
+        if (queryAttemptGuard.finish(requestId)) {
+          setQuerySettledToken((value) => value + 1);
+        }
       });
     return () => {
       window.clearTimeout(timeout);
@@ -2472,14 +3106,24 @@ export function InventoryPage() {
     || queryPhase === "RANGE_LOADING"
     || queryPhase === "REFRESHING"
     || Boolean(board && !boardMatchesCurrentQuery);
-  const activeProjectionValid = Boolean(board
+  const projectionReadyForWrite = Boolean(board
     && boardMatchesCurrentQuery
     && !queryError
     && !focusAfterNextBoard.current
     && board.projectionState === "READY"
-    && board.accessLevel === "WRITE"
     && (queryPhase === "READY" || queryPhase === "REFRESHING"));
-  const projectionWritable = activeProjectionValid && !boardExpired;
+  const activeProjectionValid = roomStatusProjectionWritable({
+    projectionReady: projectionReadyForWrite,
+    projectionExpired: false,
+    boardAccess: boardForCurrentProperty?.accessLevel,
+    principalAccess: principalPropertyAccess
+  });
+  const projectionWritable = roomStatusProjectionWritable({
+    projectionReady: projectionReadyForWrite,
+    projectionExpired: boardExpired,
+    boardAccess: boardForCurrentProperty?.accessLevel,
+    principalAccess: principalPropertyAccess
+  });
   const commandTargetScopeCurrent = selectedOrderCommandScopeIsCurrent(
     selectedOrderCommandScope,
     orderPrincipalScope,
@@ -2496,6 +3140,25 @@ export function InventoryPage() {
   });
   const commandsBlocked = commandWriteGate.startBlocked;
   const activeCommandWriteBlocked = commandWriteGate.activeBlocked;
+  const recoveryEntryAvailable = Boolean(commandRecovery.pending
+    || pageQuoteRecovery.kind !== "ABSENT"
+    || commandRecovery.canDiscardCorrupt);
+  const actionPresentationBlock = roomStatusActionPresentationBlock({
+    refreshFailed: boardRefreshFailed,
+    accessLevel: boardForCurrentProperty?.accessLevel === "WRITE" && principalPropertyAccess === "WRITE"
+      ? "WRITE"
+      : "READ",
+    projectionWritable,
+    projectionExpired: boardExpired,
+    projectionReady: activeProjectionValid,
+    recoveryBlocked: commandRecovery.blocked,
+    recoveryReady: commandRecovery.ready,
+    recoveryError: commandRecovery.error,
+    hasRecoveryEntry: recoveryEntryAvailable,
+    recoveryActionLabel: commandRecovery.pending || pageQuoteRecovery.kind === "VALID"
+      ? "查询原操作结果"
+      : "处理恢复记录"
+  });
   useEffect(() => {
     if (!command || commandPhaseRef.current === "IDLE" || !commandQueryKeyRef.current) return;
     if (commandQueryKeyRef.current !== currentBoardQueryKey) setCommandContextInvalidated(true);
@@ -2523,18 +3186,28 @@ export function InventoryPage() {
   )) ?? null;
   const quickPopoverStatus = quickPopoverInterval?.status ?? quickPopoverDay?.status ?? "UNKNOWN";
   const quickPopoverSelection = quickPopoverTarget?.selection ?? null;
-  const quickPopoverActions = (quickPopoverSelection
-    ? selectionActions(quickPopoverUnit, quickPopoverSelection)
+  const quickPopoverAuthorizedActions = (quickPopoverSelection
+    ? selectionActions(quickPopoverUnit, quickPopoverSelection, renderedBoard?.businessDate)
     : quickPopoverInterval
       ? intervalActions(quickPopoverInterval, null)
-      : dayActions(quickPopoverUnit, quickPopoverDay))
+      : dayActions(quickPopoverUnit, quickPopoverDay, renderedBoard?.businessDate))
     .filter((action) => currentReleaseFeatures.cleaningWorkflow || action.code !== "COMPLETE_CLEANING");
-  const quickPopoverOrders = quickPopoverUnit && quickPopoverTarget && !quickPopoverSelection
-    ? roomStatusOrderOptionsForDate(quickPopoverUnit, quickPopoverTarget.serviceDate)
+  const quickPopoverActions = roomStatusActionsForPresentation(quickPopoverAuthorizedActions, actionPresentationBlock);
+  const quickPopoverOrders = quickPopoverUnit && quickPopoverTarget
+    ? quickPopoverSelection
+      ? roomStatusOrderOptionsForSelection(quickPopoverUnit, quickPopoverSelection)
+      : roomStatusOrderOptionsForDate(quickPopoverUnit, quickPopoverTarget.serviceDate)
     : { kind: "READY" as const, orders: [] };
-  const quickPopoverPreviewStayId = (quickPopoverInterval
-    ? roomStatusOrderIdentityForInterval(quickPopoverInterval)?.stayId
-    : undefined) ?? roomStatusUniqueOrderStayId(quickPopoverOrders);
+  // A split-bed parent cell is an occupancy summary, even when it happens to
+  // contain one child order. Concrete bed and non-aggregate room rows may still
+  // use their unique order as the Stay preview.
+  const quickPopoverPreviewStayId = quickPopoverSelection
+    ? null
+    : roomStatusQuickPopoverPreviewStayId(
+      quickPopoverUnit,
+      quickPopoverInterval ? roomStatusOrderIdentityForInterval(quickPopoverInterval)?.stayId : null,
+      roomStatusUniqueOrderStayId(quickPopoverOrders)
+    );
   const selectedSelectionDays = selectionDays(selectedUnit, viewState.selection);
   const relatedIntervals = useMemo(() => {
     if (!selectedUnit) return [];
@@ -2550,15 +3223,35 @@ export function InventoryPage() {
   // A cell click always leaves a one-day selection behind; when that selection
   // covers unavailable days (locks, stays) selectionActions is empty by design,
   // so fall back to the clicked day's own interval actions (e.g. release lock).
-  const selectionContextActions = viewState.selection ? selectionActions(selectedUnit, viewState.selection) : [];
+  const selectionContextActions = viewState.selection ? selectionActions(selectedUnit, viewState.selection, renderedBoard?.businessDate) : [];
   const candidateContextActions = selectedInterval
       ? intervalActions(selectedInterval, viewState.selection)
       : viewState.selection && selectionContextActions.length > 0
         ? selectionContextActions
-        : dayActions(selectedUnit, selectedDay).filter((action) => action.enabled);
-  const contextActions = projectionWritable || Boolean(command)
-    ? candidateContextActions
-    : candidateContextActions.filter((action) => action.code === "OPEN_ORDER");
+        : dayActions(selectedUnit, selectedDay, renderedBoard?.businessDate).filter((action) => action.enabled);
+  const contextActions = roomStatusActionsForPresentation(candidateContextActions, actionPresentationBlock);
+  const historicalSelectionOpen = Boolean(renderedBoard && (
+    (quickPopoverTarget
+      && (quickPopoverSelection?.arrivalDate ?? quickPopoverTarget.serviceDate) < renderedBoard.businessDate)
+    || (!desktopContextCollapsed
+      && viewState.selection
+      && viewState.selection.arrivalDate < renderedBoard.businessDate)
+  ));
+  useEffect(() => {
+    void querySettledToken;
+    if (!renderedBoard || !roomStatusHistoricalSelectionNeedsRefresh({
+      boardExpired,
+      historicalSelectionOpen,
+      queryInFlight: queryAttemptGuard.isInFlight()
+    })) {
+      if (!boardExpired) historicalRefreshRequestRef.current = undefined;
+      return;
+    }
+    const requestKey = `${renderedBoard.revision}:${renderedBoard.freshUntil}`;
+    if (historicalRefreshRequestRef.current === requestKey) return;
+    historicalRefreshRequestRef.current = requestKey;
+    setRefreshToken((value) => value + 1);
+  }, [boardExpired, historicalSelectionOpen, querySettledToken, renderedBoard?.freshUntil, renderedBoard?.revision]);
   const useInlineOrderContext = roomStatusOrderContextMode(workspaceWidth, isMobile) === "INLINE";
   const authorizedSelectedOrderView = selectedOrderLoadedScope === orderPrincipalScope ? selectedOrderView : undefined;
   const selectedCorrectionOccupant = authorizedSelectedOrderView?.occupants.find((occupant) => occupant.id === selectedCorrectionOccupantId);
@@ -3036,16 +3729,53 @@ export function InventoryPage() {
       ?? paidStayTypeForDates(
         pageQuoteRecovery.pending.input.arrivalDate,
         pageQuoteRecovery.pending.input.departureDate
-      )
+      ),
+    ...(pageQuoteRecovery.pending.actionCode ? {
+      actionCode: pageQuoteRecovery.pending.actionCode,
+      ...(pageQuoteRecovery.pending.actionCode === "BACKFILL_ORDER" ? { backfill: true } : {})
+    } : {})
   } : undefined;
-  const activeQuoteTarget = recoveryQuoteTarget ?? quoteTarget;
+  const quoteRecoveryWorkbenchOpen = quoteRecoveryContextOpen && pageQuoteRecovery.kind !== "ABSENT";
+  const ownQuoteRecoveryMatchesCurrentTarget = pageQuoteRecovery.kind === "VALID"
+    && roomStatusOwnQuoteRecoveryMatchesTarget({
+      recoveryState: pageQuoteRecovery.pending.state,
+      recoveryOwnerId: pageQuoteRecovery.pending.ownerTabId,
+      currentOwnerId: currentBrowserQuoteRecoveryOwnerId,
+      recoveryTarget: recoveryQuoteTarget,
+      currentTarget: quoteTarget
+    });
+  const ownQuoteRecoveryVisible = roomStatusOwnQuoteRecoveryVisible(
+    ownQuoteRecoveryMatchesCurrentTarget,
+    currentQuoteRecoveryIdentity,
+    effectiveDismissedQuoteRecoveryIdentity
+  );
+  const activeQuoteTargetSource = quoteRecoveryWorkbenchOpen ? recoveryQuoteTarget : quoteTarget;
+  const activeQuoteTarget = activeQuoteTargetSource
+    ? roomStatusQuoteTargetForBusinessDate(activeQuoteTargetSource, renderedBoard?.businessDate ?? todayDate)
+    : undefined;
   const quoteUnit = findRoomStatusUnit(renderedBoard, activeQuoteTarget?.unitId);
-  const showQuoteWorkbench = Boolean(activeQuoteTarget) || pageQuoteRecovery.kind !== "ABSENT";
-  const quoteActionUnit = activeQuoteTarget && quoteUnit ? actionUnit(quoteUnit, projectionWritable) : undefined;
-  const quoteRecoveryDrawerOpen = quoteRecoveryContextOpen && pageQuoteRecovery.kind !== "ABSENT";
+  const showQuoteWorkbench = quoteRecoveryWorkbenchOpen
+    || ((pageQuoteRecovery.kind === "ABSENT" || ownQuoteRecoveryVisible) && Boolean(activeQuoteTarget));
+  const quoteRecoveryUiVisible = pageQuoteRecovery.kind !== "ABSENT" && showQuoteWorkbench;
+  const activeQuoteAuthorizedAction = activeQuoteTarget && renderedBoard
+    ? roomStatusAuthorizedQuoteAction(quoteUnit, activeQuoteTarget, renderedBoard.businessDate)
+    : undefined;
+  const quoteWorkbenchBlocked = commandsBlocked || !activeQuoteAuthorizedAction;
+  const quoteActionUnit = activeQuoteTarget && quoteUnit
+    ? actionUnit(quoteUnit, projectionWritable && Boolean(activeQuoteAuthorizedAction))
+    : undefined;
+  const quoteRecoveryDrawerOpen = quoteRecoveryWorkbenchOpen;
   const desktopContextKind = roomStatusDesktopContextKind(quoteRecoveryDrawerOpen, Boolean(selectedOrderIdentity));
 
+  useEffect(() => {
+    if (!quoteTarget || pageQuoteRecovery.kind !== "ABSENT" || !projectionWritable) return;
+    if (activeQuoteTarget && activeQuoteAuthorizedAction) return;
+    setQuoteTarget(undefined);
+    setActionError(new Error("当前选区已被占用、超出本阶段补录范围，或服务端已撤销原办理动作；住宿表单已关闭，请重新选择。"));
+  }, [activeQuoteAuthorizedAction, activeQuoteTarget, pageQuoteRecovery.kind, projectionWritable, quoteTarget]);
+
   function clearTransientRoomStatusContext() {
+    cancelQuoteSectionScroll();
     returnedOrderCellFocus.current = undefined;
     setQuickPopoverTarget(undefined);
     setSelectedUnitId(undefined);
@@ -3169,7 +3899,11 @@ export function InventoryPage() {
     requestAnimationFrame(() => {
       snapshot.grid?.scrollTo({ left: snapshot.gridLeft, top: snapshot.gridTop, behavior: "auto" });
       window.scrollTo({ left: snapshot.windowX, top: snapshot.windowY, behavior: "auto" });
-      if (snapshot.anchor.isConnected) snapshot.anchor.focus({ preventScroll: true });
+      if (snapshot.anchor.isConnected) {
+        snapshot.anchor.focus({ preventScroll: true });
+      } else {
+        setFocusRequestToken((value) => value + 1);
+      }
       requestAnimationFrame(() => {
         snapshot.grid?.scrollTo({ left: snapshot.gridLeft, top: snapshot.gridTop, behavior: "auto" });
         window.scrollTo({ left: snapshot.windowX, top: snapshot.windowY, behavior: "auto" });
@@ -3336,6 +4070,7 @@ export function InventoryPage() {
   }
 
   function selectRange(selection: RoomStatusSelection | null) {
+    cancelQuoteSectionScroll();
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
     invalidateSelectedOrderForRoomStatusInspection();
@@ -3345,12 +4080,16 @@ export function InventoryPage() {
     if (selection) {
       setDesktopContextCollapsed(false);
       setSelectedUnitId(selection.unitId);
-      setQuoteTarget((current) => ({
-        unitId: selection.unitId,
-        arrivalDate: selection.arrivalDate,
-        departureDate: selection.departureDate,
-        initialStayType: current?.initialStayType === "FREE" ? "FREE" : "TRANSIENT"
-      }));
+      const nextQuoteTarget = updateRoomStatusQuoteTargetSelection(
+        quoteTarget,
+        findRoomStatusUnit(renderedBoard, selection.unitId),
+        selection,
+        renderedBoard?.businessDate ?? todayDate
+      );
+      setQuoteTarget(nextQuoteTarget);
+      if (quoteTarget && !nextQuoteTarget) {
+        setActionError(new Error("修改后的房源或日期不再有服务端授权的住宿办理动作，原住宿表单已关闭。"));
+      }
     } else {
       setQuoteTarget(undefined);
     }
@@ -3479,6 +4218,7 @@ export function InventoryPage() {
   }
 
   function closeSelectedOrderContext() {
+    cancelQuoteSectionScroll();
     returnedOrderCellFocus.current = undefined;
     setSelectedCorrectionOccupantId(undefined);
     setOrderContextOpen(false);
@@ -3487,14 +4227,15 @@ export function InventoryPage() {
   }
 
   function closeDesktopContext() {
-    if (quoteRecoveryContextOpen) {
+    cancelQuoteSectionScroll();
+    if (quoteRecoveryUiVisible) {
+      if (currentQuoteRecoveryIdentity) browserDismissedQuoteRecoveryIdentities.add(currentQuoteRecoveryIdentity);
       setDismissedQuoteRecoveryIdentity(currentQuoteRecoveryIdentity);
       setQuoteRecoveryContextOpen(false);
       setDesktopContextCollapsed(true);
       restoreRoomStatusInteraction();
       return;
     }
-    if (pageQuoteRecovery.kind !== "ABSENT") return;
     returnedOrderCellFocus.current = undefined;
     setDesktopContextCollapsed(true);
     if (selectedOrderIdentity) setOrderContextOpen(false);
@@ -3514,17 +4255,35 @@ export function InventoryPage() {
   }
 
   function openQuoteRecoveryContext() {
+    cancelQuoteSectionScroll();
     setQuickPopoverTarget(undefined);
     setMobileCreateOpen(false);
     setOrderContextOpen(false);
+    if (currentQuoteRecoveryIdentity) browserDismissedQuoteRecoveryIdentities.delete(currentQuoteRecoveryIdentity);
     setDismissedQuoteRecoveryIdentity(undefined);
     setQuoteRecoveryContextOpen(true);
     setDesktopContextCollapsed(false);
-    requestAnimationFrame(() => quoteSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+    scheduleQuoteSectionScroll();
+  }
+
+  function openRoomStatusRecoveryEntry() {
+    if (commandRecovery.pending) {
+      openRecoveryDialog();
+      return;
+    }
+    if (pageQuoteRecovery.kind !== "ABSENT") {
+      openQuoteRecoveryContext();
+      return;
+    }
+    const notice = document.querySelector<HTMLElement>("[data-testid='inventory-damaged-command-recovery']");
+    notice?.scrollIntoView({ block: "start", behavior: "smooth" });
+    notice?.querySelector<HTMLElement>("input, button")?.focus({ preventScroll: true });
   }
 
   function closeQuoteWorkbench() {
+    cancelQuoteSectionScroll();
     if (pageQuoteRecovery.kind !== "ABSENT") {
+      if (currentQuoteRecoveryIdentity) browserDismissedQuoteRecoveryIdentities.add(currentQuoteRecoveryIdentity);
       setDismissedQuoteRecoveryIdentity(currentQuoteRecoveryIdentity);
       setQuoteRecoveryContextOpen(false);
       setDesktopContextCollapsed(true);
@@ -3596,6 +4355,22 @@ export function InventoryPage() {
     }
   }
 
+  function startQuoteCommand(request: CommandRequest): boolean {
+    const currentBusinessDate = renderedBoard?.businessDate;
+    const currentUnit = findRoomStatusUnit(renderedBoard, activeQuoteTarget?.unitId);
+    const currentAuthorization = currentBusinessDate
+      ? roomStatusAuthorizedQuoteAction(currentUnit, activeQuoteTarget, currentBusinessDate)
+      : undefined;
+    if (quoteWorkbenchBlocked
+      || principalPropertyAccess !== "WRITE"
+      || !currentAuthorization
+      || !roomStatusQuoteCommandMatchesTarget(request, activeQuoteTarget)) {
+      setActionError(new Error("当前住宿表单不再绑定有效的服务端动作，命令未发送。请刷新房态并重新选择日期。"));
+      return false;
+    }
+    return startCommand(request);
+  }
+
   function startCommand(request: CommandRequest, targetScope = orderPrincipalScope): boolean {
     if (commandsBlocked) {
       setActionError(new Error("当前房态已陈旧、正在刷新、权限已收窄或命令恢复尚未收口；命令未发送，表单草稿保持不变。"));
@@ -3633,21 +4408,26 @@ export function InventoryPage() {
       return false;
     }
     const selection = selectionOverride ?? viewState.selection;
-    if (action.code === "CREATE_ORDER" || action.code === "CREATE_FREE_STAY" || action.code === "LOCK_MAINTENANCE") {
+    if (action.code === "CREATE_ORDER" || action.code === "CREATE_FREE_STAY" || action.code === "BACKFILL_ORDER" || action.code === "LOCK_MAINTENANCE") {
       if (!actionSelectedUnit || !selection || selection.unitId !== actionSelectedUnit.id) {
         setActionError(new Error("请选择一个完整的房源与半开日期区间"));
         return false;
       }
       const unit = actionUnit(actionSelectedUnit, true);
-      if (action.code === "CREATE_ORDER" || action.code === "CREATE_FREE_STAY") {
+      if (action.code === "CREATE_ORDER" || action.code === "CREATE_FREE_STAY" || action.code === "BACKFILL_ORDER") {
+        const authorizedTarget = roomStatusQuoteTargetFromAction(
+          action,
+          actionSelectedUnit,
+          selection,
+          renderedBoard?.businessDate ?? todayDate
+        );
+        if (!authorizedTarget) {
+          setActionError(new Error("当前选区已被占用、越过本阶段允许的日期范围，或服务端已撤销该住宿办理动作；未打开表单。"));
+          return false;
+        }
         setQuoteRecoveryOutcome(undefined);
-        setQuoteTarget({
-          unitId: unit.id,
-          arrivalDate: selection.arrivalDate,
-          departureDate: selection.departureDate,
-          initialStayType: action.code === "CREATE_FREE_STAY" ? "FREE" : "TRANSIENT"
-        });
-        requestAnimationFrame(() => quoteSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+        setQuoteTarget(authorizedTarget);
+        scheduleQuoteSectionScroll();
       } else {
         setQuoteTarget(undefined);
         setMaintenanceTarget(unit);
@@ -3895,12 +4675,15 @@ export function InventoryPage() {
         selection={viewState.selection}
         conflicts={contextConflicts}
         allowedActions={contextActions}
+        {...(actionPresentationBlock ? { writeBlock: actionPresentationBlock } : {})}
         onSelectedUnitChange={inspectUnit}
         onSelectionChange={selectRange}
         onDraftValidityChange={setSelectionDraftValid}
         onOpenReference={openReference}
         onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
         onAction={handleAction}
+        onRefresh={() => setRefreshToken((value) => value + 1)}
+        onOpenRecovery={openRoomStatusRecoveryEntry}
         {...(useInlineOrderContext ? { onClose: closeDesktopContext } : {})}
       />
       {showQuoteWorkbench ? (
@@ -3909,18 +4692,24 @@ export function InventoryPage() {
             unit={quoteActionUnit}
             arrivalDate={activeQuoteTarget?.arrivalDate ?? range.arrivalDate}
             departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
+            businessDate={renderedBoard.businessDate}
             policies={policies}
             {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
-            commandsBlocked={commandsBlocked}
+            {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
+            backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
+            commandsBlocked={quoteWorkbenchBlocked}
             selectionDraftValid={selectionDraftValid}
             resetToken={quoteResetToken}
+            autoResolvedRecoveryIdentities={autoResolvedQuoteRecoveryIdentities}
             onClose={closeQuoteWorkbench}
             onRecoveryOutcome={setQuoteRecoveryOutcome}
             onRecoveryStateChange={() => {
-              if (recoveryQuoteTarget) setQuoteTarget(recoveryQuoteTarget);
+              if (recoveryQuoteTarget) {
+                setQuoteTarget((current) => roomStatusQuoteTargetsEqual(current, recoveryQuoteTarget) ? current : recoveryQuoteTarget);
+              }
               setPageQuoteRecoveryRevision((revision) => revision + 1);
             }}
-            onCommand={startCommand}
+            onCommand={startQuoteCommand}
           />
         </div>
       ) : null}
@@ -3990,10 +4779,14 @@ export function InventoryPage() {
                 initialScrollAnchor={viewState.scrollAnchor}
                 restoreFocus={restoreGridFocus}
                 focusRequestToken={focusRequestToken}
+                todayResetToken={todayResetToken}
                 onRangeChange={applyRange}
                 onPreviousRange={() => shiftRange(-1)}
                 onNextRange={() => shiftRange(1)}
-                onToday={() => applyRange(roomStatusTimelineRangeFromStart(todayDate))}
+                onToday={() => {
+                  setTodayResetToken((value) => value + 1);
+                  applyRange(roomStatusTimelineRangeFromStart(todayDate));
+                }}
                 onToggleRoom={(roomId) => dispatchView({ type: "TOGGLE_ROOM", roomId })}
                 onFocusedCellChange={(focus) => dispatchView({ type: "SET_FOCUS", focus })}
                 onSelectionPreviewChange={previewSelection}
@@ -4057,8 +4850,10 @@ export function InventoryPage() {
               anchor={quickPopoverTarget.anchor}
               unit={quickPopoverUnit}
               serviceDate={quickPopoverTarget.serviceDate}
+              businessDate={renderedBoard?.businessDate}
               status={quickPopoverStatus}
               actions={quickPopoverActions}
+              {...(actionPresentationBlock ? { writeBlock: actionPresentationBlock } : {})}
               orderOptions={quickPopoverOrders}
               {...(quickPopoverSelection ? { selection: quickPopoverSelection } : {})}
               onClose={(reason) => {
@@ -4070,13 +4865,14 @@ export function InventoryPage() {
                   }
                 }
               }}
-              onCreate={() => {
+              onCreate={(action) => {
                 const selection = quickPopoverSelection
                   ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
                 setSelectedUnitId(quickPopoverUnit.id);
                 setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
                 setSelectedIntervalId(undefined);
                 selectRange(selection);
+                handleAction(action, quickPopoverUnit, selection);
               }}
               onLockMaintenance={(action) => {
                 const selection = quickPopoverSelection
@@ -4110,6 +4906,11 @@ export function InventoryPage() {
                     ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate)
                 });
                 setDesktopContextCollapsed(false);
+              }}
+              onRefresh={() => setRefreshToken((value) => value + 1)}
+              onOpenRecovery={() => {
+                setQuickPopoverTarget(undefined);
+                openRoomStatusRecoveryEntry();
               }}
               onOpenOrder={(option) => selectOrderContextIdentity(option.identity, quickPopoverTarget.serviceDate)}
             />
@@ -4160,6 +4961,7 @@ export function InventoryPage() {
                 selection={viewState.selection}
                 conflicts={contextConflicts}
                 allowedActions={contextActions}
+                {...(actionPresentationBlock ? { writeBlock: actionPresentationBlock } : {})}
                 onSelectedUnitChange={(unit) => {
                   inspectUnit(unit);
                 }}
@@ -4170,6 +4972,8 @@ export function InventoryPage() {
                 onAction={(action) => {
                   if (handleAction(action)) setMobileCreateOpen(false);
                 }}
+                onRefresh={() => setRefreshToken((value) => value + 1)}
+                onOpenRecovery={openRoomStatusRecoveryEntry}
               />
             </Modal>
           ) : null}
@@ -4180,18 +4984,24 @@ export function InventoryPage() {
                 unit={quoteActionUnit}
                 arrivalDate={activeQuoteTarget?.arrivalDate ?? range.arrivalDate}
                 departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
+                businessDate={renderedBoard.businessDate}
                 policies={policies}
                 {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
-                commandsBlocked={commandsBlocked}
+                {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
+                backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
+                commandsBlocked={quoteWorkbenchBlocked}
                 selectionDraftValid={selectionDraftValid}
                 resetToken={quoteResetToken}
+                autoResolvedRecoveryIdentities={autoResolvedQuoteRecoveryIdentities}
                 onClose={closeQuoteWorkbench}
                 onRecoveryOutcome={setQuoteRecoveryOutcome}
                 onRecoveryStateChange={() => {
-                  if (recoveryQuoteTarget) setQuoteTarget(recoveryQuoteTarget);
+                  if (recoveryQuoteTarget) {
+                    setQuoteTarget((current) => roomStatusQuoteTargetsEqual(current, recoveryQuoteTarget) ? current : recoveryQuoteTarget);
+                  }
                   setPageQuoteRecoveryRevision((revision) => revision + 1);
                 }}
-                onCommand={startCommand}
+                onCommand={startQuoteCommand}
               />
             </div>
           ) : null}
@@ -4212,18 +5022,24 @@ export function InventoryPage() {
               unit={undefined}
               arrivalDate={activeQuoteTarget?.arrivalDate ?? range.arrivalDate}
               departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
+              {...(renderedBoard?.businessDate ? { businessDate: renderedBoard.businessDate } : {})}
               policies={policies}
               {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
+              {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
+              backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
               commandsBlocked
               selectionDraftValid={selectionDraftValid}
               resetToken={quoteResetToken}
+              autoResolvedRecoveryIdentities={autoResolvedQuoteRecoveryIdentities}
               onClose={closeQuoteWorkbench}
               onRecoveryOutcome={setQuoteRecoveryOutcome}
               onRecoveryStateChange={() => {
-                if (recoveryQuoteTarget) setQuoteTarget(recoveryQuoteTarget);
+                if (recoveryQuoteTarget) {
+                  setQuoteTarget((current) => roomStatusQuoteTargetsEqual(current, recoveryQuoteTarget) ? current : recoveryQuoteTarget);
+                }
                 setPageQuoteRecoveryRevision((revision) => revision + 1);
               }}
-              onCommand={startCommand}
+              onCommand={startQuoteCommand}
             />
           </div>
         </Modal>

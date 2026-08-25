@@ -49,9 +49,25 @@ function action(
   code: string,
   hasRefundableCollection = false,
   fulfillmentDates?: { businessDate: string; arrivalDate: string; departureDate: string; localTime?: string },
-  hasFutureMove = false
+  hasFutureMove = false,
+  completeStayFacts?: {
+    stayStatus: string;
+    hasCheckIn: boolean;
+    hasCheckOut: boolean;
+    hasCheckInRevocation: boolean;
+  }
 ) {
-  return orderAllowedActions("WRITE", status, hasRefundableCollection, fulfillmentDates, hasFutureMove)
+  return orderAllowedActions(
+    "WRITE",
+    status,
+    hasRefundableCollection,
+    fulfillmentDates,
+    hasFutureMove,
+    null,
+    false,
+    false,
+    completeStayFacts
+  )
     .find((candidate) => candidate.code === code);
 }
 
@@ -123,6 +139,86 @@ describe("orderAllowedActions", () => {
       for (const code of ["CHECK_IN", "CHECK_OUT", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW"]) {
         expect(action(status, code)).toMatchObject({ enabled: false, disabledReason: "ORDER_STATE_NOT_ALLOWED" });
       }
+    }
+  });
+
+  it("allows membership conversion while in-house or checked out, but not before arrival", () => {
+    const conversion = (status: string) => orderAllowedActions(
+      "WRITE", status, false, undefined, false, "WECOM", true
+    ).find((candidate) => candidate.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
+    expect(conversion("CHECKED_IN")).toEqual({
+      code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      enabled: true,
+      disabledReason: null
+    });
+    expect(conversion("CHECKED_OUT")).toEqual({
+      code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      enabled: true,
+      disabledReason: null
+    });
+    expect(conversion("RESERVED")).toMatchObject({
+      enabled: false,
+      disabledReason: "请在入住或退房完成后办理升级会员"
+    });
+    expect(conversion("CANCELLED")).toMatchObject({
+      enabled: false,
+      disabledReason: "请在入住或退房完成后办理升级会员"
+    });
+  });
+
+  it("does not publish the obsolete two-step backfill action", () => {
+    const past = { businessDate: "2026-08-04", arrivalDate: "2026-07-25", departureDate: "2026-08-04" };
+    for (const status of ["RESERVED", "CHECKED_IN", "CHECKED_OUT"]) {
+      expect(orderAllowedActions("WRITE", status, false, past)
+        .some((candidate) => (candidate.code as string) === "BACKFILL_COMPLETED_STAY")).toBe(false);
+    }
+  });
+
+  it("offers COMPLETE_STAY only for overdue reserved orders after the planned departure date", () => {
+    const past = { businessDate: "2026-08-14", arrivalDate: "2026-08-06", departureDate: "2026-08-11" };
+    expect(action("RESERVED", "COMPLETE_STAY", false, past)).toEqual({
+      code: "COMPLETE_STAY",
+      enabled: true,
+      disabledReason: null
+    });
+    // 计划离店当天（businessDate === departureDate）按住宿行业习惯视为住宿已结束，允许完成住宿。
+    expect(action("RESERVED", "COMPLETE_STAY", false, { ...past, businessDate: past.departureDate })).toMatchObject({
+      enabled: true,
+      disabledReason: null
+    });
+    expect(action("RESERVED", "COMPLETE_STAY", false, { ...past, businessDate: "2026-08-10" })).toEqual({
+      code: "COMPLETE_STAY",
+      enabled: false,
+      disabledReason: "未到计划退房日，请使用普通入住流程"
+    });
+    for (const status of ["CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]) {
+      expect(action(status, "COMPLETE_STAY", false, past)).toMatchObject({
+        enabled: false,
+        disabledReason: "ORDER_STATE_NOT_ALLOWED"
+      });
+    }
+  });
+
+  it("keeps COMPLETE_STAY action eligibility aligned with planned Stay and absent fulfillment facts", () => {
+    const past = { businessDate: "2026-08-14", arrivalDate: "2026-08-06", departureDate: "2026-08-11" };
+    const eligibleFacts = {
+      stayStatus: "PLANNED",
+      hasCheckIn: false,
+      hasCheckOut: false,
+      hasCheckInRevocation: false
+    };
+    expect(action("RESERVED", "COMPLETE_STAY", false, past, false, eligibleFacts)?.enabled).toBe(true);
+    for (const facts of [
+      { ...eligibleFacts, stayStatus: "IN_HOUSE" },
+      { ...eligibleFacts, hasCheckIn: true },
+      { ...eligibleFacts, hasCheckOut: true },
+      { ...eligibleFacts, hasCheckInRevocation: true }
+    ]) {
+      expect(action("RESERVED", "COMPLETE_STAY", false, past, false, facts)).toEqual({
+        code: "COMPLETE_STAY",
+        enabled: false,
+        disabledReason: "只有已预订且未办理入住的订单可以完成住宿"
+      });
     }
   });
 

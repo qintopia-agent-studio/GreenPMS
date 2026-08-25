@@ -51,6 +51,13 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function amendmentPayloadForRead(amendmentType: string, payload: unknown): unknown {
+  const value = recordValue(payload);
+  if (amendmentType !== "CREATE_ORDER" || !value || !Object.hasOwn(value, "confirmedEffect")) return payload;
+  const { confirmedEffect: _confirmedEffect, ...publicPayload } = value;
+  return publicPayload;
+}
+
 type HistoricalAmendmentProtocol = HistoricalProtocolVersion;
 const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 
@@ -133,16 +140,25 @@ export async function loadOrderContext(db: DbExecutor, orderId: string): Promise
 
 export async function loadActiveStayTimeline(db: DbExecutor, context: OrderContext): Promise<StayTimelineItem[]> {
   const expectedDates = enumerateServiceDates(context.order.arrival_date, context.order.departure_date);
+  const expectedDateSet = new Set(expectedDates);
   const claims = await db.selectFrom("inventory_claims")
     .select(["service_date", "inventory_unit_id", "id"])
     .where("source_type", "=", "ORDER_SEGMENT")
     .where("source_id", "in", context.segmentIds)
     .where("active", "=", true)
-    .where("service_date", ">=", context.order.arrival_date)
-    .where("service_date", "<", context.order.departure_date)
     .orderBy("service_date")
     .orderBy("id")
     .execute();
+  const outsideInterval = claims.filter((claim) => !expectedDateSet.has(claim.service_date));
+  if (outsideInterval.length > 0) {
+    throw new DomainError("INTERNAL_ERROR", "Stay inventory timeline has active Claims outside the order interval", 500, false, {
+      orderId: context.order.id,
+      arrivalDate: context.order.arrival_date,
+      departureDate: context.order.departure_date,
+      activeClaimIds: outsideInterval.map((claim) => claim.id),
+      serviceDates: outsideInterval.map((claim) => claim.service_date)
+    });
+  }
   const byDate = new Map<string, typeof claims>();
   for (const claim of claims) {
     const existing = byDate.get(claim.service_date) ?? [];
@@ -180,13 +196,20 @@ export function orderAllowedActions(
   hasFutureMove = false,
   bookingChannelCode: string | null = null,
   hasTransferableCollection = false,
-  hasStayMembershipTransfer = false
+  hasStayMembershipTransfer = false,
+  completeStayFacts?: {
+    stayStatus: string;
+    hasCheckIn: boolean;
+    hasCheckOut: boolean;
+    hasCheckInRevocation: boolean;
+  }
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
     CORRECT_ORDER_OCCUPANT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
     CHECK_IN: ["RESERVED"],
     CHECK_OUT: ["CHECKED_IN"],
+    COMPLETE_STAY: ["RESERVED"],
     RESCHEDULE_STAY: ["RESERVED"],
     SHORTEN_STAY: ["CHECKED_IN"],
     EXTEND_STAY: ["CHECKED_IN"],
@@ -197,9 +220,10 @@ export function orderAllowedActions(
     REVOKE_CHECK_IN: ["CHECKED_IN"],
     RECORD_COLLECTION: ["RESERVED", "CHECKED_IN", "CHECKED_OUT"],
     RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
-    CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: ["CHECKED_OUT"]
+    CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: ["CHECKED_IN", "CHECKED_OUT"]
   };
-  return orderActionCodes.map((code) => {
+  return orderActionCodes
+    .map((code) => {
     const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
     let fulfillmentDisabledReason: string | null = null;
     const externalFundsDisabledReason = code === "RECORD_COLLECTION" || code === "RECORD_REFUND"
@@ -222,6 +246,10 @@ export function orderAllowedActions(
       } else if (code === "CHECK_OUT") {
         if (fulfillmentDates.businessDate < fulfillmentDates.departureDate) {
           fulfillmentDisabledReason = "DEPARTURE_DATE_NOT_REACHED";
+        }
+      } else if (code === "COMPLETE_STAY") {
+        if (fulfillmentDates.businessDate < fulfillmentDates.departureDate) {
+          fulfillmentDisabledReason = "未到计划退房日，请使用普通入住流程";
         }
       } else if (code === "SHORTEN_STAY") {
         if (fulfillmentDates.arrivalDate >= fulfillmentDates.businessDate) {
@@ -249,11 +277,19 @@ export function orderAllowedActions(
     }
     const convertedFundsDisabled = hasStayMembershipTransfer
       && (code === "RECORD_COLLECTION" || code === "RECORD_REFUND" || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
+    const completeStayFactsDisabled = code === "COMPLETE_STAY"
+      && statusAllows
+      && completeStayFacts !== undefined
+      && (completeStayFacts.stayStatus !== "PLANNED"
+        || completeStayFacts.hasCheckIn
+        || completeStayFacts.hasCheckOut
+        || completeStayFacts.hasCheckInRevocation);
     const enabled = statusAllows
       && fulfillmentDisabledReason === null
       && externalFundsDisabledReason === null
       && stayConversionChannelDisabledReason === null
       && !convertedFundsDisabled
+      && !completeStayFactsDisabled
       && (code !== "RECORD_REFUND" || hasRefundableCollection)
       && (code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" || hasTransferableCollection);
     return {
@@ -261,15 +297,17 @@ export function orderAllowedActions(
       enabled,
       disabledReason: enabled
         ? null
-        : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? stayConversionChannelDisabledReason ?? (convertedFundsDisabled
+        : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? stayConversionChannelDisabledReason ?? (completeStayFactsDisabled
+          ? "只有已预订且未办理入住的订单可以完成住宿"
+          : convertedFundsDisabled
           ? "已完成升级会员，本订单不再追加住宿收退款；后续会员收款请在会员订单中处理"
           : code === "RECORD_REFUND" && statusAllows
           ? "NO_REFUNDABLE_COLLECTION"
           : code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
-          ? statusAllows ? "NO_TRANSFERABLE_COLLECTION" : "请在退房完成后办理升级会员"
+          ? statusAllows ? "NO_TRANSFERABLE_COLLECTION" : "请在入住或退房完成后办理升级会员"
           : "ORDER_STATE_NOT_ALLOWED")
     };
-  });
+    });
 }
 
 interface FulfillmentAmendmentRow {
@@ -1192,10 +1230,13 @@ function hasTransferableCollection(facts: Array<{
     ? sum + fact.amount_minor
     : sum, 0);
   const netRecordedMinor = facts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
+  // Zero-collection orders (nothing recorded, or everything refunded/reversed)
+  // convert with no transfer rows; the membership fee is collected in full.
+  if (netRecordedMinor === 0) return true;
   return transferableTotalMinor > 0 && transferableTotalMinor === netRecordedMinor;
 }
 
-async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel) {
+export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel = "WRITE") {
   const context = await loadOrderContext(db, orderId);
   const [localClock, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks] = await Promise.all([
     propertyLocalClock(db, context.order.property_id),
@@ -1336,7 +1377,12 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
      arrivalDate: context.order.arrival_date,
      departureDate: context.order.departure_date,
      localTime: localClock.time
-   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code, hasTransferableCollection(facts, transfers), transfers.length > 0),
+   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code, hasTransferableCollection(facts, transfers), transfers.length > 0, {
+     stayStatus: context.stay.status,
+     hasCheckIn: lifecycle.fulfillment.checkIn !== null,
+     hasCheckOut: lifecycle.fulfillment.checkOut !== null,
+     hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
+   }),
     order: {
       ...context.order,
       current_contract_amount_minor: context.revision.currentContractAmountMinor,
@@ -1385,7 +1431,7 @@ async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel
       reason_note: amendment.reason_note,
       prior_version: amendment.prior_version,
       new_version: amendment.new_version,
-      payload: amendment.payload,
+      payload: amendmentPayloadForRead(amendment.amendment_type, amendment.payload),
       ...(amendment.protocolVersion
         ? { protocolVersion: amendment.protocolVersion, recoveryMode: "HISTORICAL_READ_ONLY" as const }
         : {}),

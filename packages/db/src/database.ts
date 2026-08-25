@@ -41,7 +41,13 @@ const currentMigrationNames = [
   "034_stay_conversion_reversal_bridge_guard.sql",
   "035_stage13_conversion_execution_state_guards.sql",
   "036_qintopia_prelaunch_room_catalog_corrections.sql",
-  "037_member_phone_identity_and_nickname.sql"
+  "037_member_phone_identity_and_nickname.sql",
+  "038_backfill_completed_stay_checkout_guard.sql",
+  "039_inhouse_zero_collection_conversion.sql",
+  "040_conversion_order_membership_link.sql",
+  "041_completed_stay_backfill_atomicity.sql",
+  "042_complete_overdue_reserved_stay.sql",
+  "043_complete_stay_guard_hardening.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -593,6 +599,128 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
         )::text AS body_marker_count
       FROM pg_trigger AS trigger
     `.execute(db);
+    const completedStayBackfillObjects = await sql<{
+      cash_column_count: string;
+      cash_constraint_count: string;
+      cash_function_count: string;
+      cash_trigger_count: string;
+      cash_body_marker_count: string;
+      checkout_body_marker_count: string;
+    }>`
+      SELECT
+        (
+          SELECT count(*)::text
+          FROM pg_attribute AS attribute
+          WHERE attribute.attrelid = to_regclass('collection_facts')
+            AND attribute.attname = 'cash_collector'
+            AND attribute.atttypid = 'text'::regtype
+            AND NOT attribute.attnotnull
+            AND NOT attribute.attisdropped
+        ) AS cash_column_count,
+        (
+          SELECT count(*)::text
+          FROM pg_constraint AS constraint_row
+          WHERE constraint_row.conrelid = to_regclass('collection_facts')
+            AND constraint_row.conname = 'collection_facts_cash_collector_nonblank'
+            AND constraint_row.contype = 'c'
+            AND pg_get_constraintdef(constraint_row.oid, false)
+              = 'CHECK (((cash_collector IS NULL) OR (btrim(cash_collector) <> ''''::text)))'
+        ) AS cash_constraint_count,
+        (to_regprocedure('qintopia_validate_backfill_cash_collection()') IS NOT NULL)::integer::text
+          AS cash_function_count,
+        count(*) FILTER (
+          WHERE NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgtype = 7
+            AND trigger.tgrelid = to_regclass('collection_facts')
+            AND trigger.tgname = 'collection_facts_validate_backfill_cash'
+            AND trigger.tgfoid = to_regprocedure('qintopia_validate_backfill_cash_collection()')
+        )::text AS cash_trigger_count,
+        (
+          COALESCE(position('collection_facts_backfill_cash_collector_required'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_backfill_cash_collection()'))) > 0, false)::integer
+          + COALESCE(position('collection_facts_backfill_cash_note_required'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_backfill_cash_collection()'))) > 0, false)::integer
+        )::text AS cash_body_marker_count,
+        (
+          COALESCE(position('amendments_backfill_create_order_checkout_chain'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_stage10_checkout_bypass()'))) > 0, false)::integer
+          + COALESCE(position('execution_type = ''CREATE_ORDER'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_stage10_checkout_bypass()'))) > 0, false)::integer
+          + COALESCE(position('created.reason_code = ''BACKFILL_STAY'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_stage10_checkout_bypass()'))) > 0, false)::integer
+          + COALESCE(position('checked_in.amendment_type = ''CHECK_IN'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_stage10_checkout_bypass()'))) > 0, false)::integer
+        )::text AS checkout_body_marker_count
+      FROM pg_trigger AS trigger
+    `.execute(db);
+    const completeStayGuardObjects = await sql<{
+      function_bodies_ready: boolean;
+      fulfillment_index_ready: boolean;
+      trigger_bindings_ready: boolean;
+    }>`
+      SELECT
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('qintopia_reject_stage10_checkout_bypass()', '620a6560ed68e60617bd70e1a8581c65c94ce2ce098397f9af0110cecd086b33'),
+                ('qintopia_validate_complete_stay_execution_chain()', '6e56cb43654dada83fa420d23370558fd22e877b868178d227630bd36640b639'),
+                ('qintopia_validate_backfill_cash_collection()', '1c3ccea500c20ba6837d7222a7558a1d83fb65a85f56fcaa17a38e0c48e8dd5f')
+            ) AS expected(signature, body_hash)
+            WHERE NOT COALESCE((
+              SELECT encode(
+                  sha256(convert_to(procedure_row.prosrc, 'UTF8')),
+                  'hex'
+                ) = expected.body_hash
+                AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+                AND NOT procedure_row.prosecdef
+                AND procedure_row.provolatile = 'v'
+                AND procedure_row.proconfig IS NULL
+                AND procedure_row.prokind = 'f'
+              FROM pg_proc AS procedure_row
+              WHERE procedure_row.oid = to_regprocedure(expected.signature)
+            ), false)
+          )
+        ) AS function_bodies_ready,
+        EXISTS (
+          SELECT 1
+          FROM pg_index AS index_row
+          WHERE index_row.indexrelid = to_regclass('amendments_one_fulfillment_type_per_command')
+            AND index_row.indrelid = to_regclass('amendments')
+            AND index_row.indisunique
+            AND index_row.indimmediate
+            AND index_row.indisvalid
+            AND index_row.indisready
+            AND pg_get_indexdef(index_row.indexrelid, 0, false)
+              = 'CREATE UNIQUE INDEX amendments_one_fulfillment_type_per_command ON public.amendments USING btree (command_id, amendment_type) WHERE ((command_id IS NOT NULL) AND (amendment_type = ANY (ARRAY[''CHECK_IN''::text, ''CHECK_OUT''::text])))'
+        ) AS fulfillment_index_ready,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('amendments', 'amendments_complete_stay_exact_pair',
+                  'CREATE CONSTRAINT TRIGGER amendments_complete_stay_exact_pair AFTER INSERT ON public.amendments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_complete_stay_execution_chain()'),
+                ('command_executions', 'command_executions_complete_stay_exact_pair',
+                  'CREATE CONSTRAINT TRIGGER command_executions_complete_stay_exact_pair AFTER INSERT OR UPDATE ON public.command_executions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_complete_stay_execution_chain()')
+            ) AS expected(table_name, trigger_name, definition)
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM pg_trigger AS exact_trigger
+              WHERE exact_trigger.tgrelid = to_regclass(expected.table_name)
+                AND exact_trigger.tgname = expected.trigger_name
+                AND NOT exact_trigger.tgisinternal
+                AND exact_trigger.tgenabled IN ('O','A')
+                AND exact_trigger.tgnargs = 0
+                AND pg_get_triggerdef(exact_trigger.oid, false) = expected.definition
+            )
+          )
+        ) AS trigger_bindings_ready
+    `.execute(db);
     const stage12Objects = await sql<{
       function_count: string;
       deferred_trigger_count: string;
@@ -1044,7 +1172,7 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
             FROM (
               VALUES
                 ('qintopia_assert_stage13_stay_conversion_command(text)', '9f9d7311054a9c99b68999dcd799cd662996d0496573cdd783fc747ca1466459'),
-                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '534138437609d79583bcd6208c27a7e1cf0230a5afa62900d29438427ca53ef7'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '44f681ba503876fc393449cd7cea191887528be00b1e3171aa4764f6f6419542'),
                 ('qintopia_reject_lodging_funds_after_membership_transfer()', 'b05cc0f8a8d15980d17a6188079afcd1dff96d4f14df7e7957c4a6c2f36005a6'),
                 ('qintopia_reject_membership_funds_after_stay_transfer()', '4660b0b24df455e1ce047f8eeca3070216ca85ecf711df6bbcb98e9b2fbcd73d'),
                 ('qintopia_require_stage13_conversion_reversal_bridge()', '5f73c20a3019cdc3810ae4484eec1a898e700e954c20d6c6a65fe8493b8f5c2e'),
@@ -1096,6 +1224,15 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       && collectionFactObjects.rows[0]?.trigger_count === "1"
       && collectionFactObjects.rows[0]?.historical_column_count === "1"
       && collectionFactObjects.rows[0]?.body_marker_count === "6"
+      && completedStayBackfillObjects.rows[0]?.cash_column_count === "1"
+      && completedStayBackfillObjects.rows[0]?.cash_constraint_count === "1"
+      && completedStayBackfillObjects.rows[0]?.cash_function_count === "1"
+      && completedStayBackfillObjects.rows[0]?.cash_trigger_count === "1"
+      && completedStayBackfillObjects.rows[0]?.cash_body_marker_count === "2"
+      && completedStayBackfillObjects.rows[0]?.checkout_body_marker_count === "4"
+      && completeStayGuardObjects.rows[0]?.function_bodies_ready === true
+      && completeStayGuardObjects.rows[0]?.fulfillment_index_ready === true
+      && completeStayGuardObjects.rows[0]?.trigger_bindings_ready === true
       && stage12Objects.rows[0]?.function_count === "9"
       && stage12Objects.rows[0]?.deferred_trigger_count === "4"
       && stage12Objects.rows[0]?.immediate_trigger_count === "5"

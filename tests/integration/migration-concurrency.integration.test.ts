@@ -100,7 +100,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(37);
+      expect(expectedMigrations).toHaveLength(43);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -122,6 +122,7 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("029_stage12_terminal_order_guards.sql");
       expect(expectedMigrations).toContain("030_collection_fact_historical_pricing_revision.sql");
       expect(expectedMigrations).toContain("032_wecom_refund_original_route.sql");
+      expect(expectedMigrations).toContain("043_complete_stay_guard_hardening.sql");
 
       const readyDatabase = createDatabase(databaseUrl.toString());
       try {
@@ -136,6 +137,267 @@ describe("database migration concurrency", () => {
       }
     } finally {
       await client.end();
+    }
+  });
+
+  it("hardens databases that recorded the older 042 without the COMPLETE_STAY guards", async () => {
+    await recreateDatabase();
+    const migrationNames = (await readdir("packages/db/src/migrations"))
+      .filter((name) => /^\d+.*\.sql$/.test(name))
+      .sort();
+    const legacy042Index = migrationNames.indexOf("042_complete_overdue_reserved_stay.sql");
+    expect(legacy042Index).toBeGreaterThan(0);
+    expect(migrationNames[legacy042Index + 1]).toBe("043_complete_stay_guard_hardening.sql");
+    const client = new pg.Client({ connectionString: databaseUrl.toString() });
+    await client.connect();
+    try {
+      for (const migrationName of migrationNames.slice(0, legacy042Index)) {
+        await client.query(await readFile(`packages/db/src/migrations/${migrationName}`, "utf8"));
+        await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [migrationName]);
+      }
+      await client.query("INSERT INTO schema_migrations(name) VALUES ('042_complete_overdue_reserved_stay.sql')");
+      await client.query(
+        "UPDATE schema_migrations SET applied_at = '2026-01-01T00:00:00Z'::timestamptz"
+      );
+
+      const legacyObjects = await client.query<{
+        execution_function: string | null;
+        fulfillment_index: string | null;
+        exact_pair_trigger_count: number;
+        checkout_guard_hardened: boolean;
+        cash_guard_hardened: boolean;
+      }>(`
+        SELECT
+          to_regprocedure('qintopia_validate_complete_stay_execution_chain()')::text AS execution_function,
+          to_regclass('amendments_one_fulfillment_type_per_command')::text AS fulfillment_index,
+          (
+            SELECT count(*)::int
+            FROM pg_trigger
+            WHERE NOT tgisinternal
+              AND tgname IN (
+                'command_executions_complete_stay_exact_pair',
+                'amendments_complete_stay_exact_pair'
+              )
+          ) AS exact_pair_trigger_count,
+          position(
+            'amendments_complete_stay_typed_pair'
+            IN pg_get_functiondef('qintopia_reject_stage10_checkout_bypass()'::regprocedure)
+          ) > 0 AS checkout_guard_hardened,
+          position(
+            'collection_facts_complete_stay_cash_collector_required'
+            IN pg_get_functiondef('qintopia_validate_backfill_cash_collection()'::regprocedure)
+          ) > 0 AS cash_guard_hardened
+      `);
+      expect(legacyObjects.rows[0]).toEqual({
+        execution_function: null,
+        fulfillment_index: null,
+        exact_pair_trigger_count: 0,
+        checkout_guard_hardened: false,
+        cash_guard_hardened: false
+      });
+    } finally {
+      await client.end();
+    }
+
+    const outcome = await runMigration();
+    expect(outcome.stderr).toBe("");
+
+    const upgraded = new pg.Client({ connectionString: databaseUrl.toString() });
+    await upgraded.connect();
+    try {
+      const history = await upgraded.query<{ name: string }>(
+        "SELECT name FROM schema_migrations ORDER BY applied_at, name"
+      );
+      expect(history.rows.map((row) => row.name)).toEqual(migrationNames);
+
+      const functions = await upgraded.query<{
+        execution_definition: string;
+        checkout_definition: string;
+        cash_definition: string;
+      }>(`
+        SELECT
+          pg_get_functiondef('qintopia_validate_complete_stay_execution_chain()'::regprocedure)
+            AS execution_definition,
+          pg_get_functiondef('qintopia_reject_stage10_checkout_bypass()'::regprocedure)
+            AS checkout_definition,
+          pg_get_functiondef('qintopia_validate_backfill_cash_collection()'::regprocedure)
+            AS cash_definition
+      `);
+      expect(functions.rows[0]?.execution_definition).toContain(
+        "WHEN TG_TABLE_NAME = 'command_executions' THEN to_jsonb(NEW) ->> 'id'"
+      );
+      expect(functions.rows[0]?.execution_definition).toContain(
+        "command_executions_complete_stay_exact_pair"
+      );
+      expect(functions.rows[0]?.checkout_definition).toContain(
+        "amendments_complete_stay_typed_pair"
+      );
+      expect(functions.rows[0]?.cash_definition).toContain(
+        "collection_facts_complete_stay_cash_collector_required"
+      );
+
+      const index = await upgraded.query<{ definition: string }>(`
+        SELECT pg_get_indexdef(to_regclass('amendments_one_fulfillment_type_per_command')) AS definition
+      `);
+      expect(index.rows[0]?.definition).toContain("CREATE UNIQUE INDEX");
+      expect(index.rows[0]?.definition).toContain("(command_id, amendment_type)");
+
+      const triggers = await upgraded.query<{
+        name: string;
+        relation: string;
+        deferrable: boolean;
+        initially_deferred: boolean;
+        function_name: string;
+      }>(`
+        SELECT
+          tgname AS name,
+          tgrelid::regclass::text AS relation,
+          tgdeferrable AS deferrable,
+          tginitdeferred AS initially_deferred,
+          tgfoid::regprocedure::text AS function_name
+        FROM pg_trigger
+        WHERE NOT tgisinternal
+          AND tgname IN (
+            'command_executions_complete_stay_exact_pair',
+            'amendments_complete_stay_exact_pair'
+          )
+        ORDER BY tgname
+      `);
+      expect(triggers.rows).toEqual([
+        {
+          name: "amendments_complete_stay_exact_pair",
+          relation: "amendments",
+          deferrable: true,
+          initially_deferred: true,
+          function_name: "qintopia_validate_complete_stay_execution_chain()"
+        },
+        {
+          name: "command_executions_complete_stay_exact_pair",
+          relation: "command_executions",
+          deferrable: true,
+          initially_deferred: true,
+          function_name: "qintopia_validate_complete_stay_execution_chain()"
+        }
+      ]);
+    } finally {
+      await upgraded.end();
+    }
+
+    const readyDatabase = createDatabase(databaseUrl.toString());
+    try {
+      expect(await databaseReady(readyDatabase)).toBe(true);
+    } finally {
+      await readyDatabase.destroy();
+    }
+  });
+
+  it("refuses to harden an older 042 database with an incomplete applied COMPLETE_STAY chain", async () => {
+    await recreateDatabase();
+    const migrationNames = (await readdir("packages/db/src/migrations"))
+      .filter((name) => /^\d+.*\.sql$/.test(name))
+      .sort();
+    const legacy042Index = migrationNames.indexOf("042_complete_overdue_reserved_stay.sql");
+    expect(legacy042Index).toBeGreaterThan(0);
+    expect(migrationNames[legacy042Index + 1]).toBe("043_complete_stay_guard_hardening.sql");
+    const client = new pg.Client({ connectionString: databaseUrl.toString() });
+    await client.connect();
+    try {
+      for (const migrationName of migrationNames.slice(0, legacy042Index)) {
+        await client.query(await readFile(`packages/db/src/migrations/${migrationName}`, "utf8"));
+        await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [migrationName]);
+      }
+      await client.query("INSERT INTO schema_migrations(name) VALUES ('042_complete_overdue_reserved_stay.sql')");
+      await client.query(
+        "UPDATE schema_migrations SET applied_at = '2026-01-01T00:00:00Z'::timestamptz"
+      );
+    } finally {
+      await client.end();
+    }
+
+    const seeded = createDatabase(databaseUrl.toString());
+    try {
+      await seedDemo(seeded);
+    } finally {
+      await seeded.destroy();
+    }
+
+    const legacy = new pg.Client({ connectionString: databaseUrl.toString() });
+    await legacy.connect();
+    try {
+      await legacy.query(`
+        INSERT INTO orders(
+          id, property_id, status, stay_type, arrival_date, departure_date,
+          primary_guest_snapshot, pricing_policy_version_id, member_id, member_contract_id,
+          current_revision_id, version, booking_channel_code, channel_order_reference,
+          free_stay_reason, free_stay_category_code
+        ) VALUES (
+          'order_incomplete_complete_stay', '${demo.propertyId}', 'RESERVED', 'FREE',
+          '2030-01-01', '2030-01-02',
+          '{"fullName":"Migration preflight fixture","nickname":"Preflight"}'::jsonb,
+          '${demo.freePolicyId}', NULL, NULL, NULL, 1, NULL, NULL,
+          'Migration preflight fixture', 'VOLUNTEER'
+        );
+        INSERT INTO command_executions(
+          id, subject_id, credential_id, property_id, command_type,
+          idempotency_key, request_hash, correlation_id, state, completed_at
+        ) VALUES (
+          'command_incomplete_complete_stay', '${demo.agentSubjectId}', 'token_demo_write',
+          '${demo.propertyId}', 'COMPLETE_STAY', 'incomplete-complete-stay', repeat('a', 64),
+          'incomplete-complete-stay', 'APPLIED', now()
+        );
+        INSERT INTO order_occupants(
+          id, order_id, ordinal, role, full_name, nickname,
+          phone, document_number, created_by_command_id
+        ) VALUES (
+          'occupant_incomplete_complete_stay', 'order_incomplete_complete_stay', 1, 'PRIMARY',
+          'Migration preflight fixture', 'Preflight', NULL, NULL,
+          'command_incomplete_complete_stay'
+        );
+        INSERT INTO stays(id, order_id, status)
+        VALUES ('stay_incomplete_complete_stay', 'order_incomplete_complete_stay', 'PLANNED');
+        INSERT INTO amendments(
+          id, order_id, sequence, amendment_type, reason_code, reason_note,
+          prior_version, new_version, payload, command_id
+        ) VALUES (
+          'amend_incomplete_complete_stay_check_in', 'order_incomplete_complete_stay', 1,
+          'CHECK_IN', 'COMPLETE_STAY', 'Only one side of the fulfillment pair exists',
+          1, 2,
+          '{"orderId":"order_incomplete_complete_stay","fromStatus":"RESERVED","toStatus":"CHECKED_IN"}'::jsonb,
+          'command_incomplete_complete_stay'
+        );
+        INSERT INTO stay_segments(
+          id, stay_id, sequence, inventory_unit_id, arrival_date, departure_date,
+          segment_type, supersedes_segment_id, amendment_id
+        ) VALUES (
+          'segment_incomplete_complete_stay', 'stay_incomplete_complete_stay', 1,
+          '${demo.roomId}', '2030-01-01', '2030-01-02', 'ORIGINAL', NULL,
+          'amend_incomplete_complete_stay_check_in'
+        )
+      `);
+    } finally {
+      await legacy.end();
+    }
+
+    await expect(runMigration()).rejects.toMatchObject({
+      stderr: expect.stringContaining(
+        "existing COMPLETE_STAY executions violate the hardened fulfillment-pair invariant"
+      )
+    });
+
+    const rejected = new pg.Client({ connectionString: databaseUrl.toString() });
+    await rejected.connect();
+    try {
+      expect((await rejected.query(
+        "SELECT name FROM schema_migrations WHERE name = '043_complete_stay_guard_hardening.sql'"
+      )).rows).toHaveLength(0);
+      expect((await rejected.query(
+        "SELECT to_regprocedure('qintopia_validate_complete_stay_execution_chain()') AS function_name"
+      )).rows[0]?.function_name).toBeNull();
+      expect((await rejected.query(
+        "SELECT id FROM amendments WHERE command_id = 'command_incomplete_complete_stay'"
+      )).rows).toEqual([{ id: "amend_incomplete_complete_stay_check_in" }]);
+    } finally {
+      await rejected.end();
     }
   });
 

@@ -20,6 +20,8 @@ const statusLabels = {
   CLEANING: "待清洁",
   MAINTENANCE: "维修 / 锁房",
   UNAVAILABLE: "不可售",
+  SETTLED: "已结单",
+  ARREARS: "欠款",
   STALE: "数据陈旧",
   UNKNOWN: "状态未知"
 } as const;

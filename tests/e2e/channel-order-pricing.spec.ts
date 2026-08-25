@@ -120,7 +120,7 @@ async function openPaidOrderDraft(page: Page, options: {
     await expect(cell).toBeVisible();
     await clickRoomStatusCell(page, cell, unitId);
     const popover = page.getByTestId("room-status-quick-popover");
-    await popover.getByRole("button", { name: "创建住宿", exact: true }).click();
+    await popover.getByRole("button", { name: "创建订单", exact: true }).click();
 
     const writeDrawer = page.locator("dialog.room-status-write-drawer");
     await expect(writeDrawer).toBeVisible();

@@ -8,8 +8,12 @@ import {
   SelectedMemberViewRequestGuard,
   GUEST_FULL_NAME_MAX_LENGTH,
   applyMemberSelectionToGuestForms,
+  backfillCollectionCommandInput,
+  backfillReviewDetailsComplete,
   bookingChannelRequiredForStay,
   canAddGuest,
+  completedStayBackfillCommandRequest,
+  completedStayBackfillSubmissionError,
   clearCorruptQuoteCommandRecovery,
   createOrderGuestInputs,
   createOrderPricingDraft,
@@ -21,28 +25,49 @@ import {
   formatMinorForYuanInput,
   inventoryRecoveryIsBusinessFacing,
   membershipCoverageSummary,
+  parseBackfillCollectionYuanToMinor,
   parseYuanAmountToMinor,
   quotePricingSummary,
   QuoteRecoveryPageEntry,
   staffQuoteError,
   readQuoteCommandRecovery,
+  recoveredQuoteWaitsForCurrentTarget,
   roomStatusCommandWriteGate,
   roomStatusFiltersRevealingTarget,
   roomStatusAnchorMatches,
   roomStatusQuickTargetMatches,
   roomStatusGridSelectedStayId,
+  roomStatusQuickPopoverPreviewStayId,
+  roomStatusActionsForPresentation,
+  roomStatusActionPresentationBlock,
+  roomStatusAuthorizedQuoteAction,
+  roomStatusHistoricalSelectionNeedsRefresh,
+  roomStatusOrderContextVisible,
   roomStatusOrderContextMode,
   roomStatusDesktopContextKind,
+  roomStatusOwnQuoteRecoveryMatchesTarget,
+  roomStatusOwnQuoteRecoveryVisible,
   quoteRecoveryContextIdentity,
   shouldAutoOpenQuoteRecoveryContext,
+  shouldAutoResolveOwnSendingQuoteRecovery,
+  shouldOfferManualOwnSendingQuoteRecovery,
   shouldRenderDetachedQuoteRecoveryWorkbench,
   roomStatusOrderCommandScope,
   roomStatusProjectionRefreshAllowed,
+  roomStatusProjectionWritable,
+  roomStatusQuoteActionCodeForUnit,
+  roomStatusQuoteCommandMatchesTarget,
+  roomStatusQuoteRequiresBackfill,
+  roomStatusQuoteTargetFromAction,
+  roomStatusQuoteTargetForBusinessDate,
   roomStatusTimelineRangeFromStart,
+  updateRoomStatusQuoteTargetSelection,
   selectedOrderCommandScopeIsCurrent,
   selectedOrderMemberLookup,
   selectedStayDateRequestIsCompatible,
   roomStatusBlockDraftWithinSelection,
+  selectionActions,
+  dayActions,
   browserQuoteRecoveryOwnerId,
   saveQuoteCommandRecovery
 } from "./InventoryPage";
@@ -122,13 +147,33 @@ describe("room-status complete Stay selection", () => {
     });
   });
 
-  it("keeps an exact cell Stay stable across quick-popover and context visibility changes", () => {
+  it("keeps order selection explicit and avoids carrying stale order highlights into plain quick-popovers", () => {
     expect(roomStatusGridSelectedStayId(false, null, { stayId: "stay_cross_room" })).toBe("stay_cross_room");
     expect(roomStatusGridSelectedStayId(true, "stay_quick", { stayId: "stay_previous" })).toBe("stay_quick");
     expect(roomStatusGridSelectedStayId(true, null, { stayId: "stay_previous" })).toBeNull();
-    expect(roomStatusGridSelectedStayId(true, null, undefined, "stay_from_interval")).toBe("stay_from_interval");
+    expect(roomStatusGridSelectedStayId(true, null, undefined, "stay_from_interval")).toBeNull();
     expect(roomStatusGridSelectedStayId(false, null, undefined, "stay_from_interval")).toBe("stay_from_interval");
     expect(roomStatusGridSelectedStayId(false, null)).toBeNull();
+  });
+
+  it("does not promote a split-bed parent summary to its only child order", () => {
+    const parent = { kind: "ROOM", salesMode: "BED_SPLIT" } as const;
+    expect(roomStatusQuickPopoverPreviewStayId(parent, null, "stay_child")).toBeNull();
+    expect(roomStatusQuickPopoverPreviewStayId(parent, "stay_whole_room", "stay_child"))
+      .toBe("stay_whole_room");
+  });
+
+  it("keeps the unique-order fallback for concrete bed and whole-room rows", () => {
+    expect(roomStatusQuickPopoverPreviewStayId(
+      { kind: "BED", salesMode: "BED_SPLIT" },
+      null,
+      "stay_inherited_whole_room"
+    )).toBe("stay_inherited_whole_room");
+    expect(roomStatusQuickPopoverPreviewStayId(
+      { kind: "ROOM", salesMode: "WHOLE_ROOM" },
+      null,
+      "stay_whole_room"
+    )).toBe("stay_whole_room");
   });
 
   it("rebinds a quick action only to the same room-status unit and date", () => {
@@ -380,6 +425,112 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(formatMinorForYuanInput(85_000)).toBe("850");
   });
 
+  it("parses backfill collections to fen, including zero and two decimal places", () => {
+    expect(parseBackfillCollectionYuanToMinor("0")).toBe(0);
+    expect(parseBackfillCollectionYuanToMinor("84.5")).toBe(8_450);
+    expect(parseBackfillCollectionYuanToMinor("84.50")).toBe(8_450);
+    expect(parseBackfillCollectionYuanToMinor("0.01")).toBe(1);
+    expect(parseBackfillCollectionYuanToMinor("84.501")).toBeUndefined();
+    expect(parseBackfillCollectionYuanToMinor("-1")).toBeUndefined();
+  });
+
+  it("opens backfill review only after the matching free, channel, or collection evidence is complete", () => {
+    const paid = {
+      stayType: "TRANSIENT" as const,
+      backfillReason: "前台漏录",
+      freeStayCategoryCode: "" as const,
+      freeStayReason: "",
+      bookingChannelCode: "WECOM" as const,
+      paidPricingComplete: true,
+      contractAmountMinor: 10_000,
+      collectionAmountMinor: 0,
+      collectionMethod: "WECOM",
+      transactionReference: "",
+      cashCollector: "",
+      cashNote: ""
+    };
+    expect(backfillReviewDetailsComplete(paid)).toBe(true);
+    expect(backfillReviewDetailsComplete({ ...paid, backfillReason: " " })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: undefined })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 10_001, transactionReference: "WX-OVER" })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450 })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450, transactionReference: "WX-8450" })).toBe(true);
+    expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450, collectionMethod: "BANK_TRANSFER", transactionReference: "BANK-8450" })).toBe(true);
+    expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450, collectionMethod: "CASH", cashCollector: "前台甲", cashNote: "现金已核对" })).toBe(true);
+    expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450, collectionMethod: "CASH", cashCollector: "前台甲", cashNote: "" })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...paid, bookingChannelCode: "CTRIP", collectionAmountMinor: undefined })).toBe(true);
+    expect(backfillReviewDetailsComplete({ ...paid, bookingChannelCode: "CTRIP", paidPricingComplete: false })).toBe(false);
+
+    const free = {
+      ...paid,
+      stayType: "FREE" as const,
+      bookingChannelCode: "" as const,
+      paidPricingComplete: false,
+      collectionAmountMinor: undefined,
+      freeStayCategoryCode: "VOLUNTEER" as const,
+      freeStayReason: "义工住宿"
+    };
+    expect(backfillReviewDetailsComplete(free)).toBe(true);
+    expect(backfillReviewDetailsComplete({ ...free, freeStayCategoryCode: "" })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...free, freeStayReason: " " })).toBe(false);
+  });
+
+  it("opens only completed historical backfills in 8.3 and leaves cross-today stays closed for 8.4", () => {
+    expect(completedStayBackfillSubmissionError("2026-08-06", "2026-08-11", "2026-08-14")).toBeUndefined();
+    expect(completedStayBackfillSubmissionError("2026-08-06", "2026-08-14", "2026-08-14")).toBeUndefined();
+    expect(completedStayBackfillSubmissionError("2026-08-13", "2026-08-15", "2026-08-14"))
+      .toContain("8.4");
+    expect(completedStayBackfillSubmissionError("2026-08-14", "2026-08-15", "2026-08-14"))
+      .toContain("创建订单");
+  });
+
+  it("builds one server Preview request with truthful zero, transfer, and cash collection evidence", () => {
+    expect(backfillCollectionCommandInput({
+      amountMinor: 0,
+      method: "WECOM",
+      transactionReference: "",
+      cashCollector: "",
+      cashNote: ""
+    })).toEqual({ amountMinor: 0, method: "WECOM" });
+    expect(backfillCollectionCommandInput({
+      amountMinor: 8_450,
+      method: "BANK_TRANSFER",
+      transactionReference: "BANK-8450",
+      cashCollector: "",
+      cashNote: ""
+    })).toEqual({ amountMinor: 8_450, method: "BANK_TRANSFER", transactionReference: "BANK-8450" });
+    expect(backfillCollectionCommandInput({
+      amountMinor: 8_450,
+      method: "CASH",
+      transactionReference: "",
+      cashCollector: "前台甲",
+      cashNote: "现金已核对"
+    })).toEqual({ amountMinor: 8_450, method: "CASH", cashCollector: "前台甲", note: "现金已核对" });
+
+    expect(completedStayBackfillCommandRequest({
+      propertyId: "property_green",
+      quoteId: "quote_backfill",
+      primaryGuest: { fullName: "测试住客", nickname: "测试" },
+      additionalGuests: [],
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: 10_000,
+      backfillCollection: { amountMinor: 8_450, method: "WECOM", transactionReference: "WX-8450" }
+    }, " 前台漏录 ")).toMatchObject({
+      commandType: "CREATE_ORDER",
+      title: "补录住宿",
+      presentation: "BACKFILL_STAY",
+      initialReason: { code: "BACKFILL_STAY", note: "前台漏录" },
+      input: {
+        propertyId: "property_green",
+        quoteId: "quote_backfill",
+        backfill: true,
+        backfillReason: "前台漏录",
+        backfillCollection: { amountMinor: 8_450, method: "WECOM", transactionReference: "WX-8450" }
+      }
+    });
+  });
+
   it("requires explicit external channel amount and only asks for a reason above 15 percent", () => {
     const base = {
       bookingChannelCode: "CTRIP" as const,
@@ -389,6 +540,7 @@ describe("CREATE_QUOTE request lifecycle", () => {
       manualPriceAdjustmentReason: ""
     };
     expect(createOrderPricingDraft({ ...base, targetAmountYuan: "" })).toMatchObject({ complete: false });
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "0" })).toMatchObject({ complete: false });
     expect(createOrderPricingDraft({ ...base, targetAmountYuan: "850.00" })).toMatchObject({
       targetCurrentContractAmountMinor: 85_000,
       differenceFromPolicyMinor: -15_000,
@@ -541,6 +693,19 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(remountedGuard.isActive(remountedGuard.begin(scope))).toBe(true);
   });
 
+  it("persists an explicit room-status action intent and rejects unknown recovery intents", () => {
+    const storage = new MemoryStorage();
+    const backfillPending = { ...pending, actionCode: "BACKFILL_ORDER" as const };
+    expect(saveQuoteCommandRecovery(storage, backfillPending)).toBe(true);
+    expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toEqual({
+      kind: "VALID",
+      pending: backfillPending
+    });
+
+    storage.setItem(scope, JSON.stringify({ ...pending, actionCode: "LOCK_MAINTENANCE" }));
+    expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toMatchObject({ kind: "CORRUPT" });
+  });
+
   it("keeps the quote recovery owner stable across same-document remounts", () => {
     const firstMountOwner = browserQuoteRecoveryOwnerId();
     const remountedOwner = browserQuoteRecoveryOwnerId();
@@ -652,6 +817,7 @@ describe("Room-status order context layout", () => {
     expect(shouldAutoOpenQuoteRecoveryContext({
       recoveryIdentity: identity,
       dismissedIdentity: undefined,
+      autoOpenedIdentity: undefined,
       recoveryOwnerId: pending.ownerTabId,
       currentOwnerId: "another-tab",
       isMobile: false,
@@ -660,6 +826,7 @@ describe("Room-status order context layout", () => {
     expect(shouldAutoOpenQuoteRecoveryContext({
       recoveryIdentity: identity,
       dismissedIdentity: identity,
+      autoOpenedIdentity: undefined,
       recoveryOwnerId: pending.ownerTabId,
       currentOwnerId: "another-tab",
       isMobile: false,
@@ -668,6 +835,7 @@ describe("Room-status order context layout", () => {
     expect(shouldAutoOpenQuoteRecoveryContext({
       recoveryIdentity: identity,
       dismissedIdentity: undefined,
+      autoOpenedIdentity: undefined,
       recoveryOwnerId: pending.ownerTabId,
       currentOwnerId: "another-tab",
       isMobile: true,
@@ -676,11 +844,156 @@ describe("Room-status order context layout", () => {
     expect(shouldAutoOpenQuoteRecoveryContext({
       recoveryIdentity: identity,
       dismissedIdentity: undefined,
+      autoOpenedIdentity: undefined,
       recoveryOwnerId: pending.ownerTabId,
       currentOwnerId: pending.ownerTabId,
       isMobile: false,
       hasSelectedOrder: false
     })).toBe(false);
+
+    expect(shouldAutoOpenQuoteRecoveryContext({
+      recoveryIdentity: identity,
+      dismissedIdentity: undefined,
+      autoOpenedIdentity: identity,
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: "another-tab",
+      isMobile: false,
+      hasSelectedOrder: false
+    })).toBe(false);
+    expect(shouldAutoOpenQuoteRecoveryContext({
+      recoveryIdentity: `${identity}-new`,
+      dismissedIdentity: identity,
+      autoOpenedIdentity: identity,
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: "another-tab",
+      isMobile: false,
+      hasSelectedOrder: false
+    })).toBe(true);
+  });
+
+  it("automatically checks an own SENDING Quote identity only once", () => {
+    const identity = quoteRecoveryContextIdentity(scope, { kind: "VALID", pending });
+    expect(shouldAutoResolveOwnSendingQuoteRecovery({
+      recoveryIdentity: identity,
+      attemptedIdentity: undefined,
+      recoveryState: "SENDING",
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: pending.ownerTabId,
+      busy: false
+    })).toBe(true);
+    expect(shouldAutoResolveOwnSendingQuoteRecovery({
+      recoveryIdentity: identity,
+      attemptedIdentity: identity,
+      recoveryState: "SENDING",
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: pending.ownerTabId,
+      busy: false
+    })).toBe(false);
+    expect(shouldAutoResolveOwnSendingQuoteRecovery({
+      recoveryIdentity: identity,
+      attemptedIdentity: undefined,
+      recoveryState: "UNKNOWN",
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: pending.ownerTabId,
+      busy: false
+    })).toBe(false);
+  });
+
+  it("keeps an own recovery in the current workbench only for the exact quote target", () => {
+    const currentTarget = {
+      unitId: "unit_room_101",
+      arrivalDate: "2026-10-10",
+      departureDate: "2026-10-12",
+      initialStayType: "TRANSIENT" as const,
+      actionCode: "CREATE_ORDER" as const
+    };
+    expect(roomStatusOwnQuoteRecoveryMatchesTarget({
+      recoveryState: "SENDING",
+      recoveryOwnerId: "tab_current",
+      currentOwnerId: "tab_current",
+      recoveryTarget: currentTarget,
+      currentTarget
+    })).toBe(true);
+    expect(roomStatusOwnQuoteRecoveryMatchesTarget({
+      recoveryState: "UNKNOWN",
+      recoveryOwnerId: "tab_current",
+      currentOwnerId: "tab_current",
+      recoveryTarget: currentTarget,
+      currentTarget
+    })).toBe(true);
+    expect(roomStatusOwnQuoteRecoveryMatchesTarget({
+      recoveryState: "SENDING",
+      recoveryOwnerId: "tab_other",
+      currentOwnerId: "tab_current",
+      recoveryTarget: currentTarget,
+      currentTarget
+    })).toBe(false);
+    expect(roomStatusOwnQuoteRecoveryMatchesTarget({
+      recoveryState: "SENDING",
+      recoveryOwnerId: "tab_current",
+      currentOwnerId: "tab_current",
+      recoveryTarget: { ...currentTarget, departureDate: "2026-10-13" },
+      currentTarget
+    })).toBe(false);
+    expect(roomStatusOwnQuoteRecoveryMatchesTarget({
+      recoveryState: "SENDING",
+      recoveryOwnerId: "tab_current",
+      currentOwnerId: "tab_current",
+      recoveryTarget: { ...currentTarget, initialStayType: "CUSTOM" },
+      currentTarget
+    })).toBe(true);
+    expect(roomStatusOwnQuoteRecoveryMatchesTarget({
+      recoveryState: "SENDING",
+      recoveryOwnerId: "tab_current",
+      currentOwnerId: "tab_current",
+      recoveryTarget: { ...currentTarget, initialStayType: "FREE" },
+      currentTarget
+    })).toBe(false);
+  });
+
+  it("hides a matching own recovery after that identity is dismissed", () => {
+    const identity = quoteRecoveryContextIdentity(scope, { kind: "VALID", pending });
+    expect(roomStatusOwnQuoteRecoveryVisible(true, identity, undefined)).toBe(true);
+    expect(roomStatusOwnQuoteRecoveryVisible(true, identity, identity)).toBe(false);
+    expect(roomStatusOwnQuoteRecoveryVisible(false, identity, undefined)).toBe(false);
+  });
+
+  it("retains an authoritative recovered Quote until its room-status target is ready", () => {
+    expect(recoveredQuoteWaitsForCurrentTarget(false, "")).toBe(true);
+    expect(recoveredQuoteWaitsForCurrentTarget(false, pending.inputSignature)).toBe(false);
+    expect(recoveredQuoteWaitsForCurrentTarget(true, "")).toBe(false);
+  });
+
+  it("offers a manual result check after an own automatic SENDING check already started", () => {
+    const identity = quoteRecoveryContextIdentity(scope, { kind: "VALID", pending });
+    expect(shouldOfferManualOwnSendingQuoteRecovery({
+      recoveryIdentity: identity,
+      attemptedIdentity: identity,
+      recoveryState: "SENDING",
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: pending.ownerTabId
+    })).toBe(true);
+    expect(shouldOfferManualOwnSendingQuoteRecovery({
+      recoveryIdentity: identity,
+      attemptedIdentity: undefined,
+      recoveryState: "SENDING",
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: pending.ownerTabId
+    })).toBe(false);
+    expect(shouldOfferManualOwnSendingQuoteRecovery({
+      recoveryIdentity: identity,
+      attemptedIdentity: identity,
+      recoveryState: "UNKNOWN",
+      recoveryOwnerId: pending.ownerTabId,
+      currentOwnerId: pending.ownerTabId
+    })).toBe(false);
+  });
+
+  it("blocks automatic recovery only while an order context is actually visible", () => {
+    const selectedOrder = { orderId: "order_1", stayId: "stay_1" };
+    expect(roomStatusOrderContextVisible(selectedOrder, true)).toBe(true);
+    expect(roomStatusOrderContextVisible(selectedOrder, false)).toBe(false);
+    expect(roomStatusOrderContextVisible(undefined, true)).toBe(false);
   });
 
   it("keeps the recovery workbench renderable when the first room-status Query failed", () => {
@@ -759,5 +1072,314 @@ describe("Room-status Block draft authorization", () => {
     expect(roomStatusBlockDraftWithinSelection("2026-07-21", "2026-07-25", "2026-07-20", "2026-07-24")).toBe(false);
     expect(roomStatusBlockDraftWithinSelection("2026-07-21", "2026-07-21", "2026-07-20", "2026-07-24")).toBe(false);
     expect(roomStatusBlockDraftWithinSelection("", "2026-07-23", "2026-07-20", "2026-07-24")).toBe(false);
+  });
+});
+
+describe("Room-status backfill entry routing", () => {
+  const targetReference = { type: "INVENTORY_UNIT" as const, id: "unit_backfill", label: "102-B", href: null };
+  const action = (
+    code: "CREATE_ORDER" | "CREATE_FREE_STAY" | "BACKFILL_ORDER" | "LOCK_MAINTENANCE",
+    unitId = "unit_backfill",
+    enabled = true
+  ) => ({
+    code,
+    enabled,
+    disabledReason: enabled ? null : "服务端暂停该操作",
+    requiresFullInterval: false,
+    targetReference: { ...targetReference, id: unitId }
+  });
+  const day = (serviceDate: string, available: boolean) => ({
+    serviceDate,
+    status: "AVAILABLE" as const,
+    available,
+    intervalIds: [],
+    conflicts: []
+  });
+  const unit = {
+    id: "unit_backfill",
+    days: [
+      day("2026-08-12", false),
+      day("2026-08-13", false),
+      day("2026-08-14", true),
+      day("2026-08-15", true)
+    ],
+    allowedActions: [action("CREATE_ORDER"), action("CREATE_FREE_STAY"), action("BACKFILL_ORDER"), action("LOCK_MAINTENANCE")],
+    intervals: []
+  } as unknown as NonNullable<Parameters<typeof selectionActions>[0]>;
+
+  it("offers backfill only for completed historical selections in 8.3", () => {
+    expect(selectionActions(unit, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-12",
+      focusDate: "2026-08-12",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-13"
+    }, "2026-08-14").map((candidate) => candidate.code)).toEqual(["BACKFILL_ORDER"]);
+
+    expect(selectionActions(unit, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-13",
+      focusDate: "2026-08-14",
+      arrivalDate: "2026-08-13",
+      departureDate: "2026-08-15"
+    }, "2026-08-14")).toEqual([]);
+
+    expect(selectionActions(unit, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-12",
+      focusDate: "2026-08-13",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-14"
+    }, "2026-08-14").map((candidate) => candidate.code)).toEqual(["BACKFILL_ORDER"]);
+  });
+
+  it("keeps normal creation for selections starting today and routes a historical single day to backfill", () => {
+    expect(selectionActions(unit, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-14",
+      focusDate: "2026-08-15",
+      arrivalDate: "2026-08-14",
+      departureDate: "2026-08-16"
+    }, "2026-08-14").map((candidate) => candidate.code)).toEqual(["CREATE_ORDER", "CREATE_FREE_STAY", "LOCK_MAINTENANCE"]);
+    expect(dayActions(unit, unit!.days[0]!, "2026-08-14").map((candidate) => candidate.code)).toEqual(["BACKFILL_ORDER"]);
+  });
+
+  it("fails closed when a selected date is occupied or missing from the authoritative window", () => {
+    const blocked = {
+      ...unit!,
+      days: unit!.days.map((candidate) => candidate.serviceDate === "2026-08-14"
+        ? { ...candidate, available: false, intervalIds: ["interval_busy"] }
+        : candidate)
+    };
+    expect(selectionActions(blocked, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-13",
+      focusDate: "2026-08-14",
+      arrivalDate: "2026-08-13",
+      departureDate: "2026-08-15"
+    }, "2026-08-14")).toEqual([]);
+    expect(selectionActions(unit, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-11",
+      focusDate: "2026-08-12",
+      arrivalDate: "2026-08-11",
+      departureDate: "2026-08-13"
+    }, "2026-08-14")).toEqual([]);
+  });
+
+  it("keeps a server-disabled backfill action visible but never treats it as authorization", () => {
+    const disabledUnit = {
+      ...unit!,
+      allowedActions: [action("BACKFILL_ORDER", "unit_backfill", false)]
+    };
+    const selection = {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-12",
+      focusDate: "2026-08-12",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-13"
+    };
+    expect(selectionActions(disabledUnit, selection, "2026-08-14")).toEqual([
+      expect.objectContaining({
+        code: "BACKFILL_ORDER",
+        enabled: false,
+        disabledReason: "服务端暂停该操作"
+      })
+    ]);
+    expect(roomStatusQuoteTargetFromAction(
+      disabledUnit.allowedActions[0]!,
+      disabledUnit,
+      selection,
+      "2026-08-14"
+    )).toBeUndefined();
+  });
+
+  it("keeps an empty child bed eligible when sibling beds occupy the parent room", () => {
+    const blankBed = {
+      ...unit!,
+      id: "unit_room_104_bed_c",
+      days: [
+        day("2026-08-11", false),
+        day("2026-08-12", false),
+        day("2026-08-13", false),
+        day("2026-08-14", false)
+      ],
+      children: []
+    };
+    const occupiedParent = {
+      ...unit!,
+      id: "unit_room_104",
+      days: blankBed.days.map((candidate) => ({
+        ...candidate,
+        status: "IN_HOUSE" as const,
+        intervalIds: ["stay_104_a", "order_104_b"]
+      })),
+      children: [blankBed]
+    };
+    const childSelection = {
+      unitId: blankBed.id,
+      anchorDate: "2026-08-11",
+      focusDate: "2026-08-14",
+      arrivalDate: "2026-08-11",
+      departureDate: "2026-08-15"
+    };
+
+    const authorizedActions = selectionActions(occupiedParent.children[0]!, childSelection, "2026-08-15");
+    expect(authorizedActions.map((candidate) => candidate.code)).toEqual(["BACKFILL_ORDER"]);
+    expect(roomStatusActionsForPresentation(authorizedActions, roomStatusActionPresentationBlock({
+      refreshFailed: false,
+      accessLevel: "WRITE",
+      projectionWritable: true,
+      projectionExpired: false,
+      projectionReady: true,
+      recoveryBlocked: true,
+      recoveryReady: true,
+      recoveryError: undefined,
+      hasRecoveryEntry: true
+    }))).toEqual([expect.objectContaining({
+      code: "BACKFILL_ORDER",
+      enabled: false,
+      disabledReason: expect.stringContaining("上一笔操作结果")
+    })]);
+    expect(selectionActions(occupiedParent, {
+      ...childSelection,
+      unitId: occupiedParent.id
+    }, "2026-08-15")).toEqual([]);
+  });
+
+  it("prioritizes a failed projection refresh and refreshes an expired historical selection immediately", () => {
+    expect(roomStatusActionPresentationBlock({
+      refreshFailed: true,
+      accessLevel: "WRITE",
+      projectionWritable: false,
+      projectionExpired: true,
+      projectionReady: false,
+      recoveryBlocked: true,
+      recoveryReady: true,
+      recoveryError: undefined,
+      hasRecoveryEntry: true
+    })).toMatchObject({
+      kind: "REFRESH",
+      actionLabel: "重试刷新",
+      reason: expect.stringContaining("房态刷新失败")
+    });
+    const guard = new RoomStatusQueryAttemptGuard();
+    const requestId = guard.begin();
+    expect(roomStatusHistoricalSelectionNeedsRefresh({
+      boardExpired: true,
+      historicalSelectionOpen: true,
+      queryInFlight: guard.isInFlight()
+    })).toBe(false);
+    expect(guard.finish(requestId)).toBe(true);
+    expect(roomStatusHistoricalSelectionNeedsRefresh({
+      boardExpired: true,
+      historicalSelectionOpen: true,
+      queryInFlight: guard.isInFlight()
+    })).toBe(true);
+    expect(roomStatusHistoricalSelectionNeedsRefresh({
+      boardExpired: true,
+      historicalSelectionOpen: false,
+      queryInFlight: false
+    })).toBe(false);
+  });
+
+  it("requires both board and current principal WRITE access", () => {
+    const base = {
+      projectionReady: true,
+      projectionExpired: false,
+      boardAccess: "WRITE",
+      principalAccess: "WRITE"
+    };
+    expect(roomStatusProjectionWritable(base)).toBe(true);
+    expect(roomStatusProjectionWritable({ ...base, principalAccess: "READ" })).toBe(false);
+    expect(roomStatusProjectionWritable({ ...base, boardAccess: "READ" })).toBe(false);
+    expect(roomStatusProjectionWritable({ ...base, projectionExpired: true })).toBe(false);
+  });
+
+  it("binds a quote target to the current enabled server action and rechecks every date edit", () => {
+    const selection = {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-12",
+      focusDate: "2026-08-13",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-14"
+    };
+    const backfillAction = action("BACKFILL_ORDER");
+    const target = roomStatusQuoteTargetFromAction(backfillAction, unit, selection, "2026-08-14");
+    expect(target).toEqual({
+      unitId: "unit_backfill",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-14",
+      initialStayType: "TRANSIENT",
+      actionCode: "BACKFILL_ORDER",
+      backfill: true
+    });
+    expect(roomStatusAuthorizedQuoteAction(unit, target, "2026-08-14")?.code).toBe("BACKFILL_ORDER");
+
+    expect(updateRoomStatusQuoteTargetSelection(target, unit, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-12",
+      focusDate: "2026-08-12",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-13"
+    }, "2026-08-14")).toMatchObject({
+      actionCode: "BACKFILL_ORDER",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-13"
+    });
+    expect(updateRoomStatusQuoteTargetSelection(undefined, unit, selection, "2026-08-14")).toBeUndefined();
+    expect(updateRoomStatusQuoteTargetSelection(target, unit, {
+      unitId: "unit_backfill",
+      anchorDate: "2026-08-13",
+      focusDate: "2026-08-14",
+      arrivalDate: "2026-08-13",
+      departureDate: "2026-08-15"
+    }, "2026-08-14")).toBeUndefined();
+
+    const occupied = {
+      ...unit!,
+      days: unit!.days.map((candidate) => candidate.serviceDate === "2026-08-13"
+        ? { ...candidate, intervalIds: ["stay_new"] }
+        : candidate)
+    };
+    expect(roomStatusAuthorizedQuoteAction(occupied, target, "2026-08-14")).toBeUndefined();
+    expect(roomStatusQuoteActionCodeForUnit(action("BACKFILL_ORDER", "unit_other"), unit!.id)).toBeUndefined();
+  });
+
+  it("preserves a recovered quote's explicit intent and fails closed for legacy intent-less records", () => {
+    expect(roomStatusQuoteRequiresBackfill("2026-08-13", "2026-08-14")).toBe(true);
+    expect(roomStatusQuoteRequiresBackfill("2026-08-14", "2026-08-14")).toBe(false);
+    expect(roomStatusQuoteTargetForBusinessDate({
+      unitId: "unit_backfill",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-14",
+      initialStayType: "TRANSIENT"
+    }, "2026-08-14")).toBeUndefined();
+    expect(roomStatusQuoteTargetForBusinessDate({
+      unitId: "unit_backfill",
+      arrivalDate: "2026-08-14",
+      departureDate: "2026-08-16",
+      initialStayType: "TRANSIENT",
+      actionCode: "CREATE_ORDER"
+    }, "2026-08-15")).toBeUndefined();
+
+    const target = roomStatusQuoteTargetForBusinessDate({
+      unitId: "unit_backfill",
+      arrivalDate: "2026-08-12",
+      departureDate: "2026-08-14",
+      initialStayType: "TRANSIENT",
+      actionCode: "BACKFILL_ORDER"
+    }, "2026-08-14");
+    expect(target).toMatchObject({ actionCode: "BACKFILL_ORDER", backfill: true });
+    expect(roomStatusQuoteCommandMatchesTarget(
+      completedStayBackfillCommandRequest({}, "前台漏录"),
+      target
+    )).toBe(true);
+    expect(roomStatusQuoteCommandMatchesTarget({
+      commandType: "CREATE_ORDER",
+      title: "创建订单",
+      description: "普通创建",
+      input: {}
+    }, target)).toBe(false);
   });
 });

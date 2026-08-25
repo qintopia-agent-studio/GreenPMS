@@ -221,7 +221,7 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
   await expect(popover.locator("header strong")).toHaveText(targetUnitLabel);
   await expect(viewDrawer).toBeHidden();
   await expect(writeDrawer).toBeHidden();
-  await expect(popover.getByRole("button", { name: "创建住宿", exact: true })).toBeVisible();
+  await expect(popover.getByRole("button", { name: "创建订单", exact: true })).toBeVisible();
   await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeVisible();
   await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
   await expect(popover).not.toContainText(/清洁|房务/);
@@ -733,7 +733,7 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   ).toBe(true);
   expect(placement.metaFits).toBe(true);
   expect(placement.metaEndsBeforeClose).toBe(true);
-  await rangePopover.getByRole("button", { name: "创建住宿", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
   await expect(drawer).toBeVisible();
   await expect(drawer).toHaveClass(/room-status-write-drawer/);
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(targetDate);

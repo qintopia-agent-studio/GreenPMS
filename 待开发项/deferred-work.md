@@ -13,3 +13,18 @@
 - source_spec: `待开发项/QinTopia-PMS-第4步-U2-当前页面信息减负-实施规格.md`
   summary: 2026-08-09 上线前房态体验修正：刷新跨过新鲜度窗口时保留上一版真实房态视觉、仅暂停写操作；同时提高冻结房间列层级，避免锁房区间横向滚动后覆盖房号侧栏。
   evidence: B 级 UI 纠偏，不改变库存和订单业务规则；默认 Vitest 710 项、相关单元测试 65 项、刷新状态与冻结列遮挡 E2E、类型检查、Web 生产构建及本地真实页面几何遮挡检查均通过。
+- source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
+  summary: 修复撤销入住后存在原收款却无法登记真实退款的动作入口。
+  evidence: `REVOKE_CHECK_IN` 会把合同金额归零并保留退款参考，但 `RECORD_REFUND` 的允许状态遗漏 `CHECK_IN_REVOKED`；退款领域实现本身支持引用原收款，需独立补齐投影、契约与回归测试。
+- source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
+  summary: 定义逾期预订但客人事实上仍在住时的“恢复在住并续住”流程。
+  evidence: 普通入住在计划离店日后被拒绝，而续住只允许 `CHECKED_IN`，当前没有能同时如实补记入住并迁移未来库存的合法出口。
+- source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
+  summary: 定义逾期在住订单实际续住若干晚且现已离店时的历史续住闭环。
+  evidence: 迟录退房只能按原计划离店日结束，普通续住又要求新离店日晚于当前营业日，无法记录真实的历史延长区间后再完成住宿。
+- source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
+  summary: 统一设计已取消、未到、撤销入住及已退房订单的受控事实纠错入口。
+  evidence: 这些终态不可重开，已退房也不能重价；误操作、旧渠道资料缺失或终态金额录错时目前只能停留在错误事实，需另行定义审计、资金和库存补偿规则。
+- source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
+  summary: 为历史回执结果增加命令级 discriminator，消除通用 Receipt schema 的结构重叠。
+  evidence: `COMPLETE_STAY` 已强制 64 位效果哈希，但历史 `BACKFILL_COMPLETED_STAY` 仍需兼容读取无 hash 结果；若要由通用 Receipt schema 绝对区分，需要新增持久 metadata 并迁移历史读取契约。

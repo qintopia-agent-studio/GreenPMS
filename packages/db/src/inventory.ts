@@ -412,16 +412,37 @@ export async function releaseInventoryClaims(trx: Transaction<Database>, sourceT
   const claims = await query.orderBy("room_id").orderBy("service_date").execute();
   for (const claim of claims) {
     const unit = await trx.selectFrom("inventory_units").select("kind").where("id", "=", claim.inventory_unit_id).executeTakeFirstOrThrow();
+    let pointerUpdate;
     if (unit.kind === "ROOM") {
-      await trx.updateTable("inventory_room_days")
+      pointerUpdate = await trx.updateTable("inventory_room_days")
         .set({ whole_claim_id: null, version: sql`version + 1`, updated_at: new Date() })
-        .where("room_id", "=", claim.room_id).where("service_date", "=", claim.service_date).where("whole_claim_id", "=", claim.id).execute();
+        .where("room_id", "=", claim.room_id)
+        .where("service_date", "=", claim.service_date)
+        .where("whole_claim_id", "=", claim.id)
+        .executeTakeFirst();
     } else {
-      await trx.updateTable("inventory_bed_days")
+      pointerUpdate = await trx.updateTable("inventory_bed_days")
         .set({ bed_claim_id: null, version: sql`version + 1`, updated_at: new Date() })
-        .where("bed_id", "=", claim.inventory_unit_id).where("service_date", "=", claim.service_date).where("bed_claim_id", "=", claim.id).execute();
+        .where("bed_id", "=", claim.inventory_unit_id)
+        .where("service_date", "=", claim.service_date)
+        .where("bed_claim_id", "=", claim.id)
+        .executeTakeFirst();
     }
-    await trx.updateTable("inventory_claims").set({ active: false, released_at: new Date() }).where("id", "=", claim.id).execute();
+    if (pointerUpdate.numUpdatedRows !== 1n) {
+      throw new DomainError("INTERNAL_ERROR", "库存占用指针损坏，不能释放库存", 500, false, {
+        claimId: claim.id,
+        inventoryUnitId: claim.inventory_unit_id,
+        serviceDate: claim.service_date
+      });
+    }
+    const claimUpdate = await trx.updateTable("inventory_claims")
+      .set({ active: false, released_at: new Date() })
+      .where("id", "=", claim.id)
+      .where("active", "=", true)
+      .executeTakeFirst();
+    if (claimUpdate.numUpdatedRows !== 1n) {
+      throw new DomainError("INTERNAL_ERROR", "库存占用记录损坏，不能释放库存", 500, false, { claimId: claim.id });
+    }
   }
   return claims.map((claim) => claim.id);
 }

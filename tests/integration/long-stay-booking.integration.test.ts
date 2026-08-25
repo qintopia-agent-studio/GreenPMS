@@ -5,6 +5,8 @@ import {
   createCommandPreview,
   executeQuoteCommand,
   findCommandResult,
+  propertyLocalToday,
+  withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
 import type { Kysely } from "kysely";
@@ -28,6 +30,13 @@ function metadata(prefix: string) {
     idempotencyKey: `${prefix}-${sequence}`,
     correlationId: `${prefix}-${sequence}`
   };
+}
+
+async function withOrdinaryOrderCreationClock<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
+  const businessDate = await propertyLocalToday(db, demo.propertyId);
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), operation)
+    : operation();
 }
 
 function quoteInput(arrivalDate: string, departureDate: string) {
@@ -55,21 +64,23 @@ function orderEnvelope(quote: QuoteReadDto, guestName: string): CommandEnvelope 
 }
 
 async function quotePreviewConfirm(arrivalDate: string, departureDate: string, prefix: string) {
-  const quoted = await executeQuoteCommand(db, principal, quoteInput(arrivalDate, departureDate), metadata(`${prefix}-quote`));
-  const prepared = await createCommandPreview(
-    db,
-    principal,
-    orderEnvelope(quoted.quote, `住客-${prefix}`),
-    metadata(`${prefix}-preview`)
-  );
-  const receipt = await confirmCommandPreview(db, principal, prepared.preview.previewId, {
-    propertyId: demo.propertyId,
-    commandType: "CREATE_ORDER",
-    confirmation: true,
-    expectedEffectHash: prepared.preview.effectHash,
-    reason: { code: "CREATE_STANDARD_ORDER", note: "" }
-  }, metadata(`${prefix}-confirm`));
-  return { quoted, prepared, receipt };
+  return withOrdinaryOrderCreationClock(arrivalDate, async () => {
+    const quoted = await executeQuoteCommand(db, principal, quoteInput(arrivalDate, departureDate), metadata(`${prefix}-quote`));
+    const prepared = await createCommandPreview(
+      db,
+      principal,
+      orderEnvelope(quoted.quote, `住客-${prefix}`),
+      metadata(`${prefix}-preview`)
+    );
+    const receipt = await confirmCommandPreview(db, principal, prepared.preview.previewId, {
+      propertyId: demo.propertyId,
+      commandType: "CREATE_ORDER",
+      confirmation: true,
+      expectedEffectHash: prepared.preview.effectHash,
+      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
+    }, metadata(`${prefix}-confirm`));
+    return { quoted, prepared, receipt };
+  });
 }
 
 async function completeArtifactCounts() {
@@ -227,24 +238,30 @@ describe.sequential("long-stay Quote, Preview, and Confirm on PostgreSQL", () =>
       quoteInput("2026-07-26", "2026-11-20"),
       metadata("stale-remote-quote")
     );
-    const prepared = await createCommandPreview(
+    const prepared = await withPropertyClockForTesting(new Date("2026-07-26T12:00:00.000Z"), () => createCommandPreview(
       db,
       principal,
       orderEnvelope(quoted.quote, "远端并发住客"),
       metadata("stale-remote-preview")
-    );
+    ));
     await quotePreviewConfirm("2026-10-15", "2026-10-16", "remote-winner");
 
     const beforeBusiness = await businessArtifactCounts();
     const beforeProtocol = await protocolArtifactCounts();
     const confirmationMetadata = metadata("stale-remote-confirm");
-    const rejected = await confirmCommandPreview(db, principal, prepared.preview.previewId, {
-      propertyId: demo.propertyId,
-      commandType: "CREATE_ORDER",
-      confirmation: true,
-      expectedEffectHash: prepared.preview.effectHash,
-      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
-    }, confirmationMetadata);
+    const rejected = await withPropertyClockForTesting(new Date("2026-07-26T12:00:00.000Z"), () => confirmCommandPreview(
+      db,
+      principal,
+      prepared.preview.previewId,
+      {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_ORDER",
+        confirmation: true,
+        expectedEffectHash: prepared.preview.effectHash,
+        reason: { code: "CREATE_STANDARD_ORDER", note: "" }
+      },
+      confirmationMetadata
+    ));
 
     expect(rejected).toMatchObject({
       executionStatus: "NOT_EXECUTED",

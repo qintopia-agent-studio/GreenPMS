@@ -27,6 +27,8 @@ import {
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
 import { enumerateServiceDates, stableHash, todayInTimeZone } from "@qintopia/domain";
+import { legacyEffectProtocol } from "./historical-command-protocol.ts";
+import { projectOrderLifecycle } from "./orders.ts";
 import type { Database } from "./schema.ts";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -40,6 +42,7 @@ interface ProjectionEvent {
   serviceDate: string;
   sourceStartDate: string;
   sourceEndDate: string;
+  orderArrivalDate?: string;
   sourceKey: string;
   sourceKind: RoomStatusSourceKind;
   status: RoomStatusStatus;
@@ -92,6 +95,13 @@ interface BuiltBedOccupancies {
   partial: boolean;
 }
 
+interface CompletedOrderRoomStatusProjection {
+  timelineByDate: Map<string, string>;
+  status: RoomStatusStatus;
+  reason: string | null;
+  damaged: boolean;
+}
+
 interface FilteredRoomSelection {
   room: RoomStatusUnitDto;
   childUnitIds: string[];
@@ -99,6 +109,8 @@ interface FilteredRoomSelection {
 
 type RoomStatusFilters = Pick<RoomStatusBoardQueryDto,
   "search" | "roomType" | "salesMode" | "status" | "minCapacity" | "unitKind">;
+
+const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 
 function dateAfter(serviceDate: string): string {
   const date = new Date(`${serviceDate}T00:00:00.000Z`);
@@ -221,13 +233,20 @@ function uniqueActions(items: RoomStatusActionDto[]): RoomStatusActionDto[] {
   ])).values()];
 }
 
-function createActions(unit: RoomStatusUnitDto, accessLevel: AccessLevel): RoomStatusActionDto[] {
+function createActions(
+  unit: RoomStatusUnitDto,
+  accessLevel: AccessLevel,
+  availability: { currentOrFuture: boolean; historicalBlank: boolean }
+): RoomStatusActionDto[] {
   if (accessLevel !== "WRITE" || !unit.active) return [];
   const target = reference("INVENTORY_UNIT", unit.id, unit.code);
   return [
-    action("CREATE_ORDER", target),
-    action("CREATE_FREE_STAY", target),
-    action("LOCK_MAINTENANCE", target)
+    ...(availability.currentOrFuture ? [
+      action("CREATE_ORDER", target),
+      action("CREATE_FREE_STAY", target),
+      action("LOCK_MAINTENANCE", target)
+    ] : []),
+    ...(availability.historicalBlank ? [action("BACKFILL_ORDER", target)] : [])
   ];
 }
 
@@ -332,6 +351,7 @@ function operationalTaskFromSeed(
     endDate: seed.endDate,
     sourceStartDate: event.sourceStartDate,
     sourceEndDate: event.sourceEndDate,
+    ...(event.orderArrivalDate ? { orderArrivalDate: event.orderArrivalDate } : {}),
     status: event.status,
     available: !event.blocking,
     blocking: event.blocking,
@@ -499,6 +519,7 @@ function buildIntervals(
       endDate,
       sourceStartDate: builder.event.sourceStartDate,
       sourceEndDate: builder.event.sourceEndDate,
+      ...(builder.event.orderArrivalDate ? { orderArrivalDate: builder.event.orderArrivalDate } : {}),
       status: builder.event.status,
       available: !builder.event.blocking,
       blocking: builder.event.blocking,
@@ -578,12 +599,12 @@ function buildBedOccupancies(
         && event.status === "UNKNOWN"
         && event.sourceKind !== "UNIT_UNSELLABLE");
       const parentLodgingEvents = dayEvents.filter((event) => event.actualInventoryUnitId === room.id
-        && event.blocking
+        && (event.blocking || event.status === "SETTLED" || event.status === "ARREARS")
         && (event.sourceKind === "ORDER" || event.sourceKind === "FREE_STAY")
-        && (event.status === "RESERVED" || event.status === "IN_HOUSE"));
-      const validChildLodgingEvents = childEvents.filter((event) => event.blocking
+        && (event.status === "RESERVED" || event.status === "IN_HOUSE" || event.status === "SETTLED" || event.status === "ARREARS"));
+      const validChildLodgingEvents = childEvents.filter((event) => (event.blocking || event.status === "SETTLED" || event.status === "ARREARS")
         && (event.sourceKind === "ORDER" || event.sourceKind === "FREE_STAY")
-        && (event.status === "RESERVED" || event.status === "IN_HOUSE"));
+        && (event.status === "RESERVED" || event.status === "IN_HOUSE" || event.status === "SETTLED" || event.status === "ARREARS"));
 
       if (hasAmbiguousUnknownFact) {
         partial = true;
@@ -648,26 +669,31 @@ function buildBedOccupancies(
 
 function dayStatus(intervals: RoomStatusIntervalDto[], unitActive: boolean): RoomStatusStatus {
   if (!unitActive) return "UNAVAILABLE";
-  const current = intervals.filter((interval) => interval.blocking || interval.sourceKind === "CLEANING");
+  const current = intervals.filter((interval) => interval.blocking
+    || interval.sourceKind === "CLEANING"
+    || interval.status === "SETTLED"
+    || interval.status === "ARREARS"
+    || interval.status === "UNKNOWN");
   if (current.some((interval) => interval.status === "UNKNOWN")) return "UNKNOWN";
-  const priority: RoomStatusStatus[] = ["UNAVAILABLE", "IN_HOUSE", "RESERVED", "MAINTENANCE", "CLEANING"];
+  const priority: RoomStatusStatus[] = ["UNAVAILABLE", "IN_HOUSE", "RESERVED", "ARREARS", "SETTLED", "MAINTENANCE", "CLEANING"];
   return priority.find((status) => current.some((interval) => interval.status === status)) ?? "AVAILABLE";
 }
 
 function buildUnitStatuses(
   unitsById: Map<string, RoomStatusUnitDto>,
   dates: string[],
-  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>
+  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>,
+  businessDate: string
 ): Map<string, Set<RoomStatusStatus>> {
   const statusesByUnit = new Map<string, Set<RoomStatusStatus>>();
   for (const unit of unitsById.values()) {
     const intervals = intervalsByUnit.get(unit.id) ?? [];
     const statuses = new Set<RoomStatusStatus>();
     for (const serviceDate of dates) {
-      statuses.add(dayStatus(
-        intervals.filter((interval) => interval.startDate <= serviceDate && serviceDate < interval.endDate),
-        unit.active
-      ));
+      const dayIntervals = intervals.filter((interval) => interval.startDate <= serviceDate && serviceDate < interval.endDate);
+      const status = dayStatus(dayIntervals, unit.active);
+      if (serviceDate < businessDate && status === "AVAILABLE" && dayIntervals.length === 0) continue;
+      statuses.add(status);
     }
     statusesByUnit.set(unit.id, statuses);
   }
@@ -677,8 +703,10 @@ function buildUnitStatuses(
 function unitAvailableOnDate(
   unit: RoomStatusUnitDto,
   serviceDate: string,
-  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>
+  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>,
+  businessDate: string
 ): boolean {
+  if (serviceDate < businessDate) return false;
   if (!unit.active) return false;
   const intervals = intervalsByUnit.get(unit.id) ?? [];
   const dayIntervals = intervals.filter((interval) => interval.startDate <= serviceDate && serviceDate < interval.endDate);
@@ -689,23 +717,64 @@ function buildAvailabilitySummary(
   rooms: RoomStatusUnitDto[],
   unitsById: Map<string, RoomStatusUnitDto>,
   dates: string[],
-  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>
+  intervalsByUnit: Map<string, RoomStatusIntervalDto[]>,
+  businessDate: string
 ): RoomStatusAvailabilitySummaryDto[] {
+  let totalSellableUnits = 0;
+  for (const room of rooms) {
+    if (!room.active) continue;
+    if (room.salesMode === "WHOLE_ROOM") {
+      totalSellableUnits += 1;
+      continue;
+    }
+    if (room.salesMode !== "BED_SPLIT") continue;
+    totalSellableUnits += room.childUnitIds.filter((childId) => unitsById.get(childId)?.active).length;
+  }
   return dates.map((serviceDate) => {
     let availableRooms = 0;
     let availableBeds = 0;
+    const paidOccupiedSources = new Map<string, number>();
+    const occupantIds = new Set<string>();
     for (const room of rooms) {
       if (room.salesMode === "WHOLE_ROOM") {
-        if (unitAvailableOnDate(room, serviceDate, intervalsByUnit)) availableRooms += 1;
+        if (unitAvailableOnDate(room, serviceDate, intervalsByUnit, businessDate)) availableRooms += 1;
         continue;
       }
       if (room.salesMode !== "BED_SPLIT" || !room.active) continue;
       for (const childId of room.childUnitIds) {
         const child = unitsById.get(childId);
-        if (child && unitAvailableOnDate(child, serviceDate, intervalsByUnit)) availableBeds += 1;
+        if (child && unitAvailableOnDate(child, serviceDate, intervalsByUnit, businessDate)) availableBeds += 1;
       }
     }
-    return { serviceDate, availableRooms, availableBeds };
+    for (const intervals of intervalsByUnit.values()) {
+      for (const interval of intervals) {
+        if (interval.startDate > serviceDate || serviceDate >= interval.endDate) continue;
+        if (interval.sourceKind !== "ORDER") continue;
+        if (interval.status !== "IN_HOUSE"
+          && interval.status !== "RESERVED"
+          && interval.status !== "SETTLED"
+          && interval.status !== "ARREARS") continue;
+        const orderReferenceId = interval.references.find((reference) => reference.type === "ORDER")?.id ?? interval.id;
+        const stayReferenceId = interval.references.find((reference) => reference.type === "STAY")?.id ?? "none";
+        const paidSourceKey = `${orderReferenceId}:${stayReferenceId}:${interval.actualInventoryUnitId}`;
+        if (!paidOccupiedSources.has(paidSourceKey)) {
+          const actualUnit = unitsById.get(interval.actualInventoryUnitId);
+          const sellableUnitCount = actualUnit?.kind === "ROOM" && actualUnit.salesMode === "BED_SPLIT"
+            ? Math.max(1, actualUnit.childUnitIds.filter((childId) => unitsById.get(childId)?.active).length)
+            : 1;
+          paidOccupiedSources.set(paidSourceKey, sellableUnitCount);
+        }
+        for (const occupant of interval.occupants) occupantIds.add(occupant.occupantId);
+      }
+    }
+    return {
+      serviceDate,
+      availableRooms,
+      availableBeds,
+      paidOccupiedUnits: [...paidOccupiedSources.values()].reduce((total, count) => total + count, 0),
+      totalSellableUnits,
+      occupantCount: occupantIds.size
+    };
   });
 }
 
@@ -714,14 +783,15 @@ function assembleUnit(
   dates: string[],
   intervals: RoomStatusIntervalDto[],
   claimIdsByIntervalAndDate: Map<string, Map<string, string[]>>,
-  accessLevel: AccessLevel
+  accessLevel: AccessLevel,
+  businessDate: string
 ): RoomStatusUnitDto {
   const unitConflicts = intervals.flatMap((interval) => interval.conflicts);
   const days = dates.map((serviceDate) => {
     const dayIntervals = intervals.filter((interval) => interval.startDate <= serviceDate && serviceDate < interval.endDate);
     const blocking = dayIntervals.some((interval) => interval.blocking);
     const unknown = dayIntervals.some((interval) => interval.status === "UNKNOWN");
-    const available = unit.active && !blocking && !unknown;
+    const available = unit.active && serviceDate >= businessDate && !blocking && !unknown;
     const conflicts = dayIntervals.flatMap((interval) => {
       const exactClaimIds = claimIdsByIntervalAndDate.get(interval.id)?.get(serviceDate) ?? [];
       return interval.conflicts.flatMap((conflict) => conflict.blockingFactKind === "CLAIM"
@@ -742,7 +812,13 @@ function assembleUnit(
     intervals,
     conflicts: unitConflicts,
     allowedActions: uniqueActions([
-      ...(days.some((day) => day.available) ? createActions(unit, accessLevel) : []),
+      ...createActions(unit, accessLevel, {
+        currentOrFuture: days.some((day) => day.available),
+        historicalBlank: days.some((day) => day.serviceDate < businessDate
+          && day.status === "AVAILABLE"
+          && day.intervalIds.length === 0
+          && day.conflicts.length === 0)
+      }),
       ...intervals.flatMap((interval) => interval.allowedActions)
     ])
   };
@@ -984,6 +1060,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         serviceDate: businessDate,
         sourceStartDate: order.order_arrival_date,
         sourceEndDate: order.order_departure_date,
+        orderArrivalDate: order.order_arrival_date,
         sourceKey: `order-task:${order.order_id}:${taskKind}`,
         sourceKind,
         status: missingCurrentClaim || !lifecycleConsistent ? "UNKNOWN" : order.order_status === "RESERVED" ? "RESERVED" : "IN_HOUSE",
@@ -1184,6 +1261,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         "segment.created_at as segment_created_at",
         "stay.status as stay_status", "order.id as order_id", "order.status as order_status", "order.stay_type",
         "order.arrival_date as order_arrival_date", "order.departure_date as order_departure_date", "order.primary_guest_snapshot",
+        "order.member_id", "order.member_contract_id", "order.booking_channel_code", "order.channel_order_reference",
+        "order.current_revision_id",
         "order.free_stay_reason", "amendment.command_id as segment_command_id",
         "maintenance.id as maintenance_id", "maintenance.arrival_date as maintenance_arrival_date",
         "maintenance.departure_date as maintenance_departure_date", "maintenance.reason as maintenance_reason", "maintenance.status as maintenance_status",
@@ -1261,30 +1340,10 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     }
 
     const completedOrderIds = [...new Set(claimRows.flatMap((row) => row.source_type === "ORDER_SEGMENT"
-      && !row.active && row.stay_status === "COMPLETED" && row.order_id ? [row.order_id] : []))];
-    const checkoutAmendments = completedOrderIds.length === 0 ? [] : await trx
-      .selectFrom("amendments")
-      .leftJoin("cleaning_tasks", "cleaning_tasks.order_id", "amendments.order_id")
-      .select([
-        "amendments.order_id", "amendments.payload", "amendments.created_at", "amendments.sequence",
-        "cleaning_tasks.service_date as legacy_cleaning_service_date"
-      ])
-      .where("amendments.order_id", "in", completedOrderIds)
-      .where("amendments.amendment_type", "=", "CHECK_OUT")
-      .orderBy("amendments.order_id")
-      .orderBy("amendments.sequence", "desc")
-      .execute();
-    const checkoutBusinessDateByOrder = new Map<string, string>();
-    for (const amendment of checkoutAmendments) {
-      if (checkoutBusinessDateByOrder.has(amendment.order_id)) continue;
-      const payload = amendment.payload && typeof amendment.payload === "object" && !Array.isArray(amendment.payload)
-        ? amendment.payload as Record<string, unknown>
-        : {};
-      const persistedBusinessDate = typeof payload.businessDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(payload.businessDate)
-        ? payload.businessDate
-        : amendment.legacy_cleaning_service_date ?? iso(amendment.created_at).slice(0, 10);
-      checkoutBusinessDateByOrder.set(amendment.order_id, persistedBusinessDate);
-    }
+      && !row.active
+      && row.order_status === "CHECKED_OUT"
+      && row.stay_status === "COMPLETED"
+      && row.order_id ? [row.order_id] : []))];
     const completedOrderClaimCandidates = completedOrderIds.length === 0 ? [] : await trx
       .selectFrom("inventory_claims as claim")
       .innerJoin("stay_segments as segment", (join) => join
@@ -1305,12 +1364,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .orderBy("claim.created_at")
       .orderBy("claim.id")
       .execute();
-    const completedElapsedClaimCandidates = completedOrderClaimCandidates.filter((row) => {
-      const checkoutBusinessDate = checkoutBusinessDateByOrder.get(row.order_id) ?? businessDate;
-      return row.service_date < checkoutBusinessDate;
-    });
     const completedLatestByOrderDate = new Map<string, typeof completedOrderClaimCandidates[number]>();
-    for (const row of completedElapsedClaimCandidates) {
+    for (const row of completedOrderClaimCandidates) {
       const key = `${row.order_id}:${row.service_date}`;
       const previous = completedLatestByOrderDate.get(key);
       if (!previous || iso(row.created_at) > iso(previous.created_at)
@@ -1318,9 +1373,208 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         completedLatestByOrderDate.set(key, row);
       }
     }
+    const completedOrderContexts = completedOrderIds.length === 0 ? [] : await trx
+      .selectFrom("orders as order")
+      .innerJoin("stays as stay", "stay.order_id", "order.id")
+      .select([
+        "order.id as id",
+        "order.status as status",
+        "order.stay_type as stay_type",
+        "order.arrival_date as arrival_date",
+        "order.departure_date as departure_date",
+        "order.current_revision_id as current_revision_id",
+        "order.version as version",
+        "order.booking_channel_code as booking_channel_code",
+        "order.channel_order_reference as channel_order_reference",
+        "stay.id as stay_id",
+        "stay.status as stay_status"
+      ])
+      .where("order.id", "in", completedOrderIds)
+      .execute();
+    const completedStayIds = completedOrderContexts.map((row) => row.stay_id);
+    const completedSegments = completedStayIds.length === 0 ? [] : await trx.selectFrom("stay_segments")
+      .select([
+        "id",
+        "stay_id",
+        "sequence",
+        "inventory_unit_id",
+        "arrival_date",
+        "departure_date",
+        "segment_type",
+        "supersedes_segment_id",
+        "amendment_id"
+      ])
+      .where("stay_id", "in", completedStayIds)
+      .orderBy("stay_id")
+      .orderBy("sequence")
+      .execute();
+    const completedAmendments = completedOrderIds.length === 0 ? [] : await trx
+      .selectFrom("amendments as amendment")
+      .leftJoin("command_executions as command", "command.id", "amendment.command_id")
+      .leftJoin("subjects as subject", "subject.id", "command.subject_id")
+      .select([
+        "amendment.id",
+        "amendment.order_id",
+        "amendment.sequence",
+        "amendment.prior_version",
+        "amendment.new_version",
+        "amendment.amendment_type",
+        "amendment.payload",
+        "amendment.reason_code",
+        "amendment.reason_note",
+        "amendment.created_at",
+        "command.subject_id as actor_subject_id",
+        "subject.display_name as actor_display_name"
+      ])
+      .where("amendment.order_id", "in", completedOrderIds)
+      .orderBy("amendment.order_id")
+      .orderBy("amendment.sequence")
+      .execute();
+    const completedRevisions = completedOrderIds.length === 0 ? [] : await trx
+      .selectFrom("pricing_revisions")
+      .select([
+        "id",
+        "order_id",
+        "revision_no",
+        "amendment_id",
+        "arrival_date",
+        "departure_date",
+        "policy_base_amount_minor",
+        "current_contract_amount_minor",
+        "currency",
+        "pricing_basis"
+      ])
+      .where("order_id", "in", completedOrderIds)
+      .orderBy("order_id")
+      .orderBy("revision_no")
+      .execute();
+    const completedFacts = completedOrderIds.length === 0 ? [] : await trx
+      .selectFrom("collection_facts")
+      .select(["order_id", "net_effect_minor", "currency", "created_at"])
+      .where("order_id", "in", completedOrderIds)
+      .orderBy("order_id")
+      .orderBy("created_at")
+      .orderBy("fact_id")
+      .execute();
+    const stage11EpochRow = await trx.selectFrom("schema_migrations").select("applied_at")
+      .where("name", "=", "028_stage11_move_unit_guards.sql")
+      .executeTakeFirst();
+    const stage11Epoch = stage11EpochRow
+      ? stage11EpochRow.applied_at instanceof Date ? stage11EpochRow.applied_at : new Date(stage11EpochRow.applied_at)
+      : null;
+    const completedSegmentsByStay = new Map<string, typeof completedSegments>();
+    for (const segment of completedSegments) {
+      const rows = completedSegmentsByStay.get(segment.stay_id) ?? [];
+      rows.push(segment);
+      completedSegmentsByStay.set(segment.stay_id, rows);
+    }
+    const completedAmendmentsByOrder = new Map<string, typeof completedAmendments>();
+    for (const amendment of completedAmendments) {
+      const rows = completedAmendmentsByOrder.get(amendment.order_id) ?? [];
+      rows.push(amendment);
+      completedAmendmentsByOrder.set(amendment.order_id, rows);
+    }
+    const completedRevisionsByOrder = new Map<string, typeof completedRevisions>();
+    for (const revision of completedRevisions) {
+      const rows = completedRevisionsByOrder.get(revision.order_id) ?? [];
+      rows.push(revision);
+      completedRevisionsByOrder.set(revision.order_id, rows);
+    }
+    const completedFactsByOrder = new Map<string, typeof completedFacts>();
+    for (const fact of completedFacts) {
+      const rows = completedFactsByOrder.get(fact.order_id) ?? [];
+      rows.push(fact);
+      completedFactsByOrder.set(fact.order_id, rows);
+    }
+    const completedProjectionByOrder = new Map<string, CompletedOrderRoomStatusProjection>();
+    for (const row of completedOrderContexts) {
+      try {
+        const amendments = (completedAmendmentsByOrder.get(row.id) ?? []).map((amendment) => {
+          const protocolVersion = legacyEffectProtocol(amendment.amendment_type, amendment.payload);
+          if (!protocolVersion) return amendment;
+          const createdAt = amendment.created_at instanceof Date ? amendment.created_at : new Date(amendment.created_at);
+          if (stage11Epoch && createdAt.getTime() >= stage11Epoch.getTime()) {
+            throw new DomainError("INTERNAL_ERROR", "订单变更在 Stage 11 协议启用后仍使用历史数据形状", 500);
+          }
+          return { ...amendment, protocolVersion };
+        });
+        const revisions = completedRevisionsByOrder.get(row.id) ?? [];
+        const facts = completedFactsByOrder.get(row.id) ?? [];
+        const lifecycle = projectOrderLifecycle({
+          order: {
+            id: row.id,
+            status: row.status,
+            stay_type: row.stay_type,
+            arrival_date: row.arrival_date,
+            departure_date: row.departure_date,
+            current_revision_id: row.current_revision_id,
+            version: row.version
+          },
+          stay: { id: row.stay_id, status: row.stay_status },
+          businessDate,
+          segments: completedSegmentsByStay.get(row.stay_id) ?? [],
+          amendments,
+          revisions,
+          facts,
+          activeTimeline: []
+        });
+        const timelineByDate = new Map<string, string>();
+        for (const interval of lifecycle.effectiveArrangement.intervals) {
+          for (const serviceDate of enumerateServiceDates(interval.arrivalDate, interval.departureDate)) {
+            if (serviceDate < businessDate) timelineByDate.set(serviceDate, interval.inventoryUnitId);
+          }
+        }
+        const revision = revisions.find((item) => item.id === row.current_revision_id) ?? revisions.at(-1);
+        const external = row.booking_channel_code !== null && externalChannelCodes.has(row.booking_channel_code);
+        const netCollected = facts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
+        const externalUnknown = external && (!row.channel_order_reference?.trim()
+          || revision?.pricing_basis !== "CHANNEL_CONTRACT"
+          || !revision
+          || revision.current_contract_amount_minor <= 0);
+        const pricingUnknown = row.stay_type !== "FREE" && (!revision || externalUnknown);
+        const arrears = !pricingUnknown
+          && !external
+          && row.stay_type !== "FREE"
+          && Boolean(revision && revision.current_contract_amount_minor > netCollected);
+        const status: RoomStatusStatus = pricingUnknown ? "UNKNOWN" : arrears ? "ARREARS" : "SETTLED";
+        completedProjectionByOrder.set(row.id, {
+          timelineByDate,
+          status,
+          reason: pricingUnknown
+            ? external
+              ? "外部渠道住宿缺少完整渠道订单号或本单渠道应结金额"
+              : "已退房住宿缺少可核对的结算金额"
+            : arrears ? "住宿已退房，仍有未收余额" : null,
+          damaged: false
+        });
+      } catch {
+        completedProjectionByOrder.set(row.id, {
+          timelineByDate: new Map(),
+          status: "UNKNOWN",
+          reason: "已退房住宿的最终安排或结算链无法核对",
+          damaged: true
+        });
+      }
+    }
+    const completedProjectedLatestByOrderDate = new Map<string, typeof completedOrderClaimCandidates[number]>();
+    for (const row of completedOrderClaimCandidates) {
+      const projection = completedProjectionByOrder.get(row.order_id);
+      if (!projection || projection.damaged) continue;
+      if (projection.timelineByDate.get(row.service_date) !== row.inventory_unit_id) continue;
+      const key = `${row.order_id}:${row.service_date}`;
+      const previous = completedProjectedLatestByOrderDate.get(key);
+      if (!previous || iso(row.created_at) > iso(previous.created_at)
+        || (iso(row.created_at) === iso(previous.created_at) && row.claim_id > previous.claim_id)) {
+        completedProjectedLatestByOrderDate.set(key, row);
+      }
+    }
+    for (const row of completedLatestByOrderDate.values()) {
+      if (!completedProjectionByOrder.get(row.order_id)?.damaged) continue;
+      completedProjectedLatestByOrderDate.set(`${row.order_id}:${row.service_date}`, row);
+    }
     const completedOrderRunByClaimId = new Map<string, { sourceKey: string; startDate: string; endDate: string }>();
     const completedTimelineByOrder = new Map<string, typeof completedOrderClaimCandidates>();
-    for (const row of completedLatestByOrderDate.values()) {
+    for (const row of completedProjectedLatestByOrderDate.values()) {
       const rows = completedTimelineByOrder.get(row.order_id) ?? [];
       rows.push(row);
       completedTimelineByOrder.set(row.order_id, rows);
@@ -1404,9 +1658,35 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           });
           continue;
         }
-        const historicalCompleted = !row.active
-          && completedLatestByOrderDate.get(`${row.order_id}:${row.service_date}`)?.claim_id === row.claim_id;
-        if (!row.active && !historicalCompleted) continue;
+        if (!row.active) {
+          const historicalCompleted = completedProjectedLatestByOrderDate.get(`${row.order_id}:${row.service_date}`)?.claim_id === row.claim_id;
+          if (!historicalCompleted) continue;
+          const completedProjection = completedProjectionByOrder.get(row.order_id!);
+          const historicalStatus: RoomStatusStatus = completedProjection?.status ?? "UNKNOWN";
+          if (historicalStatus === "UNKNOWN") partial = true;
+          const projectedOccupants = occupantsByOrder.get(row.order_id!) ?? [];
+          const occupantLabel = projectedOccupants[0]?.nickname ?? primaryOccupantLabel(row.primary_guest_snapshot);
+          const orderRef = reference("ORDER", row.order_id!, `Order ${row.order_id}`, `/orders/${row.order_id}`);
+          const stayRef = reference("STAY", row.stay_id!, `Stay ${row.stay_id}`);
+          const projectedRun = completedOrderRunByClaimId.get(row.claim_id);
+          if (!projectedRun) partial = true;
+          events.push({
+            actualInventoryUnitId: row.inventory_unit_id, roomId: row.room_id, serviceDate: row.service_date,
+            sourceStartDate: projectedRun?.startDate ?? row.segment_arrival_date!,
+            sourceEndDate: projectedRun?.endDate ?? row.segment_departure_date!,
+            orderArrivalDate: row.order_arrival_date!,
+            sourceKey: projectedRun?.sourceKey ?? `completed:${row.order_id}:${row.segment_id}`,
+            sourceKind: row.stay_type === "FREE" ? "FREE_STAY" : "ORDER", status: historicalStatus,
+            label: historicalStatus === "UNKNOWN" ? `状态未知 ${row.order_id}` : historicalStatus === "ARREARS" ? `欠款 ${row.order_id}` : `已结单 ${row.order_id}`,
+            primaryOccupantLabel: historicalStatus === "UNKNOWN" ? null : occupantLabel,
+            occupants: historicalStatus === "UNKNOWN" ? [] : projectedOccupants,
+            reason: completedProjection?.reason ?? "已退房住宿的最终安排或结算链无法核对",
+            blocking: false, current: false,
+            blockingFactKind: null, claimId: historicalStatus === "UNKNOWN" ? null : row.claim_id, references: [claimRef, orderRef, stayRef], histories: [fallbackHistory],
+            commandIds: row.segment_command_id ? [row.segment_command_id] : [], targetReference: orderRef, orderId: row.order_id!
+          });
+          continue;
+        }
         const activeLifecycleConsistent = !row.active
           || row.order_status === "RESERVED" && row.stay_status === "PLANNED"
           || row.order_status === "CHECKED_IN" && row.stay_status === "IN_HOUSE";
@@ -1414,19 +1694,18 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         const orderRef = reference("ORDER", row.order_id!, `Order ${row.order_id}`, `/orders/${row.order_id}`);
         const stayRef = reference("STAY", row.stay_id!, `Stay ${row.stay_id}`);
         const sourceKind: RoomStatusSourceKind = row.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
-        const status: RoomStatusStatus = historicalCompleted || row.order_status === "CHECKED_IN" ? "IN_HOUSE" : "RESERVED";
+        const status: RoomStatusStatus = row.order_status === "CHECKED_IN" ? "IN_HOUSE" : "RESERVED";
         const projectedOccupants = occupantsByOrder.get(row.order_id!) ?? [];
         const occupantLabel = projectedOccupants[0]?.nickname ?? primaryOccupantLabel(row.primary_guest_snapshot);
-        const projectedRun = row.active
-          ? activeOrderRunByClaimId.get(row.claim_id)
-          : historicalCompleted ? completedOrderRunByClaimId.get(row.claim_id) : undefined;
-        if ((row.active || historicalCompleted) && !projectedRun) partial = true;
+        const projectedRun = activeOrderRunByClaimId.get(row.claim_id);
+        if (!projectedRun) partial = true;
         events.push({
           actualInventoryUnitId: row.inventory_unit_id,
           roomId: row.room_id,
           serviceDate: row.service_date,
           sourceStartDate: projectedRun?.startDate ?? row.segment_arrival_date!,
           sourceEndDate: projectedRun?.endDate ?? row.segment_departure_date!,
+          orderArrivalDate: row.order_arrival_date!,
           sourceKey: projectedRun?.sourceKey ?? `segment:${row.segment_id}`,
           sourceKind,
           status: activeLifecycleConsistent ? status : "UNKNOWN",
@@ -1737,8 +2016,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
 
     const baseRooms = roomRows.filter((roomRow) => roomRow.active)
       .map((roomRow) => displayUnitsById.get(roomRow.id)!);
-    const statusesByUnit = buildUnitStatuses(displayUnitsById, dates, builtIntervals.byUnit);
-    const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit);
+    const statusesByUnit = buildUnitStatuses(displayUnitsById, dates, builtIntervals.byUnit, businessDate);
+    const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit, businessDate);
     const filterOptions = roomStatusFilterOptions(baseRooms, displayUnitsById, statusesByUnit);
     const filteredRooms = filterRoomSelections(baseRooms, displayUnitsById, filters, statusesByUnit);
     const totalRooms = filteredRooms.length;
@@ -1747,7 +2026,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       const children = childUnitIds.map((childId) => {
         const child = displayUnitsById.get(childId)!;
         return assembleUnit(child, dates, builtIntervals.byUnit.get(child.id) ?? [],
-          builtIntervals.claimIdsByIntervalAndDate, options.accessLevel);
+          builtIntervals.claimIdsByIntervalAndDate, options.accessLevel, businessDate);
       });
       return {
         ...assembleUnit(
@@ -1755,7 +2034,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           dates,
           builtIntervals.byUnit.get(baseRoom.id) ?? [],
           builtIntervals.claimIdsByIntervalAndDate,
-          options.accessLevel
+          options.accessLevel,
+          businessDate
         ),
         bedOccupancies: builtBedOccupancies.byRoom.get(baseRoom.id) ?? [],
         children

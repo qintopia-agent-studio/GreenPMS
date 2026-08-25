@@ -29,6 +29,13 @@ function metadata(prefix: string) {
   return { idempotencyKey: `${prefix}-${sequence}`, correlationId: `${prefix}-${sequence}` };
 }
 
+async function withOrdinaryOrderCreationClock<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
+  const businessDate = await propertyLocalToday(db, demo.propertyId);
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), operation)
+    : operation();
+}
+
 function addDays(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
@@ -53,27 +60,29 @@ async function execute(envelope: CommandEnvelope, prefix: string): Promise<Recei
 }
 
 async function createPaidOrder(unitId: string, arrivalDate: string, departureDate: string, prefix: string) {
-  const quote = await createQuoteForTesting(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: unitId,
-    stayType: "TRANSIENT",
-    arrivalDate,
-    departureDate,
-    pricingPolicyVersionId: arrivalDate.slice(0, 7) === departureDate.slice(0, 7)
-      ? demo.transientPolicyId
-      : demo.publicPricingPolicyId
-  });
-  return execute({
-    commandType: "CREATE_ORDER",
-    input: {
+  return withOrdinaryOrderCreationClock(arrivalDate, async () => {
+    const quote = await createQuoteForTesting(db, {
       propertyId: demo.propertyId,
-      quoteId: quote.quoteId,
-      primaryGuest: { fullName: `Stage 12 ${prefix}`, nickname: prefix },
-      bookingChannelCode: "WECOM",
-      channelOrderReference: null,
-      targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
-    }
-  }, `${prefix}-create`);
+      inventoryUnitId: unitId,
+      stayType: "TRANSIENT",
+      arrivalDate,
+      departureDate,
+      pricingPolicyVersionId: arrivalDate.slice(0, 7) === departureDate.slice(0, 7)
+        ? demo.transientPolicyId
+        : demo.publicPricingPolicyId
+    });
+    return execute({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: `Stage 12 ${prefix}`, nickname: prefix },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+      }
+    }, `${prefix}-create`);
+  });
 }
 
 async function forgeTerminalCombination(trx: Transaction<Database>, options: {
