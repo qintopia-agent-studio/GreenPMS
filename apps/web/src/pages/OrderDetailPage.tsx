@@ -41,7 +41,7 @@ import {
   type StayDateChangeMode
 } from "../components/StayDateChangeDrawer";
 import { useWorkspace } from "../session";
-import type { CollectionFactDto, CommandRequest, InventoryUnitDto, MemberDto, MembershipProductDto, OrderViewDto, PricingRevisionDto } from "../types";
+import type { AmendmentDto, CollectionFactDto, CommandRequest, InventoryUnitDto, MemberDto, MembershipProductDto, OrderViewDto, PricingRevisionDto } from "../types";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -79,6 +79,52 @@ export const completeStayOperatorCopy = {
 
 export function orderViewPayloadChanged(previous: OrderViewDto, next: OrderViewDto): boolean {
   return JSON.stringify(previous) !== JSON.stringify(next);
+}
+
+export interface CompleteStayCorrectionRecord {
+  commandId: string;
+  actor: AmendmentDto["actor"];
+  recordedAt: string;
+  reasonNote: string;
+}
+
+function correctionActorsMatch(left: AmendmentDto["actor"], right: AmendmentDto["actor"]): boolean {
+  if (!left || !right) return left === right;
+  return left.subjectId === right.subjectId && left.displayName === right.displayName;
+}
+
+export function completeStayCorrectionRecords(amendments: readonly AmendmentDto[]): CompleteStayCorrectionRecord[] {
+  const byCommand = new Map<string, AmendmentDto[]>();
+  for (const amendment of amendments) {
+    if (!amendment.command_id
+      || amendment.reason_code !== "COMPLETE_STAY"
+      || (amendment.amendment_type !== "CHECK_IN" && amendment.amendment_type !== "CHECK_OUT")) {
+      continue;
+    }
+    const group = byCommand.get(amendment.command_id) ?? [];
+    group.push(amendment);
+    byCommand.set(amendment.command_id, group);
+  }
+
+  return [...byCommand.entries()].flatMap(([commandId, group]) => {
+    if (group.length !== 2) return [];
+    const checkIn = group.find((amendment) => amendment.amendment_type === "CHECK_IN");
+    const checkOut = group.find((amendment) => amendment.amendment_type === "CHECK_OUT");
+    if (!checkIn || !checkOut
+      || checkIn.order_id !== checkOut.order_id
+      || checkIn.sequence + 1 !== checkOut.sequence
+      || checkIn.new_version !== checkOut.prior_version
+      || checkIn.reason_note !== checkOut.reason_note
+      || !correctionActorsMatch(checkIn.actor, checkOut.actor)) {
+      return [];
+    }
+    return [{
+      commandId,
+      actor: checkOut.actor,
+      recordedAt: checkOut.created_at,
+      reasonNote: checkOut.reason_note
+    }];
+  });
 }
 
 export function orderRefreshMustCloseEditor(
@@ -517,6 +563,43 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
       })}</div>
     </section>
   </>;
+}
+
+export function CompleteStayCorrectionHistory({ view }: {
+  view: Pick<OrderViewDto, "order" | "effectiveArrangement" | "amendments" | "amounts">;
+}) {
+  const records = completeStayCorrectionRecords(view.amendments);
+  if (records.length === 0) return null;
+  const externalChannel = Boolean(view.order.booking_channel_code
+    && completeStayExternalChannelCodes.has(view.order.booking_channel_code));
+  const settledWithoutDirectCollection = view.order.stay_type === "FREE"
+    || Boolean(view.order.member_id || view.order.member_contract_id)
+    || externalChannel;
+  const settlementResult = settledWithoutDirectCollection || view.amounts.collectionDifference.minorUnits <= 0
+    ? "已结单"
+    : `欠款 ${formatMoney(view.amounts.collectionDifference)}`;
+
+  return <section className="detail-section full-detail" aria-labelledby="complete-stay-correction-history-heading" data-testid="complete-stay-correction-history">
+    <div className="section-title-row">
+      <h2 id="complete-stay-correction-history-heading">住宿纠正记录</h2>
+      <span>{records.length} 条</span>
+    </div>
+    <div className="amendment-list">{records.map((record) => (
+      <article key={record.commandId} data-testid="complete-stay-correction-history-item">
+        <header className="amendment-head">
+          <strong>完成住宿纠正</strong>
+          <span>{record.actor?.displayName ?? "历史未记录操作人"} · {formatDateTime(record.recordedAt)}</span>
+        </header>
+        <p className="amendment-reason">{record.reasonNote.trim() || "未填写纠正说明"}</p>
+        <dl className="detail-list">
+          <div><dt>纠正方式</dt><dd>保留原订单，由已预订一次完成为已退房</dd></div>
+          <div><dt>住宿日期</dt><dd>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</dd></div>
+          <div><dt>订单金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd></div>
+          <div><dt>纠正结果</dt><dd>{settlementResult}</dd></div>
+        </dl>
+      </article>
+    ))}</div>
+  </section>;
 }
 
 export function OrderAmountStrip({ amounts, pricingRevision, bookingChannelCode }: {
@@ -1611,6 +1694,8 @@ export function OrderDetailPage() {
         showPerOrderFunds={showPerOrderFunds}
         channelPriceDifferenceReason={currentPricingRevision?.reason.note}
       />
+
+      <CompleteStayCorrectionHistory view={view} />
 
       {currentReleaseFeatures.cleaningWorkflow && view.cleaningTasks.length ? <section className="detail-section full-detail" aria-labelledby="cleaning-heading" data-testid="order-cleaning-tasks">
         <div className="section-title-row"><h2 id="cleaning-heading"><Sparkles aria-hidden="true" size={18} />清洁任务</h2><span>{view.cleaningTasks.length}</span></div>

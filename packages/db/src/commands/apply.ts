@@ -296,6 +296,15 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     await lockEntitlementLots(trx, context.order.member_contract_id ?? undefined);
   }
 
+  // A competing completion can close the order and release every Claim while
+  // this transaction waits on the order lock. Let effect rebuilding classify
+  // that lifecycle change as a stale Preview; still fail closed on a broken
+  // RESERVED / PLANNED inventory timeline.
+  if (commandType === "COMPLETE_STAY"
+    && (context.order.status !== "RESERVED" || context.stay.status !== "PLANNED")) {
+    return;
+  }
+
   if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"].includes(commandType)) {
     const timeline = await loadActiveStayTimeline(trx, context);
     const roomDates = await roomDatesForTimeline(trx, propertyId, timeline);

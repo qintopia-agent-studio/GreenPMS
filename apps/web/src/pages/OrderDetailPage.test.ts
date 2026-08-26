@@ -10,6 +10,7 @@ import {
   fulfillmentResultLabel,
   initialRepriceTargetYuan,
   collectionDifferencePresentation,
+  completeStayCorrectionRecords,
   completeStayOperatorCopy,
   collectionFactTransactionReferenceLabel,
   CollectionFactNote,
@@ -20,6 +21,7 @@ import {
   collectionAmountYuanInputToMinor,
   occupantSnapshotEntries,
   OrderAmountStrip,
+  CompleteStayCorrectionHistory,
   OrderLifecycleSections,
   OrderMembershipCoverageSection,
   pricingBasisLabel,
@@ -52,6 +54,85 @@ import {
   type CommandDialogProgress,
   type PersistedCommandRecovery
 } from "../ui";
+
+describe("completed-stay correction audit history", () => {
+  function correctedOrderView(): OrderViewDto {
+    const common = {
+      order_id: "order_324",
+      reason_code: "COMPLETE_STAY",
+      reason_note: "客人实际入住并已离店，纠正开发期间遗留的错误预订",
+      command_id: "command_complete_324",
+      actor: { subjectId: "subject_operator", displayName: "前台操作员" },
+      created_at: "2026-08-25T02:30:00.000Z"
+    };
+    return {
+      order: {
+        id: "order_324",
+        arrival_date: "2026-08-06",
+        departure_date: "2026-08-12"
+      },
+      effectiveArrangement: {
+        arrivalDate: "2026-08-06",
+        departureDate: "2026-08-12"
+      },
+      amounts: {
+        currentContractAmount: { currency: "CNY", minorUnits: 139_200 },
+        netRecordedCollection: { currency: "CNY", minorUnits: 0 },
+        collectionDifference: { currency: "CNY", minorUnits: 139_200 },
+        refundReferenceAmount: { currency: "CNY", minorUnits: 0 }
+      },
+      amendments: [{
+        ...common,
+        id: "amend_check_in_324",
+        sequence: 2,
+        amendment_type: "CHECK_IN",
+        prior_version: 1,
+        new_version: 2,
+        payload: { orderId: "order_324" }
+      }, {
+        ...common,
+        id: "amend_check_out_324",
+        sequence: 3,
+        amendment_type: "CHECK_OUT",
+        prior_version: 2,
+        new_version: 3,
+        payload: { orderId: "order_324" }
+      }]
+    } as unknown as OrderViewDto;
+  }
+
+  it("groups the immutable check-in and check-out pair into one operator-facing correction record", () => {
+    const records = completeStayCorrectionRecords(correctedOrderView().amendments);
+    expect(records).toEqual([{
+      commandId: "command_complete_324",
+      actor: { subjectId: "subject_operator", displayName: "前台操作员" },
+      recordedAt: "2026-08-25T02:30:00.000Z",
+      reasonNote: "客人实际入住并已离店，纠正开发期间遗留的错误预订"
+    }]);
+  });
+
+  it("shows the preserved dates and amount alongside the final arrears result", () => {
+    const html = renderToStaticMarkup(createElement(CompleteStayCorrectionHistory, {
+      view: correctedOrderView()
+    }));
+    expect(html).toContain("住宿纠正记录");
+    expect(html).toContain("1 条");
+    expect(html).toContain("前台操作员");
+    expect(html).toContain("客人实际入住并已离店，纠正开发期间遗留的错误预订");
+    expect(html).toContain("2026-08-06 至 2026-08-12");
+    expect(html).toContain("¥1,392.00");
+    expect(html).toContain("欠款");
+  });
+
+  it("does not invent a correction record for an incomplete or unrelated amendment set", () => {
+    const view = correctedOrderView();
+    expect(completeStayCorrectionRecords(view.amendments.slice(0, 1))).toEqual([]);
+    expect(completeStayCorrectionRecords(view.amendments.map((amendment) => ({
+      ...amendment,
+      reason_code: "NORMAL_FULFILLMENT"
+    })))).toEqual([]);
+  });
+});
 
 describe("order detail background refresh", () => {
   it("keeps an identical order DTO stable while detecting real fact changes", () => {

@@ -186,6 +186,54 @@ async function projectedStatus(orderId: string, unitId: string) {
   )?.status;
 }
 
+async function completeStayBusinessSnapshot(orderId: string) {
+  const [order, stay, segments, occupants, amendments, revisions, collectionFacts] = await Promise.all([
+    db.selectFrom("orders")
+      .select(["id", "status", "arrival_date", "departure_date", "current_revision_id", "version"])
+      .where("id", "=", orderId)
+      .executeTakeFirstOrThrow(),
+    db.selectFrom("stays")
+      .select(["id", "status"])
+      .where("order_id", "=", orderId)
+      .executeTakeFirstOrThrow(),
+    db.selectFrom("stay_segments")
+      .innerJoin("stays", "stays.id", "stay_segments.stay_id")
+      .select(["stay_segments.id", "stay_segments.inventory_unit_id", "stay_segments.arrival_date", "stay_segments.departure_date"])
+      .where("stays.order_id", "=", orderId)
+      .orderBy("stay_segments.sequence")
+      .execute(),
+    db.selectFrom("order_occupants")
+      .select(["id", "ordinal", "role", "full_name", "nickname", "phone", "document_number", "created_by_command_id"])
+      .where("order_id", "=", orderId)
+      .orderBy("ordinal")
+      .execute(),
+    db.selectFrom("amendments")
+      .select(["id", "sequence", "amendment_type", "reason_code", "reason_note", "command_id"])
+      .where("order_id", "=", orderId)
+      .orderBy("sequence")
+      .execute(),
+    db.selectFrom("pricing_revisions")
+      .select(["id", "revision_no", "amendment_id", "arrival_date", "departure_date", "policy_base_amount_minor", "current_contract_amount_minor", "currency"])
+      .where("order_id", "=", orderId)
+      .orderBy("revision_no")
+      .execute(),
+    db.selectFrom("collection_facts")
+      .select(["fact_id", "fact_type", "amount_minor", "net_effect_minor", "command_id"])
+      .where("order_id", "=", orderId)
+      .orderBy("created_at")
+      .orderBy("fact_id")
+      .execute()
+  ]);
+  const claims = await db.selectFrom("inventory_claims")
+    .select(["id", "source_id", "inventory_unit_id", "service_date", "active", "released_at"])
+    .where("source_type", "=", "ORDER_SEGMENT")
+    .where("source_id", "in", segments.map((segment) => segment.id))
+    .orderBy("service_date")
+    .orderBy("id")
+    .execute();
+  return { order, stay, segments, occupants, amendments, revisions, collectionFacts, claims };
+}
+
 async function unitId(code: string) {
   return (await db.selectFrom("inventory_units").select("id").where("property_id", "=", demo.propertyId).where("code", "=", code).executeTakeFirstOrThrow()).id;
 }
@@ -280,6 +328,92 @@ afterEach(async () => {
 });
 
 describe("complete overdue reserved stay", () => {
+  it("corrects the 106 and 324 equivalent while preserving the original order, stay, occupant, dates, and price", async () => {
+    const room106Id = await unitId("106");
+    const created = await createPastOrder({
+      prefix: "324",
+      unitId: room106Id,
+      arrivalDate: "2026-08-06",
+      departureDate: "2026-08-12"
+    });
+    const before = await completeStayBusinessSnapshot(created.orderId);
+    expect(before.order).toMatchObject({
+      id: created.orderId,
+      status: "RESERVED",
+      arrival_date: "2026-08-06",
+      departure_date: "2026-08-12",
+      version: 1
+    });
+    expect(before.stay.status).toBe("PLANNED");
+    expect(before.segments).toHaveLength(1);
+    expect(before.segments[0]).toMatchObject({
+      inventory_unit_id: room106Id,
+      arrival_date: "2026-08-06",
+      departure_date: "2026-08-12"
+    });
+    expect(before.occupants).toEqual([expect.objectContaining({ full_name: "住客 324", nickname: "324" })]);
+    expect(before.revisions).toEqual([expect.objectContaining({
+      revision_no: 1,
+      arrival_date: "2026-08-06",
+      departure_date: "2026-08-12",
+      current_contract_amount_minor: 139_200,
+      currency: "CNY"
+    })]);
+    expect(before.collectionFacts).toEqual([]);
+    expect(before.claims).toHaveLength(6);
+    expect(before.claims.every((claim) => claim.active === true && claim.released_at === null)).toBe(true);
+
+    const reason = "客人实际入住并已离店，纠正开发期间遗留的错误预订";
+    const receipt = await completeStay(created.orderId, "324", reason, undefined, "2026-08-25");
+    expect(receipt.result).toMatchObject({ settlementStatus: "ARREARS", collectionFactId: null });
+    expect(receipt.factRefs).toEqual([]);
+
+    const after = await completeStayBusinessSnapshot(created.orderId);
+    expect(after.order).toEqual({ ...before.order, status: "CHECKED_OUT", version: 3 });
+    expect(after.stay).toEqual({ ...before.stay, status: "COMPLETED" });
+    expect(after.segments).toEqual(before.segments);
+    expect(after.occupants).toEqual(before.occupants);
+    expect(after.revisions).toEqual(before.revisions);
+    expect(after.collectionFacts).toEqual([]);
+    expect(after.amendments[0]).toEqual(before.amendments[0]);
+    expect(after.amendments.slice(1)).toEqual([
+      expect.objectContaining({
+        sequence: 2,
+        amendment_type: "CHECK_IN",
+        reason_code: "COMPLETE_STAY",
+        reason_note: reason,
+        command_id: receipt.commandId
+      }),
+      expect.objectContaining({
+        sequence: 3,
+        amendment_type: "CHECK_OUT",
+        reason_code: "COMPLETE_STAY",
+        reason_note: reason,
+        command_id: receipt.commandId
+      })
+    ]);
+    expect(after.claims.map((claim) => ({
+      id: claim.id,
+      source_id: claim.source_id,
+      inventory_unit_id: claim.inventory_unit_id,
+      service_date: claim.service_date
+    }))).toEqual(before.claims.map((claim) => ({
+      id: claim.id,
+      source_id: claim.source_id,
+      inventory_unit_id: claim.inventory_unit_id,
+      service_date: claim.service_date
+    })));
+    expect(after.claims.every((claim) => claim.active === false && claim.released_at !== null)).toBe(true);
+    expect(await db.selectFrom("audit_entries")
+      .select(["action", "decision", "command_id", "target_refs"])
+      .where("command_id", "=", receipt.commandId)
+      .execute()).toEqual([expect.objectContaining({
+        action: "COMPLETE_STAY",
+        decision: "ALLOWED",
+        command_id: receipt.commandId
+      })]);
+  });
+
   it("atomically completes an overdue reserved stay that was already paid in full", async () => {
     const reason = "客人实际住过且已离店，系统漏录入住与退房";
     const created = await createPastOrder({ prefix: "paid" });
@@ -904,6 +1038,164 @@ describe("complete overdue reserved stay", () => {
     expect(replay).toEqual(first);
     expect(await db.selectFrom("amendments").select("id").where("order_id", "=", orderId).execute()).toHaveLength(3);
     expect(await db.selectFrom("collection_facts").select("fact_id").where("order_id", "=", orderId).execute()).toHaveLength(1);
+  });
+
+  it("serializes different COMPLETE_STAY previews so only one correction commits", async () => {
+    const created = await createPastOrder({ prefix: "concurrent-correction" });
+    const reason = "并发核对同一笔错误预订";
+    const envelope: CommandEnvelope = {
+      commandType: "COMPLETE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        actualStayCompletedConfirmed: true,
+        reasonNote: reason
+      }
+    };
+    const [firstPrepared, secondPrepared] = await atClock(COMPLETION, () => Promise.all([
+      preview(envelope, "concurrent-correction-first"),
+      preview(envelope, "concurrent-correction-second")
+    ]));
+    const firstMetadata = metadata("concurrent-correction-first-confirm");
+    const secondMetadata = metadata("concurrent-correction-second-confirm");
+    const confirmation = (effectHash: string) => ({
+      propertyId: demo.propertyId,
+      commandType: "COMPLETE_STAY" as const,
+      confirmation: true as const,
+      expectedEffectHash: effectHash,
+      reason: { code: "COMPLETE_STAY", note: reason }
+    });
+
+    const receipts = await atClock(COMPLETION, () => Promise.all([
+      confirmCommandPreview(db, principal, firstPrepared.preview.previewId, confirmation(firstPrepared.preview.effectHash), firstMetadata),
+      confirmCommandPreview(db, principal, secondPrepared.preview.previewId, confirmation(secondPrepared.preview.effectHash), secondMetadata)
+    ]));
+    expect(receipts.filter((receipt) => receipt.businessCommitted)).toHaveLength(1);
+    const rejectedReceipts = receipts.filter((receipt) => !receipt.businessCommitted);
+    expect(rejectedReceipts).toHaveLength(1);
+    expect(rejectedReceipts[0]?.executionStatus).toBe("NOT_EXECUTED");
+    expect(rejectedReceipts[0]?.error?.code).toBe("PREVIEW_STALE");
+
+    const snapshot = await completeStayBusinessSnapshot(created.orderId);
+    expect(snapshot.order).toMatchObject({ status: "CHECKED_OUT", version: 3 });
+    expect(snapshot.stay.status).toBe("COMPLETED");
+    expect(snapshot.amendments.map((amendment) => amendment.amendment_type)).toEqual(["CREATE_ORDER", "CHECK_IN", "CHECK_OUT"]);
+    expect(snapshot.amendments.slice(1).every((amendment) => amendment.command_id === receipts.find((receipt) => receipt.businessCommitted)!.commandId)).toBe(true);
+    expect(snapshot.collectionFacts).toEqual([]);
+    expect(snapshot.claims).toHaveLength(5);
+    expect(snapshot.claims.every((claim) => claim.active === false && claim.released_at !== null)).toBe(true);
+
+    const persisted = await db.selectFrom("command_executions")
+      .innerJoin("command_receipts", "command_receipts.command_id", "command_executions.id")
+      .select(["command_executions.idempotency_key", "command_receipts.execution_status", "command_receipts.business_committed", "command_receipts.error"])
+      .where("command_executions.idempotency_key", "in", [firstMetadata.idempotencyKey, secondMetadata.idempotencyKey])
+      .execute();
+    expect(persisted).toHaveLength(2);
+    expect(persisted.map((row) => row.execution_status).sort()).toEqual(["EXECUTED", "NOT_EXECUTED"]);
+    expect(persisted.find((row) => !row.business_committed)?.error).toMatchObject({ code: "PREVIEW_STALE" });
+  });
+
+  it.each([
+    {
+      artifact: "Receipt",
+      tableName: "command_receipts",
+      functionName: "fail_complete_stay_receipt",
+      triggerName: "fail_complete_stay_receipt_at_commit",
+      failureMessage: "forced complete-stay receipt failure"
+    },
+    {
+      artifact: "audit",
+      tableName: "audit_entries",
+      functionName: "fail_complete_stay_audit",
+      triggerName: "fail_complete_stay_audit_at_commit",
+      failureMessage: "forced complete-stay audit failure"
+    }
+  ] as const)("rolls back the entire correction when $artifact persistence fails", async ({
+    artifact,
+    tableName,
+    functionName,
+    triggerName,
+    failureMessage
+  }) => {
+    const created = await createPastOrder({ prefix: `correction-${artifact.toLowerCase()}-rollback` });
+    const reason = `纠正提交在 ${artifact} 持久化失败时必须整体回滚`;
+    const envelope: CommandEnvelope = {
+      commandType: "COMPLETE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.orderId,
+        actualStayCompletedConfirmed: true,
+        reasonNote: reason,
+        collection: {
+          amountMinor: 10_000,
+          method: "WECOM",
+          transactionReference: `WX-CORRECTION-${artifact.toUpperCase()}-ROLLBACK`
+        }
+      }
+    };
+    const prepared = await atClock(COMPLETION, () => preview(envelope, `correction-${artifact.toLowerCase()}-rollback`));
+    const before = await completeStayBusinessSnapshot(created.orderId);
+    const confirmMetadata = metadata(`correction-${artifact.toLowerCase()}-rollback-confirm`);
+    const confirmation = {
+      propertyId: demo.propertyId,
+      commandType: "COMPLETE_STAY" as const,
+      confirmation: true as const,
+      expectedEffectHash: prepared.preview.effectHash,
+      reason: { code: "COMPLETE_STAY", note: reason }
+    };
+
+    try {
+      await sql.raw(`
+        CREATE OR REPLACE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION '${failureMessage}'; END $$;
+        CREATE CONSTRAINT TRIGGER ${triggerName} AFTER INSERT ON ${tableName}
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION ${functionName}();
+      `).execute(db);
+
+      await expect(atClock(COMPLETION, () => confirmCommandPreview(
+        db,
+        principal,
+        prepared.preview.previewId,
+        confirmation,
+        confirmMetadata
+      ))).rejects.toThrow(failureMessage);
+    } finally {
+      await sql.raw(`
+        DROP TRIGGER IF EXISTS ${triggerName} ON ${tableName};
+        DROP FUNCTION IF EXISTS ${functionName}();
+      `).execute(db);
+    }
+
+    expect(await completeStayBusinessSnapshot(created.orderId)).toEqual(before);
+    expect(await db.selectFrom("command_executions")
+      .select("id")
+      .where("subject_id", "=", principal.subjectId)
+      .where("property_id", "=", demo.propertyId)
+      .where("command_type", "=", "COMPLETE_STAY")
+      .where("idempotency_key", "=", confirmMetadata.idempotencyKey)
+      .execute()).toHaveLength(0);
+    expect(await db.selectFrom("audit_entries")
+      .select("id")
+      .where("correlation_id", "=", confirmMetadata.correlationId)
+      .execute()).toHaveLength(0);
+    expect(await db.selectFrom("command_previews")
+      .select(["status", "used_at"])
+      .where("id", "=", prepared.preview.previewId)
+      .executeTakeFirstOrThrow()).toEqual({ status: "OPEN", used_at: null });
+
+    const retried = await atClock(COMPLETION, () => confirmCommandPreview(
+      db,
+      principal,
+      prepared.preview.previewId,
+      confirmation,
+      confirmMetadata
+    ));
+    expect(retried).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+    const afterRetry = await completeStayBusinessSnapshot(created.orderId);
+    expect(afterRetry.order).toMatchObject({ status: "CHECKED_OUT", version: 3 });
+    expect(afterRetry.collectionFacts).toHaveLength(1);
+    expect(afterRetry.claims.every((claim) => claim.active === false && claim.released_at !== null)).toBe(true);
   });
 
   it("keeps the current property business date visible to the completion flow", async () => {
