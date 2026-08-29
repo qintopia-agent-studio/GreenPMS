@@ -15,6 +15,7 @@ import {
   reconcileRoomStatusRestoration,
   resolveRoomStatusOrderReturnTarget,
   roomStatusFactFingerprint,
+  roomStatusGridFocusForSelection,
   roomStatusCellBelongsToStay,
   roomStatusOrderIdentityForDate,
   roomStatusOrderOptionsForDate,
@@ -1014,10 +1015,12 @@ describe("RoomStatus restoration", () => {
     }), snapshot.propertyId)).toBeUndefined();
     expect(parseRoomStatusRestoration(serialized, "property_other")).toBeUndefined();
     expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-07-20" } }), snapshot.propertyId)).toBeUndefined();
-    expect(parseRoomStatusRestoration(JSON.stringify({
+    const outsideBoardSelection = {
       ...snapshot,
       state: createRoomStatusViewState({ selection: selectionFromCells("unit_room_101", "2026-07-19", "2026-07-19") })
-    }), snapshot.propertyId)).toBeUndefined();
+    };
+    expect(parseRoomStatusRestoration(JSON.stringify(outsideBoardSelection), snapshot.propertyId))
+      .toEqual(outsideBoardSelection);
     expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-08-19" } }), snapshot.propertyId)?.range)
       .toEqual({ arrivalDate: "2026-07-20", departureDate: "2026-08-19" });
     expect(parseRoomStatusRestoration(JSON.stringify({ ...snapshot, range: { arrivalDate: "2026-07-20", departureDate: "2026-08-20" } }), snapshot.propertyId)).toBeUndefined();
@@ -1049,6 +1052,82 @@ describe("RoomStatus restoration", () => {
       dateWindowAdjusted: false,
       scrollAnchorAdjusted: false
     });
+  });
+
+  it("round-trips and reconciles a 366-night draft outside the 30-night board", () => {
+    const room = unit();
+    const dates = Array.from({ length: 30 }, (_, index) => {
+      const date = new Date("2026-07-20T00:00:00.000Z");
+      date.setUTCDate(date.getUTCDate() + index);
+      return date.toISOString().slice(0, 10);
+    });
+    const selection = selectionFromInputs(room.id, "2026-07-20", "2027-07-21")!;
+    const state = createRoomStatusViewState({
+      focusedCell: { unitId: room.id, serviceDate: selection.focusDate },
+      selection,
+      scrollAnchor: { unitId: room.id, left: 32, top: 48 }
+    });
+    const snapshot = {
+      version: 1 as const,
+      propertyId: "property_qintopia",
+      range: { arrivalDate: dates[0]!, departureDate: "2026-08-19" },
+      revision: "room-status-revision-long-stay",
+      savedAt: "2026-07-20T10:00:00.000Z",
+      state
+    };
+
+    expect(parseRoomStatusRestoration(serializeRoomStatusRestoration(snapshot), snapshot.propertyId)).toEqual(snapshot);
+    expect(reconcileRoomStatusRestoration([room], dates, state)).toEqual({
+      state: {
+        ...state,
+        focusedCell: { unitId: room.id, serviceDate: "2026-07-20" }
+      },
+      outcome: "RESTORED",
+      filtersCleared: false,
+      dateWindowAdjusted: false,
+      scrollAnchorAdjusted: false
+    });
+
+    const overLimit = {
+      ...snapshot,
+      state: createRoomStatusViewState({
+        selection: selectionFromInputs(room.id, "2026-07-20", "2027-07-22")
+      })
+    };
+    expect(parseRoomStatusRestoration(JSON.stringify(overLimit), snapshot.propertyId)).toBeUndefined();
+  });
+
+  it("keeps a fully off-board long draft without assigning an off-board grid focus", () => {
+    const room = unit();
+    const selection = selectionFromInputs(room.id, "2026-10-01", "2027-03-01")!;
+    const state = createRoomStatusViewState({
+      focusedCell: { unitId: room.id, serviceDate: selection.focusDate },
+      selection
+    });
+
+    const result = reconcileRoomStatusRestoration([room], ["2026-07-20", "2026-07-21"], state);
+    expect(result.outcome).toBe("RESTORED");
+    expect(result.state.selection).toEqual(selection);
+    expect(result.state.focusedCell).toBeNull();
+  });
+
+  it("keeps an independent visible keyboard focus while restoring a selection", () => {
+    const room = unit();
+    const selection = selectionFromInputs(room.id, "2026-07-20", "2026-07-22")!;
+    const state = createRoomStatusViewState({
+      focusedCell: { unitId: room.id, serviceDate: "2026-07-23" },
+      selection
+    });
+    const dates = ["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23"];
+
+    expect(roomStatusGridFocusForSelection(selection, dates)).toEqual({
+      unitId: room.id,
+      serviceDate: "2026-07-21"
+    });
+    const result = reconcileRoomStatusRestoration([room], dates, state);
+    expect(result.outcome).toBe("RESTORED");
+    expect(result.state.focusedCell).toEqual(state.focusedCell);
+    expect(result.state.selection).toEqual(selection);
   });
 
   it("keeps a changed selection inspectable but returns focus to its start", () => {

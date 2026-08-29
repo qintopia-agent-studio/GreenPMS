@@ -1286,7 +1286,31 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   ));
   expect(candidate, "an unoccupied room outside shared E2E fixtures is required for long-stay browser coverage").toBeTruthy();
 
-  const drawer = await openRoomStatusWriteDrawer(page, candidate!.id, longArrival, "创建订单");
+  let quoteRequestCount = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/quotes") {
+      quoteRequestCount += 1;
+    }
+  });
+
+  const quickPopover = await openDayPopover(page, roomCell(page, candidate!.id, longArrival));
+  await quickPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  const selectionDrawer = page.locator("dialog.room-status-view-drawer");
+  await expect(selectionDrawer).toBeVisible();
+  const departure117 = addDays(longArrival, 117);
+  await selectionDrawer.getByLabel("退房日期", { exact: true }).fill(departure117);
+  await expect(selectionDrawer.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeVisible();
+
+  const initialQuote = quoteResponse(page, {
+    inventoryUnitId: candidate!.id,
+    arrivalDate: longArrival,
+    departureDate: departure117
+  });
+  await selectionDrawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  expect((await initialQuote).ok()).toBe(true);
+
+  const drawer = page.locator("dialog.room-status-write-drawer");
+  await expect(drawer).toBeVisible();
   const departureInput = drawer.getByLabel("退房日期", { exact: true });
   const quoteFor = async (departureDate: string) => {
     const response = quoteResponse(page, {
@@ -1298,9 +1322,6 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
     return response;
   };
 
-  const departure117 = addDays(longArrival, 117);
-  const accepted117 = await quoteFor(departure117);
-  expect(accepted117.ok()).toBe(true);
   await expect(drawer.getByText("房态当前只显示其中 30 夜，住宿日期仍按完整区间核对。", { exact: true })).toBeVisible();
   await expect(drawer.getByTestId("quote-result")).toContainText("117 晚");
   await drawer.getByTestId("primary-guest-nickname").fill("长住浏览器验证");
@@ -1314,10 +1335,12 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   await expect(drawer.getByTestId("quote-result")).toContainText("366 晚");
   await expect(drawer.getByTestId("room-status-selection-date-error")).toBeHidden();
 
+  const quoteRequestsBeforeOverLimit = quoteRequestCount;
   await departureInput.fill(addDays(longArrival, 367));
   await expect(drawer.getByTestId("room-status-selection-date-error")).toContainText("住宿日期最长 366 夜。");
   await expect(drawer.getByTestId("quote-result")).toHaveCount(0);
   await expect(drawer.getByTestId("create-order")).toBeDisabled();
+  await expect.poll(() => quoteRequestCount).toBe(quoteRequestsBeforeOverLimit);
 
   await departureInput.fill("");
   await expect(drawer.getByTestId("quote-result")).toHaveCount(0);
@@ -1345,6 +1368,11 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   await expect(quoteFailure).toContainText(remoteConflictArrival);
   await expect(quoteFailure).toContainText(remoteConflictDeparture);
   await expect(quoteFailure).toContainText(/已有住宿|不能重复安排/);
+  await expect(drawer.getByLabel("入住日期", { exact: true })).toHaveValue(longArrival);
+  await expect(departureInput).toHaveValue(addDays(longArrival, 116));
+  await expect(drawer.getByTestId("primary-guest-nickname")).toHaveValue("长住浏览器验证");
+  await expect(drawer.getByTestId("primary-guest-name")).toHaveValue("长住浏览器验证住客");
+  await expect(drawer.getByTestId("booking-channel-code")).toHaveValue("WECOM");
   expect(await propertyOrderCount()).toBe(ordersBeforeFailedTargetQuote);
 });
 

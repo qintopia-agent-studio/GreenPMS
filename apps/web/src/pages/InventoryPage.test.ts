@@ -1316,7 +1316,7 @@ describe("Room-status backfill entry routing", () => {
     expect(dayActions(unit, unit!.days[0]!, "2026-08-14").map((candidate) => candidate.code)).toEqual(["BACKFILL_ORDER"]);
   });
 
-  it("fails closed when a selected date is occupied or missing from the authoritative window", () => {
+  it("fails closed for loaded conflicts and delegates dates outside the board to the Quote API", () => {
     const blocked = {
       ...unit!,
       days: unit!.days.map((candidate) => candidate.serviceDate === "2026-08-14"
@@ -1336,7 +1336,7 @@ describe("Room-status backfill entry routing", () => {
       focusDate: "2026-08-12",
       arrivalDate: "2026-08-11",
       departureDate: "2026-08-13"
-    }, "2026-08-14")).toEqual([]);
+    }, "2026-08-14").map((candidate) => candidate.code)).toEqual(["BACKFILL_ORDER"]);
   });
 
   it("keeps a server-disabled backfill action visible but never treats it as authorization", () => {
@@ -1520,6 +1520,180 @@ describe("Room-status backfill entry routing", () => {
     };
     expect(roomStatusAuthorizedQuoteAction(occupied, target, "2026-08-14")).toBeUndefined();
     expect(roomStatusQuoteActionCodeForUnit(action("BACKFILL_ORDER", "unit_other"), unit!.id)).toBeUndefined();
+  });
+
+  it("keeps the exact server action authorized for 31 through 366 nights outside the loaded board", () => {
+    const arrivalDate = "2026-08-14";
+    const addDays = (value: string, days: number) => {
+      const date = new Date(`${value}T00:00:00.000Z`);
+      date.setUTCDate(date.getUTCDate() + days);
+      return date.toISOString().slice(0, 10);
+    };
+    const createOrderAction = action("CREATE_ORDER");
+
+    for (const nights of [31, 117, 335, 356, 365, 366]) {
+      const target = {
+        unitId: unit!.id,
+        arrivalDate,
+        departureDate: addDays(arrivalDate, nights),
+        initialStayType: "TRANSIENT" as const,
+        actionCode: "CREATE_ORDER" as const
+      };
+      expect(roomStatusAuthorizedQuoteAction(unit, target, "2026-08-14"), `${nights} nights`)
+        .toEqual(createOrderAction);
+      expect(updateRoomStatusQuoteTargetSelection(target, unit, {
+        unitId: unit!.id,
+        anchorDate: arrivalDate,
+        focusDate: addDays(arrivalDate, nights - 1),
+        arrivalDate,
+        departureDate: addDays(arrivalDate, nights)
+      }, "2026-08-14"), `${nights} night draft`).toEqual(target);
+    }
+
+    expect(roomStatusAuthorizedQuoteAction(unit, {
+      unitId: unit!.id,
+      arrivalDate,
+      departureDate: addDays(arrivalDate, 367),
+      initialStayType: "TRANSIENT",
+      actionCode: "CREATE_ORDER"
+    }, "2026-08-14")).toBeUndefined();
+    expect(selectionActions(unit, {
+      unitId: unit!.id,
+      anchorDate: arrivalDate,
+      focusDate: addDays(arrivalDate, 366),
+      arrivalDate,
+      departureDate: addDays(arrivalDate, 367)
+    }, "2026-08-14")).toEqual([]);
+  });
+
+  it("offers direct long-range actions for rooms and beds before the write form is opened", () => {
+    const roomSelection = {
+      unitId: unit!.id,
+      anchorDate: "2026-08-14",
+      focusDate: "2026-09-13",
+      arrivalDate: "2026-08-14",
+      departureDate: "2026-09-14"
+    };
+    expect(selectionActions(unit, roomSelection, "2026-08-14").map((candidate) => candidate.code))
+      .toEqual(["CREATE_ORDER", "CREATE_FREE_STAY"]);
+
+    const bedId = "unit_bed_104_a";
+    const bedUnit = {
+      ...unit!,
+      id: bedId,
+      kind: "BED" as const,
+      allowedActions: unit!.allowedActions.map((candidate) => ({
+        ...candidate,
+        targetReference: candidate.targetReference
+          ? { ...candidate.targetReference, id: bedId }
+          : null
+      }))
+    };
+    const bedSelection = { ...roomSelection, unitId: bedId };
+    expect(selectionActions(bedUnit, bedSelection, "2026-08-14").map((candidate) => candidate.code))
+      .toEqual(["CREATE_ORDER", "CREATE_FREE_STAY"]);
+    expect(roomStatusAuthorizedQuoteAction(bedUnit, {
+      unitId: bedId,
+      arrivalDate: bedSelection.arrivalDate,
+      departureDate: bedSelection.departureDate,
+      initialStayType: "TRANSIENT",
+      actionCode: "CREATE_ORDER"
+    }, "2026-08-14")?.targetReference?.id).toBe(bedId);
+  });
+
+  it("keeps long free-stay and historical backfill intent separate", () => {
+    const futureTarget = {
+      unitId: unit!.id,
+      arrivalDate: "2026-09-01",
+      departureDate: "2026-10-02",
+      initialStayType: "FREE" as const,
+      actionCode: "CREATE_FREE_STAY" as const
+    };
+    expect(roomStatusAuthorizedQuoteAction(unit, futureTarget, "2026-08-14")?.code)
+      .toBe("CREATE_FREE_STAY");
+    expect(roomStatusAuthorizedQuoteAction(unit, { ...futureTarget, actionCode: "BACKFILL_ORDER" }, "2026-08-14"))
+      .toBeUndefined();
+
+    const historicalTarget = {
+      unitId: unit!.id,
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-09-01",
+      initialStayType: "TRANSIENT" as const,
+      actionCode: "BACKFILL_ORDER" as const,
+      backfill: true as const
+    };
+    expect(roomStatusAuthorizedQuoteAction(unit, historicalTarget, "2026-08-14")?.code)
+      .toBe("BACKFILL_ORDER");
+    expect(roomStatusAuthorizedQuoteAction(unit, { ...historicalTarget, actionCode: "CREATE_ORDER" }, "2026-08-14"))
+      .toBeUndefined();
+  });
+
+  it("fails long authorization closed for disabled, mismatched, or incomplete loaded actions", () => {
+    const target = {
+      unitId: unit!.id,
+      arrivalDate: "2026-08-14",
+      departureDate: "2026-09-14",
+      initialStayType: "TRANSIENT" as const,
+      actionCode: "CREATE_ORDER" as const
+    };
+    expect(roomStatusAuthorizedQuoteAction({
+      ...unit!,
+      allowedActions: [action("CREATE_ORDER", unit!.id, false)]
+    }, target, "2026-08-14")).toBeUndefined();
+    expect(roomStatusAuthorizedQuoteAction({
+      ...unit!,
+      allowedActions: [action("CREATE_ORDER", "unit_other")]
+    }, target, "2026-08-14")).toBeUndefined();
+
+    const missingLoadedDay = {
+      ...unit!,
+      days: unit!.days.filter((candidate) => candidate.serviceDate !== "2026-08-14")
+    };
+    expect(selectionActions(missingLoadedDay, {
+      unitId: unit!.id,
+      anchorDate: "2026-08-13",
+      focusDate: "2026-08-14",
+      arrivalDate: "2026-08-13",
+      departureDate: "2026-08-15"
+    }, "2026-08-14")).toEqual([]);
+  });
+
+  it("authorizes prefix, suffix, and fully off-board intersections without inventing availability", () => {
+    const historical = {
+      unitId: unit!.id,
+      anchorDate: "2026-08-01",
+      focusDate: "2026-08-31",
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-09-01"
+    };
+    expect(selectionActions(unit, historical, "2026-08-14").map((candidate) => candidate.code))
+      .toEqual(["BACKFILL_ORDER"]);
+
+    const future = {
+      unitId: unit!.id,
+      anchorDate: "2026-09-01",
+      focusDate: "2026-10-01",
+      arrivalDate: "2026-09-01",
+      departureDate: "2026-10-02"
+    };
+    expect(selectionActions(unit, future, "2026-08-14").map((candidate) => candidate.code))
+      .toEqual(["CREATE_ORDER", "CREATE_FREE_STAY"]);
+  });
+
+  it("still fails closed when the loaded part of a long selection is occupied", () => {
+    const occupied = {
+      ...unit!,
+      days: unit!.days.map((candidate) => candidate.serviceDate === "2026-08-15"
+        ? { ...candidate, available: false, intervalIds: ["stay_inside_loaded_window"] }
+        : candidate)
+    };
+    expect(roomStatusAuthorizedQuoteAction(occupied, {
+      unitId: unit!.id,
+      arrivalDate: "2026-08-14",
+      departureDate: "2026-09-14",
+      initialStayType: "TRANSIENT",
+      actionCode: "CREATE_ORDER"
+    }, "2026-08-14")).toBeUndefined();
   });
 
   it("preserves a recovered quote's explicit intent and fails closed for legacy intent-less records", () => {

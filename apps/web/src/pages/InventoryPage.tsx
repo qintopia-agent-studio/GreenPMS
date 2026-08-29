@@ -76,6 +76,7 @@ import {
   reconcileRoomStatusRestoration,
   resolveRoomStatusOrderReturnTarget,
   roomStatusFactFingerprint,
+  roomStatusGridFocusForSelection,
   roomStatusOrderIdentityForDate,
   roomStatusOrderIdentityForInterval,
   roomStatusOrderOptionsForDate,
@@ -1355,7 +1356,21 @@ function QuoteWorkbench({
     setBackfillCashCollector("");
     setBackfillCashNote("");
     setError(undefined);
-  }, [unit?.id, arrivalDate, departureDate]);
+  }, [unit?.id]);
+
+  useEffect(() => {
+    settledQuoteSignature.current = "";
+    setQuoteSignature("");
+    setTargetContractAmountYuan("");
+    setChannelPriceDifferenceReason("");
+    setManualPriceAdjustmentReason("");
+    setBackfillAmountYuan("");
+    setBackfillMethod("WECOM");
+    setBackfillTransactionReference("");
+    setBackfillCashCollector("");
+    setBackfillCashNote("");
+    setError(undefined);
+  }, [arrivalDate, departureDate]);
 
   useEffect(() => {
     setBookingChannelCode("");
@@ -2216,6 +2231,12 @@ export function roomStatusAuthorizedQuoteAction(
     arrivalDate: validTarget.arrivalDate,
     departureDate: validTarget.departureDate
   };
+  const nights = rangeNights(selection);
+  if (!isIsoLocalDate(selection.arrivalDate)
+    || !isIsoLocalDate(selection.departureDate)
+    || nights < 1
+    || nights > MAX_STAY_SELECTION_NIGHTS) return undefined;
+
   return selectionActions(unit, selection, businessDate).find((action) => (
     action.enabled
     && action.code === validTarget.actionCode
@@ -2466,18 +2487,53 @@ function selectionDays(unit: RoomStatusUnitDto | null, selection: RoomStatusSele
   return unit.days.filter((day) => day.serviceDate >= selection.arrivalDate && day.serviceDate < selection.departureDate);
 }
 
-export function selectionActions(unit: RoomStatusUnitDto | null, selection: RoomStatusSelection | null, businessDate?: string): RoomStatusActionDto[] {
-  const days = selectionDays(unit, selection);
-  const nights = selection ? rangeNights(selection) : 0;
-  if (!selection || nights < 1 || nights > MAX_STAY_SELECTION_NIGHTS || days.length !== nights) return [];
+function selectionLoadedWindowIntersection(
+  unit: RoomStatusUnitDto,
+  selection: RoomStatusSelection
+): RoomStatusDayDto[] | undefined {
+  if (unit.days.length === 0) return [];
+  const serviceDates = unit.days.map((day) => day.serviceDate).sort();
+  const windowArrivalDate = serviceDates[0]!;
+  const windowDepartureDate = addLocalDateDays(serviceDates.at(-1)!, 1);
+  const arrivalDate = selection.arrivalDate > windowArrivalDate ? selection.arrivalDate : windowArrivalDate;
+  const departureDate = selection.departureDate < windowDepartureDate ? selection.departureDate : windowDepartureDate;
+  if (arrivalDate >= departureDate) return [];
+
+  const expectedNights = rangeNights({ arrivalDate, departureDate });
+  const days = unit.days.filter((day) => day.serviceDate >= arrivalDate && day.serviceDate < departureDate);
+  if (days.length !== expectedNights || new Set(days.map((day) => day.serviceDate)).size !== expectedNights) return undefined;
+  return days;
+}
+
+function selectionDaysEligible(
+  days: readonly RoomStatusDayDto[],
+  selection: RoomStatusSelection,
+  businessDate?: string
+): boolean {
   const historical = businessDate !== undefined && selection.arrivalDate < businessDate;
-  const eligible = historical
+  return historical
     ? days.every((day) => day.conflicts.length === 0
       && day.intervalIds.length === 0
       && (day.serviceDate < businessDate! ? day.status === "AVAILABLE" : day.available))
     : days.every((day) => day.available && day.conflicts.length === 0);
-  if (!eligible) return [];
-  return unit?.allowedActions.filter((candidate) => selectionActionCodes.has(candidate.code)
+}
+
+export function selectionActions(unit: RoomStatusUnitDto | null, selection: RoomStatusSelection | null, businessDate?: string): RoomStatusActionDto[] {
+  const days = selectionDays(unit, selection);
+  const nights = selection ? rangeNights(selection) : 0;
+  if (!unit || !selection || nights < 1 || nights > MAX_STAY_SELECTION_NIGHTS) return [];
+  const completeRangeLoaded = days.length === nights;
+  if (!completeRangeLoaded) {
+    // The board is a bounded projection, not an availability assertion for
+    // dates outside it. The Quote API validates the complete requested range.
+    const loadedDays = selectionLoadedWindowIntersection(unit, selection);
+    if (!loadedDays || !selectionDaysEligible(loadedDays, selection, businessDate)) return [];
+  } else if (!selectionDaysEligible(days, selection, businessDate)) {
+    return [];
+  }
+  const historical = businessDate !== undefined && selection.arrivalDate < businessDate;
+  return unit.allowedActions.filter((candidate) => selectionActionCodes.has(candidate.code)
+    && (completeRangeLoaded || isRoomStatusQuoteActionCode(candidate.code))
     && (historical ? candidate.code === "BACKFILL_ORDER" : candidate.code !== "BACKFILL_ORDER")) ?? [];
 }
 
@@ -4270,6 +4326,12 @@ export function InventoryPage() {
     setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
     if (selection) {
+      dispatchView({
+        type: "SET_FOCUS",
+        focus: roomStatusGridFocusForSelection(selection, renderedBoard?.dates ?? [])
+      });
+    }
+    if (selection) {
       setSelectedUnitId(selection.unitId);
       setSelectedDayDate(undefined);
       setSelectedIntervalId(undefined);
@@ -4283,8 +4345,14 @@ export function InventoryPage() {
     invalidateSelectedOrderForRoomStatusInspection();
     setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
-    setSelectionDraftValid(true);
     if (selection) {
+      dispatchView({
+        type: "SET_FOCUS",
+        focus: roomStatusGridFocusForSelection(selection, renderedBoard?.dates ?? [])
+      });
+    }
+    if (selection) {
+      setSelectionDraftValid(true);
       setDesktopContextCollapsed(false);
       setSelectedUnitId(selection.unitId);
       const nextQuoteTarget = updateRoomStatusQuoteTargetSelection(
@@ -4297,8 +4365,8 @@ export function InventoryPage() {
       if (quoteTarget && !nextQuoteTarget) {
         setActionError(new Error("修改后的房源或日期不再有服务端授权的住宿办理动作，原住宿表单已关闭。"));
       }
-    } else {
-      setQuoteTarget(undefined);
+    } else if (quoteTarget) {
+      setDesktopContextCollapsed(false);
     }
     setSelectedDayDate(undefined);
     setSelectedIntervalId(undefined);

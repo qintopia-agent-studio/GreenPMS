@@ -9,6 +9,7 @@ import {
 export const ROOM_STATUS_TIMELINE_DAYS = 30;
 export const MAX_VISIBLE_DAYS = ROOM_STATUS_TIMELINE_DAYS;
 export const DEFAULT_VISIBLE_DAYS = ROOM_STATUS_TIMELINE_DAYS;
+const MAX_RESTORABLE_STAY_NIGHTS = 366;
 /** Legacy values remain readable so saved pre-stage-14 views can be migrated once. */
 export type RoomStatusDateWindowMode = "30" | "AUTO" | "7" | "14" | "21";
 
@@ -645,10 +646,9 @@ function renderedRoomStatusUnitIds(
   ]);
 }
 
-function selectionIsVisible(
+function selectionIsRestorable(
   selection: RoomStatusSelection,
-  visibleUnitIds: ReadonlySet<string>,
-  visibleDates: ReadonlySet<string>
+  visibleUnitIds: ReadonlySet<string>
 ): boolean {
   if (!visibleUnitIds.has(selection.unitId)) return false;
   if (selection.anchorDate < selection.arrivalDate
@@ -659,7 +659,22 @@ function selectionIsVisible(
     - Date.parse(`${selection.arrivalDate}T00:00:00Z`)) / 86_400_000;
   return Number.isSafeInteger(nightCount)
     && nightCount > 0
-    && [...visibleDates].filter((date) => date >= selection.arrivalDate && date < selection.departureDate).length === nightCount;
+    && nightCount <= MAX_RESTORABLE_STAY_NIGHTS;
+}
+
+export function roomStatusGridFocusForSelection(
+  selection: RoomStatusSelection,
+  visibleDates: readonly string[]
+): RoomStatusCellFocus | null {
+  if (visibleDates.includes(selection.focusDate)) {
+    return { unitId: selection.unitId, serviceDate: selection.focusDate };
+  }
+  const visibleSelectedDate = visibleDates.find((date) => (
+    date >= selection.arrivalDate && date < selection.departureDate
+  ));
+  return visibleSelectedDate
+    ? { unitId: selection.unitId, serviceDate: visibleSelectedDate }
+    : null;
 }
 
 export function reconcileRoomStatusRestoration(
@@ -686,20 +701,22 @@ export function reconcileRoomStatusRestoration(
     : timelineState;
   const visibleDates = visibleDateWindow(dates, clampedWindowStart, ROOM_STATUS_TIMELINE_DAYS);
   const visibleDateSet = new Set(visibleDates);
-  const boardDateSet = new Set(dates);
   let visibleUnitIds = renderedRoomStatusUnitIds(rooms, nextState.filters, nextState.expandedRoomIds);
   let filtersCleared = false;
 
   const focusVisible = !nextState.focusedCell || (visibleUnitIds.includes(nextState.focusedCell.unitId)
     && visibleDateSet.has(nextState.focusedCell.serviceDate));
   const selectionVisible = !nextState.selection
-    || selectionIsVisible(nextState.selection, new Set(visibleUnitIds), boardDateSet);
+    || selectionIsRestorable(nextState.selection, new Set(visibleUnitIds));
 
-  if (focusVisible && selectionVisible) {
-    const focusedCell = nextState.focusedCell
-      ?? (nextState.selection ? { unitId: nextState.selection.unitId, serviceDate: nextState.selection.focusDate } : null);
+  if (selectionVisible && (focusVisible || nextState.selection)) {
+    const focusedCell = focusVisible && nextState.focusedCell
+      ? nextState.focusedCell
+      : nextState.selection
+        ? roomStatusGridFocusForSelection(nextState.selection, visibleDates)
+        : nextState.focusedCell;
     const scrollAnchorAdjusted = Boolean(nextState.scrollAnchor.unitId && !visibleUnitIds.includes(nextState.scrollAnchor.unitId));
-    if (focusedCell !== nextState.focusedCell || scrollAnchorAdjusted) {
+    if (!sameFocus(focusedCell, nextState.focusedCell) || scrollAnchorAdjusted) {
       nextState = {
         ...nextState,
         focusedCell,
@@ -709,14 +726,16 @@ export function reconcileRoomStatusRestoration(
     if (expectedFactFingerprint !== undefined
       && roomStatusFactFingerprint(rooms, nextState) !== expectedFactFingerprint) {
       const factFocus = nextState.selection
-        ? { unitId: nextState.selection.unitId, serviceDate: nextState.selection.arrivalDate }
+        ? (visibleDateSet.has(nextState.selection.arrivalDate)
+            ? { unitId: nextState.selection.unitId, serviceDate: nextState.selection.arrivalDate }
+            : roomStatusGridFocusForSelection(nextState.selection, visibleDates))
         : nextState.focusedCell;
       nextState = {
         ...nextState,
         focusedCell: factFocus,
         scrollAnchor: {
           ...nextState.scrollAnchor,
-          unitId: factFocus?.unitId ?? nextState.scrollAnchor.unitId
+          unitId: nextState.selection?.unitId ?? factFocus?.unitId ?? nextState.scrollAnchor.unitId
         }
       };
       return { state: nextState, outcome: "FACT_CHANGED", filtersCleared, dateWindowAdjusted, scrollAnchorAdjusted };
@@ -936,7 +955,8 @@ function validSelection(value: unknown): value is RoomStatusSelection | null {
   return anchorDate >= arrivalDate
     && anchorDate < departureDate
     && focusDate >= arrivalDate
-    && focusDate < departureDate;
+    && focusDate < departureDate
+    && localDateNightCount(arrivalDate, departureDate) <= MAX_RESTORABLE_STAY_NIGHTS;
 }
 
 function validViewState(value: unknown): value is RoomStatusViewState {
@@ -1018,9 +1038,9 @@ export function parseRoomStatusRestoration(serialized: string, expectedPropertyI
   const restored = snapshot as unknown as RoomStatusRestorationSnapshot;
   if (restored.state.focusedCell
     && (restored.state.focusedCell.serviceDate < restored.range.arrivalDate
-      || restored.state.focusedCell.serviceDate >= restored.range.departureDate)) return undefined;
-  if (restored.state.selection
-    && (restored.state.selection.arrivalDate < restored.range.arrivalDate
-      || restored.state.selection.departureDate > restored.range.departureDate)) return undefined;
+      || restored.state.focusedCell.serviceDate >= restored.range.departureDate)
+    && (!restored.state.selection
+      || restored.state.selection.unitId !== restored.state.focusedCell.unitId
+      || restored.state.selection.focusDate !== restored.state.focusedCell.serviceDate)) return undefined;
   return restored;
 }
