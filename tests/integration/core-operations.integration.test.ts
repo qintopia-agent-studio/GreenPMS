@@ -32,6 +32,12 @@ function addDays(date: string, days: number): string {
   return value.toISOString().slice(0, 10);
 }
 
+function firstDayOfNextMonth(date: string): string {
+  const value = new Date(`${date.slice(0, 7)}-01T00:00:00.000Z`);
+  value.setUTCMonth(value.getUTCMonth() + 1);
+  return value.toISOString().slice(0, 10);
+}
+
 function testPricingPolicyForDates(arrivalDate: string, departureDate: string): string {
   return arrivalDate.slice(0, 7) === departureDate.slice(0, 7)
     ? demo.transientPolicyId
@@ -282,7 +288,12 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("forms coverage before cash and locks policy/versioned order history", async () => {
-    const priced = await quote(demo.roomId, { member: true });
+    const arrivalDate = firstDayOfNextMonth(testBusinessDate);
+    const priced = await quote(demo.roomId, {
+      member: true,
+      arrival: arrivalDate,
+      departure: addDays(arrivalDate, 3)
+    });
     expect(priced.coverageSet).toHaveLength(2);
     expect(priced.cashLines).toHaveLength(1);
     expect(priced.cashRemainder.minorUnits).toBe(12_000);
@@ -757,7 +768,8 @@ describe("PostgreSQL core operations", () => {
     expect(activeCoverage.every((item) => item.inventory_unit_id === memberSourceUnitId)).toBe(true);
     expect(view.pricingRevisions.at(-1)?.manual_adjustment_minor).toBe(0);
     expect(view.amounts.currentContractAmount.minorUnits).toBe(0);
-    expect(view.pricingRevisions.every((revision) => revision.policy_version_id === demo.transientPolicyId)).toBe(true);
+    const expectedPolicyVersionId = testPricingPolicyForDates(arrivalDate, departureDate);
+    expect(view.pricingRevisions.every((revision) => revision.policy_version_id === expectedPolicyVersionId)).toBe(true);
     expect(view.currentSegment.arrivalDate).toBe(moveDate);
     expect(view.originalArrangement).toEqual({
       arrivalDate,
@@ -1040,7 +1052,7 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("keeps a manual adjustment in one revision and does not inherit it", async () => {
-    const arrivalDate = addDays(await propertyLocalToday(db, demo.propertyId), 1);
+    const arrivalDate = firstDayOfNextMonth(testBusinessDate);
     const departureDate = addDays(arrivalDate, 3);
     const shortenedDepartureDate = addDays(arrivalDate, 2);
     const created = await createOrder(demo.roomId, "manual-adjustment", {
@@ -1274,6 +1286,33 @@ describe("PostgreSQL core operations", () => {
       commandType: "REVERSE_FACT",
       input: { propertyId: demo.propertyId, orderId: refundedOrderId, reversesFactId: refundedCollection.factRefs[0], note: "must reverse refund first" }
     }, metadata("reversal-after-refund-denied"))).rejects.toMatchObject({ code: "REFUND_LIMIT_EXCEEDED" });
+    const currentRevision = await db.selectFrom("orders")
+      .select("current_revision_id")
+      .where("id", "=", refundedOrderId)
+      .executeTakeFirstOrThrow();
+    const directReversalFactId = "fact_direct_reversal_with_active_refund";
+    await expect(db.insertInto("collection_facts").values({
+      fact_id: directReversalFactId,
+      order_id: refundedOrderId,
+      fact_type: "REVERSAL",
+      amount_minor: 5_000,
+      net_effect_minor: -5_000,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: refundedCollection.factRefs[0]!,
+      method: "BANK_TRANSFER",
+      note: "direct write must not bypass active-refund reversal guard",
+      transaction_reference: null,
+      cash_collector: null,
+      pricing_revision_id: currentRevision.current_revision_id,
+      command_id: refundedCollection.commandId
+    }).execute()).rejects.toMatchObject({
+      constraint: "collection_facts_reversal_collection_has_active_refunds"
+    });
+    expect(await db.selectFrom("collection_facts")
+      .select("fact_id")
+      .where("fact_id", "=", directReversalFactId)
+      .executeTakeFirst()).toBeUndefined();
     const facts = (await getOrderView(db, refundedOrderId)).collectionFacts;
     expect(facts.map((fact) => fact.fact_type)).toEqual(["COLLECTION", "REFUND"]);
   });

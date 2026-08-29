@@ -48,6 +48,7 @@ function view(): OrderViewDto {
     coverageSet: [],
     collectionFacts: [],
     cleaningTasks: [],
+    membershipConversion: null,
     amounts: {
       currentContractAmount: { currency: "CNY", minorUnits: 20_000 },
       netRecordedCollection: { currency: "CNY", minorUnits: 10_000 },

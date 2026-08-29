@@ -33,6 +33,7 @@ import {
   listAvailability,
   listMemberSummaries,
   loadReferenceCatalog,
+  propertyLocalToday,
   projectStoredPreviewForRead,
   resolveCommandResult,
   confirmCommandPreview,
@@ -409,6 +410,7 @@ export async function buildServer(db: Kysely<Database>) {
       .leftJoin("inventory_units as current_unit", "current_unit.id", "current_segment.inventory_unit_id")
       .selectAll("orders")
       .select([
+        "stays.status as stay_status",
         "current_revision.current_contract_amount_minor as current_contract_amount_minor",
         "current_revision.currency as currency",
         "current_unit.name as current_unit_name",
@@ -416,7 +418,11 @@ export async function buildServer(db: Kysely<Database>) {
       ])
       .where("orders.property_id", "=", query.propertyId);
     if (query.status) selection = selection.where("orders.status", "=", query.status);
-    return { orders: await selection.orderBy("orders.created_at", "desc").execute() };
+    const [businessDate, orders] = await Promise.all([
+      propertyLocalToday(db, query.propertyId),
+      selection.orderBy("orders.created_at", "desc").execute()
+    ]);
+    return { businessDate, orders };
   });
 
   app.get("/api/v1/orders/:id", { schema: { tags: ["queries"], params: IdParams, response: { 200: OrderDetailResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {

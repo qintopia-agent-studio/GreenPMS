@@ -3,6 +3,14 @@ import { BadgeCheck, CircleDollarSign, CreditCard, PencilLine, RefreshCw, Search
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useWorkspace } from "../session";
+import {
+  continueStayUpgradeAfterMemberCreated,
+  parseStayUpgradeMemberCreationIntent,
+  stayUpgradeMemberCreationState,
+  stayUpgradeOccupantCorrectionHref,
+  stayUpgradeOrderHref,
+  type StayUpgradeMemberCreationState
+} from "../stayMembershipUpgrade";
 import type { CommandRequest, MemberContractDto, MemberSummaryDto, MemberViewDto, MembershipOrderSummaryDto, MembershipPaymentFactDto, MembershipProductDto } from "../types";
 import {
   CommandDialog,
@@ -17,22 +25,33 @@ import {
   isTerminalCommandRecovery,
   LoadingBlock,
   Modal,
+  QuoteRecoveryConflictNotice,
   recoveryCommandRequest,
   usePersistentCommandRecovery
 } from "../ui";
 
+export {
+  continueStayUpgradeAfterMemberCreated,
+  parseStayUpgradeMemberCreationIntent,
+  stayUpgradeOrderHref,
+  stayUpgradeMemberCreationState
+} from "../stayMembershipUpgrade";
+
 export interface MemberDeepLink {
   memberId?: string;
   contractId?: string;
+  membershipOrderId?: string;
 }
 
 export function parseMemberDeepLink(search: string): MemberDeepLink {
   const params = new URLSearchParams(search);
   const memberId = params.get("memberId")?.trim();
   const contractId = params.get("contractId")?.trim();
+  const membershipOrderId = params.get("membershipOrderId")?.trim();
   return {
     ...(memberId ? { memberId } : {}),
-    ...(contractId ? { contractId } : {})
+    ...(contractId ? { contractId } : {}),
+    ...(membershipOrderId ? { membershipOrderId } : {})
   };
 }
 
@@ -66,6 +85,31 @@ export function targetEntitlementContractId(view: MemberViewDto, requestedContra
   return view.lots.some((lot) => lot.contract_id === requestedContractId && formalLotIds.has(lot.id))
     ? requestedContractId
     : undefined;
+}
+
+export function targetMembershipOrderDeepLinkId(
+  view: MemberViewDto,
+  requestedMembershipOrderId: string | undefined
+): string | undefined {
+  return requestedMembershipOrderId
+    && view.membershipOrders.some((summary) => summary.order.id === requestedMembershipOrderId)
+    ? requestedMembershipOrderId
+    : undefined;
+}
+
+export function stayUpgradeMemberCreationAutoOpenBlockedNotice(
+  initialState: StayUpgradeMemberCreationState | undefined,
+  commandsBlocked: boolean
+): string | undefined {
+  if (!initialState || !commandsBlocked) return undefined;
+  return "当前有未完成的命令恢复记录，自动打开建档/升级流程未执行；请先处理页面顶部的恢复提示。";
+}
+
+export function stayUpgradeMemberCreationShouldOpen(
+  initialState: StayUpgradeMemberCreationState | undefined,
+  commandsBlocked: boolean
+): boolean {
+  return Boolean(initialState) && !commandsBlocked;
 }
 
 export function ledgerOrderHref(entry: Pick<MemberViewDto["ledger"][number], "order_id">): string | undefined {
@@ -163,16 +207,18 @@ function productScopeLabel(product: Pick<MembershipProductDto, "code">): string 
   return "公卫四人间单床";
 }
 
-function CreateMemberDialog({ propertyId, draft, onClose, onSubmit }: {
+function CreateMemberDialog({ propertyId, draft, prefill, onCorrectSource, onClose, onSubmit }: {
   propertyId: string;
   draft?: CommandRequest;
+  prefill?: Pick<StayUpgradeMemberCreationState, "fullName" | "nickname" | "phone">;
+  onCorrectSource?: () => void;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
-  const [fullName, setFullName] = useState(() => typeof draft?.input.fullName === "string" ? draft.input.fullName : "");
-  const [nickname, setNickname] = useState(() => typeof draft?.input.nickname === "string" ? draft.input.nickname : "");
+  const [fullName, setFullName] = useState(() => typeof draft?.input.fullName === "string" ? draft.input.fullName : prefill?.fullName ?? "");
+  const [nickname, setNickname] = useState(() => typeof draft?.input.nickname === "string" ? draft.input.nickname : prefill?.nickname ?? "");
   const [identityCardNumber, setIdentityCardNumber] = useState(() => typeof draft?.input.identityCardNumber === "string" ? draft.input.identityCardNumber : "");
-  const [phone, setPhone] = useState(() => typeof draft?.input.phone === "string" ? draft.input.phone : "");
+  const [phone, setPhone] = useState(() => typeof draft?.input.phone === "string" ? draft.input.phone : prefill?.phone ?? "");
   const [wechat, setWechat] = useState(() => typeof draft?.input.wechat === "string" ? draft.input.wechat : "");
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -198,11 +244,12 @@ function CreateMemberDialog({ propertyId, draft, onClose, onSubmit }: {
         <label htmlFor="member-full-name">姓名<input id="member-full-name" value={fullName} onChange={(event) => setFullName(event.target.value)} required maxLength={200} autoFocus data-testid="member-full-name" autoComplete="name" /></label>
         <label htmlFor="member-nickname">昵称<input id="member-nickname" value={nickname} onChange={(event) => setNickname(event.target.value)} required maxLength={200} data-testid="member-nickname" autoComplete="off" /></label>
         <label htmlFor="member-identity-card">身份证号（选填）<input id="member-identity-card" value={identityCardNumber} onChange={(event) => setIdentityCardNumber(event.target.value)} maxLength={200} data-testid="member-identity-card" autoComplete="off" /></label>
-        <label htmlFor="member-phone">手机号<input id="member-phone" value={phone} onChange={(event) => setPhone(event.target.value)} required maxLength={200} inputMode="tel" autoComplete="tel" data-testid="member-phone" /></label>
+        <label htmlFor="member-phone">手机号<input id="member-phone" value={phone} onChange={(event) => setPhone(event.target.value)} required maxLength={200} inputMode="tel" autoComplete="tel" data-testid="member-phone" readOnly={Boolean(prefill)} /></label>
         <label htmlFor="member-wechat">微信号<input id="member-wechat" value={wechat} onChange={(event) => setWechat(event.target.value)} required maxLength={200} autoComplete="off" data-testid="member-wechat" /></label>
       </div>
       <div className="form-actions">
         <button type="button" className="button button-secondary" onClick={onClose}>取消</button>
+        {onCorrectSource ? <button type="button" className="button button-secondary" onClick={onCorrectSource}><PencilLine aria-hidden="true" size={16} />更正住宿人资料</button> : null}
         <button type="submit" className="button button-primary">核对并创建</button>
       </div>
     </form>
@@ -551,14 +598,21 @@ function MemberEntitlementsPanel({ view, disabled, targetContractId, onCorrect }
   </section>;
 }
 
-function MembershipOrdersPanel({ view, disabled, onCreate, onPayment, onCorrect, onActivate }: {
+export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId, onCreate, onPayment, onCorrect, onActivate }: {
   view: MemberViewDto;
   disabled: boolean;
+  targetMembershipOrderId?: string;
   onCreate: () => void;
   onPayment: (summary: MembershipOrderSummaryDto) => void;
   onCorrect: (summary: MembershipOrderSummaryDto, fact: MembershipPaymentFactDto) => void;
   onActivate: (summary: MembershipOrderSummaryDto) => void;
 }) {
+  const targetOrderRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!targetMembershipOrderId || !targetOrderRef.current) return;
+    targetOrderRef.current.focus({ preventScroll: true });
+    targetOrderRef.current.scrollIntoView({ block: "center", inline: "nearest" });
+  }, [targetMembershipOrderId]);
   return <section className="membership-orders-panel" aria-labelledby="membership-orders-heading">
     <div className="section-title-row">
       <div><span className="section-kicker">会员购买</span><h2 id="membership-orders-heading">会员订单</h2></div>
@@ -567,11 +621,12 @@ function MembershipOrdersPanel({ view, disabled, onCreate, onPayment, onCorrect,
     {!view.membershipOrders.length ? <EmptyState title="尚无会员订单" detail="办理会员后，可登记多笔企微收款并由工作人员明确生效。" /> : <div className="membership-order-list">
       {view.membershipOrders.map((summary) => {
         const { order, paymentFacts } = summary;
+        const targeted = order.id === targetMembershipOrderId;
         const reversedIds = new Set(paymentFacts.filter((fact) => fact.reverses_fact_id).map((fact) => fact.reverses_fact_id));
         const activeCollections = paymentFacts.filter((fact) => fact.fact_type === "COLLECTION" && !reversedIds.has(fact.fact_id));
-        return <article className="membership-order-item" key={order.id} data-testid="membership-order-item">
+        return <article className="membership-order-item" key={order.id} data-testid={targeted ? "membership-order-target" : "membership-order-item"} data-membership-order-id={order.id} {...(targeted ? { ref: targetOrderRef, tabIndex: -1, "aria-current": "true" as const } : {})}>
           <div className="membership-order-heading">
-            <div><h3>{order.product_name}</h3><p>{entitlementLabel(order.entitlement_unit_kind, order.entitlement_units)} · {order.allowed_inventory_kind === "ROOM" ? "按房使用" : "按床使用"}</p></div>
+            <div>{targeted ? <span className="section-kicker">当前住宿升级</span> : null}<h3>{order.product_name}</h3><p>{entitlementLabel(order.entitlement_unit_kind, order.entitlement_units)} · {order.allowed_inventory_kind === "ROOM" ? "按房使用" : "按床使用"}</p></div>
             <span className={`membership-status membership-status-${order.status.toLowerCase()}`}>{order.status === "ACTIVE" ? "已生效" : "待生效"}</span>
           </div>
           <dl className="membership-order-pricing">
@@ -623,20 +678,23 @@ export function MembersPage() {
   const navigate = useNavigate();
   const { principal, propertyId, refreshMeta } = useWorkspace();
   const initialDeepLink = useRef(parseMemberDeepLink(location.search));
+  const initialStayUpgradeCreation = useRef(stayUpgradeMemberCreationState(parseStayUpgradeMemberCreationIntent(location.search)));
   const deepLinkSelectionPending = useRef(true);
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
+  const commandsBlocked = commandRecovery.blocked;
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [members, setMembers] = useState<MemberSummaryDto[]>([]);
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [targetContractId, setTargetContractId] = useState<string | undefined>(initialDeepLink.current.contractId);
+  const [targetMembershipOrderId, setTargetMembershipOrderId] = useState<string | undefined>(initialDeepLink.current.membershipOrderId);
   const [member, setMember] = useState<MemberViewDto>();
   const [loadingList, setLoadingList] = useState(true);
   const [loadingMember, setLoadingMember] = useState(false);
   const [error, setError] = useState<unknown>();
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [refreshToken, setRefreshToken] = useState(0);
-  const [creatingMember, setCreatingMember] = useState(false);
+  const [creatingMember, setCreatingMember] = useState(stayUpgradeMemberCreationShouldOpen(initialStayUpgradeCreation.current, commandsBlocked));
   const [creatingMembershipOrder, setCreatingMembershipOrder] = useState(false);
   const [paymentOrder, setPaymentOrder] = useState<MembershipOrderSummaryDto>();
   const [correctingPayment, setCorrectingPayment] = useState<{ summary: MembershipOrderSummaryDto; fact: MembershipPaymentFactDto }>();
@@ -645,10 +703,9 @@ export function MembersPage() {
   const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [commandNotice, setCommandNotice] = useState<string>();
-  const commandsBlocked = commandRecovery.blocked;
 
   useEffect(() => {
-    setCreatingMember(false);
+    setCreatingMember(stayUpgradeMemberCreationShouldOpen(initialStayUpgradeCreation.current, commandsBlocked));
     setCreatingMembershipOrder(false);
     setPaymentOrder(undefined);
     setCorrectingPayment(undefined);
@@ -660,7 +717,14 @@ export function MembersPage() {
     setCommandNotice(undefined);
     setSelectedMemberId("");
     setTargetContractId(initialDeepLink.current.contractId);
+    setTargetMembershipOrderId(initialDeepLink.current.membershipOrderId);
   }, [propertyId]);
+
+  useEffect(() => {
+    if (initialStayUpgradeCreation.current) {
+      setCreatingMember(stayUpgradeMemberCreationShouldOpen(initialStayUpgradeCreation.current, commandsBlocked));
+    }
+  }, [commandsBlocked]);
 
   useEffect(() => {
     let current = true;
@@ -690,6 +754,9 @@ export function MembersPage() {
 
   const currentMemberId = effectiveMemberId(members, selectedMemberId);
   const activeTargetContractId = member ? targetEntitlementContractId(member, targetContractId) : undefined;
+  const activeTargetMembershipOrderId = member
+    ? targetMembershipOrderDeepLinkId(member, targetMembershipOrderId)
+    : undefined;
 
   useEffect(() => {
     if (!currentMemberId) {
@@ -717,6 +784,7 @@ export function MembersPage() {
     event.preventDefault();
     setSelectedMemberId("");
     setTargetContractId(undefined);
+    setTargetMembershipOrderId(undefined);
     navigate("/members", { replace: true });
     setSearchQuery(normalizeMemberQuery(searchInput));
   }
@@ -724,6 +792,7 @@ export function MembersPage() {
   function selectMember(memberId: string) {
     setSelectedMemberId(memberId);
     setTargetContractId(undefined);
+    setTargetMembershipOrderId(undefined);
     navigate(`/members?memberId=${encodeURIComponent(memberId)}`, { replace: true });
   }
 
@@ -812,13 +881,18 @@ export function MembersPage() {
     {commandRecovery.canDiscardCorrupt
       ? <DamagedCommandRecoveryNotice error={commandRecovery.error} onDiscard={commandRecovery.discardCorruptAfterReview} testId="member-damaged-command-recovery" />
       : <InlineError error={commandRecovery.error} title="本地操作恢复记录不可用" />}
+    <QuoteRecoveryConflictNotice conflict={commandRecovery.conflict} testId="member-quote-recovery-conflict" />
     <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
+    <CommandResultNotice
+      message={stayUpgradeMemberCreationAutoOpenBlockedNotice(initialStayUpgradeCreation.current, commandsBlocked)}
+      onDismiss={() => undefined}
+    />
     {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="member-command-recovery" businessFacing /> : null}
 
     <form className="member-search" role="search" aria-label="搜索会员" onSubmit={search}>
       <label htmlFor="member-search-query">搜索会员<input id="member-search-query" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="昵称、姓名、手机号或微信号" data-testid="member-search-query" /></label>
       <button className="button button-secondary" type="submit" disabled={loadingList}><Search aria-hidden="true" size={17} />搜索</button>
-      {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); setTargetContractId(undefined); navigate("/members", { replace: true }); }}>清除</button> : null}
+      {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); setTargetContractId(undefined); setTargetMembershipOrderId(undefined); navigate("/members", { replace: true }); }}>清除</button> : null}
     </form>
 
     <InlineError error={error} title="无法载入会员档案" />
@@ -830,6 +904,7 @@ export function MembersPage() {
         <MembershipOrdersPanel
           view={member}
           disabled={commandsBlocked}
+          {...(activeTargetMembershipOrderId ? { targetMembershipOrderId: activeTargetMembershipOrderId } : {})}
           onCreate={() => setCreatingMembershipOrder(true)}
           onPayment={setPaymentOrder}
           onCorrect={(summary, fact) => setCorrectingPayment({ summary, fact })}
@@ -843,7 +918,10 @@ export function MembersPage() {
       </div> : null}
     </div>}
 
-    {creatingMember ? <CreateMemberDialog propertyId={propertyId} {...(commandDraft?.commandType === "CREATE_MEMBER" ? { draft: commandDraft } : {})} onClose={() => { setCreatingMember(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (commandsBlocked) return; setCreatingMember(false); startCommand(request); }} /> : null}
+    {creatingMember ? <CreateMemberDialog propertyId={propertyId} {...(commandDraft?.commandType === "CREATE_MEMBER" ? { draft: commandDraft } : {})} {...(initialStayUpgradeCreation.current ? {
+      prefill: initialStayUpgradeCreation.current,
+      onCorrectSource: () => navigate(stayUpgradeOccupantCorrectionHref(initialStayUpgradeCreation.current!), { replace: true })
+    } : {})} onClose={() => { setCreatingMember(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (commandsBlocked) return; setCreatingMember(false); startCommand(request); }} /> : null}
     {creatingMembershipOrder && member ? <CreateMembershipOrderDialog propertyId={propertyId} member={member.member} products={member.membershipProducts} {...(commandDraft?.commandType === "CREATE_MEMBERSHIP_ORDER" ? { draft: commandDraft } : {})} onClose={() => { setCreatingMembershipOrder(false); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
     {paymentOrder ? <MembershipPaymentDialog propertyId={propertyId} summary={paymentOrder} {...(commandDraft?.commandType === "RECORD_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setPaymentOrder(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
     {correctingPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={correctingPayment.summary} correction={correctingPayment.fact} {...(commandDraft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingPayment(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
@@ -870,6 +948,15 @@ export function MembersPage() {
         if (clearSearch) {
           setSearchInput("");
           setSearchQuery("");
+        }
+        if (command.commandType === "CREATE_MEMBER" && initialStayUpgradeCreation.current && memberResponse) {
+          const continuation = continueStayUpgradeAfterMemberCreated(initialStayUpgradeCreation.current, memberResponse.member);
+          if (!continuation) {
+            setError(new Error("新建会员手机号与原订单主要住宿人不一致，已停止自动升级；请返回订单重新核对。"));
+            return;
+          }
+          await refreshMeta();
+          navigate(stayUpgradeOrderHref(continuation), { replace: true });
         }
       }}
       onProgress={(progress) => commandRecovery.track(command, progress)}

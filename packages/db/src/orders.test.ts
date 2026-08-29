@@ -166,6 +166,30 @@ describe("orderAllowedActions", () => {
     });
   });
 
+  it("closes ordinary funds and lifecycle actions after a zero-transfer conversion while keeping fulfillment changes available", () => {
+    const actions = orderAllowedActions(
+      "WRITE",
+      "CHECKED_IN",
+      false,
+      undefined,
+      false,
+      "WECOM",
+      true,
+      true
+    );
+    for (const code of [
+      "RECORD_COLLECTION",
+      "RECORD_REFUND",
+      "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      "REPRICE_ORDER",
+      "REVOKE_CHECK_IN"
+    ]) {
+      expect(actions.find((candidate) => candidate.code === code)).toMatchObject({ enabled: false });
+    }
+    expect(actions.find((candidate) => candidate.code === "EXTEND_STAY")).toMatchObject({ enabled: true });
+    expect(actions.find((candidate) => candidate.code === "MOVE_UNIT")).toMatchObject({ enabled: true });
+  });
+
   it("does not publish the obsolete two-step backfill action", () => {
     const past = { businessDate: "2026-08-04", arrivalDate: "2026-07-25", departureDate: "2026-08-04" };
     for (const status of ["RESERVED", "CHECKED_IN", "CHECKED_OUT"]) {

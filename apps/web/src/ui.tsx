@@ -143,6 +143,20 @@ export function businessErrorMessage(error: unknown): string {
   return "本次操作未完成，请返回修改后重新核对。";
 }
 
+export function commandDialogBusinessErrorMessage(commandType: HistoricalCommandType, error: unknown): string {
+  if (commandType === "CORRECT_ORDER_OCCUPANT"
+    && error instanceof ApiError
+    && error.code === "VALIDATION_ERROR") {
+    return "住宿人资料未通过校验。请返回修改，并确认至少更正一项资料。";
+  }
+  return businessErrorMessage(error);
+}
+
+export function commandPreviewFailureCanReload(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return true;
+  return error.status >= 500 || error.retryable || error.code === "COMMAND_STATUS_UNKNOWN";
+}
+
 export function InfoHint({ text, label = "说明" }: { text: string; label?: string }) {
   return <span className="info-hint" tabIndex={0} role="note" aria-label={`${label}：${text}`}>
     <CircleHelp aria-hidden="true" size={14} />
@@ -776,7 +790,7 @@ function dateChangePreviewHasEvidence(
     || !hasExactKeys(decision, ["pricingBasis", "policyBaseAmount", "targetCurrentContractAmount", "differenceFromPolicy", "manualAdjustmentMinor", "differenceExceedsThreshold", "reason"])
     || !hasExactKeys(inventory, ["preservedDates", "releasedDates", "addedDates"])
     || !hasExactKeys(entitlement, shorten
-      ? ["currentConsumedCoverageDates", "retainedHistoricalConsumedCoverageDates", "ledgerWriteCount"]
+      ? ["currentConsumedCoverageDates", "retainedHistoricalConsumedCoverageDates", "restoredFutureCoverageDates", "ledgerWriteCount"]
       : ["preservedCoverageDates", "releasedCoverageDates", "addedCoverageDates", "consumedCoverageDates"])
     || !hasExactKeys(funds, shorten
       ? ["netRecordedCollection", "collectionDifference", "factCount"]
@@ -886,12 +900,15 @@ function dateChangePreviewHasEvidence(
   if (shorten) {
     const currentConsumedCoverageDates = exactDateList(entitlement.currentConsumedCoverageDates);
     const retainedHistoricalConsumedCoverageDates = exactDateList(entitlement.retainedHistoricalConsumedCoverageDates);
+    const restoredFutureCoverageDates = exactDateList(entitlement.restoredFutureCoverageDates);
     const currentCoverageDates = Array.isArray(pricing.coverageSet)
       ? exactDateList(pricing.coverageSet.map((item) => isRecord(item) ? item.serviceDate : undefined))
       : undefined;
     const refundReferenceAmount = effect.refundReferenceAmount;
-    if (!currentConsumedCoverageDates || !retainedHistoricalConsumedCoverageDates || !currentCoverageDates
-      || entitlement.ledgerWriteCount !== 0
+    if (!currentConsumedCoverageDates || !retainedHistoricalConsumedCoverageDates || !restoredFutureCoverageDates || !currentCoverageDates
+      || !Number.isSafeInteger(entitlement.ledgerWriteCount)
+      || entitlement.ledgerWriteCount !== restoredFutureCoverageDates.length
+      || (restoredFutureCoverageDates.length > 0 && !sameDateSet(restoredFutureCoverageDates, releasedDates))
       || !Number.isSafeInteger(funds.factCount)
       || (funds.factCount as number) < 0
       || !sameDateSet(currentCoverageDates, currentConsumedCoverageDates)
@@ -1032,7 +1049,7 @@ export function moveUnitPreviewHasEvidence(effect: Record<string, unknown>, inpu
     || !hasExactKeys(after, ["arrivalDate", "departureDate", "nights", "stayTimeline", "pricing"])
     || !hasExactKeys(decision, ["pricingBasis", "policyBaseAmount", "targetCurrentContractAmount", "differenceFromPolicy", "manualAdjustmentMinor", "differenceExceedsThreshold", "reason"])
     || !hasExactKeys(inventory, ["preservedClaims", "releasedClaims", "addedClaims"])
-    || !hasExactKeys(entitlement, ["preservedCoverageDates", "migratedHeldCoverageDates", "consumedCoverageDates", "ledgerWriteCount"])
+    || !hasExactKeys(entitlement, ["preservedCoverageDates", "migratedHeldCoverageDates", "consumedCoverageDates", "convertedMembershipCoveragePreserved", "ledgerWriteCount"])
     || !hasExactKeys(funds, ["netRecordedCollection", "collectionDifference", "factCount"])
     || (before.actualCurrentInventoryUnit !== null && !moveInventoryUnitHasEvidence(before.actualCurrentInventoryUnit))
     || !moveInventoryUnitHasEvidence(before.effectiveDateInventoryUnit)
@@ -1098,7 +1115,9 @@ export function moveUnitPreviewHasEvidence(effect: Record<string, unknown>, inpu
   const preservedCoverage = exactDateList(entitlement.preservedCoverageDates);
   const migratedCoverage = exactDateList(entitlement.migratedHeldCoverageDates);
   const consumedCoverage = exactDateList(entitlement.consumedCoverageDates);
-  if (!preservedCoverage || !migratedCoverage || !consumedCoverage) return false;
+  const convertedMembershipCoveragePreserved = entitlement.convertedMembershipCoveragePreserved;
+  if (!preservedCoverage || !migratedCoverage || !consumedCoverage
+    || typeof convertedMembershipCoveragePreserved !== "boolean") return false;
   const historicalCoverageInventoryDates = new Set(consumedCoverage);
   if (!pricing || !hasExactKeys(pricing, ["coverageSet", "cashLines", "cashRemainder", "currentContractAmount"])
     || !pricingReason || !hasExactKeys(pricingReason, ["code", "note"]) || !nonblankString(pricingReason.code) || typeof pricingReason.note !== "string"
@@ -1119,6 +1138,7 @@ export function moveUnitPreviewHasEvidence(effect: Record<string, unknown>, inpu
     || (input.targetCurrentContractAmountMinor !== undefined && input.targetCurrentContractAmountMinor !== targetAmount.minorUnits)
     || !pricingCoverageHasEvidence(pricing.coverageSet, afterTimelineByDate, historicalCoverageInventoryDates)
     || !(pricing.coverageSet as unknown[]).every((item) => !isRecord(item)
+      || convertedMembershipCoveragePreserved
       || !consumedCoverage.includes(String(item.serviceDate))
       || beforeTimelineByDate.get(String(item.serviceDate)) === item.inventoryUnitId)
     || !Array.isArray(pricing.cashLines)
@@ -1211,7 +1231,9 @@ export function moveUnitPreviewHasEvidence(effect: Record<string, unknown>, inpu
     && (memberPricing ? memberCashEvidence : freePricing ? freeCashEvidence : paidCashEvidence)
     && (!freePricing || noMemberFacts)
     && Number.isSafeInteger(entitlement.ledgerWriteCount)
-    && entitlement.ledgerWriteCount === migratedCoverage.length * 2
+    && (convertedMembershipCoveragePreserved
+      ? memberPricing && migratedCoverage.length === 0 && entitlement.ledgerWriteCount === 0
+      : entitlement.ledgerWriteCount === migratedCoverage.length * 2)
     && Number.isSafeInteger(funds.factCount) && Number(funds.factCount) >= 0
     && allCoverageDates.every((date) => afterDates.includes(date))
     && preservedCoverage.every((date) => expectedPreserved.some((claim) => claim.serviceDate === date))
@@ -1261,7 +1283,7 @@ export function moveUnitReceiptHasEvidence(
     || !hasExactKeys(after, ["arrivalDate", "departureDate", "nights", "stayTimeline", "pricing"])
     || !hasExactKeys(decision, ["pricingBasis", "policyBaseAmount", "targetCurrentContractAmount", "differenceFromPolicy", "manualAdjustmentMinor", "differenceExceedsThreshold", "reason"])
     || !hasExactKeys(inventory, ["preservedClaims", "releasedClaims", "addedClaims"])
-    || !hasExactKeys(entitlement, ["preservedCoverageDates", "migratedHeldCoverageDates", "consumedCoverageDates", "ledgerWriteCount"])
+    || !hasExactKeys(entitlement, ["preservedCoverageDates", "migratedHeldCoverageDates", "consumedCoverageDates", "convertedMembershipCoveragePreserved", "ledgerWriteCount"])
     || !hasExactKeys(funds, ["netRecordedCollection", "collectionDifference", "factCount"])) return false;
 
   const beforeDates = typeof before.arrivalDate === "string" && typeof before.departureDate === "string"
@@ -1348,14 +1370,18 @@ export function moveUnitReceiptHasEvidence(
   const preservedCoverage = exactDateList(entitlement.preservedCoverageDates);
   const migratedCoverage = exactDateList(entitlement.migratedHeldCoverageDates);
   const consumedCoverage = exactDateList(entitlement.consumedCoverageDates);
+  const convertedMembershipCoveragePreserved = entitlement.convertedMembershipCoveragePreserved;
   if (!preservedCoverage || !migratedCoverage || !consumedCoverage
-    || entitlement.ledgerWriteCount !== migratedCoverage.length * 2
-    || (value.factRefs as string[]).length !== entitlement.ledgerWriteCount) return false;
+    || typeof convertedMembershipCoveragePreserved !== "boolean"
+    || (convertedMembershipCoveragePreserved
+      ? migratedCoverage.length !== 0 || entitlement.ledgerWriteCount !== 0 || (value.factRefs as string[]).length !== 0
+      : entitlement.ledgerWriteCount !== migratedCoverage.length * 2 || (value.factRefs as string[]).length !== entitlement.ledgerWriteCount)) return false;
   const historicalCoverageDates = new Set(consumedCoverage);
   const afterTimelineByDate = new Map(afterTimeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
   const beforeTimelineByDate = new Map(beforeTimeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
   if (!pricingCoverageHasEvidence(pricing.coverageSet, afterTimelineByDate, historicalCoverageDates)
     || !(pricing.coverageSet as unknown[]).every((item) => !isRecord(item)
+      || convertedMembershipCoveragePreserved
       || !consumedCoverage.includes(String(item.serviceDate))
       || beforeTimelineByDate.get(String(item.serviceDate)) === item.inventoryUnitId)
     || !Array.isArray(pricing.cashLines)
@@ -1388,7 +1414,8 @@ export function moveUnitReceiptHasEvidence(
     || !allCoverageDates.every((date) => afterDates.includes(date))
     || !preservedCoverage.every((date) => expectedPreserved.some((claim) => claim.serviceDate === date))
     || !migratedCoverage.every((date) => expectedAdded.some((claim) => claim.serviceDate === date))
-    || consumedCoverage.some((date) => preservedCoverage.includes(date) || migratedCoverage.includes(date))) return false;
+    || consumedCoverage.some((date) => preservedCoverage.includes(date) || migratedCoverage.includes(date))
+    || (convertedMembershipCoveragePreserved && pricingBasis !== "MEMBER_ENTITLEMENT")) return false;
 
   if (previewEffect) {
     if (!moveUnitPreviewHasEvidence(previewEffect, input)) return false;
@@ -1808,33 +1835,47 @@ export function conversionReceiptHasEvidence(
     && expectedMemberId !== undefined
     && expectedCollectionIds !== undefined
     && expectedAgreedPriceMinor !== undefined;
-  const hasRecoveryInput = hasExactKeys(input, ["propertyId", "orderId", "memberId"])
+  const hasCurrentRecoveryInput = hasExactKeys(input, ["propertyId", "orderId", "memberId"])
     && nonblankString(input.propertyId)
     && expectedOrderId !== undefined
     && expectedMemberId !== undefined
     && isEffectHash(expectedEffectHash);
-  if (!hasFullInput && !hasRecoveryInput) return false;
+  const hasHistoricalRecoveryInput = hasExactKeys(input, ["propertyId", "orderId"])
+    && nonblankString(input.propertyId)
+    && expectedOrderId !== undefined
+    && isEffectHash(expectedEffectHash);
+  if (!hasFullInput && !hasCurrentRecoveryInput && !hasHistoricalRecoveryInput) return false;
 
   if (!receiptExecutionSemanticsAreCoherent(value) || !isRecord(value)
     || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
-    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error", "protocolVersion", "recoveryMode"])
     || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
     || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
     || value.error !== undefined || !isRecord(value.result)) return false;
+  const historicalCompletedConversion = value.protocolVersion === "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"
+    && value.recoveryMode === "HISTORICAL_READ_ONLY";
+  const currentConversion = value.protocolVersion === undefined && value.recoveryMode === undefined;
+  if (!historicalCompletedConversion && !currentConversion) return false;
+  const hasRecoveryInput = hasCurrentRecoveryInput
+    || (historicalCompletedConversion && hasHistoricalRecoveryInput);
+  if (!hasFullInput && !hasRecoveryInput) return false;
   const resourceRefs = exactNonblankStringList(value.resourceRefs);
   const factRefs = exactNonblankStringList(value.factRefs);
   const result = value.result;
   if (!resourceRefs || !factRefs
-    || !hasExactKeys(result, ["orderId", "memberId", "amendmentId", "pricingRevisionId", "membershipOrderId", "status", "contractId", "entitlementLotId", "transferredCollectionFactIds", "lodgingReversalFactIds", "membershipPaymentFactIds", "transferIds", "conversionLedgerFactIds", "transferredAmount", "membershipAgreedPrice", "remainingPaymentAmount", "entitlementUnitKind", "convertedUnits", "remainingUnits", "effectHash"])
+    || !hasExactKeys(result, ["orderId", "memberId", "amendmentId", "pricingRevisionId", "membershipOrderId", "status", "contractId", "entitlementLotId", "transferredCollectionFactIds", "lodgingReversalFactIds", "membershipPaymentFactIds", "transferIds", "conversionMode", "conversionCoverageIds", "conversionLedgerFactIds", "transferredAmount", "membershipAgreedPrice", "remainingPaymentAmount", "entitlementUnitKind", "convertedUnits", "remainingUnits", "effectHash"])
     || !nonblankString(result.orderId) || !nonblankString(result.memberId)
-    || ((hasFullInput || hasRecoveryInput) && (result.orderId !== expectedOrderId || result.memberId !== expectedMemberId))
+    || ((hasFullInput || hasRecoveryInput) && result.orderId !== expectedOrderId)
+    || (expectedMemberId !== undefined && result.memberId !== expectedMemberId)
     || result.status !== "ACTIVE"
     || !nonblankString(result.amendmentId) || !nonblankString(result.pricingRevisionId)
     || !nonblankString(result.membershipOrderId) || !nonblankString(result.contractId)
     || !nonblankString(result.entitlementLotId)
+    || (result.conversionMode !== "IN_HOUSE" && result.conversionMode !== "COMPLETED")
+    || (historicalCompletedConversion && result.conversionMode !== "COMPLETED")
     || !isEffectHash(result.effectHash)
     || (expectedEffectHash !== undefined && result.effectHash !== expectedEffectHash)
-    || !hasMoney(result.transferredAmount) || result.transferredAmount.minorUnits <= 0
+    || !hasMoney(result.transferredAmount) || result.transferredAmount.minorUnits < 0
     || !hasMoney(result.membershipAgreedPrice)
     || !hasMoney(result.remainingPaymentAmount)
     || result.transferredAmount.currency !== result.membershipAgreedPrice.currency
@@ -1849,12 +1890,15 @@ export function conversionReceiptHasEvidence(
   const reversalIds = exactNonblankStringList(result.lodgingReversalFactIds);
   const paymentIds = exactNonblankStringList(result.membershipPaymentFactIds);
   const transferIds = exactNonblankStringList(result.transferIds);
+  const coverageIds = exactNonblankStringList(result.conversionCoverageIds);
   const ledgerIds = exactNonblankStringList(result.conversionLedgerFactIds);
-  if (!sourceIds || !reversalIds || !paymentIds || !transferIds || !ledgerIds
+  if (!sourceIds || !reversalIds || !paymentIds || !transferIds || !coverageIds || !ledgerIds
     || (hasFullInput && !evidenceValuesEqual(sourceIds, expectedCollectionIds))
     || reversalIds.length !== sourceIds.length
     || transferIds.length !== sourceIds.length
     || paymentIds.length !== sourceIds.length + (result.remainingPaymentAmount.minorUnits > 0 ? 1 : 0)
+    || (result.conversionMode === "IN_HOUSE" && coverageIds.length !== result.convertedUnits)
+    || (result.conversionMode === "COMPLETED" && coverageIds.length !== 0)
     || ledgerIds.length !== result.convertedUnits
     || new Set([...reversalIds, ...paymentIds, ...ledgerIds]).size !== reversalIds.length + paymentIds.length + ledgerIds.length
     || !evidenceValuesEqual(factRefs, [...reversalIds, ...paymentIds, ...ledgerIds])) return false;
@@ -1866,7 +1910,8 @@ export function conversionReceiptHasEvidence(
     result.membershipOrderId,
     result.contractId,
     result.entitlementLotId,
-    ...transferIds
+    ...transferIds,
+    ...coverageIds
   ];
   if (!evidenceValuesEqual(resourceRefs, requiredResources)) return false;
 
@@ -2301,7 +2346,9 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           {consumedUnits !== undefined ? <><dt>本次住宿核销</dt><dd>{consumedUnits} {unitLabel}</dd></> : null}
           {remainingUnits !== undefined ? <><dt>预计剩余权益</dt><dd><strong>{remainingUnits} {unitLabel}</strong></dd></> : null}
           <dt>住宿金额</dt><dd><strong>调整为 ¥0.00</strong></dd>
-          <dt>住宿收款处理</dt><dd>保留收款记录，作为会员订单已收款来源；住宿订单不再重复计入这笔钱。</dd>
+          <dt>住宿收款处理</dt><dd>{transferTotal && transferTotal.minorUnits > 0
+            ? "保留收退款记录，将当前住宿净收款作为会员订单已收款来源；住宿订单不再重复计入。"
+            : "当前住宿净收款为 ¥0.00；本次不创建住宿收款转入或 0 元收款事实。"}</dd>
         </dl>
       </section>
     </div>;
@@ -3137,12 +3184,17 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
     const convertedUnits = result && typeof result.convertedUnits === "number" ? result.convertedUnits : undefined;
     const remainingUnits = result && typeof result.remainingUnits === "number" ? result.remainingUnits : undefined;
     const unitLabel = result?.entitlementUnitKind === "BED_NIGHT" ? "床夜" : "间夜";
+    const transferredPositive = (transferredAmount?.minorUnits ?? 0) > 0;
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
       <div className="receipt-title-row">
         <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
         <div>
           <h3 id="receipt-heading">{committed ? "升级会员已完成" : "升级会员未执行"}</h3>
-          <p>{committed ? "住宿收款已转入会员订单，住宿金额已调整为 0。" : commandShellNotExecutedMessage(businessCommand)}</p>
+          <p>{committed
+            ? transferredPositive
+              ? "住宿净收款已转入会员订单，住宿金额已调整为 0。"
+              : "住宿净收款为 0，未创建转入事实；住宿金额已调整为 0。"
+            : commandShellNotExecutedMessage(businessCommand)}</p>
         </div>
       </div>
       {committed ? <dl className="receipt-grid">
@@ -3342,8 +3394,16 @@ function parsedRecoveryTargetRefs(targetRefs: readonly string[]): Record<string,
 function recoveryTargetRefsAreValid(commandType: unknown, targetRefs: readonly string[]): boolean {
   const parsed = parsedRecoveryTargetRefs(targetRefs);
   if (!parsed) return false;
-  return commandType !== "COMPLETE_STAY"
-    || (targetRefs.length === 1 && typeof parsed.orderId === "string");
+  if (commandType === "COMPLETE_STAY") {
+    return targetRefs.length === 1 && typeof parsed.orderId === "string";
+  }
+  if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+    return typeof parsed.orderId === "string"
+      && typeof parsed.memberId === "string"
+      && targetRefs.length === 2
+      && Object.keys(parsed).every((key) => key === "orderId" || key === "memberId");
+  }
+  return true;
 }
 
 function requiredRecoveryPresentation(commandType: HistoricalCommandType): PersistedCommandRecovery["presentation"] | undefined {
@@ -3486,6 +3546,9 @@ function dateChangeReceiptHasEvidence(
   if (!dateChangePreviewHasEvidence(commandType, effect, validationInput)) return false;
 
   if (shorten) {
+    const entitlement = isRecord(result.entitlementSummary) ? result.entitlementSummary : undefined;
+    const restoredFutureCoverageDates = entitlement ? exactDateList(entitlement.restoredFutureCoverageDates) : undefined;
+    if (!restoredFutureCoverageDates || restoredFutureCoverageDates.length !== value.factRefs.length) return false;
     if (result.completionMode === "EARLY_CHECK_OUT") {
       const timing = isRecord(result.fulfillmentTiming) ? result.fulfillmentTiming : undefined;
       if (!timing || !hasExactKeys(timing, ["effectiveDate", "recordedBusinessDate", "recordingMode"])
@@ -4270,6 +4333,17 @@ export function clearPersistedCommandRecoveryIfMatches(
   }
 }
 
+export function clearTerminalPersistedCommandRecoveryIfPresent(
+  storage: CommandRecoveryStorage,
+  subjectId: string,
+  scopeId: string
+): CommandRecoveryReadResult {
+  const current = readPersistedCommandRecovery(storage, subjectId, scopeId);
+  if (current.kind !== "VALID" || !isTerminalCommandRecovery(current.recovery.state)) return current;
+  if (clearPersistedCommandRecoveryIfMatches(storage, current.recovery)) return { kind: "ABSENT" };
+  return readPersistedCommandRecovery(storage, subjectId, scopeId);
+}
+
 export function clearCorruptPersistedCommandRecovery(
   storage: CommandRecoveryStorage,
   subjectId: string,
@@ -4426,6 +4500,7 @@ export function usePersistentCommandRecovery({
     ? propertyRecoveryCoordinationScope(subjectId, scopedPropertyId)
     : storageScope;
   const activeSnapshotScopeRef = useRef(snapshotScope);
+  const initialTerminalCleanupScopeRef = useRef<string | undefined>(undefined);
   activeSnapshotScopeRef.current = snapshotScope;
 
   function readBrowserSnapshot(): {
@@ -4507,6 +4582,36 @@ export function usePersistentCommandRecovery({
     ?? (read.kind === "CORRUPT" || read.kind === "READ_ERROR" ? read.error : undefined)
     ?? (conflict.kind === "READ_ERROR" ? conflict.error : undefined);
   const blocked = !ready || commandRecoverySnapshotIsBlocked(read, conflict);
+
+  useEffect(() => {
+    if (!ready || initialTerminalCleanupScopeRef.current === snapshotScope) return;
+    initialTerminalCleanupScopeRef.current = snapshotScope;
+    if (read.kind !== "VALID" || !isTerminalCommandRecovery(read.recovery.state)) return;
+    let current = true;
+    void withRecoveryStorageLock(coordinationScope, () => {
+      const access = browserCommandRecoveryStorage();
+      if (access.kind === "READ_ERROR" || !scopeId) {
+        return access.kind === "READ_ERROR"
+          ? access
+          : { kind: "READ_ERROR", error: new Error("命令恢复作用域不可用") } as const;
+      }
+      return clearTerminalPersistedCommandRecoveryIfPresent(access.storage, subjectId, scopeId);
+    }).then((nextRead) => {
+      if (!current) return;
+      setActiveSnapshot(nextRead);
+      if (nextRead.kind === "VALID" && isTerminalCommandRecovery(nextRead.recovery.state)) {
+        setOperationError(new Error("无法清除已收口的本地命令恢复记录；写入口继续暂停"));
+      } else if (nextRead.kind === "CORRUPT" || nextRead.kind === "READ_ERROR") {
+        setOperationError(nextRead.error);
+      } else {
+        setOperationError(undefined);
+      }
+    }).catch(() => {
+      if (!current) return;
+      setOperationError(new Error("无法取得跨标签恢复协调锁；写入口继续暂停"));
+    });
+    return () => { current = false; };
+  }, [coordinationScope, ready, scopeId, snapshotScope, subjectId]);
 
   async function runPreview<T>(execute: () => Promise<T>): Promise<T> {
     const access = browserCommandRecoveryStorage();
@@ -4765,6 +4870,24 @@ export function DamagedCommandRecoveryNotice({ error, onDiscard, testId = "damag
   );
 }
 
+export function QuoteRecoveryConflictNotice({ conflict, testId = "quote-recovery-conflict" }: {
+  conflict: CommandRecoveryConflictReadResult;
+  testId?: string;
+}) {
+  if (conflict.kind !== "PRESENT") return null;
+  return (
+    <section className="recovery-bar" role="status" aria-live="polite" data-testid={testId}>
+      <div>
+        <strong>报价结果尚未收口</strong>
+        <p>本门店有一笔住宿报价需要先核对。处理完成前，会员和订单写操作会保持暂停。</p>
+      </div>
+      <Link className="button button-secondary" to="/">
+        <ChevronRight aria-hidden="true" size={17} />返回房态处理
+      </Link>
+    </section>
+  );
+}
+
 export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recovery", businessFacing = false }: {
   recovery: PersistedCommandRecovery;
   onOpen: () => void;
@@ -4937,6 +5060,7 @@ export function CommandDialog({
       : commandShellNotExecutedMessage(u1CommandType)
     : "本次操作未执行。";
   const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || tokenBusiness) && executableCommandType ? executableCommandType : undefined);
+  const deterministicPreviewFailure = Boolean(error && !preview && !receipt && !commandPreviewFailureCanReload(error));
 
   function applyShellEvent(event: CommandShellEvent): boolean {
     let accepted = false;
@@ -5373,10 +5497,10 @@ export function CommandDialog({
                   ? "取消"
                 : shellState.phase === "AUTO_PREVIEWING"
                   ? "取消核对"
-                  : "返回修改"
+                  : request.commandType === "CORRECT_ORDER_OCCUPANT" ? "返回修改资料" : "返回修改"
               : receipt ? "完成" : backfillStay ? "返回修改" : "取消"}
           </button>
-          {!preview && !receipt && !networkUncertain && (!businessFacing || Boolean(error) || shellState.phase === "EDITING") ? <button className="button button-primary" type="button" onClick={() => void loadPreview()} disabled={busy || writeBlocked} data-testid="create-command-preview">
+          {!preview && !receipt && !networkUncertain && !deterministicPreviewFailure && (!businessFacing || Boolean(error) || shellState.phase === "EDITING") ? <button className="button button-primary" type="button" onClick={() => void loadPreview()} disabled={busy || writeBlocked} data-testid="create-command-preview">
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : null}{shellState.phase === "EDITING" ? "继续核对" : businessFacing ? "重新载入核对信息" : "生成服务端预览"}
           </button> : null}
           {preview && previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className="button button-primary" type="button" onClick={regeneratePreview} disabled={busy || writeBlocked} data-testid="regenerate-command-preview">
@@ -5391,10 +5515,10 @@ export function CommandDialog({
       {request.description ? <p className="command-description" data-command-shell-state={u1CommandType ? shellState.phase : undefined}>{request.description}</p> : null}
       <div aria-live="polite" className="sr-status">{busy ? "正在处理" : receipt ? (receipt.businessCommitted ? "操作已完成" : "操作未完成") : ""}</div>
       <InlineError
-        error={fulfillment && error ? new Error(networkUncertain
+        error={error && businessFacing ? new Error(fulfillment && networkUncertain
           ? "暂时无法确认本次操作结果。请使用下方按钮查询刚才的结果，系统不会重复办理。"
-          : businessErrorMessage(error)) : error}
-        title={failedNotExecuted ? "操作未执行" : "操作处理失败"}
+          : commandDialogBusinessErrorMessage(request.commandType, error)) : error}
+        title={failedNotExecuted ? "操作未执行" : deterministicPreviewFailure ? "填写内容需要修改" : "操作处理失败"}
         hideTechnicalDetails={businessFacing}
       />
       {u1CommandType && failedNotExecuted && !error ? <InlineError
@@ -5415,7 +5539,9 @@ export function CommandDialog({
       </div> : null}
       {!preview && !receipt ? (
         <div className="command-pending">
-          {businessFacing ? <p>{busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+          {businessFacing ? <p>{deterministicPreviewFailure
+            ? request.commandType === "CORRECT_ORDER_OCCUPANT" ? "请返回修改住宿人资料后重新核对。" : "请返回修改填写内容后重新核对。"
+            : busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">

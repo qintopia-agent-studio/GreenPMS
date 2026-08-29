@@ -213,7 +213,8 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       }).execute();
     });
     await expect(db.updateTable("coverage_items").set({ status: "RELEASED", updated_at: new Date() })
-      .where("id", "=", coverage[0]!.id).execute()).rejects.toThrow(/status may only advance/);
+      .where("id", "=", coverage[0]!.id).execute())
+      .rejects.toThrow(/coverage status transition is not authorized by its typed entitlement lifecycle/);
     await expect(db.updateTable("coverage_items").set({ status: "RELEASED", updated_at: new Date() })
       .where("id", "=", coverage[1]!.id).execute())
       .rejects.toMatchObject({ constraint: "coverage_items_lifecycle_conserved" });
@@ -233,7 +234,8 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       }).execute();
     });
     await expect(db.updateTable("coverage_items").set({ status: "HELD", updated_at: new Date() })
-      .where("id", "=", coverage[1]!.id).execute()).rejects.toThrow(/status may only advance/);
+      .where("id", "=", coverage[1]!.id).execute())
+      .rejects.toThrow(/coverage status transition is not authorized by its typed entitlement lifecycle/);
 
     await expect(db.insertInto("coverage_items").values({
       id: "coverage_invalid_initial_state",

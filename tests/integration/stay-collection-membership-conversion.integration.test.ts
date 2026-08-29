@@ -4,6 +4,7 @@ import {
   confirmCommandPreview,
   createCommandPreview,
   getOrderView,
+  propertyLocalToday,
   withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
@@ -50,6 +51,12 @@ function serviceDates(arrivalDate: string, departureDate: string): string[] {
     current.setUTCDate(current.getUTCDate() + 1);
   }
   return dates;
+}
+
+function shiftDate(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 async function preview(envelope: CommandEnvelope, prefix: string) {
@@ -212,17 +219,21 @@ async function createCheckedOutStay(options: {
   skipCollection?: boolean;
   collectionAmountMinor?: number;
   transactionReference?: string;
+  arrivalDate?: string;
+  departureDate?: string;
 }) {
   const unitId = options.unitId ?? "unit_room_d_gen_01";
+  const arrivalDate = options.arrivalDate ?? stayDates.arrival;
+  const departureDate = options.departureDate ?? stayDates.departure;
   const quote = await createQuoteForTesting(db, {
     propertyId: demo.propertyId,
     inventoryUnitId: unitId,
     stayType: "CUSTOM",
-    arrivalDate: stayDates.arrival,
-    departureDate: stayDates.departure,
+    arrivalDate,
+    departureDate,
     pricingPolicyVersionId: demo.publicPricingPolicyId
   });
-  const order = await execute({
+  const createOrder = () => execute({
     commandType: "CREATE_ORDER",
     input: {
       propertyId: demo.propertyId,
@@ -240,13 +251,18 @@ async function createCheckedOutStay(options: {
       targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
     }
   }, `${options.prefix}-order`);
+  const currentBusinessDate = await propertyLocalToday(db, demo.propertyId);
+  const order = arrivalDate < currentBusinessDate
+    ? await withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), createOrder)
+    : await createOrder();
   const orderId = order.result!.orderId as string;
-  await withPropertyClockForTesting(new Date(`${stayDates.arrival}T12:00:00.000Z`), () => execute({
+  const stayId = order.result!.stayId as string;
+  await withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), () => execute({
     commandType: "CHECK_IN",
     input: { propertyId: demo.propertyId, orderId }
   }, `${options.prefix}-checkin`));
   if (!options.skipCheckOut) {
-    await withPropertyClockForTesting(new Date(`${stayDates.departure}T12:00:00.000Z`), () => execute({
+    await withPropertyClockForTesting(new Date(`${departureDate}T12:00:00.000Z`), () => execute({
       commandType: "CHECK_OUT",
       input: { propertyId: demo.propertyId, orderId }
     }, `${options.prefix}-checkout`));
@@ -256,6 +272,7 @@ async function createCheckedOutStay(options: {
   if (options.skipCollection) {
     return {
       orderId,
+      stayId,
       collectionFactId: "",
       transactionReference: options.transactionReference ?? `WX-STAGE47-${options.prefix}-SOURCE`
     };
@@ -274,6 +291,7 @@ async function createCheckedOutStay(options: {
 
   return {
     orderId,
+    stayId,
     collectionFactId: collection.result!.factId as string,
     transactionReference: options.transactionReference ?? `WX-STAGE47-${options.prefix}-SOURCE`
   };
@@ -404,6 +422,172 @@ async function conversionArtifactCounts(orderId?: string) {
   };
 }
 
+async function createInHouseConversion(options: {
+  prefix: string;
+  businessDate?: string;
+  collectionAmountMinor?: number;
+  skipCollection?: boolean;
+  unitId?: string;
+  agreedPriceMinor?: number;
+  priceAdjustmentReason?: string;
+  arrivalDate?: string;
+  departureDate?: string;
+}) {
+  const businessDate = options.businessDate ?? "2026-09-02";
+  const collectionAmountMinor = options.collectionAmountMinor ?? 59_000;
+  const agreedPriceMinor = options.agreedPriceMinor ?? 162_000;
+  const memberId = await createMember(`STAGE86-${options.prefix.toUpperCase()}-ID`, options.prefix);
+  const stay = await createCheckedOutStay({
+    prefix: options.prefix,
+    documentNumber: `STAGE86-${options.prefix.toUpperCase()}-ID`,
+    skipCheckOut: true,
+    ...(options.skipCollection ? { skipCollection: true } : {}),
+    ...(options.unitId ? { unitId: options.unitId } : {}),
+    ...(options.arrivalDate ? { arrivalDate: options.arrivalDate } : {}),
+    ...(options.departureDate ? { departureDate: options.departureDate } : {}),
+    collectionAmountMinor,
+    transactionReference: `WX-STAGE86-${options.prefix.toUpperCase()}-SOURCE`
+  });
+  const envelope = conversionEnvelope({
+    orderId: stay.orderId,
+    memberId,
+    collectionFactId: stay.collectionFactId,
+    ...(options.skipCollection ? { collectionFactIds: [] } : {}),
+    agreedPriceMinor,
+    ...(options.priceAdjustmentReason ? { priceAdjustmentReason: options.priceAdjustmentReason } : {}),
+    ...(agreedPriceMinor > (options.skipCollection ? 0 : collectionAmountMinor)
+      ? { remainingPaymentTransactionReference: `WX-STAGE86-${options.prefix.toUpperCase()}-REMAINING` }
+      : {})
+  });
+  const prepared = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () =>
+    preview(envelope, `${options.prefix}-conversion`)
+  );
+  const receipt = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () =>
+    confirmPrepared(envelope, prepared, `${options.prefix}-conversion`)
+  );
+  expect(receipt.businessCommitted).toBe(true);
+  return {
+    memberId,
+    stay,
+    envelope,
+    prepared,
+    receipt,
+    membershipOrderId: receipt.result!.membershipOrderId as string,
+    contractId: receipt.result!.contractId as string,
+    entitlementLotId: receipt.result!.entitlementLotId as string
+  };
+}
+
+async function conversionEntitlementBalance(entitlementLotId: string): Promise<number> {
+  const balance = await db.selectFrom("entitlement_lots")
+    .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
+    .select(sql<number>`coalesce(entitlement_lots.total_units + sum(entitlement_ledger.quantity_delta), entitlement_lots.total_units)::integer`.as("balance"))
+    .where("entitlement_lots.id", "=", entitlementLotId)
+    .groupBy(["entitlement_lots.id", "entitlement_lots.total_units"])
+    .executeTakeFirstOrThrow();
+  return balance.balance;
+}
+
+async function assertConversionCommandStillValid(commandId: string): Promise<void> {
+  await sql`SELECT qintopia_assert_stage13_stay_conversion_command(${commandId})`.execute(db);
+}
+
+async function assertCorruptConversionRevisionRejected(commandId: string): Promise<void> {
+  const conversionRevision = await db.selectFrom("pricing_revisions as revision")
+    .innerJoin("amendments as amendment", "amendment.id", "revision.amendment_id")
+    .select("revision.id")
+    .where("amendment.command_id", "=", commandId)
+    .where("amendment.amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
+    .executeTakeFirstOrThrow();
+  const corruptWrite = db.transaction().execute(async (trx) => {
+    await sql`ALTER TABLE pricing_revisions DISABLE TRIGGER pricing_revisions_append_only`.execute(trx);
+    await trx.updateTable("pricing_revisions")
+      .set({ current_contract_amount_minor: 1 })
+      .where("id", "=", conversionRevision.id)
+      .execute();
+    await sql`SELECT qintopia_assert_stage13_stay_conversion_command(${commandId})`.execute(trx);
+    throw new Error("conversion assertion accepted a corrupt conversion revision");
+  });
+  await expect(corruptWrite).rejects.toMatchObject({
+    code: "23514",
+    constraint: "stage13_conversion_order_state"
+  });
+}
+
+async function conversionRollbackSnapshot(orderId: string, memberId?: string) {
+  const [order, collections, transfers, membershipLedger, amendments, coverage] = await Promise.all([
+    db.selectFrom("orders").selectAll().where("id", "=", orderId).executeTakeFirstOrThrow(),
+    db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).orderBy("fact_id").execute(),
+    db.selectFrom("stay_collection_membership_transfers").selectAll().where("order_id", "=", orderId).orderBy("id").execute(),
+    db.selectFrom("entitlement_ledger").selectAll().where("order_id", "=", orderId).orderBy("fact_id").execute(),
+    db.selectFrom("amendments").selectAll().where("order_id", "=", orderId).orderBy("sequence").execute(),
+    db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("id").execute()
+  ]);
+  const membershipOrders = memberId
+    ? await db.selectFrom("membership_orders")
+      .selectAll()
+      .where("member_id", "=", memberId)
+      .orderBy("id")
+      .execute()
+    : await db.selectFrom("membership_orders")
+      .innerJoin("member_contracts", "member_contracts.membership_order_id", "membership_orders.id")
+      .innerJoin("orders", "orders.member_contract_id", "member_contracts.id")
+      .selectAll("membership_orders")
+      .where("orders.id", "=", orderId)
+      .orderBy("membership_orders.id")
+      .execute();
+  const membershipOrderIds = membershipOrders.map((membershipOrder) => membershipOrder.id);
+  const [membershipPayments, contracts, lots] = await Promise.all([
+    membershipOrderIds.length > 0
+      ? db.selectFrom("membership_payment_facts").selectAll().where("membership_order_id", "in", membershipOrderIds).orderBy("fact_id").execute()
+      : Promise.resolve([]),
+    memberId
+      ? db.selectFrom("member_contracts").selectAll().where("member_id", "=", memberId).orderBy("id").execute()
+      : db.selectFrom("member_contracts")
+        .innerJoin("orders", "orders.member_contract_id", "member_contracts.id")
+        .selectAll("member_contracts")
+        .where("orders.id", "=", orderId)
+        .orderBy("member_contracts.id")
+        .execute(),
+    membershipOrderIds.length > 0
+      ? db.selectFrom("entitlement_lots")
+        .innerJoin("membership_orders", "membership_orders.entitlement_lot_id", "entitlement_lots.id")
+        .selectAll("entitlement_lots")
+        .where("membership_orders.id", "in", membershipOrderIds)
+        .orderBy("entitlement_lots.id")
+        .execute()
+      : Promise.resolve([])
+  ]);
+  return JSON.parse(JSON.stringify({
+    order,
+    collections,
+    transfers,
+    membershipLedger,
+    amendments,
+    coverage,
+    membershipOrders,
+    membershipPayments,
+    contracts,
+    lots
+  }));
+}
+
+async function linkMemberToAdditionalProperty(memberId: string): Promise<string> {
+  const propertyId = "prop_stage86_additional_member_link";
+  await db.insertInto("properties").values({
+    id: propertyId,
+    code: "STAGE86-OTHER",
+    name: "Stage 86 Additional Property",
+    timezone: "Asia/Shanghai",
+    currency: "CNY"
+  }).execute();
+  await db.insertInto("member_property_links").values({
+    member_id: memberId,
+    property_id: propertyId
+  }).execute();
+  return propertyId;
+}
+
 beforeEach(async () => {
   sequence = 0;
   db = await resetDatabase(databaseUrl);
@@ -468,6 +652,7 @@ describe("4.7 stay collection conversion to membership", () => {
       membershipAgreedPrice: { currency: "CNY", minorUnits: 162_000 },
       remainingPaymentAmount: { currency: "CNY", minorUnits: 103_000 },
       entitlementUnitKind: "ROOM_NIGHT",
+      conversionMode: "COMPLETED",
       convertedUnits: 7,
       remainingUnits: 23
     });
@@ -628,6 +813,7 @@ describe("4.7 stay collection conversion to membership", () => {
       transferredCollectionFactIds: [stay.collectionFactId],
       transferredAmount: { currency: "CNY", minorUnits: 59_000 },
       remainingPaymentAmount: { currency: "CNY", minorUnits: 103_000 },
+      conversionMode: "IN_HOUSE",
       convertedUnits: 7,
       remainingUnits: 23
     });
@@ -666,6 +852,7 @@ describe("4.7 stay collection conversion to membership", () => {
       .where("id", "=", stay.orderId)
       .executeTakeFirstOrThrow();
     expect(checkedOut.status).toBe("CHECKED_OUT");
+    await assertConversionCommandStillValid(receipt.commandId);
   });
 
   it("converts a stay with zero recorded collections by charging the full membership price directly", async () => {
@@ -883,30 +1070,13 @@ describe("4.7 stay collection conversion to membership", () => {
       collectionAmountMinor: 59_000,
       transactionReference: "WX-STAGE47-REVERSAL-BRIDGE-SOURCE"
     });
-    const untransferredCollection = await execute({
-      commandType: "RECORD_COLLECTION",
-      input: {
-        propertyId: demo.propertyId,
-        orderId: stay.orderId,
-        amountMinor: 100,
-        method: "WECOM",
-        transactionReference: "WX-STAGE47-REVERSAL-BRIDGE-REFUNDED",
-        note: "用于验证转换命令不能夹带未转入收款的额外冲销"
-      }
-    }, "reversal-bridge-extra-collection");
-    const untransferredCollectionFactId = untransferredCollection.result!.factId as string;
-    const refund = await execute({
-      commandType: "RECORD_REFUND",
-      input: {
-        propertyId: demo.propertyId,
-        orderId: stay.orderId,
-        referencesFactId: untransferredCollectionFactId,
-        amountMinor: 100,
-        method: "WECOM",
-        note: "先全额退款，使额外收退款净影响为零"
-      }
-    }, "reversal-bridge-extra-refund");
-    const refundFactId = refund.result!.factId as string;
+    const unrelatedStay = await createCheckedOutStay({
+      prefix: "reversal-bridge-unrelated",
+      documentNumber: "STAGE47-REVERSAL-BRIDGE-UNRELATED-ID",
+      unitId: "unit_room_e_gen_01",
+      collectionAmountMinor: 100,
+      transactionReference: "WX-STAGE47-REVERSAL-BRIDGE-UNRELATED"
+    });
     const envelope = conversionEnvelope({
       orderId: stay.orderId,
       memberId,
@@ -917,48 +1087,34 @@ describe("4.7 stay collection conversion to membership", () => {
     const receipt = await confirmPrepared(envelope, prepared, "reversal-bridge-conversion");
     expect(receipt.businessCommitted).toBe(true);
 
-    const order = await db.selectFrom("orders")
+    const unrelatedOrder = await db.selectFrom("orders")
       .select("current_revision_id")
-      .where("id", "=", stay.orderId)
+      .where("id", "=", unrelatedStay.orderId)
       .executeTakeFirstOrThrow();
     const factsBefore = await db.selectFrom("collection_facts")
       .select(sql<number>`count(*)::integer`.as("count"))
-      .where("order_id", "=", stay.orderId)
+      .where("order_id", "=", unrelatedStay.orderId)
       .executeTakeFirstOrThrow();
-    const corruptFactIds = [
-      "fact_stage47_unbridged_refund_reversal",
-      "fact_stage47_unbridged_collection_reversal"
-    ] as const;
+    const corruptFactId = "fact_stage47_unbridged_collection_reversal";
 
     const corruptWrite = db.transaction().execute(async (trx) => {
+      await sql`
+        ALTER TABLE collection_facts
+        DISABLE TRIGGER collection_facts_stage13_reject_after_transfer
+      `.execute(trx);
       await trx.insertInto("collection_facts").values({
-        fact_id: corruptFactIds[0],
-        order_id: stay.orderId,
-        fact_type: "REVERSAL",
-        amount_minor: 100,
-        net_effect_minor: 100,
-        currency: "CNY",
-        references_fact_id: null,
-        reverses_fact_id: refundFactId,
-        method: "REVERSAL",
-        note: "损坏形状：夹带未桥接的退款冲销",
-        transaction_reference: null,
-        pricing_revision_id: order.current_revision_id,
-        command_id: receipt.commandId
-      }).execute();
-      await trx.insertInto("collection_facts").values({
-        fact_id: corruptFactIds[1],
-        order_id: stay.orderId,
+        fact_id: corruptFactId,
+        order_id: unrelatedStay.orderId,
         fact_type: "REVERSAL",
         amount_minor: 100,
         net_effect_minor: -100,
         currency: "CNY",
         references_fact_id: null,
-        reverses_fact_id: untransferredCollectionFactId,
+        reverses_fact_id: unrelatedStay.collectionFactId,
         method: "REVERSAL",
         note: "损坏形状：夹带未转入住宿收款的额外冲销",
         transaction_reference: null,
-        pricing_revision_id: order.current_revision_id,
+        pricing_revision_id: unrelatedOrder.current_revision_id,
         command_id: receipt.commandId
       }).execute();
     });
@@ -967,11 +1123,11 @@ describe("4.7 stay collection conversion to membership", () => {
     });
     expect(await db.selectFrom("collection_facts")
       .select("fact_id")
-      .where("fact_id", "in", corruptFactIds)
+      .where("fact_id", "=", corruptFactId)
       .execute()).toHaveLength(0);
     expect(await db.selectFrom("collection_facts")
       .select(sql<number>`count(*)::integer`.as("count"))
-      .where("order_id", "=", stay.orderId)
+      .where("order_id", "=", unrelatedStay.orderId)
       .executeTakeFirstOrThrow()).toEqual(factsBefore);
   });
 
@@ -1016,7 +1172,7 @@ describe("4.7 stay collection conversion to membership", () => {
       reason: "不得复用已完成转会员命令调整无关权益",
       command_id: receipt.commandId
     }).execute()).rejects.toMatchObject({
-      constraint: "stage13_conversion_command_fact_exclusivity"
+      constraint: "stage13_conversion_entitlement"
     });
     expect(await db.selectFrom("entitlement_ledger")
       .select("fact_id")
@@ -1065,7 +1221,7 @@ describe("4.7 stay collection conversion to membership", () => {
       pricing_revision_id: unrelatedOrder.current_revision_id,
       command_id: receipt.commandId
     }).execute()).rejects.toMatchObject({
-      constraint: "stage13_conversion_command_fact_exclusivity"
+      constraint: "stage13_conversion_initial_lodging_fund_shape"
     });
     expect(await db.selectFrom("collection_facts")
       .select("fact_id")
@@ -1092,6 +1248,7 @@ describe("4.7 stay collection conversion to membership", () => {
       const stateSuffix = state.toLowerCase();
       const directFacts: Array<{
         kind: string;
+        expectedConstraint?: string;
         write: (trx: Transaction<Database>, commandId: string, rowId: string) => Promise<void>;
       }> = [
         {
@@ -1113,6 +1270,7 @@ describe("4.7 stay collection conversion to membership", () => {
         },
         {
           kind: "lodging-collection",
+          expectedConstraint: "stage13_conversion_initial_lodging_fund_shape",
           write: async (trx, commandId, rowId) => {
             await trx.insertInto("collection_facts").values({
               fact_id: rowId,
@@ -1250,7 +1408,7 @@ describe("4.7 stay collection conversion to membership", () => {
 
         const write = db.transaction().execute((trx) => directFact.write(trx, commandId, rowId));
         await expect(write).rejects.toMatchObject({
-          constraint: "stage13_conversion_execution_state"
+          constraint: directFact.expectedConstraint ?? "stage13_conversion_execution_state"
         });
         expect(await conversionCommandArtifactCounts(commandId)).toEqual({
           amendments: 0,
@@ -1432,7 +1590,7 @@ describe("4.7 stay collection conversion to membership", () => {
       remainingPaymentTransactionReference: "WX-STAGE47-PARTIAL-REMAINING"
     }), "partial-net-conversion")).rejects.toMatchObject({
       code: "VALIDATION_ERROR",
-      message: expect.stringContaining("必须一次转入当前全部已记录净收款")
+      message: expect.stringContaining("升级会员必须一次转入全部当前可留存的企微住宿净收款")
     });
     expect(await db.selectFrom("stay_collection_membership_transfers").select("id").execute()).toHaveLength(0);
 
@@ -1472,12 +1630,12 @@ describe("4.7 stay collection conversion to membership", () => {
       remainingPaymentTransactionReference: "WX-STAGE47-STALE-OLD"
     }), "stale-ref-conversion")).rejects.toMatchObject({
       code: "VALIDATION_ERROR",
-      message: expect.stringContaining("不能沿用原住宿收款交易单号")
+      message: expect.stringContaining("住宿资金记录包含非企微、冲销或无法核对的收退款事实")
     });
     expect(await db.selectFrom("stay_collection_membership_transfers").select("id").execute()).toHaveLength(0);
   });
 
-  it("does not allow refunded lodging collections to be transferred", async () => {
+  it("transfers only the remaining WeCom amount when a lodging collection was partially refunded", async () => {
     const memberId = await createMember("STAGE47-REFUNDED-ID", "refunded");
     const stay = await createCheckedOutStay({
       prefix: "refunded",
@@ -1492,20 +1650,130 @@ describe("4.7 stay collection conversion to membership", () => {
         referencesFactId: stay.collectionFactId,
         amountMinor: 1_000,
         method: "WECOM",
-        note: "登记过退款后不能再转会员"
+        note: "部分退款后按剩余企微净额升级会员"
       }
     }, "refunded-source-refund");
 
-    await expect(preview(conversionEnvelope({
+    const envelope = conversionEnvelope({
       orderId: stay.orderId,
       memberId,
       collectionFactId: stay.collectionFactId,
       remainingPaymentTransactionReference: "WX-STAGE47-REFUNDED-REMAINING"
-    }), "refunded-source-conversion")).rejects.toMatchObject({
-      code: "REFUND_LIMIT_EXCEEDED",
-      message: expect.stringContaining("已登记退款")
     });
-    expect(await db.selectFrom("stay_collection_membership_transfers").select("id").execute()).toHaveLength(0);
+    const prepared = await preview(envelope, "refunded-source-conversion");
+    expect(prepared.preview.effect).toMatchObject({
+      transfer: {
+        total: { currency: "CNY", minorUnits: 58_000 },
+        collections: [{ factId: stay.collectionFactId, amount: { currency: "CNY", minorUnits: 58_000 } }]
+      },
+      remainingPayment: {
+        amount: { currency: "CNY", minorUnits: 104_000 },
+        transactionReference: "WX-STAGE47-REFUNDED-REMAINING"
+      }
+    });
+
+    const receipt = await confirmPrepared(envelope, prepared, "refunded-source-conversion");
+    expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+    expect(receipt.result).toMatchObject({
+      transferredCollectionFactIds: [stay.collectionFactId],
+      transferredAmount: { currency: "CNY", minorUnits: 58_000 },
+      remainingPaymentAmount: { currency: "CNY", minorUnits: 104_000 }
+    });
+    const lodgingNet = await db.selectFrom("collection_facts")
+      .select(sql<number>`coalesce(sum(net_effect_minor), 0)::integer`.as("net"))
+      .where("order_id", "=", stay.orderId)
+      .executeTakeFirstOrThrow();
+    expect(lodgingNet.net).toBe(0);
+    const transferPayment = await db.selectFrom("membership_payment_facts")
+      .select(["amount_minor", "source_type", "source_collection_fact_id"])
+      .where("membership_order_id", "=", receipt.result!.membershipOrderId as string)
+      .where("source_type", "=", "STAY_COLLECTION_TRANSFER")
+      .executeTakeFirstOrThrow();
+    expect(transferPayment).toEqual({
+      amount_minor: 58_000,
+      source_type: "STAY_COLLECTION_TRANSFER",
+      source_collection_fact_id: stay.collectionFactId
+    });
+  });
+
+  it("fails closed at the entry and preview for a historical WeCom refund that still carries its own transaction reference", async () => {
+    const memberId = await createMember("STAGE86-LEGACY-REFUND-REFERENCE-ID", "legacy-refund-reference");
+    const stay = await createCheckedOutStay({
+      prefix: "legacy-refund-reference",
+      documentNumber: "STAGE86-LEGACY-REFUND-REFERENCE-ID",
+      skipCheckOut: true,
+      transactionReference: "WX-STAGE86-LEGACY-REFUND-SOURCE"
+    });
+    const refund = await execute({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: stay.orderId,
+        referencesFactId: stay.collectionFactId,
+        amountMinor: 1_000,
+        method: "WECOM",
+        note: "构造迁移 032 前遗留的企微退款交易单号"
+      }
+    }, "legacy-refund-reference-refund");
+
+    // Migration 009 required a refund transaction number. Reproduce that
+    // immutable historical shape without weakening the current write guard.
+    await db.transaction().execute(async (trx) => {
+      await sql`ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only`.execute(trx);
+      await trx.updateTable("collection_facts")
+        .set({ transaction_reference: "WX-STAGE86-LEGACY-REFUND" })
+        .where("fact_id", "=", refund.result!.factId as string)
+        .executeTakeFirstOrThrow();
+      await sql`ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only`.execute(trx);
+    });
+
+    const before = await conversionRollbackSnapshot(stay.orderId, memberId);
+    const view = await getOrderView(db, stay.orderId);
+    expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
+      .toMatchObject({ enabled: false, disabledReason: "NO_TRANSFERABLE_COLLECTION" });
+    await expect(preview(conversionEnvelope({
+      orderId: stay.orderId,
+      memberId,
+      collectionFactId: stay.collectionFactId,
+      remainingPaymentTransactionReference: "WX-STAGE86-LEGACY-REFUND-MEMBER"
+    }), "legacy-refund-reference-conversion")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: expect.stringContaining("住宿资金记录包含非企微、冲销或无法核对的收退款事实")
+    });
+    expect(await conversionRollbackSnapshot(stay.orderId, memberId)).toEqual(before);
+  });
+
+  it("fails closed at the entry when a historical lodging fact currency does not match the order", async () => {
+    const memberId = await createMember("STAGE86-CURRENCY-MISMATCH-ID", "currency-mismatch");
+    const stay = await createCheckedOutStay({
+      prefix: "currency-mismatch",
+      documentNumber: "STAGE86-CURRENCY-MISMATCH-ID",
+      skipCheckOut: true,
+      transactionReference: "WX-STAGE86-CURRENCY-MISMATCH-SOURCE"
+    });
+    await db.transaction().execute(async (trx) => {
+      await sql`ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only`.execute(trx);
+      await trx.updateTable("collection_facts")
+        .set({ currency: "USD" })
+        .where("fact_id", "=", stay.collectionFactId)
+        .executeTakeFirstOrThrow();
+      await sql`ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only`.execute(trx);
+    });
+
+    const before = await conversionRollbackSnapshot(stay.orderId, memberId);
+    const view = await getOrderView(db, stay.orderId);
+    expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
+      .toMatchObject({ enabled: false, disabledReason: "NO_TRANSFERABLE_COLLECTION" });
+    await expect(preview(conversionEnvelope({
+      orderId: stay.orderId,
+      memberId,
+      collectionFactId: stay.collectionFactId,
+      remainingPaymentTransactionReference: "WX-STAGE86-CURRENCY-MISMATCH-MEMBER"
+    }), "currency-mismatch-conversion")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: expect.stringContaining("无法核对的收退款事实")
+    });
+    expect(await conversionRollbackSnapshot(stay.orderId, memberId)).toEqual(before);
   });
 
   it("rejects non-WeCom or ambiguous channels and disables the action for mixed funds", async () => {
@@ -1558,7 +1826,7 @@ describe("4.7 stay collection conversion to membership", () => {
       remainingPaymentTransactionReference: "WX-STAGE47-MIXED-REMAINING"
     }), "mixed-funds-conversion")).rejects.toMatchObject({
       code: "VALIDATION_ERROR",
-      message: expect.stringContaining("必须一次转入当前全部已记录净收款")
+      message: expect.stringContaining("住宿资金记录包含非企微、冲销或无法核对的收退款事实")
     });
     expect(await db.selectFrom("stay_collection_membership_transfers").select("id").execute()).toHaveLength(0);
   });
@@ -1694,5 +1962,1057 @@ describe("4.7 stay collection conversion to membership", () => {
       transferredAmount: { currency: "CNY", minorUnits: 2_100 }
     });
     expect(await db.selectFrom("stay_collection_membership_transfers").select("id").where("order_id", "=", stay.orderId).execute()).toHaveLength(21);
+  });
+
+  describe("8.6 in-house stay membership conversion fulfillment", () => {
+    it("fails closed before preview when the target member is linked to more than the current property", async () => {
+      const prefix = "inhouse-multi-property-preview";
+      const memberId = await createMember("STAGE86-MULTI-PROPERTY-PREVIEW-ID", prefix);
+      const stay = await createCheckedOutStay({
+        prefix,
+        documentNumber: "STAGE86-MULTI-PROPERTY-PREVIEW-ID",
+        skipCheckOut: true,
+        skipCollection: true
+      });
+      await linkMemberToAdditionalProperty(memberId);
+      const before = await conversionRollbackSnapshot(stay.orderId, memberId);
+
+      await expect(withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => preview(conversionEnvelope({
+        orderId: stay.orderId,
+        memberId,
+        collectionFactId: "",
+        collectionFactIds: [],
+        remainingPaymentTransactionReference: "WX-STAGE86-MULTI-PROPERTY-PREVIEW-REMAINING"
+      }), "inhouse-multi-property-preview-conversion"))).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: "当前版本仅支持单门店会员；该会员已关联其他门店，不能升级会员"
+      });
+      expect(await conversionRollbackSnapshot(stay.orderId, memberId)).toEqual(before);
+    });
+
+    it("rejects confirmation without conversion artifacts when a second property link appears after preview", async () => {
+      const prefix = "inhouse-multi-property-confirm";
+      const memberId = await createMember("STAGE86-MULTI-PROPERTY-CONFIRM-ID", prefix);
+      const stay = await createCheckedOutStay({
+        prefix,
+        documentNumber: "STAGE86-MULTI-PROPERTY-CONFIRM-ID",
+        skipCheckOut: true,
+        skipCollection: true
+      });
+      const envelope = conversionEnvelope({
+        orderId: stay.orderId,
+        memberId,
+        collectionFactId: "",
+        collectionFactIds: [],
+        remainingPaymentTransactionReference: "WX-STAGE86-MULTI-PROPERTY-CONFIRM-REMAINING"
+      });
+      const prepared = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () =>
+        preview(envelope, "inhouse-multi-property-confirm-conversion")
+      );
+      const before = await conversionRollbackSnapshot(stay.orderId, memberId);
+      await linkMemberToAdditionalProperty(memberId);
+
+      const receipt = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () =>
+        confirmPrepared(envelope, prepared, "inhouse-multi-property-confirm-conversion")
+      );
+      expect(receipt).toMatchObject({
+        executionStatus: "NOT_EXECUTED",
+        businessCommitted: false,
+        error: { code: "PREVIEW_STALE" }
+      });
+      expect(await conversionCommandArtifactCounts(receipt.commandId)).toEqual({
+        amendments: 0,
+        lodgingCollections: 0,
+        membershipCollections: 0,
+        transfers: 0,
+        entitlements: 0,
+        membershipOrders: 0
+      });
+      expect(await conversionRollbackSnapshot(stay.orderId, memberId)).toEqual(before);
+    });
+
+    it("marks a zero-collection in-house stay as upgraded without creating a fictitious zero payment", async () => {
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-zero-collection",
+        skipCollection: true
+      });
+      expect(converted.receipt.result).toMatchObject({
+        transferredCollectionFactIds: [],
+        lodgingReversalFactIds: [],
+        transferIds: [],
+        transferredAmount: { currency: "CNY", minorUnits: 0 },
+        remainingPaymentAmount: { currency: "CNY", minorUnits: 162_000 }
+      });
+      const order = await db.selectFrom("orders")
+        .innerJoin("stays", "stays.order_id", "orders.id")
+        .innerJoin("pricing_revisions", "pricing_revisions.id", "orders.current_revision_id")
+        .select([
+          "orders.status as orderStatus",
+          "orders.member_id as memberId",
+          "orders.member_contract_id as memberContractId",
+          "stays.status as stayStatus",
+          "pricing_revisions.current_contract_amount_minor as currentContractAmountMinor"
+        ])
+        .where("orders.id", "=", converted.stay.orderId)
+        .executeTakeFirstOrThrow();
+      expect(order).toEqual({
+        orderStatus: "CHECKED_IN",
+        memberId: converted.memberId,
+        memberContractId: converted.contractId,
+        stayStatus: "IN_HOUSE",
+        currentContractAmountMinor: 0
+      });
+      expect(await db.selectFrom("collection_facts")
+        .select("fact_id")
+        .where("order_id", "=", converted.stay.orderId)
+        .execute()).toEqual([]);
+      expect(await db.selectFrom("stay_collection_membership_transfers")
+        .select("id")
+        .where("order_id", "=", converted.stay.orderId)
+        .execute()).toEqual([]);
+      expect(await db.selectFrom("membership_payment_facts")
+        .select(["amount_minor", "source_type", "transaction_reference"])
+        .where("membership_order_id", "=", converted.membershipOrderId)
+        .execute()).toEqual([{
+        amount_minor: 162_000,
+        source_type: "DIRECT_WECOM",
+        transaction_reference: "WX-STAGE86-INHOUSE-ZERO-COLLECTION-REMAINING"
+      }]);
+      const coverage = await db.selectFrom("coverage_items")
+        .select(["id", "service_date", "status"])
+        .where("order_id", "=", converted.stay.orderId)
+        .orderBy("service_date")
+        .execute();
+      expect(coverage).toEqual(serviceDates(stayDates.arrival, stayDates.departure)
+        .map((service_date) => expect.objectContaining({ service_date, status: "CONSUMED" })));
+      const contract = await db.selectFrom("member_contracts")
+        .select("valid_from")
+        .where("id", "=", converted.contractId)
+        .executeTakeFirstOrThrow();
+      expect(contract.valid_from).toBe("2026-09-02");
+      expect(coverage.filter((item) => item.service_date < contract.valid_from)
+        .map((item) => item.service_date)).toEqual(["2026-09-01"]);
+      expect(converted.receipt.result).toMatchObject({
+        conversionCoverageIds: coverage.map((item) => item.id)
+      });
+      const conversionLedger = await db.selectFrom("entitlement_ledger")
+        .select(["entry_type", "quantity_delta", "service_date"])
+        .where("order_id", "=", converted.stay.orderId)
+        .where("entry_type", "=", "CONVERSION_CONSUME")
+        .orderBy("service_date")
+        .execute();
+      expect(conversionLedger).toEqual(serviceDates(stayDates.arrival, stayDates.departure)
+        .map((service_date) => ({ entry_type: "CONVERSION_CONSUME", quantity_delta: -1, service_date })));
+      expect((await getOrderView(db, converted.stay.orderId)).membershipConversion).toEqual({
+        membershipOrderId: converted.membershipOrderId,
+        memberId: converted.memberId,
+        contractId: converted.contractId,
+        entitlementLotId: converted.entitlementLotId,
+        commandId: converted.receipt.commandId
+      });
+
+      const beforeClosedFundsAction = await conversionRollbackSnapshot(converted.stay.orderId, converted.memberId);
+      await expect(preview({
+        commandType: "RECORD_COLLECTION",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          amountMinor: 1_000,
+          method: "WECOM",
+          transactionReference: "WX-STAGE86-ZERO-AFTER-CONVERSION",
+          note: "零转入升级后不得再追加住宿收款"
+        }
+      }, "inhouse-zero-after-conversion-collection")).rejects.toMatchObject({
+        code: "AGGREGATE_VERSION_CONFLICT"
+      });
+      await expect(preview(conversionEnvelope({
+        orderId: converted.stay.orderId,
+        memberId: converted.memberId,
+        collectionFactId: "",
+        collectionFactIds: [],
+        remainingPaymentTransactionReference: "WX-STAGE86-ZERO-REPEATED-CONVERSION"
+      }), "inhouse-zero-repeated-conversion")).rejects.toMatchObject({
+        code: "AGGREGATE_VERSION_CONFLICT"
+      });
+      expect(await conversionRollbackSnapshot(converted.stay.orderId, converted.memberId)).toEqual(beforeClosedFundsAction);
+    });
+
+    it("rejects untyped consumed coverage, pre-validity held coverage, and direct consumed release", async () => {
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-coverage-write-guards",
+        skipCollection: true
+      });
+      const source = await db.selectFrom("coverage_items")
+        .selectAll()
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "=", stayDates.arrival)
+        .executeTakeFirstOrThrow();
+
+      await expect(db.insertInto("coverage_items").values({
+        ...source,
+        id: "coverage_untyped_consumed_guard",
+        created_at: new Date(),
+        updated_at: new Date()
+      }).execute()).rejects.toMatchObject({
+        code: "55000",
+        constraint: "coverage_conversion_consumed_insert"
+      });
+
+      await expect(db.insertInto("coverage_items").values({
+        ...source,
+        id: "coverage_pre_validity_held_guard",
+        service_date: stayDates.arrival,
+        status: "HELD",
+        created_at: new Date(),
+        updated_at: new Date()
+      }).execute()).rejects.toMatchObject({
+        code: "23514",
+        constraint: "coverage_items_entitlement_valid"
+      });
+
+      await expect(db.updateTable("coverage_items")
+        .set({ status: "RELEASED", updated_at: new Date() })
+        .where("id", "=", source.id)
+        .execute()).rejects.toMatchObject({
+        code: "55000",
+        constraint: "coverage_status_typed_transition"
+      });
+      expect(await db.selectFrom("coverage_items")
+        .select("status")
+        .where("id", "=", source.id)
+        .executeTakeFirstOrThrow()).toEqual({ status: "CONSUMED" });
+    });
+
+    it("rejects fake typed conversion coverage with a mismatched revision, order, member, contract, or lot", async () => {
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-conversion-coverage-binding",
+        skipCollection: true
+      });
+      const other = await createInHouseConversion({
+        prefix: "inhouse-conversion-coverage-binding-other",
+        skipCollection: true,
+        unitId: "unit_room_d_gen_04"
+      });
+      const source = await db.selectFrom("coverage_items")
+        .selectAll()
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "=", stayDates.arrival)
+        .executeTakeFirstOrThrow();
+      const originalRevision = await db.selectFrom("pricing_revisions")
+        .select("id")
+        .where("order_id", "=", converted.stay.orderId)
+        .where("revision_no", "=", 1)
+        .executeTakeFirstOrThrow();
+
+      const mismatches = [
+        {
+          name: "fake conversion revision",
+          values: { held_by_revision_id: originalRevision.id }
+        },
+        {
+          name: "wrong order",
+          values: { order_id: other.stay.orderId }
+        },
+        {
+          name: "wrong member graph",
+          values: { contract_id: other.contractId, lot_id: other.entitlementLotId }
+        },
+        {
+          name: "wrong contract",
+          values: { contract_id: other.contractId }
+        },
+        {
+          name: "wrong lot",
+          values: { lot_id: other.entitlementLotId }
+        }
+      ] as const;
+
+      for (const [index, mismatch] of mismatches.entries()) {
+        const coverageId = `coverage_conversion_binding_guard_${index}`;
+        const corruptWrite = db.transaction().execute(async (trx) => {
+          await sql`ALTER TABLE command_executions DISABLE TRIGGER command_executions_protect_identity`.execute(trx);
+          await trx.updateTable("command_executions")
+            .set({ state: "EXECUTING", completed_at: null })
+            .where("id", "=", converted.receipt.commandId)
+            .executeTakeFirstOrThrow();
+          await trx.insertInto("coverage_items").values({
+            ...source,
+            id: coverageId,
+            ...mismatch.values,
+            created_at: new Date(),
+            updated_at: new Date()
+          }).execute();
+          throw new Error(`coverage guard accepted ${mismatch.name}`);
+        });
+        await expect(corruptWrite, mismatch.name).rejects.toMatchObject({
+          code: "55000",
+          constraint: "coverage_conversion_consumed_insert"
+        });
+        expect(await db.selectFrom("coverage_items")
+          .select("id")
+          .where("id", "=", coverageId)
+          .executeTakeFirst(), mismatch.name).toBeUndefined();
+      }
+      expect(await db.selectFrom("command_executions")
+        .select("state")
+        .where("id", "=", converted.receipt.commandId)
+        .executeTakeFirstOrThrow()).toEqual({ state: "APPLIED" });
+    });
+
+    it("binds a full in-house WeCom lodging transfer to the source fact carrying the original real transaction", async () => {
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-full-transfer",
+        agreedPriceMinor: 59_000,
+        priceAdjustmentReason: "住宿企微收款全额转入会员成交价"
+      });
+      expect(converted.receipt.result).toMatchObject({
+        transferredAmount: { currency: "CNY", minorUnits: 59_000 },
+        remainingPaymentAmount: { currency: "CNY", minorUnits: 0 }
+      });
+      expect(await db.selectFrom("membership_payment_facts")
+        .select(["amount_minor", "source_type", "source_collection_fact_id", "transaction_reference"])
+        .where("membership_order_id", "=", converted.membershipOrderId)
+        .execute()).toEqual([{
+        amount_minor: 59_000,
+        source_type: "STAY_COLLECTION_TRANSFER",
+        source_collection_fact_id: converted.stay.collectionFactId,
+        transaction_reference: null
+      }]);
+      expect(await db.selectFrom("collection_facts")
+        .select(["fact_id", "method", "transaction_reference"])
+        .where("fact_id", "=", converted.stay.collectionFactId)
+        .executeTakeFirstOrThrow()).toEqual({
+        fact_id: converted.stay.collectionFactId,
+        method: "WECOM",
+        transaction_reference: "WX-STAGE86-INHOUSE-FULL-TRANSFER-SOURCE"
+      });
+      expect(await db.selectFrom("membership_payment_facts")
+        .select("fact_id")
+        .where("membership_order_id", "=", converted.membershipOrderId)
+        .where("source_type", "=", "DIRECT_WECOM")
+        .execute()).toEqual([]);
+    });
+
+    it("rejects a zero membership agreed price before creating any in-house conversion artifact", async () => {
+      const memberId = await createMember("STAGE86-ZERO-AGREED-ID", "zero-agreed");
+      const stay = await createCheckedOutStay({
+        prefix: "zero-agreed",
+        documentNumber: "STAGE86-ZERO-AGREED-ID",
+        skipCheckOut: true,
+        skipCollection: true
+      });
+      const before = await conversionRollbackSnapshot(stay.orderId, memberId);
+      await expect(withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => preview(conversionEnvelope({
+        orderId: stay.orderId,
+        memberId,
+        collectionFactId: "",
+        collectionFactIds: [],
+        agreedPriceMinor: 0,
+        priceAdjustmentReason: "会员成交价不能为零"
+      }), "inhouse-zero-agreed-price"))).rejects.toMatchObject({
+        code: "VALIDATION_ERROR"
+      });
+      expect(await conversionRollbackSnapshot(stay.orderId, memberId)).toEqual(before);
+    });
+
+    it("allows a fully refunded WeCom fund graph to upgrade with zero transfer and one real direct membership payment", async () => {
+      const memberId = await createMember("STAGE86-NET-ZERO-REFUND-ID", "net-zero-refund-allowed");
+      const stay = await createCheckedOutStay({
+        prefix: "net-zero-refund-allowed",
+        documentNumber: "STAGE86-NET-ZERO-REFUND-ID",
+        skipCheckOut: true,
+        transactionReference: "WX-STAGE86-NET-ZERO-REFUND-SOURCE"
+      });
+      await execute({
+        commandType: "RECORD_REFUND",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: stay.orderId,
+          referencesFactId: stay.collectionFactId,
+          amountMinor: 59_000,
+          method: "WECOM",
+          note: "全额退款后本订单企微净额为零"
+        }
+      }, "net-zero-refund-allowed-wecom-refund");
+
+      const envelope = conversionEnvelope({
+        orderId: stay.orderId,
+        memberId,
+        collectionFactId: "",
+        collectionFactIds: [],
+        remainingPaymentTransactionReference: "WX-STAGE86-NET-ZERO-REFUND-MEMBER"
+      });
+      const prepared = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () =>
+        preview(envelope, "net-zero-refund-allowed-conversion")
+      );
+      expect(prepared.preview.effect).toMatchObject({
+        transfer: { total: { currency: "CNY", minorUnits: 0 }, collections: [] },
+        remainingPayment: {
+          amount: { currency: "CNY", minorUnits: 162_000 },
+          transactionReference: "WX-STAGE86-NET-ZERO-REFUND-MEMBER"
+        }
+      });
+
+      const receipt = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () =>
+        confirmPrepared(envelope, prepared, "net-zero-refund-allowed-conversion")
+      );
+      expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+      expect(receipt.result).toMatchObject({
+        transferredCollectionFactIds: [],
+        lodgingReversalFactIds: [],
+        transferIds: [],
+        transferredAmount: { currency: "CNY", minorUnits: 0 },
+        remainingPaymentAmount: { currency: "CNY", minorUnits: 162_000 }
+      });
+      expect(await db.selectFrom("stay_collection_membership_transfers")
+        .select("id")
+        .where("order_id", "=", stay.orderId)
+        .execute()).toEqual([]);
+      expect(await db.selectFrom("collection_facts")
+        .select(["fact_type", "amount_minor", "net_effect_minor"])
+        .where("order_id", "=", stay.orderId)
+        .orderBy("created_at")
+        .execute()).toEqual([
+        { fact_type: "COLLECTION", amount_minor: 59_000, net_effect_minor: 59_000 },
+        { fact_type: "REFUND", amount_minor: 59_000, net_effect_minor: -59_000 }
+      ]);
+      expect(await db.selectFrom("membership_payment_facts")
+        .select(["amount_minor", "source_type", "transaction_reference"])
+        .where("membership_order_id", "=", receipt.result!.membershipOrderId as string)
+        .execute()).toEqual([{
+        amount_minor: 162_000,
+        source_type: "DIRECT_WECOM",
+        transaction_reference: "WX-STAGE86-NET-ZERO-REFUND-MEMBER"
+      }]);
+    });
+
+    it("keeps the upgrade entry open after a refunded WeCom collection is followed by new valid collections", async () => {
+      const memberId = await createMember("STAGE86-NET-RECOLLECT-ID", "net-recollect");
+      const stay = await createCheckedOutStay({
+        prefix: "net-recollect",
+        documentNumber: "STAGE86-NET-RECOLLECT-ID",
+        skipCheckOut: true,
+        collectionAmountMinor: 3_300,
+        transactionReference: "WX-STAGE86-NET-RECOLLECT-A"
+      });
+      await execute({
+        commandType: "RECORD_REFUND",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: stay.orderId,
+          referencesFactId: stay.collectionFactId,
+          amountMinor: 3_300,
+          method: "WECOM",
+          note: "第一笔企微住宿收款全额退回"
+        }
+      }, "net-recollect-refund-a");
+      const second = await execute({
+        commandType: "RECORD_COLLECTION",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: stay.orderId,
+          amountMinor: 3_300,
+          method: "WECOM",
+          transactionReference: "WX-STAGE86-NET-RECOLLECT-B",
+          note: "退款后重新收到企微住宿收款"
+        }
+      }, "net-recollect-collection-b");
+      const third = await execute({
+        commandType: "RECORD_COLLECTION",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: stay.orderId,
+          amountMinor: 30_000,
+          method: "WECOM",
+          transactionReference: "WX-STAGE86-NET-RECOLLECT-C",
+          note: "后续追加的企微住宿收款"
+        }
+      }, "net-recollect-collection-c");
+
+      const view = await getOrderView(db, stay.orderId);
+      expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
+        .toMatchObject({ enabled: true, disabledReason: null });
+      const envelope = conversionEnvelope({
+        orderId: stay.orderId,
+        memberId,
+        collectionFactId: second.result!.factId as string,
+        collectionFactIds: [second.result!.factId as string, third.result!.factId as string],
+        remainingPaymentTransactionReference: "WX-STAGE86-NET-RECOLLECT-MEMBER"
+      });
+      const prepared = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () =>
+        preview(envelope, "net-recollect-conversion")
+      );
+      expect(prepared.preview.effect).toMatchObject({
+        transfer: {
+          total: { currency: "CNY", minorUnits: 33_300 },
+          collections: [
+            { factId: second.result!.factId, amount: { currency: "CNY", minorUnits: 3_300 } },
+            { factId: third.result!.factId, amount: { currency: "CNY", minorUnits: 30_000 } }
+          ]
+        },
+        remainingPayment: {
+          amount: { currency: "CNY", minorUnits: 128_700 },
+          transactionReference: "WX-STAGE86-NET-RECOLLECT-MEMBER"
+        }
+      });
+      const receipt = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () =>
+        confirmPrepared(envelope, prepared, "net-recollect-conversion")
+      );
+      expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+      expect(receipt.result).toMatchObject({
+        transferredCollectionFactIds: [second.result!.factId, third.result!.factId],
+        transferredAmount: { currency: "CNY", minorUnits: 33_300 },
+        remainingPaymentAmount: { currency: "CNY", minorUnits: 128_700 }
+      });
+      const lodgingFacts = await db.selectFrom("collection_facts")
+        .select(["fact_type", "amount_minor", "net_effect_minor", "reverses_fact_id"])
+        .where("order_id", "=", stay.orderId)
+        .orderBy("created_at")
+        .execute();
+      expect(lodgingFacts).toEqual([
+        expect.objectContaining({ fact_type: "COLLECTION", amount_minor: 3_300, net_effect_minor: 3_300, reverses_fact_id: null }),
+        expect.objectContaining({ fact_type: "REFUND", amount_minor: 3_300, net_effect_minor: -3_300, reverses_fact_id: null }),
+        expect.objectContaining({ fact_type: "COLLECTION", amount_minor: 3_300, net_effect_minor: 3_300, reverses_fact_id: null }),
+        expect.objectContaining({ fact_type: "COLLECTION", amount_minor: 30_000, net_effect_minor: 30_000, reverses_fact_id: null }),
+        expect.objectContaining({ fact_type: "REVERSAL", amount_minor: 3_300, net_effect_minor: -3_300, reverses_fact_id: second.result!.factId }),
+        expect.objectContaining({ fact_type: "REVERSAL", amount_minor: 30_000, net_effect_minor: -30_000, reverses_fact_id: third.result!.factId })
+      ]);
+      const lodgingNet = await db.selectFrom("collection_facts")
+        .select(sql<number>`coalesce(sum(net_effect_minor), 0)::integer`.as("net"))
+        .where("order_id", "=", stay.orderId)
+        .executeTakeFirstOrThrow();
+      expect(lodgingNet.net).toBe(0);
+    });
+
+    it.each(["reversal", "mixed"] as const)(
+      "does not treat net-zero in-house %s funds as a zero-transfer conversion",
+      async (variant) => {
+        const memberId = await createMember(`STAGE86-NET-ZERO-${variant}`, `net-zero-${variant}`);
+        const stay = await createCheckedOutStay({
+          prefix: `net-zero-${variant}`,
+          documentNumber: `STAGE86-NET-ZERO-${variant}`,
+          skipCheckOut: true,
+          transactionReference: `WX-STAGE86-NET-ZERO-${variant}`
+        });
+        if (variant === "reversal") {
+          await execute({
+            commandType: "REVERSE_FACT",
+            input: {
+              propertyId: demo.propertyId,
+              orderId: stay.orderId,
+              reversesFactId: stay.collectionFactId,
+              note: "净零冲销资金不得升级会员"
+            }
+          }, "net-zero-reversal");
+        }
+        if (variant === "mixed") {
+          await execute({
+            commandType: "RECORD_REFUND",
+            input: {
+              propertyId: demo.propertyId,
+              orderId: stay.orderId,
+              referencesFactId: stay.collectionFactId,
+              amountMinor: 59_000,
+              method: "WECOM",
+              note: "企微收款已全额退回，但订单还存在混合资金历史"
+            }
+          }, "net-zero-mixed-wecom-refund");
+          const cash = await execute({
+            commandType: "RECORD_COLLECTION",
+            input: {
+              propertyId: demo.propertyId,
+              orderId: stay.orderId,
+              amountMinor: 1_000,
+              method: "CASH",
+              cashCollector: "Stage 86 cashier",
+              note: "混合资金"
+            }
+          }, "net-zero-mixed-cash");
+          await execute({
+            commandType: "RECORD_REFUND",
+            input: {
+              propertyId: demo.propertyId,
+              orderId: stay.orderId,
+              referencesFactId: cash.result!.factId as string,
+              amountMinor: 1_000,
+              method: "CASH",
+              cashCollector: "Stage 86 cashier",
+              note: "混合资金退款"
+            }
+          }, "net-zero-mixed-cash-refund");
+        }
+        const net = await db.selectFrom("collection_facts")
+          .select(sql<number>`coalesce(sum(net_effect_minor), 0)::integer`.as("net"))
+          .where("order_id", "=", stay.orderId)
+          .executeTakeFirstOrThrow();
+        expect(net.net).toBe(0);
+        const before = await conversionRollbackSnapshot(stay.orderId, memberId);
+        await expect(withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => preview(conversionEnvelope({
+          orderId: stay.orderId,
+          memberId,
+          collectionFactId: "",
+          collectionFactIds: [],
+          remainingPaymentTransactionReference: `WX-STAGE86-NET-ZERO-${variant}-MEMBER`
+        }), `net-zero-${variant}-conversion`))).rejects.toMatchObject({
+          code: "VALIDATION_ERROR"
+        });
+        expect(await conversionRollbackSnapshot(stay.orderId, memberId)).toEqual(before);
+      }
+    );
+
+    it("adds entitlement only for new extension nights without rewriting converted coverage history", async () => {
+      const converted = await createInHouseConversion({ prefix: "inhouse-extend" });
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(23);
+      const originalDates = serviceDates(stayDates.arrival, stayDates.departure);
+      expect(await db.selectFrom("coverage_items")
+        .select(["service_date", "status"])
+        .where("order_id", "=", converted.stay.orderId)
+        .orderBy("service_date")
+        .execute()).toEqual(originalDates
+        .map((service_date) => ({ service_date, status: "CONSUMED" })));
+      const originalCoverage = await db.selectFrom("coverage_items")
+        .selectAll()
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "in", originalDates)
+        .orderBy("service_date")
+        .orderBy("id")
+        .execute();
+      const originalLedger = await db.selectFrom("entitlement_ledger")
+        .selectAll()
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "in", originalDates)
+        .orderBy("service_date")
+        .orderBy("fact_id")
+        .execute();
+
+      const extension = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => execute({
+        commandType: "EXTEND_STAY",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          newDepartureDate: "2026-09-09"
+        }
+      }, "inhouse-extend-one-night"));
+      expect(extension.businessCommitted).toBe(true);
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(22);
+      expect(await db.selectFrom("coverage_items")
+        .selectAll()
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "in", originalDates)
+        .orderBy("service_date")
+        .orderBy("id")
+        .execute()).toEqual(originalCoverage);
+      expect(await db.selectFrom("entitlement_ledger")
+        .selectAll()
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "in", originalDates)
+        .orderBy("service_date")
+        .orderBy("fact_id")
+        .execute()).toEqual(originalLedger);
+      const extendedOrder = await db.selectFrom("orders")
+        .select("current_revision_id")
+        .where("id", "=", converted.stay.orderId)
+        .executeTakeFirstOrThrow();
+      await expect(db.insertInto("coverage_items").values({
+        ...originalCoverage[0]!,
+        id: "coverage_extend_pre_validity_guard",
+        held_by_revision_id: extendedOrder.current_revision_id!,
+        service_date: stayDates.arrival,
+        status: "HELD",
+        created_at: new Date(),
+        updated_at: new Date()
+      }).execute()).rejects.toMatchObject({
+        code: "23514",
+        constraint: "coverage_items_entitlement_valid"
+      });
+
+      const extensionLedger = await db.selectFrom("entitlement_ledger")
+        .select(["entry_type", "quantity_delta", "service_date", "reason"])
+        .where("order_id", "=", converted.stay.orderId)
+        .orderBy("service_date")
+        .execute();
+      expect(extensionLedger.filter((item) => item.entry_type === "CONVERSION_CONSUME")).toHaveLength(7);
+      expect(extensionLedger).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          entry_type: "HOLD",
+          quantity_delta: -1,
+          service_date: "2026-09-08",
+          reason: "ORDER_COVERAGE_HOLD"
+        }),
+        expect.objectContaining({
+          entry_type: "CONSUME",
+          quantity_delta: 0,
+          service_date: "2026-09-08",
+          reason: "EXTEND_STAY_ENTITLEMENT_CONSUMED"
+        })
+      ]));
+      await assertConversionCommandStillValid(converted.receipt.commandId);
+      await assertCorruptConversionRevisionRejected(converted.receipt.commandId);
+
+      await expect(withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => preview({
+        commandType: "EXTEND_STAY",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          newDepartureDate: "2026-10-02"
+        }
+      }, "inhouse-extend-insufficient"))).rejects.toMatchObject({
+        code: "ENTITLEMENT_CONFLICT"
+      });
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(22);
+    });
+
+    it("returns only future converted nights when an in-house stay is shortened", async () => {
+      const businessDate = await propertyLocalToday(db, demo.propertyId);
+      const arrivalDate = shiftDate(businessDate, -1);
+      const departureDate = shiftDate(businessDate, 6);
+      const newDepartureDate = shiftDate(businessDate, 3);
+      const restoredFutureDates = serviceDates(newDepartureDate, departureDate);
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-shorten",
+        businessDate,
+        arrivalDate,
+        departureDate
+      });
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(23);
+
+      const receipt = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => execute({
+        commandType: "SHORTEN_STAY",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          newDepartureDate
+        }
+      }, "inhouse-shorten-future-nights"));
+      expect(receipt.businessCommitted).toBe(true);
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(26);
+
+      const restoredDates = await db.selectFrom("entitlement_ledger")
+        .select("service_date")
+        .where("order_id", "=", converted.stay.orderId)
+        .where("quantity_delta", "=", 1)
+        .orderBy("service_date")
+        .execute();
+      expect(restoredDates.map((item) => item.service_date)).toEqual(restoredFutureDates);
+      const releasedCoverage = await db.selectFrom("coverage_items")
+        .select(["id", "service_date", "status"])
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "in", restoredFutureDates)
+        .orderBy("service_date")
+        .execute();
+      expect(releasedCoverage).toEqual(restoredFutureDates.map((service_date) =>
+        expect.objectContaining({ service_date, status: "RELEASED" })
+      ));
+      const order = await db.selectFrom("orders")
+        .select(["status", "departure_date"])
+        .where("id", "=", converted.stay.orderId)
+        .executeTakeFirstOrThrow();
+      expect(order).toEqual({ status: "CHECKED_IN", departure_date: newDepartureDate });
+      await assertConversionCommandStillValid(converted.receipt.commandId);
+
+      await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => execute({
+        commandType: "EXTEND_STAY",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          newDepartureDate: shiftDate(newDepartureDate, 1)
+        }
+      }, "inhouse-shorten-then-extend"));
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(25);
+      await assertConversionCommandStillValid(converted.receipt.commandId);
+      const reusedDateCoverage = await db.selectFrom("coverage_items")
+        .select(["id", "status"])
+        .where("order_id", "=", converted.stay.orderId)
+        .where("service_date", "=", newDepartureDate)
+        .orderBy("id")
+        .execute();
+      expect(reusedDateCoverage).toHaveLength(2);
+      expect(reusedDateCoverage.find((item) => item.id === releasedCoverage[0]!.id)).toMatchObject({ status: "RELEASED" });
+      expect(reusedDateCoverage.find((item) => item.id !== releasedCoverage[0]!.id)).toMatchObject({ status: "CONSUMED" });
+    });
+
+    it("keeps the conversion snapshot valid after an entitlement-backed early checkout", async () => {
+      const businessDate = await propertyLocalToday(db, demo.propertyId);
+      const arrivalDate = shiftDate(businessDate, -2);
+      const departureDate = shiftDate(businessDate, 5);
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-early-checkout",
+        businessDate,
+        arrivalDate,
+        departureDate
+      });
+
+      const receipt = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => execute({
+        commandType: "SHORTEN_STAY",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          newDepartureDate: businessDate
+        }
+      }, "inhouse-early-checkout"));
+      expect(receipt.businessCommitted).toBe(true);
+      expect(receipt.result).toMatchObject({
+        completionMode: "EARLY_CHECK_OUT",
+        departureDate: businessDate
+      });
+      expect(await db.selectFrom("orders")
+        .innerJoin("stays", "stays.order_id", "orders.id")
+        .select(["orders.status as orderStatus", "stays.status as stayStatus"])
+        .where("orders.id", "=", converted.stay.orderId)
+        .executeTakeFirstOrThrow()).toEqual({
+        orderStatus: "CHECKED_OUT",
+        stayStatus: "COMPLETED"
+      });
+      expect(await db.selectFrom("amendments")
+        .select("amendment_type")
+        .where("command_id", "=", receipt.commandId)
+        .orderBy("sequence")
+        .execute()).toEqual([
+        { amendment_type: "SHORTEN_STAY" },
+        { amendment_type: "CHECK_OUT" }
+      ]);
+      await assertConversionCommandStillValid(converted.receipt.commandId);
+    });
+
+    it("keeps converted entitlement quantity stable for an applicable move and fails closed for an incompatible room type", async () => {
+      const converted = await createInHouseConversion({ prefix: "inhouse-move" });
+      const balanceBeforeMove = await conversionEntitlementBalance(converted.entitlementLotId);
+      expect(balanceBeforeMove).toBe(23);
+
+      const move = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => execute({
+        commandType: "MOVE_UNIT",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          newInventoryUnitId: "unit_room_d_gen_04",
+          effectiveDate: "2026-09-03"
+        }
+      }, "inhouse-move-compatible"));
+      expect(move.businessCommitted).toBe(true);
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(balanceBeforeMove);
+      expect(await db.selectFrom("coverage_items")
+        .select(["service_date", "inventory_unit_id", "status"])
+        .where("order_id", "=", converted.stay.orderId)
+        .orderBy("service_date")
+        .execute()).toEqual(serviceDates(stayDates.arrival, stayDates.departure).map((service_date) => ({
+        service_date,
+        inventory_unit_id: "unit_room_d_gen_01",
+        status: "CONSUMED"
+      })));
+      expect(await db.selectFrom("inventory_claims as claim")
+        .innerJoin("stay_segments as segment", "segment.id", "claim.source_id")
+        .select(["claim.service_date", "claim.inventory_unit_id"])
+        .where("claim.source_type", "=", "ORDER_SEGMENT")
+        .where("claim.active", "=", true)
+        .where("segment.stay_id", "=", converted.stay.stayId)
+        .orderBy("claim.service_date")
+        .execute()).toEqual(serviceDates(stayDates.arrival, stayDates.departure).map((service_date) => ({
+        service_date,
+        inventory_unit_id: service_date < "2026-09-03" ? "unit_room_d_gen_01" : "unit_room_d_gen_04"
+      })));
+      await assertConversionCommandStillValid(converted.receipt.commandId);
+
+      await expect(withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => preview({
+        commandType: "MOVE_UNIT",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: converted.stay.orderId,
+          newInventoryUnitId: "unit_room_e_gen_01",
+          effectiveDate: "2026-09-03"
+        }
+      }, "inhouse-move-incompatible"))).rejects.toMatchObject({
+        code: "ENTITLEMENT_CONFLICT"
+      });
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(balanceBeforeMove);
+    });
+
+    it("fails closed for ordinary reprice, check-in revocation, and coverage refresh after conversion", async () => {
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-closed-actions",
+        businessDate: "2026-09-01"
+      });
+      const baseInput = { propertyId: demo.propertyId, orderId: converted.stay.orderId };
+
+      await expect(withPropertyClockForTesting(new Date("2026-09-01T12:00:00.000Z"), () => preview({
+        commandType: "REPRICE_ORDER",
+        input: { ...baseInput, targetCurrentContractAmountMinor: 1_000 }
+      }, "inhouse-converted-reprice"))).rejects.toMatchObject({ code: "INVALID_ORDER_STATE" });
+      await expect(withPropertyClockForTesting(new Date("2026-09-01T12:00:00.000Z"), () => preview({
+        commandType: "REVOKE_CHECK_IN",
+        input: { ...baseInput, unusedRoomConfirmed: true }
+      }, "inhouse-converted-revoke"))).rejects.toMatchObject({ code: "INVALID_ORDER_STATE" });
+      await expect(withPropertyClockForTesting(new Date("2026-09-01T12:00:00.000Z"), () => preview({
+        commandType: "REFRESH_MEMBER_COVERAGE",
+        input: baseInput
+      }, "inhouse-converted-refresh"))).rejects.toMatchObject({ code: "INVALID_ORDER_STATE" });
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(23);
+    });
+
+    it("allows one of two concurrent in-house conversion previews and idempotently replays only its receipt", async () => {
+      const memberId = await createMember("STAGE86-CONCURRENT-INHOUSE-ID", "concurrent-inhouse");
+      const stay = await createCheckedOutStay({
+        prefix: "concurrent-inhouse",
+        documentNumber: "STAGE86-CONCURRENT-INHOUSE-ID",
+        skipCheckOut: true,
+        transactionReference: "WX-STAGE86-CONCURRENT-INHOUSE-SOURCE"
+      });
+      const envelope = conversionEnvelope({
+        orderId: stay.orderId,
+        memberId,
+        collectionFactId: stay.collectionFactId,
+        remainingPaymentTransactionReference: "WX-STAGE86-CONCURRENT-INHOUSE-REMAINING"
+      });
+      const [first, second] = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), async () => [
+        await preview(envelope, "concurrent-inhouse-a"),
+        await preview(envelope, "concurrent-inhouse-b")
+      ]);
+      const candidates = [
+        {
+          prepared: first,
+          metadata: { idempotencyKey: "stage86-concurrent-inhouse-confirm-a", correlationId: "stage86-concurrent-inhouse-confirm-a" },
+          reason: { code: "STAGE47_ACCEPTANCE", note: "8.6 concurrent conversion A" }
+        },
+        {
+          prepared: second,
+          metadata: { idempotencyKey: "stage86-concurrent-inhouse-confirm-b", correlationId: "stage86-concurrent-inhouse-confirm-b" },
+          reason: { code: "STAGE47_ACCEPTANCE", note: "8.6 concurrent conversion B" }
+        }
+      ] as const;
+      const receipts = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => Promise.all(candidates.map((candidate) =>
+        confirmCommandPreview(db, principal, candidate.prepared.preview.previewId, {
+          propertyId: demo.propertyId,
+          commandType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+          confirmation: true,
+          expectedEffectHash: candidate.prepared.preview.effectHash,
+          reason: candidate.reason
+        }, candidate.metadata)
+      )));
+      expect(receipts.filter((receipt) => receipt.businessCommitted)).toHaveLength(1);
+      expect(receipts.filter((receipt) => !receipt.businessCommitted)).toEqual([
+        expect.objectContaining({
+          executionStatus: "NOT_EXECUTED",
+          error: expect.objectContaining({ code: "PREVIEW_STALE" })
+        })
+      ]);
+      const winnerIndex = receipts.findIndex((receipt) => receipt.businessCommitted);
+      const winner = candidates[winnerIndex]!;
+      const replay = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => confirmCommandPreview(
+        db,
+        principal,
+        winner.prepared.preview.previewId,
+        {
+          propertyId: demo.propertyId,
+          commandType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+          confirmation: true,
+          expectedEffectHash: winner.prepared.preview.effectHash,
+          reason: winner.reason
+        },
+        winner.metadata
+      ));
+      expect(replay.receiptId).toBe(receipts[winnerIndex]!.receiptId);
+      expect(await db.selectFrom("stay_collection_membership_transfers")
+        .select("id")
+        .where("order_id", "=", stay.orderId)
+        .execute()).toHaveLength(1);
+      expect(await db.selectFrom("membership_orders")
+        .select("id")
+        .where("created_by_command_id", "=", receipts[winnerIndex]!.commandId)
+        .execute()).toHaveLength(1);
+      expect(await db.selectFrom("coverage_items")
+        .select("id")
+        .where("order_id", "=", stay.orderId)
+        .where("status", "=", "CONSUMED")
+        .execute()).toHaveLength(7);
+      expect(await db.selectFrom("entitlement_ledger")
+        .select("fact_id")
+        .where("order_id", "=", stay.orderId)
+        .where("entry_type", "=", "CONVERSION_CONSUME")
+        .execute()).toHaveLength(7);
+    });
+
+    it.each([
+      {
+        artifact: "Receipt",
+        tableName: "command_receipts",
+        functionName: "fail_stage86_conversion_receipt",
+        triggerName: "fail_stage86_conversion_receipt_at_commit",
+        failureMessage: "forced stage86 conversion receipt failure"
+      },
+      {
+        artifact: "audit",
+        tableName: "audit_entries",
+        functionName: "fail_stage86_conversion_audit",
+        triggerName: "fail_stage86_conversion_audit_at_commit",
+        failureMessage: "forced stage86 conversion audit failure"
+      }
+    ] as const)("rolls back every in-house conversion artifact when $artifact persistence fails", async ({
+      tableName,
+      functionName,
+      triggerName,
+      failureMessage
+    }) => {
+      const memberId = await createMember(`STAGE86-ROLLBACK-${functionName}`, `rollback-${functionName}`);
+      const stay = await createCheckedOutStay({
+        prefix: `rollback-${functionName}`,
+        documentNumber: `STAGE86-ROLLBACK-${functionName}`,
+        skipCheckOut: true,
+        transactionReference: `WX-STAGE86-ROLLBACK-${functionName}`
+      });
+      const envelope = conversionEnvelope({
+        orderId: stay.orderId,
+        memberId,
+        collectionFactId: stay.collectionFactId,
+        remainingPaymentTransactionReference: `WX-STAGE86-ROLLBACK-REMAINING-${functionName}`
+      });
+      const prepared = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () =>
+        preview(envelope, `rollback-${functionName}`)
+      );
+      const before = await conversionRollbackSnapshot(stay.orderId, memberId);
+      const confirmationMetadata = metadata(`rollback-${functionName}-confirm`);
+      const confirmation = {
+        propertyId: demo.propertyId,
+        commandType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" as const,
+        confirmation: true as const,
+        expectedEffectHash: prepared.preview.effectHash,
+        reason: { code: "STAGE47_ACCEPTANCE", note: "8.6 conversion persistence rollback" }
+      };
+
+      try {
+        await sql.raw(`
+          CREATE OR REPLACE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN RAISE EXCEPTION '${failureMessage}'; END $$;
+          CREATE CONSTRAINT TRIGGER ${triggerName} AFTER INSERT ON ${tableName}
+          DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION ${functionName}();
+        `).execute(db);
+
+        await expect(withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => confirmCommandPreview(
+          db,
+          principal,
+          prepared.preview.previewId,
+          confirmation,
+          confirmationMetadata
+        ))).rejects.toThrow(failureMessage);
+      } finally {
+        await sql.raw(`
+          DROP TRIGGER IF EXISTS ${triggerName} ON ${tableName};
+          DROP FUNCTION IF EXISTS ${functionName}();
+        `).execute(db);
+      }
+
+      expect(await conversionRollbackSnapshot(stay.orderId, memberId)).toEqual(before);
+      expect(await db.selectFrom("command_executions")
+        .select("id")
+        .where("idempotency_key", "=", confirmationMetadata.idempotencyKey)
+        .execute()).toEqual([]);
+      expect(await db.selectFrom("audit_entries")
+        .select("id")
+        .where("correlation_id", "=", confirmationMetadata.correlationId)
+        .execute()).toEqual([]);
+      expect(await db.selectFrom("command_previews")
+        .select(["status", "used_at"])
+        .where("id", "=", prepared.preview.previewId)
+        .executeTakeFirstOrThrow()).toEqual({ status: "OPEN", used_at: null });
+    });
   });
 });

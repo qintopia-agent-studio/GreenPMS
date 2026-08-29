@@ -151,6 +151,13 @@ function orderView() {
       currency: "CNY",
       created_at: "2026-07-28T08:00:00.000Z"
     }],
+    membershipConversion: null as null | {
+      membershipOrderId: string;
+      memberId: string;
+      contractId: string;
+      entitlementLotId: string;
+      commandId: string;
+    },
     coverageSet: [],
     collectionFacts: [],
     cleaningTasks: [],
@@ -279,6 +286,76 @@ function roundTripMoveArrangement(): OrderArrangementDto {
 }
 
 describe("parseOrderView", () => {
+  it("requires an explicit membership conversion projection on every order view", () => {
+    const missing = orderView() as Record<string, unknown>;
+    delete missing.membershipConversion;
+    expect(() => parseOrderView(missing)).toThrow(OrderViewValidationError);
+  });
+
+  it("accepts only a conversion projection tied to this order's member identity and unique conversion amendment", () => {
+    const input = orderView();
+    Object.assign(input.order, {
+      member_id: "member_upgrade",
+      member_contract_id: "contract_upgrade"
+    });
+    input.amendments.push(amendment({
+      id: "amendment_conversion",
+      sequence: 2,
+      amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+      prior_version: 1,
+      new_version: 2,
+      command_id: "command_conversion",
+      payload: { operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" }
+    }));
+    input.membershipConversion = {
+      membershipOrderId: "membership_order_upgrade",
+      memberId: "member_upgrade",
+      contractId: "contract_upgrade",
+      entitlementLotId: "lot_upgrade",
+      commandId: "command_conversion"
+    };
+    expect(parseOrderView(input)).toBe(input);
+
+    input.membershipConversion = { ...input.membershipConversion, memberId: "member_other" };
+    expect(() => parseOrderView(input)).toThrow("与订单当前会员身份不一致");
+  });
+
+  it("rejects either side of a missing or duplicated conversion projection link", () => {
+    const input = orderView();
+    input.amendments.push(amendment({
+      id: "amendment_conversion_only",
+      sequence: 2,
+      amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+      prior_version: 1,
+      new_version: 2,
+      command_id: "command_conversion_only",
+      payload: { operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" }
+    }));
+    expect(() => parseOrderView(input)).toThrow("升级会员事实必须有对应投影");
+
+    Object.assign(input.order, { member_id: "member_upgrade", member_contract_id: "contract_upgrade" });
+    input.membershipConversion = {
+      membershipOrderId: "membership_order_upgrade",
+      memberId: "member_upgrade",
+      contractId: "contract_upgrade",
+      entitlementLotId: "lot_upgrade",
+      commandId: "command_conversion_only"
+    };
+    input.amendments.push(amendment({
+      id: "amendment_conversion_duplicate",
+      sequence: 3,
+      amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+      prior_version: 2,
+      new_version: 3,
+      command_id: "command_conversion_duplicate",
+      payload: { operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" }
+    }));
+    expect(() => parseOrderView(input)).toThrow("没有唯一对应的升级会员事实");
+  });
+
   it("accepts a complete typed lifecycle projection without reading raw facts", () => {
     const input = orderView();
     expect(parseOrderView(input)).toBe(input);
@@ -364,6 +441,14 @@ describe("parseOrderView", () => {
       reason: { code: "STAY_COLLECTION_TO_MEMBERSHIP", note: "升级会员，住宿金额归零" },
       created_at: "2026-07-30T09:00:00.000Z"
     });
+    Object.assign(input.order, { member_id: "member_upgrade", member_contract_id: "contract_upgrade" });
+    input.membershipConversion = {
+      membershipOrderId: "membership_order_upgrade",
+      memberId: "member_upgrade",
+      contractId: "contract_upgrade",
+      entitlementLotId: "lot_upgrade",
+      commandId: "command_4"
+    };
     input.amounts.currentContractAmount.minorUnits = 0;
     input.amounts.collectionDifference.minorUnits = 0;
     expect(parseOrderView(input)).toBe(input);
@@ -980,7 +1065,9 @@ describe("parseOrderView", () => {
     ["RESCHEDULE_STAY", "LEGACY_STAGE_9_10"],
     ["EXTEND_STAY", "LEGACY_STAGE_9_10"],
     ["SHORTEN_STAY", "LEGACY_STAGE_10"],
-    ["MOVE_UNIT", "PRE_STAGE_11"]
+    ["SHORTEN_STAY", "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"],
+    ["MOVE_UNIT", "PRE_STAGE_11"],
+    ["MOVE_UNIT", "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"]
   ])("accepts the exact historical protocol metadata for %s", (amendmentType, protocolVersion) => {
     const input = orderView();
     Object.assign(input.amendments[0]!, {
@@ -1077,6 +1164,13 @@ describe("parseOrderView", () => {
     }, "历史协议版本与只读恢复标记必须成对提供"],
     ["historical protocol for the wrong amendment type", (input: ReturnType<typeof orderView>) => {
       Object.assign(input.amendments[0]!, { amendment_type: "SHORTEN_STAY", protocolVersion: "PRE_STAGE_11", recoveryMode: "HISTORICAL_READ_ONLY" });
+    }, "amendments[0].protocolVersion与住宿变更类型不一致"],
+    ["pre-in-house-membership protocol for an unrelated amendment", (input: ReturnType<typeof orderView>) => {
+      Object.assign(input.amendments[0]!, {
+        amendment_type: "EXTEND_STAY",
+        protocolVersion: "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT",
+        recoveryMode: "HISTORICAL_READ_ONLY"
+      });
     }, "amendments[0].protocolVersion与住宿变更类型不一致"],
     ["unsupported historical recovery marker", (input: ReturnType<typeof orderView>) => {
       Object.assign(input.amendments[0]!, { amendment_type: "MOVE_UNIT", protocolVersion: "PRE_STAGE_11", recoveryMode: "RECOVERABLE" });

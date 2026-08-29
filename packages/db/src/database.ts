@@ -47,7 +47,9 @@ const currentMigrationNames = [
   "040_conversion_order_membership_link.sql",
   "041_completed_stay_backfill_atomicity.sql",
   "042_complete_overdue_reserved_stay.sql",
-  "043_complete_stay_guard_hardening.sql"
+  "043_complete_stay_guard_hardening.sql",
+  "044_inhouse_membership_fulfillment_guards.sql",
+  "045_stay_membership_net_wecom_transfer.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -561,6 +563,8 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       trigger_count: string;
       historical_column_count: string;
       body_marker_count: string;
+      trigger_bindings_ready: boolean;
+      function_bodies_ready: boolean;
     }>`
       SELECT
         (to_regprocedure('qintopia_validate_new_collection_fact_transaction_reference()') IS NOT NULL)::integer::text
@@ -574,6 +578,8 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
             AND trigger.tgrelid = to_regclass('collection_facts')
             AND trigger.tgname = 'collection_facts_validate_new_transaction_reference'
             AND trigger.tgfoid = to_regprocedure('qintopia_validate_new_collection_fact_transaction_reference()')
+            AND trigger.tgnargs = 0
+            AND trigger.tgqual IS NULL
         )::text AS trigger_count,
         (
           SELECT count(*)::text
@@ -596,7 +602,51 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
             IN pg_get_functiondef(to_regprocedure('qintopia_validate_new_collection_fact_transaction_reference()'))) > 0, false)::integer
           + COALESCE(position('collection_facts_wecom_refund_original_route'
             IN pg_get_functiondef(to_regprocedure('qintopia_validate_new_collection_fact_transaction_reference()'))) > 0, false)::integer
-        )::text AS body_marker_count
+        )::text AS body_marker_count,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES (
+                'collection_facts',
+                'collection_facts_validate_new_transaction_reference',
+                'CREATE TRIGGER collection_facts_validate_new_transaction_reference BEFORE INSERT ON public.collection_facts FOR EACH ROW EXECUTE FUNCTION qintopia_validate_new_collection_fact_transaction_reference()'
+              )
+            ) AS expected(table_name, trigger_name, definition)
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM pg_trigger AS exact_trigger
+              WHERE exact_trigger.tgrelid = to_regclass(expected.table_name)
+                AND exact_trigger.tgname = expected.trigger_name
+                AND NOT exact_trigger.tgisinternal
+                AND exact_trigger.tgenabled IN ('O','A')
+                AND exact_trigger.tgnargs = 0
+                AND pg_get_triggerdef(exact_trigger.oid, false) = expected.definition
+            )
+          )
+        ) AS trigger_bindings_ready,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('qintopia_validate_new_collection_fact_transaction_reference()', '424dd22174300cf686be9422dd8b9b42ef4e7f48fa0266f504bf6f4316dabbe3')
+            ) AS expected(signature, body_hash)
+            WHERE NOT COALESCE((
+              SELECT encode(
+                sha256(convert_to(procedure_row.prosrc, 'UTF8')),
+                'hex'
+              ) = expected.body_hash
+                AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+                AND NOT procedure_row.prosecdef
+                AND procedure_row.provolatile = 'v'
+                AND procedure_row.proconfig IS NULL
+                AND procedure_row.prokind = 'f'
+              FROM pg_proc AS procedure_row
+              WHERE procedure_row.oid = to_regprocedure(expected.signature)
+            ), false)
+          )
+        ) AS function_bodies_ready
       FROM pg_trigger AS trigger
     `.execute(db);
     const completedStayBackfillObjects = await sql<{
@@ -873,6 +923,7 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
           + (to_regprocedure('qintopia_require_stage13_conversion_reversal_bridge()') IS NOT NULL)::integer
           + (to_regprocedure('qintopia_assert_stage13_stay_conversion_command_v033(text)') IS NOT NULL)::integer
           + (to_regprocedure('qintopia_validate_stage13_stay_conversion_membership_order()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_new_collection_fact_shape()') IS NOT NULL)::integer
         )::text AS function_count,
         count(*) FILTER (
           WHERE NOT trigger.tgisinternal
@@ -953,6 +1004,10 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
                 AND trigger.tgname = 'entitlement_ledger_validate_conversion_consume'
                 AND trigger.tgtype = 7
                 AND trigger.tgfoid = to_regprocedure('qintopia_validate_conversion_consume_entitlement_fact()'))
+              OR (trigger.tgrelid = to_regclass('collection_facts')
+                AND trigger.tgname = 'collection_facts_validate_new_write_shape'
+                AND trigger.tgtype = 7
+                AND trigger.tgfoid = to_regprocedure('qintopia_validate_new_collection_fact_shape()'))
             )
         )::text AS immediate_trigger_count,
         (
@@ -1088,7 +1143,7 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
             IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage13_stay_conversion_command(text)'))) > 0, false)::integer
           + COALESCE(position('qintopia_assert_stage13_stay_conversion_command_v033'
             IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage13_stay_conversion_command(text)'))) > 0, false)::integer
-          + COALESCE(position('transfer.command_id = NEW.command_id'
+          + COALESCE(position('target_membership_order.created_by_command_id = NEW.command_id'
             IN pg_get_functiondef(to_regprocedure('qintopia_reject_membership_funds_after_stay_transfer()'))) > 0, false)::integer
           + COALESCE(position('membership_payment_transfer_shape'
             IN pg_get_functiondef(to_regprocedure('qintopia_validate_membership_payment_fact()'))) > 0, false)::integer
@@ -1151,7 +1206,9 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
                 ('membership_payment_facts', 'membership_payment_stage13_reject_after_transfer',
                   'CREATE TRIGGER membership_payment_stage13_reject_after_transfer BEFORE INSERT ON public.membership_payment_facts FOR EACH ROW EXECUTE FUNCTION qintopia_reject_membership_funds_after_stay_transfer()'),
                 ('entitlement_ledger', 'entitlement_ledger_validate_conversion_consume',
-                  'CREATE TRIGGER entitlement_ledger_validate_conversion_consume BEFORE INSERT ON public.entitlement_ledger FOR EACH ROW EXECUTE FUNCTION qintopia_validate_conversion_consume_entitlement_fact()')
+                  'CREATE TRIGGER entitlement_ledger_validate_conversion_consume BEFORE INSERT ON public.entitlement_ledger FOR EACH ROW EXECUTE FUNCTION qintopia_validate_conversion_consume_entitlement_fact()'),
+                ('collection_facts', 'collection_facts_validate_new_write_shape',
+                  'CREATE TRIGGER collection_facts_validate_new_write_shape BEFORE INSERT ON public.collection_facts FOR EACH ROW EXECUTE FUNCTION qintopia_validate_new_collection_fact_shape()')
             ) AS expected(table_name, trigger_name, definition)
             WHERE NOT EXISTS (
               SELECT 1
@@ -1172,17 +1229,224 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
             FROM (
               VALUES
                 ('qintopia_assert_stage13_stay_conversion_command(text)', '9f9d7311054a9c99b68999dcd799cd662996d0496573cdd783fc747ca1466459'),
-                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '44f681ba503876fc393449cd7cea191887528be00b1e3171aa4764f6f6419542'),
-                ('qintopia_reject_lodging_funds_after_membership_transfer()', 'b05cc0f8a8d15980d17a6188079afcd1dff96d4f14df7e7957c4a6c2f36005a6'),
-                ('qintopia_reject_membership_funds_after_stay_transfer()', '4660b0b24df455e1ce047f8eeca3070216ca85ecf711df6bbcb98e9b2fbcd73d'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '9d28e833682d7dd7a62b198b1f49a8760a3ca7b3ee4e916585550034fd5aba35'),
+                ('qintopia_reject_lodging_funds_after_membership_transfer()', 'bf22eef1c8964fbe29e7bf5054b64b2fa85ce7cb2ae90bbf9e0102412669c3bd'),
+                ('qintopia_reject_membership_funds_after_stay_transfer()', '99e9a57e0f4d7a9f48936eafd26dd809e892bbfc8c76d026a05871ccb23ffc24'),
                 ('qintopia_require_stage13_conversion_reversal_bridge()', '5f73c20a3019cdc3810ae4484eec1a898e700e954c20d6c6a65fe8493b8f5c2e'),
                 ('qintopia_require_transfer_membership_payment_bridge()', '1993430b9a865fa9ab62a4c88dab76e30dc0defc753016726bb1e21ed4920af2'),
-                ('qintopia_validate_conversion_consume_entitlement_fact()', '5188d53c790586313970106f3e30f3229ae823fd2dd947baa4b756418e9f13b9'),
-                ('qintopia_validate_membership_payment_fact()', '65d0dc1eb83a036c7fa658087105dca9584df028c4003901ec8b2c86db335864'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', '1e8d4b1b3754ee3c4962c080d6a01d8299f1a7a8f2df89bb22487108c45adefd'),
+                ('qintopia_validate_membership_payment_fact()', 'cce1edb6109475403047b936d164c8cb18b6577b9078c6c398c25ce0f22a41c1'),
                 ('qintopia_validate_stage13_stay_conversion_child()', '4d0ef7b2821a7286c2e6bb87fa936b1e6c6fc194e759acf09afe0645d36095b0'),
                 ('qintopia_validate_stage13_stay_conversion_execution()', '2b83d1f0c739a4bdc65e3114d0f6ddbcca1ac80a02ede73d687705da946d3f56'),
                 ('qintopia_validate_stage13_stay_conversion_membership_order()', '1baf9a5240b34e396eed0aca2da6165adec38227ee672e63623d33a3ad1ecae2'),
-                ('qintopia_validate_stay_collection_membership_transfer()', '9611a3ec85ebd0c7e95f9e8136fc89fcb0bd306ca4b0841979ecaae0ef82faf4')
+                ('qintopia_validate_stay_collection_membership_transfer()', '1772cb165a798ee6dbf5d4c7c7a04c4b32e0bc40e27fb147235335f4c0c8b34b'),
+                ('qintopia_validate_new_collection_fact_shape()', '0922bb880a362c3fa315ef44c9cb20f8edc855263bcc03d4fb537bad3e2d8977')
+            ) AS expected(signature, body_hash)
+            WHERE NOT COALESCE((
+              SELECT encode(
+                  sha256(convert_to(procedure_row.prosrc, 'UTF8')),
+                  'hex'
+                ) = expected.body_hash
+                AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+                AND NOT procedure_row.prosecdef
+                AND procedure_row.provolatile = 'v'
+                AND procedure_row.proconfig IS NULL
+                AND procedure_row.prokind = 'f'
+              FROM pg_proc AS procedure_row
+              WHERE procedure_row.oid = to_regprocedure(expected.signature)
+            ), false)
+          )
+        ) AS function_bodies_ready
+      FROM pg_trigger AS trigger
+    `.execute(db);
+    const inHouseMembershipFulfillmentObjects = await sql<{
+      function_count: string;
+      index_ready: boolean;
+      coverage_trigger_count: string;
+      deferred_trigger_count: string;
+      trigger_bindings_ready: boolean;
+      body_marker_count: string;
+      function_bodies_ready: boolean;
+    }>`
+      SELECT
+        (
+          (to_regprocedure('qintopia_assert_stage10_shorten_combination(text)') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_coverage_ownership()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_protect_coverage_identity()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_reject_stage10_entitlement_write()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_entitlement_lifecycle_fact()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_coverage_lifecycle_state()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_assert_stage11_move_combination(text)') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_preserve_stage11_consumed_coverage()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_conversion_consume_entitlement_fact()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_reject_lodging_funds_after_membership_transfer()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_reject_membership_funds_after_stay_transfer()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_assert_stage13_stay_conversion_command_v033(text)') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_converted_stay_fulfillment_execution()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_converted_stay_fulfillment_child()') IS NOT NULL)::integer
+        )::text AS function_count,
+        EXISTS (
+          SELECT 1
+          FROM pg_index AS index_row
+          WHERE index_row.indexrelid = to_regclass('amendments_one_membership_conversion_per_order_idx')
+            AND index_row.indrelid = to_regclass('amendments')
+            AND index_row.indisunique
+            AND index_row.indimmediate
+            AND index_row.indisvalid
+            AND index_row.indisready
+            AND index_row.indexprs IS NULL
+            AND index_row.indnkeyatts = 1
+            AND index_row.indnatts = 1
+            AND position('(order_id)' IN pg_get_indexdef(index_row.indexrelid)) > 0
+            AND regexp_replace(
+              pg_get_expr(index_row.indpred, index_row.indrelid),
+              '[[:space:]()]',
+              '',
+              'g'
+            ) = 'amendment_type=''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text'
+        ) AS index_ready,
+        count(*) FILTER (
+          WHERE NOT trigger.tgisinternal
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgenabled IN ('O','A')
+            AND trigger.tgnargs = 0
+            AND trigger.tgqual IS NULL
+            AND (
+              (trigger.tgrelid = to_regclass('coverage_items')
+                AND trigger.tgname = 'coverage_items_protect_identity'
+                AND trigger.tgtype = 31
+                AND trigger.tgfoid = to_regprocedure('qintopia_protect_coverage_identity()'))
+              OR (trigger.tgrelid = to_regclass('coverage_items')
+                AND trigger.tgname = 'coverage_items_validate_ownership'
+                AND trigger.tgtype = 7
+                AND trigger.tgfoid = to_regprocedure('qintopia_validate_coverage_ownership()'))
+            )
+        )::text AS coverage_trigger_count,
+        count(*) FILTER (
+          WHERE NOT trigger.tgisinternal
+            AND trigger.tgdeferrable
+            AND trigger.tginitdeferred
+            AND trigger.tgenabled IN ('O','A')
+            AND trigger.tgnargs = 0
+            AND (
+              (trigger.tgrelid = to_regclass('command_executions')
+                AND trigger.tgname = 'command_executions_validate_converted_stay_fulfillment'
+                AND trigger.tgtype = 21
+                AND trigger.tgfoid = to_regprocedure('qintopia_validate_converted_stay_fulfillment_execution()'))
+              OR (trigger.tgrelid = to_regclass('coverage_items')
+                AND trigger.tgname = 'coverage_items_validate_lifecycle_state'
+                AND trigger.tgtype = 21
+                AND trigger.tgfoid = to_regprocedure('qintopia_validate_coverage_lifecycle_state()'))
+              OR (trigger.tgrelid = to_regclass('amendments')
+                AND trigger.tgname = 'amendments_validate_converted_stay_fulfillment'
+                AND trigger.tgtype = 5
+                AND trigger.tgfoid = to_regprocedure('qintopia_validate_converted_stay_fulfillment_child()'))
+              OR (trigger.tgrelid = to_regclass('entitlement_ledger')
+                AND trigger.tgname = 'entitlement_ledger_validate_converted_stay_fulfillment'
+                AND trigger.tgtype = 5
+                AND trigger.tgfoid = to_regprocedure('qintopia_validate_converted_stay_fulfillment_child()'))
+            )
+        )::text AS deferred_trigger_count,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('command_executions', 'command_executions_validate_converted_stay_fulfillment',
+                  'CREATE CONSTRAINT TRIGGER command_executions_validate_converted_stay_fulfillment AFTER INSERT OR UPDATE OF state ON public.command_executions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_converted_stay_fulfillment_execution()'),
+                ('coverage_items', 'coverage_items_validate_lifecycle_state',
+                  'CREATE CONSTRAINT TRIGGER coverage_items_validate_lifecycle_state AFTER INSERT OR UPDATE OF status ON public.coverage_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_coverage_lifecycle_state()'),
+                ('amendments', 'amendments_validate_converted_stay_fulfillment',
+                  'CREATE CONSTRAINT TRIGGER amendments_validate_converted_stay_fulfillment AFTER INSERT ON public.amendments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((new.command_id IS NOT NULL)) EXECUTE FUNCTION qintopia_validate_converted_stay_fulfillment_child()'),
+                ('entitlement_ledger', 'entitlement_ledger_validate_converted_stay_fulfillment',
+                  'CREATE CONSTRAINT TRIGGER entitlement_ledger_validate_converted_stay_fulfillment AFTER INSERT ON public.entitlement_ledger DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((new.command_id IS NOT NULL)) EXECUTE FUNCTION qintopia_validate_converted_stay_fulfillment_child()')
+            ) AS expected(table_name, trigger_name, definition)
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM pg_trigger AS exact_trigger
+              WHERE exact_trigger.tgrelid = to_regclass(expected.table_name)
+                AND exact_trigger.tgname = expected.trigger_name
+                AND NOT exact_trigger.tgisinternal
+                AND exact_trigger.tgenabled IN ('O','A')
+                AND exact_trigger.tgnargs = 0
+                AND pg_get_triggerdef(exact_trigger.oid, false) = expected.definition
+            )
+          )
+        ) AS trigger_bindings_ready,
+        (
+          COALESCE(position('restoredFutureCoverageDates'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage10_shorten_combination(text)'))) > 0, false)::integer
+          + COALESCE(position('booking.current_revision_id = revision.id'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
+          + COALESCE(position('coverage_conversion_consumed_insert'
+            IN pg_get_functiondef(to_regprocedure('qintopia_protect_coverage_identity()'))) > 0, false)::integer
+          + COALESCE(position('coverage_status_typed_transition'
+            IN pg_get_functiondef(to_regprocedure('qintopia_protect_coverage_identity()'))) > 0, false)::integer
+          + COALESCE(position('convertedMembershipCoveragePreserved'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage11_move_combination(text)'))) > 0, false)::integer
+          + COALESCE(position('SHORTEN_STAY_FUTURE_ENTITLEMENT_RESTORED'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_stage10_entitlement_write()'))) > 0, false)::integer
+          + COALESCE(position('entitlement_ledger_restore_command'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_entitlement_lifecycle_fact()'))) > 0, false)::integer
+          + COALESCE(position('coverage_items_lifecycle_conserved'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_lifecycle_state()'))) > 0, false)::integer
+          + COALESCE(position('typed future-stay restoration'
+            IN pg_get_functiondef(to_regprocedure('qintopia_preserve_stage11_consumed_coverage()'))) > 0, false)::integer
+          + COALESCE(position('entitlement_ledger_conversion_consume_shape'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_conversion_consume_entitlement_fact()'))) > 0, false)::integer
+          + COALESCE(position('stage13_conversion_initial_lodging_fund_shape'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_lodging_funds_after_membership_transfer()'))) > 0, false)::integer
+          + COALESCE(position('stage13_conversion_membership_funds_closed'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_membership_funds_after_stay_transfer()'))) > 0, false)::integer
+          + COALESCE(position('target_membership_order.agreed_price_minor <= 0'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage13_stay_conversion_command_v033(text)'))) > 0, false)::integer
+          + COALESCE(position('stage13_conversion_zero_transfer_funds'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage13_stay_conversion_command_v033(text)'))) > 0, false)::integer
+          + COALESCE(position('stage13_conversion_inhouse_coverage'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_stage13_stay_conversion_command_v033(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_membership_binding'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_entitlement_balance'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_extend_entitlement_graph'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_shorten_entitlement_graph'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_move_entitlement_graph'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_current_coverage'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_move_marker'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_shorten_marker'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('converted_stay_ordinary_action_closed'
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+          + COALESCE(position('coverage.status = ''HELD'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_assert_converted_stay_fulfillment_command(text)'))) > 0, false)::integer
+        )::text AS body_marker_count,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('qintopia_assert_stage10_shorten_combination(text)', 'a9ea4fc40b6f4e204db8b9c9ec05869b493f5220c389bbd6443ee355cc30db4b'),
+                ('qintopia_validate_coverage_ownership()', '4c4693e86174f88262a9ab6cefef660f0d09609abaf4ff096c0b7a5778d4b664'),
+                ('qintopia_protect_coverage_identity()', 'b8eb365fa29712bfe2c26b9c8dfe17a87bdcd0091b012af88a5bb328b5af0750'),
+                ('qintopia_reject_stage10_entitlement_write()', 'd3450f298724fa9df85d09cc89175acf4d4cccb837963839b61dddbaac22756f'),
+                ('qintopia_validate_entitlement_lifecycle_fact()', 'c03dac8f3f8571b9908fb95929f91fa7ea6386b78af1e19aa7127c54ca65ab35'),
+                ('qintopia_validate_coverage_lifecycle_state()', '5cf2df24f2cbd33405d7289b424c972a37140ddf2418660fbbf70527b0adbc5f'),
+                ('qintopia_assert_stage11_move_combination(text)', 'c86f1de759ca3cef115c0e96bcffbe80aa9057c377b897088bc8ac286e6f12a3'),
+                ('qintopia_preserve_stage11_consumed_coverage()', '7152466eed2e839a9be9e38464e0fef91d5e615246f21dd372c7d487295dde58'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', '1e8d4b1b3754ee3c4962c080d6a01d8299f1a7a8f2df89bb22487108c45adefd'),
+                ('qintopia_reject_lodging_funds_after_membership_transfer()', 'bf22eef1c8964fbe29e7bf5054b64b2fa85ce7cb2ae90bbf9e0102412669c3bd'),
+                ('qintopia_reject_membership_funds_after_stay_transfer()', '99e9a57e0f4d7a9f48936eafd26dd809e892bbfc8c76d026a05871ccb23ffc24'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '9d28e833682d7dd7a62b198b1f49a8760a3ca7b3ee4e916585550034fd5aba35'),
+                ('qintopia_assert_converted_stay_fulfillment_command(text)', '7b22fe62a3610462c82a4a54f95d62e478996454dfc312ff8e90c189dfa222a0'),
+                ('qintopia_validate_converted_stay_fulfillment_execution()', 'ed58ceb0d44795151d23b34912bf90809ca7f2e370b41d9f07b564a71c8404ce'),
+                ('qintopia_validate_converted_stay_fulfillment_child()', 'a4a789b5bbb5ad99fd7b6fd8aa38528f6bcc6f4851ea0e7f550f7d28d965733c')
             ) AS expected(signature, body_hash)
             WHERE NOT COALESCE((
               SELECT encode(
@@ -1224,6 +1488,8 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       && collectionFactObjects.rows[0]?.trigger_count === "1"
       && collectionFactObjects.rows[0]?.historical_column_count === "1"
       && collectionFactObjects.rows[0]?.body_marker_count === "6"
+      && collectionFactObjects.rows[0]?.trigger_bindings_ready === true
+      && collectionFactObjects.rows[0]?.function_bodies_ready === true
       && completedStayBackfillObjects.rows[0]?.cash_column_count === "1"
       && completedStayBackfillObjects.rows[0]?.cash_constraint_count === "1"
       && completedStayBackfillObjects.rows[0]?.cash_function_count === "1"
@@ -1239,9 +1505,9 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       && stage12Objects.rows[0]?.status_constraint_count === "2"
       && stage12Objects.rows[0]?.restore_index_count === "1"
       && stage12Objects.rows[0]?.body_marker_count === "6"
-      && stage13Objects.rows[0]?.function_count === "12"
+      && stage13Objects.rows[0]?.function_count === "13"
       && stage13Objects.rows[0]?.deferred_trigger_count === "9"
-      && stage13Objects.rows[0]?.immediate_trigger_count === "6"
+      && stage13Objects.rows[0]?.immediate_trigger_count === "7"
       && stage13Objects.rows[0]?.table_count === "1"
       && stage13Objects.rows[0]?.source_column_count === "1"
       && stage13Objects.rows[0]?.critical_constraints_ready === true
@@ -1251,7 +1517,14 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
       && stage13Objects.rows[0]?.child_wrapper_body_ready === true
       && stage13Objects.rows[0]?.membership_order_wrapper_body_ready === true
       && stage13Objects.rows[0]?.trigger_bindings_ready === true
-      && stage13Objects.rows[0]?.function_bodies_ready === true;
+      && stage13Objects.rows[0]?.function_bodies_ready === true
+      && inHouseMembershipFulfillmentObjects.rows[0]?.function_count === "15"
+      && inHouseMembershipFulfillmentObjects.rows[0]?.index_ready === true
+      && inHouseMembershipFulfillmentObjects.rows[0]?.coverage_trigger_count === "2"
+      && inHouseMembershipFulfillmentObjects.rows[0]?.deferred_trigger_count === "4"
+      && inHouseMembershipFulfillmentObjects.rows[0]?.trigger_bindings_ready === true
+      && inHouseMembershipFulfillmentObjects.rows[0]?.body_marker_count === "25"
+      && inHouseMembershipFulfillmentObjects.rows[0]?.function_bodies_ready === true;
   } catch {
     return false;
   }

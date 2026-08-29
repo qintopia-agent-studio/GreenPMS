@@ -7,7 +7,9 @@ import {
   StayDateChangeDrawer,
   stayDateChangeActionForDeparture,
   stayDateChangeActionState,
-  stayDateChangeInitialDraft
+  stayDateChangeInitialDraft,
+  stayDatePreviewIdentityMatches,
+  stayDatePreviewSemanticSignature
 } from "./StayDateChangeDrawer";
 
 function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
@@ -60,6 +62,7 @@ function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
     coverageSet: [],
     collectionFacts: [],
     cleaningTasks: [],
+    membershipConversion: null,
     amounts: {
       currentContractAmount: { currency: "CNY", minorUnits: 20_000 },
       netRecordedCollection: { currency: "CNY", minorUnits: 10_000 },
@@ -71,6 +74,51 @@ function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
 }
 
 describe("stay date change drawer rules", () => {
+  it("keeps an accepted price preview stable across equivalent room-status polling responses", () => {
+    const current = view();
+    const cloned = structuredClone(current);
+    const inputSignature = JSON.stringify({
+      commandType: "EXTEND_STAY",
+      input: { propertyId: "property_1", orderId: "order_1", newDepartureDate: "2026-08-05" }
+    });
+
+    expect(stayDatePreviewSemanticSignature(current, inputSignature))
+      .toBe(stayDatePreviewSemanticSignature(cloned, inputSignature));
+    expect(stayDatePreviewSemanticSignature({
+      ...cloned,
+      order: { ...cloned.order, version: cloned.order.version + 1 }
+    }, inputSignature)).not.toBe(stayDatePreviewSemanticSignature(current, inputSignature));
+    expect(stayDatePreviewSemanticSignature({
+      ...cloned,
+      effectiveArrangement: { ...cloned.effectiveArrangement, departureDate: "2026-08-06" }
+    }, inputSignature)).not.toBe(stayDatePreviewSemanticSignature(current, inputSignature));
+    expect(stayDatePreviewSemanticSignature({
+      ...cloned,
+      order: { ...cloned.order, current_revision_id: "revision_2" }
+    }, inputSignature)).not.toBe(stayDatePreviewSemanticSignature(current, inputSignature));
+    expect(stayDatePreviewSemanticSignature({
+      ...cloned,
+      order: { ...cloned.order, status: "CANCELLED" }
+    }, inputSignature)).not.toBe(stayDatePreviewSemanticSignature(current, inputSignature));
+    expect(stayDatePreviewSemanticSignature({
+      ...cloned,
+      effectiveArrangement: { ...cloned.effectiveArrangement, businessDate: "2026-08-02" }
+    }, inputSignature)).not.toBe(stayDatePreviewSemanticSignature(current, inputSignature));
+    expect(stayDatePreviewSemanticSignature(current, `${inputSignature}-changed`))
+      .not.toBe(stayDatePreviewSemanticSignature(current, inputSignature));
+  });
+
+  it("rejects an accepted preview immediately when either its input or order facts are stale", () => {
+    const inputSignature = "input-1";
+    const semanticSignature = stayDatePreviewSemanticSignature(view(), inputSignature);
+    const ready = { status: "READY", signature: inputSignature, semanticSignature } as const;
+
+    expect(stayDatePreviewIdentityMatches(ready, inputSignature, semanticSignature)).toBe(true);
+    expect(stayDatePreviewIdentityMatches(ready, "input-2", semanticSignature)).toBe(false);
+    expect(stayDatePreviewIdentityMatches(ready, inputSignature, `${semanticSignature}-changed`)).toBe(false);
+    expect(stayDatePreviewIdentityMatches({ status: "LOADING" }, inputSignature, semanticSignature)).toBe(false);
+  });
+
   it("requires external channels to enter this order's channel settlement amount anew", () => {
     const current = view();
     const draft = stayDateChangeInitialDraft("RESCHEDULE_STAY", current);

@@ -22,6 +22,7 @@ import { bumpRoomStatusRevision } from "../room-status.ts";
 import { getOrderViewSnapshot } from "../orders.ts";
 import type { Database } from "../schema.ts";
 import {
+  historicalProtocolEpochMigration,
   legacyEffectProtocol,
   legacyReceiptProtocol,
   type HistoricalProtocolVersion
@@ -140,29 +141,79 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
+export function projectStayMembershipConversionResultEvidenceForRead(
+  result: Record<string, unknown>,
+  ledger: ReadonlyArray<{ fact_id: string; coverage_id: string | null }>
+): Record<string, unknown> {
+  const ledgerFactIds = strictStoredStringArray(result.conversionLedgerFactIds, "conversion ledger evidence");
+  const coverageIds = strictStoredStringArray(result.conversionCoverageIds, "conversion coverage evidence");
+  const convertedUnits = result.convertedUnits;
+  if (!Number.isSafeInteger(convertedUnits) || Number(convertedUnits) < 1) {
+    throw new Error("Persisted stay-membership conversion unit evidence is malformed");
+  }
+  const persistedLedgerFactIds = ledger.map((fact) => fact.fact_id);
+  if (ledger.length !== convertedUnits || !sameStringSet(persistedLedgerFactIds, ledgerFactIds)) {
+    throw new Error("Persisted stay-membership conversion ledger differs from its receipt");
+  }
+  const nonNullCoverageIds = ledger.flatMap((fact) => fact.coverage_id === null ? [] : [fact.coverage_id]);
+  const conversionMode = nonNullCoverageIds.length === ledger.length
+    ? "IN_HOUSE"
+    : nonNullCoverageIds.length === 0
+      ? "COMPLETED"
+      : undefined;
+  if (!conversionMode || !sameStringSet(nonNullCoverageIds, coverageIds)) {
+    throw new Error("Persisted stay-membership conversion coverage differs from its receipt");
+  }
+  if (Object.hasOwn(result, "conversionMode") && result.conversionMode !== conversionMode) {
+    throw new Error("Persisted stay-membership conversion mode differs from its ledger");
+  }
+  return Object.hasOwn(result, "conversionMode") ? result : { ...result, conversionMode };
+}
+
+async function projectStayMembershipConversionResultForRead(
+  db: Kysely<Database> | Transaction<Database>,
+  commandId: string,
+  result: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const ledger = await db.selectFrom("entitlement_ledger")
+    .select(["fact_id", "coverage_id"])
+    .where("command_id", "=", commandId)
+    .where("entry_type", "=", "CONVERSION_CONSUME")
+    .orderBy("fact_id")
+    .execute();
+  return projectStayMembershipConversionResultEvidenceForRead(result, ledger);
+}
+
 const completeStayExternalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-async function stage11ProtocolEpoch(db: Kysely<Database> | Transaction<Database>): Promise<Date> {
+async function historicalProtocolEpoch(
+  db: Kysely<Database> | Transaction<Database>,
+  protocolVersion: HistoricalProtocolVersion
+): Promise<Date> {
+  const migrationName = historicalProtocolEpochMigration(protocolVersion);
   const migration = await db.selectFrom("schema_migrations")
     .select("applied_at")
-    .where("name", "=", "028_stage11_move_unit_guards.sql")
+    .where("name", "=", migrationName)
     .executeTakeFirst();
-  if (!migration) throw new DomainError("INTERNAL_ERROR", "Stage 11 protocol epoch is unavailable", 500);
+  if (!migration) {
+    throw new DomainError("INTERNAL_ERROR", `Historical protocol epoch ${migrationName} is unavailable`, 500);
+  }
   return asDate(migration.applied_at);
 }
 
-async function assertLegacyReadPredatesStage11(
+async function assertHistoricalReadPredatesProtocolEpoch(
   db: Kysely<Database> | Transaction<Database>,
+  protocolVersion: HistoricalProtocolVersion,
   createdAt: Date | string,
   resource: string
 ): Promise<void> {
-  const epoch = await stage11ProtocolEpoch(db);
+  const epoch = await historicalProtocolEpoch(db, protocolVersion);
   if (asDate(createdAt).getTime() >= epoch.getTime()) {
-    throw new DomainError("INTERNAL_ERROR", `${resource} uses a legacy protocol shape after the Stage 11 epoch`, 500);
+    throw new DomainError("INTERNAL_ERROR", `${resource} uses ${protocolVersion} after its protocol epoch`, 500);
   }
 }
 
@@ -444,7 +495,7 @@ export async function projectStoredPreviewForRead(
   const projectedEffect = projectCommandEffectForRead(preview.command_type, effect);
   const protocolVersion = legacyEffectProtocol(preview.command_type, projectedEffect);
   if (!protocolVersion) return { ...response, effect: projectedEffect };
-  await assertLegacyReadPredatesStage11(db, preview.created_at, "Stored preview");
+  await assertHistoricalReadPredatesProtocolEpoch(db, protocolVersion, preview.created_at, "Stored preview");
   return {
     ...response,
     effect: projectedEffect,
@@ -727,7 +778,20 @@ async function receiptByCommand(
     .where("command_receipts.command_id", "=", commandId).executeTakeFirst();
   if (!row) return undefined;
   const storedResult = asRecord(row.result);
-  const result = storedResult ? projectReceiptResultForRead(row.command_type, storedResult) : undefined;
+  let result = storedResult ? projectReceiptResultForRead(row.command_type, storedResult) : undefined;
+  let historicalConversionProtocol: "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT" | undefined;
+  if (readMode === "HISTORICAL_READ"
+    && row.command_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    && result
+    && !Object.hasOwn(result, "conversionCoverageIds")) {
+    const protocolVersion = "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT" as const;
+    await assertHistoricalReadPredatesProtocolEpoch(db, protocolVersion, row.protocol_created_at, "Command receipt");
+    result = projectReceiptResultForRead(row.command_type, result, protocolVersion);
+    historicalConversionProtocol = protocolVersion;
+  }
+  if (row.command_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && result) {
+    result = await projectStayMembershipConversionResultForRead(db, row.command_id, result);
+  }
   const error = asRecord(row.error) as ErrorDto | undefined;
   const receipt: ReceiptReadDto = {
     receiptId: row.id,
@@ -742,13 +806,20 @@ async function receiptByCommand(
     ...(row.committed_at ? { committedAt: asDate(row.committed_at).toISOString() } : {})
   };
   if (readMode !== "HISTORICAL_READ" || !result) return receipt;
+  if (historicalConversionProtocol) {
+    return { ...receipt, protocolVersion: historicalConversionProtocol, recoveryMode: "HISTORICAL_READ_ONLY" };
+  }
   const protocolVersion = legacyReceiptProtocol(row.command_type, result);
   if (!protocolVersion) return receipt;
-  await assertLegacyReadPredatesStage11(db, row.protocol_created_at, "Command receipt");
+  await assertHistoricalReadPredatesProtocolEpoch(db, protocolVersion, row.protocol_created_at, "Command receipt");
   return { ...receipt, protocolVersion, recoveryMode: "HISTORICAL_READ_ONLY" };
 }
 
-function projectReceiptResultForRead(commandType: string, result: Record<string, unknown>): Record<string, unknown> {
+export function projectReceiptResultForRead(
+  commandType: string,
+  result: Record<string, unknown>,
+  protocolVersion?: HistoricalProtocolVersion
+): Record<string, unknown> {
   if (commandType.startsWith("PREVIEW:")) {
     const preview = asRecord(result.preview);
     const effect = preview ? asRecord(preview.effect) : undefined;
@@ -783,6 +854,11 @@ function projectReceiptResultForRead(commandType: string, result: Record<string,
       ...result,
       transactionReference: Object.hasOwn(result, "transactionReference") ? result.transactionReference : null
     };
+  }
+  if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    && protocolVersion === "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"
+    && !Object.hasOwn(result, "conversionCoverageIds")) {
+    return { ...result, conversionMode: "COMPLETED", conversionCoverageIds: [] };
   }
   return result;
 }
@@ -1183,7 +1259,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           ? legacyEffectProtocol(preview.command_type, storedEffect)
           : undefined;
         if (legacyProtocolVersion) {
-          await assertLegacyReadPredatesStage11(trx, preview.created_at, "Stored preview");
+          await assertHistoricalReadPredatesProtocolEpoch(trx, legacyProtocolVersion, preview.created_at, "Stored preview");
           throw new HistoricalPreviewReadOnlyError();
         }
         if (commandType === "CREATE_ORDER") {

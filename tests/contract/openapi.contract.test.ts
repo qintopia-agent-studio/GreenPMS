@@ -340,7 +340,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(createFreeStayCategoryVariants.map((variant) => variant.enum[0])).toEqual(["VOLUNTEER", "RECEPTION"]);
     const previewSchema = document.paths["/api/v1/command-previews"].post.responses["200"].content["application/json"].schema;
     const previewResponseVariants = previewSchema.anyOf as JsonSchema[];
-    expect(previewResponseVariants).toHaveLength(4);
+    expect(previewResponseVariants).toHaveLength(6);
     expect(previewResponseVariants.every((variant) => variant.additionalProperties === false)).toBe(true);
     const currentPreviewResponse = previewResponseVariants.find((variant) => {
       const responseProperties = variant.properties as Record<string, JsonSchema> | undefined;

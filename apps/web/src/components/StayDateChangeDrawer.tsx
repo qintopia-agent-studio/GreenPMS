@@ -41,7 +41,7 @@ const localDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 type PricePreviewState =
   | { status: "EMPTY" }
   | { status: "LOADING" }
-  | { status: "READY"; summary: StayDatePreviewPricingSummary; expiresAt: string; signature: string }
+  | { status: "READY"; summary: StayDatePreviewPricingSummary; expiresAt: string; signature: string; semanticSignature: string }
   | { status: "ERROR"; error: unknown };
 
 function shiftDate(value: string, days: number): string {
@@ -116,6 +116,29 @@ export function stayDateChangeActionForDeparture(
   if (newDepartureDate > view.effectiveArrangement.departureDate) return "EXTEND_STAY";
   if (newDepartureDate < view.effectiveArrangement.departureDate) return "SHORTEN_STAY";
   return undefined;
+}
+
+export function stayDatePreviewSemanticSignature(view: OrderViewDto, inputSignature: string): string {
+  return JSON.stringify({
+    orderId: view.order.id,
+    orderVersion: view.order.version,
+    revisionId: view.order.current_revision_id,
+    status: view.order.status,
+    arrivalDate: view.effectiveArrangement.arrivalDate,
+    departureDate: view.effectiveArrangement.departureDate,
+    businessDate: view.effectiveArrangement.businessDate,
+    input: inputSignature
+  });
+}
+
+export function stayDatePreviewIdentityMatches(
+  preview: { status: string; signature?: string; semanticSignature?: string },
+  inputSignature: string,
+  semanticSignature: string
+): boolean {
+  return preview.status === "READY"
+    && preview.signature === inputSignature
+    && preview.semanticSignature === semanticSignature;
 }
 
 function operatorFacingDisabledReason(reason: string): string {
@@ -326,6 +349,7 @@ export function StayDateChangeDrawer({
   const previewSignature = previewRequest
     ? JSON.stringify({ commandType: previewRequest.commandType, input: previewRequest.input })
     : "";
+  const previewSemanticSignature = stayDatePreviewSemanticSignature(view, previewSignature);
 
   useEffect(() => {
     const generation = previewGeneration.current + 1;
@@ -334,9 +358,9 @@ export function StayDateChangeDrawer({
       setPricePreview({ status: "EMPTY" });
       return;
     }
+    setPricePreview({ status: "LOADING" });
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      setPricePreview({ status: "LOADING" });
       void runPreviewRef.current(() => api.preview(
         { commandType: resolvedAction, input: previewRequest.input },
         api.commandMetadata(`stay-date-price-${resolvedAction.toLowerCase()}`),
@@ -348,11 +372,17 @@ export function StayDateChangeDrawer({
           setPricePreview({ status: "ERROR", error: new Error("服务端返回的日期与金额核对信息不完整，请重新选择日期") });
           return;
         }
+        const expiresAt = response.preview.expiresAt;
+        if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) {
+          setPricePreview({ status: "ERROR", error: new Error("金额核对结果已经失效，请重新计算") });
+          return;
+        }
         setPricePreview({
           status: "READY",
           summary,
-          expiresAt: response.preview.expiresAt,
-          signature: previewSignature
+          expiresAt,
+          signature: previewSignature,
+          semanticSignature: previewSemanticSignature
         });
       }).catch((nextError: unknown) => {
         if (controller.signal.aborted || previewGeneration.current !== generation
@@ -364,21 +394,20 @@ export function StayDateChangeDrawer({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [actionState?.enabled, previewRefresh, previewRequest, previewSignature, resolvedAction, writeBlocked]);
+  }, [actionState?.enabled, previewRefresh, previewSemanticSignature, previewSignature, resolvedAction, writeBlocked]);
 
   useEffect(() => {
-    if (pricePreview.status !== "READY") return;
+    if (pricePreview.status !== "READY"
+      || !stayDatePreviewIdentityMatches(pricePreview, previewSignature, previewSemanticSignature)) return;
     const expiry = Date.parse(pricePreview.expiresAt);
-    if (!Number.isFinite(expiry)) {
-      setPricePreview({ status: "ERROR", error: new Error("金额核对结果缺少有效期，请重新计算") });
-      return;
-    }
     const timer = window.setTimeout(() => {
-      setPricePreview({ status: "EMPTY" });
+      setPricePreview((current) => stayDatePreviewIdentityMatches(current, previewSignature, previewSemanticSignature)
+        ? { status: "EMPTY" }
+        : current);
       setPreviewRefresh((value) => value + 1);
     }, Math.max(0, expiry - Date.now() + 20));
     return () => window.clearTimeout(timer);
-  }, [pricePreview]);
+  }, [pricePreview, previewSemanticSignature, previewSignature]);
 
   function update(patch: Partial<StayDateChangeDraft>) {
     setDraft((current) => ({ ...current, ...patch }));
@@ -389,7 +418,7 @@ export function StayDateChangeDrawer({
     event.preventDefault();
     setError(undefined);
     try {
-      if (pricePreview.status !== "READY" || pricePreview.signature !== previewSignature) {
+      if (!stayDatePreviewIdentityMatches(pricePreview, previewSignature, previewSemanticSignature)) {
         throw new Error("请等待调整后订单金额计算完成，再继续核对");
       }
       onSubmit({
@@ -407,6 +436,8 @@ export function StayDateChangeDrawer({
     && draft.newDepartureDate < view.effectiveArrangement.businessDate
     ? new Error("新的退房日期不能早于当前营业日期")
     : undefined;
+  const currentPricePreviewReady = stayDatePreviewIdentityMatches(pricePreview, previewSignature, previewSemanticSignature);
+  const staleReadyPreview = pricePreview.status === "READY" && !currentPricePreviewReady;
   const title = mode === "ADJUST_DEPARTURE" ? "调整退房日期" : action === "RESCHEDULE_STAY" ? "调整预订日期" : action === "EXTEND_STAY" ? "延长住宿" : earlyCheckout ? "提前退房" : "缩短住宿";
   return <Modal
     title={title}
@@ -415,7 +446,7 @@ export function StayDateChangeDrawer({
     onClose={onClose}
     footer={<>
       <button type="button" className="button button-secondary" onClick={onClose}>取消</button>
-      <button type="submit" form="stay-date-change-form" className="button button-primary" disabled={writeBlocked || !actionState?.enabled || !draft.reason.trim() || pricePreview.status !== "READY" || pricePreview.signature !== previewSignature}>继续核对</button>
+      <button type="submit" form="stay-date-change-form" className="button button-primary" disabled={writeBlocked || !actionState?.enabled || !draft.reason.trim() || !currentPricePreviewReady}>继续核对</button>
     </>}
   >
     <div className="stay-date-change-heading">
@@ -461,9 +492,9 @@ export function StayDateChangeDrawer({
       <section className="stay-date-pricing-section" aria-labelledby="stay-date-price-result-heading" aria-live="polite">
         <h3 id="stay-date-price-result-heading">金额核对</h3>
         {pricePreview.status === "EMPTY" ? <p data-testid="stay-date-price-empty">填写有效的新日期和所需金额后，系统会在这里显示调整结果。</p> : null}
-        {pricePreview.status === "LOADING" ? <div className="stay-date-price-loading" role="status" data-testid="stay-date-price-loading"><LoaderCircle className="spin" aria-hidden="true" size={17} /><span>正在计算调整后订单金额</span></div> : null}
+        {pricePreview.status === "LOADING" || staleReadyPreview ? <div className="stay-date-price-loading" role="status" data-testid="stay-date-price-loading"><LoaderCircle className="spin" aria-hidden="true" size={17} /><span>正在计算调整后订单金额</span></div> : null}
         {pricePreview.status === "ERROR" ? <InlineError error={pricePreview.error} title="暂时无法核对新金额" hideTechnicalDetails /> : null}
-        {pricePreview.status === "READY" ? (() => {
+        {pricePreview.status === "READY" && currentPricePreviewReady ? (() => {
           const { summary } = pricePreview;
           const showPerOrderFunds = stayDateFundsAreOperatorFacing(view.order.booking_channel_code, summary.pricingBasis);
           const change = {

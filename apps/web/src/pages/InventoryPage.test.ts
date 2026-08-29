@@ -10,6 +10,8 @@ import {
   applyMemberSelectionToGuestForms,
   backfillCollectionCommandInput,
   backfillReviewDetailsComplete,
+  backfillReviewValidationError,
+  backfillSubmitBlockedReason,
   bookingChannelRequiredForStay,
   canAddGuest,
   completedStayBackfillCommandRequest,
@@ -445,8 +447,14 @@ describe("CREATE_QUOTE request lifecycle", () => {
       freeStayCategoryCode: "" as const,
       freeStayReason: "",
       bookingChannelCode: "WECOM" as const,
-      paidPricingComplete: true,
+      targetAmountYuan: "100",
       contractAmountMinor: 10_000,
+      channelOrderReference: "",
+      channelReasonRequired: false,
+      channelPriceDifferenceReason: "",
+      manualReasonRequired: false,
+      manualPriceAdjustmentReason: "",
+      collectionAmountYuan: "0",
       collectionAmountMinor: 0,
       collectionMethod: "WECOM",
       transactionReference: "",
@@ -462,14 +470,16 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450, collectionMethod: "BANK_TRANSFER", transactionReference: "BANK-8450" })).toBe(true);
     expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450, collectionMethod: "CASH", cashCollector: "前台甲", cashNote: "现金已核对" })).toBe(true);
     expect(backfillReviewDetailsComplete({ ...paid, collectionAmountMinor: 8_450, collectionMethod: "CASH", cashCollector: "前台甲", cashNote: "" })).toBe(false);
-    expect(backfillReviewDetailsComplete({ ...paid, bookingChannelCode: "CTRIP", collectionAmountMinor: undefined })).toBe(true);
-    expect(backfillReviewDetailsComplete({ ...paid, bookingChannelCode: "CTRIP", paidPricingComplete: false })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...paid, bookingChannelCode: "CTRIP", channelOrderReference: "" })).toBe(false);
+    expect(backfillReviewDetailsComplete({ ...paid, bookingChannelCode: "CTRIP", channelOrderReference: "XC-100", collectionAmountMinor: undefined })).toBe(true);
 
     const free = {
       ...paid,
       stayType: "FREE" as const,
       bookingChannelCode: "" as const,
-      paidPricingComplete: false,
+      targetAmountYuan: "",
+      contractAmountMinor: undefined,
+      collectionAmountYuan: "",
       collectionAmountMinor: undefined,
       freeStayCategoryCode: "VOLUNTEER" as const,
       freeStayReason: "义工住宿"
@@ -477,6 +487,91 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(backfillReviewDetailsComplete(free)).toBe(true);
     expect(backfillReviewDetailsComplete({ ...free, freeStayCategoryCode: "" })).toBe(false);
     expect(backfillReviewDetailsComplete({ ...free, freeStayReason: " " })).toBe(false);
+  });
+
+  it("explains the exact missing backfill evidence instead of returning one generic error", () => {
+    const paid = {
+      stayType: "TRANSIENT" as const,
+      backfillReason: "前台漏录",
+      freeStayCategoryCode: "" as const,
+      freeStayReason: "",
+      bookingChannelCode: "WECOM" as const,
+      targetAmountYuan: "100",
+      contractAmountMinor: 10_000,
+      channelOrderReference: "",
+      channelReasonRequired: false,
+      channelPriceDifferenceReason: "",
+      manualReasonRequired: false,
+      manualPriceAdjustmentReason: "",
+      collectionAmountYuan: "84.50",
+      collectionAmountMinor: 8_450,
+      collectionMethod: "WECOM",
+      transactionReference: "",
+      cashCollector: "",
+      cashNote: ""
+    };
+    expect(backfillReviewValidationError({ ...paid, backfillReason: " " })).toBe("请填写补录原因");
+    expect(backfillReviewValidationError(paid)).toBe("请填写本次实际收款对应的真实交易单号");
+    expect(backfillReviewValidationError({ ...paid, collectionAmountMinor: 10_001, transactionReference: "WX-OVER" }))
+      .toBe("补录实收金额不能超过本单金额");
+    expect(backfillReviewValidationError({ ...paid, collectionAmountYuan: "", collectionAmountMinor: undefined }))
+      .toBe("请填写补录实收金额；没有住宿收款时填写 0");
+    expect(backfillReviewValidationError({ ...paid, collectionAmountYuan: "84.501", collectionAmountMinor: undefined }))
+      .toBe("补录实收金额格式不正确，请填写不超过两位小数的非负金额");
+    expect(backfillReviewValidationError({ ...paid, bookingChannelCode: "", collectionAmountYuan: "", collectionAmountMinor: undefined }))
+      .toBe("请选择订单来源渠道");
+    expect(backfillReviewValidationError({ ...paid, targetAmountYuan: "100.5", contractAmountMinor: undefined }))
+      .toBe("本单金额格式不正确，请填写非负整数金额");
+    expect(backfillReviewValidationError({ ...paid, bookingChannelCode: "CTRIP", channelOrderReference: "" }))
+      .toBe("请填写渠道订单号");
+    expect(backfillReviewValidationError({ ...paid, manualReasonRequired: true, manualPriceAdjustmentReason: "" }))
+      .toBe("请填写人工调价原因");
+    expect(backfillReviewValidationError({ ...paid, channelReasonRequired: true, channelPriceDifferenceReason: "" }))
+      .toBe("请填写渠道价格差异说明");
+    expect(backfillReviewValidationError({ ...paid, collectionMethod: "CASH", cashCollector: "", cashNote: "" }))
+      .toBe("请填写现金收款人");
+    expect(backfillReviewValidationError({ ...paid, collectionMethod: "CASH", cashCollector: "前台甲", cashNote: "" }))
+      .toBe("请填写现金收款核对备注");
+    expect(backfillReviewValidationError({ ...paid, collectionMethod: "CARD" }))
+      .toBe("请选择有效的收款方式");
+    expect(backfillReviewValidationError({
+      ...paid,
+      stayType: "FREE",
+      freeStayCategoryCode: "",
+      freeStayReason: "",
+      bookingChannelCode: "",
+      targetAmountYuan: "",
+      contractAmountMinor: undefined,
+      collectionAmountYuan: "",
+      collectionAmountMinor: undefined
+    })).toBe("请选择免费入住类型");
+  });
+
+  it("explains why the backfill review button is temporarily disabled", () => {
+    expect(backfillSubmitBlockedReason({
+      commandsBlocked: false,
+      quoteIsCurrent: false,
+      guestCount: 1,
+      occupancyCapacity: 1
+    })).toBe("房源或住宿日期的最新报价尚未载入，请稍候");
+    expect(backfillSubmitBlockedReason({
+      commandsBlocked: true,
+      quoteIsCurrent: true,
+      guestCount: 1,
+      occupancyCapacity: 1
+    })).toBe("当前房态已变化、正在刷新、权限受限或有操作尚未收口，请按页面提示处理后重试");
+    expect(backfillSubmitBlockedReason({
+      commandsBlocked: false,
+      quoteIsCurrent: true,
+      guestCount: 2,
+      occupancyCapacity: 1
+    })).toBe("住宿人数超过当前房源可入住人数");
+    expect(backfillSubmitBlockedReason({
+      commandsBlocked: false,
+      quoteIsCurrent: true,
+      guestCount: 1,
+      occupancyCapacity: 1
+    })).toBeUndefined();
   });
 
   it("opens completed and cross-today backfills while keeping today-start stays on ordinary creation", () => {

@@ -28,3 +28,6 @@
 - source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
   summary: 为历史回执结果增加命令级 discriminator，消除通用 Receipt schema 的结构重叠。
   evidence: `COMPLETE_STAY` 已强制 64 位效果哈希，但历史 `BACKFILL_COMPLETED_STAY` 仍需兼容读取无 hash 结果；若要由通用 Receipt schema 绝对区分，需要新增持久 metadata 并迁移历史读取契约。
+- source_spec: `待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md`
+  summary: 启用多门店前单独设计全局手机号会员的跨门店资料关联、可见性和权益适用规则。
+  evidence: 2026-08-26 业务方确认 8.6 仅交付当前单门店旅程，不自动关联另一门店会员，也不共享会员资料或权益；未来若出现手机号已存在但未关联当前门店的场景，必须先失败关闭并重新确认跨门店语义。

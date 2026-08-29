@@ -27,7 +27,7 @@ import {
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
 import { enumerateServiceDates, stableHash, todayInTimeZone } from "@qintopia/domain";
-import { legacyEffectProtocol } from "./historical-command-protocol.ts";
+import { historicalProtocolEpochMigration, legacyEffectProtocol } from "./historical-command-protocol.ts";
 import { projectOrderLifecycle } from "./orders.ts";
 import type { Database } from "./schema.ts";
 
@@ -1456,12 +1456,16 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .orderBy("created_at")
       .orderBy("fact_id")
       .execute();
-    const stage11EpochRow = await trx.selectFrom("schema_migrations").select("applied_at")
-      .where("name", "=", "028_stage11_move_unit_guards.sql")
-      .executeTakeFirst();
-    const stage11Epoch = stage11EpochRow
-      ? stage11EpochRow.applied_at instanceof Date ? stage11EpochRow.applied_at : new Date(stage11EpochRow.applied_at)
-      : null;
+    const protocolEpochRows = await trx.selectFrom("schema_migrations").select(["name", "applied_at"])
+      .where("name", "in", [
+        "028_stage11_move_unit_guards.sql",
+        "044_inhouse_membership_fulfillment_guards.sql"
+      ])
+      .execute();
+    const protocolEpochByMigration = new Map(protocolEpochRows.map((row) => [
+      row.name,
+      row.applied_at instanceof Date ? row.applied_at : new Date(row.applied_at)
+    ]));
     const completedSegmentsByStay = new Map<string, typeof completedSegments>();
     for (const segment of completedSegments) {
       const rows = completedSegmentsByStay.get(segment.stay_id) ?? [];
@@ -1492,9 +1496,14 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         const amendments = (completedAmendmentsByOrder.get(row.id) ?? []).map((amendment) => {
           const protocolVersion = legacyEffectProtocol(amendment.amendment_type, amendment.payload);
           if (!protocolVersion) return amendment;
+          const migrationName = historicalProtocolEpochMigration(protocolVersion);
+          const protocolEpoch = protocolEpochByMigration.get(migrationName);
+          if (!protocolEpoch) {
+            throw new DomainError("INTERNAL_ERROR", `Historical protocol epoch ${migrationName} is unavailable`, 500);
+          }
           const createdAt = amendment.created_at instanceof Date ? amendment.created_at : new Date(amendment.created_at);
-          if (stage11Epoch && createdAt.getTime() >= stage11Epoch.getTime()) {
-            throw new DomainError("INTERNAL_ERROR", "订单变更在 Stage 11 协议启用后仍使用历史数据形状", 500);
+          if (createdAt.getTime() >= protocolEpoch.getTime()) {
+            throw new DomainError("INTERNAL_ERROR", "订单变更在历史协议分界后仍使用旧数据形状", 500);
           }
           return { ...amendment, protocolVersion };
         });

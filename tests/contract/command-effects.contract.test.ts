@@ -297,6 +297,7 @@ describe("Command effect HTTP contract", () => {
           preservedCoverageDates: [],
           migratedHeldCoverageDates: [],
           consumedCoverageDates: [],
+          convertedMembershipCoveragePreserved: false,
           ledgerWriteCount: 0
         },
         fundsSummary: {
@@ -384,6 +385,7 @@ describe("Command effect HTTP contract", () => {
       entitlementSummary: {
         currentConsumedCoverageDates: [],
         retainedHistoricalConsumedCoverageDates: [],
+        restoredFutureCoverageDates: [],
         ledgerWriteCount: 0
       },
       fundsSummary: {
@@ -395,6 +397,14 @@ describe("Command effect HTTP contract", () => {
     };
 
     expect(Value.Check(CommandEffectSchema, effect)).toBe(true);
+    expect(Value.Check(CommandEffectSchema, {
+      ...effect,
+      entitlementSummary: {
+        currentConsumedCoverageDates: effect.entitlementSummary.currentConsumedCoverageDates,
+        retainedHistoricalConsumedCoverageDates: effect.entitlementSummary.retainedHistoricalConsumedCoverageDates,
+        ledgerWriteCount: effect.entitlementSummary.ledgerWriteCount
+      }
+    })).toBe(false);
     expect(Value.Check(CommandEffectSchema, {
       ...effect,
       before: {

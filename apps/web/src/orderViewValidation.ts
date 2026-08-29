@@ -16,11 +16,11 @@ const fulfillmentStates = new Set(["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", 
 const recordingModes = new Set(["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"]);
 const pricingBases = new Set(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"]);
 const actionCodes = new Set<string>(orderActionCodes);
-const historicalProtocolByAmendmentType = new Map<string, string>([
-  ["RESCHEDULE_STAY", "LEGACY_STAGE_9_10"],
-  ["EXTEND_STAY", "LEGACY_STAGE_9_10"],
-  ["SHORTEN_STAY", "LEGACY_STAGE_10"],
-  ["MOVE_UNIT", "PRE_STAGE_11"]
+const historicalProtocolsByAmendmentType = new Map<string, ReadonlySet<string>>([
+  ["RESCHEDULE_STAY", new Set(["LEGACY_STAGE_9_10"])],
+  ["EXTEND_STAY", new Set(["LEGACY_STAGE_9_10"])],
+  ["SHORTEN_STAY", new Set(["LEGACY_STAGE_10", "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"])],
+  ["MOVE_UNIT", new Set(["PRE_STAGE_11", "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"])]
 ]);
 const orderProjectionExpectations = {
   RESERVED: { stayStatus: "PLANNED", fulfillmentState: "NOT_CHECKED_IN", presentation: "CURRENT" },
@@ -74,8 +74,8 @@ function historicalAmendmentMetadata(amendment: JsonRecord, path: string, amendm
     fail(`${path}.recoveryMode`, "不是支持的历史读取模式");
   }
   const protocolVersion = stringValue(amendment.protocolVersion, `${path}.protocolVersion`);
-  const expectedProtocolVersion = historicalProtocolByAmendmentType.get(amendmentType);
-  if (!expectedProtocolVersion || protocolVersion !== expectedProtocolVersion) {
+  const expectedProtocolVersions = historicalProtocolsByAmendmentType.get(amendmentType);
+  if (!expectedProtocolVersions?.has(protocolVersion)) {
     fail(`${path}.protocolVersion`, "与住宿变更类型不一致");
   }
 }
@@ -466,7 +466,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   exactKeys(result, "根节点", [
     "accessLevel", "allowedActions", "order", "occupants", "occupantCorrections", "stay", "currentSegment",
     "segments", "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory", "amendments",
-    "pricingRevisions", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
+    "pricingRevisions", "membershipConversion", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
   ]);
   const order = record(result.order, "order");
   exactKeys(order, "order", [
@@ -501,6 +501,29 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   stringValue(order.property_id, "order.property_id");
   const orderStatus = stringValue(order.status, "order.status");
   if (!Object.hasOwn(orderProjectionExpectations, orderStatus)) fail("order.status", "不是支持的订单状态");
+  const conversionAmendments = (arrayValue(result.amendments, "amendments") as unknown[]).flatMap((item, index): JsonRecord[] => {
+    const amendment = record(item, `amendments[${index}]`);
+    return amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" ? [amendment] : [];
+  });
+  if (result.membershipConversion === null) {
+    if (conversionAmendments.length !== 0) fail("membershipConversion", "升级会员事实必须有对应投影");
+  } else {
+    const conversion = record(result.membershipConversion, "membershipConversion");
+    exactKeys(conversion, "membershipConversion", [
+      "membershipOrderId", "memberId", "contractId", "entitlementLotId", "commandId"
+    ]);
+    stringValue(conversion.membershipOrderId, "membershipConversion.membershipOrderId");
+    const memberId = stringValue(conversion.memberId, "membershipConversion.memberId");
+    const contractId = stringValue(conversion.contractId, "membershipConversion.contractId");
+    stringValue(conversion.entitlementLotId, "membershipConversion.entitlementLotId");
+    const commandId = stringValue(conversion.commandId, "membershipConversion.commandId");
+    if (memberId !== order.member_id || contractId !== order.member_contract_id) {
+      fail("membershipConversion", "与订单当前会员身份不一致");
+    }
+    if (conversionAmendments.length !== 1 || conversionAmendments[0]?.command_id !== commandId) {
+      fail("membershipConversion.commandId", "没有唯一对应的升级会员事实");
+    }
+  }
   const allowedDateActions = orderStatus === "RESERVED"
     ? new Set(["RESCHEDULE_STAY"])
     : orderStatus === "CHECKED_IN"

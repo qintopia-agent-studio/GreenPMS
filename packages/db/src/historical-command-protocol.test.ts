@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { legacyEffectProtocol, legacyReceiptProtocol } from "./historical-command-protocol.ts";
+import {
+  historicalProtocolEpochMigration,
+  legacyEffectProtocol,
+  legacyReceiptProtocol
+} from "./historical-command-protocol.ts";
 
 const unit = (id: string) => ({
   id,
@@ -63,6 +67,151 @@ const pricingDecision = {
 };
 
 describe("historical command protocol classification", () => {
+  it("binds old protocols to migration 028 and the 043 shape to migration 044", () => {
+    expect(historicalProtocolEpochMigration("LEGACY_STAGE_9_10")).toBe("028_stage11_move_unit_guards.sql");
+    expect(historicalProtocolEpochMigration("LEGACY_STAGE_10")).toBe("028_stage11_move_unit_guards.sql");
+    expect(historicalProtocolEpochMigration("PRE_STAGE_11")).toBe("028_stage11_move_unit_guards.sql");
+    expect(historicalProtocolEpochMigration("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"))
+      .toBe("044_inhouse_membership_fulfillment_guards.sql");
+  });
+
+  it("classifies only the exact pre-in-house-membership SHORTEN effect and receipt", () => {
+    const historicalBefore = { ...before, stayTimeline: after.stayTimeline };
+    const entitlementSummary = {
+      currentConsumedCoverageDates: ["2026-07-30"],
+      retainedHistoricalConsumedCoverageDates: [],
+      ledgerWriteCount: 0
+    };
+    const effect = {
+      operation: "SHORTEN_STAY",
+      orderId: "order_043_shorten",
+      stayId: "stay_043_shorten",
+      inventoryUnitId: "room_1",
+      businessDate: "2026-07-30",
+      completionMode: "SHORTEN_IN_HOUSE",
+      before: historicalBefore,
+      after: shortenedAfter,
+      pricingDecision,
+      inventoryChange: shortenedInventoryChange,
+      entitlementSummary,
+      fundsSummary: { netRecordedCollection: money, collectionDifference: money, factCount: 0 },
+      refundReferenceAmount: money
+    };
+    expect(legacyEffectProtocol("SHORTEN_STAY", effect)).toBe("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT");
+    expect(legacyReceiptProtocol("PREVIEW:SHORTEN_STAY", {
+      preview: {
+        previewId: "preview_043_shorten",
+        commandType: "SHORTEN_STAY",
+        effectHash: "a".repeat(64),
+        effect,
+        expiresAt: "2030-01-01T00:00:00.000Z"
+      }
+    })).toBe("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT");
+
+    const receipt = {
+      orderId: effect.orderId,
+      stayId: effect.stayId,
+      arrangementAmendmentId: "amendment_043_shorten",
+      checkoutAmendmentId: null,
+      staySegmentId: "segment_043_shorten",
+      pricingRevisionId: "revision_043_shorten",
+      effectHash: "a".repeat(64),
+      completionMode: effect.completionMode,
+      businessDate: effect.businessDate,
+      arrivalDate: shortenedAfter.arrivalDate,
+      departureDate: shortenedAfter.departureDate,
+      before: historicalBefore,
+      after: shortenedAfter,
+      pricingDecision,
+      inventoryChange: shortenedInventoryChange,
+      entitlementSummary,
+      fundsSummary: effect.fundsSummary,
+      refundReferenceAmount: money,
+      fulfillmentTiming: null
+    };
+    expect(legacyReceiptProtocol("SHORTEN_STAY", receipt)).toBe("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT");
+    expect(legacyEffectProtocol("SHORTEN_STAY", {
+      ...effect,
+      entitlementSummary: { ...entitlementSummary, restoredFutureCoverageDates: [] }
+    }), "the current 044 effect is not historical").toBeUndefined();
+    expect(legacyReceiptProtocol("SHORTEN_STAY", {
+      ...receipt,
+      entitlementSummary: { ...entitlementSummary, restoredFutureCoverageDates: [] }
+    }), "the current 044 receipt is not historical").toBeUndefined();
+  });
+
+  it("classifies only the exact pre-in-house-membership MOVE effect and receipt", () => {
+    const beforeMove = {
+      ...before,
+      stayTimeline: after.stayTimeline,
+      actualCurrentInventoryUnit: unit("room_1"),
+      effectiveDateInventoryUnit: unit("room_1")
+    };
+    const afterMove = {
+      ...after,
+      stayTimeline: [
+        { serviceDate: "2026-07-30", inventoryUnitId: "room_1" },
+        { serviceDate: "2026-07-31", inventoryUnitId: "room_2" }
+      ]
+    };
+    const inventoryChange = {
+      preservedClaims: [{ serviceDate: "2026-07-30", inventoryUnitId: "room_1" }],
+      releasedClaims: [{ serviceDate: "2026-07-31", inventoryUnitId: "room_1" }],
+      addedClaims: [{ serviceDate: "2026-07-31", inventoryUnitId: "room_2" }]
+    };
+    const entitlementSummary = {
+      preservedCoverageDates: [],
+      migratedHeldCoverageDates: [],
+      consumedCoverageDates: ["2026-07-30", "2026-07-31"],
+      ledgerWriteCount: 0
+    };
+    const effect = {
+      operation: "MOVE_UNIT",
+      orderId: "order_043_move",
+      stayId: "stay_043_move",
+      businessDate: "2026-07-30",
+      toInventoryUnit: unit("room_2"),
+      effectiveDate: "2026-07-31",
+      occupantCount: 1,
+      occupancyCapacity: 2,
+      before: beforeMove,
+      after: afterMove,
+      pricingDecision,
+      inventoryChange,
+      entitlementSummary,
+      fundsSummary: { netRecordedCollection: money, collectionDifference: money, factCount: 0 }
+    };
+    expect(legacyEffectProtocol("MOVE_UNIT", effect)).toBe("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT");
+    expect(legacyReceiptProtocol("PREVIEW:MOVE_UNIT", {
+      preview: {
+        previewId: "preview_043_move",
+        commandType: "MOVE_UNIT",
+        effectHash: "b".repeat(64),
+        effect,
+        expiresAt: "2030-01-01T00:00:00.000Z"
+      }
+    })).toBe("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT");
+
+    const { operation: _operation, toInventoryUnit: _toInventoryUnit, occupantCount: _occupantCount,
+      occupancyCapacity: _occupancyCapacity, ...receiptBody } = effect;
+    const receipt = {
+      ...receiptBody,
+      amendmentId: "amendment_043_move",
+      staySegmentId: "segment_043_move",
+      pricingRevisionId: "revision_043_move",
+      effectHash: "b".repeat(64)
+    };
+    expect(legacyReceiptProtocol("MOVE_UNIT", receipt)).toBe("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT");
+    expect(legacyEffectProtocol("MOVE_UNIT", {
+      ...effect,
+      entitlementSummary: { ...entitlementSummary, convertedMembershipCoveragePreserved: true }
+    }), "the current 044 effect is not historical").toBeUndefined();
+    expect(legacyReceiptProtocol("MOVE_UNIT", {
+      ...receipt,
+      entitlementSummary: { ...entitlementSummary, convertedMembershipCoveragePreserved: true }
+    }), "the current 044 receipt is not historical").toBeUndefined();
+  });
+
   it("accepts the exact pre-Stage 11 MOVE effect and receipt only", () => {
     const effect = {
       orderId: "order_1",

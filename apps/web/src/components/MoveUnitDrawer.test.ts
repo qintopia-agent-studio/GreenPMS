@@ -51,7 +51,7 @@ function view(orderOverrides: Partial<OrderViewDto["order"]> = {}): OrderViewDto
     originalArrangement: { arrivalDate: "2026-08-02", departureDate: "2026-08-04", intervals: [{ inventoryUnitId: "room_1", arrivalDate: "2026-08-02", departureDate: "2026-08-04" }] },
     effectiveArrangement: { arrivalDate: "2026-08-02", departureDate: "2026-08-04", intervals: [{ inventoryUnitId: "room_1", arrivalDate: "2026-08-02", departureDate: "2026-08-04" }], presentation: "CURRENT", businessDate: "2026-08-01" },
     fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null, checkInRevocation: null }, arrangementHistory: [], amendments: [], pricingRevisions: [],
-    coverageSet: [], collectionFacts: [], cleaningTasks: [],
+    coverageSet: [], collectionFacts: [], cleaningTasks: [], membershipConversion: null,
     amounts: {
       currentContractAmount: { currency: "CNY", minorUnits: 20_000 }, netRecordedCollection: { currency: "CNY", minorUnits: 0 },
       collectionDifference: { currency: "CNY", minorUnits: 20_000 }, refundReferenceAmount: { currency: "CNY", minorUnits: 0 }
@@ -132,7 +132,7 @@ function validEffect(): Record<string, unknown> {
     inventoryChange: {
       preservedClaims: [], releasedClaims: beforeTimeline, addedClaims: afterTimeline
     },
-    entitlementSummary: { preservedCoverageDates: [], migratedHeldCoverageDates: [], consumedCoverageDates: [], ledgerWriteCount: 0 },
+    entitlementSummary: { preservedCoverageDates: [], migratedHeldCoverageDates: [], consumedCoverageDates: [], convertedMembershipCoveragePreserved: false, ledgerWriteCount: 0 },
     fundsSummary: {
       netRecordedCollection: { currency: "CNY", minorUnits: 0 }, collectionDifference: { currency: "CNY", minorUnits: 22_000 }, factCount: 0
     }
@@ -348,7 +348,7 @@ describe("move unit drawer", () => {
       manualAdjustmentMinor: 0, differenceExceedsThreshold: false, reason: { code: "MOVE_UNIT_MEMBER", note: "" }
     };
     effect.entitlementSummary = {
-      preservedCoverageDates: [], migratedHeldCoverageDates: [], consumedCoverageDates: ["2026-08-02"], ledgerWriteCount: 0
+      preservedCoverageDates: [], migratedHeldCoverageDates: [], consumedCoverageDates: ["2026-08-02"], convertedMembershipCoveragePreserved: false, ledgerWriteCount: 0
     };
     effect.fundsSummary = {
       netRecordedCollection: { currency: "CNY", minorUnits: 0 },

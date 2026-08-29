@@ -183,6 +183,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
       created_at: "2026-07-25T10:00:00.000Z"
     }],
     cleaningTasks: [],
+    membershipConversion: null,
     amounts: {
       currentContractAmount: { currency: "CNY", minorUnits: 60000 },
       netRecordedCollection: { currency: "CNY", minorUnits: 30000 },
@@ -460,6 +461,56 @@ describe("RoomStatusOrderContext", () => {
     />);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-room-status-action-mode="inline"[^>]*>办理入住/);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*<svg[^>]*>[\s\S]*?更正资料<\/button>/);
+  });
+
+  it("shows a disabled in-house membership-upgrade route together with the server reason", () => {
+    const base = orderView();
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: {
+          ...base.order,
+          status: "CHECKED_IN",
+          stay_type: "TRANSIENT",
+          booking_channel_code: null
+        },
+        stay: { ...base.stay, status: "IN_HOUSE" },
+        allowedActions: [{
+          code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+          enabled: false,
+          disabledReason: "只有企业微信来源的普通住宿订单可以升级会员"
+        }]
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-room-status-action="CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"/);
+    expect(html).toContain("升级会员");
+    expect(html).toContain("只有企业微信来源的普通住宿订单可以升级会员");
+  });
+
+  it("describes an invalid transfer graph without claiming every refunded collection is forbidden", () => {
+    const base = orderView();
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...base.order, status: "CHECKED_IN", stay_type: "TRANSIENT", booking_channel_code: "WECOM" },
+        stay: { ...base.stay, status: "IN_HOUSE" },
+        allowedActions: [{
+          code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+          enabled: false,
+          disabledReason: "NO_TRANSFERABLE_COLLECTION"
+        }]
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toContain("企微住宿净收款无法安全全量转入");
+    expect(html).not.toContain("已退款、冲销");
   });
 
   it("keeps authoritative order facts readable while exposing no write entry to READ access", () => {

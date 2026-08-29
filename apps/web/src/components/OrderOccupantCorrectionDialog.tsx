@@ -10,6 +10,7 @@ export interface OrderOccupantCorrectionDialogProps {
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
   draft?: CommandRequest;
+  phoneRequiredForStayMembershipUpgrade?: boolean;
 }
 
 export interface OrderOccupantCorrectionValues {
@@ -18,6 +19,10 @@ export interface OrderOccupantCorrectionValues {
   phone: string;
   documentNumber: string;
   reason: string;
+}
+
+export interface OrderOccupantCorrectionOptions {
+  phoneRequiredForStayMembershipUpgrade?: boolean;
 }
 
 function optionalTrimmed(value: string): string | null {
@@ -38,14 +43,26 @@ export function correctionDraftMatchesOccupant(draft: CommandRequest | undefined
 export function buildOrderOccupantCorrectionRequest(
   view: OrderViewDto,
   occupant: OrderOccupant,
-  values: OrderOccupantCorrectionValues
+  values: OrderOccupantCorrectionValues,
+  options: OrderOccupantCorrectionOptions = {}
 ): CommandRequest {
   const nickname = values.nickname.trim();
   const fullName = values.fullName.trim();
   const reason = values.reason.trim();
+  const phone = optionalTrimmed(values.phone);
+  const documentNumber = optionalTrimmed(values.documentNumber);
   if (!nickname) throw new Error("昵称不能为空");
   if (!fullName) throw new Error("姓名不能为空");
   if (!reason) throw new Error("必须填写更正原因");
+  if (options.phoneRequiredForStayMembershipUpgrade && !phone) {
+    throw new Error("升级会员前必须填写主要住宿人手机号。");
+  }
+  if (nickname === occupant.nickname
+    && fullName === occupant.fullName
+    && phone === occupant.phone
+    && documentNumber === occupant.documentNumber) {
+    throw new Error("资料没有变化，请至少修改一项后继续核对。");
+  }
 
   return {
     commandType: "CORRECT_ORDER_OCCUPANT",
@@ -64,8 +81,8 @@ export function buildOrderOccupantCorrectionRequest(
       correctedSnapshot: {
         nickname,
         fullName,
-        phone: optionalTrimmed(values.phone),
-        documentNumber: optionalTrimmed(values.documentNumber)
+        phone,
+        documentNumber
       }
     },
     initialReason: {
@@ -75,7 +92,14 @@ export function buildOrderOccupantCorrectionRequest(
   };
 }
 
-export function OrderOccupantCorrectionDialog({ view, occupant, onClose, onSubmit, draft }: OrderOccupantCorrectionDialogProps) {
+export function OrderOccupantCorrectionDialog({
+  view,
+  occupant,
+  onClose,
+  onSubmit,
+  draft,
+  phoneRequiredForStayMembershipUpgrade = false
+}: OrderOccupantCorrectionDialogProps) {
   const [baselineOccupant] = useState(() => occupant);
   const corrected = draft?.input.correctedSnapshot && typeof draft.input.correctedSnapshot === "object"
     ? draft.input.correctedSnapshot as Record<string, unknown>
@@ -97,7 +121,7 @@ export function OrderOccupantCorrectionDialog({ view, occupant, onClose, onSubmi
         phone,
         documentNumber,
         reason
-      }));
+      }, { phoneRequiredForStayMembershipUpgrade }));
     } catch (error) {
       setValidationError(error);
     }
@@ -110,7 +134,8 @@ export function OrderOccupantCorrectionDialog({ view, occupant, onClose, onSubmi
         <div className="form-grid form-grid-two">
           <label>昵称<input value={nickname} onChange={(event) => setNickname(event.target.value)} required maxLength={200} data-testid="occupant-correction-nickname" /></label>
           <label>姓名<input value={fullName} onChange={(event) => setFullName(event.target.value)} required maxLength={200} data-testid="occupant-correction-full-name" /></label>
-          <label>联系电话<input value={phone} onChange={(event) => setPhone(event.target.value)} maxLength={80} data-testid="occupant-correction-phone" /></label>
+          <label>{phoneRequiredForStayMembershipUpgrade ? "手机号" : "联系电话"}<input value={phone} onChange={(event) => { setPhone(event.target.value); setValidationError(undefined); }} inputMode="tel" maxLength={80} data-testid="occupant-correction-phone" required={phoneRequiredForStayMembershipUpgrade} /></label>
+          {phoneRequiredForStayMembershipUpgrade ? <p className="form-field-note span-two" data-testid="occupant-correction-phone-required">升级会员前必须填写主要住宿人手机号。</p> : null}
           <label>证件号码（选填）<input value={documentNumber} onChange={(event) => setDocumentNumber(event.target.value)} maxLength={120} data-testid="occupant-correction-document-number" /></label>
           <label className="span-two">更正原因<textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} data-testid="occupant-correction-reason" /></label>
         </div>

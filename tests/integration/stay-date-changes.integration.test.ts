@@ -2272,6 +2272,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
       entitlementSummary: {
         currentConsumedCoverageDates: [],
         retainedHistoricalConsumedCoverageDates: [],
+        restoredFutureCoverageDates: [],
         ledgerWriteCount: 0
       },
       fundsSummary: {

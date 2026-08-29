@@ -223,36 +223,74 @@ export function parseBackfillCollectionYuanToMinor(value: string): number | unde
   return minor <= 2_147_483_600n ? Number(minor) : undefined;
 }
 
-export function backfillReviewDetailsComplete(input: {
+interface BackfillReviewDetails {
   stayType: StayType;
   backfillReason: string;
   freeStayCategoryCode: "VOLUNTEER" | "RECEPTION" | "";
   freeStayReason: string;
   bookingChannelCode: BookingChannelCode | "";
-  paidPricingComplete: boolean;
+  targetAmountYuan: string;
   contractAmountMinor: number | undefined;
+  channelOrderReference: string;
+  channelReasonRequired: boolean;
+  channelPriceDifferenceReason: string;
+  manualReasonRequired: boolean;
+  manualPriceAdjustmentReason: string;
+  collectionAmountYuan: string;
   collectionAmountMinor: number | undefined;
   collectionMethod: string;
   transactionReference: string;
   cashCollector: string;
   cashNote: string;
-}): boolean {
-  if (!input.backfillReason.trim()) return false;
+}
+
+export function backfillReviewValidationError(input: BackfillReviewDetails): string | undefined {
+  if (!input.backfillReason.trim()) return "请填写补录原因";
   if (input.stayType === "FREE") {
-    return Boolean(input.freeStayCategoryCode && input.freeStayReason.trim());
+    if (!input.freeStayCategoryCode) return "请选择免费入住类型";
+    if (!input.freeStayReason.trim()) return "请填写免费入住原因";
+    return undefined;
   }
-  if (!input.bookingChannelCode || !input.paidPricingComplete) return false;
-  if (input.bookingChannelCode !== "WECOM") return true;
-  if (input.collectionAmountMinor === undefined) return false;
-  if (input.contractAmountMinor === undefined || input.collectionAmountMinor > input.contractAmountMinor) return false;
-  if (input.collectionAmountMinor === 0) return true;
+  if (!input.bookingChannelCode) return "请选择订单来源渠道";
+  if (input.contractAmountMinor === undefined) return input.targetAmountYuan.trim()
+    ? "本单金额格式不正确，请填写非负整数金额"
+    : "请填写本单金额";
+  const externalChannel = input.bookingChannelCode !== "WECOM";
+  if (externalChannel && input.contractAmountMinor <= 0) return "外部渠道本单应结金额必须大于 0";
+  if (externalChannel && !input.channelOrderReference.trim()) return "请填写渠道订单号";
+  if (input.channelReasonRequired && !input.channelPriceDifferenceReason.trim()) return "请填写渠道价格差异说明";
+  if (input.manualReasonRequired && !input.manualPriceAdjustmentReason.trim()) return "请填写人工调价原因";
+  if (input.bookingChannelCode !== "WECOM") return undefined;
+  if (input.collectionAmountMinor === undefined) return input.collectionAmountYuan.trim()
+    ? "补录实收金额格式不正确，请填写不超过两位小数的非负金额"
+    : "请填写补录实收金额；没有住宿收款时填写 0";
+  if (input.collectionAmountMinor > input.contractAmountMinor) return "补录实收金额不能超过本单金额";
+  if (input.collectionAmountMinor === 0) return undefined;
   if (input.collectionMethod === "WECOM" || input.collectionMethod === "BANK_TRANSFER") {
-    return Boolean(input.transactionReference.trim());
+    return input.transactionReference.trim() ? undefined : "请填写本次实际收款对应的真实交易单号";
   }
   if (input.collectionMethod === "CASH") {
-    return Boolean(input.cashCollector.trim() && input.cashNote.trim());
+    if (!input.cashCollector.trim()) return "请填写现金收款人";
+    if (!input.cashNote.trim()) return "请填写现金收款核对备注";
+    return undefined;
   }
-  return false;
+  return "请选择有效的收款方式";
+}
+
+export function backfillReviewDetailsComplete(input: BackfillReviewDetails): boolean {
+  return backfillReviewValidationError(input) === undefined;
+}
+
+export function backfillSubmitBlockedReason(input: {
+  commandsBlocked: boolean;
+  quoteIsCurrent: boolean;
+  guestCount: number;
+  occupancyCapacity: number;
+}): string | undefined {
+  if (input.commandsBlocked) return "当前房态已变化、正在刷新、权限受限或有操作尚未收口，请按页面提示处理后重试";
+  if (!input.quoteIsCurrent) return "房源或住宿日期的最新报价尚未载入，请稍候";
+  if (input.guestCount > input.occupancyCapacity) return "住宿人数超过当前房源可入住人数";
+  return undefined;
 }
 
 export function completedStayBackfillSubmissionError(
@@ -1641,6 +1679,14 @@ function QuoteWorkbench({
       })
     : undefined;
   const backfillCollectionAmountMinor = parseBackfillCollectionYuanToMinor(backfillAmountYuan);
+  const backfillSubmitBlockReason = backfill && unit
+    ? backfillSubmitBlockedReason({
+        commandsBlocked: quoteCommandsBlocked,
+        quoteIsCurrent,
+        guestCount,
+        occupancyCapacity: unit.occupancyCapacity
+      })
+    : undefined;
 
   function addAdditionalGuest() {
     if (!unit || !canAddGuest(unit.occupancyCapacity, additionalGuests.length)) return;
@@ -1673,7 +1719,12 @@ function QuoteWorkbench({
   function createOrder(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
     const channelRequired = bookingChannelRequiredForStay(useMemberEntitlement, quote?.stayType);
-    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || !guestsComplete || guestCount > (unit?.occupancyCapacity ?? 0) || (channelRequired && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))) return;
+    if (quoteCommandsBlocked || !quote || !quoteIsCurrent || guestCount > (unit?.occupancyCapacity ?? 0)) return;
+    if (!guestsComplete) {
+      if (backfill) setError(new Error("请完整填写主要入住人及所有同行人的姓名和昵称"));
+      return;
+    }
+    if (!backfill && ((channelRequired && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode)))) return;
     const guestInputs = createOrderGuestInputs(primaryGuestForm, additionalGuests);
     const orderInput: Record<string, unknown> = {
       propertyId,
@@ -1690,22 +1741,28 @@ function QuoteWorkbench({
       ...(quote.stayType === "FREE" ? { freeStayReason: freeStayReason.trim(), freeStayCategoryCode } : {})
     };
     if (backfill) {
-      const reviewReady = backfillReviewDetailsComplete({
+      const reviewError = backfillReviewValidationError({
         stayType: quote.stayType,
         backfillReason,
         freeStayCategoryCode,
         freeStayReason,
         bookingChannelCode,
-        paidPricingComplete: Boolean(paidPricingDraft?.complete),
+        targetAmountYuan: targetContractAmountYuan,
         contractAmountMinor: paidPricingDraft?.targetCurrentContractAmountMinor,
+        channelOrderReference,
+        channelReasonRequired: Boolean(paidPricingDraft?.channelReasonRequired),
+        channelPriceDifferenceReason,
+        manualReasonRequired: Boolean(paidPricingDraft?.manualReasonRequired),
+        manualPriceAdjustmentReason,
+        collectionAmountYuan: backfillAmountYuan,
         collectionAmountMinor: backfillCollectionAmountMinor,
         collectionMethod: backfillMethod,
         transactionReference: backfillTransactionReference,
         cashCollector: backfillCashCollector,
         cashNote: backfillCashNote
       });
-      if (!reviewReady) {
-        setError(new Error("请完整填写补录原因、订单来源及对应的真实收款凭据"));
+      if (reviewError) {
+        setError(new Error(reviewError));
         return;
       }
       const submissionError = completedStayBackfillSubmissionError(arrivalDate, departureDate, businessDate);
@@ -1749,7 +1806,7 @@ function QuoteWorkbench({
         <div><p className="eyebrow">{backfill ? "补录住宿" : "办理住宿"}</p><h2 id="quote-heading">{backfill ? "补录住宿" : "住宿金额"}</h2></div>
         <button className="icon-button" type="button" onClick={onClose} title="关闭办理区域" aria-label="关闭办理区域"><X aria-hidden="true" size={18} /></button>
       </header>
-      <InlineError error={error} title={backfill ? "无法进入补录核对" : "报价失败"} />
+      {!backfill ? <InlineError error={error} title="报价失败" /> : null}
       {quoteRecoveryRead.kind === "CORRUPT" ? (
         <DamagedCommandRecoveryNotice
           error={quoteRecoveryError}
@@ -1878,7 +1935,7 @@ function QuoteWorkbench({
               </div>
                 );
               })()}
-              <form className="guest-section" aria-labelledby="guest-heading" onSubmit={createOrder}>
+              <form className="guest-section" aria-labelledby="guest-heading" onSubmit={createOrder} onChange={backfill ? () => setError(undefined) : undefined} noValidate={backfill}>
                 <div className="guest-section-heading">
                   <h3 id="guest-heading">住宿人</h3>
                   <span>{guestCount} / {unit.occupancyCapacity} 人</span>
@@ -1980,7 +2037,9 @@ function QuoteWorkbench({
                     <label className="span-two">免费入住原因<textarea rows={3} value={freeStayReason} onChange={(event) => setFreeStayReason(event.target.value)} required maxLength={1000} data-testid="free-stay-reason" /></label>
                   </> : null}
                 </div>
-                <button className="button button-primary full-width" type="submit" disabled={quoteCommandsBlocked || !quoteIsCurrent || guestCount > unit.occupancyCapacity || (!backfill && (!guestsComplete || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))))} data-testid={backfill ? "backfill-submit" : "create-order"}>
+                {backfill ? <InlineError error={error} title="无法进入补录核对" /> : null}
+                {backfillSubmitBlockReason ? <InlineError error={new Error(backfillSubmitBlockReason)} title="暂时不能核对补录" /> : null}
+                <button className="button button-primary full-width" type="submit" disabled={backfill ? Boolean(backfillSubmitBlockReason) : quoteCommandsBlocked || !quoteIsCurrent || guestCount > unit.occupancyCapacity || !guestsComplete || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid={backfill ? "backfill-submit" : "create-order"}>
                   <FilePlus2 aria-hidden="true" size={17} />{backfill ? "核对并补录住宿" : "核对并创建订单"}
                 </button>
               </form>

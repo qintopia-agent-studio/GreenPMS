@@ -19,6 +19,7 @@ import { adjustedEntitlementAvailableBalance, entitlementAvailableBalance, parse
 import {
   activeCoverageCandidates,
   loadActiveStayTimeline,
+  loadOrderMembershipConversion,
   loadOrderContext,
   getOrderViewSnapshot,
   orderAmountSummary,
@@ -119,6 +120,12 @@ function requireNonNegativeWholeYuanMinor(input: Record<string, unknown>, field:
   return value;
 }
 
+function requirePositiveWholeYuanMinor(input: Record<string, unknown>, field: string): number {
+  const value = requireInteger(input, field, { min: 1 });
+  if (value % 100 !== 0) throw new DomainError("VALIDATION_ERROR", `${field} must be a positive whole-yuan CNY amount`);
+  return value;
+}
+
 const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 const operatorCollectionMethods = new Set(["WECOM", "BANK_TRANSFER", "CASH", "OTHER"]);
 const backfillCollectionMethodSet = new Set<string>(backfillCollectionMethods);
@@ -132,17 +139,51 @@ function assertOperatorFundsAllowedForOrder(context: OrderContext): void {
   }
 }
 
-async function assertLodgingFundsOpenForOrder(db: DbExecutor, orderId: string): Promise<void> {
-  const existingTransfer = await db.selectFrom("stay_collection_membership_transfers")
+async function hasStayMembershipConversion(db: DbExecutor, orderId: string): Promise<boolean> {
+  const existingConversion = await db.selectFrom("amendments")
     .select("id")
     .where("order_id", "=", orderId)
+    .where("amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
     .executeTakeFirst();
-  if (existingTransfer) {
+  return Boolean(existingConversion);
+}
+
+export function isExactConvertedCoverageGraph(
+  rows: ReadonlyArray<{
+    service_date: string;
+    status: string;
+    contract_id: string;
+    lot_id: string;
+    unit_kind: string;
+  }>,
+  expectedDates: readonly string[],
+  conversion: {
+    contractId: string;
+    entitlementLotId: string;
+    entitlementUnitKind: "ROOM_NIGHT" | "BED_NIGHT";
+  }
+): boolean {
+  return rows.length === expectedDates.length
+    && rows.every((item, index) => item.service_date === expectedDates[index]
+      && item.status === "CONSUMED"
+      && item.contract_id === conversion.contractId
+      && item.lot_id === conversion.entitlementLotId
+      && item.unit_kind === conversion.entitlementUnitKind);
+}
+
+async function assertLodgingFundsOpenForOrder(db: DbExecutor, orderId: string): Promise<void> {
+  if (await hasStayMembershipConversion(db, orderId)) {
     throw new DomainError(
       "AGGREGATE_VERSION_CONFLICT",
       "已完成升级会员，本订单不再追加住宿收退款；后续会员收款请在会员订单中处理",
       409
     );
+  }
+}
+
+async function assertOrderNotConvertedToMembership(db: DbExecutor, orderId: string): Promise<void> {
+  if (await hasStayMembershipConversion(db, orderId)) {
+    throw new DomainError("INVALID_ORDER_STATE", "已升级会员的住宿订单不能使用普通住宿操作", 409);
   }
 }
 
@@ -340,9 +381,16 @@ function assertOrderMutable(status: string): void {
   if (!new Set(["RESERVED", "CHECKED_IN"]).has(status)) throw new DomainError("INVALID_ORDER_STATE", `Order cannot be changed from ${status}`, 409);
 }
 
-async function memberBasis(db: DbExecutor, memberContractId: string | null, memberId?: string | null) {
+async function memberBasis(
+  db: DbExecutor,
+  propertyId: string,
+  memberContractId: string | null,
+  memberId?: string | null
+) {
   if (!memberContractId && !memberId) return null;
-  let contractQuery = db.selectFrom("member_contracts").select(["id", "version", "status"]);
+  let contractQuery = db.selectFrom("member_contracts")
+    .select(["id", "version", "status"])
+    .where("property_id", "=", propertyId);
   contractQuery = memberId
     ? contractQuery.where("member_id", "=", memberId)
     : contractQuery.where("id", "=", memberContractId!);
@@ -1050,7 +1098,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       quoteInputHash: quote.inputHash,
       inventory: fingerprint,
       occupancyCapacity: unit.occupancyCapacity,
-      membership: await memberBasis(db, quote.memberContractId ?? null, quote.memberId)
+      membership: await memberBasis(db, propertyId, quote.memberContractId ?? null, quote.memberId)
     });
   }
 
@@ -1316,10 +1364,18 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     orderVersion: context.order.version,
     orderStatus: context.order.status,
     policyVersionId: context.order.pricing_policy_version_id,
-    membership: await memberBasis(db, context.order.member_contract_id, context.order.member_id)
+    membership: await memberBasis(db, propertyId, context.order.member_contract_id, context.order.member_id)
   };
 
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+    const existingOrderConversion = await db.selectFrom("amendments")
+      .select("id")
+      .where("order_id", "=", orderId)
+      .where("amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
+      .executeTakeFirst();
+    if (existingOrderConversion) {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "该住宿订单已经升级会员，不能重复办理", 409);
+    }
     const conversionStateAllowed = context.order.status === "CHECKED_OUT" && context.stay.status === "COMPLETED"
       || context.order.status === "CHECKED_IN" && context.stay.status === "IN_HOUSE";
     if (!conversionStateAllowed) {
@@ -1334,13 +1390,6 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     if (context.order.booking_channel_code !== "WECOM") {
       throw new DomainError("VALIDATION_ERROR", "只有企业微信来源的普通住宿订单可以升级会员");
     }
-    const existingOrderTransfer = await db.selectFrom("stay_collection_membership_transfers")
-      .select("id")
-      .where("order_id", "=", orderId)
-      .executeTakeFirst();
-    if (existingOrderTransfer) {
-      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "该住宿订单已经升级会员，不能重复办理", 409);
-    }
 
     const memberId = requireString(input, "memberId");
     const membershipProductId = requireString(input, "membershipProductId");
@@ -1353,23 +1402,35 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     if (new Set(collectionFactIds).size !== collectionFactIds.length) {
       throw new DomainError("VALIDATION_ERROR", "同一笔住宿收款不能重复选择");
     }
-    const agreedPriceMinor = requireNonNegativeWholeYuanMinor(input, "agreedPriceMinor");
+    const agreedPriceMinor = requirePositiveWholeYuanMinor(input, "agreedPriceMinor");
     const adjustmentReason = optionalString(input, "priceAdjustmentReason");
     const remainingPaymentNote = optionalString(input, "remainingPaymentNote") ?? "";
 
-    const [member, product] = await Promise.all([
+    const [member, memberPropertyLinks, product] = await Promise.all([
       db.selectFrom("members")
         .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
         .select(["members.id", "members.full_name", "members.phone"])
         .where("members.id", "=", memberId)
         .where("member_property_links.property_id", "=", propertyId)
         .executeTakeFirst(),
+      db.selectFrom("member_property_links")
+        .select("property_id")
+        .where("member_id", "=", memberId)
+        .orderBy("property_id")
+        .forShare()
+        .execute(),
       db.selectFrom("membership_products").selectAll()
         .where("id", "=", membershipProductId)
         .where("status", "=", "PUBLISHED")
         .executeTakeFirst()
     ]);
     if (!member) throw new DomainError("NOT_FOUND", "当前门店未找到该会员", 404);
+    if (memberPropertyLinks.length !== 1 || memberPropertyLinks[0]?.property_id !== propertyId) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "当前版本仅支持单门店会员；该会员已关联其他门店，不能升级会员"
+      );
+    }
     if (!product) throw new DomainError("NOT_FOUND", "会员产品不存在", 404);
     if (product.currency !== context.revision.currency) throw new DomainError("VALIDATION_ERROR", "会员产品币种与住宿订单不一致");
     if (agreedPriceMinor !== product.list_price_minor && !adjustmentReason) {
@@ -1419,70 +1480,72 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       throw new DomainError("ENTITLEMENT_CONFLICT", "所选会员产品不适用于本次住宿房型", 409);
     }
 
-    const collectionRows = collectionFactIds.length > 0
-      ? await db.selectFrom("collection_facts").selectAll()
-        .where("fact_id", "in", collectionFactIds)
-        .orderBy("created_at")
-        .orderBy("fact_id")
-        .execute()
-      : [];
-    if (collectionRows.length !== collectionFactIds.length) {
-      throw new DomainError("NOT_FOUND", "选中的住宿收款不存在", 404);
-    }
-    const collectionById = new Map(collectionRows.map((fact) => [fact.fact_id, fact]));
-    const orderedCollections = collectionFactIds.map((factId) => collectionById.get(factId)!);
-    const [existingReversals, existingTransfers, activeRefundedByFact, allOrderFunds] = await Promise.all([
-      collectionFactIds.length > 0
-        ? db.selectFrom("collection_facts")
-          .select(["fact_id", "reverses_fact_id"])
-          .where("reverses_fact_id", "in", collectionFactIds)
-          .execute()
-        : Promise.resolve([] as Array<{ fact_id: string; reverses_fact_id: string | null }>),
-      collectionFactIds.length > 0
-        ? db.selectFrom("stay_collection_membership_transfers")
-          .select(["id", "source_collection_fact_id"])
-          .where("source_collection_fact_id", "in", collectionFactIds)
-          .execute()
-        : Promise.resolve([] as Array<{ id: string; source_collection_fact_id: string }>),
-      Promise.all(collectionFactIds.map(async (factId) => [factId, await activeRefundedAmount(db, factId)] as const)),
+    const [allOrderFunds, existingTransfers] = await Promise.all([
       db.selectFrom("collection_facts")
-        .select(["fact_id", "fact_type", "amount_minor", "net_effect_minor", "currency", "method", "transaction_reference", "references_fact_id", "reverses_fact_id", "command_id", "pricing_revision_id"])
+        .select(["fact_id", "fact_type", "amount_minor", "net_effect_minor", "currency", "method", "transaction_reference", "references_fact_id", "reverses_fact_id", "command_id", "pricing_revision_id", "created_at"])
         .where("order_id", "=", orderId)
         .orderBy("created_at")
         .orderBy("fact_id")
+        .execute(),
+      db.selectFrom("stay_collection_membership_transfers")
+        .select(["id", "source_collection_fact_id"])
+        .where("order_id", "=", orderId)
         .execute()
     ]);
-    const reversedSourceIds = new Set(existingReversals.map((fact) => fact.reverses_fact_id).filter((value): value is string => Boolean(value)));
-    const transferredSourceIds = new Set(existingTransfers.map((transfer) => transfer.source_collection_fact_id));
-    const activeRefundedMap = new Map(activeRefundedByFact);
-    for (const fact of orderedCollections) {
-      if (fact.order_id !== orderId
-        || fact.fact_type !== "COLLECTION"
+    const sourceCollections = allOrderFunds.filter((fact) => fact.fact_type === "COLLECTION");
+    const sourceCollectionIds = new Set(sourceCollections.map((fact) => fact.fact_id));
+    const refundedBySource = new Map<string, number>();
+    const invalidFundGraph = existingTransfers.length > 0
+      || allOrderFunds.some((fact) => fact.fact_type !== "COLLECTION" && fact.fact_type !== "REFUND")
+      || sourceCollections.some((fact) => fact.amount_minor <= 0
+        || fact.net_effect_minor !== fact.amount_minor
         || fact.method !== "WECOM"
         || !fact.transaction_reference
-        || fact.currency !== context.revision.currency) {
-        throw new DomainError("VALIDATION_ERROR", "只能选择本订单未处理的企业微信住宿收款用于升级会员");
-      }
-      if (reversedSourceIds.has(fact.fact_id)) {
-        throw new DomainError("FACT_ALREADY_REVERSED", "已冲销的住宿收款不能用于升级会员", 409);
-      }
-      if ((activeRefundedMap.get(fact.fact_id) ?? 0) > 0) {
-        throw new DomainError("REFUND_LIMIT_EXCEEDED", "已登记退款的住宿收款不能用于升级会员", 409);
-      }
-      if (transferredSourceIds.has(fact.fact_id)) {
-        throw new DomainError("AGGREGATE_VERSION_CONFLICT", "该住宿收款已经用于升级会员，不能重复办理", 409);
-      }
+        || fact.currency !== context.revision.currency
+        || fact.references_fact_id !== null
+        || fact.reverses_fact_id !== null)
+      || allOrderFunds.some((fact) => {
+        if (fact.fact_type !== "REFUND") return false;
+        if (fact.amount_minor <= 0
+          || fact.net_effect_minor !== -fact.amount_minor
+          || fact.method !== "WECOM"
+          || fact.transaction_reference !== null
+          || fact.currency !== context.revision.currency
+          || !fact.references_fact_id
+          || fact.reverses_fact_id !== null
+          || !sourceCollectionIds.has(fact.references_fact_id)) {
+          return true;
+        }
+        refundedBySource.set(
+          fact.references_fact_id,
+          (refundedBySource.get(fact.references_fact_id) ?? 0) + fact.amount_minor
+        );
+        return false;
+      });
+    if (invalidFundGraph || sourceCollections.some((fact) => (refundedBySource.get(fact.fact_id) ?? 0) > fact.amount_minor)) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "住宿资金记录包含非企微、冲销或无法核对的收退款事实，不能直接升级会员；请先核对住宿收退款记录"
+      );
     }
-    const transferTotalMinor = orderedCollections.reduce((sum, fact) => sum + fact.amount_minor, 0);
-    if (!Number.isSafeInteger(transferTotalMinor)
-      || (collectionFactIds.length > 0 && transferTotalMinor <= 0)) {
+    const orderedCollections = sourceCollections.flatMap((fact) => {
+      const residualMinor = fact.amount_minor - (refundedBySource.get(fact.fact_id) ?? 0);
+      return residualMinor > 0 ? [{ ...fact, residualMinor }] : [];
+    });
+    const expectedCollectionIds = new Set(orderedCollections.map((fact) => fact.fact_id));
+    if (collectionFactIds.length !== expectedCollectionIds.size
+      || collectionFactIds.some((factId) => !expectedCollectionIds.has(factId))) {
+      throw new DomainError("VALIDATION_ERROR", expectedCollectionIds.size === 0
+        ? "本订单当前没有可转入的企微住宿净收款，请不要选择已全额退款的收款"
+        : "升级会员必须一次转入全部当前可留存的企微住宿净收款");
+    }
+    const transferTotalMinor = orderedCollections.reduce((sum, fact) => sum + fact.residualMinor, 0);
+    if (!Number.isSafeInteger(transferTotalMinor) || transferTotalMinor < 0) {
       throw new DomainError("VALIDATION_ERROR", "转入住宿收款合计无效");
     }
     const oldAmountSummary = await orderAmountSummary(db, context);
     if (oldAmountSummary.netRecordedCollection.minorUnits !== transferTotalMinor) {
-      throw new DomainError("VALIDATION_ERROR", collectionFactIds.length === 0
-        ? "本订单还有已登记净收款，请先选择全部住宿收款或先核对住宿收退款记录"
-        : "升级会员必须一次转入当前全部已记录净收款；如需排除某笔记录，请先核对住宿收退款记录");
+      throw new DomainError("VALIDATION_ERROR", "升级会员必须一次转入当前全部企微住宿净收款；请先核对住宿收退款记录");
     }
     if (agreedPriceMinor < transferTotalMinor) {
       throw new DomainError("VALIDATION_ERROR", "会员成交价不能低于本次用于升级的住宿收款合计");
@@ -1539,7 +1602,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       transfer: {
         collections: orderedCollections.map((fact) => ({
           factId: fact.fact_id,
-          amount: money(fact.currency, fact.amount_minor),
+          amount: money(fact.currency, fact.residualMinor),
           transactionReference: requireTransactionReference(fact.transaction_reference),
           recordedAt: fact.created_at instanceof Date ? fact.created_at.toISOString() : new Date(fact.created_at).toISOString()
         })),
@@ -1604,16 +1667,17 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       collectionFacts: orderedCollections.map((fact) => ({
         factId: fact.fact_id,
         amountMinor: fact.amount_minor,
+        transferAmountMinor: fact.residualMinor,
         method: fact.method,
         transactionReference: fact.transaction_reference,
         commandId: fact.command_id,
         pricingRevisionId: fact.pricing_revision_id,
-        activeRefunded: activeRefundedMap.get(fact.fact_id) ?? 0,
-        reversed: reversedSourceIds.has(fact.fact_id),
-        transferred: transferredSourceIds.has(fact.fact_id)
+        activeRefunded: refundedBySource.get(fact.fact_id) ?? 0,
+        reversed: false,
+        transferred: false
       })),
-      existingOrderTransfer: null,
-      membership: await memberBasis(db, null, member.id)
+      existingOrderConversion: null,
+      membership: await memberBasis(db, propertyId, null, member.id)
     });
   }
 
@@ -1744,9 +1808,23 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       throw new DomainError("INTERNAL_ERROR", "缩短后的住宿时间线不连续", 500);
     }
     const inventoryUnitId = stayTimeline.at(-1)!.inventoryUnitId;
-    const activeCoverage = await activeCoverageCandidates(db, orderId);
+    const [activeCoverage, activeCoverageRows, membershipConversion] = await Promise.all([
+      activeCoverageCandidates(db, orderId),
+      db.selectFrom("coverage_items")
+        .select(["service_date", "status", "contract_id", "lot_id", "unit_kind"])
+        .where("order_id", "=", orderId)
+        .where("status", "in", ["HELD", "CONSUMED"])
+        .orderBy("service_date")
+        .execute(),
+      loadOrderMembershipConversion(db, context)
+    ]);
     if (activeCoverage.some((item) => item.status === "HELD")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销的原住宿权益，当前数据状态异常，不能缩短住宿", 409);
+    }
+    if (membershipConversion) {
+      if (!isExactConvertedCoverageGraph(activeCoverageRows, oldDates, membershipConversion)) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "升级会员后的已核销权益与当前住宿日期不一致，不能缩短住宿", 409);
+      }
     }
     const timelineByDate = new Map(currentTimeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
     const latestShortening = await db.selectFrom("amendments")
@@ -1822,11 +1900,21 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       currentContractAmount: money(policyPricing.currentContractAmount.currency, decision.currentContractAmountMinor)
     };
     const oldAmountSummary = await orderAmountSummary(db, context);
+    const restoredFutureCoverageDates = membershipConversion
+      ? activeCoverage
+        .filter((item) => !newDates.includes(item.serviceDate) && item.serviceDate >= businessDate)
+        .map((item) => item.serviceDate)
+      : [];
+    if (membershipConversion && (restoredFutureCoverageDates.length !== inventoryChange.releasedDates.length
+      || restoredFutureCoverageDates.some((date, index) => date !== inventoryChange.releasedDates[index]))) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "升级会员后的未来权益与缩短日期不一致，不能安全返还", 409);
+    }
+    const restoredFutureCoverageDateSet = new Set(restoredFutureCoverageDates);
     const currentConsumedCoverageDates = activeCoverage
       .filter((item) => newDates.includes(item.serviceDate))
       .map((item) => item.serviceDate);
     const retainedHistoricalConsumedCoverageDates = activeCoverage
-      .filter((item) => !newDates.includes(item.serviceDate))
+      .filter((item) => !newDates.includes(item.serviceDate) && !restoredFutureCoverageDateSet.has(item.serviceDate))
       .map((item) => item.serviceDate);
     const collectionFacts = await db.selectFrom("collection_facts")
       .select([
@@ -1875,7 +1963,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       entitlementSummary: {
         currentConsumedCoverageDates,
         retainedHistoricalConsumedCoverageDates,
-        ledgerWriteCount: 0
+        restoredFutureCoverageDates,
+        ledgerWriteCount: restoredFutureCoverageDates.length
       },
       fundsSummary,
       refundReferenceAmount
@@ -1952,20 +2041,29 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       throw new DomainError("INVENTORY_CONFLICT", reschedule ? "调整后的住宿日期存在库存冲突" : "延长日期的库存不可用", 409);
     }
 
-    const [activeCoverage, activeCoverageRows] = await Promise.all([
+    const [activeCoverage, activeCoverageRows, membershipConversion] = await Promise.all([
       activeCoverageCandidates(db, orderId),
       db.selectFrom("coverage_items")
-        .select(["service_date", "inventory_unit_id", "status"])
+        .select(["service_date", "inventory_unit_id", "contract_id", "lot_id", "unit_kind", "status"])
         .where("order_id", "=", orderId)
         .where("status", "in", ["HELD", "CONSUMED"])
         .orderBy("service_date")
-        .execute()
+        .execute(),
+      !reschedule ? loadOrderMembershipConversion(db, context) : Promise.resolve(null)
     ]);
     if (reschedule && activeCoverage.some((item) => item.status === "CONSUMED")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能调整预订日期", 409);
     }
     if (!reschedule && activeCoverage.some((item) => item.status === "HELD")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销的原住宿权益，当前数据状态异常，不能延长住宿", 409);
+    }
+    if (membershipConversion && (activeCoverageRows.length !== oldDates.length
+      || activeCoverageRows.some((item, index) => item.service_date !== oldDates[index]
+        || item.status !== "CONSUMED"
+        || item.contract_id !== membershipConversion.contractId
+        || item.lot_id !== membershipConversion.entitlementLotId
+        || item.unit_kind !== membershipConversion.entitlementUnitKind))) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "升级会员后的已核销权益与当前住宿日期不一致，不能延长住宿", 409);
     }
     const afterUnitByDate = new Map(stayTimeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
     const reallocatableHeld = reschedule
@@ -1989,6 +2087,21 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       coverageAllocationDates: reschedule ? newDates : pairDiff.added.map((item) => item.serviceDate),
       reallocatableHeld
     });
+    if (membershipConversion) {
+      const coverageByDate = new Map(policyPricing.coverageSet.map((item) => [item.serviceDate, item]));
+      if (policyPricing.coverageSet.length !== newDates.length
+        || coverageByDate.size !== newDates.length
+        || newDates.some((date) => {
+          const coverageItem = coverageByDate.get(date);
+          return !coverageItem
+            || coverageItem.entitlementLotId !== membershipConversion.entitlementLotId
+            || coverageItem.unitKind !== membershipConversion.entitlementUnitKind;
+        })
+        || policyPricing.cashRemainder.minorUnits !== 0
+        || policyPricing.currentContractAmount.minorUnits !== 0) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "会员权益余额不足，不能延长住宿；请先补充会员权益或另建普通住宿订单", 409);
+      }
+    }
     const decision = stayChangePricingDecision({
       commandType,
       bookingChannelCode: context.order.booking_channel_code,
@@ -2057,7 +2170,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       businessDate,
       stayTimeline: currentTimeline,
       inventory: fingerprint,
-      activeCoverage
+      activeCoverage,
+      membershipConversion
     });
   }
 
@@ -2109,12 +2223,20 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         throw new DomainError("ENTITLEMENT_CONFLICT", "会员住宿只能更换到同一会员产品适用的房型", 409);
       }
     }
-    const activeCoverage = await activeCoverageCandidates(db, orderId);
+    const [activeCoverage, membershipConversion] = await Promise.all([
+      activeCoverageCandidates(db, orderId),
+      loadOrderMembershipConversion(db, context)
+    ]);
     if (context.order.status === "RESERVED" && activeCoverage.some((item) => item.status === "CONSUMED")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能换房", 409);
     }
     if (context.order.status === "CHECKED_IN" && activeCoverage.some((item) => item.status === "HELD")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销的原住宿权益，当前数据状态异常，不能换房", 409);
+    }
+    if (membershipConversion && (context.order.status !== "CHECKED_IN"
+      || newUnit.kind !== membershipConversion.allowedInventoryKind
+      || newUnit.roomTypeCode !== membershipConversion.allowedRoomTypeCode)) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "升级会员后的住宿只能更换到会员产品适用的房型", 409);
     }
     const fingerprint = await inventoryFingerprint(db, propertyId, newUnit.id, effectiveDate, context.order.departure_date, context.segmentIds);
     if (fingerprint.length > 0) {
@@ -2151,11 +2273,34 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       .orderBy("fact_id")
       .execute();
     const activeCoverageRows = await db.selectFrom("coverage_items")
-      .select(["id", "service_date", "lot_id", "status", "inventory_unit_id", "unit_kind"])
+      .select(["id", "service_date", "contract_id", "lot_id", "status", "inventory_unit_id", "unit_kind"])
       .where("order_id", "=", orderId)
       .where("status", "in", ["HELD", "CONSUMED"])
       .orderBy("service_date")
       .execute();
+    if (membershipConversion) {
+      const expectedDates = currentTimeline.map((item) => item.serviceDate);
+      const pricingCoverage = new Map(policyPricing.coverageSet.map((item) => [item.serviceDate, item]));
+      if (activeCoverageRows.length !== expectedDates.length
+        || policyPricing.coverageSet.length !== expectedDates.length
+        || pricingCoverage.size !== expectedDates.length
+        || activeCoverageRows.some((coverage, index) => {
+          const priced = pricingCoverage.get(coverage.service_date);
+          return coverage.service_date !== expectedDates[index]
+            || coverage.status !== "CONSUMED"
+            || coverage.contract_id !== membershipConversion.contractId
+            || coverage.lot_id !== membershipConversion.entitlementLotId
+            || coverage.unit_kind !== membershipConversion.entitlementUnitKind
+            || !priced
+            || priced.inventoryUnitId !== coverage.inventory_unit_id
+            || priced.entitlementLotId !== coverage.lot_id
+            || priced.unitKind !== coverage.unit_kind;
+        })
+        || policyPricing.cashRemainder.minorUnits !== 0
+        || policyPricing.currentContractAmount.minorUnits !== 0) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "升级会员后的已核销权益与换房计划不一致，不能安全换房", 409);
+      }
+    }
     const desiredCoverageByDate = new Map(pricing.coverageSet.map((item) => [item.serviceDate, item]));
     const preservedCoverageDates: string[] = [];
     const migratedHeldCoverageDates: string[] = [];
@@ -2232,7 +2377,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         preservedCoverageDates,
         migratedHeldCoverageDates,
         consumedCoverageDates,
-        ledgerWriteCount: migratedHeldCoverageDates.length * 2
+        convertedMembershipCoveragePreserved: membershipConversion !== null,
+        ledgerWriteCount: membershipConversion ? 0 : migratedHeldCoverageDates.length * 2
       },
       fundsSummary
     }, {
@@ -2242,12 +2388,14 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       inventory: fingerprint,
       occupantCount,
       destinationInventoryUnit: newUnit,
+      membershipConversion,
       activeCoverage: activeCoverageRows,
       collectionFacts
     });
   }
 
   if (commandType === "REPRICE_ORDER") {
+    await assertOrderNotConvertedToMembership(db, orderId);
     assertOrderMutable(context.order.status);
     const targetCurrentContractAmountMinor = requireNonNegativeWholeYuanMinor(input, "targetCurrentContractAmountMinor");
     if (context.order.stay_type === "FREE" && targetCurrentContractAmountMinor !== 0) {
@@ -2275,6 +2423,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   }
 
   if (commandType === "REFRESH_MEMBER_COVERAGE") {
+    await assertOrderNotConvertedToMembership(db, orderId);
     assertOrderMutable(context.order.status);
     if (!context.order.member_id && !context.order.member_contract_id) throw new DomainError("ENTITLEMENT_CONFLICT", "订单未选择会员档案，不能刷新会员覆盖", 409);
     const stayTimeline = await loadActiveStayTimeline(db, context);
@@ -2834,6 +2983,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   }
 
   if (commandType === "REVOKE_CHECK_IN") {
+    await assertOrderNotConvertedToMembership(db, orderId);
     if (context.order.status !== "CHECKED_IN") {
       throw new DomainError("INVALID_ORDER_STATE", "只有在住订单可以撤销误办入住", 409);
     }

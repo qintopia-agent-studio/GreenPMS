@@ -10,7 +10,7 @@ import {
 } from "@qintopia/contracts";
 import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, validateBookingChannel } from "@qintopia/domain";
 import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims, releaseInventoryClaimsOnDates } from "../inventory.ts";
-import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, lockOrder, reconcileCoverage, releaseCoverage, restoreConsumedCoverage, type StayTimelineItem } from "../orders.ts";
+import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, loadOrderMembershipConversion, lockOrder, reconcileCoverage, releaseCoverage, restoreConsumedCoverage, restoreFutureConsumedCoverage, type StayTimelineItem } from "../orders.ts";
 import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from "../pricing-service.ts";
 import type { Database } from "../schema.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
@@ -1109,6 +1109,9 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       || adjustment.minorUnits !== agreedPrice.minorUnits - listedPrice.minorUnits) {
       throw new DomainError("INTERNAL_ERROR", "Stay collection conversion money summary is inconsistent", 500);
     }
+    if (agreedPrice.minorUnits <= 0) {
+      throw new DomainError("INTERNAL_ERROR", "Stay collection conversion requires a positive membership agreed price", 500);
+    }
 
     const membershipOrderId = newId("membership_order");
     await trx.insertInto("membership_orders").values({
@@ -1246,24 +1249,6 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     }).where("id", "=", membershipOrderId).where("status", "=", "DRAFT").returning("id").executeTakeFirst();
     if (!updatedMembershipOrder) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "会员订单已经生效", 409);
 
-    const conversionLedgerFactIds: string[] = [];
-    for (const serviceDate of serviceDates) {
-      const factId = newId("fact");
-      await trx.insertInto("entitlement_ledger").values({
-        fact_id: factId,
-        lot_id: lotId,
-        entry_type: "CONVERSION_CONSUME",
-        quantity_delta: -1,
-        service_date: serviceDate,
-        order_id: orderId,
-        coverage_id: null,
-        reason: "STAY_COLLECTION_TO_MEMBERSHIP_CONSUMED",
-        command_id: options.commandId
-      }).execute();
-      conversionLedgerFactIds.push(factId);
-    }
-    await incrementContractAndLotVersions(trx, contractId, [lotId]);
-
     const amendmentId = await appendAmendment(trx, {
       orderId,
       sequence: context.order.version + 1,
@@ -1283,6 +1268,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       departureDate: context.order.departure_date,
       pricing
     });
+
     await trx.updateTable("orders").set({
       current_revision_id: revisionId,
       member_id: requireString(member, "memberId"),
@@ -1290,6 +1276,46 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       version: context.order.version + 1,
       updated_at: new Date()
     }).where("id", "=", orderId).execute();
+
+    const inHouseConversion = context.order.status === "CHECKED_IN" && context.stay.status === "IN_HOUSE";
+    const conversionTimeline = inHouseConversion ? await loadActiveStayTimeline(trx, context) : [];
+    if (inHouseConversion && (conversionTimeline.length !== serviceDates.length
+      || conversionTimeline.some((item, index) => item.serviceDate !== serviceDates[index]))) {
+      throw new DomainError("INTERNAL_ERROR", "In-house conversion coverage dates do not match the active stay timeline", 500);
+    }
+    const conversionCoverageIds: string[] = [];
+    const conversionLedgerFactIds: string[] = [];
+    for (const [index, serviceDate] of serviceDates.entries()) {
+      const coverageId = inHouseConversion ? newId("coverage") : null;
+      if (coverageId) {
+        await trx.insertInto("coverage_items").values({
+          id: coverageId,
+          order_id: orderId,
+          contract_id: contractId,
+          lot_id: lotId,
+          inventory_unit_id: conversionTimeline[index]!.inventoryUnitId,
+          service_date: serviceDate,
+          unit_kind: entitlementUnitKind,
+          status: "CONSUMED",
+          held_by_revision_id: revisionId
+        }).execute();
+        conversionCoverageIds.push(coverageId);
+      }
+      const factId = newId("fact");
+      await trx.insertInto("entitlement_ledger").values({
+        fact_id: factId,
+        lot_id: lotId,
+        entry_type: "CONVERSION_CONSUME",
+        quantity_delta: -1,
+        service_date: serviceDate,
+        order_id: orderId,
+        coverage_id: coverageId,
+        reason: "STAY_COLLECTION_TO_MEMBERSHIP_CONSUMED",
+        command_id: options.commandId
+      }).execute();
+      conversionLedgerFactIds.push(factId);
+    }
+    await incrementContractAndLotVersions(trx, contractId, [lotId]);
     return {
       persistedResult: {
         orderId,
@@ -1304,6 +1330,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         lodgingReversalFactIds,
         membershipPaymentFactIds,
         transferIds,
+        conversionMode: inHouseConversion ? "IN_HOUSE" : "COMPLETED",
+        conversionCoverageIds,
         conversionLedgerFactIds,
         transferredAmount: { currency: transferTotal.currency, minorUnits: transferTotal.minorUnits },
         membershipAgreedPrice: { currency: agreedPrice.currency, minorUnits: agreedPrice.minorUnits },
@@ -1314,7 +1342,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         convertedUnits: consumedUnits,
         remainingUnits
       },
-      resourceRefs: [orderId, amendmentId, revisionId, membershipOrderId, contractId, lotId, ...transferIds],
+      resourceRefs: [orderId, amendmentId, revisionId, membershipOrderId, contractId, lotId, ...transferIds, ...conversionCoverageIds],
       factRefs: [...lodgingReversalFactIds, ...membershipPaymentFactIds, ...conversionLedgerFactIds]
     };
   }
@@ -1566,6 +1594,12 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const inventoryUnitId = currentTail.inventoryUnitId;
     const inventoryChange = nestedObject(effect, "inventoryChange");
     const releasedDates = stringArray(inventoryChange, "releasedDates");
+    const entitlementSummary = nestedObject(effect, "entitlementSummary");
+    const restoredFutureCoverageDates = stringArray(entitlementSummary, "restoredFutureCoverageDates");
+    const expectedLedgerWriteCount = requireInteger(entitlementSummary, "ledgerWriteCount", { min: 0 });
+    if (expectedLedgerWriteCount !== restoredFutureCoverageDates.length) {
+      throw new DomainError("INTERNAL_ERROR", "Shorten stay entitlement restoration count is inconsistent", 500);
+    }
     const pricing = pricingSnapshot(effect, {
       stayType: context.order.stay_type,
       memberId: context.order.member_id,
@@ -1619,6 +1653,12 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       };
       await trx.updateTable("stays").set({ status: "COMPLETED" }).where("id", "=", context.stay.id).execute();
     }
+    const restoredCoverage = await restoreFutureConsumedCoverage(
+      trx,
+      orderId,
+      options.commandId,
+      restoredFutureCoverageDates
+    );
     await trx.updateTable("orders").set({
       departure_date: departureDate,
       current_revision_id: revisionId,
@@ -1628,7 +1668,6 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     }).where("id", "=", orderId).execute();
     const before = nestedObject(effect, "before");
     const pricingDecision = nestedObject(effect, "pricingDecision");
-    const entitlementSummary = nestedObject(effect, "entitlementSummary");
     const fundsSummary = nestedObject(effect, "fundsSummary");
     const refundReferenceAmount = moneyMinor(effect.refundReferenceAmount, "refundReferenceAmount");
     return {
@@ -1659,9 +1698,10 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         ...(checkoutAmendmentId ? [checkoutAmendmentId] : []),
         segmentId,
         revisionId,
-        ...releasedClaimIds
+        ...releasedClaimIds,
+        ...restoredCoverage.coverageIds
       ])],
-      factRefs: []
+      factRefs: restoredCoverage.factIds
     };
   }
 
@@ -1758,17 +1798,62 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       policyVersionId: context.order.pricing_policy_version_id,
       arrivalDate, departureDate, pricing
     });
-    const reconciled = context.order.member_id || context.order.member_contract_id
-      ? await reconcileCoverage(trx, {
-        orderId,
-        contractId: context.order.member_contract_id ?? "",
-        ...(context.order.member_id ? { memberId: context.order.member_id } : {}),
-        revisionId,
-        coverageSet: pricing.coverageSet,
-        commandId: options.commandId
-      })
-      : { coverageIds: [], factIds: [] };
     const entitlementSummary = nestedObject(effect, "entitlementSummary");
+    const conversionCoveragePreserved = entitlementSummary.convertedMembershipCoveragePreserved;
+    if (typeof conversionCoveragePreserved !== "boolean") {
+      throw new DomainError("INTERNAL_ERROR", "Move unit effect has no converted coverage preservation marker", 500);
+    }
+    const membershipConversion = await loadOrderMembershipConversion(trx, context);
+    if (conversionCoveragePreserved !== (membershipConversion !== null)) {
+      throw new DomainError("INTERNAL_ERROR", "Move unit converted coverage marker is inconsistent", 500);
+    }
+    let reconciled: { coverageIds: string[]; factIds: string[] };
+    if (membershipConversion) {
+      const coverageRows = await trx.selectFrom("coverage_items")
+        .select(["id", "service_date", "contract_id", "lot_id", "inventory_unit_id", "unit_kind", "status"])
+        .where("order_id", "=", orderId)
+        .where("status", "in", ["HELD", "CONSUMED"])
+        .orderBy("service_date")
+        .forUpdate()
+        .execute();
+      const expectedDates = enumerateServiceDates(arrivalDate, departureDate);
+      const pricingCoverage = new Map(pricing.coverageSet.map((item) => [item.serviceDate, item]));
+      if (context.order.status !== "CHECKED_IN"
+        || unit.kind !== membershipConversion.allowedInventoryKind
+        || unit.roomTypeCode !== membershipConversion.allowedRoomTypeCode
+        || coverageRows.length !== expectedDates.length
+        || pricing.coverageSet.length !== expectedDates.length
+        || pricingCoverage.size !== expectedDates.length
+        || pricing.cashLines.length !== 0
+        || pricing.currentContractAmountMinor !== 0
+        || pricing.manualAdjustmentMinor !== 0
+        || coverageRows.some((coverage, index) => {
+          const priced = pricingCoverage.get(coverage.service_date);
+          return coverage.service_date !== expectedDates[index]
+            || coverage.status !== "CONSUMED"
+            || coverage.contract_id !== membershipConversion.contractId
+            || coverage.lot_id !== membershipConversion.entitlementLotId
+            || coverage.unit_kind !== membershipConversion.entitlementUnitKind
+            || !priced
+            || priced.inventoryUnitId !== coverage.inventory_unit_id
+            || priced.entitlementLotId !== coverage.lot_id
+            || priced.unitKind !== coverage.unit_kind;
+        })) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "升级会员后的已核销权益与换房计划不一致，不能安全换房", 409);
+      }
+      reconciled = { coverageIds: coverageRows.map((coverage) => coverage.id), factIds: [] };
+    } else {
+      reconciled = context.order.member_id || context.order.member_contract_id
+        ? await reconcileCoverage(trx, {
+          orderId,
+          contractId: context.order.member_contract_id ?? "",
+          ...(context.order.member_id ? { memberId: context.order.member_id } : {}),
+          revisionId,
+          coverageSet: pricing.coverageSet,
+          commandId: options.commandId
+        })
+        : { coverageIds: [], factIds: [] };
+    }
     const ledgerWriteCount = entitlementSummary.ledgerWriteCount;
     if (!Number.isSafeInteger(ledgerWriteCount) || ledgerWriteCount !== reconciled.factIds.length) {
       throw new DomainError("INTERNAL_ERROR", "Move unit entitlement summary does not match persisted ledger writes", 500);

@@ -1,5 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { normalizeBackfillCollectionInput, optionalString } from "./effects.ts";
+import {
+  isExactConvertedCoverageGraph,
+  normalizeBackfillCollectionInput,
+  optionalString
+} from "./effects.ts";
+
+describe("isExactConvertedCoverageGraph", () => {
+  const conversion = {
+    contractId: "contract_conversion",
+    entitlementLotId: "lot_conversion",
+    entitlementUnitKind: "ROOM_NIGHT" as const
+  };
+  const rows = ["2026-09-01", "2026-09-02"].map((serviceDate) => ({
+    service_date: serviceDate,
+    status: "CONSUMED",
+    contract_id: conversion.contractId,
+    lot_id: conversion.entitlementLotId,
+    unit_kind: conversion.entitlementUnitKind
+  }));
+
+  it("requires every converted night to belong to the conversion contract and lot", () => {
+    expect(isExactConvertedCoverageGraph(rows, ["2026-09-01", "2026-09-02"], conversion)).toBe(true);
+    expect(isExactConvertedCoverageGraph(
+      rows.map((row, index) => index === 1 ? { ...row, contract_id: "contract_other" } : row),
+      ["2026-09-01", "2026-09-02"],
+      conversion
+    )).toBe(false);
+    expect(isExactConvertedCoverageGraph(
+      rows.map((row, index) => index === 1 ? { ...row, lot_id: "lot_other" } : row),
+      ["2026-09-01", "2026-09-02"],
+      conversion
+    )).toBe(false);
+  });
+
+  it("rejects missing, duplicated, non-consumed, or wrong-kind coverage", () => {
+    expect(isExactConvertedCoverageGraph(rows.slice(0, 1), ["2026-09-01", "2026-09-02"], conversion)).toBe(false);
+    expect(isExactConvertedCoverageGraph(
+      [{ ...rows[0]! }, { ...rows[0]! }],
+      ["2026-09-01", "2026-09-02"],
+      conversion
+    )).toBe(false);
+    expect(isExactConvertedCoverageGraph(
+      rows.map((row, index) => index === 1 ? { ...row, status: "HELD" } : row),
+      ["2026-09-01", "2026-09-02"],
+      conversion
+    )).toBe(false);
+    expect(isExactConvertedCoverageGraph(
+      rows.map((row, index) => index === 1 ? { ...row, unit_kind: "BED_NIGHT" } : row),
+      ["2026-09-01", "2026-09-02"],
+      conversion
+    )).toBe(false);
+  });
+});
 
 describe("optionalString", () => {
   it("normalizes blank optional input to an omitted value", () => {

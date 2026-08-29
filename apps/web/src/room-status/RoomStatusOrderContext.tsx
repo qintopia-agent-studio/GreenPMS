@@ -6,6 +6,7 @@ import type { InventoryUnitDto, MemberViewDto, OrderViewDto } from "../types";
 import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMoney, stayDateFundsAreOperatorFacing, StatusBadge } from "../ui";
 import { stayDateChangeActionState, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 import type { OrderLifecycleAction } from "../components/OrderLifecycleActionDrawer";
+import { stayMembershipUpgradeActionVisible } from "../stayMembershipUpgrade";
 
 type OrderOccupant = OrderViewDto["occupants"][number];
 
@@ -50,6 +51,13 @@ const effectiveArrangementLabels: Record<OrderViewDto["effectiveArrangement"]["p
   NO_SHOW_ORDER: "未到订单安排",
   BEFORE_CHECK_IN_REVOCATION: "撤销入住前住宿安排"
 };
+
+function stayMembershipUpgradeDisabledReason(action: OrderViewDto["allowedActions"][number]): string {
+  if (action.disabledReason === "NO_TRANSFERABLE_COLLECTION") {
+    return "当前订单的企微住宿净收款无法安全全量转入；非企微、普通冲销、损坏或混合资金请先核对。";
+  }
+  return action.disabledReason || "当前订单暂不能升级会员。";
+}
 
 const fulfillmentStateLabels: Record<OrderViewDto["fulfillment"]["state"], string> = {
   NOT_CHECKED_IN: "尚未入住",
@@ -211,6 +219,8 @@ export function RoomStatusOrderContext({
 }: RoomStatusOrderContextProps) {
   const unitMap = new Map(units.map((unit) => [unit.id, unit]));
   const enabledActions = view.allowedActions.filter((action) => action.enabled);
+  const stayMembershipUpgradeAction = view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
+  const stayMembershipUpgradeVisible = stayMembershipUpgradeActionVisible(view, stayMembershipUpgradeAction);
   const canCorrectOccupants = enabledActions.some((action) => action.code === "CORRECT_ORDER_OCCUPANT");
   const fulfillmentActions = enabledActions.filter((action): action is typeof action & { code: "CHECK_IN" | "CHECK_OUT" } => (
     action.code === "CHECK_IN" || action.code === "CHECK_OUT"
@@ -235,7 +245,7 @@ export function RoomStatusOrderContext({
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
       && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY" && action.code !== "SHORTEN_STAY"
       && action.code !== "MOVE_UNIT" && action.code !== "CANCEL_ORDER" && action.code !== "MARK_NO_SHOW"
-      && action.code !== "REVOKE_CHECK_IN"
+      && action.code !== "REVOKE_CHECK_IN" && action.code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
   ));
   const amountDifference = view.amounts.collectionDifference;
   const currentPricingRevision = view.pricingRevisions.find((revision) => revision.id === view.order.current_revision_id)
@@ -410,13 +420,28 @@ export function RoomStatusOrderContext({
         <div className="room-status-context-section-heading"><ArrowRight aria-hidden="true" size={17} /><h3 id="room-status-order-actions-heading">订单入口</h3></div>
         {primaryActionPlacement === "CONTENT" ? <button type="button" className="room-status-button" onClick={() => onOpenOrder()}>查看完整订单<ArrowRight aria-hidden="true" size={16} /></button> : null}
         {[...new Set(dateActionStates.filter((state) => !state.enabled && state.reason).map((state) => state.reason!))].map((reason) => <p key={reason} className="room-status-context-note" role="status" data-testid="stay-date-action-blocked">{reason}</p>)}
-        {fulfillmentActions.length || lifecycleActions.length || dateActions.length || departureAdjustmentAction || moveUnitEnabled || routedActions.length ? <ul>
+        {fulfillmentActions.length || lifecycleActions.length || dateActions.length || departureAdjustmentAction || moveUnitEnabled || routedActions.length || stayMembershipUpgradeVisible ? <ul>
           {fulfillmentActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action-mode="inline" onClick={() => onFulfillmentAction(action.code)}>{actionLabels[action.code]}</button></li>)}
           {dateActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onDateAction?.(action.code, "DATE_CHANGE")}>{actionLabels[action.code]}</button></li>)}
           {departureAdjustmentAction ? <li><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action="ADJUST_DEPARTURE" data-room-status-action-mode="inline" onClick={() => onDateAction?.(departureAdjustmentAction, "ADJUST_DEPARTURE")}>调整退房日期</button></li> : null}
           {moveUnitEnabled ? <li><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action="MOVE_UNIT" data-room-status-action-mode="inline" onClick={onMoveUnit}>换房</button></li> : null}
           {lifecycleActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked || !onLifecycleAction} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onLifecycleAction?.(action.code)}>{actionLabels[action.code]}</button></li>)}
           {routedActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" data-room-status-action-mode="order-detail" onClick={() => onOpenOrder(action.code)}>{actionLabels[action.code]}<ArrowRight aria-hidden="true" size={16} /></button></li>)}
+          {stayMembershipUpgradeVisible && stayMembershipUpgradeAction ? <li>
+            <button
+              type="button"
+              className="room-status-button"
+              disabled={writeBlocked || !stayMembershipUpgradeAction.enabled}
+              data-room-status-action="CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+              data-room-status-action-mode="order-detail"
+              title={!stayMembershipUpgradeAction.enabled ? stayMembershipUpgradeDisabledReason(stayMembershipUpgradeAction) : undefined}
+              onClick={() => onOpenOrder(stayMembershipUpgradeAction.code)}
+            >
+              {actionLabels[stayMembershipUpgradeAction.code]}
+              {stayMembershipUpgradeAction.enabled ? <ArrowRight aria-hidden="true" size={16} /> : null}
+            </button>
+            {!stayMembershipUpgradeAction.enabled ? <p className="room-status-context-note" role="status">{stayMembershipUpgradeDisabledReason(stayMembershipUpgradeAction)}</p> : null}
+          </li> : null}
         </ul> : null}
       </section>
 

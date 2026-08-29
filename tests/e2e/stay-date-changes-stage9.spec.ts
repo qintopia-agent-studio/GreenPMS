@@ -373,6 +373,32 @@ test("4.2 desktop checked-in member extension keeps old and added dates under th
   ]));
 });
 
+test("4.2 desktop departure pricing stays stable across room-status polling", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop Stage 9 room-status preview stability");
+  await login(page, { roomStatusRange: true });
+  const context = await openRoomStatusOrder(page, fixture.departureDay);
+  await context.getByRole("button", { name: "调整退房日期", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "调整退房日期", exact: true });
+  let datePreviewRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/v1/command-previews") return;
+    const body = request.postDataJSON() as { commandType?: string };
+    if (body.commandType === "EXTEND_STAY" || body.commandType === "SHORTEN_STAY") datePreviewRequests += 1;
+  });
+
+  await form.getByTestId("stay-date-departure").fill(fixture.departureDay.newDepartureDate);
+  await form.getByTestId("stay-date-reason").fill("核对房态轮询不重复报价");
+  await expect(form.getByTestId("stay-date-price-preview")).toBeVisible({ timeout: 30_000 });
+  expect(datePreviewRequests).toBe(1);
+
+  await roomStatusResponse(page, fixture.rangeArrivalDate, roomStatusTimelineDepartureDate(fixture.rangeArrivalDate));
+  await roomStatusResponse(page, fixture.rangeArrivalDate, roomStatusTimelineDepartureDate(fixture.rangeArrivalDate));
+  await expect(form.getByTestId("stay-date-price-preview")).toBeVisible();
+  await expect(form.getByTestId("stay-date-price-loading")).toHaveCount(0);
+  expect(datePreviewRequests).toBe(1);
+  await form.getByRole("button", { name: "取消", exact: true }).click();
+});
+
 test("4.2 desktop planned-departure-day and overdue in-house stays extend with full repricing and room-status refresh", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop Stage 9 business-date extension boundaries");
   await login(page, { roomStatusRange: true });

@@ -103,6 +103,7 @@ function validStayTotalMove() {
       preservedCoverageDates: [],
       migratedHeldCoverageDates: [],
       consumedCoverageDates: [],
+      convertedMembershipCoveragePreserved: false,
       ledgerWriteCount: 0
     },
     fundsSummary: {
@@ -160,6 +161,7 @@ function validMemberMove() {
     preservedCoverageDates: dates.slice(0, 4),
     migratedHeldCoverageDates: dates.slice(4),
     consumedCoverageDates: [],
+    convertedMembershipCoveragePreserved: false,
     ledgerWriteCount: 8
   } as unknown as typeof effect.entitlementSummary;
   effect.fundsSummary.collectionDifference.minorUnits = 0;
@@ -263,6 +265,21 @@ describe("MOVE_UNIT stay-total pricing evidence", () => {
     expect(moveUnitPreviewHasEvidence(validMemberMove(), memberInput)).toBe(true);
   });
 
+  it("preserves converted membership coverage without a synthetic held migration or ledger write", () => {
+    const effect = validMemberMove();
+    effect.entitlementSummary = {
+      preservedCoverageDates: [],
+      migratedHeldCoverageDates: [],
+      consumedCoverageDates: dates,
+      convertedMembershipCoveragePreserved: true,
+      ledgerWriteCount: 0
+    } as unknown as typeof effect.entitlementSummary;
+    expect(moveUnitPreviewHasEvidence(effect, memberInput)).toBe(true);
+
+    effect.entitlementSummary.convertedMembershipCoveragePreserved = false;
+    expect(moveUnitPreviewHasEvidence(effect, memberInput)).toBe(false);
+  });
+
   it("retains a consumed member coverage's historical room ID", () => {
     const effect = validMemberMove();
     const coverage = effect.after.pricing.coverageSet as unknown as Array<{
@@ -275,6 +292,7 @@ describe("MOVE_UNIT stay-total pricing evidence", () => {
       preservedCoverageDates: dates.slice(0, 4),
       migratedHeldCoverageDates: dates.slice(5),
       consumedCoverageDates: [dates[4]!],
+      convertedMembershipCoveragePreserved: false,
       ledgerWriteCount: 6
     } as unknown as typeof effect.entitlementSummary;
     expect(moveUnitPreviewHasEvidence(effect, memberInput)).toBe(true);

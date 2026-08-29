@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
-import { businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+import { businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
@@ -53,6 +53,81 @@ describe("cross-tab command recovery storage", () => {
     expect(conflict).toEqual({ kind: "PRESENT", storageKey: quoteKey });
     expect(commandRecoverySnapshotIsBlocked({ kind: "ABSENT" }, conflict)).toBe(true);
     expect(commandRecoverySnapshotIsBlocked({ kind: "ABSENT" }, { kind: "ABSENT" })).toBe(false);
+  });
+
+  it("presents a property Quote conflict with an actionable route back to room status", () => {
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(QuoteRecoveryConflictNotice, {
+      conflict: { kind: "PRESENT", storageKey: quoteRecoveryStorageKey(subjectId, "property_green") },
+      testId: "quote-conflict"
+    })));
+
+    expect(html).toContain('data-testid="quote-conflict"');
+    expect(html).toContain("报价结果尚未收口");
+    expect(html).toContain('href="/"');
+    expect(html).toContain("返回房态处理");
+    expect(renderToStaticMarkup(createElement(MemoryRouter, null, createElement(QuoteRecoveryConflictNotice, {
+      conflict: { kind: "ABSENT" }
+    })))).toBe("");
+  });
+
+  it("automatically clears only a strictly valid terminal command recovery", () => {
+    const storage = new MemoryStorage();
+    for (const state of ["EXECUTED", "NOT_EXECUTED"] as const) {
+      const terminal = { ...recovery, state };
+      expect(savePersistedCommandRecovery(storage, terminal)).toBe(true);
+      expect(clearTerminalPersistedCommandRecoveryIfPresent(storage, subjectId, scopeId)).toEqual({ kind: "ABSENT" });
+      expect(readPersistedCommandRecovery(storage, subjectId, scopeId)).toEqual({ kind: "ABSENT" });
+    }
+
+    expect(savePersistedCommandRecovery(storage, recovery)).toBe(true);
+    expect(clearTerminalPersistedCommandRecoveryIfPresent(storage, subjectId, scopeId)).toEqual({
+      kind: "VALID",
+      recovery
+    });
+    expect(readPersistedCommandRecovery(storage, subjectId, scopeId)).toEqual({ kind: "VALID", recovery });
+
+    storage.setItem(commandRecoveryStorageKey(subjectId, scopeId), "{\"version\":1");
+    expect(clearTerminalPersistedCommandRecoveryIfPresent(storage, subjectId, scopeId)).toMatchObject({ kind: "CORRUPT" });
+    expect(storage.getItem(commandRecoveryStorageKey(subjectId, scopeId))).not.toBeNull();
+  });
+
+  it("does not delete a new recovery claim that replaces the terminal orphan during cleanup", () => {
+    const key = commandRecoveryStorageKey(subjectId, scopeId);
+    const terminal = JSON.stringify({ ...recovery, state: "EXECUTED" as const });
+    const replacement = JSON.stringify({
+      ...recovery,
+      confirmationKey: "confirm_replacement",
+      updatedAt: "2026-08-03T08:01:00.000Z"
+    });
+    let reads = 0;
+    let removed = false;
+    const racingStorage = {
+      getItem: (candidate: string) => {
+        if (candidate !== key) return null;
+        reads += 1;
+        return reads === 1 ? terminal : replacement;
+      },
+      setItem: () => undefined,
+      removeItem: () => { removed = true; }
+    };
+
+    expect(clearTerminalPersistedCommandRecoveryIfPresent(racingStorage, subjectId, scopeId)).toMatchObject({
+      kind: "VALID",
+      recovery: { confirmationKey: "confirm_replacement", state: "UNKNOWN" }
+    });
+    expect(removed).toBe(false);
+  });
+
+  it("keeps the property blocked when a Quote recovery remains after terminal command cleanup", () => {
+    const storage = new MemoryStorage();
+    expect(savePersistedCommandRecovery(storage, { ...recovery, state: "EXECUTED" })).toBe(true);
+    storage.setItem(quoteRecoveryStorageKey(subjectId, "property_green"), "pending-quote");
+
+    const commandRead = clearTerminalPersistedCommandRecoveryIfPresent(storage, subjectId, scopeId);
+    const conflict = readCommandRecoveryConflict(storage, subjectId, scopeId);
+    expect(commandRead).toEqual({ kind: "ABSENT" });
+    expect(conflict.kind).toBe("PRESENT");
+    expect(commandRecoverySnapshotIsBlocked(commandRead, conflict)).toBe(true);
   });
 
   it("enters the same blocked snapshot when another tab claims a quote before Preview", () => {
@@ -401,6 +476,22 @@ describe("operator-facing business errors", () => {
       details: { causeCode: "REFUND_LIMIT_EXCEEDED" }
     }))).toBe("退款金额不能超过所选原收款的剩余可退金额，请返回修改退款金额。");
   });
+
+  it("returns deterministic occupant validation failures to editing instead of retrying the same preview", () => {
+    const validationError = new ApiError(400, {
+      code: "VALIDATION_ERROR",
+      message: "At least one corrected occupant field must change",
+      correlationId: "correlation_occupant_validation"
+    });
+    expect(commandDialogBusinessErrorMessage("CORRECT_ORDER_OCCUPANT", validationError))
+      .toBe("住宿人资料未通过校验。请返回修改，并确认至少更正一项资料。");
+    expect(commandPreviewFailureCanReload(validationError)).toBe(false);
+    expect(commandPreviewFailureCanReload(new ApiError(503, {
+      code: "SERVICE_UNAVAILABLE",
+      message: "temporarily unavailable",
+      correlationId: "correlation_retryable"
+    }))).toBe(true);
+  });
 });
 
 describe("stay collection upgrade membership presentation", () => {
@@ -495,6 +586,58 @@ describe("stay collection upgrade membership presentation", () => {
     expect(html).toContain("查看会员订单");
     expect(html).not.toContain("操作已完成");
     expect(html).not.toContain("业务结果已经记录");
+  });
+
+  it("states that a zero-net conversion creates no lodging transfer fact", () => {
+    const preview: PreviewDto = {
+      previewId: "preview_zero_conversion",
+      commandType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      effectHash: "b".repeat(64),
+      effect: {
+        ...conversionEffect,
+        transfer: { total: { currency: "CNY", minorUnits: 0 }, collections: [] },
+        remainingPayment: {
+          amount: { currency: "CNY", minorUnits: 162_000 },
+          transactionReference: "WX-STAGE13-ZERO-REMAINING"
+        }
+      },
+      expiresAt: "2026-08-02T00:00:00.000Z"
+    };
+    const previewHtml = renderToStaticMarkup(createElement(EffectSummary, {
+      preview,
+      businessCommand: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    }));
+    expect(previewHtml).toContain("当前住宿净收款为 ¥0.00");
+    expect(previewHtml).toContain("不创建住宿收款转入或 0 元收款事实");
+    expect(previewHtml).not.toContain("作为会员订单已收款来源");
+
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_zero_conversion",
+      commandId: "command_zero_conversion",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_zero_conversion",
+      result: {
+        orderId: "order_zero_conversion",
+        memberId: "member_conversion",
+        membershipOrderId: "membership_order_zero_conversion",
+        transferredAmount: { currency: "CNY", minorUnits: 0 },
+        membershipAgreedPrice: { currency: "CNY", minorUnits: 162_000 },
+        remainingPaymentAmount: { currency: "CNY", minorUnits: 162_000 },
+        entitlementUnitKind: "ROOM_NIGHT",
+        convertedUnits: 7,
+        remainingUnits: 23
+      },
+      resourceRefs: ["order_zero_conversion", "membership_order_zero_conversion"],
+      factRefs: [],
+      committedAt: "2026-08-02T00:00:00.000Z"
+    };
+    const receiptHtml = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(ReceiptPanel, {
+      receipt,
+      businessCommand: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    })));
+    expect(receiptHtml).toContain("住宿净收款为 0，未创建转入事实");
+    expect(receiptHtml).not.toContain("住宿收款已转入会员订单");
   });
 });
 
@@ -1391,6 +1534,8 @@ describe("stay collection upgrade membership evidence", () => {
     lodgingReversalFactIds: ["lodging_reversal_first", "lodging_reversal_second"],
     membershipPaymentFactIds: ["membership_payment_first", "membership_payment_second", "membership_payment_remaining"],
     transferIds: ["transfer_first", "transfer_second"],
+    conversionMode: "IN_HOUSE",
+    conversionCoverageIds: ["coverage_1", "coverage_2", "coverage_3", "coverage_4", "coverage_5", "coverage_6", "coverage_7"],
     conversionLedgerFactIds: ["ledger_1", "ledger_2", "ledger_3", "ledger_4", "ledger_5", "ledger_6", "ledger_7"],
     transferredAmount: money(59_000),
     membershipAgreedPrice: money(162_000),
@@ -1414,7 +1559,8 @@ describe("stay collection upgrade membership evidence", () => {
       conversionResult.membershipOrderId,
       conversionResult.contractId,
       conversionResult.entitlementLotId,
-      ...conversionResult.transferIds
+      ...conversionResult.transferIds,
+      ...conversionResult.conversionCoverageIds
     ],
     factRefs: [
       ...conversionResult.lodgingReversalFactIds,
@@ -1477,6 +1623,12 @@ describe("stay collection upgrade membership evidence", () => {
     )).toBe(true);
     expect(conversionReceiptHasEvidence(
       receipt,
+      { propertyId: input.propertyId, orderId: input.orderId },
+      undefined,
+      effectHash
+    )).toBe(false);
+    expect(conversionReceiptHasEvidence(
+      receipt,
       recoveryRequest.input,
       undefined
     )).toBe(false);
@@ -1502,6 +1654,101 @@ describe("stay collection upgrade membership evidence", () => {
     const { effectHash: _effectHash, ...missingEffectHash } = transition.recovery;
     storage.setItem(commandRecoveryStorageKey(subjectId, scopeId), JSON.stringify(missingEffectHash));
     expect(readPersistedCommandRecovery(storage, subjectId, scopeId).kind).toBe("CORRUPT");
+  });
+
+  it("accepts and recovers a committed zero-lodging-collection upgrade with a positive membership payment", () => {
+    const zeroCollectionInput = {
+      ...input,
+      collectionFactIds: [],
+      agreedPriceMinor: 93_600
+    };
+    const zeroCollectionResult = {
+      ...conversionResult,
+      transferredCollectionFactIds: [],
+      lodgingReversalFactIds: [],
+      membershipPaymentFactIds: ["membership_payment_remaining"],
+      transferIds: [],
+      transferredAmount: money(0),
+      membershipAgreedPrice: money(zeroCollectionInput.agreedPriceMinor),
+      remainingPaymentAmount: money(zeroCollectionInput.agreedPriceMinor)
+    };
+    const zeroCollectionReceipt = {
+      ...receipt,
+      result: zeroCollectionResult,
+      resourceRefs: [
+        zeroCollectionResult.orderId,
+        zeroCollectionResult.amendmentId,
+        zeroCollectionResult.pricingRevisionId,
+        zeroCollectionResult.membershipOrderId,
+        zeroCollectionResult.contractId,
+        zeroCollectionResult.entitlementLotId,
+        ...zeroCollectionResult.conversionCoverageIds
+      ],
+      factRefs: [
+        ...zeroCollectionResult.membershipPaymentFactIds,
+        ...zeroCollectionResult.conversionLedgerFactIds
+      ]
+    };
+    const recoveryInput = {
+      propertyId: zeroCollectionInput.propertyId,
+      orderId: zeroCollectionInput.orderId,
+      memberId: zeroCollectionInput.memberId
+    };
+
+    expect(conversionReceiptHasEvidence(
+      zeroCollectionReceipt,
+      zeroCollectionInput,
+      undefined,
+      effectHash
+    )).toBe(true);
+    expect(conversionReceiptHasEvidence(
+      zeroCollectionReceipt,
+      recoveryInput,
+      undefined,
+      effectHash
+    )).toBe(true);
+  });
+
+  it("accepts only server-validated historical completed coverage and rejects missing or partial current coverage", () => {
+    const historicalResult = { ...conversionResult, conversionMode: "COMPLETED", conversionCoverageIds: [] };
+    const historicalReceipt = {
+      ...receipt,
+      result: historicalResult,
+      resourceRefs: receipt.resourceRefs.filter((reference) => !conversionResult.conversionCoverageIds.includes(reference)),
+      protocolVersion: "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT",
+      recoveryMode: "HISTORICAL_READ_ONLY"
+    };
+    const partialResult = { ...conversionResult, conversionCoverageIds: [conversionResult.conversionCoverageIds[0]] };
+    const partialReceipt = {
+      ...receipt,
+      result: partialResult,
+      resourceRefs: receipt.resourceRefs.filter((reference) => (
+        !conversionResult.conversionCoverageIds.includes(reference)
+        || reference === conversionResult.conversionCoverageIds[0]
+      ))
+    };
+    const missingCurrentCoverageReceipt = {
+      ...receipt,
+      result: { ...conversionResult, conversionCoverageIds: [] },
+      resourceRefs: receipt.resourceRefs.filter((reference) => !conversionResult.conversionCoverageIds.includes(reference))
+    };
+
+    expect(conversionReceiptHasEvidence(historicalReceipt, input, previewEffect, effectHash)).toBe(true);
+    expect(conversionReceiptHasEvidence(
+      historicalReceipt,
+      { propertyId: input.propertyId, orderId: input.orderId },
+      undefined,
+      effectHash
+    )).toBe(true);
+    const { conversionMode: _conversionMode, ...oldHistoricalResult } = historicalResult;
+    const { protocolVersion: _protocolVersion, recoveryMode: _recoveryMode, ...unmarkedHistoricalReceipt } = historicalReceipt;
+    expect(conversionReceiptHasEvidence({
+      ...unmarkedHistoricalReceipt,
+      result: oldHistoricalResult
+    }, input, previewEffect, effectHash)).toBe(false);
+    expect(conversionReceiptHasEvidence({ ...historicalReceipt, recoveryMode: undefined }, input, previewEffect, effectHash)).toBe(false);
+    expect(conversionReceiptHasEvidence(missingCurrentCoverageReceipt, input, previewEffect, effectHash)).toBe(false);
+    expect(conversionReceiptHasEvidence(partialReceipt, input, previewEffect, effectHash)).toBe(false);
   });
 
   it("fails closed when a Preview changes the target identity, source money, pricing, or entitlement arithmetic", () => {
@@ -1532,6 +1779,7 @@ describe("stay collection upgrade membership evidence", () => {
       { result: { ...conversionResult, convertedUnits: 6 } },
       { result: { ...conversionResult, remainingUnits: 24 } },
       { result: { ...conversionResult, effectHash: "b".repeat(64) } },
+      { result: { ...conversionResult, conversionCoverageIds: conversionResult.conversionCoverageIds.slice(0, -1) } },
       { resourceRefs: receipt.resourceRefs.filter((reference) => reference !== conversionResult.contractId) },
       { factRefs: receipt.factRefs.filter((reference) => reference !== conversionResult.conversionLedgerFactIds[0]) }
     ];
@@ -2206,7 +2454,7 @@ describe("U1 confirmation evidence", () => {
         reason: { code: "POLICY", note: "" }
       },
       inventoryChange: { preservedDates: ["2026-08-01", "2026-08-02"], releasedDates: ["2026-08-03", "2026-08-04"], addedDates: [] },
-      entitlementSummary: { currentConsumedCoverageDates: [], retainedHistoricalConsumedCoverageDates: [], ledgerWriteCount: 0 },
+      entitlementSummary: { currentConsumedCoverageDates: [], retainedHistoricalConsumedCoverageDates: [], restoredFutureCoverageDates: [], ledgerWriteCount: 0 },
       fundsSummary: { netRecordedCollection: money(30_000), collectionDifference: money(-10_000), factCount: 2 },
       refundReferenceAmount: money(10_000)
     };
@@ -2350,6 +2598,7 @@ describe("U1 confirmation evidence", () => {
       entitlementSummary: {
         currentConsumedCoverageDates: ["2026-08-01", "2026-08-02"],
         retainedHistoricalConsumedCoverageDates: [],
+        restoredFutureCoverageDates: [],
         ledgerWriteCount: 0
       },
       fundsSummary: { netRecordedCollection: money(0), collectionDifference: money(0), factCount: 0 },
@@ -2372,6 +2621,48 @@ describe("U1 confirmation evidence", () => {
         }
       }
     }, input)).toBe(false);
+
+    const converted = structuredClone(effect);
+    converted.entitlementSummary = {
+      ...converted.entitlementSummary,
+      restoredFutureCoverageDates: ["2026-08-03", "2026-08-04"],
+      ledgerWriteCount: 2
+    } as typeof converted.entitlementSummary;
+    expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", converted, input)).toBe(true);
+    const effectHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const convertedReceipt = {
+      receiptId: "receipt_converted_shorten",
+      commandId: "command_converted_shorten",
+      executionStatus: "EXECUTED" as const,
+      businessCommitted: true,
+      correlationId: "correlation_converted_shorten",
+      result: {
+        orderId: "order_member",
+        stayId: "stay_member",
+        arrangementAmendmentId: "amendment_converted_shorten",
+        checkoutAmendmentId: null,
+        staySegmentId: "segment_converted_shorten",
+        pricingRevisionId: "revision_converted_shorten",
+        completionMode: "SHORTEN_IN_HOUSE",
+        businessDate: "2026-08-02",
+        arrivalDate: "2026-08-01",
+        departureDate: "2026-08-03",
+        before: converted.before,
+        after: converted.after,
+        pricingDecision: converted.pricingDecision,
+        inventoryChange: converted.inventoryChange,
+        entitlementSummary: converted.entitlementSummary,
+        fundsSummary: converted.fundsSummary,
+        refundReferenceAmount: converted.refundReferenceAmount,
+        fulfillmentTiming: null,
+        effectHash
+      },
+      resourceRefs: ["order_member", "stay_member", "amendment_converted_shorten", "segment_converted_shorten", "revision_converted_shorten"],
+      factRefs: ["ledger_restore_03", "ledger_restore_04"],
+      committedAt: "2026-08-02T10:00:00.000Z"
+    };
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", convertedReceipt, input, converted, effectHash)).toBe(true);
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", { ...convertedReceipt, factRefs: ["ledger_restore_03"] }, input, converted, effectHash)).toBe(false);
   });
 
   it("rejects contradictory Receipt execution semantics", () => {

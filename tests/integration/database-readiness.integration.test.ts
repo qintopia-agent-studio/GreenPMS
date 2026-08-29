@@ -69,7 +69,9 @@ describe.sequential("authoritative database readiness", () => {
       "040_conversion_order_membership_link.sql",
       "041_completed_stay_backfill_atomicity.sql",
       "042_complete_overdue_reserved_stay.sql",
-      "043_complete_stay_guard_hardening.sql"
+      "043_complete_stay_guard_hardening.sql",
+      "044_inhouse_membership_fulfillment_guards.sql",
+      "045_stay_membership_net_wecom_transfer.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
@@ -416,6 +418,68 @@ describe.sequential("authoritative database readiness", () => {
       await sql`
         DROP TRIGGER membership_payment_stage13_reject_after_transfer
         ON membership_payment_facts
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("net-transfer collection shape trigger", async (trx) => {
+      await sql`
+        DROP TRIGGER collection_facts_validate_new_write_shape
+        ON collection_facts
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("net-transfer collection shape trigger binding", async (trx) => {
+      await sql`
+        DROP TRIGGER collection_facts_validate_new_write_shape
+        ON collection_facts
+      `.execute(trx);
+      await sql`
+        CREATE TRIGGER collection_facts_validate_new_write_shape
+        BEFORE UPDATE ON collection_facts
+        FOR EACH ROW EXECUTE FUNCTION qintopia_validate_new_collection_fact_shape()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("net-transfer collection shape function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_validate_new_collection_fact_shape()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("WeCom refund transaction trigger false predicate", async (trx) => {
+      await sql`
+        DROP TRIGGER collection_facts_validate_new_transaction_reference
+        ON collection_facts
+      `.execute(trx);
+      await sql`
+        CREATE TRIGGER collection_facts_validate_new_transaction_reference
+        BEFORE INSERT ON collection_facts
+        FOR EACH ROW
+        WHEN (false)
+        EXECUTE FUNCTION qintopia_validate_new_collection_fact_transaction_reference()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("WeCom refund transaction function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_validate_new_collection_fact_transaction_reference()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF false THEN
+            RAISE EXCEPTION 'dead original-route refund guard';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
       `.execute(trx);
     });
 

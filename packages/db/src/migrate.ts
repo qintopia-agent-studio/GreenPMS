@@ -53,7 +53,8 @@ try {
   }
 
   for (const migrationName of migrationNames) {
-    if (migrationName === "028_stage11_move_unit_guards.sql") {
+    if (migrationName === "028_stage11_move_unit_guards.sql"
+      || migrationName === "044_inhouse_membership_fulfillment_guards.sql") {
       await client.query("SELECT pg_advisory_lock(hashtextextended('qintopia:protocol-epoch', 0))");
       protocolEpochLockHeld = true;
     }

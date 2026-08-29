@@ -16,7 +16,11 @@ import {
   type OrderActionCode
 } from "@qintopia/contracts";
 import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
-import { legacyEffectProtocol, type HistoricalProtocolVersion } from "./historical-command-protocol.ts";
+import {
+  historicalProtocolEpochMigration,
+  legacyEffectProtocol,
+  type HistoricalProtocolVersion
+} from "./historical-command-protocol.ts";
 import type { DbExecutor } from "./inventory.ts";
 import { propertyLocalClock, propertyLocalToday } from "./members.ts";
 import type { Database } from "./schema.ts";
@@ -43,6 +47,18 @@ export interface OrderContext {
 export interface StayTimelineItem {
   serviceDate: string;
   inventoryUnitId: string;
+}
+
+export interface OrderMembershipConversion {
+  amendmentId: string;
+  membershipOrderId: string;
+  memberId: string;
+  contractId: string;
+  entitlementLotId: string;
+  commandId: string;
+  allowedInventoryKind: "ROOM" | "BED";
+  allowedRoomTypeCode: string;
+  entitlementUnitKind: "ROOM_NIGHT" | "BED_NIGHT";
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
@@ -178,6 +194,107 @@ export async function loadActiveStayTimeline(db: DbExecutor, context: OrderConte
   });
 }
 
+export async function loadOrderMembershipConversion(
+  db: DbExecutor,
+  context: OrderContext
+): Promise<OrderMembershipConversion | null> {
+  const amendments = await db.selectFrom("amendments")
+    .select(["id", "command_id"])
+    .where("order_id", "=", context.order.id)
+    .where("amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
+    .orderBy("sequence")
+    .execute();
+  if (amendments.length === 0) return null;
+
+  const amendment = amendments[0]!;
+  if (amendments.length !== 1 || !amendment.command_id
+    || !context.order.member_id || !context.order.member_contract_id) {
+    throw new DomainError("INTERNAL_ERROR", "订单升级会员关联已损坏", 500, false, {
+      orderId: context.order.id,
+      conversionAmendmentIds: amendments.map((item) => item.id)
+    });
+  }
+
+  const [linked, commandMembershipOrders] = await Promise.all([
+    db.selectFrom("member_contracts as contract")
+      .innerJoin("membership_orders as membership_order", "membership_order.id", "contract.membership_order_id")
+      .innerJoin("entitlement_lots as lot", "lot.id", "membership_order.entitlement_lot_id")
+      .innerJoin("command_executions as execution", "execution.id", "membership_order.created_by_command_id")
+      .select([
+        "contract.id as contract_id",
+        "contract.property_id as contract_property_id",
+        "contract.member_id as contract_member_id",
+        "contract.membership_order_id as contract_membership_order_id",
+        "membership_order.id as membership_order_id",
+        "membership_order.property_id as membership_order_property_id",
+        "membership_order.member_id as membership_order_member_id",
+        "membership_order.contract_id as membership_order_contract_id",
+        "membership_order.entitlement_lot_id as membership_order_entitlement_lot_id",
+        "membership_order.created_by_command_id",
+        "membership_order.activated_by_command_id",
+        "membership_order.status as membership_order_status",
+        "membership_order.allowed_inventory_kind",
+        "membership_order.allowed_room_type_code",
+        "membership_order.entitlement_unit_kind",
+        "membership_order.entitlement_units",
+        "lot.id as lot_id",
+        "lot.contract_id as lot_contract_id",
+        "lot.unit_kind as lot_unit_kind",
+        "lot.total_units as lot_total_units",
+        "execution.id as execution_id",
+        "execution.property_id as execution_property_id",
+        "execution.command_type as execution_command_type",
+        "execution.state as execution_state"
+      ])
+      .where("contract.id", "=", context.order.member_contract_id)
+      .executeTakeFirst(),
+    db.selectFrom("membership_orders")
+      .select(({ fn }) => fn.countAll<string>().as("count"))
+      .where("created_by_command_id", "=", amendment.command_id)
+      .where("activated_by_command_id", "=", amendment.command_id)
+      .executeTakeFirstOrThrow()
+  ]);
+
+  if (!linked
+    || Number(commandMembershipOrders.count) !== 1
+    || linked.contract_id !== context.order.member_contract_id
+    || linked.contract_property_id !== context.order.property_id
+    || linked.contract_member_id !== context.order.member_id
+    || linked.contract_membership_order_id !== linked.membership_order_id
+    || linked.membership_order_property_id !== context.order.property_id
+    || linked.membership_order_member_id !== context.order.member_id
+    || linked.membership_order_contract_id !== linked.contract_id
+    || linked.membership_order_entitlement_lot_id !== linked.lot_id
+    || linked.membership_order_status !== "ACTIVE"
+    || linked.created_by_command_id !== amendment.command_id
+    || linked.activated_by_command_id !== amendment.command_id
+    || linked.lot_contract_id !== linked.contract_id
+    || linked.lot_unit_kind !== linked.entitlement_unit_kind
+    || linked.lot_total_units !== linked.entitlement_units
+    || linked.execution_id !== amendment.command_id
+    || linked.execution_property_id !== context.order.property_id
+    || linked.execution_command_type !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    || linked.execution_state !== "APPLIED") {
+    throw new DomainError("INTERNAL_ERROR", "订单升级会员合同与权益关联已损坏", 500, false, {
+      orderId: context.order.id,
+      amendmentId: amendment.id,
+      commandId: amendment.command_id
+    });
+  }
+
+  return {
+    amendmentId: amendment.id,
+    membershipOrderId: linked.membership_order_id,
+    memberId: linked.membership_order_member_id,
+    contractId: linked.contract_id,
+    entitlementLotId: linked.lot_id,
+    commandId: amendment.command_id,
+    allowedInventoryKind: linked.allowed_inventory_kind,
+    allowedRoomTypeCode: linked.allowed_room_type_code,
+    entitlementUnitKind: linked.entitlement_unit_kind
+  };
+}
+
 export async function lockOrder(trx: Transaction<Database>, orderId: string): Promise<void> {
   const row = await trx.selectFrom("orders").select("id").where("id", "=", orderId).forUpdate().executeTakeFirst();
   if (!row) throw new DomainError("NOT_FOUND", "Order not found", 404);
@@ -275,8 +392,12 @@ export function orderAllowedActions(
         fulfillmentDisabledReason = "只有计划入住当天可以撤销误办入住";
       }
     }
-    const convertedFundsDisabled = hasStayMembershipTransfer
-      && (code === "RECORD_COLLECTION" || code === "RECORD_REFUND" || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
+    const convertedOrderActionDisabled = hasStayMembershipTransfer
+      && (code === "RECORD_COLLECTION"
+        || code === "RECORD_REFUND"
+        || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+        || code === "REPRICE_ORDER"
+        || code === "REVOKE_CHECK_IN");
     const completeStayFactsDisabled = code === "COMPLETE_STAY"
       && statusAllows
       && completeStayFacts !== undefined
@@ -288,7 +409,7 @@ export function orderAllowedActions(
       && fulfillmentDisabledReason === null
       && externalFundsDisabledReason === null
       && stayConversionChannelDisabledReason === null
-      && !convertedFundsDisabled
+      && !convertedOrderActionDisabled
       && !completeStayFactsDisabled
       && (code !== "RECORD_REFUND" || hasRefundableCollection)
       && (code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" || hasTransferableCollection);
@@ -299,8 +420,10 @@ export function orderAllowedActions(
         ? null
         : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? stayConversionChannelDisabledReason ?? (completeStayFactsDisabled
           ? "只有已预订且未办理入住的订单可以完成住宿"
-          : convertedFundsDisabled
-          ? "已完成升级会员，本订单不再追加住宿收退款；后续会员收款请在会员订单中处理"
+          : convertedOrderActionDisabled
+          ? code === "RECORD_COLLECTION" || code === "RECORD_REFUND" || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+            ? "已完成升级会员，本订单不再追加住宿收退款；后续会员收款请在会员订单中处理"
+            : "已升级会员的住宿订单不能使用普通住宿操作"
           : code === "RECORD_REFUND" && statusAllows
           ? "NO_REFUNDABLE_COLLECTION"
           : code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
@@ -1207,41 +1330,52 @@ function hasTransferableCollection(facts: Array<{
   fact_type: string;
   amount_minor: number;
   net_effect_minor: number;
+  currency: string;
   references_fact_id: string | null;
   reverses_fact_id: string | null;
   method: string;
   transaction_reference: string | null;
-}>, transfers: Array<{ source_collection_fact_id: string }>): boolean {
+}>, transfers: Array<{ source_collection_fact_id: string }>, orderCurrency: string): boolean {
   if (transfers.length > 0) return false;
-  const reversed = new Set(facts.filter((fact) => fact.fact_type === "REVERSAL" && fact.reverses_fact_id)
-    .map((fact) => fact.reverses_fact_id!));
-  const transferred = new Set(transfers.map((transfer) => transfer.source_collection_fact_id));
-  const activeRefunded = new Map<string, number>();
+  if (facts.length === 0) return true;
+  if (facts.some((fact) => fact.fact_type !== "COLLECTION" && fact.fact_type !== "REFUND")) return false;
+  const sourceCollections = facts.filter((fact) => fact.fact_type === "COLLECTION");
+  const sourceCollectionIds = new Set(sourceCollections.map((fact) => fact.fact_id));
+  if (sourceCollections.some((fact) => fact.amount_minor <= 0
+    || fact.net_effect_minor !== fact.amount_minor
+    || fact.currency !== orderCurrency
+    || fact.method !== "WECOM"
+    || !fact.transaction_reference
+    || fact.references_fact_id !== null
+    || fact.reverses_fact_id !== null)) return false;
+  const refundedBySource = new Map<string, number>();
   for (const fact of facts) {
-    if (fact.fact_type !== "REFUND" || !fact.references_fact_id || reversed.has(fact.fact_id)) continue;
-    activeRefunded.set(fact.references_fact_id, (activeRefunded.get(fact.references_fact_id) ?? 0) + fact.amount_minor);
+    if (fact.fact_type !== "REFUND") continue;
+    if (fact.amount_minor <= 0
+      || fact.net_effect_minor !== -fact.amount_minor
+      || fact.currency !== orderCurrency
+      || fact.method !== "WECOM"
+      || fact.transaction_reference !== null
+      || !fact.references_fact_id
+      || fact.reverses_fact_id !== null
+      || !sourceCollectionIds.has(fact.references_fact_id)) return false;
+    refundedBySource.set(fact.references_fact_id, (refundedBySource.get(fact.references_fact_id) ?? 0) + fact.amount_minor);
   }
-  const transferableTotalMinor = facts.reduce((sum, fact) => fact.fact_type === "COLLECTION"
-    && fact.method === "WECOM"
-    && Boolean(fact.transaction_reference)
-    && !reversed.has(fact.fact_id)
-    && !transferred.has(fact.fact_id)
-    && (activeRefunded.get(fact.fact_id) ?? 0) === 0
-    ? sum + fact.amount_minor
-    : sum, 0);
-  const netRecordedMinor = facts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
-  // Zero-collection orders (nothing recorded, or everything refunded/reversed)
-  // convert with no transfer rows; the membership fee is collected in full.
-  if (netRecordedMinor === 0) return true;
-  return transferableTotalMinor > 0 && transferableTotalMinor === netRecordedMinor;
+  const netResidual = sourceCollections.reduce((sum, fact) => sum + fact.amount_minor - (refundedBySource.get(fact.fact_id) ?? 0), 0);
+  return Number.isSafeInteger(netResidual)
+    && netResidual >= 0
+    && sourceCollections.every((fact) => (refundedBySource.get(fact.fact_id) ?? 0) <= fact.amount_minor);
 }
 
 export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel = "WRITE") {
   const context = await loadOrderContext(db, orderId);
-  const [localClock, protocolEpochRow, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks] = await Promise.all([
+  const [localClock, protocolEpochRows, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks, membershipConversion] = await Promise.all([
     propertyLocalClock(db, context.order.property_id),
-    db.selectFrom("schema_migrations").select("applied_at")
-      .where("name", "=", "028_stage11_move_unit_guards.sql").executeTakeFirst(),
+    db.selectFrom("schema_migrations").select(["name", "applied_at"])
+      .where("name", "in", [
+        "028_stage11_move_unit_guards.sql",
+        "044_inhouse_membership_fulfillment_guards.sql"
+      ]).execute(),
     db.selectFrom("order_occupants").selectAll().where("order_id", "=", orderId).orderBy("ordinal").execute(),
     db.selectFrom("order_occupant_corrections")
       .innerJoin("subjects", "subjects.id", "order_occupant_corrections.actor_subject_id")
@@ -1294,24 +1428,31 @@ export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, acce
       .where("task.order_id", "=", orderId)
       .orderBy("task.service_date")
       .orderBy("task.created_at")
-      .execute() : Promise.resolve([])
+      .execute() : Promise.resolve([]),
+    loadOrderMembershipConversion(db, context)
   ]);
   const businessDate = localClock.date;
-  if (!protocolEpochRow) throw new DomainError("INTERNAL_ERROR", "Stage 11 protocol epoch is unavailable", 500);
-  const stage11Epoch = protocolEpochRow.applied_at instanceof Date
-    ? protocolEpochRow.applied_at
-    : new Date(protocolEpochRow.applied_at);
+  const protocolEpochByMigration = new Map(protocolEpochRows.map((row) => [
+    row.name,
+    row.applied_at instanceof Date ? row.applied_at : new Date(row.applied_at)
+  ]));
   const projectedAmendments: Array<(typeof amendments)[number] & {
     protocolVersion?: HistoricalAmendmentProtocol;
     recoveryMode?: "HISTORICAL_READ_ONLY";
   }> = amendments.map((amendment) => {
     const protocolVersion = legacyAmendmentProtocol(amendment.amendment_type, amendment.payload);
     if (!protocolVersion) return amendment;
+    const migrationName = historicalProtocolEpochMigration(protocolVersion);
+    const protocolEpoch = protocolEpochByMigration.get(migrationName);
+    if (!protocolEpoch) {
+      throw new DomainError("INTERNAL_ERROR", `Historical protocol epoch ${migrationName} is unavailable`, 500);
+    }
     const createdAt = amendment.created_at instanceof Date ? amendment.created_at : new Date(amendment.created_at);
-    if (createdAt.getTime() >= stage11Epoch.getTime()) {
-      throw new DomainError("INTERNAL_ERROR", "订单变更在 Stage 11 协议启用后仍使用历史数据形状", 500, false, {
+    if (createdAt.getTime() >= protocolEpoch.getTime()) {
+      throw new DomainError("INTERNAL_ERROR", "订单变更在历史协议分界后仍使用旧数据形状", 500, false, {
         amendmentId: amendment.id,
-        amendmentType: amendment.amendment_type
+        amendmentType: amendment.amendment_type,
+        protocolVersion
       });
     }
     return { ...amendment, protocolVersion, recoveryMode: "HISTORICAL_READ_ONLY" as const };
@@ -1377,7 +1518,7 @@ export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, acce
      arrivalDate: context.order.arrival_date,
      departureDate: context.order.departure_date,
      localTime: localClock.time
-   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code, hasTransferableCollection(facts, transfers), transfers.length > 0, {
+   }, lifecycle.effectiveArrangement.intervals.slice(1).some((interval) => interval.arrivalDate >= businessDate), context.order.booking_channel_code, hasTransferableCollection(facts, transfers, context.revision.currency), membershipConversion !== null, {
      stayStatus: context.stay.status,
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
@@ -1446,6 +1587,13 @@ export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, acce
       difference_from_policy_minor: revision.current_contract_amount_minor - revision.policy_base_amount_minor,
       reason: pricingReasonFromAmendment(amendmentById.get(revision.amendment_id))
     })),
+    membershipConversion: membershipConversion ? {
+      membershipOrderId: membershipConversion.membershipOrderId,
+      memberId: membershipConversion.memberId,
+      contractId: membershipConversion.contractId,
+      entitlementLotId: membershipConversion.entitlementLotId,
+      commandId: membershipConversion.commandId
+    } : null,
     coverageSet: coverage,
     collectionFacts: factsWithTransfer,
     cleaningTasks: cleaningTasks.map((task) => ({
@@ -1861,6 +2009,89 @@ export async function restoreConsumedCoverage(
       reason: "REVOKE_CHECK_IN_ENTITLEMENT_RESTORED",
       command_id: commandId
     }).execute();
+    factIds.push(factId);
+  }
+  for (const contractId of new Set(items.map((item) => item.contract_id))) {
+    await incrementContractAndLotVersions(
+      trx,
+      contractId,
+      [...new Set(items.filter((item) => item.contract_id === contractId).map((item) => item.lot_id))]
+    );
+  }
+  return { coverageIds, factIds };
+}
+
+export async function restoreFutureConsumedCoverage(
+  trx: Transaction<Database>,
+  orderId: string,
+  commandId: string,
+  serviceDates: string[]
+): Promise<{ coverageIds: string[]; factIds: string[] }> {
+  const requestedDates = [...new Set(serviceDates)].sort();
+  if (requestedDates.length === 0) return { coverageIds: [], factIds: [] };
+
+  const items = await trx.selectFrom("coverage_items")
+    .selectAll()
+    .where("order_id", "=", orderId)
+    .where("service_date", "in", requestedDates)
+    .where("status", "=", "CONSUMED")
+    .orderBy("service_date")
+    .forUpdate()
+    .execute();
+  if (items.length !== requestedDates.length
+    || items.some((item, index) => item.service_date !== requestedDates[index])) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "缩短住宿的未来已核销权益与核对结果不一致", 409, false, {
+      orderId,
+      requestedDates,
+      consumedDates: items.map((item) => item.service_date)
+    });
+  }
+
+  const coverageIds = items.map((item) => item.id);
+  const existingFacts = await trx.selectFrom("entitlement_ledger")
+    .select(["coverage_id", "entry_type"])
+    .where("coverage_id", "in", coverageIds)
+    .where("entry_type", "in", ["CONSUME", "CONVERSION_CONSUME", "RESTORE"])
+    .execute();
+  const consumptionCountByCoverage = new Map<string, number>();
+  const restoredIds = new Set<string>();
+  for (const fact of existingFacts) {
+    if (!fact.coverage_id) continue;
+    if (fact.entry_type === "RESTORE") {
+      restoredIds.add(fact.coverage_id);
+    } else {
+      consumptionCountByCoverage.set(
+        fact.coverage_id,
+        (consumptionCountByCoverage.get(fact.coverage_id) ?? 0) + 1
+      );
+    }
+  }
+  if (items.some((item) => consumptionCountByCoverage.get(item.id) !== 1 || restoredIds.has(item.id))) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "缩短住宿的会员权益核销历史不能安全返还", 409, false, {
+      orderId,
+      coverageIds
+    });
+  }
+
+  const factIds: string[] = [];
+  for (const item of items) {
+    const factId = newId("fact");
+    await trx.insertInto("entitlement_ledger").values({
+      fact_id: factId,
+      lot_id: item.lot_id,
+      entry_type: "RESTORE",
+      quantity_delta: 1,
+      service_date: item.service_date,
+      order_id: orderId,
+      coverage_id: item.id,
+      reason: "SHORTEN_STAY_FUTURE_ENTITLEMENT_RESTORED",
+      command_id: commandId
+    }).execute();
+    await trx.updateTable("coverage_items")
+      .set({ status: "RELEASED", updated_at: new Date() })
+      .where("id", "=", item.id)
+      .where("status", "=", "CONSUMED")
+      .executeTakeFirstOrThrow();
     factIds.push(factId);
   }
   for (const contractId of new Set(items.map((item) => item.contract_id))) {

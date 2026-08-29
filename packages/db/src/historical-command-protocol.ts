@@ -1,6 +1,16 @@
 import { parseLocalDate } from "@qintopia/domain";
 
-export type HistoricalProtocolVersion = "LEGACY_STAGE_9_10" | "LEGACY_STAGE_10" | "PRE_STAGE_11";
+export type HistoricalProtocolVersion =
+  | "LEGACY_STAGE_9_10"
+  | "LEGACY_STAGE_10"
+  | "PRE_STAGE_11"
+  | "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT";
+
+export function historicalProtocolEpochMigration(protocolVersion: HistoricalProtocolVersion): string {
+  return protocolVersion === "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"
+    ? "044_inhouse_membership_fulfillment_guards.sql"
+    : "028_stage11_move_unit_guards.sql";
+}
 
 const MAX_IDENTIFIER_LENGTH = 255;
 const MAX_TEXT_LENGTH = 1_000;
@@ -211,6 +221,15 @@ function stayBefore(value: unknown): boolean {
     && item.nights === dates.length && money(item.currentContractAmount, { nonNegative: true });
 }
 
+function stayBeforeWithTimeline(value: unknown): boolean {
+  const item = record(value);
+  const dates = item && localDate(item.arrivalDate) && localDate(item.departureDate)
+    ? expectedDates(item.arrivalDate, item.departureDate) : undefined;
+  return !!item && !!dates && exactKeys(item, ["arrivalDate", "departureDate", "nights", "currentContractAmount", "stayTimeline"])
+    && item.nights === dates.length && money(item.currentContractAmount, { nonNegative: true })
+    && timeline(item.stayTimeline, dates);
+}
+
 function stayAfter(value: unknown): boolean {
   const item = record(value);
   const dates = item && localDate(item.arrivalDate) && localDate(item.departureDate)
@@ -283,6 +302,56 @@ function inventoryUnit(value: unknown): boolean {
     && (!Object.hasOwn(item, "occupancyCapacity") || safeInteger(item.occupancyCapacity, 1, 1_000));
 }
 
+function nullableInventoryUnit(value: unknown): boolean {
+  return value === null || inventoryUnit(value);
+}
+
+function inventoryClaimArray(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const keys = new Set<string>();
+  for (const entry of value) {
+    const item = record(entry);
+    if (!item || !exactKeys(item, ["serviceDate", "inventoryUnitId"])
+      || !localDate(item.serviceDate) || !identifier(item.inventoryUnitId)) return false;
+    const key = `${item.serviceDate}:${item.inventoryUnitId}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+  }
+  return true;
+}
+
+function moveInventoryChange(value: unknown): boolean {
+  const item = record(value);
+  return !!item && exactKeys(item, ["preservedClaims", "releasedClaims", "addedClaims"])
+    && inventoryClaimArray(item.preservedClaims)
+    && inventoryClaimArray(item.releasedClaims)
+    && inventoryClaimArray(item.addedClaims);
+}
+
+function preInHouseMembershipMoveEntitlement(value: unknown): boolean {
+  const item = record(value);
+  return !!item && exactKeys(item, [
+    "preservedCoverageDates", "migratedHeldCoverageDates", "consumedCoverageDates", "ledgerWriteCount"
+  ]) && dateArray(item.preservedCoverageDates)
+    && dateArray(item.migratedHeldCoverageDates)
+    && dateArray(item.consumedCoverageDates)
+    && safeInteger(item.ledgerWriteCount, 0);
+}
+
+function moveBefore(value: unknown): boolean {
+  const item = record(value);
+  const dates = item && localDate(item.arrivalDate) && localDate(item.departureDate)
+    ? expectedDates(item.arrivalDate, item.departureDate) : undefined;
+  return !!item && !!dates && exactKeys(item, [
+    "arrivalDate", "departureDate", "nights", "currentContractAmount", "stayTimeline",
+    "actualCurrentInventoryUnit", "effectiveDateInventoryUnit"
+  ]) && item.nights === dates.length
+    && money(item.currentContractAmount, { nonNegative: true })
+    && timeline(item.stayTimeline, dates)
+    && nullableInventoryUnit(item.actualCurrentInventoryUnit)
+    && inventoryUnit(item.effectiveDateInventoryUnit);
+}
+
 function legacyStayEffect(commandType: string, effect: Record<string, unknown>): boolean {
   return exactKeys(effect, [
     "operation", "orderId", "stayId", "inventoryUnitId", "before", "after", "pricingDecision",
@@ -337,6 +406,24 @@ function legacyShortenEffect(effect: Record<string, unknown>): boolean {
     && legacyShortenDetails(effect) && legacyShortenRelationships(effect, effect.businessDate);
 }
 
+function preInHouseMembershipShortenDetails(value: Record<string, unknown>): boolean {
+  return (value.completionMode === "SHORTEN_IN_HOUSE" || value.completionMode === "EARLY_CHECK_OUT")
+    && stayBeforeWithTimeline(value.before) && stayAfter(value.after) && pricingDecision(value.pricingDecision)
+    && dateDiff(value.inventoryChange) && legacyShortenRelationships(value)
+    && shortenEntitlement(value.entitlementSummary) && shortenFunds(value.fundsSummary)
+    && money(value.refundReferenceAmount, { nonNegative: true });
+}
+
+function preInHouseMembershipShortenEffect(effect: Record<string, unknown>): boolean {
+  return exactKeys(effect, [
+    "operation", "orderId", "stayId", "inventoryUnitId", "businessDate", "completionMode", "before", "after",
+    "pricingDecision", "inventoryChange", "entitlementSummary", "fundsSummary", "refundReferenceAmount"
+  ]) && effect.operation === "SHORTEN_STAY" && identifier(effect.orderId) && identifier(effect.stayId)
+    && identifier(effect.inventoryUnitId) && localDate(effect.businessDate)
+    && preInHouseMembershipShortenDetails(effect)
+    && legacyShortenRelationships(effect, effect.businessDate);
+}
+
 function legacyShortenFulfillmentTiming(result: Record<string, unknown>): boolean {
   if (result.completionMode === "SHORTEN_IN_HOUSE") return result.fulfillmentTiming === null;
   const timing = record(result.fulfillmentTiming);
@@ -356,17 +443,73 @@ function legacyMoveEffect(effect: Record<string, unknown>): boolean {
     && (!Object.hasOwn(effect, "occupancyCapacity") || safeInteger(effect.occupancyCapacity, 1, 1_000));
 }
 
+function preInHouseMembershipMoveDetails(value: Record<string, unknown>): boolean {
+  const before = record(value.before);
+  const after = record(value.after);
+  if (!before || !after || !moveBefore(before) || !stayAfter(after)
+    || before.arrivalDate !== after.arrivalDate || before.departureDate !== after.departureDate
+    || !localDate(value.businessDate) || !localDate(value.effectiveDate)
+    || (value.effectiveDate as string) < (before.arrivalDate as string)
+    || (value.effectiveDate as string) >= (before.departureDate as string)
+    || !pricingDecision(value.pricingDecision) || !moveInventoryChange(value.inventoryChange)
+    || !preInHouseMembershipMoveEntitlement(value.entitlementSummary)
+    || !shortenFunds(value.fundsSummary)) return false;
+  return true;
+}
+
+function preInHouseMembershipMoveEffect(effect: Record<string, unknown>): boolean {
+  return exactKeys(effect, [
+    "operation", "orderId", "stayId", "businessDate", "toInventoryUnit", "effectiveDate",
+    "occupantCount", "occupancyCapacity", "before", "after", "pricingDecision", "inventoryChange",
+    "entitlementSummary", "fundsSummary"
+  ]) && effect.operation === "MOVE_UNIT" && identifier(effect.orderId) && identifier(effect.stayId)
+    && inventoryUnit(effect.toInventoryUnit)
+    && safeInteger(effect.occupantCount, 1, 1_000) && safeInteger(effect.occupancyCapacity, 1, 1_000)
+    && (effect.occupantCount as number) <= (effect.occupancyCapacity as number)
+    && preInHouseMembershipMoveDetails(effect);
+}
+
 export function legacyEffectProtocol(commandType: string, value: unknown): HistoricalProtocolVersion | undefined {
   const effect = record(value);
   if (!effect) return undefined;
   if ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") && legacyStayEffect(commandType, effect)) return "LEGACY_STAGE_9_10";
   if (commandType === "SHORTEN_STAY" && legacyShortenEffect(effect)) return "LEGACY_STAGE_10";
+  if (commandType === "SHORTEN_STAY" && preInHouseMembershipShortenEffect(effect)) return "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT";
   if (commandType === "MOVE_UNIT" && legacyMoveEffect(effect)) return "PRE_STAGE_11";
+  if (commandType === "MOVE_UNIT" && preInHouseMembershipMoveEffect(effect)) return "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT";
   return undefined;
 }
 
 function receiptIdentifiers(result: Record<string, unknown>, keys: string[]): boolean {
   return keys.every((key) => identifier(result[key]));
+}
+
+function preInHouseMembershipShortenReceipt(result: Record<string, unknown>): boolean {
+  if (!exactKeys(result, [
+    "orderId", "stayId", "arrangementAmendmentId", "checkoutAmendmentId", "staySegmentId", "pricingRevisionId",
+    "effectHash", "completionMode", "businessDate", "arrivalDate", "departureDate", "before", "after",
+    "pricingDecision", "inventoryChange", "entitlementSummary", "fundsSummary", "refundReferenceAmount", "fulfillmentTiming"
+  ]) || !receiptIdentifiers(result, ["orderId", "stayId", "arrangementAmendmentId", "staySegmentId", "pricingRevisionId"])
+    || !nullableIdentifier(result.checkoutAmendmentId)
+    || typeof result.effectHash !== "string" || !SHA256_HEX.test(result.effectHash)
+    || !localDate(result.businessDate) || !localDate(result.arrivalDate) || !localDate(result.departureDate)
+    || !legacyShortenFulfillmentTiming(result)) return false;
+  const after = record(result.after);
+  if (!after || result.arrivalDate !== after.arrivalDate || result.departureDate !== after.departureDate) return false;
+  if (result.completionMode === "SHORTEN_IN_HOUSE"
+    ? result.checkoutAmendmentId !== null
+    : !identifier(result.checkoutAmendmentId)) return false;
+  return preInHouseMembershipShortenDetails(result)
+    && legacyShortenRelationships(result, result.businessDate as string);
+}
+
+function preInHouseMembershipMoveReceipt(result: Record<string, unknown>): boolean {
+  return exactKeys(result, [
+    "orderId", "stayId", "amendmentId", "staySegmentId", "pricingRevisionId", "effectHash", "businessDate",
+    "effectiveDate", "before", "after", "pricingDecision", "inventoryChange", "entitlementSummary", "fundsSummary"
+  ]) && receiptIdentifiers(result, ["orderId", "stayId", "amendmentId", "staySegmentId", "pricingRevisionId"])
+    && typeof result.effectHash === "string" && SHA256_HEX.test(result.effectHash)
+    && preInHouseMembershipMoveDetails(result);
 }
 
 export function legacyReceiptProtocol(commandType: string, value: unknown): HistoricalProtocolVersion | undefined {
@@ -393,6 +536,9 @@ export function legacyReceiptProtocol(commandType: string, value: unknown): Hist
     for (const key of ["amendmentId", "staySegmentId", "pricingRevisionId", "arrivalDate", "departureDate"]) delete effect[key];
     return legacyStayEffect(commandType, effect) ? "LEGACY_STAGE_9_10" : undefined;
   }
+  if (commandType === "SHORTEN_STAY" && preInHouseMembershipShortenReceipt(result)) {
+    return "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT";
+  }
   if (commandType === "SHORTEN_STAY") {
     if (!exactKeys(result, [
       "orderId", "stayId", "arrangementAmendmentId", "checkoutAmendmentId", "staySegmentId", "pricingRevisionId",
@@ -410,5 +556,8 @@ export function legacyReceiptProtocol(commandType: string, value: unknown): Hist
   }
   if (commandType === "MOVE_UNIT" && exactKeys(result, ["orderId", "amendmentId", "staySegmentId", "pricingRevisionId"])
     && receiptIdentifiers(result, ["orderId", "amendmentId", "staySegmentId", "pricingRevisionId"])) return "PRE_STAGE_11";
+  if (commandType === "MOVE_UNIT" && preInHouseMembershipMoveReceipt(result)) {
+    return "PRE_INHOUSE_MEMBERSHIP_FULFILLMENT";
+  }
   return undefined;
 }

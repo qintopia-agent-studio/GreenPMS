@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { CollectionFactDto, CommandRequest, OrderViewDto } from "../types";
-import { buildOrderOccupantCorrectionRequest, correctionDraftMatchesOccupant, restoredOptionalCorrectionValue } from "../components/OrderOccupantCorrectionDialog";
+import { buildOrderOccupantCorrectionRequest, correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog, restoredOptionalCorrectionValue } from "../components/OrderOccupantCorrectionDialog";
 import {
   enabledOrderActionCodes,
   effectiveArrangementTitle,
@@ -11,6 +11,7 @@ import {
   initialRepriceTargetYuan,
   collectionDifferencePresentation,
   completeStayCorrectionRecords,
+  formalMembershipAgreedPriceMinor,
   completeStayOperatorCopy,
   collectionFactTransactionReferenceLabel,
   CollectionFactNote,
@@ -21,6 +22,8 @@ import {
   collectionAmountYuanInputToMinor,
   occupantSnapshotEntries,
   OrderAmountStrip,
+  OrderActionButton,
+  OverdueInHouseAlert,
   CompleteStayCorrectionHistory,
   OrderLifecycleSections,
   OrderMembershipCoverageSection,
@@ -29,6 +32,7 @@ import {
   orderFulfillmentNotice,
   orderRefundUnavailableReason,
   orderActionDisabledReasonText,
+  orderActionWithUpgradeGuard,
   orderActionHelpRequired,
   orderStatusIsTerminal,
   orderStayDateRequestIsCompatible,
@@ -37,10 +41,17 @@ import {
   wholeYuanAmountMinor,
   orderViewMatchesPrincipalScope,
   orderedOrderOccupants,
+  overdueInHouseNotice,
   primaryOrderOccupant,
   remainingRefundableMinor,
   requestedOrderAction,
+  stayMembershipUpgradeAutoOpenBlockedNotice,
+  stayMembershipUpgradeActionVisible,
+  stayMembershipUpgradeEntry,
+  stayMembershipUpgradeResumeAfterOccupantCorrection,
+  upgradedStayActionDisabledReason,
   stayConversionEntitlementDisplay,
+  stayConversionFundsState,
   terminalOrderActionCodes
 } from "./OrderDetailPage";
 import {
@@ -166,6 +177,53 @@ describe("order detail background refresh", () => {
   });
 });
 
+describe("overdue in-house operational alert", () => {
+  function overdueView(): OrderViewDto {
+    return {
+      order: { status: "CHECKED_IN" },
+      stay: { status: "IN_HOUSE" },
+      effectiveArrangement: {
+        departureDate: "2026-08-19",
+        businessDate: "2026-08-27"
+      }
+    } as OrderViewDto;
+  }
+
+  it("identifies only a checked-in in-house stay whose planned departure has passed", () => {
+    const view = overdueView();
+    expect(overdueInHouseNotice(view)).toEqual({
+      title: "逾期在住，需确认实际状态",
+      plannedDepartureDate: "2026-08-19",
+      businessDate: "2026-08-27"
+    });
+
+    expect(overdueInHouseNotice({
+      ...view,
+      effectiveArrangement: { ...view.effectiveArrangement, departureDate: "2026-08-27" }
+    })).toBeUndefined();
+    expect(overdueInHouseNotice({
+      ...view,
+      order: { ...view.order, status: "CHECKED_OUT" }
+    })).toBeUndefined();
+    expect(overdueInHouseNotice({
+      ...view,
+      stay: { ...view.stay, status: "COMPLETED" }
+    })).toBeUndefined();
+  });
+
+  it("renders the dates and both operator resolution paths without changing order state", () => {
+    const html = renderToStaticMarkup(createElement(OverdueInHouseAlert, {
+      notice: overdueInHouseNotice(overdueView())!
+    }));
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("逾期在住，需确认实际状态");
+    expect(html).toContain("2026-08-19");
+    expect(html).toContain("2026-08-27");
+    expect(html).toContain("仍在住，请先调整退房日期");
+    expect(html).toContain("已离店，请办理迟录退房");
+  });
+});
+
 describe("upgrade membership entitlement presentation", () => {
   function conversionOrderView(): OrderViewDto {
     return {
@@ -262,6 +320,41 @@ describe("upgrade membership entitlement presentation", () => {
     expect(html).toContain("查看会员订单");
     expect(html).not.toContain("没有会员覆盖");
     expect(html).not.toContain("此订单未使用会员住宿权益");
+  });
+
+  it("keeps the membership-order trace visible when an in-house conversion has coverage and no lodging transfer", () => {
+    const view = {
+      ...conversionOrderView(),
+      collectionFacts: [],
+      membershipConversion: {
+        membershipOrderId: "membership_order_zero_transfer",
+        memberId: "member_zero_transfer",
+        contractId: "contract_zero_transfer",
+        entitlementLotId: "lot_zero_transfer",
+        commandId: "command_conversion"
+      },
+      coverageSet: [{
+        id: "coverage_conversion_1",
+        order_id: "order_conversion",
+        contract_id: "contract_zero_transfer",
+        lot_id: "lot_zero_transfer",
+        inventory_unit_id: "unit_room_d_gen_01",
+        service_date: "2026-07-26",
+        unit_kind: "ROOM_NIGHT",
+        status: "CONSUMED",
+        held_by_revision_id: "revision_conversion",
+        created_at: "2026-08-01T16:00:00.000Z",
+        updated_at: "2026-08-01T16:00:00.000Z"
+      }]
+    } as OrderViewDto;
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(OrderMembershipCoverageSection, {
+      view,
+      unitMap: new Map()
+    })));
+    expect(html).toContain("stay-membership-conversion-trace");
+    expect(html).toContain("查看会员订单");
+    expect(html).toContain("memberId=member_zero_transfer");
+    expect(html).toContain("membershipOrderId=membership_order_zero_transfer");
   });
 });
 
@@ -838,6 +931,50 @@ describe("order occupant presentation", () => {
     })).toThrow("必须填写更正原因");
   });
 
+  it("requires the primary occupant phone only when correction resumes a membership upgrade", () => {
+    const view = {
+      order: { id: "order_occupants", property_id: "property_qintopia" }
+    } as OrderViewDto;
+    const values = {
+      nickname: "同名住客",
+      fullName: "同行人姓名",
+      phone: " ",
+      documentNumber: "DOC-2",
+      reason: "升级会员前补录手机号"
+    };
+
+    expect(() => buildOrderOccupantCorrectionRequest(view, occupants[0]!, values, {
+      phoneRequiredForStayMembershipUpgrade: true
+    })).toThrow("升级会员前必须填写主要住宿人手机号");
+
+    const html = renderToStaticMarkup(createElement(OrderOccupantCorrectionDialog, {
+      view,
+      occupant: occupants[0]!,
+      phoneRequiredForStayMembershipUpgrade: true,
+      onClose: () => undefined,
+      onSubmit: () => undefined
+    }));
+    expect(html).toContain("升级会员前必须填写主要住宿人手机号");
+    expect(html).toMatch(/data-testid="occupant-correction-phone"[^>]*required=""/);
+  });
+
+  it("still permits an ordinary occupant correction to clear a phone", () => {
+    const view = {
+      order: { id: "order_occupants", property_id: "property_qintopia" }
+    } as OrderViewDto;
+    const request = buildOrderOccupantCorrectionRequest(view, occupants[1]!, {
+      nickname: "主要住宿人（无电话）",
+      fullName: "主要人姓名",
+      phone: " ",
+      documentNumber: "",
+      reason: "客人确认原电话错误"
+    });
+    expect(request.input.correctedSnapshot).toMatchObject({
+      nickname: "主要住宿人（无电话）",
+      phone: null
+    });
+  });
+
   it("keeps explicit null fields empty and binds a draft to the exact order occupant", () => {
     expect(restoredOptionalCorrectionValue(null, "13800000000")).toBe("");
     expect(restoredOptionalCorrectionValue(undefined, "13800000000")).toBe("13800000000");
@@ -857,6 +994,359 @@ describe("order occupant presentation", () => {
   });
 });
 
+describe("in-house stay membership upgrade entry", () => {
+  const primaryOccupant = {
+    id: "occupant_primary_upgrade",
+    orderId: "order_in_house_upgrade",
+    ordinal: 1,
+    role: "PRIMARY" as const,
+    fullName: "主要住宿人",
+    nickname: "小住",
+    phone: " 138 0000 0000 ",
+    documentNumber: "DOC-UPGRADE",
+    createdAt: "2026-08-26T09:00:00.000Z"
+  };
+
+  function inHouseView(overrides: Record<string, unknown> = {}): OrderViewDto {
+    return {
+      order: {
+        id: "order_in_house_upgrade",
+        property_id: "property_qintopia",
+        status: "CHECKED_IN",
+        arrival_date: "2026-08-24",
+        departure_date: "2026-08-29"
+      },
+      effectiveArrangement: {
+        intervals: [{ inventoryUnitId: "unit_upgrade_eligible" }]
+      },
+      occupants: [primaryOccupant],
+      collectionFacts: [],
+      amendments: [],
+      allowedActions: [{ code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", enabled: true, disabledReason: null }],
+      ...overrides
+    } as unknown as OrderViewDto;
+  }
+
+  const matchingMember = {
+    id: "member_phone_match",
+    full_name: "同手机号会员",
+    nickname: "会员小住",
+    phone: "13800000000"
+  };
+  const matchingProduct = {
+    id: "product_upgrade_eligible",
+    allowed_inventory_kind: "BED",
+    allowed_room_type_code: "SHARED_BATH_QUAD",
+    entitlement_unit_kind: "BED_NIGHT"
+  };
+  const unitMap = new Map([["unit_upgrade_eligible", {
+    id: "unit_upgrade_eligible",
+    kind: "BED",
+    room_type_code: "SHARED_BATH_QUAD"
+  }]]);
+
+  it("keeps the upgrade entry ready for an in-house zero-collection stay without inventing a lodging receipt", () => {
+    expect(stayMembershipUpgradeEntry(inHouseView(), [matchingMember] as never, [matchingProduct] as never, unitMap as never)).toEqual({
+      state: "READY",
+      orderId: "order_in_house_upgrade",
+      primaryOccupantId: "occupant_primary_upgrade",
+      phone: "13800000000",
+      memberId: "member_phone_match",
+      transferableCollectionFactIds: []
+    });
+  });
+
+  it("keeps a partially refunded WECOM source in the ready upgrade intent at its remaining balance", () => {
+    const source = {
+      fact_id: "collection_partially_refunded_upgrade",
+      order_id: "order_in_house_upgrade",
+      fact_type: "COLLECTION",
+      amount_minor: 59_000,
+      net_effect_minor: 59_000,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "WECOM",
+      note: "",
+      transaction_reference: "WX-UPGRADE-PARTIAL-SOURCE",
+      cash_collector: null,
+      pricing_revision_id: "revision_upgrade",
+      command_id: "command_collection_partial",
+      created_at: "2026-08-26T09:00:00.000Z",
+      transfer: null
+    } as CollectionFactDto;
+    const entry = stayMembershipUpgradeEntry(inHouseView({
+      collectionFacts: [
+        source,
+        {
+          ...source,
+          fact_id: "refund_partially_refunded_upgrade",
+          fact_type: "REFUND",
+          amount_minor: 1_000,
+          net_effect_minor: -1_000,
+          references_fact_id: source.fact_id,
+          transaction_reference: null
+        }
+      ]
+    }), [matchingMember] as never, [matchingProduct] as never, unitMap as never);
+
+    expect(entry).toMatchObject({
+      state: "READY",
+      transferableCollectionFactIds: [source.fact_id]
+    });
+  });
+
+  it("requires a positive whole-yuan agreed price for a formal membership", () => {
+    expect(formalMembershipAgreedPriceMinor("1620")).toBe(162_000);
+    expect(formalMembershipAgreedPriceMinor("0")).toBeUndefined();
+    expect(formalMembershipAgreedPriceMinor("1.5")).toBeUndefined();
+    expect(formalMembershipAgreedPriceMinor("21474836")).toBe(2_147_483_600);
+    expect(formalMembershipAgreedPriceMinor("21474837")).toBeUndefined();
+  });
+
+  it("transfers only the remaining WECOM balance while keeping invalid fund graphs closed", () => {
+    expect(stayConversionFundsState([], 0)).toEqual({
+      transferableCollections: [],
+      transferTotalMinor: 0,
+      zeroCollectionOrder: true,
+      refundedToZero: false
+    });
+    const valid = {
+      fact_id: "collection_upgrade",
+      order_id: "order_in_house_upgrade",
+      fact_type: "COLLECTION",
+      amount_minor: 59_000,
+      net_effect_minor: 59_000,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "WECOM",
+      note: "",
+      transaction_reference: "WX-UPGRADE-SOURCE",
+      cash_collector: null,
+      pricing_revision_id: "revision_upgrade",
+      command_id: "command_collection",
+      created_at: "2026-08-26T09:00:00.000Z",
+      transfer: null
+    } as CollectionFactDto;
+    expect(stayConversionFundsState([valid], valid.amount_minor).disabledReason).toBeUndefined();
+    const fullyRefunded = stayConversionFundsState([
+      valid,
+      {
+        ...valid,
+        fact_id: "refund_conversion",
+        fact_type: "REFUND",
+        amount_minor: 59_000,
+        net_effect_minor: -59_000,
+        references_fact_id: valid.fact_id,
+        transaction_reference: null
+      }
+    ], 0);
+    expect(fullyRefunded).toMatchObject({
+      transferableCollections: [],
+      transferTotalMinor: 0,
+      zeroCollectionOrder: false,
+      refundedToZero: true
+    });
+    const partiallyRefunded = stayConversionFundsState([
+      valid,
+      {
+        ...valid,
+        fact_id: "partial_refund_conversion",
+        fact_type: "REFUND",
+        amount_minor: 1_000,
+        net_effect_minor: -1_000,
+        references_fact_id: valid.fact_id,
+        transaction_reference: null
+      }
+    ], 58_000);
+    expect(partiallyRefunded).toMatchObject({
+      transferTotalMinor: 58_000,
+      zeroCollectionOrder: false,
+      refundedToZero: false
+    });
+    expect(partiallyRefunded.transferableCollections).toHaveLength(1);
+    expect(partiallyRefunded.transferableCollections[0]?.transferAmountMinor).toBe(58_000);
+    const recollected = stayConversionFundsState([
+      valid,
+      {
+        ...valid,
+        fact_id: "refund_before_recollection",
+        fact_type: "REFUND",
+        amount_minor: 59_000,
+        net_effect_minor: -59_000,
+        references_fact_id: valid.fact_id,
+        transaction_reference: null
+      },
+      {
+        ...valid,
+        fact_id: "collection_after_refund",
+        amount_minor: 30_000,
+        net_effect_minor: 30_000,
+        transaction_reference: "WX-UPGRADE-RECOLLECTION"
+      }
+    ], 30_000);
+    expect(recollected).toMatchObject({
+      transferTotalMinor: 30_000,
+      zeroCollectionOrder: false,
+      refundedToZero: false
+    });
+    expect(recollected.transferableCollections).toHaveLength(1);
+    expect(recollected.transferableCollections[0]?.fact_id).toBe("collection_after_refund");
+    expect(stayConversionFundsState([
+      valid,
+      {
+        ...valid,
+        fact_id: "refund_with_illegal_new_reference",
+        fact_type: "REFUND",
+        amount_minor: 1_000,
+        net_effect_minor: -1_000,
+        references_fact_id: valid.fact_id,
+        transaction_reference: "WX-REFUND-MUST-BE-NULL"
+      }
+    ], 58_000).disabledReason).toContain("无法核对");
+    expect(stayConversionFundsState([{ ...valid, fact_id: "cash_collection", method: "CASH", transaction_reference: null }], valid.amount_minor).disabledReason).toContain("非企微");
+    expect(stayConversionFundsState([{ ...valid, currency: "USD" }], valid.amount_minor, "CNY").disabledReason).toContain("无法核对");
+  });
+
+  it("requires correction of the primary occupant before matching when their phone is absent", () => {
+    const entry = stayMembershipUpgradeEntry(inHouseView({
+      occupants: [{ ...primaryOccupant, phone: null }]
+    }), [matchingMember] as never, [matchingProduct] as never, unitMap as never);
+
+    expect(entry).toEqual({
+      state: "CORRECT_PRIMARY_OCCUPANT",
+      orderId: "order_in_house_upgrade",
+      primaryOccupantId: "occupant_primary_upgrade",
+      reason: "PRIMARY_PHONE_REQUIRED"
+    });
+  });
+
+  it("fails closed instead of matching a companion when the primary occupant is missing", () => {
+    expect(stayMembershipUpgradeEntry(inHouseView({
+      occupants: [{ ...primaryOccupant, role: "ADDITIONAL", ordinal: 2 }]
+    }), [matchingMember] as never, [matchingProduct] as never, unitMap as never)).toEqual({
+      state: "UNAVAILABLE",
+      reason: "PRIMARY_OCCUPANT_REQUIRED"
+    });
+  });
+
+  it("rejects a stay with no applicable formal product before correcting an occupant or creating a member", () => {
+    expect(stayMembershipUpgradeEntry(inHouseView({
+      occupants: [{ ...primaryOccupant, phone: null }]
+    }), [], [], unitMap as never)).toEqual({
+      state: "UNAVAILABLE",
+      reason: "MEMBERSHIP_PRODUCT_NOT_APPLICABLE"
+    });
+  });
+
+  it("resumes only the exact interrupted upgrade after a primary-occupant correction supplies a phone", () => {
+    const interrupted = {
+      orderId: "order_in_house_upgrade",
+      primaryOccupantId: "occupant_primary_upgrade",
+      action: "STAY_MEMBERSHIP_UPGRADE" as const
+    };
+
+    expect(stayMembershipUpgradeResumeAfterOccupantCorrection(interrupted, {
+      ...primaryOccupant,
+      phone: "13800000000"
+    })).toEqual({
+      ...interrupted,
+      phone: "13800000000"
+    });
+    expect(stayMembershipUpgradeResumeAfterOccupantCorrection(interrupted, {
+      ...primaryOccupant,
+      id: "occupant_other",
+      phone: "13800000000"
+    })).toBeUndefined();
+    expect(stayMembershipUpgradeResumeAfterOccupantCorrection(interrupted, {
+      ...primaryOccupant,
+      phone: ""
+    })).toBeUndefined();
+  });
+
+  it("routes a phone with no member match into member creation using the primary guest only", () => {
+    expect(stayMembershipUpgradeEntry(inHouseView(), [{
+      ...matchingMember,
+      id: "member_same_name_wrong_phone",
+      full_name: primaryOccupant.fullName,
+      nickname: primaryOccupant.nickname,
+      phone: "13900000000"
+    }] as never, [matchingProduct] as never, unitMap as never)).toEqual({
+      state: "CREATE_MEMBER",
+      orderId: "order_in_house_upgrade",
+      primaryOccupantId: "occupant_primary_upgrade",
+      prefill: {
+        fullName: "主要住宿人",
+        nickname: "小住",
+        phone: "13800000000"
+      },
+      returnTo: {
+        action: "STAY_MEMBERSHIP_UPGRADE",
+        orderId: "order_in_house_upgrade",
+        primaryOccupantId: "occupant_primary_upgrade",
+        phone: "13800000000"
+      }
+    });
+  });
+
+  it("fails closed for ordinary reprice and check-in revocation once a stay was upgraded, including a zero-transfer upgrade", () => {
+    const upgraded = inHouseView({
+      amendments: [{
+        id: "amendment_zero_transfer_upgrade",
+        amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+        reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+        payload: {
+          member: { memberId: "member_phone_match" },
+          transferredCollectionFactIds: []
+        }
+      }]
+    });
+
+    expect(upgradedStayActionDisabledReason(upgraded, "REPRICE_ORDER")).toBe("STAY_MEMBERSHIP_UPGRADE_REPRICE_CLOSED");
+    expect(upgradedStayActionDisabledReason(upgraded, "REVOKE_CHECK_IN")).toBe("STAY_MEMBERSHIP_UPGRADE_REVOKE_CHECK_IN_CLOSED");
+    expect(upgradedStayActionDisabledReason(upgraded, "EXTEND_STAY")).toBeUndefined();
+    expect(upgradedStayActionDisabledReason(inHouseView(), "REPRICE_ORDER")).toBeUndefined();
+
+    const guardedReprice = orderActionWithUpgradeGuard(upgraded, {
+      code: "REPRICE_ORDER",
+      enabled: true,
+      disabledReason: null
+    });
+    expect(guardedReprice).toMatchObject({
+      code: "REPRICE_ORDER",
+      enabled: false,
+      disabledReason: "STAY_MEMBERSHIP_UPGRADE_REPRICE_CLOSED"
+    });
+    const html = renderToStaticMarkup(createElement(OrderActionButton, {
+      action: guardedReprice,
+      blocked: false,
+      showWhenDisabled: true,
+      children: "调整金额"
+    }));
+    expect(html).toContain("disabled");
+    expect(html).toContain("升级会员后的住宿金额已冻结");
+  });
+
+  it("closes an open ordinary editor when refresh observes a zero-transfer upgrade", () => {
+    const beforeUpgrade = inHouseView({
+      pricingRevisions: [{ id: "revision_before_upgrade" }]
+    });
+    const afterUpgrade = inHouseView({
+      pricingRevisions: [{ id: "revision_after_upgrade" }],
+      amendments: [{
+        id: "amendment_zero_transfer_upgrade_refresh",
+        amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+        reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+        payload: { transferredCollectionFactIds: [] }
+      }]
+    });
+
+    expect(orderRefreshMustCloseEditor(beforeUpgrade, afterUpgrade, true)).toBe(true);
+    expect(orderRefreshMustCloseEditor(beforeUpgrade, afterUpgrade, false)).toBe(false);
+  });
+});
+
 describe("server-authoritative order actions", () => {
   const actions = [{ code: "CHECK_IN" as const, enabled: true, disabledReason: null }, {
     code: "CANCEL_ORDER" as const,
@@ -873,6 +1363,45 @@ describe("server-authoritative order actions", () => {
     expect(requestedOrderAction("?action=CHECK_IN", actions)).toBe("CHECK_IN");
     expect(requestedOrderAction("?action=CANCEL_ORDER", actions)).toBeUndefined();
     expect(requestedOrderAction("?action=REPRICE_ORDER", actions)).toBeUndefined();
+  });
+
+  it("keeps URL-requested stay-upgrade editors closed behind a command-recovery gate", () => {
+    expect(stayMembershipUpgradeAutoOpenBlockedNotice("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", true))
+      .toContain("已暂停自动打开升级会员流程");
+    expect(stayMembershipUpgradeAutoOpenBlockedNotice("CORRECT_ORDER_OCCUPANT", true))
+      .toContain("已暂停自动打开升级会员流程");
+    expect(stayMembershipUpgradeAutoOpenBlockedNotice("CHECK_IN", true)).toBeUndefined();
+    expect(stayMembershipUpgradeAutoOpenBlockedNotice("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", false)).toBeUndefined();
+  });
+
+  it("keeps every unconverted transient in-house WRITE upgrade entry visible with the server reason", () => {
+    const disabled = { code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" as const, enabled: false, disabledReason: "NO_TRANSFERABLE_COLLECTION" };
+    const base = {
+      accessLevel: "WRITE",
+      order: { status: "CHECKED_IN", booking_channel_code: "WECOM", stay_type: "TRANSIENT", member_id: null, member_contract_id: null },
+      stay: { status: "IN_HOUSE" },
+      amendments: []
+    } as unknown as OrderViewDto;
+    expect(stayMembershipUpgradeActionVisible(base, disabled)).toBe(true);
+    expect(stayMembershipUpgradeActionVisible({ ...base, amendments: [{ amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" }] } as unknown as OrderViewDto, disabled)).toBe(false);
+    expect(stayMembershipUpgradeActionVisible({ ...base, order: { ...base.order, booking_channel_code: null } } as unknown as OrderViewDto, disabled)).toBe(true);
+    expect(stayMembershipUpgradeActionVisible({ ...base, order: { ...base.order, booking_channel_code: "MEITUAN" } } as unknown as OrderViewDto, disabled)).toBe(true);
+    expect(stayMembershipUpgradeActionVisible({ ...base, order: { ...base.order, stay_type: "FREE" } } as unknown as OrderViewDto, disabled)).toBe(false);
+    expect(stayMembershipUpgradeActionVisible({ ...base, order: { ...base.order, member_id: "member_existing" } } as unknown as OrderViewDto, disabled)).toBe(false);
+    expect(stayMembershipUpgradeActionVisible({ ...base, order: { ...base.order, status: "RESERVED" } } as unknown as OrderViewDto, disabled)).toBe(false);
+    expect(stayMembershipUpgradeActionVisible({
+      ...base,
+      order: { ...base.order, status: "CHECKED_OUT" },
+      stay: { ...base.stay, status: "COMPLETED" }
+    } as unknown as OrderViewDto, disabled)).toBe(true);
+    expect(stayMembershipUpgradeActionVisible({
+      ...base,
+      order: { ...base.order, status: "CHECKED_OUT" }
+    } as unknown as OrderViewDto, disabled)).toBe(false);
+    expect(stayMembershipUpgradeActionVisible({ ...base, accessLevel: "READ" } as unknown as OrderViewDto, disabled)).toBe(false);
+    expect(stayMembershipUpgradeActionVisible(base, {
+      code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", enabled: true, disabledReason: null
+    })).toBe(true);
   });
 
   it("keeps a disabled refund action explainable when there is no refundable collection", () => {
@@ -929,7 +1458,7 @@ describe("server-authoritative order actions", () => {
       code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
       enabled: false,
       disabledReason: "NO_TRANSFERABLE_COLLECTION"
-    })).toContain("当前订单没有可整笔用于升级会员的企业微信住宿收款");
+    })).toContain("非企微、冲销或无法核对");
     expect(orderActionDisabledReasonText({
       code: "CHECK_IN",
       enabled: true,

@@ -42,6 +42,8 @@ const OptionalNote = Type.String({ maxLength: 1000 });
 const SafeInteger = Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER });
 const PositiveAmount = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const NonNegativeWholeYuanAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
+const PositiveWholeYuanAmount = Type.Integer({ minimum: 100, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
+const MembershipAgreedPriceAmount = Type.Integer({ minimum: 100, maximum: 2_147_483_600, multipleOf: 100 });
 const StayChangeTargetAmount = Type.Integer({ minimum: 0, maximum: 2_147_483_600, multipleOf: 100 });
 const NonZeroInteger = Type.Union([
   Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: -1 }),
@@ -423,7 +425,7 @@ export const CommandEnvelopeSchema = Type.Union([
     memberId: Id,
     membershipProductId: Id,
     collectionFactIds: Type.Array(Id),
-    agreedPriceMinor: NonNegativeWholeYuanAmount,
+    agreedPriceMinor: MembershipAgreedPriceAmount,
     priceAdjustmentReason: Type.Optional(Note),
     remainingPaymentTransactionReference: Type.Optional(ShortText),
     remainingPaymentNote: Type.Optional(OptionalNote)
@@ -602,10 +604,16 @@ const ShortenStayFundsSummarySchema = strictObject({
   collectionDifference: Money,
   factCount: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
 });
-const ShortenStayEntitlementSummarySchema = strictObject({
+const LegacyShortenStayEntitlementSummarySchema = strictObject({
   currentConsumedCoverageDates: Type.Array(LocalDate),
   retainedHistoricalConsumedCoverageDates: Type.Array(LocalDate),
   ledgerWriteCount: Type.Literal(0)
+});
+const ShortenStayEntitlementSummarySchema = strictObject({
+  currentConsumedCoverageDates: Type.Array(LocalDate),
+  retainedHistoricalConsumedCoverageDates: Type.Array(LocalDate),
+  restoredFutureCoverageDates: Type.Array(LocalDate),
+  ledgerWriteCount: Type.Integer({ minimum: 0, maximum: 366 })
 });
 const InventoryClaimSummarySchema = strictObject({
   serviceDate: LocalDate,
@@ -617,6 +625,13 @@ const MoveUnitInventoryChangeSchema = strictObject({
   addedClaims: Type.Array(InventoryClaimSummarySchema)
 });
 const MoveUnitEntitlementSummarySchema = strictObject({
+  preservedCoverageDates: Type.Array(LocalDate),
+  migratedHeldCoverageDates: Type.Array(LocalDate),
+  consumedCoverageDates: Type.Array(LocalDate),
+  convertedMembershipCoveragePreserved: Type.Boolean(),
+  ledgerWriteCount: Type.Integer({ minimum: 0, maximum: 2_147_483_647 })
+});
+const PreInHouseMembershipMoveUnitEntitlementSummarySchema = strictObject({
   preservedCoverageDates: Type.Array(LocalDate),
   migratedHeldCoverageDates: Type.Array(LocalDate),
   consumedCoverageDates: Type.Array(LocalDate),
@@ -690,7 +705,7 @@ const LegacyShortenStayEffectSchema = strictObject({
   }),
   pricingDecision: CreateOrderPricingDecisionSchema,
   inventoryChange: StayChangeDateDiffSchema,
-  entitlementSummary: ShortenStayEntitlementSummarySchema,
+  entitlementSummary: LegacyShortenStayEntitlementSummarySchema,
   fundsSummary: ShortenStayFundsSummarySchema,
   refundReferenceAmount: NonNegativeMoney
 });
@@ -704,6 +719,51 @@ const LegacyMoveUnitEffectSchema = strictObject({
   occupancyCapacity: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
   stayTimeline: StayTimelineSchema,
   pricing: PricingResultSchema
+});
+
+const PreInHouseMembershipShortenStayEffectSchema = strictObject({
+  operation: Type.Literal("SHORTEN_STAY"),
+  orderId: Id,
+  stayId: Id,
+  inventoryUnitId: Id,
+  businessDate: LocalDate,
+  completionMode: Type.Union([Type.Literal("SHORTEN_IN_HOUSE"), Type.Literal("EARLY_CHECK_OUT")]),
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money,
+    stayTimeline: StayTimelineSchema
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementSummary: LegacyShortenStayEntitlementSummarySchema,
+  fundsSummary: ShortenStayFundsSummarySchema,
+  refundReferenceAmount: NonNegativeMoney
+});
+
+const PreInHouseMembershipMoveUnitEffectSchema = strictObject({
+  operation: Type.Literal("MOVE_UNIT"),
+  orderId: Id,
+  stayId: Id,
+  businessDate: LocalDate,
+  toInventoryUnit: InventoryUnitRecordSchema,
+  effectiveDate: LocalDate,
+  occupantCount: Type.Integer({ minimum: 1, maximum: 1000 }),
+  occupancyCapacity: Type.Integer({ minimum: 1, maximum: 1000 }),
+  before: MoveUnitBeforeSchema,
+  after: MoveUnitAfterSchema,
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: MoveUnitInventoryChangeSchema,
+  entitlementSummary: PreInHouseMembershipMoveUnitEntitlementSummarySchema,
+  fundsSummary: MoveUnitFundsSummarySchema
 });
 
 const StayCollectionTransferItemSchema = strictObject({
@@ -1338,7 +1398,7 @@ const LegacyShortenStayResultSchema = strictObject({
   }),
   pricingDecision: CreateOrderPricingDecisionSchema,
   inventoryChange: StayChangeDateDiffSchema,
-  entitlementSummary: ShortenStayEntitlementSummarySchema,
+  entitlementSummary: LegacyShortenStayEntitlementSummarySchema,
   fundsSummary: ShortenStayFundsSummarySchema,
   refundReferenceAmount: NonNegativeMoney,
   fulfillmentTiming: nullable(strictObject({
@@ -1352,6 +1412,59 @@ const LegacyMoveUnitResultSchema = strictObject({
   amendmentId: Id,
   staySegmentId: Id,
   pricingRevisionId: Id
+});
+const PreInHouseMembershipShortenStayResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  arrangementAmendmentId: Id,
+  checkoutAmendmentId: nullable(Id),
+  staySegmentId: Id,
+  pricingRevisionId: Id,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  completionMode: Type.Union([Type.Literal("SHORTEN_IN_HOUSE"), Type.Literal("EARLY_CHECK_OUT")]),
+  businessDate: LocalDate,
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  before: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    currentContractAmount: Money,
+    stayTimeline: StayTimelineSchema
+  }),
+  after: strictObject({
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    nights: Type.Integer({ minimum: 1, maximum: 366 }),
+    stayTimeline: StayTimelineSchema,
+    pricing: PricingResultSchema
+  }),
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: StayChangeDateDiffSchema,
+  entitlementSummary: LegacyShortenStayEntitlementSummarySchema,
+  fundsSummary: ShortenStayFundsSummarySchema,
+  refundReferenceAmount: NonNegativeMoney,
+  fulfillmentTiming: nullable(strictObject({
+    effectiveDate: LocalDate,
+    recordedBusinessDate: LocalDate,
+    recordingMode: Type.Literal("ON_SCHEDULE")
+  }))
+});
+const PreInHouseMembershipMoveUnitResultSchema = strictObject({
+  orderId: Id,
+  stayId: Id,
+  amendmentId: Id,
+  staySegmentId: Id,
+  pricingRevisionId: Id,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  businessDate: LocalDate,
+  effectiveDate: LocalDate,
+  before: MoveUnitBeforeSchema,
+  after: MoveUnitAfterSchema,
+  pricingDecision: CreateOrderPricingDecisionSchema,
+  inventoryChange: MoveUnitInventoryChangeSchema,
+  entitlementSummary: PreInHouseMembershipMoveUnitEntitlementSummarySchema,
+  fundsSummary: MoveUnitFundsSummarySchema
 });
 const RepriceResultSchema = strictObject({
   orderId: Id, amendmentId: Id, pricingRevisionId: Id,
@@ -1456,6 +1569,8 @@ const StayCollectionMembershipConversionResultSchema = strictObject({
   lodgingReversalFactIds: Type.Array(Id),
   membershipPaymentFactIds: Type.Array(Id),
   transferIds: Type.Array(Id),
+  conversionMode: Type.Union([Type.Literal("IN_HOUSE"), Type.Literal("COMPLETED")]),
+  conversionCoverageIds: Type.Array(Id),
   conversionLedgerFactIds: Type.Array(Id, { minItems: 1 }),
   transferredAmount: Money,
   membershipAgreedPrice: Money,
@@ -1536,9 +1651,29 @@ const LegacyMoveUnitPreviewSchema = strictObject({
   effect: LegacyMoveUnitEffectSchema,
   expiresAt: DateTime
 });
+const PreInHouseMembershipShortenStayPreviewSchema = strictObject({
+  previewId: Id,
+  commandType: Type.Literal("SHORTEN_STAY"),
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  effect: PreInHouseMembershipShortenStayEffectSchema,
+  expiresAt: DateTime
+});
+const PreInHouseMembershipMoveUnitPreviewSchema = strictObject({
+  previewId: Id,
+  commandType: Type.Literal("MOVE_UNIT"),
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  effect: PreInHouseMembershipMoveUnitEffectSchema,
+  expiresAt: DateTime
+});
 const LegacyPreviewReceiptStayChangeResultSchema = strictObject({ preview: LegacyStayChangePreviewSchema });
 const LegacyPreviewReceiptShortenResultSchema = strictObject({ preview: LegacyShortenStayPreviewSchema });
 const LegacyPreviewReceiptMoveResultSchema = strictObject({ preview: LegacyMoveUnitPreviewSchema });
+const PreInHouseMembershipPreviewReceiptShortenResultSchema = strictObject({
+  preview: PreInHouseMembershipShortenStayPreviewSchema
+});
+const PreInHouseMembershipPreviewReceiptMoveResultSchema = strictObject({
+  preview: PreInHouseMembershipMoveUnitPreviewSchema
+});
 const HistoricalExecutedReceiptBase = {
   receiptId: Id,
   commandId: Id,
@@ -1565,11 +1700,35 @@ const HistoricalMoveReceiptReadSchema = strictObject({
   protocolVersion: Type.Literal("PRE_STAGE_11"),
   result: Type.Union([LegacyMoveUnitResultSchema, LegacyPreviewReceiptMoveResultSchema])
 });
+const PreInHouseMembershipShortenReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"),
+  result: Type.Union([
+    PreInHouseMembershipShortenStayResultSchema,
+    PreInHouseMembershipPreviewReceiptShortenResultSchema
+  ])
+});
+const PreInHouseMembershipMoveReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"),
+  result: Type.Union([
+    PreInHouseMembershipMoveUnitResultSchema,
+    PreInHouseMembershipPreviewReceiptMoveResultSchema
+  ])
+});
+const PreInHouseMembershipConversionReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"),
+  result: StayCollectionMembershipConversionResultSchema
+});
 export const HistoricalReceiptReadSchema = Type.Union([
   ReceiptSchema,
   HistoricalStayChangeReceiptReadSchema,
   HistoricalShortenReceiptReadSchema,
-  HistoricalMoveReceiptReadSchema
+  HistoricalMoveReceiptReadSchema,
+  PreInHouseMembershipShortenReceiptReadSchema,
+  PreInHouseMembershipMoveReceiptReadSchema,
+  PreInHouseMembershipConversionReceiptReadSchema
 ]);
 
 const CurrentCommandPreviewResponseSchema = strictObject({
@@ -1591,6 +1750,16 @@ const HistoricalMovePreviewReceiptReadSchema = strictObject({
   protocolVersion: Type.Literal("PRE_STAGE_11"),
   result: LegacyPreviewReceiptMoveResultSchema
 });
+const PreInHouseMembershipShortenPreviewReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"),
+  result: PreInHouseMembershipPreviewReceiptShortenResultSchema
+});
+const PreInHouseMembershipMovePreviewReceiptReadSchema = strictObject({
+  ...HistoricalExecutedReceiptBase,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"),
+  result: PreInHouseMembershipPreviewReceiptMoveResultSchema
+});
 export const HistoricalCommandPreviewResponseSchema = Type.Union([
   CurrentCommandPreviewResponseSchema,
   strictObject({
@@ -1604,6 +1773,14 @@ export const HistoricalCommandPreviewResponseSchema = Type.Union([
   strictObject({
     preview: LegacyMoveUnitPreviewSchema,
     receipt: HistoricalMovePreviewReceiptReadSchema
+  }),
+  strictObject({
+    preview: PreInHouseMembershipShortenStayPreviewSchema,
+    receipt: PreInHouseMembershipShortenPreviewReceiptReadSchema
+  }),
+  strictObject({
+    preview: PreInHouseMembershipMoveUnitPreviewSchema,
+    receipt: PreInHouseMembershipMovePreviewReceiptReadSchema
   })
 ]);
 
@@ -2095,7 +2272,17 @@ export const OrderRowSchema = strictObject({
   created_at: DateTime,
   updated_at: DateTime
 });
-export const OrdersListResponseSchema = strictObject({ orders: Type.Array(OrderRowSchema) });
+const OrderListRowSchema = strictObject({
+  ...OrderRowSchema.properties,
+  stay_status: Type.Union([
+    Type.Literal("PLANNED"), Type.Literal("IN_HOUSE"), Type.Literal("COMPLETED"),
+    Type.Literal("CANCELLED"), Type.Literal("NO_SHOW"), Type.Literal("CHECK_IN_REVOKED")
+  ])
+});
+export const OrdersListResponseSchema = strictObject({
+  businessDate: LocalDate,
+  orders: Type.Array(OrderListRowSchema)
+});
 
 const StaySegmentRowSchema = strictObject({
   id: Id, stay_id: Id, sequence: Type.Integer({ minimum: 1 }), inventory_unit_id: Id,
@@ -2175,13 +2362,29 @@ const LegacyMoveAmendmentRowSchema = strictObject({
   protocolVersion: Type.Literal("PRE_STAGE_11"),
   ...HistoricalReadOnlyMetadata
 });
+const PreInHouseMembershipShortenAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("SHORTEN_STAY"),
+  payload: PreInHouseMembershipShortenStayEffectSchema,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"),
+  ...HistoricalReadOnlyMetadata
+});
+const PreInHouseMembershipMoveAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("MOVE_UNIT"),
+  payload: PreInHouseMembershipMoveUnitEffectSchema,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"),
+  ...HistoricalReadOnlyMetadata
+});
 const AmendmentRowSchema = Type.Union([
   BackfillCheckInAmendmentRowSchema,
   BackfillCheckOutAmendmentRowSchema,
   CurrentAmendmentRowSchema,
   LegacyStayChangeAmendmentRowSchema,
   LegacyShortenAmendmentRowSchema,
-  LegacyMoveAmendmentRowSchema
+  LegacyMoveAmendmentRowSchema,
+  PreInHouseMembershipShortenAmendmentRowSchema,
+  PreInHouseMembershipMoveAmendmentRowSchema
 ]);
 const PricingRevisionRowSchema = strictObject({
   id: Id, order_id: Id, revision_no: Type.Integer({ minimum: 1 }), amendment_id: Id, policy_version_id: Id,
@@ -2319,6 +2522,13 @@ export const OrderDetailResponseSchema = strictObject({
   arrangementHistory: Type.Array(OrderArrangementHistoryItemSchema, { minItems: 1 }),
   amendments: Type.Array(AmendmentRowSchema),
   pricingRevisions: Type.Array(PricingRevisionRowSchema),
+  membershipConversion: nullable(strictObject({
+    membershipOrderId: Id,
+    memberId: Id,
+    contractId: Id,
+    entitlementLotId: Id,
+    commandId: Id
+  })),
   coverageSet: Type.Array(CoverageRowSchema),
   collectionFacts: Type.Array(CollectionFactRowSchema),
   cleaningTasks: Type.Array(CleaningTaskSummarySchema),
@@ -2529,11 +2739,25 @@ const HistoricalMoveStoredPreviewSchema = strictObject({
   effect: LegacyMoveUnitEffectSchema,
   protocolVersion: Type.Literal("PRE_STAGE_11")
 });
+const PreInHouseMembershipShortenStoredPreviewSchema = strictObject({
+  ...HistoricalStoredPreviewBase,
+  command_type: Type.Literal("SHORTEN_STAY"),
+  effect: PreInHouseMembershipShortenStayEffectSchema,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT")
+});
+const PreInHouseMembershipMoveStoredPreviewSchema = strictObject({
+  ...HistoricalStoredPreviewBase,
+  command_type: Type.Literal("MOVE_UNIT"),
+  effect: PreInHouseMembershipMoveUnitEffectSchema,
+  protocolVersion: Type.Literal("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT")
+});
 export const HistoricalStoredPreviewResponseSchema = Type.Union([
   StoredPreviewResponseSchema,
   HistoricalStayChangeStoredPreviewSchema,
   HistoricalShortenStoredPreviewSchema,
-  HistoricalMoveStoredPreviewSchema
+  HistoricalMoveStoredPreviewSchema,
+  PreInHouseMembershipShortenStoredPreviewSchema,
+  PreInHouseMembershipMoveStoredPreviewSchema
 ]);
 
 export const IdParams = strictObject({ id: Id });

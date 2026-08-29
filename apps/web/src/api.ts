@@ -176,7 +176,7 @@ export const api = {
   orders: (propertyId: string, status?: string) => {
     const query = new URLSearchParams({ propertyId });
     if (status) query.set("status", status);
-    return request<{ orders: OrderRowDto[] }>(`/api/v1/orders?${query.toString()}`);
+    return request<{ businessDate: string; orders: OrderRowDto[] }>(`/api/v1/orders?${query.toString()}`);
   },
   order: (orderId: string, signal?: AbortSignal) => request<unknown>(
     `/api/v1/orders/${encodeURIComponent(orderId)}`,

@@ -324,7 +324,7 @@ export interface MaintenanceLockDto {
   released_at: string | null;
 }
 
-export interface OrderRowDto {
+export interface OrderDetailRowDto {
   id: string;
   property_id: string;
   status: string;
@@ -347,6 +347,10 @@ export interface OrderRowDto {
   version: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface OrderRowDto extends OrderDetailRowDto {
+  stay_status: "PLANNED" | "IN_HOUSE" | "COMPLETED" | "CANCELLED" | "NO_SHOW" | "CHECK_IN_REVOKED";
 }
 
 export interface StaySegmentDto {
@@ -450,7 +454,7 @@ export interface CleaningTaskSummaryDto {
 export interface OrderViewDto {
   accessLevel: AccessLevel;
   allowedActions: OrderAllowedActionDto[];
-  order: OrderRowDto;
+  order: OrderDetailRowDto;
   occupants: Array<{
     id: string;
     orderId: string;
@@ -490,6 +494,13 @@ export interface OrderViewDto {
   arrangementHistory: OrderArrangementHistoryItemDto[];
   amendments: AmendmentDto[];
   pricingRevisions: PricingRevisionDto[];
+  membershipConversion: {
+    membershipOrderId: string;
+    memberId: string;
+    contractId: string;
+    entitlementLotId: string;
+    commandId: string;
+  } | null;
   coverageSet: CoverageRowDto[];
   collectionFacts: CollectionFactDto[];
   cleaningTasks: CleaningTaskSummaryDto[];

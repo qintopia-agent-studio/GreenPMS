@@ -1,9 +1,21 @@
 import { execFile } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
+import { sql } from "kysely";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatabase, databaseReady, getRoomStatusBoard, listAvailability } from "@qintopia/db";
+import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
+import {
+  confirmCommandPreview,
+  createCommandPreview,
+  createDatabase,
+  databaseReady,
+  getRoomStatusBoard,
+  listAvailability,
+  propertyLocalToday,
+  withPropertyClockForTesting
+} from "@qintopia/db";
+import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo, seedDemo } from "../../packages/db/src/seed.ts";
 
 const execFileAsync = promisify(execFile);
@@ -35,12 +47,44 @@ async function recreateDatabase(): Promise<void> {
   }
 }
 
+async function applyMigrationFiles(migrationNames: readonly string[]): Promise<void> {
+  const client = new pg.Client({ connectionString: databaseUrl.toString() });
+  await client.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        name text PRIMARY KEY,
+        applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    for (const migrationName of migrationNames) {
+      await client.query("BEGIN");
+      try {
+        await client.query(await readFile(`packages/db/src/migrations/${migrationName}`, "utf8"));
+        await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [migrationName]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+  } finally {
+    await client.end();
+  }
+}
+
 function runMigration() {
   return execFileAsync(
     process.execPath,
     ["--import", "tsx", "packages/db/src/migrate.ts"],
     { cwd: process.cwd(), env: { ...process.env, DATABASE_URL: databaseUrl.toString() } }
   );
+}
+
+function shiftDate(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 async function installMigrationHistory(
@@ -100,7 +144,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(43);
+      expect(expectedMigrations).toHaveLength(45);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -123,6 +167,8 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("030_collection_fact_historical_pricing_revision.sql");
       expect(expectedMigrations).toContain("032_wecom_refund_original_route.sql");
       expect(expectedMigrations).toContain("043_complete_stay_guard_hardening.sql");
+      expect(expectedMigrations).toContain("044_inhouse_membership_fulfillment_guards.sql");
+      expect(expectedMigrations).toContain("045_stay_membership_net_wecom_transfer.sql");
 
       const readyDatabase = createDatabase(databaseUrl.toString());
       try {
@@ -137,6 +183,231 @@ describe("database migration concurrency", () => {
       }
     } finally {
       await client.end();
+    }
+  });
+
+  it("holds migration 044 behind the command protocol epoch lock", async () => {
+    await recreateDatabase();
+    const migrationNames = (await readdir("packages/db/src/migrations"))
+      .filter((name) => /^\d+.*\.sql$/.test(name))
+      .sort();
+    const migration044Index = migrationNames.indexOf("044_inhouse_membership_fulfillment_guards.sql");
+    expect(migration044Index).toBeGreaterThan(0);
+    expect(migrationNames[migration044Index - 1]).toBe("043_complete_stay_guard_hardening.sql");
+    await applyMigrationFiles(migrationNames.slice(0, migration044Index));
+
+    const blocker = new pg.Client({ connectionString: databaseUrl.toString() });
+    await blocker.connect();
+    await blocker.query("SELECT pg_advisory_lock_shared(hashtextextended('qintopia:protocol-epoch', 0))");
+    const migration = runMigration();
+    let observedWaitingEpochLock = false;
+    try {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const waiting = await blocker.query<{ count: number }>(`
+          SELECT count(*)::int AS count
+          FROM pg_stat_activity
+          WHERE datname = $1
+            AND wait_event_type = 'Lock'
+            AND wait_event = 'advisory'
+        `, [databaseName]);
+        if ((waiting.rows[0]?.count ?? 0) > 0) {
+          observedWaitingEpochLock = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(await blocker.query<{ count: number }>(`
+        SELECT count(*)::int AS count
+        FROM schema_migrations
+        WHERE name = '044_inhouse_membership_fulfillment_guards.sql'
+      `).then((result) => result.rows[0]?.count)).toBe(0);
+    } finally {
+      await blocker.query("SELECT pg_advisory_unlock_shared(hashtextextended('qintopia:protocol-epoch', 0))");
+      await blocker.end();
+    }
+
+    const outcome = await migration;
+    expect(observedWaitingEpochLock).toBe(true);
+    expect(outcome.stderr).toBe("");
+    const readyDatabase = createDatabase(databaseUrl.toString());
+    try {
+      expect(await databaseReady(readyDatabase)).toBe(true);
+    } finally {
+      await readyDatabase.destroy();
+    }
+  });
+
+  it("upgrades populated 044 data after an in-house membership conversion was checked out", async () => {
+    await recreateDatabase();
+    const migrationNames = (await readdir("packages/db/src/migrations"))
+      .filter((name) => /^\d+.*\.sql$/.test(name))
+      .sort();
+    const migration045Index = migrationNames.indexOf("045_stay_membership_net_wecom_transfer.sql");
+    expect(migration045Index).toBeGreaterThan(0);
+    expect(migrationNames[migration045Index - 1]).toBe("044_inhouse_membership_fulfillment_guards.sql");
+
+    await applyMigrationFiles(migrationNames.slice(0, migration045Index));
+
+    const legacyDb = createDatabase(databaseUrl.toString());
+    const principal: AuthPrincipal = {
+      subjectId: demo.agentSubjectId,
+      credentialId: "token_demo_write",
+      credentialType: "TOKEN",
+      displayName: "Demo Agent",
+      propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+    };
+    let commandSequence = 0;
+    const execute = async (envelope: CommandEnvelope, prefix: string) => {
+      commandSequence += 1;
+      const previewMetadata = {
+        idempotencyKey: `${prefix}-preview-${commandSequence}`,
+        correlationId: `${prefix}-preview-${commandSequence}`
+      };
+      const prepared = await createCommandPreview(legacyDb, principal, envelope, previewMetadata);
+      commandSequence += 1;
+      const receipt = await confirmCommandPreview(legacyDb, principal, prepared.preview.previewId, {
+        propertyId: demo.propertyId,
+        commandType: envelope.commandType,
+        confirmation: true,
+        expectedEffectHash: prepared.preview.effectHash,
+        reason: envelope.commandType === "CREATE_ORDER"
+          ? { code: "CREATE_STANDARD_ORDER", note: "" }
+          : { code: "STAGE47_ACCEPTANCE", note: "populated 044 to 045 migration regression" }
+      }, {
+        idempotencyKey: `${prefix}-confirm-${commandSequence}`,
+        correlationId: `${prefix}-confirm-${commandSequence}`
+      });
+      expect(receipt.businessCommitted).toBe(true);
+      return receipt;
+    };
+
+    let conversionCommandId = "";
+    let orderId = "";
+    let conversionRevisionId = "";
+    let snapshotBeforeUpgrade: unknown;
+    try {
+      await seedDemo(legacyDb);
+      const businessDate = await propertyLocalToday(legacyDb, demo.propertyId);
+      const arrivalDate = shiftDate(businessDate, -2);
+      const departureDate = shiftDate(businessDate, 5);
+      const memberPhone = "13904500001";
+      const memberReceipt = await execute({
+        commandType: "CREATE_MEMBER",
+        input: {
+          propertyId: demo.propertyId,
+          fullName: "Migration 045 Member",
+          nickname: "migration-045",
+          identityCardNumber: "MIGRATION-045-MEMBER",
+          phone: memberPhone,
+          wechat: "migration-045"
+        }
+      }, "migration-045-member");
+      const memberId = memberReceipt.result!.memberId as string;
+      const quote = await withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), () =>
+        createQuoteForTesting(legacyDb, {
+          propertyId: demo.propertyId,
+          inventoryUnitId: "unit_room_d_gen_01",
+          stayType: "CUSTOM",
+          arrivalDate,
+          departureDate,
+          pricingPolicyVersionId: demo.publicPricingPolicyId
+        })
+      );
+      const orderReceipt = await withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), () => execute({
+        commandType: "CREATE_ORDER",
+        input: {
+          propertyId: demo.propertyId,
+          quoteId: quote.quoteId,
+          primaryGuest: {
+            fullName: "Migration 045 Guest",
+            nickname: "migration-045",
+            phone: memberPhone,
+            documentNumber: "MIGRATION-045-GUEST"
+          },
+          bookingChannelCode: "WECOM",
+          channelOrderReference: null,
+          targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+        }
+      }, "migration-045-order"));
+      orderId = orderReceipt.result!.orderId as string;
+      await withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), () => execute({
+        commandType: "CHECK_IN",
+        input: { propertyId: demo.propertyId, orderId }
+      }, "migration-045-checkin"));
+      const conversionReceipt = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => execute({
+        commandType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+        input: {
+          propertyId: demo.propertyId,
+          orderId,
+          memberId,
+          membershipProductId: "membership_product_shared_bath_single_v1",
+          collectionFactIds: [],
+          agreedPriceMinor: 162_000,
+          remainingPaymentTransactionReference: "WX-MIGRATION-045-DIRECT"
+        }
+      }, "migration-045-conversion"));
+      conversionCommandId = conversionReceipt.commandId;
+      conversionRevisionId = conversionReceipt.result!.pricingRevisionId as string;
+      await withPropertyClockForTesting(new Date(`${departureDate}T12:00:00.000Z`), () => execute({
+        commandType: "CHECK_OUT",
+        input: { propertyId: demo.propertyId, orderId }
+      }, "migration-045-checkout"));
+
+      snapshotBeforeUpgrade = await legacyDb.selectFrom("orders")
+        .innerJoin("stays", "stays.order_id", "orders.id")
+        .innerJoin("amendments as conversion", (join) => join
+          .onRef("conversion.order_id", "=", "orders.id")
+          .on("conversion.command_id", "=", conversionCommandId))
+        .select([
+          "orders.version",
+          "orders.status as orderStatus",
+          "orders.current_revision_id as currentRevisionId",
+          "stays.status as stayStatus",
+          "conversion.prior_version as conversionPriorVersion",
+          "conversion.new_version as conversionNewVersion"
+        ])
+        .where("orders.id", "=", orderId)
+        .executeTakeFirstOrThrow();
+      expect(snapshotBeforeUpgrade).toEqual({
+        version: 4,
+        orderStatus: "CHECKED_OUT",
+        currentRevisionId: conversionRevisionId,
+        stayStatus: "COMPLETED",
+        conversionPriorVersion: 2,
+        conversionNewVersion: 3
+      });
+    } finally {
+      await legacyDb.destroy();
+    }
+
+    const outcome = await runMigration();
+    expect(outcome.stderr).toBe("");
+
+    const upgradedDb = createDatabase(databaseUrl.toString());
+    try {
+      expect(await databaseReady(upgradedDb)).toBe(true);
+      await sql`SELECT qintopia_assert_stage13_stay_conversion_command(${conversionCommandId})`.execute(upgradedDb);
+      expect(await upgradedDb.selectFrom("orders")
+        .innerJoin("stays", "stays.order_id", "orders.id")
+        .innerJoin("amendments as conversion", (join) => join
+          .onRef("conversion.order_id", "=", "orders.id")
+          .on("conversion.command_id", "=", conversionCommandId))
+        .select([
+          "orders.version",
+          "orders.status as orderStatus",
+          "orders.current_revision_id as currentRevisionId",
+          "stays.status as stayStatus",
+          "conversion.prior_version as conversionPriorVersion",
+          "conversion.new_version as conversionNewVersion"
+        ])
+        .where("orders.id", "=", orderId)
+        .executeTakeFirstOrThrow()).toEqual(snapshotBeforeUpgrade);
+      expect(await upgradedDb.selectFrom("schema_migrations")
+        .select("name")
+        .where("name", "=", "045_stay_membership_net_wecom_transfer.sql")
+        .execute()).toEqual([{ name: "045_stay_membership_net_wecom_transfer.sql" }]);
+    } finally {
+      await upgradedDb.destroy();
     }
   });
 
