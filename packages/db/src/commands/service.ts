@@ -76,6 +76,9 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "EXTEND_STAY",
   "MOVE_UNIT",
   "REPRICE_ORDER",
+  "RECORD_COLLECTION",
+  "RECORD_REFUND",
+  "REVERSE_FACT",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
@@ -941,6 +944,7 @@ export async function executeQuoteCommand(
 
     return withQuoteQuotaLock(lockedDb, quoteQuotaLockKey, () => (
       lockedDb.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
+      await lockCommandProtocolEpoch(trx);
       await revalidateQuoteReadAccess(trx, principal, propertyId);
       const replay = await replayOrConflict(trx, {
         subjectId: principal.subjectId,
@@ -1119,6 +1123,7 @@ async function persistRejected(db: Kysely<Database>, principal: AuthPrincipal, o
   closePreviewId?: string;
 }): Promise<ReceiptDto> {
   return db.transaction().execute(async (trx) => {
+    await lockCommandProtocolEpoch(trx);
     if (options.closePreviewId) {
       await trx.updateTable("command_previews")
         .set({ status: "EXPIRED", used_at: null })
@@ -1513,6 +1518,7 @@ export async function resolveCommandResult(
     originalIdempotencyKey
   );
   return db.transaction().execute(async (trx) => {
+    await lockCommandProtocolEpoch(trx);
     const lockResult = await sql<{ acquired: boolean }>`
       select pg_try_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint)) as acquired
     `.execute(trx);

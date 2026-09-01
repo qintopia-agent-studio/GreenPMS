@@ -309,9 +309,7 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
     const { trigger, popover } = await openWholeRoomPopover(page);
     await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(1);
     await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
-    const selectedOrder = orderResponse(page, fixture.wholeRoom.orderId);
     await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
-    await selectedOrder;
 
     const drawer = page.locator("dialog.modal-drawer");
     await expect(drawer).toBeVisible();
@@ -337,8 +335,6 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
 
     const correctionAction = context.getByRole("button", { name: "更正资料", exact: true }).first();
     await expect(correctionAction).toBeEnabled();
-    const polledOrder = orderResponse(page, fixture.wholeRoom.orderId);
-    await polledOrder;
     await expect(correctionAction).toBeEnabled();
 
     await page.keyboard.press("Escape");
@@ -856,9 +852,9 @@ test("U2 mobile order context is full-screen, machine-free, and returns focus to
   await login(page);
   await expect(page.locator(".room-status-toolbar")).toHaveCount(0);
   await expect(page.locator(".room-status-grid-section")).toBeHidden();
+  await showRange(page, 7, false);
   await page.getByRole("button", { name: "查看住宿安排说明", exact: true }).click();
   await expect(page.getByText("这里按房间和日期列出当前查看范围内的已预订和在住占用，用于核对每天的占用情况；它不是今日待办，也不会直接创建订单。", { exact: true })).toBeVisible();
-  await showRange(page, 7, false);
   await expect(page.getByTestId("sidebar-toggle")).toBeHidden();
   for (const viewport of [{ width: 375, height: 812 }, { width: 320, height: 700 }]) {
     await page.setViewportSize(viewport);

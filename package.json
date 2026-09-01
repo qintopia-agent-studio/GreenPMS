@@ -28,6 +28,8 @@
     "test:e2e": "node --import tsx tests/helpers/run-database-test-suite.ts -- npm run test:e2e:run --",
     "test:e2e:run": "node --import tsx tests/helpers/assert-database-test-lock.ts && VITE_DEMO_LOGIN=true WEB_BUILD_OUT_DIR=dist-e2e npm run build && node --import tsx tests/e2e/setup-database.ts && playwright test",
     "test:pricing-facts": "node --import tsx tests/pricing-facts/verify-pricing-facts.ts",
+    "data:purge:local-acceptance": "node --import tsx scripts/purge-local-acceptance-business-data.ts",
+    "data:setup:room-status-visual": "node --import tsx tests/e2e/setup-room-status-visual-acceptance.ts",
     "backup": "./scripts/backup.sh",
     "verify:restore": "bash ./scripts/verify-backup-restore.sh",
     "verify:cold-start": "bash ./scripts/verify-cold-start.sh",

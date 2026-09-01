@@ -60,11 +60,13 @@ function unit(overrides: Partial<RoomStatusUnitDto> = {}): RoomStatusUnitDto {
     buildingCode: "1",
     roomTypeCode: "PUBLIC_FOUR_BED",
     pricingProductCode: "PUBLIC_FOUR_BED_WHOLE_ROOM",
+    physicalBedCount: 4,
     capacity: 4,
     occupancyCapacity: 4,
     childUnitIds: [],
     children: [],
     bedOccupancies: [],
+    bedSlotStates: [],
     days: [day("2026-07-20"), day("2026-07-21")],
     intervals: [],
     conflicts: [],
@@ -85,9 +87,14 @@ function lodgingInterval(overrides: Partial<RoomStatusIntervalDto> = {}): RoomSt
     sourceStartDate: "2026-07-20",
     sourceEndDate: "2026-07-21",
     status: "RESERVED",
+    attention: null,
+    operationalAttention: null,
     available: false,
     blocking: true,
     label: "order_bed",
+    sourceCategory: "DIRECT",
+    freeStayCategoryCode: null,
+    freeStayReason: null,
     primaryOccupantLabel: "山风",
     occupantCount: 1,
     occupants: [{ occupantId: "occupant_bed", nickname: "山风" }],
@@ -113,7 +120,20 @@ describe("RoomStatus grid intervals", () => {
     const unresolvedChild = lodgingInterval({ id: "interval_unknown", status: "UNKNOWN", occupants: [], occupantCount: 0 });
     const settled = lodgingInterval({ id: "interval_settled", status: "SETTLED", blocking: false });
     const arrears = lodgingInterval({ id: "interval_arrears", status: "ARREARS", blocking: false });
-    const maintenance = lodgingInterval({ id: "interval_maintenance", sourceKind: "MAINTENANCE" });
+    const freeStay = lodgingInterval({
+      id: "interval_free_stay",
+      sourceKind: "FREE_STAY",
+      sourceCategory: "FREE_STAY",
+      freeStayCategoryCode: "VOLUNTEER",
+      freeStayReason: "义工服务",
+      status: "IN_HOUSE"
+    });
+    const maintenance = lodgingInterval({
+      id: "interval_maintenance",
+      sourceKind: "MAINTENANCE",
+      status: "MAINTENANCE",
+      label: "维修锁房"
+    });
     const rendered = intervalsRenderedOnRoomStatusGrid(unit({
       bedOccupancies: [{
         serviceDate: "2026-07-20",
@@ -127,20 +147,16 @@ describe("RoomStatus grid intervals", () => {
           sourceReference: orderReference
         }]
       }],
-      intervals: [childBed, wholeRoom, unresolvedChild, settled, arrears, maintenance]
+      intervals: [childBed, wholeRoom, unresolvedChild, settled, arrears, freeStay, maintenance]
     }), ["2026-07-20"]);
 
-    expect(rendered.map((interval) => interval.id)).toEqual([
-      "interval_maintenance"
-    ]);
+    expect(rendered.map((interval) => interval.id)).toEqual(["interval_maintenance"]);
 
     const aggregationMissing = intervalsRenderedOnRoomStatusGrid(unit({
       bedOccupancies: [],
-      intervals: [childBed, wholeRoom, unresolvedChild, settled, arrears, maintenance]
+      intervals: [childBed, wholeRoom, unresolvedChild, settled, arrears, freeStay, maintenance]
     }), ["2026-07-20"]);
-    expect(aggregationMissing.map((interval) => interval.id)).toEqual([
-      "interval_maintenance"
-    ]);
+    expect(aggregationMissing.map((interval) => interval.id)).toEqual(["interval_maintenance"]);
 
     const missingWholeRoomOccupants = intervalsRenderedOnRoomStatusGrid(unit({
       intervals: [wholeRoom, lodgingInterval({
@@ -172,6 +188,45 @@ describe("RoomStatus grid intervals", () => {
 });
 
 describe("RoomStatus quick order options", () => {
+  it("retains structured source facts instead of deriving them from an order label", () => {
+    const result = roomStatusOrderOptionsForDate(unit({ intervals: [lodgingInterval({
+      sourceCategory: "MEITUAN"
+    })] }), "2026-07-20");
+
+    expect(result).toMatchObject({
+      kind: "READY",
+      orders: [{
+        source: {
+          sourceKind: "ORDER",
+          sourceCategory: "MEITUAN",
+          freeStayCategoryCode: null,
+          freeStayReason: null
+        }
+      }]
+    });
+  });
+
+  it("keeps legacy free stays structurally unknown instead of guessing their category", () => {
+    const result = roomStatusOrderOptionsForDate(unit({ intervals: [lodgingInterval({
+      sourceKind: "FREE_STAY",
+      sourceCategory: null,
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    })] }), "2026-07-20");
+
+    expect(result).toMatchObject({
+      kind: "READY",
+      orders: [{
+        source: {
+          sourceKind: "FREE_STAY",
+          sourceCategory: null,
+          freeStayCategoryCode: null,
+          freeStayReason: null
+        }
+      }]
+    });
+  });
+
   it("keeps a split-bed parent cell distinct from its only child order", () => {
     const parentDisplay = lodgingInterval({
       id: "interval_parent_display",
@@ -1154,6 +1209,76 @@ describe("RoomStatus restoration", () => {
     expect(result.state.focusedCell).toEqual({ unitId: original.id, serviceDate: "2026-07-20" });
     expect(roomStatusFactFingerprint([changed], result.state)).not.toBe(fingerprint);
   });
+
+  it("treats a debt attention transition as an authoritative fact change", () => {
+    const state = createRoomStatusViewState({
+      focusedCell: { unitId: "unit_room_101", serviceDate: "2026-07-20" }
+    });
+    const paid = unit({
+      intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101", attention: null })]
+    });
+    const owing = unit({
+      intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101", attention: "ARREARS" })]
+    });
+
+    expect(roomStatusFactFingerprint([owing], state)).not.toBe(roomStatusFactFingerprint([paid], state));
+  });
+
+  it("treats physical-bed, child-set, and in-range bed-slot transitions as authoritative fact changes", () => {
+    const state = createRoomStatusViewState({
+      focusedCell: { unitId: "unit_room_101", serviceDate: "2026-07-20" }
+    });
+    const original = unit({
+      childUnitIds: ["unit_bed_101_a", "unit_bed_101_b"],
+      bedSlotStates: [{
+        serviceDate: "2026-07-20",
+        inventoryUnitId: "unit_bed_101_a",
+        inventoryUnitCode: "101-A",
+        status: "AVAILABLE"
+      }]
+    });
+    const fingerprint = roomStatusFactFingerprint([original], state);
+
+    expect(roomStatusFactFingerprint([unit({
+      ...original,
+      physicalBedCount: 3
+    })], state)).not.toBe(fingerprint);
+    expect(roomStatusFactFingerprint([unit({
+      ...original,
+      childUnitIds: ["unit_bed_101_a"]
+    })], state)).not.toBe(fingerprint);
+    expect(roomStatusFactFingerprint([unit({
+      ...original,
+      bedSlotStates: [{
+        ...original.bedSlotStates[0]!,
+        status: "MAINTENANCE"
+      }]
+    })], state)).not.toBe(fingerprint);
+  });
+
+  it.each(["OVERDUE_RESERVED", "OVERDUE_IN_HOUSE"] as const)(
+    "treats a %s operational transition as an authoritative fact change",
+    (operationalAttention) => {
+      const state = createRoomStatusViewState({
+        focusedCell: { unitId: "unit_room_101", serviceDate: "2026-07-20" }
+      });
+      const ordinary = unit({
+        intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101", operationalAttention: null })]
+      });
+      const overdue = unit({
+        intervals: [lodgingInterval({ actualInventoryUnitId: "unit_room_101", operationalAttention })]
+      });
+      const fingerprint = roomStatusFactFingerprint([ordinary], state);
+
+      expect(roomStatusFactFingerprint([overdue], state)).not.toBe(fingerprint);
+      expect(reconcileRoomStatusRestoration(
+        [overdue],
+        ["2026-07-20", "2026-07-21"],
+        state,
+        fingerprint
+      ).outcome).toBe("FACT_CHANGED");
+    }
+  );
 
   it("clears a hidden child selection and focuses the first genuinely visible cell", () => {
     const bedA = unit({

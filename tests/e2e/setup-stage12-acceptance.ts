@@ -59,6 +59,16 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+async function withOrdinaryOrderCreationClock<T>(
+  businessDate: string,
+  arrivalDate: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00+08:00`), operation)
+    : operation();
+}
+
 async function execute(
   db: Kysely<Database>,
   commandType: CommandType,
@@ -124,7 +134,7 @@ async function createMember(db: Kysely<Database>, key: string): Promise<string> 
   return memberId;
 }
 
-async function createStay(db: Kysely<Database>, options: {
+async function createStay(db: Kysely<Database>, businessDate: string, options: {
   key: string;
   unitCode: string;
   nickname: string;
@@ -136,33 +146,36 @@ async function createStay(db: Kysely<Database>, options: {
 }): Promise<Stage12StayFixture> {
   const unit = await unitByCode(db, options.unitCode);
   const stayType = options.stayType ?? "TRANSIENT";
-  const quote = await createQuoteForTesting(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: unit.id,
-    arrivalDate: options.arrivalDate,
-    departureDate: options.departureDate,
-    pricingPolicyVersionId: stayType === "FREE" ? demo.freePolicyId : demo.pricingPolicyId,
-    stayType,
-    ...(options.memberId ? { memberId: options.memberId } : {})
+  const { quote, created } = await withOrdinaryOrderCreationClock(businessDate, options.arrivalDate, async () => {
+    const quote = await createQuoteForTesting(db, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: unit.id,
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate,
+      pricingPolicyVersionId: stayType === "FREE" ? demo.freePolicyId : demo.pricingPolicyId,
+      stayType,
+      ...(options.memberId ? { memberId: options.memberId } : {})
+    });
+    const created = await execute(db, "CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: quote.quoteId,
+      primaryGuest: {
+        fullName: `${options.nickname}完整姓名`,
+        nickname: options.nickname,
+        phone: "13800001210",
+        documentNumber: `STAGE12-${options.key}`
+      },
+      ...(!options.memberId && stayType !== "FREE" ? {
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null
+      } : {}),
+      ...(stayType === "FREE" ? {
+        freeStayReason: "4.5 取消与库存释放验收",
+        freeStayCategoryCode: "RECEPTION"
+      } : {})
+    }, `${options.key}-create`);
+    return { quote, created };
   });
-  const created = await execute(db, "CREATE_ORDER", {
-    propertyId: demo.propertyId,
-    quoteId: quote.quoteId,
-    primaryGuest: {
-      fullName: `${options.nickname}完整姓名`,
-      nickname: options.nickname,
-      phone: "13800001210",
-      documentNumber: `STAGE12-${options.key}`
-    },
-    ...(!options.memberId && stayType !== "FREE" ? {
-      bookingChannelCode: "WECOM",
-      channelOrderReference: null
-    } : {}),
-    ...(stayType === "FREE" ? {
-      freeStayReason: "4.5 取消与库存释放验收",
-      freeStayCategoryCode: "RECEPTION"
-    } : {})
-  }, `${options.key}-create`);
   const orderId = created.result?.orderId;
   const stayId = created.result?.stayId;
   if (typeof orderId !== "string" || typeof stayId !== "string") {
@@ -251,7 +264,7 @@ export async function prepareStage12Acceptance(
       () => createMember(db, `${suffix}-member`)
     );
 
-    const cancellation = await createStay(db, {
+    const cancellation = await createStay(db, businessDate, {
       key: `${suffix}-cancel-normal`,
       unitCode: "A01",
       nickname: `普通取消-${suffix}`,
@@ -259,15 +272,15 @@ export async function prepareStage12Acceptance(
       departureDate: futureDeparture,
       collectionMinor: 12_300
     });
-    const memberCancellation = await createStay(db, {
+    const memberCancellation = await createStay(db, businessDate, {
       key: `${suffix}-cancel-member`,
-      unitCode: "D02",
+      unitCode: "D04",
       nickname: `会员取消-${suffix}`,
       arrivalDate: futureArrival,
       departureDate: futureDeparture,
       memberId
     });
-    const freeCancellation = await createStay(db, {
+    const freeCancellation = await createStay(db, businessDate, {
       key: `${suffix}-cancel-free`,
       unitCode: "D03",
       nickname: `免费取消-${suffix}`,
@@ -275,7 +288,7 @@ export async function prepareStage12Acceptance(
       departureDate: futureDeparture,
       stayType: "FREE"
     });
-    const noShow = await createStay(db, {
+    const noShow = await createStay(db, businessDate, {
       key: `${suffix}-no-show`,
       unitCode: "D04",
       nickname: `逾期未到-${suffix}`,
@@ -283,21 +296,21 @@ export async function prepareStage12Acceptance(
       departureDate: currentDeparture,
       collectionMinor: 8_600
     });
-    const noShowThreshold = await createStay(db, {
+    const noShowThreshold = await createStay(db, businessDate, {
       key: `${suffix}-no-show-threshold`,
       unitCode: "D05",
       nickname: `未到门禁-${suffix}`,
       arrivalDate: businessDate,
       departureDate: currentDeparture
     });
-    const overdueCheckIn = await createStay(db, {
+    const overdueCheckIn = await createStay(db, businessDate, {
       key: `${suffix}-late-check-in`,
       unitCode: "E01",
       nickname: `迟录入住-${suffix}`,
       arrivalDate: overdueArrival,
       departureDate: currentDeparture
     });
-    const revokeCheckIn = await createStay(db, {
+    const revokeCheckIn = await createStay(db, businessDate, {
       key: `${suffix}-revoke-normal`,
       unitCode: "E02",
       nickname: `撤销入住-${suffix}`,
@@ -305,7 +318,7 @@ export async function prepareStage12Acceptance(
       departureDate: currentDeparture,
       collectionMinor: 17_000
     });
-    const memberRevokeCheckIn = await createStay(db, {
+    const memberRevokeCheckIn = await createStay(db, businessDate, {
       key: `${suffix}-revoke-member`,
       unitCode: "D01",
       nickname: `会员撤销入住-${suffix}`,

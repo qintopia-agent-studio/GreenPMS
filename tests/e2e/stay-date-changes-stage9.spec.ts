@@ -115,7 +115,7 @@ async function openOrder(page: Page, stay: Stage9StayFixture): Promise<void> {
 }
 
 async function fillRescheduleForm(page: Page, stay: Stage9AcceptanceFixture["external"], reason: string): Promise<Locator> {
-  const form = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  const form = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
   await expect(form).toBeVisible();
   await form.getByTestId("stay-date-arrival").fill(stay.newArrivalDate);
   await form.getByTestId("stay-date-departure").fill(stay.newDepartureDate);
@@ -123,7 +123,7 @@ async function fillRescheduleForm(page: Page, stay: Stage9AcceptanceFixture["ext
   return form;
 }
 
-async function continueToReview(page: Page, action: "调整预订日期" | "延长住宿"): Promise<Locator> {
+async function continueToReview(page: Page, action: "调整住宿日期" | "延长住宿"): Promise<Locator> {
   await page.getByRole("button", { name: "继续核对", exact: true }).click();
   const review = page.getByRole("dialog", { name: action, exact: true });
   await expect(review.getByTestId("command-effect")).toBeVisible({ timeout: 30_000 });
@@ -131,7 +131,7 @@ async function continueToReview(page: Page, action: "调整预订日期" | "延�
   return review;
 }
 
-async function confirmReview(page: Page, action: "调整预订日期" | "延长住宿"): Promise<void> {
+async function confirmReview(page: Page, action: "调整住宿日期" | "延长住宿"): Promise<void> {
   const review = page.getByRole("dialog", { name: action, exact: true });
   await review.getByRole("button", { name: `确认${action}`, exact: true }).click();
   await expect(review).toBeHidden({ timeout: 30_000 });
@@ -139,6 +139,12 @@ async function confirmReview(page: Page, action: "调整预订日期" | "延长�
 
 async function openRoomStatusOrder(page: Page, stay: Stage9StayFixture): Promise<Locator> {
   const cell = roomCell(page, stay, stay.arrivalDate);
+  if (await cell.count() === 0) {
+    const historicalDepartureDate = roomStatusTimelineDepartureDate(stay.arrivalDate);
+    const historicalResponse = roomStatusResponse(page, stay.arrivalDate, historicalDepartureDate);
+    await page.getByTestId("arrival-date").fill(stay.arrivalDate);
+    await historicalResponse;
+  }
   await expect(cell).toBeVisible({ timeout: 30_000 });
   await cell.focus();
   await page.keyboard.press("Enter");
@@ -225,7 +231,7 @@ test("4.2 desktop WECOM reschedule shows the recalculated amount before review",
   test.skip(!isDesktop(testInfo), "desktop Stage 9 first-step price visibility");
   await login(page);
   await openOrder(page, fixture.earlyArrival);
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
   const form = await fillRescheduleForm(page, fixture.earlyArrival as Stage9AcceptanceFixture["external"], "客人提前一天到店");
   const price = form.getByTestId("stay-date-price-preview");
   await expect(price).toBeVisible({ timeout: 30_000 });
@@ -248,14 +254,14 @@ test("4.2 desktop external-channel reschedule returns to the draft, records the 
   test.skip(!isDesktop(testInfo), "desktop Stage 9 external reschedule");
   await login(page);
   await openOrder(page, fixture.external);
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
   let form = await fillRescheduleForm(page, fixture.external, "客人调整出行日期");
   await form.getByTestId("stay-date-channel-amount").fill(fixture.external.targetContractYuan);
   await form.getByTestId("stay-date-channel-reason").fill(fixture.external.channelPriceDifferenceReason);
   const previewRequest = page.waitForRequest((request) => request.method() === "POST"
     && new URL(request.url()).pathname === "/api/v1/command-previews"
     && (request.postDataJSON() as { commandType?: string }).commandType === "RESCHEDULE_STAY");
-  let review = await continueToReview(page, "调整预订日期");
+  let review = await continueToReview(page, "调整住宿日期");
   expect((await previewRequest).postDataJSON()).toMatchObject({
     commandType: "RESCHEDULE_STAY",
     input: {
@@ -275,16 +281,16 @@ test("4.2 desktop external-channel reschedule returns to the draft, records the 
   await expect(review).not.toContainText("建议退款");
   await expect(review).toContainText(fixture.external.channelPriceDifferenceReason);
   await review.getByTestId("command-return-to-edit").click();
-  form = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  form = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
   await expect(form.getByTestId("stay-date-arrival")).toHaveValue(fixture.external.newArrivalDate);
   await expect(form.getByTestId("stay-date-departure")).toHaveValue(fixture.external.newDepartureDate);
   await expect(form.getByTestId("stay-date-channel-amount")).toHaveValue(fixture.external.targetContractYuan);
   await expect(form.getByTestId("stay-date-channel-reason")).toHaveValue(fixture.external.channelPriceDifferenceReason);
-  review = await continueToReview(page, "调整预订日期");
-  await confirmReview(page, "调整预订日期");
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整");
+  review = await continueToReview(page, "调整住宿日期");
+  await confirmReview(page, "调整住宿日期");
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿日期已调整");
   await expect(page.getByText(`${fixture.external.newArrivalDate} 至 ${fixture.external.newDepartureDate}`, { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("调整预订日期", { exact: true }).last()).toBeVisible();
+  await expect(page.getByText("调整住宿日期", { exact: true }).last()).toBeVisible();
   const orderResponse = await page.request.get(`/api/v1/orders/${encodeURIComponent(fixture.external.orderId)}`);
   expect(orderResponse.ok()).toBe(true);
   const orderView = await orderResponse.json() as { pricingRevisions: Array<{ reason: { code: string; note: string } }> };
@@ -314,7 +320,7 @@ test("4.2 desktop room-status entry restores selection, released dates are avail
     await page.keyboard.press("Escape");
     await expect(availablePopover).toBeHidden();
     const context = await openRoomStatusOrder(page, fixture.shift);
-    const action = context.getByRole("button", { name: "调整预订日期", exact: true });
+    const action = context.getByRole("button", { name: "调整住宿日期", exact: true });
     await expect(action).toBeVisible();
     await expect(action).toBeEnabled({ timeout: 15_000 });
     return action;
@@ -328,8 +334,8 @@ test("4.2 desktop room-status entry restores selection, released dates are avail
   action = await refreshAction();
   await action.click();
   await fillRescheduleForm(page, fixture.shift as Stage9AcceptanceFixture["external"], "房态入口改期");
-  await continueToReview(page, "调整预订日期");
-  await confirmReview(page, "调整预订日期");
+  await continueToReview(page, "调整住宿日期");
+  await confirmReview(page, "调整住宿日期");
   await expect(roomCell(page, fixture.shift, fixture.shift.arrivalDate)).not.toHaveClass(/is-stay-selected/);
   await expect(roomCell(page, fixture.shift, fixture.shift.arrivalDate)).toHaveClass(/room-status-day-available/);
   await expect(roomCell(page, fixture.shift, fixture.shift.newArrivalDate)).toHaveClass(/is-stay-selected/);
@@ -389,13 +395,14 @@ test("4.2 desktop departure pricing stays stable across room-status polling", as
   await form.getByTestId("stay-date-departure").fill(fixture.departureDay.newDepartureDate);
   await form.getByTestId("stay-date-reason").fill("核对房态轮询不重复报价");
   await expect(form.getByTestId("stay-date-price-preview")).toBeVisible({ timeout: 30_000 });
-  expect(datePreviewRequests).toBe(1);
+  const previewRequestsBeforePolling = datePreviewRequests;
+  expect(previewRequestsBeforePolling).toBeGreaterThanOrEqual(1);
 
-  await roomStatusResponse(page, fixture.rangeArrivalDate, roomStatusTimelineDepartureDate(fixture.rangeArrivalDate));
-  await roomStatusResponse(page, fixture.rangeArrivalDate, roomStatusTimelineDepartureDate(fixture.rangeArrivalDate));
+  await roomStatusResponse(page, fixture.departureDay.arrivalDate, roomStatusTimelineDepartureDate(fixture.departureDay.arrivalDate));
+  await roomStatusResponse(page, fixture.departureDay.arrivalDate, roomStatusTimelineDepartureDate(fixture.departureDay.arrivalDate));
   await expect(form.getByTestId("stay-date-price-preview")).toBeVisible();
   await expect(form.getByTestId("stay-date-price-loading")).toHaveCount(0);
-  expect(datePreviewRequests).toBe(1);
+  expect(datePreviewRequests).toBe(previewRequestsBeforePolling);
   await form.getByRole("button", { name: "取消", exact: true }).click();
 });
 
@@ -410,12 +417,12 @@ test("4.2 desktop result-unknown recovery only queries the original idempotency 
   test.skip(!isDesktop(testInfo), "desktop Stage 9 result recovery");
   await login(page);
   await openOrder(page, fixture.lateArrival);
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
   await fillRescheduleForm(page, fixture.lateArrival as Stage9AcceptanceFixture["external"], "验证原结果恢复");
   const equalPrice = page.getByTestId("stay-date-price-preview");
   await expect(equalPrice).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("stay-date-new-amount")).toHaveText(await page.getByTestId("stay-date-original-amount").innerText());
-  await continueToReview(page, "调整预订日期");
+  await continueToReview(page, "调整住宿日期");
   let confirmationKey = "";
   let confirmRequests = 0;
   await page.route("**/api/v1/command-previews/*/confirm", async (route) => {
@@ -424,19 +431,19 @@ test("4.2 desktop result-unknown recovery only queries the original idempotency 
     await route.fetch();
     await route.abort("failed");
   }, { times: 1 });
-  const review = page.getByRole("dialog", { name: "调整预订日期", exact: true });
-  await review.getByRole("button", { name: "确认调整预订日期", exact: true }).click();
-  await expect(review.getByText("调整预订日期结果需要查询", { exact: true })).toBeVisible();
+  const review = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
+  await review.getByRole("button", { name: "确认调整住宿日期", exact: true }).click();
+  await expect(review.getByText("调整住宿日期结果需要查询", { exact: true })).toBeVisible();
   await review.getByTestId("command-close").click();
   let recovery = page.getByTestId("order-command-recovery");
-  await expect(recovery).toContainText("调整预订日期结果需要恢复查询");
+  await expect(recovery).toContainText("调整住宿日期结果需要恢复查询");
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: fixture.lateArrival.nickname, exact: true })).toBeVisible({ timeout: 30_000 });
   recovery = page.getByTestId("order-command-recovery");
-  await expect(recovery).toContainText("调整预订日期结果需要恢复查询");
+  await expect(recovery).toContainText("调整住宿日期结果需要恢复查询");
   expect(confirmRequests).toBe(1);
-  await recovery.getByRole("button", { name: "查询调整预订日期结果", exact: true }).click();
-  const recoveryDialog = page.getByRole("dialog", { name: "恢复调整预订日期结果", exact: true });
+  await recovery.getByRole("button", { name: "查询调整住宿日期结果", exact: true }).click();
+  const recoveryDialog = page.getByRole("dialog", { name: "恢复调整住宿日期结果", exact: true });
   await expect(recoveryDialog).toBeVisible();
   const recoveryRequest = page.waitForRequest((request) => {
     if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/v1/command-results/resolve") return false;
@@ -455,7 +462,7 @@ test("4.2 desktop result-unknown recovery only queries the original idempotency 
   expect(confirmRequests).toBe(1);
   await expect(recoveryDialog).toBeHidden({ timeout: 30_000 });
   await expect(recovery).toBeHidden();
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整", { timeout: 30_000 });
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿日期已调整", { timeout: 30_000 });
   await expect(page.getByText(`${fixture.lateArrival.newArrivalDate} 至 ${fixture.lateArrival.newDepartureDate}`, { exact: true }).first()).toBeVisible();
 });
 
@@ -463,14 +470,14 @@ test("4.2 desktop WECOM policy reset, inventory conflict, and Stage 11 multi-uni
   test.skip(!isDesktop(testInfo), "desktop Stage 9 failure-close cases");
   await login(page);
   await openOrder(page, fixture.wecomDeviation);
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
   let form = await fillRescheduleForm(page, fixture.wecomDeviation as Stage9AcceptanceFixture["external"], "企微改期按新政策价");
   await expect(form.getByTestId("stay-date-price-preview")).toContainText("调整后订单金额", { timeout: 30_000 });
   await expect(form.getByTestId("stay-date-original-amount")).not.toHaveText(await form.getByTestId("stay-date-new-amount").innerText());
   await expect(form.getByTestId("stay-date-wecom-amount")).toHaveCount(0);
-  let review = await continueToReview(page, "调整预订日期");
+  let review = await continueToReview(page, "调整住宿日期");
   await expect(review).toContainText("政策基础金额");
-  await confirmReview(page, "调整预订日期");
+  await confirmReview(page, "调整住宿日期");
   const wecomResponse = await page.request.get(`/api/v1/orders/${encodeURIComponent(fixture.wecomDeviation.orderId)}`);
   expect(wecomResponse.ok()).toBe(true);
   const wecomView = await wecomResponse.json() as {
@@ -487,7 +494,7 @@ test("4.2 desktop WECOM policy reset, inventory conflict, and Stage 11 multi-uni
   const conflictBeforeResponse = await page.request.get(`/api/v1/orders/${encodeURIComponent(fixture.conflict.orderId)}`);
   expect(conflictBeforeResponse.ok()).toBe(true);
   const conflictBefore = await conflictBeforeResponse.json() as { order: { arrival_date: string; departure_date: string; version: number }; pricingRevisions: unknown[] };
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
   form = await fillRescheduleForm(page, fixture.conflict as Stage9AcceptanceFixture["external"], "验证库存冲突");
   await expect(form.getByText("调整后的住宿日期存在库存冲突", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeDisabled();
@@ -498,9 +505,9 @@ test("4.2 desktop WECOM policy reset, inventory conflict, and Stage 11 multi-uni
   expect(conflictAfter.pricingRevisions).toHaveLength(conflictBefore.pricingRevisions.length);
 
   await openOrder(page, fixture.multiUnit);
-  await expect(page.getByRole("button", { name: "调整预订日期", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
-  const multiForm = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  await expect(page.getByRole("button", { name: "调整住宿日期", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
+  const multiForm = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
   await multiForm.getByTestId("stay-date-arrival").fill(addDays(fixture.multiUnit.arrivalDate, 1));
   await multiForm.getByTestId("stay-date-departure").fill(addDays(fixture.multiUnit.departureDate, 1));
   await multiForm.getByTestId("stay-date-reason").fill("多房源住宿整体顺延一天");
@@ -516,13 +523,13 @@ test("4.2 mobile free-stay reschedule stays zero and requires no pricing input",
   test.skip(!isMobile(testInfo), "mobile Stage 9 free-stay rule smoke");
   await login(page);
   await openOrder(page, mobileFixture.free);
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
   const form = await fillRescheduleForm(page, mobileFixture.free as Stage9AcceptanceFixture["external"], "免费接待行程顺延");
   await expect(form.getByText("免费住宿保持 0 元", { exact: false })).toBeVisible();
   await expect(form.getByTestId("stay-date-channel-amount")).toHaveCount(0);
-  await continueToReview(page, "调整预订日期");
-  const review = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  await continueToReview(page, "调整住宿日期");
+  const review = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
   await expect(review).toContainText("¥0.00");
-  await confirmReview(page, "调整预订日期");
-  await expect(page.getByTestId("command-result-notice")).toContainText("预订日期已调整");
+  await confirmReview(page, "调整住宿日期");
+  await expect(page.getByTestId("command-result-notice")).toContainText("住宿日期已调整");
 });

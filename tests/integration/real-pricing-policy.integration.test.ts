@@ -33,6 +33,12 @@ function metadata(prefix: string) {
   };
 }
 
+function addDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 async function withOrdinaryOrderCreationClock<T>(arrivalDate: string, operation: () => Promise<T>): Promise<T> {
   const businessDate = await propertyLocalToday(db, demo.propertyId);
   return arrivalDate < businessDate
@@ -272,30 +278,40 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
   });
 
   it("keeps FREE changes zero, entitlement-free, and append-only through cancellation", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = addDays(businessDate, 1);
+    const initialDepartureDate = addDays(businessDate, 4);
+    const extendedDepartureDate = addDays(businessDate, 6);
+    const shortenedDepartureDate = addDays(businessDate, 5);
+    const moveDate = addDays(businessDate, 3);
     const created = await createOrder({
       prefix: "free-history",
       unitId: "unit_room_201",
-      arrivalDate: "2026-08-30",
-      departureDate: "2026-09-02",
+      arrivalDate,
+      departureDate: initialDepartureDate,
       stayType: "FREE",
       freeStayReason: "Volunteer accommodation"
     });
-    await previewAndConfirm({
+    const extended = await previewAndConfirm({
       commandType: "RESCHEDULE_STAY",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newArrivalDate: "2026-08-30", newDepartureDate: "2026-09-04" }
+      input: { propertyId: demo.propertyId, orderId: created.orderId, newArrivalDate: arrivalDate, newDepartureDate: extendedDepartureDate }
     }, "free-extend");
-    await previewAndConfirm({
+    expect(extended.businessCommitted).toBe(true);
+    const shortened = await previewAndConfirm({
       commandType: "RESCHEDULE_STAY",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newArrivalDate: "2026-08-30", newDepartureDate: "2026-09-03" }
+      input: { propertyId: demo.propertyId, orderId: created.orderId, newArrivalDate: arrivalDate, newDepartureDate: shortenedDepartureDate }
     }, "free-shorten");
-    await previewAndConfirm({
+    expect(shortened.businessCommitted).toBe(true);
+    const moved = await previewAndConfirm({
       commandType: "MOVE_UNIT",
-      input: { propertyId: demo.propertyId, orderId: created.orderId, newInventoryUnitId: "unit_room_205", effectiveDate: "2026-09-01" }
+      input: { propertyId: demo.propertyId, orderId: created.orderId, newInventoryUnitId: "unit_room_205", effectiveDate: moveDate }
     }, "free-move");
-    await previewAndConfirm({
+    expect(moved.businessCommitted).toBe(true);
+    const cancelled = await previewAndConfirm({
       commandType: "CANCEL_ORDER",
       input: { propertyId: demo.propertyId, orderId: created.orderId }
     }, "free-cancel");
+    expect(cancelled.businessCommitted).toBe(true);
 
     const view = await getOrderView(db, created.orderId);
     expect(view.order.status).toBe("CANCELLED");

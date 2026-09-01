@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -14,7 +14,7 @@ import {
   CircleHelp,
   ShieldAlert
 } from "lucide-react";
-import type { RoomStatusActionDto, RoomStatusBoardDto, RoomStatusOperationalTaskDto, RoomStatusUnitDto } from "@qintopia/contracts";
+import type { RoomStatusActionDto, RoomStatusBoardDto, RoomStatusIntervalDto, RoomStatusOperationalTaskDto, RoomStatusUnitDto } from "@qintopia/contracts";
 import { Modal } from "../ui";
 import {
   formatRoomStatusDate,
@@ -22,11 +22,16 @@ import {
   roomStatusBedOccupantLabels,
   roomStatusActionLabels,
   roomStatusIntervalBusinessLabel,
+  roomStatusIntervalAttentionLabels,
+  roomStatusLifecycleStatus,
   roomStatusOccupantLabelLines,
+  roomStatusPhysicalOccupancyRatio,
   roomStatusPresentation,
   roomStatusSourceLabels,
   roomStatusUnitLabel,
+  RoomStatusAttentionBadges,
   RoomStatusMark,
+  type RoomStatusAttentionLabel,
   useRoomStatusMobileViewport
 } from "./roomStatusPresentation";
 import {
@@ -68,7 +73,7 @@ export interface RoomStatusMobileTasksProps {
   onCreate: () => void;
   onOpenReference: (reference: RoomStatusOperationalTaskDto["references"][number]) => void;
   onOpenReceipt: (receiptId: string) => void;
-  onOpenOrderContext: (identity: RoomStatusOrderIdentity, serviceDate: string) => void;
+  onOpenOrderContext: (identity: RoomStatusOrderIdentity, serviceDate: string, trigger: HTMLButtonElement) => void;
   onAction: (action: RoomStatusActionDto, task: RoomStatusOperationalTaskDto, unit: RoomStatusUnitDto | null) => void;
 }
 
@@ -136,6 +141,27 @@ export function nextMobileTaskFocusId(
   return remaining[Math.min(Math.max(0, previousIndex), remaining.length - 1)]?.id ?? null;
 }
 
+export function focusReplacementMobileTaskTrigger(
+  taskId: string,
+  taskRefs: ReadonlyMap<string, HTMLButtonElement>,
+  fallback: HTMLButtonElement | undefined
+): boolean {
+  const trigger = taskRefs.get(taskId);
+  if (trigger?.isConnected) {
+    trigger.focus({ preventScroll: true });
+    return true;
+  }
+  fallback?.focus({ preventScroll: true });
+  return false;
+}
+
+export function mobileTaskDetailWasRemoved(
+  detailIntervalId: string | null,
+  intervalMap: ReadonlyMap<string, RoomStatusOperationalTaskDto>
+): boolean {
+  return detailIntervalId !== null && !intervalMap.has(detailIntervalId);
+}
+
 function flattenUnitMap(board: RoomStatusBoardDto): Map<string, RoomStatusUnitDto> {
   return new Map(board.rooms.flatMap((room) => [room, ...room.children]).map((unit) => [unit.id, unit]));
 }
@@ -145,10 +171,28 @@ export interface MobileBedOccupancySummary {
   kind: "BED_SPLIT" | "BED_ORDER" | "WHOLE_ROOM";
   room: RoomStatusUnitDto;
   serviceDate: string;
-  ratio: string;
+  ratio: string | null;
   status: RoomStatusUnitDto["days"][number]["status"];
+  attentionLabels: RoomStatusAttentionLabel[];
   occupantLabels: string[];
   orderIdentity: RoomStatusOrderIdentity | null;
+}
+
+function uniqueAttentionLabels(labels: readonly RoomStatusAttentionLabel[]): RoomStatusAttentionLabel[] {
+  return [...new Set(labels)];
+}
+
+export function roomStatusMobileLifecycleLabel(status: RoomStatusUnitDto["days"][number]["status"]): string {
+  return roomStatusPresentation[roomStatusLifecycleStatus(status)].label;
+}
+
+function attentionLabelsForIntervals(
+  intervals: readonly RoomStatusIntervalDto[],
+  serviceDate: string
+): RoomStatusAttentionLabel[] {
+  return uniqueAttentionLabels(intervals
+    .filter((interval) => interval.startDate <= serviceDate && serviceDate < interval.endDate)
+    .flatMap(roomStatusIntervalAttentionLabels));
 }
 
 export function mobileBedOccupancySummaries(board: RoomStatusBoardDto): MobileBedOccupancySummary[] {
@@ -158,15 +202,19 @@ export function mobileBedOccupancySummaries(board: RoomStatusBoardDto): MobileBe
       kind: "BED_SPLIT",
       room,
       serviceDate: occupancy.serviceDate,
-      ratio: `${occupancy.occupiedBedCount}/${occupancy.totalBedCount}`,
-      status: room.days.find((day) => day.serviceDate === occupancy.serviceDate)?.status ?? "UNKNOWN",
+      ratio: roomStatusPhysicalOccupancyRatio(occupancy.occupants.length, room),
+      status: roomStatusLifecycleStatus(room.days.find((day) => day.serviceDate === occupancy.serviceDate)?.status ?? "UNKNOWN"),
+      attentionLabels: attentionLabelsForIntervals(room.intervals, occupancy.serviceDate),
       occupantLabels: roomStatusBedOccupantLabels(occupancy.occupants),
       orderIdentity: null
     };
     const exactBedOrders = occupancy.occupants.flatMap((occupant): MobileBedOccupancySummary[] => {
       const bed = room.children?.find((child) => child.id === occupant.inventoryUnitId);
       if (!bed) return [];
-      const identities = bed.intervals.flatMap((interval) => {
+      const matchingIntervals = bed.intervals.filter((interval) => (
+        interval.startDate <= occupancy.serviceDate && occupancy.serviceDate < interval.endDate
+      ));
+      const identities = matchingIntervals.flatMap((interval) => {
         if (interval.startDate > occupancy.serviceDate || occupancy.serviceDate >= interval.endDate) return [];
         const identity = roomStatusOrderIdentityForInterval(interval);
         return identity?.orderId === occupant.sourceReference.id ? [identity] : [];
@@ -178,8 +226,11 @@ export function mobileBedOccupancySummaries(board: RoomStatusBoardDto): MobileBe
         kind: "BED_ORDER",
         room: bed,
         serviceDate: occupancy.serviceDate,
-        ratio: "1人",
-        status: bed.days.find((day) => day.serviceDate === occupancy.serviceDate)?.status ?? "UNKNOWN",
+        ratio: null,
+        status: roomStatusLifecycleStatus(bed.days.find((day) => day.serviceDate === occupancy.serviceDate)?.status ?? "UNKNOWN"),
+        attentionLabels: uniqueAttentionLabels(matchingIntervals
+          .filter((interval) => roomStatusOrderIdentityForInterval(interval)?.orderId === identities[0]!.orderId)
+          .flatMap(roomStatusIntervalAttentionLabels)),
         occupantLabels: [occupant.primaryOccupantLabel?.trim() || "历史未记录"],
         orderIdentity: identities[0]!
       }];
@@ -202,8 +253,9 @@ export function mobileWholeRoomOccupancySummaries(board: RoomStatusBoardDto): Mo
         kind: "WHOLE_ROOM" as const,
         room,
         serviceDate,
-        ratio: `${interval.occupantCount}人`,
-        status: room.days.find((day) => day.serviceDate === serviceDate)?.status ?? interval.status,
+        ratio: roomStatusPhysicalOccupancyRatio(interval.occupantCount, room),
+        status: roomStatusLifecycleStatus(room.days.find((day) => day.serviceDate === serviceDate)?.status ?? interval.status),
+        attentionLabels: roomStatusIntervalAttentionLabels(interval),
         occupantLabels: interval.occupants.map((occupant) => occupant.nickname?.trim() || "历史未记录"),
         orderIdentity: roomStatusOrderIdentityForInterval(interval)
       }));
@@ -263,6 +315,7 @@ export function RoomStatusMobileTasks({
   const taskRefs = useRef(new Map<string, HTMLButtonElement>());
   const handledFocusRequest = useRef(0);
   const [detailIntervalId, setDetailIntervalId] = useState<string | null>(null);
+  const [detailRestoreTaskId, setDetailRestoreTaskId] = useState<string | null>(null);
   const [showOccupancyExplanation, setShowOccupancyExplanation] = useState(false);
   const [showOccupancyList, setShowOccupancyList] = useState(false);
   const [showRangePicker, setShowRangePicker] = useState(false);
@@ -301,10 +354,31 @@ export function RoomStatusMobileTasks({
     return () => cancelAnimationFrame(frame);
   }, [activeTab, board.revision, focusRequest, tasks]);
 
+  useLayoutEffect(() => {
+    if (!detailRestoreTaskId || detailIntervalId !== null) return;
+    focusReplacementMobileTaskTrigger(
+      detailRestoreTaskId,
+      taskRefs.current,
+      tabRefs.current.get(activeTab)
+    );
+    setDetailRestoreTaskId(null);
+  }, [activeTab, detailIntervalId, detailRestoreTaskId]);
+
+  useEffect(() => {
+    if (!mobileTaskDetailWasRemoved(detailIntervalId, intervalMap)) return;
+    setDetailRestoreTaskId(detailIntervalId);
+    setDetailIntervalId(null);
+  }, [detailIntervalId, intervalMap]);
+
   if (!isMobile) return null;
 
   const openTask = (task: RoomStatusOperationalTaskDto) => {
     setDetailIntervalId(task.id);
+  };
+
+  const closeDetail = () => {
+    if (detailIntervalId) setDetailRestoreTaskId(detailIntervalId);
+    setDetailIntervalId(null);
   };
 
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, current: RoomStatusMobileTab) => {
@@ -439,7 +513,8 @@ export function RoomStatusMobileTasks({
               <li key={summary.key}>
                 <div className="room-status-mobile-occupancy-heading">
                   <strong>{roomStatusUnitLabel(summary.room)}</strong>
-                  <span>{formatRoomStatusDate(summary.serviceDate)} · {summary.ratio} · {roomStatusPresentation[summary.status].label}</span>
+                  <span>{formatRoomStatusDate(summary.serviceDate)}{summary.ratio ? ` · ${summary.ratio}` : ""} · {roomStatusMobileLifecycleLabel(summary.status)}</span>
+                  <RoomStatusAttentionBadges labels={summary.attentionLabels} />
                 </div>
                 <div className="room-status-mobile-occupant-list">
                   {roomStatusOccupantLabelLines(summary.occupantLabels).map((line, index) => (
@@ -450,7 +525,7 @@ export function RoomStatusMobileTasks({
                     >{line}</span>
                   ))}
                 </div>
-                {summary.orderIdentity ? <button type="button" className="room-status-text-button" onClick={() => onOpenOrderContext(summary.orderIdentity!, summary.serviceDate)}>查看订单信息<ArrowRight aria-hidden="true" size={16} /></button> : null}
+                {summary.orderIdentity ? <button type="button" className="room-status-text-button" onClick={(event) => onOpenOrderContext(summary.orderIdentity!, summary.serviceDate, event.currentTarget)}>查看订单信息<ArrowRight aria-hidden="true" size={16} /></button> : null}
               </li>
             ))}
           </ul> : null}
@@ -509,6 +584,7 @@ export function RoomStatusMobileTasks({
                     <span className="room-status-mobile-task-title">
                       <strong>{unit ? roomStatusUnitLabel(unit) : "房源名称暂不可用"}</strong>
                       <RoomStatusMark status={interval.status} compact />
+                      <RoomStatusAttentionBadges labels={roomStatusIntervalAttentionLabels(interval)} />
                     </span>
                     {lodging ? <span>住宿人 · {businessLabel}</span> : null}
                     {!lodging ? <span>{interval.label}</span> : null}
@@ -542,10 +618,10 @@ export function RoomStatusMobileTasks({
         <Modal
           title={`${detailUnit?.code ?? "房源"} · 任务详情`}
           size="mobile-fullscreen"
-          onClose={() => setDetailIntervalId(null)}
+          onClose={closeDetail}
           footer={(
             <div className="room-status-mobile-detail-actions">
-              <button type="button" className="room-status-button room-status-button-secondary" onClick={() => setDetailIntervalId(null)}>返回任务列表</button>
+              <button type="button" className="room-status-button room-status-button-secondary" onClick={closeDetail}>返回任务列表</button>
               {detailAction ? (
                 <button
                   type="button"
@@ -564,6 +640,7 @@ export function RoomStatusMobileTasks({
           <div className="room-status-mobile-detail">
             <div className="room-status-mobile-detail-summary">
               <RoomStatusMark status={detailInterval.status} />
+              <RoomStatusAttentionBadges labels={roomStatusIntervalAttentionLabels(detailInterval)} />
               <strong>{detailLodging ? `住宿人 · ${mobileLodgingOccupantSummary(detailInterval)}` : roomStatusIntervalBusinessLabel(detailInterval)}</strong>
               <span>{roomStatusSourceLabels[detailInterval.sourceKind]}</span>
             </div>
@@ -602,7 +679,9 @@ export function RoomStatusMobileTasks({
               <section aria-labelledby={`${tabsId}-detail-source`}>
                 <h2 id={`${tabsId}-detail-source`}><CalendarCheck2 aria-hidden="true" size={18} />住宿信息</h2>
                 <dl>
-                  <dt>住宿状态</dt><dd>{roomStatusPresentation[detailInterval.status].label}</dd>
+                  <dt>住宿状态</dt><dd>{roomStatusMobileLifecycleLabel(detailInterval.status)}</dd>
+                  {detailInterval.attention === "ARREARS" || detailInterval.status === "ARREARS" ? <><dt>收款状态</dt><dd><span className="room-status-mobile-attention">欠款</span></dd></> : null}
+                  {detailInterval.operationalAttention ? <><dt>运营提醒</dt><dd><RoomStatusAttentionBadges labels={roomStatusIntervalAttentionLabels(detailInterval).filter((label) => label !== "欠款")} /></dd></> : null}
                   <dt>住宿来源</dt><dd>{roomStatusSourceLabels[detailInterval.sourceKind]}</dd>
                   <dt>说明</dt><dd>{detailInterval.reason ?? "无额外说明"}</dd>
                 </dl>

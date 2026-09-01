@@ -4,6 +4,7 @@ import { hashPassword, todayInTimeZone } from "@qintopia/domain";
 import type { AuthPrincipal, CommandEnvelope, RoomStatusBoardDto } from "@qintopia/contracts";
 import { confirmCommandPreview, createCommandPreview, executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
 import { createDatabase } from "../../packages/db/src/database.ts";
+import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
@@ -12,6 +13,12 @@ const agentSubjectId = "subject_demo_agent";
 const publicPricingPolicyId = "policy_qintopia_public_2026_rev561_v1";
 const commandUiWaitMs = 60_000;
 const roomStatusTimelineDays = 30;
+const ordinaryLodgingIntervalSelector = [
+  ".room-status-interval-reserved",
+  ".room-status-interval-in-house",
+  ".room-status-interval-settled",
+  ".room-status-interval-arrears"
+].join(", ");
 const operator = { username: "operator", password: "demo-pass-2026" };
 const longStayFixturePrincipal: AuthPrincipal = {
   subjectId: agentSubjectId,
@@ -69,15 +76,22 @@ function quoteResponse(page: Page, expected: { inventoryUnitId: string; arrivalD
   }, { timeout: 30_000 });
 }
 
-async function createRemoteLongStayConflict(unitId: string, arrivalDate: string, departureDate: string): Promise<void> {
+async function createReservedOrderFixture(options: {
+  unitId: string;
+  arrivalDate: string;
+  departureDate: string;
+  guest: string;
+  nickname: string;
+  keyPrefix: string;
+}): Promise<string> {
   const db = createDatabase(e2eDatabaseUrl);
-  const key = `e2e-long-stay-remote-conflict-${crypto.randomUUID()}`;
+  const key = `${options.keyPrefix}-${crypto.randomUUID()}`;
   try {
     const quoted = await executeQuoteCommand(db, longStayFixturePrincipal, {
         propertyId,
-        inventoryUnitId: unitId,
-        arrivalDate,
-        departureDate,
+        inventoryUnitId: options.unitId,
+        arrivalDate: options.arrivalDate,
+        departureDate: options.departureDate,
         pricingPolicyVersionId: publicPricingPolicyId
     }, { idempotencyKey: `${key}-quote`, correlationId: `${key}-quote` });
     const preview = await createCommandPreview(db, longStayFixturePrincipal, {
@@ -85,7 +99,7 @@ async function createRemoteLongStayConflict(unitId: string, arrivalDate: string,
       input: {
         propertyId,
         quoteId: quoted.quote.quoteId,
-        primaryGuest: { fullName: "长住窗口外冲突住客", nickname: "窗口外冲突" },
+        primaryGuest: { fullName: options.guest, nickname: options.nickname },
         bookingChannelCode: "WECOM",
         channelOrderReference: null,
         targetCurrentContractAmountMinor: quoted.quote.currentContractAmount.minorUnits
@@ -99,7 +113,100 @@ async function createRemoteLongStayConflict(unitId: string, arrivalDate: string,
       reason: { code: "CREATE_STANDARD_ORDER", note: "" }
     }, { idempotencyKey: `${key}-confirm`, correlationId: `${key}-confirm` });
     if (receipt.executionStatus !== "EXECUTED" || !receipt.businessCommitted) {
-      throw new Error(`Failed to prepare remote long-stay conflict: ${receipt.error?.message ?? receipt.executionStatus}`);
+      throw new Error(`Failed to prepare reserved order fixture: ${receipt.error?.message ?? receipt.executionStatus}`);
+    }
+    const orderId = receipt.result?.orderId;
+    if (typeof orderId !== "string") throw new Error("Reserved order fixture did not return an order id");
+    return orderId;
+  } finally {
+    await db.destroy();
+  }
+}
+
+async function createCompletedBackfillFixture(options: {
+  unitId: string;
+  arrivalDate: string;
+  departureDate: string;
+  guest: string;
+  nickname: string;
+  collected: boolean;
+  keyPrefix: string;
+}): Promise<void> {
+  const db = createDatabase(e2eDatabaseUrl);
+  const key = `${options.keyPrefix}-${crypto.randomUUID()}`;
+  try {
+    const quote = await createQuoteForTesting(db, {
+      propertyId,
+      inventoryUnitId: options.unitId,
+      stayType: "TRANSIENT",
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate,
+      pricingPolicyVersionId: publicPricingPolicyId
+    });
+    const preview = await createCommandPreview(db, longStayFixturePrincipal, {
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: options.guest, nickname: options.nickname },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits,
+        backfill: true,
+        backfillReason: "房态历史床位图标回归",
+        ...(options.collected ? {
+          backfillCollection: {
+            amountMinor: quote.currentContractAmount.minorUnits,
+            method: "WECOM",
+            transactionReference: `WX-${key}`,
+            note: "房态历史床位图标回归"
+          }
+        } : {})
+      }
+    } as CommandEnvelope, { idempotencyKey: `${key}-preview`, correlationId: `${key}-preview` });
+    const receipt = await confirmCommandPreview(db, longStayFixturePrincipal, preview.preview.previewId, {
+      propertyId,
+      commandType: "CREATE_ORDER",
+      confirmation: true,
+      expectedEffectHash: preview.preview.effectHash,
+      reason: { code: "BACKFILL_STAY", note: "房态历史床位图标回归" }
+    }, { idempotencyKey: `${key}-confirm`, correlationId: `${key}-confirm` });
+    if (receipt.executionStatus !== "EXECUTED" || !receipt.businessCommitted) {
+      throw new Error(`Failed to prepare completed backfill fixture: ${receipt.error?.message ?? receipt.executionStatus}`);
+    }
+  } finally {
+    await db.destroy();
+  }
+}
+
+async function createRemoteLongStayConflict(unitId: string, arrivalDate: string, departureDate: string): Promise<void> {
+  await createReservedOrderFixture({
+    unitId,
+    arrivalDate,
+    departureDate,
+    guest: "长住窗口外冲突住客",
+    nickname: "窗口外冲突",
+    keyPrefix: "e2e-long-stay-remote-conflict"
+  });
+}
+
+async function checkInOrderFixture(orderId: string): Promise<void> {
+  const db = createDatabase(e2eDatabaseUrl);
+  const key = `e2e-room-status-check-in-${crypto.randomUUID()}`;
+  try {
+    const preview = await createCommandPreview(db, longStayFixturePrincipal, {
+      commandType: "CHECK_IN",
+      input: { propertyId, orderId }
+    } as CommandEnvelope, { idempotencyKey: `${key}-preview`, correlationId: `${key}-preview` });
+    const receipt = await confirmCommandPreview(db, longStayFixturePrincipal, preview.preview.previewId, {
+      propertyId,
+      commandType: "CHECK_IN",
+      confirmation: true,
+      expectedEffectHash: preview.preview.effectHash,
+      reason: { code: "CHECKED_IN", note: "Room-status mixed presentation fixture" }
+    }, { idempotencyKey: `${key}-confirm`, correlationId: `${key}-confirm` });
+    if (receipt.executionStatus !== "EXECUTED" || !receipt.businessCommitted) {
+      throw new Error(`Failed to check in room-status fixture: ${receipt.error?.message ?? receipt.executionStatus}`);
     }
   } finally {
     await db.destroy();
@@ -306,10 +413,9 @@ async function login(
 }
 
 async function expectDesktopGrid(page: Page) {
-  const region = page.getByRole("region", { name: /房态二维网格/ });
-  await expect(region).toBeVisible();
-  await expect(page.getByRole("grid")).toBeVisible();
-  return region;
+  const grid = page.getByRole("grid");
+  await expect(grid).toBeVisible();
+  return grid;
 }
 
 async function expectMobileRoomStatus(page: Page) {
@@ -322,11 +428,10 @@ async function expectResponsiveRoomStatus(page: Page): Promise<
   | { mode: "desktop"; gridRegion: Locator }
   | { mode: "mobile" }
 > {
-  const desktopRegion = page.getByRole("region", { name: /房态二维网格/ });
+  const desktopRegion = page.getByRole("grid");
   const mobileShell = page.locator(".room-status-mobile");
   await expect(desktopRegion.or(mobileShell)).toBeVisible();
   if (await desktopRegion.isVisible()) {
-    await expect(desktopRegion.getByRole("grid")).toBeVisible();
     return { mode: "desktop", gridRegion: desktopRegion };
   }
   await expectMobileRoomStatus(page);
@@ -362,6 +467,65 @@ function roomCell(page: Page, unitId: string, serviceDate: string): Locator {
 
 function roomRow(page: Page, unitId: string): Locator {
   return page.locator(`[data-room-status-row="${unitId}"]`);
+}
+
+async function expectOrdinaryLodgingCellPresentation(
+  cell: Locator,
+  status: "RESERVED" | "IN_HOUSE",
+  nickname: string,
+  granularity: "ROOM" | "BED"
+): Promise<void> {
+  await expect(cell.locator(".room-status-direct-occupants")).toContainText(nickname);
+  const statusClass = status === "RESERVED" ? "reserved" : "in-house";
+  if (granularity === "BED") {
+    await expect(cell.locator(`.room-status-bed-slot.is-occupied.is-${statusClass}`)).toHaveCount(1);
+    await expect(cell.locator(".room-status-bed-slot svg")).toHaveCount(0);
+    await expect(cell.locator(".room-status-direct-room-block")).toHaveCount(0);
+    await expect(cell.locator(".room-status-direct-count")).toHaveCount(0);
+    await expect(cell.locator(".room-status-direct-status-label"))
+      .toHaveText(status === "IN_HOUSE" ? "在住" : "预订");
+  } else {
+    await expect(cell.locator(`.room-status-direct-room-block.is-${statusClass}`)).toHaveCount(1);
+    await expect(cell.locator(".room-status-direct-room-block svg")).toHaveCount(0);
+    await expect(cell.locator(".room-status-bed-slot")).toHaveCount(0);
+    await expect(cell.locator(".room-status-direct-count")).toHaveText(/^\d+\/(?:\d+|\?)$/);
+    await expect(cell.locator(".room-status-direct-status-label")).toHaveCount(0);
+  }
+  await expect(cell.locator(".room-status-bed-state")).toHaveCount(0);
+  await expect(cell.locator(ordinaryLodgingIntervalSelector))
+    .toHaveCount(0);
+
+  const presentation = await cell.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const colorMatch = style.backgroundColor.match(/color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+))?\)/);
+    const rgbMatch = style.backgroundColor.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/);
+    const bodyColor = colorMatch
+      ? colorMatch.slice(1, 4).map((component) => Number(component) * 255)
+      : rgbMatch?.slice(1, 4).map(Number) ?? null;
+    const bodyAlpha = colorMatch?.[4] ?? rgbMatch?.[4];
+    return {
+      backgroundImage: style.backgroundImage,
+      backgroundColor: style.backgroundColor,
+      bodyColor,
+      bodyAlpha: bodyAlpha === undefined ? 1 : Number(bodyAlpha)
+    };
+  });
+  expect(presentation.backgroundImage, "ordinary lodging must not add a leading status strip")
+    .toBe("none");
+  expect(presentation.backgroundColor).not.toMatch(/transparent|\/ 0(?:\)|,)/);
+  expect(presentation.bodyColor, `expected a resolved opaque sRGB body in ${presentation.backgroundColor}`).not.toBeNull();
+  expect(presentation.bodyAlpha).toBe(1);
+  const [bodyRed, bodyGreen, bodyBlue] = presentation.bodyColor!;
+  if (status === "RESERVED") {
+    // At 22% #F97316 over the normal surface, these gaps are about 50 and 30.
+    // The lower bounds reject the old 9-10% faint treatment.
+    expect(bodyRed! - bodyBlue!).toBeGreaterThanOrEqual(40);
+    expect(bodyRed! - bodyGreen!).toBeGreaterThanOrEqual(20);
+  } else {
+    // At 22% #0969DA over the normal surface, these gaps are about 46 and 25.
+    expect(bodyBlue! - bodyRed!).toBeGreaterThanOrEqual(40);
+    expect(bodyBlue! - bodyGreen!).toBeGreaterThanOrEqual(20);
+  }
 }
 
 async function openRoomStatusWriteDrawer(
@@ -513,6 +677,111 @@ test.beforeAll(async () => {
   await ensureReadOnlyPrincipal();
 });
 
+test("visual acceptance source badges keep category, color and cell layout stable", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop grid source-badge coverage");
+  test.skip(process.env.ROOM_STATUS_VISUAL_E2E !== "1", "requires the isolated room-status visual fixture");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const { board } = await login(page);
+  const serviceDate = addDays(todayInTimeZone("Asia/Shanghai"), 1);
+  const expectations = [
+    { code: "C04", badge: "Y", title: "游牧岛", tone: "channel", color: "rgb(49, 95, 120)", foreground: "rgb(255, 255, 255)" },
+    { code: "C02", badge: "X", title: "携程", tone: "channel", color: "rgb(49, 95, 120)", foreground: "rgb(255, 255, 255)" },
+    { code: "E01", badge: "M", title: "美团", tone: "channel", color: "rgb(49, 95, 120)", foreground: "rgb(255, 255, 255)" },
+    { code: "C03", badge: "F", title: "免费入住", tone: "free", color: "rgb(124, 58, 237)", foreground: "rgb(255, 255, 255)" },
+    { code: "D04", badge: "H", title: "会员权益", tone: "member", color: "rgb(250, 204, 21)", foreground: "rgb(63, 42, 0)" }
+  ] as const;
+
+  for (const expected of expectations) {
+    const unit = board.rooms.find((candidate) => candidate.code === expected.code);
+    expect(unit, `visual fixture must expose ${expected.code}`).toBeTruthy();
+    const cell = roomCell(page, unit!.id, serviceDate);
+    await expect(cell).toBeVisible();
+    await expect(cell).toHaveAttribute("data-room-status-source-count", "1");
+    await expect(cell).toHaveAccessibleName(new RegExp(expected.title));
+    const badge = cell.locator(`.room-status-source-badge.is-${expected.tone}`);
+    await expect(badge).toHaveText(expected.badge);
+    await expect(badge).toHaveCSS("background-color", expected.color);
+    await expect(badge).toHaveCSS("color", expected.foreground);
+    const layout = await cell.evaluate((element) => {
+      const badge = element.querySelector<HTMLElement>(".room-status-source-badge");
+      const occupants = element.querySelector<HTMLElement>(".room-status-direct-occupants, .room-status-bed-occupants");
+      const summary = element.querySelector<HTMLElement>(".room-status-direct-occupancy-summary, .room-status-bed-occupancy-summary");
+      const attention = element.querySelector<HTMLElement>(".room-status-bed-attention-tags");
+      if (!badge || !occupants || !summary) throw new Error("source badge cell presentation is incomplete");
+      const overlaps = (left: DOMRect, right: DOMRect) => left.left < right.right
+        && left.right > right.left && left.top < right.bottom && left.bottom > right.top;
+      const badgeRect = badge.getBoundingClientRect();
+      return {
+        badgeOverlapsOccupants: overlaps(badgeRect, occupants.getBoundingClientRect()),
+        badgeOverlapsSummary: overlaps(badgeRect, summary.getBoundingClientRect()),
+        badgeOverlapsAttention: attention ? overlaps(badgeRect, attention.getBoundingClientRect()) : false
+      };
+    });
+    expect(layout).toEqual({
+      badgeOverlapsOccupants: false,
+      badgeOverlapsSummary: false,
+      badgeOverlapsAttention: false
+    });
+  }
+
+  const compactLayoutMatrix = await page.evaluate(() => {
+    const cases = [
+      { id: "four-sources", sources: ["H", "F", "M", "X"], attention: [] },
+      { id: "three-sources-one-attention", sources: ["H", "F", "M"], attention: ["欠款"] },
+      { id: "overflow-one-attention", sources: ["H", "F", "+2"], attention: ["欠款"] },
+      { id: "two-sources-multiple-attention", sources: ["H", "F"], attention: ["未退", "+2"] }
+    ];
+    const overlaps = (left: DOMRect, right: DOMRect) => left.left < right.right
+      && left.right > right.left && left.top < right.bottom && left.bottom > right.top;
+    const inside = (outer: DOMRect, inner: DOMRect) => inner.left >= outer.left
+      && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom;
+
+    return cases.map((fixture) => {
+      const cell = document.createElement("div");
+      cell.className = "room-status-day-cell has-bed-occupancy has-bed-slot-states is-bed-split-parent has-attention-occupancy";
+      cell.style.cssText = "position:fixed;left:0;top:0;width:88px;--room-status-interval-lanes:1;--room-status-row-height:80px";
+      cell.innerHTML = `
+        <span class="room-status-source-badges">${fixture.sources.map((label) => `<span class="room-status-source-badge ${label.startsWith("+") ? "is-overflow" : "is-channel"}">${label}</span>`).join("")}</span>
+        <span class="room-status-bed-attention-tags">${fixture.attention.map((label) => `<span class="room-status-bed-attention-tag ${label.startsWith("+") ? "is-overflow" : ""}">${label}</span>`).join("")}</span>
+        <span class="room-status-bed-occupants"><span>春风</span><span>山海</span><span>星河</span><span>云端</span></span>
+        <span class="room-status-bed-occupancy-summary"><span class="room-status-bed-slots"><span class="room-status-bed-slot is-in-house"></span><span class="room-status-bed-slot is-reserved"></span><span class="room-status-bed-slot is-settled"></span><span class="room-status-bed-slot"></span></span><span class="room-status-bed-occupancy">4/4</span></span>`;
+      document.body.append(cell);
+      const bounds = cell.getBoundingClientRect();
+      const sources = cell.querySelector<HTMLElement>(".room-status-source-badges")!.getBoundingClientRect();
+      const attention = cell.querySelector<HTMLElement>(".room-status-bed-attention-tags")!.getBoundingClientRect();
+      const occupants = cell.querySelector<HTMLElement>(".room-status-bed-occupants")!.getBoundingClientRect();
+      const summary = cell.querySelector<HTMLElement>(".room-status-bed-occupancy-summary")!.getBoundingClientRect();
+      const result = {
+        id: fixture.id,
+        sourcesInside: inside(bounds, sources),
+        attentionInside: fixture.attention.length === 0 || inside(bounds, attention),
+        sourcesOverlapAttention: fixture.attention.length > 0 && overlaps(sources, attention),
+        sourcesOverlapOccupants: overlaps(sources, occupants),
+        attentionOverlapsOccupants: fixture.attention.length > 0 && overlaps(attention, occupants),
+        badgesOverlapSummary: overlaps(sources, summary) || (fixture.attention.length > 0 && overlaps(attention, summary)),
+        occupantsOverlapSummary: overlaps(occupants, summary)
+      };
+      cell.remove();
+      return result;
+    });
+  });
+  expect(compactLayoutMatrix).toEqual([
+    "four-sources",
+    "three-sources-one-attention",
+    "overflow-one-attention",
+    "two-sources-multiple-attention"
+  ].map((id) => ({
+    id,
+    sourcesInside: true,
+    attentionInside: true,
+    sourcesOverlapAttention: false,
+    sourcesOverlapOccupants: false,
+    attentionOverlapsOccupants: false,
+    badgesOverlapSummary: false,
+    occupantsOverlapSummary: false
+  })));
+});
+
 test("desktop room-status matrix drives a typed Block journey and restores the workbench", async ({ page, browser }, testInfo: TestInfo) => {
   test.skip(!isProject(testInfo, "desktop"), "desktop room-status workbench coverage");
   test.setTimeout(180_000);
@@ -616,19 +885,17 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await observerPage.getByRole("button", { name: "刷新房态", exact: true }).click();
   await renderedResponse;
   const observerParentInterval = roomRow(observerPage, roomId).locator(".room-status-interval-maintenance");
-  await expect(observerParentInterval).toBeVisible({ timeout: 5_000 });
-  await expect(observerParentInterval).toHaveAccessibleName(/A.*维修/);
+  await expect(observerParentInterval).toHaveCount(0);
   const bedAInterval = roomRow(page, bedAId).locator(".room-status-interval-maintenance");
   const parentInterval = roomRow(page, roomId).locator(".room-status-interval-maintenance");
   await expect(bedAInterval, "the committing workbench refreshes after the command closes").toBeVisible();
-  await expect(parentInterval).toBeVisible();
+  await expect(parentInterval).toHaveCount(0);
   await expect(bedAStart).toBeFocused();
   expect(await bedAStart.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
 
   await expect(bedAInterval).toBeVisible();
-  await expect(parentInterval).toBeVisible();
+  await expect(parentInterval).toHaveCount(0);
   await expect(bedAInterval).toHaveAccessibleName(/维修/);
-  await expect(parentInterval).toHaveAccessibleName(/维修/);
   await expect(roomCell(page, roomId, arrivalDate)).toHaveAccessibleName(/维修.*当前不可安排.*已有住宿，不能重复安排/);
   await expect(roomCell(page, bedAId, arrivalDate)).toHaveAccessibleName(/维修.*当前不可安排.*已有住宿，不能重复安排/);
   await expect(roomCell(page, bedBId, arrivalDate)).toHaveAccessibleName(/可售.*可以安排/);
@@ -641,7 +908,9 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
     has: page.getByRole("heading", { name: "选区内住宿或锁房" })
   });
   await expect(relatedSources).toContainText("维修");
-  await expect(relatedSources).toContainText("住宿日期");
+  await expect(relatedSources).toContainText(
+    `${Number(arrivalDate.slice(5, 7))}月${Number(arrivalDate.slice(8, 10))}日至${Number(departureDate.slice(5, 7))}月${Number(departureDate.slice(8, 10))}日`
+  );
   await expect(relatedSources).not.toContainText(/MAINTENANCE|unit_room_|Block|Receipt/);
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
@@ -688,7 +957,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(conflictSection.locator(".room-status-conflict-list > li")).toHaveCount(2);
   await expect(conflictSection).toContainText("已有住宿，不能重复安排");
   await expect(conflictSection).not.toContainText(/unit_room_|Block|Claim|conflict/i);
-  await expect(actionRegion).toContainText("服务端未为当前对象下发可执行动作");
+  await expect(actionRegion.getByRole("button", { name: "释放维修锁房", exact: true })).toHaveCount(2);
   for (const action of ["创建正常住宿订单", "创建免费入住", "放置维修锁房"]) {
     await expect(actionRegion.getByRole("button", { name: action, exact: true })).toHaveCount(0);
   }
@@ -817,6 +1086,258 @@ test("property switching flushes the latest debounced restoration snapshot", asy
   }
 });
 
+test("split-bed parent shows debt, status slots, ratio, and nicknames without overlap", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop split-bed debt presentation coverage");
+  test.setTimeout(180_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const { board } = await login(page);
+  await expectDesktopGrid(page);
+
+  const serviceDate = board.businessDate;
+  const room = board.rooms.find((candidate) => candidate.salesMode === "BED_SPLIT"
+    && candidate.capacity === 4
+    && candidate.children.filter((child) => {
+      const day = child.days.find((item) => item.serviceDate === serviceDate);
+      return day?.available && day.conflicts.length === 0;
+    }).length >= 2);
+  expect(room, "two available beds today are required for mixed debt presentation").toBeTruthy();
+  const availableBeds = room!.children.filter((child) => {
+    const day = child.days.find((item) => item.serviceDate === serviceDate);
+    return day?.available && day.conflicts.length === 0;
+  });
+  const emptySplitRoom = board.rooms.find((candidate) => candidate.salesMode === "BED_SPLIT"
+    && candidate.bedSlotStates.filter((slot) => slot.serviceDate === serviceDate).length === candidate.children.length
+    && candidate.bedSlotStates
+      .filter((slot) => slot.serviceDate === serviceDate)
+      .every((slot) => slot.status === "AVAILABLE"));
+  expect(emptySplitRoom, "an all-available split room is required for empty slot presentation").toBeTruthy();
+  const emptyParentCell = roomCell(page, emptySplitRoom!.id, serviceDate);
+  await expect(emptyParentCell).toHaveAttribute(
+    "data-bed-occupancy-ratio",
+    `0/${emptySplitRoom!.physicalBedCount ?? "?"}`
+  );
+  await expect(emptyParentCell.locator(".room-status-bed-slot")).toHaveCount(emptySplitRoom!.children.length);
+  await expect(emptyParentCell.locator(".room-status-bed-slot.is-occupied")).toHaveCount(0);
+  const inHouseBed = availableBeds[0]!;
+  const reservedBed = availableBeds[1]!;
+  const departureDate = addDays(serviceDate, 1);
+
+  const expandBeds = roomRow(page, room!.id).locator(".room-status-expand-button[aria-expanded='false']");
+  await expandBeds.click();
+  const inHouseOrderId = await createFreeStayForToday(page, {
+    unitId: inHouseBed.id,
+    guest: "Mixed Status In-house Guest",
+    nickname: "在住青岚",
+    arrivalDate: serviceDate,
+    departureDate
+  });
+  await checkInOrderFixture(inHouseOrderId);
+  await createReservedOrderFixture({
+    unitId: reservedBed.id,
+    arrivalDate: serviceDate,
+    departureDate,
+    guest: "Mixed Status Reserved Guest",
+    nickname: "预订橙光",
+    keyPrefix: "e2e-room-status-debt"
+  });
+
+  const refreshed = roomStatusResponse(page);
+  await page.getByRole("button", { name: "刷新房态", exact: true }).click();
+  const refreshedBoard = await (await refreshed).json() as RoomStatusBoardDto;
+  const refreshedRoom = refreshedBoard.rooms.find((candidate) => candidate.id === room!.id);
+  expect(refreshedRoom).toBeTruthy();
+  const statuses = refreshedRoom!.intervals
+    .filter((interval) => interval.startDate <= serviceDate && serviceDate < interval.endDate)
+    .map((interval) => interval.status);
+  expect(statuses).toContain("IN_HOUSE");
+  expect(statuses).toContain("RESERVED");
+  expect(refreshedRoom!.intervals.some((interval) => interval.attention === "ARREARS"
+    && interval.startDate <= serviceDate && serviceDate < interval.endDate)).toBe(true);
+
+  await expectOrdinaryLodgingCellPresentation(
+    roomCell(page, inHouseBed.id, serviceDate),
+    "IN_HOUSE",
+    "在住青岚",
+    "BED"
+  );
+  await expectOrdinaryLodgingCellPresentation(
+    roomCell(page, reservedBed.id, serviceDate),
+    "RESERVED",
+    "预订橙光",
+    "BED"
+  );
+  for (const cell of [
+    roomCell(page, inHouseBed.id, serviceDate),
+    roomCell(page, reservedBed.id, serviceDate),
+    roomCell(page, room!.id, serviceDate)
+  ]) {
+    const overlay = cell.locator(".room-status-today-overlay");
+    await expect(cell).toHaveClass(/is-today/);
+    await expect(overlay).toHaveCount(1);
+    await expect(overlay).toHaveCSS("pointer-events", "none");
+    const todayPresentation = await cell.evaluate((element) => {
+      const overlay = element.querySelector<HTMLElement>(".room-status-today-overlay");
+      const occupants = element.querySelector<HTMLElement>(".room-status-direct-occupants, .room-status-bed-occupants");
+      const summary = element.querySelector<HTMLElement>(".room-status-direct-occupancy-summary, .room-status-bed-occupancy-summary");
+      if (!overlay) throw new Error("today overlay is missing");
+      const cellBounds = element.getBoundingClientRect();
+      const overlayBounds = overlay.getBoundingClientRect();
+      const style = getComputedStyle(overlay);
+      return {
+        edgeGaps: [
+          Math.abs(cellBounds.left - overlayBounds.left),
+          Math.abs(cellBounds.right - overlayBounds.right),
+          Math.abs(cellBounds.top - overlayBounds.top),
+          Math.abs(cellBounds.bottom - overlayBounds.bottom)
+        ],
+        backgroundColor: style.backgroundColor,
+        zIndex: style.zIndex,
+        occupantsZIndex: occupants ? getComputedStyle(occupants).zIndex : null,
+        summaryZIndex: summary ? getComputedStyle(summary).zIndex : null
+      };
+    });
+    expect(Math.max(...todayPresentation.edgeGaps)).toBeLessThanOrEqual(1.1);
+    expect(todayPresentation.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(todayPresentation.zIndex).toBe("1");
+    expect(Number(todayPresentation.occupantsZIndex)).toBeGreaterThan(1);
+    expect(Number(todayPresentation.summaryZIndex)).toBeGreaterThan(1);
+  }
+  const todayCells = page.locator(".room-status-day-cell.is-today");
+  await expect(page.locator(".room-status-day-cell.is-today > .room-status-today-overlay"))
+    .toHaveCount(await todayCells.count());
+  // A concrete bed is already a single sellable unit; a room-level denominator is misleading here.
+  await expect(roomCell(page, inHouseBed.id, serviceDate).locator(".room-status-direct-count")).toHaveCount(0);
+  await expect(roomCell(page, reservedBed.id, serviceDate).locator(".room-status-direct-count")).toHaveCount(0);
+  await expect(roomRow(page, room!.id).locator(ordinaryLodgingIntervalSelector))
+    .toHaveCount(0);
+
+  const collapseBeds = roomRow(page, room!.id).locator(".room-status-expand-button[aria-expanded='true']");
+  if (await collapseBeds.count()) await collapseBeds.click();
+  const parentCell = roomCell(page, room!.id, serviceDate);
+  await expect(parentCell).toHaveAttribute("data-bed-occupancy-ratio", "2/4");
+  await expect(parentCell.locator(".room-status-bed-occupants > span")).toHaveText(["在住青岚", "预订橙光"]);
+  await expect(parentCell.locator(".room-status-bed-attention-tag")).toHaveText("欠款");
+
+  const slots = parentCell.locator(".room-status-bed-slot");
+  await expect(slots).toHaveCount(4);
+  const expectedCodes = room!.children
+    .slice()
+    .sort((left, right) => left.code.localeCompare(right.code, "en", { numeric: true }))
+    .slice(0, 4)
+    .map((bed) => bed.code.split("-").at(-1)?.trim().toUpperCase() || bed.code);
+  expect(await slots.evaluateAll((elements) => elements.map((element) => element.getAttribute("data-bed-code"))))
+    .toEqual(expectedCodes);
+  await expect(slots.filter({ has: page.locator("svg") })).toHaveCount(0);
+  await expect(parentCell.locator(".room-status-bed-slot.is-in-house")).toHaveCount(1);
+  await expect(parentCell.locator(".room-status-bed-slot.is-reserved")).toHaveCount(1);
+  await expect(parentCell.locator(".room-status-bed-slot:not(.is-occupied)")).toHaveCount(2);
+
+  const presentation = await parentCell.evaluate((cell) => {
+    const attention = cell.querySelector<HTMLElement>(".room-status-bed-attention-tags");
+    const occupants = cell.querySelector<HTMLElement>(".room-status-bed-occupants");
+    const summary = cell.querySelector<HTMLElement>(".room-status-bed-occupancy-summary");
+    const inHouse = cell.querySelector<HTMLElement>(".room-status-bed-slot.is-in-house");
+    const reserved = cell.querySelector<HTMLElement>(".room-status-bed-slot.is-reserved");
+    const available = cell.querySelector<HTMLElement>(".room-status-bed-slot:not(.is-occupied)");
+    if (!attention || !occupants || !summary || !inHouse || !reserved || !available) {
+      throw new Error("mixed bed presentation is incomplete");
+    }
+    const overlaps = (left: DOMRect, right: DOMRect) => left.left < right.right
+      && left.right > right.left
+      && left.top < right.bottom
+      && left.bottom > right.top;
+    const attentionRect = attention.getBoundingClientRect();
+    return {
+      attentionOverlapsOccupants: overlaps(attentionRect, occupants.getBoundingClientRect()),
+      attentionOverlapsSummary: overlaps(attentionRect, summary.getBoundingClientRect()),
+      inHouseBackground: getComputedStyle(inHouse).backgroundColor,
+      reservedBackground: getComputedStyle(reserved).backgroundColor,
+      availableBackground: getComputedStyle(available).backgroundColor,
+      availableBorderStyle: getComputedStyle(available).borderStyle,
+      parentBackground: getComputedStyle(cell).backgroundColor,
+      parentBackgroundImage: getComputedStyle(cell).backgroundImage
+    };
+  });
+  expect(presentation.attentionOverlapsOccupants).toBe(false);
+  expect(presentation.attentionOverlapsSummary).toBe(false);
+  expect(presentation.inHouseBackground).toBe("rgb(9, 105, 218)");
+  expect(presentation.reservedBackground).toBe("rgb(249, 115, 22)");
+  expect(presentation.availableBackground).toBe("rgba(0, 0, 0, 0)");
+  expect(presentation.availableBorderStyle).toBe("solid");
+  expect(presentation.parentBackground).toBe("rgb(255, 255, 255)");
+  expect(presentation.parentBackgroundImage).toBe("none");
+
+  const historicalArrival = addDays(serviceDate, -3);
+  const historicalDeparture = addDays(serviceDate, -2);
+  await createCompletedBackfillFixture({
+    unitId: inHouseBed.id,
+    arrivalDate: historicalArrival,
+    departureDate: historicalDeparture,
+    guest: "Historical Settled Guest",
+    nickname: "历史结清",
+    collected: true,
+    keyPrefix: "e2e-room-status-history-settled"
+  });
+  await createCompletedBackfillFixture({
+    unitId: reservedBed.id,
+    arrivalDate: historicalArrival,
+    departureDate: historicalDeparture,
+    guest: "Historical Arrears Guest",
+    nickname: "历史欠款",
+    collected: false,
+    keyPrefix: "e2e-room-status-history-arrears"
+  });
+  const historicalResponse = roomStatusResponse(page, {
+    arrivalDate: historicalArrival,
+    departureDate: addDays(historicalArrival, roomStatusTimelineDays)
+  });
+  await page.getByRole("textbox", { name: "起始日期" }).fill(historicalArrival);
+  await historicalResponse;
+  const historicalParentCell = roomCell(page, room!.id, historicalArrival);
+  const settledHistoricalSlot = historicalParentCell.locator(".room-status-bed-slot[data-bed-status='SETTLED']");
+  const arrearsHistoricalSlot = historicalParentCell.locator(".room-status-bed-slot[data-bed-status='ARREARS']");
+  await expect(settledHistoricalSlot).toHaveCount(1);
+  await expect(arrearsHistoricalSlot).toHaveCount(1);
+  await expect(settledHistoricalSlot).toHaveClass(/is-settled/);
+  // ARREARS keeps its source status in data-bed-status, but shares the completed-green lifecycle treatment.
+  await expect(arrearsHistoricalSlot).toHaveClass(/is-settled/);
+  await expect(settledHistoricalSlot.locator("svg")).toHaveCount(1);
+  await expect(arrearsHistoricalSlot.locator("svg")).toHaveCount(1);
+  await expect(settledHistoricalSlot).toHaveAttribute("aria-label", /已结单/);
+  await expect(arrearsHistoricalSlot).toHaveAttribute("aria-label", /已结单/);
+  const historicalPresentation = await historicalParentCell.evaluate((cell) => {
+    const settled = cell.querySelector<HTMLElement>(".room-status-bed-slot[data-bed-status='SETTLED']");
+    const arrears = cell.querySelector<HTMLElement>(".room-status-bed-slot[data-bed-status='ARREARS']");
+    const attentionTags = [...cell.querySelectorAll<HTMLElement>(".room-status-bed-attention-tag")]
+      .map((tag) => tag.textContent?.trim());
+    if (!settled || !arrears) throw new Error("historical settled and arrears slots are required");
+    return {
+      settledBackground: getComputedStyle(settled).backgroundColor,
+      arrearsBackground: getComputedStyle(arrears).backgroundColor,
+      attentionTags
+    };
+  });
+  expect(historicalPresentation.settledBackground).toBe("rgb(40, 122, 75)");
+  expect(historicalPresentation.arrearsBackground).toBe("rgb(40, 122, 75)");
+  expect(historicalPresentation.attentionTags).toEqual(["欠款"]);
+
+  await roomRow(page, room!.id).locator(".room-status-expand-button[aria-expanded='false']").click();
+  const historicalArrearsCell = roomCell(page, reservedBed.id, historicalArrival);
+  const historicalArrearsPopover = await openDayPopover(page, historicalArrearsCell);
+  await expect(historicalArrearsPopover.locator(".room-status-mark")).toContainText("已结单");
+  await expect(historicalArrearsPopover.locator(".room-status-mobile-attention")).toHaveText("欠款");
+  await expect(historicalArrearsPopover.getByText("欠款", { exact: true })).toHaveCount(1);
+  await historicalArrearsPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  const historicalArrearsContext = page.getByRole("dialog", { name: "选中对象上下文" });
+  await expect(historicalArrearsContext.locator(".room-status-context-header-actions .room-status-mark"))
+    .toContainText("已结单");
+  await expect(historicalArrearsContext.locator(".room-status-context-header-actions .room-status-mobile-attention"))
+    .toHaveText("欠款");
+  await expect(historicalArrearsContext.locator(".room-status-context-header-actions").getByText("欠款", { exact: true }))
+    .toHaveCount(1);
+  await historicalArrearsContext.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+});
+
 test("split-bed parent cells show occupied-to-total ratio and every guest nickname", async ({ page }, testInfo: TestInfo) => {
   test.skip(!isProject(testInfo, "desktop"), "desktop split-bed occupancy summary coverage");
   test.setTimeout(300_000);
@@ -866,9 +1387,7 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
     const parentCell = roomCell(page, room!.id, serviceDate!);
     await expect(parentCell).toHaveAttribute("data-bed-occupancy-ratio", `${index + 1}/4`);
     const visibleOccupants = occupants.slice(0, index + 1).map((candidate) => candidate.nickname);
-    const visibleLines = Array.from({ length: Math.ceil(visibleOccupants.length / 2) }, (_, lineIndex) =>
-      visibleOccupants.slice(lineIndex * 2, lineIndex * 2 + 2).join("、"));
-    await expect(parentCell.locator(".room-status-bed-occupants > span")).toHaveText(visibleLines);
+    await expect(parentCell.locator(".room-status-bed-occupants > span")).toHaveText(visibleOccupants);
     await expect(parentCell.locator(".room-status-bed-occupants")).not.toContainText(/\+[123]/);
   }
 
@@ -877,54 +1396,36 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   const parentCell = roomCell(page, room!.id, serviceDate!);
   await expect(parentCell).toHaveText(/4\/4/);
   await expect(parentCell).not.toHaveAttribute("title");
-  await expect(parentCell).toHaveAccessibleName(/已占 4\/4.*山风.*同名住客.*同名住客.*北辰/);
+  await expect(parentCell).toHaveAccessibleName(/占用 4\/4.*山风.*同名住客.*同名住客.*北辰/);
   await expect(parentCell).not.toHaveAccessibleName(/阻断|Claim|order_/i);
-  await parentCell.hover();
-  await expect(page.getByRole("tooltip")).toContainText("已占 4/4");
-  await expect(page.getByRole("tooltip")).toContainText("山风");
-  await expect(page.getByRole("tooltip")).toContainText("同名住客");
-  await expect(page.getByRole("tooltip")).toContainText("北辰");
-  await expect(page.getByRole("tooltip")).toContainText("免费入住");
-  await expect(page.getByRole("tooltip")).toContainText(`${Number(serviceDate!.slice(5, 7))}月${Number(serviceDate!.slice(8, 10))}日`);
-  await expect(page.getByRole("tooltip")).not.toContainText(/阻断|Claim|order_/i);
-  const gridScroll = page.locator(".room-status-grid-scroll");
-  const horizontalScroll = await gridScroll.evaluate((element) => {
-    const before = element.scrollLeft;
-    element.scrollLeft = before + 120;
-    return { before, after: element.scrollLeft };
-  });
-  expect(horizontalScroll.after).toBeGreaterThan(horizontalScroll.before);
-  await expect(page.getByRole("tooltip"), "scrolling closes a fixed tooltip before it can detach from its cell").toBeHidden();
-  await gridScroll.evaluate((element, left) => {
-    element.scrollLeft = left;
-  }, horizontalScroll.before);
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-  await page.mouse.move(1, 1);
-  await parentCell.hover();
-  await expect(page.getByRole("tooltip")).toBeVisible();
-  await page.evaluate(() => window.dispatchEvent(new Event("scroll")));
-  await expect(page.getByRole("tooltip"), "page scrolling closes a fixed tooltip before it can detach from its cell").toBeHidden();
-  await page.mouse.move(1, 1);
-  await parentCell.hover();
-  await expect(page.getByRole("tooltip")).toBeVisible();
-  await page.setViewportSize({ width: 1430, height: 900 });
-  await expect(page.getByRole("tooltip"), "viewport resize closes a fixed tooltip before it can detach from its cell").toBeHidden();
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.mouse.move(1, 1);
-  await parentCell.hover();
-  await expect(parentCell.locator(".room-status-bed-occupants > span")).toHaveText([
-    occupants.slice(0, 2).map((occupant) => occupant.nickname).join("、"),
-    occupants.slice(2, 4).map((occupant) => occupant.nickname).join("、")
-  ]);
+  const nicknameLabels = parentCell.locator(".room-status-bed-occupants > span");
+  await expect(nicknameLabels).toHaveText(
+    occupants.map((occupant) => occupant.nickname)
+  );
   await expect(parentCell.locator(".room-status-bed-occupants")).not.toContainText(/\+[123]/);
-  await expect(parentCell).toContainText("已预订");
   const occupiedBounds = await roomRow(page, room!.id).boundingBox();
-  expect(occupiedBounds!.height).toBeGreaterThan(initialRowBounds!.height);
+  expect(occupiedBounds!.height).toBe(initialRowBounds!.height);
+
+  const truncatedNickname = nicknameLabels.first();
+  const completeNickname = nicknameLabels.nth(1);
+  expect(await truncatedNickname.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  expect(await completeNickname.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(false);
+  await truncatedNickname.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(occupants[0]!.nickname);
+  await page.mouse.move(1, 1);
+  await expect(page.getByRole("tooltip")).toBeHidden();
+  await completeNickname.hover();
+  await expect(page.getByRole("tooltip"), "a complete nickname must not open redundant help text").toHaveCount(0);
+  await truncatedNickname.focus();
+  await expect(page.getByRole("tooltip")).toHaveText(occupants[0]!.nickname);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip")).toBeHidden();
+  await expect(truncatedNickname).toBeFocused();
 
   await page.mouse.move(1, 1);
   await page.locator(".room-status-grid-scroll").focus();
   await parentCell.focus();
-  await expect(page.getByRole("tooltip")).toContainText("已占 4/4");
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
   expect((await roomRow(page, room!.id).boundingBox())!.height).toBe(occupiedBounds!.height);
   await page.keyboard.press("Enter");
   const quickPopover = page.getByTestId("room-status-quick-popover");
@@ -933,78 +1434,13 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   await page.keyboard.press("Escape");
   await expect(quickPopover).toBeHidden();
   await expect(parentCell).toBeFocused();
-  await parentCell.hover();
-  await page.mouse.move(1, 1);
-  await page.waitForTimeout(250);
-  await expect(page.getByRole("tooltip"), "focused trigger keeps its tooltip open after pointer leave").toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("tooltip"), "first Escape closes the tooltip before clearing selection").toBeHidden();
-  await expect(parentCell).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("Escape");
   await expect(parentCell).toHaveAttribute("aria-selected", "false");
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("ArrowLeft");
   await expect(parentCell).toBeFocused();
-  await expect(page.getByRole("tooltip")).toContainText("北辰");
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
   expect((await roomRow(page, room!.id).boundingBox())!.height).toBe(occupiedBounds!.height);
-
-  await page.setViewportSize({ width: 1440, height: 260 });
-  await parentCell.scrollIntoViewIfNeeded();
-  await parentCell.hover();
-  const constrainedTooltip = page.getByTestId("bed-occupancy-tooltip");
-  await expect(constrainedTooltip).toBeVisible();
-  const tooltipGeometry = await constrainedTooltip.evaluate((element) => ({
-    top: element.getBoundingClientRect().top,
-    bottom: element.getBoundingClientRect().bottom,
-    clientHeight: element.clientHeight,
-    scrollHeight: element.scrollHeight
-  }));
-  expect(tooltipGeometry.top).toBeGreaterThanOrEqual(11);
-  expect(tooltipGeometry.bottom).toBeLessThanOrEqual(249);
-  expect(tooltipGeometry.scrollHeight).toBeGreaterThan(tooltipGeometry.clientHeight);
-  await page.keyboard.press("Tab");
-  await expect(constrainedTooltip, "the long occupant list is keyboard reachable from its trigger cell").toBeFocused();
-  await page.keyboard.press("PageDown");
-  await expect.poll(() => constrainedTooltip.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  await expect(constrainedTooltip, "scrolling the tooltip itself keeps the anchored tooltip open").toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(constrainedTooltip).toBeHidden();
-  await expect(parentCell).toBeFocused();
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.mouse.move(1, 1);
-
-  await parentCell.hover();
-  await expect(page.getByRole("tooltip")).toBeVisible();
-  const forwardTabProbe = await parentCell.evaluate((trigger) => {
-    const selector = [
-      "a[href]",
-      "area[href]",
-      "button",
-      "input",
-      "select",
-      "textarea",
-      "iframe",
-      "[contenteditable='true']",
-      "[tabindex]"
-    ].join(",");
-    const tooltip = document.querySelector<HTMLElement>("[data-testid='bed-occupancy-tooltip']");
-    const tabStops = [...document.querySelectorAll<HTMLElement>(selector)].filter((element) => {
-      if (tooltip?.contains(element) || element.tabIndex < 0 || element.matches(":disabled")) return false;
-      if (element.closest("[hidden], [inert]")) return false;
-      const style = window.getComputedStyle(element);
-      return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
-    });
-    const next = tabStops[tabStops.indexOf(trigger as HTMLElement) + 1];
-    if (!next) return false;
-    next.dataset.forwardTabProbe = "true";
-    return true;
-  });
-  expect(forwardTabProbe, "the occupied trigger must have a following logical tab stop").toBe(true);
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("tooltip")).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("tooltip"), "forward Tab leaves the tooltip without wrapping to the page start").toBeHidden();
-  await expect(page.locator("[data-forward-tab-probe='true']")).toBeFocused();
 
   const wholeRoomNickname = "云岫";
   await createFreeStayForToday(page, {
@@ -1015,14 +1451,25 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
     departureDate: addDays(wholeRoomServiceDate!, 1)
   });
   const wholeRoomCell = roomCell(page, room!.id, wholeRoomServiceDate!);
-  await expect(wholeRoomCell.locator(".room-status-direct-occupants")).toHaveText(wholeRoomNickname);
-  await expect(wholeRoomCell.locator(".room-status-direct-count")).toHaveText("1人");
-  await expect(roomRow(page, room!.id).locator(".room-status-interval").filter({ hasText: wholeRoomNickname })).toHaveCount(0);
+  // A whole-room reservation in a bed-split room is still one ordinary lodging,
+  // not a mixed-bed parent summary: it keeps the orange date-cell treatment.
+  await expectOrdinaryLodgingCellPresentation(wholeRoomCell, "RESERVED", wholeRoomNickname, "ROOM");
+  await expect(roomRow(page, room!.id).locator(ordinaryLodgingIntervalSelector))
+    .toHaveCount(0);
 
   await page.mouse.move(1, 1);
   const expandBeds = roomRow(page, room!.id).locator(".room-status-expand-button[aria-expanded='false']");
   await expect(expandBeds).toBeVisible();
   await expandBeds.click();
+  for (const bed of room!.children) {
+    const childCell = roomCell(page, bed.id, wholeRoomServiceDate!);
+    await expect(childCell).toHaveAttribute("data-whole-room-occupied", "true");
+    await expect(childCell).toHaveClass(/is-whole-room-occupied-bed/);
+    await expect(childCell).toHaveAccessibleName(/整房占用.*当前不可安排/);
+    await expect(childCell).not.toHaveAccessibleName(/预订|在住/);
+    await expect(childCell.locator(".room-status-mark, .room-status-direct-occupants, .room-status-direct-occupancy-summary"))
+      .toHaveCount(0);
+  }
   for (let index = 0; index < occupants.length; index += 1) {
     const childRow = roomRow(page, room!.children[index]!.id);
     await expect(roomCell(page, room!.children[index]!.id, serviceDate!)).toHaveAccessibleName(
@@ -1032,8 +1479,8 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
       hasText: occupants[index]!.nickname
     })).toHaveCount(0);
   }
-  await parentCell.hover();
-  await expect(page.getByRole("tooltip")).toBeVisible();
+  await truncatedNickname.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(occupants[0]!.nickname);
   await page.screenshot({ path: testInfo.outputPath("room-status-bed-occupancy-nicknames.png") });
   await assertNoA11yViolations(page);
   await assertNoPageOverflow(page);
@@ -1376,6 +1823,436 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   expect(await propertyOrderCount()).toBe(ordersBeforeFailedTargetQuote);
 });
 
+test("desktop write draft stays stable across three room-status freshness windows", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop room-status freshness stability coverage");
+  test.setTimeout(150_000);
+  await page.setViewportSize({ width: 1440, height: 720 });
+  const { board } = await login(page);
+  await expectDesktopGrid(page);
+
+  const candidate = board.rooms
+    .flatMap((room) => room.days.map((day) => ({ room, day })))
+    .find(({ room, day }) => room.kind === "ROOM"
+      && day.available
+      && day.conflicts.length === 0
+      && room.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled));
+  expect(candidate, "an available room is required for the freshness stability draft").toBeTruthy();
+
+  const drawer = await openRoomStatusWriteDrawer(page, candidate!.room.id, candidate!.day.serviceDate, "创建订单");
+  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  await expect(drawer.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
+  await drawer.getByTestId("primary-guest-name").fill("房态静默续期验证住客");
+  const nickname = drawer.getByTestId("primary-guest-nickname");
+  await nickname.fill("静默续期草稿");
+  await drawer.getByTestId("booking-channel-code").selectOption("WECOM");
+  const createButton = drawer.getByTestId("create-order");
+  await expect(createButton).toBeEnabled();
+  const drawerBody = drawer.locator(".modal-body");
+  const initialScrollTop = await drawerBody.evaluate((element) => {
+    element.scrollTop = Math.min(40, Math.max(0, element.scrollHeight - element.clientHeight));
+    return element.scrollTop;
+  });
+  await nickname.focus();
+
+  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  const delayedRefreshes: Array<{ startedAt: number; fulfilledAt: number }> = [];
+  const delayedResponseMs = 1_500;
+  await page.route(roomStatusRoutePattern, async (route) => {
+    const startedAt = Date.now();
+    // Fetching first keeps this a real API response; only its delivery is delayed.
+    const response = await route.fetch();
+    await new Promise<void>((resolve) => setTimeout(resolve, delayedResponseMs));
+    await route.fulfill({ response });
+    delayedRefreshes.push({ startedAt, fulfilledAt: Date.now() });
+  });
+  let stability: {
+    disabledStates: boolean[];
+    focusLost: boolean;
+    value: string;
+    scrollTop: number;
+    drawerConnected: boolean;
+  };
+  try {
+    stability = await page.evaluate(async ({ durationMs }) => {
+      const button = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
+      const input = document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']");
+      const body = document.querySelector<HTMLElement>("dialog.room-status-write-drawer .modal-body");
+      if (!button || !input || !body) throw new Error("write draft controls are unavailable");
+      const disabledStates = [button.disabled];
+      let focusLost = document.activeElement !== input;
+      const observeButtonState = () => disabledStates.push(button.disabled);
+      const observer = new MutationObserver(observeButtonState);
+      observer.observe(button, { attributes: true, attributeFilter: ["disabled"] });
+      const focusProbe = window.setInterval(() => {
+        if (document.activeElement !== input) focusLost = true;
+        observeButtonState();
+      }, 40);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, durationMs));
+      window.clearInterval(focusProbe);
+      observer.disconnect();
+      return {
+        disabledStates,
+        focusLost,
+        value: input.value,
+        scrollTop: body.scrollTop,
+        drawerConnected: body.isConnected
+      };
+    }, { durationMs: 18_000 });
+  } finally {
+    await page.unrouteAll({ behavior: "wait" });
+  }
+
+  expect(delayedRefreshes.length, "the open draft must cross at least three five-second freshness windows")
+    .toBeGreaterThanOrEqual(3);
+  expect(delayedRefreshes.length, "a 1.5-second response delay must not turn renewal into a tight refresh loop")
+    .toBeLessThanOrEqual(10);
+  expect(delayedRefreshes.every((renewal) => renewal.fulfilledAt - renewal.startedAt >= delayedResponseMs - 100)).toBe(true);
+  const renewalGapsAfterDelivery = delayedRefreshes.slice(1)
+    .map((renewal, index) => renewal.startedAt - delayedRefreshes[index]!.fulfilledAt);
+  expect(renewalGapsAfterDelivery, "each delayed renewal after the first must be measured")
+    .toHaveLength(delayedRefreshes.length - 1);
+  expect(
+    renewalGapsAfterDelivery.every((gap) => gap >= 250),
+    `renewals must not immediately loop after delivery; observed gaps: ${renewalGapsAfterDelivery.join(", ")}ms`
+  )
+    .toBe(true);
+  expect(stability.disabledStates.every((disabled) => !disabled)).toBe(true);
+  expect(stability.focusLost).toBe(false);
+  expect(stability.value).toBe("静默续期草稿");
+  expect(stability.scrollTop).toBe(initialScrollTop);
+  expect(stability.drawerConnected).toBe(true);
+  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+  await expect(page.getByRole("alert").filter({ hasText: /房态.*失败|房态.*过期/ })).toHaveCount(0);
+  await expect(createButton).toBeEnabled();
+});
+
+test("desktop keeps room status writable when the client clock is ahead of the server", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop room-status clock-skew coverage");
+  await page.addInitScript(() => {
+    const systemNow = Date.now.bind(Date);
+    Date.now = () => systemNow() + 60_000;
+  });
+  await page.setViewportSize({ width: 1440, height: 720 });
+  let roomStatusResponses = 0;
+  page.on("response", (response) => {
+    const url = new URL(response.url());
+    if (response.request().method() === "GET"
+      && url.pathname === `/api/v1/properties/${propertyId}/room-status`
+      && response.status() === 200) roomStatusResponses += 1;
+  });
+
+  const { board } = await login(page);
+  await expectDesktopGrid(page);
+  const cell = firstAvailableRoomStatusCell(page, board);
+  const popover = await openDayPopover(page, cell);
+  await expect(popover.getByRole("button", { name: "创建订单", exact: true })).toBeEnabled();
+  await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeEnabled();
+  const responsesBeforeRenewal = roomStatusResponses;
+
+  await page.waitForTimeout(7_000);
+
+  expect(roomStatusResponses).toBeGreaterThan(responsesBeforeRenewal);
+  await expect(popover).toBeVisible();
+  await expect(popover.getByRole("button", { name: "创建订单", exact: true })).toBeEnabled();
+  await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeEnabled();
+  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+});
+
+test("desktop rejects a slow room-status renewal across wall-clock rollback without a write-gate loop", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop room-status slow-renewal boundary coverage");
+  test.setTimeout(120_000);
+  await page.addInitScript(() => {
+    const systemNow = Date.now.bind(Date);
+    let offsetMs = 0;
+    (window as unknown as { setRoomStatusClockOffset: (value: number) => void }).setRoomStatusClockOffset = (value) => {
+      offsetMs = value;
+    };
+    Date.now = () => systemNow() + offsetMs;
+  });
+  await page.setViewportSize({ width: 1440, height: 720 });
+  const { board } = await login(page);
+  await expectDesktopGrid(page);
+
+  const candidate = board.rooms
+    .flatMap((room) => room.days.map((day) => ({ room, day })))
+    .find(({ room, day }) => room.kind === "ROOM"
+      && day.available
+      && day.conflicts.length === 0
+      && room.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled));
+  expect(candidate, "an available room is required for the slow-renewal draft").toBeTruthy();
+
+  const drawer = await openRoomStatusWriteDrawer(page, candidate!.room.id, candidate!.day.serviceDate, "创建订单");
+  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  await expect(drawer.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
+  await drawer.getByTestId("primary-guest-name").fill("房态慢响应验证住客");
+  const nickname = drawer.getByTestId("primary-guest-nickname");
+  await nickname.fill("慢响应草稿");
+  await drawer.getByTestId("booking-channel-code").selectOption("WECOM");
+  const createButton = drawer.getByTestId("create-order");
+  await expect(createButton).toBeEnabled();
+  const drawerBody = drawer.locator(".modal-body");
+  const initialScrollTop = await drawerBody.evaluate((element) => {
+    element.scrollTop = Math.min(40, Math.max(0, element.scrollHeight - element.clientHeight));
+    return element.scrollTop;
+  });
+  await nickname.focus();
+
+  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  const delayedResponseMs = 2_500;
+  let delayedRenewalStarted!: () => void;
+  let delayedRenewalFulfilled!: () => void;
+  const delayedRenewalStartedPromise = new Promise<void>((resolve) => { delayedRenewalStarted = resolve; });
+  const delayedRenewalFulfilledPromise = new Promise<void>((resolve) => { delayedRenewalFulfilled = resolve; });
+  let delayedRenewalCount = 0;
+  await page.route(roomStatusRoutePattern, async (route) => {
+    // Keep the response real. The local request budget makes this delay cross
+    // the three-second install headroom independently of machine clock skew.
+    const response = await route.fetch();
+    delayedRenewalCount += 1;
+    delayedRenewalStarted();
+    await new Promise<void>((resolve) => setTimeout(resolve, delayedResponseMs));
+    await route.fulfill({ response });
+    delayedRenewalFulfilled();
+  });
+
+  await delayedRenewalStartedPromise;
+  await page.evaluate(() => {
+    (window as unknown as { setRoomStatusClockOffset: (value: number) => void })
+      .setRoomStatusClockOffset(-60_000);
+  });
+  const slowRenewalStability = await page.evaluate(async ({ durationMs }) => {
+    const button = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
+    const body = document.querySelector<HTMLElement>("dialog.room-status-write-drawer .modal-body");
+    if (!button || !body) throw new Error("slow-renewal draft controls are unavailable");
+    const disabledStates = [button.disabled];
+    let focusLost = false;
+    const sample = () => {
+      const currentButton = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
+      const currentInput = document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']");
+      if (!currentButton || !currentInput) throw new Error("slow-renewal draft controls were removed");
+      disabledStates.push(currentButton.disabled);
+      if (document.activeElement !== currentInput) focusLost = true;
+    };
+    const timer = window.setInterval(sample, 40);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, durationMs));
+    window.clearInterval(timer);
+    sample();
+    return {
+      disabledStates,
+      focusLost,
+      value: document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']")?.value,
+      scrollTop: body.scrollTop,
+      drawerConnected: body.isConnected
+    };
+  }, { durationMs: delayedResponseMs + 300 });
+
+  try {
+    await delayedRenewalFulfilledPromise;
+    expect(delayedRenewalCount, "the slow boundary must cover at least one rejected renewal before recovery")
+      .toBeGreaterThanOrEqual(1);
+    expect(delayedRenewalCount, "the slow boundary must not start a tight refresh loop before recovery")
+      .toBeLessThanOrEqual(2);
+    await expect(createButton).toBeDisabled();
+    await expect(page.locator(".room-status-stale-notice")).toHaveCount(1);
+    await expect(page.locator(".room-status-stale-notice")).toContainText("正在更新房态，更新完成前暂不能写入。");
+    await expect(page.locator(".room-status-quick-gate")).toHaveCount(0);
+
+    const transitions = slowRenewalStability.disabledStates
+      .filter((state, index, states) => index === 0 || state !== states[index - 1]);
+    expect(transitions, "a rejected renewal may close writes once, but must not reopen them before recovery")
+      .toEqual([false, true]);
+    expect(slowRenewalStability.focusLost).toBe(false);
+    expect(slowRenewalStability.value).toBe("慢响应草稿");
+    expect(slowRenewalStability.scrollTop).toBe(initialScrollTop);
+    expect(slowRenewalStability.drawerConnected).toBe(true);
+  } finally {
+    await page.unroute(roomStatusRoutePattern);
+  }
+
+  await expect(createButton, "after network recovery, the client must renew without a manual refresh").toBeEnabled({ timeout: 15_000 });
+  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+  await expect(nickname).toHaveValue("慢响应草稿");
+  await expect(nickname).toBeFocused();
+  expect(await drawerBody.evaluate((element) => element.scrollTop)).toBe(initialScrollTop);
+});
+
+test("desktop stops repeated low-freshness renewals and requires one manual retry", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop room-status repeated low-freshness failure coverage");
+  test.setTimeout(150_000);
+  await page.setViewportSize({ width: 1440, height: 720 });
+  const { board } = await login(page);
+  await expectDesktopGrid(page);
+
+  const candidate = board.rooms
+    .flatMap((room) => room.days.map((day) => ({ room, day })))
+    .find(({ room, day }) => room.kind === "ROOM"
+      && day.available
+      && day.conflicts.length === 0
+      && room.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled));
+  expect(candidate, "an available room is required for the repeated low-freshness draft").toBeTruthy();
+
+  const drawer = await openRoomStatusWriteDrawer(page, candidate!.room.id, candidate!.day.serviceDate, "创建订单");
+  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
+  await expect(drawer.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
+  await drawer.getByTestId("primary-guest-name").fill("房态连续慢响应验证住客");
+  const nickname = drawer.getByTestId("primary-guest-nickname");
+  await nickname.fill("连续慢响应草稿");
+  await drawer.getByTestId("booking-channel-code").selectOption("WECOM");
+  const createButton = drawer.getByTestId("create-order");
+  await expect(createButton).toBeEnabled();
+  const drawerBody = drawer.locator(".modal-body");
+  const initialScrollTop = await drawerBody.evaluate((element) => {
+    element.scrollTop = Math.min(40, Math.max(0, element.scrollHeight - element.clientHeight));
+    return element.scrollTop;
+  });
+  await nickname.focus();
+
+  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  const delayedResponseMs = 3_250;
+  let firstDelayedRenewalStarted!: () => void;
+  const firstDelayedRenewalStartedPromise = new Promise<void>((resolve) => { firstDelayedRenewalStarted = resolve; });
+  let delayedRenewalCount = 0;
+  await page.route(roomStatusRoutePattern, async (route) => {
+    // The real five-second response is delivered after the local request has
+    // consumed enough of its budget that every attempt must be rejected.
+    const response = await route.fetch();
+    delayedRenewalCount += 1;
+    const renewalNumber = delayedRenewalCount;
+    if (renewalNumber === 1) firstDelayedRenewalStarted();
+    await new Promise<void>((resolve) => setTimeout(resolve, delayedResponseMs));
+    await route.fulfill({ response });
+  });
+
+  // Trigger the first delayed response explicitly. Waiting for whichever
+  // background timer happens to survive quote setup makes this boundary flaky.
+  await page.getByRole("button", { name: "刷新房态", exact: true })
+    .evaluate((element: HTMLButtonElement) => element.click());
+  await firstDelayedRenewalStartedPromise;
+  const stability = await page.evaluate(async ({ durationMs }) => {
+    const body = document.querySelector<HTMLElement>("dialog.room-status-write-drawer .modal-body");
+    if (!body) throw new Error("repeated low-freshness drawer is unavailable");
+    const disabledStates: boolean[] = [];
+    let focusLost = false;
+    const sample = () => {
+      const button = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
+      const input = document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']");
+      if (!button || !input) throw new Error("repeated low-freshness draft controls were removed");
+      disabledStates.push(button.disabled);
+      if (document.activeElement !== input) focusLost = true;
+    };
+    sample();
+    const timer = window.setInterval(sample, 40);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, durationMs));
+    window.clearInterval(timer);
+    sample();
+    return {
+      disabledStates,
+      focusLost,
+      value: document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']")?.value,
+      scrollTop: body.scrollTop,
+      drawerConnected: body.isConnected
+    };
+  }, { durationMs: 13_000 });
+
+  try {
+    const failureNotice = page.locator(".room-status-stale-notice");
+    await expect(failureNotice).toContainText(
+      "房态刷新失败，当前仍显示上次成功结果。刷新成功前不能发起补录或其他写入。",
+      { timeout: 15_000 }
+    );
+    await expect(failureNotice).toHaveAttribute("role", "alert");
+    await expect(failureNotice.getByRole("button", { name: "重试刷新", exact: true })).toHaveCount(1);
+    await expect(createButton).toBeDisabled();
+    await expect(page.locator(".room-status-quick-gate")).toHaveCount(0);
+    const stoppedRenewalCount = delayedRenewalCount;
+    expect(stoppedRenewalCount, "manual retry must require at least three delivered low-freshness attempts")
+      .toBeGreaterThanOrEqual(3);
+    await page.waitForTimeout(1_000);
+    expect(delayedRenewalCount, "the final failure state must stop background retries")
+      .toBe(stoppedRenewalCount);
+
+    const transitions = stability.disabledStates
+      .filter((state, index, states) => index === 0 || state !== states[index - 1]);
+    expect(transitions, "writes may close once but must not reopen while low-freshness retries fail")
+      .toEqual([false, true]);
+    expect(stability.focusLost).toBe(false);
+    expect(stability.value).toBe("连续慢响应草稿");
+    expect(stability.scrollTop).toBe(initialScrollTop);
+    expect(stability.drawerConnected).toBe(true);
+  } finally {
+    await page.unroute(roomStatusRoutePattern);
+  }
+
+  const refreshed = roomStatusResponse(page);
+  await page.locator(".room-status-stale-notice")
+    .getByRole("button", { name: "重试刷新", exact: true })
+    .click({ timeout: 5_000 });
+  await refreshed;
+  await expect(createButton).toBeEnabled({ timeout: 15_000 });
+  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+  await expect(nickname).toHaveValue("连续慢响应草稿");
+  await expect(nickname).toBeFocused();
+  expect(await drawerBody.evaluate((element) => element.scrollTop)).toBe(initialScrollTop);
+});
+
+test("desktop cancels a low-freshness retry when a replacement range query fails", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop room-status retry-scope coverage");
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1440, height: 720 });
+  const { board } = await login(page);
+  await expectDesktopGrid(page);
+
+  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  const initialArrivalDate = board.range.arrivalDate;
+  const replacementArrivalDate = addDays(initialArrivalDate, roomStatusTimelineDays);
+  let requestCount = 0;
+  let secondLowFreshnessDelivered!: () => void;
+  let replacementFailed!: () => void;
+  const secondLowFreshnessDeliveredPromise = new Promise<void>((resolve) => {
+    secondLowFreshnessDelivered = resolve;
+  });
+  const replacementFailedPromise = new Promise<void>((resolve) => {
+    replacementFailed = resolve;
+  });
+  await page.route(roomStatusRoutePattern, async (route) => {
+    requestCount += 1;
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("arrivalDate") === replacementArrivalDate) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ code: "ROOM_STATUS_TEST_FAILURE", message: "replacement query failed" })
+      });
+      replacementFailed();
+      return;
+    }
+    const response = await route.fetch();
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_250));
+    await route.fulfill({ response });
+    if (requestCount === 2) secondLowFreshnessDelivered();
+  });
+
+  try {
+    await page.getByRole("button", { name: "刷新房态", exact: true })
+      .evaluate((element: HTMLButtonElement) => element.click());
+    await secondLowFreshnessDeliveredPromise;
+    await page.waitForTimeout(100);
+    await page.getByRole("button", { name: "查看后 30 夜", exact: true }).click();
+    await replacementFailedPromise;
+    const failureNotice = page.locator(".room-status-stale-notice");
+    await expect(failureNotice).toContainText(
+      "房态刷新失败，当前仍显示上次成功结果。刷新成功前不能发起补录或其他写入。"
+    );
+    await expect(failureNotice).toHaveAttribute("role", "alert");
+    const stoppedRequestCount = requestCount;
+    await page.waitForTimeout(1_500);
+    expect(requestCount, "a retry from the previous range must not wake after the replacement query fails")
+      .toBe(stoppedRequestCount);
+  } finally {
+    await page.unroute(roomStatusRoutePattern);
+  }
+});
+
 test("desktop stale and unknown states fail closed without mocked room-status data", async ({ page }, testInfo: TestInfo) => {
   test.skip(!isProject(testInfo, "desktop"), "desktop room-status network-state coverage");
   const { board } = await login(page);
@@ -1406,16 +2283,19 @@ test("desktop stale and unknown states fail closed without mocked room-status da
   try {
     await page.getByRole("button", { name: "刷新房态", exact: true }).click();
     await refreshIntercepted;
-    await expect(page.getByRole("button", { name: "正在刷新", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "刷新房态", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "正在刷新", exact: true })).toHaveCount(0);
     await page.waitForTimeout(Math.max(0, Date.parse(board.freshUntil) - Date.now() + 200));
 
     await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
-    await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+    await expect(page.locator(".room-status-stale-notice")).toHaveCount(1);
+    await expect(page.locator(".room-status-stale-notice")).toContainText("正在更新房态");
     await expect(preservedCell).toHaveAttribute("aria-label", preservedAccessibleName!);
     const refreshingPopover = await openDayPopover(page, preservedCell);
     await expect(refreshingPopover).toContainText("可售");
-    await expect(refreshingPopover.getByRole("button", { name: "创建订单", exact: true })).toHaveCount(0);
-    await expect(refreshingPopover.getByRole("button", { name: "维修锁房", exact: true })).toHaveCount(0);
+    await expect(refreshingPopover.getByRole("button", { name: "创建订单", exact: true })).toBeDisabled();
+    await expect(refreshingPopover.getByRole("button", { name: "维修锁房", exact: true })).toBeDisabled();
+    await expect(refreshingPopover.locator(".room-status-quick-gate")).toHaveCount(0);
     await page.keyboard.press("Escape");
   } finally {
     releaseRefresh();
@@ -1432,18 +2312,18 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await page.context().setOffline(true);
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
-    await expect(page.getByRole("alert").filter({ hasText: "房态刷新未完成" })).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "房态刷新失败" })).toBeVisible();
     await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
-    await expect(page.getByRole("dialog", { name: "选中对象上下文" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "创建订单", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeDisabled();
 
     await page.context().setOffline(false);
     const refreshed = roomStatusResponse(page);
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
     await refreshed;
-    await expect(page.getByRole("alert").filter({ hasText: "房态刷新未完成" })).toBeHidden();
-    const restoredContext = page.getByRole("dialog", { name: "选中对象上下文" });
+    await expect(page.getByRole("alert").filter({ hasText: "房态刷新失败" })).toBeHidden();
+    const restoredContext = page.getByRole("dialog", { name: "创建订单", exact: true });
     await restoredContext.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
     await expect(restoredContext).toBeHidden();
 
@@ -1609,7 +2489,7 @@ test("READ Web principal receives the real projection without business write act
   const quickPopover = await openDayPopover(page, firstAvailableRoomStatusCell(page, board));
   await quickPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
   const actionRegion = page.locator(".room-status-context-actions");
-  await expect(actionRegion).toContainText("服务端未为当前对象下发可执行动作");
+  await expect(actionRegion).toContainText("当前账号只有查看权限，不能补录住宿或执行其他写入");
   for (const action of ["创建正常住宿订单", "创建免费入住", "放置维修锁房"]) {
     await expect(actionRegion.getByRole("button", { name: action, exact: true })).toHaveCount(0);
   }
@@ -1636,7 +2516,7 @@ test("room-status responsive layouts keep the matrix bounded through tablet and 
       const gridRegion = layout.gridRegion;
       const viewDrawer = page.locator("dialog.room-status-view-drawer");
       const context = page.locator(".room-status-context");
-      expect(await page.locator(".room-status-grid-header").evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
+      expect(await page.locator(".room-status-grid-header-scroll").evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
       expect(await page.locator(".room-status-resource-header").evaluate((element) => getComputedStyle(element).position)).toBe("sticky");
       const gridBox = await gridRegion.boundingBox();
       expect(gridBox).not.toBeNull();
@@ -1714,7 +2594,7 @@ test("room-status reload LCP and a real fixed 30-night grid stay within the inte
   const committedRange = page.getByTestId("room-status-board-range");
   await expect(committedRange).toHaveAttribute("data-range-arrival", timelineStartDate);
   await expect(committedRange).toHaveAttribute("data-range-departure", departureDate);
-  const grid = committedRange.getByRole("region", { name: /房态二维网格/ });
+  const grid = committedRange.getByRole("grid");
   await expect(grid).toBeVisible();
   const firstCell = grid.locator("[data-room-status-cell='true']").first();
   await firstCell.focus();
@@ -1934,7 +2814,9 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await expect(restoredMobileRange).toContainText(
     `${Number(restoredBoard.range.departureDate.slice(5, 7))}月${Number(restoredBoard.range.departureDate.slice(8, 10))}日`
   );
-  await expect(page.locator(".room-status-return-notice")).toContainText("已按最新房态恢复原住宿选择");
+  await expect(page.locator(".room-status-return-notice")).toContainText(
+    "最新房态中找不到原住宿位置。已安全关闭订单上下文"
+  );
   await expect.poll(() => page.evaluate(() => {
     const key = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
       .find((candidate) => candidate?.startsWith("qintopia.room-status-view.v1:"));
@@ -1945,18 +2827,10 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     return { range: snapshot?.range, selection: snapshot?.state?.selection };
   })).toEqual({
     range: restoredBoard.range,
-    selection: {
-      unitId: "unit_room_201",
-      anchorDate: today,
-      focusDate: today,
-      arrivalDate: today,
-      departureDate: orderDepartureDate
-    }
+    selection: null
   });
 
   const restoredOrderDialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
-  await expect(restoredOrderDialog).toContainText(guest);
-  await restoredOrderDialog.locator(".modal-header").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(restoredOrderDialog).toBeHidden();
 
   await page.getByRole("tab", { name: /异常/ }).click();

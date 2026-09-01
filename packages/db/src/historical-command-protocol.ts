@@ -148,7 +148,8 @@ function stayTotalCashLine(value: Record<string, unknown>, timelineByDate?: Map<
       || !localDate(segment.arrivalDate) || !localDate(segment.departureDate)
       || segment.arrivalDate !== nextSegmentArrival
       || !safeInteger(segment.nights, 1, 366) || !safeInteger(segment.anchorAmountMinor, 1)
-      || !safeInteger(segment.numeratorMinor, 1) || segment.denominator !== value.pricingBandAnchorNights) return false;
+      || !safeInteger(segment.numeratorMinor, 1, Number.MAX_SAFE_INTEGER)
+      || segment.denominator !== value.pricingBandAnchorNights) return false;
     const dates = expectedDates(segment.arrivalDate, segment.departureDate);
     if (!dates || dates.length !== segment.nights
       || (timelineByDate && dates.some((date) => timelineByDate.get(date) !== segment.inventoryUnitId))) return false;
@@ -171,6 +172,61 @@ function cashLines(value: unknown, timelineByDate?: Map<string, string>): boolea
       ? stayTotalCashLine(item, timelineByDate)
       : nightlyCashLine(item, timelineDates));
   });
+}
+
+export function pricingCashLineTotalMinor(value: unknown, currency: string): number | undefined {
+  if (!CURRENCY_CODE.test(currency) || !cashLines(value)) return undefined;
+  const lineRecords = (value as unknown[]).map((entry) => record(entry)!);
+  const stayTotalLineCount = lineRecords.filter((entry) => entry.lineKind === "STAY_TOTAL").length;
+  if (stayTotalLineCount > 0 && (stayTotalLineCount !== 1 || lineRecords.length !== 1)) return undefined;
+  if (stayTotalLineCount === 0) {
+    const serviceDates = lineRecords.map((entry) => entry.serviceDate as string);
+    if (new Set(serviceDates).size !== serviceDates.length) return undefined;
+  }
+  let totalMinor = 0;
+  for (const entry of lineRecords) {
+    const amount = record(entry.amount);
+    if (amount?.currency !== currency || !safeInteger(amount.minorUnits, 0)) return undefined;
+    totalMinor += amount.minorUnits as number;
+    if (!safeInteger(totalMinor, 0)) return undefined;
+  }
+  return totalMinor;
+}
+
+export function ordinaryStayCashLineTotalMinor(
+  value: unknown,
+  currency: string,
+  timeline: readonly { serviceDate: string; inventoryUnitId: string }[]
+): number | undefined {
+  const totalMinor = pricingCashLineTotalMinor(value, currency);
+  if (totalMinor === undefined || timeline.length === 0 || !Array.isArray(value)) return undefined;
+
+  const timelineByDate = new Map<string, string>();
+  for (const item of timeline) {
+    if (!localDate(item.serviceDate) || !identifier(item.inventoryUnitId) || timelineByDate.has(item.serviceDate)) {
+      return undefined;
+    }
+    timelineByDate.set(item.serviceDate, item.inventoryUnitId);
+  }
+
+  const stayTotalLines = value.filter((entry) => record(entry)?.lineKind === "STAY_TOTAL");
+  if (stayTotalLines.length > 0) {
+    return value.length === 1 && stayTotalLines.length === 1
+      && stayTotalCashLine(record(stayTotalLines[0])!, timelineByDate)
+      ? totalMinor
+      : undefined;
+  }
+
+  if (value.length !== timelineByDate.size) return undefined;
+  const timelineDates = new Set(timelineByDate.keys());
+  for (const [index, entry] of value.entries()) {
+    const item = record(entry);
+    const timelineItem = timeline[index]!;
+    if (!item || !nightlyCashLine(item, timelineDates)
+      || item.serviceDate !== timelineItem.serviceDate
+      || item.inventoryUnitId !== timelineItem.inventoryUnitId) return undefined;
+  }
+  return totalMinor;
 }
 
 function pricing(value: unknown, timelineValue?: unknown): boolean {

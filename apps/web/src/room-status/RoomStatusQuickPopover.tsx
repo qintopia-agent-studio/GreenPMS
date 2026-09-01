@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, CalendarPlus2, ClipboardList, FileClock, LockKeyhole, LockKeyholeOpen, RefreshCw, Search, X } from "lucide-react";
+import { AlertTriangle, CalendarPlus2, ClipboardList, FileClock, Gift, HandHeart, LockKeyhole, LockKeyholeOpen, RefreshCw, Search, X } from "lucide-react";
 import type { RoomStatusActionDto, RoomStatusStatus } from "@qintopia/contracts";
-import { formatRoomStatusDate, roomStatusUnitLabel, RoomStatusMark } from "./roomStatusPresentation";
-import type { RoomStatusOrderOptionsResult, RoomStatusSelection } from "./roomStatusState";
+import {
+  formatRoomStatusDate,
+  roomStatusFreeStayCategoryLabel,
+  roomStatusUnitLabel,
+  RoomStatusAttentionBadges,
+  RoomStatusMark,
+  type RoomStatusAttentionLabel
+} from "./roomStatusPresentation";
+import type { RoomStatusOrderOption, RoomStatusOrderOptionsResult, RoomStatusSelection } from "./roomStatusState";
 
 const VIEWPORT_MARGIN = 8;
 const ANCHOR_GAP = 8;
@@ -76,6 +83,14 @@ export function roomStatusQuickActionCanRun(action: Pick<RoomStatusActionDto, "e
   return action.enabled;
 }
 
+export function roomStatusQuickActionDisabledReason(
+  action: Pick<RoomStatusActionDto, "disabledReason">,
+  writeBlock: { reason: string } | undefined
+): string | undefined {
+  const reason = action.disabledReason ?? undefined;
+  return reason === writeBlock?.reason ? undefined : reason;
+}
+
 export function runRoomStatusQuickAction(
   action: RoomStatusActionDto,
   callback: (action: RoomStatusActionDto) => void
@@ -98,6 +113,59 @@ export function runRoomStatusWriteBlockAction(
     return true;
   }
   return false;
+}
+
+export interface RoomStatusQuickOrderHeaderMark {
+  label: string;
+  title: string;
+}
+
+export function roomStatusQuickOrderHeaderMarks(
+  orders: readonly RoomStatusOrderOption[]
+): RoomStatusQuickOrderHeaderMark[] {
+  if (orders.length !== 1) return [];
+  const source = orders[0]!.source;
+  if (source.sourceKind !== "FREE_STAY") return [];
+  const category = roomStatusFreeStayCategoryLabel(source.freeStayCategoryCode);
+  if (!category) {
+    return [
+      { label: "免费", title: "免费入住" },
+      { label: "历史未记录", title: "免费入住类型与原因：历史未记录" }
+    ];
+  }
+  return [
+    { label: "免费", title: "免费入住" },
+    { label: category, title: `${category}；免费入住原因：${source.freeStayReason ?? "历史未记录"}` }
+  ];
+}
+
+export function roomStatusQuickOrderSourceSummary(option: RoomStatusOrderOption): string {
+  const { source } = option;
+  if (source.sourceKind === "FREE_STAY") {
+    return `免费入住 · ${roomStatusFreeStayCategoryLabel(source.freeStayCategoryCode) ?? "历史未记录"}`;
+  }
+  const labels = {
+    DIRECT: "直订",
+    YOUMUDAO: "游牧岛",
+    CTRIP: "携程",
+    MEITUAN: "美团",
+    MEMBER: "会员权益"
+  } as const;
+  return source.sourceCategory && source.sourceCategory in labels
+    ? labels[source.sourceCategory as keyof typeof labels]
+    : "来源历史未记录";
+}
+
+function RoomStatusQuickOrderHeaderMark({ mark, category }: {
+  mark: RoomStatusQuickOrderHeaderMark;
+  category: boolean;
+}) {
+  const Icon = category ? HandHeart : Gift;
+  return <span
+    className="room-status-mark room-status-mark-compact room-status-mark-source"
+    title={mark.title}
+    aria-label={mark.title}
+  ><Icon aria-hidden="true" size={14} /><span>{mark.label}</span></span>;
 }
 
 function QuickActionButton({
@@ -138,6 +206,7 @@ export function RoomStatusQuickPopover({
   serviceDate,
   businessDate,
   status,
+  attentionLabels = [],
   actions,
   writeBlock,
   orderOptions,
@@ -156,6 +225,7 @@ export function RoomStatusQuickPopover({
   serviceDate: string;
   businessDate?: string;
   status: RoomStatusStatus;
+  attentionLabels?: readonly RoomStatusAttentionLabel[];
   actions: readonly RoomStatusActionDto[];
   writeBlock?: { kind: "REFRESH" | "RECOVERY" | "PERMISSION"; reason: string; actionLabel?: string };
   orderOptions: RoomStatusOrderOptionsResult;
@@ -199,9 +269,12 @@ export function RoomStatusQuickPopover({
     : formatRoomStatusDate(serviceDate);
   const historicalBlank = !selection && businessDate !== undefined && serviceDate < businessDate && status === "AVAILABLE";
   const selectedOrderCount = orderOptions.kind === "READY" ? orderOptions.orders.length : 0;
+  const quickOrderHeaderMarks = orderOptions.kind === "READY"
+    ? roomStatusQuickOrderHeaderMarks(orderOptions.orders)
+    : [];
   const hasQuickAction = Boolean(createAction || backfillAction || maintenanceAction || releaseAction);
   const hasApplicableServerAction = hasQuickAction || selectedOrderCount > 0;
-  const disabledReason = (action: RoomStatusActionDto) => action.disabledReason ?? writeBlock?.reason;
+  const disabledReason = (action: RoomStatusActionDto) => roomStatusQuickActionDisabledReason(action, writeBlock);
   const actionReasonId = (action: RoomStatusActionDto) => `${popoverId}-disabled-${action.code}-${action.targetReference?.id ?? "selection"}`;
   const rangeLabel = selection
     ? `${selectionNights(selection)}晚 · ${orderOptions.kind === "INVALID_REFERENCE"
@@ -367,6 +440,8 @@ export function RoomStatusQuickPopover({
           <span className="room-status-quick-meta">
             <span>{dateLabel}</span>
             {selection ? <span>{rangeLabel}</span> : historicalBlank ? <span>历史空白</span> : <RoomStatusMark status={status} compact />}
+            {quickOrderHeaderMarks.map((mark, index) => <RoomStatusQuickOrderHeaderMark key={mark.label} mark={mark} category={index === 1} />)}
+            <RoomStatusAttentionBadges labels={attentionLabels} />
           </span>
         </div>
         <button type="button" className="room-status-icon-button" onClick={() => close(true)} aria-label="关闭快捷操作" title="关闭快捷操作"><X aria-hidden="true" size={17} /></button>
@@ -379,7 +454,7 @@ export function RoomStatusQuickPopover({
             <div className="room-status-quick-orders" aria-label="当前订单列表">
               {orderOptions.orders.map((option) => (
                 <button key={`${option.identity.orderId}:${option.identity.stayId}`} type="button" onClick={() => { onClose("ACTION"); onOpenOrder(option); }}>
-                  <ClipboardList aria-hidden="true" size={17} /><span><strong>{option.label}</strong><small>{formatRoomStatusDate(option.identity.arrivalDate)} 至 {formatRoomStatusDate(option.identity.departureDate)}</small></span>
+                  <ClipboardList aria-hidden="true" size={17} /><span><strong>{option.label}</strong><small>{formatRoomStatusDate(option.identity.arrivalDate)} 至 {formatRoomStatusDate(option.identity.departureDate)} · {roomStatusQuickOrderSourceSummary(option)}</small></span>
                 </button>
               ))}
             </div>

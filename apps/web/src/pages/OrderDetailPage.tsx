@@ -28,6 +28,7 @@ import {
 } from "@qintopia/contracts";
 import { api } from "../api";
 import { accommodationPositionItems, type AccommodationPositionItem } from "../components/AccommodationPositionSummary";
+import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { MoveUnitDrawer } from "../components/MoveUnitDrawer";
 import {
@@ -76,6 +77,8 @@ import {
   usePersistentCommandRecovery,
   StatusBadge
 } from "../ui";
+
+export { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
 
 export {
   stayMembershipUpgradeEntry,
@@ -282,38 +285,6 @@ export function orderFulfillmentNotice(actions: readonly OrderAllowedActionDto[]
   return undefined;
 }
 
-export interface OverdueInHouseNotice {
-  title: "逾期在住，需确认实际状态";
-  plannedDepartureDate: string;
-  businessDate: string;
-}
-
-export function overdueInHouseNotice(
-  view: Pick<OrderViewDto, "order" | "stay" | "effectiveArrangement">
-): OverdueInHouseNotice | undefined {
-  if (view.order.status !== "CHECKED_IN"
-    || view.stay.status !== "IN_HOUSE"
-    || view.effectiveArrangement.departureDate >= view.effectiveArrangement.businessDate) {
-    return undefined;
-  }
-  return {
-    title: "逾期在住，需确认实际状态",
-    plannedDepartureDate: view.effectiveArrangement.departureDate,
-    businessDate: view.effectiveArrangement.businessDate
-  };
-}
-
-export function OverdueInHouseAlert({ notice }: { notice: OverdueInHouseNotice }) {
-  return <section className="overdue-in-house-alert" role="alert" data-testid="overdue-in-house-alert">
-    <AlertTriangle aria-hidden="true" size={20} />
-    <div>
-      <strong>{notice.title}</strong>
-      <span>计划离店日 {formatDate(notice.plannedDepartureDate)} 已早于当前营业日 {formatDate(notice.businessDate)}。</span>
-      <span>客人仍在住，请先调整退房日期；客人已离店，请办理迟录退房。</span>
-    </div>
-  </section>;
-}
-
 export function orderRefundUnavailableReason(actions: readonly OrderAllowedActionDto[]): string | undefined {
   const refund = actions.find((action) => action.code === "RECORD_REFUND");
   if (refund?.disabledReason !== "NO_REFUNDABLE_COLLECTION") return undefined;
@@ -449,7 +420,7 @@ export function effectiveArrangementTitle(presentation: OrderEffectiveArrangemen
 export function arrangementChangeLabel(type: OrderArrangementHistoryItemDto["type"]): string {
   switch (type) {
     case "INITIAL_BOOKING": return "创建预订";
-    case "RESCHEDULE": return "调整预订日期";
+    case "RESCHEDULE": return "调整住宿日期";
     case "EXTENSION": return "延长住宿";
     case "SHORTENING": return "缩短住宿";
     case "MOVE": return "更换房源";
@@ -1860,7 +1831,7 @@ export function OrderDetailPage() {
             {blockedStayDateState && !blockedStayDateState.enabled && blockedStayDateState.reason ? (
               <span className="action-notice" role="status" data-testid="stay-date-action-notice">
                 <AlertTriangle aria-hidden="true" size={14} />
-                {view.order.status === "RESERVED" ? "暂不能调整预订日期" : "暂不能缩短住宿或提前退房"}
+                {view.order.status === "RESERVED" ? "暂不能调整住宿日期" : "暂不能缩短住宿或提前退房"}
                 <InfoHint text={blockedStayDateState.reason} />
               </span>
             ) : null}
@@ -1873,7 +1844,7 @@ export function OrderDetailPage() {
             <OrderActionButton action={actionByCode.get("RECORD_COLLECTION")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("RECORD_COLLECTION")} onClick={() => openForm("RECORD_COLLECTION")} testId="record-collection"><CircleDollarSign aria-hidden="true" size={17} />收款</OrderActionButton>
             <OrderActionButton action={actionByCode.get("RECORD_REFUND")} blocked={orderActionsBlocked} showWhenDisabled={refundActionVisible} onClick={() => openForm("RECORD_REFUND")}><Undo2 aria-hidden="true" size={17} />退款</OrderActionButton>
             <OrderActionButton action={actionByCode.get("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")} blocked={orderActionsBlocked} showWhenDisabled={convertActionVisible} onClick={() => { if (!enabledActions.has("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")) return; beginStayMembershipUpgrade(view); }} testId="convert-stay-collections-to-membership"><Sparkles aria-hidden="true" size={17} />升级会员</OrderActionButton>
-            <OrderActionButton action={actionByCode.get("RESCHEDULE_STAY")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("RESCHEDULE_STAY")} onClick={() => { setCommandDraft(undefined); setStayDateMode("DATE_CHANGE"); setStayDateAction("RESCHEDULE_STAY"); }}><CalendarRange aria-hidden="true" size={17} />调整预订日期</OrderActionButton>
+            <OrderActionButton action={actionByCode.get("RESCHEDULE_STAY")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("RESCHEDULE_STAY")} onClick={() => { setCommandDraft(undefined); setStayDateMode("DATE_CHANGE"); setStayDateAction("RESCHEDULE_STAY"); }}><CalendarRange aria-hidden="true" size={17} />调整住宿日期</OrderActionButton>
             {showDepartureAdjustmentButton ? <OrderActionButton action={visibleDepartureAdjustmentAction} blocked={orderActionsBlocked} showWhenDisabled={Boolean(departureAdjustmentDisabledAction)} dataOrderAction="ADJUST_DEPARTURE" onClick={() => { if (!departureAdjustmentAction) return; setCommandDraft(undefined); setStayDateMode("ADJUST_DEPARTURE"); setStayDateAction(departureAdjustmentAction); }}><CalendarRange aria-hidden="true" size={17} />调整退房日期</OrderActionButton> : null}
             <OrderActionButton action={actionByCode.get("MOVE_UNIT")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("MOVE_UNIT")} onClick={() => { setCommandDraft(undefined); setMovingUnit(true); }}><ArrowRightLeft aria-hidden="true" size={17} />换房</OrderActionButton>
             <OrderActionButton action={repriceAction} blocked={orderActionsBlocked} showWhenDisabled={repriceClosedByUpgrade || terminalActionVisible("REPRICE_ORDER")} onClick={() => openForm("REPRICE_ORDER")} testId="reprice-order"><CircleDollarSign aria-hidden="true" size={17} />调整金额</OrderActionButton>

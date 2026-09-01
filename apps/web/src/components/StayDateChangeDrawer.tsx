@@ -252,7 +252,7 @@ export function buildStayDateChangeRequest(
   }
   const request: CommandRequest & { bookingChannelCode: string | null } = {
     commandType: resolvedAction,
-    title: resolvedAction === "RESCHEDULE_STAY" ? "调整预订日期" : resolvedAction === "EXTEND_STAY" ? "延长住宿" : draft.newDepartureDate === view.effectiveArrangement.businessDate ? "提前退房" : "缩短住宿",
+    title: resolvedAction === "RESCHEDULE_STAY" ? "调整住宿日期" : resolvedAction === "EXTEND_STAY" ? "延长住宿" : draft.newDepartureDate === view.effectiveArrangement.businessDate ? "提前退房" : "缩短住宿",
     description: externalChannelStay
       ? resolvedAction === "RESCHEDULE_STAY"
         ? "系统将按新日期核对完整库存、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
@@ -438,7 +438,7 @@ export function StayDateChangeDrawer({
     : undefined;
   const currentPricePreviewReady = stayDatePreviewIdentityMatches(pricePreview, previewSignature, previewSemanticSignature);
   const staleReadyPreview = pricePreview.status === "READY" && !currentPricePreviewReady;
-  const title = mode === "ADJUST_DEPARTURE" ? "调整退房日期" : action === "RESCHEDULE_STAY" ? "调整预订日期" : action === "EXTEND_STAY" ? "延长住宿" : earlyCheckout ? "提前退房" : "缩短住宿";
+  const title = mode === "ADJUST_DEPARTURE" ? "调整退房日期" : action === "RESCHEDULE_STAY" ? "调整住宿日期" : action === "EXTEND_STAY" ? "延长住宿" : earlyCheckout ? "提前退房" : "缩短住宿";
   return <Modal
     title={title}
     size="drawer"

@@ -23,6 +23,9 @@ export type CreateOrderPricingBasis = (typeof createOrderPricingBasisCodes)[numb
 export const freeStayCategoryCodes = ["VOLUNTEER", "RECEPTION"] as const;
 export type FreeStayCategoryCode = (typeof freeStayCategoryCodes)[number];
 
+export const roomStatusSourceCategories = ["DIRECT", "YOUMUDAO", "CTRIP", "MEITUAN", "FREE_STAY", "MEMBER"] as const;
+export type RoomStatusSourceCategory = (typeof roomStatusSourceCategories)[number];
+
 export const backfillCollectionMethods = ["WECOM", "BANK_TRANSFER", "CASH"] as const;
 export type BackfillCollectionMethod = (typeof backfillCollectionMethods)[number];
 
@@ -377,6 +380,12 @@ export const roomStatusStatuses = [
 ] as const;
 export type RoomStatusStatus = (typeof roomStatusStatuses)[number];
 
+export const roomStatusAttentionCodes = ["ARREARS"] as const;
+export type RoomStatusAttention = (typeof roomStatusAttentionCodes)[number];
+
+export const roomStatusOperationalAttentionCodes = ["OVERDUE_RESERVED", "OVERDUE_IN_HOUSE"] as const;
+export type RoomStatusOperationalAttention = (typeof roomStatusOperationalAttentionCodes)[number];
+
 export const ROOM_STATUS_MAX_QUERY_NIGHTS = 30;
 export const ROOM_STATUS_OPERATIONAL_TASK_LIMIT = 500;
 
@@ -467,9 +476,14 @@ export interface RoomStatusIntervalDto {
   /** Original order arrival date. Omitted for non-lodging and legacy projections. */
   orderArrivalDate?: string;
   status: RoomStatusStatus;
+  attention: RoomStatusAttention | null;
+  operationalAttention: RoomStatusOperationalAttention | null;
   available: boolean;
   blocking: boolean;
   sourceKind: RoomStatusSourceKind;
+  sourceCategory: RoomStatusSourceCategory | null;
+  freeStayCategoryCode: FreeStayCategoryCode | null;
+  freeStayReason: string | null;
   label: string;
   primaryOccupantLabel: string | null;
   occupantCount: number;
@@ -507,6 +521,13 @@ export interface RoomStatusBedOccupancyDto {
   occupants: RoomStatusBedOccupantDto[];
 }
 
+export interface RoomStatusBedSlotStateDto {
+  serviceDate: string;
+  inventoryUnitId: string;
+  inventoryUnitCode: string;
+  status: RoomStatusStatus;
+}
+
 export interface RoomStatusAvailabilitySummaryDto {
   serviceDate: string;
   availableRooms: number;
@@ -529,11 +550,14 @@ export interface RoomStatusUnitDto {
   buildingCode: string | null;
   roomTypeCode: string | null;
   pricingProductCode: string | null;
+  physicalBedCount: number | null;
+  /** Compatibility capacity. Presentation must use physicalBedCount for physical-bed ratios. */
   capacity: number;
   occupancyCapacity: number;
   childUnitIds: string[];
   children: RoomStatusUnitDto[];
   bedOccupancies: RoomStatusBedOccupancyDto[];
+  bedSlotStates: RoomStatusBedSlotStateDto[];
   days: RoomStatusDayDto[];
   intervals: RoomStatusIntervalDto[];
   conflicts: RoomStatusConflictDto[];

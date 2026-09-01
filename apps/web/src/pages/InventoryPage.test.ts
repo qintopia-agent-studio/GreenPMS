@@ -38,6 +38,7 @@ import {
   roomStatusFiltersRevealingTarget,
   roomStatusAnchorMatches,
   roomStatusQuickTargetMatches,
+  roomStatusQuickPopoverAttentionLabels,
   roomStatusGridSelectedStayId,
   roomStatusQuickPopoverPreviewStayId,
   roomStatusActionsForPresentation,
@@ -47,8 +48,12 @@ import {
   roomStatusOrderContextVisible,
   roomStatusOrderIdentityKey,
   roomStatusOrderContextMode,
+  roomStatusOrderContextNeedsReload,
   roomStatusDesktopContextKind,
   roomStatusQuoteRecoveryDrawerOpen,
+  roomStatusActiveOwnQuoteSubmissionMatches,
+  roomStatusDeferredMaintenanceReady,
+  roomStatusMaintenanceQuoteTargetClearMode,
   roomStatusOwnQuoteRecoveryMatchesTarget,
   roomStatusOwnQuoteRecoveryVisible,
   roomStatusQuoteRecoveryNeedsPagePresentation,
@@ -60,6 +65,15 @@ import {
   shouldRenderDetachedQuoteRecoveryWorkbench,
   roomStatusOrderCommandScope,
   roomStatusProjectionRefreshAllowed,
+  roomStatusProjectionRefreshDecision,
+  roomStatusConservativeElapsed,
+  roomStatusProjectionLocalFreshnessDeadline,
+  roomStatusProjectionHasWriteHeadroom,
+  roomStatusProjectionResponseCanBeInstalled,
+  roomStatusLowFreshnessResponseRequiresManualRetry,
+  roomStatusRefreshDelay,
+  roomStatusStaleResponseRetryDelay,
+  roomStatusCommittedRefreshScopeIsCurrent,
   roomStatusProjectionWritable,
   roomStatusQuoteActionCodeForUnit,
   roomStatusQuoteCommandMatchesTarget,
@@ -167,6 +181,31 @@ describe("room-status complete Stay selection", () => {
     expect(roomStatusQuickPopoverPreviewStayId(parent, null, "stay_child")).toBeNull();
     expect(roomStatusQuickPopoverPreviewStayId(parent, "stay_whole_room", "stay_child"))
       .toBe("stay_whole_room");
+  });
+
+  it("keeps quick-popover attention on the exact day or selected interval", () => {
+    const unit = {
+      intervals: [{
+        startDate: "2026-08-26",
+        endDate: "2026-08-31",
+        attention: null,
+        operationalAttention: "OVERDUE_IN_HOUSE"
+      }, {
+        startDate: "2026-09-01",
+        endDate: "2026-09-03",
+        attention: "ARREARS",
+        operationalAttention: null
+      }]
+    } as unknown as NonNullable<Parameters<typeof roomStatusQuickPopoverAttentionLabels>[0]>;
+
+    expect(roomStatusQuickPopoverAttentionLabels(unit, "2026-08-29")).toEqual(["未退"]);
+    expect(roomStatusQuickPopoverAttentionLabels(unit, "2026-08-31")).toEqual([]);
+    expect(roomStatusQuickPopoverAttentionLabels(unit, "2026-09-01")).toEqual(["欠款"]);
+    expect(roomStatusQuickPopoverAttentionLabels(unit, "2026-08-29", {
+      arrivalDate: "2026-08-29",
+      departureDate: "2026-09-02"
+    })).toEqual(["未退", "欠款"]);
+    expect(roomStatusQuickPopoverAttentionLabels(null, "2026-08-29")).toEqual([]);
   });
 
   it("keeps the unique-order fallback for concrete bed and whole-room rows", () => {
@@ -1130,6 +1169,54 @@ describe("Room-status order context layout", () => {
     })).toBe(true);
   });
 
+  it("allows only the exact same-page active Quote to queue a new selection intent", () => {
+    const recovery = { kind: "VALID" as const, pending };
+    const current = {
+      recovery,
+      currentOwnerId: pending.ownerTabId,
+      activeSubmissionIdentity: pending.metadata.idempotencyKey,
+      workbenchOpen: true
+    };
+
+    expect(roomStatusActiveOwnQuoteSubmissionMatches(current)).toBe(true);
+    expect(roomStatusActiveOwnQuoteSubmissionMatches({ ...current, workbenchOpen: false })).toBe(false);
+    expect(roomStatusActiveOwnQuoteSubmissionMatches({ ...current, currentOwnerId: "another-tab" })).toBe(false);
+    expect(roomStatusActiveOwnQuoteSubmissionMatches({ ...current, activeSubmissionIdentity: "another-command" })).toBe(false);
+    expect(roomStatusActiveOwnQuoteSubmissionMatches({
+      ...current,
+      recovery: { kind: "VALID", pending: { ...pending, state: "UNKNOWN" } }
+    })).toBe(false);
+  });
+
+  it("cancels an unsent Quote immediately but defers maintenance until an active Quote safely clears", () => {
+    expect(roomStatusMaintenanceQuoteTargetClearMode(undefined)).toBe("IMMEDIATE");
+    expect(roomStatusMaintenanceQuoteTargetClearMode(pending.metadata.idempotencyKey)).toBe("AFTER_RECOVERY_CLEARS");
+
+    const deferred = {
+      deferredSubmissionIdentity: pending.metadata.idempotencyKey,
+      activeSubmissionIdentity: pending.metadata.idempotencyKey,
+      quoteRecoveryKind: "VALID" as const
+    };
+    expect(roomStatusDeferredMaintenanceReady(deferred)).toBe(false);
+    expect(roomStatusDeferredMaintenanceReady({
+      ...deferred,
+      activeSubmissionIdentity: undefined,
+      quoteRecoveryKind: "VALID"
+    })).toBe(false);
+    expect(roomStatusDeferredMaintenanceReady({ ...deferred, activeSubmissionIdentity: undefined, quoteRecoveryKind: "CORRUPT" })).toBe(false);
+    expect(roomStatusDeferredMaintenanceReady({ ...deferred, activeSubmissionIdentity: undefined, quoteRecoveryKind: "READ_ERROR" })).toBe(false);
+    expect(roomStatusDeferredMaintenanceReady({
+      ...deferred,
+      activeSubmissionIdentity: undefined,
+      quoteRecoveryKind: "ABSENT"
+    })).toBe(true);
+    expect(roomStatusDeferredMaintenanceReady({
+      deferredSubmissionIdentity: undefined,
+      activeSubmissionIdentity: undefined,
+      quoteRecoveryKind: "ABSENT"
+    })).toBe(false);
+  });
+
   it("retains an authoritative recovered Quote until its room-status target is ready", () => {
     expect(recoveredQuoteWaitsForCurrentTarget(false, "")).toBe(true);
     expect(recoveredQuoteWaitsForCurrentTarget(false, pending.inputSignature)).toBe(false);
@@ -1201,12 +1288,191 @@ describe("Room-status command attempt lifecycle", () => {
 });
 
 describe("Room-status query attempt lifecycle", () => {
-  it("pauses projection refresh while an operator command is active", () => {
+  it("keeps silent projection refresh active while staff review a draft or Preview", () => {
     expect(roomStatusProjectionRefreshAllowed("IDLE")).toBe(true);
-    expect(roomStatusProjectionRefreshAllowed("DRAFT")).toBe(false);
-    expect(roomStatusProjectionRefreshAllowed("PREVIEW")).toBe(false);
+    expect(roomStatusProjectionRefreshAllowed("DRAFT")).toBe(true);
+    expect(roomStatusProjectionRefreshAllowed("PREVIEW")).toBe(true);
     expect(roomStatusProjectionRefreshAllowed("SETTLED")).toBe(true);
     expect(roomStatusProjectionRefreshAllowed("CONFIRMING")).toBe(false);
+  });
+
+  it("resumes a deferred one-shot renewal as soon as the command leaves Confirming", () => {
+    const base = {
+      visible: true,
+      permissionDenied: false,
+      queryInFlight: false
+    } as const;
+
+    expect(roomStatusProjectionRefreshDecision({ ...base, phase: "CONFIRMING" })).toBe("WAIT");
+    expect(roomStatusProjectionRefreshDecision({ ...base, phase: "DRAFT" })).toBe("REFRESH");
+    expect(roomStatusProjectionRefreshDecision({ ...base, phase: "SETTLED" })).toBe("REFRESH");
+    expect(roomStatusProjectionRefreshDecision({ ...base, phase: "IDLE" })).toBe("REFRESH");
+  });
+
+  it("never lets a delayed low-freshness retry supersede an authoritative query", () => {
+    const base = {
+      visible: true,
+      permissionDenied: false,
+      phase: "SETTLED" as const
+    };
+
+    expect(roomStatusProjectionRefreshDecision({ ...base, queryInFlight: true })).toBe("WAIT");
+    expect(roomStatusProjectionRefreshDecision({ ...base, queryInFlight: false })).toBe("REFRESH");
+    expect(roomStatusProjectionRefreshDecision({ ...base, visible: false, queryInFlight: false })).toBe("STOP");
+    expect(roomStatusProjectionRefreshDecision({ ...base, permissionDenied: true, queryInFlight: false })).toBe("STOP");
+  });
+
+  it("refreshes before the write headroom closes and never reopens an almost-expired response", () => {
+    const now = Date.parse("2026-08-30T08:00:00.000Z");
+    const freshUntil = "2026-08-30T08:00:05.000Z";
+
+    expect(roomStatusRefreshDelay(freshUntil, now)).toBe(2_000);
+    expect(roomStatusProjectionHasWriteHeadroom(freshUntil, now)).toBe(true);
+    expect(roomStatusProjectionHasWriteHeadroom(freshUntil, now + 4_249)).toBe(true);
+    expect(roomStatusProjectionHasWriteHeadroom(freshUntil, now + 4_250)).toBe(false);
+    expect(roomStatusRefreshDelay(freshUntil, now + 4_900)).toBe(0);
+    expect(roomStatusProjectionHasWriteHeadroom("invalid", now)).toBe(false);
+    expect(roomStatusProjectionResponseCanBeInstalled(freshUntil, now + 1_999)).toBe(true);
+    expect(roomStatusProjectionResponseCanBeInstalled(freshUntil, now + 2_000)).toBe(false);
+    expect(roomStatusProjectionResponseCanBeInstalled("invalid", now)).toBe(false);
+  });
+
+  it("derives a conservative local freshness deadline without comparing client and server clocks", () => {
+    const clientRequestStartedAt = Date.parse("2036-08-30T08:00:00.000Z");
+    const deadline = roomStatusProjectionLocalFreshnessDeadline({
+      asOf: "2026-08-30T08:00:00.000Z",
+      freshUntil: "2026-08-30T08:00:05.000Z"
+    }, clientRequestStartedAt);
+
+    expect(deadline).toBe(clientRequestStartedAt + 5_000);
+    expect(roomStatusProjectionResponseCanBeInstalled(deadline, clientRequestStartedAt + 1_999)).toBe(true);
+    expect(roomStatusProjectionResponseCanBeInstalled(deadline, clientRequestStartedAt + 2_000)).toBe(false);
+    expect(roomStatusProjectionLocalFreshnessDeadline({
+      asOf: "invalid",
+      freshUntil: "2026-08-30T08:00:05.000Z"
+    }, clientRequestStartedAt)).toBeNaN();
+  });
+
+  it("advances freshness by the safer elapsed clock across wall rollback and browser sleep", () => {
+    expect(roomStatusConservativeElapsed(
+      { monotonic: 1_000, wall: 10_000 },
+      { monotonic: 2_500, wall: -50_000 }
+    )).toBe(1_500);
+    expect(roomStatusConservativeElapsed(
+      { monotonic: 2_500, wall: 10_000 },
+      { monotonic: 2_500, wall: 16_000 }
+    )).toBe(6_000);
+  });
+
+  it("keeps the old projection writable through a normal delayed renewal without installing low-headroom data", () => {
+    const initialRequestAt = Date.parse("2026-08-30T08:00:00.000Z");
+    const oldFreshUntil = "2026-08-30T08:00:05.000Z";
+    const refreshStartedAt = initialRequestAt + roomStatusRefreshDelay(oldFreshUntil, initialRequestAt);
+    const responseReceivedAt = refreshStartedAt + 1_500;
+    const renewedFreshUntil = new Date(refreshStartedAt + 5_000).toISOString();
+
+    expect(refreshStartedAt).toBe(initialRequestAt + 2_000);
+    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, responseReceivedAt)).toBe(true);
+    expect(roomStatusProjectionResponseCanBeInstalled(renewedFreshUntil, responseReceivedAt)).toBe(true);
+    expect(roomStatusProjectionResponseCanBeInstalled(
+      new Date(responseReceivedAt + 2_000).toISOString(),
+      responseReceivedAt
+    )).toBe(false);
+
+    const loopingBandResponseReceivedAt = refreshStartedAt + 2_500;
+    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, loopingBandResponseReceivedAt)).toBe(false);
+    expect(roomStatusProjectionResponseCanBeInstalled(
+      new Date(refreshStartedAt + 5_000).toISOString(),
+      loopingBandResponseReceivedAt
+    )).toBe(false);
+
+    const lateTimerStartedAt = initialRequestAt + 2_400;
+    const lateResponseReceivedAt = lateTimerStartedAt + 1_900;
+    const lateResponseDeadline = lateTimerStartedAt + 5_000;
+    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, lateTimerStartedAt)).toBe(true);
+    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, lateResponseReceivedAt)).toBe(false);
+    expect(roomStatusProjectionResponseCanBeInstalled(lateResponseDeadline, lateResponseReceivedAt)).toBe(true);
+    expect(roomStatusProjectionResponseCanBeInstalled(lateResponseDeadline, lateResponseReceivedAt, 4_000)).toBe(false);
+  });
+
+  it("backs off repeated low-freshness responses instead of immediately looping", () => {
+    expect(roomStatusStaleResponseRetryDelay(1)).toBe(500);
+    expect(roomStatusStaleResponseRetryDelay(2)).toBe(1_000);
+    expect(roomStatusStaleResponseRetryDelay(3)).toBe(2_000);
+    expect(roomStatusStaleResponseRetryDelay(4)).toBe(4_000);
+    expect(roomStatusStaleResponseRetryDelay(20)).toBe(4_000);
+    expect(roomStatusLowFreshnessResponseRequiresManualRetry(1)).toBe(false);
+    expect(roomStatusLowFreshnessResponseRequiresManualRetry(2)).toBe(false);
+    expect(roomStatusLowFreshnessResponseRequiresManualRetry(3)).toBe(true);
+    expect(roomStatusLowFreshnessResponseRequiresManualRetry(20)).toBe(true);
+  });
+
+  it("applies the same minimum freshness gate to a committed refresh response", () => {
+    const receivedAt = Date.parse("2026-08-30T08:00:00.000Z");
+    expect(roomStatusProjectionResponseCanBeInstalled("2026-08-30T08:00:03.000Z", receivedAt)).toBe(false);
+    expect(roomStatusProjectionResponseCanBeInstalled("2026-08-30T08:00:03.001Z", receivedAt)).toBe(true);
+  });
+
+  it("rejects a committed refresh after its property or selected order changes", () => {
+    const capturedOrder = { orderId: "order_1", stayId: "stay_1" };
+    expect(roomStatusCommittedRefreshScopeIsCurrent({
+      requestActive: true,
+      requestAborted: false,
+      capturedPropertyId: "property_1",
+      currentPropertyId: "property_1",
+      capturedPrincipalScope: "scope_1",
+      currentPrincipalScope: "scope_1",
+      capturedOrder,
+      currentOrder: capturedOrder
+    })).toBe(true);
+    expect(roomStatusCommittedRefreshScopeIsCurrent({
+      requestActive: true,
+      requestAborted: false,
+      capturedPropertyId: "property_1",
+      currentPropertyId: "property_2",
+      capturedPrincipalScope: "scope_1",
+      currentPrincipalScope: "scope_1",
+      capturedOrder,
+      currentOrder: capturedOrder
+    })).toBe(false);
+    expect(roomStatusCommittedRefreshScopeIsCurrent({
+      requestActive: true,
+      requestAborted: false,
+      capturedPropertyId: "property_1",
+      currentPropertyId: "property_1",
+      capturedPrincipalScope: "scope_1",
+      currentPrincipalScope: "scope_1",
+      capturedOrder,
+      currentOrder: { orderId: "order_2", stayId: "stay_2" }
+    })).toBe(false);
+    expect(roomStatusCommittedRefreshScopeIsCurrent({
+      requestActive: false,
+      requestAborted: true,
+      capturedPropertyId: "property_1",
+      currentPropertyId: "property_1",
+      capturedPrincipalScope: "scope_1",
+      currentPrincipalScope: "scope_1",
+      capturedOrder,
+      currentOrder: capturedOrder
+    })).toBe(false);
+  });
+
+  it("does not reload an open order context for a freshness-only renewal", () => {
+    const previous = {
+      propertyId: "property_qintopia",
+      revision: "17",
+      businessDate: "2026-08-30",
+      accessLevel: "WRITE",
+      freshUntil: "2026-08-30T08:00:05.000Z"
+    } as const;
+    const renewed = {
+      ...previous,
+      freshUntil: "2026-08-30T08:00:10.000Z"
+    };
+    expect(roomStatusOrderContextNeedsReload(previous, renewed)).toBe(false);
+    expect(roomStatusOrderContextNeedsReload(previous, { ...previous, revision: "18" })).toBe(true);
+    expect(roomStatusOrderContextNeedsReload(previous, { ...previous, businessDate: "2026-08-31" })).toBe(true);
+    expect(roomStatusOrderContextNeedsReload(previous, { ...previous, accessLevel: "READ" })).toBe(true);
   });
 
   it("keeps a slow query active so a polling tick can skip overlapping refreshes", () => {
@@ -1233,6 +1499,23 @@ describe("Room-status query attempt lifecycle", () => {
     expect(guard.finish(oldRangeAttemptId)).toBe(false);
     expect(guard.isActive(currentRangeAttemptId)).toBe(true);
     expect(guard.finish(currentRangeAttemptId)).toBe(true);
+    expect(guard.isInFlight()).toBe(false);
+  });
+
+  it("aborts the previous transport when an authoritative refresh supersedes it", () => {
+    const guard = new RoomStatusQueryAttemptGuard();
+    const oldController = new AbortController();
+    const currentController = new AbortController();
+    const oldAttemptId = guard.begin(oldController);
+
+    const currentAttemptId = guard.begin(currentController);
+    expect(oldController.signal.aborted).toBe(true);
+    expect(currentController.signal.aborted).toBe(false);
+    expect(guard.finish(oldAttemptId)).toBe(false);
+    expect(guard.isActive(currentAttemptId)).toBe(true);
+
+    guard.invalidateActive();
+    expect(currentController.signal.aborted).toBe(true);
     expect(guard.isInFlight()).toBe(false);
   });
 });
@@ -1411,7 +1694,7 @@ describe("Room-status backfill entry routing", () => {
     }))).toEqual([expect.objectContaining({
       code: "BACKFILL_ORDER",
       enabled: false,
-      disabledReason: expect.stringContaining("上一笔操作结果")
+      disabledReason: null
     })]);
     expect(selectionActions(occupiedParent, {
       ...childSelection,
@@ -1453,6 +1736,37 @@ describe("Room-status backfill entry routing", () => {
       historicalSelectionOpen: false,
       queryInFlight: false
     })).toBe(false);
+  });
+
+  it("keeps an ordinary background renewal quiet and offers manual retry only after failure", () => {
+    const renewing = roomStatusActionPresentationBlock({
+      refreshFailed: false,
+      accessLevel: "WRITE",
+      projectionWritable: false,
+      projectionExpired: false,
+      projectionReady: true,
+      recoveryBlocked: false,
+      recoveryReady: true,
+      recoveryError: undefined,
+      hasRecoveryEntry: false
+    });
+    expect(renewing).toEqual({
+      kind: "REFRESH",
+      reason: "正在更新房态，更新完成前暂不能写入。"
+    });
+
+    const failed = roomStatusActionPresentationBlock({
+      refreshFailed: true,
+      accessLevel: "WRITE",
+      projectionWritable: false,
+      projectionExpired: true,
+      projectionReady: false,
+      recoveryBlocked: false,
+      recoveryReady: true,
+      recoveryError: undefined,
+      hasRecoveryEntry: false
+    });
+    expect(failed).toMatchObject({ kind: "REFRESH", actionLabel: "重试刷新" });
   });
 
   it("requires both board and current principal WRITE access", () => {

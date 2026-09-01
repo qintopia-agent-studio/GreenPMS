@@ -74,6 +74,19 @@ function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
 }
 
 describe("stay date change drawer rules", () => {
+  it("names the reserved-stay drawer as an accommodation date adjustment", () => {
+    const html = renderToStaticMarkup(createElement(StayDateChangeDrawer, {
+      action: "RESCHEDULE_STAY",
+      view: view(),
+      inventoryUnitLabel: "101 · 单人间",
+      runPreview: (execute) => execute(),
+      onClose: () => undefined,
+      onSubmit: () => undefined
+    }));
+    expect(html).toContain("调整住宿日期");
+    expect(html).not.toContain("调整预订日期");
+  });
+
   it("keeps an accepted price preview stable across equivalent room-status polling responses", () => {
     const current = view();
     const cloned = structuredClone(current);
@@ -339,8 +352,10 @@ describe("stay date change drawer rules", () => {
       onClose: () => undefined,
       onSubmit: () => undefined
     }));
+    const arrivalInput = html.match(/<input[^>]*data-testid="stay-date-arrival"[^>]*>/)?.[0] ?? "";
     const departureInput = html.match(/<input[^>]*data-testid="stay-date-departure"[^>]*>/)?.[0] ?? "";
     expect(html).toContain("调整退房日期");
+    expect(arrivalInput).toContain("disabled");
     expect(departureInput).toContain('min="2026-08-03"');
     expect(departureInput).toContain('value="2026-08-05"');
     expect(departureInput).not.toContain("max=");

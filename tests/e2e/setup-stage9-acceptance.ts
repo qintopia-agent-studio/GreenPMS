@@ -116,6 +116,16 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+async function withOrdinaryOrderCreationClock<T>(
+  businessDate: string,
+  arrivalDate: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00+08:00`), operation)
+    : operation();
+}
+
 async function execute(
   db: Kysely<Database>,
   commandType: CommandType,
@@ -147,7 +157,7 @@ async function unitByCode(db: Kysely<Database>, code: string) {
     .executeTakeFirstOrThrow();
 }
 
-async function createStay(db: Kysely<Database>, options: {
+type Stage9CreateStayOptions = {
   key: string;
   unitId: string;
   unitCode: string;
@@ -161,7 +171,12 @@ async function createStay(db: Kysely<Database>, options: {
   manualAdjustmentMinor?: number;
   channelPriceDifferenceReason?: string;
   manualPriceAdjustmentReason?: string;
-}): Promise<Stage9StayFixture & { contractAmountMinor: number }> {
+};
+
+async function createStayAtCreationClock(
+  db: Kysely<Database>,
+  options: Stage9CreateStayOptions
+): Promise<Stage9StayFixture & { contractAmountMinor: number }> {
   const stayType = options.stayType ?? "TRANSIENT";
   const quote = await createQuoteForTesting(db, {
     propertyId: demo.propertyId,
@@ -212,6 +227,16 @@ async function createStay(db: Kysely<Database>, options: {
     departureDate: options.departureDate,
     contractAmountMinor: targetCurrentContractAmountMinor
   };
+}
+
+async function createStay(
+  db: Kysely<Database>,
+  businessDate: string,
+  options: Stage9CreateStayOptions
+): Promise<Stage9StayFixture & { contractAmountMinor: number }> {
+  return withOrdinaryOrderCreationClock(businessDate, options.arrivalDate, () => {
+    return createStayAtCreationClock(db, options);
+  });
 }
 
 async function createMember(
@@ -317,7 +342,7 @@ export async function prepareStage9Acceptance(
       ])
     )) as Record<Stage9LogicalUnitCode, Awaited<ReturnType<typeof unitByCode>>>;
     const at = (offset: number) => addDays(businessDate, dayOffset + offset);
-    const ordinary = (key: string, logicalUnitCode: Stage9LogicalUnitCode, nickname: string, arrival: number, departure: number) => createStay(db, {
+    const ordinary = (key: string, logicalUnitCode: Stage9LogicalUnitCode, nickname: string, arrival: number, departure: number) => createStay(db, businessDate, {
       key: `${suffix}-${key}`,
       unitId: units[logicalUnitCode].id,
       unitCode: units[logicalUnitCode].code,
@@ -343,7 +368,7 @@ export async function prepareStage9Acceptance(
       note: "4.2 已登记收款改期验收"
     }, `${suffix}-collected-receipt`);
 
-    const external = await createStay(db, {
+    const external = await createStay(db, businessDate, {
       key: `${suffix}-external`,
       unitId: units["107"]!.id,
       unitCode: units["107"].code,
@@ -354,7 +379,7 @@ export async function prepareStage9Acceptance(
     });
     const externalTargetMinor = external.contractAmountMinor * 2;
 
-    const wecomDeviation = await createStay(db, {
+    const wecomDeviation = await createStay(db, businessDate, {
       key: `${suffix}-wecom-deviation`,
       unitId: units["108"]!.id,
       unitCode: units["108"].code,
@@ -366,7 +391,7 @@ export async function prepareStage9Acceptance(
     });
 
     const memberId = await createMember(db, `${suffix}-member`, units.D01.room_type_code);
-    const memberReserved = await createStay(db, {
+    const memberReserved = await createStay(db, businessDate, {
       key: `${suffix}-member-reserved`,
       unitId: units.D01!.id,
       unitCode: units.D01.code,
@@ -375,7 +400,7 @@ export async function prepareStage9Acceptance(
       departureDate: at(11),
       memberId
     });
-    const memberInHouse = await createStay(db, {
+    const memberInHouse = await createStay(db, businessDate, {
       key: `${suffix}-member-in-house`,
       unitId: units.D01.id,
       unitCode: units.D01.code,
@@ -397,7 +422,7 @@ export async function prepareStage9Acceptance(
       departureDayArrival,
       departureDayNewDeparture
     );
-    const departureDay = await createStay(db, {
+    const departureDay = await createStay(db, businessDate, {
       key: `${suffix}-departure-day`,
       unitId: units["202"]!.id,
       unitCode: units["202"].code,
@@ -415,7 +440,7 @@ export async function prepareStage9Acceptance(
       overdueArrival,
       overdueNewDeparture
     );
-    const overdue = await createStay(db, {
+    const overdue = await createStay(db, businessDate, {
       key: `${suffix}-overdue`,
       unitId: units.D02!.id,
       unitCode: units.D02.code,
@@ -425,7 +450,7 @@ export async function prepareStage9Acceptance(
     });
     await markHistoricalOrderInHouse(db, overdue, overdue.arrivalDate);
 
-    const free = await createStay(db, {
+    const free = await createStay(db, businessDate, {
       key: `${suffix}-free`,
       unitId: units["109"]!.id,
       unitCode: units["109"].code,
@@ -436,7 +461,7 @@ export async function prepareStage9Acceptance(
     });
 
     const conflict = await ordinary("conflict", "201", "库存冲突", 11, 13);
-    const blocker = await createStay(db, {
+    const blocker = await createStay(db, businessDate, {
       key: `${suffix}-conflict-blocker`,
       unitId: units["201"]!.id,
       unitCode: units["201"].code,
@@ -445,7 +470,7 @@ export async function prepareStage9Acceptance(
       departureDate: at(17)
     });
 
-    const multiUnitStay = await createStay(db, {
+    const multiUnitStay = await createStay(db, businessDate, {
       key: `${suffix}-multi`,
       unitId: units["203"]!.id,
       unitCode: units["203"].code,
@@ -573,7 +598,7 @@ export async function prepareStage9MobileAcceptance(
     const unit = await unitByCode(db, options.unitCodeOverride ?? "D02");
     const arrivalDate = addDays(businessDate, 2);
     const departureDate = addDays(businessDate, 4);
-    const free = await createStay(db, {
+    const free = await createStay(db, businessDate, {
       key: `${suffix}-free`,
       unitId: unit.id,
       unitCode: unit.code,

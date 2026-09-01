@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, Check, ChevronRight, CircleHelp, Clock3, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
@@ -253,11 +253,18 @@ interface ModalProps {
   className?: string;
 }
 
+const ModalNoticeContext = createContext<ReactNode>(null);
+
+export function ModalNoticeProvider({ notice, children }: { notice?: ReactNode; children: ReactNode }) {
+  return <ModalNoticeContext.Provider value={notice ?? null}>{children}</ModalNoticeContext.Provider>;
+}
+
 const useDialogVisibilityEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export function Modal({ title, onClose, children, footer, size = "default", closeDisabled = false, modal = true, className }: ModalProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const modalNotice = useContext(ModalNoticeContext);
 
   useDialogVisibilityEffect(() => {
     const dialog = dialogRef.current;
@@ -364,6 +371,7 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
             <X aria-hidden="true" size={20} />
           </button>
         </header>
+        {modal && modalNotice ? <div className="modal-notice">{modalNotice}</div> : null}
         <div className="modal-body" tabIndex={0}>{children}</div>
         {footer ? <footer className="modal-footer">{footer}</footer> : null}
       </div>
@@ -535,7 +543,7 @@ function scalar(value: unknown): string {
 }
 
 const commandBusinessLabels: Partial<Record<HistoricalCommandType, string>> = {
-  RESCHEDULE_STAY: "调整预订日期",
+  RESCHEDULE_STAY: "调整住宿日期",
   SHORTEN_STAY: "缩短住宿",
   EXTEND_STAY: "延长住宿",
   MOVE_UNIT: "换房",

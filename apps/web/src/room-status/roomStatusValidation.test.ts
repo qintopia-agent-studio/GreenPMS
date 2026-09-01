@@ -57,11 +57,13 @@ function validBoard(): RoomStatusBoardDto {
       buildingCode: "V",
       roomTypeCode: "VALIDATION",
       pricingProductCode: "VALIDATION",
+      physicalBedCount: 1,
       capacity: 1,
       occupancyCapacity: 2,
       childUnitIds: [],
       children: [],
       bedOccupancies: [],
+      bedSlotStates: [],
       days: [{
         serviceDate: "2028-01-01",
         status: "AVAILABLE",
@@ -89,9 +91,14 @@ function maintenanceInterval(overrides: Partial<RoomStatusIntervalDto> = {}): Ro
     sourceStartDate: "2028-01-01",
     sourceEndDate: "2028-01-02",
     status: "MAINTENANCE",
+    attention: null,
+    operationalAttention: null,
     available: false,
     blocking: true,
     sourceKind: "MAINTENANCE",
+    sourceCategory: null,
+    freeStayCategoryCode: null,
+    freeStayReason: null,
     label: "Maintenance lock",
     primaryOccupantLabel: null,
     occupantCount: 0,
@@ -166,9 +173,14 @@ function splitBedLodgingInterval(displayInventoryUnitId: string, actualInventory
     sourceStartDate: "2028-01-01",
     sourceEndDate: "2028-01-02",
     status: "RESERVED",
+    attention: null,
+    operationalAttention: null,
     available: false,
     blocking: true,
     sourceKind: "ORDER",
+    sourceCategory: "DIRECT",
+    freeStayCategoryCode: null,
+    freeStayReason: null,
     label: "Split-bed order",
     primaryOccupantLabel: "Validation nickname",
     occupantCount: 1,
@@ -216,12 +228,14 @@ function boardWithSplitBedLodging(): RoomStatusBoardDto {
     kind: "BED" as const,
     code: "V01-A",
     name: "Validation bed A",
+    physicalBedCount: null,
     capacity: 1,
     occupancyCapacity: 1,
     salesMode: "BED_SPLIT" as const,
     childUnitIds: [],
     children: [],
     bedOccupancies: [],
+    bedSlotStates: [],
     days: [{
       serviceDate: "2028-01-01",
       status: "RESERVED" as const,
@@ -252,6 +266,12 @@ function boardWithSplitBedLodging(): RoomStatusBoardDto {
         href: "/orders/order_split_validation"
       }
     }]
+  }];
+  room.bedSlotStates = [{
+    serviceDate: "2028-01-01",
+    inventoryUnitId: childId,
+    inventoryUnitCode: child.code,
+    status: "RESERVED"
   }];
   room.days = [{
     serviceDate: "2028-01-01",
@@ -311,10 +331,20 @@ function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomSt
     endDate,
     sourceStartDate: startDate,
     sourceEndDate: endDate,
+    ...(status === "RESERVED" ? { orderArrivalDate: startDate } : {}),
     status,
+    attention: null,
+    operationalAttention: status === "RESERVED"
+      ? "OVERDUE_RESERVED"
+      : status === "IN_HOUSE"
+        ? "OVERDUE_IN_HOUSE"
+        : null,
     available: overdueDeparture,
     blocking: !overdueDeparture,
     sourceKind: "ORDER",
+    sourceCategory: status === "UNKNOWN" ? null : "DIRECT",
+    freeStayCategoryCode: null,
+    freeStayReason: null,
     label: "Order exception",
     primaryOccupantLabel: null,
     occupantCount: status === "UNKNOWN" ? 0 : 1,
@@ -359,6 +389,8 @@ function normalLodgingTask(taskKind: "ARRIVAL" | "IN_HOUSE" | "DEPARTURE"): Room
   task.endDate = taskKind === "DEPARTURE" ? "2028-01-01" : "2028-01-02";
   task.sourceStartDate = task.startDate;
   task.sourceEndDate = task.endDate;
+  task.orderArrivalDate = task.startDate;
+  task.operationalAttention = null;
   if (taskKind === "DEPARTURE") {
     task.available = false;
     task.blocking = true;
@@ -404,6 +436,68 @@ function normalLodgingTask(taskKind: "ARRIVAL" | "IN_HOUSE" | "DEPARTURE"): Room
 }
 
 describe("assertRoomStatusBoard", () => {
+  it("strictly keeps source categories mutually exclusive while preserving only all-null historical free metadata", () => {
+    const nonLodging = boardWithMaintenance();
+    nonLodging.rooms[0]!.intervals[0]!.sourceCategory = "DIRECT";
+    expect(() => assertRoomStatusBoard(nonLodging, expected)).toThrow(/非住宿来源/);
+
+    const missingCategory = boardWithWholeRoomLodging();
+    missingCategory.rooms[0]!.intervals[0]!.sourceCategory = null;
+    expect(() => assertRoomStatusBoard(missingCategory, expected)).toThrow(/住宿来源/);
+
+    const freeWithOrderCategory = boardWithWholeRoomLodging();
+    freeWithOrderCategory.rooms[0]!.intervals[0]!.sourceKind = "FREE_STAY";
+    expect(() => assertRoomStatusBoard(freeWithOrderCategory, expected)).toThrow(/免费入住来源类别/);
+
+    const currentFreeMissingReason = boardWithWholeRoomLodging();
+    const currentFree = currentFreeMissingReason.rooms[0]!.intervals[0]!;
+    currentFree.sourceKind = "FREE_STAY";
+    currentFree.sourceCategory = "FREE_STAY";
+    currentFree.freeStayCategoryCode = "VOLUNTEER";
+    currentFree.freeStayReason = null;
+    expect(() => assertRoomStatusBoard(currentFreeMissingReason, expected)).toThrow(/免费入住必须携带类别和原因/);
+
+    const historicalLegacyFree = boardWithWholeRoomLodging();
+    historicalLegacyFree.businessDate = "2028-01-02";
+    const legacyFree = historicalLegacyFree.rooms[0]!.intervals[0]!;
+    legacyFree.sourceKind = "FREE_STAY";
+    legacyFree.sourceCategory = null;
+    legacyFree.freeStayCategoryCode = null;
+    legacyFree.freeStayReason = null;
+    legacyFree.status = "SETTLED";
+    legacyFree.blocking = false;
+    legacyFree.available = true;
+    legacyFree.conflicts = [];
+    historicalLegacyFree.rooms[0]!.conflicts = [];
+    historicalLegacyFree.rooms[0]!.days[0]!.conflicts = [];
+    historicalLegacyFree.rooms[0]!.days[0]!.status = "SETTLED";
+    historicalLegacyFree.rooms[0]!.days[0]!.available = false;
+    expect(() => assertRoomStatusBoard(historicalLegacyFree, expected)).not.toThrow();
+
+    const partialLegacyFree = boardWithWholeRoomLodging();
+    partialLegacyFree.businessDate = "2028-01-02";
+    const partial = partialLegacyFree.rooms[0]!.intervals[0]!;
+    partial.sourceKind = "FREE_STAY";
+    partial.sourceCategory = null;
+    partial.freeStayCategoryCode = "VOLUNTEER";
+    partial.freeStayReason = null;
+    partial.status = "SETTLED";
+    partial.blocking = false;
+    partialLegacyFree.rooms[0]!.days[0]!.status = "SETTLED";
+    partialLegacyFree.rooms[0]!.days[0]!.available = true;
+    expect(() => assertRoomStatusBoard(partialLegacyFree, expected)).toThrow(/历史.*免费|免费入住/);
+
+    const failedClosed = validBoard();
+    failedClosed.projectionState = "PARTIAL";
+    const unknownTask = orderExceptionTask("UNKNOWN");
+    unknownTask.sourceCategory = null;
+    failedClosed.operationalTasks = [unknownTask];
+    expect(() => assertRoomStatusBoard(failedClosed, expected)).not.toThrow();
+
+    unknownTask.sourceCategory = "DIRECT";
+    expect(() => assertRoomStatusBoard(failedClosed, expected)).toThrow(/UNKNOWN 住宿必须隐藏全部来源/);
+  });
+
   it("accepts a complete authoritative board", () => {
     expect(() => assertRoomStatusBoard(validBoard(), expected)).not.toThrow();
   });
@@ -411,6 +505,7 @@ describe("assertRoomStatusBoard", () => {
   it("accepts an original order arrival date only for lodging intervals", () => {
     const lodging = boardWithWholeRoomLodging();
     lodging.rooms[0]!.intervals[0]!.orderArrivalDate = "2027-12-30";
+    lodging.rooms[0]!.intervals[0]!.operationalAttention = "OVERDUE_RESERVED";
     expect(() => assertRoomStatusBoard(lodging, expected)).not.toThrow();
 
     const afterSourceStart = boardWithWholeRoomLodging();
@@ -505,9 +600,14 @@ describe("assertRoomStatusBoard", () => {
       sourceStartDate: "2028-01-01",
       sourceEndDate: "2028-01-02",
       status: "MAINTENANCE",
+      attention: null,
+      operationalAttention: null,
       available: false,
       blocking: true,
       sourceKind: "MAINTENANCE",
+      sourceCategory: null,
+      freeStayCategoryCode: null,
+      freeStayReason: null,
       label: "Maintenance lock",
       primaryOccupantLabel: null,
       occupantCount: 0,
@@ -522,6 +622,219 @@ describe("assertRoomStatusBoard", () => {
     const rawInterval = missingOccupantField.rooms[0]!.intervals[0] as unknown as Record<string, unknown>;
     delete rawInterval.primaryOccupantLabel;
     expect(() => assertRoomStatusBoard(missingOccupantField, expected)).toThrow(/primaryOccupantLabel/);
+  });
+
+  it("requires explicit nullable arrears attention on intervals and operational tasks", () => {
+    const arrearsAttention = boardWithWholeRoomLodging();
+    arrearsAttention.rooms[0]!.intervals[0]!.attention = "ARREARS";
+    expect(() => assertRoomStatusBoard(arrearsAttention, expected)).not.toThrow();
+
+    const missingHistoricalArrearsAttention = boardWithWholeRoomLodging();
+    missingHistoricalArrearsAttention.rooms[0]!.intervals[0]!.status = "ARREARS";
+    missingHistoricalArrearsAttention.rooms[0]!.intervals[0]!.attention = null;
+    expect(() => assertRoomStatusBoard(missingHistoricalArrearsAttention, expected))
+      .toThrow(/历史欠款状态必须显式携带欠款注意事实/);
+
+    const missingIntervalAttention = boardWithWholeRoomLodging() as unknown as {
+      rooms: Array<{ intervals: Array<Record<string, unknown>> }>;
+    };
+    delete missingIntervalAttention.rooms[0]!.intervals[0]!.attention;
+    expect(() => assertRoomStatusBoard(missingIntervalAttention, expected)).toThrow(/attention/);
+
+    const invalidIntervalAttention = boardWithWholeRoomLodging();
+    invalidIntervalAttention.rooms[0]!.intervals[0]!.attention = "SETTLED" as never;
+    expect(() => assertRoomStatusBoard(invalidIntervalAttention, expected)).toThrow(/attention/);
+
+    const maintenanceAttention = boardWithMaintenance();
+    maintenanceAttention.rooms[0]!.intervals[0]!.attention = "ARREARS";
+    expect(() => assertRoomStatusBoard(maintenanceAttention, expected)).toThrow(/只能附着于当前预订或历史欠款订单/);
+
+    const inHouseAttention = boardWithWholeRoomLodging();
+    inHouseAttention.rooms[0]!.intervals[0]!.status = "IN_HOUSE";
+    inHouseAttention.rooms[0]!.days[0]!.status = "IN_HOUSE";
+    inHouseAttention.rooms[0]!.intervals[0]!.attention = "ARREARS";
+    expect(() => assertRoomStatusBoard(inHouseAttention, expected)).toThrow(/只能附着于当前预订或历史欠款订单/);
+
+    const historicalReservedAttention = boardWithWholeRoomLodging();
+    historicalReservedAttention.businessDate = "2028-01-02";
+    historicalReservedAttention.rooms[0]!.intervals[0]!.attention = "ARREARS";
+    expect(() => assertRoomStatusBoard(historicalReservedAttention, expected))
+      .toThrow(/欠款注意事实与营业日分区不一致/);
+
+    const currentHistoricalArrears = boardWithWholeRoomLodging();
+    currentHistoricalArrears.rooms[0]!.intervals[0]!.status = "ARREARS";
+    currentHistoricalArrears.rooms[0]!.days[0]!.status = "ARREARS";
+    currentHistoricalArrears.rooms[0]!.intervals[0]!.attention = "ARREARS";
+    expect(() => assertRoomStatusBoard(currentHistoricalArrears, expected))
+      .toThrow(/欠款注意事实与营业日分区不一致/);
+
+    const clippedSourceStillCurrent = boardWithWholeRoomLodging();
+    clippedSourceStillCurrent.businessDate = "2028-01-02";
+    clippedSourceStillCurrent.rooms[0]!.intervals[0]!.status = "ARREARS";
+    clippedSourceStillCurrent.rooms[0]!.intervals[0]!.attention = "ARREARS";
+    clippedSourceStillCurrent.rooms[0]!.intervals[0]!.sourceEndDate = "2028-01-03";
+    clippedSourceStillCurrent.rooms[0]!.days[0]!.status = "ARREARS";
+    expect(() => assertRoomStatusBoard(clippedSourceStillCurrent, expected))
+      .toThrow(/欠款注意事实与营业日分区不一致|已完成住宿状态只能表示营业日前结束的住宿/);
+
+    const futureSettled = boardWithWholeRoomLodging();
+    futureSettled.rooms[0]!.intervals[0]!.status = "SETTLED";
+    futureSettled.rooms[0]!.intervals[0]!.attention = null;
+    futureSettled.rooms[0]!.days[0]!.status = "SETTLED";
+    expect(() => assertRoomStatusBoard(futureSettled, expected))
+      .toThrow(/已完成住宿状态只能表示营业日前结束的住宿/);
+
+    const missingTaskAttention = validBoard() as unknown as { operationalTasks: Array<Record<string, unknown>> };
+    missingTaskAttention.operationalTasks = [orderExceptionTask("RESERVED") as unknown as Record<string, unknown>];
+    delete missingTaskAttention.operationalTasks[0]!.attention;
+    expect(() => assertRoomStatusBoard(missingTaskAttention, expected)).toThrow(/attention/);
+
+    const invalidTaskAttention = validBoard();
+    invalidTaskAttention.operationalTasks = [{ ...orderExceptionTask("RESERVED"), attention: "SETTLED" as never }];
+    expect(() => assertRoomStatusBoard(invalidTaskAttention, expected)).toThrow(/attention/);
+
+    const freeTaskAttention = validBoard();
+    freeTaskAttention.operationalTasks = [{
+      ...orderExceptionTask("RESERVED"),
+      sourceKind: "FREE_STAY",
+      sourceCategory: "FREE_STAY",
+      freeStayCategoryCode: "VOLUNTEER",
+      freeStayReason: "Validation",
+      attention: "ARREARS"
+    }];
+    expect(() => assertRoomStatusBoard(freeTaskAttention, expected)).toThrow(/只能附着于当前预订或历史欠款订单/);
+  });
+
+  it("requires each daily status to match its authoritative covering intervals", () => {
+    const futureEmptyArrears = validBoard();
+    futureEmptyArrears.rooms[0]!.days[0]!.status = "ARREARS";
+    expect(() => assertRoomStatusBoard(futureEmptyArrears, expected))
+      .toThrow(/必须与覆盖该日的权威区间状态一致/);
+
+    const reservedDayAsArrears = boardWithWholeRoomLodging();
+    reservedDayAsArrears.rooms[0]!.days[0]!.status = "ARREARS";
+    expect(() => assertRoomStatusBoard(reservedDayAsArrears, expected))
+      .toThrow(/必须与覆盖该日的权威区间状态一致/);
+
+    const failOpenReserved = boardWithWholeRoomLodging();
+    failOpenReserved.rooms[0]!.intervals[0]!.blocking = false;
+    failOpenReserved.rooms[0]!.intervals[0]!.available = true;
+    failOpenReserved.rooms[0]!.intervals[0]!.conflicts = [];
+    failOpenReserved.rooms[0]!.days[0]!.available = true;
+    failOpenReserved.rooms[0]!.days[0]!.conflicts = [];
+    failOpenReserved.rooms[0]!.conflicts = [];
+    expect(() => assertRoomStatusBoard(failOpenReserved, expected))
+      .toThrow(/当前或未来住宿必须保持库存阻断/);
+  });
+
+  it("requires authoritative physical-bed and daily bed-slot fields", () => {
+    const missingPhysical = validBoard() as unknown as { rooms: Array<Record<string, unknown>> };
+    delete missingPhysical.rooms[0]!.physicalBedCount;
+    expect(() => assertRoomStatusBoard(missingPhysical, expected)).toThrow(/physicalBedCount/);
+
+    const nullablePhysical = validBoard();
+    nullablePhysical.rooms[0]!.physicalBedCount = null;
+    expect(() => assertRoomStatusBoard(nullablePhysical, expected)).not.toThrow();
+
+    const missingSlots = validBoard() as unknown as { rooms: Array<Record<string, unknown>> };
+    delete missingSlots.rooms[0]!.bedSlotStates;
+    expect(() => assertRoomStatusBoard(missingSlots, expected)).toThrow(/bedSlotStates/);
+
+    const split = boardWithSplitBedLodging();
+    expect(() => assertRoomStatusBoard(split, expected)).not.toThrow();
+    (split.rooms[0]!.bedSlotStates[0] as unknown as Record<string, unknown>).occupied = true;
+    expect(() => assertRoomStatusBoard(split, expected)).toThrow(/不允许的字段 occupied/);
+  });
+
+  it("rejects READY bed slots that disagree with authoritative intervals or child identity", () => {
+    const occupiedButAvailable = boardWithSplitBedLodging();
+    occupiedButAvailable.rooms[0]!.bedSlotStates[0]!.status = "AVAILABLE";
+    expect(() => assertRoomStatusBoard(occupiedButAvailable, expected))
+      .toThrow(/唯一权威 interval 状态/);
+
+    const wrongChildCode = boardWithSplitBedLodging();
+    wrongChildCode.rooms[0]!.bedSlotStates[0]!.inventoryUnitCode = "V01-X";
+    expect(() => assertRoomStatusBoard(wrongChildCode, expected))
+      .toThrow(/权威子床代码/);
+
+    const phantomSlotWithoutPhysicalCount = boardWithSplitBedLodging();
+    phantomSlotWithoutPhysicalCount.rooms[0]!.physicalBedCount = null;
+    phantomSlotWithoutPhysicalCount.rooms[0]!.bedSlotStates.push({
+      serviceDate: "2028-01-01",
+      inventoryUnitId: "bed_split_validation_phantom",
+      inventoryUnitCode: "V01-X",
+      status: "AVAILABLE"
+    });
+    expect(() => assertRoomStatusBoard(phantomSlotWithoutPhysicalCount, expected))
+      .toThrow(/权威子床集合/);
+
+    const partialPhantomSlot = boardWithSplitBedLodging();
+    partialPhantomSlot.projectionState = "PARTIAL";
+    partialPhantomSlot.rooms[0]!.physicalBedCount = null;
+    partialPhantomSlot.rooms[0]!.bedSlotStates.push({
+      serviceDate: "2028-01-01",
+      inventoryUnitId: "bed_split_validation_phantom",
+      inventoryUnitCode: "V01-X",
+      status: "AVAILABLE"
+    });
+    expect(() => assertRoomStatusBoard(partialPhantomSlot, expected))
+      .toThrow(/床位槽必须来自权威子床集合/);
+  });
+
+  it("rejects current or future completed states in PARTIAL bed-slot summaries", () => {
+    const partialContradiction = boardWithSplitBedLodging();
+    partialContradiction.projectionState = "PARTIAL";
+    partialContradiction.rooms[0]!.bedSlotStates[0]!.status = "AVAILABLE";
+    expect(() => assertRoomStatusBoard(partialContradiction, expected))
+      .toThrow(/必须与当天唯一权威 interval 状态一致/);
+
+    const partialFutureArrears = boardWithSplitBedLodging();
+    partialFutureArrears.projectionState = "PARTIAL";
+    partialFutureArrears.rooms[0]!.bedSlotStates[0]!.status = "ARREARS";
+    expect(() => assertRoomStatusBoard(partialFutureArrears, expected))
+      .toThrow(/已完成床位状态只能表示营业日前的住宿/);
+
+    const partialFutureSettled = boardWithSplitBedLodging();
+    partialFutureSettled.projectionState = "PARTIAL";
+    partialFutureSettled.rooms[0]!.bedSlotStates[0]!.status = "SETTLED";
+    expect(() => assertRoomStatusBoard(partialFutureSettled, expected))
+      .toThrow(/已完成床位状态只能表示营业日前的住宿/);
+  });
+
+  it("allows financial and operational attention to coexist but rejects lifecycle mismatches", () => {
+    const overdueReserved = validBoard();
+    const task = orderExceptionTask("RESERVED");
+    task.attention = "ARREARS";
+    overdueReserved.operationalTasks = [task];
+    expect(() => assertRoomStatusBoard(overdueReserved, expected)).not.toThrow();
+
+    const missingOperational = validBoard() as unknown as { operationalTasks: Array<Record<string, unknown>> };
+    missingOperational.operationalTasks = [orderExceptionTask("RESERVED") as unknown as Record<string, unknown>];
+    delete missingOperational.operationalTasks[0]!.operationalAttention;
+    expect(() => assertRoomStatusBoard(missingOperational, expected)).toThrow(/operationalAttention/);
+
+    const omittedOverdueAttention = validBoard();
+    omittedOverdueAttention.operationalTasks = [{
+      ...orderExceptionTask("RESERVED"),
+      operationalAttention: null
+    }];
+    expect(() => assertRoomStatusBoard(omittedOverdueAttention, expected))
+      .toThrow(/逾期预订必须显式携带逾期运营关注事实/);
+
+    const wrongLifecycle = validBoard();
+    wrongLifecycle.operationalTasks = [{
+      ...orderExceptionTask("RESERVED"),
+      operationalAttention: "OVERDUE_IN_HOUSE"
+    }];
+    expect(() => assertRoomStatusBoard(wrongLifecycle, expected)).toThrow(/逾期未退只能附着于在住住宿/);
+
+    const omittedOverdueInHouseAttention = validBoard();
+    omittedOverdueInHouseAttention.operationalTasks = [{
+      ...orderExceptionTask("IN_HOUSE"),
+      operationalAttention: null
+    }];
+    expect(() => assertRoomStatusBoard(omittedOverdueInHouseAttention, expected))
+      .toThrow(/逾期未退任务必须显式携带未退运营关注事实/);
   });
 
   it("rejects personal details embedded in a room-status occupant summary", () => {
@@ -610,9 +923,14 @@ describe("assertRoomStatusBoard", () => {
       sourceStartDate: "2027-12-31",
       sourceEndDate: "2028-01-02",
       status: "IN_HOUSE",
+      attention: null,
+      operationalAttention: null,
       available: true,
       blocking: false,
       sourceKind: "ORDER",
+      sourceCategory: "DIRECT",
+      freeStayCategoryCode: null,
+      freeStayReason: null,
       label: "Order departure",
       primaryOccupantLabel: "Validation guest",
       occupantCount: 1,
@@ -798,7 +1116,7 @@ describe("assertRoomStatusBoard", () => {
       endDate: "2028-01-01",
       sourceEndDate: "2028-01-01"
     }];
-    expect(() => assertRoomStatusBoard(notHistoricalOverdueDeparture, expected)).toThrow(/逾期未退异常/);
+    expect(() => assertRoomStatusBoard(notHistoricalOverdueDeparture, expected)).toThrow(/逾期未退/);
 
     const missingTaskConflict = validBoard();
     missingTaskConflict.operationalTasks = [orderExceptionTask("UNKNOWN")];

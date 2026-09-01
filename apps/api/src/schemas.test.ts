@@ -555,9 +555,14 @@ describe("room-status order arrival date schema", () => {
     sourceStartDate: "2026-08-10",
     sourceEndDate: "2026-08-12",
     status: "RESERVED",
+    attention: null,
+    operationalAttention: null,
     available: false,
     blocking: true,
     sourceKind: "ORDER",
+    sourceCategory: "DIRECT",
+    freeStayCategoryCode: null,
+    freeStayReason: null,
     label: "202",
     primaryOccupantLabel: null,
     occupantCount: 0,
@@ -572,13 +577,66 @@ describe("room-status order arrival date schema", () => {
 
   it("accepts an optional local-date value on intervals and operational tasks", () => {
     expect(Value.Check(RoomStatusIntervalSchema, interval)).toBe(true);
+    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, attention: "ARREARS" })).toBe(true);
     expect(Value.Check(RoomStatusIntervalSchema, { ...interval, orderArrivalDate: "2026-08-09" })).toBe(true);
+    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, sourceCategory: "CTRIP" })).toBe(true);
+    expect(Value.Check(RoomStatusIntervalSchema, {
+      ...interval,
+      sourceKind: "FREE_STAY",
+      sourceCategory: "FREE_STAY",
+      freeStayCategoryCode: "VOLUNTEER",
+      freeStayReason: "义工住宿"
+    })).toBe(true);
     expect(Value.Check(RoomStatusOperationalTaskSchema, {
       ...interval,
       orderArrivalDate: "2026-08-09",
       taskKind: "ARRIVAL",
       businessDate: "2026-08-10"
     })).toBe(true);
+  });
+
+  it("requires explicit lodging source metadata and rejects unknown source categories", () => {
+    const { sourceCategory: _sourceCategory, ...missingSourceCategory } = interval;
+    const { freeStayCategoryCode: _freeStayCategoryCode, ...missingFreeStayCategoryCode } = interval;
+    const { freeStayReason: _freeStayReason, ...missingFreeStayReason } = interval;
+    expect(Value.Check(RoomStatusIntervalSchema, missingSourceCategory)).toBe(false);
+    expect(Value.Check(RoomStatusIntervalSchema, missingFreeStayCategoryCode)).toBe(false);
+    expect(Value.Check(RoomStatusIntervalSchema, missingFreeStayReason)).toBe(false);
+    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, sourceCategory: "AIRBNB" })).toBe(false);
+    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, freeStayCategoryCode: "FRIEND" })).toBe(false);
+  });
+
+  it("requires an explicit arrears attention marker on intervals and operational tasks", () => {
+    const { attention: _attention, ...missingAttention } = interval;
+    expect(Value.Check(RoomStatusIntervalSchema, missingAttention)).toBe(false);
+    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, attention: "SETTLED" })).toBe(false);
+    expect(Value.Check(RoomStatusOperationalTaskSchema, {
+      ...missingAttention,
+      taskKind: "ARRIVAL",
+      businessDate: "2026-08-10"
+    })).toBe(false);
+    expect(Value.Check(RoomStatusOperationalTaskSchema, {
+      ...interval,
+      attention: "SETTLED",
+      taskKind: "ARRIVAL",
+      businessDate: "2026-08-10"
+    })).toBe(false);
+  });
+
+  it("requires an explicit operational attention marker and rejects unknown values", () => {
+    const { operationalAttention: _operationalAttention, ...missingOperationalAttention } = interval;
+    expect(Value.Check(RoomStatusIntervalSchema, missingOperationalAttention)).toBe(false);
+    expect(Value.Check(RoomStatusIntervalSchema, {
+      ...interval,
+      operationalAttention: "OVERDUE_RESERVED",
+      orderArrivalDate: "2026-08-09"
+    })).toBe(true);
+    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, operationalAttention: "LATE" })).toBe(false);
+    expect(Value.Check(RoomStatusOperationalTaskSchema, {
+      ...missingOperationalAttention,
+      taskKind: "ARRIVAL",
+      businessDate: "2026-08-10"
+    })).toBe(false);
   });
 
   it("rejects a non-local-date order arrival value", () => {

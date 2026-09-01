@@ -91,6 +91,16 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+async function withOrdinaryOrderCreationClock<T>(
+  businessDate: string,
+  arrivalDate: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00+08:00`), operation)
+    : operation();
+}
+
 async function execute(
   db: Kysely<Database>,
   commandType: CommandType,
@@ -125,7 +135,7 @@ async function unitByCode(db: Kysely<Database>, code: string): Promise<Stage11Un
   return { id: unit.id, code: unit.code, name: unit.name, kind: unit.kind, roomTypeCode: unit.room_type_code };
 }
 
-async function createStay(db: Kysely<Database>, options: {
+type Stage11CreateStayOptions = {
   key: string;
   source: Stage11UnitFixture;
   nickname: string;
@@ -136,7 +146,9 @@ async function createStay(db: Kysely<Database>, options: {
   channel?: "WECOM" | "CTRIP";
   wecomAdjustmentMinor?: number;
   additionalGuestCount?: number;
-}): Promise<Stage11StayFixture> {
+};
+
+async function createStayAtCreationClock(db: Kysely<Database>, options: Stage11CreateStayOptions): Promise<Stage11StayFixture> {
   const stayType = options.stayType ?? "TRANSIENT";
   const quote = await createQuoteForTesting(db, {
     propertyId: demo.propertyId,
@@ -192,13 +204,23 @@ async function createStay(db: Kysely<Database>, options: {
   };
 }
 
-async function createMember(db: Kysely<Database>, key: string): Promise<string> {
+async function createStay(
+  db: Kysely<Database>,
+  businessDate: string,
+  options: Stage11CreateStayOptions
+): Promise<Stage11StayFixture> {
+  return withOrdinaryOrderCreationClock(businessDate, options.arrivalDate, () => {
+    return createStayAtCreationClock(db, options);
+  });
+}
+
+async function createMember(db: Kysely<Database>, key: string, phone: string): Promise<string> {
   const profile = await execute(db, "CREATE_MEMBER", {
     propertyId: demo.propertyId,
     fullName: `阶段十一会员-${key}`,
     nickname: `阶段十一会员-${key}`,
     identityCardNumber: `STAGE11-ID-${key}`,
-    phone: "13800001119",
+    phone,
     wechat: `wx-stage11-${key}`
   }, `${key}-profile`);
   const memberId = profile.result?.memberId;
@@ -262,24 +284,24 @@ export async function prepareStage11Acceptance(
     const at = (offset: number) => addDays(businessDate, offset);
 
     const samePrice = {
-      ...await createStay(db, { key: `${suffix}-same`, source: unit("305"), nickname: `同价换房-${suffix}`, arrivalDate: at(6), departureDate: at(9) }),
-      target: unit("306"), effectiveDate: at(7)
+      ...await createStay(db, businessDate, { key: `${suffix}-same`, source: unit("302"), nickname: `同价换房-${suffix}`, arrivalDate: at(6), departureDate: at(9) }),
+      target: unit("304"), effectiveDate: at(7)
     };
     const crossPrice = {
-      ...await createStay(db, { key: `${suffix}-cross`, source: unit("307"), nickname: `跨价换房-${suffix}`, arrivalDate: at(6), departureDate: at(9) }),
+      ...await createStay(db, businessDate, { key: `${suffix}-cross`, source: unit("307"), nickname: `跨价换房-${suffix}`, arrivalDate: at(6), departureDate: at(9) }),
       target: unit("E03"), effectiveDate: at(7)
     };
     const external = {
-      ...await createStay(db, { key: `${suffix}-external`, source: unit("308"), nickname: `携程换房-${suffix}`, arrivalDate: at(10), departureDate: at(13), channel: "CTRIP" }),
+      ...await createStay(db, businessDate, { key: `${suffix}-external`, source: unit("308"), nickname: `携程换房-${suffix}`, arrivalDate: at(10), departureDate: at(13), channel: "CTRIP" }),
       target: unit("309"), effectiveDate: at(11), targetContractYuan: "1000",
       channelPriceDifferenceReason: "携程重新确认本单渠道应结金额"
     };
     const free = {
-      ...await createStay(db, { key: `${suffix}-free`, source: unit("E01"), nickname: `免费换房-${suffix}`, arrivalDate: at(10), departureDate: at(13), stayType: "FREE" }),
+      ...await createStay(db, businessDate, { key: `${suffix}-free`, source: unit("E01"), nickname: `免费换房-${suffix}`, arrivalDate: at(10), departureDate: at(13), stayType: "FREE" }),
       target: unit("E02"), effectiveDate: at(11)
     };
 
-    const historicalBase = await createStay(db, {
+    const historicalBase = await createStay(db, businessDate, {
       key: `${suffix}-history`, source: unit("206-A"), nickname: `历史换房续住-${suffix}`,
       arrivalDate: at(-2), departureDate: at(2)
     });
@@ -291,7 +313,7 @@ export async function prepareStage11Acceptance(
     );
     const historicalExtend = { ...historicalMove, newDepartureDate: at(3) };
 
-    const futureBase = await createStay(db, {
+    const futureBase = await createStay(db, businessDate, {
       key: `${suffix}-future`, source: unit("309"), nickname: `未来换房裁剪-${suffix}`,
       arrivalDate: at(-1), departureDate: at(4)
     });
@@ -303,34 +325,37 @@ export async function prepareStage11Acceptance(
       newDepartureDate: at(2)
     };
 
-    const memberId = await withPropertyClockForTesting(new Date(`${at(12)}T09:00:00+08:00`), () => createMember(db, `${suffix}-member`));
+    const memberId = await withPropertyClockForTesting(
+      new Date(`${at(12)}T09:00:00+08:00`),
+      () => createMember(db, `${suffix}-member`, "13800001119")
+    );
     const member = {
-      ...await createStay(db, {
-        key: `${suffix}-member-stay`, source: unit("301"), nickname: `会员同产品换房-${suffix}`,
+      ...await createStay(db, businessDate, {
+        key: `${suffix}-member-stay`, source: unit("302"), nickname: `会员同产品换房-${suffix}`,
         arrivalDate: at(12), departureDate: at(15), memberId
       }),
-      target: unit("302"), effectiveDate: at(13), memberId
+      target: unit("308"), effectiveDate: at(13), memberId
     };
     const capacityBlocked = {
-      ...await createStay(db, {
+      ...await createStay(db, businessDate, {
         key: `${suffix}-capacity`, source: unit("206"), nickname: `容量拒绝-${suffix}`,
         arrivalDate: at(12), departureDate: at(15), additionalGuestCount: 1
       }),
       target: unit("304"), effectiveDate: at(13)
     };
     const conflictBlocked = {
-      ...await createStay(db, {
+      ...await createStay(db, businessDate, {
         key: `${suffix}-conflict`, source: unit("303"), nickname: `库存拒绝-${suffix}`,
         arrivalDate: at(12), departureDate: at(15)
       }),
       target: unit("304"), effectiveDate: at(13), blockerNickname: `目标占用-${suffix}`
     };
-    await createStay(db, {
+    await createStay(db, businessDate, {
       key: `${suffix}-blocker`, source: unit("304"), nickname: conflictBlocked.blockerNickname,
       arrivalDate: at(13), departureDate: at(15)
     });
     const bedMove = {
-      ...await createStay(db, {
+      ...await createStay(db, businessDate, {
         key: `${suffix}-bed`, source: unit("202-A"), nickname: `床位换房-${suffix}`,
         arrivalDate: at(12), departureDate: at(15)
       }),
@@ -345,7 +370,7 @@ export async function prepareStage11Acceptance(
       newDepartureDate: string,
       expectedIntervals: Stage11SchemeFixture["expectedIntervals"]
     ): Promise<Stage11SchemeFixture> {
-      const stay = await createStay(db, {
+      const stay = await createStay(db, businessDate, {
         key: `${suffix}-${key}`, source: unit(sourceCode), nickname: `${key}-${suffix}`,
         arrivalDate: at(14), departureDate: at(18), stayType: "FREE"
       });
@@ -399,38 +424,41 @@ export async function prepareStage11MobileAcceptance(
     const at = (offset: number) => addDays(businessDate, mobileDayOffset + offset);
     const freeSource = await unitByCode(db, "305");
     const freeTarget = await unitByCode(db, "306");
-    const freeStay = await createStay(db, {
+    const freeStay = await createStay(db, businessDate, {
       key: `${suffix}-free`, source: freeSource, nickname: `手机免费换房-${suffix}`,
       arrivalDate: at(2), departureDate: at(5), stayType: "FREE"
     });
     const sameSource = await unitByCode(db, "A01");
     const sameTarget = await unitByCode(db, "A02");
-    const sameStay = await createStay(db, {
+    const sameStay = await createStay(db, businessDate, {
       key: `${suffix}-same`, source: sameSource, nickname: `手机同价换房-${suffix}`,
       arrivalDate: at(2), departureDate: at(5)
     });
     const crossSource = await unitByCode(db, "A03");
     const crossTarget = await unitByCode(db, "B01");
-    const crossStay = await createStay(db, {
+    const crossStay = await createStay(db, businessDate, {
       key: `${suffix}-cross`, source: crossSource, nickname: `手机跨价换房-${suffix}`,
       arrivalDate: at(2), departureDate: at(5)
     });
     const externalSource = await unitByCode(db, "B03");
     const externalTarget = await unitByCode(db, "B04");
-    const externalStay = await createStay(db, {
+    const externalStay = await createStay(db, businessDate, {
       key: `${suffix}-external`, source: externalSource, nickname: `手机渠道换房-${suffix}`,
       arrivalDate: at(6), departureDate: at(9), channel: "CTRIP"
     });
     const wecomSource = await unitByCode(db, "C01");
     const wecomTarget = await unitByCode(db, "C02");
-    const wecomStay = await createStay(db, {
+    const wecomStay = await createStay(db, businessDate, {
       key: `${suffix}-wecom`, source: wecomSource, nickname: `手机企微换房-${suffix}`,
       arrivalDate: at(6), departureDate: at(9), wecomAdjustmentMinor: -100
     });
-    const memberId = await withPropertyClockForTesting(new Date(`${at(12)}T09:00:00+08:00`), () => createMember(db, `${suffix}-member`));
+    const memberId = await withPropertyClockForTesting(
+      new Date(`${at(12)}T09:00:00+08:00`),
+      () => createMember(db, `${suffix}-member`, "13800001129")
+    );
     const memberSource = await unitByCode(db, "D01");
     const memberTarget = await unitByCode(db, "202-A");
-    const memberStay = await createStay(db, {
+    const memberStay = await createStay(db, businessDate, {
       key: `${suffix}-member-cross-kind`, source: memberSource, nickname: `手机会员跨类型拒绝-${suffix}`,
       arrivalDate: at(12), departureDate: at(15), memberId
     });

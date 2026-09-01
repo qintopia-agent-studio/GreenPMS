@@ -1,3 +1,4 @@
+import pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
 import {
@@ -110,6 +111,96 @@ afterEach(async () => {
 });
 
 describe("durable command protocol", () => {
+  it("holds the protocol shared lock while persisting a rejected confirmation", async () => {
+    const prepared = await createCommandPreview(db, principal, {
+      commandType: "LOCK_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: demo.secondRoomId,
+        arrivalDate: "2028-04-10",
+        departureDate: "2028-04-11",
+        reason: "Rejected confirmation protocol gate test"
+      }
+    }, metadata("rejected-confirm-preview"));
+    const rejectionMetadata = metadata("rejected-confirm");
+    const blocker = new pg.Client({ connectionString: databaseUrl });
+    const observer = new pg.Client({ connectionString: databaseUrl });
+    let pending: ReturnType<typeof confirmCommandPreview> | undefined;
+    await Promise.all([blocker.connect(), observer.connect()]);
+    await blocker.query("SELECT pg_advisory_lock(hashtextextended('qintopia:test:persist-rejected', 0))");
+    await sql.raw(`
+      CREATE FUNCTION qintopia_test_block_rejected_execution() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.state = 'REJECTED' THEN
+          PERFORM pg_advisory_xact_lock(hashtextextended('qintopia:test:persist-rejected', 0));
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER qintopia_test_block_rejected_execution
+        BEFORE INSERT ON command_executions
+        FOR EACH ROW EXECUTE FUNCTION qintopia_test_block_rejected_execution()
+    `).execute(db);
+    try {
+      pending = confirmCommandPreview(db, principal, prepared.preview.previewId, {
+        propertyId: demo.propertyId,
+        commandType: "LOCK_MAINTENANCE",
+        confirmation: true,
+        expectedEffectHash: "deliberately-wrong-effect-hash",
+        reason: { code: "TEST_REJECTION", note: "Verify rejected receipts join the protocol gate" }
+      }, rejectionMetadata);
+      void pending.catch(() => undefined);
+
+      let rejectedWriterWaiting = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const result = await observer.query<{ waiting: boolean }>(`
+          select exists (
+            select 1
+            from pg_stat_activity
+            where datname = current_database()
+              and pid <> pg_backend_pid()
+              and wait_event_type = 'Lock'
+              and wait_event = 'advisory'
+              and query ilike '%command_executions%'
+          ) as waiting
+        `);
+        if (result.rows[0]?.waiting) {
+          rejectedWriterWaiting = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(rejectedWriterWaiting).toBe(true);
+
+      const protocolExclusive = await observer.query<{ acquired: boolean }>(`
+        select pg_try_advisory_lock(
+          hashtextextended('qintopia:protocol-epoch', 0::bigint)
+        ) as acquired
+      `);
+      if (protocolExclusive.rows[0]?.acquired) {
+        await observer.query(`
+          select pg_advisory_unlock(
+            hashtextextended('qintopia:protocol-epoch', 0::bigint)
+          )
+        `);
+      }
+      expect(protocolExclusive.rows[0]?.acquired).toBe(false);
+    } finally {
+      await blocker.query("SELECT pg_advisory_unlock(hashtextextended('qintopia:test:persist-rejected', 0))");
+      await Promise.allSettled(pending ? [pending] : []);
+      await sql.raw(`
+        DROP TRIGGER IF EXISTS qintopia_test_block_rejected_execution ON command_executions;
+        DROP FUNCTION IF EXISTS qintopia_test_block_rejected_execution()
+      `).execute(db);
+      await Promise.all([blocker.end(), observer.end()]);
+    }
+
+    await expect(pending!).resolves.toMatchObject({
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      error: { code: "CONFIRMATION_MISMATCH" }
+    });
+  });
+
   it("fences an absent confirmation key and prevents its delayed Confirm from writing business facts", async () => {
     const preview = await createCommandPreview(db, principal, {
       commandType: "LOCK_MAINTENANCE",

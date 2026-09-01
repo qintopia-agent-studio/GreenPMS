@@ -1,3 +1,4 @@
+import pg from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthPrincipal, CreateQuoteCommandInputDto } from "@qintopia/contracts";
 import {
@@ -89,6 +90,37 @@ afterEach(async () => {
 });
 
 describe("recoverable CREATE_QUOTE command on PostgreSQL", () => {
+  it("serializes result-resolution writes with the protocol epoch gate", async () => {
+    const blocker = new pg.Client({ connectionString: databaseUrl });
+    await blocker.connect();
+    await blocker.query("SELECT pg_advisory_lock(hashtextextended('qintopia:protocol-epoch', 0))");
+    const pending = resolveCommandResult(
+      db,
+      readPrincipal,
+      {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: "quote-resolution-protocol-gate-original"
+      },
+      metadata("quote-resolution-protocol-gate")
+    );
+    try {
+      const outcome = await Promise.race([
+        pending.then(() => "settled" as const),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 150))
+      ]);
+      expect(outcome).toBe("blocked");
+    } finally {
+      await blocker.query("SELECT pg_advisory_unlock(hashtextextended('qintopia:protocol-epoch', 0))");
+      await blocker.end();
+    }
+    await expect(pending).resolves.toMatchObject({
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      error: { code: "COMMAND_INTERRUPTED" }
+    });
+  });
+
   it("durably fences an absent Quote key, replays that fence, and blocks a delayed Quote", async () => {
     const commandMetadata = metadata("quote-recovery-fence");
     const fenced = await resolveCommandResult(

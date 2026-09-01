@@ -204,8 +204,7 @@ test("200 real inventory units by 30 nights become keyboard-interactive within t
   await expect(committedRange).toHaveAttribute("data-range-arrival", arrivalDate);
   await expect(committedRange).toHaveAttribute("data-range-departure", departureDate);
 
-  const gridRegion = committedRange.getByRole("region", { name: /房态二维网格/ });
-  const grid = gridRegion.getByRole("grid");
+  const grid = committedRange.getByRole("grid");
   await expect(grid).toBeVisible();
   const renderedBuildingGroupCount = 1;
   await expect(grid).toHaveAttribute("aria-rowcount", String(roomStatusPageSize + renderedBuildingGroupCount + 1));
@@ -316,7 +315,9 @@ test("mobile operators can page through every room in a property larger than one
   const arrivalDate = todayInTimeZone("Asia/Shanghai");
   await preparePerformanceProperty(arrivalDate);
   await page.setViewportSize({ width: 375, height: 812 });
-  await login(page);
+  await page.addInitScript((propertyId) => {
+    window.localStorage.setItem("qintopia.propertyId", propertyId);
+  }, performancePropertyId);
 
   const firstPageResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -325,7 +326,7 @@ test("mobile operators can page through every room in a property larger than one
       && url.searchParams.get("page") === "0"
       && response.status() === 200;
   });
-  await page.getByTestId("property-select").selectOption(performancePropertyId);
+  await login(page);
   await firstPageResponse;
 
   const pager = page.getByRole("navigation", { name: "移动房源分页" });

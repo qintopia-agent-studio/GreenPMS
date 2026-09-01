@@ -23,12 +23,14 @@ import { addLocalDateDays, isIsoLocalDate, selectionFromInputs, type RoomStatusS
 import {
   formatRoomStatusDate,
   roomStatusActionLabels,
+  roomStatusIntervalAttentionLabels,
   roomStatusIntervalBusinessLabel,
   roomStatusOccupancyCapacity,
   roomStatusSaleCapabilityLabel,
   roomStatusSelectedSaleLabel,
   roomStatusSourceLabels,
   roomStatusUnitLabel,
+  RoomStatusAttentionBadges,
   RoomStatusMark,
   RoomStatusWarning
 } from "./roomStatusPresentation";
@@ -181,6 +183,7 @@ export function RoomStatusContext({
     const intervals = selectedInterval ? [selectedInterval, ...relatedIntervals] : [...relatedIntervals];
     return [...new Map(intervals.map((interval) => [interval.id, interval])).values()];
   }, [relatedIntervals, selectedInterval]);
+  const contextAttentionLabels = [...new Set(contextIntervals.flatMap(roomStatusIntervalAttentionLabels))];
   const status = selectedInterval?.status ?? selectedDay?.status;
   const contextTitle = selectedInterval?.label ?? (selectedUnit ? roomStatusUnitLabel(selectedUnit) : "尚未选择房源");
 
@@ -223,6 +226,7 @@ export function RoomStatusContext({
         </div>
         <div className="room-status-context-header-actions">
           {status ? <RoomStatusMark status={status} /> : null}
+          <RoomStatusAttentionBadges labels={contextAttentionLabels} />
           {onClose ? <button type="button" className="room-status-icon-button" onClick={onClose} aria-label="关闭选中对象上下文" title="关闭选中对象上下文"><X aria-hidden="true" size={17} /></button> : null}
         </div>
       </header>
@@ -362,7 +366,7 @@ export function RoomStatusContext({
           <ul>
             {allowedActions.map((action) => {
               const actionKey = `${action.code}:${action.targetReference?.type ?? "none"}:${action.targetReference?.id ?? "none"}`;
-              const disabledReason = !action.enabled ? action.disabledReason ?? writeBlock?.reason : undefined;
+              const disabledReason = !action.enabled ? action.disabledReason : undefined;
               const disabledReasonId = `${actionReasonIdPrefix}-${actionKey}`;
               return <li key={actionKey}>
                 <button type="button" className="room-status-button" disabled={!action.enabled} aria-describedby={disabledReason ? disabledReasonId : undefined} onClick={() => {

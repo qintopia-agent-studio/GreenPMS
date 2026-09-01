@@ -37,7 +37,7 @@ test("4.3 member lodging and entitlement records link to each other without expo
   await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
-  await expect(popover).toHaveAttribute("data-unit-id", stay.unitId);
+  await expect(popover).toHaveAccessibleName(new RegExp(stay.unitCode));
   const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: stay.nickname });
   await expect(orderOption).toHaveCount(1);
   await orderOption.click();

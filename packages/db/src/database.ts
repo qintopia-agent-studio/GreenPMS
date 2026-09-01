@@ -4,7 +4,7 @@ import type { Database } from "./schema.ts";
 
 pg.types.setTypeParser(1082, (value) => value);
 
-const currentMigrationNames = [
+export const currentMigrationNames = [
   "001_initial.sql",
   "002_immutability.sql",
   "003_active_coverage_uniqueness.sql",

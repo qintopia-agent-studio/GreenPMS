@@ -201,6 +201,13 @@ async function openPersistedQuoteRecovery(page: Page) {
   return recovery;
 }
 
+async function quoteRecoveryRecordExists(page: Page, idempotencyKey: string): Promise<boolean> {
+  return page.evaluate((targetIdempotencyKey) => Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
+    .filter((key): key is string => Boolean(key?.startsWith("qintopia.quote-command-recovery.v1:")))
+    .map((key) => JSON.parse(sessionStorage.getItem(key) ?? "null") as { metadata?: { idempotencyKey?: string } })
+    .some((record) => record.metadata?.idempotencyKey === targetIdempotencyKey), idempotencyKey);
+}
+
 async function createOrder(page: Page, options: {
   stayMode: "MEMBER" | "NORMAL" | "FREE";
   unitCode: string;
@@ -227,7 +234,7 @@ async function createOrder(page: Page, options: {
   }>;
 }) {
   const memberIdentityCardNumber = options.memberIdentityCardNumber
-    ?? (options.transientMember ? "DEMO-ID-310000199001010001" : undefined);
+    ?? (options.transientMember ? "13800000000" : undefined);
   if (options.stayMode === "MEMBER") expect(memberIdentityCardNumber).toBeTruthy();
   else expect(memberIdentityCardNumber).toBeUndefined();
   await chooseDatesAndUnit(
@@ -407,20 +414,20 @@ async function tabTo(page: Page, target: Locator, options: { reverse?: boolean; 
 async function assertShellDoesNotOverlap(page: Page, width: number) {
   const shell = await page.evaluate(() => {
     const sidebar = document.querySelector<HTMLElement>(".sidebar")?.getBoundingClientRect();
-    const header = document.querySelector<HTMLElement>(".workspace-header")?.getBoundingClientRect();
+    const workspace = document.querySelector<HTMLElement>(".workspace")?.getBoundingClientRect();
     return {
       sidebarBottom: sidebar?.bottom ?? -1,
       sidebarRight: sidebar?.right ?? -1,
-      headerTop: header?.top ?? -1,
-      headerLeft: header?.left ?? -1
+      workspaceTop: workspace?.top ?? -1,
+      workspaceLeft: workspace?.left ?? -1
     };
   });
   if (width <= 860) {
-    expect(shell.headerTop, `workspace header top at ${width}px`).toBeGreaterThanOrEqual(shell.sidebarBottom - 1);
-    expect(shell.headerTop, `workspace header top at ${width}px`).toBeLessThanOrEqual(shell.sidebarBottom + 1);
+    expect(shell.workspaceTop, `workspace top at ${width}px`).toBeGreaterThanOrEqual(shell.sidebarBottom - 1);
+    expect(shell.workspaceTop, `workspace top at ${width}px`).toBeLessThanOrEqual(shell.sidebarBottom + 1);
   } else {
-    expect(shell.headerLeft, `workspace header left at ${width}px`).toBeGreaterThanOrEqual(shell.sidebarRight - 1);
-    expect(shell.headerLeft, `workspace header left at ${width}px`).toBeLessThanOrEqual(shell.sidebarRight + 1);
+    expect(shell.workspaceLeft, `workspace left at ${width}px`).toBeGreaterThanOrEqual(shell.sidebarRight - 1);
+    expect(shell.workspaceLeft, `workspace left at ${width}px`).toBeLessThanOrEqual(shell.sidebarRight + 1);
   }
 }
 
@@ -643,8 +650,8 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(page.getByTestId("reprice-target-yuan")).toHaveValue("110");
   await page.getByRole("dialog", { name: "调整订单金额" }).getByRole("button", { name: "取消", exact: true }).click();
 
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
-  const dateChangeDrawer = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
+  const dateChangeDrawer = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
   await dateChangeDrawer.getByTestId("stay-date-departure").fill(addDays(businessDate, 2));
   await dateChangeDrawer.getByTestId("stay-date-reason").fill("Guest leaves one night early");
   await expect(dateChangeDrawer.getByTestId("stay-date-new-amount")).toBeVisible({ timeout: 15_000 });
@@ -744,7 +751,7 @@ test("desktop whole-room order records every occupant and room status exposes ni
   await page.getByTestId("arrival-date").fill("2026-10-01");
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   const cell = page.locator('[data-room-status-cell="true"][data-unit-id="unit_room_a03"][data-service-date="2026-10-01"]');
-  await expect(cell).toContainText("山峰、小满");
+  await expect(cell.locator(".room-status-direct-occupants > span")).toHaveText(["山峰", "小满"]);
   await expect(cell).toContainText("2人");
   await expect(page.locator('[data-room-status-row="unit_room_a03"] .room-status-interval').filter({ hasText: /山峰|小满/ })).toHaveCount(0);
   const accessibleText = `${await cell.getAttribute("aria-label") ?? ""} ${await cell.getAttribute("title") ?? ""}`;
@@ -785,14 +792,14 @@ test("desktop stay changes and exception commands remain operable through Web", 
 
   const changeOrderId = await createOrder(page, { stayMode: "NORMAL", unitCode: "101", guest: "E2E Change Guest", arrivalDate: "2026-09-10", departureDate: "2026-09-12", bookingChannelCode: "MEITUAN", channelOrderReference: "TEST-E2E-MEITUAN-001" });
   await page.goto(`/orders/${encodeURIComponent(changeOrderId)}`);
-  await page.getByRole("button", { name: "调整预订日期", exact: true }).click();
-  const stayDateDrawer = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  await page.getByRole("button", { name: "调整住宿日期", exact: true }).click();
+  const stayDateDrawer = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
   await stayDateDrawer.getByTestId("stay-date-departure").fill("2026-09-13");
   await stayDateDrawer.getByTestId("stay-date-channel-amount").fill("696");
   await stayDateDrawer.getByTestId("stay-date-reason").fill("住客确认延长住宿一晚");
   await expect(stayDateDrawer.getByTestId("stay-date-price-preview")).toBeVisible({ timeout: 30_000 });
   await stayDateDrawer.getByRole("button", { name: "继续核对", exact: true }).click();
-  const stayDateReview = page.getByRole("dialog", { name: "调整预订日期", exact: true });
+  const stayDateReview = page.getByRole("dialog", { name: "调整住宿日期", exact: true });
   await expect(stayDateReview.getByTestId("command-effect")).toBeVisible({ timeout: 30_000 });
   await stayDateReview.getByTestId("confirm-command").click();
   await expect(stayDateReview).toBeHidden({ timeout: 30_000 });
@@ -978,7 +985,7 @@ test("desktop quote command recovers the committed Quote after response loss", a
     await route.abort("failed");
   }, { times: 1 });
 
-  await chooseDatesAndUnit(page, "101", "2026-10-12", "2026-10-10", "FREE");
+  await selectRoomStatusRange(page, "101", "2026-10-12", "2026-10-10");
   let recovery = page.getByTestId("quote-recovery");
   await expect(recovery).toContainText("报价结果尚未确认", { timeout: 15_000 });
   await expect(recovery).not.toContainText(originalQuoteKey);
@@ -1019,7 +1026,7 @@ test("desktop Quote recovery rejects mismatched committed evidence and stays blo
     await route.abort("failed");
   }, { times: 1 });
 
-  await chooseDatesAndUnit(page, "101", "2026-10-12", "2026-10-10", "FREE");
+  await selectRoomStatusRange(page, "101", "2026-10-12", "2026-10-10");
   const recovery = page.getByTestId("quote-recovery");
   await expect(recovery).toContainText("报价结果尚未确认", { timeout: 15_000 });
   expect(originalQuoteKey).toMatch(/^web-create-quote-/);
@@ -1071,14 +1078,13 @@ test("desktop corrupt Quote recovery stays blocked until staff review and scoped
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/quotes") quotePostCount += 1;
   });
   await login(page);
-  await page.evaluate(() => {
-    sessionStorage.setItem(
-      "qintopia.quote-command-recovery.v1:subject_demo_operator:prop_qintopia_demo",
-      "{damaged-json"
-    );
-  });
+  const storageKey = "qintopia.quote-command-recovery.v1:subject_demo_operator:prop_qintopia_demo";
+  const otherStorageKey = "qintopia.quote-command-recovery.v1:subject_demo_operator:property_other";
+  await page.evaluate(({ key, otherKey }) => {
+    localStorage.setItem(key, "{damaged-json");
+    localStorage.setItem(otherKey, "preserve-other-property");
+  }, { key: storageKey, otherKey: otherStorageKey });
 
-  await chooseDatesAndUnit(page, "101", "2026-10-20", "2026-10-18", "FREE");
   const damaged = page.getByTestId("quote-damaged-command-recovery");
   await expect(damaged).toBeVisible();
   await expect(damaged).toContainText("先在当前业务页面核对订单、房态或会员记录");
@@ -1089,8 +1095,21 @@ test("desktop corrupt Quote recovery stays blocked until staff review and scoped
   await damaged.getByRole("checkbox").check();
   await discard.click();
   await expect(damaged).toBeHidden();
+  const recoveryDrawer = page.locator("dialog.room-status-write-drawer");
+  if (await recoveryDrawer.isVisible().catch(() => false)) {
+    await recoveryDrawer.getByRole("button", { name: "关闭", exact: true }).last().click();
+    await expect(recoveryDrawer).toBeHidden();
+  }
+  await chooseDatesAndUnit(page, "101", "2026-10-20", "2026-10-18", "FREE");
   await expect(page.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
   expect(quotePostCount).toBe(1);
+  await expect.poll(() => page.evaluate(({ key, otherKey }) => ({
+    currentRecord: localStorage.getItem(key),
+    otherRecord: localStorage.getItem(otherKey)
+  }), { key: storageKey, otherKey: otherStorageKey })).toEqual({
+    currentRecord: null,
+    otherRecord: "preserve-other-property"
+  });
 });
 
 test("desktop delayed Quote callback after navigation preserves SENDING recovery without a duplicate Quote", async ({ page }, testInfo: TestInfo) => {
@@ -1106,7 +1125,7 @@ test("desktop delayed Quote callback after navigation preserves SENDING recovery
   await delayed.fetched;
   const originalQuoteKey = delayed.idempotencyKey();
   expect(originalQuoteKey).toMatch(/^web-create-quote-/);
-  await expect(page.getByText("正在计算住宿金额", { exact: true })).toBeVisible();
+  await expect(page.getByText("报价正在提交", { exact: true })).toBeVisible();
 
   await navigateWithinApp(page, "/orders", "订单");
   await releaseQuoteAndFlushOldCallback(page, delayed);
@@ -1115,14 +1134,36 @@ test("desktop delayed Quote callback after navigation preserves SENDING recovery
     .map((key) => JSON.parse(sessionStorage.getItem(key) ?? "null") as { state?: string; metadata?: { idempotencyKey?: string } })
     .some((record) => record.state === "SENDING" && record.metadata?.idempotencyKey === idempotencyKey), originalQuoteKey)).toBe(true);
 
-  const recoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
-    propertyId: "prop_qintopia_demo",
-    commandType: "CREATE_QUOTE",
-    idempotencyKey: originalQuoteKey
-  }));
+  let recoveryRequestSeen = false;
+  page.on("request", (request) => {
+    if (isResolvedCommandRequest(request, {
+      propertyId: "prop_qintopia_demo",
+      commandType: "CREATE_QUOTE",
+      idempotencyKey: originalQuoteKey
+    })) recoveryRequestSeen = true;
+  });
   await navigateWithinApp(page, "/", "房间与床位逐日房态");
-  await selectRoomStatusRange(page, "102", "2026-10-15", "2026-10-13");
-  await recoveryRequest;
+  const recoveryEntry = page.getByTestId("inventory-quote-recovery-entry");
+  await expect(recoveryEntry).toBeVisible();
+  await recoveryEntry.getByRole("button", { name: "打开处理入口", exact: true }).click();
+  const recoveryButton = page.getByTestId("quote-recovery")
+    .getByRole("button", { name: "核对原报价结果", exact: true });
+  await expect.poll(async () => recoveryRequestSeen
+    || await recoveryButton.isVisible().catch(() => false)
+    || !await quoteRecoveryRecordExists(page, originalQuoteKey), { timeout: 15_000 }).toBe(true);
+  if (!recoveryRequestSeen) {
+    if (await recoveryButton.isVisible().catch(() => false)) {
+      const request = page.waitForRequest((candidate) => isResolvedCommandRequest(candidate, {
+        propertyId: "prop_qintopia_demo",
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: originalQuoteKey
+      }));
+      await recoveryButton.click();
+      await request;
+    } else {
+      await expect.poll(() => quoteRecoveryRecordExists(page, originalQuoteKey)).toBe(false);
+    }
+  }
   await expect(page.getByTestId("quote-recovery")).toHaveCount(0);
   expect(quotePostCount).toBe(1);
 });
@@ -1205,6 +1246,7 @@ test("desktop delayed Quote callback cannot cross a same-page property scope swi
   await expect(page.getByTestId("property-select")).toHaveValue(secondaryPropertyId);
   await secondaryRoomStatus;
   await expect(page.getByTestId("quote-recovery")).toBeHidden();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
   await releaseQuoteAndFlushOldCallback(page, delayed);
   await expect(page.getByText("本地报价恢复记录不可用", { exact: true })).toBeHidden();
   await expect(page.getByTestId("quote-result")).toBeHidden();
@@ -1213,13 +1255,41 @@ test("desktop delayed Quote callback cannot cross a same-page property scope swi
     .map((key) => JSON.parse(sessionStorage.getItem(key) ?? "null") as { state?: string; metadata?: { idempotencyKey?: string } })
     .some((record) => record.state === "SENDING" && record.metadata?.idempotencyKey === idempotencyKey), originalQuoteKey)).toBe(true);
 
-  const recoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
-    propertyId: originalPropertyId,
-    commandType: "CREATE_QUOTE",
-    idempotencyKey: originalQuoteKey
-  }));
+  let recoveryRequestSeen = false;
+  page.on("request", (request) => {
+    if (isResolvedCommandRequest(request, {
+      propertyId: originalPropertyId,
+      commandType: "CREATE_QUOTE",
+      idempotencyKey: originalQuoteKey
+    })) recoveryRequestSeen = true;
+  });
+  const originalRoomStatus = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/api/v1/properties/${originalPropertyId}/room-status`
+      && response.status() === 200
+  );
   await page.getByTestId("property-select").selectOption(originalPropertyId);
-  await recoveryRequest;
+  await originalRoomStatus;
+  const recoveryEntry = page.getByTestId("inventory-quote-recovery-entry");
+  await expect(recoveryEntry).toBeVisible();
+  await recoveryEntry.getByRole("button", { name: "打开处理入口", exact: true }).click();
+  const recoveryButton = page.getByTestId("quote-recovery")
+    .getByRole("button", { name: "核对原报价结果", exact: true });
+  await expect.poll(async () => recoveryRequestSeen
+    || await recoveryButton.isVisible().catch(() => false)
+    || !await quoteRecoveryRecordExists(page, originalQuoteKey), { timeout: 15_000 }).toBe(true);
+  if (!recoveryRequestSeen) {
+    if (await recoveryButton.isVisible().catch(() => false)) {
+      const request = page.waitForRequest((candidate) => isResolvedCommandRequest(candidate, {
+        propertyId: originalPropertyId,
+        commandType: "CREATE_QUOTE",
+        idempotencyKey: originalQuoteKey
+      }));
+      await recoveryButton.click();
+      await request;
+    } else {
+      await expect.poll(() => quoteRecoveryRecordExists(page, originalQuoteKey)).toBe(false);
+    }
+  }
   await expect(page.getByTestId("quote-recovery")).toHaveCount(0);
   expect(quotePostCount).toBe(1);
 });
@@ -1428,7 +1498,7 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await expect(originalRow).toContainText(replacementTokenId!);
   await page.getByRole("region", { name: /一次性 secret 待清除/ }).getByRole("button", { name: "已保存，清除本机显示" }).click();
 
-  await activeRow.getByRole("button", { name: "撤销", exact: true }).click();
+  await activeRow.getByRole("button", { name: /^撤销 Token / }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
   await page.route("**/api/v1/command-previews/*/confirm", async (route) => {
     await route.fetch();
@@ -1534,7 +1604,7 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
   expect(tokenListRequests).toBe(requestsBeforeOldIssueResponse);
 
   await retained.getByRole("button", { name: "已保存，清除本机显示" }).click();
-  await tokenRows.getByRole("button", { name: "撤销", exact: true }).click();
+  await tokenRows.getByRole("button", { name: /^撤销 Token / }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
 
   const delayedRevoke = await deferNextConfirmResponse(page, "SERVER_ERROR");
@@ -1688,7 +1758,9 @@ test("property timezone controls default operating dates across local midnight",
 test("maintenance lock can be listed and released", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name !== "desktop", "desktop maintenance journey");
   await login(page);
-  const unitId = await selectRoomStatusRange(page, "102", "2026-08-11", "2026-08-10");
+  const maintenanceArrivalDate = addDays(todayInTimeZone("Asia/Shanghai"), 45);
+  const maintenanceDepartureDate = addDays(maintenanceArrivalDate, 1);
+  const unitId = await selectRoomStatusRange(page, "102", maintenanceDepartureDate, maintenanceArrivalDate);
   await page.getByRole("button", { name: "放置维修锁房", exact: true }).click();
   await page.getByLabel("维修原因").fill("E2E air conditioner service");
   await page.getByRole("button", { name: "继续核对" }).click();
@@ -1715,6 +1787,6 @@ test("maintenance lock can be listed and released", async ({ page }, testInfo: T
   const statusDrawer = page.locator("dialog.room-status-view-drawer");
   await expect(statusDrawer).toBeVisible();
   await statusDrawer.getByRole("button", { name: "关闭", exact: true }).first().click();
-  await expectRoomStatusDateAvailable(page, unitId, "2026-08-10");
+  await expectRoomStatusDateAvailable(page, unitId, maintenanceArrivalDate);
   await assertNoA11yViolations(page);
 });

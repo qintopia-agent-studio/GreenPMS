@@ -1763,7 +1763,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       throw new DomainError(
         "INVALID_ORDER_STATE",
         context.order.status === "RESERVED"
-          ? "未入住订单请使用调整预订日期"
+          ? "未入住订单请使用调整住宿日期"
           : "只有在住订单可以缩短住宿",
         409
       );
@@ -1980,7 +1980,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") {
     const reschedule = commandType === "RESCHEDULE_STAY";
     if (reschedule && context.order.status !== "RESERVED") {
-      throw new DomainError("INVALID_ORDER_STATE", "只有未入住订单可以调整预订日期", 409);
+      throw new DomainError("INVALID_ORDER_STATE", "只有未入住订单可以调整住宿日期", 409);
     }
     if (!reschedule && context.order.status !== "CHECKED_IN") {
       throw new DomainError("INVALID_ORDER_STATE", "只有在住订单可以延长住宿", 409);
@@ -2052,7 +2052,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       !reschedule ? loadOrderMembershipConversion(db, context) : Promise.resolve(null)
     ]);
     if (reschedule && activeCoverage.some((item) => item.status === "CONSUMED")) {
-      throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能调整预订日期", 409);
+      throw new DomainError("ENTITLEMENT_CONFLICT", "未入住订单存在已核销会员权益，当前数据状态异常，不能调整住宿日期", 409);
     }
     if (!reschedule && activeCoverage.some((item) => item.status === "HELD")) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "在住订单仍有未核销的原住宿权益，当前数据状态异常，不能延长住宿", 409);

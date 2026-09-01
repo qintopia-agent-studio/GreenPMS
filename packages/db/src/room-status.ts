@@ -2,6 +2,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 import {
   currentReleaseFeatures,
   DomainError,
+  freeStayCategoryCodes,
   inventoryUnitKinds,
   ROOM_STATUS_MAX_QUERY_NIGHTS,
   ROOM_STATUS_OPERATIONAL_TASK_LIMIT,
@@ -9,8 +10,10 @@ import {
   type AccessLevel,
   type RoomStatusActionCode,
   type RoomStatusActionDto,
+  type RoomStatusAttention,
   type RoomStatusAvailabilitySummaryDto,
   type RoomStatusBedOccupancyDto,
+  type RoomStatusBedSlotStateDto,
   type RoomStatusBoardDto,
   type RoomStatusBoardQueryDto,
   type RoomStatusBlockingFactKind,
@@ -20,14 +23,21 @@ import {
   type RoomStatusIntervalDto,
   type RoomStatusOperationalTaskDto,
   type RoomStatusOperationalTaskKind,
+  type RoomStatusOperationalAttention,
   type RoomStatusOccupantDto,
   type RoomStatusReferenceDto,
+  type RoomStatusSourceCategory,
   type RoomStatusSourceKind,
   type RoomStatusStatus,
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
 import { enumerateServiceDates, stableHash, todayInTimeZone } from "@qintopia/domain";
-import { historicalProtocolEpochMigration, legacyEffectProtocol } from "./historical-command-protocol.ts";
+import {
+  historicalProtocolEpochMigration,
+  legacyEffectProtocol,
+  ordinaryStayCashLineTotalMinor,
+  pricingCashLineTotalMinor
+} from "./historical-command-protocol.ts";
 import { projectOrderLifecycle } from "./orders.ts";
 import type { Database } from "./schema.ts";
 
@@ -45,7 +55,12 @@ interface ProjectionEvent {
   orderArrivalDate?: string;
   sourceKey: string;
   sourceKind: RoomStatusSourceKind;
+  sourceCategory?: RoomStatusSourceCategory | null;
+  freeStayCategoryCode?: (typeof freeStayCategoryCodes)[number] | null;
+  freeStayReason?: string | null;
   status: RoomStatusStatus;
+  attention: RoomStatusAttention | null;
+  operationalAttention: RoomStatusOperationalAttention | null;
   label: string;
   primaryOccupantLabel: string | null;
   occupants?: RoomStatusOccupantDto[];
@@ -95,11 +110,22 @@ interface BuiltBedOccupancies {
   partial: boolean;
 }
 
+interface BuiltBedSlotStates {
+  byRoom: Map<string, RoomStatusBedSlotStateDto[]>;
+  partial: boolean;
+}
+
 interface CompletedOrderRoomStatusProjection {
   timelineByDate: Map<string, string>;
   status: RoomStatusStatus;
   reason: string | null;
   damaged: boolean;
+}
+
+interface ActiveReservedArrearsProjection {
+  attention: RoomStatusAttention | null;
+  damaged: boolean;
+  reason: string | null;
 }
 
 interface FilteredRoomSelection {
@@ -111,6 +137,112 @@ type RoomStatusFilters = Pick<RoomStatusBoardQueryDto,
   "search" | "roomType" | "salesMode" | "status" | "minCapacity" | "unitKind">;
 
 const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
+const freeStayCategoryCodeSet = new Set<string>(freeStayCategoryCodes);
+
+type LodgingSourceProjectionRow = {
+  stay_type?: string | null;
+  member_id?: string | null;
+  member_contract_id?: string | null;
+  booking_channel_code?: string | null;
+  channel_order_reference?: string | null;
+  free_stay_category_code?: string | null;
+  free_stay_reason?: string | null;
+};
+
+type LodgingSourceFields = Pick<ProjectionEvent,
+  "sourceCategory" | "freeStayCategoryCode" | "freeStayReason">;
+
+const nullLodgingSourceFields: LodgingSourceFields = {
+  sourceCategory: null,
+  freeStayCategoryCode: null,
+  freeStayReason: null
+};
+
+function normalizedOptionalText(value: string | null | undefined): string | null {
+  return value?.trim() || null;
+}
+
+function roomStatusSourceCategoryForOrder(row: LodgingSourceProjectionRow): RoomStatusSourceCategory | null {
+  if (row.stay_type === "FREE") return "FREE_STAY";
+  if (row.member_id || row.member_contract_id) return "MEMBER";
+  if (row.booking_channel_code && externalChannelCodes.has(row.booking_channel_code)) {
+    return row.channel_order_reference?.trim()
+      ? row.booking_channel_code as RoomStatusSourceCategory
+      : null;
+  }
+  if (row.booking_channel_code === null || row.booking_channel_code === undefined || row.booking_channel_code === "WECOM") return "DIRECT";
+  return null;
+}
+
+function roomStatusFreeStayCategoryCode(value: string | null | undefined): (typeof freeStayCategoryCodes)[number] | null {
+  return value && freeStayCategoryCodeSet.has(value)
+    ? value as (typeof freeStayCategoryCodes)[number]
+    : null;
+}
+
+function roomStatusOrderSourceFields(row: LodgingSourceProjectionRow): LodgingSourceFields {
+  const freeStay = row.stay_type === "FREE";
+  return {
+    sourceCategory: roomStatusSourceCategoryForOrder(row),
+    freeStayCategoryCode: freeStay ? roomStatusFreeStayCategoryCode(row.free_stay_category_code) : null,
+    freeStayReason: freeStay ? row.free_stay_reason ?? null : null
+  };
+}
+
+function roomStatusSourceMetadataDamageReason(
+  sourceKind: RoomStatusSourceKind,
+  row: LodgingSourceProjectionRow,
+  options: { allowLegacyHistoricalFreeMetadata: boolean } = { allowLegacyHistoricalFreeMetadata: false }
+): string | null {
+  const sourceFields = roomStatusOrderSourceFields(row);
+  const bookingChannelCode = row.booking_channel_code ?? null;
+  const channelReference = normalizedOptionalText(row.channel_order_reference);
+  const hasMemberLink = Boolean(row.member_id || row.member_contract_id);
+  const hasExternalChannel = bookingChannelCode !== null && externalChannelCodes.has(bookingChannelCode);
+  const hasUnknownChannel = bookingChannelCode !== null && bookingChannelCode !== "WECOM" && !hasExternalChannel;
+  const hasFreeStayMetadata = row.free_stay_category_code !== null && row.free_stay_category_code !== undefined
+    || normalizedOptionalText(row.free_stay_reason) !== null;
+
+  if (sourceKind === "FREE_STAY") {
+    if (hasMemberLink || bookingChannelCode !== null || channelReference !== null) {
+      return "订单来源类型或免费入住信息无法核对";
+    }
+    if (sourceFields.sourceCategory !== "FREE_STAY") return "订单来源类型或免费入住信息无法核对";
+    if (sourceFields.freeStayCategoryCode === null || !sourceFields.freeStayReason?.trim()) {
+      const genuinelyLegacy = row.free_stay_category_code === null || row.free_stay_category_code === undefined;
+      return options.allowLegacyHistoricalFreeMetadata && genuinelyLegacy
+        ? null
+        : "免费入住类型或原因无法核对";
+    }
+    return null;
+  }
+
+  if (hasFreeStayMetadata) return "非免费订单携带了免费入住信息";
+  if (hasMemberLink) {
+    if (hasExternalChannel || hasUnknownChannel || channelReference !== null) return "会员住宿来源与渠道来源互相矛盾";
+    return sourceFields.sourceCategory === "MEMBER" ? null : "会员住宿来源无法核对";
+  }
+  if (hasExternalChannel) {
+    return channelReference !== null ? null : "外部渠道住宿缺少渠道订单号";
+  }
+  if (hasUnknownChannel) return "订单渠道来源无法识别";
+  if (channelReference !== null) return "直订住宿携带了渠道订单号";
+  return sourceFields.sourceCategory === "DIRECT" ? null : "订单来源类型无法核对";
+}
+
+function roomStatusHistoricalOrderSourceFields(
+  sourceKind: RoomStatusSourceKind,
+  row: LodgingSourceProjectionRow
+): LodgingSourceFields {
+  const fields = roomStatusOrderSourceFields(row);
+  if (sourceKind === "FREE_STAY"
+    && (row.free_stay_category_code === null || row.free_stay_category_code === undefined)
+    && roomStatusSourceMetadataDamageReason(sourceKind, row, { allowLegacyHistoricalFreeMetadata: true }) === null
+    && fields.freeStayCategoryCode === null) {
+    return nullLodgingSourceFields;
+  }
+  return fields;
+}
 
 function dateAfter(serviceDate: string): string {
   const date = new Date(`${serviceDate}T00:00:00.000Z`);
@@ -121,6 +253,21 @@ function dateAfter(serviceDate: string): string {
 function isSyntheticInactiveUnitEvent(event: ProjectionEvent): boolean {
   return event.sourceKind === "UNIT_UNSELLABLE"
     && event.sourceKey === `unsellable:${event.actualInventoryUnitId}`;
+}
+
+function operationalAttentionForOrder(order: {
+  orderStatus: string;
+  stayStatus: string;
+  arrivalDate: string;
+  departureDate: string;
+}, businessDate: string): RoomStatusOperationalAttention | null {
+  if (order.orderStatus === "RESERVED" && order.stayStatus === "PLANNED" && order.arrivalDate < businessDate) {
+    return "OVERDUE_RESERVED";
+  }
+  if (order.orderStatus === "CHECKED_IN" && order.stayStatus === "IN_HOUSE" && order.departureDate < businessDate) {
+    return "OVERDUE_IN_HOUSE";
+  }
+  return null;
 }
 
 function iso(value: Date | string): string {
@@ -353,9 +500,16 @@ function operationalTaskFromSeed(
     sourceEndDate: event.sourceEndDate,
     ...(event.orderArrivalDate ? { orderArrivalDate: event.orderArrivalDate } : {}),
     status: event.status,
+    attention: event.attention,
+    operationalAttention: event.operationalAttention,
     available: !event.blocking,
     blocking: event.blocking,
     sourceKind: event.sourceKind,
+    sourceCategory: (event.sourceKind === "ORDER" || event.sourceKind === "FREE_STAY") && event.status !== "UNKNOWN"
+      ? event.sourceCategory ?? null
+      : null,
+    freeStayCategoryCode: event.status !== "UNKNOWN" ? event.freeStayCategoryCode ?? null : null,
+    freeStayReason: event.status !== "UNKNOWN" ? event.freeStayReason ?? null : null,
     label: event.label,
     primaryOccupantLabel: event.primaryOccupantLabel,
     occupantCount: event.occupants?.length ?? 0,
@@ -380,8 +534,13 @@ function intervalGroupKey(event: ProjectionEvent, displayInventoryUnitId: string
     displayInventoryUnitId,
     event.actualInventoryUnitId,
     event.sourceKind,
+    event.sourceCategory ?? "no-source-category",
+    event.freeStayCategoryCode ?? "no-free-stay-category",
+    event.freeStayReason ?? "no-free-stay-reason",
     event.sourceKey,
     event.status,
+    event.attention ?? "no-attention",
+    event.operationalAttention ?? "no-operational-attention",
     event.blocking ? "blocking" : "nonblocking",
     event.blockingFactKind ?? "no-blocking-fact",
     event.current ? "current" : "history"
@@ -521,9 +680,16 @@ function buildIntervals(
       sourceEndDate: builder.event.sourceEndDate,
       ...(builder.event.orderArrivalDate ? { orderArrivalDate: builder.event.orderArrivalDate } : {}),
       status: builder.event.status,
+      attention: builder.event.attention,
+      operationalAttention: builder.event.operationalAttention,
       available: !builder.event.blocking,
       blocking: builder.event.blocking,
       sourceKind: builder.event.sourceKind,
+      sourceCategory: (builder.event.sourceKind === "ORDER" || builder.event.sourceKind === "FREE_STAY") && builder.event.status !== "UNKNOWN"
+        ? builder.event.sourceCategory ?? null
+        : null,
+      freeStayCategoryCode: builder.event.status !== "UNKNOWN" ? builder.event.freeStayCategoryCode ?? null : null,
+      freeStayReason: builder.event.status !== "UNKNOWN" ? builder.event.freeStayReason ?? null : null,
       label: builder.event.label,
       primaryOccupantLabel: builder.event.primaryOccupantLabel,
       occupantCount: builder.event.occupants?.length ?? 0,
@@ -663,6 +829,72 @@ function buildBedOccupancies(
       }
     }
     byRoom.set(room.id, occupancies);
+  }
+  return { byRoom, partial };
+}
+
+function buildBedSlotStates(
+  events: ProjectionEvent[],
+  displayUnitsById: Map<string, RoomStatusUnitDto>,
+  dates: string[],
+  businessDate: string
+): BuiltBedSlotStates {
+  const eventsByUnitAndDate = new Map<string, ProjectionEvent[]>();
+  for (const event of events) {
+    if (isSyntheticInactiveUnitEvent(event)) continue;
+    const key = `${event.actualInventoryUnitId}:${event.serviceDate}`;
+    const dayEvents = eventsByUnitAndDate.get(key) ?? [];
+    dayEvents.push(event);
+    eventsByUnitAndDate.set(key, dayEvents);
+  }
+
+  const byRoom = new Map<string, RoomStatusBedSlotStateDto[]>();
+  let partial = false;
+  for (const room of displayUnitsById.values()) {
+    if (room.kind !== "ROOM" || room.salesMode !== "BED_SPLIT") continue;
+    const childUnits = room.childUnitIds
+      .map((childId) => displayUnitsById.get(childId))
+      .filter((child): child is RoomStatusUnitDto => child?.kind === "BED" && child.parentRoomId === room.id)
+      .sort((left, right) => left.code.localeCompare(right.code) || left.id.localeCompare(right.id));
+    if (childUnits.length !== new Set(room.childUnitIds).size
+      || (room.physicalBedCount !== null && childUnits.length !== room.physicalBedCount)) {
+      partial = true;
+    }
+
+    const states: RoomStatusBedSlotStateDto[] = [];
+    for (const serviceDate of dates) {
+      const parentEvents = eventsByUnitAndDate.get(`${room.id}:${serviceDate}`) ?? [];
+      for (const child of childUnits) {
+        const candidates = [
+          ...(eventsByUnitAndDate.get(`${child.id}:${serviceDate}`) ?? []),
+          ...parentEvents
+        ];
+        const facts = [...new Map(candidates.map((event) => [
+          `${event.sourceKind}:${event.sourceKey}:${event.status}:${event.blocking ? "blocking" : "nonblocking"}`,
+          event
+        ])).values()];
+
+        let status: RoomStatusStatus;
+        if (facts.some((event) => event.status === "UNKNOWN") || facts.length > 1) {
+          status = "UNKNOWN";
+          partial = true;
+        } else if (!child.active && serviceDate >= businessDate && facts.some((event) => event.current)) {
+          status = "UNKNOWN";
+          partial = true;
+        } else if (facts[0]) {
+          status = facts[0].status;
+        } else {
+          status = child.active ? "AVAILABLE" : "UNAVAILABLE";
+        }
+        states.push({
+          serviceDate,
+          inventoryUnitId: child.id,
+          inventoryUnitCode: child.code,
+          status
+        });
+      }
+    }
+    byRoom.set(room.id, states);
   }
   return { byRoom, partial };
 }
@@ -987,7 +1219,9 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .leftJoin("amendments as amendment", "amendment.id", "segment.amendment_id")
       .select([
         "order.id as order_id", "order.status as order_status", "order.stay_type", "order.arrival_date as order_arrival_date",
-        "order.departure_date as order_departure_date", "order.primary_guest_snapshot", "order.free_stay_reason",
+        "order.departure_date as order_departure_date", "order.primary_guest_snapshot",
+        "order.member_id", "order.member_contract_id", "order.booking_channel_code", "order.channel_order_reference",
+        "order.free_stay_category_code", "order.free_stay_reason",
         "stay.id as stay_id", "stay.status as stay_status", "segment.id as segment_id", "segment.sequence as segment_sequence",
         "segment.arrival_date as segment_arrival_date", "segment.departure_date as segment_departure_date",
         "segment.inventory_unit_id", "segment.created_at as segment_created_at", "amendment.command_id as segment_command_id",
@@ -1009,6 +1243,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     }
     const operationalTaskSeeds: OperationalTaskSeed[] = [];
     const syntheticOccupancyEvents: ProjectionEvent[] = [];
+    let partial = false;
     let missingOperationalClaim = false;
     let inconsistentOperationalLifecycle = false;
     for (const rows of operationalOrderGroups.values()) {
@@ -1049,10 +1284,16 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       blocking = departureDayInHouse || dateCoveredByOrder;
       const orderRef = reference("ORDER", order.order_id, `Order ${order.order_id}`, `/orders/${order.order_id}`);
       const sourceKind: RoomStatusSourceKind = order.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
+      const orderSourceFields = roomStatusOrderSourceFields(order);
+      const sourceMetadataDamageReason = roomStatusSourceMetadataDamageReason(sourceKind, order);
+      const sourceMetadataDamaged = sourceMetadataDamageReason !== null;
+      if (sourceMetadataDamaged) partial = true;
       const freeStayReason = sourceKind === "FREE_STAY" ? order.free_stay_reason : null;
-      const taskReason = exceptionReason && freeStayReason
-        ? `${exceptionReason}；免费入住原因：${freeStayReason}`
-        : exceptionReason ?? freeStayReason;
+      const taskReason = [
+        exceptionReason,
+        sourceMetadataDamageReason,
+        freeStayReason ? `免费入住原因：${freeStayReason}` : null
+      ].filter(Boolean).join("；") || null;
       const projectedOccupants = operationalOccupantsByOrder.get(order.order_id) ?? [];
       const taskEvent: ProjectionEvent = {
         actualInventoryUnitId: segment.inventory_unit_id,
@@ -1063,12 +1304,22 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         orderArrivalDate: order.order_arrival_date,
         sourceKey: `order-task:${order.order_id}:${taskKind}`,
         sourceKind,
-        status: missingCurrentClaim || !lifecycleConsistent ? "UNKNOWN" : order.order_status === "RESERVED" ? "RESERVED" : "IN_HOUSE",
+        ...orderSourceFields,
+        status: missingCurrentClaim || !lifecycleConsistent || sourceMetadataDamaged ? "UNKNOWN" : order.order_status === "RESERVED" ? "RESERVED" : "IN_HOUSE",
+        attention: null,
+        operationalAttention: !missingCurrentClaim && lifecycleConsistent && !sourceMetadataDamaged
+          ? operationalAttentionForOrder({
+            orderStatus: order.order_status,
+            stayStatus: order.stay_status,
+            arrivalDate: order.order_arrival_date,
+            departureDate: order.order_departure_date
+          }, businessDate)
+          : null,
         label: `${sourceKind === "FREE_STAY" ? "免费入住" : "订单"} ${order.order_id}`,
-        primaryOccupantLabel: lifecycleConsistent && !missingCurrentClaim
+        primaryOccupantLabel: lifecycleConsistent && !missingCurrentClaim && !sourceMetadataDamaged
           ? projectedOccupants[0]?.nickname ?? primaryOccupantLabel(order.primary_guest_snapshot)
           : null,
-        occupants: lifecycleConsistent && !missingCurrentClaim ? projectedOccupants : [],
+        occupants: lifecycleConsistent && !missingCurrentClaim && !sourceMetadataDamaged ? projectedOccupants : [],
         reason: taskReason,
         blocking,
         current: true,
@@ -1150,6 +1401,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceKey: `unsellable:${unit.id}`,
           sourceKind: "UNIT_UNSELLABLE",
           status: "UNAVAILABLE",
+          attention: null,
+          operationalAttention: null,
           label: "Unit unavailable",
           primaryOccupantLabel: null,
           reason: "The inventory unit is inactive",
@@ -1189,11 +1442,13 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         buildingCode: room.building_code,
         roomTypeCode: room.room_type_code,
         pricingProductCode: room.pricing_product_code,
+        physicalBedCount: room.physical_bed_count,
         capacity: room.physical_bed_count ?? Math.max(children.length, 1),
         occupancyCapacity: room.occupancy_capacity,
         childUnitIds: children.map((bed) => bed.id),
         children: [],
         bedOccupancies: [],
+        bedSlotStates: [],
         days: [],
         intervals: [],
         conflicts: [],
@@ -1214,11 +1469,13 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           buildingCode: bed.building_code,
           roomTypeCode: bed.room_type_code,
           pricingProductCode: bed.pricing_product_code,
+          physicalBedCount: bed.physical_bed_count,
           capacity: 1,
           occupancyCapacity: bed.occupancy_capacity,
           childUnitIds: [],
           children: [],
           bedOccupancies: [],
+          bedSlotStates: [],
           days: [],
           intervals: [],
           conflicts: [],
@@ -1263,7 +1520,9 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         "order.arrival_date as order_arrival_date", "order.departure_date as order_departure_date", "order.primary_guest_snapshot",
         "order.member_id", "order.member_contract_id", "order.booking_channel_code", "order.channel_order_reference",
         "order.current_revision_id",
-        "order.free_stay_reason", "amendment.command_id as segment_command_id",
+        sql<string | null>`to_jsonb("order") ->> 'free_stay_category_code'`.as("free_stay_category_code"),
+        sql<string | null>`to_jsonb("order") ->> 'free_stay_reason'`.as("free_stay_reason"),
+        "amendment.command_id as segment_command_id",
         "maintenance.id as maintenance_id", "maintenance.arrival_date as maintenance_arrival_date",
         "maintenance.departure_date as maintenance_departure_date", "maintenance.reason as maintenance_reason", "maintenance.status as maintenance_status",
         "maintenance.created_by_command_id as maintenance_created_command_id",
@@ -1296,19 +1555,22 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
 
     const activeOrderIds = [...new Set(claimRows.flatMap((row) => row.source_type === "ORDER_SEGMENT"
       && row.active && row.order_id ? [row.order_id] : []))];
-    const activeOrderTimelineRows = activeOrderIds.length === 0 ? [] : await trx
+    const activePricingOrderIds = [...new Set([...activeOrderIds, ...operationalOrderIds])];
+    const activeOrderTimelineRows = activePricingOrderIds.length === 0 ? [] : await trx
       .selectFrom("inventory_claims as claim")
       .innerJoin("stay_segments as segment", (join) => join
         .onRef("segment.id", "=", "claim.source_id")
         .on("claim.source_type", "=", "ORDER_SEGMENT"))
       .innerJoin("stays as stay", "stay.id", "segment.stay_id")
+      .innerJoin("orders as timeline_order", "timeline_order.id", "stay.order_id")
       .select([
         "claim.id as claim_id", "claim.inventory_unit_id", "claim.service_date",
-        "stay.order_id"
+        "stay.order_id", "timeline_order.arrival_date as order_arrival_date",
+        "timeline_order.departure_date as order_departure_date"
       ])
       .where("claim.property_id", "=", options.propertyId)
       .where("claim.active", "=", true)
-      .where("stay.order_id", "in", activeOrderIds)
+      .where("stay.order_id", "in", activePricingOrderIds)
       .orderBy("stay.order_id")
       .orderBy("claim.service_date")
       .orderBy("claim.id")
@@ -1330,13 +1592,368 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         for (const item of run) activeOrderRunByClaimId.set(item.claim_id, { sourceKey, startDate, endDate });
         run = [];
       };
-      for (const row of rows) {
+      for (const row of rows.filter((candidate) => candidate.order_arrival_date <= candidate.service_date
+        && candidate.service_date < candidate.order_departure_date)) {
         const previous = run.at(-1);
         if (previous && (previous.inventory_unit_id !== row.inventory_unit_id
           || dateAfter(previous.service_date) !== row.service_date)) flush();
         run.push(row);
       }
       flush();
+    }
+
+    const protocolEpochRows = await trx.selectFrom("schema_migrations").select(["name", "applied_at"])
+      .where("name", "in", [
+        "028_stage11_move_unit_guards.sql",
+        "044_inhouse_membership_fulfillment_guards.sql"
+      ])
+      .execute();
+    const protocolEpochByMigration = new Map(protocolEpochRows.map((row) => [
+      row.name,
+      row.applied_at instanceof Date ? row.applied_at : new Date(row.applied_at)
+    ]));
+    const normalizeLifecycleAmendments = <T extends {
+      amendment_type: string;
+      payload: unknown;
+      created_at: Date | string;
+    }>(amendments: readonly T[]) => amendments.map((amendment) => {
+      const protocolVersion = legacyEffectProtocol(amendment.amendment_type, amendment.payload);
+      if (!protocolVersion) return amendment;
+      const migrationName = historicalProtocolEpochMigration(protocolVersion);
+      const protocolEpoch = protocolEpochByMigration.get(migrationName);
+      if (!protocolEpoch) {
+        throw new DomainError("INTERNAL_ERROR", `Historical protocol epoch ${migrationName} is unavailable`, 500);
+      }
+      const createdAt = amendment.created_at instanceof Date ? amendment.created_at : new Date(amendment.created_at);
+      if (createdAt.getTime() >= protocolEpoch.getTime()) {
+        throw new DomainError("INTERNAL_ERROR", "订单变更在历史协议分界后仍使用旧数据形状", 500);
+      }
+      return { ...amendment, protocolVersion };
+    });
+
+    const activeOrderContexts = activePricingOrderIds.length === 0 ? [] : await trx
+      .selectFrom("orders as order")
+      .innerJoin("stays as stay", "stay.order_id", "order.id")
+      .select([
+        "order.id as id",
+        "order.status as status",
+        "order.stay_type as stay_type",
+        "order.arrival_date as arrival_date",
+        "order.departure_date as departure_date",
+        "order.current_revision_id as current_revision_id",
+        "order.version as version",
+        "order.member_id as member_id",
+        "order.member_contract_id as member_contract_id",
+        "order.booking_channel_code as booking_channel_code",
+        "order.channel_order_reference as channel_order_reference",
+        "order.free_stay_category_code as free_stay_category_code",
+        "order.free_stay_reason as free_stay_reason",
+        "order.pricing_policy_version_id as pricing_policy_version_id",
+        "stay.id as stay_id",
+        "stay.status as stay_status"
+      ])
+      .where("order.id", "in", activePricingOrderIds)
+      .execute();
+    const activeStayIds = activeOrderContexts.map((row) => row.stay_id);
+    const activeSegments = activeStayIds.length === 0 ? [] : await trx.selectFrom("stay_segments")
+      .select([
+        "id",
+        "stay_id",
+        "sequence",
+        "inventory_unit_id",
+        "arrival_date",
+        "departure_date",
+        "segment_type",
+        "supersedes_segment_id",
+        "amendment_id"
+      ])
+      .where("stay_id", "in", activeStayIds)
+      .orderBy("stay_id")
+      .orderBy("sequence")
+      .execute();
+    const activeAmendments = activePricingOrderIds.length === 0 ? [] : await trx
+      .selectFrom("amendments as amendment")
+      .leftJoin("command_executions as command", "command.id", "amendment.command_id")
+      .leftJoin("subjects as subject", "subject.id", "command.subject_id")
+      .select([
+        "amendment.id",
+        "amendment.order_id",
+        "amendment.sequence",
+        "amendment.prior_version",
+        "amendment.new_version",
+        "amendment.amendment_type",
+        "amendment.payload",
+        "amendment.reason_code",
+        "amendment.reason_note",
+        "amendment.created_at",
+        "amendment.command_id",
+        "command.subject_id as actor_subject_id",
+        "subject.display_name as actor_display_name"
+      ])
+      .where("amendment.order_id", "in", activePricingOrderIds)
+      .orderBy("amendment.order_id")
+      .orderBy("amendment.sequence")
+      .execute();
+    const activeRevisions = activePricingOrderIds.length === 0 ? [] : await trx
+      .selectFrom("pricing_revisions")
+      .select([
+        "id",
+        "order_id",
+        "revision_no",
+        "amendment_id",
+        "arrival_date",
+        "departure_date",
+        "policy_base_amount_minor",
+        "current_contract_amount_minor",
+        "currency",
+        "pricing_basis",
+        "policy_version_id",
+        "coverage_set",
+        "cash_lines",
+        "manual_adjustment_minor"
+      ])
+      .where("order_id", "in", activePricingOrderIds)
+      .orderBy("order_id")
+      .orderBy("revision_no")
+      .execute();
+    const activeFacts = activePricingOrderIds.length === 0 ? [] : await trx
+      .selectFrom("collection_facts")
+      .select([
+        "fact_id",
+        "order_id",
+        "fact_type",
+        "amount_minor",
+        "net_effect_minor",
+        "currency",
+        "references_fact_id",
+        "reverses_fact_id",
+        "pricing_revision_id",
+        "created_at"
+      ])
+      .where("order_id", "in", activePricingOrderIds)
+      .orderBy("order_id")
+      .orderBy("created_at")
+      .orderBy("fact_id")
+      .execute();
+    const activeCoverageItems = activePricingOrderIds.length === 0 ? [] : await trx
+      .selectFrom("coverage_items")
+      .select(["id", "order_id", "contract_id", "status", "held_by_revision_id"])
+      .where("order_id", "in", activePricingOrderIds)
+      .execute();
+    const activeSegmentsByStay = new Map<string, typeof activeSegments>();
+    for (const segment of activeSegments) {
+      const rows = activeSegmentsByStay.get(segment.stay_id) ?? [];
+      rows.push(segment);
+      activeSegmentsByStay.set(segment.stay_id, rows);
+    }
+    const activeAmendmentsByOrder = new Map<string, typeof activeAmendments>();
+    for (const amendment of activeAmendments) {
+      const rows = activeAmendmentsByOrder.get(amendment.order_id) ?? [];
+      rows.push(amendment);
+      activeAmendmentsByOrder.set(amendment.order_id, rows);
+    }
+    const activeRevisionsByOrder = new Map<string, typeof activeRevisions>();
+    for (const revision of activeRevisions) {
+      const rows = activeRevisionsByOrder.get(revision.order_id) ?? [];
+      rows.push(revision);
+      activeRevisionsByOrder.set(revision.order_id, rows);
+    }
+    const activeFactsByOrder = new Map<string, typeof activeFacts>();
+    for (const fact of activeFacts) {
+      const rows = activeFactsByOrder.get(fact.order_id) ?? [];
+      rows.push(fact);
+      activeFactsByOrder.set(fact.order_id, rows);
+    }
+    const activeCoverageByOrder = new Map<string, typeof activeCoverageItems>();
+    for (const item of activeCoverageItems) {
+      const rows = activeCoverageByOrder.get(item.order_id) ?? [];
+      rows.push(item);
+      activeCoverageByOrder.set(item.order_id, rows);
+    }
+    const activeReservedArrearsByOrder = new Map<string, ActiveReservedArrearsProjection>();
+    for (const row of activeOrderContexts) {
+      const potentiallyEligible = row.status === "RESERVED"
+        && row.stay_status === "PLANNED"
+        && row.stay_type !== "FREE"
+        && (row.booking_channel_code === null || row.booking_channel_code === "WECOM");
+      if (!potentiallyEligible) continue;
+      const coverageItems = activeCoverageByOrder.get(row.id) ?? [];
+      if (row.member_id || row.member_contract_id) continue;
+      if (coverageItems.length > 0) {
+        activeReservedArrearsByOrder.set(row.id, {
+          attention: null,
+          damaged: true,
+          reason: "当前预订住宿的会员覆盖关系无法核对"
+        });
+        continue;
+      }
+      try {
+        const revisions = activeRevisionsByOrder.get(row.id) ?? [];
+        const facts = activeFactsByOrder.get(row.id) ?? [];
+        projectOrderLifecycle({
+          order: {
+            id: row.id,
+            status: row.status,
+            stay_type: row.stay_type,
+            arrival_date: row.arrival_date,
+            departure_date: row.departure_date,
+            current_revision_id: row.current_revision_id,
+            version: row.version
+          },
+          stay: { id: row.stay_id, status: row.stay_status },
+          businessDate,
+          segments: activeSegmentsByStay.get(row.stay_id) ?? [],
+          amendments: normalizeLifecycleAmendments(activeAmendmentsByOrder.get(row.id) ?? []),
+          revisions,
+          facts,
+          activeTimeline: (timelineByOrder.get(row.id) ?? []).map((item) => ({
+            serviceDate: item.service_date,
+            inventoryUnitId: item.inventory_unit_id
+          }))
+        });
+        const revision = revisions.find((candidate) => candidate.id === row.current_revision_id);
+        const currentTimeline = (timelineByOrder.get(row.id) ?? []).map((item) => ({
+          serviceDate: item.service_date,
+          inventoryUnitId: item.inventory_unit_id
+        }));
+        const revisionsAreConsistent = revisions.every((candidate) => {
+          const coverageSet = candidate.coverage_set;
+          if (!Array.isArray(coverageSet) || coverageSet.length !== 0) return false;
+          const cashLineTotal = candidate.id === row.current_revision_id
+            ? ordinaryStayCashLineTotalMinor(candidate.cash_lines, candidate.currency, currentTimeline)
+            : pricingCashLineTotalMinor(candidate.cash_lines, candidate.currency);
+          return candidate.policy_version_id === row.pricing_policy_version_id
+            && (candidate.pricing_basis === "POLICY" || candidate.pricing_basis === "MANUAL_ADJUSTMENT")
+            && Number.isSafeInteger(candidate.policy_base_amount_minor)
+            && candidate.policy_base_amount_minor >= 0
+            && Number.isSafeInteger(candidate.manual_adjustment_minor)
+            && Number.isSafeInteger(candidate.current_contract_amount_minor)
+            && candidate.current_contract_amount_minor >= 0
+            && candidate.current_contract_amount_minor
+              === candidate.policy_base_amount_minor + candidate.manual_adjustment_minor
+            && (candidate.pricing_basis === "POLICY"
+              ? candidate.manual_adjustment_minor === 0
+              : candidate.manual_adjustment_minor !== 0)
+            && cashLineTotal !== undefined
+            && cashLineTotal === candidate.policy_base_amount_minor;
+        });
+        if (!revision || !revisionsAreConsistent) {
+          throw new DomainError("INTERNAL_ERROR", "当前预订住宿的计价链无法核对", 500);
+        }
+        const revisionIds = new Set(revisions.map((candidate) => candidate.id));
+        const factsById = new Map(facts.map((fact) => [fact.fact_id, fact]));
+        const reversedFactIds = new Set<string>();
+        const processedFactIds = new Set<string>();
+        const activeRefundMinorByCollection = new Map<string, number>();
+        let factsMatchRevisionCurrency = true;
+        for (const fact of facts) {
+          if (fact.currency !== revision.currency
+            || !Number.isSafeInteger(fact.amount_minor)
+            || fact.amount_minor <= 0
+            || !Number.isSafeInteger(fact.net_effect_minor)
+            || !fact.pricing_revision_id
+            || !revisionIds.has(fact.pricing_revision_id)) {
+            factsMatchRevisionCurrency = false;
+            break;
+          }
+          if (fact.fact_type === "COLLECTION") {
+            if (fact.net_effect_minor !== fact.amount_minor
+              || fact.references_fact_id !== null
+              || fact.reverses_fact_id !== null
+              || activeRefundMinorByCollection.has(fact.fact_id)) {
+              factsMatchRevisionCurrency = false;
+              break;
+            }
+            activeRefundMinorByCollection.set(fact.fact_id, 0);
+            processedFactIds.add(fact.fact_id);
+            continue;
+          }
+          if (fact.fact_type === "REFUND") {
+            const source = fact.references_fact_id ? factsById.get(fact.references_fact_id) : undefined;
+            const activeRefundMinor = source ? activeRefundMinorByCollection.get(source.fact_id) : undefined;
+            const nextActiveRefundMinor = activeRefundMinor !== undefined
+              ? activeRefundMinor + fact.amount_minor
+              : Number.NaN;
+            if (fact.net_effect_minor !== -fact.amount_minor
+              || fact.reverses_fact_id !== null
+              || source?.fact_type !== "COLLECTION"
+              || !processedFactIds.has(source.fact_id)
+              || reversedFactIds.has(source.fact_id)
+              || activeRefundMinor === undefined
+              || !Number.isSafeInteger(nextActiveRefundMinor)
+              || nextActiveRefundMinor > source.amount_minor) {
+              factsMatchRevisionCurrency = false;
+              break;
+            }
+            activeRefundMinorByCollection.set(source.fact_id, nextActiveRefundMinor);
+            processedFactIds.add(fact.fact_id);
+            continue;
+          }
+          const source = fact.reverses_fact_id ? factsById.get(fact.reverses_fact_id) : undefined;
+          if (fact.references_fact_id !== null
+            || !source
+            || source.fact_type === "REVERSAL"
+            || fact.amount_minor !== source.amount_minor
+            || fact.net_effect_minor !== -source.net_effect_minor
+            || reversedFactIds.has(source.fact_id)
+            || !processedFactIds.has(source.fact_id)) {
+            factsMatchRevisionCurrency = false;
+            break;
+          }
+          if (source.fact_type === "REFUND") {
+            const refundSource = source.references_fact_id ? factsById.get(source.references_fact_id) : undefined;
+            const activeRefundMinor = refundSource ? activeRefundMinorByCollection.get(refundSource.fact_id) : undefined;
+            const nextActiveRefundMinor = activeRefundMinor !== undefined
+              ? activeRefundMinor - source.amount_minor
+              : Number.NaN;
+            if (refundSource?.fact_type !== "COLLECTION"
+              || activeRefundMinor === undefined
+              || !Number.isSafeInteger(nextActiveRefundMinor)
+              || nextActiveRefundMinor < 0) {
+              factsMatchRevisionCurrency = false;
+              break;
+            }
+            activeRefundMinorByCollection.set(refundSource.fact_id, nextActiveRefundMinor);
+          } else {
+            const activeRefundMinor = activeRefundMinorByCollection.get(source.fact_id);
+            if (activeRefundMinor !== 0) {
+              factsMatchRevisionCurrency = false;
+              break;
+            }
+          }
+          reversedFactIds.add(source.fact_id);
+          processedFactIds.add(fact.fact_id);
+        }
+        if (factsMatchRevisionCurrency) {
+          for (const collection of facts.filter((fact) => fact.fact_type === "COLLECTION")) {
+            const activeRefundTotal = activeRefundMinorByCollection.get(collection.fact_id);
+            if (activeRefundTotal === undefined
+              || !Number.isSafeInteger(activeRefundTotal)
+              || activeRefundTotal > collection.amount_minor
+              || (reversedFactIds.has(collection.fact_id) && activeRefundTotal !== 0)) {
+              factsMatchRevisionCurrency = false;
+              break;
+            }
+          }
+        }
+        const netRecordedCollectionMinor = facts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
+        if (!factsMatchRevisionCurrency
+          || !Number.isSafeInteger(netRecordedCollectionMinor)
+          || netRecordedCollectionMinor < 0) {
+          throw new DomainError("INTERNAL_ERROR", "当前预订住宿的资金链无法核对", 500);
+        }
+        activeReservedArrearsByOrder.set(row.id, {
+          attention: netRecordedCollectionMinor < revision.current_contract_amount_minor ? "ARREARS" : null,
+          damaged: false,
+          reason: null
+        });
+      } catch {
+        activeReservedArrearsByOrder.set(row.id, {
+          attention: null,
+          damaged: true,
+          reason: "当前预订住宿的计价或资金链无法核对"
+        });
+      }
     }
 
     const completedOrderIds = [...new Set(claimRows.flatMap((row) => row.source_type === "ORDER_SEGMENT"
@@ -1384,8 +2001,12 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         "order.departure_date as departure_date",
         "order.current_revision_id as current_revision_id",
         "order.version as version",
+        "order.member_id as member_id",
+        "order.member_contract_id as member_contract_id",
         "order.booking_channel_code as booking_channel_code",
         "order.channel_order_reference as channel_order_reference",
+        "order.free_stay_category_code as free_stay_category_code",
+        "order.free_stay_reason as free_stay_reason",
         "stay.id as stay_id",
         "stay.status as stay_status"
       ])
@@ -1456,16 +2077,6 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .orderBy("created_at")
       .orderBy("fact_id")
       .execute();
-    const protocolEpochRows = await trx.selectFrom("schema_migrations").select(["name", "applied_at"])
-      .where("name", "in", [
-        "028_stage11_move_unit_guards.sql",
-        "044_inhouse_membership_fulfillment_guards.sql"
-      ])
-      .execute();
-    const protocolEpochByMigration = new Map(protocolEpochRows.map((row) => [
-      row.name,
-      row.applied_at instanceof Date ? row.applied_at : new Date(row.applied_at)
-    ]));
     const completedSegmentsByStay = new Map<string, typeof completedSegments>();
     for (const segment of completedSegments) {
       const rows = completedSegmentsByStay.get(segment.stay_id) ?? [];
@@ -1493,20 +2104,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     const completedProjectionByOrder = new Map<string, CompletedOrderRoomStatusProjection>();
     for (const row of completedOrderContexts) {
       try {
-        const amendments = (completedAmendmentsByOrder.get(row.id) ?? []).map((amendment) => {
-          const protocolVersion = legacyEffectProtocol(amendment.amendment_type, amendment.payload);
-          if (!protocolVersion) return amendment;
-          const migrationName = historicalProtocolEpochMigration(protocolVersion);
-          const protocolEpoch = protocolEpochByMigration.get(migrationName);
-          if (!protocolEpoch) {
-            throw new DomainError("INTERNAL_ERROR", `Historical protocol epoch ${migrationName} is unavailable`, 500);
-          }
-          const createdAt = amendment.created_at instanceof Date ? amendment.created_at : new Date(amendment.created_at);
-          if (createdAt.getTime() >= protocolEpoch.getTime()) {
-            throw new DomainError("INTERNAL_ERROR", "订单变更在历史协议分界后仍使用旧数据形状", 500);
-          }
-          return { ...amendment, protocolVersion };
-        });
+        const amendments = normalizeLifecycleAmendments(completedAmendmentsByOrder.get(row.id) ?? []);
         const revisions = completedRevisionsByOrder.get(row.id) ?? [];
         const facts = completedFactsByOrder.get(row.id) ?? [];
         const lifecycle = projectOrderLifecycle({
@@ -1535,12 +2133,17 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         }
         const revision = revisions.find((item) => item.id === row.current_revision_id) ?? revisions.at(-1);
         const external = row.booking_channel_code !== null && externalChannelCodes.has(row.booking_channel_code);
+        const sourceKind: RoomStatusSourceKind = row.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
+        const sourceMetadataDamageReason = roomStatusSourceMetadataDamageReason(sourceKind, row, {
+          allowLegacyHistoricalFreeMetadata: true
+        });
         const netCollected = facts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
         const externalUnknown = external && (!row.channel_order_reference?.trim()
           || revision?.pricing_basis !== "CHANNEL_CONTRACT"
           || !revision
           || revision.current_contract_amount_minor <= 0);
-        const pricingUnknown = row.stay_type !== "FREE" && (!revision || externalUnknown);
+        const pricingUnknown = Boolean(sourceMetadataDamageReason)
+          || row.stay_type !== "FREE" && (!revision || externalUnknown);
         const arrears = !pricingUnknown
           && !external
           && row.stay_type !== "FREE"
@@ -1549,11 +2152,11 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         completedProjectionByOrder.set(row.id, {
           timelineByDate,
           status,
-          reason: pricingUnknown
+          reason: sourceMetadataDamageReason ?? (pricingUnknown
             ? external
               ? "外部渠道住宿缺少完整渠道订单号或本单渠道应结金额"
               : "已退房住宿缺少可核对的结算金额"
-            : arrears ? "住宿已退房，仍有未收余额" : null,
+            : arrears ? "住宿已退房，仍有未收余额" : null),
           damaged: false
         });
       } catch {
@@ -1627,7 +2230,28 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     const occupantsByOrder = await loadProjectedOccupants(trx, orderIdsForHistory);
 
     const events: ProjectionEvent[] = [...syntheticOccupancyEvents];
-    let partial = missingOperationalClaim || inconsistentOperationalLifecycle || operationalOrdersTruncated || inactiveUnitsTruncated;
+    partial = partial || missingOperationalClaim || inconsistentOperationalLifecycle || operationalOrdersTruncated || inactiveUnitsTruncated;
+    const projectActiveReservedArrearsEvent = (event: ProjectionEvent): ProjectionEvent => {
+      if (!event.orderId || event.status !== "RESERVED") return event;
+      const projection = activeReservedArrearsByOrder.get(event.orderId);
+      if (!projection) return event;
+      if (projection.damaged) {
+        partial = true;
+        return {
+          ...event,
+          status: "UNKNOWN",
+          attention: null,
+          operationalAttention: null,
+          primaryOccupantLabel: null,
+          occupants: [],
+          reason: projection.reason ?? "当前预订住宿的计价或资金链无法核对"
+        };
+      }
+      if (event.serviceDate < businessDate
+        || event.serviceDate < event.sourceStartDate
+        || event.serviceDate >= event.sourceEndDate) return event;
+      return { ...event, attention: projection.attention };
+    };
     for (const row of claimRows) {
       const claimRef = reference("CLAIM", row.claim_id, `Claim ${row.claim_id}`);
       const fallbackHistory: RoomStatusHistoryDto = {
@@ -1653,6 +2277,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
             sourceKey: `unknown:${row.claim_id}`,
             sourceKind: "ORDER",
             status: "UNKNOWN",
+            attention: null,
+            operationalAttention: null,
             label: "Unresolved order claim",
             primaryOccupantLabel: null,
             reason: "The order or Stay source could not be resolved",
@@ -1671,25 +2297,43 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           const historicalCompleted = completedProjectedLatestByOrderDate.get(`${row.order_id}:${row.service_date}`)?.claim_id === row.claim_id;
           if (!historicalCompleted) continue;
           const completedProjection = completedProjectionByOrder.get(row.order_id!);
-          const historicalStatus: RoomStatusStatus = completedProjection?.status ?? "UNKNOWN";
-          if (historicalStatus === "UNKNOWN") partial = true;
+          const completedStatus: RoomStatusStatus = completedProjection?.status ?? "UNKNOWN";
           const projectedOccupants = occupantsByOrder.get(row.order_id!) ?? [];
           const occupantLabel = projectedOccupants[0]?.nickname ?? primaryOccupantLabel(row.primary_guest_snapshot);
           const orderRef = reference("ORDER", row.order_id!, `Order ${row.order_id}`, `/orders/${row.order_id}`);
           const stayRef = reference("STAY", row.stay_id!, `Stay ${row.stay_id}`);
           const projectedRun = completedOrderRunByClaimId.get(row.claim_id);
           if (!projectedRun) partial = true;
+          const sourceKind: RoomStatusSourceKind = row.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
+          const sourceMetadataDamageReason = roomStatusSourceMetadataDamageReason(
+            sourceKind,
+            row,
+            { allowLegacyHistoricalFreeMetadata: true }
+          );
+          const historicalStatus: RoomStatusStatus = completedStatus === "UNKNOWN" || sourceMetadataDamageReason
+            ? "UNKNOWN"
+            : completedStatus;
+          if (historicalStatus === "UNKNOWN") partial = true;
+          const sourceFields = historicalStatus === "UNKNOWN"
+            ? nullLodgingSourceFields
+            : roomStatusHistoricalOrderSourceFields(sourceKind, row);
           events.push({
             actualInventoryUnitId: row.inventory_unit_id, roomId: row.room_id, serviceDate: row.service_date,
             sourceStartDate: projectedRun?.startDate ?? row.segment_arrival_date!,
             sourceEndDate: projectedRun?.endDate ?? row.segment_departure_date!,
             orderArrivalDate: row.order_arrival_date!,
             sourceKey: projectedRun?.sourceKey ?? `completed:${row.order_id}:${row.segment_id}`,
-            sourceKind: row.stay_type === "FREE" ? "FREE_STAY" : "ORDER", status: historicalStatus,
-            label: historicalStatus === "UNKNOWN" ? `状态未知 ${row.order_id}` : historicalStatus === "ARREARS" ? `欠款 ${row.order_id}` : `已结单 ${row.order_id}`,
+            sourceKind,
+            ...sourceFields,
+            status: historicalStatus,
+            attention: historicalStatus === "ARREARS" ? "ARREARS" : null,
+            operationalAttention: null,
+            label: historicalStatus === "UNKNOWN" ? `状态未知 ${row.order_id}` : `已结单 ${row.order_id}`,
             primaryOccupantLabel: historicalStatus === "UNKNOWN" ? null : occupantLabel,
             occupants: historicalStatus === "UNKNOWN" ? [] : projectedOccupants,
-            reason: completedProjection?.reason ?? "已退房住宿的最终安排或结算链无法核对",
+            reason: sourceMetadataDamageReason
+              ?? completedProjection?.reason
+              ?? "已退房住宿的最终安排或结算链无法核对",
             blocking: false, current: false,
             blockingFactKind: null, claimId: historicalStatus === "UNKNOWN" ? null : row.claim_id, references: [claimRef, orderRef, stayRef], histories: [fallbackHistory],
             commandIds: row.segment_command_id ? [row.segment_command_id] : [], targetReference: orderRef, orderId: row.order_id!
@@ -1700,15 +2344,50 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           || row.order_status === "RESERVED" && row.stay_status === "PLANNED"
           || row.order_status === "CHECKED_IN" && row.stay_status === "IN_HOUSE";
         if (!activeLifecycleConsistent) partial = true;
+        const activeDateCoveredByOrder = row.order_arrival_date! <= row.service_date
+          && row.service_date < row.order_departure_date!;
+        if (!activeDateCoveredByOrder) {
+          partial = true;
+          events.push({
+            actualInventoryUnitId: row.inventory_unit_id,
+            roomId: row.room_id,
+            serviceDate: row.service_date,
+            sourceStartDate: row.service_date,
+            sourceEndDate: dateAfter(row.service_date),
+            sourceKey: `unknown:${row.claim_id}`,
+            sourceKind: "ORDER",
+            status: "UNKNOWN",
+            attention: null,
+            operationalAttention: null,
+            label: "Invalid order claim date",
+            primaryOccupantLabel: null,
+            occupants: [],
+            reason: "The active order Claim date falls outside the current order interval",
+            blocking: true,
+            current: true,
+            blockingFactKind: "CLAIM",
+            claimId: row.claim_id,
+            references: [claimRef],
+            histories: [fallbackHistory],
+            commandIds: [],
+            targetReference: null
+          });
+          continue;
+        }
         const orderRef = reference("ORDER", row.order_id!, `Order ${row.order_id}`, `/orders/${row.order_id}`);
         const stayRef = reference("STAY", row.stay_id!, `Stay ${row.stay_id}`);
         const sourceKind: RoomStatusSourceKind = row.stay_type === "FREE" ? "FREE_STAY" : "ORDER";
+        const orderSourceFields = roomStatusOrderSourceFields(row);
+        const sourceMetadataDamageReason = roomStatusSourceMetadataDamageReason(sourceKind, row);
+        const sourceMetadataDamaged = sourceMetadataDamageReason !== null;
+        if (sourceMetadataDamaged) partial = true;
+        const activeDisplayable = activeLifecycleConsistent && !sourceMetadataDamaged;
         const status: RoomStatusStatus = row.order_status === "CHECKED_IN" ? "IN_HOUSE" : "RESERVED";
         const projectedOccupants = occupantsByOrder.get(row.order_id!) ?? [];
         const occupantLabel = projectedOccupants[0]?.nickname ?? primaryOccupantLabel(row.primary_guest_snapshot);
         const projectedRun = activeOrderRunByClaimId.get(row.claim_id);
         if (!projectedRun) partial = true;
-        events.push({
+        events.push(projectActiveReservedArrearsEvent({
           actualInventoryUnitId: row.inventory_unit_id,
           roomId: row.room_id,
           serviceDate: row.service_date,
@@ -1717,13 +2396,25 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           orderArrivalDate: row.order_arrival_date!,
           sourceKey: projectedRun?.sourceKey ?? `segment:${row.segment_id}`,
           sourceKind,
-          status: activeLifecycleConsistent ? status : "UNKNOWN",
+          ...orderSourceFields,
+          status: activeDisplayable ? status : "UNKNOWN",
+          attention: null,
+          operationalAttention: activeDisplayable
+            ? operationalAttentionForOrder({
+              orderStatus: row.order_status!,
+              stayStatus: row.stay_status!,
+              arrivalDate: row.order_arrival_date!,
+              departureDate: row.order_departure_date!
+            }, businessDate)
+            : null,
           label: `${sourceKind === "FREE_STAY" ? "免费入住" : "订单"} ${row.order_id}`,
-          primaryOccupantLabel: activeLifecycleConsistent ? occupantLabel : null,
-          occupants: activeLifecycleConsistent ? projectedOccupants : [],
-          reason: activeLifecycleConsistent
+          primaryOccupantLabel: activeDisplayable ? occupantLabel : null,
+          occupants: activeDisplayable ? projectedOccupants : [],
+          reason: activeDisplayable
             ? sourceKind === "FREE_STAY" ? row.free_stay_reason : null
-            : `订单状态 ${row.order_status} 与 Stay 状态 ${row.stay_status} 不一致`,
+            : sourceMetadataDamaged
+              ? sourceMetadataDamageReason
+              : `订单状态 ${row.order_status} 与 Stay 状态 ${row.stay_status} 不一致`,
           blocking: row.active,
           current: row.active,
           blockingFactKind: row.active ? "CLAIM" : null,
@@ -1733,7 +2424,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           commandIds: row.segment_command_id ? [row.segment_command_id] : [],
           targetReference: orderRef,
           orderId: row.order_id!
-        });
+        }));
         continue;
       }
       if (row.source_type === "MAINTENANCE") {
@@ -1749,6 +2440,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
             sourceKey: `unknown:${row.claim_id}`,
             sourceKind: "MAINTENANCE",
             status: "UNKNOWN",
+            attention: null,
+            operationalAttention: null,
             label: "Unresolved maintenance claim",
             primaryOccupantLabel: null,
             reason: "The maintenance source could not be resolved",
@@ -1775,6 +2468,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceKey: `maintenance:${row.maintenance_id}`,
           sourceKind: "MAINTENANCE",
           status: invalidActiveReleased ? "UNKNOWN" : "MAINTENANCE",
+          attention: null,
+          operationalAttention: null,
           label: invalidActiveReleased ? "Inconsistent maintenance lock" : "Maintenance lock",
           primaryOccupantLabel: null,
           reason: row.maintenance_reason,
@@ -1801,6 +2496,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceKey: `unknown:${row.claim_id}`,
           sourceKind: "UNIT_UNSELLABLE",
           status: "UNKNOWN",
+          attention: null,
+          operationalAttention: null,
           label: "Unresolved unavailable inventory claim",
           primaryOccupantLabel: null,
           reason: "A legacy unavailable inventory source could not be resolved",
@@ -1828,6 +2525,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         sourceKey: `legacy-unavailable:${row.internal_id}`,
         sourceKind: "UNIT_UNSELLABLE",
         status: "UNKNOWN",
+        attention: null,
+        operationalAttention: null,
         label: invalidActiveReleased ? "Inconsistent unavailable inventory history" : "Legacy unavailable inventory history",
         primaryOccupantLabel: null,
         reason: null,
@@ -1862,6 +2561,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceKey: `legacy-unavailable:${block.id}`,
           sourceKind: "UNIT_UNSELLABLE",
           status: "UNKNOWN",
+          attention: null,
+          operationalAttention: null,
           label: "Legacy unavailable inventory history",
           primaryOccupantLabel: null,
           reason: null,
@@ -1915,6 +2616,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         sourceKey: `cleaning:${task.id}`,
         sourceKind: "CLEANING",
         status: "CLEANING",
+        attention: null,
+        operationalAttention: null,
         label: "Cleaning pending",
         primaryOccupantLabel: null,
         reason: null,
@@ -1942,6 +2645,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceKey: `unsellable:${unit.id}`,
           sourceKind: "UNIT_UNSELLABLE",
           status: "UNAVAILABLE",
+          attention: null,
+          operationalAttention: null,
           label: "Unit unavailable",
           primaryOccupantLabel: null,
           reason: "The inventory unit is inactive",
@@ -1981,7 +2686,11 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       };
     };
     const eventsWithAmendments = events.map(attachAmendments);
-    const taskSeedsWithAmendments = operationalTaskSeeds.map((seed) => ({ ...seed, event: attachAmendments(seed.event) }));
+    const projectedOperationalTaskSeeds = operationalTaskSeeds.map((seed) => ({
+      ...seed,
+      event: projectActiveReservedArrearsEvent(seed.event)
+    }));
+    const taskSeedsWithAmendments = projectedOperationalTaskSeeds.map((seed) => ({ ...seed, event: attachAmendments(seed.event) }));
     const commandIds = [...new Set([
       ...eventsWithAmendments.flatMap((event) => event.commandIds),
       ...taskSeedsWithAmendments.flatMap((seed) => seed.event.commandIds)
@@ -2003,7 +2712,9 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           && (event.sourceKind !== "ORDER" && event.sourceKind !== "FREE_STAY" || event.status === "UNKNOWN"))));
     const builtIntervals = buildIntervals(gridEvents, unitsById, displayUnitsById, options.accessLevel);
     const builtBedOccupancies = buildBedOccupancies(gridEvents, unitsById, displayUnitsById, dates);
+    const builtBedSlotStates = buildBedSlotStates(gridEvents, displayUnitsById, dates, businessDate);
     if (builtBedOccupancies.partial) partial = true;
+    if (builtBedSlotStates.partial) partial = true;
     const uniqueTaskExceptionEvents = [...new Map(taskExceptionEvents.map((event) => [
       `${event.sourceKey}:${event.actualInventoryUnitId}`,
       event
@@ -2047,6 +2758,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           businessDate
         ),
         bedOccupancies: builtBedOccupancies.byRoom.get(baseRoom.id) ?? [],
+        bedSlotStates: builtBedSlotStates.byRoom.get(baseRoom.id) ?? [],
         children
       };
     });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  commandShellLabel,
   commandShellSuccessMessage,
   initialCommandShellState,
   isU1CommandType,
@@ -23,6 +24,8 @@ describe("U1 command shell state", () => {
     expect(isU1CommandType("MARK_NO_SHOW")).toBe(true);
     expect(isU1CommandType("REVOKE_CHECK_IN")).toBe(true);
     expect(isU1CommandType("ISSUE_TOKEN")).toBe(false);
+    expect(commandShellLabel("RESCHEDULE_STAY")).toBe("调整住宿日期");
+    expect(commandShellSuccessMessage("RESCHEDULE_STAY")).toBe("住宿日期已调整，订单和房态已刷新。");
   });
 
   it("moves through automatic preview, one confirmation, unknown recovery and success", () => {

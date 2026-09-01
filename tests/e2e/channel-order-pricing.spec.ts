@@ -41,7 +41,7 @@ async function expectRoomStatusLanding(page: Page): Promise<void> {
   const mobile = (page.viewportSize()?.width ?? 0) < 576;
   await expect(page.getByRole("heading", {
     name: mobile ? "今日运营任务" : "房间与床位逐日房态",
-    level: 1
+    level: mobile ? 1 : 2
   })).toBeVisible({ timeout: 30_000 });
 }
 
@@ -88,6 +88,11 @@ async function openPaidOrderDraft(page: Page, options: {
     await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
     await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-arrival", options.arrivalDate);
     await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", boardDepartureDate);
+    const restoredContext = page.locator("dialog.room-status-view-drawer");
+    if (await restoredContext.isVisible()) {
+      await restoredContext.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+      await expect(restoredContext).toBeHidden();
+    }
     const refreshed = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return response.request().method() === "GET"
@@ -266,10 +271,11 @@ test.describe("第 4 步阶段 2 / 渠道订单原子计价", () => {
       });
       await selectChannel(page, direction === "HIGH" ? "CTRIP" : "MEITUAN");
       const boundaryMinor = direction === "HIGH"
-        ? draft.policyBaseMinor * 115 / 100
-        : draft.policyBaseMinor * 85 / 100;
-      expect(Number.isInteger(boundaryMinor / 100)).toBe(true);
-      const targetMinor = direction === "HIGH" ? boundaryMinor + 100 : boundaryMinor - 100;
+        ? draft.policyBaseMinor * 1.15
+        : draft.policyBaseMinor * 0.85;
+      const targetMinor = direction === "HIGH"
+        ? Math.floor(boundaryMinor / 100) * 100 + 100
+        : Math.ceil(boundaryMinor / 100) * 100 - 100;
       const targetYuan = targetMinor / 100;
       const reference = `E2E-${testInfo.project.name}-${direction}`;
       const reason = direction === "HIGH" ? "渠道节假日加价" : "渠道专项促销价";

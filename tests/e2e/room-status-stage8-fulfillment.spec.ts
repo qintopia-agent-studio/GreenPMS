@@ -133,7 +133,7 @@ async function openOrder(page: Page, stay: Stage8StayFixture) {
 async function selectQuickPopoverOrder(page: Page, stay: Stage8StayFixture): Promise<void> {
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
-  await expect(popover).toHaveAttribute("data-unit-id", stay.unitId);
+  await expect(popover).toHaveAccessibleName(new RegExp(stay.unitCode));
   const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: stay.nickname });
   await expect(orderOption).toHaveCount(1);
   await orderOption.click();

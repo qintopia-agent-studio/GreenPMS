@@ -3,6 +3,7 @@ import { newId, todayInTimeZone } from "@qintopia/domain";
 import type { Kysely } from "kysely";
 import { confirmCommandPreview, createCommandPreview } from "../../packages/db/src/commands/service.ts";
 import { createDatabase } from "../../packages/db/src/database.ts";
+import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
 import { resetE2eDatabase } from "./reset-database.ts";
@@ -61,6 +62,16 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+async function withOrdinaryOrderCreationClock<T>(
+  businessDate: string,
+  arrivalDate: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00+08:00`), operation)
+    : operation();
+}
+
 async function execute(db: Kysely<Database>, commandType: CommandType, input: Record<string, unknown>, key: string): Promise<ReceiptDto> {
   const prepared = await createCommandPreview(db, principal, { commandType, input } as CommandEnvelope, {
     idempotencyKey: `${key}-preview`, correlationId: key
@@ -83,7 +94,7 @@ async function unitByCode(db: Kysely<Database>, code: string) {
     .where("property_id", "=", demo.propertyId).where("code", "=", code).executeTakeFirstOrThrow();
 }
 
-async function createStay(db: Kysely<Database>, options: {
+type Stage8CreateStayOptions = {
   key: string;
   unitId: string;
   unitCode: string;
@@ -92,7 +103,9 @@ async function createStay(db: Kysely<Database>, options: {
   nickname: string;
   stayType?: "TRANSIENT" | "FREE";
   memberId?: string;
-}): Promise<Stage8StayFixture> {
+};
+
+async function createStayAtCreationClock(db: Kysely<Database>, options: Stage8CreateStayOptions): Promise<Stage8StayFixture> {
   const stayType = options.stayType ?? "TRANSIENT";
   const quote = await createQuoteForTesting(db, {
     propertyId: demo.propertyId,
@@ -123,6 +136,16 @@ async function createStay(db: Kysely<Database>, options: {
   const stayId = receipt.result?.stayId;
   if (typeof orderId !== "string" || typeof stayId !== "string") throw new Error(`${options.key} did not create an order and Stay`);
   return { orderId, stayId, unitId: options.unitId, unitCode: options.unitCode, nickname: options.nickname };
+}
+
+async function createStay(
+  db: Kysely<Database>,
+  businessDate: string,
+  options: Stage8CreateStayOptions
+): Promise<Stage8StayFixture> {
+  return withOrdinaryOrderCreationClock(businessDate, options.arrivalDate, () => {
+    return createStayAtCreationClock(db, options);
+  });
 }
 
 async function createMemberWithCoverage(db: Kysely<Database>, key: string): Promise<string> {
@@ -248,7 +271,7 @@ export async function prepareStage8Acceptance(
     const scenario = options.scenario ?? "desktop";
     const unitCodes = scenario === "desktop"
       ? ["D02", "D01", "D03", "D04", "D05", "201", "202", "203", "E01", "305", "306"]
-      : ["204", "301", "C03", "205", "303", "304", "B01", "E02", "E03", "307", "308"];
+      : ["204", "308", "C03", "205", "303", "304", "B01", "E02", "E03", "307", "301"];
     const key = `stage8-${scenario}-${arrivalDate.replaceAll("-", "")}-${process.pid}`;
     const [
       normalUnit,
@@ -289,10 +312,10 @@ export async function prepareStage8Acceptance(
       earlyCheckoutGate,
       overdueGrid
     ] = await Promise.all([
-      createStay(db, { key: `${key}-normal`, unitId: normalUnit.id, unitCode: normalUnit.code, arrivalDate, departureDate, nickname: "青岚" }),
-      createStay(db, { key: `${key}-member`, unitId: memberUnit.id, unitCode: memberUnit.code, arrivalDate, departureDate, nickname: "星河", memberId }),
-      createStay(db, { key: `${key}-free`, unitId: freeUnit.id, unitCode: freeUnit.code, arrivalDate, departureDate, nickname: "云朵", stayType: "FREE" }),
-      createStay(db, {
+      createStay(db, businessDate, { key: `${key}-normal`, unitId: normalUnit.id, unitCode: normalUnit.code, arrivalDate, departureDate, nickname: "青岚" }),
+      createStay(db, businessDate, { key: `${key}-member`, unitId: memberUnit.id, unitCode: memberUnit.code, arrivalDate, departureDate, nickname: "星河", memberId }),
+      createStay(db, businessDate, { key: `${key}-free`, unitId: freeUnit.id, unitCode: freeUnit.code, arrivalDate, departureDate, nickname: "云朵", stayType: "FREE" }),
+      createStay(db, businessDate, {
         key: `${key}-legacy-cleaning`,
         unitId: legacyCleaningUnit.id,
         unitCode: legacyCleaningUnit.code,
@@ -300,8 +323,8 @@ export async function prepareStage8Acceptance(
         departureDate: legacyCleaningServiceDate,
         nickname: "清和"
       }),
-      createStay(db, { key: `${key}-restoration`, unitId: restorationUnit.id, unitCode: restorationUnit.code, arrivalDate, departureDate, nickname: "归舟" }),
-      createStay(db, {
+      createStay(db, businessDate, { key: `${key}-restoration`, unitId: restorationUnit.id, unitCode: restorationUnit.code, arrivalDate, departureDate, nickname: "归舟" }),
+      createStay(db, businessDate, {
         key: `${key}-planned-checkout`,
         unitId: plannedCheckoutUnit.id,
         unitCode: plannedCheckoutUnit.code,
@@ -309,7 +332,7 @@ export async function prepareStage8Acceptance(
         departureDate: businessDate,
         nickname: "海棠"
       }),
-      createStay(db, {
+      createStay(db, businessDate, {
         key: `${key}-overdue-checkout`,
         unitId: overdueCheckoutUnit.id,
         unitCode: overdueCheckoutUnit.code,
@@ -317,7 +340,7 @@ export async function prepareStage8Acceptance(
         departureDate: overdueCheckoutDepartureDate,
         nickname: "晚舟"
       }),
-      createStay(db, {
+      createStay(db, businessDate, {
         key: `${key}-future-check-in`,
         unitId: futureCheckInUnit.id,
         unitCode: futureCheckInUnit.code,
@@ -325,7 +348,7 @@ export async function prepareStage8Acceptance(
         departureDate: addDays(businessDate, 3),
         nickname: "初晴"
       }),
-      createStay(db, {
+      createStay(db, businessDate, {
         key: `${key}-overdue-check-in`,
         unitId: overdueCheckInUnit.id,
         unitCode: overdueCheckInUnit.code,
@@ -333,7 +356,7 @@ export async function prepareStage8Acceptance(
         departureDate: addDays(businessDate, 1),
         nickname: "远帆"
       }),
-      createStay(db, {
+      createStay(db, businessDate, {
         key: `${key}-early-checkout-gate`,
         unitId: earlyCheckoutGateUnit.id,
         unitCode: earlyCheckoutGateUnit.code,
@@ -341,7 +364,7 @@ export async function prepareStage8Acceptance(
         departureDate: addDays(businessDate, 2),
         nickname: "临川"
       }),
-      createStay(db, {
+      createStay(db, businessDate, {
         key: `${key}-overdue-grid`,
         unitId: overdueGridUnit.id,
         unitCode: overdueGridUnit.code,

@@ -55,7 +55,7 @@ async function assertScopedAxe(page: Page, selector: string): Promise<void> {
   expect(results.violations).toEqual([]);
 }
 
-async function createWecomOrder(
+async function createWecomInHouseBackfill(
   page: Page,
   fixture: Stage15CompleteJourneyFixture,
   nickname: string
@@ -74,17 +74,17 @@ async function createWecomOrder(
 
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
-  await popover.getByRole("button", { name: "创建订单", exact: true }).click();
+  await popover.getByRole("button", { name: "补录住宿", exact: true }).click();
   const drawer = page.locator("dialog.room-status-write-drawer");
   await expect(drawer).toBeVisible();
   await drawer.getByLabel("入住日期", { exact: true }).fill(fixture.arrivalDate);
   await drawer.getByLabel("退房日期", { exact: true }).fill(fixture.initialDepartureDate);
-  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
 
   const quote = page.getByTestId("quote-result");
   await expect(quote).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("primary-guest-nickname").fill(nickname);
   await page.getByTestId("primary-guest-name").fill("阶段十五完整旅程住客");
+  await page.getByTestId("primary-guest-phone").fill("13800001515");
   await page.getByTestId("primary-guest-document").fill("STAGE15-COMPLETE-JOURNEY-ID");
   await page.getByTestId("booking-channel-code").selectOption("WECOM");
   const policyAmountYuan = (await quote.getByText("政策基础金额", { exact: true }).locator("..").locator("strong").innerText())
@@ -92,8 +92,10 @@ async function createWecomOrder(
     .replace(/\.00$/, "");
   expect(Number(policyAmountYuan) * 100).toBe(fixture.expectedInitialAmountMinor);
   await page.getByTestId("target-contract-amount").fill(policyAmountYuan);
-  await expect(page.getByTestId("create-order")).toBeEnabled();
-  await page.getByTestId("create-order").click();
+  await page.getByTestId("backfill-reason").fill("阶段 15 已在住订单补录，后续收退款按实际发生登记");
+  await page.getByTestId("backfill-amount").fill("0");
+  await expect(page.getByTestId("backfill-submit")).toBeEnabled();
+  await page.getByTestId("backfill-submit").click();
 
   const effect = page.getByTestId("command-effect");
   await expect(effect).toBeVisible({ timeout: 30_000 });
@@ -106,6 +108,8 @@ async function createWecomOrder(
   await page.getByTestId("confirm-command").click();
   const receipt = await (await confirmed).json() as { result?: { orderId?: string } };
   expect(receipt.result?.orderId).toMatch(/^order_/);
+  await expect(page.getByTestId("command-receipt")).toContainText("订单已在住");
+  await page.getByRole("button", { name: "完成", exact: true }).click();
   await expect(page.locator("dialog.modal-wide")).toBeHidden({ timeout: 30_000 });
   return receipt.result!.orderId!;
 }
@@ -244,7 +248,7 @@ test("6.2 desktop ordinary WeCom order composes collections, in-house changes, r
   expect(secondRefundMinor).toBeLessThanOrEqual(secondCollectionMinor);
 
   await login(page);
-  const orderId = await createWecomOrder(page, fixture, nickname);
+  const orderId = await createWecomInHouseBackfill(page, fixture, nickname);
   await page.goto(`/orders/${encodeURIComponent(orderId)}`);
   await waitForOrder(page, nickname);
   await expect(page.getByTestId("order-amounts")).toContainText(yuanDisplay(fixture.expectedInitialAmountMinor));
@@ -252,7 +256,6 @@ test("6.2 desktop ordinary WeCom order composes collections, in-house changes, r
   await recordWecomCollection(page, yuanInput(secondCollectionMinor), secondReference);
   await expect(page.getByTestId("order-amounts")).toContainText(yuanDisplay(fixture.expectedExtendedAmountMinor));
 
-  await fulfill(page, "入住");
   await expect(page.locator(".order-title-row").getByText("在住", { exact: true })).toBeVisible();
 
   await changeDeparture(page, fixture.extendedDepartureDate, fixture.expectedExtendedAmountMinor, "延长住宿");
@@ -470,7 +473,7 @@ test("6.2 desktop upgrade membership survives reload and keeps order-member trac
   await expect(transferRow).toContainText("已用于升级会员");
   await expect(page.getByRole("region", { name: "升级会员核销", exact: true })).toContainText("7 间夜");
   await expect(page.getByRole("button", { name: "退款", exact: true })).toBeDisabled();
-  await expect(convertButton).toBeDisabled();
+  await expect(convertButton).toHaveCount(0);
 
   const orderResponse = await page.request.get(`/api/v1/orders/${encodeURIComponent(conversion.orderId)}`);
   expect(orderResponse.ok()).toBe(true);
@@ -510,12 +513,13 @@ test("6.2 desktop upgrade membership survives reload and keeps order-member trac
   await waitForOrder(page, conversion.nickname);
   await expect(page.getByRole("region", { name: "升级会员核销", exact: true })).toContainText("7 间夜");
   await expect(page.getByRole("button", { name: "退款", exact: true })).toBeDisabled();
-  await expect(convertButton).toBeDisabled();
+  await expect(page.getByTestId("convert-stay-collections-to-membership")).toHaveCount(0);
   await transferRow.getByRole("link", { name: "查看会员订单", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/members\\?memberId=${conversion.memberId}`), { timeout: 30_000 });
   await expect(page.getByRole("heading", { name: `住宿转会员匹配会员-stage15-${testInfo.project.name}-${testInfo.workerIndex}`, exact: true })).toBeVisible({ timeout: 30_000 });
 
-  const membershipOrder = page.getByTestId("membership-order-item").filter({ hasText: "公卫单人间会员" });
+  const membershipOrder = page.getByTestId("membership-order-target");
+  await expect(membershipOrder).toHaveAttribute("data-membership-order-id", receipt.result!.membershipOrderId!);
   await expect(membershipOrder).toContainText("已生效");
   await expect(membershipOrder).toContainText("住宿收款转入");
   await expect(membershipOrder).toContainText("¥590.00");

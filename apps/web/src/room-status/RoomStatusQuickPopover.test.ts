@@ -2,13 +2,34 @@ import { describe, expect, it } from "vitest";
 import type { RoomStatusActionDto } from "@qintopia/contracts";
 import {
   roomStatusQuickActionVisible,
+  roomStatusQuickActionDisabledReason,
   roomStatusQuickActionCanRun,
   runRoomStatusQuickAction,
   runRoomStatusWriteBlockAction,
   roomStatusPopoverMeasuredHeight,
   roomStatusPopoverPosition,
-  roomStatusPopoverViewportEventShouldClose
+  roomStatusPopoverViewportEventShouldClose,
+  roomStatusQuickOrderHeaderMarks,
+  roomStatusQuickOrderSourceSummary
 } from "./RoomStatusQuickPopover";
+import type { RoomStatusOrderOption } from "./roomStatusState";
+
+function orderOption(source: RoomStatusOrderOption["source"]): RoomStatusOrderOption {
+  return {
+    identity: {
+      orderId: "order_1",
+      stayId: "stay_1",
+      intervalId: "interval_1",
+      unitId: "unit_1",
+      intervalStartDate: "2026-09-01",
+      intervalEndDate: "2026-09-02",
+      arrivalDate: "2026-09-01",
+      departureDate: "2026-09-02"
+    },
+    label: "朝露",
+    source
+  };
+}
 
 describe("roomStatusPopoverMeasuredHeight", () => {
   it("includes borders without mistaking a clipped box for intrinsic content height", () => {
@@ -107,6 +128,21 @@ describe("roomStatusQuickActionVisible", () => {
     expect(calls).toEqual([]);
   });
 
+  it("shows a global write gate once instead of repeating it below every action", () => {
+    const action = {
+      code: "CREATE_ORDER",
+      enabled: false,
+      disabledReason: "正在更新房态，更新完成前暂不能写入。"
+    } as const;
+    const writeBlock = { kind: "REFRESH" as const, reason: action.disabledReason };
+
+    expect(roomStatusQuickActionDisabledReason(action, writeBlock)).toBeUndefined();
+    expect(roomStatusQuickActionDisabledReason(
+      { ...action, disabledReason: "该日期已经被占用" },
+      writeBlock
+    )).toBe("该日期已经被占用");
+  });
+
   it("routes refresh and recovery buttons only to their matching callback", () => {
     let refreshed = 0;
     let recovered = 0;
@@ -123,5 +159,47 @@ describe("roomStatusQuickActionVisible", () => {
       onOpenRecovery: () => { recovered += 1; }
     })).toBe(false);
     expect({ refreshed, recovered }).toEqual({ refreshed: 1, recovered: 1 });
+  });
+});
+
+describe("RoomStatus quick order source presentation", () => {
+  it("shows free and category marks only for one free order, with its actual recorded reason", () => {
+    const free = orderOption({
+      sourceKind: "FREE_STAY",
+      sourceCategory: "FREE_STAY",
+      freeStayCategoryCode: "VOLUNTEER",
+      freeStayReason: "协助前台接待"
+    });
+    expect(roomStatusQuickOrderHeaderMarks([free])).toEqual([
+      { label: "免费", title: "免费入住" },
+      { label: "义工", title: "义工；免费入住原因：协助前台接待" }
+    ]);
+  });
+
+  it("does not guess the type of a legacy free stay and does not put source facts in a multi-order header", () => {
+    const legacyFree = orderOption({
+      sourceKind: "FREE_STAY",
+      sourceCategory: null,
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    });
+    const direct = orderOption({
+      sourceKind: "ORDER",
+      sourceCategory: "DIRECT",
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    });
+    expect(roomStatusQuickOrderHeaderMarks([legacyFree])).toEqual([
+      { label: "免费", title: "免费入住" },
+      { label: "历史未记录", title: "免费入住类型与原因：历史未记录" }
+    ]);
+    expect(roomStatusQuickOrderHeaderMarks([legacyFree, direct])).toEqual([]);
+    expect(roomStatusQuickOrderSourceSummary(legacyFree)).toBe("免费入住 · 历史未记录");
+    expect(roomStatusQuickOrderSourceSummary(orderOption({
+      sourceKind: "ORDER",
+      sourceCategory: "CTRIP",
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    }))).toBe("携程");
   });
 });

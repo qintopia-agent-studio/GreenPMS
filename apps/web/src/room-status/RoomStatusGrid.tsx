@@ -11,6 +11,7 @@ import {
   type WheelEvent as ReactWheelEvent
 } from "react";
 import {
+  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -24,6 +25,7 @@ import type {
   RoomStatusBoardDto,
   RoomStatusDayDto,
   RoomStatusIntervalDto,
+  RoomStatusStatus,
   RoomStatusUnitDto
 } from "@qintopia/contracts";
 import {
@@ -47,23 +49,32 @@ import {
   formatRoomStatusDate,
   roomStatusBedOccupantLabel,
   roomStatusBedOccupantLabels,
+  roomStatusIntervalAttentionLabels,
   roomStatusIntervalBusinessLabel,
   roomStatusIntervalGridLabel,
   roomStatusIntervalIsOverdueReserved,
   roomStatusIntervalStatusLabel,
   roomStatusIntervalOccupantLabels,
+  roomStatusLifecycleStatus,
+  roomStatusAttentionBadgeSummary,
+  roomStatusOrderedAttentionLabels,
   roomStatusOccupancyCapacity,
-  roomStatusOccupantLabelLines,
+  roomStatusPhysicalOccupancyRatio,
   roomStatusPresentation,
   roomStatusRowSalesLabel,
+  RoomStatusSourceBadges,
+  roomStatusSourceBadgesForIntervals,
+  roomStatusSourceBadgeSummary,
   roomStatusSourceLabels,
   roomStatusUnitDescription,
   roomStatusUnitLabel,
   roomStatusUnitLocationLabel,
   RoomStatusMark,
+  RoomStatusGridAttentionBadges,
   RoomStatusWarning,
   useRoomStatusMobileViewport
 } from "./roomStatusPresentation";
+import type { RoomStatusAttentionLabel } from "./roomStatusPresentation";
 
 interface PositionedInterval {
   interval: RoomStatusIntervalDto;
@@ -95,6 +106,14 @@ interface BedOccupancyTooltipState {
   maxHeight: number;
   placement: "ABOVE" | "BELOW";
 }
+
+export interface RoomStatusBedOccupancySlot {
+  code: string;
+  status: RoomStatusStatus | "AVAILABLE";
+  occupied: boolean;
+}
+
+type RoomStatusCellAttentionLabel = RoomStatusAttentionLabel;
 
 interface PointerSelectionState {
   pointerId: number;
@@ -319,6 +338,18 @@ function intervalsForWindow(intervals: readonly RoomStatusIntervalDto[], dates: 
   });
 }
 
+export function roomStatusGridOperationalIntervals(
+  unit: RoomStatusUnitDto,
+  serviceDates: readonly string[]
+): readonly RoomStatusIntervalDto[] {
+  return intervalsRenderedOnRoomStatusGrid(unit, serviceDates).filter((interval) => {
+    // The parent summarizes every child-bed operational fact with slots; only facts targeting the room get a bar.
+    return !(unit.kind === "ROOM"
+      && unit.salesMode === "BED_SPLIT"
+      && interval.actualInventoryUnitId !== unit.id);
+  });
+}
+
 export function roomStatusAttentionLaneOffset(
   intervals: readonly { startColumn: number; endColumn: number }[],
   attentionColumnIndexes: ReadonlySet<number>
@@ -363,6 +394,68 @@ function bedOccupancySourceIntervals(
   });
 }
 
+function roomStatusCellSourceIntervals(
+  unit: RoomStatusUnitDto,
+  serviceDate: string,
+  directLodging: RoomStatusIntervalDto | null,
+  bedOccupancy: RoomStatusBedOccupancyDto | null
+): RoomStatusIntervalDto[] {
+  if (directLodging) return [directLodging];
+  if (!bedOccupancy) return [];
+  const childIndex = new Map(unit.children.map((child, index) => [child.id, index]));
+  return bedOccupancySourceIntervals(bedOccupancy, unit, serviceDate)
+    .slice()
+    .sort((left, right) => (childIndex.get(left.actualInventoryUnitId) ?? Number.MAX_SAFE_INTEGER)
+      - (childIndex.get(right.actualInventoryUnitId) ?? Number.MAX_SAFE_INTEGER)
+      || left.actualInventoryUnitId.localeCompare(right.actualInventoryUnitId));
+}
+
+export function roomStatusBedOccupancySlots(
+  unit: Pick<RoomStatusUnitDto, "bedSlotStates">,
+  serviceDate: string
+): RoomStatusBedOccupancySlot[] {
+  return unit.bedSlotStates
+    .filter((slot) => slot.serviceDate === serviceDate)
+    .slice()
+    .sort((left, right) => left.inventoryUnitCode.localeCompare(right.inventoryUnitCode, "en", { numeric: true }))
+    .slice(0, 4)
+    .map((slot) => ({
+      code: slot.inventoryUnitCode.split("-").at(-1)?.trim().toUpperCase() || slot.inventoryUnitCode,
+      status: slot.status,
+      // Any non-available slot is an actual server-side fact, never an empty sellable bed.
+      occupied: slot.status !== "AVAILABLE"
+    }));
+}
+
+export function roomStatusOccupancyDisplayRatio(
+  registeredOccupantCount: number,
+  unit: Pick<RoomStatusUnitDto, "physicalBedCount">
+): string {
+  return roomStatusPhysicalOccupancyRatio(registeredOccupantCount, unit);
+}
+
+export function roomStatusOccupancyLifecycleStatus(status: RoomStatusStatus): RoomStatusStatus {
+  return roomStatusLifecycleStatus(status);
+}
+
+export function roomStatusBedHasWholeRoomLodging(
+  unit: Pick<RoomStatusUnitDto, "kind" | "roomId" | "parentRoomId" | "intervals">,
+  serviceDate: string
+): boolean {
+  const parentRoomInventoryUnitId = unit.parentRoomId ?? unit.roomId;
+  return unit.kind === "BED" && unit.intervals.some((interval) => (
+    interval.actualInventoryUnitId === parentRoomInventoryUnitId
+    && interval.startDate <= serviceDate
+    && serviceDate < interval.endDate
+    && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+    && interval.status !== "UNKNOWN"
+  ));
+}
+
+export function roomStatusTextOverflows(element: Pick<HTMLElement, "scrollWidth" | "clientWidth">): boolean {
+  return element.scrollWidth > element.clientWidth;
+}
+
 export function roomStatusBedOccupancyStateLabel(
   occupancy: RoomStatusBedOccupancyDto,
   unit: RoomStatusUnitDto,
@@ -373,13 +466,13 @@ export function roomStatusBedOccupancyStateLabel(
   const sources = bedOccupancySourceIntervals(occupancy, unit, serviceDate);
   const sourceLabels = new Set(sources.map((source) => roomStatusIntervalStatusLabel(source, businessDate)));
   if (sourceLabels.size > 1) return "占用";
-  if (sources.some((source) => source.status === "ARREARS")) return roomStatusPresentation.ARREARS.label;
-  if (sources.some((source) => roomStatusIntervalIsOverdueReserved(source, businessDate))) return "逾期预订";
-  return roomStatusPresentation[fallbackStatus].label;
+  if (sourceLabels.size === 1) return [...sourceLabels][0]!;
+  return roomStatusPresentation[roomStatusLifecycleStatus(fallbackStatus)].label;
 }
 
 function roomStatusIntervalNeedsProcessing(interval: RoomStatusIntervalDto, businessDate?: string): boolean {
-  return interval.status === "ARREARS" || roomStatusIntervalIsOverdueReserved(interval, businessDate);
+  void businessDate;
+  return roomStatusIntervalAttentionLabels(interval).length > 0;
 }
 
 export function roomStatusBedOccupancyNeedsProcessing(
@@ -397,32 +490,22 @@ export function roomStatusBedOccupancyAttentionLabels(
   unit: RoomStatusUnitDto,
   serviceDate: string,
   businessDate?: string
-): readonly ("欠款" | "逾期")[] {
+): readonly RoomStatusCellAttentionLabel[] {
   const sources = bedOccupancySourceIntervals(occupancy, unit, serviceDate);
-  const labels: ("欠款" | "逾期")[] = [];
-  if (sources.some((source) => source.status === "ARREARS")) labels.push("欠款");
-  if (sources.some((source) => roomStatusIntervalIsOverdueReserved(source, businessDate))) labels.push("逾期");
-  return labels;
+  void businessDate;
+  return roomStatusOrderedAttentionLabels(sources.flatMap((source) => roomStatusIntervalAttentionLabels(source)));
 }
 
 export function roomStatusCellAttentionLabels(
   dayIntervals: readonly RoomStatusIntervalDto[],
   serviceDate: string,
   businessDate?: string
-): readonly ("欠款" | "逾期")[] {
-  if (!businessDate) return [];
-  const labels: ("欠款" | "逾期")[] = [];
-  for (const interval of dayIntervals) {
-    if (interval.sourceKind !== "ORDER" && interval.sourceKind !== "FREE_STAY") continue;
-    // 欠款是已完成历史住宿的结算待办，仍只显示在过去日期。
-    if (serviceDate < businessDate && interval.status === "ARREARS") {
-      if (!labels.includes("欠款")) labels.push("欠款");
-    } else if (roomStatusIntervalIsOverdueReserved(interval, businessDate)) {
-      // 逾期预订是整张订单的待办，跨今天时整段都需要可见。
-      if (!labels.includes("逾期")) labels.push("逾期");
-    }
-  }
-  return labels;
+): readonly RoomStatusCellAttentionLabel[] {
+  void serviceDate;
+  void businessDate;
+  return roomStatusOrderedAttentionLabels(dayIntervals
+    .filter((interval) => interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
+    .flatMap((interval) => roomStatusIntervalAttentionLabels(interval)));
 }
 
 export interface RoomStatusBuildingOccupancySummary {
@@ -476,27 +559,40 @@ export function roomStatusCellAccessibleName(
   businessDate?: string
 ): string {
   if (!day) return `${roomStatusUnitLabel(unit)}，${formatRoomStatusDate(serviceDate)}，状态未知，服务端未返回逐日事实`;
+  if (roomStatusBedHasWholeRoomLodging(unit, serviceDate)) {
+    return `${roomStatusUnitLabel(unit)}，${formatRoomStatusDate(serviceDate)}，整房占用，当前不可安排`;
+  }
   const historicalBlank = Boolean(businessDate
     && serviceDate < businessDate
     && day.status === "AVAILABLE"
     && !day.available
     && day.intervalIds.length === 0
     && day.conflicts.length === 0);
-  const status = historicalBlank ? "历史空白" : roomStatusPresentation[day.status].label;
+  const status = historicalBlank
+    ? "历史空白"
+    : roomStatusPresentation[roomStatusLifecycleStatus(day.status)].label;
   const intervals = unit.intervals.filter((interval) => day.intervalIds.includes(interval.id));
-  const sources = intervals.map((interval) => [
-    roomStatusSourceLabels[interval.sourceKind],
-    roomStatusIntervalBusinessLabel(interval),
-    roomStatusIntervalStatusLabel(interval, businessDate)
-  ].filter(Boolean).join(" "));
   const bedOccupancyStatus = bedOccupancy
     ? roomStatusBedOccupancyStateLabel(bedOccupancy, unit, serviceDate, day.status, businessDate)
     : null;
   const overdueReserved = intervals.some((interval) => roomStatusIntervalIsOverdueReserved(interval, businessDate));
+  const primary = bedOccupancyStatus ?? (overdueReserved ? "逾期预订" : status);
+  const sources = intervals.map((interval) => {
+    const sourceStatus = roomStatusIntervalStatusLabel(interval, businessDate);
+    return [
+      roomStatusSourceLabels[interval.sourceKind],
+      roomStatusIntervalBusinessLabel(interval),
+      sourceStatus === primary ? null : sourceStatus
+    ].filter(Boolean).join(" ");
+  });
+  const sourceBadgeTitles = roomStatusSourceBadgesForIntervals(intervals).map((badge) => badge.title);
   const conflicts = day.conflicts.length ? ["已有住宿，不能重复安排"] : [];
+  const attention = roomStatusCellAttentionLabels(intervals, serviceDate, businessDate);
+  const spokenAttention = attention.filter((label) => label !== primary
+    && !(label === "逾期" && primary === "逾期预订"));
   const availability = historicalBlank ? "不能创建普通住宿" : day.available ? "可以安排" : "当前不可安排";
   const occupancy = bedOccupancy ? bedOccupancyDescription(bedOccupancy, unit, serviceDate, businessDate) : null;
-  return [roomStatusUnitLabel(unit), formatRoomStatusDate(serviceDate), bedOccupancyStatus ?? (overdueReserved ? "逾期预订" : status), availability, occupancy, ...sources, ...conflicts]
+  return [roomStatusUnitLabel(unit), formatRoomStatusDate(serviceDate), primary, ...spokenAttention, availability, occupancy, ...sourceBadgeTitles, ...sources, ...conflicts]
     .filter(Boolean)
     .join("，");
 }
@@ -616,6 +712,9 @@ export function RoomStatusGrid({
   const focusRestored = useRef(false);
   const lastFocusRequestToken = useRef(focusRequestToken);
   const lastTodayResetToken = useRef(todayResetToken);
+  const previousRangeButtonRef = useRef<HTMLButtonElement>(null);
+  const nextRangeButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingRangeNavigationFocus = useRef<"PREVIOUS" | "NEXT" | null>(null);
   const pendingKeyboardFocus = useRef<RoomStatusCellFocus | null>(null);
   const [touchSelectionMode, setTouchSelectionMode] = useState(false);
   const [draggingUnitId, setDraggingUnitId] = useState<string | null>(null);
@@ -625,8 +724,8 @@ export function RoomStatusGrid({
   const rangeErrorRef = useRef<HTMLDivElement>(null);
   const bedOccupancyTooltipDismissTimer = useRef<number | null>(null);
   const bedOccupancyTooltipRef = useRef<HTMLDivElement>(null);
-  const bedOccupancyTooltipTriggerRef = useRef<HTMLDivElement | null>(null);
-  const suppressBedOccupancyTooltipFocusRef = useRef<HTMLDivElement | null>(null);
+  const bedOccupancyTooltipTriggerRef = useRef<HTMLElement | null>(null);
+  const suppressBedOccupancyTooltipFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     setRangeDraft(range);
   }, [range.arrivalDate, range.departureDate]);
@@ -640,6 +739,14 @@ export function RoomStatusGrid({
     lastTodayResetToken.current = todayResetToken;
     resetRoomStatusHorizontalScroll(scrollRef.current, headerScrollRef.current);
   }, [todayResetToken]);
+
+  useEffect(() => {
+    const pending = pendingRangeNavigationFocus.current;
+    if (!pending) return;
+    pendingRangeNavigationFocus.current = null;
+    const target = pending === "PREVIOUS" ? previousRangeButtonRef.current : nextRangeButtonRef.current;
+    target?.focus({ preventScroll: true });
+  }, [board.range.arrivalDate, board.range.departureDate]);
 
   const changeRange = (nextRange: { arrivalDate: string; departureDate: string }) => {
     setRangeDraft(nextRange);
@@ -783,7 +890,7 @@ export function RoomStatusGrid({
     .flatMap((row) => row.kind === "UNIT" ? [{ unit: row.unit, parent: row.parent, depth: row.depth }] : []), [renderedRows]);
   const positionedByUnit = useMemo(() => new Map(renderedUnits.map(({ unit }) => [
     unit.id,
-    intervalsForWindow(intervalsRenderedOnRoomStatusGrid(unit, dates), dates)
+    intervalsForWindow(roomStatusGridOperationalIntervals(unit, dates), dates)
   ])), [dates, renderedUnits]);
   const dayByCell = useMemo(() => {
     const visibleDates = new Set(dates);
@@ -1052,12 +1159,19 @@ export function RoomStatusGrid({
 
   const showBedOccupancyTooltip = (target: HTMLElement, text: string) => {
     cancelBedOccupancyTooltipDismiss();
-    bedOccupancyTooltipTriggerRef.current = target as HTMLDivElement;
+    bedOccupancyTooltipTriggerRef.current = target;
     setBedOccupancyTooltip(roomStatusBedOccupancyTooltipPosition(
       target.getBoundingClientRect(),
       { height: window.innerHeight, width: window.innerWidth },
       text
     ));
+  };
+  const showBedOccupantTooltipIfTruncated = (target: HTMLElement, nickname: string) => {
+    if (!roomStatusTextOverflows(target)) {
+      closeBedOccupancyTooltip();
+      return;
+    }
+    showBedOccupancyTooltip(target, nickname);
   };
 
   const handleScroll = () => {
@@ -1122,7 +1236,6 @@ export function RoomStatusGrid({
     "--room-status-date-count": dates.length,
     "--room-status-interval-lanes": 1
   } as CSSProperties;
-
   return (
     <section
       className={`room-status-grid-section${touchSelectionMode ? " is-touch-selection" : ""}${draggingUnitId ? " is-drag-selecting" : ""}`}
@@ -1152,11 +1265,14 @@ export function RoomStatusGrid({
       ) : null}
 
       <div className="room-status-grid" role="grid" aria-rowcount={renderedRows.length + 1} aria-colcount={dates.length + 1} style={gridStyle}>
-          <div className="room-status-grid-header-scroll" ref={headerScrollRef} onScroll={handleHeaderScroll} role="presentation">
+          <div className="room-status-grid-header-scroll" ref={headerScrollRef} onScroll={handleHeaderScroll} role="rowgroup">
             <div className="room-status-grid-header" role="row">
             <div className="room-status-resource-header" role="columnheader">
               <div className="room-status-grid-range-controls" aria-label="房态起始日期">
-                <button type="button" className="room-status-grid-range-button" onClick={onPreviousRange} aria-label="查看前 30 夜" title="前 30 夜">
+                <button ref={previousRangeButtonRef} type="button" className="room-status-grid-range-button" onClick={() => {
+                  pendingRangeNavigationFocus.current = "PREVIOUS";
+                  onPreviousRange();
+                }} aria-label="查看前 30 夜" title="前 30 夜">
                   <ChevronLeft aria-hidden="true" size={16} />
                 </button>
                 <label className="sr-only" htmlFor={rangeInputId}>起始日期</label>
@@ -1171,7 +1287,10 @@ export function RoomStatusGrid({
                   onChange={(event) => changeStartDate(event.target.value)}
                 />
                 <button type="button" className="room-status-grid-today-button" onClick={onToday}>今天</button>
-                <button type="button" className="room-status-grid-range-button" onClick={onNextRange} aria-label="查看后 30 夜" title="后 30 夜">
+                <button ref={nextRangeButtonRef} type="button" className="room-status-grid-range-button" onClick={() => {
+                  pendingRangeNavigationFocus.current = "NEXT";
+                  onNextRange();
+                }} aria-label="查看后 30 夜" title="后 30 夜">
                   <ChevronRight aria-hidden="true" size={16} />
                 </button>
               </div>
@@ -1215,7 +1334,7 @@ export function RoomStatusGrid({
             ref={scrollRef}
             onScroll={handleScroll}
             onWheel={handleWheel}
-            role="region"
+            role="rowgroup"
             aria-label="房态二维网格，可使用方向键移动，Shift 加方向键扩展选区"
             tabIndex={0}
           >
@@ -1245,7 +1364,7 @@ export function RoomStatusGrid({
             const canExpand = depth === 0 && unit.salesMode === "BED_SPLIT" && unit.children.length > 0;
             const expanded = canExpand && expandedRoomIds.includes(unit.id);
             const positionedIntervals = positionedByUnit.get(unit.id) ?? [];
-            const cellAttentionLabelsByDate = new Map<string, readonly ("欠款" | "逾期")[]>();
+            const cellAttentionLabelsByDate = new Map<string, readonly RoomStatusCellAttentionLabel[]>();
             const attentionColumnIndexes = new Set<number>();
             dates.forEach((date, columnIndex) => {
               const day = dayByCell.get(`${unit.id}:${date}`) ?? null;
@@ -1295,18 +1414,22 @@ export function RoomStatusGrid({
                     const day = dayByCell.get(`${unit.id}:${date}`) ?? null;
                     const status = day?.status ?? "UNKNOWN";
                     const dayIntervals = day ? unit.intervals.filter((interval) => day.intervalIds.includes(interval.id)) : [];
+                    const wholeRoomLodgingOnBed = roomStatusBedHasWholeRoomLodging(unit, date);
                     const cellStatusLabel = dayIntervals.some((interval) => roomStatusIntervalIsOverdueReserved(interval, board.businessDate))
                       ? "逾期预订"
-                      : roomStatusPresentation[status].label;
+                      : roomStatusPresentation[roomStatusLifecycleStatus(status)].label;
                     const bedOccupancy = bedOccupancyByCell.get(`${unit.id}:${date}`) ?? null;
-                    const bedOccupancyRatio = bedOccupancy
-                      ? `${bedOccupancy.occupiedBedCount}/${bedOccupancy.totalBedCount}`
-                      : null;
-                    const cellAttentionLabels = cellAttentionLabelsByDate.get(date) ?? [];
+                    const cellAttentionLabels = wholeRoomLodgingOnBed ? [] : cellAttentionLabelsByDate.get(date) ?? [];
+                    const attentionBadgeSummary = roomStatusAttentionBadgeSummary(cellAttentionLabels);
                     const bedOccupancyNeedsProcessing = bedOccupancy
                       ? roomStatusBedOccupancyNeedsProcessing(bedOccupancy, unit, date, board.businessDate)
                       : false;
-                    const bedOccupancyTooltipText = bedOccupancy ? bedOccupancyDescription(bedOccupancy, unit, date, board.businessDate) : undefined;
+                    const bedOccupancyTooltipText = bedOccupancy && unit.salesMode !== "BED_SPLIT"
+                      ? bedOccupancyDescription(bedOccupancy, unit, date, board.businessDate)
+                      : undefined;
+                    const bedOccupantLabels = bedOccupancy ? roomStatusBedOccupantLabels(bedOccupancy.occupants).slice(0, 4) : [];
+                    const bedSlots = roomStatusBedOccupancySlots(unit, date);
+                    const hasBedSlots = unit.salesMode === "BED_SPLIT" && bedSlots.length > 0;
                     const historicalBlank = Boolean(day
                       && date < board.businessDate
                       && status === "AVAILABLE"
@@ -1323,7 +1446,19 @@ export function RoomStatusGrid({
                     const directLodgingNeedsProcessing = directLodging
                       ? roomStatusIntervalNeedsProcessing(directLodging, board.businessDate)
                       : false;
-                    const directOccupantLabels = directLodging ? roomStatusIntervalOccupantLabels(directLodging) : [];
+                    const directOccupantLabels = directLodging ? roomStatusIntervalOccupantLabels(directLodging).slice(0, 4) : [];
+                    const cellSourceBadges = wholeRoomLodgingOnBed
+                      ? []
+                      : roomStatusSourceBadgesForIntervals(
+                        roomStatusCellSourceIntervals(unit, date, directLodging, bedOccupancy)
+                      );
+                    const sourceBadgeSummary = roomStatusSourceBadgeSummary(
+                      cellSourceBadges,
+                      attentionBadgeSummary.visible.length + attentionBadgeSummary.hiddenCount
+                    );
+                    const bedOccupancyRatio = !directLodging && hasBedSlots
+                      ? roomStatusOccupancyDisplayRatio(bedOccupancy?.occupants.length ?? 0, unit)
+                      : null;
                     const selected = isCellSelected(pointerPreviewSelection ?? selection, unit.id, date)
                       || (!pointerPreviewSelection && selectedStayId ? roomStatusCellBelongsToStay(unit, date, selectedStayId) : false);
                     const focusable = effectiveFocus?.unitId === unit.id && effectiveFocus.serviceDate === date;
@@ -1341,7 +1476,10 @@ export function RoomStatusGrid({
                         data-unit-id={unit.id}
                         data-service-date={date}
                         data-bed-occupancy-ratio={bedOccupancyRatio ?? undefined}
-                        className={`room-status-day-cell room-status-day-${status.toLowerCase().replaceAll("_", "-")}${selected ? " is-selected" : ""}${selectedStayId && roomStatusCellBelongsToStay(unit, date, selectedStayId) ? " is-stay-selected" : ""}${date === todayDate ? " is-today" : ""}${!day?.available ? " is-authoritatively-unavailable" : ""}${historicalBlank ? " is-historical-blank" : ""}${day?.conflicts.length ? " has-blocking-conflict" : ""}${startingIntervals.length ? " has-source-interval" : ""}${bedOccupancy ? " has-bed-occupancy" : ""}${directLodging ? " has-direct-lodging" : ""}${bedOccupancyNeedsProcessing || directLodgingNeedsProcessing ? " has-attention-occupancy" : ""}`}
+                        data-whole-room-occupied={wholeRoomLodgingOnBed || undefined}
+                        data-room-status-source-count={cellSourceBadges.length || undefined}
+                        data-room-status-attention-count={cellAttentionLabels.length || undefined}
+                        className={`room-status-day-cell room-status-day-${status.toLowerCase().replaceAll("_", "-")}${selected ? " is-selected" : ""}${selectedStayId && roomStatusCellBelongsToStay(unit, date, selectedStayId) ? " is-stay-selected" : ""}${date === todayDate ? " is-today" : ""}${!day?.available ? " is-authoritatively-unavailable" : ""}${historicalBlank ? " is-historical-blank" : ""}${wholeRoomLodgingOnBed ? " is-whole-room-occupied-bed" : ""}${day?.conflicts.length ? " has-blocking-conflict" : ""}${startingIntervals.length ? " has-source-interval" : ""}${bedOccupancy ? " has-bed-occupancy" : ""}${hasBedSlots ? " has-bed-slot-states" : ""}${unit.salesMode === "BED_SPLIT" && (bedOccupancy || hasBedSlots || directLodging) ? " is-bed-split-parent" : ""}${directLodging ? " has-direct-lodging" : ""}${bedOccupancyNeedsProcessing || directLodgingNeedsProcessing ? " has-attention-occupancy" : ""}`}
                         ref={(node) => {
                           const key = `${unit.id}:${date}`;
                           if (node) cellRefs.current.set(key, node);
@@ -1378,45 +1516,120 @@ export function RoomStatusGrid({
                         onDoubleClick={(event) => onInspectDay(unit, day, event.currentTarget)}
                         onKeyDown={(event) => handleCellKeyDown(event, unit, day)}
                       >
+                        {date === todayDate ? <span className="room-status-today-overlay" aria-hidden="true" /> : null}
+                        <RoomStatusSourceBadges
+                          badges={sourceBadgeSummary.visible}
+                          hiddenCount={sourceBadgeSummary.hiddenCount}
+                          title={sourceBadgeSummary.title}
+                        />
                         {bedOccupancy ? (
-                          <span className="room-status-bed-occupants" aria-hidden="true">
-                            {roomStatusOccupantLabelLines(roomStatusBedOccupantLabels(bedOccupancy.occupants)).map((line, index) => (
-                              <span key={`${bedOccupancy.occupants[index * 2]!.inventoryUnitId}:${index}`}>{line}</span>
+                          <span className="room-status-bed-occupants">
+                            {bedOccupantLabels.map((nickname, index) => (
+                              <span
+                                key={`${bedOccupancy.occupants[index]!.inventoryUnitId}:${index}`}
+                                tabIndex={0}
+                                onMouseEnter={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
+                                onMouseLeave={scheduleBedOccupancyTooltipDismiss}
+                                onFocus={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
+                                onBlur={scheduleBedOccupancyTooltipDismiss}
+                                onKeyDown={(event) => {
+                                  if (event.key !== "Escape") return;
+                                  event.stopPropagation();
+                                  closeBedOccupancyTooltip();
+                                }}
+                              >{nickname}</span>
                             ))}
                           </span>
                         ) : null}
                         {directLodging ? (
-                          <span className="room-status-direct-occupants" aria-hidden="true">
-                            {roomStatusOccupantLabelLines(directOccupantLabels).map((line, index) => (
-                              <span key={`${directLodging.occupants[index * 2]!.occupantId}:${index}`}>{line}</span>
+                          <span className="room-status-direct-occupants">
+                            {directOccupantLabels.map((nickname, index) => (
+                              <span
+                                key={directLodging.occupants[index]!.occupantId}
+                                tabIndex={0}
+                                onMouseEnter={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
+                                onMouseLeave={scheduleBedOccupancyTooltipDismiss}
+                                onFocus={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
+                                onBlur={scheduleBedOccupancyTooltipDismiss}
+                                onKeyDown={(event) => {
+                                  if (event.key !== "Escape") return;
+                                  event.stopPropagation();
+                                  closeBedOccupancyTooltip();
+                                }}
+                              >{nickname}</span>
                             ))}
                           </span>
                         ) : null}
-                        {cellAttentionLabels.length ? (
-                          <span className="room-status-bed-attention-tags" aria-hidden="true">
-                            {cellAttentionLabels.map((label) => (
-                              <span key={label} className="room-status-bed-attention-tag">{label}</span>
-                            ))}
-                          </span>
-                        ) : null}
+                        <RoomStatusGridAttentionBadges summary={attentionBadgeSummary} />
                         {bedOccupancyRatio ? (
-                          <span className="room-status-bed-occupancy-summary" aria-hidden="true">
-                            <span className="room-status-bed-state">占用</span>
+                          <span className="room-status-bed-occupancy-summary" aria-label={`床位占用 ${bedOccupancyRatio}`}>
+                            {bedSlots.length ? <span className="room-status-bed-slots">
+                              {bedSlots.map((slot) => <span
+                                key={slot.code}
+                                role="img"
+                                className={`room-status-bed-slot is-${roomStatusOccupancyLifecycleStatus(slot.status).toLowerCase().replaceAll("_", "-")}${slot.occupied ? " is-occupied" : ""}`}
+                                data-bed-code={slot.code}
+                                data-bed-status={slot.status}
+                                aria-label={`${slot.code} 床${slot.occupied
+                                  ? roomStatusPresentation[roomStatusLifecycleStatus(slot.status)].label
+                                  : "空闲"}`}
+                              >
+                                {slot.occupied && (slot.status === "SETTLED" || slot.status === "ARREARS")
+                                  ? <Check aria-hidden="true" size={7} />
+                                  : null}
+                                {slot.status === "UNKNOWN" ? <span aria-hidden="true">?</span> : null}
+                              </span>)}
+                            </span> : <span className="room-status-bed-state">占用</span>}
                             <span className="room-status-bed-occupancy">{bedOccupancyRatio}</span>
                           </span>
                         ) : directLodging ? (
-                          <span className="room-status-direct-occupancy-summary" aria-hidden="true">
-                            <span className="room-status-bed-state">{roomStatusIntervalStatusLabel(directLodging, board.businessDate)}</span>
-                            <span className="room-status-direct-count">{directLodging.occupantCount}人</span>
+                          <span className={`room-status-direct-occupancy-summary${unit.kind === "BED" ? " is-bed-unit" : ""}`} aria-hidden="true">
+                            {unit.kind === "BED" ? <span
+                              className={`room-status-bed-slot is-occupied is-${roomStatusOccupancyLifecycleStatus(directLodging.status).toLowerCase().replaceAll("_", "-")}`}
+                              role="img"
+                              data-bed-code={unit.code}
+                              data-bed-status={directLodging.status}
+                              aria-label={`${unit.code} 床${roomStatusPresentation[roomStatusLifecycleStatus(directLodging.status)].label}`}
+                            >
+                              {directLodging.status === "SETTLED" || directLodging.status === "ARREARS"
+                                ? <Check aria-hidden="true" size={7} />
+                                : null}
+                              {directLodging.status === "UNKNOWN" ? <span aria-hidden="true">?</span> : null}
+                            </span> : <span
+                              className={`room-status-direct-room-block is-${roomStatusOccupancyLifecycleStatus(directLodging.status).toLowerCase().replaceAll("_", "-")}`}
+                              role="img"
+                              aria-label={roomStatusPresentation[roomStatusLifecycleStatus(directLodging.status)].label}
+                            >
+                              {directLodging.status === "SETTLED" || directLodging.status === "ARREARS"
+                                ? <Check aria-hidden="true" size={7} />
+                                : null}
+                              {directLodging.status === "UNKNOWN" ? <span aria-hidden="true">?</span> : null}
+                            </span>}
+                            {unit.kind === "BED" && (directLodging.status === "IN_HOUSE" || directLodging.status === "RESERVED") ? (
+                              <span className={`room-status-direct-status-label is-${directLodging.status.toLowerCase().replaceAll("_", "-")}`}>
+                                {directLodging.status === "IN_HOUSE" ? "在住" : "预订"}
+                              </span>
+                            ) : null}
+                            {unit.kind !== "BED" ? <span className="room-status-direct-count">
+                              {roomStatusOccupancyDisplayRatio(directLodging.occupantCount, {
+                                physicalBedCount: unit.physicalBedCount
+                              })}
+                            </span> : null}
                           </span>
-                        ) : historicalBlank ? null : <RoomStatusMark status={status} label={cellStatusLabel} compact />}
-                        {startingIntervals.map(({ interval, startColumn, endColumn, lane }) => {
+                        ) : historicalBlank || wholeRoomLodgingOnBed ? null : <RoomStatusMark
+                          status={roomStatusLifecycleStatus(status)}
+                          label={cellStatusLabel}
+                          compact
+                        />}
+                        {startingIntervals
+                          .filter(({ interval }) => interval.sourceKind !== "ORDER" && interval.sourceKind !== "FREE_STAY")
+                          .map(({ interval, startColumn, endColumn, lane }) => {
                           const gridLabel = roomStatusIntervalGridLabel(interval, unit);
                           const maintenance = interval.sourceKind === "MAINTENANCE" && interval.status === "MAINTENANCE";
                           const intervalStatusLabel = roomStatusIntervalStatusLabel(interval, board.businessDate);
                           const intervalAriaLabel = maintenance
                             ? `${gridLabel}，${formatRoomStatusDate(interval.startDate)}至${formatRoomStatusDate(interval.endDate)}`
-                            : `${gridLabel}，${roomStatusSourceLabels[interval.sourceKind]}，${formatRoomStatusDate(interval.startDate)}至${formatRoomStatusDate(interval.endDate)}，${intervalStatusLabel}`;
+                            : `${gridLabel}，${roomStatusSourceLabels[interval.sourceKind]}，${formatRoomStatusDate(interval.startDate)}至${formatRoomStatusDate(interval.endDate)}，${intervalStatusLabel}${interval.attention === "ARREARS" ? "，欠款" : ""}`;
                           return (
                             <button
                               key={interval.id}
@@ -1445,7 +1658,7 @@ export function RoomStatusGrid({
                               {maintenance ? null : <small>{roomStatusSourceLabels[interval.sourceKind]} · {intervalStatusLabel}</small>}
                             </button>
                           );
-                        })}
+                          })}
                       </div>
                     );
                   })}

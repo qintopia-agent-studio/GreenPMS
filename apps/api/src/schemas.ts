@@ -17,8 +17,11 @@ import {
   ROOM_STATUS_OPERATIONAL_TASK_LIMIT,
   recoverableCommandTypes,
   roomStatusActionCodes,
+  roomStatusAttentionCodes,
   roomStatusBlockingFactKinds,
+  roomStatusOperationalAttentionCodes,
   roomStatusOperationalTaskKinds,
+  roomStatusSourceCategories,
   roomStatusSourceKinds,
   roomStatusStatuses,
   stayTypes,
@@ -1839,7 +1842,12 @@ export const AvailabilityUnitSchema = strictObject({
 });
 
 export const RoomStatusStatusSchema = Type.Union(roomStatusStatuses.map((status) => Type.Literal(status)));
+export const RoomStatusAttentionSchema = Type.Union(roomStatusAttentionCodes.map((attention) => Type.Literal(attention)));
+export const RoomStatusOperationalAttentionSchema = Type.Union(
+  roomStatusOperationalAttentionCodes.map((attention) => Type.Literal(attention))
+);
 export const RoomStatusSourceKindSchema = Type.Union(roomStatusSourceKinds.map((kind) => Type.Literal(kind)));
+export const RoomStatusSourceCategorySchema = Type.Union(roomStatusSourceCategories.map((category) => Type.Literal(category)));
 export const RoomStatusActionCodeSchema = Type.Union(roomStatusActionCodes.map((code) => Type.Literal(code)));
 export const RoomStatusOperationalTaskKindSchema = Type.Union(roomStatusOperationalTaskKinds.map((kind) => Type.Literal(kind)));
 export const RoomStatusSalesModeSchema = Type.Union([
@@ -1913,9 +1921,14 @@ export const RoomStatusIntervalSchema = strictObject({
   sourceEndDate: LocalDate,
   orderArrivalDate: Type.Optional(LocalDate),
   status: RoomStatusStatusSchema,
+  attention: nullable(RoomStatusAttentionSchema),
+  operationalAttention: nullable(RoomStatusOperationalAttentionSchema),
   available: Type.Boolean(),
   blocking: Type.Boolean(),
   sourceKind: RoomStatusSourceKindSchema,
+  sourceCategory: nullable(RoomStatusSourceCategorySchema),
+  freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema),
+  freeStayReason: nullable(RoomStatusDisplayText),
   label: RoomStatusDisplayText,
   primaryOccupantLabel: nullable(ShortText),
   occupantCount: Type.Integer({ minimum: 0, maximum: 1000 }),
@@ -1940,9 +1953,14 @@ export const RoomStatusOperationalTaskSchema = strictObject({
   sourceEndDate: LocalDate,
   orderArrivalDate: Type.Optional(LocalDate),
   status: RoomStatusStatusSchema,
+  attention: nullable(RoomStatusAttentionSchema),
+  operationalAttention: nullable(RoomStatusOperationalAttentionSchema),
   available: Type.Boolean(),
   blocking: Type.Boolean(),
   sourceKind: RoomStatusSourceKindSchema,
+  sourceCategory: nullable(RoomStatusSourceCategorySchema),
+  freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema),
+  freeStayReason: nullable(RoomStatusDisplayText),
   label: RoomStatusDisplayText,
   primaryOccupantLabel: nullable(ShortText),
   occupantCount: Type.Integer({ minimum: 0, maximum: 1000 }),
@@ -1979,6 +1997,12 @@ export const RoomStatusBedOccupancySchema = strictObject({
   totalBedCount: Type.Integer({ minimum: 1 }),
   occupants: Type.Array(RoomStatusBedOccupantSchema, { minItems: 1 })
 });
+export const RoomStatusBedSlotStateSchema = strictObject({
+  serviceDate: LocalDate,
+  inventoryUnitId: Id,
+  inventoryUnitCode: RoomStatusDisplayText,
+  status: RoomStatusStatusSchema
+});
 export const RoomStatusAvailabilitySummarySchema = strictObject({
   serviceDate: LocalDate,
   availableRooms: Type.Integer({ minimum: 0 }),
@@ -1998,10 +2022,12 @@ const RoomStatusUnitBase = {
   buildingCode: nullable(ShortText),
   roomTypeCode: nullable(ShortText),
   pricingProductCode: nullable(ShortText),
+  physicalBedCount: nullable(Type.Integer({ minimum: 1, maximum: 1000 })),
   capacity: Type.Integer({ minimum: 1 }),
   occupancyCapacity: Type.Integer({ minimum: 1, maximum: 1000 }),
   childUnitIds: Type.Array(Id),
   bedOccupancies: Type.Array(RoomStatusBedOccupancySchema),
+  bedSlotStates: Type.Array(RoomStatusBedSlotStateSchema),
   days: Type.Array(RoomStatusDaySchema),
   intervals: Type.Array(RoomStatusIntervalSchema),
   conflicts: Type.Array(RoomStatusConflictSchema),

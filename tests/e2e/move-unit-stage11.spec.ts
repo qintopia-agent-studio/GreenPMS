@@ -178,10 +178,10 @@ async function performMove(page: Page, stay: Stage11MoveFixture): Promise<void> 
 
 async function openDateDrawer(page: Page, stay: Stage11StayFixture): Promise<Locator> {
   await openOrder(page, stay);
-  const button = page.getByRole("button", { name: /调整预订日期|调整退房日期/, exact: true });
+  const button = page.getByRole("button", { name: /调整住宿日期|调整退房日期/, exact: true });
   await expect(button).toBeVisible();
   await button.click();
-  return page.getByRole("dialog", { name: /调整预订日期|调整退房日期/, exact: true });
+  return page.getByRole("dialog", { name: /调整住宿日期|调整退房日期/, exact: true });
 }
 
 async function confirmDateChange(page: Page, drawer: Locator, reviewTitle: RegExp): Promise<void> {
@@ -438,7 +438,7 @@ test("4.4 Scheme B computes equal, non-equal, wholly-earlier, and wholly-later t
       await expect(timeline).toContainText(interval.arrivalDate);
       await expect(timeline).toContainText(interval.departureDate);
     }
-    await confirmDateChange(page, drawer, /调整预订日期/);
+    await confirmDateChange(page, drawer, /调整住宿日期/);
     const view = await getOrderView(page, scheme);
     expect(intervalCodes(view, [scheme.source, scheme.target])).toEqual(scheme.expectedIntervals);
   }

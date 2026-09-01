@@ -22,7 +22,7 @@ import {
   withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type Updateable } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { assertRoomStatusBoard } from "../../apps/web/src/room-status/roomStatusValidation.ts";
@@ -177,15 +177,32 @@ function unitIn(result: RoomStatusBoardDto, unitId: string): RoomStatusUnitDto {
   throw new Error(`Unit ${unitId} is absent from room-status`);
 }
 
+function intervalForOrder(result: RoomStatusBoardDto, unitId: string, orderId: string) {
+  const interval = unitIn(result, unitId).intervals.find((candidate) => candidate.references
+    .some((reference) => reference.type === "ORDER" && reference.id === orderId));
+  if (!interval) throw new Error(`Order ${orderId} is absent from room-status intervals`);
+  return interval;
+}
+
+function taskForOrder(result: RoomStatusBoardDto, orderId: string) {
+  const task = result.operationalTasks.find((candidate) => candidate.references
+    .some((reference) => reference.type === "ORDER" && reference.id === orderId));
+  if (!task) throw new Error(`Order ${orderId} is absent from room-status operational tasks`);
+  return task;
+}
+
 async function createOrder(options: {
   unitId: string;
   arrivalDate: string;
   departureDate: string;
   prefix: string;
   stayType?: "TRANSIENT" | "FREE";
-    freeStayReason?: string;
-    memberContractId?: string;
-    nickname?: string;
+  freeStayReason?: string;
+  memberContractId?: string;
+  nickname?: string;
+  bookingChannelCode?: "WECOM" | "YOUMUDAO" | "CTRIP" | "MEITUAN";
+  channelOrderReference?: string;
+  pricingPolicyVersionId?: string;
 }) {
   return withOrdinaryOrderCreationClock(options.arrivalDate, async () => {
     const stayType = options.stayType ?? "TRANSIENT";
@@ -195,9 +212,9 @@ async function createOrder(options: {
       stayType,
       arrivalDate: options.arrivalDate,
       departureDate: options.departureDate,
-      pricingPolicyVersionId: stayType === "FREE"
+      pricingPolicyVersionId: options.pricingPolicyVersionId ?? (stayType === "FREE"
         ? demo.freePolicyId
-        : testPricingPolicyForDates(options.arrivalDate, options.departureDate),
+        : testPricingPolicyForDates(options.arrivalDate, options.departureDate)),
       ...(options.memberContractId ? { memberContractId: options.memberContractId } : {})
     });
     return execute({
@@ -207,8 +224,10 @@ async function createOrder(options: {
         quoteId: quote.quoteId,
         primaryGuest: { fullName: `Room status ${options.prefix}`, nickname: options.nickname ?? `RS ${options.prefix}` },
         ...(!options.memberContractId && stayType !== "FREE" ? {
-          bookingChannelCode: "WECOM",
-          channelOrderReference: null,
+          bookingChannelCode: options.bookingChannelCode ?? "WECOM",
+          channelOrderReference: options.bookingChannelCode && options.bookingChannelCode !== "WECOM"
+            ? options.channelOrderReference ?? `RS-${options.prefix.toUpperCase()}`
+            : null,
           targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
         } : {}),
         ...(stayType === "FREE" ? { freeStayReason: options.freeStayReason ?? "Volunteer accommodation", freeStayCategoryCode: "RECEPTION" } : {})
@@ -250,6 +269,41 @@ async function markOrderInHouseFixture(orderId: string) {
   }).execute();
   await db.updateTable("orders").set({ status: "CHECKED_IN", version: nextVersion }).where("id", "=", orderId).execute();
   await db.updateTable("stays").set({ status: "IN_HOUSE" }).where("order_id", "=", orderId).execute();
+}
+
+async function updateOrderIdentityForProjectionTest(
+  orderId: string,
+  values: Updateable<Database["orders"]>
+): Promise<void> {
+  await sql`alter table orders disable trigger orders_protect_identity`.execute(db);
+  try {
+    await db.updateTable("orders").set(values).where("id", "=", orderId).execute();
+  } finally {
+    await sql`alter table orders enable trigger orders_protect_identity`.execute(db);
+  }
+}
+
+async function recordFullCollectionForProjectionTest(orderId: string, prefix: string): Promise<void> {
+  const revision = await db.selectFrom("orders as order")
+    .innerJoin("pricing_revisions as revision", "revision.id", "order.current_revision_id")
+    .select("revision.current_contract_amount_minor as amountMinor")
+    .where("order.id", "=", orderId)
+    .executeTakeFirstOrThrow();
+  const amountMinor = Number(revision.amountMinor);
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+    throw new Error(`Expected a positive current contract amount for ${prefix}`);
+  }
+  await execute({
+    commandType: "RECORD_COLLECTION",
+    input: {
+      propertyId: demo.propertyId,
+      orderId,
+      amountMinor,
+      method: "WECOM",
+      transactionReference: `ROOM-STATUS-${prefix.toUpperCase()}-FULL`,
+      note: "room-status projection source fixture"
+    }
+  }, `${prefix}-full-collection`);
 }
 
 async function orderFulfillmentState(orderId: string) {
@@ -338,6 +392,49 @@ describe("PostgreSQL room-status projection", () => {
     });
     expect(filteredEmpty.rooms).toEqual([]);
     expect(filteredEmpty.availabilitySummary).toEqual(unfiltered.availabilitySummary);
+  });
+
+  it("projects authoritative physical-bed counts without substituting occupancy capacity or compatibility capacity", async () => {
+    const fixtures = [
+      { id: "unit_room_status_physical_two", code: "PHYSICAL-2", physicalBedCount: 2, occupancyCapacity: 2 },
+      { id: "unit_room_status_physical_king", code: "PHYSICAL-KING", physicalBedCount: 1, occupancyCapacity: 2 },
+      { id: "unit_room_status_physical_unknown", code: "PHYSICAL-UNKNOWN", physicalBedCount: null, occupancyCapacity: 2 }
+    ] as const;
+    await db.insertInto("inventory_units").values(fixtures.map((fixture) => ({
+      id: fixture.id,
+      property_id: demo.propertyId,
+      kind: "ROOM" as const,
+      parent_room_id: null,
+      code: fixture.code,
+      name: fixture.code,
+      active: true,
+      catalog_version: "test-physical-bed-contract",
+      building_code: "TEST",
+      room_type_code: "TEST_PHYSICAL",
+      pricing_product_code: null,
+      inventory_basis: "INDEPENDENT" as const,
+      code_provenance: "PMS_GENERATED" as const,
+      physical_bed_count: fixture.physicalBedCount,
+      occupancy_capacity: fixture.occupancyCapacity
+    }))).execute();
+
+    const result = await board({
+      arrivalDate: "2034-02-01",
+      departureDate: "2034-02-02",
+      roomType: "TEST_PHYSICAL",
+      pageSize: 200
+    });
+    expect(result.rooms.map((room) => ({
+      id: room.id,
+      physicalBedCount: room.physicalBedCount,
+      capacity: room.capacity,
+      occupancyCapacity: room.occupancyCapacity,
+      bedSlotStates: room.bedSlotStates
+    }))).toEqual([
+      { id: fixtures[0].id, physicalBedCount: 2, capacity: 2, occupancyCapacity: 2, bedSlotStates: [] },
+      { id: fixtures[1].id, physicalBedCount: 1, capacity: 1, occupancyCapacity: 2, bedSlotStates: [] },
+      { id: fixtures[2].id, physicalBedCount: null, capacity: 1, occupancyCapacity: 2, bedSlotStates: [] }
+    ]);
   });
 
   it("counts whole-room business occupancy in split-bed rooms by the room's occupied bed sellable units", async () => {
@@ -469,7 +566,14 @@ describe("PostgreSQL room-status projection", () => {
         ]
       }
     ]);
+    expect(parent.bedSlotStates.filter((slot) => slot.serviceDate === "2029-02-01")).toEqual([
+      { serviceDate: "2029-02-01", inventoryUnitId: demo.bedAId, inventoryUnitCode: "101-A", status: "RESERVED" },
+      { serviceDate: "2029-02-01", inventoryUnitId: demo.bedBId, inventoryUnitCode: "101-B", status: "MAINTENANCE" },
+      { serviceDate: "2029-02-01", inventoryUnitId: demo.bedCId, inventoryUnitCode: "101-C", status: "AVAILABLE" },
+      { serviceDate: "2029-02-01", inventoryUnitId: demo.bedDId, inventoryUnitCode: "101-D", status: "RESERVED" }
+    ]);
     expect(parent.children.every((child) => child.bedOccupancies.length === 0)).toBe(true);
+    expect(parent.children.every((child) => child.bedSlotStates.length === 0)).toBe(true);
 
     const historicalNickname = await createOrder({
       unitId: demo.bedAId,
@@ -532,6 +636,8 @@ describe("PostgreSQL room-status projection", () => {
       }),
       expect.objectContaining({ serviceDate: "2029-02-05", occupiedBedCount: 1, totalBedCount: 4 })
     ]);
+    expect(freeOccupied.bedSlotStates.filter((slot) => slot.serviceDate === "2029-02-04").map((slot) => slot.status))
+      .toEqual(["MAINTENANCE", "RESERVED", "AVAILABLE", "AVAILABLE"]);
 
     const wholeRoom = await createOrder({
       unitId: demo.roomId,
@@ -543,6 +649,8 @@ describe("PostgreSQL room-status projection", () => {
     const wholeRoomBoard = await board({ arrivalDate: "2029-02-07", departureDate: "2029-02-09" });
     const wholeRoomParent = unitIn(wholeRoomBoard, demo.roomId);
     expect(wholeRoomParent.bedOccupancies).toEqual([]);
+    expect(wholeRoomParent.bedSlotStates.filter((slot) => slot.serviceDate === "2029-02-07")
+      .every((slot) => slot.status === "RESERVED")).toBe(true);
     expect(wholeRoomParent.intervals).toEqual(expect.arrayContaining([
       expect.objectContaining({
         actualInventoryUnitId: demo.roomId,
@@ -576,6 +684,11 @@ describe("PostgreSQL room-status projection", () => {
     const unknown = await board({ arrivalDate: "2029-02-10", departureDate: "2029-02-11" });
     expect(unknown.projectionState).toBe("PARTIAL");
     expect(unitIn(unknown, demo.roomId).bedOccupancies).toEqual([]);
+    expect(unitIn(unknown, demo.roomId).bedSlotStates.filter((slot) => slot.serviceDate === "2029-02-10"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ inventoryUnitId: demo.bedAId, status: "UNKNOWN" }),
+        expect.objectContaining({ inventoryUnitId: demo.bedBId, status: "RESERVED" })
+      ]));
 
     await createOrder({
       unitId: demo.bedDId,
@@ -602,6 +715,9 @@ describe("PostgreSQL room-status projection", () => {
     const parentUnknown = await board({ arrivalDate: "2029-02-14", departureDate: "2029-02-15" });
     expect(parentUnknown.projectionState).toBe("PARTIAL");
     expect(unitIn(parentUnknown, demo.roomId).bedOccupancies).toEqual([]);
+    expect(unitIn(parentUnknown, demo.roomId).bedSlotStates
+      .filter((slot) => slot.serviceDate === "2029-02-14")
+      .every((slot) => slot.status === "UNKNOWN")).toBe(true);
 
     const duplicate = await createOrder({
       unitId: demo.bedCId,
@@ -1081,12 +1197,14 @@ describe("PostgreSQL room-status projection", () => {
       actualInventoryUnitId: rooms[3]!.id,
       startDate: yesterday,
       endDate: businessDate,
+      operationalAttention: null,
       references: expect.arrayContaining([expect.objectContaining({ type: "STAY", id: movedStayId })])
     });
     expect(movedIntervalIn(rooms[4]!.id)).toMatchObject({
       actualInventoryUnitId: rooms[4]!.id,
       startDate: businessDate,
       endDate: tomorrow,
+      operationalAttention: null,
       references: expect.arrayContaining([expect.objectContaining({ type: "STAY", id: movedStayId })])
     });
     expect(taskForOrder(overdueArrivalOrderId)).toMatchObject({
@@ -1098,6 +1216,7 @@ describe("PostgreSQL room-status projection", () => {
       sourceStartDate: yesterday,
       sourceEndDate: tomorrow,
       status: "RESERVED",
+      operationalAttention: "OVERDUE_RESERVED",
       available: false,
       blocking: true,
       reason: `计划到店日 ${yesterday} 已早于营业日 ${businessDate}，订单仍处于已预订`,
@@ -1116,6 +1235,7 @@ describe("PostgreSQL room-status projection", () => {
       sourceStartDate: twoDaysAgo,
       sourceEndDate: yesterday,
       status: "IN_HOUSE",
+      operationalAttention: "OVERDUE_IN_HOUSE",
       available: true,
       blocking: false,
       reason: `计划退房日 ${yesterday} 已早于营业日 ${businessDate}，订单仍处于在住`,
@@ -1140,6 +1260,20 @@ describe("PostgreSQL room-status projection", () => {
       .some((reference) => reference.type === "ORDER" && reference.id === overdueDepartureOrderId))).toBe(false);
     expect(overdueUnit.conflicts.some((conflict) => conflict.blockingFactKind === "OVERDUE_IN_HOUSE")).toBe(false);
     expect(overdueUnit.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled)).toBe(true);
+
+    const historicalOverdueBoard = await board({ arrivalDate: twoDaysAgo, departureDate: businessDate, pageSize: 200 });
+    const overdueHistoricalInterval = intervalForOrder(
+      historicalOverdueBoard,
+      rooms[6]!.id,
+      overdueDepartureOrderId
+    );
+    expect(overdueHistoricalInterval).toMatchObject({
+      startDate: twoDaysAgo,
+      endDate: yesterday,
+      status: "IN_HOUSE",
+      operationalAttention: "OVERDUE_IN_HOUSE"
+    });
+    expect(overdueHistoricalInterval.endDate < businessDate).toBe(true);
 
     const departureUnit = unitIn(todayBoard, rooms[2]!.id);
     expect(departureUnit.days[0]).toMatchObject({ serviceDate: businessDate, status: "IN_HOUSE", available: false });
@@ -1198,6 +1332,7 @@ describe("PostgreSQL room-status projection", () => {
       taskKind: "EXCEPTION",
       sourceKind: "FREE_STAY",
       status: "RESERVED",
+      operationalAttention: "OVERDUE_RESERVED",
       blocking: true
     });
     expect(taskForOrder(overdueFreeStayOrderId)?.reason).toContain(longFreeStayReason);
@@ -1216,21 +1351,64 @@ describe("PostgreSQL room-status projection", () => {
     const orderArrivalDate = shiftLocalDate(businessDate, -2);
     const moveDate = shiftLocalDate(businessDate, 1);
     const departureDate = shiftLocalDate(businessDate, 3);
+    const parentRoomId = "unit_room_status_overdue_move_fixture";
+    const sourceBedId = `${parentRoomId}_bed_a`;
+    const destinationBedId = `${parentRoomId}_bed_b`;
+    await db.insertInto("inventory_units").values({
+      id: parentRoomId,
+      property_id: demo.propertyId,
+      kind: "ROOM",
+      parent_room_id: null,
+      code: "OVERDUE-MOVE",
+      name: "Overdue move fixture room",
+      active: true,
+      catalog_version: "test-overdue-move",
+      building_code: "TEST",
+      room_type_code: "shared_bath_double",
+      pricing_product_code: "shared_bath_double_whole_room",
+      inventory_basis: "WHOLE_ROOM_COMBINATION",
+      code_provenance: "PMS_GENERATED",
+      physical_bed_count: 2,
+      occupancy_capacity: 2
+    }).execute();
+    await db.insertInto("inventory_units").values([sourceBedId, destinationBedId].map((id, index) => ({
+      id,
+      property_id: demo.propertyId,
+      kind: "BED" as const,
+      parent_room_id: parentRoomId,
+      code: `OVERDUE-MOVE-${index === 0 ? "A" : "B"}`,
+      name: `Overdue move fixture bed ${index === 0 ? "A" : "B"}`,
+      active: true,
+      catalog_version: "test-overdue-move",
+      building_code: "TEST",
+      room_type_code: "shared_bath_double",
+      pricing_product_code: "shared_bath_double_bed",
+      inventory_basis: "INDEPENDENT" as const,
+      code_provenance: "PMS_GENERATED" as const,
+      physical_bed_count: null,
+      occupancy_capacity: 1
+    }))).execute();
     const created = await createOrder({
-      unitId: demo.bedAId,
+      unitId: sourceBedId,
       arrivalDate: businessDate,
       departureDate,
-      prefix: "overdue-prearranged-bed-move"
+      prefix: "overdue-prearranged-bed-move",
+      bookingChannelCode: "YOUMUDAO"
     });
     const orderId = created.result!.orderId as string;
-
+    const currentAmount = await db.selectFrom("orders as order")
+      .innerJoin("pricing_revisions as revision", "revision.id", "order.current_revision_id")
+      .select("revision.current_contract_amount_minor")
+      .where("order.id", "=", orderId)
+      .executeTakeFirstOrThrow();
     const moved = await execute({
       commandType: "MOVE_UNIT",
       input: {
         propertyId: demo.propertyId,
         orderId,
-        newInventoryUnitId: demo.bedBId,
-        effectiveDate: moveDate
+        newInventoryUnitId: destinationBedId,
+        effectiveDate: moveDate,
+        targetCurrentContractAmountMinor: currentAmount.current_contract_amount_minor
       }
     }, "overdue-prearranged-bed-move");
     expect(moved.executionStatus).toBe("EXECUTED");
@@ -1248,9 +1426,9 @@ describe("PostgreSQL room-status projection", () => {
       .orderBy("claim.service_date")
       .execute();
     expect(activeClaims).toEqual([
-      { service_date: businessDate, inventory_unit_id: demo.bedAId },
-      { service_date: moveDate, inventory_unit_id: demo.bedBId },
-      { service_date: shiftLocalDate(moveDate, 1), inventory_unit_id: demo.bedBId }
+      { service_date: businessDate, inventory_unit_id: sourceBedId },
+      { service_date: moveDate, inventory_unit_id: destinationBedId },
+      { service_date: shiftLocalDate(moveDate, 1), inventory_unit_id: destinationBedId }
     ]);
 
     const result = await board({
@@ -1260,12 +1438,12 @@ describe("PostgreSQL room-status projection", () => {
     });
     const belongsToOrder = (interval: RoomStatusUnitDto["intervals"][number]) => interval.references
       .some((reference) => reference.type === "ORDER" && reference.id === orderId);
-    const originalRun = unitIn(result, demo.bedAId).intervals.find(belongsToOrder);
-    const movedRun = unitIn(result, demo.bedBId).intervals.find(belongsToOrder);
-    const parentRuns = unitIn(result, demo.roomId).intervals.filter(belongsToOrder);
+    const originalRun = unitIn(result, sourceBedId).intervals.find(belongsToOrder);
+    const movedRun = unitIn(result, destinationBedId).intervals.find(belongsToOrder);
+    const parentRuns = unitIn(result, parentRoomId).intervals.filter(belongsToOrder);
 
     expect(originalRun).toMatchObject({
-      actualInventoryUnitId: demo.bedAId,
+      actualInventoryUnitId: sourceBedId,
       startDate: businessDate,
       endDate: moveDate,
       sourceStartDate: businessDate,
@@ -1274,7 +1452,7 @@ describe("PostgreSQL room-status projection", () => {
       status: "RESERVED"
     });
     expect(movedRun).toMatchObject({
-      actualInventoryUnitId: demo.bedBId,
+      actualInventoryUnitId: destinationBedId,
       startDate: moveDate,
       endDate: departureDate,
       sourceStartDate: moveDate,
@@ -1283,7 +1461,64 @@ describe("PostgreSQL room-status projection", () => {
       status: "RESERVED"
     });
     expect(parentRuns).toHaveLength(2);
-    expect(parentRuns.map((interval) => interval.actualInventoryUnitId).sort()).toEqual([demo.bedAId, demo.bedBId].sort());
+    expect(parentRuns.map((interval) => interval.actualInventoryUnitId).sort()).toEqual([sourceBedId, destinationBedId].sort());
+  });
+
+  it("keeps an ended overdue reservation task healthy without projecting debt outside its stay interval", async () => {
+    const baseline = await board({ arrivalDate: "2030-02-01", departureDate: "2030-02-02" });
+    const businessDate = baseline.businessDate;
+    const arrivalDate = shiftLocalDate(businessDate, -3);
+    const departureDate = shiftLocalDate(businessDate, -1);
+    const created = await withPropertyClockForTesting(
+      new Date(`${arrivalDate}T12:00:00.000Z`),
+      () => createOrder({
+        unitId: demo.secondRoomId,
+        arrivalDate,
+        departureDate,
+        prefix: "ended-overdue-reserved-attention"
+      })
+    );
+    const orderId = created.result!.orderId as string;
+
+    const result = await board({ arrivalDate: businessDate, departureDate: shiftLocalDate(businessDate, 1) });
+    expect(taskForOrder(result, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: null,
+      operationalAttention: "OVERDUE_RESERVED"
+    });
+  });
+
+  it("fails an ended overdue reservation task closed when its current pricing revision is missing", async () => {
+    const baseline = await board({ arrivalDate: "2030-02-01", departureDate: "2030-02-02" });
+    const businessDate = baseline.businessDate;
+    const arrivalDate = shiftLocalDate(businessDate, -3);
+    const departureDate = shiftLocalDate(businessDate, -1);
+    const created = await withPropertyClockForTesting(
+      new Date(`${arrivalDate}T12:00:00.000Z`),
+      () => createOrder({
+        unitId: demo.secondRoomId,
+        arrivalDate,
+        departureDate,
+        prefix: "ended-overdue-missing-current-revision"
+      })
+    );
+    const orderId = created.result!.orderId as string;
+    await db.updateTable("orders").set({ current_revision_id: null }).where("id", "=", orderId).execute();
+
+    const result = await board({ arrivalDate: businessDate, departureDate: shiftLocalDate(businessDate, 1) });
+    expect(result.projectionState).toBe("PARTIAL");
+    expect(taskForOrder(result, orderId)).toMatchObject({
+      taskKind: "EXCEPTION",
+      status: "UNKNOWN",
+      attention: null,
+      operationalAttention: null,
+      available: true,
+      blocking: false,
+      primaryOccupantLabel: null,
+      occupantCount: 0,
+      occupants: [],
+      allowedActions: []
+    });
   });
 
   it("fails closed consistently in the grid and task projection when a current lodging Claim is missing", async () => {
@@ -1526,6 +1761,11 @@ describe("PostgreSQL room-status projection", () => {
       expect(room.childUnitIds).toEqual([`${id}_bed_a`, `${id}_bed_b`]);
       expect(room.children.map((child) => child.id)).toEqual([`${id}_bed_a`, `${id}_bed_b`]);
       expect(room.children.every((child) => child.active)).toBe(true);
+      expect(room.physicalBedCount).toBe(2);
+      expect(room.bedSlotStates.filter((slot) => slot.serviceDate === arrivalDate)).toEqual([
+        expect.objectContaining({ inventoryUnitId: `${id}_bed_a`, status: "AVAILABLE" }),
+        expect.objectContaining({ inventoryUnitId: `${id}_bed_b`, status: "AVAILABLE" })
+      ]);
       expect(activeTree.operationalTasks.filter((task) => task.actualInventoryUnitId.startsWith(`${id}_bed_`)))
         .toEqual(expect.arrayContaining([
           expect.objectContaining({
@@ -1638,7 +1878,14 @@ describe("PostgreSQL room-status projection", () => {
       }
     }, "active-tree-hidden-maintenance-release");
     await db.updateTable("inventory_units").set({ active: false }).where("id", "=", hiddenBedId).execute();
-    expect((await board({ arrivalDate, departureDate, pageSize: 200 })).projectionState).toBe("READY");
+    const releasedHiddenFact = await board({ arrivalDate, departureDate, pageSize: 200 });
+    expect(releasedHiddenFact.projectionState).toBe("READY");
+    expect(unitIn(releasedHiddenFact, "unit_room_105").bedSlotStates
+      .filter((slot) => slot.serviceDate === arrivalDate)
+      .map((slot) => slot.inventoryUnitId)).toEqual([
+        "unit_room_105_bed_a",
+        "unit_room_105_bed_b"
+      ]);
 
     const malformedRoomId = "unit_room_status_active_tree_incomplete";
     await db.insertInto("inventory_units").values({
@@ -2014,6 +2261,8 @@ describe("PostgreSQL room-status projection", () => {
     expect(historical).toMatchObject({
       sourceKind: "ORDER",
       status: "ARREARS",
+      attention: "ARREARS",
+      label: `已结单 ${orderId}`,
       startDate: arrivalDate,
       endDate: businessDate,
       available: true,
@@ -2096,6 +2345,8 @@ describe("PostgreSQL room-status projection", () => {
     const historical = bed.intervals.find((interval) => interval.references.some((item) => item.type === "ORDER" && item.id === orderId));
     expect(historical).toMatchObject({
       status: "ARREARS",
+      attention: "ARREARS",
+      label: `已结单 ${orderId}`,
       startDate: arrivalDate,
       endDate: businessDate,
       available: true,
@@ -2610,6 +2861,871 @@ describe("PostgreSQL room-status projection", () => {
     expect(unitIn(unknown, demo.secondRoomId).allowedActions).toEqual([]);
   });
 
+  it("fails closed on an active order Claim outside the order interval at its actual unit and service date", async () => {
+    const arrivalDate = "2032-05-01";
+    const departureDate = "2032-05-02";
+    const queryDepartureDate = "2032-05-03";
+    const created = await createOrder({
+      unitId: demo.bedAId,
+      arrivalDate,
+      departureDate,
+      prefix: "order-claim-outside-order-interval"
+    });
+    const claimId = "claim_outside_current_order_interval";
+    const orderId = created.result!.orderId as string;
+
+    await sql`alter table inventory_claims disable trigger inventory_claims_validate_source`.execute(db);
+    try {
+      await db.insertInto("inventory_claims").values({
+        id: claimId,
+        property_id: demo.propertyId,
+        room_id: demo.roomId,
+        inventory_unit_id: demo.bedAId,
+        service_date: departureDate,
+        source_type: "ORDER_SEGMENT",
+        source_id: created.result!.segmentId as string,
+        active: true,
+        released_at: null
+      }).execute();
+    } finally {
+      await sql`alter table inventory_claims enable trigger inventory_claims_validate_source`.execute(db);
+    }
+
+    const result = await board({ arrivalDate, departureDate: queryDepartureDate });
+    const actualUnit = unitIn(result, demo.bedAId);
+    const legalInterval = intervalForOrder(result, demo.bedAId, orderId);
+    const damagedInterval = actualUnit.intervals.find((interval) => interval.references
+      .some((item) => item.type === "CLAIM" && item.id === claimId));
+
+    expect(result.projectionState).toBe("PARTIAL");
+    expect(actualUnit.days.find((day) => day.serviceDate === arrivalDate)).toMatchObject({
+      status: "UNKNOWN",
+      available: false
+    });
+    expect(legalInterval).toMatchObject({
+      actualInventoryUnitId: demo.bedAId,
+      startDate: arrivalDate,
+      endDate: departureDate,
+      sourceStartDate: arrivalDate,
+      sourceEndDate: departureDate,
+      status: "UNKNOWN",
+      attention: null,
+      operationalAttention: null,
+      available: false,
+      blocking: true,
+      primaryOccupantLabel: null,
+      occupantCount: 0,
+      occupants: [],
+      allowedActions: []
+    });
+    expect(actualUnit.days.find((day) => day.serviceDate === departureDate)).toMatchObject({
+      status: "UNKNOWN",
+      available: false
+    });
+    expect(damagedInterval).toMatchObject({
+      actualInventoryUnitId: demo.bedAId,
+      startDate: departureDate,
+      endDate: queryDepartureDate,
+      sourceStartDate: departureDate,
+      sourceEndDate: queryDepartureDate,
+      status: "UNKNOWN",
+      attention: null,
+      operationalAttention: null,
+      available: false,
+      blocking: true,
+      sourceKind: "ORDER",
+      primaryOccupantLabel: null,
+      occupantCount: 0,
+      occupants: [],
+      claimIds: [claimId],
+      allowedActions: []
+    });
+    expect(damagedInterval?.references).toEqual([
+      { type: "CLAIM", id: claimId, label: `Claim ${claimId}`, href: null }
+    ]);
+    expect(damagedInterval?.conflicts).toEqual([
+      expect.objectContaining({
+        blockingFactKind: "CLAIM",
+        claimId,
+        claimIds: [claimId],
+        actualInventoryUnitId: demo.bedAId,
+        startDate: departureDate,
+        endDate: queryDepartureDate,
+        sourceReference: { type: "CLAIM", id: claimId, label: `Claim ${claimId}`, href: null },
+        blocking: true
+      })
+    ]);
+  });
+
+  it("projects active WECOM reserved arrears as attention without changing status, actions, filters, or idempotent revision", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "active-arrears"
+    });
+    const orderId = created.result!.orderId as string;
+
+    const initial = await board({ arrivalDate: businessDate, departureDate });
+    const initialInterval = intervalForOrder(initial, demo.secondRoomId, orderId);
+    expect(initialInterval).toMatchObject({
+      sourceKind: "ORDER",
+      status: "RESERVED",
+      attention: "ARREARS",
+      available: false,
+      blocking: true,
+      allowedActions: [expect.objectContaining({ code: "OPEN_ORDER", enabled: true })]
+    });
+    expect(initialInterval.allowedActions.map((action) => action.code)).toEqual(["OPEN_ORDER"]);
+    expect(unitIn(initial, demo.secondRoomId).days[0]).toMatchObject({
+      status: "RESERVED",
+      available: false,
+      intervalIds: [initialInterval.id]
+    });
+    expect(initial.filterOptions.statuses).toContain("RESERVED");
+    expect(initial.filterOptions.statuses).not.toContain("ARREARS");
+    expect(taskForOrder(initial, orderId)).toMatchObject({
+      taskKind: "ARRIVAL",
+      status: "RESERVED",
+      attention: "ARREARS",
+      allowedActions: [expect.objectContaining({ code: "OPEN_ORDER", enabled: true })]
+    });
+
+    await execute({
+      commandType: "REPRICE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        targetCurrentContractAmountMinor: 10_000
+      }
+    }, "active-arrears-reprice");
+    const afterReprice = await board({ arrivalDate: businessDate, departureDate });
+    expect(intervalForOrder(afterReprice, demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: "ARREARS"
+    });
+
+    const partialCollectionPrepared = await prepare({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 4_000,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-ARREARS-PARTIAL",
+        note: "partial collection keeps active reserved arrears visible"
+      }
+    }, "active-arrears-partial");
+    const partialCollection = await confirmPrepared(partialCollectionPrepared, "active-arrears-partial");
+    const afterPartial = await board({ arrivalDate: businessDate, departureDate });
+    expect(Number(afterPartial.revision)).toBe(Number(afterReprice.revision) + 1);
+    expect(intervalForOrder(afterPartial, demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: "ARREARS"
+    });
+    const replayPartial = await confirmCommandPreview(
+      db,
+      writePrincipal,
+      partialCollectionPrepared.preview.previewId,
+      partialCollection.confirmation,
+      partialCollection.confirmMetadata
+    );
+    expect(replayPartial).toEqual(partialCollection.receipt);
+    expect((await board({ arrivalDate: businessDate, departureDate })).revision).toBe(afterPartial.revision);
+
+    await execute({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 6_000,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-ARREARS-BALANCE",
+        note: "balance collection clears active reserved arrears attention"
+      }
+    }, "active-arrears-balance");
+    const afterFull = await board({ arrivalDate: businessDate, departureDate });
+    expect(Number(afterFull.revision)).toBe(Number(afterPartial.revision) + 1);
+    expect(intervalForOrder(afterFull, demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: null
+    });
+    expect(taskForOrder(afterFull, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: null
+    });
+
+    const refund = await execute({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 1_000,
+        referencesFactId: partialCollection.receipt.factRefs[0]!,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-ARREARS-REFUND",
+        note: "refund reopens active reserved arrears attention"
+      }
+    }, "active-arrears-refund");
+    const afterRefund = await board({ arrivalDate: businessDate, departureDate });
+    expect(Number(afterRefund.revision)).toBe(Number(afterFull.revision) + 1);
+    expect(intervalForOrder(afterRefund, demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: "ARREARS"
+    });
+
+    const reverseRefundPrepared = await prepare({
+      commandType: "REVERSE_FACT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        reversesFactId: refund.factRefs[0]!,
+        note: "reverse refund clears active reserved arrears attention again"
+      }
+    }, "active-arrears-reverse-refund");
+    const reverseRefund = await confirmPrepared(reverseRefundPrepared, "active-arrears-reverse-refund");
+    const afterReverseRefund = await board({ arrivalDate: businessDate, departureDate });
+    expect(Number(afterReverseRefund.revision)).toBe(Number(afterRefund.revision) + 1);
+    expect(intervalForOrder(afterReverseRefund, demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: null
+    });
+    const replayReverseRefund = await confirmCommandPreview(
+      db,
+      writePrincipal,
+      reverseRefundPrepared.preview.previewId,
+      reverseRefund.confirmation,
+      reverseRefund.confirmMetadata
+    );
+    expect(replayReverseRefund).toEqual(reverseRefund.receipt);
+    expect((await board({ arrivalDate: businessDate, departureDate })).revision).toBe(afterReverseRefund.revision);
+
+    await execute({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 1_000,
+        referencesFactId: partialCollection.receipt.factRefs[0]!,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-ARREARS-REFUND-AGAIN",
+        note: "second refund after refund reversal is valid"
+      }
+    }, "active-arrears-refund-again");
+    const afterSecondRefund = await board({ arrivalDate: businessDate, departureDate });
+    expect(Number(afterSecondRefund.revision)).toBe(Number(afterReverseRefund.revision) + 1);
+    expect(intervalForOrder(afterSecondRefund, demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: "ARREARS"
+    });
+  });
+
+  it("projects migration 009 legacy direct reservations with a null booking channel as arrears", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "legacy-null-channel-arrears"
+    });
+    const orderId = created.result!.orderId as string;
+
+    await sql`alter table orders disable trigger orders_protect_identity`.execute(db);
+    try {
+      await db.updateTable("orders")
+        .set({ booking_channel_code: null })
+        .where("id", "=", orderId)
+        .executeTakeFirstOrThrow();
+    } finally {
+      await sql`alter table orders enable trigger orders_protect_identity`.execute(db);
+    }
+
+    const result = await board({ arrivalDate: businessDate, departureDate });
+    expect(result.projectionState).toBe("READY");
+    expect(intervalForOrder(result, demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: "ARREARS",
+      available: false,
+      blocking: true
+    });
+    expect(taskForOrder(result, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: "ARREARS"
+    });
+  });
+
+  it("limits active arrears attention to eligible service dates and excludes external, free, and member orders", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const priorDate = shiftLocalDate(businessDate, -1);
+    const futureDate = shiftLocalDate(businessDate, 1);
+    const overdue = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: priorDate,
+      departureDate: futureDate,
+      prefix: "cross-business-date"
+    });
+    const overdueOrderId = overdue.result!.orderId as string;
+    const crossed = await board({ arrivalDate: priorDate, departureDate: futureDate });
+    const overdueIntervals = unitIn(crossed, demo.secondRoomId).intervals
+      .filter((interval) => interval.references.some((reference) => reference.type === "ORDER" && reference.id === overdueOrderId))
+      .sort((left, right) => left.startDate.localeCompare(right.startDate));
+    expect(overdueIntervals).toEqual([
+      expect.objectContaining({
+        startDate: priorDate,
+        endDate: businessDate,
+        status: "RESERVED",
+        attention: null,
+        operationalAttention: "OVERDUE_RESERVED"
+      }),
+      expect.objectContaining({
+        startDate: businessDate,
+        endDate: futureDate,
+        status: "RESERVED",
+        attention: "ARREARS",
+        operationalAttention: "OVERDUE_RESERVED"
+      })
+    ]);
+    expect(taskForOrder(crossed, overdueOrderId)).toMatchObject({
+      taskKind: "EXCEPTION",
+      status: "RESERVED",
+      attention: "ARREARS",
+      operationalAttention: "OVERDUE_RESERVED",
+      sourceCategory: "DIRECT",
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    });
+
+    const external = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: "2032-06-01",
+      departureDate: "2032-06-02",
+      prefix: "external-attention",
+      bookingChannelCode: "YOUMUDAO",
+      channelOrderReference: "EXT-ROOM-STATUS-ARREARS"
+    });
+    const ctrip = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: "2032-06-04",
+      departureDate: "2032-06-05",
+      prefix: "ctrip-source-badge",
+      bookingChannelCode: "CTRIP",
+      channelOrderReference: "CTRIP-ROOM-STATUS-SOURCE"
+    });
+    const meituan = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: "2032-06-05",
+      departureDate: "2032-06-06",
+      prefix: "meituan-source-badge",
+      bookingChannelCode: "MEITUAN",
+      channelOrderReference: "MEITUAN-ROOM-STATUS-SOURCE"
+    });
+    const free = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: "2032-06-02",
+      departureDate: "2032-06-03",
+      prefix: "free-attention",
+      stayType: "FREE"
+    });
+    const member = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: "2032-06-03",
+      departureDate: "2032-06-04",
+      prefix: "member-attention",
+      memberContractId: demo.memberContractId
+    });
+    const exclusions = await board({ arrivalDate: "2032-06-01", departureDate: "2032-06-06" });
+    expect(intervalForOrder(exclusions, demo.secondRoomId, external.result!.orderId as string)).toMatchObject({
+      attention: null,
+      sourceCategory: "YOUMUDAO",
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    });
+    expect(intervalForOrder(exclusions, demo.secondRoomId, ctrip.result!.orderId as string)).toMatchObject({
+      attention: null,
+      sourceCategory: "CTRIP"
+    });
+    expect(intervalForOrder(exclusions, demo.secondRoomId, meituan.result!.orderId as string)).toMatchObject({
+      attention: null,
+      sourceCategory: "MEITUAN"
+    });
+    expect(intervalForOrder(exclusions, demo.secondRoomId, free.result!.orderId as string)).toMatchObject({
+      attention: null,
+      sourceKind: "FREE_STAY",
+      sourceCategory: "FREE_STAY",
+      freeStayCategoryCode: "RECEPTION",
+      freeStayReason: "Volunteer accommodation"
+    });
+    expect(intervalForOrder(exclusions, demo.roomId, member.result!.orderId as string)).toMatchObject({
+      attention: null,
+      sourceCategory: "MEMBER",
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    });
+  });
+
+  it("classifies legal active member links from either member field while tolerating conversion-style WECOM residue", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const memberIdOnly = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "member-id-wecom-source"
+    });
+    const contractIdOnly = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "member-contract-wecom-source"
+    });
+    const memberIdOnlyOrderId = memberIdOnly.result!.orderId as string;
+    const contractIdOnlyOrderId = contractIdOnly.result!.orderId as string;
+    await updateOrderIdentityForProjectionTest(memberIdOnlyOrderId, { member_id: demo.memberId });
+    await updateOrderIdentityForProjectionTest(contractIdOnlyOrderId, { member_contract_id: demo.memberContractId });
+
+    const result = await board({ arrivalDate: businessDate, departureDate });
+    expect(result.projectionState).toBe("READY");
+    for (const [unitId, orderId] of [
+      [demo.secondRoomId, memberIdOnlyOrderId],
+      [demo.roomId, contractIdOnlyOrderId]
+    ] as const) {
+      expect(intervalForOrder(result, unitId, orderId)).toMatchObject({
+        status: "RESERVED",
+        sourceCategory: "MEMBER",
+        freeStayCategoryCode: null,
+        freeStayReason: null,
+        primaryOccupantLabel: expect.any(String)
+      });
+      expect(taskForOrder(result, orderId)).toMatchObject({
+        status: "RESERVED",
+        sourceCategory: "MEMBER",
+        freeStayCategoryCode: null,
+        freeStayReason: null
+      });
+    }
+  });
+
+  it("fails closed when active lodging source relationships are contradictory", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const freeWithChannel = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "free-channel-conflict",
+      stayType: "FREE"
+    });
+    const memberWithExternalChannel = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "member-external-conflict"
+    });
+    const freeOrderId = freeWithChannel.result!.orderId as string;
+    const memberOrderId = memberWithExternalChannel.result!.orderId as string;
+    await updateOrderIdentityForProjectionTest(freeOrderId, { booking_channel_code: "WECOM" });
+    await updateOrderIdentityForProjectionTest(memberOrderId, {
+      member_id: demo.memberId,
+      booking_channel_code: "CTRIP",
+      channel_order_reference: "CTRIP-CONFLICT"
+    });
+
+    const result = await board({ arrivalDate: businessDate, departureDate });
+    expect(result.projectionState).toBe("PARTIAL");
+    for (const [unitId, orderId] of [
+      [demo.secondRoomId, freeOrderId],
+      [demo.roomId, memberOrderId]
+    ] as const) {
+      expect(intervalForOrder(result, unitId, orderId)).toMatchObject({
+        status: "UNKNOWN",
+        sourceCategory: null,
+        freeStayCategoryCode: null,
+        freeStayReason: null,
+        primaryOccupantLabel: null,
+        occupantCount: 0,
+        occupants: [],
+        allowedActions: []
+      });
+      expect(taskForOrder(result, orderId)).toMatchObject({
+        status: "UNKNOWN",
+        sourceCategory: null,
+        freeStayCategoryCode: null,
+        freeStayReason: null,
+        primaryOccupantLabel: null,
+        occupantCount: 0,
+        occupants: [],
+        allowedActions: []
+      });
+    }
+  });
+
+  it("normalizes historical source metadata without losing valid completed timelines", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const legacyFreeArrival = shiftLocalDate(businessDate, -8);
+    const legacyFreeDeparture = shiftLocalDate(businessDate, -7);
+    const damagedExternalArrival = shiftLocalDate(businessDate, -6);
+    const damagedExternalDeparture = shiftLocalDate(businessDate, -5);
+    const memberArrival = shiftLocalDate(businessDate, -4);
+    const memberDeparture = shiftLocalDate(businessDate, -3);
+    const damagedFreeArrival = shiftLocalDate(businessDate, -2);
+    const damagedFreeDeparture = shiftLocalDate(businessDate, -1);
+    const legacyFree = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: legacyFreeArrival,
+      departureDate: legacyFreeDeparture,
+      prefix: "legacy-free-source",
+      stayType: "FREE"
+    });
+    const damagedExternal = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: damagedExternalArrival,
+      departureDate: damagedExternalDeparture,
+      prefix: "completed-external-source"
+    });
+    const completedMember = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: memberArrival,
+      departureDate: memberDeparture,
+      prefix: "completed-member-wecom-source"
+    });
+    const damagedFree = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: damagedFreeArrival,
+      departureDate: damagedFreeDeparture,
+      prefix: "completed-free-missing-reason",
+      stayType: "FREE"
+    });
+    const legacyFreeOrderId = legacyFree.result!.orderId as string;
+    const damagedExternalOrderId = damagedExternal.result!.orderId as string;
+    const completedMemberOrderId = completedMember.result!.orderId as string;
+    const damagedFreeOrderId = damagedFree.result!.orderId as string;
+    await recordFullCollectionForProjectionTest(damagedExternalOrderId, "completed-external-source");
+    await recordFullCollectionForProjectionTest(completedMemberOrderId, "completed-member-wecom-source");
+    for (const [orderId, prefix] of [
+      [legacyFreeOrderId, "legacy-free-source"],
+      [damagedExternalOrderId, "completed-external-source"],
+      [completedMemberOrderId, "completed-member-wecom-source"],
+      [damagedFreeOrderId, "completed-free-missing-reason"]
+    ] as const) {
+      await markOrderInHouseFixture(orderId);
+      await execute({
+        commandType: "CHECK_OUT",
+        input: { propertyId: demo.propertyId, orderId }
+      }, `${prefix}-check-out`);
+    }
+    await updateOrderIdentityForProjectionTest(legacyFreeOrderId, {
+      free_stay_category_code: null,
+      free_stay_reason: null
+    });
+    await updateOrderIdentityForProjectionTest(damagedExternalOrderId, {
+      booking_channel_code: "CTRIP",
+      channel_order_reference: null
+    });
+    await updateOrderIdentityForProjectionTest(completedMemberOrderId, { member_id: demo.memberId });
+    await updateOrderIdentityForProjectionTest(damagedFreeOrderId, { free_stay_reason: null });
+
+    const result = await board({ arrivalDate: legacyFreeArrival, departureDate: damagedFreeDeparture });
+    expect(result.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(result, demo.secondRoomId, legacyFreeOrderId)).toMatchObject({
+      status: "SETTLED",
+      sourceKind: "FREE_STAY",
+      sourceCategory: null,
+      freeStayCategoryCode: null,
+      freeStayReason: null,
+      primaryOccupantLabel: "RS legacy-free-source"
+    });
+    expect(intervalForOrder(result, demo.secondRoomId, damagedExternalOrderId)).toMatchObject({
+      status: "UNKNOWN",
+      sourceKind: "ORDER",
+      sourceCategory: null,
+      freeStayCategoryCode: null,
+      freeStayReason: null,
+      primaryOccupantLabel: null,
+      occupantCount: 0,
+      occupants: [],
+      allowedActions: []
+    });
+    expect(intervalForOrder(result, demo.roomId, completedMemberOrderId)).toMatchObject({
+      status: "SETTLED",
+      sourceKind: "ORDER",
+      sourceCategory: "MEMBER",
+      freeStayCategoryCode: null,
+      freeStayReason: null,
+      primaryOccupantLabel: "RS completed-member-wecom-source"
+    });
+    expect(intervalForOrder(result, demo.secondRoomId, damagedFreeOrderId)).toMatchObject({
+      status: "UNKNOWN",
+      sourceKind: "FREE_STAY",
+      sourceCategory: null,
+      freeStayCategoryCode: null,
+      freeStayReason: null,
+      primaryOccupantLabel: null,
+      occupantCount: 0,
+      occupants: [],
+      allowedActions: []
+    });
+  });
+
+  it("fails closed instead of guessing active reserved arrears when the current pricing revision is missing", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "missing-current-revision"
+    });
+    const orderId = created.result!.orderId as string;
+    await db.updateTable("orders").set({ current_revision_id: null }).where("id", "=", orderId).execute();
+
+    const missingRevision = await board({ arrivalDate: businessDate, departureDate });
+    expect(missingRevision.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(missingRevision, demo.secondRoomId, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      available: false,
+      blocking: true,
+      allowedActions: []
+    });
+    expect(taskForOrder(missingRevision, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      allowedActions: []
+    });
+  });
+
+  it("fails closed when current cash lines keep the same amount but no longer match the stay timeline", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "damaged-cash-line-timeline",
+      pricingPolicyVersionId: demo.publicPricingPolicyId
+    });
+    const orderId = created.result!.orderId as string;
+    const revision = await db.selectFrom("orders as order")
+      .innerJoin("pricing_revisions as revision", "revision.id", "order.current_revision_id")
+      .select(["revision.id", "revision.cash_lines"])
+      .where("order.id", "=", orderId)
+      .executeTakeFirstOrThrow();
+    const originalCashLines = revision.cash_lines as Array<{
+      lineKind: string;
+      amount: { minorUnits: number };
+      calculationSegments: Array<{ inventoryUnitId: string }>;
+    }>;
+    expect(originalCashLines).toHaveLength(1);
+    expect(originalCashLines[0]).toMatchObject({
+      lineKind: "STAY_TOTAL",
+      amount: { minorUnits: expect.any(Number) }
+    });
+    const unchangedAmount = originalCashLines[0]!.amount.minorUnits;
+
+    await sql`alter table pricing_revisions disable trigger pricing_revisions_append_only`.execute(db);
+    try {
+      await sql`
+        update pricing_revisions
+        set cash_lines = jsonb_set(
+          cash_lines::jsonb,
+          '{0,calculationSegments,0,inventoryUnitId}',
+          to_jsonb(${demo.roomId}::text)
+        )::json
+        where id = ${revision.id}
+      `.execute(db);
+    } finally {
+      await sql`alter table pricing_revisions enable trigger pricing_revisions_append_only`.execute(db);
+    }
+    const damagedCashLines = (await db.selectFrom("pricing_revisions")
+      .select("cash_lines")
+      .where("id", "=", revision.id)
+      .executeTakeFirstOrThrow()).cash_lines as typeof originalCashLines;
+    expect(damagedCashLines[0]!.amount.minorUnits).toBe(unchangedAmount);
+    expect(damagedCashLines[0]!.calculationSegments[0]!.inventoryUnitId).toBe(demo.roomId);
+
+    const result = await board({ arrivalDate: businessDate, departureDate });
+    expect(result.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(result, demo.secondRoomId, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      available: false,
+      blocking: true,
+      allowedActions: []
+    });
+    expect(taskForOrder(result, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      allowedActions: []
+    });
+  });
+
+  it("fails closed instead of projecting active reserved arrears from a negative net collection", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const negativeNet = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "negative-net-arrears"
+    });
+    const negativeNetOrderId = negativeNet.result!.orderId as string;
+    const negativeNetCollection = await execute({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: negativeNetOrderId,
+        amountMinor: 1_000,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-NEGATIVE-NET-COLLECTION",
+        note: "seed a fact that the test will corrupt to negative net"
+      }
+    }, "negative-net-arrears-collection");
+    await sql`alter table collection_facts disable trigger collection_facts_append_only`.execute(db);
+    try {
+      await db.updateTable("collection_facts")
+        .set({ net_effect_minor: -1_000 })
+        .where("fact_id", "=", negativeNetCollection.factRefs[0]!)
+        .execute();
+    } finally {
+      await sql`alter table collection_facts enable trigger collection_facts_append_only`.execute(db);
+    }
+
+    const damaged = await board({ arrivalDate: businessDate, departureDate });
+    expect(damaged.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(damaged, demo.secondRoomId, negativeNetOrderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      available: false,
+      blocking: true,
+      allowedActions: []
+    });
+    expect(taskForOrder(damaged, negativeNetOrderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      allowedActions: []
+    });
+  });
+
+  it("fails closed when a reversed refund previously exceeded its damaged source collection", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "historical-over-refund-arrears"
+    });
+    const orderId = created.result!.orderId as string;
+    const collection = await execute({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 1_000,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-HISTORICAL-OVER-REFUND-COLLECTION",
+        note: "seed source collection for historical over-refund corruption"
+      }
+    }, "historical-over-refund-collection");
+    const refund = await execute({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 1_000,
+        referencesFactId: collection.factRefs[0]!,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-HISTORICAL-OVER-REFUND",
+        note: "legal full refund before source collection corruption"
+      }
+    }, "historical-over-refund-refund");
+    await execute({
+      commandType: "REVERSE_FACT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        reversesFactId: refund.factRefs[0]!,
+        note: "reverse the full refund before source collection corruption"
+      }
+    }, "historical-over-refund-reversal");
+    expect((await board({ arrivalDate: businessDate, departureDate })).projectionState).toBe("READY");
+
+    await sql`alter table collection_facts disable trigger collection_facts_append_only`.execute(db);
+    try {
+      await db.updateTable("collection_facts")
+        .set({ amount_minor: 500, net_effect_minor: 500 })
+        .where("fact_id", "=", collection.factRefs[0]!)
+        .execute();
+    } finally {
+      await sql`alter table collection_facts enable trigger collection_facts_append_only`.execute(db);
+    }
+
+    const damaged = await board({ arrivalDate: businessDate, departureDate });
+    expect(damaged.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(damaged, demo.secondRoomId, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      available: false,
+      blocking: true,
+      allowedActions: []
+    });
+    expect(taskForOrder(damaged, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      allowedActions: []
+    });
+  });
+
+  it("fails closed when an active collection loses its pricing revision lineage", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "missing-collection-revision-lineage"
+    });
+    const orderId = created.result!.orderId as string;
+    const collection = await execute({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 1_000,
+        method: "BANK_TRANSFER",
+        transactionReference: "ROOM-STATUS-MISSING-REVISION-LINEAGE",
+        note: "seed a collection whose immutable lineage will be corrupted"
+      }
+    }, "missing-collection-revision-lineage");
+    await sql`alter table collection_facts disable trigger collection_facts_append_only`.execute(db);
+    try {
+      await db.updateTable("collection_facts")
+        .set({ pricing_revision_id: null })
+        .where("fact_id", "=", collection.factRefs[0]!)
+        .execute();
+    } finally {
+      await sql`alter table collection_facts enable trigger collection_facts_append_only`.execute(db);
+    }
+
+    const damaged = await board({ arrivalDate: businessDate, departureDate });
+    expect(damaged.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(damaged, demo.secondRoomId, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      available: false,
+      blocking: true,
+      allowedActions: []
+    });
+    expect(taskForOrder(damaged, orderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      allowedActions: []
+    });
+  });
+
   it("filters the full 200-room property before pagination and keeps unfiltered authoritative facets", async () => {
     const currentRooms = await db.selectFrom("inventory_units")
       .select(({ fn }) => fn.countAll<string>().as("count"))
@@ -2753,7 +3869,7 @@ describe("PostgreSQL room-status projection", () => {
     expect(validateRoomStatusBoardSchema(result), JSON.stringify(validateRoomStatusBoardSchema.errors)).toBe(true);
   });
 
-  it("bumps revision for repricing and member coverage history, excludes pure money, and serves 200 units by 30 nights within 500 ms P95", async () => {
+  it("bumps revision for repricing, active booking money history, and member coverage while serving 200 units by 30 nights within 500 ms P95", async () => {
     const created = await createOrder({
       unitId: demo.secondRoomId,
       arrivalDate: "2028-10-01",
@@ -2788,7 +3904,7 @@ describe("PostgreSQL room-status projection", () => {
         note: "room status money revision probe"
       }
     }, "money-revision");
-    expect((await board({ arrivalDate: "2028-10-01", departureDate: "2028-10-02" })).revision).toBe(beforeMoney);
+    expect(Number((await board({ arrivalDate: "2028-10-01", departureDate: "2028-10-02" })).revision)).toBe(Number(beforeMoney) + 1);
 
     const memberOrder = await createOrder({
       unitId: demo.roomId,

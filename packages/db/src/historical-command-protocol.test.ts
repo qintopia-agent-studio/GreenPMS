@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   historicalProtocolEpochMigration,
   legacyEffectProtocol,
-  legacyReceiptProtocol
+  legacyReceiptProtocol,
+  ordinaryStayCashLineTotalMinor,
+  pricingCashLineTotalMinor
 } from "./historical-command-protocol.ts";
 
 const unit = (id: string) => ({
@@ -73,6 +75,94 @@ describe("historical command protocol classification", () => {
     expect(historicalProtocolEpochMigration("PRE_STAGE_11")).toBe("028_stage11_move_unit_guards.sql");
     expect(historicalProtocolEpochMigration("PRE_INHOUSE_MEMBERSHIP_FULFILLMENT"))
       .toBe("044_inhouse_membership_fulfillment_guards.sql");
+  });
+
+  it("validates ordinary-stay cash lines against the complete authoritative timeline", () => {
+    const timeline = [
+      { serviceDate: "2026-07-30", inventoryUnitId: "room_1" },
+      { serviceDate: "2026-07-31", inventoryUnitId: "room_2" }
+    ];
+    const lines = [{
+      lineKind: "STAY_TOTAL",
+      arrivalDate: "2026-07-30",
+      departureDate: "2026-08-01",
+      inventoryUnitId: "room_1",
+      description: "Accommodation total",
+      pricingBandAnchorNights: 7,
+      calculationSegments: [{
+        inventoryUnitId: "room_1",
+        pricingProductCode: "product_1",
+        arrivalDate: "2026-07-30",
+        departureDate: "2026-07-31",
+        nights: 1,
+        anchorAmountMinor: 81_200,
+        numeratorMinor: 81_200,
+        denominator: 7
+      }, {
+        inventoryUnitId: "room_2",
+        pricingProductCode: "product_2",
+        arrivalDate: "2026-07-31",
+        departureDate: "2026-08-01",
+        nights: 1,
+        anchorAmountMinor: 81_200,
+        numeratorMinor: 81_200,
+        denominator: 7
+      }],
+      amount: { currency: "CNY", minorUnits: 23_200 }
+    }];
+
+    expect(pricingCashLineTotalMinor(lines, "CNY")).toBe(23_200);
+    expect(ordinaryStayCashLineTotalMinor(lines, "CNY", timeline)).toBe(23_200);
+
+    const sameAmountWrongUnit = structuredClone(lines);
+    sameAmountWrongUnit[0]!.calculationSegments[1]!.inventoryUnitId = "room_1";
+    expect(pricingCashLineTotalMinor(sameAmountWrongUnit, "CNY")).toBe(23_200);
+    expect(ordinaryStayCashLineTotalMinor(sameAmountWrongUnit, "CNY", timeline)).toBeUndefined();
+
+    const duplicatedNight = [{
+      serviceDate: "2026-07-30",
+      inventoryUnitId: "room_1",
+      description: "Night one",
+      amount: { currency: "CNY", minorUnits: 11_600 }
+    }, {
+      serviceDate: "2026-07-30",
+      inventoryUnitId: "room_1",
+      description: "Duplicated night",
+      amount: { currency: "CNY", minorUnits: 11_600 }
+    }];
+    expect(pricingCashLineTotalMinor(duplicatedNight, "CNY")).toBeUndefined();
+  });
+
+  it("accepts safe-integer stay-total numerators while persisted money stays int32-bounded", () => {
+    const serviceDates = Array.from({ length: 366 }, (_, index) =>
+      new Date(Date.UTC(2026, 0, 1 + index)).toISOString().slice(0, 10));
+    const timeline = serviceDates.map((serviceDate) => ({ serviceDate, inventoryUnitId: "room_1" }));
+    const lines = [{
+      lineKind: "STAY_TOTAL",
+      arrivalDate: "2026-01-01",
+      departureDate: "2027-01-02",
+      inventoryUnitId: "room_1",
+      description: "Accommodation total",
+      pricingBandAnchorNights: 30,
+      calculationSegments: [{
+        inventoryUnitId: "room_1",
+        pricingProductCode: "product_1",
+        arrivalDate: "2026-01-01",
+        departureDate: "2027-01-02",
+        nights: 366,
+        anchorAmountMinor: 6_000_000,
+        numeratorMinor: 2_196_000_000,
+        denominator: 30
+      }],
+      amount: { currency: "CNY", minorUnits: 73_200_000 }
+    }];
+
+    expect(pricingCashLineTotalMinor(lines, "CNY")).toBe(73_200_000);
+    expect(ordinaryStayCashLineTotalMinor(lines, "CNY", timeline)).toBe(73_200_000);
+
+    const oversizedPersistedAmount = structuredClone(lines);
+    oversizedPersistedAmount[0]!.amount.minorUnits = 2_147_483_648;
+    expect(pricingCashLineTotalMinor(oversizedPersistedAmount, "CNY")).toBeUndefined();
   });
 
   it("classifies only the exact pre-in-house-membership SHORTEN effect and receipt", () => {

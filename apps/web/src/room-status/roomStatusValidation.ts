@@ -1,19 +1,26 @@
 import {
   roomStatusActionCodes,
+  roomStatusAttentionCodes,
   roomStatusBlockingFactKinds,
+  roomStatusOperationalAttentionCodes,
   roomStatusOperationalTaskKinds,
+  roomStatusSourceCategories,
   roomStatusSourceKinds,
   roomStatusStatuses,
+  freeStayCategoryCodes,
   type RoomStatusActionCode,
   type RoomStatusActionDto,
+  type RoomStatusAttention,
   type RoomStatusAvailabilitySummaryDto,
   type RoomStatusBoardDto,
   type RoomStatusConflictDto,
   type RoomStatusHistoryDto,
   type RoomStatusIntervalDto,
   type RoomStatusOperationalTaskDto,
+  type RoomStatusOperationalAttention,
   type RoomStatusReferenceDto,
   type RoomStatusSourceKind,
+  type RoomStatusStatus,
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
 import { addLocalDateDays, isIsoLocalDate } from "./roomStatusState";
@@ -27,7 +34,12 @@ export interface ExpectedRoomStatusQuery {
 }
 
 const statuses = new Set<string>(roomStatusStatuses);
+const attentions = new Set<string>(roomStatusAttentionCodes);
+const operationalAttentions = new Set<string>(roomStatusOperationalAttentionCodes);
+const sourceCategories = new Set<string>(roomStatusSourceCategories);
 const sourceKinds = new Set<string>(roomStatusSourceKinds);
+const freeStayCategories = new Set<string>(freeStayCategoryCodes);
+const orderSourceCategories = new Set<string>(["DIRECT", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER"]);
 const actionCodes = new Set<string>(roomStatusActionCodes);
 const blockingFactKinds = new Set<string>(roomStatusBlockingFactKinds);
 const taskKinds = new Set<string>(roomStatusOperationalTaskKinds);
@@ -59,6 +71,33 @@ const sourceReferenceTypes: Record<RoomStatusSourceKind, RoomStatusReferenceDto[
   CLEANING: "OPERATIONS",
   UNIT_UNSELLABLE: "INVENTORY_UNIT"
 };
+
+function lodgingSource(sourceKind: RoomStatusSourceKind): boolean {
+  return sourceKind === "ORDER" || sourceKind === "FREE_STAY";
+}
+
+function authoritativeDayStatus(
+  intervals: readonly RoomStatusIntervalDto[],
+  unitActive: boolean
+): RoomStatusStatus {
+  if (!unitActive) return "UNAVAILABLE";
+  const projected = intervals.filter((interval) => interval.blocking
+    || interval.sourceKind === "CLEANING"
+    || interval.status === "SETTLED"
+    || interval.status === "ARREARS"
+    || interval.status === "UNKNOWN");
+  if (projected.some((interval) => interval.status === "UNKNOWN")) return "UNKNOWN";
+  const priority: readonly RoomStatusStatus[] = [
+    "UNAVAILABLE",
+    "IN_HOUSE",
+    "RESERVED",
+    "ARREARS",
+    "SETTLED",
+    "MAINTENANCE",
+    "CLEANING"
+  ];
+  return priority.find((status) => projected.some((interval) => interval.status === status)) ?? "AVAILABLE";
+}
 
 function fail(path: string, detail: string): never {
   throw new Error(`房态 DTO ${path} ${detail}`);
@@ -106,6 +145,20 @@ function dateTime(value: unknown, path: string): number {
   const timestamp = Date.parse(result);
   if (!Number.isFinite(timestamp) || !result.includes("T")) fail(path, "必须是有效 ISO 日期时间");
   return timestamp;
+}
+
+function attention(value: unknown, path: string): RoomStatusAttention | null {
+  if (value === null) return null;
+  const result = string(value, path)!;
+  if (!attentions.has(result)) fail(path, "不是允许的关注标记");
+  return result as RoomStatusAttention;
+}
+
+function operationalAttention(value: unknown, path: string): RoomStatusOperationalAttention | null {
+  if (value === null) return null;
+  const result = string(value, path)!;
+  if (!operationalAttentions.has(result)) fail(path, "不是允许的运营关注标记");
+  return result as RoomStatusOperationalAttention;
 }
 
 function assertReference(value: unknown, path: string): asserts value is RoomStatusReferenceDto {
@@ -266,7 +319,8 @@ function assertInterval(
   accessLevel: "READ" | "WRITE",
   expectedRange: ExpectedRoomStatusQuery["range"],
   constrainToRange = true,
-  constrainConflictDatesToInterval = true
+  constrainConflictDatesToInterval = true,
+  businessDate?: string
 ): asserts value is RoomStatusIntervalDto {
   const item = record(value, path);
   string(item.id, `${path}.id`);
@@ -283,19 +337,120 @@ function assertInterval(
   }
   const status = string(item.status, `${path}.status`)!;
   if (!statuses.has(status)) fail(`${path}.status`, "不是允许的房态");
+  const projectedAttention = attention(item.attention, `${path}.attention`);
+  const projectedOperationalAttention = operationalAttention(
+    item.operationalAttention,
+    `${path}.operationalAttention`
+  );
   const available = boolean(item.available, `${path}.available`);
   const blocking = boolean(item.blocking, `${path}.blocking`);
   const sourceKindValue = string(item.sourceKind, `${path}.sourceKind`)!;
   if (!sourceKinds.has(sourceKindValue)) fail(`${path}.sourceKind`, "不是允许的 typed source");
   const sourceKind = sourceKindValue as RoomStatusSourceKind;
-  if (item.orderArrivalDate !== undefined) {
-    const orderArrivalDate = localDate(item.orderArrivalDate, `${path}.orderArrivalDate`);
+  const sourceCategoryValue = string(item.sourceCategory, `${path}.sourceCategory`, true);
+  if (sourceCategoryValue !== null && !sourceCategories.has(sourceCategoryValue)) {
+    fail(`${path}.sourceCategory`, "不是允许的住宿来源类别");
+  }
+  const freeStayCategoryCode = string(item.freeStayCategoryCode, `${path}.freeStayCategoryCode`, true);
+  if (freeStayCategoryCode !== null && !freeStayCategories.has(freeStayCategoryCode)) {
+    fail(`${path}.freeStayCategoryCode`, "不是允许的免费入住类别");
+  }
+  const freeStayReason = string(item.freeStayReason, `${path}.freeStayReason`, true);
+  const legacyFreeStayWithoutSourceMetadata = sourceKind === "FREE_STAY"
+    && sourceCategoryValue === null
+    && freeStayCategoryCode === null
+    && freeStayReason === null
+    && (status === "SETTLED" || status === "ARREARS")
+    && (!businessDate || sourceEndDate <= businessDate);
+  const failedClosedLodgingWithoutSourceMetadata = lodgingSource(sourceKind)
+    && status === "UNKNOWN"
+    && sourceCategoryValue === null
+    && freeStayCategoryCode === null
+    && freeStayReason === null;
+  if (status === "UNKNOWN" && lodgingSource(sourceKind)
+    && !failedClosedLodgingWithoutSourceMetadata) {
+    fail(`${path}.sourceCategory`, "UNKNOWN 住宿必须隐藏全部来源角标字段");
+  }
+  if (!lodgingSource(sourceKind)) {
+    if (sourceCategoryValue !== null || freeStayCategoryCode !== null || freeStayReason !== null) {
+      fail(`${path}.sourceCategory`, "非住宿来源不能携带住宿来源角标字段");
+    }
+  } else if (sourceCategoryValue === null) {
+    if (!legacyFreeStayWithoutSourceMetadata && !failedClosedLodgingWithoutSourceMetadata) {
+      fail(`${path}.sourceCategory`, sourceKind === "FREE_STAY" ? "免费入住必须携带完整来源类别和原因" : "住宿来源必须显式携带来源类别");
+    }
+  } else if (sourceKind === "FREE_STAY") {
+    if (sourceCategoryValue !== "FREE_STAY") fail(`${path}.sourceCategory`, "免费入住来源类别必须为 FREE_STAY");
+    if (freeStayCategoryCode === null || freeStayReason === null) {
+      fail(`${path}.freeStayCategoryCode`, "免费入住必须携带类别和原因以供人工核对");
+    }
+  } else {
+    if (!orderSourceCategories.has(sourceCategoryValue ?? "")) {
+      fail(`${path}.sourceCategory`, "普通订单来源只能为直订、渠道或会员权益；不可识别来源必须以 UNKNOWN 状态和空来源类别表示");
+    }
+    if (freeStayCategoryCode !== null || freeStayReason !== null) {
+      fail(`${path}.freeStayCategoryCode`, "非免费订单不能携带免费入住类别或原因");
+    }
+  }
+  if (constrainToRange
+    && businessDate
+    && lodgingSource(sourceKind)
+    && (status === "RESERVED" || status === "IN_HOUSE")
+    && endDate > businessDate
+    && !blocking) {
+    fail(`${path}.blocking`, "当前或未来住宿必须保持库存阻断");
+  }
+  if (status === "ARREARS" && projectedAttention !== "ARREARS") {
+    fail(`${path}.attention`, "历史欠款状态必须显式携带欠款注意事实");
+  }
+  if (projectedAttention === "ARREARS"
+    && (sourceKind !== "ORDER" || (status !== "RESERVED" && status !== "ARREARS"))) {
+    fail(`${path}.attention`, "欠款注意事实只能附着于当前预订或历史欠款订单");
+  }
+  if (constrainToRange && businessDate && projectedAttention === "ARREARS"
+    && ((status === "RESERVED" && startDate < businessDate)
+      || (status === "ARREARS" && sourceEndDate > businessDate))) {
+    fail(`${path}.attention`, "欠款注意事实与营业日分区不一致");
+  }
+  if (businessDate
+    && (status === "SETTLED" || status === "ARREARS")
+    && sourceEndDate > businessDate) {
+    fail(`${path}.status`, "已完成住宿状态只能表示营业日前结束的住宿");
+  }
+  const orderArrivalDate = item.orderArrivalDate === undefined
+    ? null
+    : localDate(item.orderArrivalDate, `${path}.orderArrivalDate`);
+  if (orderArrivalDate !== null) {
     if (sourceKind !== "ORDER" && sourceKind !== "FREE_STAY") {
       fail(`${path}.orderArrivalDate`, "只能由住宿订单来源提供");
     }
     if (orderArrivalDate > sourceStartDate) {
       fail(`${path}.orderArrivalDate`, "不能晚于来源完整区间的开始日期");
     }
+  }
+  if (projectedOperationalAttention === "OVERDUE_RESERVED") {
+    if (!lodgingSource(sourceKind) || status !== "RESERVED" || orderArrivalDate === null) {
+      fail(`${path}.operationalAttention`, "逾期预订只能附着于带原始到店日的已预订住宿");
+    }
+    if (businessDate && orderArrivalDate !== null && !(orderArrivalDate < businessDate)) {
+      fail(`${path}.operationalAttention`, "逾期预订的原始到店日必须早于营业日");
+    }
+  }
+  if (projectedOperationalAttention === "OVERDUE_IN_HOUSE") {
+    if (!lodgingSource(sourceKind) || status !== "IN_HOUSE") {
+      fail(`${path}.operationalAttention`, "逾期未退只能附着于在住住宿");
+    }
+    if (businessDate && !(sourceEndDate < businessDate)) {
+      fail(`${path}.operationalAttention`, "逾期未退的可见来源区间必须在营业日前结束");
+    }
+  }
+  if (businessDate
+    && lodgingSource(sourceKind)
+    && status === "RESERVED"
+    && orderArrivalDate !== null
+    && orderArrivalDate < businessDate
+    && projectedOperationalAttention !== "OVERDUE_RESERVED") {
+    fail(`${path}.operationalAttention`, "逾期预订必须显式携带逾期运营关注事实");
   }
   string(item.label, `${path}.label`);
   if (item.primaryOccupantLabel !== null) string(item.primaryOccupantLabel, `${path}.primaryOccupantLabel`);
@@ -395,12 +550,20 @@ function assertOperationalTask(
   const taskKind = string(item.taskKind, `${path}.taskKind`)!;
   if (!taskKinds.has(taskKind)) fail(`${path}.taskKind`, "不是允许的运营任务类型");
   if (localDate(item.businessDate, `${path}.businessDate`) !== businessDate) fail(`${path}.businessDate`, "与房态营业日期不一致");
-  assertInterval(value, path, accessLevel, expected.range, false, false);
+  assertInterval(value, path, accessLevel, expected.range, false, false, businessDate);
   if (item.displayInventoryUnitId !== item.actualInventoryUnitId) fail(path, "运营任务必须引用实际库存单元");
   if (item.startDate !== item.sourceStartDate || item.endDate !== item.sourceEndDate) fail(path, "运营任务必须公开来源完整区间");
   const sourceKind = item.sourceKind as RoomStatusSourceKind;
   const lodging = sourceKind === "ORDER" || sourceKind === "FREE_STAY";
   const conflicts = item.conflicts as RoomStatusConflictDto[];
+  if (taskKind === "EXCEPTION"
+    && lodging
+    && item.status === "IN_HOUSE"
+    && typeof item.endDate === "string"
+    && item.endDate < businessDate
+    && item.operationalAttention !== "OVERDUE_IN_HOUSE") {
+    fail(`${path}.operationalAttention`, "逾期未退任务必须显式携带未退运营关注事实");
+  }
   if (item.blocking === true && conflicts.some((conflict) => (
     conflict.startDate !== businessDate || conflict.endDate !== addLocalDateDays(businessDate, 1)
   ))) {
@@ -489,6 +652,12 @@ function assertUnit(
   for (const key of ["buildingCode", "roomTypeCode", "pricingProductCode"] as const) {
     if (item[key] !== null) string(item[key], `${path}.${key}`);
   }
+  const physicalBedCount = item.physicalBedCount === null
+    ? null
+    : integer(item.physicalBedCount, `${path}.physicalBedCount`, 1);
+  if (kind === "BED" && physicalBedCount !== null) {
+    fail(`${path}.physicalBedCount`, "床位单元不能伪造房间实体床数");
+  }
   integer(item.capacity, `${path}.capacity`, 1);
   const occupancyCapacity = integer(item.occupancyCapacity, `${path}.occupancyCapacity`, 1);
   if (kind === "BED" && occupancyCapacity !== 1) fail(`${path}.occupancyCapacity`, "床位住宿容量必须为 1");
@@ -496,7 +665,7 @@ function assertUnit(
   const intervals = array(item.intervals, `${path}.intervals`);
   intervals.forEach((interval, index) => {
     const intervalPath = `${path}.intervals[${index}]`;
-    assertInterval(interval, intervalPath, accessLevel, expected.range);
+    assertInterval(interval, intervalPath, accessLevel, expected.range, true, true, businessDate);
     const projected = interval as RoomStatusIntervalDto;
     const inheritedFromChild = kind === "ROOM" && childUnitIds.includes(projected.actualInventoryUnitId);
     const inheritedFromRoom = kind === "BED" && projected.actualInventoryUnitId === expectedParentRoomId;
@@ -572,6 +741,62 @@ function assertUnit(
       }
     });
   });
+  const bedSlotStates = array(item.bedSlotStates, `${path}.bedSlotStates`);
+  if ((kind !== "ROOM" || item.salesMode !== "BED_SPLIT") && bedSlotStates.length > 0) {
+    fail(`${path}.bedSlotStates`, "只能由拆床销售的房间父行提供");
+  }
+  const slotsByDate = new Map<string, Array<{
+    index: number;
+    inventoryUnitId: string;
+    inventoryUnitCode: string;
+    status: string;
+  }>>();
+  bedSlotStates.forEach((slotValue, index) => {
+    const slotPath = `${path}.bedSlotStates[${index}]`;
+    const slot = record(slotValue, slotPath);
+    onlyKeys(slot, ["serviceDate", "inventoryUnitId", "inventoryUnitCode", "status"], slotPath);
+    const serviceDate = localDate(slot.serviceDate, `${slotPath}.serviceDate`);
+    if (!dates.includes(serviceDate)) fail(`${slotPath}.serviceDate`, "必须位于查询日期范围内");
+    const inventoryUnitId = string(slot.inventoryUnitId, `${slotPath}.inventoryUnitId`)!;
+    const inventoryUnitCode = string(slot.inventoryUnitCode, `${slotPath}.inventoryUnitCode`)!;
+    if (kind === "ROOM" && item.salesMode === "BED_SPLIT" && !childUnitIds.includes(inventoryUnitId)) {
+      fail(`${slotPath}.inventoryUnitId`, "床位槽必须来自权威子床集合");
+    }
+    const slotStatus = string(slot.status, `${slotPath}.status`)!;
+    if (!statuses.has(slotStatus)) fail(`${slotPath}.status`, "不是允许的房态");
+    if ((slotStatus === "SETTLED" || slotStatus === "ARREARS") && serviceDate >= businessDate) {
+      fail(`${slotPath}.status`, "已完成床位状态只能表示营业日前的住宿");
+    }
+    if (slotStatus === "UNKNOWN" && projectionState === "READY") {
+      fail(`${slotPath}.status`, "UNKNOWN 床位槽必须使投影失败关闭为 PARTIAL");
+    }
+    const daySlots = slotsByDate.get(serviceDate) ?? [];
+    if (daySlots.some((candidate) => candidate.inventoryUnitId === inventoryUnitId)) {
+      fail(`${slotPath}.inventoryUnitId`, "同一日期不能重复床位槽");
+    }
+    daySlots.push({ index, inventoryUnitId, inventoryUnitCode, status: slotStatus });
+    slotsByDate.set(serviceDate, daySlots);
+  });
+  if (kind === "ROOM" && item.salesMode === "BED_SPLIT") {
+    const firstSlots = slotsByDate.get(dates[0]!) ?? [];
+    if (dates.some((serviceDate) => !slotsByDate.has(serviceDate))) {
+      fail(`${path}.bedSlotStates`, "必须覆盖查询范围内的每个日期");
+    }
+    for (const serviceDate of dates) {
+      const daySlots = slotsByDate.get(serviceDate)!;
+      if (daySlots.length !== firstSlots.length
+        || daySlots.some((slot, index) => slot.inventoryUnitId !== firstSlots[index]?.inventoryUnitId
+          || slot.inventoryUnitCode !== firstSlots[index]?.inventoryUnitCode)) {
+        fail(`${path}.bedSlotStates`, "每日必须保持相同的完整床位槽顺序");
+      }
+    }
+    if (projectionState === "READY" && physicalBedCount !== null && firstSlots.length !== physicalBedCount) {
+      fail(`${path}.bedSlotStates`, "READY 投影的床位槽数量必须等于权威实体床数");
+    }
+    if (projectionState === "READY" && childUnitIds.some((childId) => !firstSlots.some((slot) => slot.inventoryUnitId === childId))) {
+      fail(`${path}.bedSlotStates`, "READY 投影必须包含全部可展开子床");
+    }
+  }
   const days = array(item.days, `${path}.days`);
   if (days.length !== dates.length) fail(`${path}.days`, "未覆盖完整查询日期");
   days.forEach((dayValue, index) => {
@@ -621,6 +846,9 @@ function assertUnit(
       && dayAvailable) {
       fail(dayPath, "未知、陈旧或不可售日期必须 fail closed");
     }
+    if (dayStatus !== authoritativeDayStatus(coveringIntervals, active)) {
+      fail(`${dayPath}.status`, "必须与覆盖该日的权威区间状态一致");
+    }
   });
   const unitConflicts = array(item.conflicts, `${path}.conflicts`);
   unitConflicts.forEach((conflict, index) => assertConflict(conflict, `${path}.conflicts[${index}]`));
@@ -657,7 +885,9 @@ function assertUnit(
   if (kind === "BED" && children.length) fail(`${path}.children`, "床位不能再包含子单元");
   if (kind === "ROOM") {
     children.forEach((child, index) => assertUnit(child, `${path}.children[${index}]`, accessLevel, projectionState, expected, dates, id, businessDate));
-    const childIds = children.map((child) => (child as RoomStatusUnitDto).id);
+    const typedChildren = children as RoomStatusUnitDto[];
+    const childrenById = new Map(typedChildren.map((child) => [child.id, child] as const));
+    const childIds = typedChildren.map((child) => child.id);
     const childPositions = childIds.map((childId) => childUnitIds.indexOf(childId));
     if (new Set(childUnitIds).size !== childUnitIds.length
       || new Set(childIds).size !== childIds.length
@@ -666,8 +896,39 @@ function assertUnit(
       fail(`${path}.childUnitIds`, "必须保持完整稳定床位关系，展示子行只能是其有序子集");
     }
     if (item.salesMode !== "BED_SPLIT" && children.length) fail(`${path}.children`, "非拆床房间不能返回可展开床位");
+    for (const [serviceDate, slots] of slotsByDate) {
+      for (const slot of slots) {
+        const child = childrenById.get(slot.inventoryUnitId);
+        if (child && slot.inventoryUnitCode !== child.code) {
+          fail(`${path}.bedSlotStates[${slot.index}].inventoryUnitCode`, "必须与返回的权威子床代码一致");
+        }
+        // A PARTIAL projection may omit facts, but it cannot contradict facts that it returns.
+        const facts = typedIntervals.filter((interval) => interval.startDate <= serviceDate
+          && serviceDate < interval.endDate
+          && (interval.actualInventoryUnitId === slot.inventoryUnitId || interval.actualInventoryUnitId === id));
+        if (facts.length > 1 || facts.some((interval) => interval.status === "UNKNOWN")) {
+          if (projectionState === "READY") {
+            fail(`${path}.bedSlotStates[${slot.index}].status`, "READY 投影的床位槽不能合并多个或 UNKNOWN 权威 interval 事实");
+          }
+          if (slot.status !== "UNKNOWN") {
+            fail(`${path}.bedSlotStates[${slot.index}].status`, "PARTIAL 投影的歧义床位事实必须保持 UNKNOWN");
+          }
+        } else if (facts.length === 1 && slot.status !== facts[0]!.status) {
+          fail(`${path}.bedSlotStates[${slot.index}].status`, "必须与当天唯一权威 interval 状态一致");
+        } else if (facts.length === 0 && projectionState === "READY") {
+          const expectedSlotStatus = child?.active === false ? "UNAVAILABLE" : "AVAILABLE";
+          if (slot.status !== expectedSlotStatus) {
+            fail(`${path}.bedSlotStates[${slot.index}].status`, "没有权威 interval 事实时必须表示为空闲子床");
+          }
+        }
+      }
+    }
 
     if (projectionState === "READY" && item.salesMode === "BED_SPLIT") {
+      const firstSlots = slotsByDate.get(dates[0]!) ?? [];
+      if (!sameStringSet(firstSlots.map((slot) => slot.inventoryUnitId), childUnitIds)) {
+        fail(`${path}.bedSlotStates`, "READY 投影的每日床位槽必须精确对应权威子床集合");
+      }
       const occupanciesByDate = new Map((bedOccupancies as RoomStatusUnitDto["bedOccupancies"])
         .map((occupancy) => [occupancy.serviceDate, occupancy] as const));
       typedIntervals.forEach((interval, intervalIndex) => {

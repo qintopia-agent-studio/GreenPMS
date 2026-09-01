@@ -1,7 +1,10 @@
 import {
   ROOM_STATUS_MAX_QUERY_NIGHTS,
   roomStatusStatuses,
+  type FreeStayCategoryCode,
   type RoomStatusIntervalDto,
+  type RoomStatusSourceCategory,
+  type RoomStatusSourceKind,
   type RoomStatusStatus,
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
@@ -156,6 +159,12 @@ export function roomStatusOrderIdentityForDate(
 export interface RoomStatusOrderOption {
   identity: RoomStatusOrderIdentity;
   label: string;
+  source: {
+    sourceKind: Extract<RoomStatusSourceKind, "ORDER" | "FREE_STAY">;
+    sourceCategory: RoomStatusSourceCategory | null;
+    freeStayCategoryCode: FreeStayCategoryCode | null;
+    freeStayReason: string | null;
+  };
 }
 
 export type RoomStatusOrderOptionsResult =
@@ -184,7 +193,16 @@ function roomStatusOrderOptions(
     const occupantLabel = interval.primaryOccupantLabel?.trim()
       || interval.occupants.find((occupant) => occupant.nickname?.trim())?.nickname?.trim()
       || "住宿订单";
-    options.push({ identity, label: occupantLabel });
+    options.push({
+      identity,
+      label: occupantLabel,
+      source: {
+        sourceKind: interval.sourceKind as Extract<RoomStatusSourceKind, "ORDER" | "FREE_STAY">,
+        sourceCategory: interval.sourceCategory,
+        freeStayCategoryCode: interval.freeStayCategoryCode,
+        freeStayReason: interval.freeStayReason
+      }
+    });
   }
   const unique = new Map<string, RoomStatusOrderOption>();
   const stayByOrder = new Map<string, string>();
@@ -341,9 +359,10 @@ export function intervalsRenderedOnRoomStatusGrid(
   serviceDates: readonly string[] = unit.days.map((day) => day.serviceDate)
 ): readonly RoomStatusIntervalDto[] {
   void serviceDates;
-  return unit.intervals.filter((interval) => {
-    return !isLodgingInterval(interval);
-  });
+  // Lodging belongs exclusively in its daily cells. Only operational blocks keep timeline bars.
+  return unit.intervals.filter((interval) => (
+    interval.sourceKind !== "ORDER" && interval.sourceKind !== "FREE_STAY"
+  ));
 }
 
 export interface RoomStatusFilterOptions {
@@ -434,6 +453,8 @@ export function roomStatusFactFingerprint(
       sourceStartDate: interval.sourceStartDate,
       sourceEndDate: interval.sourceEndDate,
       status: interval.status,
+      attention: interval.attention,
+      operationalAttention: interval.operationalAttention,
       available: interval.available,
       blocking: interval.blocking,
       sourceKind: interval.sourceKind,
@@ -458,15 +479,28 @@ export function roomStatusFactFingerprint(
         sourceReference: `${occupant.sourceReference.type}:${occupant.sourceReference.id}`
       })).sort((left, right) => left.inventoryUnitId.localeCompare(right.inventoryUnitId))
     }));
+  const bedSlotStates = unit.bedSlotStates
+    .filter((slot) => slot.serviceDate >= target.arrivalDate && slot.serviceDate < target.departureDate)
+    .map((slot) => ({
+      serviceDate: slot.serviceDate,
+      inventoryUnitId: slot.inventoryUnitId,
+      inventoryUnitCode: slot.inventoryUnitCode,
+      status: slot.status
+    }))
+    .sort((left, right) => left.serviceDate.localeCompare(right.serviceDate)
+      || left.inventoryUnitId.localeCompare(right.inventoryUnitId));
   return JSON.stringify({
     unitId: unit.id,
     active: unit.active,
     salesMode: unit.salesMode,
+    physicalBedCount: unit.physicalBedCount,
+    childUnitIds: [...unit.childUnitIds].sort(),
     targetRange: [target.arrivalDate, target.departureDate],
     allowedActions: actionFingerprint(unit.allowedActions),
     days,
     intervals,
-    bedOccupancies
+    bedOccupancies,
+    bedSlotStates
   });
 }
 

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { RoomStatusActionDto, RoomStatusBoardDto, RoomStatusUnitDto } from "@qintopia/contracts";
+import type { RoomStatusActionDto, RoomStatusBoardDto, RoomStatusIntervalDto, RoomStatusUnitDto } from "@qintopia/contracts";
 import { RoomStatusContext, roomStatusDraftSelection } from "./RoomStatusContext";
 
 const unit = {
@@ -32,13 +32,14 @@ const backfillAction = {
 
 function renderContext(
   allowedActions: readonly RoomStatusActionDto[],
-  writeBlock?: { kind: "REFRESH" | "RECOVERY" | "PERMISSION"; reason: string; actionLabel?: string }
+  writeBlock?: { kind: "REFRESH" | "RECOVERY" | "PERMISSION"; reason: string; actionLabel?: string },
+  selectedInterval: RoomStatusIntervalDto | null = null
 ): string {
   return renderToStaticMarkup(<RoomStatusContext
     board={board}
     selectedUnit={unit}
     selectedDay={null}
-    selectedInterval={null}
+    selectedInterval={selectedInterval}
     relatedIntervals={[]}
     selection={null}
     conflicts={[]}
@@ -56,6 +57,50 @@ function renderContext(
 }
 
 describe("RoomStatusContext write action presentation", () => {
+  it("shows the same lifecycle mark and attention badges used by the grid", () => {
+    const interval = {
+      id: "interval_overdue_debt",
+      status: "RESERVED",
+      attention: "ARREARS",
+      operationalAttention: "OVERDUE_RESERVED",
+      sourceKind: "ORDER",
+      sourceStartDate: "2026-08-01",
+      sourceEndDate: "2026-08-03",
+      occupantCount: 1,
+      occupants: [{ occupantId: "occupant_1", nickname: "山风" }],
+      primaryOccupantLabel: "山风",
+      label: "order",
+      reason: null
+    } as RoomStatusIntervalDto;
+
+    const html = renderContext([], undefined, interval);
+    expect(html).toContain("已预订");
+    expect(html).toContain("欠款");
+    expect(html).toContain("逾期");
+  });
+
+  it("renders historical debt as a completed stay with one separate debt badge", () => {
+    const interval = {
+      id: "interval_historical_debt",
+      status: "ARREARS",
+      attention: "ARREARS",
+      operationalAttention: null,
+      sourceKind: "ORDER",
+      sourceStartDate: "2026-08-01",
+      sourceEndDate: "2026-08-03",
+      occupantCount: 1,
+      occupants: [{ occupantId: "occupant_1", nickname: "山风" }],
+      primaryOccupantLabel: "山风",
+      label: "已结单 order_historical_debt",
+      reason: null
+    } as RoomStatusIntervalDto;
+
+    const html = renderContext([], undefined, interval);
+    expect(html).toContain("已结单");
+    expect(html).toContain("已结单 order_historical_debt");
+    expect(html.match(/欠款/g)).toHaveLength(1);
+  });
+
   it("keeps the server-authorized backfill visible but disabled with a recovery entry", () => {
     const html = renderContext([backfillAction], {
       kind: "RECOVERY",

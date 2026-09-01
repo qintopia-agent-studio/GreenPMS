@@ -105,14 +105,6 @@ export async function prepareStage15CompleteJourney(
       .where("active", "=", true)
       .orderBy("code")
       .execute();
-    const preferredUnits = roomCandidates.filter((unit) => unit.code === "D01" || unit.code === "D02");
-    if (preferredUnits.length !== 2
-      || !preferredUnits[0]!.room_type_code
-      || preferredUnits[0]!.room_type_code !== preferredUnits[1]!.room_type_code
-      || preferredUnits[0]!.pricing_product_code !== preferredUnits[1]!.pricing_product_code) {
-      throw new Error("Stage 15 requires D01 and D02 to remain compatible same-price move targets");
-    }
-
     const claimedUnits = await db.selectFrom("inventory_claims as claim")
       .innerJoin("inventory_units as claimed_unit", "claimed_unit.id", "claim.inventory_unit_id")
       .select([
@@ -123,16 +115,18 @@ export async function prepareStage15CompleteJourney(
       .where("claim.service_date", "<", extendedDepartureDate)
       .execute();
     const blockedRoomIds = new Set(claimedUnits.map((claim) => claim.parentRoomId ?? claim.inventoryUnitId));
-    const preferredCodeRank = (code: string) => code === "D01" ? 0 : code === "D02" ? 1 : 2;
-    const units = roomCandidates
-      .filter((unit) => unit.room_type_code === preferredUnits[0]!.room_type_code
-        && unit.pricing_product_code === preferredUnits[0]!.pricing_product_code
-        && !blockedRoomIds.has(unit.id))
-      .sort((left, right) => preferredCodeRank(left.code) - preferredCodeRank(right.code)
-        || left.code.localeCompare(right.code))
-      .slice(0, 2);
-    if (units.length !== 2) {
-      throw new Error("Stage 15 requires two available compatible same-price move targets");
+    const compatibleUnitsByPrice = new Map<string, typeof roomCandidates>();
+    for (const unit of roomCandidates) {
+      if (!unit.room_type_code || !unit.pricing_product_code || blockedRoomIds.has(unit.id)) continue;
+      const priceGroup = `${unit.room_type_code}:${unit.pricing_product_code}`;
+      compatibleUnitsByPrice.set(priceGroup, [...(compatibleUnitsByPrice.get(priceGroup) ?? []), unit]);
+    }
+    const units = [...compatibleUnitsByPrice.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, candidates]) => candidates.sort((left, right) => left.code.localeCompare(right.code)).slice(0, 2))
+      .find((candidates) => candidates.length === 2);
+    if (!units) {
+      throw new Error("Stage 15 requires two available rooms with the same room type and pricing product");
     }
     const [initialQuote, extendedQuote, shortenedQuote] = await Promise.all([
       createQuoteForTesting(db, {

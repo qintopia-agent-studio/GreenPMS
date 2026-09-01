@@ -1958,9 +1958,11 @@ describe("4.7 stay collection conversion to membership", () => {
     }), prepared, "many-collections-conversion");
     expect(receipt.businessCommitted).toBe(true);
     expect(receipt.result).toMatchObject({
-      transferredCollectionFactIds: collectionFactIds,
       transferredAmount: { currency: "CNY", minorUnits: 2_100 }
     });
+    const transferredCollectionFactIds = receipt.result!.transferredCollectionFactIds as string[];
+    expect(transferredCollectionFactIds).toHaveLength(collectionFactIds.length);
+    expect(new Set(transferredCollectionFactIds)).toEqual(new Set(collectionFactIds));
     expect(await db.selectFrom("stay_collection_membership_transfers").select("id").where("order_id", "=", stay.orderId).execute()).toHaveLength(21);
   });
 

@@ -200,6 +200,31 @@ const units = [
 ] as never[];
 
 describe("RoomStatusOrderContext", () => {
+  it("uses the same overdue in-house warning as the full order page", () => {
+    const base = orderView();
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...base.order, status: "CHECKED_IN" },
+        stay: { ...base.stay, status: "IN_HOUSE" },
+        effectiveArrangement: {
+          ...base.effectiveArrangement,
+          businessDate: "2026-07-31"
+        },
+        fulfillment: { ...base.fulfillment, state: "IN_HOUSE" }
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+
+    expect(html).toContain("逾期在住，需确认实际状态");
+    expect(html).toContain("计划离店日");
+    expect(html).toContain("办理迟录退房");
+    expect(html).toContain('data-testid="overdue-in-house-alert"');
+  });
+
   it("shows the four typed lifecycle layers, correction audit, and only enabled server actions", () => {
     const html = renderToStaticMarkup(<RoomStatusOrderContext view={orderView()} units={units} onOpenOrder={() => undefined} onFulfillmentAction={() => undefined} onCorrectOccupant={() => undefined} onLocateRange={() => undefined} />);
     expect(html).toContain("3 夜");
@@ -426,7 +451,7 @@ describe("RoomStatusOrderContext", () => {
       onLocateRange={() => undefined}
     />);
     expect(blockedHtml).toContain('data-room-status-action="RESCHEDULE_STAY"');
-    expect(blockedHtml).not.toContain("该订单已有换房安排，当前版本暂不能调整预订日期");
+    expect(blockedHtml).not.toContain("该订单已有换房安排，当前版本暂不能调整住宿日期");
 
     const singleRoom = orderView({
       effectiveArrangement: {
@@ -444,7 +469,8 @@ describe("RoomStatusOrderContext", () => {
       onCorrectOccupant={() => undefined}
       onLocateRange={() => undefined}
     />);
-    expect(enabledHtml).toContain("调整预订日期");
+    expect(enabledHtml).toContain("调整住宿日期");
+    expect(enabledHtml).not.toContain("调整预订日期");
     expect(enabledHtml).toContain('data-room-status-action="RESCHEDULE_STAY"');
     expect(enabledHtml).toContain('data-room-status-action-mode="inline"');
   });

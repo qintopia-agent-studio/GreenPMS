@@ -1236,7 +1236,7 @@ describe("database migration concurrency", () => {
         expect(secondDay?.conflicts).toEqual(expect.arrayContaining([
           expect.objectContaining({ blockingFactKind: "UNIT_UNSELLABLE", claimIds: [] })
         ]));
-        expect(board.projectionState).toBe("READY");
+        expect(board.projectionState).toBe("PARTIAL");
         const availability = (await listAvailability(
           projectedDb,
           demo.propertyId,

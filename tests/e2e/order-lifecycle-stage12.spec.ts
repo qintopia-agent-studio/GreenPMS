@@ -236,7 +236,7 @@ test("4.5 no-show uses the 20:00 gate, is operator initiated and becomes termina
   await expect(page.getByTestId("command-result-notice")).toContainText("订单已标记未到");
   await expect(page.locator(".order-title-row").getByText("未到", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "入住", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "调整预订日期", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "调整住宿日期", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "标记未到", exact: true })).toBeDisabled();
 
   const after = await orderView(page, fixture.noShow);
@@ -262,7 +262,7 @@ test("4.5 overdue reserved order stays visible and can be checked in late withou
   await row.getByRole("link", { name: "处理逾期到店", exact: true }).click();
   await expect(page.getByRole("heading", { name: stay.nickname, exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: "入住", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "调整预订日期", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "调整住宿日期", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "标记未到", exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "入住", exact: true }).click();

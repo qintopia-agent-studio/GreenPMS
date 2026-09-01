@@ -33,7 +33,7 @@ function assertCompleteTimeline(
   if (timeline.length !== expectedDates.length || timeline.some((item, index) => (
     !item.inventoryUnitId || item.serviceDate !== expectedDates[index]
   ))) {
-    throw new DomainError("INTERNAL_ERROR", "当前住宿安排时间线损坏，不能调整预订日期", 500);
+    throw new DomainError("INTERNAL_ERROR", "当前住宿安排时间线损坏，不能调整住宿日期", 500);
   }
 }
 

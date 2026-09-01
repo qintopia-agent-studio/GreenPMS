@@ -5,15 +5,21 @@ import {
   roomStatusBuildingOccupancySummaryLabel,
   roomStatusAttentionLaneOffset,
   roomStatusBedOccupancyNeedsProcessing,
+  roomStatusBedOccupancySlots,
   roomStatusBedOccupancyAttentionLabels,
+  roomStatusBedHasWholeRoomLodging,
   roomStatusBedOccupancyStateLabel,
+  roomStatusOccupancyLifecycleStatus,
+  roomStatusOccupancyDisplayRatio,
   roomStatusCellAttentionLabels,
   roomStatusCellAccessibleName,
   roomStatusBedOccupancyTooltipPosition,
   roomStatusDateHeaderSummaryLabel,
   roomStatusFocusRestorationTarget,
+  roomStatusGridOperationalIntervals,
   roomStatusHorizontalDragAutoScrollDelta,
   roomStatusIntervalServiceDateAtPointer,
+  roomStatusTextOverflows,
   roomStatusSingleCellMappingSelection,
   resetRoomStatusHorizontalScroll
 } from "./RoomStatusGrid";
@@ -252,6 +258,13 @@ describe("roomStatusBedOccupancyTooltipPosition", () => {
   });
 });
 
+describe("roomStatusTextOverflows", () => {
+  it("only treats a nickname as tooltip-eligible when the rendered box actually clips it", () => {
+    expect(roomStatusTextOverflows({ scrollWidth: 64, clientWidth: 64 })).toBe(false);
+    expect(roomStatusTextOverflows({ scrollWidth: 65, clientWidth: 64 })).toBe(true);
+  });
+});
+
 describe("room-status focus restoration", () => {
   const unitIds = ["unit_page_1"];
   const dates = ["2026-08-01", "2026-08-02"];
@@ -364,6 +377,121 @@ describe("building occupancy summary", () => {
   });
 });
 
+describe("whole-room lodging on split-room beds", () => {
+  const wholeRoomLodging = {
+    id: "interval_room_104",
+    actualInventoryUnitId: "room_104",
+    sourceKind: "FREE_STAY",
+    status: "IN_HOUSE",
+    startDate: "2026-08-14",
+    endDate: "2026-08-16",
+    occupantCount: 2
+  } as RoomStatusIntervalDto;
+  const bed = {
+    id: "bed_104_a",
+    roomId: "room_104",
+    parentRoomId: "room_104",
+    kind: "BED",
+    intervals: [wholeRoomLodging]
+  } as RoomStatusUnitDto;
+
+  it("identifies inherited whole-room lodging without treating a bed's own stay as whole-room occupancy", () => {
+    expect(roomStatusBedHasWholeRoomLodging(bed, "2026-08-14")).toBe(true);
+    expect(roomStatusBedHasWholeRoomLodging(bed, "2026-08-16")).toBe(false);
+    expect(roomStatusBedHasWholeRoomLodging({
+      ...bed,
+      intervals: [{ ...wholeRoomLodging, actualInventoryUnitId: bed.id }]
+    }, "2026-08-14")).toBe(false);
+    expect(roomStatusBedHasWholeRoomLodging({
+      ...bed,
+      intervals: [{ ...wholeRoomLodging, status: "UNKNOWN" }]
+    }, "2026-08-14")).toBe(false);
+  });
+});
+
+describe("roomStatusGridOperationalIntervals", () => {
+  const childBedOperationalIntervals = [
+    { id: "maintenance", sourceKind: "MAINTENANCE", status: "MAINTENANCE" },
+    { id: "cleaning", sourceKind: "CLEANING", status: "CLEANING" },
+    { id: "unsellable", sourceKind: "UNIT_UNSELLABLE", status: "UNAVAILABLE" }
+  ].map((interval) => ({
+    ...interval,
+    id: `${interval.id}_bed_102_c`,
+    actualInventoryUnitId: "bed_102_c",
+    startDate: "2026-09-01",
+    endDate: "2026-09-03",
+    occupantCount: 0
+  })) as RoomStatusIntervalDto[];
+
+  it("keeps child-bed operational bars on the bed row but not on a BED_SPLIT parent row", () => {
+    const parent = {
+      id: "room_102",
+      kind: "ROOM",
+      salesMode: "BED_SPLIT",
+      intervals: [
+        ...childBedOperationalIntervals,
+        ...childBedOperationalIntervals.map((interval) => ({
+          ...interval,
+          id: interval.id.replace("bed_102_c", "room_102"),
+          actualInventoryUnitId: "room_102"
+        }))
+      ]
+    } as RoomStatusUnitDto;
+    const bed = {
+      id: "bed_102_c",
+      kind: "BED",
+      salesMode: "BED_SPLIT",
+      intervals: childBedOperationalIntervals
+    } as RoomStatusUnitDto;
+
+    expect(roomStatusGridOperationalIntervals(parent, ["2026-09-01", "2026-09-02"]).map((interval) => interval.id))
+      .toEqual(["maintenance_room_102", "cleaning_room_102", "unsellable_room_102"]);
+    expect(roomStatusGridOperationalIntervals(bed, ["2026-09-01", "2026-09-02"]).map((interval) => interval.id))
+      .toEqual(["maintenance_bed_102_c", "cleaning_bed_102_c", "unsellable_bed_102_c"]);
+  });
+});
+
+describe("room status source badge accessibility", () => {
+  it("includes every non-direct badge's complete business name in the cell label", () => {
+    const categories = [
+      ["YOUMUDAO", "游牧岛"],
+      ["CTRIP", "携程"],
+      ["MEITUAN", "美团"],
+      ["FREE_STAY", "免费入住"],
+      ["MEMBER", "会员权益"]
+    ] as const;
+    const intervals = categories.map(([sourceCategory], index) => ({
+      id: `source_${sourceCategory}`,
+      actualInventoryUnitId: "room_c01",
+      sourceKind: sourceCategory === "FREE_STAY" ? "FREE_STAY" : "ORDER",
+      sourceCategory,
+      status: "RESERVED",
+      startDate: "2026-09-01",
+      endDate: "2026-09-02",
+      occupantCount: 1,
+      label: `source ${index}`,
+      primaryOccupantLabel: null,
+      occupants: [],
+      references: []
+    })) as unknown as RoomStatusIntervalDto[];
+    const label = roomStatusCellAccessibleName({
+      id: "room_c01",
+      kind: "ROOM",
+      code: "C01",
+      name: "C01",
+      intervals
+    } as RoomStatusUnitDto, "2026-09-01", {
+      serviceDate: "2026-09-01",
+      status: "RESERVED",
+      available: false,
+      intervalIds: intervals.map((interval) => interval.id),
+      conflicts: []
+    }, null, "2026-09-01");
+
+    for (const [, title] of categories) expect(label).toContain(title);
+  });
+});
+
 describe("bed occupancy cell summary", () => {
   const baseReference = {
     type: "ORDER",
@@ -413,6 +541,7 @@ describe("bed occupancy cell summary", () => {
     id: "interval_overdue_reserved",
     actualInventoryUnitId: "bed_104_b",
     status: "RESERVED",
+    operationalAttention: "OVERDUE_RESERVED",
     sourceStartDate: "2026-08-06",
     label: "Order order_overdue_reserved",
     primaryOccupantLabel: "324",
@@ -427,13 +556,25 @@ describe("bed occupancy cell summary", () => {
     occupants: [{ occupantId: "occupant_reserved_second", nickname: "325" }],
     references: [{ ...baseReference, id: "order_overdue_reserved_second" }]
   } as RoomStatusIntervalDto;
+  const reservedArrears = {
+    ...inHouse,
+    id: "interval_reserved_arrears",
+    actualInventoryUnitId: "bed_104_c",
+    status: "RESERVED",
+    attention: "ARREARS",
+    sourceStartDate: "2026-08-15",
+    startDate: "2026-08-15",
+    primaryOccupantLabel: "欠款住客",
+    occupants: [{ occupantId: "occupant_reserved_arrears", nickname: "欠款住客" }],
+    references: [{ ...baseReference, id: "order_reserved_arrears" }]
+  } as RoomStatusIntervalDto;
   const unit = {
     id: "room_104",
     kind: "ROOM",
     code: "104",
     name: "104 · 四人间（公卫）",
     buildingCode: "1",
-    intervals: [inHouse, settled, arrears, secondArrears, overdueReserved, secondOverdueReserved]
+    intervals: [inHouse, settled, arrears, secondArrears, overdueReserved, secondOverdueReserved, reservedArrears]
   } as RoomStatusUnitDto;
 
   it("uses occupancy copy for mixed non-critical bed states", () => {
@@ -476,7 +617,38 @@ describe("bed occupancy cell summary", () => {
       ]
     };
 
-    expect(roomStatusBedOccupancyAttentionLabels(mixedWithArrearsAndOverdue, unit, "2026-08-14", "2026-08-14")).toEqual(["欠款", "逾期"]);
+    expect(roomStatusBedOccupancyAttentionLabels(mixedWithArrearsAndOverdue, unit, "2026-08-14", "2026-08-14")).toEqual(["逾期", "欠款"]);
+  });
+
+  it("keeps an active reservation's lifecycle label while exposing its debt attention", () => {
+    const occupancy = {
+      serviceDate: "2026-08-15",
+      occupiedBedCount: 1,
+      totalBedCount: 4,
+      occupants: [{
+        occupantId: "occupant_reserved_arrears",
+        inventoryUnitId: "bed_104_c",
+        inventoryUnitCode: "104-C",
+        primaryOccupantLabel: "欠款住客",
+        sourceReference: { ...baseReference, id: "order_reserved_arrears" }
+      }]
+    };
+
+    expect(roomStatusBedOccupancyStateLabel(occupancy, unit, "2026-08-15", "RESERVED", "2026-08-14"))
+      .toBe("已预订");
+    expect(roomStatusBedOccupancyNeedsProcessing(occupancy, unit, "2026-08-15", "2026-08-14"))
+      .toBe(true);
+    expect(roomStatusBedOccupancyAttentionLabels(occupancy, unit, "2026-08-15", "2026-08-14"))
+      .toEqual(["欠款"]);
+    const accessibleName = roomStatusCellAccessibleName(unit, "2026-08-15", {
+      serviceDate: "2026-08-15",
+      status: "RESERVED",
+      available: false,
+      intervalIds: [reservedArrears.id],
+      conflicts: []
+    }, occupancy, "2026-08-14");
+    expect(accessibleName).toContain("已预订");
+    expect(accessibleName).toContain("欠款");
   });
 
   it("keeps a moved overdue reservation visible in its parent-room summary", () => {
@@ -549,7 +721,7 @@ describe("bed occupancy cell summary", () => {
       occupants: [
         { occupantId: "occupant_arrears", inventoryUnitId: "bed_104_b", inventoryUnitCode: "104-B", primaryOccupantLabel: "234", sourceReference: { ...baseReference, id: "order_arrears" } }
       ]
-    }, unit, "2026-08-14", "ARREARS", "2026-08-14")).toBe("欠款");
+    }, unit, "2026-08-14", "ARREARS", "2026-08-14")).toBe("已结单");
     expect(roomStatusBedOccupancyNeedsProcessing({
       serviceDate: "2026-08-14",
       occupiedBedCount: 1,
@@ -568,6 +740,89 @@ describe("bed occupancy cell summary", () => {
       ]
     }, unit, "2026-08-14", "RESERVED", "2026-08-14")).toBe("逾期预订");
   });
+
+  it("does not announce a historical debt or overdue reservation twice", () => {
+    const historicalDebtName = roomStatusCellAccessibleName(unit, "2026-08-13", {
+      serviceDate: "2026-08-13",
+      status: "ARREARS",
+      available: false,
+      intervalIds: [arrears.id],
+      conflicts: []
+    }, null, "2026-08-14");
+    expect(historicalDebtName).toContain("已结单");
+    expect(historicalDebtName.match(/欠款/g)).toHaveLength(1);
+
+    const overdueName = roomStatusCellAccessibleName(unit, "2026-08-14", {
+      serviceDate: "2026-08-14",
+      status: "RESERVED",
+      available: false,
+      intervalIds: [overdueReserved.id],
+      conflicts: []
+    }, null, "2026-08-14");
+    expect(overdueName.match(/逾期预订/g)).toHaveLength(1);
+    expect(overdueName).not.toMatch(/逾期预订，逾期/);
+  });
+
+  it("maps historical, current, and future split-room beds into the same stable A-D color slots", () => {
+    const splitRoom = {
+      ...unit,
+      salesMode: "BED_SPLIT",
+      children: [
+        { id: "bed_104_d", kind: "BED", code: "104-D" },
+        { id: "bed_104_b", kind: "BED", code: "104-B" },
+        { id: "bed_104_a", kind: "BED", code: "104-A" },
+        { id: "bed_104_c", kind: "BED", code: "104-C" }
+      ],
+      bedSlotStates: [
+        { serviceDate: "2026-08-13", inventoryUnitId: "bed_104_d", inventoryUnitCode: "104-D", status: "UNKNOWN" },
+        { serviceDate: "2026-08-13", inventoryUnitId: "bed_104_b", inventoryUnitCode: "104-B", status: "SETTLED" },
+        { serviceDate: "2026-08-13", inventoryUnitId: "bed_104_a", inventoryUnitCode: "104-A", status: "IN_HOUSE" },
+        { serviceDate: "2026-08-13", inventoryUnitId: "bed_104_c", inventoryUnitCode: "104-C", status: "MAINTENANCE" },
+        { serviceDate: "2026-08-14", inventoryUnitId: "bed_104_d", inventoryUnitCode: "104-D", status: "AVAILABLE" },
+        { serviceDate: "2026-08-14", inventoryUnitId: "bed_104_b", inventoryUnitCode: "104-B", status: "RESERVED" },
+        { serviceDate: "2026-08-14", inventoryUnitId: "bed_104_a", inventoryUnitCode: "104-A", status: "IN_HOUSE" },
+        { serviceDate: "2026-08-14", inventoryUnitId: "bed_104_c", inventoryUnitCode: "104-C", status: "AVAILABLE" }
+      ]
+    } as unknown as RoomStatusUnitDto;
+
+    expect(roomStatusBedOccupancySlots(splitRoom, "2026-08-14")).toEqual([
+      { code: "A", status: "IN_HOUSE", occupied: true },
+      { code: "B", status: "RESERVED", occupied: true },
+      { code: "C", status: "AVAILABLE", occupied: false },
+      { code: "D", status: "AVAILABLE", occupied: false }
+    ]);
+
+    expect(roomStatusBedOccupancySlots(splitRoom, "2026-08-13")).toEqual([
+      { code: "A", status: "IN_HOUSE", occupied: true },
+      { code: "B", status: "SETTLED", occupied: true },
+      { code: "C", status: "MAINTENANCE", occupied: true },
+      { code: "D", status: "UNKNOWN", occupied: true }
+    ]);
+  });
+
+  it("uses registered occupants over physical beds for every occupancy ratio", () => {
+    expect(roomStatusOccupancyDisplayRatio(2, {
+      ...unit,
+      capacity: 4,
+      physicalBedCount: 1
+    } as RoomStatusUnitDto)).toBe("2/1");
+    expect(roomStatusOccupancyDisplayRatio(2, {
+      ...unit,
+      capacity: 1,
+      physicalBedCount: 4
+    } as RoomStatusUnitDto)).toBe("2/4");
+    expect(roomStatusOccupancyDisplayRatio(1, {
+      ...unit,
+      capacity: 4,
+      physicalBedCount: null
+    } as RoomStatusUnitDto)).toBe("1/?");
+  });
+
+  it("keeps debt as a completed lifecycle color and leaves debt to the attention tag", () => {
+    expect(roomStatusOccupancyLifecycleStatus("ARREARS")).toBe("SETTLED");
+    expect(roomStatusOccupancyLifecycleStatus("SETTLED")).toBe("SETTLED");
+    expect(roomStatusOccupancyLifecycleStatus("IN_HOUSE")).toBe("IN_HOUSE");
+  });
 });
 
 describe("roomStatusCellAttentionLabels", () => {
@@ -576,6 +831,7 @@ describe("roomStatusCellAttentionLabels", () => {
     actualInventoryUnitId: "bed_101_a",
     sourceKind: "ORDER",
     status: "SETTLED",
+    operationalAttention: null,
     sourceStartDate: "2026-08-06",
     startDate: "2026-08-06",
     endDate: "2026-08-11",
@@ -585,17 +841,21 @@ describe("roomStatusCellAttentionLabels", () => {
   it("marks historical arrears and overdue reserved cells with compact labels", () => {
     expect(roomStatusCellAttentionLabels([
       { ...baseInterval, status: "ARREARS" },
-      { ...baseInterval, id: "interval_2", status: "RESERVED" }
-    ], "2026-08-10", "2026-08-14")).toEqual(["欠款", "逾期"]);
+      { ...baseInterval, id: "interval_2", status: "RESERVED", operationalAttention: "OVERDUE_RESERVED" }
+    ], "2026-08-10", "2026-08-14")).toEqual(["逾期", "欠款"]);
     expect(roomStatusCellAttentionLabels([{ ...baseInterval, status: "ARREARS" }], "2026-08-10", "2026-08-14"))
       .toEqual(["欠款"]);
-    expect(roomStatusCellAttentionLabels([{ ...baseInterval, status: "RESERVED" }], "2026-08-10", "2026-08-14"))
+    expect(roomStatusCellAttentionLabels([{
+      ...baseInterval,
+      status: "RESERVED",
+      operationalAttention: "OVERDUE_RESERVED"
+    }], "2026-08-10", "2026-08-14"))
       .toEqual(["逾期"]);
   });
 
-  it("keeps arrears and ordinary future reservations out of today and future cells", () => {
+  it("keeps debt visible while leaving ordinary non-debt reservations without an attention tag", () => {
     expect(roomStatusCellAttentionLabels([{ ...baseInterval, status: "ARREARS" }], "2026-08-14", "2026-08-14"))
-      .toEqual([]);
+      .toEqual(["欠款"]);
     expect(roomStatusCellAttentionLabels([{
       ...baseInterval,
       status: "RESERVED",
@@ -605,13 +865,72 @@ describe("roomStatusCellAttentionLabels", () => {
     }], "2026-08-15", "2026-08-14"))
       .toEqual([]);
     expect(roomStatusCellAttentionLabels([{ ...baseInterval, status: "ARREARS" }], "2026-08-10"))
+      .toEqual(["欠款"]);
+  });
+
+  it("shows and deduplicates active reservation debt attention on its covered date", () => {
+    const activeDebt = {
+      ...baseInterval,
+      status: "RESERVED",
+      attention: "ARREARS",
+      sourceStartDate: "2026-08-15",
+      startDate: "2026-08-15",
+      endDate: "2026-08-20"
+    } as RoomStatusIntervalDto;
+
+    expect(roomStatusCellAttentionLabels([
+      activeDebt,
+      { ...activeDebt, id: "interval_2" }
+    ], "2026-08-15", "2026-08-14")).toEqual(["欠款"]);
+  });
+
+  it("only exposes an overdue checkout when the service explicitly marks the interval", () => {
+    const overdueInHouse = {
+      ...baseInterval,
+      status: "IN_HOUSE",
+      occupants: [],
+      operationalAttention: "OVERDUE_IN_HOUSE"
+    } as RoomStatusIntervalDto;
+
+    expect(roomStatusCellAttentionLabels([overdueInHouse], "2026-08-14", "2026-08-14"))
+      .toEqual(["未退"]);
+    expect(roomStatusCellAttentionLabels([{
+      ...overdueInHouse,
+      operationalAttention: null
+    } as RoomStatusIntervalDto], "2026-08-14", "2026-08-14"))
       .toEqual([]);
+  });
+
+  it("announces an explicitly overdue checkout once alongside its in-house lifecycle", () => {
+    const overdueInHouse = {
+      ...baseInterval,
+      status: "IN_HOUSE",
+      occupants: [],
+      operationalAttention: "OVERDUE_IN_HOUSE"
+    } as RoomStatusIntervalDto;
+    const accessibleName = roomStatusCellAccessibleName({
+      id: "room_101",
+      kind: "ROOM",
+      code: "101",
+      name: "101",
+      intervals: [overdueInHouse]
+    } as RoomStatusUnitDto, "2026-08-14", {
+      serviceDate: "2026-08-14",
+      status: "IN_HOUSE",
+      available: false,
+      intervalIds: [overdueInHouse.id],
+      conflicts: []
+    }, null, "2026-08-14");
+
+    expect(accessibleName).toContain("在住");
+    expect(accessibleName.match(/未退/g)).toHaveLength(1);
   });
 
   it("marks every visible day of a cross-today overdue reservation", () => {
     const crossTodayOverdueReserved: RoomStatusIntervalDto = {
       ...baseInterval,
       status: "RESERVED",
+      operationalAttention: "OVERDUE_RESERVED",
       sourceStartDate: "2026-08-06",
       startDate: "2026-08-06",
       endDate: "2026-08-20"
@@ -629,6 +948,7 @@ describe("roomStatusCellAttentionLabels", () => {
     const movedRun: RoomStatusIntervalDto = {
       ...baseInterval,
       status: "RESERVED",
+      operationalAttention: "OVERDUE_RESERVED",
       sourceStartDate: "2026-08-16",
       startDate: "2026-08-16",
       endDate: "2026-08-20",
@@ -643,13 +963,13 @@ describe("roomStatusCellAttentionLabels", () => {
     expect(roomStatusCellAttentionLabels([
       { ...baseInterval, status: "ARREARS" },
       { ...baseInterval, id: "interval_2", status: "ARREARS" },
-      { ...baseInterval, id: "interval_3", status: "RESERVED" }
-    ], "2026-08-10", "2026-08-14")).toEqual(["欠款", "逾期"]);
+      { ...baseInterval, id: "interval_3", status: "RESERVED", operationalAttention: "OVERDUE_RESERVED" }
+    ], "2026-08-10", "2026-08-14")).toEqual(["逾期", "欠款"]);
   });
 
   it("treats overdue free stays as needing attention but never marks settled history", () => {
     expect(roomStatusCellAttentionLabels([
-      { ...baseInterval, sourceKind: "FREE_STAY", status: "RESERVED" }
+      { ...baseInterval, sourceKind: "FREE_STAY", status: "RESERVED", operationalAttention: "OVERDUE_RESERVED" }
     ], "2026-08-10", "2026-08-14")).toEqual(["逾期"]);
     expect(roomStatusCellAttentionLabels([
       { ...baseInterval, sourceKind: "MAINTENANCE", status: "RESERVED" }

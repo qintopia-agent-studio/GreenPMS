@@ -2,6 +2,7 @@ import { ArrowRight, CalendarRange, Clock3, Crosshair, FilePenLine, ReceiptText,
 import { currentReleaseFeatures } from "@qintopia/contracts";
 import { Link } from "react-router-dom";
 import { AccommodationPositionSummary } from "../components/AccommodationPositionSummary";
+import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
 import type { InventoryUnitDto, MemberViewDto, OrderViewDto } from "../types";
 import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMoney, stayDateFundsAreOperatorFacing, StatusBadge } from "../ui";
 import { stayDateChangeActionState, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
@@ -15,7 +16,7 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   CHECK_IN: "办理入住",
   CHECK_OUT: "办理退房",
   COMPLETE_STAY: "完成住宿",
-  RESCHEDULE_STAY: "调整预订日期",
+  RESCHEDULE_STAY: "调整住宿日期",
   SHORTEN_STAY: "缩短住宿",
   EXTEND_STAY: "延长住宿",
   MOVE_UNIT: "换房",
@@ -269,6 +270,7 @@ export function RoomStatusOrderContext({
   const matchingLotId = matchingMembershipOrder?.order.entitlement_lot_id ?? undefined;
   const consumedMembershipSummary = matchingLotId ? membershipCoverageStatusSummary(view, "CONSUMED", matchingLotId) : undefined;
   const heldMembershipSummary = matchingLotId ? membershipCoverageStatusSummary(view, "HELD", matchingLotId) : undefined;
+  const overdueNotice = overdueInHouseNotice(view);
 
   return (
     <aside className="room-status-context room-status-order-context" aria-labelledby="room-status-order-context-heading" aria-busy={loading}>
@@ -282,6 +284,8 @@ export function RoomStatusOrderContext({
           {onClose ? <button type="button" className="room-status-icon-button" onClick={onClose} aria-label="关闭订单上下文" title="关闭订单上下文"><X aria-hidden="true" size={17} /></button> : null}
         </div>
       </header>
+
+      {overdueNotice ? <OverdueInHouseAlert notice={overdueNotice} /> : null}
 
       <section className="room-status-context-section" aria-labelledby="room-status-order-stay-heading">
         <div className="room-status-context-section-heading"><CalendarRange aria-hidden="true" size={17} /><h3 id="room-status-order-stay-heading">完整住宿</h3></div>

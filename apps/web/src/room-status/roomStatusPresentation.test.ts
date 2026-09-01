@@ -1,23 +1,39 @@
 import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { RoomStatusDayDto, RoomStatusUnitDto } from "@qintopia/contracts";
 import { roomStatusCellAccessibleName, rowDescription } from "./RoomStatusGrid";
 import {
+  RoomStatusAttentionBadges,
+  RoomStatusGridAttentionBadges,
+  RoomStatusSourceBadges,
   roomStatusBedOccupantLabels,
   roomStatusIntervalBusinessLabel,
   roomStatusIntervalGridLabel,
+  roomStatusIntervalAttentionLabels,
   roomStatusIntervalStatusLabel,
+  roomStatusLifecycleStatus,
   roomStatusOccupancyCapacity,
   roomStatusOccupantLabelLines,
   roomStatusRowSalesLabel,
   roomStatusSaleCapabilityLabel,
   roomStatusSelectedSaleLabel,
   roomStatusRoomTypeLabel,
+  roomStatusPresentation,
+  roomStatusSourceBadgesForIntervals,
+  roomStatusSourceBadgeSummary,
+  roomStatusAttentionBadgeSummary,
+  roomStatusPhysicalOccupancyRatio,
   roomStatusUnitDescription,
   roomStatusUnitLabel,
   roomStatusUnitLocationLabel
 } from "./roomStatusPresentation";
 
 describe("room status lodging presentation", () => {
+  it("uses the frozen high-contrast colors for reservations and in-house stays", () => {
+    expect(roomStatusPresentation.RESERVED.color).toBe("#F97316");
+    expect(roomStatusPresentation.IN_HOUSE.color).toBe("#0969DA");
+  });
+
   it("keeps every bed nickname in stable DTO order without deduplicating", () => {
     expect(roomStatusBedOccupantLabels([
       { primaryOccupantLabel: "山风" },
@@ -105,6 +121,113 @@ describe("room status lodging presentation", () => {
       sourceStartDate: "2026-08-16",
       orderArrivalDate: "2026-08-06"
     }, "2026-08-14")).toBe("逾期预订");
+  });
+
+  it("keeps lifecycle color, operational attention, and debt attention as separate facts", () => {
+    expect(roomStatusLifecycleStatus("ARREARS")).toBe("SETTLED");
+    expect(roomStatusIntervalAttentionLabels({
+      status: "RESERVED",
+      attention: "ARREARS",
+      operationalAttention: "OVERDUE_RESERVED"
+    })).toEqual(["欠款", "逾期"]);
+    expect(roomStatusIntervalAttentionLabels({
+      status: "IN_HOUSE",
+      attention: null,
+      operationalAttention: "OVERDUE_IN_HOUSE"
+    })).toEqual(["未退"]);
+  });
+
+  it("renders the same compact attention badges for every room-status entry", () => {
+    const html = renderToStaticMarkup(RoomStatusAttentionBadges({ labels: ["欠款", "逾期", "未退"] }));
+    expect(html.match(/room-status-mobile-attention/g)).toHaveLength(3);
+    expect(html).toContain("欠款");
+    expect(html).toContain("逾期");
+    expect(html).toContain("未退");
+  });
+
+  it("maps one square source badge per business source and deduplicates parent-room summaries", () => {
+    const badges = roomStatusSourceBadgesForIntervals([
+      { sourceCategory: "MEMBER" },
+      { sourceCategory: "FREE_STAY" },
+      { sourceCategory: "MEITUAN" },
+      { sourceCategory: "CTRIP" },
+      { sourceCategory: "YOUMUDAO" },
+      { sourceCategory: "DIRECT" },
+      { sourceCategory: null }
+    ]);
+
+    expect(badges.map(({ label, title, tone }) => ({ label, title, tone }))).toEqual([
+      { label: "H", title: "会员权益", tone: "member" },
+      { label: "F", title: "免费入住", tone: "free" },
+      { label: "M", title: "美团", tone: "channel" },
+      { label: "X", title: "携程", tone: "channel" },
+      { label: "Y", title: "游牧岛", tone: "channel" }
+    ]);
+    const html = renderToStaticMarkup(RoomStatusSourceBadges({ badges }));
+    expect(html.match(/room-status-source-badge is-/g)).toHaveLength(5);
+    expect(html).toContain('title="游牧岛"');
+    expect(html).toContain('title="免费入住"');
+    expect(html).toContain('title="会员权益"');
+  });
+
+  it("summarizes parent-cell source and attention badges without dropping the full hover description", () => {
+    const badges = roomStatusSourceBadgesForIntervals([
+      { sourceCategory: "MEMBER" },
+      { sourceCategory: "FREE_STAY" },
+      { sourceCategory: "MEITUAN" },
+      { sourceCategory: "CTRIP" },
+      { sourceCategory: "YOUMUDAO" }
+    ]);
+    const withoutAttention = roomStatusSourceBadgeSummary(badges, 0);
+    expect(withoutAttention.visible.map((badge) => badge.label)).toEqual(["H", "F", "M"]);
+    expect(withoutAttention.hiddenCount).toBe(2);
+    expect(withoutAttention.title).toBe("会员权益、免费入住、美团、携程、游牧岛");
+
+    const fourSourcesWithoutAttention = roomStatusSourceBadgeSummary(badges.slice(0, 4), 0);
+    expect(fourSourcesWithoutAttention.visible.map((badge) => badge.label)).toEqual(["H", "F", "M", "X"]);
+    expect(fourSourcesWithoutAttention.hiddenCount).toBe(0);
+
+    const withOneAttention = roomStatusSourceBadgeSummary(badges, 1);
+    expect(withOneAttention.visible.map((badge) => badge.label)).toEqual(["H", "F"]);
+    expect(withOneAttention.hiddenCount).toBe(3);
+
+    const threeSourcesWithOneAttention = roomStatusSourceBadgeSummary(badges.slice(0, 3), 1);
+    expect(threeSourcesWithOneAttention.visible.map((badge) => badge.label)).toEqual(["H", "F", "M"]);
+    expect(threeSourcesWithOneAttention.hiddenCount).toBe(0);
+
+    const fourSourcesWithOneAttention = roomStatusSourceBadgeSummary(badges.slice(0, 4), 1);
+    expect(fourSourcesWithOneAttention.visible.map((badge) => badge.label)).toEqual(["H", "F"]);
+    expect(fourSourcesWithOneAttention.hiddenCount).toBe(2);
+
+    const attention = roomStatusAttentionBadgeSummary(["欠款", "逾期", "未退"]);
+    expect(attention.visible).toEqual(["未退"]);
+    expect(attention.hiddenCount).toBe(2);
+    expect(attention.title).toBe("未退、逾期、欠款");
+
+    const withMultipleAttention = roomStatusSourceBadgeSummary(badges, attention.visible.length + attention.hiddenCount);
+    expect(withMultipleAttention.visible.map((badge) => badge.label)).toEqual(["H"]);
+    expect(withMultipleAttention.hiddenCount).toBe(4);
+
+    const twoSourcesWithMultipleAttention = roomStatusSourceBadgeSummary(badges.slice(0, 2), 2);
+    expect(twoSourcesWithMultipleAttention.visible.map((badge) => badge.label)).toEqual(["H", "F"]);
+    expect(twoSourcesWithMultipleAttention.hiddenCount).toBe(0);
+
+    const sourceHtml = renderToStaticMarkup(RoomStatusSourceBadges({
+      badges: withMultipleAttention.visible,
+      hiddenCount: withMultipleAttention.hiddenCount,
+      title: withMultipleAttention.title
+    }));
+    expect(sourceHtml).toContain("+4");
+    expect(sourceHtml).toContain('title="会员权益、免费入住、美团、携程、游牧岛"');
+    const attentionHtml = renderToStaticMarkup(RoomStatusGridAttentionBadges({ summary: attention }));
+    expect(attentionHtml).toContain("+2");
+    expect(attentionHtml).toContain('title="未退、逾期、欠款"');
+  });
+
+  it("uses registered occupants over physical beds and never guesses a missing denominator", () => {
+    expect(roomStatusPhysicalOccupancyRatio(2, { physicalBedCount: 1 })).toBe("2/1");
+    expect(roomStatusPhysicalOccupancyRatio(2, { physicalBedCount: 4 })).toBe("2/4");
+    expect(roomStatusPhysicalOccupancyRatio(1, { physicalBedCount: null })).toBe("1/?");
   });
 
   it("derives room-status copy only from nicknames even if an unsafe runtime object has extra personal fields", () => {

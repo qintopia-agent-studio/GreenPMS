@@ -746,7 +746,7 @@ describe("operator-facing order lifecycle presentation", () => {
       "当前住宿安排", "最后住宿安排", "取消前安排", "未到订单安排"
     ]);
     expect(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT"].map((value) => arrangementChangeLabel(value as Parameters<typeof arrangementChangeLabel>[0]))).toEqual([
-      "创建预订", "调整预订日期", "延长住宿", "缩短住宿", "更换房源", "提前退房"
+      "创建预订", "调整住宿日期", "延长住宿", "缩短住宿", "更换房源", "提前退房"
     ]);
     expect(["COLLECTION", "REFUND", "REVERSAL"].map((value) => collectionFactTypeLabel(value as CollectionFactDto["fact_type"]))).toEqual(["收款", "退款", "冲销"]);
     expect(["CASH", "BANK_TRANSFER", "CARD", "WECOM", "OTHER", "LEGACY_UNKNOWN"].map(collectionMethodLabel)).toEqual(["现金", "银行转账", "银行卡", "企业微信", "其他方式", "其他方式"]);

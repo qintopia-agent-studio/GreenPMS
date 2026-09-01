@@ -14,7 +14,9 @@ import type {
   RoomStatusActionCode,
   RoomStatusBedOccupancyDto,
   RoomStatusBlockingFactKind,
+  FreeStayCategoryCode,
   RoomStatusIntervalDto,
+  RoomStatusSourceCategory,
   RoomStatusSourceKind,
   RoomStatusStatus,
   RoomStatusUnitDto
@@ -86,12 +88,13 @@ type StatusIcon = ComponentType<SVGProps<SVGSVGElement> & { size?: string | numb
 export interface RoomStatusPresentation {
   label: string;
   Icon: StatusIcon;
+  color?: string;
 }
 
 export const roomStatusPresentation: Record<RoomStatusStatus, RoomStatusPresentation> = {
   AVAILABLE: { label: "可售", Icon: CheckCircle2 },
-  RESERVED: { label: "已预订", Icon: CalendarClock },
-  IN_HOUSE: { label: "在住", Icon: BedDouble },
+  RESERVED: { label: "已预订", Icon: CalendarClock, color: "#F97316" },
+  IN_HOUSE: { label: "在住", Icon: BedDouble, color: "#0969DA" },
   CLEANING: { label: "待清洁", Icon: Sparkles },
   MAINTENANCE: { label: "维修 / 锁房", Icon: Wrench },
   UNAVAILABLE: { label: "不可售", Icon: Ban },
@@ -102,12 +105,192 @@ export const roomStatusPresentation: Record<RoomStatusStatus, RoomStatusPresenta
 };
 
 type ReservedTimingSource = Pick<RoomStatusIntervalDto,
-  "sourceKind" | "status" | "sourceStartDate" | "orderArrivalDate">;
+  "sourceKind" | "status" | "sourceStartDate" | "orderArrivalDate"> &
+  Partial<Pick<RoomStatusIntervalDto, "operationalAttention">>;
+
+export type RoomStatusAttentionLabel = "欠款" | "逾期" | "未退";
+
+const roomStatusAttentionPriority: Record<RoomStatusAttentionLabel, number> = {
+  "未退": 0,
+  "逾期": 1,
+  "欠款": 2
+};
+
+export interface RoomStatusBadgeSummary<T> {
+  visible: readonly T[];
+  hiddenCount: number;
+  title: string;
+}
+
+export function roomStatusOrderedAttentionLabels(
+  labels: readonly RoomStatusAttentionLabel[]
+): RoomStatusAttentionLabel[] {
+  return [...new Set(labels)].sort((left, right) => roomStatusAttentionPriority[left] - roomStatusAttentionPriority[right]);
+}
+
+export function roomStatusAttentionBadgeSummary(
+  labels: readonly RoomStatusAttentionLabel[]
+): RoomStatusBadgeSummary<RoomStatusAttentionLabel> {
+  const ordered = roomStatusOrderedAttentionLabels(labels);
+  return {
+    visible: ordered.slice(0, 1),
+    hiddenCount: Math.max(0, ordered.length - 1),
+    title: ordered.join("、")
+  };
+}
+
+export function roomStatusLifecycleStatus(status: RoomStatusStatus): RoomStatusStatus {
+  return status === "ARREARS" ? "SETTLED" : status;
+}
+
+export function roomStatusIntervalAttentionLabels(
+  interval: Pick<RoomStatusIntervalDto, "status" | "attention" | "operationalAttention">
+): RoomStatusAttentionLabel[] {
+  const labels: RoomStatusAttentionLabel[] = [];
+  if (interval.status === "ARREARS" || interval.attention === "ARREARS") labels.push("欠款");
+  if (interval.operationalAttention === "OVERDUE_RESERVED") labels.push("逾期");
+  if (interval.operationalAttention === "OVERDUE_IN_HOUSE") labels.push("未退");
+  return labels;
+}
+
+export function roomStatusPhysicalOccupancyRatio(
+  registeredOccupantCount: number,
+  unit: Pick<RoomStatusUnitDto, "physicalBedCount">
+): string {
+  const occupants = Number.isFinite(registeredOccupantCount)
+    ? Math.max(0, Math.trunc(registeredOccupantCount))
+    : 0;
+  const physicalBedCount = unit.physicalBedCount !== null
+    && Number.isFinite(unit.physicalBedCount)
+    && unit.physicalBedCount > 0
+    ? Math.trunc(unit.physicalBedCount)
+    : null;
+  return `${occupants}/${physicalBedCount ?? "?"}`;
+}
+
+export function RoomStatusAttentionBadges({ labels }: { labels: readonly RoomStatusAttentionLabel[] }) {
+  return labels.map((label) => <span key={label} className="room-status-mobile-attention">{label}</span>);
+}
+
+export type RoomStatusSourceBadgeTone = "channel" | "free" | "member";
+
+export interface RoomStatusSourceBadge {
+  category: Exclude<RoomStatusSourceCategory, "DIRECT">;
+  label: "Y" | "X" | "M" | "F" | "H";
+  title: string;
+  tone: RoomStatusSourceBadgeTone;
+}
+
+const roomStatusSourceBadgeByCategory: Partial<Record<RoomStatusSourceCategory, RoomStatusSourceBadge>> = {
+  YOUMUDAO: { category: "YOUMUDAO", label: "Y", title: "游牧岛", tone: "channel" },
+  CTRIP: { category: "CTRIP", label: "X", title: "携程", tone: "channel" },
+  MEITUAN: { category: "MEITUAN", label: "M", title: "美团", tone: "channel" },
+  FREE_STAY: { category: "FREE_STAY", label: "F", title: "免费入住", tone: "free" },
+  MEMBER: { category: "MEMBER", label: "H", title: "会员权益", tone: "member" }
+};
+
+const roomStatusFreeStayCategoryLabels: Record<FreeStayCategoryCode, string> = {
+  VOLUNTEER: "义工",
+  RECEPTION: "接待"
+};
+
+export function roomStatusSourceBadge(
+  interval: Pick<RoomStatusIntervalDto, "sourceCategory">
+): RoomStatusSourceBadge | null {
+  return interval.sourceCategory ? roomStatusSourceBadgeByCategory[interval.sourceCategory] ?? null : null;
+}
+
+export function roomStatusSourceBadgeKey(badge: RoomStatusSourceBadge): string {
+  return badge.category;
+}
+
+export function roomStatusSourceBadgesForIntervals(
+  intervals: readonly Pick<RoomStatusIntervalDto, "sourceCategory">[]
+): RoomStatusSourceBadge[] {
+  const byKey = new Map<string, RoomStatusSourceBadge>();
+  for (const interval of intervals) {
+    const badge = roomStatusSourceBadge(interval);
+    if (!badge) continue;
+    byKey.set(roomStatusSourceBadgeKey(badge), badge);
+  }
+  return [...byKey.values()];
+}
+
+export function roomStatusSourceBadgeSummary(
+  badges: readonly RoomStatusSourceBadge[],
+  attentionCount: number
+): RoomStatusBadgeSummary<RoomStatusSourceBadge> {
+  const availableSlots = attentionCount > 1 ? 2 : attentionCount === 1 ? 3 : 4;
+  const maxVisible = badges.length > availableSlots ? availableSlots - 1 : availableSlots;
+  return {
+    visible: badges.slice(0, maxVisible),
+    hiddenCount: Math.max(0, badges.length - maxVisible),
+    title: badges.map((badge) => badge.title).join("、")
+  };
+}
+
+export function roomStatusFreeStayCategoryLabel(code: FreeStayCategoryCode | null | undefined): string | null {
+  return code ? roomStatusFreeStayCategoryLabels[code] ?? null : null;
+}
+
+export function roomStatusFreeStayMetaLabels(
+  interval: Pick<RoomStatusIntervalDto, "sourceKind" | "sourceCategory" | "freeStayCategoryCode">
+): string[] {
+  if (interval.sourceKind !== "FREE_STAY" && interval.sourceCategory !== "FREE_STAY") return [];
+  return ["免费", roomStatusFreeStayCategoryLabel(interval.freeStayCategoryCode)].filter((label): label is string => Boolean(label));
+}
+
+export function RoomStatusSourceBadges({
+  badges,
+  hiddenCount = 0,
+  title
+}: {
+  badges: readonly RoomStatusSourceBadge[];
+  hiddenCount?: number;
+  title?: string;
+}) {
+  if (!badges.length && hiddenCount <= 0) return null;
+  return (
+    <span className="room-status-source-badges" aria-hidden="true" title={title || badges.map((badge) => badge.title).join("、")}>
+      {badges.map((badge) => (
+        <span
+          key={roomStatusSourceBadgeKey(badge)}
+          className={`room-status-source-badge is-${badge.tone}`}
+          title={badge.title}
+        >{badge.label}</span>
+      ))}
+      {hiddenCount > 0 ? <span className="room-status-source-badge is-overflow" title={title || badges.map((badge) => badge.title).join("、")}>+{hiddenCount}</span> : null}
+    </span>
+  );
+}
+
+export function RoomStatusGridAttentionBadges({
+  summary
+}: {
+  summary: RoomStatusBadgeSummary<RoomStatusAttentionLabel>;
+}) {
+  if (!summary.visible.length) return null;
+  return (
+    <span className="room-status-bed-attention-tags" aria-hidden="true" title={summary.title}>
+      {summary.visible.map((label) => (
+        <span key={label} className="room-status-bed-attention-tag">{label}</span>
+      ))}
+      {summary.hiddenCount > 0 ? <span className="room-status-bed-attention-tag is-overflow" title={summary.title}>+{summary.hiddenCount}</span> : null}
+    </span>
+  );
+}
+
+export function RoomStatusFreeStayMetaBadges({ labels }: { labels: readonly string[] }) {
+  return labels.map((label) => <span key={label} className="room-status-quick-meta-tag">{label}</span>);
+}
 
 export function roomStatusIntervalIsOverdueReserved(
   interval: ReservedTimingSource,
   businessDate?: string
 ): boolean {
+  if (interval.operationalAttention !== undefined) {
+    return interval.operationalAttention === "OVERDUE_RESERVED";
+  }
   return Boolean(businessDate
     && (interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY")
     && interval.status === "RESERVED"
@@ -120,7 +303,7 @@ export function roomStatusIntervalStatusLabel(
 ): string {
   return roomStatusIntervalIsOverdueReserved(interval, businessDate)
     ? "逾期预订"
-    : roomStatusPresentation[interval.status].label;
+    : roomStatusPresentation[roomStatusLifecycleStatus(interval.status)].label;
 }
 
 export const roomStatusSourceLabels: Record<RoomStatusSourceKind, string> = {
@@ -291,10 +474,11 @@ export function formatRoomStatusDateTime(value: string): string {
 }
 
 export function RoomStatusMark({ status, compact = false, label }: { status: RoomStatusStatus; compact?: boolean; label?: string }) {
-  const presentation = roomStatusPresentation[status];
+  const lifecycleStatus = roomStatusLifecycleStatus(status);
+  const presentation = roomStatusPresentation[lifecycleStatus];
   const Icon = presentation.Icon;
   return (
-    <span className={`room-status-mark room-status-mark-${status.toLowerCase().replaceAll("_", "-")}${compact ? " room-status-mark-compact" : ""}`}>
+    <span className={`room-status-mark room-status-mark-${lifecycleStatus.toLowerCase().replaceAll("_", "-")}${compact ? " room-status-mark-compact" : ""}`}>
       <Icon aria-hidden="true" size={compact ? 14 : 16} />
       <span>{label ?? presentation.label}</span>
     </span>

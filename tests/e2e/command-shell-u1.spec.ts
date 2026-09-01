@@ -310,9 +310,10 @@ test("U1 pending command coordinates and clears across tabs without reload", asy
     const peerPopover = peer.getByTestId("room-status-quick-popover");
     await peer.waitForTimeout(250);
     if (await peerPopover.isVisible()) {
-      await expect(peerPopover).toContainText("当前选区暂无可执行操作");
-      await expect(peerPopover.getByRole("button", { name: "创建订单", exact: true })).toHaveCount(0);
-      await expect(peerPopover.getByRole("button", { name: "维修锁房", exact: true })).toHaveCount(0);
+      await expect(peerPopover.getByRole("button", { name: "创建订单", exact: true })).toBeDisabled();
+      await expect(peerPopover.getByRole("button", { name: "维修锁房", exact: true })).toBeDisabled();
+      await expect(peerPopover).toContainText("上一笔操作结果尚未收口");
+      await expect(peerPopover.getByRole("button", { name: "查询原操作结果", exact: true })).toBeVisible();
       await expect(peerPopover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
       await peerPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
     } else {
@@ -580,8 +581,13 @@ test("U1 damaged Quote recovery requires review and preserves other property rec
     localStorage.setItem(otherKey, "preserve-other-property");
   }, { key: storageKey, otherKey: otherStorageKey });
 
-  await openQuoteWorkbench(page, candidate);
+  const recoveryEntry = page.getByTestId("inventory-quote-recovery-entry");
+  await expect(recoveryEntry).toBeVisible();
+  await expect(recoveryEntry).toContainText("报价恢复记录需要核对");
   const notice = page.getByTestId("quote-damaged-command-recovery");
+  if (!await notice.isVisible({ timeout: 2_000 }).catch(() => false)) {
+    await recoveryEntry.getByRole("button", { name: "打开处理入口", exact: true }).click();
+  }
   await expect(notice).toBeVisible();
   await expect(notice).toContainText("先在当前业务页面核对订单、房态或会员记录");
   const discard = notice.getByRole("button", { name: "清除本物业损坏记录", exact: true });
@@ -592,6 +598,12 @@ test("U1 damaged Quote recovery requires review and preserves other property rec
   await expect(discard).toBeEnabled();
   await discard.click();
   await expect(notice).toBeHidden();
+  const recoveryDrawer = page.locator("dialog.room-status-write-drawer");
+  if (await recoveryDrawer.isVisible().catch(() => false)) {
+    await recoveryDrawer.getByRole("button", { name: "关闭", exact: true }).last().click();
+    await expect(recoveryDrawer).toBeHidden();
+  }
+  await openQuoteWorkbench(page, candidate);
   await expect.poll(() => quotePostCount).toBe(1);
   await expect.poll(() => page.evaluate(({ key, otherKey }) => ({
     damagedRecord: localStorage.getItem(key) === "{damaged-json",
@@ -628,6 +640,7 @@ test("U1 orphaned Quote recovery requires explicit review before recalculating",
       ownerTabId: "closed-quote-tab",
       input,
       inputSignature: JSON.stringify(input),
+      actionCode: "CREATE_ORDER",
       metadata: {
         idempotencyKey: "orphaned-quote-idempotency-key",
         correlationId: "orphaned-quote-correlation-id"
@@ -643,8 +656,8 @@ test("U1 orphaned Quote recovery requires explicit review before recalculating",
     departureDate: candidate.departureDate
   });
 
-  await openQuoteWorkbench(page, candidate);
   const recovery = page.getByTestId("quote-recovery");
+  await expect(recovery).toBeVisible();
   await expect(recovery).toContainText("另一标签正在提交报价");
   await expect(recovery).toContainText("如果原标签已经关闭，可核对原报价是否完成");
   const restart = recovery.getByRole("button", { name: "核对原报价结果", exact: true });

@@ -55,6 +55,16 @@ function addDays(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+async function withOrdinaryOrderCreationClock<T>(
+  businessDate: string,
+  arrivalDate: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  return arrivalDate < businessDate
+    ? withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00+08:00`), operation)
+    : operation();
+}
+
 async function execute(
   db: Kysely<Database>,
   commandType: CommandType,
@@ -106,7 +116,7 @@ async function createMember(db: Kysely<Database>, options: {
   return memberId;
 }
 
-async function createCheckedOutStay(db: Kysely<Database>, options: {
+async function createCheckedOutStay(db: Kysely<Database>, businessDate: string, options: {
   key: string;
   unitCode: string;
   nickname: string;
@@ -117,27 +127,30 @@ async function createCheckedOutStay(db: Kysely<Database>, options: {
   transactionReference: string;
 }): Promise<Omit<Stage13StayConversionFixture, "memberId" | "mismatchMemberId" | "membershipProductId" | "agreedPriceMinor" | "remainingPaymentMinor">> {
   const unit = await unitByCode(db, options.unitCode);
-  const quote = await createQuoteForTesting(db, {
-    propertyId: demo.propertyId,
-    inventoryUnitId: unit.id,
-    arrivalDate: options.arrivalDate,
-    departureDate: options.departureDate,
-    pricingPolicyVersionId: demo.pricingPolicyId,
-    stayType: "CUSTOM"
+  const { quote, created } = await withOrdinaryOrderCreationClock(businessDate, options.arrivalDate, async () => {
+    const quote = await createQuoteForTesting(db, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: unit.id,
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate,
+      pricingPolicyVersionId: demo.pricingPolicyId,
+      stayType: "CUSTOM"
+    });
+    const created = await execute(db, "CREATE_ORDER", {
+      propertyId: demo.propertyId,
+      quoteId: quote.quoteId,
+      primaryGuest: {
+        fullName: `${options.nickname}完整姓名`,
+        nickname: options.nickname,
+        phone: "13800001313",
+        documentNumber: options.documentNumber
+      },
+      bookingChannelCode: "WECOM",
+      channelOrderReference: null,
+      targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+    }, `${options.key}-create`);
+    return { quote, created };
   });
-  const created = await execute(db, "CREATE_ORDER", {
-    propertyId: demo.propertyId,
-    quoteId: quote.quoteId,
-    primaryGuest: {
-      fullName: `${options.nickname}完整姓名`,
-      nickname: options.nickname,
-      phone: "13800001313",
-      documentNumber: options.documentNumber
-    },
-    bookingChannelCode: "WECOM",
-    channelOrderReference: null,
-    targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
-  }, `${options.key}-create`);
   const orderId = created.result?.orderId;
   const stayId = created.result?.stayId;
   if (typeof orderId !== "string" || typeof stayId !== "string") {
@@ -192,7 +205,7 @@ export async function prepareStage13Acceptance(
       fullName: `住宿转会员匹配会员-${suffix}`,
       identityCardNumber
     });
-    const stay = await createCheckedOutStay(db, {
+    const stay = await createCheckedOutStay(db, businessDate, {
       key: `${suffix}-conversion`,
       unitCode: "D01",
       nickname: `住宿转会员-stage13-0`,

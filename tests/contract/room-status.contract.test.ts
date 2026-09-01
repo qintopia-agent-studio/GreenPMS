@@ -6,7 +6,9 @@ import {
   ROOM_STATUS_MAX_QUERY_NIGHTS,
   ROOM_STATUS_OPERATIONAL_TASK_LIMIT,
   roomStatusActionCodes,
+  roomStatusAttentionCodes,
   roomStatusBlockingFactKinds,
+  roomStatusOperationalAttentionCodes,
   roomStatusOperationalTaskKinds,
   roomStatusSourceKinds,
   roomStatusStatuses
@@ -148,6 +150,9 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(JSON.stringify(responseSchema)).toContain("primaryOccupantLabel");
     expect(JSON.stringify(responseSchema)).toContain("sourceStartDate");
     expect(JSON.stringify(responseSchema)).toContain("sourceEndDate");
+    expect(JSON.stringify(responseSchema)).toContain("sourceCategory");
+    expect(JSON.stringify(responseSchema)).toContain("freeStayCategoryCode");
+    expect(JSON.stringify(responseSchema)).toContain("freeStayReason");
     expect(JSON.stringify(responseSchema)).toContain("claimIds");
     expect(JSON.stringify(responseSchema)).toContain("blockingFactKind");
     expect(JSON.stringify(responseSchema)).toContain("filterOptions");
@@ -158,13 +163,33 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(responseProperties.operationalTasks!.maxItems).toBe(ROOM_STATUS_OPERATIONAL_TASK_LIMIT);
     const operationalTaskItems = (responseProperties.operationalTasks!.items as JsonSchema);
     const operationalTaskProperties = operationalTaskItems.properties as Record<string, JsonSchema>;
+    expect((operationalTaskItems.required as string[])).toContain("attention");
+    expect((operationalTaskItems.required as string[])).toContain("operationalAttention");
+    expect(JSON.stringify(operationalTaskProperties.attention)).toContain('"ARREARS"');
+    expect(JSON.stringify(operationalTaskProperties.operationalAttention)).toContain('"OVERDUE_IN_HOUSE"');
     expect(JSON.stringify(operationalTaskProperties.reason)).not.toContain("maxLength");
     const taskConflictProperties = ((operationalTaskProperties.conflicts!.items as JsonSchema).properties as Record<string, JsonSchema>);
     expect(JSON.stringify(taskConflictProperties.reason)).not.toContain("maxLength");
     const roomProperties = ((responseProperties.rooms!.items as JsonSchema).properties as Record<string, JsonSchema>);
     const intervalProperties = (((roomProperties.intervals!.items as JsonSchema).properties) as Record<string, JsonSchema>);
+    const intervalItems = roomProperties.intervals!.items as JsonSchema;
+    expect((intervalItems.required as string[])).toContain("attention");
+    expect((intervalItems.required as string[])).toContain("operationalAttention");
+    expect(JSON.stringify(intervalProperties.attention)).toContain('"ARREARS"');
+    expect(JSON.stringify(intervalProperties.operationalAttention)).toContain('"OVERDUE_RESERVED"');
+    expect(JSON.stringify(intervalProperties.sourceCategory)).toContain('"CTRIP"');
+    expect(JSON.stringify(intervalProperties.sourceCategory)).toContain('"FREE_STAY"');
+    expect(JSON.stringify(intervalProperties.sourceCategory)).toContain('"MEMBER"');
+    expect((responseProperties.rooms!.items as JsonSchema).required).toEqual(expect.arrayContaining([
+      "physicalBedCount",
+      "bedSlotStates"
+    ]));
+    const bedSlotProperties = (((roomProperties.bedSlotStates!.items as JsonSchema).properties) as Record<string, JsonSchema>);
+    expect(Object.keys(bedSlotProperties)).toEqual(["serviceDate", "inventoryUnitId", "inventoryUnitCode", "status"]);
     expect(JSON.stringify(intervalProperties.reason)).not.toContain("maxLength");
     for (const value of roomStatusStatuses) expect(JSON.stringify(responseSchema)).toContain(`\"${value}\"`);
+    for (const value of roomStatusAttentionCodes) expect(JSON.stringify(responseSchema)).toContain(`\"${value}\"`);
+    for (const value of roomStatusOperationalAttentionCodes) expect(JSON.stringify(responseSchema)).toContain(`\"${value}\"`);
     for (const value of roomStatusSourceKinds) expect(JSON.stringify(responseSchema)).toContain(`\"${value}\"`);
     for (const value of roomStatusBlockingFactKinds) expect(JSON.stringify(responseSchema)).toContain(`\"${value}\"`);
     for (const value of roomStatusActionCodes) expect(JSON.stringify(responseSchema)).toContain(`\"${value}\"`);
