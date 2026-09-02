@@ -20,6 +20,7 @@ import { amountSummary, enumerateServiceDates, newId, paidStayTypeForNights, sha
 import { createQuoteInTransaction, projectQuoteForExternalRead } from "../pricing-service.ts";
 import { bumpRoomStatusRevision } from "../room-status.ts";
 import { getOrderViewSnapshot } from "../orders.ts";
+import { sampleAuthoritativePropertyWallClock, withPropertyOperationClockSnapshot } from "../members.ts";
 import type { Database } from "../schema.ts";
 import {
   historicalProtocolEpochMigration,
@@ -27,6 +28,17 @@ import {
   legacyReceiptProtocol,
   type HistoricalProtocolVersion
 } from "../historical-command-protocol.ts";
+import {
+  auditCommandResourceNotFound,
+  authorizeCommandAccess,
+  baseCommandCatalogType,
+  effectiveSubjectCommandGrants,
+  isCommandAuthorizationError,
+  throwCommandAuthorizationDenial,
+  withCommandAuthorizationAudit,
+  type CommandAuthorizationStage,
+  type CommandAuthorizationTokenLifecycleConstraint
+} from "../command-authorization.ts";
 import { applyCommand, lockCommandResources } from "./apply.ts";
 import { buildCommandEffect, normalizePhoneNumber, projectCommandEffectForRead, projectPrimaryGuestForRead } from "./effects.ts";
 
@@ -62,9 +74,15 @@ class HistoricalPreviewReadOnlyError extends DomainError {
   }
 }
 
+class ConfirmationIdentityMismatchError extends DomainError {
+  constructor() {
+    super("CONFIRMATION_MISMATCH", "Confirmed property or command type does not match the preview", 409);
+  }
+}
+
 type ExecutableCommandType = (typeof commandTypes)[number];
 
-function isExecutableCommandType(commandType: CommandType): commandType is ExecutableCommandType {
+function isExecutableCommandType(commandType: string): commandType is ExecutableCommandType {
   return (commandTypes as readonly string[]).includes(commandType);
 }
 
@@ -513,11 +531,46 @@ function isTokenLifecycleCommand(commandType: string): boolean {
   return baseType === "ISSUE_TOKEN" || baseType === "ROTATE_TOKEN" || baseType === "REVOKE_TOKEN";
 }
 
+function tokenLifecycleAuthorizationConstraint(
+  commandType: CommandType,
+  input: Record<string, unknown>
+): CommandAuthorizationTokenLifecycleConstraint | undefined {
+  if (commandType === "ISSUE_TOKEN") {
+    return {
+      kind: "ISSUE_TOKEN",
+      subjectId: input.subjectId,
+      accessCeiling: input.accessCeiling,
+      commandCeiling: input.commandCeiling,
+      expiresAt: input.expiresAt
+    };
+  }
+
+  if (commandType === "ROTATE_TOKEN") {
+    return {
+      kind: "ROTATE_TOKEN",
+      tokenId: input.tokenId,
+      commandCeiling: input.commandCeiling,
+      expiresAt: input.expiresAt
+    };
+  }
+
+  if (commandType === "REVOKE_TOKEN") {
+    return {
+      kind: "REVOKE_TOKEN",
+      tokenId: input.tokenId
+    };
+  }
+
+  return undefined;
+}
+
 async function assertTokenExpiryCeiling(
   db: Kysely<Database> | Transaction<Database>,
   principal: AuthPrincipal,
+  propertyId: string,
   commandType: CommandType,
-  effect: Record<string, unknown>
+  effect: Record<string, unknown>,
+  attempt: { stage: CommandAuthorizationStage; idempotencyKey: string | undefined; correlationId: string | undefined }
 ): Promise<void> {
   if (principal.credentialType !== "TOKEN" || (commandType !== "ISSUE_TOKEN" && commandType !== "ROTATE_TOKEN")) return;
   if (typeof effect.expiresAt !== "string") throw new DomainError("INTERNAL_ERROR", "Token command effect has no expiry", 500);
@@ -526,108 +579,66 @@ async function assertTokenExpiryCeiling(
     .where("id", "=", principal.credentialId)
     .where("subject_id", "=", principal.subjectId)
     .executeTakeFirst();
-  if (!caller) throw new DomainError("AUTHENTICATION_REQUIRED", "Bearer token is invalid", 401);
+  if (!caller) {
+    return throwCommandAuthorizationDenial({
+      principal,
+      propertyId,
+      commandType,
+      ...attempt,
+      denialReason: "TOKEN_INVALID",
+      message: "Bearer token is invalid",
+      code: "AUTHENTICATION_REQUIRED",
+      statusCode: 401
+    });
+  }
   if (Date.parse(effect.expiresAt) > asDate(caller.expires_at).getTime()) {
-    throw new DomainError("INSUFFICIENT_ACCESS", "A Token cannot issue or rotate a Token beyond its own expiry", 403);
+    return throwCommandAuthorizationDenial({
+      principal,
+      propertyId,
+      commandType,
+      ...attempt,
+      denialReason: "TOKEN_EXPIRY_CEILING_EXCEEDED",
+      message: "A Token cannot issue or rotate a Token beyond its own expiry"
+    });
   }
 }
 
-function assertExecutionAccess(principal: AuthPrincipal, execution: { subject_id: string; property_id: string; command_type: string }, resource: string): void {
-  if (execution.subject_id !== principal.subjectId) throw new DomainError("NOT_FOUND", `${resource} not found`, 404);
-  const access = principal.propertyAccess.get(execution.property_id);
-  if (!access) throw new DomainError("NOT_FOUND", `${resource} not found`, 404);
-  if (isTokenLifecycleCommand(execution.command_type) && access !== "WRITE") {
-    throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required for Token lifecycle results", 403);
+function strictEffectStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)
+    || value.some((entry) => typeof entry !== "string" || entry.trim() === "")
+    || new Set(value).size !== value.length) {
+    throw new DomainError("INTERNAL_ERROR", `${field} is malformed`, 500);
   }
+  return value as string[];
 }
 
-async function revalidateConfirmWriteAccess(
+async function assertTokenCommandCeiling(
   trx: Transaction<Database>,
   principal: AuthPrincipal,
   propertyId: string,
-  commandType: HistoricalRecoverableCommandType
+  commandType: CommandType,
+  effect: Record<string, unknown>,
+  attempt: { stage: CommandAuthorizationStage; idempotencyKey: string | undefined; correlationId: string | undefined }
 ): Promise<void> {
-  let subjectQuery = trx.selectFrom("subjects")
-    .select(["id", "status"])
-    .where("id", "=", principal.subjectId);
-  subjectQuery = isTokenLifecycleCommand(commandType) ? subjectQuery.forUpdate() : subjectQuery.forShare();
-  const subject = await subjectQuery.executeTakeFirst();
-  if (!subject || subject.status !== "ACTIVE") throw new DomainError("SUBJECT_DISABLED", "Subject is disabled", 403);
-
-  const grant = await trx.selectFrom("subject_property_grants")
-    .select("access_level")
-    .where("subject_id", "=", principal.subjectId)
-    .where("property_id", "=", propertyId)
-    .forShare()
-    .executeTakeFirst();
-  if (!grant) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the subject's current scope", 403);
-  if (grant.access_level !== "WRITE") throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
-
-  if (principal.credentialType === "TOKEN") {
-    const tokenQuery = trx.selectFrom("api_tokens")
-      .select(["subject_id", "property_scope", "access_ceiling", "expires_at", "revoked_at"])
-      .where("id", "=", principal.credentialId)
-      .where("subject_id", "=", principal.subjectId);
-    const token = await (isTokenLifecycleCommand(commandType) ? tokenQuery.forUpdate() : tokenQuery.forShare()).executeTakeFirst();
-    if (!token || token.subject_id !== principal.subjectId) throw new DomainError("AUTHENTICATION_REQUIRED", "Bearer token is invalid", 401);
-    if (token.revoked_at) throw new DomainError("TOKEN_REVOKED", "Bearer token has been revoked", 401);
-    if (asDate(token.expires_at).getTime() <= Date.now()) throw new DomainError("TOKEN_EXPIRED", "Bearer token has expired", 401);
-    if (token.property_scope !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the Token scope", 403);
-    if (token.access_ceiling !== "WRITE") throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
-    return;
-  }
-
-  const session = await trx.selectFrom("web_sessions")
-    .select(["subject_id", "expires_at", "revoked_at"])
-    .where("id", "=", principal.credentialId)
-    .forShare()
-    .executeTakeFirst();
-  if (!session || session.subject_id !== principal.subjectId || session.revoked_at || asDate(session.expires_at).getTime() <= Date.now()) {
-    throw new DomainError("AUTHENTICATION_REQUIRED", "Session is invalid or expired", 401);
-  }
-}
-
-async function revalidateQuoteReadAccess(
-  trx: Transaction<Database>,
-  principal: AuthPrincipal,
-  propertyId: string
-): Promise<void> {
-  const subject = await trx.selectFrom("subjects")
-    .select(["id", "status"])
-    .where("id", "=", principal.subjectId)
-    .forShare()
-    .executeTakeFirst();
-  if (!subject || subject.status !== "ACTIVE") throw new DomainError("SUBJECT_DISABLED", "Subject is disabled", 403);
-
-  const grant = await trx.selectFrom("subject_property_grants")
-    .select("access_level")
-    .where("subject_id", "=", principal.subjectId)
-    .where("property_id", "=", propertyId)
-    .forShare()
-    .executeTakeFirst();
-  if (!grant) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the subject's current scope", 403);
-
-  if (principal.credentialType === "TOKEN") {
-    const token = await trx.selectFrom("api_tokens")
-      .select(["subject_id", "property_scope", "expires_at", "revoked_at"])
-      .where("id", "=", principal.credentialId)
-      .where("subject_id", "=", principal.subjectId)
-      .forShare()
-      .executeTakeFirst();
-    if (!token || token.subject_id !== principal.subjectId) throw new DomainError("AUTHENTICATION_REQUIRED", "Bearer token is invalid", 401);
-    if (token.revoked_at) throw new DomainError("TOKEN_REVOKED", "Bearer token has been revoked", 401);
-    if (asDate(token.expires_at).getTime() <= Date.now()) throw new DomainError("TOKEN_EXPIRED", "Bearer token has expired", 401);
-    if (token.property_scope !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the Token scope", 403);
-    return;
-  }
-
-  const session = await trx.selectFrom("web_sessions")
-    .select(["subject_id", "expires_at", "revoked_at"])
-    .where("id", "=", principal.credentialId)
-    .forShare()
-    .executeTakeFirst();
-  if (!session || session.subject_id !== principal.subjectId || session.revoked_at || asDate(session.expires_at).getTime() <= Date.now()) {
-    throw new DomainError("AUTHENTICATION_REQUIRED", "Session is invalid or expired", 401);
+  if (commandType !== "ISSUE_TOKEN" && commandType !== "ROTATE_TOKEN") return;
+  const commandCeiling = strictEffectStringArray(effect.commandCeiling, "Token command ceiling");
+  const persistedCommandCeiling = strictEffectStringArray(
+    effect.persistedCommandCeiling,
+    "Persisted Token command ceiling"
+  );
+  const commandCeilingSet = new Set(commandCeiling);
+  const callerEffectiveCommands = await effectiveSubjectCommandGrants(trx, principal, propertyId);
+  if (persistedCommandCeiling.length !== commandCeiling.length
+    || persistedCommandCeiling.some((candidate) => !commandCeilingSet.has(candidate))
+    || persistedCommandCeiling.some((candidate) => !callerEffectiveCommands.has(candidate))) {
+    return throwCommandAuthorizationDenial({
+      principal,
+      propertyId,
+      commandType,
+      ...attempt,
+      denialReason: "TOKEN_COMMAND_CEILING_ESCALATION",
+      message: "Persisted Token command ceiling must equal the explicit ceiling and remain within the caller's current command scope"
+    });
   }
 }
 
@@ -706,16 +717,31 @@ function executionLockKey(subjectId: string, propertyId: string, commandType: st
   return `qintopia:command:${subjectId}:${propertyId}:${commandType}:${idempotencyKey}`;
 }
 
+type CommandAuthorizationOptions = Parameters<typeof authorizeCommandAccess>[3];
+type BusyExecutionAuthorizationGuard = (connection: Kysely<Database>) => Promise<void>;
+
+function busyExecutionAuthorizationGuard(
+  auditDb: Kysely<Database>,
+  principal: AuthPrincipal,
+  options: CommandAuthorizationOptions
+): BusyExecutionAuthorizationGuard {
+  return (connection) => connection.transaction().setIsolationLevel("repeatable read").execute((trx) => (
+    authorizeCommandAccess(auditDb, trx, principal, options)
+  ));
+}
+
 async function withExecutionLock<T>(
   db: Kysely<Database>,
   lockKey: string,
-  work: (connection: Kysely<Database>) => Promise<T>
+  work: (connection: Kysely<Database>) => Promise<T>,
+  authorizeWhenBusy?: BusyExecutionAuthorizationGuard
 ): Promise<T> {
   return db.connection().execute(async (connection) => {
     const lockResult = await sql<{ acquired: boolean }>`
       select pg_try_advisory_lock(hashtextextended(${lockKey}, 0::bigint)) as acquired
     `.execute(connection);
     if (!lockResult.rows[0]?.acquired) {
+      if (authorizeWhenBusy) await authorizeWhenBusy(connection);
       throw new DomainError("COMMAND_STATUS_UNKNOWN", "Another request is executing this command", 409, true);
     }
     try {
@@ -749,10 +775,18 @@ async function existingQuoteCommand(
   principal: AuthPrincipal,
   propertyId: string,
   idempotencyKey: string,
-  requestHash: string
+  requestHash: string,
+  correlationId: string | undefined
 ): Promise<CreateQuoteCommandResponseDto | undefined> {
   return db.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
-    await revalidateQuoteReadAccess(trx, principal, propertyId);
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId,
+      commandType: "CREATE_QUOTE",
+      stage: "REPLAY",
+      idempotencyKey,
+      correlationId,
+      mode: "READ"
+    });
     const replay = await replayOrConflict(trx, {
       subjectId: principal.subjectId,
       propertyId,
@@ -903,9 +937,6 @@ export async function executeQuoteCommand(
   const headers = assertWriteMetadata(metadata.idempotencyKey, metadata.correlationId);
   const propertyId = input.propertyId?.trim();
   if (!propertyId) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
-  if (!principal.propertyAccess.has(propertyId)) {
-    throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the credential scope", 403);
-  }
 
   const nights = enumerateServiceDates(input.arrivalDate, input.departureDate).length;
   const derivedPaidStayType = paidStayTypeForNights(nights);
@@ -931,21 +962,37 @@ export async function executeQuoteCommand(
   const requestHash = stableHash(normalizedInput);
   const commandLockKey = executionLockKey(principal.subjectId, propertyId, commandType, headers.idempotencyKey);
   const quoteQuotaLockKey = `qintopia:quote:${principal.subjectId}:${propertyId}`;
+  const authorizeWhenBusy = busyExecutionAuthorizationGuard(db, principal, {
+    propertyId,
+    commandType,
+    stage: "COMMAND",
+    idempotencyKey: headers.idempotencyKey,
+    correlationId: headers.correlationId,
+    mode: "READ"
+  });
 
-  return withExecutionLock(db, commandLockKey, async (lockedDb) => {
+  return withCommandAuthorizationAudit(db, () => withExecutionLock(db, commandLockKey, async (lockedDb) => {
     const replayBeforeQuota = await existingQuoteCommand(
       lockedDb,
       principal,
       propertyId,
       headers.idempotencyKey,
-      requestHash
+      requestHash,
+      headers.correlationId
     );
     if (replayBeforeQuota) return replayBeforeQuota;
 
     return withQuoteQuotaLock(lockedDb, quoteQuotaLockKey, () => (
       lockedDb.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
       await lockCommandProtocolEpoch(trx);
-      await revalidateQuoteReadAccess(trx, principal, propertyId);
+      await authorizeCommandAccess(db, trx, principal, {
+        propertyId,
+        commandType,
+        stage: "COMMAND",
+        idempotencyKey: headers.idempotencyKey,
+        correlationId: headers.correlationId,
+        mode: "READ"
+      });
       const replay = await replayOrConflict(trx, {
         subjectId: principal.subjectId,
         propertyId,
@@ -1021,7 +1068,7 @@ export async function executeQuoteCommand(
       return { quote: readableQuote, receipt };
       })
     ));
-  });
+  }, authorizeWhenBusy));
 }
 
 function previewFromReceipt(receipt: ReceiptDto): PreviewDto {
@@ -1043,38 +1090,40 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
   const requestHash = stableHash(normalizedEnvelope);
   const requestedPropertyId = normalizedEnvelope.input.propertyId;
   if (typeof requestedPropertyId !== "string" || !requestedPropertyId) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
-  const requestedAccess = principal.propertyAccess.get(requestedPropertyId);
-  if (!requestedAccess) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the credential scope", 403);
-  if (requestedAccess !== "WRITE") throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
-  if (normalizedEnvelope.commandType === "ISSUE_TOKEN") {
-    const subjectId = normalizedEnvelope.input.subjectId;
-    if (typeof subjectId !== "string" || !subjectId) throw new DomainError("VALIDATION_ERROR", "subjectId is required");
-    if (subjectId !== principal.subjectId) throw new DomainError("RESOURCE_SCOPE_DENIED", "A subject may only manage its own tokens", 403);
-  }
-  if (normalizedEnvelope.commandType === "ROTATE_TOKEN" || normalizedEnvelope.commandType === "REVOKE_TOKEN") {
-    const tokenId = normalizedEnvelope.input.tokenId;
-    if (typeof tokenId !== "string" || !tokenId) throw new DomainError("VALIDATION_ERROR", "tokenId is required");
-    const ownedToken = await db.selectFrom("api_tokens").select("id")
-      .where("id", "=", tokenId)
-      .where("property_scope", "=", requestedPropertyId)
-      .where("subject_id", "=", principal.subjectId)
-      .executeTakeFirst();
-    if (!ownedToken) throw new DomainError("NOT_FOUND", "Token not found", 404);
-  }
-  const replay = await replayOrConflict(db, { subjectId: principal.subjectId, propertyId: requestedPropertyId, commandType: executionType, idempotencyKey: headers.idempotencyKey, requestHash });
-  if (replay) return { preview: previewFromReceipt(replay), receipt: replay };
   const commandLockKey = executionLockKey(principal.subjectId, requestedPropertyId, executionType, headers.idempotencyKey);
+  const tokenLifecycleConstraint = tokenLifecycleAuthorizationConstraint(normalizedEnvelope.commandType, normalizedEnvelope.input);
+  const authorizeWhenBusy = busyExecutionAuthorizationGuard(db, principal, {
+    propertyId: requestedPropertyId,
+    commandType: normalizedEnvelope.commandType,
+    stage: "PREVIEW",
+    idempotencyKey: headers.idempotencyKey,
+    correlationId: headers.correlationId,
+    mode: "EXECUTE",
+    ...(tokenLifecycleConstraint ? { tokenLifecycleConstraint } : {})
+  });
 
-  return withExecutionLock(db, commandLockKey, (lockedDb) => lockedDb.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
+  return withCommandAuthorizationAudit(db, () => withExecutionLock(db, commandLockKey, (lockedDb) => lockedDb.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
     await lockCommandProtocolEpoch(trx);
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId: requestedPropertyId,
+      commandType: normalizedEnvelope.commandType,
+      stage: "PREVIEW",
+      idempotencyKey: headers.idempotencyKey,
+      correlationId: headers.correlationId,
+      mode: "EXECUTE",
+      ...(tokenLifecycleConstraint ? { tokenLifecycleConstraint } : {})
+    });
+    const replay = await replayOrConflict(trx, { subjectId: principal.subjectId, propertyId: requestedPropertyId, commandType: executionType, idempotencyKey: headers.idempotencyKey, requestHash });
+    if (replay) return { preview: previewFromReceipt(replay), receipt: replay };
     const frozenInput = freezeCreateOrderOccupantIds(normalizedEnvelope.commandType, normalizedEnvelope.input);
     const built = await buildCommandEffect(trx, normalizedEnvelope.commandType, frozenInput);
-    await assertTokenExpiryCeiling(trx, principal, normalizedEnvelope.commandType, built.effect);
-    const access = principal.propertyAccess.get(built.propertyId);
-    if (access !== "WRITE") throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
-    if (["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"].includes(normalizedEnvelope.commandType) && built.effect.subjectId !== principal.subjectId) {
-      throw new DomainError("RESOURCE_SCOPE_DENIED", "A subject may only manage its own tokens", 403);
-    }
+    const authorizationAttempt = {
+      stage: "PREVIEW" as const,
+      idempotencyKey: headers.idempotencyKey,
+      correlationId: headers.correlationId
+    };
+    await assertTokenExpiryCeiling(trx, principal, built.propertyId, normalizedEnvelope.commandType, built.effect, authorizationAttempt);
+    await assertTokenCommandCeiling(trx, principal, built.propertyId, normalizedEnvelope.commandType, built.effect, authorizationAttempt);
     const inserted = await trx.insertInto("command_executions").values({
       id: newId("command"), subject_id: principal.subjectId, credential_id: principal.credentialId,
       property_id: built.propertyId,
@@ -1108,7 +1157,7 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
     const receipt = await receiptByCommand(trx, inserted.id);
     if (!receipt) throw new DomainError("INTERNAL_ERROR", "Preview receipt was not persisted", 500);
     return { preview, receipt };
-  }));
+  }), authorizeWhenBusy));
 }
 
 async function persistRejected(db: Kysely<Database>, principal: AuthPrincipal, options: {
@@ -1174,34 +1223,143 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
   correlationId: string | undefined;
 }): Promise<ReceiptDto> {
   const headers = assertWriteMetadata(metadata.idempotencyKey, metadata.correlationId);
-  if (!isExecutableCommandType(confirmation.commandType)) throw new DomainError("VALIDATION_ERROR", "Unsupported command type");
-  if (!confirmation.propertyId?.trim()) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
-  if (confirmation.confirmation !== true) throw new DomainError("CONFIRMATION_REQUIRED", "Explicit confirmation is required");
-  if (!confirmation.expectedEffectHash?.trim()) throw new DomainError("CONFIRMATION_MISMATCH", "expectedEffectHash is required");
-  if (!confirmation.reason?.code?.trim()
-    || (confirmation.commandType !== "CREATE_ORDER" && !confirmation.reason.note?.trim())) {
-    throw new DomainError("REASON_REQUIRED", "A structured reason is required");
-  }
-  if (confirmation.commandType === "CREATE_ORDER"
-    && confirmation.reason.code !== "CREATE_STANDARD_ORDER"
-    && confirmation.reason.code !== "BACKFILL_STAY") {
-    throw new DomainError(
-      "VALIDATION_ERROR",
-      "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER or BACKFILL_STAY"
-    );
-  }
   const requestHash = stableHash({ previewId, confirmation });
-  const propertyId = confirmation.propertyId.trim();
-  const commandType = confirmation.commandType;
-  const snapshotAccess = principal.propertyAccess.get(propertyId);
-  if (!snapshotAccess) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the credential scope", 403);
-  if (snapshotAccess !== "WRITE") throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
-  const lockKey = executionLockKey(principal.subjectId, propertyId, commandType, headers.idempotencyKey);
-  return withExecutionLock(db, lockKey, async (lockedDb) => {
-    try {
-      return await lockedDb.transaction().execute(async (trx) => {
+  return withCommandAuthorizationAudit(db, async () => {
+    const storedIdentity = await db.selectFrom("command_previews")
+      .select(["subject_id", "property_id", "command_type", "normalized_input"])
+      .where("id", "=", previewId)
+      .executeTakeFirst();
+    if (!storedIdentity) {
+      if (!isExecutableCommandType(confirmation.commandType)) {
+        throw new DomainError("VALIDATION_ERROR", "Unsupported command type");
+      }
+      const replayPropertyId = confirmation.propertyId?.trim();
+      if (!replayPropertyId) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
+      if (confirmation.confirmation !== true) throw new DomainError("CONFIRMATION_REQUIRED", "Explicit confirmation is required");
+      if (!confirmation.expectedEffectHash?.trim()) {
+        throw new DomainError("CONFIRMATION_MISMATCH", "expectedEffectHash is required");
+      }
+      if (!confirmation.reason?.code?.trim()
+        || (confirmation.commandType !== "CREATE_ORDER" && !confirmation.reason.note?.trim())) {
+        throw new DomainError("REASON_REQUIRED", "A structured reason is required");
+      }
+      if (confirmation.commandType === "CREATE_ORDER"
+        && confirmation.reason.code !== "CREATE_STANDARD_ORDER"
+        && confirmation.reason.code !== "BACKFILL_STAY") {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER or BACKFILL_STAY"
+        );
+      }
+      return db.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
+        await authorizeCommandAccess(db, trx, principal, {
+          propertyId: replayPropertyId,
+          commandType: confirmation.commandType,
+          stage: "REPLAY",
+          idempotencyKey: headers.idempotencyKey,
+          correlationId: headers.correlationId,
+          mode: "READ"
+        });
+        const replay = await replayOrConflict(trx, {
+          subjectId: principal.subjectId,
+          propertyId: replayPropertyId,
+          commandType: confirmation.commandType,
+          idempotencyKey: headers.idempotencyKey,
+          requestHash
+        });
+        if (replay) return replay;
+        throw new DomainError("PREVIEW_NOT_FOUND", "Preview not found", 404);
+      });
+    }
+    const propertyId = storedIdentity.property_id;
+    if (!isExecutableCommandType(storedIdentity.command_type)) {
+      throw new DomainError("INTERNAL_ERROR", "Stored Preview command type is unsupported", 500);
+    }
+    const commandType = storedIdentity.command_type;
+    if (storedIdentity.subject_id !== principal.subjectId) {
+      return auditCommandResourceNotFound(db, {
+        principal,
+        propertyId,
+        commandType,
+        stage: "CONFIRM",
+        idempotencyKey: headers.idempotencyKey,
+        correlationId: headers.correlationId,
+        message: "Preview not found",
+        code: "PREVIEW_NOT_FOUND"
+      });
+    }
+    const storedNormalizedInput = asRecord(storedIdentity.normalized_input);
+    if (!storedNormalizedInput) throw new DomainError("INTERNAL_ERROR", "Stored Preview input is malformed", 500);
+    const tokenLifecycleConstraint = tokenLifecycleAuthorizationConstraint(commandType, storedNormalizedInput);
+    const lockKey = executionLockKey(principal.subjectId, propertyId, commandType, headers.idempotencyKey);
+    const authorizeWhenBusy = busyExecutionAuthorizationGuard(db, principal, {
+      propertyId,
+      commandType,
+      stage: "CONFIRM",
+      idempotencyKey: headers.idempotencyKey,
+      correlationId: headers.correlationId,
+      mode: "EXECUTE",
+      ...(tokenLifecycleConstraint ? { tokenLifecycleConstraint } : {})
+    });
+    return withExecutionLock(db, lockKey, async (lockedDb) => {
+      try {
+        return await lockedDb.transaction().execute(async (trx) => {
         await lockCommandProtocolEpoch(trx);
-        await revalidateConfirmWriteAccess(trx, principal, propertyId, commandType);
+        const previewIdentity = await trx.selectFrom("command_previews")
+          .selectAll()
+          .where("id", "=", previewId)
+          .executeTakeFirst();
+        if (!previewIdentity) throw new DomainError("PREVIEW_NOT_FOUND", "Preview not found", 404);
+        if (previewIdentity.subject_id !== principal.subjectId) {
+          return auditCommandResourceNotFound(db, {
+            principal,
+            propertyId: previewIdentity.property_id,
+            commandType: previewIdentity.command_type,
+            stage: "CONFIRM",
+            idempotencyKey: headers.idempotencyKey,
+            correlationId: headers.correlationId,
+            message: "Preview not found",
+            code: "PREVIEW_NOT_FOUND"
+          });
+        }
+        const normalizedInput = asRecord(previewIdentity.normalized_input);
+        if (!normalizedInput) throw new DomainError("INTERNAL_ERROR", "Stored Preview input is malformed", 500);
+        const lockedTokenLifecycleConstraint = tokenLifecycleAuthorizationConstraint(commandType, normalizedInput);
+        await authorizeCommandAccess(db, trx, principal, {
+          propertyId,
+          commandType,
+          stage: "CONFIRM",
+          idempotencyKey: headers.idempotencyKey,
+          correlationId: headers.correlationId,
+          mode: "EXECUTE",
+          ...(lockedTokenLifecycleConstraint ? { tokenLifecycleConstraint: lockedTokenLifecycleConstraint } : {})
+        });
+        const preflightEffect = asRecord(previewIdentity.effect);
+        if (!preflightEffect) throw new DomainError("INTERNAL_ERROR", "Stored Preview effect is malformed", 500);
+        const authorizationAttempt = {
+          stage: "CONFIRM" as const,
+          idempotencyKey: headers.idempotencyKey,
+          correlationId: headers.correlationId
+        };
+        await assertTokenExpiryCeiling(trx, principal, propertyId, commandType, preflightEffect, authorizationAttempt);
+        await assertTokenCommandCeiling(trx, principal, propertyId, commandType, preflightEffect, authorizationAttempt);
+        if (confirmation.propertyId?.trim() !== propertyId || confirmation.commandType !== commandType) {
+          throw new ConfirmationIdentityMismatchError();
+        }
+        if (confirmation.confirmation !== true) throw new DomainError("CONFIRMATION_REQUIRED", "Explicit confirmation is required");
+        if (!confirmation.expectedEffectHash?.trim()) throw new DomainError("CONFIRMATION_MISMATCH", "expectedEffectHash is required");
+        if (!confirmation.reason?.code?.trim()
+          || (commandType !== "CREATE_ORDER" && !confirmation.reason.note?.trim())) {
+          throw new DomainError("REASON_REQUIRED", "A structured reason is required");
+        }
+        if (commandType === "CREATE_ORDER"
+          && confirmation.reason.code !== "CREATE_STANDARD_ORDER"
+          && confirmation.reason.code !== "BACKFILL_STAY") {
+          throw new DomainError(
+            "VALIDATION_ERROR",
+            "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER or BACKFILL_STAY"
+          );
+        }
         const replay = await replayOrConflict(trx, {
           subjectId: principal.subjectId,
           propertyId,
@@ -1210,10 +1368,6 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           requestHash
         });
         if (replay) return replay;
-
-        if (commandType === "COMPLETE_CLEANING" && !currentReleaseFeatures.cleaningWorkflow) {
-          throw new DomainError("VALIDATION_ERROR", "Cleaning workflow is disabled in this release", 409);
-        }
 
         const inserted = await trx.insertInto("command_executions").values({
           id: newId("command"),
@@ -1244,12 +1398,23 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         const preview = await trx.selectFrom("command_previews")
           .selectAll()
           .where("id", "=", previewId)
-          .where("subject_id", "=", principal.subjectId)
           .forUpdate()
           .executeTakeFirst();
         if (!preview) throw new DomainError("PREVIEW_NOT_FOUND", "Preview not found", 404);
+        if (preview.subject_id !== principal.subjectId) {
+          return auditCommandResourceNotFound(db, {
+            principal,
+            propertyId: preview.property_id,
+            commandType: preview.command_type,
+            stage: "CONFIRM",
+            idempotencyKey: headers.idempotencyKey,
+            correlationId: headers.correlationId,
+            message: "Preview not found",
+            code: "PREVIEW_NOT_FOUND"
+          });
+        }
         if (preview.property_id !== propertyId || preview.command_type !== commandType) {
-          throw new DomainError("CONFIRMATION_MISMATCH", "Confirmed property or command type does not match the preview", 409);
+          throw new DomainError("INTERNAL_ERROR", "Stored Preview identity changed while confirming", 500);
         }
         if (preview.status === "EXPIRED") {
           throw new DomainError("PREVIEW_STALE", "Preview has expired; request a new preview", 409, false, { causeCode: "PREVIEW_EXPIRED" });
@@ -1298,39 +1463,54 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         }
         if (preview.effect_hash !== confirmation.expectedEffectHash) throw new DomainError("CONFIRMATION_MISMATCH", "Confirmed effect hash does not match the preview", 409);
         await lockCommandResources(trx, commandType, preview.normalized_input);
-        let rebuilt;
-        try {
-          rebuilt = await buildCommandEffect(trx, commandType, preview.normalized_input);
-          await assertTokenExpiryCeiling(trx, principal, commandType, rebuilt.effect);
-        } catch (error) {
-          if (error instanceof DomainError && ([
-            "INVENTORY_CONFLICT",
-            "ENTITLEMENT_CONFLICT",
-            "AGGREGATE_VERSION_CONFLICT",
-            "INVALID_ORDER_STATE",
-            "QUOTE_EXPIRED",
-            "FACT_ALREADY_REVERSED",
-            "REFUND_LIMIT_EXCEEDED"
-          ].includes(error.code)
-            || (isTokenLifecycleCommand(commandType) && error.code === "VALIDATION_ERROR")
-            || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
-            || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
-            || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
-            || (commandType === "COMPLETE_STAY" && error.code === "VALIDATION_ERROR")
-            || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
-            || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
-            throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });
+        const authoritativeWallInstant = commandType === "CREATE_ORDER"
+          ? await sampleAuthoritativePropertyWallClock(trx)
+          : null;
+        const rebuildAndApply = async () => {
+          let rebuilt: Awaited<ReturnType<typeof buildCommandEffect>>;
+          try {
+            rebuilt = await buildCommandEffect(trx, commandType, preview.normalized_input);
+            const authorizationAttempt = {
+              stage: "CONFIRM" as const,
+              idempotencyKey: headers.idempotencyKey,
+              correlationId: headers.correlationId
+            };
+            await assertTokenExpiryCeiling(trx, principal, propertyId, commandType, rebuilt.effect, authorizationAttempt);
+            await assertTokenCommandCeiling(trx, principal, propertyId, commandType, rebuilt.effect, authorizationAttempt);
+          } catch (error) {
+            if (error instanceof DomainError && ([
+              "INVENTORY_CONFLICT",
+              "ENTITLEMENT_CONFLICT",
+              "AGGREGATE_VERSION_CONFLICT",
+              "INVALID_ORDER_STATE",
+              "QUOTE_EXPIRED",
+              "FACT_ALREADY_REVERSED",
+              "REFUND_LIMIT_EXCEEDED"
+            ].includes(error.code)
+              || (isTokenLifecycleCommand(commandType) && error.code === "VALIDATION_ERROR")
+              || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
+              || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
+              || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
+              || (commandType === "COMPLETE_STAY" && error.code === "VALIDATION_ERROR")
+              || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
+              || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
+              throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });
+            }
+            throw error;
           }
-          throw error;
-        }
-        if (rebuilt.effectHash !== preview.effect_hash) throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409);
-        const applied = await applyCommand(trx, {
-          commandType,
-          input: preview.normalized_input,
-          effect: rebuilt.effect,
-          reason: confirmation.reason,
-          commandId: inserted.id
-        });
+          if (rebuilt.effectHash !== preview.effect_hash) throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409);
+          const applied = await applyCommand(trx, {
+            commandType,
+            input: preview.normalized_input,
+            effect: rebuilt.effect,
+            reason: confirmation.reason,
+            commandId: inserted.id
+          });
+          return { rebuilt, applied };
+        };
+        const { rebuilt, applied } = authoritativeWallInstant
+          ? await withPropertyOperationClockSnapshot(authoritativeWallInstant, rebuildAndApply)
+          : await rebuildAndApply();
         const strictRecoveryEvidence = requiresStrictRecoveryEvidence(commandType, storedEffect);
         const persistedEffectHash = strictRecoveryEvidence
           ? await bindPersistedEffectHash(trx, inserted.id, commandType, storedEffect, rebuilt.effectHash)
@@ -1370,70 +1550,113 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         const receipt = await receiptByCommand(trx, inserted.id);
         if (!receipt) throw new DomainError("INTERNAL_ERROR", "Command receipt was not persisted", 500);
         return receipt;
-      });
-    } catch (error) {
-      // A Preview outside this subject's namespace is not a command attempt and
-      // must not create an artifact that can be used as an existence oracle.
-      if (error instanceof DomainError && error.code === "PREVIEW_NOT_FOUND") throw error;
+        });
+      } catch (error) {
+        if (isCommandAuthorizationError(error)) throw error;
+        if (error instanceof ConfirmationIdentityMismatchError) throw error;
+        // A Preview outside this subject's namespace is not a command attempt and
+        // must not create an artifact that can be used as an existence oracle.
+        if (error instanceof DomainError && error.code === "PREVIEW_NOT_FOUND") throw error;
       // Preserve exact replays of historical receipts, but do not create a new
       // rejected command artifact for an open cleaning Preview while disabled.
-      if (error instanceof DomainError
-        && commandType === "COMPLETE_CLEANING"
-        && !currentReleaseFeatures.cleaningWorkflow
-        && error.code === "VALIDATION_ERROR") throw error;
-      const rejectionError = error instanceof DomainError
-        ? error
-        : new DomainError(
-          "COMMAND_INTERRUPTED",
-          "The command transaction failed before any business facts committed; retry with a new idempotency key",
-          409,
-          true
-        );
-      try {
-        return await persistRejected(lockedDb, principal, {
-          propertyId,
-          commandType,
-          idempotencyKey: headers.idempotencyKey,
-          correlationId: headers.correlationId,
-          requestHash,
-          reason: confirmation.reason,
-          error: rejectionError,
-          replayExisting: false,
-          ...(rejectionError.code === "PREVIEW_STALE"
-            && !(rejectionError instanceof HistoricalPreviewReadOnlyError)
-            ? { closePreviewId: previewId }
-            : {})
-        });
-      } catch (persistenceError) {
-        if (!(error instanceof DomainError)) throw error;
-        throw persistenceError;
+        if (error instanceof DomainError
+          && commandType === "COMPLETE_CLEANING"
+          && !currentReleaseFeatures.cleaningWorkflow
+          && error.code === "VALIDATION_ERROR") throw error;
+        const rejectionError = error instanceof DomainError
+          ? error
+          : new DomainError(
+            "COMMAND_INTERRUPTED",
+            "The command transaction failed before any business facts committed; retry with a new idempotency key",
+            409,
+            true
+          );
+        try {
+          return await persistRejected(lockedDb, principal, {
+            propertyId,
+            commandType,
+            idempotencyKey: headers.idempotencyKey,
+            correlationId: headers.correlationId,
+            requestHash,
+            reason: confirmation.reason,
+            error: rejectionError,
+            replayExisting: false,
+            ...(rejectionError.code === "PREVIEW_STALE"
+              && !(rejectionError instanceof HistoricalPreviewReadOnlyError)
+              ? { closePreviewId: previewId }
+              : {})
+          });
+        } catch (persistenceError) {
+          if (!(error instanceof DomainError)) throw error;
+          throw persistenceError;
+        }
       }
-    }
+    }, authorizeWhenBusy);
   });
 }
 
 export async function getReceipt(db: Kysely<Database>, principal: AuthPrincipal, receiptId: string): Promise<ReceiptReadDto> {
-  const command = await db.selectFrom("command_receipts")
-    .innerJoin("command_executions", "command_executions.id", "command_receipts.command_id")
-    .select(["command_executions.id", "command_executions.subject_id", "command_executions.property_id", "command_executions.command_type"])
-    .where("command_receipts.id", "=", receiptId).executeTakeFirst();
-  if (!command) throw new DomainError("NOT_FOUND", "Receipt not found", 404);
-  assertExecutionAccess(principal, command, "Receipt");
-  const receipt = await receiptByCommand(db, command.id, "HISTORICAL_READ");
-  if (!receipt) throw new DomainError("NOT_FOUND", "Receipt not found", 404);
-  return receipt;
+  return withCommandAuthorizationAudit(db, () => db.transaction().execute(async (trx) => {
+    const command = await trx.selectFrom("command_receipts")
+      .innerJoin("command_executions", "command_executions.id", "command_receipts.command_id")
+      .select(["command_executions.id", "command_executions.subject_id", "command_executions.property_id", "command_executions.command_type", "command_executions.idempotency_key", "command_executions.correlation_id"])
+      .where("command_receipts.id", "=", receiptId).executeTakeFirst();
+    if (!command) throw new DomainError("NOT_FOUND", "Receipt not found", 404);
+    if (command.subject_id !== principal.subjectId) {
+      return auditCommandResourceNotFound(db, {
+        principal,
+        propertyId: command.property_id,
+        commandType: command.command_type,
+        stage: "RECEIPT",
+        idempotencyKey: command.idempotency_key,
+        correlationId: command.correlation_id,
+        message: "Receipt not found"
+      });
+    }
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId: command.property_id,
+      commandType: command.command_type,
+      stage: "RECEIPT",
+      idempotencyKey: command.idempotency_key,
+      correlationId: command.correlation_id,
+      mode: "READ"
+    });
+    const receipt = await receiptByCommand(trx, command.id, "HISTORICAL_READ");
+    if (!receipt) throw new DomainError("NOT_FOUND", "Receipt not found", 404);
+    return receipt;
+  }));
 }
 
 export async function getCommand(db: Kysely<Database>, principal: AuthPrincipal, commandId: string): Promise<ReceiptReadDto | UnknownCommandResult> {
-  const command = await db.selectFrom("command_executions").selectAll().where("id", "=", commandId).executeTakeFirst();
-  if (!command) throw new DomainError("NOT_FOUND", "Command not found", 404);
-  assertExecutionAccess(principal, command, "Command");
-  return (await receiptByCommand(db, command.id, "HISTORICAL_READ")) ?? {
-    commandId: command.id,
-    executionStatus: "UNKNOWN",
-    businessCommitted: false,
-    correlationId: command.correlation_id
-  };
+  return withCommandAuthorizationAudit(db, () => db.transaction().execute(async (trx) => {
+    const command = await trx.selectFrom("command_executions").selectAll().where("id", "=", commandId).executeTakeFirst();
+    if (!command) throw new DomainError("NOT_FOUND", "Command not found", 404);
+    if (command.subject_id !== principal.subjectId) {
+      return auditCommandResourceNotFound(db, {
+        principal,
+        propertyId: command.property_id,
+        commandType: command.command_type,
+        stage: "COMMAND",
+        idempotencyKey: command.idempotency_key,
+        correlationId: command.correlation_id,
+        message: "Command not found"
+      });
+    }
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId: command.property_id,
+      commandType: command.command_type,
+      stage: "COMMAND",
+      idempotencyKey: command.idempotency_key,
+      correlationId: command.correlation_id,
+      mode: "READ"
+    });
+    return (await receiptByCommand(trx, command.id, "HISTORICAL_READ")) ?? {
+      commandId: command.id,
+      executionStatus: "UNKNOWN",
+      businessCommitted: false,
+      correlationId: command.correlation_id
+    };
+  }));
 }
 
 export async function findCommandResult(
@@ -1445,17 +1668,13 @@ export async function findCommandResult(
 ) {
   const normalizedIdempotencyKey = idempotencyKey.trim();
   if (!normalizedIdempotencyKey) throw new DomainError("VALIDATION_ERROR", "idempotencyKey is required");
-  if (!principal.propertyAccess.has(propertyId)) {
-    throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the credential scope", 403);
-  }
-  const findExecution = (connection: Kysely<Database>) => connection.selectFrom("command_executions").selectAll()
+  const findExecution = (connection: Kysely<Database> | Transaction<Database>) => connection.selectFrom("command_executions").selectAll()
     .where("subject_id", "=", principal.subjectId)
     .where("property_id", "=", propertyId)
     .where("command_type", "=", commandType)
     .where("idempotency_key", "=", normalizedIdempotencyKey)
     .executeTakeFirst();
-  const toVisibleResult = async (connection: Kysely<Database>, execution: NonNullable<Awaited<ReturnType<typeof findExecution>>>) => {
-    assertExecutionAccess(principal, execution, "Command result");
+  const toVisibleResult = async (connection: Kysely<Database> | Transaction<Database>, execution: NonNullable<Awaited<ReturnType<typeof findExecution>>>) => {
     return (await receiptByCommand(connection, execution.id, "HISTORICAL_READ")) ?? {
       commandId: execution.id,
       executionStatus: "UNKNOWN" as const,
@@ -1464,12 +1683,22 @@ export async function findCommandResult(
     };
   };
 
-  const execution = await findExecution(db);
-  if (execution) return toVisibleResult(db, execution);
+  return withCommandAuthorizationAudit(db, () => db.transaction().execute(async (trx) => {
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId,
+      commandType,
+      stage: "FIND",
+      idempotencyKey: normalizedIdempotencyKey,
+      correlationId: undefined,
+      mode: "READ"
+    });
+    const execution = await findExecution(trx);
+    if (execution) return toVisibleResult(trx, execution);
 
-  // A read-only lookup cannot prove that a request still in transit will never
-  // arrive. Only resolveCommandResult may publish durable NOT_EXECUTED.
-  return { executionStatus: "UNKNOWN" as const, businessCommitted: false as const };
+    // A read-only lookup cannot prove that a request still in transit will never
+    // arrive. Only resolveCommandResult may publish durable NOT_EXECUTED.
+    return { executionStatus: "UNKNOWN" as const, businessCommitted: false as const };
+  }));
 }
 
 export async function resolveCommandResult(
@@ -1484,12 +1713,6 @@ export async function resolveCommandResult(
   if (!propertyId) throw new DomainError("VALIDATION_ERROR", "propertyId is required");
   if (!originalIdempotencyKey) throw new DomainError("VALIDATION_ERROR", "idempotencyKey is required");
 
-  const access = principal.propertyAccess.get(propertyId);
-  if (!access) throw new DomainError("RESOURCE_SCOPE_DENIED", "Property is outside the credential scope", 403);
-  if (request.commandType !== "CREATE_QUOTE" && access !== "WRITE") {
-    throw new DomainError("INSUFFICIENT_ACCESS", "WRITE access is required", 403);
-  }
-
   const findExecution = (connection: Kysely<Database> | Transaction<Database>) => connection
     .selectFrom("command_executions")
     .selectAll()
@@ -1502,7 +1725,6 @@ export async function resolveCommandResult(
     connection: Kysely<Database> | Transaction<Database>,
     execution: NonNullable<Awaited<ReturnType<typeof findExecution>>>
   ): Promise<ReceiptReadDto | UnknownCommandResult> => {
-    assertExecutionAccess(principal, execution, "Command result");
     return (await receiptByCommand(connection, execution.id, "HISTORICAL_READ")) ?? {
       commandId: execution.id,
       executionStatus: "UNKNOWN",
@@ -1517,8 +1739,16 @@ export async function resolveCommandResult(
     request.commandType,
     originalIdempotencyKey
   );
-  return db.transaction().execute(async (trx) => {
+  return withCommandAuthorizationAudit(db, () => db.transaction().execute(async (trx) => {
     await lockCommandProtocolEpoch(trx);
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId,
+      commandType: request.commandType,
+      stage: "RESOLVE",
+      idempotencyKey: originalIdempotencyKey,
+      correlationId: headers.correlationId,
+      mode: "READ"
+    });
     const lockResult = await sql<{ acquired: boolean }>`
       select pg_try_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint)) as acquired
     `.execute(trx);
@@ -1526,14 +1756,22 @@ export async function resolveCommandResult(
       return { executionStatus: "UNKNOWN" as const, businessCommitted: false as const };
     }
 
-    if (request.commandType === "CREATE_QUOTE") {
-      await revalidateQuoteReadAccess(trx, principal, propertyId);
-    } else {
-      await revalidateConfirmWriteAccess(trx, principal, propertyId, request.commandType);
-    }
-
     const raced = await findExecution(trx);
     if (raced) return visibleResult(trx, raced);
+
+    if (request.commandType !== "CREATE_QUOTE") {
+      if (!isExecutableCommandType(request.commandType as CommandType)) {
+        return { executionStatus: "UNKNOWN" as const, businessCommitted: false as const };
+      }
+      await authorizeCommandAccess(db, trx, principal, {
+        propertyId,
+        commandType: request.commandType,
+        stage: "RESOLVE",
+        idempotencyKey: originalIdempotencyKey,
+        correlationId: headers.correlationId,
+        mode: "EXECUTE"
+      });
+    }
 
     const commandId = newId("command");
     const receiptId = newId("receipt");
@@ -1605,5 +1843,5 @@ export async function resolveCommandResult(
     const receipt = await receiptByCommand(trx, commandId);
     if (!receipt) throw new DomainError("INTERNAL_ERROR", "Command resolution receipt was not persisted", 500);
     return receipt;
-  });
+  }));
 }

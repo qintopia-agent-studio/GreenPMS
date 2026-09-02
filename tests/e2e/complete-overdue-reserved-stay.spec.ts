@@ -7,6 +7,7 @@ import { createDatabase } from "../../packages/db/src/database.ts";
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetE2eDatabase } from "./reset-database.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
@@ -20,7 +21,7 @@ const setupPrincipal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "完成住宿浏览器验收数据",
-  propertyAccess: new Map([[propertyId, "WRITE"]])
+  ...authScope({ propertyId })
 };
 
 interface CompleteStayFixture {

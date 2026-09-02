@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { orderActionCodes } from "@qintopia/contracts";
 import { orderAllowedActions, pricingReasonFromAmendment, projectOrderFulfillment, projectOrderLifecycle } from "./orders.ts";
+
+const allOrderActionGrants = new Set(orderActionCodes);
 
 describe("pricingReasonFromAmendment", () => {
   it.each(["RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT"])("keeps the typed pricing reason separate from the %s stay-change reason", (amendmentType) => {
@@ -66,7 +69,8 @@ function action(
     null,
     false,
     false,
-    completeStayFacts
+    completeStayFacts,
+    allOrderActionGrants
   )
     .find((candidate) => candidate.code === code);
 }
@@ -76,6 +80,95 @@ describe("orderAllowedActions", () => {
     for (const status of ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"]) {
       expect(orderAllowedActions("READ", status, true)).toEqual([]);
     }
+  });
+
+  it("filters write actions by exact command grants while preserving existing staff operations", () => {
+    const ordinaryStaffGrants = new Set([
+      "CHECK_IN",
+      "CHECK_OUT",
+      "SHORTEN_STAY",
+      "MOVE_UNIT",
+      "REPRICE_ORDER",
+      "CANCEL_ORDER",
+      "MARK_NO_SHOW",
+      "REVOKE_CHECK_IN",
+      "RECORD_COLLECTION",
+      "RECORD_REFUND",
+      "REVERSE_FACT",
+      "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    ]);
+    const checkedIn = orderAllowedActions(
+      "WRITE",
+      "CHECKED_IN",
+      true,
+      { businessDate: "2026-08-01", arrivalDate: "2026-08-01", departureDate: "2026-08-03" },
+      false,
+      "WECOM",
+      true,
+      false,
+      undefined,
+      ordinaryStaffGrants
+    );
+    expect(checkedIn.map((candidate) => candidate.code)).not.toContain("CORRECT_ORDER_OCCUPANT");
+    expect(checkedIn.find((candidate) => candidate.code === "REPRICE_ORDER")).toMatchObject({ enabled: true });
+    expect(checkedIn.find((candidate) => candidate.code === "RECORD_REFUND")).toMatchObject({ enabled: true });
+    expect(checkedIn.find((candidate) => candidate.code === "REVOKE_CHECK_IN")).toMatchObject({ enabled: true });
+    expect(checkedIn.find((candidate) => candidate.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")).toMatchObject({ enabled: true });
+
+    const administrator = orderAllowedActions(
+      "WRITE",
+      "CHECKED_OUT",
+      false,
+      undefined,
+      false,
+      null,
+      false,
+      false,
+      undefined,
+      new Set(["CORRECT_ORDER_OCCUPANT"])
+    );
+    expect(administrator).toEqual([{ code: "CORRECT_ORDER_OCCUPANT", enabled: true, disabledReason: null }]);
+
+    expect(orderAllowedActions(
+      "WRITE",
+      "CHECKED_IN",
+      true,
+      undefined,
+      false,
+      null,
+      false,
+      false,
+      undefined,
+      new Set(["REPRICE_*", "ADMIN", "reprice_order"])
+    )).toEqual([]);
+  });
+
+  it("enables reverse fact for ordinary staff only through an exact command grant", () => {
+    expect(orderAllowedActions(
+      "WRITE",
+      "CHECKED_IN",
+      false,
+      undefined,
+      false,
+      null,
+      false,
+      false,
+      undefined,
+      new Set(["REVERSE_FACT"])
+    )).toEqual([{ code: "REVERSE_FACT", enabled: true, disabledReason: null }]);
+
+    expect(orderAllowedActions(
+      "WRITE",
+      "CHECKED_IN",
+      false,
+      undefined,
+      false,
+      null,
+      false,
+      false,
+      undefined,
+      new Set(["reverse_fact", "REVERSE_*"])
+    )).toEqual([]);
   });
 
   it("enables scheduled and late-recorded check-in only before the planned departure date", () => {
@@ -144,7 +237,7 @@ describe("orderAllowedActions", () => {
 
   it("allows membership conversion while in-house or checked out, but not before arrival", () => {
     const conversion = (status: string) => orderAllowedActions(
-      "WRITE", status, false, undefined, false, "WECOM", true
+      "WRITE", status, false, undefined, false, "WECOM", true, false, undefined, allOrderActionGrants
     ).find((candidate) => candidate.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
     expect(conversion("CHECKED_IN")).toEqual({
       code: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
@@ -175,11 +268,14 @@ describe("orderAllowedActions", () => {
       false,
       "WECOM",
       true,
-      true
+      true,
+      undefined,
+      allOrderActionGrants
     );
     for (const code of [
       "RECORD_COLLECTION",
       "RECORD_REFUND",
+      "REVERSE_FACT",
       "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
       "REPRICE_ORDER",
       "REVOKE_CHECK_IN"
@@ -193,7 +289,7 @@ describe("orderAllowedActions", () => {
   it("does not publish the obsolete two-step backfill action", () => {
     const past = { businessDate: "2026-08-04", arrivalDate: "2026-07-25", departureDate: "2026-08-04" };
     for (const status of ["RESERVED", "CHECKED_IN", "CHECKED_OUT"]) {
-      expect(orderAllowedActions("WRITE", status, false, past)
+      expect(orderAllowedActions("WRITE", status, false, past, false, null, false, false, undefined, allOrderActionGrants)
         .some((candidate) => (candidate.code as string) === "BACKFILL_COMPLETED_STAY")).toBe(false);
     }
   });

@@ -135,6 +135,11 @@ describe("room status lodging presentation", () => {
       attention: null,
       operationalAttention: "OVERDUE_IN_HOUSE"
     })).toEqual(["未退"]);
+    expect(roomStatusIntervalAttentionLabels({
+      status: "IN_HOUSE",
+      attention: null,
+      operationalAttention: "DUE_OUT"
+    } as Parameters<typeof roomStatusIntervalAttentionLabels>[0])).toEqual(["待退房"]);
   });
 
   it("renders the same compact attention badges for every room-status entry", () => {

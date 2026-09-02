@@ -3,8 +3,8 @@ import { AlertTriangle, CalendarDays, ChevronRight, DoorOpen, LogIn, LogOut, Ref
 import { Link } from "react-router-dom";
 import type { CommandType } from "@qintopia/contracts";
 import { api } from "../api";
-import { useWorkspace } from "../session";
-import type { CommandRequest, OrderRowDto } from "../types";
+import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
+import type { CommandCapability, CommandRequest, OrderRowDto } from "../types";
 import { localDateInTimeZone } from "../dates";
 import {
   CommandDialog,
@@ -25,7 +25,7 @@ import {
   usePersistentCommandRecovery
 } from "../ui";
 
-type TodayTab = "ARRIVALS" | "IN_HOUSE" | "DEPARTURES" | "EXCEPTIONS";
+export type TodayTab = "ARRIVALS" | "IN_HOUSE" | "DEPARTURES" | "EXCEPTIONS";
 
 const tabs: Array<{ id: TodayTab; label: string }> = [
   { id: "ARRIVALS", label: "今日到店" },
@@ -91,9 +91,23 @@ export function buildTodayBuckets(
   };
 }
 
+export function todayQueueStatusLabel(
+  tab: TodayTab,
+  order: Pick<OrderRowDto, "status" | "departure_date">,
+  currentBusinessDate: string
+): string {
+  if (tab !== "DEPARTURES" || order.status !== "CHECKED_IN") return businessStatusLabel(order.status);
+  if (order.departure_date < currentBusinessDate) return "未退";
+  if (order.departure_date === currentBusinessDate) return "待退房";
+  return businessStatusLabel(order.status);
+}
+
 export function TodayPage() {
   const { meta, principal, propertyId } = useWorkspace();
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
+  const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
+  const canCheckIn = principalCan(principal, propertyId, "CHECK_IN");
+  const canCheckOut = principalCan(principal, propertyId, "CHECK_OUT");
   const propertyTimezone = meta.properties.find((property) => property.id === propertyId)?.timezone ?? "UTC";
   const [orders, setOrders] = useState<OrderRowDto[]>([]);
   const [browsingDate, setBrowsingDate] = useState(() => localDateInTimeZone(propertyTimezone));
@@ -108,7 +122,7 @@ export function TodayPage() {
   const [command, setCommand] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [commandNotice, setCommandNotice] = useState<string>();
-  const commandsBlocked = commandRecovery.blocked;
+  const commandsBlocked = commandRecovery.blocked && recoveryPendingAllowed;
 
   useEffect(() => {
     if (previousPropertyId.current === propertyId) return;
@@ -152,6 +166,7 @@ export function TodayPage() {
   );
 
   function directCommand(order: OrderRowDto, commandType: CommandType, title: string) {
+    if (!principalCan(principal, propertyId, commandType as CommandCapability)) return;
     if (commandsBlocked) return;
     setRecoveryDialogOpen(false);
     setCommand({
@@ -166,7 +181,7 @@ export function TodayPage() {
   }
 
   function openRecoveryDialog() {
-    if (!commandRecovery.pending) return;
+    if (!commandRecovery.pending || !recoveryPendingAllowed) return;
     setRecoveryDialogOpen(true);
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
@@ -197,7 +212,8 @@ export function TodayPage() {
         : <InlineError error={commandRecovery.error} title="本地命令恢复记录不可用" />}
       <QuoteRecoveryConflictNotice conflict={commandRecovery.conflict} testId="today-quote-recovery-conflict" />
       <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
-      {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
+      {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
+      {commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="today-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；只读查看不受影响。</p></div></section> : null}
       <div className="today-tabs" role="tablist" aria-label="今日履约分类">
         {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong>{buckets[item.id].length}</strong></button>)}
       </div>
@@ -211,11 +227,11 @@ export function TodayPage() {
               <span>{formatDate(order.arrival_date)} 至 {formatDate(order.departure_date)}</span>
               {tab === "EXCEPTIONS" ? <TodayExceptionReason order={order} businessDate={currentBusinessDate} /> : null}
             </div>
-            <StatusBadge value={order.status} label={businessStatusLabel(order.status)} />
+            <StatusBadge value={order.status} label={todayQueueStatusLabel(tab, order, currentBusinessDate)} />
             <div className="queue-actions">
-              {tab === "ARRIVALS" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_IN", "办理入住")} disabled={commandsBlocked}><LogIn aria-hidden="true" size={17} />入住</button> : null}
-              {tab === "DEPARTURES" ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_OUT", "办理退房")} disabled={commandsBlocked}><LogOut aria-hidden="true" size={17} />退房</button> : null}
-              {tab === "IN_HOUSE" ? <Link className="button button-primary" to={`/orders/${encodeURIComponent(order.id)}?action=CHECK_OUT`}><LogOut aria-hidden="true" size={17} />退房</Link> : null}
+              {tab === "ARRIVALS" && canCheckIn ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_IN", "办理入住")} disabled={commandsBlocked}><LogIn aria-hidden="true" size={17} />入住</button> : null}
+              {tab === "DEPARTURES" && canCheckOut ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_OUT", "办理退房")} disabled={commandsBlocked}><LogOut aria-hidden="true" size={17} />退房</button> : null}
+              {tab === "IN_HOUSE" && canCheckOut ? <Link className="button button-primary" to={`/orders/${encodeURIComponent(order.id)}?action=CHECK_OUT`}><LogOut aria-hidden="true" size={17} />退房</Link> : null}
               {tab === "EXCEPTIONS" ? <TodayExceptionAction order={order} businessDate={currentBusinessDate} /> : null}
               {tab === "EXCEPTIONS" && order.status === "RESERVED" && order.stay_status === "PLANNED" && order.arrival_date < currentBusinessDate
                 ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(order.id)}`}>处理逾期到店<ChevronRight aria-hidden="true" size={17} /></Link>

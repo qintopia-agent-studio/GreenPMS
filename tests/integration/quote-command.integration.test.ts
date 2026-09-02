@@ -12,6 +12,7 @@ import {
 import { stableHash } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.QUOTE_COMMAND_INTEGRATION_DATABASE_URL
@@ -22,7 +23,7 @@ const readPrincipal: AuthPrincipal = {
   credentialId: "token_demo_read",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "READ"]])
+  ...authScope({ accessLevel: "READ" })
 };
 
 const baseInput: CreateQuoteCommandInputDto = {

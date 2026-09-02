@@ -6,10 +6,12 @@ import {
   mobileBedOccupancySummaries,
   mobileLodgingOccupantSummary,
   roomStatusMobileLifecycleLabel,
+  roomStatusMobileTaskPeriod,
   mobileTaskDetailWasRemoved,
   mobileWholeRoomOccupancySummaries,
   nextMobileTaskFocusId
 } from "./RoomStatusMobileTasks";
+import { roomStatusIntervalAttentionLabels } from "./roomStatusPresentation";
 
 function maintenanceTask(overrides: Partial<RoomStatusOperationalTaskDto> = {}): RoomStatusOperationalTaskDto {
   return {
@@ -57,6 +59,24 @@ describe("RoomStatus mobile task actions", () => {
     expect(roomStatusMobileLifecycleLabel("ARREARS")).toBe("已结单");
     expect(roomStatusMobileLifecycleLabel("SETTLED")).toBe("已结单");
     expect(roomStatusMobileLifecycleLabel("RESERVED")).toBe("已预订");
+  });
+
+  it("presents a departure-day task with the original order dates and waiting-for-checkout attention", () => {
+    const dueOut = maintenanceTask({
+      sourceKind: "ORDER",
+      status: "IN_HOUSE",
+      operationalAttention: "DUE_OUT",
+      sourceStartDate: "2026-07-20",
+      sourceEndDate: "2026-07-21",
+      orderArrivalDate: "2026-07-15",
+      orderDepartureDate: "2026-07-20"
+    });
+
+    expect(roomStatusMobileTaskPeriod(dueOut)).toEqual({
+      arrivalDate: "2026-07-15",
+      departureDate: "2026-07-20"
+    });
+    expect(roomStatusIntervalAttentionLabels(dueOut)).toEqual(["待退房"]);
   });
 
   it("lists every same-day bed nickname without deduplicating or folding", () => {

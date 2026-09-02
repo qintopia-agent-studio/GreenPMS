@@ -9,17 +9,23 @@ import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import Fastify from "fastify";
-import type { Kysely } from "kysely";
+import Fastify, { type FastifyRequest } from "fastify";
+import type { Kysely, Transaction } from "kysely";
 import {
+  commandCapabilities,
+  commandCatalogTypes,
+  currentReleaseFeatures,
   DomainError,
   type CommandEnvelope,
+  type AuthPrincipal,
+  type CommandCapability,
+  type CommandCatalogType,
   type CreateQuoteCommandInputDto,
   type InventoryUnitKind,
   type RoomStatusBoardQueryDto,
   type HistoricalRecoverableCommandType
 } from "@qintopia/contracts";
-import { stableHash } from "@qintopia/domain";
+import { humanGrantableCommandTypes, stableHash } from "@qintopia/domain";
 import {
   createCommandPreview,
   databaseReady,
@@ -35,12 +41,23 @@ import {
   loadReferenceCatalog,
   propertyLocalToday,
   projectStoredPreviewForRead,
+  auditCommandResourceNotFound,
+  authorizeCommandAccess,
+  writeSecurityAuthorizationAudit,
+  withCommandAuthorizationAudit,
   resolveCommandResult,
   confirmCommandPreview,
   type ConfirmRequest,
   type Database
 } from "@qintopia/db";
-import { login, logout, requirePrincipal, requirePropertyAccess, requireScopedResourceAccess } from "./auth.ts";
+import {
+  isKnownCredentialAuthenticationError,
+  login,
+  logout,
+  requirePrincipal,
+  requirePropertyAccess,
+  requireScopedResourceAccess
+} from "./auth.ts";
 import {
   AuditResponseSchema,
   AvailabilityUnitSchema,
@@ -76,6 +93,7 @@ import {
   RoomStatusQuerySchema,
   ResolveCommandResultSchema,
   HistoricalStoredPreviewResponseSchema,
+  TokenTargetsResponseSchema,
   TokensResponseSchema,
   WriteHeaders
 } from "./schemas.ts";
@@ -83,6 +101,163 @@ import {
 const InternalErrorResponses = { 500: ErrorResponse } as const;
 const commandPreviewRequestBodies = new WeakMap<object, unknown>();
 const defaultLocalWebPort = 4173;
+const commandCapabilitySet = new Set<string>(commandCapabilities);
+const historicalReadGrantTypes = ["PLACE_INTERNAL_USE", "RELEASE_INTERNAL_USE", "BACKFILL_COMPLETED_STAY"] as const;
+const commandGrantSet = new Set<string>([...humanGrantableCommandTypes, ...historicalReadGrantTypes]);
+const tokenLifecycleCommandTypes = ["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"] as const;
+
+type ProjectablePrincipal = Pick<AuthPrincipal, "subjectId" | "credentialType" | "displayName" | "propertyAccess"> & {
+  credentialId?: string;
+  propertyCommandGrants?: ReadonlyMap<string, ReadonlySet<unknown>>;
+  tokenCommandCeiling?: ReadonlySet<unknown> | null;
+};
+
+function isCommandCapability(value: unknown): value is CommandCapability {
+  return typeof value === "string" && commandCapabilitySet.has(value);
+}
+
+function isCommandGrant(value: unknown): value is CommandCatalogType {
+  return typeof value === "string" && commandGrantSet.has(value);
+}
+
+function commandFeatureEnabledForProjection(commandType: CommandCapability): boolean {
+  if (commandType === "COMPLETE_CLEANING") return currentReleaseFeatures.cleaningWorkflow;
+  if (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") return currentReleaseFeatures.historicalStayArrangementCorrection;
+  if (commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") return currentReleaseFeatures.membershipConversionVoidCorrection;
+  return true;
+}
+
+function sortedExactCommandCapabilities(commands: ReadonlySet<unknown> | undefined): CommandCapability[] {
+  if (!commands) return [];
+  return humanGrantableCommandTypes.filter((commandType) => commands.has(commandType));
+}
+
+function sortedExactCommandGrants(commands: ReadonlySet<unknown> | undefined): CommandCatalogType[] {
+  if (!commands) return [];
+  return commandCatalogTypes.filter((commandType) => commandGrantSet.has(commandType) && commands.has(commandType));
+}
+
+export function projectTokenListCommandCeiling(
+  accessCeiling: "READ" | "WRITE",
+  persistedCommands: ReadonlySet<unknown> | readonly unknown[]
+) {
+  if (accessCeiling === "READ") {
+    return {
+      commandCeiling: [],
+      persistedCommandCeiling: [],
+      historicalReadCeilingPreserved: false
+    };
+  }
+
+  const persistedSet = new Set(persistedCommands);
+  const commandCeiling = sortedExactCommandCapabilities(persistedSet)
+    .filter(commandFeatureEnabledForProjection);
+  const persistedCommandCeiling = sortedExactCommandGrants(persistedSet);
+  return {
+    commandCeiling,
+    persistedCommandCeiling,
+    historicalReadCeilingPreserved: persistedCommandCeiling.some((commandType) => !commandCeiling.includes(commandType as CommandCapability))
+  };
+}
+
+function tokenCeilingFilteredGrants<T extends CommandCatalogType>(principal: ProjectablePrincipal, grants: T[]): T[] {
+  if (principal.credentialType !== "TOKEN") return grants;
+  if (!principal.tokenCommandCeiling) return [];
+  return grants.filter((commandType) => principal.tokenCommandCeiling?.has(commandType));
+}
+
+function effectiveAllowedCommands(principal: ProjectablePrincipal, propertyId: string): CommandCapability[] {
+  if (principal.propertyAccess.get(propertyId) !== "WRITE") return [];
+  return tokenCeilingFilteredGrants(principal, sortedExactCommandCapabilities(principal.propertyCommandGrants?.get(propertyId)))
+    .filter(commandFeatureEnabledForProjection);
+}
+
+export function tokenManagementQueryCommand(
+  principal: ProjectablePrincipal,
+  propertyId: string,
+  candidates: readonly (typeof tokenLifecycleCommandTypes)[number][] = tokenLifecycleCommandTypes
+): (typeof tokenLifecycleCommandTypes)[number] {
+  const subjectGrants = principal.propertyCommandGrants?.get(propertyId);
+  return candidates.find((commandType) => (
+    subjectGrants?.has(commandType)
+    && (principal.credentialType !== "TOKEN" || principal.tokenCommandCeiling?.has(commandType))
+  )) ?? candidates[0] ?? "ISSUE_TOKEN";
+}
+
+async function authorizeTokenManagementQuery<T>(
+  db: Kysely<Database>,
+  principal: AuthPrincipal,
+  propertyId: string,
+  candidates: readonly (typeof tokenLifecycleCommandTypes)[number][],
+  query: (trx: Transaction<Database>) => Promise<T>
+): Promise<T> {
+  const commandType = tokenManagementQueryCommand(principal, propertyId, candidates);
+  return withCommandAuthorizationAudit(db, () => db.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId,
+      commandType,
+      stage: "COMMAND",
+      mode: "READ"
+    });
+    return query(trx);
+  }));
+}
+
+export function projectMeResponse(principal: ProjectablePrincipal) {
+  const propertyCommandGrants = Object.fromEntries([...principal.propertyAccess.keys()].map((propertyId) => [
+    propertyId,
+    tokenCeilingFilteredGrants(principal, sortedExactCommandGrants(principal.propertyCommandGrants?.get(propertyId)))
+  ]));
+  const allowedActions = Object.fromEntries([...principal.propertyAccess.keys()].map((propertyId) => [
+    propertyId,
+    effectiveAllowedCommands(principal, propertyId)
+  ]));
+  return {
+    subjectId: principal.subjectId,
+    displayName: principal.displayName,
+    credentialType: principal.credentialType,
+    propertyAccess: Object.fromEntries(principal.propertyAccess),
+    propertyCommandGrants,
+    allowedActions
+  };
+}
+
+async function tokenCommandCeilingsByTokenId(db: Kysely<Database>, tokenIds: readonly string[]) {
+  if (!tokenIds.length) return new Map<string, CommandCatalogType[]>();
+  const rows = await db.selectFrom("token_command_ceilings")
+    .select(["token_id", "command_type"])
+    .where("token_id", "in", tokenIds)
+    .orderBy("token_id")
+    .orderBy("command_type")
+    .execute();
+  const grouped = new Map<string, Set<CommandCatalogType>>();
+  for (const row of rows) {
+    if (!isCommandGrant(row.command_type)) continue;
+    const commands = grouped.get(row.token_id) ?? new Set<CommandCatalogType>();
+    commands.add(row.command_type);
+    grouped.set(row.token_id, commands);
+  }
+  return new Map([...grouped].map(([tokenId, commands]) => [tokenId, sortedExactCommandGrants(commands)]));
+}
+
+async function commandGrantsBySubjectId(db: Kysely<Database>, propertyId: string, subjectIds: readonly string[]) {
+  if (!subjectIds.length) return new Map<string, CommandCapability[]>();
+  const rows = await db.selectFrom("subject_command_grants")
+    .select(["subject_id", "command_type"])
+    .where("property_id", "=", propertyId)
+    .where("subject_id", "in", subjectIds)
+    .orderBy("subject_id")
+    .orderBy("command_type")
+    .execute();
+  const grouped = new Map<string, Set<CommandCapability>>();
+  for (const row of rows) {
+    if (!isCommandCapability(row.command_type)) continue;
+    const commands = grouped.get(row.subject_id) ?? new Set<CommandCapability>();
+    commands.add(row.command_type);
+    grouped.set(row.subject_id, commands);
+  }
+  return new Map([...grouped].map(([subjectId, commands]) => [subjectId, sortedExactCommandCapabilities(commands)]));
+}
 
 export function webOriginAllowlist(
   configuredOrigin = process.env.WEB_ORIGIN,
@@ -123,6 +298,178 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+type KnownCredentialCommandAuditContext = {
+  propertyId: string;
+  commandType: CommandCatalogType;
+  stage: "PREVIEW" | "CONFIRM" | "STORED_PREVIEW" | "RECEIPT" | "COMMAND" | "FIND" | "RESOLVE";
+  idempotencyKey?: string;
+  correlationId?: string;
+};
+
+function exactAuditCommandType(value: unknown): CommandCatalogType | undefined {
+  if (typeof value !== "string") return undefined;
+  const commandType = value.startsWith("PREVIEW:") ? value.slice("PREVIEW:".length) : value;
+  return (commandCatalogTypes as readonly string[]).includes(commandType)
+    ? commandType as CommandCatalogType
+    : undefined;
+}
+
+function commandAuditContextFromValues(
+  request: FastifyRequest,
+  values: {
+    propertyId?: unknown;
+    commandType?: unknown;
+    stage: KnownCredentialCommandAuditContext["stage"];
+    idempotencyKey?: unknown;
+    correlationId?: unknown;
+  }
+): KnownCredentialCommandAuditContext | undefined {
+  const commandType = exactAuditCommandType(values.commandType);
+  if (typeof values.propertyId !== "string" || !values.propertyId.trim() || !commandType) return undefined;
+  const requestIdempotencyKey = request.headers["idempotency-key"];
+  const idempotencyKey = typeof values.idempotencyKey === "string" && values.idempotencyKey.trim()
+    ? values.idempotencyKey.trim()
+    : typeof requestIdempotencyKey === "string" && requestIdempotencyKey.trim()
+      ? requestIdempotencyKey.trim()
+      : undefined;
+  const storedCorrelationId = typeof values.correlationId === "string" && values.correlationId.trim()
+    ? values.correlationId.trim()
+    : undefined;
+  return {
+    propertyId: values.propertyId.trim(),
+    commandType,
+    stage: values.stage,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+    correlationId: storedCorrelationId ?? correlationId(request)
+  };
+}
+
+async function knownCredentialCommandAuditContext(
+  db: Kysely<Database>,
+  request: FastifyRequest
+): Promise<KnownCredentialCommandAuditContext | undefined> {
+  const path = request.url.split("?", 1)[0] ?? request.url;
+  const body = record(request.body);
+  const query = record(request.query);
+  const params = record(request.params);
+
+  if (request.method === "POST" && path === "/api/v1/quotes") {
+    return commandAuditContextFromValues(request, {
+      propertyId: body?.propertyId,
+      commandType: "CREATE_QUOTE",
+      stage: "COMMAND"
+    });
+  }
+  if (request.method === "POST" && path === "/api/v1/command-previews") {
+    return commandAuditContextFromValues(request, {
+      propertyId: record(body?.input)?.propertyId,
+      commandType: body?.commandType,
+      stage: "PREVIEW"
+    });
+  }
+  if (request.method === "POST" && /^\/api\/v1\/command-previews\/[^/]+\/confirm$/.test(path)) {
+    const previewId = /^\/api\/v1\/command-previews\/([^/]+)\/confirm$/.exec(path)?.[1];
+    if (previewId) {
+      const preview = await db.selectFrom("command_previews")
+        .select(["property_id", "command_type"])
+        .where("id", "=", decodeURIComponent(previewId))
+        .executeTakeFirst();
+      if (preview) {
+        return commandAuditContextFromValues(request, {
+          propertyId: preview.property_id,
+          commandType: preview.command_type,
+          stage: "CONFIRM"
+        });
+      }
+    }
+    return commandAuditContextFromValues(request, {
+      propertyId: body?.propertyId,
+      commandType: body?.commandType,
+      stage: "CONFIRM"
+    });
+  }
+  if (request.method === "GET" && path === "/api/v1/command-results") {
+    return commandAuditContextFromValues(request, {
+      propertyId: query?.propertyId,
+      commandType: query?.commandType,
+      stage: "FIND",
+      idempotencyKey: query?.idempotencyKey
+    });
+  }
+  if (request.method === "POST" && path === "/api/v1/command-results/resolve") {
+    return commandAuditContextFromValues(request, {
+      propertyId: body?.propertyId,
+      commandType: body?.commandType,
+      stage: "RESOLVE",
+      idempotencyKey: body?.idempotencyKey
+    });
+  }
+  if (request.method === "GET" && path === "/api/v1/tokens") {
+    return commandAuditContextFromValues(request, {
+      propertyId: query?.propertyId,
+      commandType: "ISSUE_TOKEN",
+      stage: "COMMAND"
+    });
+  }
+  if (request.method === "GET" && /^\/api\/v1\/properties\/[^/]+\/token-targets$/.test(path)) {
+    return commandAuditContextFromValues(request, {
+      propertyId: params?.id,
+      commandType: "ISSUE_TOKEN",
+      stage: "COMMAND"
+    });
+  }
+
+  const storedPreviewId = request.method === "GET"
+    ? /^\/api\/v1\/command-previews\/([^/]+)$/.exec(path)?.[1]
+    : undefined;
+  if (storedPreviewId) {
+    const preview = await db.selectFrom("command_previews")
+      .select(["property_id", "command_type"])
+      .where("id", "=", decodeURIComponent(storedPreviewId))
+      .executeTakeFirst();
+    return preview ? commandAuditContextFromValues(request, {
+      propertyId: preview.property_id,
+      commandType: preview.command_type,
+      stage: "STORED_PREVIEW"
+    }) : undefined;
+  }
+
+  const receiptId = request.method === "GET" ? /^\/api\/v1\/receipts\/([^/]+)$/.exec(path)?.[1] : undefined;
+  if (receiptId) {
+    const command = await db.selectFrom("command_receipts")
+      .innerJoin("command_executions", "command_executions.id", "command_receipts.command_id")
+      .select([
+        "command_executions.property_id",
+        "command_executions.command_type",
+        "command_executions.idempotency_key",
+        "command_executions.correlation_id"
+      ])
+      .where("command_receipts.id", "=", decodeURIComponent(receiptId))
+      .executeTakeFirst();
+    return command ? commandAuditContextFromValues(request, {
+      propertyId: command.property_id,
+      commandType: command.command_type,
+      stage: "RECEIPT",
+      idempotencyKey: command.idempotency_key,
+      correlationId: command.correlation_id
+    }) : undefined;
+  }
+
+  const commandId = request.method === "GET" ? /^\/api\/v1\/commands\/([^/]+)$/.exec(path)?.[1] : undefined;
+  if (!commandId) return undefined;
+  const command = await db.selectFrom("command_executions")
+    .select(["property_id", "command_type", "idempotency_key", "correlation_id"])
+    .where("id", "=", decodeURIComponent(commandId))
+    .executeTakeFirst();
+  return command ? commandAuditContextFromValues(request, {
+    propertyId: command.property_id,
+    commandType: command.command_type,
+    stage: "COMMAND",
+    idempotencyKey: command.idempotency_key,
+    correlationId: command.correlation_id
+  }) : undefined;
+}
+
 async function replayHistoricalCreateOrderPreview(
   db: Kysely<Database>,
   principal: Awaited<ReturnType<typeof requirePrincipal>>,
@@ -142,27 +489,37 @@ async function replayHistoricalCreateOrderPreview(
   if (!correlation) throw new DomainError("CORRELATION_ID_REQUIRED", "X-Correlation-ID header is required", 400);
 
   const propertyId = envelope.input.propertyId;
-  requirePropertyAccess(principal, propertyId, "WRITE");
-  const execution = await db.selectFrom("command_executions as execution")
-    .leftJoin("command_receipts as receipt", "receipt.command_id", "execution.id")
-    .select(["execution.id", "execution.request_hash", "receipt.id as receipt_id"])
-    .where("execution.subject_id", "=", principal.subjectId)
-    .where("execution.property_id", "=", propertyId)
-    .where("execution.command_type", "=", "PREVIEW:CREATE_ORDER")
-    .where("execution.idempotency_key", "=", idempotencyKey)
-    .executeTakeFirst();
-  if (!execution || execution.request_hash !== stableHash(envelope)) return undefined;
-  if (!execution.receipt_id) {
-    throw new DomainError(
-      "COMMAND_STATUS_UNKNOWN",
-      "The historical Preview command is still executing or its final state is unknown",
-      409,
-      true,
-      { commandId: execution.id }
-    );
-  }
-
-  const receipt = await getReceipt(db, principal, execution.receipt_id);
+  const replay = await withCommandAuthorizationAudit(db, () => db.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
+    await authorizeCommandAccess(db, trx, principal, {
+      propertyId,
+      commandType: "CREATE_ORDER",
+      stage: "REPLAY",
+      mode: "READ",
+      idempotencyKey,
+      correlationId: correlation
+    });
+    const execution = await trx.selectFrom("command_executions as execution")
+      .leftJoin("command_receipts as receipt", "receipt.command_id", "execution.id")
+      .select(["execution.id", "execution.request_hash", "receipt.id as receipt_id"])
+      .where("execution.subject_id", "=", principal.subjectId)
+      .where("execution.property_id", "=", propertyId)
+      .where("execution.command_type", "=", "PREVIEW:CREATE_ORDER")
+      .where("execution.idempotency_key", "=", idempotencyKey)
+      .executeTakeFirst();
+    if (!execution || execution.request_hash !== stableHash(envelope)) return undefined;
+    if (!execution.receipt_id) {
+      throw new DomainError(
+        "COMMAND_STATUS_UNKNOWN",
+        "The historical Preview command is still executing or its final state is unknown",
+        409,
+        true,
+        { commandId: execution.id }
+      );
+    }
+    return { receiptId: execution.receipt_id };
+  }));
+  if (!replay) return undefined;
+  const receipt = await getReceipt(db, principal, replay.receiptId);
   const preview = record(receipt.result)?.preview;
   if (!record(preview)) throw new DomainError("INTERNAL_ERROR", "Historical Preview receipt is malformed", 500);
   return { preview, receipt };
@@ -216,12 +573,37 @@ export async function buildServer(db: Kysely<Database>) {
     }
   });
 
-  app.setErrorHandler((error, request, reply) => {
+  app.setErrorHandler(async (error, request, reply) => {
+    const requestCorrelationId = correlationId(request);
+    if (isKnownCredentialAuthenticationError(error)) {
+      try {
+        const auditContext = await knownCredentialCommandAuditContext(db, request);
+        if (auditContext) {
+          await writeSecurityAuthorizationAudit(db, {
+            principal: error.identity,
+            propertyId: auditContext.propertyId,
+            commandType: auditContext.commandType,
+            stage: auditContext.stage,
+            idempotencyKey: auditContext.idempotencyKey,
+            correlationId: auditContext.correlationId,
+            denialReason: error.denialReason
+          });
+        }
+      } catch (auditError) {
+        request.log.error({ err: auditError, correlationId: requestCorrelationId }, "Authorization denial audit failed");
+        return reply.code(500).send({
+          code: "INTERNAL_ERROR",
+          message: "Internal server error",
+          correlationId: requestCorrelationId,
+          retryable: false
+        });
+      }
+    }
+
     const known = error instanceof DomainError ? error : undefined;
     const generic = error as { statusCode?: unknown; message?: unknown };
     const missingHeader = known ? undefined : missingWriteHeaderError(error);
     const statusCode = known?.statusCode ?? (typeof generic.statusCode === "number" ? generic.statusCode : 500);
-    const requestCorrelationId = correlationId(request);
     if (statusCode >= 500) {
       request.log.error({ err: error, correlationId: requestCorrelationId }, "Request failed");
       return reply.code(statusCode).send({
@@ -263,7 +645,7 @@ export async function buildServer(db: Kysely<Database>) {
   });
   app.get("/api/v1/me", { schema: { tags: ["auth"], response: { 200: MeResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
-    return { subjectId: principal.subjectId, displayName: principal.displayName, credentialType: principal.credentialType, propertyAccess: Object.fromEntries(principal.propertyAccess) };
+    return projectMeResponse(principal);
   });
 
   app.get("/api/v1/meta", { schema: { tags: ["queries"], response: { 200: MetaResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
@@ -334,6 +716,7 @@ export async function buildServer(db: Kysely<Database>) {
       arrivalDate: query.arrivalDate,
       departureDate: query.departureDate,
       accessLevel: principal.propertyAccess.get(id)!,
+      commandGrants: new Set(effectiveAllowedCommands(principal, id)),
       requestingSubjectId: principal.subjectId,
       ...(query.page !== undefined ? { page: query.page } : {}),
       ...(query.pageSize !== undefined ? { pageSize: query.pageSize } : {}),
@@ -382,7 +765,6 @@ export async function buildServer(db: Kysely<Database>) {
   }, async (request) => {
     const body = request.body as CreateQuoteCommandInputDto;
     const principal = await requirePrincipal(db, request);
-    requirePropertyAccess(principal, body.propertyId, "READ");
     return executeQuoteCommand(db, principal, body, {
       idempotencyKey: request.headers["idempotency-key"] as string | undefined,
       correlationId: request.headers["x-correlation-id"] as string | undefined
@@ -431,7 +813,7 @@ export async function buildServer(db: Kysely<Database>) {
     const order = await db.selectFrom("orders").select("property_id").where("id", "=", orderId).executeTakeFirst();
     if (!order) throw new DomainError("NOT_FOUND", "Order not found", 404);
     requireScopedResourceAccess(principal, order.property_id);
-    return getOrderView(db, orderId, principal.propertyAccess.get(order.property_id)!);
+    return getOrderView(db, orderId, principal.propertyAccess.get(order.property_id)!, new Set(effectiveAllowedCommands(principal, order.property_id)));
   });
 
   app.get("/api/v1/members", { schema: { tags: ["queries"], querystring: MembersQuerySchema, response: { 200: MembersListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
@@ -454,11 +836,61 @@ export async function buildServer(db: Kysely<Database>) {
   }, async (request) => {
     const propertyId = (request.query as { propertyId: string }).propertyId;
     const principal = await requirePrincipal(db, request);
-    requirePropertyAccess(principal, propertyId, "READ");
-    const tokens = await db.selectFrom("api_tokens")
-      .select(["id", "label", "access_ceiling", "property_scope", "expires_at", "revoked_at", "rotated_from_id", "replaced_by_id", "created_at"])
-      .where("subject_id", "=", principal.subjectId).where("property_scope", "=", propertyId).orderBy("created_at", "desc").execute();
-    return { tokens };
+    return authorizeTokenManagementQuery(db, principal, propertyId, tokenLifecycleCommandTypes, async (trx) => {
+      const tokens = await trx.selectFrom("api_tokens")
+        .innerJoin("subjects", "subjects.id", "api_tokens.subject_id")
+        .select([
+          "api_tokens.subject_id as subjectId",
+          "subjects.display_name as displayName",
+          "api_tokens.id",
+          "api_tokens.label",
+          "api_tokens.access_ceiling",
+          "api_tokens.property_scope",
+          "api_tokens.expires_at",
+          "api_tokens.revoked_at",
+          "api_tokens.rotated_from_id",
+          "api_tokens.replaced_by_id",
+          "api_tokens.created_at"
+        ])
+        .where("api_tokens.property_scope", "=", propertyId)
+        .orderBy("api_tokens.created_at", "desc")
+        .execute();
+      const ceilingsByTokenId = await tokenCommandCeilingsByTokenId(trx, tokens.map((token) => token.id));
+      return {
+        tokens: tokens.map((token) => ({
+          ...token,
+          ...projectTokenListCommandCeiling(token.access_ceiling, ceilingsByTokenId.get(token.id) ?? [])
+        }))
+      };
+    });
+  });
+
+  app.get("/api/v1/properties/:id/token-targets", {
+    schema: { tags: ["queries"], params: IdParams, response: { 200: TokenTargetsResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+  }, async (request) => {
+    const { id: propertyId } = request.params as { id: string };
+    const principal = await requirePrincipal(db, request);
+    return authorizeTokenManagementQuery(db, principal, propertyId, ["ISSUE_TOKEN"], async (trx) => {
+      const subjects = await trx.selectFrom("subject_property_grants")
+        .innerJoin("subjects", "subjects.id", "subject_property_grants.subject_id")
+        .select([
+          "subjects.id as subjectId",
+          "subjects.display_name as displayName",
+          "subject_property_grants.access_level as accessLevel"
+        ])
+        .where("subject_property_grants.property_id", "=", propertyId)
+        .where("subjects.status", "=", "ACTIVE")
+        .orderBy("subjects.display_name")
+        .orderBy("subjects.id")
+        .execute();
+      const grantsBySubjectId = await commandGrantsBySubjectId(trx, propertyId, subjects.map((subject) => subject.subjectId));
+      return {
+        subjects: subjects.map((subject) => ({
+          ...subject,
+          commandGrants: grantsBySubjectId.get(subject.subjectId) ?? []
+        }))
+      };
+    });
   });
 
   app.get("/api/v1/maintenance-locks", {
@@ -536,12 +968,28 @@ export async function buildServer(db: Kysely<Database>) {
     schema: { tags: ["commands"], params: PreviewParams, response: { 200: HistoricalStoredPreviewResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
     const principal = await requirePrincipal(db, request);
-    const preview = await db.selectFrom("command_previews").selectAll()
-      .where("id", "=", (request.params as { previewId: string }).previewId)
-      .where("subject_id", "=", principal.subjectId).executeTakeFirst();
-    if (!preview) throw new DomainError("PREVIEW_NOT_FOUND", "Preview not found", 404);
-    requireScopedResourceAccess(principal, preview.property_id);
-    return projectStoredPreviewForRead(db, preview);
+    return withCommandAuthorizationAudit(db, () => db.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
+      const preview = await trx.selectFrom("command_previews").selectAll()
+        .where("id", "=", (request.params as { previewId: string }).previewId)
+        .executeTakeFirst();
+      if (!preview) throw new DomainError("PREVIEW_NOT_FOUND", "Preview not found", 404);
+      if (preview.subject_id !== principal.subjectId) {
+        return auditCommandResourceNotFound(db, {
+          principal,
+          propertyId: preview.property_id,
+          commandType: preview.command_type,
+          stage: "STORED_PREVIEW",
+          message: "Preview not found"
+        });
+      }
+      await authorizeCommandAccess(db, trx, principal, {
+        propertyId: preview.property_id,
+        commandType: preview.command_type,
+        stage: "STORED_PREVIEW",
+        mode: "READ"
+      });
+      return projectStoredPreviewForRead(trx, preview);
+    }));
   });
 
   app.post("/api/v1/command-previews/:previewId/confirm", {

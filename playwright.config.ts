@@ -1,6 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
+import { runtimeDatabaseUrlForTesting } from "./tests/helpers/runtime-database.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
+const e2eRuntimeDatabaseUrl = process.env.E2E_RUNTIME_DATABASE_URL
+  ?? runtimeDatabaseUrlForTesting(e2eDatabaseUrl);
 const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const e2eApiPort = process.env.E2E_API_PORT ?? "4100";
 const e2eWebPort = process.env.E2E_WEB_PORT ?? "4173";
@@ -32,7 +35,8 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 120_000,
       env: {
-        DATABASE_URL: e2eDatabaseUrl,
+        DATABASE_URL: e2eRuntimeDatabaseUrl,
+        STAFF_PROFILE_MANIFEST_NAME: "demo",
         PORT: e2eApiPort,
         WEB_ORIGIN: e2eWebUrl,
         LOG_LEVEL: "warn",

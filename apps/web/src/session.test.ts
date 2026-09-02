@@ -1,15 +1,52 @@
 import { describe, expect, it, vi } from "vitest";
-import { availableLocalStorage, navigationItemsForAccess, persistSidebarCollapsed, sidebarStorageKey, storedSidebarCollapsed } from "./session";
+import { availableLocalStorage, canManageTokens, commandRecoveryAvailable, navigationItemsForAccess, persistSidebarCollapsed, principalCan, sidebarStorageKey, storedSidebarCollapsed } from "./session";
+import type { PrincipalDto } from "./types";
+
+function principal(allowedActions: PrincipalDto["allowedActions"], overrides: Partial<PrincipalDto> = {}): PrincipalDto {
+  return {
+    subjectId: "subject_operator",
+    displayName: "前台",
+    credentialType: "SESSION",
+    propertyAccess: { property_test: "WRITE" },
+    propertyCommandGrants: allowedActions,
+    allowedActions,
+    ...overrides
+  };
+}
 
 describe("permission-aware staff navigation", () => {
-  it("uses staff language and exposes Token management only with write access", () => {
-    const writable = navigationItemsForAccess("WRITE").map(({ label, to }) => ({ label, to }));
-    const readonly = navigationItemsForAccess("READ").map(({ label, to }) => ({ label, to }));
+  it("uses staff language and exposes Token management only with exact Token grants", () => {
+    const staff = principal({ property_test: ["CREATE_ORDER", "REPRICE_ORDER", "RECORD_REFUND", "REVOKE_CHECK_IN"] });
+    const tokenManager = principal({ property_test: ["ISSUE_TOKEN"] });
+    const staffItems = navigationItemsForAccess(staff, "property_test").map(({ label, to }) => ({ label, to }));
+    const managerItems = navigationItemsForAccess(tokenManager, "property_test").map(({ label, to }) => ({ label, to }));
 
-    expect(writable).toContainEqual({ label: "今日履约", to: "/today" });
-    expect(writable).toContainEqual({ label: "Token", to: "/tokens" });
-    expect(readonly).toContainEqual({ label: "今日履约", to: "/today" });
-    expect(readonly).not.toContainEqual({ label: "Token", to: "/tokens" });
+    expect(staffItems).toContainEqual({ label: "今日履约", to: "/today" });
+    expect(staffItems).not.toContainEqual({ label: "Token", to: "/tokens" });
+    expect(managerItems).toContainEqual({ label: "今日履约", to: "/today" });
+    expect(managerItems).toContainEqual({ label: "Token", to: "/tokens" });
+    expect(principalCan(staff, "property_test", "REPRICE_ORDER")).toBe(true);
+    expect(canManageTokens(staff, "property_test")).toBe(false);
+    expect(canManageTokens(tokenManager, "property_test")).toBe(true);
+  });
+
+  it("keeps recovery permissions tied to the smallest relevant fact", () => {
+    const readOnlyQuote = principal({}, {
+      propertyAccess: { property_test: "READ" },
+      propertyCommandGrants: { property_test: [] }
+    });
+    const historicalRecovery = principal({}, {
+      propertyCommandGrants: { property_test: ["BACKFILL_COMPLETED_STAY"] }
+    });
+    const writeRecovery = principal({ property_test: ["REPRICE_ORDER"] }, {
+      propertyCommandGrants: { property_test: ["REPRICE_ORDER"] }
+    });
+
+    expect(commandRecoveryAvailable(readOnlyQuote, "property_test", "CREATE_QUOTE")).toBe(true);
+    expect(commandRecoveryAvailable(readOnlyQuote, "property_missing", "CREATE_QUOTE")).toBe(false);
+    expect(commandRecoveryAvailable(historicalRecovery, "property_test", "BACKFILL_COMPLETED_STAY")).toBe(true);
+    expect(commandRecoveryAvailable(historicalRecovery, "property_test", "REPRICE_ORDER")).toBe(false);
+    expect(commandRecoveryAvailable(writeRecovery, "property_test", "REPRICE_ORDER")).toBe(true);
   });
 });
 

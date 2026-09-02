@@ -92,6 +92,8 @@ const npm = join(bin, "npm");
   await writeFile(npm, `#!/bin/sh
 printf 'npm %s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 printf 'pg user=%s password=%s host=%s port=%s database=%s\\n' "$PGUSER" "$PGPASSWORD" "$PGHOST" "$PGPORT" "$PGDATABASE" >> "$FAKE_DOCKER_LOG"
+printf 'migration pg user=%s password=%s host=%s port=%s database=%s\\n' "$MIGRATION_PGUSER" "$MIGRATION_PGPASSWORD" "$MIGRATION_PGHOST" "$MIGRATION_PGPORT" "$MIGRATION_PGDATABASE" >> "$FAKE_DOCKER_LOG"
+printf 'staff profile manifest=%s\\n' "$STAFF_PROFILE_MANIFEST_NAME" >> "$FAKE_DOCKER_LOG"
 case "$*" in
   *"run db:migrate"*)
     if [ "$FAKE_MIGRATION_FAILURE" = "1" ]; then exit 1; fi
@@ -110,6 +112,13 @@ esac
     env: {
       ...process.env,
       ALLOW_RESTORE: "true",
+      POSTGRES_USER: "qintopia_migrator",
+      POSTGRES_PASSWORD: "qintopia_migrator",
+      MIGRATION_DATABASE_USER: "",
+      MIGRATION_DATABASE_PASSWORD: "",
+      RUNTIME_DATABASE_USER: "qintopia_runtime",
+      RUNTIME_DATABASE_PASSWORD: "qintopia_runtime",
+      STAFF_PROFILE_MANIFEST_NAME: "demo",
       FAKE_DOCKER_LOG: log,
       FAKE_TARGET_EXISTS: targetExists ? "1" : "",
       FAKE_RESTORE_FAILURE: failRestore ? "1" : "",
@@ -153,12 +162,17 @@ describe("restore script contract", () => {
   });
 
   it("creates a new target, upgrades a stage 9 backup, and validates the current stage 13 schema", async () => {
+    expect(currentMigrationNames).toHaveLength(48);
+    expect(currentMigrationNames).toContain("046_command_authorization.sql");
+    expect(currentMigrationNames).toContain("047_runtime_database_role.sql");
+    expect(currentMigrationNames).toContain("048_runtime_isolation_guards.sql");
+
     const fixture = await fakeDockerEnvironment(false);
     try {
       await expect(execFileAsync("bash", [restoreScript, fixture.backup, "new_restore_target"], { env: fixture.env }))
         .resolves.toMatchObject({ stdout: expect.stringContaining("Restored") });
       const calls = await readFile(fixture.log, "utf8");
-      expect(calls).toContain("createdb -U qintopia new_restore_target");
+      expect(calls).toContain("createdb -U qintopia_migrator new_restore_target");
       expect(calls).toContain("pg_restore");
       expect(calls).toContain("npm run db:migrate");
       expect(calls).toContain("007_reference_catalog.sql");
@@ -190,7 +204,11 @@ describe("restore script contract", () => {
       expect(calls).toContain("033_stay_collection_membership_conversion.sql");
       expect(calls).toContain("034_stay_conversion_reversal_bridge_guard.sql");
       expect(calls).toContain("035_stage13_conversion_execution_state_guards.sql");
+      expect(calls).toContain("046_command_authorization.sql");
+      expect(calls).toContain("047_runtime_database_role.sql");
+      expect(calls).toContain("048_runtime_isolation_guards.sql");
       expect(calls).toContain("npm run db:ready");
+      expect(calls.match(/staff profile manifest=demo/g)).toHaveLength(2);
       expect(calls).toContain("pricing_revisions_stage10_validate");
       expect(calls).toContain("amendments_stage10_reject_checkout_bypass");
       expect(calls).toContain("entitlement_ledger_stage10_reject_write");
@@ -301,12 +319,13 @@ describe("restore script contract", () => {
     expect(script).toContain("INSERT INTO schema_migrations(name)");
     expect(script).toContain("027_stage10_stay_shortening_guards.sql");
     expect(script).toContain("028_stage11_move_unit_guards.sql");
-    expect(script).toContain("037_member_phone_identity_and_nickname.sql");
+    expect(script).toContain("current_migrations_sql");
+    expect(script).toContain('test "$required_migrations" = "$current_migration_count"');
     expect(script).not.toContain("DROP TRIGGER IF EXISTS");
     expect(script).not.toContain("DELETE FROM schema_migrations");
 
     const fixtureIndex = script.indexOf("tests/helpers/create-restore-fixture.ts");
-    const dumpIndex = script.indexOf('pg_dump -U "$user" -Fc "$source_database"');
+    const dumpIndex = script.indexOf('pg_dump -U "$migration_user" -Fc "$source_database"');
     expect(fixtureIndex).toBeGreaterThan(0);
     expect(dumpIndex).toBeGreaterThan(fixtureIndex);
   });
@@ -323,7 +342,8 @@ describe("restore script contract", () => {
       expect(source).not.toContain("tgenabled <> 'D'");
     }
     for (const source of [verifyRestoreSource, composeSource]) {
-      expect(source).toContain("037_member_phone_identity_and_nickname.sql");
+      expect(source).toContain("current_migrations_sql");
+      expect(source).toContain("migrations_directory");
     }
   });
 
@@ -335,7 +355,8 @@ describe("restore script contract", () => {
         env: { ...fixture.env, POSTGRES_PASSWORD: password }
       })).resolves.toMatchObject({ stdout: expect.stringContaining("Restored") });
       const calls = await readFile(fixture.log, "utf8");
-      expect(calls).toContain(`pg user=qintopia password=${password} host=127.0.0.1 port=55432 database=reserved_password_target`);
+      expect(calls).toContain("pg user=qintopia_runtime password=qintopia_runtime host=127.0.0.1 port=55432 database=reserved_password_target");
+      expect(calls).toContain(`migration pg user=qintopia_migrator password=${password} host=127.0.0.1 port=55432 database=reserved_password_target`);
       expect(calls).not.toContain("DATABASE_URL=postgres://");
     } finally {
       await rm(fixture.workdir, { recursive: true, force: true });
@@ -346,10 +367,14 @@ describe("restore script contract", () => {
       readFile(verifyBackupRestoreScript, "utf8")
     ]);
     for (const source of [restoreSource, verifyRestoreSource]) {
-      expect(source).not.toContain("DATABASE_URL=postgres://$user:$password@");
+      expect(source).not.toContain("DATABASE_URL=postgres://$migration_user:$migration_password@");
       expect(source).toContain('DATABASE_URL=""');
-      expect(source).toContain('PGPASSWORD="$password"');
     }
+    expect(restoreSource).toContain('PGPASSWORD="$runtime_password"');
+    expect(restoreSource).toContain('MIGRATION_PGPASSWORD="$migration_password"');
+    expect(restoreSource).toContain('-e "STAFF_PROFILE_MANIFEST_NAME=$staff_profile_manifest_name"');
+    expect(restoreSource).toContain('STAFF_PROFILE_MANIFEST_NAME="$staff_profile_manifest_name"');
+    expect(verifyRestoreSource).toContain('PGPASSWORD="$migration_password"');
   });
 
   it("encodes discrete PostgreSQL connection fields without changing their values", () => {
@@ -382,7 +407,7 @@ describe("restore script contract", () => {
       await expect(execFileAsync("bash", [restoreScript, fixture.backup, "failed_restore_target"], { env: fixture.env }))
         .rejects.toMatchObject({ code: 1 });
       const calls = await readFile(fixture.log, "utf8");
-      expect(calls).toContain("createdb -U qintopia failed_restore_target");
+      expect(calls).toContain("createdb -U qintopia_migrator failed_restore_target");
       expect(calls).toContain("pg_restore");
       expect(calls).not.toContain("dropdb");
     } finally {
@@ -398,7 +423,7 @@ describe("restore script contract", () => {
       expect(failure).toMatchObject({ code: 1 });
       expect(failure?.stderr).toContain("retained for manual inspection");
       const calls = await readFile(fixture.log, "utf8");
-      expect(calls).toContain("createdb -U qintopia replaced_restore_target");
+      expect(calls).toContain("createdb -U qintopia_migrator replaced_restore_target");
       expect(calls).not.toContain("SELECT oid FROM pg_database");
       expect(calls).not.toContain("dropdb");
     } finally {

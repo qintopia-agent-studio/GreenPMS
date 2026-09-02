@@ -12,6 +12,7 @@ import {
 import { sql, type Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.MEMBER_PROFILE_LIFECYCLE_DATABASE_URL
@@ -22,7 +23,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 let db: Kysely<Database>;
@@ -392,16 +393,25 @@ describe("check-in entitlement consumption lifecycle", () => {
       .toEqual(before.coverageSet.map((coverage) => ({ id: coverage.id, inventory: coverage.inventory_unit_id, status: "CONSUMED" })));
   });
 
-  it("immediately consumes newly covered nights added to an in-house order", async () => {
+  it("immediately consumes newly covered nights after an audited balance correction and reprice", async () => {
     const arrivalDate = await propertyLocalToday(db, demo.propertyId);
     const orderId = await createMemberOrder("refresh-in-house", arrivalDate, shiftDate(arrivalDate, 3));
     await confirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "refresh-in-house-check-in");
     expect((await getOrderView(db, orderId)).coverageSet).toHaveLength(2);
     await confirm({
-      commandType: "ADD_MEMBER_ENTITLEMENT_LOT",
-      input: { propertyId: demo.propertyId, memberContractId: demo.memberContractId, unitKind: "ROOM_NIGHT", units: 1, expiresOn: "2029-12-31" }
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+      input: {
+        propertyId: demo.propertyId,
+        entitlementLotId: demo.roomLotId,
+        expectedAvailableBalance: 0,
+        targetAvailableBalance: 1,
+        adjustmentReason: "补足在住订单第三晚的真实权益"
+      }
     }, "refresh-in-house-top-up");
-    const refreshed = await confirm({ commandType: "REFRESH_MEMBER_COVERAGE", input: { propertyId: demo.propertyId, orderId } }, "refresh-in-house-command");
+    const refreshed = await confirm({
+      commandType: "REPRICE_ORDER",
+      input: { propertyId: demo.propertyId, orderId, targetCurrentContractAmountMinor: 0 }
+    }, "refresh-in-house-command");
     const refreshedFacts = await db.selectFrom("entitlement_ledger").select(["entry_type", "coverage_id"])
       .where("command_id", "=", refreshed.commandId).orderBy("entry_type").execute();
     expect(refreshedFacts.map((fact) => fact.entry_type).sort()).toEqual(["CONSUME", "HOLD"]);

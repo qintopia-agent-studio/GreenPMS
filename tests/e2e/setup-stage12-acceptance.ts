@@ -6,6 +6,7 @@ import { createDatabase } from "../../packages/db/src/database.ts";
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetE2eDatabase } from "./reset-database.ts";
 
 const demo = {
@@ -20,7 +21,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Stage 12 Acceptance Setup",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 const defaultDatabaseUrl = process.env.STAGE12_ACCEPTANCE_DATABASE_URL

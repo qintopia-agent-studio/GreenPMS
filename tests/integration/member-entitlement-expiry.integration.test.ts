@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AuthPrincipal, CommandEnvelope, ReceiptDto } from "@qintopia/contracts";
+import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
 import {
-  confirmCommandPreview,
   createCommandPreview,
   getMemberView,
   listMemberSummaries,
@@ -12,6 +11,7 @@ import {
 import type { Kysely } from "kysely";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.MEMBER_ENTITLEMENT_EXPIRY_DATABASE_URL
@@ -22,7 +22,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 const memberId = "member_expiry_consistency";
@@ -48,17 +48,6 @@ function metadata(prefix: string) {
 
 async function preview(envelope: CommandEnvelope, prefix: string) {
   return createCommandPreview(db, principal, envelope, metadata(`${prefix}-preview`));
-}
-
-async function confirm(envelope: CommandEnvelope, prefix: string): Promise<ReceiptDto> {
-  const created = await preview(envelope, prefix);
-  return confirmCommandPreview(db, principal, created.preview.previewId, {
-    propertyId: envelope.input.propertyId as string,
-    commandType: envelope.commandType,
-    confirmation: true,
-    expectedEffectHash: created.preview.effectHash,
-    reason: { code: "ENTITLEMENT_EXPIRY_TEST", note: `Confirm ${prefix}` }
-  }, metadata(`${prefix}-confirm`));
 }
 
 beforeEach(async () => {
@@ -113,7 +102,7 @@ afterEach(async () => {
 });
 
 describe("member entitlement natural expiry", () => {
-  it("rejects a newly added already-expired Lot with zero writes while keeping expiresOn=today valid", async () => {
+  it("keeps system Lot creation commands closed to human subjects while preserving expiresOn=today semantics", async () => {
     const expiredEnvelope: CommandEnvelope = {
       commandType: "ADD_MEMBER_ENTITLEMENT_LOT",
       input: {
@@ -125,8 +114,7 @@ describe("member entitlement natural expiry", () => {
       }
     };
     await expect(preview(expiredEnvelope, "add-expired-lot")).rejects.toMatchObject({
-      code: "ENTITLEMENT_CONFLICT",
-      details: { expiresOn: yesterday, propertyToday: today }
+      code: "INSUFFICIENT_ACCESS"
     });
     expect(await db.selectFrom("entitlement_lots").select("id").where("contract_id", "=", activeContractId).execute()).toEqual([]);
     expect(await db.selectFrom("entitlement_ledger").select("fact_id").execute()).toEqual([]);
@@ -141,18 +129,18 @@ describe("member entitlement natural expiry", () => {
         expiresOn: today
       }
     };
-    const created = await preview(validEnvelope, "add-today-lot");
-    expect(created.preview.effect).toMatchObject({ expiresOn: today, units: 3 });
-    expect(created.preview.effect).not.toHaveProperty("propertyToday");
-    const receipt = await confirmCommandPreview(db, principal, created.preview.previewId, {
-      propertyId: demo.propertyId,
-      commandType: validEnvelope.commandType,
-      confirmation: true,
-      expectedEffectHash: created.preview.effectHash,
-      reason: { code: "LOT_ADDED", note: "Today remains a valid expiry date" }
-    }, metadata("add-today-lot-confirm"));
-    expect(receipt).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
-    const lotId = receipt.result!.entitlementLotId as string;
+    await expect(preview(validEnvelope, "add-today-lot")).rejects.toMatchObject({
+      code: "INSUFFICIENT_ACCESS"
+    });
+    const lotId = "lot_expires_today_fixture";
+    await db.insertInto("entitlement_lots").values({
+      id: lotId,
+      contract_id: activeContractId,
+      unit_kind: "ROOM_NIGHT",
+      total_units: 3,
+      expires_on: today,
+      version: 1
+    }).execute();
     expect((await getMemberView(db, demo.propertyId, memberId)).lotBalances)
       .toContainEqual({ lotId, unitKind: "ROOM_NIGHT", availableUnits: 3 });
   });
@@ -175,11 +163,12 @@ describe("member entitlement natural expiry", () => {
     }).execute();
 
     await expect(preview({
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
       input: {
         propertyId: demo.propertyId,
         entitlementLotId: "lot_naturally_expired",
-        quantityDelta: 1,
+        expectedAvailableBalance: 0,
+        targetAvailableBalance: 1,
         adjustmentReason: "Must not revive natural expiry"
       }
     }, "adjust-natural-expiry")).rejects.toMatchObject({
@@ -187,11 +176,12 @@ describe("member entitlement natural expiry", () => {
       details: { expiresOn: yesterday, propertyToday: today }
     });
     await expect(preview({
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
       input: {
         propertyId: demo.propertyId,
         entitlementLotId: "lot_explicitly_expired",
-        quantityDelta: 1,
+        expectedAvailableBalance: 0,
+        targetAvailableBalance: 1,
         adjustmentReason: "Must not revive explicit expiry"
       }
     }, "adjust-explicit-expiry")).rejects.toMatchObject({
@@ -201,7 +191,7 @@ describe("member entitlement natural expiry", () => {
     expect(await db.selectFrom("entitlement_ledger").select("fact_id").where("entry_type", "=", "ADJUST").execute()).toEqual([]);
   });
 
-  it("requires expiration asOfDate after expiresOn and no later than property today", async () => {
+  it("keeps system expiration commands closed to human subjects", async () => {
     await db.insertInto("entitlement_lots").values({
       id: "lot_ready_for_expiration",
       contract_id: activeContractId,
@@ -214,28 +204,14 @@ describe("member entitlement natural expiry", () => {
     await expect(preview({
       commandType: "EXPIRE_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: "lot_ready_for_expiration", asOfDate: yesterday }
-    }, "expire-on-expiry-date")).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT" });
+    }, "expire-on-expiry-date")).rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS" });
     await expect(preview({
       commandType: "EXPIRE_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: "lot_ready_for_expiration", asOfDate: tomorrow }
     }, "expire-on-future-date")).rejects.toMatchObject({
-      code: "ENTITLEMENT_CONFLICT",
-      details: { asOfDate: tomorrow, propertyToday: today }
+      code: "INSUFFICIENT_ACCESS"
     });
     expect(await db.selectFrom("entitlement_ledger").select("fact_id").where("lot_id", "=", "lot_ready_for_expiration").execute()).toEqual([]);
-
-    const receipt = await confirm({
-      commandType: "EXPIRE_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: "lot_ready_for_expiration", asOfDate: today }
-    }, "expire-on-property-today");
-    expect(receipt).toMatchObject({
-      executionStatus: "EXECUTED",
-      businessCommitted: true,
-      result: { entitlementLotId: "lot_ready_for_expiration", expiredUnits: 4, remainingAvailable: 0, asOfDate: today }
-    });
-    expect(await db.selectFrom("entitlement_ledger").select(["entry_type", "quantity_delta"])
-      .where("lot_id", "=", "lot_ready_for_expiration").execute())
-      .toEqual([{ entry_type: "EXPIRE", quantity_delta: -4 }]);
   });
 
   it("derives balances only from ACTIVE contracts and zeroes natural expiry without hiding history", async () => {

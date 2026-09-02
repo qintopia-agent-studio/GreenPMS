@@ -13,7 +13,8 @@ import {
   type OrderFulfillmentProjectionDto,
   type OrderFulfillmentRecordDto,
   type OrderAllowedActionDto,
-  type OrderActionCode
+  type OrderActionCode,
+  type CommandCapability
 } from "@qintopia/contracts";
 import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
 import {
@@ -319,7 +320,8 @@ export function orderAllowedActions(
     hasCheckIn: boolean;
     hasCheckOut: boolean;
     hasCheckInRevocation: boolean;
-  }
+  },
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
@@ -337,9 +339,11 @@ export function orderAllowedActions(
     REVOKE_CHECK_IN: ["CHECKED_IN"],
     RECORD_COLLECTION: ["RESERVED", "CHECKED_IN", "CHECKED_OUT"],
     RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
+    REVERSE_FACT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
     CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: ["CHECKED_IN", "CHECKED_OUT"]
   };
   return orderActionCodes
+    .filter((code) => commandGrants.has(code))
     .map((code) => {
     const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
     let fulfillmentDisabledReason: string | null = null;
@@ -395,6 +399,7 @@ export function orderAllowedActions(
     const convertedOrderActionDisabled = hasStayMembershipTransfer
       && (code === "RECORD_COLLECTION"
         || code === "RECORD_REFUND"
+        || code === "REVERSE_FACT"
         || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
         || code === "REPRICE_ORDER"
         || code === "REVOKE_CHECK_IN");
@@ -421,7 +426,7 @@ export function orderAllowedActions(
         : fulfillmentDisabledReason ?? externalFundsDisabledReason ?? stayConversionChannelDisabledReason ?? (completeStayFactsDisabled
           ? "只有已预订且未办理入住的订单可以完成住宿"
           : convertedOrderActionDisabled
-          ? code === "RECORD_COLLECTION" || code === "RECORD_REFUND" || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+          ? code === "RECORD_COLLECTION" || code === "RECORD_REFUND" || code === "REVERSE_FACT" || code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
             ? "已完成升级会员，本订单不再追加住宿收退款；后续会员收款请在会员订单中处理"
             : "已升级会员的住宿订单不能使用普通住宿操作"
           : code === "RECORD_REFUND" && statusAllows
@@ -1367,7 +1372,12 @@ function hasTransferableCollection(facts: Array<{
     && sourceCollections.every((fact) => (refundedBySource.get(fact.fact_id) ?? 0) <= fact.amount_minor);
 }
 
-export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, accessLevel: AccessLevel = "WRITE") {
+export async function getOrderViewSnapshot(
+  db: DbExecutor,
+  orderId: string,
+  accessLevel: AccessLevel = "WRITE",
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
+) {
   const context = await loadOrderContext(db, orderId);
   const [localClock, protocolEpochRows, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks, membershipConversion] = await Promise.all([
     propertyLocalClock(db, context.order.property_id),
@@ -1523,7 +1533,7 @@ export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, acce
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
-   }),
+   }, commandGrants),
     order: {
       ...context.order,
       current_contract_amount_minor: context.revision.currentContractAmountMinor,
@@ -1616,9 +1626,14 @@ export async function getOrderViewSnapshot(db: DbExecutor, orderId: string, acce
   };
 }
 
-export async function getOrderView(db: Kysely<Database>, orderId: string, accessLevel: AccessLevel = "WRITE") {
+export async function getOrderView(
+  db: Kysely<Database>,
+  orderId: string,
+  accessLevel: AccessLevel = "WRITE",
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
+) {
   return db.transaction().setIsolationLevel("repeatable read")
-    .execute((trx) => getOrderViewSnapshot(trx, orderId, accessLevel));
+    .execute((trx) => getOrderViewSnapshot(trx, orderId, accessLevel, commandGrants));
 }
 
 export async function activeCoverageCandidates(db: DbExecutor, orderId: string, dates?: string[]): Promise<CoverageCandidate[]> {

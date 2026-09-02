@@ -412,6 +412,35 @@ describe("RoomStatus quick order options", () => {
     }
   });
 
+  it("uses original order dates for a departure-day safety interval", () => {
+    const dueOut = {
+      ...lodgingInterval({
+        actualInventoryUnitId: "unit_room_101",
+        displayInventoryUnitId: "unit_room_101",
+        status: "IN_HOUSE",
+        startDate: "2026-09-01",
+        endDate: "2026-09-02",
+        sourceStartDate: "2026-09-01",
+        sourceEndDate: "2026-09-02"
+      }),
+      orderArrivalDate: "2026-08-28",
+      orderDepartureDate: "2026-09-01",
+      operationalAttention: "DUE_OUT"
+    } as unknown as RoomStatusIntervalDto;
+    const wholeRoom = unit({
+      salesMode: "WHOLE_ROOM",
+      days: [{ ...day("2026-09-01", "IN_HOUSE"), available: false, intervalIds: [dueOut.id] }],
+      intervals: [dueOut]
+    });
+
+    expect(roomStatusOrderIdentityForDate(wholeRoom, "2026-09-01")).toMatchObject({
+      arrivalDate: "2026-08-28",
+      departureDate: "2026-09-01",
+      intervalStartDate: "2026-09-01",
+      intervalEndDate: "2026-09-02"
+    });
+  });
+
   it("fails closed when any visible lodging lacks a stable order and Stay pair", () => {
     const broken = lodgingInterval({ references: [orderReference] });
     const bed = unit({
@@ -616,7 +645,8 @@ describe("RoomStatus stable order selection", () => {
     const returnState = createRoomStatusOrderReturnState("property_qintopia", {
       orderId: "order_moved",
       stayId: "stay_moved",
-      arrivalDate: "2026-07-20"
+      arrivalDate: "2026-07-20",
+      departureDate: "2026-07-25"
     }, "2026-07-22");
     const returnTarget = parseRoomStatusOrderReturnTarget(returnState);
     expect(returnTarget).toMatchObject({ orderId: "order_moved", stayId: "stay_moved", triggerDate: "2026-07-22" });
@@ -649,6 +679,26 @@ describe("RoomStatus stable order selection", () => {
       intervalId: "interval_moved_to",
       unitId: "unit_room_b02"
     });
+
+    const departureDayReturnState = createRoomStatusOrderReturnState("property_qintopia", {
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      arrivalDate: "2026-07-20",
+      departureDate: "2026-07-25"
+    }, "2026-07-25");
+    const departureDayReturnTarget = parseRoomStatusOrderReturnTarget(departureDayReturnState);
+    expect(departureDayReturnTarget).toMatchObject({
+      orderId: "order_moved",
+      stayId: "stay_moved",
+      triggerDate: "2026-07-24"
+    });
+    expect(resolveRoomStatusOrderReturnTarget([fromRoom, toRoom], departureDayReturnTarget!)).toMatchObject({
+      kind: "MATCH",
+      identity: {
+        intervalId: "interval_moved_to",
+        unitId: "unit_room_b02"
+      }
+    });
     expect(roomStatusOrderIdentityForReturnTarget([fromRoom, toRoom], {
       ...returnTarget!,
       triggerDate: "2026-07-19"
@@ -663,7 +713,8 @@ describe("RoomStatus stable order selection", () => {
     const returnState = createRoomStatusOrderReturnState("property_qintopia", {
       orderId: "order_moved",
       stayId: "stay_moved",
-      arrivalDate: "2026-07-20"
+      arrivalDate: "2026-07-20",
+      departureDate: "2026-07-25"
     }, "2026-07-22");
     expect(parseRoomStatusOrderReturnTarget(returnState)).toEqual({
       version: 1,

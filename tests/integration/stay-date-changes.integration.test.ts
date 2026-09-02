@@ -15,6 +15,7 @@ import { createQuoteForTesting as createQuote } from "../../packages/db/src/pric
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { loadActiveStayTimeline, loadOrderContext } from "../../packages/db/src/orders.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.STAY_DATE_CHANGE_INTEGRATION_DATABASE_URL
@@ -25,7 +26,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 let db: Kysely<Database>;

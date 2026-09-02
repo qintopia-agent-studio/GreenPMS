@@ -15,6 +15,7 @@ import {
   withExclusiveAcceptanceWriterGate
 } from "../../scripts/purge-local-acceptance-business-data.ts";
 import { assertNoOtherDatabaseSessions } from "../e2e/setup-room-status-visual-acceptance.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const adminUrl = process.env.ACCEPTANCE_PURGE_ADMIN_DATABASE_URL
@@ -30,7 +31,7 @@ const writerPrincipal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Acceptance purge writer",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 function withApplicationName(value: string): string {

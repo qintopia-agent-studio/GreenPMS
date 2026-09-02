@@ -1,9 +1,11 @@
-import { hashPassword, sha256 } from "@qintopia/domain";
+import { administratorCommandGrants, enabledAdministratorCommandGrants, hashPassword, ordinaryStaffCommandGrants, sha256 } from "@qintopia/domain";
 import { pathToFileURL } from "node:url";
 import { sql, type Insertable, type Kysely } from "kysely";
+import type { CommandCatalogType } from "@qintopia/contracts";
 import { createDatabase } from "./database.ts";
 import { loadBundledQintopia2026Catalog } from "./reference-catalog.ts";
 import type { Database } from "./schema.ts";
+import { reconcileStaffProfileManifest } from "./staff-profile-manifest.ts";
 
 export const demo = {
   propertyId: "prop_qintopia_demo",
@@ -23,8 +25,10 @@ export const demo = {
   membershipPaymentFactId: "membership_payment_demo_shared_single",
   operatorSubjectId: "subject_demo_operator",
   agentSubjectId: "subject_demo_agent",
+  administratorSubjectId: "subject_demo_administrator",
   readToken: "qtp_demo_read_token_2026",
-  writeToken: "qtp_demo_write_token_2026"
+  writeToken: "qtp_demo_write_token_2026",
+  administratorWriteToken: "qtp_demo_admin_write_token_2026"
 } as const;
 
 function slug(value: string): string {
@@ -62,6 +66,40 @@ function roomOccupancyCapacity(roomTypeKey: string): number {
   const capacity = roomOccupancyCapacities[roomTypeKey];
   if (capacity === undefined) throw new Error(`Unknown room type occupancy capacity: ${roomTypeKey}`);
   return capacity;
+}
+
+async function relationExists(db: Kysely<Database>, tableName: string): Promise<boolean> {
+  const result = await sql<{ present: boolean }>`
+    select to_regclass(${`public.${tableName}`}) is not null as present
+  `.execute(db);
+  return result.rows[0]?.present === true;
+}
+
+async function seedCommandGrants(
+  db: Kysely<Database>,
+  subjectId: string,
+  propertyId: string,
+  commandTypes: readonly CommandCatalogType[]
+): Promise<void> {
+  if (commandTypes.length === 0) return;
+  await db.insertInto("subject_command_grants")
+    .values(commandTypes.map((commandType) => ({ subject_id: subjectId, property_id: propertyId, command_type: commandType })))
+    .onConflict((oc) => oc.columns(["subject_id", "property_id", "command_type"]).doNothing())
+    .execute();
+}
+
+async function seedTokenCommandCeiling(
+  db: Kysely<Database>,
+  tokenId: string,
+  subjectId: string,
+  propertyId: string,
+  commandTypes: readonly CommandCatalogType[]
+): Promise<void> {
+  if (commandTypes.length === 0) return;
+  await db.insertInto("token_command_ceilings")
+    .values(commandTypes.map((commandType) => ({ token_id: tokenId, subject_id: subjectId, property_id: propertyId, command_type: commandType })))
+    .onConflict((oc) => oc.columns(["token_id", "command_type"]).doNothing())
+    .execute();
 }
 
 export async function buildQintopia2026OperationalCatalogRows(propertyId = demo.propertyId) {
@@ -125,6 +163,7 @@ function publicPricingPolicyRow(snapshot: Awaited<ReturnType<typeof loadBundledQ
 }
 
 export async function seedDemo(db: Kysely<Database>, options: { includeProtocolFixturePolicy?: boolean } = {}): Promise<void> {
+  const profileReconciliationReady = await relationExists(db, "staff_profile_reconciliation_state");
   const catalog = await buildQintopia2026OperationalCatalogRows();
   const occupancyColumn = await sql<{ present: boolean }>`
     select exists (
@@ -170,16 +209,28 @@ export async function seedDemo(db: Kysely<Database>, options: { includeProtocolF
   const passwordHash = hashPassword("demo-pass-2026", passwordSalt);
   await db.insertInto("subjects").values([
     { id: demo.operatorSubjectId, username: "operator", display_name: "Demo Operator", password_salt: passwordSalt, password_hash: passwordHash, status: "ACTIVE", auth_version: 1 },
-    { id: demo.agentSubjectId, username: "agent-demo", display_name: "Demo Agent", password_salt: passwordSalt, password_hash: passwordHash, status: "ACTIVE", auth_version: 1 }
+    { id: demo.agentSubjectId, username: "agent-demo", display_name: "Demo Agent", password_salt: passwordSalt, password_hash: passwordHash, status: "ACTIVE", auth_version: 1 },
+    { id: demo.administratorSubjectId, username: "admin", display_name: "Demo Administrator", password_salt: passwordSalt, password_hash: passwordHash, status: "ACTIVE", auth_version: 1 }
   ]).onConflict((oc) => oc.column("id").doNothing()).execute();
   await db.insertInto("subject_property_grants").values([
     { subject_id: demo.operatorSubjectId, property_id: demo.propertyId, access_level: "WRITE" },
-    { subject_id: demo.agentSubjectId, property_id: demo.propertyId, access_level: "WRITE" }
+    { subject_id: demo.agentSubjectId, property_id: demo.propertyId, access_level: "WRITE" },
+    { subject_id: demo.administratorSubjectId, property_id: demo.propertyId, access_level: "WRITE" }
   ]).onConflict((oc) => oc.columns(["subject_id", "property_id"]).doNothing()).execute();
   await db.insertInto("api_tokens").values([
     { id: "token_demo_read", subject_id: demo.agentSubjectId, label: "Demo read-only agent", secret_hash: sha256(demo.readToken), access_ceiling: "READ", property_scope: demo.propertyId, expires_at: "2030-01-01T00:00:00.000Z", revoked_at: null, rotated_from_id: null, replaced_by_id: null },
-    { id: "token_demo_write", subject_id: demo.agentSubjectId, label: "Demo write agent", secret_hash: sha256(demo.writeToken), access_ceiling: "WRITE", property_scope: demo.propertyId, expires_at: "2030-01-01T00:00:00.000Z", revoked_at: null, rotated_from_id: null, replaced_by_id: null }
+    { id: "token_demo_write", subject_id: demo.agentSubjectId, label: "Demo write agent", secret_hash: sha256(demo.writeToken), access_ceiling: "WRITE", property_scope: demo.propertyId, expires_at: "2030-01-01T00:00:00.000Z", revoked_at: null, rotated_from_id: null, replaced_by_id: null },
+    { id: "token_demo_admin_write", subject_id: demo.administratorSubjectId, label: "Demo administrator", secret_hash: sha256(demo.administratorWriteToken), access_ceiling: "WRITE", property_scope: demo.propertyId, expires_at: "2030-01-01T00:00:00.000Z", revoked_at: null, rotated_from_id: null, replaced_by_id: null }
   ]).onConflict((oc) => oc.column("id").doNothing()).execute();
+  if (!profileReconciliationReady && await relationExists(db, "subject_command_grants")) {
+    await seedCommandGrants(db, demo.operatorSubjectId, demo.propertyId, ordinaryStaffCommandGrants);
+    await seedCommandGrants(db, demo.agentSubjectId, demo.propertyId, ordinaryStaffCommandGrants);
+    await seedCommandGrants(db, demo.administratorSubjectId, demo.propertyId, administratorCommandGrants);
+  }
+  if (!profileReconciliationReady && await relationExists(db, "token_command_ceilings")) {
+    await seedTokenCommandCeiling(db, "token_demo_write", demo.agentSubjectId, demo.propertyId, ordinaryStaffCommandGrants);
+    await seedTokenCommandCeiling(db, "token_demo_admin_write", demo.administratorSubjectId, demo.propertyId, enabledAdministratorCommandGrants);
+  }
   const nicknameColumn = await sql<{ present: boolean }>`
     select exists (
       select 1 from information_schema.columns
@@ -287,6 +338,24 @@ export async function seedDemo(db: Kysely<Database>, options: { includeProtocolF
       .where("id", "=", demo.memberContractId)
       .where("membership_order_id", "is", null)
       .execute();
+  }
+  if (profileReconciliationReady) {
+    await reconcileStaffProfileManifest(db, "demo");
+    await seedTokenCommandCeiling(
+      db,
+      "token_demo_write",
+      demo.agentSubjectId,
+      demo.propertyId,
+      ordinaryStaffCommandGrants
+    );
+    await seedTokenCommandCeiling(
+      db,
+      "token_demo_admin_write",
+      demo.administratorSubjectId,
+      demo.propertyId,
+      enabledAdministratorCommandGrants
+    );
+    await reconcileStaffProfileManifest(db, "demo");
   }
 }
 

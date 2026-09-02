@@ -80,6 +80,7 @@ import {
   roomStatusQuoteRequiresBackfill,
   roomStatusQuoteTargetFromAction,
   roomStatusQuoteTargetForBusinessDate,
+  roomStatusRangeForOrderReturn,
   roomStatusTimelineRangeFromStart,
   updateRoomStatusQuoteTargetSelection,
   selectedOrderCommandScopeIsCurrent,
@@ -165,6 +166,16 @@ describe("room-status complete Stay selection", () => {
       arrivalDate: "2026-08-21",
       departureDate: "2026-09-20"
     });
+  });
+
+  it("queries the normalized lodging day before restoring a departure-day order return", () => {
+    const departureDayRange = roomStatusTimelineRangeFromStart("2026-09-01");
+
+    expect(roomStatusRangeForOrderReturn(departureDayRange, "2026-08-31")).toEqual({
+      arrivalDate: "2026-08-31",
+      departureDate: "2026-09-30"
+    });
+    expect(roomStatusRangeForOrderReturn(departureDayRange, "2026-09-01")).toBe(departureDayRange);
   });
 
   it("keeps order selection explicit and avoids carrying stale order highlights into plain quick-popovers", () => {

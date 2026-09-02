@@ -5,6 +5,7 @@ import { Value } from "@sinclair/typebox/value";
 import { commandTypes, type AuthPrincipal, type CommandType } from "@qintopia/contracts";
 import { newOpaqueSecret, parseLocalDate, todayInTimeZone } from "@qintopia/domain";
 import {
+  buildCommandEffect,
   confirmCommandPreview as confirmCommandPreviewDirect,
   createCommandPreview as createCommandPreviewDirect,
   withPropertyClockForTesting,
@@ -14,6 +15,7 @@ import type { Kysely } from "kysely";
 import { CommandEffectSchema, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const effectContractDatabaseUrl = process.env.EFFECT_CONTRACT_DATABASE_URL
@@ -57,9 +59,16 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   ADJUST_MEMBER_ENTITLEMENT: ["adjustmentReason", "availableAfter", "availableBefore", "contractId", "entitlementLotId", "quantityDelta", "unitKind"],
   CORRECT_MEMBER_ENTITLEMENT_BALANCE: ["adjustmentReason", "availableAfter", "availableBefore", "contractId", "entitlementLotId", "quantityDelta", "unitKind"],
   EXPIRE_MEMBER_ENTITLEMENT: ["asOfDate", "contractId", "entitlementLotId", "entryType", "expiresOn", "quantityDelta", "remainingAvailable", "unitKind"],
-  ISSUE_TOKEN: ["accessCeiling", "expiresAt", "label", "subjectId"],
-  ROTATE_TOKEN: ["accessCeiling", "expiresAt", "label", "operation", "subjectId", "tokenId"],
-  REVOKE_TOKEN: ["accessCeiling", "expiresAt", "label", "operation", "subjectId", "tokenId"]
+  ISSUE_TOKEN: ["accessCeiling", "commandCeiling", "expiresAt", "label", "persistedCommandCeiling", "subjectDisplayName", "subjectId"],
+  ROTATE_TOKEN: [
+    "accessCeiling", "commandCeiling", "expiresAt", "historicalReadCeilingPreserved", "label", "operation",
+    "persistedCommandCeiling", "previousCommandCeiling", "previousExpiresAt", "previousPersistedCommandCeiling",
+    "subjectDisplayName", "subjectId", "tokenId"
+  ],
+  REVOKE_TOKEN: [
+    "accessCeiling", "commandCeiling", "expiresAt", "historicalReadCeilingPreserved", "label", "operation",
+    "persistedCommandCeiling", "subjectDisplayName", "subjectId", "tokenId"
+  ]
 };
 
 type Preview = {
@@ -85,7 +94,7 @@ const directPrincipal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 function shiftLocalDate(value: string, days: number): string {
@@ -94,10 +103,10 @@ function shiftLocalDate(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-function headers(prefix: string) {
+function headers(prefix: string, token: string = demo.writeToken) {
   sequence += 1;
   return {
-    authorization: `Bearer ${demo.writeToken}`,
+    authorization: `Bearer ${token}`,
     "content-type": "application/json",
     "idempotency-key": `${prefix}-${sequence}`,
     "x-correlation-id": `${prefix}-${sequence}`
@@ -128,11 +137,11 @@ async function executeSetupCommand(commandType: CommandType, input: Record<strin
   return result as Record<string, unknown>;
 }
 
-async function requestPreview(commandType: CommandType, input: Record<string, unknown>): Promise<Preview> {
+async function requestPreview(commandType: CommandType, input: Record<string, unknown>, token: string = demo.writeToken): Promise<Preview> {
   const response = await app.inject({
     method: "POST",
     url: "/api/v1/command-previews",
-    headers: headers(`effect-${commandType.toLowerCase()}-preview`),
+    headers: headers(`effect-${commandType.toLowerCase()}-preview`, token),
     payload: { commandType, input }
   });
   expect(response.statusCode, `${commandType}: ${response.body}`).toBe(200);
@@ -591,10 +600,17 @@ describe("Command effect HTTP contract", () => {
   it("serializes and validates the real Preview effect for every command type", async () => {
     const propertyToday = todayInTimeZone("Asia/Shanghai");
     const covered = new Set<CommandType>();
-    const capture = async (commandType: CommandType, input: Record<string, unknown>) => {
-      const preview = await requestPreview(commandType, input);
+    const capture = async (commandType: CommandType, input: Record<string, unknown>, token: string = demo.writeToken) => {
+      const preview = await requestPreview(commandType, input, token);
       covered.add(commandType);
       return preview;
+    };
+    const captureInternalEffect = async (commandType: CommandType, input: Record<string, unknown>) => {
+      const built = await buildCommandEffect(db, commandType, input);
+      expect(Object.keys(built.effect).sort(), commandType).toEqual(expectedEffectKeys[commandType]);
+      expect(Value.Check(CommandEffectSchema, built.effect), `${commandType}: ${JSON.stringify(built.effect)}`).toBe(true);
+      covered.add(commandType);
+      return built.effect as Record<string, unknown>;
     };
 
     await capture("CREATE_MEMBER", {
@@ -646,14 +662,14 @@ describe("Command effect HTTP contract", () => {
       maintenanceLockId: maintenanceResult.maintenanceLockId
     });
 
-    await capture("ADD_MEMBER_ENTITLEMENT_LOT", {
+    await captureInternalEffect("ADD_MEMBER_ENTITLEMENT_LOT", {
       propertyId: demo.propertyId,
       memberContractId: demo.memberContractId,
       unitKind: "ROOM_NIGHT",
       units: 1,
       expiresOn: "2029-12-31"
     });
-    await capture("ADJUST_MEMBER_ENTITLEMENT", {
+    await captureInternalEffect("ADJUST_MEMBER_ENTITLEMENT", {
       propertyId: demo.propertyId,
       entitlementLotId: demo.roomLotId,
       quantityDelta: 1,
@@ -688,7 +704,7 @@ describe("Command effect HTTP contract", () => {
       expires_on: expiredOn,
       version: 1
     }).execute();
-    await capture("EXPIRE_MEMBER_ENTITLEMENT", {
+    await captureInternalEffect("EXPIRE_MEMBER_ENTITLEMENT", {
       propertyId: demo.propertyId,
       entitlementLotId: expiredLotId,
       asOfDate: propertyToday
@@ -699,18 +715,20 @@ describe("Command effect HTTP contract", () => {
       subjectId: demo.agentSubjectId,
       label: "Effect contract issued Token",
       accessCeiling: "READ",
+      commandCeiling: [],
       expiresAt: "2029-01-01T00:00:00.000Z",
       tokenSecret: newOpaqueSecret("qtp")
-    });
+    }, demo.administratorWriteToken);
     await capture("ROTATE_TOKEN", {
       propertyId: demo.propertyId,
       tokenId: "token_demo_read",
+      commandCeiling: [],
       tokenSecret: newOpaqueSecret("qtp")
-    });
+    }, demo.administratorWriteToken);
     await capture("REVOKE_TOKEN", {
       propertyId: demo.propertyId,
       tokenId: "token_demo_read"
-    });
+    }, demo.administratorWriteToken);
 
     const priced = await quote({ arrivalDate: "2028-04-10", departureDate: "2028-04-14" });
     const createOrder = await capture("CREATE_ORDER", {
@@ -782,7 +800,7 @@ describe("Command effect HTTP contract", () => {
         phone: "+86-138-0000-0001",
         documentNumber: "EFFECT-CONTRACT-002"
       }
-    });
+    }, demo.administratorWriteToken);
 
     const reschedule = await capture("RESCHEDULE_STAY", {
       propertyId: demo.propertyId,
@@ -843,7 +861,7 @@ describe("Command effect HTTP contract", () => {
     const memberOrderResult = await confirm(memberOrder);
     expect(memberOrderResult).toMatchObject({ bookingChannelCode: null, channelOrderReference: null });
     const memberOrderId = memberOrderResult.orderId as string;
-    await capture("REFRESH_MEMBER_COVERAGE", { propertyId: demo.propertyId, orderId: memberOrderId });
+    await captureInternalEffect("REFRESH_MEMBER_COVERAGE", { propertyId: demo.propertyId, orderId: memberOrderId });
 
     const checkInPriced = await quote({
       arrivalDate: propertyToday,
@@ -1201,19 +1219,33 @@ describe("Command effect HTTP contract", () => {
       transferredAmount: { currency: "CNY", minorUnits: 0 },
       remainingPaymentAmount: { currency: "CNY", minorUnits: 162_000 }
     });
+    const adminLogin = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: { username: "admin", password: "demo-pass-2026" }
+    });
+    expect(adminLogin.statusCode).toBe(200);
+    const adminSession = adminLogin.cookies.find((entry) => entry.name === "qintopia_session");
+    expect(adminSession).toBeDefined();
+    sequence += 1;
     const disabledCleaning = await app.inject({
       method: "POST",
       url: "/api/v1/command-previews",
-      headers: headers("effect-complete-cleaning-disabled"),
+      cookies: { qintopia_session: adminSession!.value },
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `effect-complete-cleaning-disabled-${sequence}`,
+        "x-correlation-id": `effect-complete-cleaning-disabled-${sequence}`
+      },
       payload: {
         commandType: "COMPLETE_CLEANING",
         input: { propertyId: demo.propertyId, cleaningTaskId: "cleaning_historical" }
       }
     });
-    expect(disabledCleaning.statusCode, disabledCleaning.body).toBe(409);
+    expect(disabledCleaning.statusCode, disabledCleaning.body).toBe(403);
     expect(disabledCleaning.json()).toMatchObject({
-      code: "VALIDATION_ERROR",
-      message: "Cleaning workflow is disabled in this release"
+      code: "INSUFFICIENT_ACCESS",
+      message: "Command feature is disabled in this release"
     });
     const historicalCleaningEffect = {
       cleaningTaskId: "cleaning_historical",

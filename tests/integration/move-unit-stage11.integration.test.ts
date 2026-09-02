@@ -12,6 +12,7 @@ import { sql, type Kysely } from "kysely";
 import pg from "pg";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope, commandGrantSetForProfile } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.MOVE_UNIT_STAGE11_DATABASE_URL
@@ -24,8 +25,9 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
+const ordinaryCommandGrants = commandGrantSetForProfile("ordinary");
 
 let db: Kysely<Database>;
 let sequence = 0;
@@ -59,6 +61,37 @@ async function confirm(prepared: Awaited<ReturnType<typeof preview>>, prefix: st
 
 async function execute(envelope: CommandEnvelope, prefix: string) {
   return confirm(await preview(envelope, prefix), prefix);
+}
+
+async function getWritableOrderView(orderId: string) {
+  return getOrderView(db, orderId, "WRITE", ordinaryCommandGrants);
+}
+
+async function availableEntitlementBalance(lotId: string): Promise<number> {
+  const row = await db.selectFrom("entitlement_lots")
+    .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
+    .select([
+      "entitlement_lots.total_units",
+      sql<number>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as integer)`.as("ledger_delta")
+    ])
+    .where("entitlement_lots.id", "=", lotId)
+    .groupBy("entitlement_lots.total_units")
+    .executeTakeFirstOrThrow();
+  return row.total_units + Number(row.ledger_delta);
+}
+
+async function correctEntitlementBalance(lotId: string, delta: number, prefix: string, adjustmentReason: string) {
+  const availableBefore = await availableEntitlementBalance(lotId);
+  return execute({
+    commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+    input: {
+      propertyId: demo.propertyId,
+      entitlementLotId: lotId,
+      expectedAvailableBalance: availableBefore,
+      targetAvailableBalance: availableBefore + delta,
+      adjustmentReason
+    }
+  }, prefix);
 }
 
 async function createOrder(options: {
@@ -285,13 +318,13 @@ describe.sequential("Stage 11 MOVE_UNIT PostgreSQL transaction", () => {
     }, "stage11-departure-day-check-in");
 
     await db.updateTable("properties").set({ timezone: "Etc/GMT-12" }).where("id", "=", demo.propertyId).execute();
-    expect((await getOrderView(db, reservedOrderId)).allowedActions.find((action) => action.code === "MOVE_UNIT"))
+    expect((await getWritableOrderView(reservedOrderId)).allowedActions.find((action) => action.code === "MOVE_UNIT"))
       .toEqual({
         code: "MOVE_UNIT",
         enabled: false,
         disabledReason: "逾期未到订单暂不能换房，请先处理到店日期"
       });
-    expect((await getOrderView(db, inHouseOrderId)).allowedActions.find((action) => action.code === "MOVE_UNIT"))
+    expect((await getWritableOrderView(inHouseOrderId)).allowedActions.find((action) => action.code === "MOVE_UNIT"))
       .toEqual({
         code: "MOVE_UNIT",
         enabled: false,
@@ -872,15 +905,7 @@ describe.sequential("Stage 11 MOVE_UNIT PostgreSQL transaction", () => {
   it("moves after an in-house shortening without binding the current revision to out-of-interval CONSUMED history", async () => {
     await db.updateTable("properties").set({ timezone: "Etc/GMT+12" }).where("id", "=", demo.propertyId).execute();
     const arrivalDate = await propertyLocalToday(db, demo.propertyId);
-    await execute({
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: {
-        propertyId: demo.propertyId,
-        entitlementLotId: demo.roomLotId,
-        quantityDelta: 3,
-        adjustmentReason: "Stage 11 shortening then move coverage"
-      }
-    }, "stage11-shorten-move-adjust");
+    await correctEntitlementBalance(demo.roomLotId, 3, "stage11-shorten-move-adjust", "Stage 11 shortening then move coverage");
     const orderId = await createOrder({
       prefix: "stage11-shorten-move",
       arrivalDate,

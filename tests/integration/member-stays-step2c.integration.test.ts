@@ -4,6 +4,7 @@ import { confirmCommandPreview, createCommandPreview, getMemberView, propertyLoc
 import type { Kysely } from "kysely";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.MEMBER_STAYS_STEP2C_DATABASE_URL
@@ -14,7 +15,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 const products = {
@@ -316,7 +317,7 @@ describe("step 2C member balances and stays", () => {
     expect((await getMemberView(db, demo.propertyId, cancelledMember)).lotBalances).toContainEqual({ lotId: cancelledMembership.lotId, unitKind: "ROOM_NIGHT", availableUnits: 30 });
   });
 
-  it("refreshes a zero-coverage member stay from a newly activated matching membership order", async () => {
+  it("refreshes a zero-coverage member stay through an ordinary reprice after membership activation", async () => {
     const today = await propertyLocalToday(db, demo.propertyId);
     const arrival = shiftDate(today, 30);
     const departure = shiftDate(arrival, 2);
@@ -335,7 +336,10 @@ describe("step 2C member balances and stays", () => {
     expect((await db.selectFrom("orders").select(["member_id", "member_contract_id"]).where("id", "=", orderId).executeTakeFirstOrThrow()).member_id).toBe(memberId);
 
     const replenished = await activateProduct(memberId, products.sharedSingle, "refresh-replenished");
-    const refreshed = await confirm({ commandType: "REFRESH_MEMBER_COVERAGE", input: { propertyId: demo.propertyId, orderId } }, "refresh-coverage");
+    const refreshed = await confirm({
+      commandType: "REPRICE_ORDER",
+      input: { propertyId: demo.propertyId, orderId, targetCurrentContractAmountMinor: 0 }
+    }, "refresh-coverage-through-reprice");
     expect(refreshed.businessCommitted).toBe(true);
     const coverage = await db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("service_date").execute();
     expect(coverage).toHaveLength(2);

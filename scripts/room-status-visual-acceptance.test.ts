@@ -102,5 +102,10 @@ describe("room-status visual acceptance fixture target guard", () => {
       emptyBedCode: "105-B",
       expected: expect.stringMatching(/A 床位行不显示比例.*父房显示 1\/2/)
     });
+    expect(visualAcceptanceScenarioDefinitions.dueOutWhole).toMatchObject({
+      roomCode: "A04",
+      unitCode: "A04",
+      expected: expect.stringMatching(/原订单日期保持不变.*待退房.*继续阻断.*不伪造/)
+    });
   });
 });

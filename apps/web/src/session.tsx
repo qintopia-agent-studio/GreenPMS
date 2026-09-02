@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type D
 import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, UserRound } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api, ApiError } from "./api";
-import type { MetaDto, PendingTokenCommand, PrincipalDto, RetainedTokenSecret } from "./types";
+import type { CommandCapability, CommandCatalogType, MetaDto, PendingTokenCommand, PrincipalDto, RetainedTokenSecret } from "./types";
 import { errorMessage, LoadingBlock } from "./ui";
 
 function propertyDisplayName(property: MetaDto["properties"][number] | undefined) {
@@ -183,12 +183,45 @@ const navigation = [
   { to: "/", label: "房态", icon: BedDouble, end: true },
   { to: "/orders", label: "订单", icon: ClipboardList, end: false },
   { to: "/members", label: "会员", icon: BadgeCheck, end: false },
-  { to: "/tokens", label: "Token", icon: KeyRound, end: false, requiresWrite: true },
+  { to: "/tokens", label: "Token", icon: KeyRound, end: false, requiresTokenManagement: true },
   { to: "/today", label: "今日履约", icon: Smartphone, end: false }
 ] as const;
 
-export function navigationItemsForAccess(access: "READ" | "WRITE") {
-  return navigation.filter((item) => !("requiresWrite" in item && item.requiresWrite && access !== "WRITE"));
+const tokenManagementCommands = new Set<CommandCapability>(["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"]);
+const historicalRecoveryCommandGrants = new Set<CommandCatalogType>([
+  "PLACE_INTERNAL_USE",
+  "RELEASE_INTERNAL_USE",
+  "BACKFILL_COMPLETED_STAY"
+]);
+
+export function propertyAllowedActions(principal: PrincipalDto, propertyId: string): ReadonlySet<CommandCapability> {
+  return new Set(principal.allowedActions[propertyId] ?? []);
+}
+
+export function principalCan(principal: PrincipalDto, propertyId: string, commandType: CommandCapability): boolean {
+  return propertyAllowedActions(principal, propertyId).has(commandType);
+}
+
+export function propertyCommandGrants(principal: PrincipalDto, propertyId: string): ReadonlySet<CommandCatalogType> {
+  return new Set(principal.propertyCommandGrants[propertyId] ?? []);
+}
+
+export function canManageTokens(principal: PrincipalDto, propertyId: string): boolean {
+  const actions = propertyAllowedActions(principal, propertyId);
+  return [...tokenManagementCommands].some((commandType) => actions.has(commandType));
+}
+
+export function commandRecoveryAvailable(principal: PrincipalDto, propertyId: string, commandType: string | undefined): boolean {
+  if (!commandType) return false;
+  if (commandType === "CREATE_QUOTE") return principal.propertyAccess[propertyId] === "READ" || principal.propertyAccess[propertyId] === "WRITE";
+  if (historicalRecoveryCommandGrants.has(commandType as CommandCatalogType)) {
+    return propertyCommandGrants(principal, propertyId).has(commandType as CommandCatalogType);
+  }
+  return propertyAllowedActions(principal, propertyId).has(commandType as CommandCapability);
+}
+
+export function navigationItemsForAccess(principal: PrincipalDto, propertyId: string) {
+  return navigation.filter((item) => !("requiresTokenManagement" in item && item.requiresTokenManagement && !canManageTokens(principal, propertyId)));
 }
 
 const sidebarStoragePrefix = "qintopia:pms:sidebar-collapsed:v1";
@@ -240,10 +273,10 @@ export function persistSidebarCollapsed(storage: Pick<Storage, "setItem"> | unde
   }
 }
 
-function Navigation({ access, mobile = false, collapsed = false }: { access: "READ" | "WRITE"; mobile?: boolean; collapsed?: boolean }) {
+function Navigation({ principal, propertyId, mobile = false, collapsed = false }: { principal: PrincipalDto; propertyId: string; mobile?: boolean; collapsed?: boolean }) {
   return (
     <nav className={mobile ? "mobile-navigation" : "primary-navigation"} aria-label={mobile ? "移动主导航" : "主导航"}>
-      {navigationItemsForAccess(access).map((item) => {
+      {navigationItemsForAccess(principal, propertyId).map((item) => {
         const Icon = item.icon;
         return (
           <NavLink
@@ -333,7 +366,7 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
           </button>
           <button className="mobile-logout icon-button" type="button" onClick={() => void logout()} disabled={loggingOut} aria-label="退出登录" title="退出登录"><LogOut aria-hidden="true" size={19} /></button>
         </div>
-        <Navigation access={propertyAccess} collapsed={sidebarCollapsed} />
+        <Navigation principal={principal} propertyId={propertyId} collapsed={sidebarCollapsed} />
         <div className="sidebar-property" title={propertyLabel}>
           <Building2 aria-hidden="true" size={15} />
           <label className="sr-only" htmlFor="property-select">门店</label>
@@ -362,7 +395,7 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
         ) : null}
         <main id="main-content" className="main-content" tabIndex={-1}><Outlet /></main>
       </div>
-      <Navigation access={propertyAccess} mobile />
+      <Navigation principal={principal} propertyId={propertyId} mobile />
     </div>
   );
 }

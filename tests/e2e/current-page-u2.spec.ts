@@ -51,11 +51,14 @@ function roomCell(page: Page, unitId: string, serviceDate: string): Locator {
   return page.locator(`[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${serviceDate}"]`);
 }
 
-async function login(page: Page): Promise<RoomStatusBoardDto> {
+async function login(
+  page: Page,
+  credentials: { username: string; password: string } = fixture.operator
+): Promise<RoomStatusBoardDto> {
   await page.goto(process.env.ROOM_STATUS_E2E_BASE_URL ?? "/");
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible({ timeout: 30_000 });
-  await page.getByTestId("login-username").fill(fixture.operator.username);
-  await page.getByTestId("login-password").fill(fixture.operator.password);
+  await page.getByTestId("login-username").fill(credentials.username);
+  await page.getByTestId("login-password").fill(credentials.password);
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
@@ -302,7 +305,7 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
   ]) {
     await page.setViewportSize(viewport);
     if (page.url() === "about:blank") {
-      await login(page);
+      await login(page, { username: "admin", password: "demo-pass-2026" });
       await showRange(page);
     }
     const boardWidth = await page.locator(".room-status-grid-section").evaluate((element) => element.getBoundingClientRect().width);

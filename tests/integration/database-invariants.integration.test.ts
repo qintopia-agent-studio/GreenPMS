@@ -12,17 +12,22 @@ import { newId, sha256 } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.INVARIANTS_INTEGRATION_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_database_invariants";
+const demoOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "demo"
+} as const;
 
 const principal: AuthPrincipal = {
   subjectId: demo.agentSubjectId,
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 let db: Kysely<Database>;
@@ -44,6 +49,32 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
       ? { code: "CREATE_STANDARD_ORDER", note: "" }
       : { code: "DATABASE_INVARIANT", note: `Database invariant acceptance for ${prefix}` }
   }, metadata(`${prefix}-confirm`));
+}
+
+async function availableEntitlementBalance(lotId: string): Promise<number> {
+  const row = await db.selectFrom("entitlement_lots")
+    .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
+    .select([
+      "entitlement_lots.total_units",
+      sql<number>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as integer)`.as("ledger_delta")
+    ])
+    .where("entitlement_lots.id", "=", lotId)
+    .groupBy("entitlement_lots.total_units")
+    .executeTakeFirstOrThrow();
+  return row.total_units + Number(row.ledger_delta);
+}
+
+async function balanceCorrectionEnvelope(lotId: string, targetAvailableBalance: number, adjustmentReason: string): Promise<CommandEnvelope> {
+  return {
+    commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+    input: {
+      propertyId: demo.propertyId,
+      entitlementLotId: lotId,
+      expectedAvailableBalance: await availableEntitlementBalance(lotId),
+      targetAvailableBalance,
+      adjustmentReason
+    }
+  };
 }
 
 async function createOrder(prefix: string, options: { member?: boolean; arrival?: string; departure?: string } = {}): Promise<string> {
@@ -469,28 +500,30 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
       .rejects.toMatchObject({ constraint: "api_tokens_rotation_not_self" });
   });
 
-  it("bounds ADJUST balances with bigint-safe sums and serializes concurrent confirmations", async () => {
+  it("bounds entitlement balance corrections with bigint-safe sums and serializes concurrent confirmations", async () => {
     const negative = await insertLot("negative", 1);
     await expect(createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
       input: {
         propertyId: demo.propertyId,
         entitlementLotId: negative.lotId,
-        quantityDelta: -2,
+        expectedAvailableBalance: await availableEntitlementBalance(negative.lotId),
+        targetAvailableBalance: -1,
         adjustmentReason: "Would make the lot negative"
       }
-    }, metadata("adjust-negative"))).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT", statusCode: 409 });
+    }, metadata("adjust-negative"))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
 
     const overflow = await insertLot("overflow", 1);
     await expect(createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
       input: {
         propertyId: demo.propertyId,
         entitlementLotId: overflow.lotId,
-        quantityDelta: 2_147_483_647,
+        expectedAvailableBalance: await availableEntitlementBalance(overflow.lotId),
+        targetAvailableBalance: 2_147_483_648,
         adjustmentReason: "Would exceed PostgreSQL integer maximum"
       }
-    }, metadata("adjust-overflow"))).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT", statusCode: 409 });
+    }, metadata("adjust-overflow"))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
 
     const rawOverflow = await insertLot("raw-overflow", 0);
     await db.insertInto("entitlement_ledger").values([
@@ -514,35 +547,29 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
     })).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT", statusCode: 409 });
 
     const concurrent = await insertLot("concurrent", 0);
-    const largePreview = await createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: {
-        propertyId: demo.propertyId,
-        entitlementLotId: concurrent.lotId,
-        quantityDelta: 2_147_483_647,
-        adjustmentReason: "Concurrent maximum"
-      }
-    }, metadata("adjust-concurrent-large-preview"));
-    const smallPreview = await createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: {
-        propertyId: demo.propertyId,
-        entitlementLotId: concurrent.lotId,
-        quantityDelta: 1,
-        adjustmentReason: "Concurrent one"
-      }
-    }, metadata("adjust-concurrent-small-preview"));
+    const largePreview = await createCommandPreview(
+      db,
+      principal,
+      await balanceCorrectionEnvelope(concurrent.lotId, 2_147_483_647, "Concurrent maximum"),
+      metadata("adjust-concurrent-large-preview")
+    );
+    const smallPreview = await createCommandPreview(
+      db,
+      principal,
+      await balanceCorrectionEnvelope(concurrent.lotId, 1, "Concurrent one"),
+      metadata("adjust-concurrent-small-preview")
+    );
     const [large, small] = await Promise.all([
       confirmCommandPreview(db, principal, largePreview.preview.previewId, {
         propertyId: demo.propertyId,
-        commandType: "ADJUST_MEMBER_ENTITLEMENT",
+        commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
         confirmation: true,
         expectedEffectHash: largePreview.preview.effectHash,
         reason: { code: "CONCURRENT_ADJUST", note: "Concurrent maximum adjustment" }
       }, metadata("adjust-concurrent-large-confirm")),
       confirmCommandPreview(db, principal, smallPreview.preview.previewId, {
         propertyId: demo.propertyId,
-        commandType: "ADJUST_MEMBER_ENTITLEMENT",
+        commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
         confirmation: true,
         expectedEffectHash: smallPreview.preview.effectHash,
         reason: { code: "CONCURRENT_ADJUST", note: "Concurrent small adjustment" }
@@ -663,7 +690,7 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
   });
 
   it("requires every current operational migration for readiness", async () => {
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     for (const migrationName of [
       "019_member_stay_booking_channel_rules.sql",
       "020_whole_room_occupants.sql",
@@ -676,41 +703,41 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
     ]) {
       await db.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
       try {
-        expect(await databaseReady(db), migrationName).toBe(false);
+        expect(await databaseReady(db, demoOwnerReadinessOptions), migrationName).toBe(false);
       } finally {
         await db.insertInto("schema_migrations").values({ name: migrationName }).execute();
       }
     }
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     const rollbackProbe = new Error("rollback readiness object probe");
 
     await expect(db.transaction().execute(async (trx) => {
       await sql`DROP TRIGGER amendments_stage11_validate_move_combination ON amendments`.execute(trx);
-      expect(await databaseReady(trx)).toBe(false);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(false);
       throw rollbackProbe;
     })).rejects.toBe(rollbackProbe);
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
 
     await expect(db.transaction().execute(async (trx) => {
       await sql`DROP TRIGGER coverage_items_stage11_preserve_consumed_update ON coverage_items`.execute(trx);
-      expect(await databaseReady(trx)).toBe(false);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(false);
       throw rollbackProbe;
     })).rejects.toBe(rollbackProbe);
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
 
     await expect(db.transaction().execute(async (trx) => {
       await sql`ALTER FUNCTION qintopia_assert_stage11_move_combination(text) RENAME TO qintopia_assert_stage11_move_combination_missing`.execute(trx);
-      expect(await databaseReady(trx)).toBe(false);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(false);
       throw rollbackProbe;
     })).rejects.toBe(rollbackProbe);
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
 
     await expect(db.transaction().execute(async (trx) => {
       await sql`DROP TRIGGER amendments_stage10_validate_combination ON amendments`.execute(trx);
-      expect(await databaseReady(trx)).toBe(false);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(false);
       throw rollbackProbe;
     })).rejects.toBe(rollbackProbe);
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
 
     for (const trigger of [
       { name: "pricing_revisions_stage10_validate", table: "pricing_revisions" },
@@ -719,10 +746,10 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
     ] as const) {
       await expect(db.transaction().execute(async (trx) => {
         await sql.raw(`DROP TRIGGER ${trigger.name} ON ${trigger.table}`).execute(trx);
-        expect(await databaseReady(trx), trigger.name).toBe(false);
+        expect(await databaseReady(trx, demoOwnerReadinessOptions), trigger.name).toBe(false);
         throw rollbackProbe;
       })).rejects.toBe(rollbackProbe);
-      expect(await databaseReady(db), trigger.name).toBe(true);
+      expect(await databaseReady(db, demoOwnerReadinessOptions), trigger.name).toBe(true);
     }
 
     await expect(db.transaction().execute(async (trx) => {
@@ -740,16 +767,16 @@ describe.sequential("database-owned invariants on PostgreSQL", () => {
         BEFORE INSERT ON pricing_revisions
         FOR EACH ROW EXECUTE FUNCTION qintopia_test_stage10_noop_trigger()
       `.execute(trx);
-      expect(await databaseReady(trx)).toBe(false);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(false);
       throw rollbackProbe;
     })).rejects.toBe(rollbackProbe);
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
 
     await expect(db.transaction().execute(async (trx) => {
       await sql`ALTER FUNCTION qintopia_assert_stage10_shorten_combination(text) RENAME TO qintopia_assert_stage10_shorten_combination_missing`.execute(trx);
-      expect(await databaseReady(trx)).toBe(false);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(false);
       throw rollbackProbe;
     })).rejects.toBe(rollbackProbe);
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
   });
 });

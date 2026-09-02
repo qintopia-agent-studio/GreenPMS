@@ -27,9 +27,28 @@ function orderOption(source: RoomStatusOrderOption["source"]): RoomStatusOrderOp
       departureDate: "2026-09-02"
     },
     label: "朝露",
+    operationalAttention: null,
     source
   };
 }
+
+it("presents a departure-day safety order as waiting for checkout instead of a direct booking", () => {
+  const dueOut: RoomStatusOrderOption = {
+    ...orderOption({
+      sourceKind: "ORDER",
+      sourceCategory: "DIRECT",
+      freeStayCategoryCode: null,
+      freeStayReason: null
+    }),
+    operationalAttention: "DUE_OUT"
+  };
+
+  expect(roomStatusQuickOrderSourceSummary(dueOut)).toBe("待退房");
+  expect(dueOut.identity).toMatchObject({
+    arrivalDate: "2026-09-01",
+    departureDate: "2026-09-02"
+  });
+});
 
 describe("roomStatusPopoverMeasuredHeight", () => {
   it("includes borders without mistaking a clipped box for intrinsic content height", () => {

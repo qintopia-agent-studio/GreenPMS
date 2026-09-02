@@ -16,7 +16,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The copied `.env.example` sets `SEED_DEMO_DATA=true`; the app waits for PostgreSQL, applies migrations, inserts idempotent demo data, and starts the built API/Web server. Compose itself defaults seeding to `false`, so a production image run does not seed public demo credentials unless that flag is explicitly enabled.
+The copied `.env.example` sets `SEED_DEMO_DATA=true`, selects the reviewed `demo` staff profile for the app, and keeps the pre-seed migration profile `unconfigured`; the app waits for PostgreSQL, applies migrations, inserts idempotent demo data, and starts the built API/Web server. Compose itself defaults seeding to `false` and the staff profile to `unconfigured`, so a production image run does not seed public demo credentials or trust a database-selected profile unless those settings are explicitly changed.
 
 ## Start for development
 
@@ -26,7 +26,7 @@ docker compose up -d postgres
 npm run db:migrate
 npm run db:seed
 npm run db:import:2026
-npm run dev
+STAFF_PROFILE_MANIFEST_NAME=demo npm run dev
 ```
 
 Preview the bundled Feishu import without touching PostgreSQL with `npm run db:import:2026 -- --dry-run`. The import is optional, transactional, and idempotent; Docker startup can opt in with `IMPORT_2026_REFERENCE_CATALOG=true`. Run it only after the target property exists. `REFERENCE_CATALOG_PROPERTY_ID` and `REFERENCE_CATALOG_PROPERTY_CODE` must identify that property's exact code, `Asia/Shanghai` timezone, and `CNY` currency. The importer never creates properties or executable inventory, pricing, member-contract, or entitlement facts.

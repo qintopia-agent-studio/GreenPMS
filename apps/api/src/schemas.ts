@@ -2,8 +2,10 @@ import { Type, type TObject, type TProperties } from "@sinclair/typebox";
 import {
   backfillCollectionMethods,
   bookingChannelCodes,
+  commandCapabilities,
   commandTypes,
   createOrderPricingBasisCodes,
+  currentReleaseFeatures,
   errorCauseCodes,
   errorCodes,
   freeStayCategoryCodes,
@@ -27,13 +29,21 @@ import {
   stayTypes,
   type CommandType
 } from "@qintopia/contracts";
+import { humanGrantableCommandTypes } from "@qintopia/domain";
 
 const strictObject = <T extends TProperties>(properties: T) => Type.Object(properties, { additionalProperties: false });
 const nullable = <T extends Parameters<typeof Type.Union>[0][number]>(schema: T) => Type.Union([schema, Type.Null()]);
-const commandEnvelope = <C extends CommandType, T extends TProperties>(commandType: C, input: TObject<T>) => strictObject({
-  commandType: Type.Literal(commandType),
-  input
-});
+const humanGrantableCommandTypeSet = new Set<string>(humanGrantableCommandTypes);
+const publicCommandTypes = commandTypes.filter((commandType) => humanGrantableCommandTypeSet.has(commandType));
+const commandEnvelope = <C extends CommandType, T extends TProperties>(commandType: C, input: TObject<T>) => {
+  if (!humanGrantableCommandTypeSet.has(commandType)) {
+    throw new Error(`Public command envelope cannot expose non-human-grantable command ${commandType}`);
+  }
+  return strictObject({
+    commandType: Type.Literal(commandType),
+    input
+  });
+};
 
 export const Id = Type.String({ minLength: 3, maxLength: 160 });
 export const LocalDate = Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" });
@@ -61,6 +71,26 @@ export const BookingChannelCodeSchema = Type.Union(bookingChannelCodes.map((code
 export const FreeStayCategoryCodeSchema = Type.Union(freeStayCategoryCodes.map((code) => Type.Literal(code)));
 export const BackfillCollectionMethodSchema = Type.Union(backfillCollectionMethods.map((method) => Type.Literal(method)));
 export const CommandTypeSchema = Type.Union(commandTypes.map((commandType) => Type.Literal(commandType)));
+export const CommandCapabilitySchema = Type.Union(commandCapabilities.map((commandType) => Type.Literal(commandType)));
+const HumanGrantableCommandCapabilitySchema = Type.Union(humanGrantableCommandTypes.map((commandType) => Type.Literal(commandType)));
+const HistoricalReadCommandGrantSchema = Type.Union([
+  Type.Literal("PLACE_INTERNAL_USE"),
+  Type.Literal("RELEASE_INTERNAL_USE"),
+  Type.Literal("BACKFILL_COMPLETED_STAY")
+]);
+export const CommandGrantSchema = Type.Union([
+  ...humanGrantableCommandTypes.map((commandType) => Type.Literal(commandType)),
+  HistoricalReadCommandGrantSchema
+]);
+const EffectiveCommandCapabilitySchema = Type.Union(humanGrantableCommandTypes
+  .filter((commandType) => commandType !== "COMPLETE_CLEANING" || currentReleaseFeatures.cleaningWorkflow)
+  .filter((commandType) => commandType !== "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" || currentReleaseFeatures.historicalStayArrangementCorrection)
+  .filter((commandType) => commandType !== "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY" || currentReleaseFeatures.membershipConversionVoidCorrection)
+  .map((commandType) => Type.Literal(commandType)));
+const CommandCeilingSchema = Type.Array(HumanGrantableCommandCapabilitySchema, { uniqueItems: true });
+const EffectiveCommandCeilingSchema = Type.Array(EffectiveCommandCapabilitySchema, { uniqueItems: true });
+const PersistedCommandCeilingSchema = Type.Array(CommandGrantSchema, { uniqueItems: true });
+const EmptyCommandCeilingSchema = Type.Tuple([]);
 export const RecoverableCommandTypeSchema = Type.Union(recoverableCommandTypes.map((commandType) => Type.Literal(commandType)));
 export const HistoricalCommandTypeSchema = Type.Union([
   CommandTypeSchema,
@@ -441,15 +471,6 @@ export const CommandEnvelopeSchema = Type.Union([
     reasonNote: Note,
     collection: Type.Optional(BackfillCollectionInputSchema)
   })),
-  commandEnvelope("REFRESH_MEMBER_COVERAGE", strictObject(OrderInput)),
-  commandEnvelope("ADD_MEMBER_ENTITLEMENT_LOT", strictObject({
-    ...PropertyInput,
-    memberContractId: Id,
-    unitKind: EntitlementUnitKindSchema,
-    units: PositiveAmount,
-    expiresOn: LocalDate
-  })),
-  commandEnvelope("ADJUST_MEMBER_ENTITLEMENT", strictObject({ ...PropertyInput, entitlementLotId: Id, quantityDelta: NonZeroInteger, adjustmentReason: Note })),
   commandEnvelope("CORRECT_MEMBER_ENTITLEMENT_BALANCE", strictObject({
     ...PropertyInput,
     entitlementLotId: Id,
@@ -457,18 +478,19 @@ export const CommandEnvelopeSchema = Type.Union([
     expectedAvailableBalance: Type.Integer({ minimum: 0, maximum: 2_147_483_647 }),
     adjustmentReason: Note
   })),
-  commandEnvelope("EXPIRE_MEMBER_ENTITLEMENT", strictObject({ ...PropertyInput, entitlementLotId: Id, asOfDate: LocalDate })),
   commandEnvelope("ISSUE_TOKEN", strictObject({
     ...PropertyInput,
     subjectId: Id,
     label: Type.String({ minLength: 1, maxLength: 200 }),
     accessCeiling: AccessLevelSchema,
+    commandCeiling: CommandCeilingSchema,
     expiresAt: DateTime,
     tokenSecret: OpaqueTokenSecret
   })),
   commandEnvelope("ROTATE_TOKEN", strictObject({
     ...PropertyInput,
     tokenId: Id,
+    commandCeiling: CommandCeilingSchema,
     expiresAt: Type.Optional(DateTime),
     tokenSecret: OpaqueTokenSecret
   })),
@@ -491,7 +513,7 @@ export const ConfirmSchema = Type.Union([
   }),
   strictObject({
     ...ConfirmBaseProperties,
-    commandType: Type.Union(commandTypes
+    commandType: Type.Union(publicCommandTypes
       .filter((commandType) => commandType !== "CREATE_ORDER")
       .map((commandType) => Type.Literal(commandType))),
     reason: CommandReasonSchema
@@ -924,10 +946,41 @@ export const CommandEffectSchema = Type.Union([
     entitlementLotId: Id, contractId: Id, unitKind: EntitlementUnitKindSchema, expiresOn: LocalDate,
     asOfDate: LocalDate, remainingAvailable: Type.Integer({ minimum: 0 }), quantityDelta: Type.Integer({ maximum: 0 }), entryType: Type.Literal("EXPIRE")
   }),
-  strictObject({ subjectId: Id, label: ShortText, accessCeiling: AccessLevelSchema, expiresAt: DateTime }),
   strictObject({
-    tokenId: Id, subjectId: Id, label: ShortText, accessCeiling: AccessLevelSchema, expiresAt: DateTime,
-    operation: Type.Union([Type.Literal("ROTATE"), Type.Literal("REVOKE")])
+    subjectId: Id,
+    subjectDisplayName: ShortText,
+    label: ShortText,
+    accessCeiling: AccessLevelSchema,
+    commandCeiling: CommandCeilingSchema,
+    persistedCommandCeiling: PersistedCommandCeilingSchema,
+    expiresAt: DateTime
+  }),
+  strictObject({
+    tokenId: Id,
+    subjectId: Id,
+    subjectDisplayName: ShortText,
+    label: ShortText,
+    accessCeiling: AccessLevelSchema,
+    previousCommandCeiling: CommandCeilingSchema,
+    commandCeiling: CommandCeilingSchema,
+    previousPersistedCommandCeiling: PersistedCommandCeilingSchema,
+    persistedCommandCeiling: PersistedCommandCeilingSchema,
+    previousExpiresAt: DateTime,
+    expiresAt: DateTime,
+    historicalReadCeilingPreserved: Type.Boolean(),
+    operation: Type.Literal("ROTATE")
+  }),
+  strictObject({
+    tokenId: Id,
+    subjectId: Id,
+    subjectDisplayName: ShortText,
+    label: ShortText,
+    accessCeiling: AccessLevelSchema,
+    commandCeiling: CommandCeilingSchema,
+    persistedCommandCeiling: PersistedCommandCeilingSchema,
+    expiresAt: DateTime,
+    historicalReadCeilingPreserved: Type.Literal(false),
+    operation: Type.Literal("REVOKE")
   }),
   strictObject({
     operation: Type.Union([Type.Literal("RESCHEDULE_STAY"), Type.Literal("EXTEND_STAY")]),
@@ -1258,17 +1311,40 @@ const EntitlementExpirationResultSchema = strictObject({
 const TokenIssueResultSchema = strictObject({
   tokenId: Id,
   subjectId: Id,
+  subjectDisplayName: ShortText,
+  label: ShortText,
   accessCeiling: AccessLevelSchema,
+  commandCeiling: CommandCeilingSchema,
+  persistedCommandCeiling: PersistedCommandCeilingSchema,
   expiresAt: DateTime
 });
 const TokenRotationResultSchema = strictObject({
   tokenId: Id,
   rotatedFromTokenId: Id,
   subjectId: Id,
+  subjectDisplayName: ShortText,
+  label: ShortText,
   accessCeiling: AccessLevelSchema,
-  expiresAt: DateTime
+  previousCommandCeiling: CommandCeilingSchema,
+  commandCeiling: CommandCeilingSchema,
+  previousPersistedCommandCeiling: PersistedCommandCeilingSchema,
+  persistedCommandCeiling: PersistedCommandCeilingSchema,
+  previousExpiresAt: DateTime,
+  expiresAt: DateTime,
+  historicalReadCeilingPreserved: Type.Boolean()
 });
-const TokenRevocationResultSchema = strictObject({ tokenId: Id, revoked: Type.Literal(true) });
+const TokenRevocationResultSchema = strictObject({
+  tokenId: Id,
+  subjectId: Id,
+  subjectDisplayName: ShortText,
+  label: ShortText,
+  accessCeiling: AccessLevelSchema,
+  commandCeiling: CommandCeilingSchema,
+  persistedCommandCeiling: PersistedCommandCeilingSchema,
+  expiresAt: DateTime,
+  historicalReadCeilingPreserved: Type.Literal(false),
+  revoked: Type.Literal(true)
+});
 const StayChangeResultSchema = strictObject({
   orderId: Id,
   stayId: Id,
@@ -1910,7 +1986,7 @@ export const RoomStatusOccupantSchema = strictObject({
   occupantId: Id,
   nickname: nullable(RoomStatusDisplayText)
 });
-export const RoomStatusIntervalSchema = strictObject({
+export const RoomStatusIntervalSchema = Type.Object({
   id: Id,
   displayInventoryUnitId: Id,
   actualInventoryUnitId: Id,
@@ -1920,6 +1996,7 @@ export const RoomStatusIntervalSchema = strictObject({
   sourceStartDate: LocalDate,
   sourceEndDate: LocalDate,
   orderArrivalDate: Type.Optional(LocalDate),
+  orderDepartureDate: Type.Optional(LocalDate),
   status: RoomStatusStatusSchema,
   attention: nullable(RoomStatusAttentionSchema),
   operationalAttention: nullable(RoomStatusOperationalAttentionSchema),
@@ -1939,8 +2016,14 @@ export const RoomStatusIntervalSchema = strictObject({
   conflicts: Type.Array(RoomStatusConflictSchema),
   history: Type.Array(RoomStatusHistorySchema),
   allowedActions: Type.Array(RoomStatusActionSchema)
+}, {
+  additionalProperties: false,
+  dependentRequired: {
+    orderArrivalDate: ["orderDepartureDate"],
+    orderDepartureDate: ["orderArrivalDate"]
+  }
 });
-export const RoomStatusOperationalTaskSchema = strictObject({
+export const RoomStatusOperationalTaskSchema = Type.Object({
   taskKind: RoomStatusOperationalTaskKindSchema,
   businessDate: LocalDate,
   id: Id,
@@ -1952,6 +2035,7 @@ export const RoomStatusOperationalTaskSchema = strictObject({
   sourceStartDate: LocalDate,
   sourceEndDate: LocalDate,
   orderArrivalDate: Type.Optional(LocalDate),
+  orderDepartureDate: Type.Optional(LocalDate),
   status: RoomStatusStatusSchema,
   attention: nullable(RoomStatusAttentionSchema),
   operationalAttention: nullable(RoomStatusOperationalAttentionSchema),
@@ -1971,6 +2055,12 @@ export const RoomStatusOperationalTaskSchema = strictObject({
   conflicts: Type.Array(RoomStatusConflictSchema),
   history: Type.Array(RoomStatusHistorySchema),
   allowedActions: Type.Array(RoomStatusActionSchema)
+}, {
+  additionalProperties: false,
+  dependentRequired: {
+    orderArrivalDate: ["orderDepartureDate"],
+    orderDepartureDate: ["orderArrivalDate"]
+  }
 });
 export const RoomStatusDaySchema = strictObject({
   serviceDate: LocalDate,
@@ -2082,7 +2172,9 @@ export const MeResponseSchema = strictObject({
   subjectId: Id,
   displayName: ShortText,
   credentialType: Type.Union([Type.Literal("SESSION"), Type.Literal("TOKEN")]),
-  propertyAccess: Type.Record(Type.String({ minLength: 3, maxLength: 160 }), AccessLevelSchema)
+  propertyAccess: Type.Record(Type.String({ minLength: 3, maxLength: 160 }), AccessLevelSchema),
+  propertyCommandGrants: Type.Record(Type.String({ minLength: 3, maxLength: 160 }), Type.Array(CommandGrantSchema, { uniqueItems: true })),
+  allowedActions: Type.Record(Type.String({ minLength: 3, maxLength: 160 }), Type.Array(EffectiveCommandCapabilitySchema, { uniqueItems: true }))
 });
 
 const PropertyRowSchema = strictObject({
@@ -2681,11 +2773,36 @@ const CollectionFactResponseSchema = strictObject({
 const EntitlementFactResponseSchema = strictObject({ ...EntitlementLedgerRowSchema.properties, property_id: Id });
 export const FactResponseSchema = Type.Union([CollectionFactResponseSchema, EntitlementFactResponseSchema]);
 
-const TokenRowSchema = strictObject({
-  id: Id, label: ShortText, access_ceiling: AccessLevelSchema, property_scope: Id, expires_at: DateTime,
+const TokenRowCore = {
+  subjectId: Id,
+  displayName: ShortText,
+  id: Id, label: ShortText, property_scope: Id, expires_at: DateTime,
   revoked_at: nullable(DateTime), rotated_from_id: nullable(Id), replaced_by_id: nullable(Id), created_at: DateTime
+} as const;
+const ReadTokenRowSchema = strictObject({
+  ...TokenRowCore,
+  access_ceiling: Type.Literal("READ"),
+  commandCeiling: EmptyCommandCeilingSchema,
+  persistedCommandCeiling: EmptyCommandCeilingSchema,
+  historicalReadCeilingPreserved: Type.Literal(false)
 });
+const WriteTokenRowSchema = strictObject({
+  ...TokenRowCore,
+  access_ceiling: Type.Literal("WRITE"),
+  commandCeiling: EffectiveCommandCeilingSchema,
+  persistedCommandCeiling: PersistedCommandCeilingSchema,
+  historicalReadCeilingPreserved: Type.Boolean()
+});
+const TokenRowSchema = Type.Union([ReadTokenRowSchema, WriteTokenRowSchema]);
 export const TokensResponseSchema = strictObject({ tokens: Type.Array(TokenRowSchema) });
+
+const TokenTargetSchema = strictObject({
+  subjectId: Id,
+  displayName: ShortText,
+  accessLevel: AccessLevelSchema,
+  commandGrants: Type.Array(CommandCapabilitySchema, { uniqueItems: true })
+});
+export const TokenTargetsResponseSchema = strictObject({ subjects: Type.Array(TokenTargetSchema) });
 
 export const MaintenanceLockStatusSchema = Type.Union([Type.Literal("ACTIVE"), Type.Literal("RELEASED")]);
 export const MaintenanceLocksQuerySchema = strictObject({

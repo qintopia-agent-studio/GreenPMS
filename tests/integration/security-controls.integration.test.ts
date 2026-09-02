@@ -12,19 +12,24 @@ import {
 import { newId, newOpaqueSecret, sha256 } from "@qintopia/domain";
 import type { Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope, commandGrantsForProfile, emptyAuthScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const securityDatabaseUrl = process.env.SECURITY_INTEGRATION_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_security_integration";
+const demoOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "demo"
+} as const;
 
 let db: Kysely<Database>;
 let sequence = 0;
 const principal: AuthPrincipal = {
-  subjectId: demo.agentSubjectId,
-  credentialId: "token_demo_write",
+  subjectId: demo.administratorSubjectId,
+  credentialId: "token_demo_admin_write",
   credentialType: "TOKEN",
-  displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  displayName: "Demo Administrator",
+  ...authScope({ profile: "administrator" })
 };
 
 function metadata(prefix: string) {
@@ -46,6 +51,17 @@ async function execute(envelope: CommandEnvelope, prefix: string) {
   return { preview, confirmation, confirmMetadata, receipt };
 }
 
+async function authorizationArtifactCounts() {
+  const [executions, previews, receipts, audits, securityAudits] = await Promise.all([
+    db.selectFrom("command_executions").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("command_previews").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("command_receipts").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("audit_entries").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
+    db.selectFrom("security_audit_entries").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
+  ]);
+  return [executions, previews, receipts, audits, securityAudits].map((row) => Number(row.count));
+}
+
 beforeAll(async () => {
   db = await resetDatabase(securityDatabaseUrl);
 });
@@ -64,6 +80,7 @@ describe("security controls on PostgreSQL", () => {
         subjectId: demo.agentSubjectId,
         label: "Transient security token",
         accessCeiling: "WRITE",
+        commandCeiling: commandGrantsForProfile("ordinary"),
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret
       }
@@ -93,9 +110,21 @@ describe("security controls on PostgreSQL", () => {
     expect(JSON.stringify({ receipts, previews, audits })).not.toContain(tokenSecret);
     expect(JSON.stringify(receipts)).not.toContain("qtp_");
 
-    const readPrincipal: AuthPrincipal = { ...principal, propertyAccess: new Map([[demo.propertyId, "READ"]]) };
-    await expect(getCommand(db, readPrincipal, flow.receipt.commandId)).rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS" });
-    const outsidePrincipal: AuthPrincipal = { ...principal, propertyAccess: new Map() };
+    await db.updateTable("subject_property_grants").set({ access_level: "READ" })
+      .where("subject_id", "=", demo.administratorSubjectId).where("property_id", "=", demo.propertyId).execute();
+    try {
+      await expect(getCommand(db, principal, flow.receipt.commandId)).rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS" });
+    } finally {
+      await db.updateTable("subject_property_grants").set({ access_level: "WRITE" })
+        .where("subject_id", "=", demo.administratorSubjectId).where("property_id", "=", demo.propertyId).execute();
+    }
+    const outsidePrincipal: AuthPrincipal = {
+      subjectId: demo.agentSubjectId,
+      credentialId: "token_demo_write",
+      credentialType: "TOKEN",
+      displayName: "Demo Agent",
+      ...emptyAuthScope()
+    };
     await expect(getReceipt(db, outsidePrincipal, flow.receipt.receiptId)).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
@@ -108,6 +137,7 @@ describe("security controls on PostgreSQL", () => {
         subjectId: demo.agentSubjectId,
         label: "Client provisioned token",
         accessCeiling: "READ",
+        commandCeiling: [],
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: clientSecret
       }
@@ -128,6 +158,7 @@ describe("security controls on PostgreSQL", () => {
         subjectId: demo.agentSubjectId,
         label: "Duplicate rotation source",
         accessCeiling: "WRITE",
+        commandCeiling: commandGrantsForProfile("ordinary"),
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: sourceSecret
       }
@@ -141,6 +172,7 @@ describe("security controls on PostgreSQL", () => {
         subjectId: demo.agentSubjectId,
         label: "Duplicate Token hash",
         accessCeiling: "WRITE",
+        commandCeiling: commandGrantsForProfile("ordinary"),
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: sourceSecret
       }
@@ -158,17 +190,17 @@ describe("security controls on PostgreSQL", () => {
       error: { code: "AGGREGATE_VERSION_CONFLICT" }
     });
 
-    const sourcePrincipal: AuthPrincipal = { ...principal, credentialId: sourceTokenId };
-    const rotationPreview = await createCommandPreview(db, sourcePrincipal, {
+    const rotationPreview = await createCommandPreview(db, principal, {
       commandType: "ROTATE_TOKEN",
       input: {
         propertyId: demo.propertyId,
         tokenId: sourceTokenId,
+        commandCeiling: commandGrantsForProfile("ordinary"),
         tokenSecret: sourceSecret
       }
     }, metadata("duplicate-hash-rotation-preview"));
     const rotationMetadata = metadata("duplicate-hash-rotation-confirm");
-    const rejectedRotation = await confirmCommandPreview(db, sourcePrincipal, rotationPreview.preview.previewId, {
+    const rejectedRotation = await confirmCommandPreview(db, principal, rotationPreview.preview.previewId, {
       propertyId: demo.propertyId,
       commandType: "ROTATE_TOKEN",
       confirmation: true,
@@ -180,7 +212,7 @@ describe("security controls on PostgreSQL", () => {
       businessCommitted: false,
       error: { code: "AGGREGATE_VERSION_CONFLICT" }
     });
-    expect(await findCommandResult(db, sourcePrincipal, demo.propertyId, "ROTATE_TOKEN", rotationMetadata.idempotencyKey))
+    expect(await findCommandResult(db, principal, demo.propertyId, "ROTATE_TOKEN", rotationMetadata.idempotencyKey))
       .toMatchObject({ receiptId: rejectedRotation.receiptId, executionStatus: "NOT_EXECUTED" });
     const unchangedSource = await db.selectFrom("api_tokens").select(["revoked_at", "replaced_by_id"])
       .where("id", "=", sourceTokenId).executeTakeFirstOrThrow();
@@ -211,7 +243,7 @@ describe("security controls on PostgreSQL", () => {
       credentialId: attackerSessionId,
       credentialType: "SESSION",
       displayName: "Demo Operator",
-      propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+      ...authScope({ credentialType: "SESSION" })
     };
     const before = await Promise.all([
       db.selectFrom("command_executions").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow(),
@@ -241,7 +273,7 @@ describe("security controls on PostgreSQL", () => {
       }
     }, metadata("downgrade-preview"));
     await db.updateTable("subject_property_grants").set({ access_level: "READ" })
-      .where("subject_id", "=", demo.agentSubjectId).where("property_id", "=", demo.propertyId).execute();
+      .where("subject_id", "=", demo.administratorSubjectId).where("property_id", "=", demo.propertyId).execute();
     const confirmation = {
       propertyId: demo.propertyId,
       commandType: "LOCK_MAINTENANCE" as const,
@@ -250,13 +282,18 @@ describe("security controls on PostgreSQL", () => {
       reason: { code: "DOWNGRADED", note: "The current grant must be revalidated" }
     };
     const confirmMetadata = metadata("downgrade-confirm");
-    const rejected = await confirmCommandPreview(db, principal, downgradePreview.preview.previewId, confirmation, confirmMetadata);
-    expect(rejected).toMatchObject({ executionStatus: "NOT_EXECUTED", businessCommitted: false, error: { code: "INSUFFICIENT_ACCESS" } });
-    expect(await db.selectFrom("maintenance_locks").select("id").where("arrival_date", "=", "2026-12-03").execute()).toHaveLength(0);
-    await expect(confirmCommandPreview(db, principal, downgradePreview.preview.previewId, confirmation, confirmMetadata))
-      .rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS" });
-    await db.updateTable("subject_property_grants").set({ access_level: "WRITE" })
-      .where("subject_id", "=", demo.agentSubjectId).where("property_id", "=", demo.propertyId).execute();
+    const beforeDeniedConfirm = await authorizationArtifactCounts();
+    try {
+      await expect(confirmCommandPreview(db, principal, downgradePreview.preview.previewId, confirmation, confirmMetadata))
+        .rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS" });
+      const afterDeniedConfirm = await authorizationArtifactCounts();
+      expect(afterDeniedConfirm.slice(0, 4)).toEqual(beforeDeniedConfirm.slice(0, 4));
+      expect(afterDeniedConfirm[4]).toBe(beforeDeniedConfirm[4]! + 1);
+      expect(await db.selectFrom("maintenance_locks").select("id").where("arrival_date", "=", "2026-12-03").execute()).toHaveLength(0);
+    } finally {
+      await db.updateTable("subject_property_grants").set({ access_level: "WRITE" })
+        .where("subject_id", "=", demo.administratorSubjectId).where("property_id", "=", demo.propertyId).execute();
+    }
   });
 
   it("rejects confirmation after the credential used for Preview is revoked", async () => {
@@ -268,14 +305,18 @@ describe("security controls on PostgreSQL", () => {
         subjectId: demo.agentSubjectId,
         label: "Revocation window token",
         accessCeiling: "WRITE",
+        commandCeiling: ["LOCK_MAINTENANCE"],
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: revocationWindowSecret
       }
     }, "revocation-window-issue");
     const tokenId = issued.receipt.result?.tokenId as string;
     const revokedPrincipal: AuthPrincipal = {
-      ...principal,
-      credentialId: tokenId
+      subjectId: demo.agentSubjectId,
+      credentialId: tokenId,
+      credentialType: "TOKEN",
+      displayName: "Demo Agent",
+      ...authScope()
     };
     const preview = await createCommandPreview(db, revokedPrincipal, {
       commandType: "LOCK_MAINTENANCE",
@@ -293,24 +334,23 @@ describe("security controls on PostgreSQL", () => {
       input: { propertyId: demo.propertyId, tokenId }
     }, "revocation-window-revoke");
 
-    const receipt = await confirmCommandPreview(db, revokedPrincipal, preview.preview.previewId, {
+    const beforeRevokedConfirm = await authorizationArtifactCounts();
+    await expect(confirmCommandPreview(db, revokedPrincipal, preview.preview.previewId, {
       propertyId: demo.propertyId,
       commandType: "LOCK_MAINTENANCE",
       confirmation: true,
       expectedEffectHash: preview.preview.effectHash,
       reason: { code: "REVOKED_CREDENTIAL", note: "Revoked credentials must not confirm an existing Preview" }
-    }, metadata("revocation-window-confirm"));
-    expect(receipt).toMatchObject({
-      executionStatus: "NOT_EXECUTED",
-      businessCommitted: false,
-      error: { code: "TOKEN_REVOKED" }
-    });
+    }, metadata("revocation-window-confirm"))).rejects.toMatchObject({ code: "TOKEN_REVOKED" });
+    const afterRevokedConfirm = await authorizationArtifactCounts();
+    expect(afterRevokedConfirm.slice(0, 4)).toEqual(beforeRevokedConfirm.slice(0, 4));
+    expect(afterRevokedConfirm[4]).toBe(beforeRevokedConfirm[4]! + 1);
     expect(await db.selectFrom("maintenance_locks").select("id")
       .where("arrival_date", "=", "2026-12-05").execute()).toHaveLength(0);
   });
 
   it("protects command and Token identity while allowing normal state advancement and revocation", async () => {
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     const immutableSecret = newOpaqueSecret("qtp");
     const flow = await execute({
       commandType: "ISSUE_TOKEN",
@@ -319,6 +359,7 @@ describe("security controls on PostgreSQL", () => {
         subjectId: demo.agentSubjectId,
         label: "Immutable security token",
         accessCeiling: "READ",
+        commandCeiling: [],
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: immutableSecret
       }
@@ -333,7 +374,7 @@ describe("security controls on PostgreSQL", () => {
     const replacementSecret = newOpaqueSecret("qtp");
     const rotation = await execute({
       commandType: "ROTATE_TOKEN",
-      input: { propertyId: demo.propertyId, tokenId, tokenSecret: replacementSecret }
+      input: { propertyId: demo.propertyId, tokenId, commandCeiling: [], tokenSecret: replacementSecret }
     }, "immutable-token-rotation");
     const replacementTokenId = rotation.receipt.result?.tokenId as string;
     expect(await db.selectFrom("api_tokens").select(["revoked_at", "replaced_by_id"])

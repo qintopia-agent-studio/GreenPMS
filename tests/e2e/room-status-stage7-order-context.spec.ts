@@ -8,17 +8,26 @@ import {
   stage7ReadOnlyOperator,
   type Stage7AcceptanceFixture
 } from "./setup-stage7-acceptance.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
 const propertyId = "prop_qintopia_demo";
 const operator = { username: "operator", password: "demo-pass-2026" };
+const administrator = { username: "admin", password: "demo-pass-2026" };
 const externalOperator: AuthPrincipal = {
   subjectId: "subject_demo_agent",
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[propertyId, "WRITE"]])
+  ...authScope({ propertyId })
+};
+const externalAdministrator: AuthPrincipal = {
+  subjectId: "subject_demo_administrator",
+  credentialId: "token_demo_admin_write",
+  credentialType: "TOKEN",
+  displayName: "Demo Administrator",
+  ...authScope({ propertyId, profile: "administrator" })
 };
 const fixtureDayOffset = 365;
 let fixture: Stage7AcceptanceFixture;
@@ -407,6 +416,7 @@ test("external collection and full refund refresh amounts and refund availabilit
     fixture.dates.arrivalDate,
     fixture.wholeRoom.orderId
   );
+  await expect(context.getByRole("button", { name: "更正资料", exact: true })).toHaveCount(0);
   const transactionReference = `STAGE7-EXTERNAL-COLLECTION-${crypto.randomUUID()}`;
   const collectionKey = `stage7-external-collection-${crypto.randomUUID()}`;
   const db = createDatabase(e2eDatabaseUrl);
@@ -479,7 +489,7 @@ test("occupant correction Preview and Confirm refresh both order context and roo
   test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 correction workflow coverage");
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await login(page, administrator);
   await showFixtureRange(page);
 
   const db = createDatabase(e2eDatabaseUrl);
@@ -555,7 +565,7 @@ test("an external occupant correction refreshes the open context and remains vis
   test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 external revision coverage");
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await login(page, administrator);
   await showFixtureRange(page);
 
   await roomRow(page, fixture.splitBed.roomId).getByRole("button", { name: /^展开.*床位$/ }).click();
@@ -576,7 +586,7 @@ test("an external occupant correction refreshes the open context and remains vis
     const current = await getOrderView(db, fixture.splitBed.bedBOrderId, "WRITE");
     const occupant = current.occupants[0]!;
     const key = `stage7-external-correction-${crypto.randomUUID()}`;
-    const prepared = await createCommandPreview(db, externalOperator, {
+    const prepared = await createCommandPreview(db, externalAdministrator, {
       commandType: "CORRECT_ORDER_OCCUPANT",
       input: {
         propertyId,
@@ -596,7 +606,7 @@ test("an external occupant correction refreshes the open context and remains vis
         }
       }
     }, { idempotencyKey: `${key}-preview`, correlationId: key });
-    const receipt = await confirmCommandPreview(db, externalOperator, prepared.preview.previewId, {
+    const receipt = await confirmCommandPreview(db, externalAdministrator, prepared.preview.previewId, {
       propertyId,
       commandType: "CORRECT_ORDER_OCCUPANT",
       confirmation: true,

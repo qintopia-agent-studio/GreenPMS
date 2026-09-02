@@ -10,6 +10,7 @@ import {
 import { sql, type Kysely } from "kysely";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.CHANNEL_ORDER_PRICING_INTEGRATION_DATABASE_URL
@@ -20,7 +21,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 let db: Kysely<Database>;

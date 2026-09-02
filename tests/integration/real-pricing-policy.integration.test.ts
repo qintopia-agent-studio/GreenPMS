@@ -12,6 +12,7 @@ import type { Kysely } from "kysely";
 import { enumerateServiceDates, paidStayTypeForNights } from "@qintopia/domain";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
 
 const principal: AuthPrincipal = {
@@ -19,7 +20,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 let db: Kysely<Database>;
@@ -210,11 +211,15 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
 
   it("uses one cumulative band across a product move and drops a prior manual target on the next revision", async () => {
     const room201Id = "unit_room_201";
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = addDays(businessDate, 30);
+    const departureDate = addDays(arrivalDate, 14);
+    const moveDate = addDays(arrivalDate, 7);
     const created = await createOrder({
       prefix: "cross-product",
       unitId: demo.bedAId,
-      arrivalDate: "2026-09-01",
-      departureDate: "2026-09-15"
+      arrivalDate,
+      departureDate
     });
     expect(created.quote.currentContractAmount.minorUnits).toBe(48_000);
 
@@ -256,7 +261,7 @@ describe.sequential("QinTopia 2026 pricing policy on PostgreSQL", () => {
         propertyId: demo.propertyId,
         orderId: created.orderId,
         newInventoryUnitId: room201Id,
-        effectiveDate: "2026-09-08",
+        effectiveDate: moveDate,
         targetCurrentContractAmountMinor: 65_000
       }
     }, "cross-product-move");

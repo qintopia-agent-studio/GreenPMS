@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
-import { commandTypes, historicalRecoverableCommandTypes } from "@qintopia/contracts";
-import { newId, newOpaqueSecret, stableHash } from "@qintopia/domain";
+import { commandTypes, historicalRecoverableCommandTypes, type CommandType } from "@qintopia/contracts";
+import { humanGrantableCommandTypes, newId, newOpaqueSecret, stableHash, systemDerivedCommandTypes } from "@qintopia/domain";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { importQintopia2026ReferenceCatalog, type Database } from "@qintopia/db";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -13,8 +13,13 @@ let database: Kysely<Database>;
 const catalogWithoutImportPropertyId = "prop_contract_catalog_without_import";
 
 type JsonSchema = Record<string, unknown>;
+type PublicCommandEnvelopeType = Exclude<CommandType, (typeof systemDerivedCommandTypes)[number]>;
 
-const commandInputContract: Record<(typeof commandTypes)[number], { required: string[]; properties: string[] }> = {
+const publicCommandEnvelopeTypes = commandTypes.filter((commandType): commandType is PublicCommandEnvelopeType =>
+  (humanGrantableCommandTypes as readonly string[]).includes(commandType)
+);
+
+const commandInputContract: Record<PublicCommandEnvelopeType, { required: string[]; properties: string[] }> = {
   CREATE_MEMBER: {
     required: ["propertyId", "fullName", "nickname", "phone", "wechat"],
     properties: ["propertyId", "fullName", "nickname", "identityCardNumber", "phone", "wechat"]
@@ -86,19 +91,12 @@ const commandInputContract: Record<(typeof commandTypes)[number], { required: st
     required: ["propertyId", "orderId", "actualStayCompletedConfirmed", "reasonNote"],
     properties: ["propertyId", "orderId", "actualStayCompletedConfirmed", "reasonNote", "collection"]
   },
-  REFRESH_MEMBER_COVERAGE: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
-  ADD_MEMBER_ENTITLEMENT_LOT: {
-    required: ["propertyId", "memberContractId", "unitKind", "units", "expiresOn"],
-    properties: ["propertyId", "memberContractId", "unitKind", "units", "expiresOn"]
-  },
-  ADJUST_MEMBER_ENTITLEMENT: { required: ["propertyId", "entitlementLotId", "quantityDelta", "adjustmentReason"], properties: ["propertyId", "entitlementLotId", "quantityDelta", "adjustmentReason"] },
   CORRECT_MEMBER_ENTITLEMENT_BALANCE: {
     required: ["propertyId", "entitlementLotId", "targetAvailableBalance", "expectedAvailableBalance", "adjustmentReason"],
     properties: ["propertyId", "entitlementLotId", "targetAvailableBalance", "expectedAvailableBalance", "adjustmentReason"]
   },
-  EXPIRE_MEMBER_ENTITLEMENT: { required: ["propertyId", "entitlementLotId", "asOfDate"], properties: ["propertyId", "entitlementLotId", "asOfDate"] },
-  ISSUE_TOKEN: { required: ["propertyId", "subjectId", "label", "accessCeiling", "expiresAt", "tokenSecret"], properties: ["propertyId", "subjectId", "label", "accessCeiling", "expiresAt", "tokenSecret"] },
-  ROTATE_TOKEN: { required: ["propertyId", "tokenId", "tokenSecret"], properties: ["propertyId", "tokenId", "expiresAt", "tokenSecret"] },
+  ISSUE_TOKEN: { required: ["propertyId", "subjectId", "label", "accessCeiling", "commandCeiling", "expiresAt", "tokenSecret"], properties: ["propertyId", "subjectId", "label", "accessCeiling", "commandCeiling", "expiresAt", "tokenSecret"] },
+  ROTATE_TOKEN: { required: ["propertyId", "tokenId", "commandCeiling", "tokenSecret"], properties: ["propertyId", "tokenId", "commandCeiling", "expiresAt", "tokenSecret"] },
   REVOKE_TOKEN: { required: ["propertyId", "tokenId"], properties: ["propertyId", "tokenId"] }
 };
 
@@ -250,18 +248,21 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(resolveRequest.properties.commandType.anyOf.map((variant: { enum: string[] }) => variant.enum[0]).sort())
       .toEqual([...historicalRecoverableCommandTypes].sort());
     const commandSchema = document.paths["/api/v1/command-previews"].post.requestBody.content["application/json"].schema;
-    expect(commandSchema.anyOf).toHaveLength(commandTypes.length);
+    expect(commandSchema.anyOf).toHaveLength(publicCommandEnvelopeTypes.length);
     const variants = new Map<string, JsonSchema>(commandSchema.anyOf.map((variant: JsonSchema) => {
       const properties = variant.properties as Record<string, JsonSchema>;
       return [((properties.commandType!.enum as string[])[0])!, variant];
     }));
-    expect([...variants.keys()].sort()).toEqual([...commandTypes].sort());
+    expect([...variants.keys()].sort()).toEqual([...publicCommandEnvelopeTypes].sort());
     expect(variants.has("CREATE_QUOTE")).toBe(false);
     expect(commandTypes).not.toContain("PLACE_INTERNAL_USE");
     expect(commandTypes).not.toContain("RELEASE_INTERNAL_USE");
     expect(variants.has("PLACE_INTERNAL_USE")).toBe(false);
     expect(variants.has("RELEASE_INTERNAL_USE")).toBe(false);
-    for (const commandType of commandTypes) {
+    for (const commandType of systemDerivedCommandTypes) {
+      expect(variants.has(commandType), commandType).toBe(false);
+    }
+    for (const commandType of publicCommandEnvelopeTypes) {
       const variant = variants.get(commandType)!;
       const input = (variant.properties as Record<string, JsonSchema>).input!;
       expect(variant.additionalProperties, commandType).toBe(false);
@@ -373,8 +374,6 @@ describe("OpenAPI 3.1 command contract", () => {
     expect((createMemberInput.properties as Record<string, JsonSchema>).nickname).toMatchObject({ minLength: 1, maxLength: 200 });
     expect(createMemberInput.properties).not.toHaveProperty("validFrom");
     expect(createMemberInput.properties).not.toHaveProperty("sourceApplicationRecordId");
-    const expiryInput = (variants.get("EXPIRE_MEMBER_ENTITLEMENT")!.properties as Record<string, JsonSchema>).input!;
-    expect((expiryInput.properties as Record<string, JsonSchema>).asOfDate!).toMatchObject({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" });
     for (const commandType of ["ISSUE_TOKEN", "ROTATE_TOKEN"] as const) {
       const tokenInput = (variants.get(commandType)!.properties as Record<string, JsonSchema>).input!;
       expect((tokenInput.properties as Record<string, JsonSchema>).tokenSecret).toMatchObject({
@@ -452,6 +451,17 @@ describe("OpenAPI 3.1 command contract", () => {
         committed_at: new Date("2026-07-24T11:30:00.000Z")
       }).execute();
     });
+    await database.insertInto("subject_command_grants").values({
+      subject_id: demo.agentSubjectId,
+      property_id: demo.propertyId,
+      command_type: "RELEASE_INTERNAL_USE"
+    }).execute();
+    await database.insertInto("token_command_ceilings").values({
+      token_id: "token_demo_write",
+      subject_id: demo.agentSubjectId,
+      property_id: demo.propertyId,
+      command_type: "RELEASE_INTERNAL_USE"
+    }).execute();
 
     const previewResponse = await app.inject({
       method: "GET",
@@ -1931,9 +1941,9 @@ describe("OpenAPI 3.1 command contract", () => {
 
   it("enforces narrowed Token issuance and immediate rotation/revocation", async () => {
     const readSecret = newOpaqueSecret("qtp");
-    const readIssue = await command(demo.writeToken, "ISSUE_TOKEN", {
+    const readIssue = await command(demo.administratorWriteToken, "ISSUE_TOKEN", {
       propertyId: demo.propertyId, subjectId: demo.agentSubjectId, label: "Contract read token",
-      accessCeiling: "READ", expiresAt: "2029-01-01T00:00:00.000Z", tokenSecret: readSecret
+      accessCeiling: "READ", commandCeiling: [], expiresAt: "2029-01-01T00:00:00.000Z", tokenSecret: readSecret
     });
     expect(readIssue.result).not.toHaveProperty("tokenSecret");
     const denied = await app.inject({
@@ -1947,16 +1957,17 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(denied.statusCode).toBe(403);
 
     const oldSecret = newOpaqueSecret("qtp");
-    const writeIssue = await command(demo.writeToken, "ISSUE_TOKEN", {
+    const writeIssue = await command(demo.administratorWriteToken, "ISSUE_TOKEN", {
       propertyId: demo.propertyId, subjectId: demo.agentSubjectId, label: "Contract rotating token",
-      accessCeiling: "WRITE", expiresAt: "2029-01-01T00:00:00.000Z", tokenSecret: oldSecret
+      accessCeiling: "WRITE", commandCeiling: ["CREATE_ORDER", "LOCK_MAINTENANCE"], expiresAt: "2029-01-01T00:00:00.000Z", tokenSecret: oldSecret
     });
     expect(writeIssue.result).not.toHaveProperty("tokenSecret");
     const oldTokenId = writeIssue.result.tokenId as string;
     const replacementSecret = newOpaqueSecret("qtp");
-    const rotated = await command(oldSecret, "ROTATE_TOKEN", {
+    const rotated = await command(demo.administratorWriteToken, "ROTATE_TOKEN", {
       propertyId: demo.propertyId,
       tokenId: oldTokenId,
+      commandCeiling: ["CREATE_ORDER", "LOCK_MAINTENANCE"],
       tokenSecret: replacementSecret
     });
     expect(rotated.result).not.toHaveProperty("tokenSecret");
@@ -1965,7 +1976,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(oldResponse.statusCode).toBe(401);
     expect(oldResponse.json().code).toBe("TOKEN_REVOKED");
     expect((await app.inject({ method: "GET", url: "/api/v1/meta", headers: { authorization: `Bearer ${replacementSecret}` } })).statusCode).toBe(200);
-    await command(replacementSecret, "REVOKE_TOKEN", { propertyId: demo.propertyId, tokenId: replacementTokenId });
+    await command(demo.administratorWriteToken, "REVOKE_TOKEN", { propertyId: demo.propertyId, tokenId: replacementTokenId });
     const revoked = await app.inject({ method: "GET", url: "/api/v1/meta", headers: { authorization: `Bearer ${replacementSecret}` } });
     expect(revoked.statusCode).toBe(401);
     expect(revoked.json().code).toBe("TOKEN_REVOKED");

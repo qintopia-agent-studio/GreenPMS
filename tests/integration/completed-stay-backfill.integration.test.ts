@@ -14,6 +14,7 @@ import { newId } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope, commandGrantSetForProfile } from "../helpers/auth-principals.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
 
 let db: Kysely<Database>;
@@ -24,8 +25,9 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
+const ordinaryCommandGrants = commandGrantSetForProfile("ordinary");
 
 function metadata(prefix: string) {
   sequence += 1;
@@ -128,6 +130,7 @@ async function board(arrivalDate: string, departureDate: string): Promise<RoomSt
     arrivalDate,
     departureDate,
     accessLevel: "WRITE",
+    commandGrants: principal.propertyCommandGrants.get(demo.propertyId)!,
     requestingSubjectId: demo.agentSubjectId,
     pageSize: 200
   });
@@ -408,7 +411,7 @@ describe("8.3 completed-stay backfill", () => {
       db.selectFrom("inventory_claims").selectAll().where("source_id", "in",
         db.selectFrom("stay_segments").select("id").where("stay_id", "=", receipt.result!.stayId as string)).orderBy("service_date").execute(),
       db.selectFrom("collection_facts").selectAll().where("order_id", "=", orderId).execute(),
-      getOrderView(db, orderId)
+      getOrderView(db, orderId, "WRITE", ordinaryCommandGrants)
     ]);
     expect(order).toMatchObject({ status: "CHECKED_IN", version: 2 });
     expect(stay.status).toBe("IN_HOUSE");

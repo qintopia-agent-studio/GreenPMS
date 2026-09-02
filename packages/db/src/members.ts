@@ -5,10 +5,51 @@ import { entitlementAvailableBalance } from "./entitlement-balance.ts";
 import type { DbExecutor } from "./inventory.ts";
 
 const propertyClockForTesting = new AsyncLocalStorage<Date>();
+const propertyOperationClockSnapshot = new AsyncLocalStorage<Date>();
+const authoritativePropertyWallClockForTesting = new AsyncLocalStorage<{ instant: Date }>();
+
+function assertValidClockInstant(instant: Date, label: string): void {
+  if (!Number.isFinite(instant.getTime())) throw new Error(`${label} is invalid`);
+}
 
 export function withPropertyClockForTesting<T>(instant: Date, operation: () => Promise<T>): Promise<T> {
-  if (!Number.isFinite(instant.getTime())) throw new Error("Test property clock instant is invalid");
+  assertValidClockInstant(instant, "Test property clock instant");
   return propertyClockForTesting.run(new Date(instant), operation);
+}
+
+export interface MutablePropertyWallClockForTesting {
+  get(): Date;
+  set(instant: Date): void;
+}
+
+export function withMutablePropertyWallClockForTesting<T>(
+  initialInstant: Date,
+  operation: (clock: MutablePropertyWallClockForTesting) => Promise<T>
+): Promise<T> {
+  assertValidClockInstant(initialInstant, "Test property wall clock instant");
+  const state = { instant: new Date(initialInstant) };
+  const clock: MutablePropertyWallClockForTesting = {
+    get: () => new Date(state.instant),
+    set: (instant: Date) => {
+      assertValidClockInstant(instant, "Test property wall clock instant");
+      state.instant = new Date(instant);
+    }
+  };
+  return authoritativePropertyWallClockForTesting.run(state, () => operation(clock));
+}
+
+export function withPropertyOperationClockSnapshot<T>(instant: Date, operation: () => Promise<T>): Promise<T> {
+  assertValidClockInstant(instant, "Property operation clock snapshot");
+  return propertyOperationClockSnapshot.run(new Date(instant), operation);
+}
+
+export async function sampleAuthoritativePropertyWallClock(db: DbExecutor): Promise<Date> {
+  const testingClock = authoritativePropertyWallClockForTesting.getStore();
+  if (testingClock) return new Date(testingClock.instant);
+  const legacyTestingClock = propertyClockForTesting.getStore();
+  if (legacyTestingClock) return new Date(legacyTestingClock);
+  const clock = await sql<{ as_of: Date }>`select clock_timestamp() as as_of`.execute(db);
+  return new Date(clock.rows[0]!.as_of);
 }
 
 export function localDateInTimeZone(timeZone: string, instant = new Date()): string {
@@ -39,13 +80,17 @@ export function localClockInTimeZone(timeZone: string, instant = new Date()): { 
   };
 }
 
+export function propertyLocalClockAt(timeZone: string, databaseInstant: Date): { date: string; time: string } {
+  return localClockInTimeZone(timeZone, propertyOperationClockSnapshot.getStore() ?? propertyClockForTesting.getStore() ?? databaseInstant);
+}
+
 export async function propertyLocalClock(db: DbExecutor, propertyId: string): Promise<{ date: string; time: string }> {
   const property = await db.selectFrom("properties")
     .select(["timezone", sql<Date>`transaction_timestamp()`.as("as_of")])
     .where("id", "=", propertyId)
     .executeTakeFirst();
   if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
-  return localClockInTimeZone(property.timezone, propertyClockForTesting.getStore() ?? new Date(property.as_of));
+  return propertyLocalClockAt(property.timezone, new Date(property.as_of));
 }
 
 export async function propertyLocalToday(db: DbExecutor, propertyId: string): Promise<string> {

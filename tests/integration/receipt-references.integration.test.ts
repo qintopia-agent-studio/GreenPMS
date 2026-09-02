@@ -7,9 +7,10 @@ import {
   withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.RECEIPT_REFERENCES_INTEGRATION_DATABASE_URL
@@ -20,12 +21,11 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 const contractId = "member_receipt_references";
 const activeLotId = "lot_receipt_references_active";
-const expiringLotId = "lot_receipt_references_expiring";
 
 let db: Kysely<Database>;
 let sequence = 0;
@@ -168,24 +168,14 @@ beforeAll(async () => {
     valid_until: "2035-12-31",
     version: 1
   }).execute();
-  await db.insertInto("entitlement_lots").values([
-    {
-      id: activeLotId,
-      contract_id: contractId,
-      unit_kind: "ROOM_NIGHT",
-      total_units: 12,
-      expires_on: "2035-12-31",
-      version: 1
-    },
-    {
-      id: expiringLotId,
-      contract_id: contractId,
-      unit_kind: "ROOM_NIGHT",
-      total_units: 3,
-      expires_on: "2026-01-01",
-      version: 1
-    }
-  ]).execute();
+  await db.insertInto("entitlement_lots").values({
+    id: activeLotId,
+    contract_id: contractId,
+    unit_kind: "ROOM_NIGHT",
+    total_units: 12,
+    expires_on: "2035-12-31",
+    version: 1
+  }).execute();
 });
 
 afterAll(async () => {
@@ -292,37 +282,32 @@ describe.sequential("Receipt permanent references for member entitlement facts",
     });
   });
 
-  it.each([
-    {
-      label: "ADJUST",
-      envelope: {
-        commandType: "ADJUST_MEMBER_ENTITLEMENT",
-        input: {
-          propertyId: demo.propertyId,
-          entitlementLotId: activeLotId,
-          quantityDelta: 2,
-          adjustmentReason: "Receipt reference acceptance adjustment"
-        }
-      } satisfies CommandEnvelope,
-      lotId: activeLotId,
-      entryType: "ADJUST" as const
-    },
-    {
-      label: "EXPIRE",
-      envelope: {
-        commandType: "EXPIRE_MEMBER_ENTITLEMENT",
-        input: { propertyId: demo.propertyId, entitlementLotId: expiringLotId, asOfDate: "2026-01-02" }
-      } satisfies CommandEnvelope,
-      lotId: expiringLotId,
-      entryType: "EXPIRE" as const
-    }
-  ])("ties $label fact to its command with no coverage reference", async ({ label, envelope, lotId, entryType }) => {
-    const receipt = await previewAndConfirm(envelope, label.toLowerCase());
+  it("ties a balance correction ADJUST fact to its command with no coverage reference", async () => {
+    const balance = await db.selectFrom("entitlement_lots")
+      .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
+      .select([
+        "entitlement_lots.total_units",
+        sql<number>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as integer)`.as("ledger_delta")
+      ])
+      .where("entitlement_lots.id", "=", activeLotId)
+      .groupBy("entitlement_lots.total_units")
+      .executeTakeFirstOrThrow();
+    const availableBefore = balance.total_units + Number(balance.ledger_delta);
+    const receipt = await previewAndConfirm({
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+      input: {
+        propertyId: demo.propertyId,
+        entitlementLotId: activeLotId,
+        expectedAvailableBalance: availableBefore,
+        targetAvailableBalance: availableBefore + 2,
+        adjustmentReason: "Receipt reference acceptance adjustment"
+      }
+    }, "balance-correction");
     await expectExactLedgerReferences({
       receipt,
-      entryTypes: [entryType],
+      entryTypes: ["ADJUST"],
       coverageResourceIds: [],
-      resourceRefs: [contractId, lotId]
+      resourceRefs: [contractId, activeLotId]
     });
   });
 });

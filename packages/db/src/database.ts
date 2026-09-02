@@ -1,6 +1,12 @@
 import { Kysely, PostgresDialect, sql, type Transaction } from "kysely";
 import pg from "pg";
+import {
+  administratorCommandGrants,
+  commandFeatureEnabled,
+  ordinaryStaffCommandGrants
+} from "@qintopia/domain";
 import type { Database } from "./schema.ts";
+import { resolveStaffProfileManifest } from "./staff-profile-manifest.ts";
 
 pg.types.setTypeParser(1082, (value) => value);
 
@@ -49,7 +55,10 @@ export const currentMigrationNames = [
   "042_complete_overdue_reserved_stay.sql",
   "043_complete_stay_guard_hardening.sql",
   "044_inhouse_membership_fulfillment_guards.sql",
-  "045_stay_membership_net_wecom_transfer.sql"
+  "045_stay_membership_net_wecom_transfer.sql",
+  "046_command_authorization.sql",
+  "047_runtime_database_role.sql",
+  "048_runtime_isolation_guards.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -74,10 +83,35 @@ export function createDatabase(url = databaseUrl()): Kysely<Database> {
 
 type DatabaseReadyExecutor = Kysely<Database> | Transaction<Database>;
 
-export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean> {
+export interface DatabaseReadyOptions {
+  identity?: "runtime" | "maintenance-owner";
+  staffProfileManifestName?: string;
+}
+
+const expectedStaffProfileCatalog = [
+  ...ordinaryStaffCommandGrants.map((commandType) => ({
+    profile: "STAFF" as const,
+    command_type: commandType,
+    token_default: true
+  })),
+  ...administratorCommandGrants.map((commandType) => ({
+    profile: "ADMIN" as const,
+    command_type: commandType,
+    token_default: commandFeatureEnabled(commandType)
+  }))
+].sort((left, right) => {
+  if (left.profile !== right.profile) return left.profile < right.profile ? -1 : 1;
+  if (left.command_type === right.command_type) return 0;
+  return left.command_type < right.command_type ? -1 : 1;
+});
+
+export async function databaseReady(
+  db: DatabaseReadyExecutor,
+  options: DatabaseReadyOptions = {}
+): Promise<boolean> {
   if (!db.isTransaction) {
     try {
-      return await db.transaction().execute(async (trx) => databaseReady(trx));
+      return await db.transaction().execute(async (trx) => databaseReady(trx, options));
     } catch {
       return false;
     }
@@ -94,6 +128,543 @@ export async function databaseReady(db: DatabaseReadyExecutor): Promise<boolean>
     const migrationsReady = rows.length === currentMigrationNames.length
       && rows.every((row, index) => row.name === currentMigrationNames[index]);
     if (!migrationsReady) return false;
+
+    const expectedStaffProfileManifest = resolveStaffProfileManifest(
+      options.staffProfileManifestName ?? process.env.STAFF_PROFILE_MANIFEST_NAME
+    );
+
+    const reconciliationStates = await db.selectFrom("staff_profile_reconciliation_state")
+      .select("singleton")
+      .execute();
+    if (reconciliationStates.length !== 1) return false;
+
+    const profileCatalog = await db.selectFrom("staff_command_profile_catalog")
+      .select(["profile", "command_type", "token_default"])
+      .orderBy("profile")
+      .orderBy("command_type")
+      .execute();
+    const profileCatalogReady = profileCatalog.length === expectedStaffProfileCatalog.length
+      && profileCatalog.every((row, index) => {
+        const expected = expectedStaffProfileCatalog[index];
+        return row.profile === expected?.profile
+          && row.command_type === expected.command_type
+          && row.token_default === expected.token_default;
+      });
+    if (!profileCatalogReady) return false;
+
+    const runtimeIsolation = await sql<{
+      identity_ready: boolean;
+      role_ready: boolean;
+      memberships_ready: boolean;
+      ownership_ready: boolean;
+      capabilities_ready: boolean;
+      update_privileges_ready: boolean;
+      destructive_privileges_ready: boolean;
+      profile_assignments_ready: boolean;
+      profile_grants_ready: boolean;
+      reviewed_manifest_ready: boolean;
+      token_policy_ready: boolean;
+      reconciliation_state_ready: boolean;
+      isolation_objects_ready: boolean;
+    }>`
+      WITH RECURSIVE
+      runtime_role AS (
+        SELECT *
+        FROM pg_roles
+        WHERE rolname = 'qintopia_runtime'
+      ),
+      database_owner AS (
+        SELECT database_row.oid,
+          database_row.datdba,
+          pg_get_userbyid(database_row.datdba) AS owner_name
+        FROM pg_database AS database_row
+        WHERE database_row.datname = current_database()
+      ),
+      inherited_roles(roleid) AS (
+        SELECT membership.roleid
+        FROM pg_auth_members AS membership
+        JOIN runtime_role ON runtime_role.oid = membership.member
+        UNION
+        SELECT membership.roleid
+        FROM pg_auth_members AS membership
+        JOIN inherited_roles ON inherited_roles.roleid = membership.member
+      ),
+      expected_update_columns(table_name, column_name) AS (
+        VALUES
+          ('web_sessions', 'revoked_at'),
+          ('command_executions', 'state'),
+          ('command_executions', 'completed_at'),
+          ('command_previews', 'status'),
+          ('command_previews', 'used_at'),
+          ('api_tokens', 'revoked_at'),
+          ('api_tokens', 'replaced_by_id'),
+          ('subjects', 'created_at'),
+          ('subject_property_grants', 'created_at'),
+          ('subject_command_grants', 'created_at'),
+          ('token_command_ceilings', 'created_at'),
+          ('order_occupants', 'created_at'),
+          ('membership_orders', 'status'),
+          ('membership_orders', 'activated_at'),
+          ('membership_orders', 'valid_from'),
+          ('membership_orders', 'valid_until'),
+          ('membership_orders', 'contract_id'),
+          ('membership_orders', 'entitlement_lot_id'),
+          ('membership_orders', 'version'),
+          ('membership_orders', 'activated_by_command_id'),
+          ('membership_orders', 'updated_at'),
+          ('member_contracts', 'version'),
+          ('entitlement_lots', 'version'),
+          ('orders', 'status'),
+          ('orders', 'arrival_date'),
+          ('orders', 'departure_date'),
+          ('orders', 'current_revision_id'),
+          ('orders', 'member_id'),
+          ('orders', 'member_contract_id'),
+          ('orders', 'version'),
+          ('orders', 'updated_at'),
+          ('stays', 'status'),
+          ('coverage_items', 'status'),
+          ('coverage_items', 'updated_at'),
+          ('inventory_room_days', 'whole_claim_id'),
+          ('inventory_room_days', 'version'),
+          ('inventory_room_days', 'updated_at'),
+          ('inventory_bed_days', 'bed_claim_id'),
+          ('inventory_bed_days', 'version'),
+          ('inventory_bed_days', 'updated_at'),
+          ('inventory_claims', 'active'),
+          ('inventory_claims', 'released_at'),
+          ('maintenance_locks', 'status'),
+          ('maintenance_locks', 'version'),
+          ('maintenance_locks', 'released_by_command_id'),
+          ('maintenance_locks', 'released_at'),
+          ('cleaning_tasks', 'status'),
+          ('cleaning_tasks', 'version'),
+          ('cleaning_tasks', 'completed_by_command_id'),
+          ('cleaning_tasks', 'completed_at'),
+          ('room_status_revisions', 'revision'),
+          ('room_status_revisions', 'updated_at')
+      ),
+      actual_update_columns AS (
+        SELECT relation.relname::text AS table_name,
+          attribute.attname::text AS column_name
+        FROM runtime_role
+        JOIN pg_class AS relation
+          ON relation.relkind IN ('r', 'p')
+        JOIN pg_namespace AS namespace
+          ON namespace.oid = relation.relnamespace
+          AND namespace.nspname = 'public'
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = relation.oid
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+        WHERE has_column_privilege(
+          runtime_role.oid,
+          relation.oid,
+          attribute.attnum,
+          'UPDATE'
+        )
+      ),
+      reviewed_manifest AS (
+        SELECT item."subjectId" AS subject_id,
+          item."propertyId" AS property_id,
+          item.profile
+        FROM jsonb_to_recordset(${JSON.stringify(expectedStaffProfileManifest.entries)}::jsonb)
+          AS item("subjectId" text, "propertyId" text, profile text)
+      ),
+      canonical_manifest AS (
+        SELECT COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'subjectId', subject_id,
+              'propertyId', property_id,
+              'profile', profile
+            )
+            ORDER BY subject_id, property_id
+          ),
+          '[]'::jsonb
+        ) AS value
+        FROM reviewed_manifest
+      ),
+      expected_assignments AS (
+        SELECT property_grant.subject_id,
+          property_grant.property_id,
+          COALESCE(reviewed_manifest.profile, 'STAFF') AS profile
+        FROM subject_property_grants AS property_grant
+        LEFT JOIN reviewed_manifest
+          ON reviewed_manifest.subject_id = property_grant.subject_id
+          AND reviewed_manifest.property_id = property_grant.property_id
+        WHERE property_grant.access_level = 'WRITE'
+      ),
+      expected_profile_grants AS (
+        SELECT assignment.subject_id,
+          assignment.property_id,
+          profile_command.command_type
+        FROM expected_assignments AS assignment
+        JOIN staff_command_profile_catalog AS profile_command
+          ON profile_command.profile = assignment.profile
+      ),
+      expected_historical_grants AS (
+        SELECT DISTINCT execution.subject_id,
+          execution.property_id,
+          regexp_replace(execution.command_type, '^PREVIEW:', '') AS command_type
+        FROM command_executions AS execution
+        JOIN expected_assignments AS assignment
+          ON assignment.subject_id = execution.subject_id
+          AND assignment.property_id = execution.property_id
+        JOIN command_catalog AS catalog
+          ON catalog.command_type = regexp_replace(execution.command_type, '^PREVIEW:', '')
+          AND catalog.command_class = 'HISTORICAL_READ'
+      ),
+      expected_grants AS (
+        SELECT * FROM expected_profile_grants
+        UNION
+        SELECT * FROM expected_historical_grants
+      ),
+      actual_projection AS (
+        SELECT format('A|%s|%s|%s', subject_id, property_id, profile) AS row_value
+        FROM staff_profile_assignments
+        UNION ALL
+        SELECT format('G|%s|%s|%s', subject_id, property_id, command_type)
+        FROM subject_command_grants
+      ),
+      actual_projection_hash AS (
+        SELECT encode(
+          sha256(convert_to(COALESCE(string_agg(row_value, E'\\n' ORDER BY row_value), ''), 'UTF8')),
+          'hex'
+        ) AS value
+        FROM actual_projection
+      )
+      SELECT
+        CASE ${options.identity ?? "runtime"}
+          WHEN 'runtime' THEN current_user = 'qintopia_runtime'
+            AND session_user = 'qintopia_runtime'
+            AND current_setting('search_path') = 'public'
+          WHEN 'maintenance-owner' THEN current_user = session_user
+            AND current_user = (SELECT owner_name FROM database_owner)
+            AND current_user <> 'qintopia_runtime'
+          ELSE false
+        END AS identity_ready,
+        COALESCE((
+          SELECT NOT runtime_role.rolsuper
+            AND NOT runtime_role.rolinherit
+            AND NOT runtime_role.rolcreaterole
+            AND NOT runtime_role.rolcreatedb
+            AND runtime_role.rolcanlogin
+            AND NOT runtime_role.rolreplication
+            AND NOT runtime_role.rolbypassrls
+            AND COALESCE(runtime_role.rolconfig, ARRAY[]::text[]) = ARRAY['search_path=public']::text[]
+            AND NOT EXISTS (
+              SELECT 1
+              FROM pg_db_role_setting AS role_setting
+              JOIN database_owner ON database_owner.oid = role_setting.setdatabase
+              WHERE role_setting.setrole = runtime_role.oid
+            )
+          FROM runtime_role
+        ), false) AS role_ready,
+        NOT EXISTS (SELECT 1 FROM inherited_roles) AS memberships_ready,
+        COALESCE((
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM pg_shdepend AS dependency
+            JOIN database_owner
+              ON dependency.dbid = database_owner.oid
+              OR (
+                dependency.dbid = 0
+                AND dependency.classid = 'pg_database'::regclass
+                AND dependency.objid = database_owner.oid
+              )
+            WHERE dependency.refclassid = 'pg_authid'::regclass
+              AND dependency.refobjid = runtime_role.oid
+              AND dependency.deptype = 'o'
+          )
+          FROM runtime_role
+        ), false) AS ownership_ready,
+        COALESCE((
+          SELECT has_database_privilege(runtime_role.oid, current_database(), 'CONNECT')
+            AND NOT has_database_privilege(runtime_role.oid, current_database(), 'CREATE')
+            AND NOT has_database_privilege(runtime_role.oid, current_database(), 'TEMPORARY')
+            AND has_schema_privilege(runtime_role.oid, 'public', 'USAGE')
+            AND NOT has_schema_privilege(runtime_role.oid, 'public', 'CREATE')
+            AND NOT has_parameter_privilege(runtime_role.oid, 'session_replication_role', 'SET')
+            AND NOT has_parameter_privilege(runtime_role.oid, 'session_replication_role', 'ALTER SYSTEM')
+            AND NOT has_function_privilege(
+              runtime_role.oid,
+              'qintopia_reconcile_staff_profile_manifest(text,jsonb)'::regprocedure,
+              'EXECUTE'
+            )
+            AND NOT has_function_privilege(
+              runtime_role.oid,
+              'qintopia_guard_runtime_order_projection_update()'::regprocedure,
+              'EXECUTE'
+            )
+            AND NOT has_function_privilege(
+              runtime_role.oid,
+              'qintopia_guard_runtime_mutable_projection_update()'::regprocedure,
+              'EXECUTE'
+            )
+            AND NOT has_function_privilege(
+              runtime_role.oid,
+              'qintopia_guard_runtime_token_mutation()'::regprocedure,
+              'EXECUTE'
+            )
+          FROM runtime_role
+        ), false) AS capabilities_ready,
+        NOT EXISTS (
+          SELECT * FROM actual_update_columns
+          EXCEPT
+          SELECT * FROM expected_update_columns
+        ) AND NOT EXISTS (
+          SELECT * FROM expected_update_columns
+          EXCEPT
+          SELECT * FROM actual_update_columns
+        ) AS update_privileges_ready,
+        COALESCE((
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM pg_class AS relation
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+              AND namespace.nspname = 'public'
+            WHERE relation.relkind IN ('r', 'p')
+              AND (
+                has_table_privilege(runtime_role.oid, relation.oid, 'DELETE')
+                OR has_table_privilege(runtime_role.oid, relation.oid, 'TRUNCATE')
+                OR has_table_privilege(runtime_role.oid, relation.oid, 'TRIGGER')
+                OR has_table_privilege(runtime_role.oid, relation.oid, 'REFERENCES')
+              )
+          )
+          FROM runtime_role
+        ), false) AS destructive_privileges_ready,
+        NOT EXISTS (
+          SELECT subject_id, property_id, profile FROM staff_profile_assignments
+          EXCEPT
+          SELECT subject_id, property_id, profile FROM expected_assignments
+        ) AND NOT EXISTS (
+          SELECT subject_id, property_id, profile FROM expected_assignments
+          EXCEPT
+          SELECT subject_id, property_id, profile FROM staff_profile_assignments
+        ) AS profile_assignments_ready,
+        NOT EXISTS (
+          SELECT subject_id, property_id, command_type FROM subject_command_grants
+          EXCEPT
+          SELECT subject_id, property_id, command_type FROM expected_grants
+        ) AND NOT EXISTS (
+          SELECT subject_id, property_id, command_type FROM expected_grants
+          EXCEPT
+          SELECT subject_id, property_id, command_type FROM subject_command_grants
+        ) AS profile_grants_ready,
+        NOT EXISTS (
+          SELECT 1
+          FROM reviewed_manifest
+          LEFT JOIN expected_assignments
+            ON expected_assignments.subject_id = reviewed_manifest.subject_id
+            AND expected_assignments.property_id = reviewed_manifest.property_id
+            AND expected_assignments.profile = reviewed_manifest.profile
+          WHERE expected_assignments.subject_id IS NULL
+        ) AS reviewed_manifest_ready,
+        NOT EXISTS (
+          SELECT 1
+          FROM token_command_ceilings AS ceiling
+          LEFT JOIN api_tokens AS token
+            ON token.id = ceiling.token_id
+            AND token.subject_id = ceiling.subject_id
+            AND token.property_scope = ceiling.property_id
+          LEFT JOIN subjects AS subject_row
+            ON subject_row.id = ceiling.subject_id
+          LEFT JOIN subject_property_grants AS property_grant
+            ON property_grant.subject_id = ceiling.subject_id
+            AND property_grant.property_id = ceiling.property_id
+          LEFT JOIN command_catalog AS catalog
+            ON catalog.command_type = ceiling.command_type
+          WHERE token.id IS NULL
+            OR subject_row.id IS NULL
+            OR property_grant.subject_id IS NULL
+            OR property_grant.access_level <> 'WRITE'
+            OR catalog.command_type IS NULL
+            OR token.access_ceiling <> 'WRITE'
+            OR NOT (
+              catalog.command_class = 'HISTORICAL_READ'
+              OR (
+                catalog.command_class = 'HUMAN_COMMAND'
+                AND EXISTS (
+                  SELECT 1
+                  FROM staff_profile_assignments AS assignment
+                  JOIN staff_command_profile_catalog AS profile_command
+                    ON profile_command.profile = assignment.profile
+                    AND profile_command.command_type = ceiling.command_type
+                    AND profile_command.token_default
+                  WHERE assignment.subject_id = ceiling.subject_id
+                    AND assignment.property_id = ceiling.property_id
+                )
+              )
+            )
+            OR NOT EXISTS (
+              SELECT 1
+              FROM expected_grants
+              WHERE expected_grants.subject_id = ceiling.subject_id
+                AND expected_grants.property_id = ceiling.property_id
+                AND expected_grants.command_type = ceiling.command_type
+            )
+        ) AS token_policy_ready,
+        EXISTS (
+          SELECT 1
+          FROM staff_profile_reconciliation_state AS state
+          CROSS JOIN canonical_manifest
+          CROSS JOIN actual_projection_hash
+          CROSS JOIN database_owner
+          WHERE state.singleton
+            AND state.manifest_name = ${expectedStaffProfileManifest.name}
+            AND state.manifest_hash = encode(
+              sha256(convert_to(canonical_manifest.value::text, 'UTF8')),
+              'hex'
+            )
+            AND state.projection_hash = actual_projection_hash.value
+            AND state.reconciled_by = database_owner.owner_name
+        ) AS reconciliation_state_ready,
+        (
+          COALESCE((
+            SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+                'fe886ce2bf56de9b4b36b4931bded39e6fac66b89b3fe51d82d6150356fd52ee'
+              AND procedure_row.proowner = database_owner.datdba
+              AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+              AND NOT procedure_row.prosecdef
+              AND procedure_row.provolatile = 'v'
+              AND procedure_row.prokind = 'f'
+              AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            FROM pg_proc AS procedure_row
+            CROSS JOIN database_owner
+            WHERE procedure_row.oid = to_regprocedure('qintopia_reconcile_staff_profile_manifest(text,jsonb)')
+          ), false)
+          AND COALESCE((
+            SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+                '3e4349ac6cad620f37a0b03f16f14d283a3617226068f5f2a5b02f3827dcb39a'
+              AND procedure_row.proowner = database_owner.datdba
+              AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+              AND NOT procedure_row.prosecdef
+              AND procedure_row.provolatile = 'v'
+              AND procedure_row.prokind = 'f'
+              AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            FROM pg_proc AS procedure_row
+            CROSS JOIN database_owner
+            WHERE procedure_row.oid = to_regprocedure('qintopia_guard_runtime_order_projection_update()')
+          ), false)
+          AND COALESCE((
+            SELECT NOT trigger.tgisinternal
+              AND trigger.tgenabled IN ('O', 'A')
+              AND trigger.tgdeferrable
+              AND trigger.tginitdeferred
+              AND trigger.tgnargs = 0
+              AND trigger.tgfoid = to_regprocedure('qintopia_guard_runtime_order_projection_update()')
+              AND pg_get_triggerdef(trigger.oid, false) =
+                'CREATE CONSTRAINT TRIGGER orders_runtime_projection_guard AFTER UPDATE ON public.orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_order_projection_update()'
+            FROM pg_trigger AS trigger
+            WHERE trigger.tgrelid = to_regclass('orders')
+              AND trigger.tgname = 'orders_runtime_projection_guard'
+          ), false)
+          AND COALESCE((
+            SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+                '092ae1bb31ab8cd2b854e26f76fd58ab896d29a8dfb3393bc73a43d80038d5fe'
+              AND procedure_row.proowner = database_owner.datdba
+              AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+              AND NOT procedure_row.prosecdef
+              AND procedure_row.provolatile = 'v'
+              AND procedure_row.prokind = 'f'
+              AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            FROM pg_proc AS procedure_row
+            CROSS JOIN database_owner
+            WHERE procedure_row.oid = to_regprocedure('qintopia_guard_runtime_token_mutation()')
+          ), false)
+          AND COALESCE((
+            SELECT NOT trigger.tgisinternal
+              AND trigger.tgenabled IN ('O', 'A')
+              AND trigger.tgdeferrable
+              AND trigger.tginitdeferred
+              AND trigger.tgnargs = 0
+              AND trigger.tgfoid = to_regprocedure('qintopia_guard_runtime_token_mutation()')
+              AND pg_get_triggerdef(trigger.oid, false) =
+                'CREATE CONSTRAINT TRIGGER api_tokens_runtime_token_mutation_guard AFTER INSERT OR UPDATE ON public.api_tokens DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()'
+            FROM pg_trigger AS trigger
+            WHERE trigger.tgrelid = to_regclass('api_tokens')
+              AND trigger.tgname = 'api_tokens_runtime_token_mutation_guard'
+          ), false)
+          AND COALESCE((
+            SELECT NOT trigger.tgisinternal
+              AND trigger.tgenabled IN ('O', 'A')
+              AND trigger.tgdeferrable
+              AND trigger.tginitdeferred
+              AND trigger.tgnargs = 0
+              AND trigger.tgfoid = to_regprocedure('qintopia_guard_runtime_token_mutation()')
+              AND pg_get_triggerdef(trigger.oid, false) =
+                'CREATE CONSTRAINT TRIGGER token_command_ceilings_runtime_token_mutation_guard AFTER INSERT ON public.token_command_ceilings DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()'
+            FROM pg_trigger AS trigger
+            WHERE trigger.tgrelid = to_regclass('token_command_ceilings')
+              AND trigger.tgname = 'token_command_ceilings_runtime_token_mutation_guard'
+          ), false)
+          AND COALESCE((
+            SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+                '336e30e78aa3518a116126f27dcaa5b0c943e85fa0903c42fbb96342e262954c'
+              AND procedure_row.proowner = database_owner.datdba
+              AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+              AND NOT procedure_row.prosecdef
+              AND procedure_row.provolatile = 'v'
+              AND procedure_row.prokind = 'f'
+              AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            FROM pg_proc AS procedure_row
+            CROSS JOIN database_owner
+            WHERE procedure_row.oid = to_regprocedure('qintopia_guard_runtime_mutable_projection_update()')
+          ), false)
+          AND COALESCE((
+            SELECT count(*) = 11
+              AND bool_and(
+                NOT trigger.tgisinternal
+                AND trigger.tgenabled IN ('O', 'A')
+                AND trigger.tgdeferrable
+                AND trigger.tginitdeferred
+                AND trigger.tgnargs = 0
+                AND trigger.tgfoid = to_regprocedure('qintopia_guard_runtime_mutable_projection_update()')
+                AND pg_get_triggerdef(trigger.oid, false) = format(
+                  'CREATE CONSTRAINT TRIGGER %s AFTER UPDATE ON public.%s DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_mutable_projection_update()',
+                  expected.trigger_name,
+                  expected.table_name
+                )
+              )
+            FROM (VALUES
+              ('membership_orders', 'membership_orders_runtime_projection_guard'),
+              ('member_contracts', 'member_contracts_runtime_projection_guard'),
+              ('entitlement_lots', 'entitlement_lots_runtime_projection_guard'),
+              ('stays', 'stays_runtime_projection_guard'),
+              ('coverage_items', 'coverage_items_runtime_projection_guard'),
+              ('inventory_room_days', 'inventory_room_days_runtime_projection_guard'),
+              ('inventory_bed_days', 'inventory_bed_days_runtime_projection_guard'),
+              ('inventory_claims', 'inventory_claims_runtime_projection_guard'),
+              ('maintenance_locks', 'maintenance_locks_runtime_projection_guard'),
+              ('cleaning_tasks', 'cleaning_tasks_runtime_projection_guard'),
+              ('room_status_revisions', 'room_status_revisions_runtime_projection_guard')
+            ) AS expected(table_name, trigger_name)
+            JOIN pg_trigger AS trigger
+              ON trigger.tgrelid = to_regclass(expected.table_name)
+              AND trigger.tgname = expected.trigger_name
+          ), false)
+        ) AS isolation_objects_ready
+    `.execute(db);
+
+    const runtimeIsolationReady = runtimeIsolation.rows[0];
+    if (!runtimeIsolationReady
+      || !runtimeIsolationReady.identity_ready
+      || !runtimeIsolationReady.role_ready
+      || !runtimeIsolationReady.memberships_ready
+      || !runtimeIsolationReady.ownership_ready
+      || !runtimeIsolationReady.capabilities_ready
+      || !runtimeIsolationReady.update_privileges_ready
+      || !runtimeIsolationReady.destructive_privileges_ready
+      || !runtimeIsolationReady.profile_assignments_ready
+      || !runtimeIsolationReady.profile_grants_ready
+      || !runtimeIsolationReady.reviewed_manifest_ready
+      || !runtimeIsolationReady.token_policy_ready
+      || !runtimeIsolationReady.reconciliation_state_ready
+      || !runtimeIsolationReady.isolation_objects_ready) {
+      return false;
+    }
 
     const memberProfileObjects = await sql<{
       columns_ready: boolean;

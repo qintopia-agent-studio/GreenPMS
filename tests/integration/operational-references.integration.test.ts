@@ -9,6 +9,7 @@ import {
   createDatabase,
   databaseReady,
   getOrderView,
+  reconcileStaffProfileManifest,
   type ConfirmRequest,
   type Database
 } from "@qintopia/db";
@@ -17,19 +18,24 @@ import { sha256, stableHash } from "@qintopia/domain";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { demo, seedDemo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.OPERATIONAL_REFERENCES_INTEGRATION_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_operational_references";
 const historicalDatabaseUrl = process.env.OPERATIONAL_REFERENCES_HISTORY_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_operational_references_history";
+const demoOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "demo"
+} as const;
 
 const principal: AuthPrincipal = {
   subjectId: demo.agentSubjectId,
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 let db: Kysely<Database>;
@@ -1007,7 +1013,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 045, preserves historical facts and identity guards, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 048, preserves historical facts and identity guards, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -1783,12 +1789,21 @@ describe.sequential("booking channels and external transaction references on Pos
         const migration045 = await readFile(resolve(process.cwd(), "packages/db/src/migrations/045_stay_membership_net_wecom_transfer.sql"), "utf8");
         await client.query(migration045);
         await client.query("INSERT INTO schema_migrations(name) VALUES ('045_stay_membership_net_wecom_transfer.sql')");
+        for (const migrationName of [
+          "046_command_authorization.sql",
+          "047_runtime_database_role.sql",
+          "048_runtime_isolation_guards.sql"
+        ]) {
+          await client.query(await readFile(resolve(process.cwd(), "packages/db/src/migrations", migrationName), "utf8"));
+          await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [migrationName]);
+        }
         await client.query("ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only");
         await client.query("UPDATE collection_facts SET pricing_revision_id = NULL WHERE fact_id = 'fact_historical_nulls'");
         await client.query("ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only");
       } finally {
         await client.end();
       }
+      await reconcileStaffProfileManifest(historicalDb, "unconfigured");
 
       const [migration043Epoch, migration044Epoch, preInHousePreviews, preInHouseReceipts, preInHouseCommands, preInHouseAmendment] = await Promise.all([
         historicalDb.selectFrom("schema_migrations").select("applied_at")
@@ -2083,7 +2098,7 @@ describe.sequential("booking channels and external transaction references on Pos
         transaction_reference: null,
         pricing_revision_id: null
       });
-      expect(await databaseReady(historicalDb)).toBe(true);
+      expect(await databaseReady(historicalDb, demoOwnerReadinessOptions)).toBe(true);
 
       const app = await buildServer(historicalDb);
       await app.ready();

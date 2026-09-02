@@ -1,6 +1,8 @@
 import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import {
   CommandEnvelopeSchema,
   CommandEffectSchema,
@@ -8,10 +10,12 @@ import {
   ExecutedCommandResultSchema,
   HistoricalReceiptReadSchema,
   HistoricalStoredPreviewResponseSchema,
+  MeResponseSchema,
   OrdersListResponseSchema,
   ReceiptSchema,
   RoomStatusIntervalSchema,
-  RoomStatusOperationalTaskSchema
+  RoomStatusOperationalTaskSchema,
+  TokensResponseSchema
 } from "./schemas.ts";
 
 FormatRegistry.Set("date-time", (value) => typeof value === "string" && Number.isFinite(Date.parse(value)));
@@ -74,6 +78,43 @@ describe("orders list operational context", () => {
     expect(Value.Check(OrdersListResponseSchema, {
       businessDate: "2026-08-27",
       orders: [missingStayStatus]
+    })).toBe(false);
+  });
+});
+
+describe("/me command permission projection schema", () => {
+  it("requires exact command grants and per-property allowed action lists", () => {
+    expect(Value.Check(MeResponseSchema, {
+      subjectId: "subject_operator",
+      displayName: "前台",
+      credentialType: "SESSION",
+      propertyAccess: { property_qintopia: "WRITE", property_readonly: "READ" },
+      propertyCommandGrants: {
+        property_qintopia: ["CREATE_ORDER", "REPRICE_ORDER", "ISSUE_TOKEN", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS", "BACKFILL_COMPLETED_STAY"],
+        property_readonly: ["CREATE_ORDER", "PLACE_INTERNAL_USE"]
+      },
+      allowedActions: {
+        property_qintopia: ["CREATE_ORDER", "REPRICE_ORDER", "ISSUE_TOKEN"],
+        property_readonly: []
+      }
+    })).toBe(true);
+
+    expect(Value.Check(MeResponseSchema, {
+      subjectId: "subject_operator",
+      displayName: "前台",
+      credentialType: "SESSION",
+      propertyAccess: { property_qintopia: "WRITE" },
+      propertyCommandGrants: { property_qintopia: ["CREATE_*"] },
+      allowedActions: { property_qintopia: ["CREATE_ORDER"] }
+    })).toBe(false);
+
+    expect(Value.Check(MeResponseSchema, {
+      subjectId: "subject_operator",
+      displayName: "前台",
+      credentialType: "SESSION",
+      propertyAccess: { property_qintopia: "WRITE" },
+      propertyCommandGrants: { property_qintopia: ["CREATE_ORDER", "COMPLETE_CLEANING"] },
+      allowedActions: { property_qintopia: ["COMPLETE_CLEANING"] }
     })).toBe(false);
   });
 });
@@ -359,6 +400,180 @@ describe("backfill collection command schema", () => {
   });
 });
 
+describe("public command envelope schema", () => {
+  it.each([
+    ["REFRESH_MEMBER_COVERAGE", { propertyId: "prop_test", orderId: "order_test" }],
+    ["ADD_MEMBER_ENTITLEMENT_LOT", {
+      propertyId: "prop_test",
+      memberContractId: "contract_test",
+      unitKind: "ROOM_NIGHT",
+      units: 1,
+      expiresOn: "2028-12-31"
+    }],
+    ["ADJUST_MEMBER_ENTITLEMENT", {
+      propertyId: "prop_test",
+      entitlementLotId: "lot_test",
+      quantityDelta: 1,
+      adjustmentReason: "Internal entitlement repair"
+    }],
+    ["EXPIRE_MEMBER_ENTITLEMENT", {
+      propertyId: "prop_test",
+      entitlementLotId: "lot_test",
+      asOfDate: "2028-12-31"
+    }]
+  ])("rejects system-derived command %s", (commandType, input) => {
+    expect(Value.Check(CommandEnvelopeSchema, { commandType, input })).toBe(false);
+  });
+});
+
+describe("Token command ceiling schema", () => {
+  const tokenSecret = `qtp_${"A".repeat(43)}`;
+
+  it("requires issue and rotate commands to carry an exact command ceiling", () => {
+    const issue = {
+      commandType: "ISSUE_TOKEN",
+      input: {
+        propertyId: "prop_test",
+        subjectId: "subject_test",
+        label: "Integration client",
+        accessCeiling: "WRITE",
+        commandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION", "ISSUE_TOKEN"],
+        expiresAt: "2028-01-01T00:00:00.000Z",
+        tokenSecret
+      }
+    };
+    const rotate = {
+      commandType: "ROTATE_TOKEN",
+      input: {
+        propertyId: "prop_test",
+        tokenId: "token_test",
+        commandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION"],
+        tokenSecret
+      }
+    };
+
+    expect(Value.Check(CommandEnvelopeSchema, issue)).toBe(true);
+    expect(Value.Check(CommandEnvelopeSchema, rotate)).toBe(true);
+    expect(Value.Check(CommandEnvelopeSchema, { ...issue, input: { ...issue.input, commandCeiling: ["CREATE_*"] } })).toBe(false);
+    expect(Value.Check(CommandEnvelopeSchema, { ...issue, input: { ...issue.input, commandCeiling: ["ADD_MEMBER_ENTITLEMENT_LOT"] } })).toBe(false);
+    expect(Value.Check(CommandEnvelopeSchema, { ...rotate, input: { ...rotate.input, commandCeiling: ["CREATE_ORDER", "CREATE_ORDER"] } })).toBe(false);
+    const { commandCeiling: _issueCeiling, ...issueWithoutCeiling } = issue.input;
+    const { commandCeiling: _rotateCeiling, ...rotateWithoutCeiling } = rotate.input;
+    expect(Value.Check(CommandEnvelopeSchema, { ...issue, input: issueWithoutCeiling })).toBe(false);
+    expect(Value.Check(CommandEnvelopeSchema, { ...rotate, input: rotateWithoutCeiling })).toBe(false);
+  });
+
+  it("distinguishes rotate and revoke command effects by operation", () => {
+    const rotateEffect = {
+      tokenId: "token_test",
+      subjectId: "subject_test",
+      subjectDisplayName: "渠道同步账号",
+      label: "Integration client",
+      accessCeiling: "WRITE",
+      previousCommandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION"],
+      commandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION"],
+      previousPersistedCommandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION"],
+      persistedCommandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION"],
+      previousExpiresAt: "2027-01-01T00:00:00.000Z",
+      expiresAt: "2028-01-01T00:00:00.000Z",
+      historicalReadCeilingPreserved: true,
+      operation: "ROTATE"
+    };
+    const revokeEffect = {
+      tokenId: "token_test",
+      subjectId: "subject_test",
+      subjectDisplayName: "渠道同步账号",
+      label: "Integration client",
+      accessCeiling: "WRITE",
+      commandCeiling: ["CREATE_ORDER"],
+      persistedCommandCeiling: ["CREATE_ORDER"],
+      expiresAt: "2028-01-01T00:00:00.000Z",
+      historicalReadCeilingPreserved: false,
+      operation: "REVOKE"
+    };
+
+    expect(Value.Check(CommandEffectSchema, rotateEffect)).toBe(true);
+    expect(Value.Check(CommandEffectSchema, revokeEffect)).toBe(true);
+    const { commandCeiling: _rotateCeiling, ...rotateWithoutCeiling } = rotateEffect;
+    expect(Value.Check(CommandEffectSchema, rotateWithoutCeiling)).toBe(false);
+    expect(Value.Check(CommandEffectSchema, { ...revokeEffect, historicalReadCeilingPreserved: true })).toBe(false);
+    expect(Value.Check(CommandEffectSchema, { ...revokeEffect, previousCommandCeiling: ["CREATE_ORDER"] })).toBe(false);
+  });
+});
+
+describe("Token list response schema", () => {
+  const baseToken = {
+    subjectId: "subject_agent",
+    displayName: "渠道同步账号",
+    id: "token_public_row",
+    label: "房态同步",
+    property_scope: "property_green",
+    expires_at: "2030-01-01T00:00:00.000Z",
+    revoked_at: null,
+    rotated_from_id: null,
+    replaced_by_id: null,
+    created_at: "2026-09-01T00:00:00.000Z"
+  };
+
+  it("requires both executable and persisted ceilings plus the server-owned historical read flag", () => {
+    const response = {
+      tokens: [{
+        ...baseToken,
+        access_ceiling: "WRITE",
+        commandCeiling: ["REPRICE_ORDER"],
+        persistedCommandCeiling: ["REPRICE_ORDER", "PLACE_INTERNAL_USE"],
+        historicalReadCeilingPreserved: true
+      }]
+    };
+
+    expect(Value.Check(TokensResponseSchema, response)).toBe(true);
+    expect(Value.Check(TokensResponseSchema, {
+      tokens: [{
+        ...baseToken,
+        access_ceiling: "WRITE",
+        commandCeiling: ["REPRICE_ORDER"],
+        persistedCommandCeiling: ["REPRICE_ORDER", "PLACE_INTERNAL_USE"]
+      }]
+    })).toBe(false);
+    expect(Value.Check(TokensResponseSchema, {
+      tokens: [{
+        ...baseToken,
+        access_ceiling: "WRITE",
+        commandCeiling: ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS"],
+        persistedCommandCeiling: ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS"],
+        historicalReadCeilingPreserved: true
+      }]
+    })).toBe(false);
+    expect(Value.Check(TokensResponseSchema, {
+      tokens: [{
+        ...response.tokens[0],
+        rawCommandType: "REPRICE_ORDER"
+      }]
+    })).toBe(false);
+  });
+
+  it("requires READ Token rows to have empty executable and persisted ceilings", () => {
+    const readRow = {
+      ...baseToken,
+      access_ceiling: "READ",
+      commandCeiling: [],
+      persistedCommandCeiling: [],
+      historicalReadCeilingPreserved: false
+    };
+
+    expect(Value.Check(TokensResponseSchema, { tokens: [readRow] })).toBe(true);
+    expect(Value.Check(TokensResponseSchema, {
+      tokens: [{ ...readRow, commandCeiling: ["REPRICE_ORDER"] }]
+    })).toBe(false);
+    expect(Value.Check(TokensResponseSchema, {
+      tokens: [{ ...readRow, persistedCommandCeiling: ["PLACE_INTERNAL_USE"] }]
+    })).toBe(false);
+    expect(Value.Check(TokensResponseSchema, {
+      tokens: [{ ...readRow, historicalReadCeilingPreserved: true }]
+    })).toBe(false);
+  });
+});
+
 describe("stay-to-membership conversion command schema", () => {
   const envelope = {
     commandType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
@@ -544,7 +759,7 @@ describe("complete-overdue-reserved-stay receipt schema", () => {
   });
 });
 
-describe("room-status order arrival date schema", () => {
+describe("room-status original order date schema", () => {
   const interval = {
     id: "interval_test",
     displayInventoryUnitId: "unit_test",
@@ -575,10 +790,21 @@ describe("room-status order arrival date schema", () => {
     allowedActions: []
   };
 
-  it("accepts an optional local-date value on intervals and operational tasks", () => {
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const validateInterval = ajv.compile(RoomStatusIntervalSchema);
+  const validateTask = ajv.compile(RoomStatusOperationalTaskSchema);
+
+  it("accepts omitted or paired local dates and rejects either original order date alone", () => {
     expect(Value.Check(RoomStatusIntervalSchema, interval)).toBe(true);
     expect(Value.Check(RoomStatusIntervalSchema, { ...interval, attention: "ARREARS" })).toBe(true);
-    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, orderArrivalDate: "2026-08-09" })).toBe(true);
+    expect(validateInterval({
+      ...interval,
+      orderArrivalDate: "2026-08-09",
+      orderDepartureDate: "2026-08-12"
+    })).toBe(true);
+    expect(validateInterval({ ...interval, orderArrivalDate: "2026-08-09" })).toBe(false);
+    expect(validateInterval({ ...interval, orderDepartureDate: "2026-08-12" })).toBe(false);
     expect(Value.Check(RoomStatusIntervalSchema, { ...interval, sourceCategory: "CTRIP" })).toBe(true);
     expect(Value.Check(RoomStatusIntervalSchema, {
       ...interval,
@@ -587,12 +813,19 @@ describe("room-status order arrival date schema", () => {
       freeStayCategoryCode: "VOLUNTEER",
       freeStayReason: "义工住宿"
     })).toBe(true);
-    expect(Value.Check(RoomStatusOperationalTaskSchema, {
+    expect(validateTask({
+      ...interval,
+      orderArrivalDate: "2026-08-09",
+      orderDepartureDate: "2026-08-12",
+      taskKind: "ARRIVAL",
+      businessDate: "2026-08-10"
+    })).toBe(true);
+    expect(validateTask({
       ...interval,
       orderArrivalDate: "2026-08-09",
       taskKind: "ARRIVAL",
       businessDate: "2026-08-10"
-    })).toBe(true);
+    })).toBe(false);
   });
 
   it("requires explicit lodging source metadata and rejects unknown source categories", () => {
@@ -629,7 +862,8 @@ describe("room-status order arrival date schema", () => {
     expect(Value.Check(RoomStatusIntervalSchema, {
       ...interval,
       operationalAttention: "OVERDUE_RESERVED",
-      orderArrivalDate: "2026-08-09"
+      orderArrivalDate: "2026-08-09",
+      orderDepartureDate: "2026-08-12"
     })).toBe(true);
     expect(Value.Check(RoomStatusIntervalSchema, { ...interval, operationalAttention: "LATE" })).toBe(false);
     expect(Value.Check(RoomStatusOperationalTaskSchema, {
@@ -640,10 +874,15 @@ describe("room-status order arrival date schema", () => {
   });
 
   it("rejects a non-local-date order arrival value", () => {
-    expect(Value.Check(RoomStatusIntervalSchema, { ...interval, orderArrivalDate: "2026/08/09" })).toBe(false);
-    expect(Value.Check(RoomStatusOperationalTaskSchema, {
+    expect(validateInterval({
       ...interval,
       orderArrivalDate: "2026/08/09",
+      orderDepartureDate: "2026-08-12"
+    })).toBe(false);
+    expect(validateTask({
+      ...interval,
+      orderArrivalDate: "2026/08/09",
+      orderDepartureDate: "2026-08-12",
       taskKind: "ARRIVAL",
       businessDate: "2026-08-10"
     })).toBe(false);

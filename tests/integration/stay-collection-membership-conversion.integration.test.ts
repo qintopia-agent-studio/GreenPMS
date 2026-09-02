@@ -11,6 +11,7 @@ import {
 import { sql, type Kysely, type Transaction } from "kysely";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.STAY_COLLECTION_MEMBERSHIP_CONVERSION_DATABASE_URL
@@ -21,8 +22,9 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
+const ordinaryCommandGrants = principal.propertyCommandGrants.get(demo.propertyId)!;
 
 const products = {
   sharedSingle: "membership_product_shared_bath_single_v1",
@@ -61,6 +63,10 @@ function shiftDate(value: string, days: number): string {
 
 async function preview(envelope: CommandEnvelope, prefix: string) {
   return createCommandPreview(db, principal, envelope, metadata(`${prefix}-preview`));
+}
+
+async function writableOrderView(orderId: string) {
+  return getOrderView(db, orderId, "WRITE", ordinaryCommandGrants);
 }
 
 async function confirmPrepared(envelope: CommandEnvelope, prepared: Awaited<ReturnType<typeof preview>>, prefix: string): Promise<ReceiptDto> {
@@ -1728,7 +1734,7 @@ describe("4.7 stay collection conversion to membership", () => {
     });
 
     const before = await conversionRollbackSnapshot(stay.orderId, memberId);
-    const view = await getOrderView(db, stay.orderId);
+    const view = await writableOrderView(stay.orderId);
     expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
       .toMatchObject({ enabled: false, disabledReason: "NO_TRANSFERABLE_COLLECTION" });
     await expect(preview(conversionEnvelope({
@@ -1761,7 +1767,7 @@ describe("4.7 stay collection conversion to membership", () => {
     });
 
     const before = await conversionRollbackSnapshot(stay.orderId, memberId);
-    const view = await getOrderView(db, stay.orderId);
+    const view = await writableOrderView(stay.orderId);
     expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
       .toMatchObject({ enabled: false, disabledReason: "NO_TRANSFERABLE_COLLECTION" });
     await expect(preview(conversionEnvelope({
@@ -1793,7 +1799,7 @@ describe("4.7 stay collection conversion to membership", () => {
       code: "VALIDATION_ERROR",
       message: expect.stringContaining("外部渠道订单")
     });
-    let view = await getOrderView(db, externalStay.orderId);
+    let view = await writableOrderView(externalStay.orderId);
     expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
       .toMatchObject({ enabled: false, disabledReason: expect.stringContaining("外部渠道订单") });
 
@@ -1816,7 +1822,7 @@ describe("4.7 stay collection conversion to membership", () => {
         note: "Cashier A"
       }
     }, "mixed-cash-collection");
-    view = await getOrderView(db, mixedStay.orderId);
+    view = await writableOrderView(mixedStay.orderId);
     expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
       .toMatchObject({ enabled: false, disabledReason: "NO_TRANSFERABLE_COLLECTION" });
     await expect(preview(conversionEnvelope({
@@ -2431,7 +2437,7 @@ describe("4.7 stay collection conversion to membership", () => {
         }
       }, "net-recollect-collection-c");
 
-      const view = await getOrderView(db, stay.orderId);
+      const view = await writableOrderView(stay.orderId);
       expect(view.allowedActions.find((action) => action.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"))
         .toMatchObject({ enabled: true, disabledReason: null });
       const envelope = conversionEnvelope({
@@ -2846,7 +2852,10 @@ describe("4.7 stay collection conversion to membership", () => {
       await expect(withPropertyClockForTesting(new Date("2026-09-01T12:00:00.000Z"), () => preview({
         commandType: "REFRESH_MEMBER_COVERAGE",
         input: baseInput
-      }, "inhouse-converted-refresh"))).rejects.toMatchObject({ code: "INVALID_ORDER_STATE" });
+      }, "inhouse-converted-refresh"))).rejects.toMatchObject({
+        code: "INSUFFICIENT_ACCESS",
+        message: "Exact command grant is required"
+      });
       expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(23);
     });
 

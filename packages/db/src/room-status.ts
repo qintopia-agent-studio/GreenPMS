@@ -8,6 +8,7 @@ import {
   ROOM_STATUS_OPERATIONAL_TASK_LIMIT,
   roomStatusStatuses,
   type AccessLevel,
+  type CommandCapability,
   type RoomStatusActionCode,
   type RoomStatusActionDto,
   type RoomStatusAttention,
@@ -31,7 +32,7 @@ import {
   type RoomStatusStatus,
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
-import { enumerateServiceDates, stableHash, todayInTimeZone } from "@qintopia/domain";
+import { enumerateServiceDates, stableHash } from "@qintopia/domain";
 import {
   historicalProtocolEpochMigration,
   legacyEffectProtocol,
@@ -39,6 +40,7 @@ import {
   pricingCashLineTotalMinor
 } from "./historical-command-protocol.ts";
 import { projectOrderLifecycle } from "./orders.ts";
+import { propertyLocalClockAt } from "./members.ts";
 import type { Database } from "./schema.ts";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -53,6 +55,7 @@ interface ProjectionEvent {
   sourceStartDate: string;
   sourceEndDate: string;
   orderArrivalDate?: string;
+  orderDepartureDate?: string;
   sourceKey: string;
   sourceKind: RoomStatusSourceKind;
   sourceCategory?: RoomStatusSourceCategory | null;
@@ -267,6 +270,9 @@ function operationalAttentionForOrder(order: {
   if (order.orderStatus === "CHECKED_IN" && order.stayStatus === "IN_HOUSE" && order.departureDate < businessDate) {
     return "OVERDUE_IN_HOUSE";
   }
+  if (order.orderStatus === "CHECKED_IN" && order.stayStatus === "IN_HOUSE" && order.departureDate === businessDate) {
+    return "DUE_OUT";
+  }
   return null;
 }
 
@@ -380,10 +386,27 @@ function uniqueActions(items: RoomStatusActionDto[]): RoomStatusActionDto[] {
   ])).values()];
 }
 
+function roomStatusActionGrant(actionCode: RoomStatusActionCode): CommandCapability | null {
+  if (actionCode === "OPEN_ORDER") return null;
+  if (actionCode === "CREATE_FREE_STAY" || actionCode === "BACKFILL_ORDER") return "CREATE_ORDER";
+  return actionCode as CommandCapability;
+}
+
+export function roomStatusActionGranted(
+  actionCode: RoomStatusActionCode,
+  commandGrants: ReadonlySet<CommandCapability | string> | undefined
+): boolean {
+  if (actionCode === "COMPLETE_CLEANING" && !currentReleaseFeatures.cleaningWorkflow) return false;
+  const grant = roomStatusActionGrant(actionCode);
+  if (!grant) return true;
+  return commandGrants ? commandGrants.has(grant) : false;
+}
+
 function createActions(
   unit: RoomStatusUnitDto,
   accessLevel: AccessLevel,
-  availability: { currentOrFuture: boolean; historicalBlank: boolean }
+  availability: { currentOrFuture: boolean; historicalBlank: boolean },
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
 ): RoomStatusActionDto[] {
   if (accessLevel !== "WRITE" || !unit.active) return [];
   const target = reference("INVENTORY_UNIT", unit.id, unit.code);
@@ -394,23 +417,35 @@ function createActions(
       action("LOCK_MAINTENANCE", target)
     ] : []),
     ...(availability.historicalBlank ? [action("BACKFILL_ORDER", target)] : [])
-  ];
+  ].filter((candidate) => roomStatusActionGranted(candidate.code, commandGrants));
 }
 
-function eventActions(event: ProjectionEvent, accessLevel: AccessLevel): RoomStatusActionDto[] {
+function eventActions(
+  event: ProjectionEvent,
+  accessLevel: AccessLevel,
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
+): RoomStatusActionDto[] {
   if (event.status === "UNKNOWN") return [];
   if ((event.sourceKind === "ORDER" || event.sourceKind === "FREE_STAY")) {
     const order = event.references.find((item) => item.type === "ORDER");
     return order ? [action("OPEN_ORDER", order)] : [];
   }
   if (accessLevel !== "WRITE" || !event.current || !event.targetReference) return [];
-  if (event.sourceKind === "MAINTENANCE") return [action("RELEASE_MAINTENANCE", event.targetReference, true)];
-  if (event.sourceKind === "CLEANING") return [action("COMPLETE_CLEANING", event.targetReference)];
+  if (event.sourceKind === "MAINTENANCE") return [action("RELEASE_MAINTENANCE", event.targetReference, true)]
+    .filter((candidate) => roomStatusActionGranted(candidate.code, commandGrants));
+  if (event.sourceKind === "CLEANING") return [action("COMPLETE_CLEANING", event.targetReference)]
+    .filter((candidate) => roomStatusActionGranted(candidate.code, commandGrants));
   return [];
 }
 
-function intervalActions(event: ProjectionEvent, accessLevel: AccessLevel, startDate: string, endDate: string): RoomStatusActionDto[] {
-  return eventActions(event, accessLevel).map((candidate) => candidate.requiresFullInterval
+function intervalActions(
+  event: ProjectionEvent,
+  accessLevel: AccessLevel,
+  startDate: string,
+  endDate: string,
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
+): RoomStatusActionDto[] {
+  return eventActions(event, accessLevel, commandGrants).map((candidate) => candidate.requiresFullInterval
     && candidate.code !== "RELEASE_MAINTENANCE"
     && (startDate !== event.sourceStartDate || endDate !== event.sourceEndDate)
     ? {
@@ -484,7 +519,8 @@ function attachCommandProjection(event: ProjectionEvent, commands: Map<string, C
 function operationalTaskFromSeed(
   seed: OperationalTaskSeed,
   commands: Map<string, CommandProjection>,
-  accessLevel: AccessLevel
+  accessLevel: AccessLevel,
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
 ): RoomStatusOperationalTaskDto {
   const event = attachCommandProjection(seed.event, commands);
   const task: RoomStatusOperationalTaskDto = {
@@ -499,6 +535,7 @@ function operationalTaskFromSeed(
     sourceStartDate: event.sourceStartDate,
     sourceEndDate: event.sourceEndDate,
     ...(event.orderArrivalDate ? { orderArrivalDate: event.orderArrivalDate } : {}),
+    ...(event.orderDepartureDate ? { orderDepartureDate: event.orderDepartureDate } : {}),
     status: event.status,
     attention: event.attention,
     operationalAttention: event.operationalAttention,
@@ -519,7 +556,7 @@ function operationalTaskFromSeed(
     references: uniqueReferences(event.references),
     conflicts: [],
     history: uniqueHistories(event.histories),
-    allowedActions: eventActions(event, accessLevel)
+    allowedActions: eventActions(event, accessLevel, commandGrants)
   };
   const conflict = conflictFor(task, event.blockingFactKind, {
     startDate: seed.businessDate,
@@ -537,6 +574,8 @@ function intervalGroupKey(event: ProjectionEvent, displayInventoryUnitId: string
     event.sourceCategory ?? "no-source-category",
     event.freeStayCategoryCode ?? "no-free-stay-category",
     event.freeStayReason ?? "no-free-stay-reason",
+    event.orderArrivalDate ?? "no-order-arrival",
+    event.orderDepartureDate ?? "no-order-departure",
     event.sourceKey,
     event.status,
     event.attention ?? "no-attention",
@@ -577,7 +616,7 @@ function conflictFor(
   }
   const sourceReference = blockingFactKind === "UNIT_UNSELLABLE"
     ? interval.references.find((item) => item.type === "INVENTORY_UNIT")
-    : blockingFactKind === "LODGING_ORDER" || blockingFactKind === "OVERDUE_IN_HOUSE"
+    : blockingFactKind === "DUE_OUT" || blockingFactKind === "LODGING_ORDER" || blockingFactKind === "OVERDUE_IN_HOUSE"
       ? interval.references.find((item) => item.type === "ORDER")
       : interval.references.find((item) => item.type !== "CLAIM")
         ?? interval.references.find((item) => item.type === "CLAIM");
@@ -619,7 +658,8 @@ function buildIntervals(
   events: ProjectionEvent[],
   unitsById: Map<string, RoomStatusUnitDto>,
   displayUnitsById: Map<string, RoomStatusUnitDto>,
-  accessLevel: AccessLevel
+  accessLevel: AccessLevel,
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
 ): BuiltIntervals {
   const expanded = events.flatMap((event) => {
     const actual = unitsById.get(event.actualInventoryUnitId);
@@ -679,6 +719,7 @@ function buildIntervals(
       sourceStartDate: builder.event.sourceStartDate,
       sourceEndDate: builder.event.sourceEndDate,
       ...(builder.event.orderArrivalDate ? { orderArrivalDate: builder.event.orderArrivalDate } : {}),
+      ...(builder.event.orderDepartureDate ? { orderDepartureDate: builder.event.orderDepartureDate } : {}),
       status: builder.event.status,
       attention: builder.event.attention,
       operationalAttention: builder.event.operationalAttention,
@@ -699,7 +740,7 @@ function buildIntervals(
       references: uniqueReferences(builder.references),
       conflicts: [],
       history: uniqueHistories(builder.histories),
-      allowedActions: intervalActions(builder.event, accessLevel, builder.startDate, endDate)
+      allowedActions: intervalActions(builder.event, accessLevel, builder.startDate, endDate, commandGrants)
     };
     const conflict = conflictFor(interval, builder.event.blockingFactKind);
     if (conflict) interval.conflicts.push(conflict);
@@ -1016,7 +1057,8 @@ function assembleUnit(
   intervals: RoomStatusIntervalDto[],
   claimIdsByIntervalAndDate: Map<string, Map<string, string[]>>,
   accessLevel: AccessLevel,
-  businessDate: string
+  businessDate: string,
+  commandGrants?: ReadonlySet<CommandCapability | string>
 ): RoomStatusUnitDto {
   const unitConflicts = intervals.flatMap((interval) => interval.conflicts);
   const days = dates.map((serviceDate) => {
@@ -1050,7 +1092,7 @@ function assembleUnit(
           && day.status === "AVAILABLE"
           && day.intervalIds.length === 0
           && day.conflicts.length === 0)
-      }),
+      }, commandGrants),
       ...intervals.flatMap((interval) => interval.allowedActions)
     ])
   };
@@ -1139,6 +1181,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
   arrivalDate: string;
   departureDate: string;
   accessLevel: AccessLevel;
+  commandGrants: ReadonlySet<CommandCapability | string>;
   requestingSubjectId: string;
   page?: number;
   pageSize?: number;
@@ -1173,7 +1216,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
     const asOf = iso(property.as_of);
     const freshUntil = new Date(new Date(asOf).getTime() + 5_000).toISOString();
-    const businessDate = todayInTimeZone(property.timezone, new Date(asOf));
+    const businessDate = propertyLocalClockAt(property.timezone, new Date(asOf)).date;
 
     const inventoryRows = await trx.selectFrom("inventory_units")
       .selectAll()
@@ -1292,6 +1335,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       const taskReason = [
         exceptionReason,
         sourceMetadataDamageReason,
+        departureDayInHouse ? `计划退房日 ${businessDate}，订单仍待办理退房` : null,
         freeStayReason ? `免费入住原因：${freeStayReason}` : null
       ].filter(Boolean).join("；") || null;
       const projectedOccupants = operationalOccupantsByOrder.get(order.order_id) ?? [];
@@ -1302,6 +1346,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         sourceStartDate: order.order_arrival_date,
         sourceEndDate: order.order_departure_date,
         orderArrivalDate: order.order_arrival_date,
+        orderDepartureDate: order.order_departure_date,
         sourceKey: `order-task:${order.order_id}:${taskKind}`,
         sourceKind,
         ...orderSourceFields,
@@ -1323,14 +1368,16 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         reason: taskReason,
         blocking,
         current: true,
-        blockingFactKind: claimId
+        blockingFactKind: departureDayInHouse && lifecycleConsistent && !sourceMetadataDamaged
+          ? "DUE_OUT"
+          : claimId
             ? "CLAIM"
             : blocking
               ? "LODGING_ORDER"
               : null,
-        claimId: claimId ?? null,
+        claimId: departureDayInHouse ? null : claimId ?? null,
         references: [
-          ...(claimId ? [reference("CLAIM", claimId, `Claim ${claimId}`)] : []),
+          ...(!departureDayInHouse && claimId ? [reference("CLAIM", claimId, `Claim ${claimId}`)] : []),
           orderRef,
           reference("STAY", order.stay_id, `Stay ${order.stay_id}`),
           reference("INVENTORY_UNIT", segment.inventory_unit_id, `${segment.unit_code} · ${segment.unit_name}`)
@@ -1348,7 +1395,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         targetReference: orderRef,
         orderId: order.order_id
       };
-      if (!missingCurrentClaim && lifecycleConsistent) {
+      if (!missingCurrentClaim && lifecycleConsistent && !sourceMetadataDamaged) {
         operationalTaskSeeds.push({
           taskKind,
           businessDate,
@@ -1363,7 +1410,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceStartDate: businessDate,
           sourceEndDate: dateAfter(businessDate),
           sourceKey: `departure-day-in-house:${order.order_id}:${businessDate}`,
-          blockingFactKind: "LODGING_ORDER",
+          blockingFactKind: lifecycleConsistent && !sourceMetadataDamaged ? "DUE_OUT" : "LODGING_ORDER",
           claimId: null,
           references: taskEvent.references.filter((item) => item.type !== "CLAIM")
         });
@@ -2322,6 +2369,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
             sourceStartDate: projectedRun?.startDate ?? row.segment_arrival_date!,
             sourceEndDate: projectedRun?.endDate ?? row.segment_departure_date!,
             orderArrivalDate: row.order_arrival_date!,
+            orderDepartureDate: row.order_departure_date!,
             sourceKey: projectedRun?.sourceKey ?? `completed:${row.order_id}:${row.segment_id}`,
             sourceKind,
             ...sourceFields,
@@ -2387,6 +2435,17 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         const occupantLabel = projectedOccupants[0]?.nickname ?? primaryOccupantLabel(row.primary_guest_snapshot);
         const projectedRun = activeOrderRunByClaimId.get(row.claim_id);
         if (!projectedRun) partial = true;
+        const projectedOperationalAttention = activeDisplayable
+          ? operationalAttentionForOrder({
+            orderStatus: row.order_status!,
+            stayStatus: row.stay_status!,
+            arrivalDate: row.order_arrival_date!,
+            departureDate: row.order_departure_date!
+          }, businessDate)
+          : null;
+        const claimOperationalAttention = projectedOperationalAttention === "DUE_OUT"
+          ? null
+          : projectedOperationalAttention;
         events.push(projectActiveReservedArrearsEvent({
           actualInventoryUnitId: row.inventory_unit_id,
           roomId: row.room_id,
@@ -2394,19 +2453,13 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           sourceStartDate: projectedRun?.startDate ?? row.segment_arrival_date!,
           sourceEndDate: projectedRun?.endDate ?? row.segment_departure_date!,
           orderArrivalDate: row.order_arrival_date!,
+          orderDepartureDate: row.order_departure_date!,
           sourceKey: projectedRun?.sourceKey ?? `segment:${row.segment_id}`,
           sourceKind,
           ...orderSourceFields,
           status: activeDisplayable ? status : "UNKNOWN",
           attention: null,
-          operationalAttention: activeDisplayable
-            ? operationalAttentionForOrder({
-              orderStatus: row.order_status!,
-              stayStatus: row.stay_status!,
-              arrivalDate: row.order_arrival_date!,
-              departureDate: row.order_departure_date!
-            }, businessDate)
-            : null,
+          operationalAttention: claimOperationalAttention,
           label: `${sourceKind === "FREE_STAY" ? "免费入住" : "订单"} ${row.order_id}`,
           primaryOccupantLabel: activeDisplayable ? occupantLabel : null,
           occupants: activeDisplayable ? projectedOccupants : [],
@@ -2710,7 +2763,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       && (isHiddenCurrentBlockingFact(event)
         || ((event.serviceDate === businessDate || event.sourceKind === "CLEANING" && event.serviceDate < businessDate)
           && (event.sourceKind !== "ORDER" && event.sourceKind !== "FREE_STAY" || event.status === "UNKNOWN"))));
-    const builtIntervals = buildIntervals(gridEvents, unitsById, displayUnitsById, options.accessLevel);
+    const builtIntervals = buildIntervals(gridEvents, unitsById, displayUnitsById, options.accessLevel, options.commandGrants);
     const builtBedOccupancies = buildBedOccupancies(gridEvents, unitsById, displayUnitsById, dates);
     const builtBedSlotStates = buildBedSlotStates(gridEvents, displayUnitsById, dates, businessDate);
     if (builtBedOccupancies.partial) partial = true;
@@ -2720,14 +2773,14 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       event
     ])).values()];
     const sortedOperationalTasks: RoomStatusOperationalTaskDto[] = [
-      ...taskSeedsWithAmendments.map((seed) => operationalTaskFromSeed(seed, commandProjections, options.accessLevel)),
+      ...taskSeedsWithAmendments.map((seed) => operationalTaskFromSeed(seed, commandProjections, options.accessLevel, options.commandGrants)),
       ...uniqueTaskExceptionEvents.map((event) => operationalTaskFromSeed({
         taskKind: "EXCEPTION",
         businessDate,
         startDate: event.sourceStartDate,
         endDate: event.sourceEndDate,
         event
-      }, new Map(), options.accessLevel))
+      }, new Map(), options.accessLevel, options.commandGrants))
     ].sort((left, right) => left.taskKind.localeCompare(right.taskKind)
       || left.startDate.localeCompare(right.startDate)
       || left.id.localeCompare(right.id));
@@ -2746,7 +2799,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       const children = childUnitIds.map((childId) => {
         const child = displayUnitsById.get(childId)!;
         return assembleUnit(child, dates, builtIntervals.byUnit.get(child.id) ?? [],
-          builtIntervals.claimIdsByIntervalAndDate, options.accessLevel, businessDate);
+          builtIntervals.claimIdsByIntervalAndDate, options.accessLevel, businessDate, options.commandGrants);
       });
       return {
         ...assembleUnit(
@@ -2755,7 +2808,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           builtIntervals.byUnit.get(baseRoom.id) ?? [],
           builtIntervals.claimIdsByIntervalAndDate,
           options.accessLevel,
-          businessDate
+          businessDate,
+          options.commandGrants
         ),
         bedOccupancies: builtBedOccupancies.byRoom.get(baseRoom.id) ?? [],
         bedSlotStates: builtBedSlotStates.byRoom.get(baseRoom.id) ?? [],

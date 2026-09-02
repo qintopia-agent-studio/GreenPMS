@@ -11,6 +11,7 @@ import {
 } from "@qintopia/db";
 import type { Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
 
 const principal: AuthPrincipal = {
@@ -18,7 +19,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 let db: Kysely<Database>;

@@ -22,6 +22,7 @@ import {
   withPurgedIsolatedAcceptanceDatabase,
   withExclusiveAcceptanceWriterGate
 } from "../../scripts/purge-local-acceptance-business-data.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetE2eDatabase } from "./reset-database.ts";
 
 const defaultDatabaseUrl = process.env.ROOM_STATUS_VISUAL_DATABASE_URL
@@ -33,7 +34,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Room-status Visual Acceptance Setup",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 const backfillReason = "统一房态视觉人工验收模拟数据";
@@ -108,6 +109,7 @@ export interface RoomStatusVisualAcceptanceFixture {
     emptyBedCode: "105-B";
   };
   kingTwoGuestsInHouse: VisualStayFixture;
+  dueOutWhole: VisualStayFixture;
   overdueWholeTwoGuests: VisualStayFixture;
   paidOverdueReserved: VisualStayFixture;
   emptyRoomCode: "D05";
@@ -172,6 +174,11 @@ export const visualAcceptanceScenarioDefinitions = {
     roomCode: "105",
     emptyBedCode: "105-B",
     expected: "A 为橙色预订块，B 为空心块；A 床位行不显示比例，父房显示 1/2"
+  },
+  dueOutWhole: {
+    unitCode: "A04",
+    roomCode: "A04",
+    expected: "原订单日期保持不变并显示待退房，当日继续阻断且不伪造成今天至明天直订订单"
   }
 } as const;
 
@@ -469,6 +476,7 @@ async function verifyFixtureOrders(db: Kysely<Database>, fixtures: RoomStatusVis
     [fixtures.debtExclusions.memberCovered, "RESERVED"],
     [fixtures.twoBedSplit.reserved, "RESERVED"],
     [fixtures.kingTwoGuestsInHouse, "CHECKED_IN"],
+    [fixtures.dueOutWhole, "CHECKED_IN"],
     [fixtures.overdueWholeTwoGuests, "CHECKED_IN"],
     [fixtures.paidOverdueReserved, "RESERVED"]
   ] as const;
@@ -733,6 +741,18 @@ export async function prepareRoomStatusVisualAcceptance(
       collection: "FULL"
     });
 
+    const dueOutWhole = await createStay(db, {
+      key: `${suffix}-a04-due-out`,
+      unitCode: visualAcceptanceScenarioDefinitions.dueOutWhole.unitCode,
+      arrivalDate: at(-2),
+      departureDate: businessDate,
+      nicknames: ["待退房样例"],
+      creationMode: "STANDARD",
+      collection: "FULL",
+      creationClockDate: at(-2)
+    });
+    await checkInAtArrival(db, dueOutWhole, `${suffix}-a04-due-out`);
+
     const overdueWholeTwoGuests = await createStay(db, {
       key: `${suffix}-104-overdue-in-house`,
       unitCode: "104",
@@ -856,6 +876,13 @@ export async function prepareRoomStatusVisualAcceptance(
         expected: "蓝色整房块，两个昵称，显示 2/1"
       },
       {
+        id: "due-out-in-house",
+        roomCode: visualAcceptanceScenarioDefinitions.dueOutWhole.roomCode,
+        from: dueOutWhole.arrivalDate,
+        toExclusive: dueOutWhole.departureDate,
+        expected: visualAcceptanceScenarioDefinitions.dueOutWhole.expected
+      },
+      {
         id: "overdue-in-house",
         roomCode: overdueWholeTwoGuests.unitCode,
         from: overdueWholeTwoGuests.arrivalDate,
@@ -919,6 +946,7 @@ export async function prepareRoomStatusVisualAcceptance(
         emptyBedCode: visualAcceptanceScenarioDefinitions.twoBedSplit.emptyBedCode
       },
       kingTwoGuestsInHouse,
+      dueOutWhole,
       overdueWholeTwoGuests,
       paidOverdueReserved,
       emptyRoomCode: "D05",

@@ -126,10 +126,22 @@ function isLodgingInterval(interval: RoomStatusIntervalDto): boolean {
     && lodgingStatuses.has(interval.status);
 }
 
+export function roomStatusIntervalBusinessPeriod(
+  interval: Pick<RoomStatusIntervalDto,
+    "sourceKind" | "sourceStartDate" | "sourceEndDate" | "orderArrivalDate" | "orderDepartureDate">
+): { arrivalDate: string; departureDate: string } {
+  const lodging = interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY";
+  return {
+    arrivalDate: lodging ? interval.orderArrivalDate ?? interval.sourceStartDate : interval.sourceStartDate,
+    departureDate: lodging ? interval.orderDepartureDate ?? interval.sourceEndDate : interval.sourceEndDate
+  };
+}
+
 export function roomStatusOrderIdentityForInterval(interval: RoomStatusIntervalDto): RoomStatusOrderIdentity | null {
   if (!isLodgingInterval(interval)) return null;
   const orderId = stableReferenceId(interval, "ORDER");
   const stayId = stableReferenceId(interval, "STAY");
+  const businessPeriod = roomStatusIntervalBusinessPeriod(interval);
   return orderId && stayId ? {
     orderId,
     stayId,
@@ -137,8 +149,8 @@ export function roomStatusOrderIdentityForInterval(interval: RoomStatusIntervalD
     unitId: interval.actualInventoryUnitId,
     intervalStartDate: interval.startDate,
     intervalEndDate: interval.endDate,
-    arrivalDate: interval.sourceStartDate,
-    departureDate: interval.sourceEndDate
+    arrivalDate: businessPeriod.arrivalDate,
+    departureDate: businessPeriod.departureDate
   } : null;
 }
 
@@ -159,6 +171,7 @@ export function roomStatusOrderIdentityForDate(
 export interface RoomStatusOrderOption {
   identity: RoomStatusOrderIdentity;
   label: string;
+  operationalAttention: RoomStatusIntervalDto["operationalAttention"];
   source: {
     sourceKind: Extract<RoomStatusSourceKind, "ORDER" | "FREE_STAY">;
     sourceCategory: RoomStatusSourceCategory | null;
@@ -196,6 +209,7 @@ function roomStatusOrderOptions(
     options.push({
       identity,
       label: occupantLabel,
+      operationalAttention: interval.operationalAttention,
       source: {
         sourceKind: interval.sourceKind as Extract<RoomStatusSourceKind, "ORDER" | "FREE_STAY">,
         sourceCategory: interval.sourceCategory,
@@ -250,9 +264,19 @@ export function roomStatusOrderOptionsForSelection(
 
 export function createRoomStatusOrderReturnState(
   propertyId: string,
-  identity: Pick<RoomStatusOrderIdentity, "orderId" | "stayId" | "arrivalDate">,
+  identity: Pick<RoomStatusOrderIdentity, "orderId" | "stayId" | "arrivalDate" | "departureDate">,
   triggerDate?: string
 ): RoomStatusOrderReturnState {
+  const requestedTriggerDate = triggerDate && isIsoLocalDate(triggerDate) ? triggerDate : identity.arrivalDate;
+  const triggerDateInStay = isIsoLocalDate(identity.arrivalDate)
+    && isIsoLocalDate(identity.departureDate)
+    && identity.arrivalDate < identity.departureDate
+    ? requestedTriggerDate < identity.arrivalDate
+      ? identity.arrivalDate
+      : requestedTriggerDate >= identity.departureDate
+        ? addLocalDateDays(identity.departureDate, -1)
+        : requestedTriggerDate
+    : requestedTriggerDate;
   return {
     fromRoomStatus: true,
     roomStatusOrderReturn: {
@@ -260,7 +284,7 @@ export function createRoomStatusOrderReturnState(
       propertyId,
       orderId: identity.orderId,
       stayId: identity.stayId,
-      triggerDate: triggerDate && isIsoLocalDate(triggerDate) ? triggerDate : identity.arrivalDate
+      triggerDate: triggerDateInStay
     }
   };
 }
@@ -452,6 +476,8 @@ export function roomStatusFactFingerprint(
       endDate: interval.endDate,
       sourceStartDate: interval.sourceStartDate,
       sourceEndDate: interval.sourceEndDate,
+      orderArrivalDate: interval.orderArrivalDate ?? null,
+      orderDepartureDate: interval.orderDepartureDate ?? null,
       status: interval.status,
       attention: interval.attention,
       operationalAttention: interval.operationalAttention,

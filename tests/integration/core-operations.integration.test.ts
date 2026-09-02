@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthPrincipal, CommandEnvelope, ReceiptDto } from "@qintopia/contracts";
 import { confirmCommandPreview, createCommandPreview, findCommandResult, getOrderView, listAvailability, loadActiveStayTimeline, loadOrderContext, propertyLocalToday, type Database } from "@qintopia/db";
-import { newOpaqueSecret } from "@qintopia/domain";
+import { newId, newOpaqueSecret } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
 
 let db: Kysely<Database>;
@@ -17,7 +18,15 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
+};
+
+const administratorPrincipal: AuthPrincipal = {
+  subjectId: demo.administratorSubjectId,
+  credentialId: "token_demo_admin_write",
+  credentialType: "TOKEN",
+  displayName: "Demo Administrator",
+  ...authScope({ profile: "administrator" })
 };
 
 let sequence = 0;
@@ -45,8 +54,12 @@ function testPricingPolicyForDates(arrivalDate: string, departureDate: string): 
 }
 
 async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Promise<ReceiptDto> {
-  const preview = await createCommandPreview(db, principal, envelope, metadata(`${prefix}-preview`));
-  return confirmCommandPreview(db, principal, preview.preview.previewId, {
+  return previewAndConfirmAs(principal, envelope, prefix);
+}
+
+async function previewAndConfirmAs(actor: AuthPrincipal, envelope: CommandEnvelope, prefix: string): Promise<ReceiptDto> {
+  const preview = await createCommandPreview(db, actor, envelope, metadata(`${prefix}-preview`));
+  return confirmCommandPreview(db, actor, preview.preview.previewId, {
     propertyId: envelope.input.propertyId as string,
     commandType: envelope.commandType,
     confirmation: true,
@@ -55,6 +68,37 @@ async function previewAndConfirm(envelope: CommandEnvelope, prefix: string): Pro
       ? { code: "CREATE_STANDARD_ORDER", note: "" }
       : { code: "AUTOMATED_ACCEPTANCE", note: "Database integration acceptance" }
   }, metadata(`${prefix}-confirm`));
+}
+
+async function availableEntitlementBalance(lotId: string): Promise<number> {
+  const row = await db.selectFrom("entitlement_lots")
+    .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
+    .select([
+      "entitlement_lots.total_units",
+      sql<number>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as integer)`.as("ledger_delta")
+    ])
+    .where("entitlement_lots.id", "=", lotId)
+    .groupBy("entitlement_lots.total_units")
+    .executeTakeFirstOrThrow();
+  return row.total_units + Number(row.ledger_delta);
+}
+
+async function balanceCorrectionEnvelope(lotId: string, delta: number, adjustmentReason: string): Promise<CommandEnvelope> {
+  const availableBefore = await availableEntitlementBalance(lotId);
+  return {
+    commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+    input: {
+      propertyId: demo.propertyId,
+      entitlementLotId: lotId,
+      expectedAvailableBalance: availableBefore,
+      targetAvailableBalance: availableBefore + delta,
+      adjustmentReason
+    }
+  };
+}
+
+async function correctEntitlementBalance(lotId: string, delta: number, prefix: string, adjustmentReason: string): Promise<ReceiptDto> {
+  return previewAndConfirm(await balanceCorrectionEnvelope(lotId, delta, adjustmentReason), prefix);
 }
 
 async function quote(unitId: string, options: { member?: boolean; stayType?: "TRANSIENT" | "FREE"; arrival?: string; departure?: string } = {}) {
@@ -313,18 +357,10 @@ describe("PostgreSQL core operations", () => {
     const orderId = created.result!.orderId as string;
     expect((await getOrderView(db, orderId)).coverageSet.filter((item) => item.status === "HELD")).toHaveLength(2);
 
+    await correctEntitlementBalance(demo.roomLotId, 1, "reprice-coverage-adjust", "Cover the third service date");
     await previewAndConfirm({
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: {
-        propertyId: demo.propertyId,
-        entitlementLotId: demo.roomLotId,
-        quantityDelta: 1,
-        adjustmentReason: "Cover the third service date"
-      }
-    }, "reprice-coverage-adjust");
-    await previewAndConfirm({
-      commandType: "REFRESH_MEMBER_COVERAGE",
-      input: { propertyId: demo.propertyId, orderId }
+      commandType: "REPRICE_ORDER",
+      input: { propertyId: demo.propertyId, orderId, targetCurrentContractAmountMinor: 0 }
     }, "reprice-coverage-first");
 
     let activeCoverage = (await getOrderView(db, orderId)).coverageSet.filter((item) => item.status === "HELD");
@@ -344,8 +380,8 @@ describe("PostgreSQL core operations", () => {
     expect(balance.total_units + Number(balance.ledger_delta)).toBe(0);
 
     await previewAndConfirm({
-      commandType: "REFRESH_MEMBER_COVERAGE",
-      input: { propertyId: demo.propertyId, orderId }
+      commandType: "REPRICE_ORDER",
+      input: { propertyId: demo.propertyId, orderId, targetCurrentContractAmountMinor: 0 }
     }, "reprice-coverage-second");
     activeCoverage = (await getOrderView(db, orderId)).coverageSet.filter((item) => item.status === "HELD");
     expect(activeCoverage).toHaveLength(3);
@@ -426,10 +462,7 @@ describe("PostgreSQL core operations", () => {
     const shortenedDepartureDate = addDays(arrivalDate, 2);
     const departureDate = addDays(arrivalDate, 3);
     const returnedServiceDate = addDays(arrivalDate, 2);
-    await previewAndConfirm({
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 1, adjustmentReason: "Three-night re-hold acceptance" }
-    }, "rehold-adjust");
+    await correctEntitlementBalance(demo.roomLotId, 1, "rehold-adjust", "Three-night re-hold acceptance");
     const created = await createOrder(demo.roomId, "rehold", {
       member: true,
       arrival: arrivalDate,
@@ -503,10 +536,8 @@ describe("PostgreSQL core operations", () => {
       commandType: "CREATE_ORDER",
       input: { propertyId: demo.propertyId, quoteId: priced.quoteId, primaryGuest: { fullName: "Lock Order Guest", nickname: "Lock Guest" } }
     }, metadata("lock-order-create-preview"));
-    const adjustPreview = await createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 1, adjustmentReason: "Concurrent lock-order acceptance" }
-    }, metadata("lock-order-adjust-preview"));
+    const adjustEnvelope = await balanceCorrectionEnvelope(demo.roomLotId, 1, "Concurrent lock-order acceptance");
+    const adjustPreview = await createCommandPreview(db, principal, adjustEnvelope, metadata("lock-order-adjust-preview"));
     const outcomes = await within(Promise.allSettled([
       confirmCommandPreview(db, principal, createPreview.preview.previewId, {
         propertyId: demo.propertyId, commandType: "CREATE_ORDER",
@@ -514,7 +545,7 @@ describe("PostgreSQL core operations", () => {
         reason: { code: "CREATE_STANDARD_ORDER", note: "" }
       }, metadata("lock-order-create-confirm")),
       confirmCommandPreview(db, principal, adjustPreview.preview.previewId, {
-        propertyId: demo.propertyId, commandType: "ADJUST_MEMBER_ENTITLEMENT",
+        propertyId: demo.propertyId, commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
         confirmation: true, expectedEffectHash: adjustPreview.preview.effectHash,
         reason: { code: "LOCK_ORDER_TEST", note: "Adjust entitlement concurrently" }
       }, metadata("lock-order-adjust-confirm"))
@@ -708,10 +739,7 @@ describe("PostgreSQL core operations", () => {
     const day3 = addDays(arrivalDate, 3);
     const shortenedDepartureDate = addDays(arrivalDate, 3);
     const departureDate = addDays(arrivalDate, 4);
-    await previewAndConfirm({
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 2, adjustmentReason: "Four-night timeline acceptance" }
-    }, "timeline-adjust");
+    await correctEntitlementBalance(demo.roomLotId, 2, "timeline-adjust", "Four-night timeline acceptance");
     const created = await createOrder(memberSourceUnitId, "timeline", { member: true, arrival: arrivalDate, departure: departureDate });
     const orderId = created.result!.orderId as string;
     await previewAndConfirm({
@@ -870,13 +898,14 @@ describe("PostgreSQL core operations", () => {
 
   it("issues, rotates, and revokes only self-bound narrowed tokens", async () => {
     const issuedSecret = newOpaqueSecret("qtp");
-    const issued = await previewAndConfirm({
+    const issued = await previewAndConfirmAs(administratorPrincipal, {
       commandType: "ISSUE_TOKEN",
       input: {
         propertyId: demo.propertyId,
         subjectId: demo.agentSubjectId,
         label: "Acceptance token",
         accessCeiling: "READ",
+        commandCeiling: [],
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: issuedSecret
       }
@@ -884,21 +913,21 @@ describe("PostgreSQL core operations", () => {
     expect(issued.result).not.toHaveProperty("tokenSecret");
     const tokenId = issued.result!.tokenId as string;
     const replacementSecret = newOpaqueSecret("qtp");
-    const rotated = await previewAndConfirm({
+    const rotated = await previewAndConfirmAs(administratorPrincipal, {
       commandType: "ROTATE_TOKEN",
-      input: { propertyId: demo.propertyId, tokenId, tokenSecret: replacementSecret }
+      input: { propertyId: demo.propertyId, tokenId, commandCeiling: [], tokenSecret: replacementSecret }
     }, "rotate-token");
     expect(rotated.result).not.toHaveProperty("tokenSecret");
     const newTokenId = rotated.result!.tokenId as string;
     const old = await db.selectFrom("api_tokens").selectAll().where("id", "=", tokenId).executeTakeFirstOrThrow();
     expect(old.revoked_at).not.toBeNull();
     expect(old.replaced_by_id).toBe(newTokenId);
-    await previewAndConfirm({ commandType: "REVOKE_TOKEN", input: { propertyId: demo.propertyId, tokenId: newTokenId } }, "revoke-token");
+    await previewAndConfirmAs(administratorPrincipal, { commandType: "REVOKE_TOKEN", input: { propertyId: demo.propertyId, tokenId: newTokenId } }, "revoke-token");
     const replacement = await db.selectFrom("api_tokens").select("revoked_at").where("id", "=", newTokenId).executeTakeFirstOrThrow();
     expect(replacement.revoked_at).not.toBeNull();
   });
 
-  it("expires only the available entitlement balance after the inclusive expiry date", async () => {
+  it("keeps natural expiry system commands closed to human subjects", async () => {
     const expirationLotId = "lot_core_expiration_acceptance";
     await db.insertInto("entitlement_lots").values({
       id: expirationLotId,
@@ -912,93 +941,19 @@ describe("PostgreSQL core operations", () => {
     await expect(createCommandPreview(db, principal, {
       commandType: "EXPIRE_MEMBER_ENTITLEMENT",
       input: { propertyId: demo.propertyId, entitlementLotId: expirationLotId, asOfDate: "2026-01-01" }
-    }, metadata("expire-on-inclusive-date"))).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT" });
-
-    const stalePreview = await createCommandPreview(db, principal, {
-      commandType: "EXPIRE_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: expirationLotId, asOfDate: "2026-01-02" }
-    }, metadata("expire-stale-preview"));
-    expect(stalePreview.preview.effect).toMatchObject({
-      entitlementLotId: expirationLotId,
-      remainingAvailable: 5,
-      quantityDelta: -5,
-      asOfDate: "2026-01-02",
-      entryType: "EXPIRE"
-    });
-    const storedStalePreview = await db.selectFrom("command_previews").select("basis_versions").where("id", "=", stalePreview.preview.previewId).executeTakeFirstOrThrow();
-    expect(storedStalePreview.basis_versions).toMatchObject({ lotVersion: 1, contractVersion: 1, remainingAvailable: 5 });
-
-    const winnerPreview = await createCommandPreview(db, principal, {
-      commandType: "EXPIRE_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: expirationLotId, asOfDate: "2026-01-02" }
-    }, metadata("expire-winner-preview"));
-    const confirmation = {
-      propertyId: demo.propertyId,
-      commandType: "EXPIRE_MEMBER_ENTITLEMENT" as const,
-      confirmation: true as const,
-      expectedEffectHash: winnerPreview.preview.effectHash,
-      reason: { code: "ENTITLEMENT_EXPIRY", note: "Expire the available balance after lot expiry" }
-    };
-    const confirmMetadata = { idempotencyKey: "expire-success-confirm", correlationId: "expire-success-confirm" };
-    const expired = await confirmCommandPreview(db, principal, winnerPreview.preview.previewId, confirmation, confirmMetadata);
-    const replay = await confirmCommandPreview(db, principal, winnerPreview.preview.previewId, confirmation, confirmMetadata);
-    expect(replay.receiptId).toBe(expired.receiptId);
-
-    const staleResult = await confirmCommandPreview(db, principal, stalePreview.preview.previewId, {
-      propertyId: demo.propertyId,
-      commandType: "EXPIRE_MEMBER_ENTITLEMENT",
-      confirmation: true,
-      expectedEffectHash: stalePreview.preview.effectHash,
-      reason: { code: "ENTITLEMENT_EXPIRY", note: "Confirm stale expiration preview" }
-    }, metadata("expire-stale-confirm"));
-    expect(staleResult).toMatchObject({ businessCommitted: false, error: { code: "PREVIEW_STALE" } });
-    expect(await db.selectFrom("entitlement_ledger").select("fact_id").where("lot_id", "=", expirationLotId).where("entry_type", "=", "EXPIRE").execute()).toHaveLength(1);
-
-    expect(expired.result).toMatchObject({
-      entitlementLotId: expirationLotId,
-      contractId: demo.memberContractId,
-      factId: expired.factRefs[0],
-      entryType: "EXPIRE",
-      expiredUnits: 5,
-      remainingAvailable: 0,
-      asOfDate: "2026-01-02"
-    });
-    expect(expired.resourceRefs).toEqual([demo.memberContractId, expirationLotId]);
-    expect(expired.factRefs).toHaveLength(1);
-
-    const fact = await db.selectFrom("entitlement_ledger").selectAll().where("fact_id", "=", expired.factRefs[0]!).executeTakeFirstOrThrow();
-    expect(fact).toMatchObject({
-      lot_id: expirationLotId,
-      entry_type: "EXPIRE",
-      quantity_delta: -5,
-      service_date: null,
-      order_id: null,
-      coverage_id: null,
-      reason: "ENTITLEMENT_EXPIRED asOfDate=2026-01-02"
-    });
-    const balance = await db.selectFrom("entitlement_lots")
-      .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
-      .select([
-        "entitlement_lots.total_units",
-        sql<number>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as integer)`.as("ledger_delta")
-      ])
-      .where("entitlement_lots.id", "=", expirationLotId)
-      .groupBy("entitlement_lots.total_units")
-      .executeTakeFirstOrThrow();
-    expect(balance.total_units + Number(balance.ledger_delta)).toBe(0);
-    const lot = await db.selectFrom("entitlement_lots").select("version").where("id", "=", expirationLotId).executeTakeFirstOrThrow();
-    const contract = await db.selectFrom("member_contracts").select("version").where("id", "=", demo.memberContractId).executeTakeFirstOrThrow();
-    expect(lot.version).toBe(2);
-    expect(contract.version).toBe(2);
+    }, metadata("expire-on-inclusive-date"))).rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS" });
+    expect(await db.selectFrom("entitlement_ledger").select("fact_id").where("lot_id", "=", expirationLotId).execute()).toEqual([]);
   });
 
   it("rejects integer command inputs outside PostgreSQL's safe integer range", async () => {
+    const availableBefore = await availableEntitlementBalance(demo.roomLotId);
     await expect(createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
       input: {
         propertyId: demo.propertyId,
         entitlementLotId: demo.roomLotId,
-        quantityDelta: 2_147_483_648,
+        expectedAvailableBalance: availableBefore,
+        targetAvailableBalance: 2_147_483_648,
         adjustmentReason: "Out-of-range acceptance"
       }
     }, metadata("integer-range-denied"))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
@@ -1018,17 +973,30 @@ describe("PostgreSQL core operations", () => {
       .set({ expires_on: expirationDate })
       .where("id", "=", demo.roomLotId)
       .execute();
-    const expired = await previewAndConfirm({
-      commandType: "EXPIRE_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, asOfDate: departureDate }
-    }, "expire-held-marker");
-    expect(expired.result).toMatchObject({ expiredUnits: 0, remainingAvailable: 0 });
-    const marker = await db.selectFrom("entitlement_ledger").selectAll().where("fact_id", "=", expired.factRefs[0]!).executeTakeFirstOrThrow();
+    const markerFactId = newId("fact");
+    await db.insertInto("entitlement_ledger").values({
+      fact_id: markerFactId,
+      lot_id: demo.roomLotId,
+      entry_type: "EXPIRE",
+      quantity_delta: 0,
+      service_date: null,
+      order_id: null,
+      coverage_id: null,
+      reason: `ENTITLEMENT_EXPIRED asOfDate=${departureDate}`,
+      command_id: null
+    }).execute();
+    const marker = await db.selectFrom("entitlement_ledger").selectAll().where("fact_id", "=", markerFactId).executeTakeFirstOrThrow();
     expect(marker).toMatchObject({ entry_type: "EXPIRE", quantity_delta: 0 });
 
     await expect(createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: { propertyId: demo.propertyId, entitlementLotId: demo.roomLotId, quantityDelta: 1, adjustmentReason: "Must not revive expired lot" }
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+      input: {
+        propertyId: demo.propertyId,
+        entitlementLotId: demo.roomLotId,
+        expectedAvailableBalance: 0,
+        targetAvailableBalance: 1,
+        adjustmentReason: "Must not revive expired lot"
+      }
     }, metadata("expired-adjust-denied"))).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT" });
     const laterQuote = await quote(demo.secondRoomId, { member: true, arrival: afterExpirationDate, departure: addDays(afterExpirationDate, 1) });
     expect(laterQuote.coverageSet).toHaveLength(0);
@@ -1136,7 +1104,9 @@ describe("PostgreSQL core operations", () => {
   });
 
   it("uses operator-selected collection methods for direct orders and forbids per-order funds on external channels", async () => {
-    const wecomQuote = await quote(demo.roomId, { arrival: "2026-09-01", departure: "2026-09-02" });
+    const collectionArrivalDate = addDays(testBusinessDate, 1);
+    const collectionDepartureDate = addDays(collectionArrivalDate, 1);
+    const wecomQuote = await quote(demo.roomId, { arrival: collectionArrivalDate, departure: collectionDepartureDate });
     const wecomCreated = await previewAndConfirm({
       commandType: "CREATE_ORDER",
       input: {
@@ -1173,8 +1143,8 @@ describe("PostgreSQL core operations", () => {
     }, "wecom-refund-bank");
 
     const externalCreated = await createOrder(demo.secondRoomId, "external-method-guard", {
-      arrival: "2026-09-01",
-      departure: "2026-09-02",
+      arrival: collectionArrivalDate,
+      departure: collectionDepartureDate,
       bookingChannelCode: "YOUMUDAO"
     });
     const externalOrderId = externalCreated.result!.orderId as string;

@@ -8,6 +8,7 @@ import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMon
 import { stayDateChangeActionState, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 import type { OrderLifecycleAction } from "../components/OrderLifecycleActionDrawer";
 import { stayMembershipUpgradeActionVisible } from "../stayMembershipUpgrade";
+import { RoomStatusAttentionBadges } from "./roomStatusPresentation";
 
 type OrderOccupant = OrderViewDto["occupants"][number];
 
@@ -26,6 +27,7 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   REVOKE_CHECK_IN: "撤销入住",
   RECORD_COLLECTION: "登记收款",
   RECORD_REFUND: "登记退款",
+  REVERSE_FACT: "登记冲销",
   CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: "升级会员"
 };
 
@@ -271,6 +273,10 @@ export function RoomStatusOrderContext({
   const consumedMembershipSummary = matchingLotId ? membershipCoverageStatusSummary(view, "CONSUMED", matchingLotId) : undefined;
   const heldMembershipSummary = matchingLotId ? membershipCoverageStatusSummary(view, "HELD", matchingLotId) : undefined;
   const overdueNotice = overdueInHouseNotice(view);
+  const dueOut = view.order.status === "CHECKED_IN"
+    && view.stay.status === "IN_HOUSE"
+    && view.fulfillment.state === "IN_HOUSE"
+    && view.effectiveArrangement.departureDate === view.effectiveArrangement.businessDate;
 
   return (
     <aside className="room-status-context room-status-order-context" aria-labelledby="room-status-order-context-heading" aria-busy={loading}>
@@ -281,6 +287,7 @@ export function RoomStatusOrderContext({
         </div>
         <div className="room-status-order-context-header-actions">
           <StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} />
+          {dueOut ? <RoomStatusAttentionBadges labels={["待退房"]} /> : null}
           {onClose ? <button type="button" className="room-status-icon-button" onClick={onClose} aria-label="关闭订单上下文" title="关闭订单上下文"><X aria-hidden="true" size={17} /></button> : null}
         </div>
       </header>

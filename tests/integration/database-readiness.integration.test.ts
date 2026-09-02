@@ -1,10 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { databaseReady, type Database } from "@qintopia/db";
+import { newOpaqueSecret, sha256 } from "@qintopia/domain";
 import { sql, type Kysely, type Transaction } from "kysely";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.READINESS_INTEGRATION_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_database_readiness";
+const demoOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "demo"
+} as const;
 
 let db: Kysely<Database>;
 
@@ -37,10 +42,10 @@ async function expectReadinessFailure(
   const rollback = new Error(`rollback readiness probe: ${label}`);
   await expect(db.transaction().execute(async (trx) => {
     await damage(trx);
-    expect(await databaseReady(trx), label).toBe(false);
+    expect(await databaseReady(trx, demoOwnerReadinessOptions), label).toBe(false);
     throw rollback;
   })).rejects.toBe(rollback);
-  expect(await databaseReady(db), `${label} rollback`).toBe(true);
+  expect(await databaseReady(db, demoOwnerReadinessOptions), `${label} rollback`).toBe(true);
 }
 
 beforeAll(async () => {
@@ -52,8 +57,32 @@ afterAll(async () => {
 });
 
 describe.sequential("authoritative database readiness", () => {
-  it("requires every migration from terminal-order handling through completed-stay backfill", async () => {
-    expect(await databaseReady(db)).toBe(true);
+  it("binds readiness to the configured reviewed staff-profile manifest", async () => {
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
+    expect(await databaseReady(db, {
+      identity: "maintenance-owner",
+      staffProfileManifestName: "unconfigured"
+    })).toBe(false);
+
+    const previousManifestName = process.env.STAFF_PROFILE_MANIFEST_NAME;
+    try {
+      process.env.STAFF_PROFILE_MANIFEST_NAME = "unconfigured";
+      expect(await databaseReady(db, { identity: "maintenance-owner" })).toBe(false);
+      expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
+
+      process.env.STAFF_PROFILE_MANIFEST_NAME = "demo";
+      expect(await databaseReady(db, { identity: "maintenance-owner" })).toBe(true);
+
+      process.env.STAFF_PROFILE_MANIFEST_NAME = "not-reviewed";
+      expect(await databaseReady(db, { identity: "maintenance-owner" })).toBe(false);
+    } finally {
+      if (previousManifestName === undefined) delete process.env.STAFF_PROFILE_MANIFEST_NAME;
+      else process.env.STAFF_PROFILE_MANIFEST_NAME = previousManifestName;
+    }
+  });
+
+  it("requires every migration from terminal-order handling through runtime database role hardening", async () => {
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     for (const migrationName of [
       "029_stage12_terminal_order_guards.sql",
       "030_collection_fact_historical_pricing_revision.sql",
@@ -71,12 +100,197 @@ describe.sequential("authoritative database readiness", () => {
       "042_complete_overdue_reserved_stay.sql",
       "043_complete_stay_guard_hardening.sql",
       "044_inhouse_membership_fulfillment_guards.sql",
-      "045_stay_membership_net_wecom_transfer.sql"
+      "045_stay_membership_net_wecom_transfer.sql",
+      "046_command_authorization.sql",
+      "047_runtime_database_role.sql",
+      "048_runtime_isolation_guards.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
       });
     }
+  });
+
+  it("keeps legal dynamic Token lifecycle rows outside the reconciled staff-profile projection", async () => {
+    const rollback = new Error("rollback legal dynamic Token lifecycle readiness probe");
+    const issuedTokenId = `token_readiness_issue_${process.pid}`;
+    const rotatedTokenId = `token_readiness_rotate_${process.pid}`;
+    await expect(db.transaction().execute(async (trx) => {
+      await trx.insertInto("api_tokens").values({
+        id: issuedTokenId,
+        subject_id: "subject_demo_administrator",
+        label: "Readiness issue probe",
+        secret_hash: sha256(newOpaqueSecret("qtp")),
+        access_ceiling: "WRITE",
+        property_scope: "prop_qintopia_demo",
+        expires_at: "2029-12-01T00:00:00.000Z",
+        revoked_at: null,
+        rotated_from_id: null,
+        replaced_by_id: null
+      }).execute();
+      await trx.insertInto("token_command_ceilings").values({
+        token_id: issuedTokenId,
+        subject_id: "subject_demo_administrator",
+        property_id: "prop_qintopia_demo",
+        command_type: "REPRICE_ORDER"
+      }).execute();
+      expect(await databaseReady(trx, demoOwnerReadinessOptions), "legal issue").toBe(true);
+
+      await trx.insertInto("api_tokens").values({
+        id: rotatedTokenId,
+        subject_id: "subject_demo_administrator",
+        label: "Readiness rotate probe",
+        secret_hash: sha256(newOpaqueSecret("qtp")),
+        access_ceiling: "WRITE",
+        property_scope: "prop_qintopia_demo",
+        expires_at: "2029-06-01T00:00:00.000Z",
+        revoked_at: null,
+        rotated_from_id: issuedTokenId,
+        replaced_by_id: null
+      }).execute();
+      await trx.insertInto("token_command_ceilings").values({
+        token_id: rotatedTokenId,
+        subject_id: "subject_demo_administrator",
+        property_id: "prop_qintopia_demo",
+        command_type: "REPRICE_ORDER"
+      }).execute();
+      await trx.updateTable("api_tokens")
+        .set({ revoked_at: new Date(), replaced_by_id: rotatedTokenId })
+        .where("id", "=", issuedTokenId)
+        .execute();
+      expect(await databaseReady(trx, demoOwnerReadinessOptions), "legal rotate").toBe(true);
+
+      await trx.updateTable("api_tokens")
+        .set({ revoked_at: new Date() })
+        .where("id", "=", rotatedTokenId)
+        .execute();
+      expect(await databaseReady(trx, demoOwnerReadinessOptions), "legal revoke").toBe(true);
+      throw rollback;
+    })).rejects.toBe(rollback);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
+  });
+
+  it("keeps illegal dynamic Token ceiling policy drift readiness-fatal", async () => {
+    await expectReadinessFailure("READ Token with a write-command ceiling", async (trx) => {
+      await trx.insertInto("token_command_ceilings").values({
+        token_id: "token_demo_read",
+        subject_id: "subject_demo_agent",
+        property_id: "prop_qintopia_demo",
+        command_type: "REPRICE_ORDER"
+      }).execute();
+    });
+
+    await expectReadinessFailure("FUTURE_DISABLED command in an existing Token ceiling", async (trx) => {
+      await trx.insertInto("token_command_ceilings").values({
+        token_id: "token_demo_admin_write",
+        subject_id: "subject_demo_administrator",
+        property_id: "prop_qintopia_demo",
+        command_type: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
+      }).execute();
+    });
+
+    await expectReadinessFailure("disabled HUMAN_COMMAND feature in an existing Token ceiling", async (trx) => {
+      await trx.insertInto("token_command_ceilings").values({
+        token_id: "token_demo_admin_write",
+        subject_id: "subject_demo_administrator",
+        property_id: "prop_qintopia_demo",
+        command_type: "COMPLETE_CLEANING"
+      }).execute();
+    });
+  });
+
+  it("requires the exact owner-controlled runtime Token guard function and trigger bindings", async () => {
+    await expectReadinessFailure("runtime Token guard function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_guard_runtime_token_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime Token guard function owner", async (trx) => {
+      await sql`ALTER FUNCTION qintopia_guard_runtime_token_mutation() OWNER TO qintopia_runtime`.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime Token guard function EXECUTE grant", async (trx) => {
+      await sql`GRANT EXECUTE ON FUNCTION qintopia_guard_runtime_token_mutation() TO qintopia_runtime`.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime Token guard function execution metadata", async (trx) => {
+      await sql`ALTER FUNCTION qintopia_guard_runtime_token_mutation() SECURITY DEFINER STABLE SET search_path = public`.execute(trx);
+    });
+
+    await expectReadinessFailure("API Token mutation guard missing", async (trx) => {
+      await sql`DROP TRIGGER api_tokens_runtime_token_mutation_guard ON api_tokens`.execute(trx);
+    });
+
+    await expectReadinessFailure("ceiling insertion guard missing", async (trx) => {
+      await sql`DROP TRIGGER token_command_ceilings_runtime_token_mutation_guard ON token_command_ceilings`.execute(trx);
+    });
+
+    await expectReadinessFailure("API Token mutation guard rebound", async (trx) => {
+      await sql`DROP TRIGGER api_tokens_runtime_token_mutation_guard ON api_tokens`.execute(trx);
+      await sql`
+        CREATE CONSTRAINT TRIGGER api_tokens_runtime_token_mutation_guard
+        AFTER INSERT ON token_command_ceilings
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("API Token mutation guard non-deferred", async (trx) => {
+      await sql`DROP TRIGGER api_tokens_runtime_token_mutation_guard ON api_tokens`.execute(trx);
+      await sql`
+        CREATE TRIGGER api_tokens_runtime_token_mutation_guard
+        AFTER INSERT OR UPDATE ON api_tokens
+        FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("API Token mutation guard event set", async (trx) => {
+      await sql`DROP TRIGGER api_tokens_runtime_token_mutation_guard ON api_tokens`.execute(trx);
+      await sql`
+        CREATE CONSTRAINT TRIGGER api_tokens_runtime_token_mutation_guard
+        AFTER INSERT ON api_tokens
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("ceiling insertion guard rebound", async (trx) => {
+      await sql`DROP TRIGGER token_command_ceilings_runtime_token_mutation_guard ON token_command_ceilings`.execute(trx);
+      await sql`
+        CREATE CONSTRAINT TRIGGER token_command_ceilings_runtime_token_mutation_guard
+        AFTER INSERT ON api_tokens
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("ceiling insertion guard non-deferred", async (trx) => {
+      await sql`DROP TRIGGER token_command_ceilings_runtime_token_mutation_guard ON token_command_ceilings`.execute(trx);
+      await sql`
+        CREATE TRIGGER token_command_ceilings_runtime_token_mutation_guard
+        AFTER INSERT ON token_command_ceilings
+        FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("ceiling insertion guard event set", async (trx) => {
+      await sql`DROP TRIGGER token_command_ceilings_runtime_token_mutation_guard ON token_command_ceilings`.execute(trx);
+      await sql`
+        CREATE CONSTRAINT TRIGGER token_command_ceilings_runtime_token_mutation_guard
+        AFTER INSERT OR UPDATE ON token_command_ceilings
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()
+      `.execute(trx);
+    });
   });
 
   it("rejects damaged foundational audit, identity, and idempotency controls", async () => {
@@ -297,7 +511,7 @@ describe.sequential("authoritative database readiness", () => {
 
   it("holds the shared migration lock for the complete readiness inspection", async () => {
     await db.transaction().execute(async (readinessTransaction) => {
-      expect(await databaseReady(readinessTransaction)).toBe(true);
+      expect(await databaseReady(readinessTransaction, demoOwnerReadinessOptions)).toBe(true);
 
       const acquiredWhileReadinessIsOpen = await db.transaction().execute(async (contender) => {
         const result = await sql<{ acquired: boolean }>`

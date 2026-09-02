@@ -4,6 +4,7 @@ import pg from "pg";
 import { createDatabase, type Database } from "@qintopia/db";
 import { seedDemo } from "../../packages/db/src/seed.ts";
 import type { Kysely } from "kysely";
+import { runtimeDatabaseTestPassword } from "./runtime-database.ts";
 
 export const testDatabaseUrl = process.env.TEST_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_test";
 
@@ -17,6 +18,11 @@ async function migrateAndSeedDatabase(databaseUrl: string): Promise<Kysely<Datab
       await client.query(await readFile(resolve(directory, migration), "utf8"));
       await client.query("INSERT INTO schema_migrations(name) VALUES ($1) ON CONFLICT DO NOTHING", [migration]);
     }
+    const password = await client.query<{ literal: string }>(
+      "SELECT quote_literal($1) AS literal",
+      [runtimeDatabaseTestPassword]
+    );
+    await client.query(`ALTER ROLE qintopia_runtime PASSWORD ${password.rows[0]!.literal}`);
   } finally {
     await client.end();
   }

@@ -41,7 +41,8 @@ import {
   type StayDateChangeAction,
   type StayDateChangeMode
 } from "../components/StayDateChangeDrawer";
-import { useWorkspace } from "../session";
+import { commandRecoveryAvailable, propertyAllowedActions, useWorkspace } from "../session";
+import { assertOrderViewAllowedActions } from "../orderViewValidation";
 import {
   membershipProductMatchesCurrentStay,
   normalizeStayUpgradePhone as normalizePhoneNumber,
@@ -87,7 +88,7 @@ export {
   upgradedStayActionDisabledReason
 } from "../stayMembershipUpgrade";
 
-type FormAction = "RECORD_COLLECTION" | "RECORD_REFUND" | "SHORTEN_STAY" | "EXTEND_STAY" | "REPRICE_ORDER";
+type FormAction = "RECORD_COLLECTION" | "RECORD_REFUND" | "REVERSE_FACT" | "SHORTEN_STAY" | "EXTEND_STAY" | "REPRICE_ORDER";
 const completeStayExternalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
 const ORDER_DETAIL_POLL_MS = 4_000;
 
@@ -198,6 +199,7 @@ export function orderStayDateRequestIsCompatible(
 const formTitles: Record<FormAction, string> = {
   RECORD_COLLECTION: "登记收款",
   RECORD_REFUND: "登记退款",
+  REVERSE_FACT: "登记冲销",
   SHORTEN_STAY: "缩短住宿",
   EXTEND_STAY: "续住",
   REPRICE_ORDER: "调整订单金额"
@@ -365,6 +367,42 @@ export function remainingRefundableMinor(facts: readonly CollectionFactDto[], co
     .filter((refund) => !facts.some((fact) => fact.reverses_fact_id === refund.fact_id))
     .reduce((sum, refund) => sum + refund.amount_minor, 0);
   return Math.max(0, collection.amount_minor - activeRefunded);
+}
+
+export function collectionFactCanReverse(
+  facts: readonly CollectionFactDto[],
+  fact: CollectionFactDto,
+  reverseActionEnabled: boolean
+): boolean {
+  if (!reverseActionEnabled || fact.fact_type === "REVERSAL") return false;
+  const reversedFactIds = new Set(facts
+    .filter((candidate) => candidate.fact_type === "REVERSAL" && candidate.reverses_fact_id)
+    .map((candidate) => candidate.reverses_fact_id));
+  if (reversedFactIds.has(fact.fact_id)) return false;
+  if (fact.fact_type !== "COLLECTION") return true;
+  return !facts.some((candidate) => candidate.fact_type === "REFUND"
+    && candidate.references_fact_id === fact.fact_id
+    && !reversedFactIds.has(candidate.fact_id));
+}
+
+export function buildReverseFactRequest(
+  view: Pick<OrderViewDto, "order">,
+  fact: CollectionFactDto,
+  note: string
+): CommandRequest {
+  const trimmedNote = note.trim();
+  return {
+    commandType: "REVERSE_FACT",
+    title: formTitles.REVERSE_FACT,
+    description: "系统将追加一条反向冲销记录，用于抵销所选收退款事实；原记录不会被删除。",
+    input: {
+      propertyId: view.order.property_id,
+      orderId: view.order.id,
+      reversesFactId: fact.fact_id,
+      note: trimmedNote
+    },
+    initialReason: { code: "REVERSE_FACT", note: trimmedNote }
+  };
 }
 
 export function collectionFactTransactionReferenceLabel(facts: readonly CollectionFactDto[], fact: CollectionFactDto): string {
@@ -1233,6 +1271,15 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
   const collections = view.collectionFacts.filter((fact) => fact.fact_type === "COLLECTION");
   const refundableCollections = collections.filter((fact) => remainingRefundableMinor(view.collectionFacts, fact) > 0);
   const initialSelectedFactId = initialFactId ?? refundableCollections[0]?.fact_id ?? "";
+  const reversibleFacts = view.collectionFacts.filter((fact) => collectionFactCanReverse(view.collectionFacts, fact, true));
+  const draftReverseFactId = typeof draft?.input.reversesFactId === "string" ? draft.input.reversesFactId : undefined;
+  const initialReverseFactId = action === "REVERSE_FACT"
+    ? (initialFactId && reversibleFacts.some((fact) => fact.fact_id === initialFactId)
+      ? initialFactId
+      : draftReverseFactId && reversibleFacts.some((fact) => fact.fact_id === draftReverseFactId)
+        ? draftReverseFactId
+        : reversibleFacts[0]?.fact_id ?? "")
+    : "";
   const recordedExcessMinor = view.amounts.refundReferenceAmount.minorUnits;
   function selectedRefundCollectionFor(collectionFactId: string): CollectionFactDto | undefined {
     return collections.find((fact) => fact.fact_id === collectionFactId);
@@ -1244,12 +1291,19 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
   }
   const initialSuggestedRefund = action === "RECORD_REFUND" ? suggestedRefundFor(initialSelectedFactId) : 0;
   const initialRefundMethod = action === "RECORD_REFUND" ? selectedRefundCollectionFor(initialSelectedFactId)?.method ?? "WECOM" : "WECOM";
+  const initialReverseNote = typeof draft?.input.note === "string"
+    ? draft.input.note
+    : draft?.initialReason?.note ?? "";
   const [amountYuan, setAmountYuan] = useState(initialSuggestedRefund > 0 ? collectionAmountMinorToYuanInput(initialSuggestedRefund) : "");
   const [method, setMethod] = useState(initialRefundMethod);
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState(action === "REVERSE_FACT" ? initialReverseNote : "");
   const [transactionReference, setTransactionReference] = useState("");
   const [factId, setFactId] = useState(initialSelectedFactId);
+  const [reverseFactId, setReverseFactId] = useState(initialReverseFactId);
   const selectedRefundCollection = action === "RECORD_REFUND" ? selectedRefundCollectionFor(factId) : undefined;
+  const selectedReverseFact = action === "REVERSE_FACT"
+    ? reversibleFacts.find((fact) => fact.fact_id === reverseFactId)
+    : undefined;
   const selectedRefundRemainingMinor = selectedRefundCollection ? remainingRefundableMinor(view.collectionFacts, selectedRefundCollection) : 0;
   const transactionReferenceRequired = action === "RECORD_COLLECTION"
     ? method === "WECOM" || method === "BANK_TRANSFER"
@@ -1273,6 +1327,23 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
     setValidationError(undefined);
     const base: Record<string, unknown> = { propertyId: view.order.property_id, orderId: view.order.id };
     let description = "请核对本次操作信息。";
+    if (action === "REVERSE_FACT") {
+      const trimmedNote = note.trim();
+      if (reversibleFacts.length === 0) {
+        setValidationError(new Error("该订单当前没有可冲销的收退款记录"));
+        return;
+      }
+      if (!selectedReverseFact) {
+        setValidationError(new Error("请选择要冲销的收退款记录"));
+        return;
+      }
+      if (!trimmedNote) {
+        setValidationError(new Error("必须填写冲销原因"));
+        return;
+      }
+      onSubmit(buildReverseFactRequest(view, selectedReverseFact, trimmedNote));
+      return;
+    }
     if (action === "RECORD_COLLECTION" || action === "RECORD_REFUND") {
       if (action === "RECORD_REFUND" && refundableCollections.length === 0) {
         setValidationError(new Error("该订单当前没有可退款的收款记录，不能登记退款"));
@@ -1373,6 +1444,23 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
             <label className="span-two">{action === "RECORD_REFUND" ? "退款原因" : method === "CASH" ? "收款人" : method === "OTHER" ? "其他收款说明" : "备注（选填）"}<textarea rows={3} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} required={action === "RECORD_REFUND" || method === "CASH" || method === "OTHER"} maxLength={1000} data-testid={action === "RECORD_REFUND" ? "refund-reason" : "collection-note"} /></label>
           </div>
         ) : null}
+        {action === "REVERSE_FACT" ? (
+          <div className="form-grid form-grid-two">
+            {reversibleFacts.length === 0 ? (
+              <div className="span-two form-field-note" role="status">
+                <strong>该订单当前没有可冲销的收退款记录</strong>
+                <span>只能冲销尚未被冲销、且没有有效退款占用的收款或退款记录。</span>
+              </div>
+            ) : <>
+              <label className="span-two">选择要冲销的记录<select value={reverseFactId} onChange={(event) => { setReverseFactId(event.target.value); setValidationError(undefined); }} required data-testid="reverse-fact-id">{reversibleFacts.map((fact) => <option key={fact.fact_id} value={fact.fact_id}>{collectionFactTypeLabel(fact.fact_type)} · {formatDateTime(fact.created_at)} · 净影响 {formatMinor(fact.net_effect_minor, fact.currency)} · {collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</option>)}</select></label>
+              {selectedReverseFact ? <div className="span-two form-field-note" role="status" data-testid="reverse-fact-summary">
+                <strong>追加反向冲销记录</strong>
+                <span>原{collectionFactTypeLabel(selectedReverseFact.fact_type)}记录不会被删除；冲销后抵销净影响 {formatMinor(selectedReverseFact.net_effect_minor, selectedReverseFact.currency)}。</span>
+              </div> : null}
+              <label className="span-two">冲销原因<textarea rows={3} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} required maxLength={1000} data-testid="reverse-fact-note" /></label>
+            </>}
+          </div>
+        ) : null}
         {(action === "SHORTEN_STAY" || action === "EXTEND_STAY") ? (
           <div className="form-grid">
             <label>新离店日期<input type="date" value={newDepartureDate} min={view.order.arrival_date} onChange={(event) => setNewDepartureDate(event.target.value)} required data-testid="new-departure-date" /></label>
@@ -1384,7 +1472,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0}>{action === "RECORD_COLLECTION" || action === "RECORD_REFUND" ? "下一步" : "继续核对"}</button></div>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={(action === "RECORD_REFUND" && refundableCollections.length === 0) || (action === "REVERSE_FACT" && reversibleFacts.length === 0)}>{action === "RECORD_COLLECTION" || action === "RECORD_REFUND" ? "下一步" : "继续核对"}</button></div>
       </form>
     </Modal>
   );
@@ -1394,10 +1482,19 @@ function countArray(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
 }
 
-function FactActions({ fact, canRefund, disabled, onRefund }: { fact: CollectionFactDto; canRefund: boolean; disabled: boolean; onRefund: () => void }) {
+export function FactActions({ fact, facts, canRefund, canReverse, disabled, onRefund, onReverse }: {
+  fact: CollectionFactDto;
+  facts: readonly CollectionFactDto[];
+  canRefund: boolean;
+  canReverse: boolean;
+  disabled: boolean;
+  onRefund: () => void;
+  onReverse: () => void;
+}) {
   return (
     <div className="row-actions">
       {canRefund && fact.fact_type === "COLLECTION" ? <button className="button button-secondary fact-refund-button" type="button" onClick={onRefund} disabled={disabled} aria-label={`为 ${fact.transaction_reference ?? "这笔收款"} 记录退款`} data-order-action="RECORD_REFUND">退款</button> : null}
+      {canReverse ? <button className="button button-secondary fact-reverse-button" type="button" onClick={onReverse} disabled={disabled} aria-label={`冲销${collectionFactTypeLabel(fact.fact_type)} ${collectionFactTransactionReferenceLabel(facts, fact)}`} data-order-action="REVERSE_FACT">冲销</button> : null}
     </div>
   );
 }
@@ -1434,7 +1531,8 @@ export function OrderDetailPage() {
   const navigate = useNavigate();
   const { meta, principal, propertyId } = useWorkspace();
   const recoveryScope = propertyId ? `property:${propertyId}` : "";
-  const principalOrderScope = `${principal.subjectId}:${principal.credentialType}:${principal.propertyAccess[propertyId] ?? "NONE"}`;
+  const currentPropertyAllowedActions = useMemo(() => propertyAllowedActions(principal, propertyId), [principal, propertyId]);
+  const principalOrderScope = `${principal.subjectId}:${principal.credentialType}:${principal.propertyAccess[propertyId] ?? "NONE"}:${[...currentPropertyAllowedActions].join("|")}`;
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: recoveryScope });
   const [view, setView] = useState<OrderViewDto>();
   const [loadedPrincipalOrderScope, setLoadedPrincipalOrderScope] = useState<string>();
@@ -1464,7 +1562,8 @@ export function OrderDetailPage() {
   editorIsOpenRef.current = Boolean(formAction || completeStayAction || stayDateAction || movingUnit || convertingToMembership || correctingOccupant || lifecycleAction);
 
   const pendingRecovery = commandRecovery.pending;
-  const orderActionsBlocked = commandRecovery.blocked;
+  const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, pendingRecovery?.commandType);
+  const orderActionsBlocked = commandRecovery.blocked && recoveryPendingAllowed;
   const enabledActions = useMemo(() => new Set(enabledOrderActionCodes(view?.allowedActions ?? [])), [view]);
   const actionByCode = useMemo(() => new Map((view?.allowedActions ?? []).map((action) => [action.code, action])), [view]);
   const fulfillmentNotice = useMemo(() => orderFulfillmentNotice(view?.allowedActions ?? []), [view]);
@@ -1517,6 +1616,7 @@ export function OrderDetailPage() {
     api.order(orderId)
       .then((response) => {
         if (!current) return;
+        assertOrderViewAllowedActions(response, currentPropertyAllowedActions);
         const payloadChanged = !prior || orderViewPayloadChanged(prior, response);
         if (prior && orderRefreshMustCloseEditor(prior, response, editorIsOpenRef.current)) {
           editorIsOpenRef.current = false;
@@ -1540,7 +1640,7 @@ export function OrderDetailPage() {
       .catch((nextError) => current && setError(nextError))
       .finally(() => current && setLoading(false));
     return () => { current = false; };
-  }, [orderId, principalOrderScope, refreshToken]);
+  }, [currentPropertyAllowedActions, orderId, principalOrderScope, refreshToken]);
 
   useEffect(() => {
     if (view && view.order.property_id !== propertyId) navigate("/orders", { replace: true });
@@ -1645,7 +1745,7 @@ export function OrderDetailPage() {
   }
 
   function openRecoveryDialog() {
-    if (!pendingRecovery) return;
+    if (!pendingRecovery || !recoveryPendingAllowed) return;
     setRecoveryDialogOpen(true);
     setCommand(recoveryCommandRequest(pendingRecovery));
   }
@@ -1684,6 +1784,12 @@ export function OrderDetailPage() {
     }
     if (request.commandType === "COMPLETE_STAY") {
       setCompleteStayAction(true);
+      return;
+    }
+    if (request.commandType === "REVERSE_FACT") {
+      const reversesFactId = request.input.reversesFactId;
+      if (typeof reversesFactId === "string") setInitialFactId(reversesFactId);
+      setFormAction("REVERSE_FACT");
       return;
     }
     if (request.commandType === "REPRICE_ORDER") {
@@ -1809,7 +1915,8 @@ export function OrderDetailPage() {
       <QuoteRecoveryConflictNotice conflict={commandRecovery.conflict} testId="order-quote-recovery-conflict" />
       <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       {refreshNotice ? <div className="room-status-return-notice" role="alert">{refreshNotice}</div> : null}
-      {pendingRecovery ? <CommandRecoveryBar recovery={pendingRecovery} onOpen={openRecoveryDialog} testId="order-command-recovery" /> : null}
+      {pendingRecovery && recoveryPendingAllowed ? <CommandRecoveryBar recovery={pendingRecovery} onOpen={openRecoveryDialog} testId="order-command-recovery" /> : null}
+      {pendingRecovery && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="order-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；订单仍可按当前权限查看。</p></div></section> : null}
 
       <section className="action-band" aria-labelledby="order-actions-heading">
         <h2 id="order-actions-heading">订单操作</h2>
@@ -1936,7 +2043,7 @@ export function OrderDetailPage() {
 
       <OrderMembershipCoverageSection view={view} unitMap={unitMap} />
 
-      <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{view.collectionFacts.length}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
+      <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{view.collectionFacts.length}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
 
       {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {completeStayAction ? <CompleteStayDialog view={view} {...(commandDraft?.commandType === "COMPLETE_STAY" ? { draft: commandDraft } : {})} onClose={() => { setCompleteStayAction(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("COMPLETE_STAY")) return; setCompleteStayAction(false); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
@@ -2031,6 +2138,7 @@ export function OrderDetailPage() {
         onCommitted={async () => {
           if (!orderId) throw new Error("当前订单引用缺失，无法刷新订单详情");
           const response = await api.order(orderId);
+          assertOrderViewAllowedActions(response, currentPropertyAllowedActions);
           setView(response);
           setLoadedPrincipalOrderScope(principalOrderScope);
           viewRef.current = response;

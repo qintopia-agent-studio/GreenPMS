@@ -24,11 +24,17 @@ async function expectRoomStatusLanding(page: Page): Promise<void> {
     .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
-async function login(page: Page) {
+const ordinaryStaffCredentials = { username: "operator", password: "demo-pass-2026" } as const;
+const administratorCredentials = { username: "admin", password: "demo-pass-2026" } as const;
+
+async function login(
+  page: Page,
+  credentials: { username: string; password: string } = ordinaryStaffCredentials
+) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "登录", exact: true })).toBeVisible();
-  await page.getByTestId("login-username").fill("operator");
-  await page.getByTestId("login-password").fill("demo-pass-2026");
+  await page.getByTestId("login-username").fill(credentials.username);
+  await page.getByTestId("login-password").fill(credentials.password);
   await page.getByTestId("login-submit").click();
   await expectRoomStatusLanding(page);
 }
@@ -60,6 +66,13 @@ async function assertOperatorReceipt(page: Page) {
   await expect(receipt.getByRole("heading")).toBeVisible();
   await expect(receipt).not.toContainText(/EXECUTED|Receipt|业务写入已提交/);
   return receipt;
+}
+
+async function assertTokenPreviewUsesOperatorCopy(effect: Locator, secret: string) {
+  await expect(effect).toContainText("目标主体");
+  await expect(effect).toContainText("Demo Administrator");
+  await expect(effect).not.toContainText(secret);
+  await expect(effect).not.toContainText(/(?:token_|subject_|qtp_|ISSUE_TOKEN|ROTATE_TOKEN|REVOKE_TOKEN|CREATE_ORDER)/);
 }
 
 async function navigateWithinApp(page: Page, pathname: string, heading: string) {
@@ -677,6 +690,23 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(fundsRegion).toContainText("TEST-E2E-TXN-COLLECTION-001");
   await expect(fundsRegion).toContainText("TEST-E2E-TXN-COLLECTION-002");
   await expect(fundsRegion).not.toContainText("TEST-E2E-TXN-REFUND-001");
+
+  const refundRow = fundsRegion.locator("tbody tr").filter({ hasText: "退款原因：E2E 验证" });
+  await expect(refundRow).toHaveCount(1);
+  await refundRow.getByRole("button", { name: /冲销退款/ }).click();
+  const reverseDialog = page.getByRole("dialog", { name: "登记冲销", exact: true });
+  await expect(reverseDialog).toBeVisible();
+  await expect(reverseDialog.getByTestId("reverse-fact-summary")).toContainText("原退款记录不会被删除");
+  await expect(reverseDialog).not.toContainText(/fact_|order_|REVERSE_FACT|Preview|Receipt|Command/i);
+  await reverseDialog.getByRole("button", { name: "继续核对", exact: true }).click();
+  await expect(reverseDialog.getByRole("alert")).toContainText("必须填写冲销原因");
+  await reverseDialog.getByTestId("reverse-fact-note").fill("退款事实登记错单，冲销后重新核对");
+  await reverseDialog.getByRole("button", { name: "继续核对", exact: true }).click();
+  await confirmCommand(page, "Reverse refund fact", ["¥30.00"]);
+  await closeReceipt(page);
+  await expect(fundsRegion.getByRole("rowheader", { name: "冲销", exact: true })).toBeVisible();
+  await expect(fundsRegion).toContainText("退款事实登记错单，冲销后重新核对");
+  await expect(refundRow.getByRole("button", { name: /冲销退款/ })).toHaveCount(0);
 
   await page.getByTestId("check-in").click();
   const checkInEffect = page.getByTestId("command-effect");
@@ -1410,15 +1440,71 @@ test("desktop quote workbench only offers recovery after a real response interru
   await expect(page.getByTestId("quote-result")).toBeVisible();
 });
 
+test("desktop projects the exact two-level staff and administrator capabilities", async ({ page }, testInfo: TestInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop-only 9.2 permission projection");
+  await login(page);
+  await expect(page.getByRole("link", { name: "Token", exact: true })).toHaveCount(0);
+
+  const staffResponse = await page.request.get("/api/v1/me");
+  expect(staffResponse.ok()).toBe(true);
+  const staff = await staffResponse.json() as {
+    allowedActions: Record<string, string[]>;
+    propertyCommandGrants: Record<string, string[]>;
+  };
+  expect(staff.allowedActions.prop_qintopia_demo).toEqual(expect.arrayContaining([
+    "REPRICE_ORDER",
+    "RECORD_REFUND",
+    "REVERSE_FACT",
+    "CORRECT_MEMBERSHIP_PAYMENT",
+    "REVOKE_CHECK_IN",
+    "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
+  ]));
+  for (const administratorOnly of ["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN", "CORRECT_ORDER_OCCUPANT"]) {
+    expect(staff.allowedActions.prop_qintopia_demo).not.toContain(administratorOnly);
+  }
+
+  const logoutResponse = await page.request.post("/api/v1/auth/logout");
+  expect(logoutResponse.ok()).toBe(true);
+  await login(page, administratorCredentials);
+  await expect(page.getByRole("link", { name: "Token", exact: true })).toBeVisible();
+
+  const administratorResponse = await page.request.get("/api/v1/me");
+  expect(administratorResponse.ok()).toBe(true);
+  const administrator = await administratorResponse.json() as {
+    allowedActions: Record<string, string[]>;
+    propertyCommandGrants: Record<string, string[]>;
+  };
+  expect(administrator.allowedActions.prop_qintopia_demo).toEqual(expect.arrayContaining([
+    "ISSUE_TOKEN",
+    "ROTATE_TOKEN",
+    "REVOKE_TOKEN",
+    "CORRECT_ORDER_OCCUPANT"
+  ]));
+  for (const disabledFeature of [
+    "COMPLETE_CLEANING",
+    "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+    "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+  ]) {
+    expect(administrator.allowedActions.prop_qintopia_demo).not.toContain(disabledFeature);
+  }
+  expect(administrator.propertyCommandGrants.prop_qintopia_demo).toEqual(expect.arrayContaining([
+    "COMPLETE_CLEANING",
+    "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+    "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+  ]));
+});
+
 test("desktop Token lifecycle retains client secrets and uses Preview Confirm Receipt", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name !== "desktop", "desktop-only Token lifecycle");
-  await login(page);
+  await login(page, administratorCredentials);
   await page.getByRole("link", { name: "Token", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Token 生命周期" })).toBeVisible();
 
   await page.getByRole("button", { name: "签发 Token" }).click();
   await page.getByLabel("标签").fill("E2E external agent");
   await page.getByLabel("权限上限").selectOption("WRITE");
+  await page.getByLabel("创建住宿订单", { exact: true }).check();
+  await page.getByLabel("登记住宿收款", { exact: true }).check();
   const issueSecret = await page.getByLabel("一次性 Token secret").inputValue();
   expect(issueSecret).toMatch(/^qtp_[A-Za-z0-9_-]{43}$/);
   const issuePreviewIdempotencyKeys: string[] = [];
@@ -1446,7 +1532,12 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await page.getByRole("link", { name: "Token", exact: true }).click();
   await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
-  await expect(page.getByTestId("command-effect")).toBeVisible();
+  const issueEffect = page.getByTestId("command-effect");
+  await expect(issueEffect).toBeVisible();
+  await assertTokenPreviewUsesOperatorCopy(issueEffect, issueSecret);
+  await expect(issueEffect).toContainText("权限范围");
+  await expect(issueEffect).toContainText("可写：创建住宿订单");
+  await expect(issueEffect).toContainText("登记住宿收款");
   expect(issuePreviewIdempotencyKeys.slice(0, 3)).toEqual([
     issuePreviewIdempotencyKeys[0],
     issuePreviewIdempotencyKeys[0],
@@ -1471,35 +1562,47 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await closeReceipt(page);
   await expect(retainedIssueSecret).toContainText("已完成");
 
-  let activeRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "ACTIVE" });
+  let activeRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "有效" });
   await expect(activeRow).toHaveCount(1);
-  const originalTokenId = (await activeRow.locator("code").first().textContent())?.trim();
-  expect(originalTokenId).toMatch(/^token_/);
+  await expect(activeRow).not.toContainText(/(?:token_|subject_|CREATE_ORDER)/);
   await retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" }).click();
 
   await activeRow.getByRole("button", { name: "轮换", exact: true }).click();
   const rotationSecret = await page.getByLabel("一次性 Token secret").inputValue();
   expect(rotationSecret).toMatch(/^qtp_[A-Za-z0-9_-]{43}$/);
   expect(rotationSecret).not.toBe(issueSecret);
+  await page.getByLabel("登记住宿收款", { exact: true }).uncheck();
   await page.getByLabel(/我已将一次性 secret 安全保存/).check();
   await page.getByRole("button", { name: "下一步" }).click();
-  await expect(page.getByTestId("command-effect")).not.toContainText(rotationSecret);
+  const rotationEffect = page.getByTestId("command-effect");
+  await assertTokenPreviewUsesOperatorCopy(rotationEffect, rotationSecret);
+  await expect(rotationEffect).toContainText("原权限范围");
+  await expect(rotationEffect).toContainText("新权限范围");
+  await expect(rotationEffect).toContainText("可写：创建住宿订单");
+  await expect(rotationEffect).not.toContainText("历史结果查询");
+  await expect(rotationEffect).not.toContainText("系统自动保留历史结果查询与恢复范围");
   await page.getByTestId("confirm-command").click();
   await assertOperatorReceipt(page);
   await closeReceipt(page);
 
-  const originalRow = page.getByRole("row").filter({ has: page.locator("th code", { hasText: originalTokenId! }) });
-  await expect(originalRow).toContainText("ROTATED");
-  activeRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "ACTIVE" });
+  const originalRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "已轮换" });
+  await expect(originalRow).toHaveCount(1);
+  await expect(originalRow).toContainText("已由新 Token 替换");
+  activeRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "有效" });
   await expect(activeRow).toHaveCount(1);
-  const replacementTokenId = (await activeRow.locator("code").first().textContent())?.trim();
-  expect(replacementTokenId).toMatch(/^token_/);
-  expect(replacementTokenId).not.toBe(originalTokenId);
-  await expect(originalRow).toContainText(replacementTokenId!);
+  await expect(activeRow).toContainText("由旧 Token 轮换生成");
+  await expect(activeRow).not.toContainText(/(?:token_|subject_|CREATE_ORDER)/);
   await page.getByRole("region", { name: /一次性 secret 待清除/ }).getByRole("button", { name: "已保存，清除本机显示" }).click();
 
-  await activeRow.getByRole("button", { name: /^撤销 Token / }).click();
-  await expect(page.getByTestId("command-effect")).toBeVisible();
+  await activeRow.getByRole("button", { name: /^撤销/ }).click();
+  const revokeEffect = page.getByTestId("command-effect");
+  await expect(revokeEffect).toBeVisible();
+  await assertTokenPreviewUsesOperatorCopy(revokeEffect, rotationSecret);
+  await expect(revokeEffect).toContainText("原权限范围");
+  await expect(revokeEffect).toContainText("新权限范围");
+  await expect(revokeEffect).toContainText("已撤销；无访问权限");
+  await expect(revokeEffect).toContainText("历史结果查询");
+  await expect(revokeEffect).toContainText("撤销后不保留该 Token 的历史结果查询与恢复范围");
   await page.route("**/api/v1/command-previews/*/confirm", async (route) => {
     await route.fetch();
     await route.abort("failed");
@@ -1513,7 +1616,7 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await page.getByRole("button", { name: "查询 Token 结果" }).click();
   await assertOperatorReceipt(page);
   await closeReceipt(page);
-  await expect(page.getByRole("row").filter({ has: page.locator("th code", { hasText: replacementTokenId! }) })).toContainText("REVOKED");
+  await expect(page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "已撤销" })).toHaveCount(1);
   await assertNoA11yViolations(page);
   await page.screenshot({ path: testInfo.outputPath("token-lifecycle.png"), fullPage: true });
 });
@@ -1521,7 +1624,7 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
 test("desktop expired Token Preview rotates preview metadata without changing the retained secret", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name !== "desktop", "desktop-only Token Preview expiry recovery");
   await page.clock.install();
-  await login(page);
+  await login(page, administratorCredentials);
   await page.getByRole("link", { name: "Token", exact: true }).click();
   await page.getByRole("button", { name: "签发 Token" }).click();
   await page.getByLabel("标签").fill("E2E expired preview agent");
@@ -1556,7 +1659,7 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
     if (request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/tokens") tokenListRequests += 1;
   });
 
-  await login(page);
+  await login(page, administratorCredentials);
   await page.getByRole("link", { name: "Token", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Token 生命周期" })).toBeVisible();
 
@@ -1593,9 +1696,8 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
 
   const tokenRows = page.getByRole("row").filter({ hasText: "E2E deferred callback agent" });
   await expect(tokenRows).toHaveCount(1);
-  await expect(tokenRows).toContainText("ACTIVE");
-  const issuedTokenId = (await tokenRows.locator("th code").textContent())?.trim();
-  expect(issuedTokenId).toMatch(/^token_/);
+  await expect(tokenRows).toContainText("有效");
+  await expect(tokenRows).not.toContainText(/(?:token_|subject_|CREATE_ORDER)/);
 
   const requestsBeforeOldIssueResponse = tokenListRequests;
   await releaseConfirmAndFlushOldCallback(page, delayedIssue);
@@ -1604,7 +1706,7 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
   expect(tokenListRequests).toBe(requestsBeforeOldIssueResponse);
 
   await retained.getByRole("button", { name: "已保存，清除本机显示" }).click();
-  await tokenRows.getByRole("button", { name: /^撤销 Token / }).click();
+  await tokenRows.getByRole("button", { name: /^撤销/ }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
 
   const delayedRevoke = await deferNextConfirmResponse(page, "SERVER_ERROR");
@@ -1632,13 +1734,13 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
   await closeReceipt(page);
   await expect(pending).toContainText("已完成");
   await expect(tokenRows).toHaveCount(1);
-  await expect(tokenRows).toContainText("REVOKED");
+  await expect(tokenRows).toContainText("已撤销");
 
   const requestsBeforeOldRevokeResponse = tokenListRequests;
   await releaseConfirmAndFlushOldCallback(page, delayedRevoke);
   await expect(pending).toContainText("已完成");
   await expect(tokenRows).toHaveCount(1);
-  await expect(tokenRows).toContainText("REVOKED");
+  await expect(tokenRows).toContainText("已撤销");
   expect(tokenListRequests).toBe(requestsBeforeOldRevokeResponse);
 });
 
@@ -1705,7 +1807,7 @@ test("keyboard-only navigation reaches a business Preview and cancels without co
 
 test("responsive shell and 200 percent zoom stay contiguous without page overflow", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name !== "desktop", "single-browser responsive assertion");
-  await login(page);
+  await login(page, administratorCredentials);
 
   for (const width of [320, 375, 768, 1024, 1440]) {
     await page.setViewportSize({ width, height: 900 });

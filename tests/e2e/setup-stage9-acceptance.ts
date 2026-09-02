@@ -6,6 +6,7 @@ import { createDatabase } from "../../packages/db/src/database.ts";
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetE2eDatabase } from "./reset-database.ts";
 
 // Keep Playwright's browser-test loader away from seed.ts, which intentionally uses import.meta.
@@ -25,7 +26,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Stage 9 Acceptance Setup",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 export interface Stage9StayFixture {

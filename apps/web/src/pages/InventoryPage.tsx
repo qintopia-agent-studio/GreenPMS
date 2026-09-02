@@ -15,9 +15,11 @@ import type {
 import { currentReleaseFeatures } from "@qintopia/contracts";
 import { api, ApiError, type ClientCommandMetadata } from "../api";
 import { addLocalDateDays, localDateInTimeZone } from "../dates";
-import { useWorkspace } from "../session";
+import { commandRecoveryAvailable, principalCan, propertyAllowedActions, useWorkspace } from "../session";
+import { assertOrderViewAllowedActions } from "../orderViewValidation";
 import type {
   BookingChannelCode,
+  CommandCapability,
   CommandRequest,
   MemberContractDto,
   MemberDto,
@@ -2138,6 +2140,11 @@ const ROOM_STATUS_RANGE_LOADING_NOTICE_DELAY_MS = 250;
 const ROOM_STATUS_RESTORATION_PREFIX = "qintopia.room-status-view.v1";
 const selectionActionCodes = new Set(["CREATE_ORDER", "CREATE_FREE_STAY", "BACKFILL_ORDER", "LOCK_MAINTENANCE"]);
 
+function roomStatusBoardHasSelectionAction(board: RoomStatusBoardDto): boolean {
+  return board.rooms.some((room) => [room, ...room.children].some((unit) => unit.allowedActions
+    .some((action) => selectionActionCodes.has(action.code) && action.enabled)));
+}
+
 interface RoomStatusInteractionSnapshot {
   anchor: HTMLElement;
   selection: RoomStatusSelection | null;
@@ -2501,6 +2508,16 @@ export function roomStatusTimelineRangeFromStart(startDate: string): RoomStatusR
     arrivalDate: startDate,
     departureDate: addLocalDateDays(startDate, ROOM_STATUS_TIMELINE_DAYS)
   };
+}
+
+export function roomStatusRangeForOrderReturn(
+  range: RoomStatusRange,
+  triggerDate: string | undefined
+): RoomStatusRange {
+  if (!triggerDate
+    || !isIsoLocalDate(triggerDate)
+    || (range.arrivalDate <= triggerDate && triggerDate < range.departureDate)) return range;
+  return roomStatusTimelineRangeFromStart(triggerDate);
 }
 
 function restoredOrDefaultRoomStatusRange(restored: RoomStatusRestorationSnapshot | undefined, timeZone: string): RoomStatusRange {
@@ -2867,7 +2884,8 @@ export function InventoryPage() {
   const property = meta.properties.find((item) => item.id === propertyId);
   const propertyTimezone = property?.timezone ?? "UTC";
   const principalPropertyAccess = principal.propertyAccess[propertyId];
-  const orderPrincipalScope = `${propertyId}:${principal.subjectId}:${principal.credentialType}:${principalPropertyAccess ?? "NONE"}`;
+  const currentPropertyAllowedActions = useMemo(() => propertyAllowedActions(principal, propertyId), [principal, propertyId]);
+  const orderPrincipalScope = `${propertyId}:${principal.subjectId}:${principal.credentialType}:${principalPropertyAccess ?? "NONE"}:${[...currentPropertyAllowedActions].join("|")}`;
   const currentPropertyIdRef = useRef(propertyId);
   currentPropertyIdRef.current = propertyId;
   const currentOrderPrincipalScopeRef = useRef(orderPrincipalScope);
@@ -2875,7 +2893,12 @@ export function InventoryPage() {
   const initialRestoration = useRef(readRoomStatusRestoration(principal.subjectId, propertyId));
   const orderReturnEnvelopePresent = useRef(hasRoomStatusOrderReturnEnvelope(location.state));
   const pendingOrderReturnTarget = useRef(parseRoomStatusOrderReturnTarget(location.state));
-  const [range, setRange] = useState<RoomStatusRange>(() => restoredOrDefaultRoomStatusRange(initialRestoration.current, propertyTimezone));
+  const [range, setRange] = useState<RoomStatusRange>(() => roomStatusRangeForOrderReturn(
+    restoredOrDefaultRoomStatusRange(initialRestoration.current, propertyTimezone),
+    pendingOrderReturnTarget.current?.propertyId === propertyId
+      ? pendingOrderReturnTarget.current.triggerDate
+      : undefined
+  ));
   const [viewState, dispatchView] = useReducer(
     roomStatusViewReducer,
     initialRestoration.current?.state ?? createRoomStatusViewState()
@@ -2908,6 +2931,7 @@ export function InventoryPage() {
     subjectId: principal.subjectId,
     scopeId: `property:${propertyId}`
   });
+  const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
   const [board, setBoard] = useState<RoomStatusBoardDto>();
   const [boardFreshnessDeadline, setBoardFreshnessDeadline] = useState<number>();
   const boardRef = useRef<RoomStatusBoardDto | undefined>(undefined);
@@ -3174,6 +3198,7 @@ export function InventoryPage() {
         if (response.order.property_id !== propertyId || response.stay.id !== selectedOrderIdentity.stayId) {
           throw new Error("订单上下文与当前房态的稳定引用不一致，已停止显示");
         }
+        assertOrderViewAllowedActions(response, currentPropertyAllowedActions);
         setSelectedOrderView(response);
         setSelectedOrderLoadedScope(orderPrincipalScope);
       })
@@ -3360,7 +3385,12 @@ export function InventoryPage() {
     setRestoreGridFocus(Boolean(restored));
     orderRestorationAttempted.current = false;
     restorationPagesVisited.current.clear();
-    setRange(restoredOrDefaultRoomStatusRange(restored, propertyTimezone));
+    setRange(roomStatusRangeForOrderReturn(
+      restoredOrDefaultRoomStatusRange(restored, propertyTimezone),
+      pendingOrderReturnTarget.current?.propertyId === propertyId
+        ? pendingOrderReturnTarget.current.triggerDate
+        : undefined
+    ));
     dispatchView({ type: "RESTORE", state: restored?.state ?? createRoomStatusViewState() });
     setBoard(undefined);
     setBoardFreshnessDeadline(undefined);
@@ -3444,7 +3474,7 @@ export function InventoryPage() {
       .then((response) => {
         if (!queryAttemptGuard.isActive(requestId)) return;
         permissionDeniedRef.current = false;
-        assertRoomStatusBoard(response, { propertyId, range, pageIndex: viewState.roomPageIndex });
+        assertRoomStatusBoard(response, { propertyId, range, pageIndex: viewState.roomPageIndex, allowedActions: currentPropertyAllowedActions });
         const responseReceivedAt = roomStatusFreshnessNow();
         const localFreshnessDeadline = roomStatusProjectionLocalFreshnessDeadline(response, requestStartedAt);
         const writeContinuityPreserved = !writeContinuityExpected
@@ -3749,6 +3779,7 @@ export function InventoryPage() {
     ? pageQuoteRecovery
     : { kind: "ABSENT" };
   const commandRecoveryBlockedForPresentation = commandRecovery.blocked
+    && recoveryPendingAllowed
     && !(currentQuoteSubmittingInWorkbench
       && commandRecovery.ready
       && !commandRecovery.pending
@@ -3764,7 +3795,7 @@ export function InventoryPage() {
   const commandWriteGate = roomStatusCommandWriteGate({
     projectionWritable,
     activeProjectionValid,
-    recoveryBlocked: roomStatusRecoveryBlocksNewWrites(commandRecovery.blocked, pageQuoteRecovery),
+    recoveryBlocked: roomStatusRecoveryBlocksNewWrites(commandRecovery.blocked && recoveryPendingAllowed, pageQuoteRecovery),
     recoveryReady: commandRecovery.ready,
     recoveryError: commandRecovery.error,
     contextInvalidated: commandContextInvalidated,
@@ -3772,7 +3803,7 @@ export function InventoryPage() {
   });
   const commandsBlocked = commandWriteGate.startBlocked;
   const activeCommandWriteBlocked = commandWriteGate.activeBlocked;
-  const recoveryEntryAvailable = Boolean(commandRecovery.pending
+  const recoveryEntryAvailable = Boolean(commandRecovery.pending && recoveryPendingAllowed
     || pageQuoteRecoveryForPresentation.kind !== "ABSENT"
     || commandRecovery.canDiscardCorrupt);
   const actionPresentationBlock = roomStatusActionPresentationBlock({
@@ -4085,7 +4116,7 @@ export function InventoryPage() {
         if (pageIndex === renderedBoard.page.index) continue;
         const response = await loadReturnPage(pageIndex);
         if (!current) return;
-        assertRoomStatusBoard(response, { propertyId, range, pageIndex });
+        assertRoomStatusBoard(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
         if (response.revision !== renderedBoard.revision
           || response.businessDate !== renderedBoard.businessDate
           || response.accessLevel !== renderedBoard.accessLevel
@@ -4220,7 +4251,7 @@ export function InventoryPage() {
     const loadPage = async (pageIndex: number, filters: RoomStatusViewState["filters"]) => {
       const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, filters));
       if (!current) return undefined;
-      assertRoomStatusBoard(response, { propertyId, range, pageIndex });
+      assertRoomStatusBoard(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
       return response;
     };
     const loadPageSet = async (
@@ -4996,7 +5027,7 @@ export function InventoryPage() {
         for (let pageIndex = 0; pageIndex < renderedBoard.page.totalPages; pageIndex += 1) {
           if (pageIndex === renderedBoard.page.index) continue;
           const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, viewState.filters));
-          assertRoomStatusBoard(response, { propertyId, range, pageIndex });
+          assertRoomStatusBoard(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
           if (findRoomStatusUnit(response, target.inventoryUnitId)) {
             targetPage = pageIndex;
             break;
@@ -5049,7 +5080,7 @@ export function InventoryPage() {
       ? roomStatusAuthorizedQuoteAction(currentUnit, activeQuoteTarget, currentBusinessDate)
       : undefined;
     if (quoteWorkbenchBlocked
-      || principalPropertyAccess !== "WRITE"
+      || !principalCan(principal, propertyId, "CREATE_ORDER")
       || !currentAuthorization
       || !roomStatusQuoteCommandMatchesTarget(request, activeQuoteTarget)) {
       setActionError(new Error("当前住宿表单不再绑定有效的服务端动作，命令未发送。请刷新房态并重新选择日期。"));
@@ -5059,6 +5090,10 @@ export function InventoryPage() {
   }
 
   function startCommand(request: CommandRequest, targetScope = orderPrincipalScope): boolean {
+    if (!principalCan(principal, propertyId, request.commandType as CommandCapability)) {
+      setActionError(new Error("当前账号已没有该命令授权；命令未发送，表单草稿保持不变。"));
+      return false;
+    }
     if (commandsBlocked) {
       setActionError(new Error("当前房态已陈旧、正在刷新、权限已收窄或命令恢复尚未收口；命令未发送，表单草稿保持不变。"));
       return false;
@@ -5166,7 +5201,7 @@ export function InventoryPage() {
   }
 
   function openRecoveryDialog() {
-    if (!commandRecovery.pending) return;
+    if (!commandRecovery.pending || !recoveryPendingAllowed) return;
     const recoveryOrderId = commandRecovery.pending.targetRefs
       .find((reference) => reference.startsWith("orderId="))
       ?.slice("orderId=".length);
@@ -5328,7 +5363,7 @@ export function InventoryPage() {
         ...(refreshOrderIdentity ? { capturedOrder: refreshOrderIdentity } : {}),
         ...(currentSelectedOrderIdentityRef.current ? { currentOrder: currentSelectedOrderIdentityRef.current } : {})
       })) throw new Error("提交后的房态刷新已被新的权威查询或操作范围替代");
-      assertRoomStatusBoard(response, { propertyId, range, pageIndex: viewState.roomPageIndex });
+      assertRoomStatusBoard(response, { propertyId, range, pageIndex: viewState.roomPageIndex, allowedActions: currentPropertyAllowedActions });
       const responseReceivedAt = roomStatusFreshnessNow();
       const localFreshnessDeadline = roomStatusProjectionLocalFreshnessDeadline(response, requestStartedAt);
       const writeContinuityPreserved = !writeContinuityExpected
@@ -5372,6 +5407,7 @@ export function InventoryPage() {
       restoreRefreshReturnFocus();
       if (refreshOrderIdentity) {
         const orderResponse = await api.order(refreshOrderIdentity.orderId, controller.signal);
+        assertOrderViewAllowedActions(orderResponse, currentPropertyAllowedActions);
         if (!roomStatusCommittedRefreshScopeIsCurrent({
           requestActive: queryAttemptGuard.isActive(requestId),
           requestAborted: controller.signal.aborted,
@@ -5565,7 +5601,8 @@ export function InventoryPage() {
       {queryPhase !== "PERMISSION_DENIED"
         ? <QuoteRecoveryPageEntry recovery={pageQuoteRecoveryForPresentation} onOpen={openQuoteRecoveryContext} />
         : null}
-      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={inventoryRecoveryIsBusinessFacing(commandRecovery.pending.presentation)} /> : null}
+      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={inventoryRecoveryIsBusinessFacing(commandRecovery.pending.presentation)} /> : null}
+      {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="inventory-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；房态只按当前权限开放服务端动作。</p></div></section> : null}
       {returnNotice ? <div className="room-status-return-notice" role="status">{returnNotice}</div> : null}
       {!roomStatusBlockingModalOpen ? roomStatusRefreshNotice : null}
 
@@ -5637,7 +5674,7 @@ export function InventoryPage() {
                 range={range}
                 groups={mobileGroups}
                 activeTab={mobileTab}
-                canCreate={!commandsBlocked && renderedBoard.accessLevel === "WRITE"}
+                canCreate={!commandsBlocked && roomStatusBoardHasSelectionAction(renderedBoard)}
                 focusRequest={mobileFocusRequest}
                 onTabChange={setMobileTab}
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}

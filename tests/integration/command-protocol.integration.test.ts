@@ -11,17 +11,18 @@ import {
 import { newOpaqueSecret, sha256, stableHash } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.COMMAND_PROTOCOL_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_command_protocol";
 
 const principal: AuthPrincipal = {
-  subjectId: demo.agentSubjectId,
-  credentialId: "token_demo_write",
+  subjectId: demo.administratorSubjectId,
+  credentialId: "token_demo_admin_write",
   credentialType: "TOKEN",
-  displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  displayName: "Demo Administrator",
+  ...authScope({ profile: "administrator" })
 };
 
 let db: Kysely<Database>;
@@ -30,6 +31,33 @@ let sequence = 0;
 function metadata(prefix: string) {
   sequence += 1;
   return { idempotencyKey: `${prefix}-${sequence}`, correlationId: `${prefix}-${sequence}` };
+}
+
+async function availableEntitlementBalance(lotId: string): Promise<number> {
+  const row = await db.selectFrom("entitlement_lots")
+    .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
+    .select([
+      "entitlement_lots.total_units",
+      sql<number>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as integer)`.as("ledger_delta")
+    ])
+    .where("entitlement_lots.id", "=", lotId)
+    .groupBy("entitlement_lots.total_units")
+    .executeTakeFirstOrThrow();
+  return row.total_units + Number(row.ledger_delta);
+}
+
+async function balanceCorrectionEnvelope(lotId: string, delta: number, adjustmentReason: string): Promise<CommandEnvelope> {
+  const availableBefore = await availableEntitlementBalance(lotId);
+  return {
+    commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+    input: {
+      propertyId: demo.propertyId,
+      entitlementLotId: lotId,
+      expectedAvailableBalance: availableBefore,
+      targetAvailableBalance: availableBefore + delta,
+      adjustmentReason
+    }
+  };
 }
 
 async function waitForUnknown(commandType: string, idempotencyKey: string) {
@@ -534,6 +562,7 @@ describe("durable command protocol", () => {
         subjectId: demo.agentSubjectId,
         label: "Recoverable client-held secret",
         accessCeiling: "READ",
+        commandCeiling: [],
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret
       }
@@ -595,6 +624,7 @@ describe("durable command protocol", () => {
         subjectId: demo.agentSubjectId,
         label,
         accessCeiling: "READ",
+        commandCeiling: [],
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: newOpaqueSecret("qtp")
       }
@@ -704,6 +734,7 @@ describe("durable command protocol", () => {
           subjectId: demo.agentSubjectId,
           label: "Expiring Preview Token",
           accessCeiling: "READ",
+          commandCeiling: [],
           expiresAt: new Date(baseNow + 60_000).toISOString(),
           tokenSecret
         }
@@ -795,18 +826,11 @@ describe("durable command protocol", () => {
   });
 
   it("exposes UNKNOWN while a visible execution claim is blocked, then resolves to EXECUTED", async () => {
-    const preview = await createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: {
-        propertyId: demo.propertyId,
-        entitlementLotId: demo.roomLotId,
-        quantityDelta: 1,
-        adjustmentReason: "Command recovery concurrency acceptance"
-      }
-    }, metadata("blocked-preview"));
+    const envelope = await balanceCorrectionEnvelope(demo.roomLotId, 1, "Command recovery concurrency acceptance");
+    const preview = await createCommandPreview(db, principal, envelope, metadata("blocked-preview"));
     const confirmation = {
       propertyId: demo.propertyId,
-      commandType: "ADJUST_MEMBER_ENTITLEMENT" as const,
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE" as const,
       confirmation: true as const,
       expectedEffectHash: preview.preview.effectHash,
       reason: { code: "RECOVERY_ACCEPTANCE", note: "Observe the durable in-flight state" }
@@ -840,7 +864,7 @@ describe("durable command protocol", () => {
     );
     try {
       await waitForBlockedEntitlementOwner();
-      expect(await waitForUnknown("ADJUST_MEMBER_ENTITLEMENT", confirmMetadata.idempotencyKey))
+      expect(await waitForUnknown("CORRECT_MEMBER_ENTITLEMENT_BALANCE", confirmMetadata.idempotencyKey))
         .toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
       const ledgerCountDuring = await db.selectFrom("entitlement_ledger")
         .select(({ fn }) => fn.countAll<number>().as("count"))
@@ -853,23 +877,16 @@ describe("durable command protocol", () => {
     await blocker;
     const receipt = await confirmationPromise;
     expect(receipt).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
-    expect(await findCommandResult(db, principal, demo.propertyId, "ADJUST_MEMBER_ENTITLEMENT", confirmMetadata.idempotencyKey))
+    expect(await findCommandResult(db, principal, demo.propertyId, "CORRECT_MEMBER_ENTITLEMENT_BALANCE", confirmMetadata.idempotencyKey))
       .toEqual(receipt);
   });
 
   it("rejects more concurrent same-key retries than the pool size without starving unrelated queries", async () => {
-    const preview = await createCommandPreview(db, principal, {
-      commandType: "ADJUST_MEMBER_ENTITLEMENT",
-      input: {
-        propertyId: demo.propertyId,
-        entitlementLotId: demo.roomLotId,
-        quantityDelta: 1,
-        adjustmentReason: "Connection pool resilience acceptance"
-      }
-    }, metadata("pool-preview"));
+    const envelope = await balanceCorrectionEnvelope(demo.roomLotId, 1, "Connection pool resilience acceptance");
+    const preview = await createCommandPreview(db, principal, envelope, metadata("pool-preview"));
     const confirmation = {
       propertyId: demo.propertyId,
-      commandType: "ADJUST_MEMBER_ENTITLEMENT" as const,
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE" as const,
       confirmation: true as const,
       expectedEffectHash: preview.preview.effectHash,
       reason: { code: "POOL_RESILIENCE", note: "Concurrent retry must not wait behind the active owner" }
@@ -893,7 +910,7 @@ describe("durable command protocol", () => {
 
     const owner = confirmCommandPreview(db, principal, preview.preview.previewId, confirmation, confirmMetadata);
     await waitForBlockedEntitlementOwner();
-    await waitForUnknown("ADJUST_MEMBER_ENTITLEMENT", confirmMetadata.idempotencyKey);
+    await waitForUnknown("CORRECT_MEMBER_ENTITLEMENT_BALANCE", confirmMetadata.idempotencyKey);
     try {
       const retryOutcome = await Promise.race([
         Promise.allSettled(Array.from({ length: 24 }, () => (

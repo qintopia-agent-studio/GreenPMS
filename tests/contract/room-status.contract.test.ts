@@ -150,6 +150,7 @@ describe("RoomStatus Query and Command API contract", () => {
     expect(JSON.stringify(responseSchema)).toContain("primaryOccupantLabel");
     expect(JSON.stringify(responseSchema)).toContain("sourceStartDate");
     expect(JSON.stringify(responseSchema)).toContain("sourceEndDate");
+    expect(JSON.stringify(responseSchema)).toContain("orderDepartureDate");
     expect(JSON.stringify(responseSchema)).toContain("sourceCategory");
     expect(JSON.stringify(responseSchema)).toContain("freeStayCategoryCode");
     expect(JSON.stringify(responseSchema)).toContain("freeStayReason");
@@ -167,6 +168,7 @@ describe("RoomStatus Query and Command API contract", () => {
     expect((operationalTaskItems.required as string[])).toContain("operationalAttention");
     expect(JSON.stringify(operationalTaskProperties.attention)).toContain('"ARREARS"');
     expect(JSON.stringify(operationalTaskProperties.operationalAttention)).toContain('"OVERDUE_IN_HOUSE"');
+    expect(JSON.stringify(operationalTaskProperties.operationalAttention)).toContain('"DUE_OUT"');
     expect(JSON.stringify(operationalTaskProperties.reason)).not.toContain("maxLength");
     const taskConflictProperties = ((operationalTaskProperties.conflicts!.items as JsonSchema).properties as Record<string, JsonSchema>);
     expect(JSON.stringify(taskConflictProperties.reason)).not.toContain("maxLength");

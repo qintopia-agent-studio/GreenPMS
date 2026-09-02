@@ -225,6 +225,29 @@ describe("RoomStatusOrderContext", () => {
     expect(html).toContain('data-testid="overdue-in-house-alert"');
   });
 
+  it("shows due-out attention with the original order dates in the order context", () => {
+    const base = orderView();
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        order: { ...base.order, status: "CHECKED_IN" },
+        stay: { ...base.stay, status: "IN_HOUSE" },
+        effectiveArrangement: {
+          ...base.effectiveArrangement,
+          businessDate: base.effectiveArrangement.departureDate
+        },
+        fulfillment: { ...base.fulfillment, state: "IN_HOUSE" }
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+
+    expect(html).toContain("待退房");
+    expect(html).toContain("2026-07-25 至 2026-07-28");
+  });
+
   it("shows the four typed lifecycle layers, correction audit, and only enabled server actions", () => {
     const html = renderToStaticMarkup(<RoomStatusOrderContext view={orderView()} units={units} onOpenOrder={() => undefined} onFulfillmentAction={() => undefined} onCorrectOccupant={() => undefined} onLocateRange={() => undefined} />);
     expect(html).toContain("3 夜");

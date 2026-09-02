@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { BadgeCheck, CircleDollarSign, CreditCard, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { useWorkspace } from "../session";
+import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
 import {
   continueStayUpgradeAfterMemberCreated,
   parseStayUpgradeMemberCreationIntent,
@@ -11,7 +11,7 @@ import {
   stayUpgradeOrderHref,
   type StayUpgradeMemberCreationState
 } from "../stayMembershipUpgrade";
-import type { CommandRequest, MemberContractDto, MemberSummaryDto, MemberViewDto, MembershipOrderSummaryDto, MembershipPaymentFactDto, MembershipProductDto } from "../types";
+import type { CommandCapability, CommandRequest, MemberContractDto, MemberSummaryDto, MemberViewDto, MembershipOrderSummaryDto, MembershipPaymentFactDto, MembershipProductDto } from "../types";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -512,10 +512,11 @@ function CorrectEntitlementBalanceDialog({ propertyId, lot, currentBalance, draf
   </Modal>;
 }
 
-function MemberEntitlementsPanel({ view, disabled, targetContractId, onCorrect }: {
+function MemberEntitlementsPanel({ view, disabled, targetContractId, canCorrect, onCorrect }: {
   view: MemberViewDto;
   disabled: boolean;
   targetContractId?: string;
+  canCorrect: boolean;
   onCorrect: (lot: MemberViewDto["lots"][number], currentBalance: number) => void;
 }) {
   const targetArticleRef = useRef<HTMLElement>(null);
@@ -561,7 +562,7 @@ function MemberEntitlementsPanel({ view, disabled, targetContractId, onCorrect }
             <div><dt>初始发放</dt><dd>{lot.total_units} {unit}</dd></div>
             <div><dt>当前可用</dt><dd><strong>{available} {unit}</strong></dd></div>
           </dl>
-          {active ? <button type="button" className="button button-secondary button-small" disabled={disabled} onClick={() => onCorrect(lot, available)} data-testid="correct-entitlement-balance"><PencilLine aria-hidden="true" size={15} />更正余额</button> : null}
+          {active && canCorrect ? <button type="button" className="button button-secondary button-small" disabled={disabled} onClick={() => onCorrect(lot, available)} data-testid="correct-entitlement-balance"><PencilLine aria-hidden="true" size={15} />更正余额</button> : null}
         </article>;
       })}
     </div>}
@@ -598,10 +599,14 @@ function MemberEntitlementsPanel({ view, disabled, targetContractId, onCorrect }
   </section>;
 }
 
-export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId, onCreate, onPayment, onCorrect, onActivate }: {
+export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId, canCreate, canRecordPayment, canCorrectPayment, canActivate, onCreate, onPayment, onCorrect, onActivate }: {
   view: MemberViewDto;
   disabled: boolean;
   targetMembershipOrderId?: string;
+  canCreate: boolean;
+  canRecordPayment: boolean;
+  canCorrectPayment: boolean;
+  canActivate: boolean;
   onCreate: () => void;
   onPayment: (summary: MembershipOrderSummaryDto) => void;
   onCorrect: (summary: MembershipOrderSummaryDto, fact: MembershipPaymentFactDto) => void;
@@ -616,7 +621,7 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
   return <section className="membership-orders-panel" aria-labelledby="membership-orders-heading">
     <div className="section-title-row">
       <div><span className="section-kicker">会员购买</span><h2 id="membership-orders-heading">会员订单</h2></div>
-      <button type="button" className="button button-primary" onClick={onCreate} disabled={disabled || view.membershipProducts.length === 0} data-testid="create-membership-order"><CreditCard aria-hidden="true" size={17} />办理会员</button>
+      {canCreate ? <button type="button" className="button button-primary" onClick={onCreate} disabled={disabled || view.membershipProducts.length === 0} data-testid="create-membership-order"><CreditCard aria-hidden="true" size={17} />办理会员</button> : null}
     </div>
     {!view.membershipOrders.length ? <EmptyState title="尚无会员订单" detail="办理会员后，可登记多笔企微收款并由工作人员明确生效。" /> : <div className="membership-order-list">
       {view.membershipOrders.map((summary) => {
@@ -658,14 +663,14 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
                     {fact.source_type === "STAY_COLLECTION_TRANSFER" && fact.source_order_id ? <Link className="inline-link" to={`/orders/${encodeURIComponent(fact.source_order_id)}`}>查看住宿订单</Link> : null}
                     {reversed ? <small>已由后续更正冲销</small> : fact.note ? <small>{fact.note}</small> : null}
                   </div>
-                  {order.status === "DRAFT" && fact.fact_type === "COLLECTION" && !reversed ? <button type="button" className="button button-secondary button-small" onClick={() => onCorrect(summary, fact)} disabled={disabled}><PencilLine aria-hidden="true" size={15} />更正</button> : null}
+                  {order.status === "DRAFT" && fact.fact_type === "COLLECTION" && !reversed && canCorrectPayment ? <button type="button" className="button button-secondary button-small" onClick={() => onCorrect(summary, fact)} disabled={disabled}><PencilLine aria-hidden="true" size={15} />更正</button> : null}
                 </li>;
               })}
             </ol>}
           </section>
           {order.status === "DRAFT" ? <div className="membership-order-actions">
-            <button type="button" className="button button-secondary" onClick={() => onPayment(summary)} disabled={disabled} data-testid="record-membership-payment"><CircleDollarSign aria-hidden="true" size={17} />登记企微收款</button>
-            <button type="button" className="button button-primary" onClick={() => onActivate(summary)} disabled={disabled} data-testid="activate-membership-order"><BadgeCheck aria-hidden="true" size={17} />生效会员订单</button>
+            {canRecordPayment ? <button type="button" className="button button-secondary" onClick={() => onPayment(summary)} disabled={disabled} data-testid="record-membership-payment"><CircleDollarSign aria-hidden="true" size={17} />登记企微收款</button> : null}
+            {canActivate ? <button type="button" className="button button-primary" onClick={() => onActivate(summary)} disabled={disabled} data-testid="activate-membership-order"><BadgeCheck aria-hidden="true" size={17} />生效会员订单</button> : null}
           </div> : null}
         </article>;
       })}
@@ -681,7 +686,14 @@ export function MembersPage() {
   const initialStayUpgradeCreation = useRef(stayUpgradeMemberCreationState(parseStayUpgradeMemberCreationIntent(location.search)));
   const deepLinkSelectionPending = useRef(true);
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
-  const commandsBlocked = commandRecovery.blocked;
+  const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
+  const commandsBlocked = commandRecovery.blocked && recoveryPendingAllowed;
+  const canCreateMember = principalCan(principal, propertyId, "CREATE_MEMBER");
+  const canCreateMembershipOrder = principalCan(principal, propertyId, "CREATE_MEMBERSHIP_ORDER");
+  const canRecordMembershipPayment = principalCan(principal, propertyId, "RECORD_MEMBERSHIP_PAYMENT");
+  const canCorrectMembershipPayment = principalCan(principal, propertyId, "CORRECT_MEMBERSHIP_PAYMENT");
+  const canActivateMembershipOrder = principalCan(principal, propertyId, "ACTIVATE_MEMBERSHIP_ORDER");
+  const canCorrectEntitlementBalance = principalCan(principal, propertyId, "CORRECT_MEMBER_ENTITLEMENT_BALANCE");
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [members, setMembers] = useState<MemberSummaryDto[]>([]);
@@ -802,6 +814,7 @@ export function MembersPage() {
   }
 
   function startCommand(request: CommandRequest) {
+    if (!principalCan(principal, propertyId, request.commandType as CommandCapability)) return;
     if (commandsBlocked) return;
     setRecoveryDialogOpen(false);
     setCommandDraft(undefined);
@@ -822,7 +835,7 @@ export function MembersPage() {
   }
 
   function openRecoveryDialog() {
-    if (!commandRecovery.pending) return;
+    if (!commandRecovery.pending || !recoveryPendingAllowed) return;
     setRecoveryDialogOpen(true);
     setCommand(recoveryCommandRequest(commandRecovery.pending));
   }
@@ -874,7 +887,7 @@ export function MembersPage() {
     <header className="page-heading page-heading-actions">
       <div><p className="eyebrow">会员管理</p><h1>会员档案</h1><p>查询和维护当前门店的会员资料</p></div>
       <button className="button button-secondary" type="button" onClick={refresh} disabled={loadingList || loadingMember}><RefreshCw className={loadingList || loadingMember ? "spin" : ""} aria-hidden="true" size={17} />刷新</button>
-      <button className="button button-primary" type="button" onClick={() => setCreatingMember(true)} disabled={commandsBlocked} data-testid="create-member"><UserPlus aria-hidden="true" size={17} />新建会员</button>
+      {canCreateMember ? <button className="button button-primary" type="button" onClick={() => setCreatingMember(true)} disabled={commandsBlocked} data-testid="create-member"><UserPlus aria-hidden="true" size={17} />新建会员</button> : null}
     </header>
 
     <InlineError error={recoveryError} title="恢复记录未完成" />
@@ -887,7 +900,8 @@ export function MembersPage() {
       message={stayUpgradeMemberCreationAutoOpenBlockedNotice(initialStayUpgradeCreation.current, commandsBlocked)}
       onDismiss={() => undefined}
     />
-    {commandRecovery.pending ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="member-command-recovery" businessFacing /> : null}
+    {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="member-command-recovery" businessFacing /> : null}
+    {commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="member-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；请由具备权限的账号处理或清理终态记录。</p></div></section> : null}
 
     <form className="member-search" role="search" aria-label="搜索会员" onSubmit={search}>
       <label htmlFor="member-search-query">搜索会员<input id="member-search-query" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="昵称、姓名、手机号或微信号" data-testid="member-search-query" /></label>
@@ -900,10 +914,14 @@ export function MembersPage() {
       <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
         <MemberProfile member={member} />
-        <MemberEntitlementsPanel view={member} disabled={commandsBlocked} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
+        <MemberEntitlementsPanel view={member} disabled={commandsBlocked} canCorrect={canCorrectEntitlementBalance} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
         <MembershipOrdersPanel
           view={member}
           disabled={commandsBlocked}
+          canCreate={canCreateMembershipOrder}
+          canRecordPayment={canRecordMembershipPayment}
+          canCorrectPayment={canCorrectMembershipPayment}
+          canActivate={canActivateMembershipOrder}
           {...(activeTargetMembershipOrderId ? { targetMembershipOrderId: activeTargetMembershipOrderId } : {})}
           onCreate={() => setCreatingMembershipOrder(true)}
           onPayment={setPaymentOrder}
@@ -918,14 +936,14 @@ export function MembersPage() {
       </div> : null}
     </div>}
 
-    {creatingMember ? <CreateMemberDialog propertyId={propertyId} {...(commandDraft?.commandType === "CREATE_MEMBER" ? { draft: commandDraft } : {})} {...(initialStayUpgradeCreation.current ? {
+    {creatingMember && canCreateMember ? <CreateMemberDialog propertyId={propertyId} {...(commandDraft?.commandType === "CREATE_MEMBER" ? { draft: commandDraft } : {})} {...(initialStayUpgradeCreation.current ? {
       prefill: initialStayUpgradeCreation.current,
       onCorrectSource: () => navigate(stayUpgradeOccupantCorrectionHref(initialStayUpgradeCreation.current!), { replace: true })
     } : {})} onClose={() => { setCreatingMember(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (commandsBlocked) return; setCreatingMember(false); startCommand(request); }} /> : null}
-    {creatingMembershipOrder && member ? <CreateMembershipOrderDialog propertyId={propertyId} member={member.member} products={member.membershipProducts} {...(commandDraft?.commandType === "CREATE_MEMBERSHIP_ORDER" ? { draft: commandDraft } : {})} onClose={() => { setCreatingMembershipOrder(false); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
-    {paymentOrder ? <MembershipPaymentDialog propertyId={propertyId} summary={paymentOrder} {...(commandDraft?.commandType === "RECORD_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setPaymentOrder(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
-    {correctingPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={correctingPayment.summary} correction={correctingPayment.fact} {...(commandDraft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingPayment(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
-    {correctingEntitlement ? <CorrectEntitlementBalanceDialog propertyId={propertyId} lot={correctingEntitlement.lot} currentBalance={correctingEntitlement.currentBalance} {...(commandDraft?.commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingEntitlement(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { setCorrectingEntitlement(undefined); submitBusinessCommand(request); }} /> : null}
+    {creatingMembershipOrder && member && canCreateMembershipOrder ? <CreateMembershipOrderDialog propertyId={propertyId} member={member.member} products={member.membershipProducts} {...(commandDraft?.commandType === "CREATE_MEMBERSHIP_ORDER" ? { draft: commandDraft } : {})} onClose={() => { setCreatingMembershipOrder(false); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
+    {paymentOrder && canRecordMembershipPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={paymentOrder} {...(commandDraft?.commandType === "RECORD_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setPaymentOrder(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
+    {correctingPayment && canCorrectMembershipPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={correctingPayment.summary} correction={correctingPayment.fact} {...(commandDraft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingPayment(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
+    {correctingEntitlement && canCorrectEntitlementBalance ? <CorrectEntitlementBalanceDialog propertyId={propertyId} lot={correctingEntitlement.lot} currentBalance={correctingEntitlement.currentBalance} {...(commandDraft?.commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingEntitlement(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { setCorrectingEntitlement(undefined); submitBusinessCommand(request); }} /> : null}
     {command ? <CommandDialog
       key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}` : "new-member-command"}
       request={command}

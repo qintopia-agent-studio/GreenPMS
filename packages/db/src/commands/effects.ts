@@ -1,12 +1,14 @@
 import { sql } from "kysely";
-import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType } from "@qintopia/contracts";
+import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandCapability, type CommandCatalogType, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType } from "@qintopia/contracts";
 import {
   amountSummary,
   calculatePricing,
   calculateDurationTimelinePricing,
+  commandFeatureEnabled,
   createOrderPricingDecision,
   entitlementKindFor,
   enumerateServiceDates,
+  isHumanGrantableCommandCapability,
   parseLocalDate,
   requireTransactionReference,
   stayChangePricingDecision,
@@ -101,6 +103,102 @@ function requireTokenSecretHash(input: Record<string, unknown>): string {
   const value = optionalTokenSecretHash(input);
   if (!value) throw new DomainError("VALIDATION_ERROR", "tokenSecretHash is required for Token rotation");
   return value;
+}
+
+function optionalCommandCeiling(input: Record<string, unknown>): CommandCapability[] | undefined {
+  const value = input.commandCeiling;
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
+    throw new DomainError("VALIDATION_ERROR", "commandCeiling must be an array of exact command names");
+  }
+  const normalized = [...new Set(value.map((entry) => (entry as string).trim()))].sort();
+  if (normalized.some((entry) => !isHumanGrantableCommandCapability(entry))) {
+    throw new DomainError("VALIDATION_ERROR", "commandCeiling contains a non-grantable command");
+  }
+  return normalized as CommandCapability[];
+}
+
+function requireCommandCeiling(input: Record<string, unknown>): CommandCapability[] {
+  const commandCeiling = optionalCommandCeiling(input);
+  if (!commandCeiling) throw new DomainError("VALIDATION_ERROR", "commandCeiling is required");
+  return commandCeiling;
+}
+
+async function targetSubjectCommandGrants(
+  db: DbExecutor,
+  subjectId: string,
+  propertyId: string
+): Promise<Array<{
+  command_type: CommandCatalogType;
+  command_class: "DIRECT_READ" | "HUMAN_COMMAND" | "SYSTEM_DERIVED" | "FUTURE_DISABLED" | "HISTORICAL_READ";
+}>> {
+  const rows = await db.selectFrom("subject_command_grants")
+    .innerJoin("command_catalog", "command_catalog.command_type", "subject_command_grants.command_type")
+    .select(["subject_command_grants.command_type", "command_catalog.command_class"])
+    .where("subject_id", "=", subjectId)
+    .where("property_id", "=", propertyId)
+    .orderBy("subject_command_grants.command_type")
+    .execute();
+  return rows;
+}
+
+function sortedUniqueStrings<T extends string>(values: readonly T[]): T[] {
+  return [...new Set(values)].sort() as T[];
+}
+
+function commandGrantTypes(grants: ReadonlyArray<{ command_type: CommandCatalogType }>): CommandCatalogType[] {
+  return sortedUniqueStrings(grants.map((grant) => grant.command_type));
+}
+
+function commandGrantBasis(grants: ReadonlyArray<{
+  command_type: CommandCatalogType;
+  command_class: string;
+}>): Array<{ commandType: CommandCatalogType; commandClass: string; featureEnabled: boolean }> {
+  return grants.map((grant) => ({
+    commandType: grant.command_type,
+    commandClass: grant.command_class,
+    featureEnabled: commandFeatureEnabled(grant.command_type)
+  }));
+}
+
+function executableCommandCeilingFromGrants(grants: ReadonlyArray<{
+  command_type: CommandCatalogType;
+  command_class: string;
+}>): CommandCapability[] {
+  return sortedUniqueStrings(grants.flatMap((grant) => grant.command_class === "HUMAN_COMMAND"
+    && isHumanGrantableCommandCapability(grant.command_type)
+    && commandFeatureEnabled(grant.command_type)
+    ? [grant.command_type]
+    : []));
+}
+
+function persistedTokenCommandCeiling(
+  accessCeiling: "READ" | "WRITE",
+  commandCeiling: readonly CommandCapability[]
+): CommandCatalogType[] {
+  if (accessCeiling === "READ") return [];
+  return [...commandCeiling];
+}
+
+function resolveTokenCommandCeiling(options: {
+  requested: readonly CommandCapability[];
+  targetGrants: ReadonlyArray<{ command_type: CommandCatalogType; command_class: string }>;
+  accessCeiling: "READ" | "WRITE";
+}): CommandCapability[] {
+  if (options.accessCeiling === "READ") {
+    if (options.requested && options.requested.length > 0) {
+      throw new DomainError("VALIDATION_ERROR", "READ tokens cannot carry command ceilings");
+    }
+    return [];
+  }
+
+  const targetGrantSet = new Set(executableCommandCeilingFromGrants(options.targetGrants));
+  const ceiling = sortedUniqueStrings(options.requested);
+  const invalid = ceiling.find((commandType) => !targetGrantSet.has(commandType));
+  if (invalid) {
+    throw new DomainError("INSUFFICIENT_ACCESS", "Token command ceiling cannot exceed the target subject's exact command grants", 403);
+  }
+  return ceiling;
 }
 
 export function requireInteger(input: Record<string, unknown>, field: string, options: { min?: number; allowZero?: boolean } = {}): number {
@@ -642,6 +740,16 @@ async function activeRefundedAmount(db: DbExecutor, collectionFactId: string): P
   return refunds.filter((refund) => !refund.reversal_id).reduce((sum, refund) => sum + refund.amount_minor, 0);
 }
 
+async function loadOrderContextForProperty(db: DbExecutor, propertyId: string, orderId: string): Promise<OrderContext> {
+  const scopedOrder = await db.selectFrom("orders")
+    .select("id")
+    .where("id", "=", orderId)
+    .where("property_id", "=", propertyId)
+    .executeTakeFirst();
+  if (!scopedOrder) throw new DomainError("NOT_FOUND", "Order not found", 404);
+  return loadOrderContext(db, orderId);
+}
+
 function finalize(propertyId: string, effect: Record<string, unknown>, basisVersions: Record<string, unknown>): BuiltCommandEffect {
   return { propertyId, effect, basisVersions, effectHash: stableHash({ effect, basisVersions }) };
 }
@@ -1096,6 +1204,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     };
     return finalize(propertyId, effect, {
       quoteInputHash: quote.inputHash,
+      businessDate,
       inventory: fingerprint,
       occupancyCapacity: unit.occupancyCapacity,
       membership: await memberBasis(db, propertyId, quote.memberContractId ?? null, quote.memberId)
@@ -1317,24 +1426,56 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     if (accessCeiling !== "READ" && accessCeiling !== "WRITE") throw new DomainError("VALIDATION_ERROR", "accessCeiling must be READ or WRITE");
     const expiresAt = requireFutureDateTime(input, "expiresAt");
     const tokenSecretHash = optionalTokenSecretHash(input);
-    const subject = await db.selectFrom("subjects").innerJoin("subject_property_grants", "subject_property_grants.subject_id", "subjects.id")
-      .select(["subjects.id", "subjects.status", "subjects.auth_version", "subject_property_grants.access_level"])
-      .where("subjects.id", "=", subjectId).where("subject_property_grants.property_id", "=", propertyId).executeTakeFirst();
-    if (!subject || subject.status !== "ACTIVE") throw new DomainError("SUBJECT_DISABLED", "Subject is not active for this property", 409);
+    const requestedCommandCeiling = requireCommandCeiling(input);
+    const subject = await db.selectFrom("subjects")
+      .innerJoin("subject_property_grants", "subject_property_grants.subject_id", "subjects.id")
+      .select(["subjects.id", "subjects.display_name", "subjects.status", "subjects.auth_version", "subject_property_grants.access_level"])
+      .where("subjects.id", "=", subjectId)
+      .where("subject_property_grants.property_id", "=", propertyId)
+      .executeTakeFirst();
+    if (!subject) throw new DomainError("NOT_FOUND", "Subject not found", 404);
+    if (subject.status !== "ACTIVE") throw new DomainError("SUBJECT_DISABLED", "Subject is not active for this property", 409);
     if (subject.access_level === "READ" && accessCeiling === "WRITE") throw new DomainError("INSUFFICIENT_ACCESS", "Token cannot exceed subject READ access", 403);
-    return finalize(propertyId, { subjectId, label, accessCeiling, expiresAt }, {
+    const targetGrants = await targetSubjectCommandGrants(db, subjectId, propertyId);
+    const commandCeiling = resolveTokenCommandCeiling({
+      requested: requestedCommandCeiling,
+      targetGrants,
+      accessCeiling
+    });
+    const persistedCommandCeiling = persistedTokenCommandCeiling(accessCeiling, commandCeiling);
+    return finalize(propertyId, {
+      subjectId,
+      subjectDisplayName: subject.display_name,
+      label,
+      accessCeiling,
+      commandCeiling,
+      persistedCommandCeiling,
+      expiresAt
+    }, {
       subjectAuthVersion: subject.auth_version,
       subjectAccess: subject.access_level,
+      targetCommandGrants: commandGrantTypes(targetGrants),
+      targetCommandGrantCatalog: commandGrantBasis(targetGrants),
+      persistedCommandCeiling,
       ...(tokenSecretHash ? { tokenSecretHash } : {})
     });
   }
 
   if (commandType === "ROTATE_TOKEN" || commandType === "REVOKE_TOKEN") {
     const tokenId = requireString(input, "tokenId");
-    const token = await db.selectFrom("api_tokens").innerJoin("subjects", "subjects.id", "api_tokens.subject_id")
-      .select(["api_tokens.id", "api_tokens.subject_id", "api_tokens.label", "api_tokens.access_ceiling", "api_tokens.property_scope", "api_tokens.expires_at", "api_tokens.revoked_at", "api_tokens.replaced_by_id", "subjects.auth_version"])
-      .where("api_tokens.id", "=", tokenId).where("api_tokens.property_scope", "=", propertyId).executeTakeFirst();
+    const token = await db.selectFrom("api_tokens")
+      .innerJoin("subjects", "subjects.id", "api_tokens.subject_id")
+      .innerJoin("subject_property_grants", "subject_property_grants.subject_id", "subjects.id")
+      .select(["api_tokens.id", "api_tokens.subject_id", "api_tokens.label", "api_tokens.access_ceiling", "api_tokens.property_scope", "api_tokens.expires_at", "api_tokens.revoked_at", "api_tokens.replaced_by_id", "subjects.display_name", "subjects.status", "subjects.auth_version", "subject_property_grants.access_level"])
+      .where("api_tokens.id", "=", tokenId)
+      .where("api_tokens.property_scope", "=", propertyId)
+      .where("subject_property_grants.property_id", "=", propertyId)
+      .executeTakeFirst();
     if (!token) throw new DomainError("NOT_FOUND", "Token not found", 404);
+    if (token.status !== "ACTIVE") throw new DomainError("SUBJECT_DISABLED", "Subject is not active for this property", 409);
+    if (commandType !== "REVOKE_TOKEN" && token.access_level === "READ" && token.access_ceiling === "WRITE") {
+      throw new DomainError("INSUFFICIENT_ACCESS", "Token exceeds subject READ access", 403);
+    }
     if (token.revoked_at) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Token is already revoked", 409);
     const requestedExpiresAt = optionalString(input, "expiresAt");
     const expiresAt = commandType === "ROTATE_TOKEN"
@@ -1342,13 +1483,49 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       : new Date(token.expires_at).toISOString();
     if (commandType === "ROTATE_TOKEN" && Date.parse(expiresAt) <= Date.now()) throw new DomainError("VALIDATION_ERROR", "Rotated token expiry must be in the future");
     const tokenSecretHash = commandType === "ROTATE_TOKEN" ? requireTokenSecretHash(input) : undefined;
+    const targetGrants = await targetSubjectCommandGrants(db, token.subject_id, propertyId);
+    const existingCeilingRows = await db.selectFrom("token_command_ceilings")
+      .innerJoin("command_catalog", "command_catalog.command_type", "token_command_ceilings.command_type")
+      .select(["token_command_ceilings.command_type", "command_catalog.command_class"])
+      .where("token_id", "=", token.id)
+      .where("subject_id", "=", token.subject_id)
+      .where("property_id", "=", propertyId)
+      .orderBy("token_command_ceilings.command_type")
+      .execute();
+    const previousPersistedCommandCeiling = commandGrantTypes(existingCeilingRows);
+    const previousCommandCeiling = executableCommandCeilingFromGrants(existingCeilingRows);
+    const commandCeiling = commandType === "ROTATE_TOKEN"
+      ? resolveTokenCommandCeiling({
+          requested: requireCommandCeiling(input),
+          targetGrants,
+          accessCeiling: token.access_ceiling
+        })
+      : previousCommandCeiling;
+    const persistedCommandCeiling = commandType === "ROTATE_TOKEN"
+      ? persistedTokenCommandCeiling(token.access_ceiling, commandCeiling)
+      : previousPersistedCommandCeiling;
+    const previousExpiresAt = new Date(token.expires_at).toISOString();
+    const historicalReadCeilingPreserved = false;
     return finalize(propertyId, {
-      tokenId: token.id, subjectId: token.subject_id, label: token.label, accessCeiling: token.access_ceiling,
-      expiresAt, operation: commandType === "ROTATE_TOKEN" ? "ROTATE" : "REVOKE"
+      tokenId: token.id, subjectId: token.subject_id, subjectDisplayName: token.display_name, label: token.label, accessCeiling: token.access_ceiling,
+      commandCeiling,
+      persistedCommandCeiling,
+      ...(commandType === "ROTATE_TOKEN" ? { previousCommandCeiling, previousPersistedCommandCeiling, previousExpiresAt } : {}),
+      expiresAt, operation: commandType === "ROTATE_TOKEN" ? "ROTATE" : "REVOKE",
+      historicalReadCeilingPreserved: commandType === "ROTATE_TOKEN" ? historicalReadCeilingPreserved : false
     }, {
       tokenRevokedAt: token.revoked_at,
       replacedById: token.replaced_by_id,
       subjectAuthVersion: token.auth_version,
+      previousExpiresAt,
+      previousCommandCeiling,
+      previousPersistedCommandCeiling,
+      persistedCommandCeiling,
+      ...(commandType === "ROTATE_TOKEN" ? {
+        subjectAccess: token.access_level,
+        targetCommandGrants: commandGrantTypes(targetGrants),
+        targetCommandGrantCatalog: commandGrantBasis(targetGrants)
+      } : {}),
       ...(tokenSecretHash ? { tokenSecretHash } : {})
     });
   }
@@ -1358,8 +1535,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   }
 
   const orderId = requireString(input, "orderId");
-  const context = await loadOrderContext(db, orderId);
-  if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
+  const context = await loadOrderContextForProperty(db, propertyId, orderId);
   const baseBasis: Record<string, unknown> = {
     orderVersion: context.order.version,
     orderStatus: context.order.status,

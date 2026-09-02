@@ -108,12 +108,13 @@ type ReservedTimingSource = Pick<RoomStatusIntervalDto,
   "sourceKind" | "status" | "sourceStartDate" | "orderArrivalDate"> &
   Partial<Pick<RoomStatusIntervalDto, "operationalAttention">>;
 
-export type RoomStatusAttentionLabel = "欠款" | "逾期" | "未退";
+export type RoomStatusAttentionLabel = "待退房" | "欠款" | "逾期" | "未退";
 
 const roomStatusAttentionPriority: Record<RoomStatusAttentionLabel, number> = {
-  "未退": 0,
-  "逾期": 1,
-  "欠款": 2
+  "待退房": 0,
+  "未退": 1,
+  "逾期": 2,
+  "欠款": 3
 };
 
 export interface RoomStatusBadgeSummary<T> {
@@ -148,6 +149,7 @@ export function roomStatusIntervalAttentionLabels(
 ): RoomStatusAttentionLabel[] {
   const labels: RoomStatusAttentionLabel[] = [];
   if (interval.status === "ARREARS" || interval.attention === "ARREARS") labels.push("欠款");
+  if (interval.operationalAttention === "DUE_OUT") labels.push("待退房");
   if (interval.operationalAttention === "OVERDUE_RESERVED") labels.push("逾期");
   if (interval.operationalAttention === "OVERDUE_IN_HOUSE") labels.push("未退");
   return labels;
@@ -316,6 +318,7 @@ export const roomStatusSourceLabels: Record<RoomStatusSourceKind, string> = {
 
 export const roomStatusBlockingFactLabels: Record<RoomStatusBlockingFactKind, string> = {
   CLAIM: "库存 Claim",
+  DUE_OUT: "计划退房日待办理退房事实",
   LODGING_ORDER: "住宿订单事实",
   OVERDUE_IN_HOUSE: "逾期未退在住事实",
   UNIT_UNSELLABLE: "库存不可售事实"

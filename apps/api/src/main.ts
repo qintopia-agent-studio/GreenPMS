@@ -1,11 +1,17 @@
-import { createDatabase } from "@qintopia/db";
-import { buildServer } from "./server.ts";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { listenRuntimeApi } from "./runtime-startup.ts";
 
-const app = await buildServer(createDatabase());
-const shutdown = async () => {
-  await app.close();
-  process.exit(0);
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-await app.listen({ host: "0.0.0.0", port: Number(process.env.PORT ?? 4100) });
+export async function main(): Promise<void> {
+  const { app } = await listenRuntimeApi();
+  const shutdown = async () => {
+    await app.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  await main();
+}

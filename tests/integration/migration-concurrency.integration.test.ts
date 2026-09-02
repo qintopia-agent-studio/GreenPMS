@@ -1,13 +1,12 @@
 import { execFile } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
-import { sql } from "kysely";
+import { sql, type Kysely } from "kysely";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
+import type { CommandEnvelope, CommandReason, ReceiptDto } from "@qintopia/contracts";
 import {
-  confirmCommandPreview,
-  createCommandPreview,
+  buildCommandEffect,
   createDatabase,
   databaseReady,
   getRoomStatusBoard,
@@ -15,8 +14,12 @@ import {
   propertyLocalToday,
   withPropertyClockForTesting
 } from "@qintopia/db";
+import { newId, stableHash } from "@qintopia/domain";
+import { applyCommand, lockCommandResources } from "../../packages/db/src/commands/apply.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo, seedDemo } from "../../packages/db/src/seed.ts";
+import type { Database } from "../../packages/db/src/schema.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 
 const execFileAsync = promisify(execFile);
 const adminUrl = process.env.MIGRATION_CONCURRENCY_ADMIN_DATABASE_URL
@@ -24,6 +27,10 @@ const adminUrl = process.env.MIGRATION_CONCURRENCY_ADMIN_DATABASE_URL
 const databaseName = `qintopia_migration_concurrency_${process.pid}`;
 const databaseUrl = new URL(adminUrl);
 databaseUrl.pathname = `/${databaseName}`;
+const unconfiguredOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "unconfigured"
+} as const;
 
 async function dropDatabase(): Promise<void> {
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -77,7 +84,14 @@ function runMigration() {
   return execFileAsync(
     process.execPath,
     ["--import", "tsx", "packages/db/src/migrate.ts"],
-    { cwd: process.cwd(), env: { ...process.env, DATABASE_URL: databaseUrl.toString() } }
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl.toString(),
+        STAFF_PROFILE_MANIFEST_NAME: "unconfigured"
+      }
+    }
   );
 }
 
@@ -85,6 +99,87 @@ function shiftDate(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+async function executeLegacyMigrationFixtureCommand(
+  db: Kysely<Database>,
+  envelope: CommandEnvelope,
+  prefix: string,
+  reason: CommandReason
+): Promise<ReceiptDto> {
+  const commandId = newId("command");
+  const receiptId = newId("receipt");
+  const correlationId = `${prefix}-legacy-fixture`;
+  const idempotencyKey = `${prefix}-legacy-fixture`;
+  const input = envelope.commandType === "CREATE_ORDER"
+    ? {
+        ...envelope.input,
+        _occupantIds: [newId("occupant")]
+      }
+    : envelope.input;
+
+  return db.transaction().execute(async (trx) => {
+    await lockCommandResources(trx, envelope.commandType, input);
+    const built = await buildCommandEffect(trx, envelope.commandType, input);
+    await trx.insertInto("command_executions").values({
+      id: commandId,
+      subject_id: demo.agentSubjectId,
+      credential_id: "token_demo_write",
+      property_id: built.propertyId,
+      command_type: envelope.commandType,
+      idempotency_key: idempotencyKey,
+      request_hash: stableHash({ commandType: envelope.commandType, input }),
+      correlation_id: correlationId,
+      state: "EXECUTING",
+      completed_at: null
+    }).execute();
+    const applied = await applyCommand(trx, {
+      commandType: envelope.commandType,
+      input,
+      effect: built.effect,
+      reason,
+      commandId
+    });
+    const committedAt = new Date();
+    await trx.updateTable("command_executions")
+      .set({ state: "APPLIED", completed_at: committedAt })
+      .where("id", "=", commandId)
+      .execute();
+    await trx.insertInto("command_receipts").values({
+      id: receiptId,
+      command_id: commandId,
+      execution_status: "EXECUTED",
+      business_committed: true,
+      result: applied.persistedResult,
+      error: null,
+      resource_refs: JSON.stringify(applied.resourceRefs),
+      fact_refs: JSON.stringify(applied.factRefs),
+      committed_at: committedAt
+    }).execute();
+    await trx.insertInto("audit_entries").values({
+      id: newId("audit"),
+      subject_id: demo.agentSubjectId,
+      credential_id: "token_demo_write",
+      action: envelope.commandType,
+      decision: "ALLOWED",
+      command_id: commandId,
+      correlation_id: correlationId,
+      reason,
+      target_refs: JSON.stringify(applied.resourceRefs),
+      metadata: { effectHash: built.effectHash, fixture: "legacy-044-to-047-migration" }
+    }).execute();
+    return {
+      receiptId,
+      commandId,
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId,
+      result: applied.persistedResult,
+      resourceRefs: applied.resourceRefs,
+      factRefs: applied.factRefs,
+      committedAt: committedAt.toISOString()
+    };
+  });
 }
 
 async function installMigrationHistory(
@@ -144,7 +239,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(45);
+      expect(expectedMigrations).toHaveLength(48);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -169,15 +264,35 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("043_complete_stay_guard_hardening.sql");
       expect(expectedMigrations).toContain("044_inhouse_membership_fulfillment_guards.sql");
       expect(expectedMigrations).toContain("045_stay_membership_net_wecom_transfer.sql");
+      expect(expectedMigrations).toContain("046_command_authorization.sql");
+      expect(expectedMigrations).toContain("047_runtime_database_role.sql");
+      expect(expectedMigrations).toContain("048_runtime_isolation_guards.sql");
 
       const readyDatabase = createDatabase(databaseUrl.toString());
       try {
-        expect(await databaseReady(readyDatabase)).toBe(true);
+        expect(await databaseReady(readyDatabase, unconfiguredOwnerReadinessOptions)).toBe(true);
+        expect(await databaseReady(readyDatabase, {
+          identity: "maintenance-owner",
+          staffProfileManifestName: "demo"
+        })).toBe(false);
+
+        const previousManifestName = process.env.STAFF_PROFILE_MANIFEST_NAME;
+        try {
+          delete process.env.STAFF_PROFILE_MANIFEST_NAME;
+          expect(await databaseReady(readyDatabase, { identity: "maintenance-owner" })).toBe(true);
+          process.env.STAFF_PROFILE_MANIFEST_NAME = "demo";
+          expect(await databaseReady(readyDatabase, { identity: "maintenance-owner" })).toBe(false);
+          expect(await databaseReady(readyDatabase, unconfiguredOwnerReadinessOptions)).toBe(true);
+        } finally {
+          if (previousManifestName === undefined) delete process.env.STAFF_PROFILE_MANIFEST_NAME;
+          else process.env.STAFF_PROFILE_MANIFEST_NAME = previousManifestName;
+        }
+
         await client.query(`
           CREATE OR REPLACE FUNCTION qintopia_assert_stage11_move_combination(target_command_id text)
           RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$
         `);
-        expect(await databaseReady(readyDatabase)).toBe(false);
+        expect(await databaseReady(readyDatabase, unconfiguredOwnerReadinessOptions)).toBe(false);
       } finally {
         await readyDatabase.destroy();
       }
@@ -231,10 +346,55 @@ describe("database migration concurrency", () => {
     expect(outcome.stderr).toBe("");
     const readyDatabase = createDatabase(databaseUrl.toString());
     try {
-      expect(await databaseReady(readyDatabase)).toBe(true);
+      expect(await databaseReady(readyDatabase, unconfiguredOwnerReadinessOptions)).toBe(true);
     } finally {
       await readyDatabase.destroy();
     }
+  });
+
+  it("holds migration 046 authorization backfill behind the command protocol epoch lock", async () => {
+    await recreateDatabase();
+    const migrationNames = (await readdir("packages/db/src/migrations"))
+      .filter((name) => /^\d+.*\.sql$/.test(name))
+      .sort();
+    const migration046Index = migrationNames.indexOf("046_command_authorization.sql");
+    expect(migration046Index).toBeGreaterThan(0);
+    expect(migrationNames[migration046Index - 1]).toBe("045_stay_membership_net_wecom_transfer.sql");
+    await applyMigrationFiles(migrationNames.slice(0, migration046Index));
+
+    const blocker = new pg.Client({ connectionString: databaseUrl.toString() });
+    await blocker.connect();
+    await blocker.query("SELECT pg_advisory_lock_shared(hashtextextended('qintopia:protocol-epoch', 0))");
+    const migration = runMigration();
+    let observedWaitingEpochLock = false;
+    try {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const waiting = await blocker.query<{ count: number }>(`
+          SELECT count(*)::int AS count
+          FROM pg_stat_activity
+          WHERE datname = $1
+            AND wait_event_type = 'Lock'
+            AND wait_event = 'advisory'
+        `, [databaseName]);
+        if ((waiting.rows[0]?.count ?? 0) > 0) {
+          observedWaitingEpochLock = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(await blocker.query<{ count: number }>(`
+        SELECT count(*)::int AS count
+        FROM schema_migrations
+        WHERE name = '046_command_authorization.sql'
+      `).then((result) => result.rows[0]?.count)).toBe(0);
+    } finally {
+      await blocker.query("SELECT pg_advisory_unlock_shared(hashtextextended('qintopia:protocol-epoch', 0))");
+      await blocker.end();
+    }
+
+    const outcome = await migration;
+    expect(observedWaitingEpochLock).toBe(true);
+    expect(outcome.stderr).toBe("");
   });
 
   it("upgrades populated 044 data after an in-house membership conversion was checked out", async () => {
@@ -249,34 +409,15 @@ describe("database migration concurrency", () => {
     await applyMigrationFiles(migrationNames.slice(0, migration045Index));
 
     const legacyDb = createDatabase(databaseUrl.toString());
-    const principal: AuthPrincipal = {
-      subjectId: demo.agentSubjectId,
-      credentialId: "token_demo_write",
-      credentialType: "TOKEN",
-      displayName: "Demo Agent",
-      propertyAccess: new Map([[demo.propertyId, "WRITE"]])
-    };
-    let commandSequence = 0;
     const execute = async (envelope: CommandEnvelope, prefix: string) => {
-      commandSequence += 1;
-      const previewMetadata = {
-        idempotencyKey: `${prefix}-preview-${commandSequence}`,
-        correlationId: `${prefix}-preview-${commandSequence}`
-      };
-      const prepared = await createCommandPreview(legacyDb, principal, envelope, previewMetadata);
-      commandSequence += 1;
-      const receipt = await confirmCommandPreview(legacyDb, principal, prepared.preview.previewId, {
-        propertyId: demo.propertyId,
-        commandType: envelope.commandType,
-        confirmation: true,
-        expectedEffectHash: prepared.preview.effectHash,
-        reason: envelope.commandType === "CREATE_ORDER"
+      const receipt = await executeLegacyMigrationFixtureCommand(
+        legacyDb,
+        envelope,
+        prefix,
+        envelope.commandType === "CREATE_ORDER"
           ? { code: "CREATE_STANDARD_ORDER", note: "" }
-          : { code: "STAGE47_ACCEPTANCE", note: "populated 044 to 045 migration regression" }
-      }, {
-        idempotencyKey: `${prefix}-confirm-${commandSequence}`,
-        correlationId: `${prefix}-confirm-${commandSequence}`
-      });
+          : { code: "STAGE47_ACCEPTANCE", note: "populated 044 to 047 migration regression" }
+      );
       expect(receipt.businessCommitted).toBe(true);
       return receipt;
     };
@@ -385,7 +526,7 @@ describe("database migration concurrency", () => {
 
     const upgradedDb = createDatabase(databaseUrl.toString());
     try {
-      expect(await databaseReady(upgradedDb)).toBe(true);
+      expect(await databaseReady(upgradedDb, unconfiguredOwnerReadinessOptions)).toBe(true);
       await sql`SELECT qintopia_assert_stage13_stay_conversion_command(${conversionCommandId})`.execute(upgradedDb);
       expect(await upgradedDb.selectFrom("orders")
         .innerJoin("stays", "stays.order_id", "orders.id")
@@ -404,8 +545,19 @@ describe("database migration concurrency", () => {
         .executeTakeFirstOrThrow()).toEqual(snapshotBeforeUpgrade);
       expect(await upgradedDb.selectFrom("schema_migrations")
         .select("name")
-        .where("name", "=", "045_stay_membership_net_wecom_transfer.sql")
-        .execute()).toEqual([{ name: "045_stay_membership_net_wecom_transfer.sql" }]);
+        .where("name", "in", [
+          "045_stay_membership_net_wecom_transfer.sql",
+          "046_command_authorization.sql",
+          "047_runtime_database_role.sql",
+          "048_runtime_isolation_guards.sql"
+        ])
+        .orderBy("name")
+        .execute()).toEqual([
+          { name: "045_stay_membership_net_wecom_transfer.sql" },
+          { name: "046_command_authorization.sql" },
+          { name: "047_runtime_database_role.sql" },
+          { name: "048_runtime_isolation_guards.sql" }
+        ]);
     } finally {
       await upgradedDb.destroy();
     }
@@ -556,7 +708,7 @@ describe("database migration concurrency", () => {
 
     const readyDatabase = createDatabase(databaseUrl.toString());
     try {
-      expect(await databaseReady(readyDatabase)).toBe(true);
+      expect(await databaseReady(readyDatabase, unconfiguredOwnerReadinessOptions)).toBe(true);
     } finally {
       await readyDatabase.destroy();
     }
@@ -728,6 +880,42 @@ describe("database migration concurrency", () => {
       } finally {
         await client.end();
       }
+    }
+  });
+
+  it("tolerates minor schema_migrations applied_at clock skew for an otherwise exact history", async () => {
+    await recreateDatabase();
+    const migrationNames = (await readdir("packages/db/src/migrations"))
+      .filter((name) => /^\d+.*\.sql$/.test(name))
+      .sort();
+    await applyMigrationFiles(migrationNames);
+
+    const skewed = new pg.Client({ connectionString: databaseUrl.toString() });
+    await skewed.connect();
+    try {
+      await skewed.query(`
+        UPDATE schema_migrations
+        SET applied_at = CASE name
+          WHEN '001_initial.sql' THEN '2026-01-01T00:00:05Z'::timestamptz
+          WHEN '002_immutability.sql' THEN '2026-01-01T00:00:01Z'::timestamptz
+          ELSE applied_at
+        END
+        WHERE name IN ('001_initial.sql', '002_immutability.sql')
+      `);
+    } finally {
+      await skewed.end();
+    }
+
+    const outcome = await runMigration();
+    expect(outcome.stderr).toBe("");
+
+    const upgraded = new pg.Client({ connectionString: databaseUrl.toString() });
+    await upgraded.connect();
+    try {
+      const rows = await upgraded.query<{ name: string }>("SELECT name FROM schema_migrations ORDER BY name");
+      expect(rows.rows.map((row) => row.name)).toEqual(migrationNames);
+    } finally {
+      await upgraded.end();
     }
   });
 
@@ -1212,6 +1400,7 @@ describe("database migration concurrency", () => {
           arrivalDate: "2030-01-01",
           departureDate: "2030-01-03",
           accessLevel: "READ",
+          commandGrants: authScope({ accessLevel: "READ" }).propertyCommandGrants.get(demo.propertyId)!,
           requestingSubjectId: demo.agentSubjectId
         });
         const legacyInterval = board.rooms

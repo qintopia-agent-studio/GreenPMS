@@ -5,6 +5,7 @@ import { confirmCommandPreview, createCommandPreview } from "../../packages/db/s
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetE2eDatabase } from "./reset-database.ts";
 
 const demo = {
@@ -25,7 +26,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Stage 7 Acceptance Setup",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 export const stage7ReadOnlyOperator = {

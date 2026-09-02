@@ -2,8 +2,9 @@ import type { AuthPrincipal, CommandEnvelope, CommandType } from "@qintopia/cont
 import { confirmCommandPreview, createCommandPreview, createDatabase, executeQuoteCommand, type Database } from "@qintopia/db";
 import { sql, type Kysely } from "kysely";
 import { pathToFileURL } from "node:url";
-import { newId, sha256 } from "@qintopia/domain";
+import { newId, ordinaryStaffCommandGrants, sha256 } from "@qintopia/domain";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "./auth-principals.ts";
 
 async function runCommand(db: Kysely<Database>, principal: AuthPrincipal, commandType: CommandType, input: Record<string, unknown>, reference: string) {
   const preview = await createCommandPreview(db, principal, { commandType, input } as CommandEnvelope, {
@@ -24,9 +25,63 @@ async function runCommand(db: Kysely<Database>, principal: AuthPrincipal, comman
   });
 }
 
+async function relationExists(db: Kysely<Database>, relationName: string): Promise<boolean> {
+  const result = await sql<{ exists: boolean }>`
+    SELECT to_regclass(${`public.${relationName}`}) IS NOT NULL AS exists
+  `.execute(db);
+  return result.rows[0]?.exists === true;
+}
+
+async function ensureCommandAuthorizationCompatibility(db: Kysely<Database>, credentialId: string): Promise<string[]> {
+  const createdRelations: string[] = [];
+  if (!await relationExists(db, "subject_command_grants")) {
+    await sql`
+      CREATE TABLE subject_command_grants (
+        subject_id text NOT NULL,
+        property_id text NOT NULL,
+        command_type text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (subject_id, property_id, command_type)
+      )
+    `.execute(db);
+    createdRelations.push("subject_command_grants");
+  }
+  if (!await relationExists(db, "token_command_ceilings")) {
+    await sql`
+      CREATE TABLE token_command_ceilings (
+        token_id text NOT NULL,
+        subject_id text NOT NULL,
+        property_id text NOT NULL,
+        command_type text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (token_id, command_type)
+      )
+    `.execute(db);
+    createdRelations.push("token_command_ceilings");
+  }
+  await db.insertInto("subject_command_grants")
+    .values(ordinaryStaffCommandGrants.map((commandType) => ({
+      subject_id: demo.agentSubjectId,
+      property_id: demo.propertyId,
+      command_type: commandType
+    })))
+    .onConflict((oc) => oc.doNothing())
+    .execute();
+  await db.insertInto("token_command_ceilings")
+    .values(ordinaryStaffCommandGrants.map((commandType) => ({
+      token_id: credentialId,
+      subject_id: demo.agentSubjectId,
+      property_id: demo.propertyId,
+      command_type: commandType
+    })))
+    .execute();
+  return createdRelations;
+}
+
 export async function createRestoreFixture(reference: string): Promise<void> {
   const db = createDatabase();
   let createdLegacyTransferCompatibilityTable = false;
+  let createdCommandAuthorizationCompatibilityRelations: string[] = [];
   try {
     const credentialId = newId("token");
     await db.insertInto("api_tokens").values({
@@ -41,12 +96,13 @@ export async function createRestoreFixture(reference: string): Promise<void> {
       rotated_from_id: null,
       replaced_by_id: null
     }).execute();
+    createdCommandAuthorizationCompatibilityRelations = await ensureCommandAuthorizationCompatibility(db, credentialId);
     const principal: AuthPrincipal = {
       subjectId: demo.agentSubjectId,
       credentialId,
       credentialType: "TOKEN",
       displayName: "Restore Fixture Agent",
-      propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+      ...authScope()
     };
     const inventoryUnitId = newId("unit");
     await db.insertInto("inventory_units").values({
@@ -137,6 +193,12 @@ export async function createRestoreFixture(reference: string): Promise<void> {
   } finally {
     if (createdLegacyTransferCompatibilityTable) {
       await sql`DROP TABLE IF EXISTS stay_collection_membership_transfers`.execute(db);
+    }
+    if (createdCommandAuthorizationCompatibilityRelations.includes("token_command_ceilings")) {
+      await sql`DROP TABLE IF EXISTS token_command_ceilings`.execute(db);
+    }
+    if (createdCommandAuthorizationCompatibilityRelations.includes("subject_command_grants")) {
+      await sql`DROP TABLE IF EXISTS subject_command_grants`.execute(db);
     }
     await db.destroy();
   }

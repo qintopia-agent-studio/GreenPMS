@@ -4,6 +4,7 @@ import { confirmCommandPreview, createCommandPreview, getMemberView, propertyLoc
 import { parseLocalDate } from "@qintopia/domain";
 import type { Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.MEMBERSHIP_ORDERS_DATABASE_URL
@@ -14,7 +15,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 const products = {

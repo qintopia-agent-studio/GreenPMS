@@ -5,6 +5,7 @@ import {
   commandTypes,
   currentReleaseFeatures,
   historicalRecoverableCommandTypes,
+  type CommandCapability,
   type CommandType,
   type HistoricalCommandType,
   type HistoricalRecoverableCommandType,
@@ -521,17 +522,10 @@ function membershipCommandLabel(commandType: CommandType): string {
   return "会员操作";
 }
 
-function tokenCommandLabel(commandType: HistoricalCommandType): string {
-  if (commandType === "ISSUE_TOKEN") return "签发 Token";
-  if (commandType === "ROTATE_TOKEN") return "轮换 Token";
-  if (commandType === "REVOKE_TOKEN") return "撤销 Token";
-  return "Token 操作";
-}
-
-function tokenAccessCeilingLabel(value: unknown): string {
+export function tokenAccessCeilingLabel(value: unknown): string {
   if (value === "READ") return "只读";
   if (value === "WRITE") return "可写";
-  return scalar(value);
+  return "权限范围不可识别";
 }
 
 function scalar(value: unknown): string {
@@ -542,20 +536,79 @@ function scalar(value: unknown): string {
   return JSON.stringify(value);
 }
 
-const commandBusinessLabels: Partial<Record<HistoricalCommandType, string>> = {
+export const commandCapabilityBusinessLabels: Record<CommandCapability, string> = {
+  CREATE_MEMBER: "创建会员档案",
+  CREATE_MEMBERSHIP_ORDER: "创建会员订单",
+  RECORD_MEMBERSHIP_PAYMENT: "登记企微收款",
+  CORRECT_MEMBERSHIP_PAYMENT: "更正企微收款",
+  ACTIVATE_MEMBERSHIP_ORDER: "生效会员订单",
+  CREATE_ORDER: "创建住宿订单",
+  CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
   RESCHEDULE_STAY: "调整住宿日期",
-  SHORTEN_STAY: "缩短住宿",
   EXTEND_STAY: "延长住宿",
-  MOVE_UNIT: "换房",
+  SHORTEN_STAY: "缩短住宿或提前退房",
+  MOVE_UNIT: "办理换房",
+  REPRICE_ORDER: "调整订单金额",
   CANCEL_ORDER: "取消订单",
   MARK_NO_SHOW: "标记未到",
   REVOKE_CHECK_IN: "撤销入住",
-  RECORD_COLLECTION: "登记收款",
-  RECORD_REFUND: "登记退款",
+  LOCK_MAINTENANCE: "设置维修锁房",
+  RELEASE_MAINTENANCE: "释放维修锁房",
+  COMPLETE_CLEANING: "完成清洁",
+  RECORD_COLLECTION: "登记住宿收款",
+  RECORD_REFUND: "登记住宿退款",
   REVERSE_FACT: "冲销收退款记录",
+  CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: "升级会员",
+  CHECK_IN: "办理入住",
+  CHECK_OUT: "办理退房",
+  COMPLETE_STAY: "完成住宿",
+  REFRESH_MEMBER_COVERAGE: "刷新会员住宿覆盖",
+  ADD_MEMBER_ENTITLEMENT_LOT: "增加会员权益",
+  ADJUST_MEMBER_ENTITLEMENT: "调整会员权益",
+  CORRECT_MEMBER_ENTITLEMENT_BALANCE: "更正会员余额",
+  EXPIRE_MEMBER_ENTITLEMENT: "过期会员权益",
   ISSUE_TOKEN: "签发 Token",
   ROTATE_TOKEN: "轮换 Token",
-  REVOKE_TOKEN: "撤销 Token"
+  REVOKE_TOKEN: "撤销 Token",
+  CORRECT_HISTORICAL_STAY_ARRANGEMENTS: "纠正历史住宿安排",
+  VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY: "撤销错误办卡并重新升级"
+};
+
+export function commandCapabilityBusinessLabel(commandType: CommandCapability): string {
+  return commandCapabilityBusinessLabels[commandType];
+}
+
+function tokenCommandLabel(commandType: HistoricalCommandType): string {
+  if (commandType === "ISSUE_TOKEN" || commandType === "ROTATE_TOKEN" || commandType === "REVOKE_TOKEN") {
+    return commandCapabilityBusinessLabel(commandType);
+  }
+  return "Token 操作";
+}
+
+function commandCeilingFrom(value: unknown): CommandCapability[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const commands: CommandCapability[] = [];
+  for (const commandType of value) {
+    if (typeof commandType !== "string" || !(commandType in commandCapabilityBusinessLabels)) return undefined;
+    if (!commands.includes(commandType as CommandCapability)) commands.push(commandType as CommandCapability);
+  }
+  return commands;
+}
+
+export function tokenPermissionScopeLabel(accessCeiling: unknown, commandCeiling: unknown): string {
+  if (accessCeiling === "READ") return "只读；无写入能力";
+  if (accessCeiling !== "WRITE") return "权限范围不可识别";
+  const commands = commandCeilingFrom(commandCeiling);
+  if (!commands) return "权限范围不可识别";
+  const labels = commands.map(commandCapabilityBusinessLabel);
+  return labels.length ? `可写：${labels.join("、")}` : "可写；无可执行写命令";
+}
+
+const commandBusinessLabels: Partial<Record<HistoricalCommandType, string>> = {
+  ...commandCapabilityBusinessLabels,
+  PLACE_INTERNAL_USE: "设置内部使用",
+  RELEASE_INTERNAL_USE: "释放内部使用",
+  BACKFILL_COMPLETED_STAY: "补录已完成住宿"
 };
 
 const effectFieldLabels: Record<string, string> = {
@@ -2253,25 +2306,47 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     const label = typeof effect.label === "string" && effect.label.trim()
       ? effect.label.trim()
       : typeof commandInput?.label === "string" && commandInput.label.trim() ? commandInput.label.trim() : "未填写";
-    const tokenId = typeof effect.tokenId === "string" && effect.tokenId.trim()
-      ? effect.tokenId.trim()
-      : typeof commandInput?.tokenId === "string" && commandInput.tokenId.trim() ? commandInput.tokenId.trim() : undefined;
+    const subjectDisplayName = typeof effect.subjectDisplayName === "string" && effect.subjectDisplayName.trim()
+      ? effect.subjectDisplayName.trim()
+      : "未提供主体名称";
     const accessCeiling = effect.accessCeiling ?? commandInput?.accessCeiling;
     const expiresAt = typeof effect.expiresAt === "string" ? effect.expiresAt : typeof commandInput?.expiresAt === "string" ? commandInput.expiresAt : undefined;
+    const previousExpiresAt = typeof effect.previousExpiresAt === "string" ? effect.previousExpiresAt : undefined;
+    const previousScope = tokenPermissionScopeLabel(
+      accessCeiling,
+      preview.commandType === "REVOKE_TOKEN" ? effect.commandCeiling : effect.previousCommandCeiling
+    );
+    const nextScope = preview.commandType === "REVOKE_TOKEN"
+      ? "已撤销；无访问权限"
+      : tokenPermissionScopeLabel(accessCeiling, effect.commandCeiling ?? commandInput?.commandCeiling);
+    const historicalReadCeilingPreserved = typeof effect.historicalReadCeilingPreserved === "boolean"
+      ? effect.historicalReadCeilingPreserved
+      : undefined;
     const outcome = preview.commandType === "ISSUE_TOKEN"
       ? "新 Token 会立即生效。"
       : preview.commandType === "ROTATE_TOKEN"
         ? "旧 Token 会立即失效，新 Token 会立即生效。"
         : "该 Token 会立即失效。";
+    const unchanged = preview.commandType === "ISSUE_TOKEN"
+      ? "目标主体的账号状态、物业权限和现有 Token 保持不变。"
+      : "目标主体、物业权限和已有审计记录保持不变。";
     return <div className="effect-summary token-command-summary" data-testid="command-effect">
       <section className="effect-section" aria-labelledby="token-command-summary-heading">
         <h3 id="token-command-summary-heading">请核对{tokenCommandLabel(preview.commandType)}</h3>
         <dl className="difference-grid">
+          <dt>目标主体</dt><dd><strong>{subjectDisplayName}</strong></dd>
           <dt>Token 标签</dt><dd><strong>{label}</strong></dd>
-          {tokenId ? <><dt>当前 Token</dt><dd><code>{tokenId}</code></dd></> : null}
-          <dt>权限</dt><dd>{tokenAccessCeilingLabel(accessCeiling)}</dd>
-          {expiresAt ? <><dt>过期时间</dt><dd>{formatDateTime(expiresAt)}</dd></> : null}
+          {preview.commandType === "ISSUE_TOKEN" ? <><dt>权限范围</dt><dd>{nextScope}</dd></> : <>
+            <dt>原权限范围</dt><dd>{previousScope}</dd>
+            <dt>新权限范围</dt><dd>{nextScope}</dd>
+          </>}
+          {previousExpiresAt && preview.commandType === "ROTATE_TOKEN" ? <><dt>原过期时间</dt><dd>{formatDateTime(previousExpiresAt)}</dd></> : null}
+          {expiresAt ? <><dt>{preview.commandType === "ROTATE_TOKEN" ? "新过期时间" : "过期时间"}</dt><dd>{formatDateTime(expiresAt)}</dd></> : null}
+          {historicalReadCeilingPreserved === true ? <><dt>历史结果查询与恢复</dt><dd>系统自动保留历史结果查询与恢复范围</dd></> : null}
+          {historicalReadCeilingPreserved === false && preview.commandType === "REVOKE_TOKEN" ? <><dt>历史结果查询与恢复</dt><dd>撤销后不保留该 Token 的历史结果查询与恢复范围</dd></> : null}
+          <dt>保持不变</dt><dd>{unchanged}</dd>
           <dt>确认后</dt><dd>{outcome}</dd>
+          <dt>确认失败</dt><dd>权限或主体状态发生变化时，本次确认会失败且不会写入。</dd>
         </dl>
       </section>
     </div>;

@@ -101,6 +101,30 @@ describe("RoomStatusContext write action presentation", () => {
     expect(html.match(/欠款/g)).toHaveLength(1);
   });
 
+  it("shows original order dates and due-out attention instead of the synthetic safety interval", () => {
+    const interval = {
+      id: "interval_due_out",
+      status: "IN_HOUSE",
+      attention: null,
+      operationalAttention: "DUE_OUT",
+      sourceKind: "ORDER",
+      sourceStartDate: "2026-09-01",
+      sourceEndDate: "2026-09-02",
+      orderArrivalDate: "2026-08-28",
+      orderDepartureDate: "2026-09-01",
+      occupantCount: 1,
+      occupants: [{ occupantId: "occupant_due_out", nickname: "朝露" }],
+      primaryOccupantLabel: "朝露",
+      label: "order due out",
+      reason: "计划退房日 2026-09-01，订单仍待办理退房"
+    } as RoomStatusIntervalDto;
+
+    const html = renderContext([], undefined, interval);
+    expect(html).toContain("待退房");
+    expect(html).toContain("住宿日期</dt><dd>8月28日至9月1日");
+    expect(html).not.toContain("住宿日期</dt><dd>9月1日至9月2日");
+  });
+
   it("keeps the server-authorized backfill visible but disabled with a recovery entry", () => {
     const html = renderContext([backfillAction], {
       kind: "RECOVERY",

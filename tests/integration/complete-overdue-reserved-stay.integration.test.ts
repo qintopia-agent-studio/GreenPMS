@@ -23,6 +23,7 @@ import { createQuoteForTesting as createQuote } from "../../packages/db/src/pric
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { releaseInventoryClaims } from "../../packages/db/src/inventory.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
 
 let db: Kysely<Database>;
@@ -38,7 +39,7 @@ const principal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope({ credentialType: "TOKEN", profile: "ordinary" })
 };
 
 function metadata(prefix: string) {
@@ -165,6 +166,7 @@ async function board(): Promise<RoomStatusBoardDto> {
     arrivalDate: shiftDate(ARRIVAL, -1),
     departureDate: shiftDate(COMPLETION, 1),
     accessLevel: "WRITE",
+    commandGrants: principal.propertyCommandGrants.get(demo.propertyId)!,
     requestingSubjectId: demo.agentSubjectId,
     pageSize: 200
   });

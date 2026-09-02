@@ -140,6 +140,7 @@ export function roomStatusQuickOrderHeaderMarks(
 }
 
 export function roomStatusQuickOrderSourceSummary(option: RoomStatusOrderOption): string {
+  if (option.operationalAttention === "DUE_OUT") return "待退房";
   const { source } = option;
   if (source.sourceKind === "FREE_STAY") {
     return `免费入住 · ${roomStatusFreeStayCategoryLabel(source.freeStayCategoryCode) ?? "历史未记录"}`;

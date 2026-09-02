@@ -11,22 +11,25 @@ import type { Kysely } from "kysely";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.ORDER_OCCUPANT_CORRECTIONS_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_order_occupant_corrections";
 
 const writePrincipal: AuthPrincipal = {
-  subjectId: demo.agentSubjectId,
-  credentialId: "token_demo_write",
+  subjectId: demo.administratorSubjectId,
+  credentialId: "token_demo_admin_write",
   credentialType: "TOKEN",
-  displayName: "Demo Agent",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  displayName: "Demo Administrator",
+  ...authScope({ profile: "administrator" })
 };
 const readPrincipal: AuthPrincipal = {
-  ...writePrincipal,
+  subjectId: demo.agentSubjectId,
   credentialId: "token_demo_read",
-  propertyAccess: new Map([[demo.propertyId, "READ"]])
+  credentialType: "TOKEN",
+  displayName: "Demo Agent",
+  ...authScope({ accessLevel: "READ" })
 };
 
 let db: Kysely<Database>;
@@ -172,12 +175,12 @@ describe("order occupant corrections", () => {
       corrected_document_number: "DOC-2",
       reason_code: "DATA_ENTRY_CORRECTION",
       reason_note: "人工核对住宿人资料后更正",
-      actor_subject_id: demo.agentSubjectId,
+      actor_subject_id: demo.administratorSubjectId,
       amendment_id: receipt.result!.amendmentId,
       created_by_command_id: receipt.commandId
     });
 
-    const view = await getOrderView(db, fixture.orderId, "WRITE");
+    const view = await getOrderView(db, fixture.orderId, "WRITE", writePrincipal.propertyCommandGrants.get(demo.propertyId)!);
     expect(view.occupants[1]).toMatchObject({ id: fixture.occupantId, nickname: "清风", phone: "13800000002", documentNumber: "DOC-2" });
     expect(view.occupantCorrections).toEqual([
       expect.objectContaining({
@@ -185,7 +188,7 @@ describe("order occupant corrections", () => {
         priorSnapshot: { fullName: "李山风", nickname: "山风", phone: null, documentNumber: null },
         correctedSnapshot: { fullName: "李山风（已核对）", nickname: "清风", phone: "13800000002", documentNumber: "DOC-2" },
         reason: { code: "DATA_ENTRY_CORRECTION", note: "人工核对住宿人资料后更正" },
-        actor: { subjectId: demo.agentSubjectId, displayName: writePrincipal.displayName }
+        actor: { subjectId: demo.administratorSubjectId, displayName: writePrincipal.displayName }
       })
     ]);
     expect(view.allowedActions.find((action) => action.code === "CORRECT_ORDER_OCCUPANT")).toEqual({
@@ -200,7 +203,8 @@ describe("order occupant corrections", () => {
       arrivalDate: "2033-05-01",
       departureDate: "2033-05-03",
       accessLevel: "WRITE",
-      requestingSubjectId: demo.agentSubjectId
+      commandGrants: writePrincipal.propertyCommandGrants.get(demo.propertyId)!,
+      requestingSubjectId: demo.administratorSubjectId
     });
     expect(board.rooms.find((room) => room.id === fixture.unitId)?.intervals[0]?.occupants)
       .toEqual(expect.arrayContaining([{ occupantId: fixture.occupantId, nickname: "清风" }]));
@@ -236,13 +240,20 @@ describe("order occupant corrections", () => {
   it("fails closed for missing reason, READ access, stale previews, no-op input, and direct mutation", async () => {
     const fixture = await createTwoPersonOrder();
     const noReason = await previewCorrection(fixture.orderId, fixture.occupantId, "青山");
-    await expect(confirmCommandPreview(db, writePrincipal, noReason.preview.previewId, {
+    const noReasonReceipt = await confirmCommandPreview(db, writePrincipal, noReason.preview.previewId, {
       propertyId: demo.propertyId,
       commandType: "CORRECT_ORDER_OCCUPANT",
       confirmation: true,
       expectedEffectHash: noReason.preview.effectHash,
       reason: { code: "", note: "" }
-    }, metadata("missing-reason"))).rejects.toMatchObject({ code: "REASON_REQUIRED" });
+    }, metadata("missing-reason"));
+    expect(noReasonReceipt).toMatchObject({
+      executionStatus: "NOT_EXECUTED",
+      businessCommitted: false,
+      error: { code: "REASON_REQUIRED" },
+      resourceRefs: [],
+      factRefs: []
+    });
     await expect(createCommandPreview(db, readPrincipal, {
       commandType: "CORRECT_ORDER_OCCUPANT",
       input: { propertyId: demo.propertyId, orderId: fixture.orderId, occupantId: fixture.occupantId, expectedPriorSnapshot: { fullName: "李山风", nickname: "山风", phone: null, documentNumber: null }, correctedSnapshot: { fullName: "李山风", nickname: "青山", phone: null, documentNumber: null } }

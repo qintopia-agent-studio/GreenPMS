@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { sql, type Kysely } from "kysely";
 import type { CommandType } from "@qintopia/contracts";
-import { parseLocalDate, sha256, todayInTimeZone } from "@qintopia/domain";
+import { ordinaryStaffCommandGrants, parseLocalDate, sha256, todayInTimeZone } from "@qintopia/domain";
 import type { Database } from "@qintopia/db";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -283,7 +283,9 @@ describe("scoped agent HTTP core journey", () => {
       subjectId: demo.agentSubjectId,
       displayName: "Demo Agent",
       credentialType: "TOKEN",
-      propertyAccess: { [demo.propertyId]: "WRITE" }
+      propertyAccess: { [demo.propertyId]: "WRITE" },
+      propertyCommandGrants: { [demo.propertyId]: ordinaryStaffCommandGrants },
+      allowedActions: { [demo.propertyId]: ordinaryStaffCommandGrants }
     });
 
     const availability = await app.inject({
@@ -701,8 +703,8 @@ describe("scoped agent HTTP core journey", () => {
       url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=CREATE_ORDER&idempotencyKey=${created.confirmIdempotencyKey}`,
       headers: { authorization: `Bearer ${foreignToken}` }
     });
-    expect(foreignRecovery.statusCode, foreignRecovery.body).toBe(200);
-    expect(foreignRecovery.json()).toEqual({ executionStatus: "UNKNOWN", businessCommitted: false });
+    expect(foreignRecovery.statusCode, foreignRecovery.body).toBe(403);
+    expect(foreignRecovery.json()).toMatchObject({ code: "INSUFFICIENT_ACCESS", retryable: false });
   });
 
   it("reports UNKNOWN only while an HTTP command owner is active and then returns its durable Receipt", async () => {

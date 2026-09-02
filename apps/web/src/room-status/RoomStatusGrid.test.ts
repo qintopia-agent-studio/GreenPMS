@@ -13,6 +13,7 @@ import {
   roomStatusOccupancyDisplayRatio,
   roomStatusCellAttentionLabels,
   roomStatusCellAccessibleName,
+  roomStatusCellOperationalAttentionTooltipText,
   roomStatusBedOccupancyTooltipPosition,
   roomStatusDateHeaderSummaryLabel,
   roomStatusFocusRestorationTarget,
@@ -23,7 +24,8 @@ import {
   roomStatusSingleCellMappingSelection,
   resetRoomStatusHorizontalScroll
 } from "./RoomStatusGrid";
-import type { RoomStatusDayDto, RoomStatusIntervalDto, RoomStatusUnitDto } from "@qintopia/contracts";
+import type { RoomStatusBedOccupancyDto, RoomStatusDayDto, RoomStatusIntervalDto, RoomStatusUnitDto } from "@qintopia/contracts";
+import { formatRoomStatusDate } from "./roomStatusPresentation";
 
 describe("roomStatusIntervalServiceDateAtPointer", () => {
   const dates = ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04"];
@@ -924,6 +926,190 @@ describe("roomStatusCellAttentionLabels", () => {
 
     expect(accessibleName).toContain("在住");
     expect(accessibleName.match(/未退/g)).toHaveLength(1);
+  });
+
+  it("announces a departure-day checkout once alongside its in-house lifecycle", () => {
+    const dueOut = {
+      ...baseInterval,
+      status: "IN_HOUSE",
+      occupants: [],
+      operationalAttention: "DUE_OUT"
+    } as RoomStatusIntervalDto;
+    const accessibleName = roomStatusCellAccessibleName({
+      id: "room_101",
+      kind: "ROOM",
+      code: "101",
+      name: "101",
+      intervals: [dueOut]
+    } as RoomStatusUnitDto, "2026-08-14", {
+      serviceDate: "2026-08-14",
+      status: "IN_HOUSE",
+      available: false,
+      intervalIds: [dueOut.id],
+      conflicts: []
+    }, null, "2026-08-14");
+
+    expect(accessibleName).toContain("在住");
+    expect(accessibleName.match(/待退房/g)).toHaveLength(1);
+  });
+
+  it("keeps whole-room departure and overdue checkout cells tied to their original order dates", () => {
+    for (const [operationalAttention, orderArrivalDate, orderDepartureDate, attention] of [
+      ["DUE_OUT", "2026-08-13", "2026-08-14", "待退房"],
+      ["OVERDUE_IN_HOUSE", "2026-08-10", "2026-08-13", "未退"]
+    ] as const) {
+      const interval = {
+        ...baseInterval,
+        id: `whole_room_${operationalAttention}`,
+        actualInventoryUnitId: "room_101",
+        status: "IN_HOUSE",
+        startDate: operationalAttention === "DUE_OUT" ? "2026-08-14" : "2026-08-10",
+        endDate: operationalAttention === "DUE_OUT" ? "2026-08-15" : "2026-08-13",
+        sourceStartDate: operationalAttention === "DUE_OUT" ? "2026-08-14" : "2026-08-10",
+        sourceEndDate: operationalAttention === "DUE_OUT" ? "2026-08-15" : "2026-08-13",
+        orderArrivalDate,
+        orderDepartureDate,
+        attention: "ARREARS",
+        operationalAttention,
+        occupants: []
+      } as RoomStatusIntervalDto;
+      const accessibleName = roomStatusCellAccessibleName({
+        id: "room_101",
+        kind: "ROOM",
+        code: "101",
+        name: "101",
+        intervals: [interval]
+      } as RoomStatusUnitDto, operationalAttention === "DUE_OUT" ? "2026-08-14" : "2026-08-12", {
+        serviceDate: operationalAttention === "DUE_OUT" ? "2026-08-14" : "2026-08-12",
+        status: "IN_HOUSE",
+        available: false,
+        intervalIds: [interval.id],
+        conflicts: []
+      }, null, "2026-08-14");
+
+      expect(accessibleName).toContain(`${formatRoomStatusDate(orderArrivalDate)}至${formatRoomStatusDate(orderDepartureDate)}`);
+      expect(accessibleName).toContain(attention);
+      expect(roomStatusCellOperationalAttentionTooltipText([interval]))
+        .toBe(`原订单日期：${formatRoomStatusDate(orderArrivalDate)}至${formatRoomStatusDate(orderDepartureDate)}；${attention}`);
+    }
+  });
+
+  it("keeps split-bed departure and overdue checkout cells tied to their original order dates", () => {
+    for (const [operationalAttention, orderArrivalDate, orderDepartureDate, attention] of [
+      ["DUE_OUT", "2026-08-13", "2026-08-14", "待退房"],
+      ["OVERDUE_IN_HOUSE", "2026-08-10", "2026-08-13", "未退"]
+    ] as const) {
+      const interval = {
+        ...baseInterval,
+        id: `bed_${operationalAttention}`,
+        actualInventoryUnitId: "bed_101_a",
+        status: "IN_HOUSE",
+        startDate: operationalAttention === "DUE_OUT" ? "2026-08-14" : "2026-08-10",
+        endDate: operationalAttention === "DUE_OUT" ? "2026-08-15" : "2026-08-13",
+        sourceStartDate: operationalAttention === "DUE_OUT" ? "2026-08-14" : "2026-08-10",
+        sourceEndDate: operationalAttention === "DUE_OUT" ? "2026-08-15" : "2026-08-13",
+        orderArrivalDate,
+        orderDepartureDate,
+        attention: "ARREARS",
+        operationalAttention,
+        references: [{ type: "ORDER", id: "order_101", label: "订单", href: "/orders/order_101" }]
+      } as RoomStatusIntervalDto;
+      const serviceDate = operationalAttention === "DUE_OUT" ? "2026-08-14" : "2026-08-12";
+      const unit = {
+        id: "room_101",
+        kind: "ROOM",
+        code: "101",
+        name: "101",
+        salesMode: "BED_SPLIT",
+        intervals: [interval]
+      } as RoomStatusUnitDto;
+      const occupancy: RoomStatusBedOccupancyDto = {
+        serviceDate,
+        occupiedBedCount: 1,
+        totalBedCount: 4,
+        occupants: [{
+          occupantId: "occupant_101",
+          inventoryUnitId: "bed_101_a",
+          inventoryUnitCode: "101-A",
+          primaryOccupantLabel: "住客",
+          sourceReference: { type: "ORDER", id: "order_101", label: "订单", href: "/orders/order_101" }
+        }]
+      };
+      const accessibleName = roomStatusCellAccessibleName(unit, serviceDate, {
+        serviceDate,
+        status: "IN_HOUSE",
+        available: false,
+        intervalIds: [],
+        conflicts: []
+      }, occupancy, "2026-08-14");
+
+      expect(accessibleName).toContain(`${formatRoomStatusDate(orderArrivalDate)}至${formatRoomStatusDate(orderDepartureDate)}`);
+      expect(accessibleName).toContain(attention);
+      expect(roomStatusCellOperationalAttentionTooltipText([interval]))
+        .toBe(`原订单日期：${formatRoomStatusDate(orderArrivalDate)}至${formatRoomStatusDate(orderDepartureDate)}；${attention}`);
+    }
+  });
+
+  it("sorts and deduplicates every due-out bed in parent tooltip and accessible copy", () => {
+    const dueOut = (id: string, bedId: string, orderId: string, arrivalDate: string) => ({
+      ...baseInterval,
+      id,
+      actualInventoryUnitId: bedId,
+      status: "IN_HOUSE",
+      startDate: "2026-08-14",
+      endDate: "2026-08-15",
+      sourceStartDate: "2026-08-14",
+      sourceEndDate: "2026-08-15",
+      orderArrivalDate: arrivalDate,
+      orderDepartureDate: "2026-08-14",
+      operationalAttention: "DUE_OUT",
+      references: [{ type: "ORDER", id: orderId, label: "订单", href: `/orders/${orderId}` }]
+    }) as RoomStatusIntervalDto;
+    const earlier = dueOut("due_out_a", "bed_101_a", "order_a", "2026-08-10");
+    const later = dueOut("due_out_b", "bed_101_b", "order_b", "2026-08-12");
+    const expectedEarlier = "原订单日期：8月10日至8月14日；待退房";
+    const expectedLater = "原订单日期：8月12日至8月14日；待退房";
+    const unit = {
+      id: "room_101",
+      kind: "ROOM",
+      code: "101",
+      name: "101",
+      salesMode: "BED_SPLIT",
+      intervals: [later, earlier]
+    } as RoomStatusUnitDto;
+    const occupancy: RoomStatusBedOccupancyDto = {
+      serviceDate: "2026-08-14",
+      occupiedBedCount: 2,
+      totalBedCount: 4,
+      occupants: [
+        {
+          occupantId: "occupant_b",
+          inventoryUnitId: "bed_101_b",
+          inventoryUnitCode: "101-B",
+          primaryOccupantLabel: "乙",
+          sourceReference: { type: "ORDER", id: "order_b", label: "订单", href: "/orders/order_b" }
+        },
+        {
+          occupantId: "occupant_a",
+          inventoryUnitId: "bed_101_a",
+          inventoryUnitCode: "101-A",
+          primaryOccupantLabel: "甲",
+          sourceReference: { type: "ORDER", id: "order_a", label: "订单", href: "/orders/order_a" }
+        }
+      ]
+    };
+
+    expect(roomStatusCellOperationalAttentionTooltipText([later, earlier, earlier]))
+      .toBe(`${expectedEarlier}；${expectedLater}`);
+    const accessibleName = roomStatusCellAccessibleName(unit, "2026-08-14", {
+      serviceDate: "2026-08-14",
+      status: "IN_HOUSE",
+      available: false,
+      intervalIds: [],
+      conflicts: []
+    }, occupancy, "2026-08-14");
+    expect(accessibleName.indexOf(expectedEarlier)).toBeLessThan(accessibleName.indexOf(expectedLater));
+    expect(accessibleName.match(/待退房/g)).toHaveLength(2);
   });
 
   it("marks every visible day of a cross-today overdue reservation", () => {

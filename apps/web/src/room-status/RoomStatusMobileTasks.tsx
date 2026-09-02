@@ -38,6 +38,7 @@ import {
   addLocalDateDays,
   isIsoLocalDate,
   ROOM_STATUS_TIMELINE_DAYS,
+  roomStatusIntervalBusinessPeriod,
   roomStatusOrderIdentityForInterval,
   type RoomStatusOrderIdentity
 } from "./roomStatusState";
@@ -268,6 +269,12 @@ export function mobileLodgingOccupancySummaries(board: RoomStatusBoardDto): Mobi
 
 export function mobileLodgingOccupantSummary(interval: RoomStatusOperationalTaskDto): string {
   return roomStatusIntervalBusinessLabel(interval);
+}
+
+export function roomStatusMobileTaskPeriod(
+  interval: Pick<RoomStatusOperationalTaskDto, "sourceStartDate" | "sourceEndDate" | "orderArrivalDate" | "orderDepartureDate">
+): { arrivalDate: string; departureDate: string } {
+  return roomStatusIntervalBusinessPeriod({ ...interval, sourceKind: "ORDER" });
 }
 
 export function executableTaskAction(
@@ -568,6 +575,8 @@ export function RoomStatusMobileTasks({
               const unit = unitMap.get(interval.displayInventoryUnitId) ?? unitMap.get(interval.actualInventoryUnitId) ?? null;
               const primaryAction = executableTaskAction(interval, unit);
               const lodging = interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY";
+              const identity = roomStatusOrderIdentityForInterval(interval);
+              const businessPeriod = roomStatusMobileTaskPeriod(interval);
               const businessLabel = mobileLodgingOccupantSummary(interval);
               return (
                 <li key={interval.id}>
@@ -588,7 +597,7 @@ export function RoomStatusMobileTasks({
                     </span>
                     {lodging ? <span>住宿人 · {businessLabel}</span> : null}
                     {!lodging ? <span>{interval.label}</span> : null}
-                    <small>完整业务周期 {formatRoomStatusDate(interval.sourceStartDate)}至{formatRoomStatusDate(interval.sourceEndDate)} · {roomStatusSourceLabels[interval.sourceKind]}</small>
+                    <small>完整业务周期 {formatRoomStatusDate(businessPeriod.arrivalDate)}至{formatRoomStatusDate(businessPeriod.departureDate)} · {roomStatusSourceLabels[interval.sourceKind]}</small>
                     {!unit ? <small className="room-status-mobile-task-warning">当前查询页未包含该房源名称，请刷新或调整房源页。</small> : null}
                     {!lodging && interval.conflicts.length ? <small className="room-status-mobile-task-warning">{interval.conflicts.length} 个日期占用</small> : null}
                   </button>
@@ -650,7 +659,7 @@ export function RoomStatusMobileTasks({
                 <dt>房源</dt><dd>{detailUnit ? roomStatusUnitLabel(detailUnit) : "当前查询页未包含房源名称"}</dd>
                 <dt>营业日期</dt><dd>{formatRoomStatusDate(detailInterval.businessDate)}</dd>
                 <dt>当前显示日期</dt><dd>{formatRoomStatusDate(detailInterval.startDate)}至{formatRoomStatusDate(detailInterval.endDate)}</dd>
-                <dt>完整业务周期</dt><dd>{formatRoomStatusDate(detailInterval.sourceStartDate)}至{formatRoomStatusDate(detailInterval.sourceEndDate)}</dd>
+                <dt>完整业务周期</dt><dd>{formatRoomStatusDate(roomStatusMobileTaskPeriod(detailInterval).arrivalDate)}至{formatRoomStatusDate(roomStatusMobileTaskPeriod(detailInterval).departureDate)}</dd>
               </dl>
             </section>
             {!detailLodging ? <section aria-labelledby={`${tabsId}-detail-source`}>

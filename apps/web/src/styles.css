@@ -1503,9 +1503,7 @@ textarea:focus-visible {
 }
 
 .token-chain span {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  gap: 5px;
+  display: block;
   color: var(--muted);
   font-size: 11px;
 }

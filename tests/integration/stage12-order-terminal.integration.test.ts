@@ -12,16 +12,21 @@ import {
 import { sql, type Kysely, type Transaction } from "kysely";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
 
 let db: Kysely<Database>;
 let sequence = 0;
+const demoOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "demo"
+} as const;
 const principal: AuthPrincipal = {
   subjectId: demo.agentSubjectId,
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Stage 12 operator",
-  propertyAccess: new Map([[demo.propertyId, "WRITE"]])
+  ...authScope()
 };
 
 function metadata(prefix: string) {
@@ -178,7 +183,7 @@ afterEach(async () => {
 
 describe("Stage 12 cancellation, no-show, and check-in revocation", () => {
   it("rejects direct terminal status bypasses and terminal reopening with zero partial writes", async () => {
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const created = await createPaidOrder(demo.roomId, addDays(businessDate, 1), addDays(businessDate, 3), "terminal-guard");
     const orderId = created.result!.orderId as string;

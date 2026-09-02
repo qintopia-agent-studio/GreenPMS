@@ -19,7 +19,13 @@ import type {
   RoomStatusReferenceDto,
   RoomStatusUnitDto
 } from "@qintopia/contracts";
-import { addLocalDateDays, isIsoLocalDate, selectionFromInputs, type RoomStatusSelection } from "./roomStatusState";
+import {
+  addLocalDateDays,
+  isIsoLocalDate,
+  roomStatusIntervalBusinessPeriod,
+  selectionFromInputs,
+  type RoomStatusSelection
+} from "./roomStatusState";
 import {
   formatRoomStatusDate,
   roomStatusActionLabels,
@@ -107,7 +113,8 @@ export function roomStatusDraftSelection(input: {
 }
 
 function relatedSourceSummary(interval: RoomStatusIntervalDto): string {
-  const dates = `${formatRoomStatusDate(interval.sourceStartDate)}至${formatRoomStatusDate(interval.sourceEndDate)}`;
+  const period = roomStatusIntervalBusinessPeriod(interval);
+  const dates = `${formatRoomStatusDate(period.arrivalDate)}至${formatRoomStatusDate(period.departureDate)}`;
   const source = roomStatusSourceLabels[interval.sourceKind];
   if (interval.sourceKind === "MAINTENANCE") {
     return `${source} · ${dates} · 原因：${interval.reason ?? "未提供原因"}`;
@@ -184,6 +191,7 @@ export function RoomStatusContext({
     return [...new Map(intervals.map((interval) => [interval.id, interval])).values()];
   }, [relatedIntervals, selectedInterval]);
   const contextAttentionLabels = [...new Set(contextIntervals.flatMap(roomStatusIntervalAttentionLabels))];
+  const selectedBusinessPeriod = selectedInterval ? roomStatusIntervalBusinessPeriod(selectedInterval) : null;
   const status = selectedInterval?.status ?? selectedDay?.status;
   const contextTitle = selectedInterval?.label ?? (selectedUnit ? roomStatusUnitLabel(selectedUnit) : "尚未选择房源");
 
@@ -306,7 +314,7 @@ export function RoomStatusContext({
           <dl className="room-status-context-facts">
             <dt>业务类型</dt><dd>{roomStatusSourceLabels[selectedInterval.sourceKind]}</dd>
             <dt>住宿人</dt><dd>{selectedInterval.sourceKind === "ORDER" || selectedInterval.sourceKind === "FREE_STAY" ? roomStatusIntervalBusinessLabel(selectedInterval) : "不适用"}</dd>
-            <dt>住宿日期</dt><dd>{formatRoomStatusDate(selectedInterval.sourceStartDate)}至{formatRoomStatusDate(selectedInterval.sourceEndDate)}</dd>
+            <dt>住宿日期</dt><dd>{formatRoomStatusDate(selectedBusinessPeriod!.arrivalDate)}至{formatRoomStatusDate(selectedBusinessPeriod!.departureDate)}</dd>
             <dt>原因</dt><dd>{selectedInterval.reason ?? "未提供原因"}</dd>
           </dl>
         </section>

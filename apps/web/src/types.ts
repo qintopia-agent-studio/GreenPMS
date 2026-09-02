@@ -2,6 +2,8 @@ import type {
   AccessLevel,
   AmountSummaryDto,
   BookingChannelCode,
+  CommandCapability,
+  CommandCatalogType,
   CommandType,
   CommandReason,
   CreateQuoteCommandResponseDto,
@@ -24,6 +26,8 @@ export interface PrincipalDto {
   displayName: string;
   credentialType: "SESSION" | "TOKEN";
   propertyAccess: Record<string, "READ" | "WRITE">;
+  propertyCommandGrants: Record<string, CommandCatalogType[]>;
+  allowedActions: Record<string, CommandCapability[]>;
 }
 
 export interface ClientCommandMetadata {
@@ -64,6 +68,8 @@ export interface RetainedTokenSecret {
 }
 
 export interface TokenDto {
+  subjectId: string;
+  displayName: string;
   id: string;
   label: string;
   access_ceiling: "READ" | "WRITE";
@@ -73,6 +79,16 @@ export interface TokenDto {
   rotated_from_id: string | null;
   replaced_by_id: string | null;
   created_at: string;
+  commandCeiling: CommandCapability[];
+  persistedCommandCeiling: CommandCatalogType[];
+  historicalReadCeilingPreserved: boolean;
+}
+
+export interface TokenTargetDto {
+  subjectId: string;
+  displayName: string;
+  accessLevel: "READ" | "WRITE";
+  commandGrants: CommandCapability[];
 }
 
 export interface PropertyDto {
@@ -528,6 +544,8 @@ export type {
   AccessLevel,
   AmountSummaryDto,
   BookingChannelCode,
+  CommandCapability,
+  CommandCatalogType,
   CommandType,
   CommandReason,
   CreateQuoteCommandResponseDto,

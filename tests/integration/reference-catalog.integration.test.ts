@@ -14,6 +14,10 @@ import { resetDatabase } from "../helpers/database.ts";
 
 const databaseUrl = process.env.REFERENCE_CATALOG_INTEGRATION_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_reference_catalog";
+const demoOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "demo"
+} as const;
 
 let db: Kysely<Database>;
 
@@ -176,7 +180,7 @@ describe.sequential("2026 reference catalog import", () => {
       await concurrentDb.destroy();
     }
 
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     expect(first.batch.id).toBe(second.batch.id);
     expect(first.batch).toMatchObject({
       propertyId: demo.propertyId,

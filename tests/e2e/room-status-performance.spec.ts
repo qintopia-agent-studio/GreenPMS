@@ -4,6 +4,7 @@ import { todayInTimeZone, sha256 } from "@qintopia/domain";
 import { confirmCommandPreview, createCommandPreview } from "../../packages/db/src/commands/service.ts";
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createRoomStatusViewState, serializeRoomStatusRestoration } from "../../apps/web/src/room-status/roomStatusState.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
@@ -105,7 +106,7 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
       credentialId: performanceTokenId,
       credentialType: "TOKEN",
       displayName: "Room-status performance fixture writer",
-      propertyAccess: new Map([[performancePropertyId, "WRITE"]])
+      ...authScope({ propertyId: performancePropertyId })
     };
     for (let index = 0; index < 200; index += 10) {
       const suffix = index.toString().padStart(3, "0");

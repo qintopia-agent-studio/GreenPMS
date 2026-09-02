@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Copy, KeyRound, RefreshCw, ShieldOff, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { useWorkspace } from "../session";
-import type { ClientCommandMetadata, CommandRequest, PendingTokenCommand, RetainedTokenSecret, TokenDto, TrackedCommandState } from "../types";
-import { CommandDialog, EmptyState, formatDateTime, InlineError, LoadingBlock, Modal, StatusBadge, usePersistentCommandRecovery, type CommandDialogProgress } from "../ui";
+import { canManageTokens, commandRecoveryAvailable, principalCan, propertyAllowedActions, useWorkspace } from "../session";
+import type { ClientCommandMetadata, CommandCapability, CommandRequest, PendingTokenCommand, RetainedTokenSecret, TokenDto, TokenTargetDto, TrackedCommandState } from "../types";
+import { commandCapabilityBusinessLabel, CommandDialog, EmptyState, formatDateTime, InlineError, LoadingBlock, Modal, StatusBadge, tokenAccessCeilingLabel, tokenPermissionScopeLabel, usePersistentCommandRecovery, type CommandDialogProgress } from "../ui";
 
 export const TOKEN_SECRET_BYTES = 32;
 export type TokenLifecycleStatus = "ACTIVE" | "EXPIRED" | "REVOKED" | "ROTATED";
@@ -24,6 +24,43 @@ export function tokenLifecycleStatus(token: TokenDto, now = new Date()): TokenLi
   if (token.revoked_at) return "REVOKED";
   if (new Date(token.expires_at).getTime() <= now.getTime()) return "EXPIRED";
   return "ACTIVE";
+}
+
+export function tokenLifecycleStatusLabel(status: TokenLifecycleStatus): string {
+  if (status === "ACTIVE") return "有效";
+  if (status === "EXPIRED") return "已过期";
+  if (status === "REVOKED") return "已撤销";
+  return "已轮换";
+}
+
+export function tokenRotationRelationshipLabel(token: Pick<TokenDto, "rotated_from_id" | "replaced_by_id">): string {
+  if (token.rotated_from_id && token.replaced_by_id) return "由旧 Token 轮换生成，现已由新 Token 替换";
+  if (token.replaced_by_id) return "已由新 Token 替换";
+  if (token.rotated_from_id) return "由旧 Token 轮换生成";
+  return "初始签发";
+}
+
+export function tokenCommandCeilingOptions(
+  targetCommandGrants: readonly CommandCapability[],
+  callerAllowedActions: ReadonlySet<CommandCapability>,
+  currentCommandCeiling?: readonly CommandCapability[]
+): CommandCapability[] {
+  const current = currentCommandCeiling ? new Set(currentCommandCeiling) : undefined;
+  return targetCommandGrants.filter((commandType, index) => targetCommandGrants.indexOf(commandType) === index
+    && callerAllowedActions.has(commandType)
+    && (!current || current.has(commandType)));
+}
+
+export function tokenCommandCeilingForSubmit(
+  accessCeiling: "READ" | "WRITE",
+  selectedCommands: readonly CommandCapability[]
+): CommandCapability[] {
+  if (accessCeiling === "READ") return [];
+  return [...new Set(selectedCommands)];
+}
+
+export function tokenHistoricalReadCeilingHint(token: Pick<TokenDto, "historicalReadCeilingPreserved">): string | null {
+  return token.historicalReadCeilingPreserved ? "系统保留历史结果查询与恢复范围" : null;
 }
 
 type NewRetainedTokenSecret = Pick<RetainedTokenSecret, "propertyId" | "operation" | "label" | "value">;
@@ -152,21 +189,45 @@ function tokenRequestLabel(request: CommandRequest): string {
   return request.title;
 }
 
-function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }: {
+function TokenSecretDialog({ operation, token, accessGrant, targets, callerAllowedActions, onClose, onSubmit }: {
   operation: "ISSUE" | "ROTATE";
   token?: TokenDto;
   accessGrant: "READ" | "WRITE";
+  targets: readonly TokenTargetDto[];
+  callerAllowedActions: ReadonlySet<CommandCapability>;
   onClose: () => void;
   onSubmit: (request: CommandRequest, retained: NewRetainedTokenSecret) => void;
 }) {
   const { principal, propertyId } = useWorkspace();
   const [label, setLabel] = useState(token?.label ?? "External agent");
+  const [subjectId, setSubjectId] = useState(() => token?.subjectId ?? targets.find((target) => target.subjectId === principal.subjectId)?.subjectId ?? targets[0]?.subjectId ?? "");
   const [accessCeiling, setAccessCeiling] = useState<"READ" | "WRITE">(token?.access_ceiling ?? "READ");
   const [expiresAt, setExpiresAt] = useState(() => token ? toLocalDateTimeInput(token.expires_at) : defaultExpiration());
   const [secret] = useState(() => generateTokenSecret());
+  const [selectedCommandCeiling, setSelectedCommandCeiling] = useState<CommandCapability[]>(() => token?.commandCeiling ?? []);
   const [saved, setSaved] = useState(false);
   const [validationError, setValidationError] = useState<unknown>();
   const isIssue = operation === "ISSUE";
+  const selectedTarget = targets.find((target) => target.subjectId === subjectId);
+  const canGrantWriteAccess = accessGrant === "WRITE" && selectedTarget?.accessLevel === "WRITE";
+  const commandOptions = tokenCommandCeilingOptions(
+    token ? token.commandCeiling : selectedTarget?.commandGrants ?? [],
+    callerAllowedActions,
+    token?.commandCeiling
+  );
+  const commandOptionKey = commandOptions.join("|");
+
+  useEffect(() => {
+    if (accessCeiling === "WRITE" && !canGrantWriteAccess) setAccessCeiling("READ");
+  }, [accessCeiling, canGrantWriteAccess]);
+
+  useEffect(() => {
+    const allowed = new Set(commandOptions);
+    setSelectedCommandCeiling((current) => {
+      const filtered = current.filter((commandType) => allowed.has(commandType));
+      return isIssue || current.length > 0 ? filtered : commandOptions;
+    });
+  }, [commandOptionKey, isIssue]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -183,6 +244,10 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
       setValidationError(new Error("轮换目标 Token 不存在"));
       return;
     }
+    if (isIssue && !selectedTarget) {
+      setValidationError(new Error("请选择要签发 Token 的目标主体"));
+      return;
+    }
     const expiration = new Date(expiresAt);
     if (Number.isNaN(expiration.getTime()) || expiration.getTime() <= Date.now()) {
       setValidationError(new Error("Token 过期时间必须晚于当前时间"));
@@ -194,9 +259,10 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
       description: "确认后，这个 Token 可以用于外围客户端访问本物业数据。",
       input: {
         propertyId,
-        subjectId: principal.subjectId,
+        subjectId,
         label: label.trim(),
         accessCeiling,
+        commandCeiling: tokenCommandCeilingForSubmit(accessCeiling, selectedCommandCeiling),
         expiresAt: expiration.toISOString(),
         tokenSecret: secret
       }
@@ -207,6 +273,7 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
       input: {
         propertyId,
         tokenId: token!.id,
+        commandCeiling: tokenCommandCeilingForSubmit(token!.access_ceiling, selectedCommandCeiling),
         expiresAt: expiration.toISOString(),
         tokenSecret: secret
       }
@@ -224,15 +291,39 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
       <form className="modal-form" onSubmit={submit}>
         <InlineError error={validationError} title="无法继续" />
         <div className="form-grid">
+          {isIssue ? <label htmlFor="token-subject">目标主体
+            <select id="token-subject" value={subjectId} onChange={(event) => setSubjectId(event.target.value)} required>
+              {targets.map((target) => <option key={target.subjectId} value={target.subjectId}>{target.displayName} · {tokenAccessCeilingLabel(target.accessLevel)}</option>)}
+            </select>
+          </label> : (
+            <dl className="token-operation-context"><div><dt>目标主体</dt><dd>{token?.displayName}</dd></div></dl>
+          )}
           {isIssue ? <label htmlFor="token-label">标签<input id="token-label" value={label} onChange={(event) => setLabel(event.target.value)} required maxLength={200} /></label> : (
-            <dl className="token-operation-context"><div><dt>旧 Token</dt><dd><code>{token?.id}</code></dd></div><div><dt>标签</dt><dd>{token?.label}</dd></div></dl>
+            <dl className="token-operation-context"><div><dt>Token 标签</dt><dd>{token?.label}</dd></div><div><dt>当前权限</dt><dd>{tokenPermissionScopeLabel(token?.access_ceiling, token?.commandCeiling)}</dd></div></dl>
           )}
           {isIssue ? <label htmlFor="token-access-ceiling">权限上限
             <select id="token-access-ceiling" value={accessCeiling} onChange={(event) => setAccessCeiling(event.target.value as "READ" | "WRITE")}>
-              <option value="READ">READ</option>
-              {accessGrant === "WRITE" ? <option value="WRITE">WRITE</option> : null}
+              <option value="READ">只读</option>
+              {canGrantWriteAccess ? <option value="WRITE">可写</option> : null}
             </select>
           </label> : null}
+          {(isIssue ? accessCeiling : token?.access_ceiling) === "WRITE" ? (
+            <fieldset className="span-two token-command-ceiling">
+              <legend>命令上限</legend>
+              {!commandOptions.length ? <p>当前没有可授予的写命令；Token 将不能执行写命令。</p> : commandOptions.map((commandType) => (
+                <label key={commandType}>
+                  <input
+                    type="checkbox"
+                    checked={selectedCommandCeiling.includes(commandType)}
+                    onChange={(event) => setSelectedCommandCeiling((current) => event.target.checked
+                      ? [...current, commandType]
+                      : current.filter((candidate) => candidate !== commandType))}
+                  />
+                  <span>{commandCapabilityBusinessLabel(commandType)}</span>
+                </label>
+              ))}
+            </fieldset>
+          ) : null}
           <label htmlFor="token-expires-at">过期时间<input id="token-expires-at" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} required /></label>
           <SecretValue value={secret} />
           <label className="token-saved-confirmation"><input type="checkbox" checked={saved} onChange={(event) => setSaved(event.target.checked)} required /><span>我已将一次性 secret 安全保存；关闭后服务端无法找回。</span></label>
@@ -246,7 +337,7 @@ function TokenSecretDialog({ operation, token, accessGrant, onClose, onSubmit }:
 function RetainedSecretPanel({ secret, onClear, onRecover }: {
   secret: RetainedTokenSecret;
   onClear: () => void;
-  onRecover: () => void;
+  onRecover?: () => void;
 }) {
   const unresolved = retainedTokenCommandUnresolved(secret);
   const stateText: Record<RetainedTokenSecret["state"], string> = {
@@ -265,7 +356,7 @@ function RetainedSecretPanel({ secret, onClear, onRecover }: {
       <dl className="retained-secret-meta"><div><dt>操作</dt><dd>{tokenOperationLabel(secret.operation)}</dd></div><div><dt>处理状态</dt><dd>{tokenCommandStateText(secret.state)}</dd></div><div><dt>Token 标签</dt><dd>{secret.label}</dd></div></dl>
       <SecretValue value={secret.value} />
       <div className="retained-secret-actions">
-        {unresolved && (secret.confirmationKey || secret.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />继续处理</button> : null}
+        {unresolved && onRecover && (secret.confirmationKey || secret.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />继续处理</button> : null}
         <button className="button button-danger" type="button" onClick={onClear} disabled={unresolved}><Trash2 aria-hidden="true" size={16} />已保存，清除本机显示</button>
       </div>
     </section>
@@ -274,7 +365,7 @@ function RetainedSecretPanel({ secret, onClear, onRecover }: {
 
 function PendingTokenCommandPanel({ pending, onRecover, onClear }: {
   pending: PendingTokenCommand;
-  onRecover: () => void;
+  onRecover?: () => void;
   onClear: () => void;
 }) {
   const unresolved = trackedCommandUnresolved(pending.state);
@@ -283,7 +374,7 @@ function PendingTokenCommandPanel({ pending, onRecover, onClear }: {
       <div className="retained-secret-heading"><ShieldOff aria-hidden="true" size={20} /><div><h2 id="pending-token-command-heading">Token 操作待完成</h2><p>有一项 Token 操作还需要继续处理。系统会查询原操作结果，不会重复提交。</p></div></div>
       <dl className="retained-secret-meta"><div><dt>操作</dt><dd>{tokenRequestLabel(pending.request)}</dd></div><div><dt>处理状态</dt><dd>{tokenCommandStateText(pending.state)}</dd></div></dl>
       <div className="retained-secret-actions">
-        {unresolved && (pending.confirmationKey || pending.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />继续处理</button> : null}
+        {unresolved && onRecover && (pending.confirmationKey || pending.previewMetadata) ? <button className="button button-secondary" type="button" onClick={onRecover}><RefreshCw aria-hidden="true" size={16} />继续处理</button> : null}
         <button className="button button-secondary" type="button" onClick={onClear} disabled={unresolved}>清除记录</button>
       </div>
     </section>
@@ -300,6 +391,7 @@ export function TokensPage() {
     setPendingTokenCommand
   } = useWorkspace();
   const [tokens, setTokens] = useState<TokenDto[]>([]);
+  const [targets, setTargets] = useState<TokenTargetDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>();
   const [refreshToken, setRefreshToken] = useState(0);
@@ -307,7 +399,13 @@ export function TokensPage() {
   const [command, setCommand] = useState<TokenCommandDialogState>();
   const activeCommandAttemptRef = useRef<string | undefined>(undefined);
   const accessGrant = principal.propertyAccess[propertyId] ?? "READ";
-  const canWrite = accessGrant === "WRITE";
+  const callerAllowedActions = propertyAllowedActions(principal, propertyId);
+  const canManage = canManageTokens(principal, propertyId);
+  const canIssue = principalCan(principal, propertyId, "ISSUE_TOKEN");
+  const canRotate = principalCan(principal, propertyId, "ROTATE_TOKEN");
+  const canRevoke = principalCan(principal, propertyId, "REVOKE_TOKEN");
+  const retainedRecoverable = commandRecoveryAvailable(principal, propertyId, retainedTokenSecret?.command.commandType);
+  const pendingRecoverable = commandRecoveryAvailable(principal, propertyId, pendingTokenCommand?.request.commandType);
   const commandRecovery = usePersistentCommandRecovery({
     subjectId: principal.subjectId,
     scopeId: `property:${propertyId}`
@@ -315,15 +413,30 @@ export function TokensPage() {
 
   useEffect(() => {
     let current = true;
+    if (!canManage) {
+      setLoading(false);
+      setError(undefined);
+      setTokens([]);
+      setTargets([]);
+      return () => { current = false; };
+    }
     setLoading(true);
     setError(undefined);
     setTokens([]);
-    api.tokens(propertyId)
-      .then((response) => current && setTokens(response.tokens))
+    setTargets([]);
+    Promise.all([
+      api.tokens(propertyId),
+      canIssue ? api.tokenTargets(propertyId) : Promise.resolve({ subjects: [] })
+    ])
+      .then(([tokensResponse, targetsResponse]) => {
+        if (!current) return;
+        setTokens(tokensResponse.tokens);
+        setTargets(targetsResponse.subjects);
+      })
       .catch((nextError) => current && setError(nextError))
       .finally(() => current && setLoading(false));
     return () => { current = false; };
-  }, [propertyId, refreshToken]);
+  }, [canIssue, canManage, propertyId, refreshToken]);
 
   useEffect(() => () => {
     activeCommandAttemptRef.current = undefined;
@@ -347,6 +460,7 @@ export function TokensPage() {
   }
 
   function submitSecretCommand(request: CommandRequest, retained: NewRetainedTokenSecret) {
+    if (!principalCan(principal, propertyId, request.commandType as CommandCapability)) return;
     const operationId = crypto.randomUUID();
     setRetainedTokenSecret({ ...retained, operationId, command: request, state: "LOCAL_ONLY" });
     setSecretAction(undefined);
@@ -380,7 +494,7 @@ export function TokensPage() {
   }
 
   function recoverRetainedSecret() {
-    if (!retainedTokenSecret || (!retainedTokenSecret.confirmationKey && !retainedTokenSecret.previewMetadata)) return;
+    if (!retainedRecoverable || !retainedTokenSecret || (!retainedTokenSecret.confirmationKey && !retainedTokenSecret.previewMetadata)) return;
     openCommand({
       request: retainedTokenSecret.command,
       operationId: retainedTokenSecret.operationId,
@@ -390,7 +504,7 @@ export function TokensPage() {
   }
 
   function recoverPendingTokenCommand() {
-    if (!pendingTokenCommand || (!pendingTokenCommand.confirmationKey && !pendingTokenCommand.previewMetadata)) return;
+    if (!pendingRecoverable || !pendingTokenCommand || (!pendingTokenCommand.confirmationKey && !pendingTokenCommand.previewMetadata)) return;
     openCommand({
       request: pendingTokenCommand.request,
       operationId: pendingTokenCommand.operationId,
@@ -400,6 +514,7 @@ export function TokensPage() {
   }
 
   function revoke(token: TokenDto) {
+    if (!canRevoke) return;
     const operationId = crypto.randomUUID();
     const request: CommandRequest = {
       commandType: "REVOKE_TOKEN",
@@ -414,8 +529,8 @@ export function TokensPage() {
   return (
     <div className="tokens-page">
       <header className="page-heading page-heading-actions">
-        <div><p className="eyebrow">外部系统接入</p><h1>Token 生命周期</h1><p>当前主体的物业范围 Token、权限上限与轮换链</p></div>
-        <div className="token-page-actions"><button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={17} />刷新</button><button className="button button-primary" type="button" onClick={() => setSecretAction({ operation: "ISSUE" })} disabled={!canWrite || loading || Boolean(error) || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}><KeyRound aria-hidden="true" size={17} />签发 Token</button></div>
+        <div><p className="eyebrow">外部系统接入</p><h1>Token 生命周期</h1><p>本物业接入 Token、权限范围与有效状态</p></div>
+        <div className="token-page-actions"><button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={loading || !canManage}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={17} />刷新</button><button className="button button-primary" type="button" onClick={() => setSecretAction({ operation: "ISSUE" })} disabled={!canIssue || loading || Boolean(error) || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand) || targets.length === 0}><KeyRound aria-hidden="true" size={17} />签发 Token</button></div>
       </header>
 
       <InlineError error={commandRecovery.error} title="本物业有操作需要先处理" />
@@ -423,38 +538,42 @@ export function TokensPage() {
         <div><strong>请先处理本物业未完成的操作</strong><p>Token 操作尚未发送。处理完原操作或报价后，再返回这里继续。</p></div>
         <Link className="button button-secondary" to="/">前往房态处理</Link>
       </section> : null}
-      {retainedTokenSecret && !command ? <RetainedSecretPanel secret={retainedTokenSecret} onClear={() => setRetainedTokenSecret(undefined)} onRecover={recoverRetainedSecret} /> : null}
-      {pendingTokenCommand && !command ? <PendingTokenCommandPanel pending={pendingTokenCommand} onRecover={recoverPendingTokenCommand} onClear={() => setPendingTokenCommand(undefined)} /> : null}
-      {!canWrite ? <div className="token-readonly-notice"><ShieldOff aria-hidden="true" size={18} /><p>当前主体在该物业只有 READ 权限，可以查看 Token，但不能签发、轮换或撤销。</p></div> : null}
+      {retainedTokenSecret && !command ? <RetainedSecretPanel secret={retainedTokenSecret} onClear={() => setRetainedTokenSecret(undefined)} {...(retainedRecoverable ? { onRecover: recoverRetainedSecret } : {})} /> : null}
+      {pendingTokenCommand && !command ? <PendingTokenCommandPanel pending={pendingTokenCommand} {...(pendingRecoverable ? { onRecover: recoverPendingTokenCommand } : {})} onClear={() => setPendingTokenCommand(undefined)} /> : null}
+      {!canManage ? <div className="token-readonly-notice"><ShieldOff aria-hidden="true" size={18} /><p>当前主体没有本物业 Token 管理命令授权；普通员工可继续处理一线业务，Token 由管理员维护。</p></div> : null}
 
       <section className="token-principal-band" aria-label="Token 主体与状态汇总">
-        <div><span>真实主体</span><strong>{principal.displayName}</strong><code>{principal.subjectId}</code></div>
-        <div><span>物业授权</span><StatusBadge value={accessGrant} /></div>
-        <div className="token-counts"><span>ACTIVE {counts.ACTIVE}</span><span>EXPIRED {counts.EXPIRED}</span><span>REVOKED {counts.REVOKED}</span><span>ROTATED {counts.ROTATED}</span></div>
+        <div><span>当前工作人员</span><strong>{principal.displayName}</strong></div>
+        <div><span>物业授权</span><StatusBadge value={tokenAccessCeilingLabel(accessGrant)} /></div>
+        <div><span>命令授权</span><strong>{canManage ? "可管理 Token" : "无 Token 管理"}</strong></div>
+        <div className="token-counts"><span>有效 {counts.ACTIVE}</span><span>已过期 {counts.EXPIRED}</span><span>已撤销 {counts.REVOKED}</span><span>已轮换 {counts.ROTATED}</span></div>
       </section>
 
       <InlineError error={error} title="无法载入 Token" />
       {loading ? <LoadingBlock label="正在载入 Token" /> : error ? null : tokens.length ? (
-        <div className="table-region token-table-region" role="region" aria-label="当前主体 Token" tabIndex={0}>
+        <div className="table-region token-table-region" role="region" aria-label="本物业主体 Token" tabIndex={0}>
           <table className="data-table token-table">
-            <thead><tr><th scope="col">Token / 标签</th><th scope="col">权限</th><th scope="col">状态</th><th scope="col">过期时间</th><th scope="col">轮换链</th><th scope="col" className="token-actions-heading">操作</th></tr></thead>
+            <thead><tr><th scope="col">Token 标签</th><th scope="col">目标主体</th><th scope="col">权限上限</th><th scope="col">可执行命令</th><th scope="col">状态</th><th scope="col">过期时间</th><th scope="col">轮换状态</th><th scope="col" className="token-actions-heading">操作</th></tr></thead>
             <tbody>{tokens.map((token) => {
               const status = tokenLifecycleStatus(token);
               const revoked = status === "REVOKED" || status === "ROTATED";
+              const historicalReadCeilingHint = tokenHistoricalReadCeilingHint(token);
               return <tr key={token.id}>
-                <th scope="row"><strong>{token.label}</strong><code>{token.id}</code><small>{formatDateTime(token.created_at)}</small></th>
-                <td><StatusBadge value={token.access_ceiling} /></td>
-                <td><StatusBadge value={status} />{token.revoked_at ? <small>{formatDateTime(token.revoked_at)}</small> : null}</td>
+                <th scope="row"><strong>{token.label}</strong><small>签发于 {formatDateTime(token.created_at)}</small></th>
+                <td><strong>{token.displayName}</strong></td>
+                <td><StatusBadge value={tokenAccessCeilingLabel(token.access_ceiling)} /></td>
+                <td>{token.commandCeiling.length ? <small>{token.commandCeiling.map(commandCapabilityBusinessLabel).join(" / ")}</small> : <small>无写入能力</small>}{historicalReadCeilingHint ? <small>{historicalReadCeilingHint}</small> : null}</td>
+                <td><StatusBadge value={tokenLifecycleStatusLabel(status)} />{token.revoked_at ? <small>{formatDateTime(token.revoked_at)}</small> : null}</td>
                 <td>{formatDateTime(token.expires_at)}</td>
-                <td className="token-chain"><span>来自 <code>{token.rotated_from_id ?? "-"}</code></span><span>替换为 <code>{token.replaced_by_id ?? "-"}</code></span></td>
-                <td className="token-actions-cell"><div className="row-actions token-row-actions"><button className="button button-compact button-secondary" type="button" onClick={() => setSecretAction({ operation: "ROTATE", token })} disabled={!canWrite || revoked || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}>轮换</button><button className="button button-compact button-secondary danger-text-button" type="button" onClick={() => revoke(token)} disabled={!canWrite || revoked || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)} aria-label={`撤销 Token ${token.id}`}>撤销</button></div></td>
+                <td className="token-chain"><span>{tokenRotationRelationshipLabel(token)}</span></td>
+                <td className="token-actions-cell"><div className="row-actions token-row-actions"><button className="button button-compact button-secondary" type="button" onClick={() => setSecretAction({ operation: "ROTATE", token })} disabled={!canRotate || revoked || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)}>轮换</button><button className="button button-compact button-secondary danger-text-button" type="button" onClick={() => revoke(token)} disabled={!canRevoke || revoked || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand)} aria-label={`撤销 Token ${token.label}`}>撤销</button></div></td>
               </tr>;
             })}</tbody>
           </table>
         </div>
-      ) : <EmptyState title="当前主体没有 Token" detail="签发第一个受物业和主体授权收窄的外围客户端 Token。" />}
+      ) : canManage ? <EmptyState title="本物业没有 Token" detail="签发第一个受物业、目标主体和命令上限共同收窄的外围客户端 Token。" /> : null}
 
-      {secretAction ? <TokenSecretDialog operation={secretAction.operation} {...(secretAction.token ? { token: secretAction.token } : {})} accessGrant={accessGrant} onClose={() => setSecretAction(undefined)} onSubmit={submitSecretCommand} /> : null}
+      {secretAction ? <TokenSecretDialog operation={secretAction.operation} {...(secretAction.token ? { token: secretAction.token } : {})} accessGrant={accessGrant} targets={targets} callerAllowedActions={callerAllowedActions} onClose={() => setSecretAction(undefined)} onSubmit={submitSecretCommand} /> : null}
       {command ? <CommandDialog
         request={command.request}
         onClose={() => closeCommand(command.attemptId)}

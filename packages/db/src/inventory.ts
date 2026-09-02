@@ -1,6 +1,7 @@
 import { sql, type Kysely, type Transaction } from "kysely";
 import { DomainError, type InventoryUnitKind } from "@qintopia/contracts";
-import { enumerateServiceDates, newId, todayInTimeZone } from "@qintopia/domain";
+import { enumerateServiceDates, newId } from "@qintopia/domain";
+import { propertyLocalClockAt } from "./members.ts";
 import type { Database } from "./schema.ts";
 
 export type DbExecutor = Kysely<Database> | Transaction<Database>;
@@ -84,7 +85,7 @@ async function loadDepartureDayStayBlockers(
   const property = await db.selectFrom("properties").select("timezone").where("id", "=", propertyId).executeTakeFirst();
   if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
   const clock = await sql<{ as_of: Date }>`select transaction_timestamp() as as_of`.execute(db);
-  const businessDate = todayInTimeZone(property.timezone, clock.rows[0]!.as_of);
+  const businessDate = propertyLocalClockAt(property.timezone, clock.rows[0]!.as_of).date;
   if (!dates.includes(businessDate)) return [];
 
   const orderRows = await db.selectFrom("orders")

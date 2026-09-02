@@ -331,7 +331,8 @@ function orderExceptionTask(status: "RESERVED" | "IN_HOUSE" | "UNKNOWN"): RoomSt
     endDate,
     sourceStartDate: startDate,
     sourceEndDate: endDate,
-    ...(status === "RESERVED" ? { orderArrivalDate: startDate } : {}),
+    orderArrivalDate: startDate,
+    orderDepartureDate: endDate,
     status,
     attention: null,
     operationalAttention: status === "RESERVED"
@@ -390,15 +391,17 @@ function normalLodgingTask(taskKind: "ARRIVAL" | "IN_HOUSE" | "DEPARTURE"): Room
   task.sourceStartDate = task.startDate;
   task.sourceEndDate = task.endDate;
   task.orderArrivalDate = task.startDate;
+  task.orderDepartureDate = task.endDate;
   task.operationalAttention = null;
   if (taskKind === "DEPARTURE") {
+    task.operationalAttention = "DUE_OUT";
     task.available = false;
     task.blocking = true;
     task.claimIds = [];
     task.references = task.references.filter((reference) => reference.type !== "CLAIM");
     task.conflicts = [{
       id: "conflict_order_departure",
-      blockingFactKind: "LODGING_ORDER",
+      blockingFactKind: "DUE_OUT",
       claimId: null,
       claimIds: [],
       requestedInventoryUnitId: task.displayInventoryUnitId,
@@ -502,19 +505,26 @@ describe("assertRoomStatusBoard", () => {
     expect(() => assertRoomStatusBoard(validBoard(), expected)).not.toThrow();
   });
 
-  it("accepts an original order arrival date only for lodging intervals", () => {
+  it("accepts paired original order dates only for lodging intervals", () => {
     const lodging = boardWithWholeRoomLodging();
     lodging.rooms[0]!.intervals[0]!.orderArrivalDate = "2027-12-30";
+    lodging.rooms[0]!.intervals[0]!.orderDepartureDate = "2028-01-02";
     lodging.rooms[0]!.intervals[0]!.operationalAttention = "OVERDUE_RESERVED";
     expect(() => assertRoomStatusBoard(lodging, expected)).not.toThrow();
 
     const afterSourceStart = boardWithWholeRoomLodging();
     afterSourceStart.rooms[0]!.intervals[0]!.orderArrivalDate = "2028-01-02";
+    afterSourceStart.rooms[0]!.intervals[0]!.orderDepartureDate = "2028-01-03";
     expect(() => assertRoomStatusBoard(afterSourceStart, expected)).toThrow(/不能晚于来源完整区间/);
 
     const maintenance = boardWithMaintenance();
     maintenance.rooms[0]!.intervals[0]!.orderArrivalDate = "2028-01-01";
+    maintenance.rooms[0]!.intervals[0]!.orderDepartureDate = "2028-01-02";
     expect(() => assertRoomStatusBoard(maintenance, expected)).toThrow(/只能由住宿订单来源提供/);
+
+    const missingDeparture = boardWithWholeRoomLodging();
+    missingDeparture.rooms[0]!.intervals[0]!.orderArrivalDate = "2028-01-01";
+    expect(() => assertRoomStatusBoard(missingDeparture, expected)).toThrow(/同时提供或同时省略/);
   });
 
   it("accepts backfill only for an authoritative historical blank day", () => {
@@ -962,6 +972,43 @@ describe("assertRoomStatusBoard", () => {
       normalLodgingTask("DEPARTURE")
     ];
     expect(() => assertRoomStatusBoard(board, expected)).not.toThrow();
+
+    const missingOriginalDeparture = validBoard();
+    const missingOriginalDepartureTask = normalLodgingTask("DEPARTURE") as unknown as Record<string, unknown>;
+    delete missingOriginalDepartureTask.orderDepartureDate;
+    missingOriginalDeparture.operationalTasks = [missingOriginalDepartureTask as unknown as RoomStatusOperationalTaskDto];
+    expect(() => assertRoomStatusBoard(missingOriginalDeparture, expected)).toThrow(/同时提供或同时省略/);
+
+    const wrongBusinessDate = validBoard();
+    wrongBusinessDate.operationalTasks = [{
+      ...normalLodgingTask("DEPARTURE"),
+      orderDepartureDate: "2028-01-02"
+    }];
+    expect(() => assertRoomStatusBoard(wrongBusinessDate, expected)).toThrow(/退房日必须等于营业日/);
+
+    const oldLodgingOrderBlocker = validBoard();
+    const oldLodgingOrderTask = normalLodgingTask("DEPARTURE");
+    oldLodgingOrderTask.conflicts[0] = {
+      ...oldLodgingOrderTask.conflicts[0]!,
+      blockingFactKind: "LODGING_ORDER"
+    };
+    oldLodgingOrderBlocker.operationalTasks = [oldLodgingOrderTask];
+    expect(() => assertRoomStatusBoard(oldLodgingOrderBlocker, expected)).toThrow(/专用安全事实|离店任务/);
+
+    const blockerWithoutAttention = validBoard();
+    blockerWithoutAttention.operationalTasks = [{
+      ...normalLodgingTask("DEPARTURE"),
+      operationalAttention: null
+    }];
+    expect(() => assertRoomStatusBoard(blockerWithoutAttention, expected)).toThrow(/必须同时携带待退房运营关注事实/);
+
+    const attentionWithoutBlocker = validBoard();
+    const attentionWithoutBlockerTask = normalLodgingTask("DEPARTURE");
+    attentionWithoutBlockerTask.conflicts = [];
+    attentionWithoutBlockerTask.blocking = false;
+    attentionWithoutBlockerTask.available = true;
+    attentionWithoutBlocker.operationalTasks = [attentionWithoutBlockerTask];
+    expect(() => assertRoomStatusBoard(attentionWithoutBlocker, expected)).toThrow(/专用安全事实/);
 
     const misclassified = validBoard();
     const inHouse = normalLodgingTask("IN_HOUSE");

@@ -1,5 +1,5 @@
 import type { ColumnType } from "kysely";
-import type { BookingChannelCode, CreateOrderPricingBasis } from "@qintopia/contracts";
+import type { BookingChannelCode, CommandCapability, CommandCatalogType, CreateOrderPricingBasis } from "@qintopia/contracts";
 
 type Timestamp = ColumnType<Date, Date | string, Date | string>;
 type GeneratedTimestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -18,7 +18,13 @@ export interface Database {
   pricing_policy_versions: { id: string; property_id: string; code: string; version: number; stay_type: string | null; calculation_kind: "FLAT_NIGHTLY" | "DURATION_BAND_TOTAL" | "FREE"; nightly_rate_minor: number | null; product_anchor_rates_minor: NullableInsert<unknown>; effective_from: NullableInsert<string>; effective_until: NullableInsert<string>; rounding_rule: NullableInsert<"FINAL_TOTAL_WHOLE_YUAN_HALF_UP">; currency: string; status: "PUBLISHED"; created_at: GeneratedTimestamp };
   subjects: { id: string; username: string; display_name: string; password_salt: string; password_hash: string; status: "ACTIVE" | "DISABLED"; auth_version: number; created_at: GeneratedTimestamp };
   subject_property_grants: { subject_id: string; property_id: string; access_level: "READ" | "WRITE"; created_at: GeneratedTimestamp };
+  command_catalog: { command_type: CommandCatalogType; command_class: "DIRECT_READ" | "HUMAN_COMMAND" | "SYSTEM_DERIVED" | "FUTURE_DISABLED" | "HISTORICAL_READ"; feature_key: string | null; created_at: GeneratedTimestamp };
+  staff_command_profile_catalog: { profile: "STAFF" | "ADMIN"; command_type: CommandCatalogType; token_default: boolean };
+  staff_profile_assignments: { subject_id: string; property_id: string; profile: "STAFF" | "ADMIN"; created_at: GeneratedTimestamp };
+  staff_profile_reconciliation_state: { singleton: boolean; manifest_name: string; manifest_hash: string; projection_hash: string; reconciled_by: string; reconciled_at: GeneratedTimestamp };
+  subject_command_grants: { subject_id: string; property_id: string; command_type: CommandCatalogType; created_at: GeneratedTimestamp };
   api_tokens: { id: string; subject_id: string; label: string; secret_hash: string; access_ceiling: "READ" | "WRITE"; property_scope: string; expires_at: Timestamp; revoked_at: Timestamp | null; rotated_from_id: string | null; replaced_by_id: string | null; created_at: GeneratedTimestamp };
+  token_command_ceilings: { token_id: string; subject_id: string; property_id: string; command_type: CommandCatalogType; created_at: GeneratedTimestamp };
   web_sessions: { id: string; subject_id: string; secret_hash: string; expires_at: Timestamp; revoked_at: Timestamp | null; created_at: GeneratedTimestamp };
   members: { id: string; identity_card_number: string | null; nickname: string; full_name: string; phone: string; wechat: string; created_at: GeneratedTimestamp };
   member_property_links: { member_id: string; property_id: string; created_at: GeneratedTimestamp };
@@ -51,4 +57,5 @@ export interface Database {
   command_executions: { id: string; subject_id: string; credential_id: string; property_id: string; command_type: string; idempotency_key: string; request_hash: string; correlation_id: string; state: "EXECUTING" | "APPLIED" | "REJECTED"; created_at: GeneratedTimestamp; completed_at: Timestamp | null };
   command_receipts: { id: string; command_id: string; execution_status: "EXECUTED" | "NOT_EXECUTED" | "UNKNOWN"; business_committed: boolean; result: Json | null; error: Json | null; resource_refs: Json; fact_refs: Json; committed_at: Timestamp | null; created_at: GeneratedTimestamp };
   audit_entries: { id: string; subject_id: string; credential_id: string; action: string; decision: "ALLOWED" | "DENIED"; command_id: string | null; correlation_id: string; reason: Json | null; target_refs: Json; metadata: Json; created_at: GeneratedTimestamp };
+  security_audit_entries: { id: string; property_id: string; subject_id: string; command_type: CommandCatalogType; stage: "PREVIEW" | "CONFIRM" | "STORED_PREVIEW" | "RECEIPT" | "COMMAND" | "FIND" | "RESOLVE" | "REPLAY"; denial_reason: string; credential_type: "SESSION" | "TOKEN"; credential_fingerprint: string; correlation_id: string; idempotency_key_hash: string; metadata: Json; created_at: GeneratedTimestamp };
 }

@@ -5,8 +5,8 @@ import type { FastifyInstance } from "fastify";
 import { sql, type Kysely } from "kysely";
 import { Value } from "@sinclair/typebox/value";
 import type { CommandType } from "@qintopia/contracts";
-import { newOpaqueSecret, sha256 } from "@qintopia/domain";
-import { createDatabase, databaseReady, type Database } from "@qintopia/db";
+import { newOpaqueSecret, ordinaryStaffCommandGrants, sha256 } from "@qintopia/domain";
+import { createDatabase, databaseReady, reconcileStaffProfileManifest, type Database } from "@qintopia/db";
 import { ErrorResponse, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -20,7 +20,12 @@ const secondPolicyId = "policy_security_scope_transient";
 const secondScopeSecret = "qtp_security_second_scope_2026";
 const foreignSubjectSecret = "qtp_security_foreign_subject_2026";
 const disabledForeignSubjectId = "subject_security_disabled_foreign";
+const secondPropertyOnlySubjectId = "subject_security_second_property_only";
 const revokedForeignTokenId = "token_security_revoked_foreign";
+const demoOwnerReadinessOptions = {
+  identity: "maintenance-owner",
+  staffProfileManifestName: "demo"
+} as const;
 
 type PreviewBody = {
   preview: {
@@ -112,6 +117,13 @@ async function commandArtifactCounts() {
   return [executions, previews, receipts, audits].map((row) => Number(row.count));
 }
 
+async function securityAuditCount(): Promise<number> {
+  const row = await db.selectFrom("security_audit_entries")
+    .select(({ fn }) => fn.countAll<number>().as("count"))
+    .executeTakeFirstOrThrow();
+  return Number(row.count);
+}
+
 beforeAll(async () => {
   setTestEnvironment("LOG_LEVEL", "silent");
   setTestEnvironment("LOGIN_RATE_LIMIT_MAX", "2");
@@ -150,20 +162,40 @@ beforeAll(async () => {
     property_id: secondPropertyId,
     access_level: "WRITE"
   }).execute();
-  await db.insertInto("subjects").values({
-    id: disabledForeignSubjectId,
-    username: "security-disabled-foreign",
-    display_name: "Disabled Foreign Subject",
-    password_salt: "security-disabled",
-    password_hash: "disabled",
-    status: "DISABLED",
-    auth_version: 1
-  }).execute();
-  await db.insertInto("subject_property_grants").values({
-    subject_id: disabledForeignSubjectId,
-    property_id: demo.propertyId,
-    access_level: "WRITE"
-  }).execute();
+  await db.insertInto("subject_command_grants").values(ordinaryStaffCommandGrants.map((commandType) => ({
+    subject_id: demo.agentSubjectId,
+    property_id: secondPropertyId,
+    command_type: commandType
+  }))).execute();
+  await db.insertInto("subjects").values([
+    {
+      id: disabledForeignSubjectId,
+      username: "security-disabled-foreign",
+      display_name: "Disabled Foreign Subject",
+      password_salt: "security-disabled",
+      password_hash: "disabled",
+      status: "DISABLED",
+      auth_version: 1
+    },
+    {
+      id: secondPropertyOnlySubjectId,
+      username: "security-second-property-only",
+      display_name: "Second Property Only Subject",
+      password_salt: "security-second-property-only",
+      password_hash: "second-property-only",
+      status: "ACTIVE",
+      auth_version: 1
+    }
+  ]).execute();
+  await db.insertInto("subject_property_grants").values([
+    { subject_id: disabledForeignSubjectId, property_id: demo.propertyId, access_level: "WRITE" },
+    { subject_id: secondPropertyOnlySubjectId, property_id: secondPropertyId, access_level: "WRITE" }
+  ]).execute();
+  await db.insertInto("subject_command_grants").values(ordinaryStaffCommandGrants.map((commandType) => ({
+    subject_id: secondPropertyOnlySubjectId,
+    property_id: secondPropertyId,
+    command_type: commandType
+  }))).execute();
   await db.insertInto("api_tokens").values([
     {
       id: "token_security_second_scope",
@@ -202,6 +234,27 @@ beforeAll(async () => {
       replaced_by_id: null
     }
   ]).execute();
+  await db.insertInto("token_command_ceilings").values([
+    ...ordinaryStaffCommandGrants.map((commandType) => ({
+      token_id: "token_security_second_scope",
+      subject_id: demo.agentSubjectId,
+      property_id: secondPropertyId,
+      command_type: commandType
+    })),
+    {
+      token_id: "token_security_foreign_subject",
+      subject_id: demo.operatorSubjectId,
+      property_id: demo.propertyId,
+      command_type: "LOCK_MAINTENANCE" as const
+    },
+    {
+      token_id: revokedForeignTokenId,
+      subject_id: demo.operatorSubjectId,
+      property_id: demo.propertyId,
+      command_type: "LOCK_MAINTENANCE" as const
+    }
+  ]).execute();
+  await reconcileStaffProfileManifest(db, "demo");
   app = await buildServer(db);
   await app.ready();
 }, 120_000);
@@ -247,11 +300,11 @@ describe("HTTP security contract", () => {
   it("fails readiness for unknown migrations and non-operational guard trigger states", async () => {
     await db.insertInto("schema_migrations").values({ name: "999_future_application.sql" }).execute();
     try {
-      expect(await databaseReady(db)).toBe(false);
+      expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(false);
     } finally {
       await db.deleteFrom("schema_migrations").where("name", "=", "999_future_application.sql").execute();
     }
-    expect(await databaseReady(db)).toBe(true);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
 
     const rollbackProbe = new Error("rollback readiness trigger state probe");
     for (const triggerState of ["DISABLE", "ENABLE REPLICA"] as const) {
@@ -259,10 +312,10 @@ describe("HTTP security contract", () => {
         await sql.raw(
           `ALTER TABLE amendments ${triggerState} TRIGGER amendments_stage11_validate_move_combination`
         ).execute(trx);
-        expect(await databaseReady(trx)).toBe(false);
+        expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(false);
         throw rollbackProbe;
       })).rejects.toBe(rollbackProbe);
-      expect(await databaseReady(db)).toBe(true);
+      expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     }
   });
 
@@ -367,6 +420,49 @@ describe("HTTP security contract", () => {
       db.selectFrom("inventory_claims").select(({ fn }) => fn.countAll<number>().as("count")).executeTakeFirstOrThrow()
     ]);
     expect(afterBusiness.map((row) => Number(row.count))).toEqual(beforeBusiness.map((row) => Number(row.count)));
+  });
+
+  it("audits known revoked Confirm credentials using the stored Preview identity, not the request body", async () => {
+    const prepared = await previewCommand(demo.writeToken, "LOCK_MAINTENANCE", {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.secondRoomId,
+      arrivalDate: "2027-04-03",
+      departureDate: "2027-04-04",
+      reason: "Known revoked Confirm audit context"
+    }, "known-revoked-confirm-audit");
+    expect(prepared.response.statusCode, prepared.response.body).toBe(200);
+
+    const beforeArtifacts = await commandArtifactCounts();
+    const beforeSecurityAudit = await securityAuditCount();
+    const rejected = await app.inject({
+      method: "POST",
+      url: `/api/v1/command-previews/${prepared.body.preview.previewId}/confirm`,
+      headers: writeHeaders("qtp_security_revoked_foreign_2026", "known-revoked-confirm-audit"),
+      payload: {
+        propertyId: "property_spoofed_confirm_audit",
+        commandType: "REPRICE_ORDER",
+        confirmation: true,
+        expectedEffectHash: prepared.body.preview.effectHash,
+        reason: { code: "SECURITY_CONTRACT", note: "Body property and command must not drive this audit" }
+      }
+    });
+
+    expect(rejected.statusCode, rejected.body).toBe(401);
+    expect(rejected.json()).toMatchObject({ code: "TOKEN_REVOKED", retryable: false });
+    expect(await commandArtifactCounts()).toEqual(beforeArtifacts);
+    expect(await securityAuditCount()).toBe(beforeSecurityAudit + 1);
+    const latest = await db.selectFrom("security_audit_entries")
+      .select(["property_id", "subject_id", "command_type", "stage", "denial_reason", "credential_type"])
+      .orderBy("created_at", "desc")
+      .executeTakeFirstOrThrow();
+    expect(latest).toEqual({
+      property_id: demo.propertyId,
+      subject_id: demo.operatorSubjectId,
+      command_type: "LOCK_MAINTENANCE",
+      stage: "CONFIRM",
+      denial_reason: "TOKEN_REVOKED",
+      credential_type: "TOKEN"
+    });
   });
 
   it("rejects Bearer logout instead of implying that the Token was revoked", async () => {
@@ -580,11 +676,12 @@ describe("HTTP security contract", () => {
 
   it("accepts a client-provisioned Token secret without persisting or returning it", async () => {
     const secret = newOpaqueSecret("qtp");
-    const flow = await executeCommand(demo.writeToken, "ISSUE_TOKEN", {
+    const flow = await executeCommand(demo.administratorWriteToken, "ISSUE_TOKEN", {
       propertyId: demo.propertyId,
       subjectId: demo.agentSubjectId,
       label: "One response Token",
       accessCeiling: "WRITE",
+      commandCeiling: ["LOCK_MAINTENANCE"],
       expiresAt: "2029-01-01T00:00:00.000Z",
       tokenSecret: secret
     }, "client-secret");
@@ -604,40 +701,45 @@ describe("HTTP security contract", () => {
     const receipt = await app.inject({
       method: "GET",
       url: `/api/v1/receipts/${flow.confirmation.body.receiptId}`,
-      headers: { authorization: `Bearer ${demo.writeToken}` }
+      headers: { authorization: `Bearer ${demo.administratorWriteToken}` }
     });
     const commandResult = await app.inject({
       method: "GET",
       url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=ISSUE_TOKEN&idempotencyKey=${flow.confirmation.headers["idempotency-key"]}`,
-      headers: { authorization: `Bearer ${demo.writeToken}` }
+      headers: { authorization: `Bearer ${demo.administratorWriteToken}` }
     });
     expect([replay.statusCode, receipt.statusCode, commandResult.statusCode]).toEqual([200, 200, 200]);
     expect(JSON.stringify([replay.json(), receipt.json(), commandResult.json()])).not.toContain(secret);
     expect(replay.json().result).not.toHaveProperty("tokenSecret");
 
     const readOnlyRecoveryRequests = [
-      `/api/v1/receipts/${flow.confirmation.body.receiptId}`,
-      `/api/v1/commands/${flow.confirmation.body.commandId}`,
-      `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=ISSUE_TOKEN&idempotencyKey=${flow.confirmation.headers["idempotency-key"]}`
+      { url: `/api/v1/receipts/${flow.confirmation.body.receiptId}`, statusCode: 404, code: "NOT_FOUND" },
+      { url: `/api/v1/commands/${flow.confirmation.body.commandId}`, statusCode: 404, code: "NOT_FOUND" },
+      {
+        url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=ISSUE_TOKEN&idempotencyKey=${flow.confirmation.headers["idempotency-key"]}`,
+        statusCode: 403,
+        code: "INSUFFICIENT_ACCESS"
+      }
     ];
-    for (const url of readOnlyRecoveryRequests) {
+    for (const request of readOnlyRecoveryRequests) {
       const denied = await app.inject({
         method: "GET",
-        url,
+        url: request.url,
         headers: { authorization: `Bearer ${demo.readToken}` }
       });
-      expect(denied.statusCode, url).toBe(403);
-      expect(denied.json()).toMatchObject({ code: "INSUFFICIENT_ACCESS", retryable: false });
+      expect(denied.statusCode, request.url).toBe(request.statusCode);
+      expect(denied.json()).toMatchObject({ code: request.code, retryable: false });
     }
   });
 
   it("supports client-provisioned secret rotation without persisting a recoverable secret", async () => {
     const oldSecret = newOpaqueSecret("qtp");
-    const issued = await executeCommand(demo.writeToken, "ISSUE_TOKEN", {
+    const issued = await executeCommand(demo.administratorWriteToken, "ISSUE_TOKEN", {
       propertyId: demo.propertyId,
-      subjectId: demo.agentSubjectId,
+      subjectId: demo.administratorSubjectId,
       label: "Client rotation source",
       accessCeiling: "WRITE",
+      commandCeiling: ["ROTATE_TOKEN"],
       expiresAt: "2029-01-01T00:00:00.000Z",
       tokenSecret: oldSecret
     }, "client-rotation-issue");
@@ -646,6 +748,7 @@ describe("HTTP security contract", () => {
     const rotated = await executeCommand(oldSecret, "ROTATE_TOKEN", {
       propertyId: demo.propertyId,
       tokenId: oldTokenId,
+      commandCeiling: ["ROTATE_TOKEN"],
       tokenSecret: clientSecret
     }, "client-rotation");
     expect(rotated.confirmation.body.result).not.toHaveProperty("tokenSecret");
@@ -679,7 +782,7 @@ describe("HTTP security contract", () => {
     const shortTokenId = "token_security_short_expiry";
     await db.insertInto("api_tokens").values({
       id: shortTokenId,
-      subject_id: demo.agentSubjectId,
+      subject_id: demo.administratorSubjectId,
       label: "Short expiry security caller",
       secret_hash: sha256(shortSecret),
       access_ceiling: "WRITE",
@@ -689,6 +792,12 @@ describe("HTTP security contract", () => {
       rotated_from_id: null,
       replaced_by_id: null
     }).execute();
+    await db.insertInto("token_command_ceilings").values({
+      token_id: shortTokenId,
+      subject_id: demo.administratorSubjectId,
+      property_id: demo.propertyId,
+      command_type: "ISSUE_TOKEN"
+    }).execute();
 
     const deniedPreviewSecret = newOpaqueSecret("qtp");
     const deniedPreview = await previewCommand(shortSecret, "ISSUE_TOKEN", {
@@ -696,6 +805,7 @@ describe("HTTP security contract", () => {
       subjectId: demo.agentSubjectId,
       label: "Expiry escalation at Preview",
       accessCeiling: "WRITE",
+      commandCeiling: ["LOCK_MAINTENANCE"],
       expiresAt: "2029-01-01T00:00:00.000Z",
       tokenSecret: deniedPreviewSecret
     }, "expiry-ceiling-preview");
@@ -704,28 +814,29 @@ describe("HTTP security contract", () => {
     expect(await db.selectFrom("api_tokens").select("id").where("secret_hash", "=", sha256(deniedPreviewSecret)).executeTakeFirst()).toBeUndefined();
 
     const confirmSecret = newOpaqueSecret("qtp");
-    const pending = await previewCommand(demo.writeToken, "ISSUE_TOKEN", {
+    const pending = await previewCommand(demo.administratorWriteToken, "ISSUE_TOKEN", {
       propertyId: demo.propertyId,
       subjectId: demo.agentSubjectId,
       label: "Expiry escalation at Confirm",
       accessCeiling: "WRITE",
+      commandCeiling: ["LOCK_MAINTENANCE"],
       expiresAt: "2029-01-01T00:00:00.000Z",
       tokenSecret: confirmSecret
     }, "expiry-ceiling-pending");
     expect(pending.response.statusCode).toBe(200);
+    const artifactsBeforeDeniedConfirm = await commandArtifactCounts();
+    const auditsBeforeDeniedConfirm = await securityAuditCount();
     const deniedConfirm = await confirmPreview(shortSecret, pending.body.preview, "expiry-ceiling-confirm");
-    expect(deniedConfirm.response.statusCode).toBe(409);
-    expect(deniedConfirm.body).toMatchObject({
-      executionStatus: "NOT_EXECUTED",
-      businessCommitted: false,
-      error: { code: "INSUFFICIENT_ACCESS", retryable: false }
-    });
+    expect(deniedConfirm.response.statusCode).toBe(403);
+    expect(deniedConfirm.body).toMatchObject({ code: "INSUFFICIENT_ACCESS", retryable: false });
+    expect(await commandArtifactCounts()).toEqual(artifactsBeforeDeniedConfirm);
+    expect(await securityAuditCount()).toBe(auditsBeforeDeniedConfirm + 1);
     expect(await db.selectFrom("api_tokens").select("id").where("secret_hash", "=", sha256(confirmSecret)).executeTakeFirst()).toBeUndefined();
 
     const sessionCookie = newOpaqueSecret("qts");
     await db.insertInto("web_sessions").values({
       id: "session_security_expiry_ceiling",
-      subject_id: demo.operatorSubjectId,
+      subject_id: demo.administratorSubjectId,
       secret_hash: sha256(sessionCookie),
       expires_at: "2028-01-01T00:00:00.000Z",
       revoked_at: null
@@ -746,6 +857,7 @@ describe("HTTP security contract", () => {
           subjectId: demo.operatorSubjectId,
           label: "Session managed long expiry",
           accessCeiling: "WRITE",
+          commandCeiling: ["LOCK_MAINTENANCE"],
           expiresAt: "2035-01-01T00:00:00.000Z",
           tokenSecret: sessionSecret
         }
@@ -805,8 +917,8 @@ describe("HTTP security contract", () => {
       url: `/api/v1/command-results?propertyId=${secondPropertyId}&commandType=LOCK_MAINTENANCE&idempotencyKey=${secondScope.confirmation.headers["idempotency-key"]}`,
       headers: { authorization: `Bearer ${demo.writeToken}` }
     });
-    expect(hiddenResult.statusCode).toBe(403);
-    expect(hiddenResult.json()).toMatchObject({ code: "RESOURCE_SCOPE_DENIED", retryable: false });
+    expect(hiddenResult.statusCode).toBe(404);
+    expect(hiddenResult.json()).toMatchObject({ code: "NOT_FOUND", retryable: false });
   });
 
   it("hides cross-property collection facts while preserving same-property cross-order errors", async () => {
@@ -933,7 +1045,7 @@ describe("HTTP security contract", () => {
       ].sort((left, right) => left.fact_id!.localeCompare(right.fact_id!)));
   });
 
-  it("rejects a forged Confirm property before locking or creating command artifacts", async () => {
+  it("authorizes a forged Confirm against the stored property before rejecting its identity mismatch", async () => {
     const pending = await previewCommand(demo.writeToken, "LOCK_MAINTENANCE", {
       propertyId: demo.propertyId,
       inventoryUnitId: demo.secondRoomId,
@@ -943,54 +1055,60 @@ describe("HTTP security contract", () => {
     }, "forged-confirm-property");
     expect(pending.response.statusCode, pending.response.body).toBe(200);
     const before = await commandArtifactCounts();
+    const securityAuditsBefore = await securityAuditCount();
     const denied = await confirmPreview(
       demo.writeToken,
       pending.body.preview,
       "forged-confirm-property",
       "prop_security_not_in_credential_scope"
     );
-    expect(denied.response.statusCode, denied.response.body).toBe(403);
-    expect(denied.body).toMatchObject({ code: "RESOURCE_SCOPE_DENIED", retryable: false });
+    expect(denied.response.statusCode, denied.response.body).toBe(409);
+    expect(denied.body).toMatchObject({ code: "CONFIRMATION_MISMATCH", retryable: false });
     expect(await commandArtifactCounts()).toEqual(before);
+    expect(await securityAuditCount()).toBe(securityAuditsBefore);
   });
 
   it("rejects foreign Token lifecycle targets without revealing existence or creating artifacts", async () => {
     const before = await commandArtifactCounts();
-    for (const subjectId of [demo.operatorSubjectId, disabledForeignSubjectId, "subject_security_missing_foreign"]) {
-      const response = await previewCommand(demo.writeToken, "ISSUE_TOKEN", {
+    const securityAuditsBefore = await securityAuditCount();
+    for (const subjectId of [secondPropertyOnlySubjectId, "subject_security_missing_foreign"]) {
+      const response = await previewCommand(demo.administratorWriteToken, "ISSUE_TOKEN", {
         propertyId: demo.propertyId,
         subjectId,
         label: "Foreign subject enumeration probe",
         accessCeiling: "WRITE",
+        commandCeiling: ["LOCK_MAINTENANCE"],
         expiresAt: "2029-01-01T00:00:00.000Z",
         tokenSecret: newOpaqueSecret("qtp")
       }, "foreign-subject-probe");
-      expect(response.response.statusCode).toBe(403);
-      expect(response.body).toMatchObject({ code: "RESOURCE_SCOPE_DENIED", retryable: false });
+      expect(response.response.statusCode).toBe(404);
+      expect(response.body).toMatchObject({ code: "NOT_FOUND", retryable: false });
     }
 
-    const tokenIds = ["token_security_foreign_subject", revokedForeignTokenId, "token_security_missing_foreign"];
+    const tokenIds = ["token_security_second_scope", "token_security_missing_foreign"];
     for (const commandType of ["ROTATE_TOKEN", "REVOKE_TOKEN"] as const) {
       for (const tokenId of tokenIds) {
-        const response = await previewCommand(demo.writeToken, commandType, {
+        const response = await previewCommand(demo.administratorWriteToken, commandType, {
           propertyId: demo.propertyId,
           tokenId,
-          ...(commandType === "ROTATE_TOKEN" ? { tokenSecret: newOpaqueSecret("qtp") } : {})
+          ...(commandType === "ROTATE_TOKEN" ? { commandCeiling: ["LOCK_MAINTENANCE"], tokenSecret: newOpaqueSecret("qtp") } : {})
         }, `foreign-token-${commandType.toLowerCase()}`);
         expect(response.response.statusCode).toBe(404);
         expect(response.body).toMatchObject({ code: "NOT_FOUND", retryable: false });
       }
     }
     expect(await commandArtifactCounts()).toEqual(before);
+    expect(await securityAuditCount()).toBe(securityAuditsBefore + 6);
   });
 
   it("revalidates grant downgrade and Token revocation before Confirm or replay", async () => {
     const windowSecret = newOpaqueSecret("qtp");
-    const issued = await executeCommand(demo.writeToken, "ISSUE_TOKEN", {
+    const issued = await executeCommand(demo.administratorWriteToken, "ISSUE_TOKEN", {
       propertyId: demo.propertyId,
       subjectId: demo.agentSubjectId,
       label: "Authorization window Token",
       accessCeiling: "WRITE",
+      commandCeiling: ["LOCK_MAINTENANCE"],
       expiresAt: "2029-01-01T00:00:00.000Z",
       tokenSecret: windowSecret
     }, "authorization-window-issue");
@@ -1037,7 +1155,7 @@ describe("HTTP security contract", () => {
       reason: "Revocation before Confirm"
     }, "revocation-pending");
     expect(pendingRevocation.response.statusCode).toBe(200);
-    await executeCommand(demo.writeToken, "REVOKE_TOKEN", {
+    await executeCommand(demo.administratorWriteToken, "REVOKE_TOKEN", {
       propertyId: demo.propertyId,
       tokenId: windowTokenId
     }, "authorization-window-revoke");
@@ -1052,7 +1170,7 @@ describe("HTTP security contract", () => {
     const invalid = await app.inject({
       method: "POST",
       url: "/api/v1/command-previews",
-      headers: writeHeaders(demo.writeToken, "invalid-expiry"),
+      headers: writeHeaders(demo.administratorWriteToken, "invalid-expiry"),
       payload: {
         commandType: "ISSUE_TOKEN",
         input: {
@@ -1060,6 +1178,7 @@ describe("HTTP security contract", () => {
           subjectId: demo.agentSubjectId,
           label: "Invalid expiry",
           accessCeiling: "READ",
+          commandCeiling: [],
           expiresAt: "not-a-date",
           tokenSecret: newOpaqueSecret("qtp")
         }
@@ -1067,11 +1186,12 @@ describe("HTTP security contract", () => {
     });
     expect(invalid.statusCode).toBe(400);
     expect(invalid.json().code).toBe("VALIDATION_ERROR");
-    const past = await previewCommand(demo.writeToken, "ISSUE_TOKEN", {
+    const past = await previewCommand(demo.administratorWriteToken, "ISSUE_TOKEN", {
       propertyId: demo.propertyId,
       subjectId: demo.agentSubjectId,
       label: "Past expiry",
       accessCeiling: "READ",
+      commandCeiling: [],
       expiresAt: "2020-01-01T00:00:00.000Z",
       tokenSecret: newOpaqueSecret("qtp")
     }, "past-expiry");
@@ -1080,10 +1200,10 @@ describe("HTTP security contract", () => {
     const rotationWithoutClientSecret = await app.inject({
       method: "POST",
       url: "/api/v1/command-previews",
-      headers: writeHeaders(demo.writeToken, "rotation-without-client-secret"),
+      headers: writeHeaders(demo.administratorWriteToken, "rotation-without-client-secret"),
       payload: {
         commandType: "ROTATE_TOKEN",
-        input: { propertyId: demo.propertyId, tokenId: "token_demo_write" }
+        input: { propertyId: demo.propertyId, tokenId: "token_demo_write", commandCeiling: ["LOCK_MAINTENANCE"] }
       }
     });
     expect(rotationWithoutClientSecret.statusCode).toBe(400);

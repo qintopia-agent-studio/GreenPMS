@@ -11,7 +11,8 @@ import type {
   OrderRowDto,
   PrincipalDto,
   HistoricalRecoverableCommandType,
-  TokenDto
+  TokenDto,
+  TokenTargetDto
 } from "./types";
 import { parseOrderView } from "./orderViewValidation";
 import { parseAvailability } from "./availabilityValidation";
@@ -195,6 +196,9 @@ export const api = {
     const query = new URLSearchParams({ propertyId });
     return request<{ tokens: TokenDto[] }>(`/api/v1/tokens?${query.toString()}`);
   },
+  tokenTargets: (propertyId: string) => request<{ subjects: TokenTargetDto[] }>(
+    `/api/v1/properties/${encodeURIComponent(propertyId)}/token-targets`
+  ),
   preview: (envelope: CommandEnvelope, metadata: ClientCommandMetadata, signal?: AbortSignal) => request<CommandPreviewResponse>("/api/v1/command-previews", {
     method: "POST",
     headers: metadataHeaders(metadata),

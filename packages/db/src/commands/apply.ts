@@ -3,6 +3,7 @@ import {
   createOrderPricingBasisCodes,
   currentReleaseFeatures,
   DomainError,
+  type CommandCatalogType,
   type CommandReason,
   type CommandType,
   type CoverageItemDto,
@@ -10,7 +11,7 @@ import {
 } from "@qintopia/contracts";
 import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, validateBookingChannel } from "@qintopia/domain";
 import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims, releaseInventoryClaimsOnDates } from "../inventory.ts";
-import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, loadOrderMembershipConversion, lockOrder, reconcileCoverage, releaseCoverage, restoreConsumedCoverage, restoreFutureConsumedCoverage, type StayTimelineItem } from "../orders.ts";
+import { appendAmendment, consumeCoverage, holdCoverage, incrementContractAndLotVersions, loadActiveStayTimeline, loadOrderContext, loadOrderMembershipConversion, reconcileCoverage, releaseCoverage, restoreConsumedCoverage, restoreFutureConsumedCoverage, type OrderContext, type StayTimelineItem } from "../orders.ts";
 import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from "../pricing-service.ts";
 import type { Database } from "../schema.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
@@ -28,6 +29,24 @@ function rethrowTokenSecretConflict(error: unknown): never {
     throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Token secret is already assigned", 409);
   }
   throw error;
+}
+
+async function insertTokenCommandCeiling(
+  trx: Transaction<Database>,
+  tokenId: string,
+  subjectId: string,
+  propertyId: string,
+  commandCeiling: readonly string[]
+): Promise<void> {
+  if (commandCeiling.length === 0) return;
+  await trx.insertInto("token_command_ceilings")
+    .values(commandCeiling.map((commandType) => ({
+      token_id: tokenId,
+      subject_id: subjectId,
+      property_id: propertyId,
+      command_type: commandType as CommandCatalogType
+    })))
+    .execute();
 }
 
 function rethrowMemberRegistrationConflict(error: unknown): never {
@@ -153,6 +172,55 @@ async function roomDatesForTimeline(trx: Transaction<Database>, propertyId: stri
   return timeline.map((item) => ({ roomId: units.get(item.inventoryUnitId)!.roomId, serviceDate: item.serviceDate }));
 }
 
+async function lockOrderForProperty(trx: Transaction<Database>, propertyId: string, orderId: string): Promise<void> {
+  const order = await trx.selectFrom("orders")
+    .select("id")
+    .where("id", "=", orderId)
+    .where("property_id", "=", propertyId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (!order) throw new DomainError("NOT_FOUND", "Order not found", 404);
+}
+
+async function loadLockedOrderContextForProperty(trx: Transaction<Database>, propertyId: string, orderId: string): Promise<OrderContext> {
+  await lockOrderForProperty(trx, propertyId, orderId);
+  return loadOrderContext(trx, orderId);
+}
+
+async function lockSubjectForProperty(trx: Transaction<Database>, propertyId: string, subjectId: string, notFoundMessage: string): Promise<void> {
+  const subject = await trx.selectFrom("subjects")
+    .innerJoin("subject_property_grants", "subject_property_grants.subject_id", "subjects.id")
+    .select("subjects.id")
+    .where("subjects.id", "=", subjectId)
+    .where("subject_property_grants.property_id", "=", propertyId)
+    .forUpdate("subjects")
+    .executeTakeFirst();
+  if (!subject) throw new DomainError("NOT_FOUND", notFoundMessage, 404);
+}
+
+async function lockTokenLifecycleTarget(trx: Transaction<Database>, propertyId: string, tokenId: string): Promise<{ subjectId: string }> {
+  const token = await trx.selectFrom("api_tokens")
+    .innerJoin("subject_property_grants", "subject_property_grants.subject_id", "api_tokens.subject_id")
+    .select(["api_tokens.id", "api_tokens.subject_id"])
+    .where("api_tokens.id", "=", tokenId)
+    .where("api_tokens.property_scope", "=", propertyId)
+    .where("subject_property_grants.property_id", "=", propertyId)
+    .executeTakeFirst();
+  if (!token) throw new DomainError("NOT_FOUND", "Token not found", 404);
+
+  await lockSubjectForProperty(trx, propertyId, token.subject_id, "Token not found");
+  const lockedToken = await trx.selectFrom("api_tokens")
+    .select("id")
+    .where("id", "=", token.id)
+    .where("subject_id", "=", token.subject_id)
+    .where("property_scope", "=", propertyId)
+    .forUpdate()
+    .executeTakeFirst();
+  if (!lockedToken) throw new DomainError("NOT_FOUND", "Token not found", 404);
+
+  return { subjectId: token.subject_id };
+}
+
 export async function lockCommandResources(trx: Transaction<Database>, commandType: CommandType, rawInput: unknown): Promise<void> {
   const input = requireObject(rawInput);
   const propertyId = requireString(input, "propertyId");
@@ -238,23 +306,18 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   }
   if (commandType === "ISSUE_TOKEN") {
     const subjectId = requireString(input, "subjectId");
-    const subject = await trx.selectFrom("subjects").select("id").where("id", "=", subjectId).forUpdate().executeTakeFirst();
-    if (!subject) throw new DomainError("NOT_FOUND", "Subject not found", 404);
+    await lockSubjectForProperty(trx, propertyId, subjectId, "Subject not found");
     return;
   }
   if (commandType === "ROTATE_TOKEN" || commandType === "REVOKE_TOKEN") {
-    const token = await trx.selectFrom("api_tokens").select("subject_id").where("id", "=", requireString(input, "tokenId")).forUpdate().executeTakeFirst();
-    if (!token) throw new DomainError("NOT_FOUND", "Token not found", 404);
-    await trx.selectFrom("subjects").select("id").where("id", "=", token.subject_id).forUpdate().executeTakeFirst();
+    await lockTokenLifecycleTarget(trx, propertyId, requireString(input, "tokenId"));
     return;
   }
 
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
     const orderId = requireString(input, "orderId");
     const memberId = requireString(input, "memberId");
-    await lockOrder(trx, orderId);
-    const context = await loadOrderContext(trx, orderId);
-    if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
+    const context = await loadLockedOrderContextForProperty(trx, propertyId, orderId);
     await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${memberId}`}, 0::bigint))`.execute(trx);
     await trx.selectFrom("members").select("id").where("id", "=", memberId).forUpdate().executeTakeFirst();
     await trx.selectFrom("membership_products").select("id")
@@ -286,9 +349,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   }
 
   const orderId = requireString(input, "orderId");
-  await lockOrder(trx, orderId);
-  const context = await loadOrderContext(trx, orderId);
-  if (context.order.property_id !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Order belongs to another property", 403);
+  const context = await loadLockedOrderContextForProperty(trx, propertyId, orderId);
   if (context.order.member_id) {
     await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${context.order.member_id}`}, 0::bigint))`.execute(trx);
     await lockMemberEntitlementLots(trx, propertyId, context.order.member_id);
@@ -991,6 +1052,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const tokenId = newId("token");
     const secretHash = requireString(input, "tokenSecretHash");
     const subjectId = requireString(effect, "subjectId");
+    const commandCeiling = stringArray(effect, "commandCeiling");
+    const persistedCommandCeiling = stringArray(effect, "persistedCommandCeiling");
     try {
       await trx.insertInto("api_tokens").values({
         id: tokenId, subject_id: subjectId, label: requireString(effect, "label"), secret_hash: secretHash,
@@ -1000,8 +1063,18 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     } catch (error) {
       rethrowTokenSecretConflict(error);
     }
+    await insertTokenCommandCeiling(trx, tokenId, subjectId, propertyId, persistedCommandCeiling);
     return {
-      persistedResult: { tokenId, subjectId, accessCeiling: effect.accessCeiling, expiresAt: effect.expiresAt },
+      persistedResult: {
+        tokenId,
+        subjectId,
+        subjectDisplayName: requireString(effect, "subjectDisplayName"),
+        label: requireString(effect, "label"),
+        accessCeiling: requireString(effect, "accessCeiling"),
+        commandCeiling,
+        persistedCommandCeiling,
+        expiresAt: requireString(effect, "expiresAt")
+      },
       resourceRefs: [tokenId, subjectId],
       factRefs: []
     };
@@ -1012,6 +1085,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const tokenId = newId("token");
     const secretHash = requireString(input, "tokenSecretHash");
     const subjectId = requireString(effect, "subjectId");
+    const commandCeiling = stringArray(effect, "commandCeiling");
+    const persistedCommandCeiling = stringArray(effect, "persistedCommandCeiling");
     try {
       await trx.insertInto("api_tokens").values({
         id: tokenId, subject_id: subjectId, label: requireString(effect, "label"), secret_hash: secretHash,
@@ -1021,9 +1096,27 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     } catch (error) {
       rethrowTokenSecretConflict(error);
     }
-    await trx.updateTable("api_tokens").set({ revoked_at: new Date(), replaced_by_id: tokenId }).where("id", "=", oldTokenId).execute();
+    await insertTokenCommandCeiling(trx, tokenId, subjectId, propertyId, persistedCommandCeiling);
+    await trx.updateTable("api_tokens").set({ revoked_at: new Date(), replaced_by_id: tokenId })
+      .where("id", "=", oldTokenId)
+      .where("property_scope", "=", propertyId)
+      .execute();
     return {
-      persistedResult: { tokenId, rotatedFromTokenId: oldTokenId, subjectId, accessCeiling: effect.accessCeiling, expiresAt: effect.expiresAt },
+      persistedResult: {
+        tokenId,
+        rotatedFromTokenId: oldTokenId,
+        subjectId,
+        subjectDisplayName: requireString(effect, "subjectDisplayName"),
+        label: requireString(effect, "label"),
+        accessCeiling: requireString(effect, "accessCeiling"),
+        previousCommandCeiling: stringArray(effect, "previousCommandCeiling"),
+        commandCeiling,
+        previousPersistedCommandCeiling: stringArray(effect, "previousPersistedCommandCeiling"),
+        persistedCommandCeiling,
+        previousExpiresAt: requireString(effect, "previousExpiresAt"),
+        expiresAt: requireString(effect, "expiresAt"),
+        historicalReadCeilingPreserved: effect.historicalReadCeilingPreserved === true
+      },
       resourceRefs: [oldTokenId, tokenId, subjectId],
       factRefs: []
     };
@@ -1031,12 +1124,31 @@ export async function applyCommand(trx: Transaction<Database>, options: {
 
   if (options.commandType === "REVOKE_TOKEN") {
     const tokenId = requireString(effect, "tokenId");
-    await trx.updateTable("api_tokens").set({ revoked_at: new Date() }).where("id", "=", tokenId).execute();
-    return { persistedResult: { tokenId, revoked: true }, resourceRefs: [tokenId], factRefs: [] };
+    const subjectId = requireString(effect, "subjectId");
+    await trx.updateTable("api_tokens").set({ revoked_at: new Date() })
+      .where("id", "=", tokenId)
+      .where("property_scope", "=", propertyId)
+      .execute();
+    return {
+      persistedResult: {
+        tokenId,
+        subjectId,
+        subjectDisplayName: requireString(effect, "subjectDisplayName"),
+        label: requireString(effect, "label"),
+        accessCeiling: requireString(effect, "accessCeiling"),
+        commandCeiling: stringArray(effect, "commandCeiling"),
+        persistedCommandCeiling: stringArray(effect, "persistedCommandCeiling"),
+        expiresAt: requireString(effect, "expiresAt"),
+        historicalReadCeilingPreserved: false,
+        revoked: true
+      },
+      resourceRefs: [tokenId, subjectId],
+      factRefs: []
+    };
   }
 
   const orderId = requireString(effect, "orderId");
-  const context = await loadOrderContext(trx, orderId);
+  const context = await loadLockedOrderContextForProperty(trx, propertyId, orderId);
 
   if (options.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
     if (requireString(effect, "operation") !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {

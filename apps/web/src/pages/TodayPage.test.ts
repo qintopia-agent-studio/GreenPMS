@@ -3,7 +3,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { OrderRowDto } from "../types";
-import { buildTodayBuckets, TodayExceptionAction, TodayExceptionReason, todayExceptionPresentation } from "./TodayPage";
+import {
+  buildTodayBuckets,
+  TodayExceptionAction,
+  TodayExceptionReason,
+  todayExceptionPresentation,
+  todayQueueStatusLabel
+} from "./TodayPage";
 
 function order(id: string, status: string, arrivalDate: string, departureDate: string): OrderRowDto {
   return {
@@ -93,5 +99,18 @@ describe("today fulfillment buckets", () => {
     };
     expect(buildTodayBuckets([inconsistent], "2026-08-27", "2026-08-27").EXCEPTIONS).toEqual([]);
     expect(todayExceptionPresentation(inconsistent, "2026-08-27")).toBeUndefined();
+  });
+
+  it("labels an in-house order due today as waiting for checkout", () => {
+    const dueOut = order("due-out", "CHECKED_IN", "2026-08-28", "2026-09-01");
+    expect(buildTodayBuckets([dueOut], "2026-09-01").DEPARTURES).toEqual([dueOut]);
+    expect(todayQueueStatusLabel("DEPARTURES", dueOut, "2026-09-01")).toBe("待退房");
+    expect(todayQueueStatusLabel("IN_HOUSE", dueOut, "2026-09-01")).toBe("在住");
+
+    const overdue = order("overdue", "CHECKED_IN", "2026-08-20", "2026-08-31");
+    expect(todayQueueStatusLabel("DEPARTURES", overdue, "2026-09-01")).toBe("未退");
+
+    const future = order("future-departure", "CHECKED_IN", "2026-08-28", "2026-09-03");
+    expect(todayQueueStatusLabel("DEPARTURES", future, "2026-09-01")).toBe("在住");
   });
 });

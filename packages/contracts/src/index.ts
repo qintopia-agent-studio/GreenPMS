@@ -32,7 +32,9 @@ export type BackfillCollectionMethod = (typeof backfillCollectionMethods)[number
 export const currentReleaseFeatures = {
   cleaningWorkflow: false,
   stayBackfillSubmission: false,
-  completedStayBackfillCreation: true
+  completedStayBackfillCreation: true,
+  historicalStayArrangementCorrection: false,
+  membershipConversionVoidCorrection: false
 } as const;
 
 export const commandTypes = [
@@ -73,6 +75,13 @@ export const commandTypes = [
 export type DeferredCommandType = "PLACE_INTERNAL_USE" | "RELEASE_INTERNAL_USE";
 export type ObsoleteCommandType = "BACKFILL_COMPLETED_STAY";
 export type CommandType = (typeof commandTypes)[number];
+export const futureAdministratorCommandTypes = [
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+] as const;
+export type FutureAdministratorCommandType = (typeof futureAdministratorCommandTypes)[number];
+export const commandCapabilities = [...commandTypes, ...futureAdministratorCommandTypes] as const;
+export type CommandCapability = (typeof commandCapabilities)[number];
 export type HistoricalCommandType = CommandType | DeferredCommandType | ObsoleteCommandType;
 
 export const directCommandTypes = ["CREATE_QUOTE"] as const;
@@ -86,6 +95,15 @@ export const historicalRecoverableCommandTypes = [
   "BACKFILL_COMPLETED_STAY"
 ] as const;
 export type HistoricalRecoverableCommandType = (typeof historicalRecoverableCommandTypes)[number];
+export const commandCatalogTypes = [
+  ...directCommandTypes,
+  ...commandTypes,
+  ...futureAdministratorCommandTypes,
+  "PLACE_INTERNAL_USE",
+  "RELEASE_INTERNAL_USE",
+  "BACKFILL_COMPLETED_STAY"
+] as const;
+export type CommandCatalogType = (typeof commandCatalogTypes)[number];
 
 export const errorCodes = [
   "AUTHENTICATION_REQUIRED",
@@ -383,7 +401,7 @@ export type RoomStatusStatus = (typeof roomStatusStatuses)[number];
 export const roomStatusAttentionCodes = ["ARREARS"] as const;
 export type RoomStatusAttention = (typeof roomStatusAttentionCodes)[number];
 
-export const roomStatusOperationalAttentionCodes = ["OVERDUE_RESERVED", "OVERDUE_IN_HOUSE"] as const;
+export const roomStatusOperationalAttentionCodes = ["DUE_OUT", "OVERDUE_RESERVED", "OVERDUE_IN_HOUSE"] as const;
 export type RoomStatusOperationalAttention = (typeof roomStatusOperationalAttentionCodes)[number];
 
 export const ROOM_STATUS_MAX_QUERY_NIGHTS = 30;
@@ -412,7 +430,7 @@ export type RoomStatusSourceKind = (typeof roomStatusSourceKinds)[number];
 export const roomStatusOperationalTaskKinds = ["ARRIVAL", "IN_HOUSE", "DEPARTURE", "EXCEPTION"] as const;
 export type RoomStatusOperationalTaskKind = (typeof roomStatusOperationalTaskKinds)[number];
 
-export const roomStatusBlockingFactKinds = ["CLAIM", "LODGING_ORDER", "OVERDUE_IN_HOUSE", "UNIT_UNSELLABLE"] as const;
+export const roomStatusBlockingFactKinds = ["CLAIM", "DUE_OUT", "LODGING_ORDER", "OVERDUE_IN_HOUSE", "UNIT_UNSELLABLE"] as const;
 export type RoomStatusBlockingFactKind = (typeof roomStatusBlockingFactKinds)[number];
 
 export interface RoomStatusReferenceDto {
@@ -475,6 +493,8 @@ export interface RoomStatusIntervalDto {
   sourceEndDate: string;
   /** Original order arrival date. Omitted for non-lodging and legacy projections. */
   orderArrivalDate?: string;
+  /** Original order departure date. Omitted for non-lodging and legacy projections. */
+  orderDepartureDate?: string;
   status: RoomStatusStatus;
   attention: RoomStatusAttention | null;
   operationalAttention: RoomStatusOperationalAttention | null;
@@ -662,6 +682,8 @@ export interface AuthPrincipal {
   credentialType: "SESSION" | "TOKEN";
   displayName: string;
   propertyAccess: Map<string, AccessLevel>;
+  propertyCommandGrants: ReadonlyMap<string, ReadonlySet<CommandCatalogType>>;
+  tokenCommandCeiling: ReadonlySet<CommandCatalogType> | null;
 }
 
 export interface CommandEnvelope {
@@ -833,6 +855,7 @@ export const orderActionCodes = [
   "REVOKE_CHECK_IN",
   "RECORD_COLLECTION",
   "RECORD_REFUND",
+  "REVERSE_FACT",
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
 ] as const;
 export type OrderActionCode = (typeof orderActionCodes)[number];
@@ -998,6 +1021,7 @@ export interface TokenIssueResultDto {
   tokenId: string;
   subjectId: string;
   accessCeiling: AccessLevel;
+  commandCeiling: CommandCapability[];
   expiresAt: string;
 }
 

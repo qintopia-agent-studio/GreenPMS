@@ -20,9 +20,11 @@ import {
   arrangementChangeLabel,
   collectionAmountMinorToYuanInput,
   collectionAmountYuanInputToMinor,
+  collectionFactCanReverse,
   occupantSnapshotEntries,
   OrderAmountStrip,
   OrderActionButton,
+  FactActions,
   OverdueInHouseAlert,
   CompleteStayCorrectionHistory,
   OrderLifecycleSections,
@@ -44,6 +46,7 @@ import {
   overdueInHouseNotice,
   primaryOrderOccupant,
   remainingRefundableMinor,
+  buildReverseFactRequest,
   requestedOrderAction,
   stayMembershipUpgradeAutoOpenBlockedNotice,
   stayMembershipUpgradeActionVisible,
@@ -1514,6 +1517,101 @@ describe("server-authoritative order actions", () => {
 
     const reversal = fact({ fact_id: "reversal", fact_type: "REVERSAL", amount_minor: 4_000, reverses_fact_id: partialRefund.fact_id });
     expect(remainingRefundableMinor([collection, partialRefund, finalRefund, reversal], collection)).toBe(4_000);
+  });
+
+  it("offers per-fact reversal only for server-enabled facts that can be safely reversed", () => {
+    const fact = (values: Partial<CollectionFactDto> & Pick<CollectionFactDto, "fact_id" | "fact_type" | "amount_minor">): CollectionFactDto => ({
+      order_id: "order_reverse",
+      net_effect_minor: values.fact_type === "COLLECTION" ? values.amount_minor : -values.amount_minor,
+      currency: "CNY",
+      references_fact_id: null,
+      reverses_fact_id: null,
+      method: "WECOM",
+      cash_collector: null,
+      note: "",
+      transaction_reference: "WX-REVERSE-001",
+      pricing_revision_id: "revision_reverse",
+      command_id: `command_${values.fact_id}`,
+      created_at: "2026-07-25T00:00:00.000Z",
+      ...values
+    });
+    const collection = fact({ fact_id: "collection_reverse", fact_type: "COLLECTION", amount_minor: 10_000 });
+    const refund = fact({
+      fact_id: "refund_reverse",
+      fact_type: "REFUND",
+      amount_minor: 4_000,
+      references_fact_id: collection.fact_id,
+      transaction_reference: null
+    });
+    const refundReversal = fact({
+      fact_id: "reversal_refund",
+      fact_type: "REVERSAL",
+      amount_minor: 4_000,
+      reverses_fact_id: refund.fact_id,
+      method: "REVERSAL",
+      transaction_reference: null
+    });
+
+    expect(collectionFactCanReverse([collection], collection, true)).toBe(true);
+    expect(collectionFactCanReverse([collection, refund], collection, true)).toBe(false);
+    expect(collectionFactCanReverse([collection, refund, refundReversal], collection, true)).toBe(true);
+    expect(collectionFactCanReverse([collection, refund, refundReversal], refund, true)).toBe(false);
+    expect(collectionFactCanReverse([collection], collection, false)).toBe(false);
+    expect(collectionFactCanReverse([collection, refund, refundReversal], refundReversal, true)).toBe(false);
+
+    const html = renderToStaticMarkup(createElement(FactActions, {
+      fact: refund,
+      facts: [collection, refund],
+      canRefund: false,
+      canReverse: true,
+      disabled: false,
+      onRefund: () => undefined,
+      onReverse: () => undefined
+    }));
+    expect(html).toContain('data-order-action="REVERSE_FACT"');
+    expect(html).toContain("冲销");
+    expect(html).not.toContain(refund.fact_id);
+    expect(html).not.toContain(collection.fact_id);
+  });
+
+  it("builds a controlled reverse-fact command request from one selected fact", () => {
+    const fact: CollectionFactDto = {
+      fact_id: "refund_reverse_request",
+      order_id: "order_reverse_request",
+      fact_type: "REFUND",
+      amount_minor: 3_000,
+      net_effect_minor: -3_000,
+      currency: "CNY",
+      references_fact_id: "collection_reverse_request",
+      reverses_fact_id: null,
+      method: "WECOM",
+      cash_collector: null,
+      note: "原退款登记错单",
+      transaction_reference: null,
+      pricing_revision_id: "revision_reverse_request",
+      command_id: "command_refund_reverse_request",
+      created_at: "2026-07-25T00:00:00.000Z"
+    };
+    const request = buildReverseFactRequest({
+      order: { id: "order_reverse_request", property_id: "property_qintopia" }
+    } as OrderViewDto, fact, "  退款登记错单，需冲销  ");
+
+    expect(request).toMatchObject({
+      commandType: "REVERSE_FACT",
+      title: "登记冲销",
+      input: {
+        propertyId: "property_qintopia",
+        orderId: "order_reverse_request",
+        reversesFactId: fact.fact_id,
+        note: "退款登记错单，需冲销"
+      },
+      initialReason: {
+        code: "REVERSE_FACT",
+        note: "退款登记错单，需冲销"
+      }
+    });
+    expect(request.description).toContain("追加一条反向冲销记录");
+    expect(request.description).not.toContain(fact.fact_id);
   });
 
   it("shows WECOM refunds as original-route references when no new transaction number is recorded", () => {

@@ -649,8 +649,10 @@ describe("Token command presentation", () => {
       effectHash: "b".repeat(64),
       effect: {
         subjectId: "subject_agent",
+        subjectDisplayName: "自动化接入账号",
         label: "外部客户端",
         accessCeiling: "READ",
+        commandCeiling: [],
         expiresAt: "2026-11-01T08:37:00.000Z"
       },
       expiresAt: "2026-08-03T08:49:00.000Z"
@@ -670,11 +672,98 @@ describe("Token command presentation", () => {
 
     expect(html).toContain("请核对签发 Token");
     expect(html).toContain("Token 标签");
+    expect(html).toContain("目标主体");
+    expect(html).toContain("自动化接入账号");
     expect(html).toContain("只读");
+    expect(html).toContain("无写入能力");
+    expect(html).toContain("保持不变");
+    expect(html).toContain("权限或主体状态发生变化时，本次确认会失败且不会写入");
     expect(html).not.toContain("qtp_must_not_render");
+    expect(html).not.toContain("subject_agent");
     expect(html).not.toContain("Preview");
     expect(html).not.toContain("命令类型");
     expect(html).not.toContain("原因代码");
+  });
+
+  it("shows the authoritative before/after rotation scope without protocol names or internal IDs", () => {
+    const preview: PreviewDto = {
+      previewId: "preview_rotation",
+      commandType: "ROTATE_TOKEN",
+      effectHash: "c".repeat(64),
+      effect: {
+        tokenId: "token_internal_current",
+        subjectId: "subject_internal_target",
+        subjectDisplayName: "渠道同步账号",
+        label: "房态同步",
+        accessCeiling: "WRITE",
+        previousCommandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION"],
+        commandCeiling: ["CREATE_ORDER"],
+        previousPersistedCommandCeiling: ["CREATE_ORDER", "RECORD_COLLECTION", "PLACE_INTERNAL_USE"],
+        persistedCommandCeiling: ["CREATE_ORDER", "PLACE_INTERNAL_USE"],
+        previousExpiresAt: "2026-10-01T08:00:00.000Z",
+        expiresAt: "2026-12-01T08:00:00.000Z",
+        historicalReadCeilingPreserved: true,
+        operation: "ROTATE"
+      },
+      expiresAt: "2026-08-03T08:49:00.000Z"
+    };
+    const html = renderToStaticMarkup(createElement(EffectSummary, {
+      preview,
+      businessCommand: "ROTATE_TOKEN",
+      commandInput: {
+        propertyId: "prop_internal",
+        tokenId: "token_internal_current",
+        commandCeiling: ["CREATE_ORDER"],
+        expiresAt: "2026-12-01T08:00:00.000Z",
+        tokenSecret: "qtp_must_not_render"
+      }
+    }));
+
+    expect(html).toContain("渠道同步账号");
+    expect(html).toContain("原权限范围");
+    expect(html).toContain("新权限范围");
+    expect(html).toContain("创建住宿订单");
+    expect(html).toContain("登记住宿收款");
+    expect(html).toContain("系统自动保留历史结果查询与恢复范围");
+    expect(html).not.toContain("token_internal_current");
+    expect(html).not.toContain("subject_internal_target");
+    expect(html).not.toContain("CREATE_ORDER");
+    expect(html).not.toContain("RECORD_COLLECTION");
+    expect(html).not.toContain("PLACE_INTERNAL_USE");
+    expect(html).not.toContain("qtp_must_not_render");
+  });
+
+  it("states that revocation removes both execution and historical-result access", () => {
+    const preview: PreviewDto = {
+      previewId: "preview_revoke",
+      commandType: "REVOKE_TOKEN",
+      effectHash: "d".repeat(64),
+      effect: {
+        tokenId: "token_internal_current",
+        subjectId: "subject_internal_target",
+        subjectDisplayName: "渠道同步账号",
+        label: "房态同步",
+        accessCeiling: "WRITE",
+        commandCeiling: ["CREATE_ORDER"],
+        expiresAt: "2026-10-01T08:00:00.000Z",
+        historicalReadCeilingPreserved: false,
+        operation: "REVOKE"
+      },
+      expiresAt: "2026-08-03T08:49:00.000Z"
+    };
+    const html = renderToStaticMarkup(createElement(EffectSummary, {
+      preview,
+      businessCommand: "REVOKE_TOKEN",
+      commandInput: { propertyId: "prop_internal", tokenId: "token_internal_current" }
+    }));
+
+    expect(html).toContain("渠道同步账号");
+    expect(html).toContain("创建住宿订单");
+    expect(html).toContain("已撤销；无访问权限");
+    expect(html).toContain("撤销后不保留该 Token 的历史结果查询与恢复范围");
+    expect(html).not.toContain("token_internal_current");
+    expect(html).not.toContain("subject_internal_target");
+    expect(html).not.toContain("CREATE_ORDER");
   });
 
   it("summarizes a committed Token receipt in business copy", () => {

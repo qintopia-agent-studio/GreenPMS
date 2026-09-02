@@ -946,3 +946,14 @@ export function parseOrderView(value: unknown): OrderViewDto {
   assertOrderView(value);
   return value;
 }
+
+export function assertOrderViewAllowedActions(
+  view: OrderViewDto,
+  expectedAllowedActions: ReadonlySet<string>
+): void {
+  for (const [index, action] of view.allowedActions.entries()) {
+    if (action.enabled && !expectedAllowedActions.has(action.code)) {
+      fail(`allowedActions[${index}].code`, "超出当前主体命令授权");
+    }
+  }
+}

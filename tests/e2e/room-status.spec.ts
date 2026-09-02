@@ -5,6 +5,7 @@ import type { AuthPrincipal, CommandEnvelope, RoomStatusBoardDto } from "@qintop
 import { confirmCommandPreview, createCommandPreview, executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
+import { authScope } from "../helpers/auth-principals.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
@@ -25,7 +26,7 @@ const longStayFixturePrincipal: AuthPrincipal = {
   credentialId: "token_demo_write",
   credentialType: "TOKEN",
   displayName: "Long-stay E2E fixture writer",
-  propertyAccess: new Map([[propertyId, "WRITE"]])
+  ...authScope({ propertyId })
 };
 const readOnlyOperator = {
   id: "subject_e2e_room_status_reader",
