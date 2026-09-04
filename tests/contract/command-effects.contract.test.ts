@@ -29,6 +29,11 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   ACTIVATE_MEMBERSHIP_ORDER: ["agreedPrice", "entitlementUnitKind", "entitlementUnits", "fromStatus", "memberName", "membershipOrderId", "operation", "paymentDifference", "paymentTotal", "productName", "toStatus", "validFrom", "validUntil"],
   CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayCategoryCode", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingDecision", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
+  CORRECT_HISTORICAL_STAY_ARRANGEMENTS: ["corrections", "operation"],
+  CORRECT_MEMBER_PROFILE: ["after", "before", "changedFields", "evidenceNote", "memberId", "operation"],
+  CORRECT_MEMBERSHIP_EFFECTIVE_DATE: ["after", "before", "contractId", "entitlementLotId", "evidenceNote", "memberId", "membershipOrderId", "operation", "propertyToday", "unchanged"],
+  BACKFILL_HISTORICAL_MEMBERSHIP: ["entitlementUnitKind", "entitlementUnits", "evidenceNote", "member", "operation", "payment", "product", "status", "validFrom", "validUntil"],
+  VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY: ["entitlement", "evidenceNote", "funds", "member", "newMembership", "oldMembership", "operation", "sourceStay"],
   RESCHEDULE_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
   EXTEND_STAY: ["after", "before", "entitlementChange", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "stayId"],
   SHORTEN_STAY: ["after", "before", "businessDate", "completionMode", "entitlementSummary", "fundsSummary", "inventoryChange", "inventoryUnitId", "operation", "orderId", "pricingDecision", "refundReferenceAmount", "stayId"],
@@ -613,7 +618,7 @@ describe("Command effect HTTP contract", () => {
       return built.effect as Record<string, unknown>;
     };
 
-    await capture("CREATE_MEMBER", {
+    const correctionMember = await capture("CREATE_MEMBER", {
       propertyId: demo.propertyId,
       fullName: "Effect Contract Member",
       nickname: "Effect Contract Member",
@@ -621,10 +626,44 @@ describe("Command effect HTTP contract", () => {
       phone: "13800000001",
       wechat: "effect-contract-member"
     });
+    const correctionMemberId = (await confirm(correctionMember)).memberId as string;
+    await capture("CORRECT_MEMBER_PROFILE", {
+      propertyId: demo.propertyId,
+      memberId: correctionMemberId,
+      expectedPriorProfile: {
+        fullName: "Effect Contract Member",
+        nickname: "Effect Contract Member",
+        identityCardNumber: "TEST-EFFECT-MEMBER-ID-001",
+        phone: "13800000001",
+        wechat: "effect-contract-member"
+      },
+      correctedProfile: {
+        fullName: "Effect Contract Member Corrected",
+        nickname: "Effect Member Corrected",
+        identityCardNumber: "TEST-EFFECT-MEMBER-ID-002",
+        phone: "13800000009",
+        wechat: "effect-contract-member-corrected"
+      },
+      evidenceNote: "Effect contract verified profile evidence"
+    }, demo.administratorWriteToken);
+    const historicalMembershipDate = shiftLocalDate(propertyToday, -20);
+    await capture("BACKFILL_HISTORICAL_MEMBERSHIP", {
+      propertyId: demo.propertyId,
+      memberId: correctionMemberId,
+      membershipProductId: "membership_product_shared_bath_quad_v1",
+      actualMembershipDate: historicalMembershipDate,
+      payment: {
+        amountMinor: 93_600,
+        businessDate: shiftLocalDate(historicalMembershipDate, 1),
+        transactionReference: "WX-EFFECT-HISTORICAL-MEMBERSHIP-001",
+        note: "Effect contract historical payment evidence"
+      },
+      evidenceNote: "Effect contract verified historical membership evidence"
+    }, demo.administratorWriteToken);
 
     const membershipOrder = await capture("CREATE_MEMBERSHIP_ORDER", {
       propertyId: demo.propertyId,
-      memberId: demo.memberId,
+      memberId: correctionMemberId,
       membershipProductId: "membership_product_shared_bath_single_v1",
       agreedPriceMinor: 162000
     });
@@ -648,6 +687,12 @@ describe("Command effect HTTP contract", () => {
       propertyId: demo.propertyId,
       membershipOrderId: membershipOrderResult.membershipOrderId
     });
+    await capture("CORRECT_MEMBERSHIP_EFFECTIVE_DATE", {
+      propertyId: demo.propertyId,
+      membershipOrderId: demo.membershipOrderId,
+      actualMembershipDate: shiftLocalDate(propertyToday, -30),
+      evidenceNote: "Effect contract verified membership date evidence"
+    }, demo.administratorWriteToken);
 
     const maintenance = await capture("LOCK_MAINTENANCE", {
       propertyId: demo.propertyId,
@@ -949,6 +994,20 @@ describe("Command effect HTTP contract", () => {
     expect(checkOut.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     const checkOutResult = await confirm(checkOut);
     expect(checkOutResult).not.toHaveProperty("cleaningTaskId");
+    const checkoutOrderVersion = await db.selectFrom("orders").select("version")
+      .where("id", "=", checkoutOrderId).executeTakeFirstOrThrow();
+    await capture("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", {
+      propertyId: demo.propertyId,
+      correctionSet: [{
+        orderId: checkoutOrderId,
+        expectedVersion: checkoutOrderVersion.version,
+        target: {
+          inventoryUnitId: "unit_room_103",
+          arrivalDate: shiftLocalDate(propertyToday, -1),
+          departureDate: propertyToday
+        }
+      }]
+    }, demo.administratorWriteToken);
 
     // 逾期已预订订单完成住宿：一次补记入住与退房并按真实结算显示。
     const completeStayArrival = shiftLocalDate(propertyToday, -5);
@@ -1219,6 +1278,86 @@ describe("Command effect HTTP contract", () => {
       transferredAmount: { currency: "CNY", minorUnits: 0 },
       remainingPaymentAmount: { currency: "CNY", minorUnits: 162_000 }
     });
+
+    const voidMember = await capture("CREATE_MEMBER", {
+      propertyId: demo.propertyId,
+      fullName: "Effect Contract Void Member",
+      nickname: "Effect Void Member",
+      identityCardNumber: "TEST-EFFECT-VOID-ID-001",
+      phone: "13800000003",
+      wechat: "effect-contract-void"
+    });
+    const voidMemberId = (await confirm(voidMember)).memberId as string;
+    const voidSourceArrivalDate = shiftLocalDate(propertyToday, -10);
+    const voidSourceDepartureDate = shiftLocalDate(propertyToday, -8);
+    const voidSourceQuote = await quote({
+      arrivalDate: voidSourceArrivalDate,
+      departureDate: voidSourceDepartureDate,
+      inventoryUnitId: demo.bedAId
+    });
+    const voidBackfillReason = "Effect contract verified completed stay";
+    const { preview: voidSourceOrder } = await createCommandPreviewDirect(db, directPrincipal, {
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: voidSourceQuote.quoteId,
+        primaryGuest: {
+          fullName: "Effect Contract Void Member",
+          nickname: "Effect Void Member",
+          phone: "13800000003",
+          documentNumber: "TEST-EFFECT-VOID-ID-001"
+        },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: voidSourceQuote.currentContractAmount.minorUnits,
+        backfill: true,
+        backfillReason: voidBackfillReason,
+        backfillCollection: {
+          amountMinor: voidSourceQuote.currentContractAmount.minorUnits,
+          method: "WECOM",
+          transactionReference: "WX-EFFECT-VOID-SOURCE-STAY-001"
+        }
+      }
+    }, metadata("effect-void-source-preview"));
+    expect(Value.Check(CommandEffectSchema, voidSourceOrder.effect)).toBe(true);
+    const voidSourceReceipt = await confirmCommandPreviewDirect(db, directPrincipal, voidSourceOrder.previewId, {
+      propertyId: demo.propertyId,
+      commandType: "CREATE_ORDER",
+      confirmation: true,
+      expectedEffectHash: voidSourceOrder.effectHash,
+      reason: { code: "BACKFILL_STAY", note: voidBackfillReason }
+    }, metadata("effect-void-source-confirm"));
+    const voidSourceOrderId = voidSourceReceipt.result!.orderId as string;
+    const erroneousMembershipOrder = await capture("CREATE_MEMBERSHIP_ORDER", {
+      propertyId: demo.propertyId,
+      memberId: voidMemberId,
+      membershipProductId: "membership_product_shared_bath_quad_v1",
+      agreedPriceMinor: 93_600
+    });
+    const erroneousMembershipOrderId = (await confirm(erroneousMembershipOrder)).membershipOrderId as string;
+    const erroneousMembershipPayment = await capture("RECORD_MEMBERSHIP_PAYMENT", {
+      propertyId: demo.propertyId,
+      membershipOrderId: erroneousMembershipOrderId,
+      amountMinor: 93_600,
+      transactionReference: "WX-EFFECT-VOID-OLD-DIRECT-001"
+    });
+    await confirm(erroneousMembershipPayment);
+    const erroneousMembershipActivation = await capture("ACTIVATE_MEMBERSHIP_ORDER", {
+      propertyId: demo.propertyId,
+      membershipOrderId: erroneousMembershipOrderId
+    });
+    await confirm(erroneousMembershipActivation);
+    await capture("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", {
+      propertyId: demo.propertyId,
+      erroneousMembershipOrderId,
+      sourceStayOrderId: voidSourceOrderId,
+      actualMembershipDate: voidSourceArrivalDate,
+      replacementDirectPayment: {
+        businessDate: shiftLocalDate(voidSourceArrivalDate, 1),
+        transactionReference: "WX-EFFECT-VOID-RECLASSIFIED-001"
+      },
+      evidenceNote: "Effect contract verified erroneous membership reconstruction"
+    }, demo.administratorWriteToken);
     const adminLogin = await app.inject({
       method: "POST",
       url: "/api/v1/auth/login",

@@ -58,7 +58,10 @@ export const currentMigrationNames = [
   "045_stay_membership_net_wecom_transfer.sql",
   "046_command_authorization.sql",
   "047_runtime_database_role.sql",
-  "048_runtime_isolation_guards.sql"
+  "048_runtime_isolation_guards.sql",
+  "049_historical_stay_arrangement_corrections.sql",
+  "050_admin_membership_corrections.sql",
+  "051_runtime_role_command_compatibility.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -88,6 +91,15 @@ export interface DatabaseReadyOptions {
   staffProfileManifestName?: string;
 }
 
+function compareStaffProfileCatalogRows(
+  left: { profile: string; command_type: string },
+  right: { profile: string; command_type: string }
+): number {
+  if (left.profile !== right.profile) return left.profile < right.profile ? -1 : 1;
+  if (left.command_type === right.command_type) return 0;
+  return left.command_type < right.command_type ? -1 : 1;
+}
+
 const expectedStaffProfileCatalog = [
   ...ordinaryStaffCommandGrants.map((commandType) => ({
     profile: "STAFF" as const,
@@ -99,11 +111,7 @@ const expectedStaffProfileCatalog = [
     command_type: commandType,
     token_default: commandFeatureEnabled(commandType)
   }))
-].sort((left, right) => {
-  if (left.profile !== right.profile) return left.profile < right.profile ? -1 : 1;
-  if (left.command_type === right.command_type) return 0;
-  return left.command_type < right.command_type ? -1 : 1;
-});
+].sort(compareStaffProfileCatalogRows);
 
 export async function databaseReady(
   db: DatabaseReadyExecutor,
@@ -138,11 +146,10 @@ export async function databaseReady(
       .execute();
     if (reconciliationStates.length !== 1) return false;
 
-    const profileCatalog = await db.selectFrom("staff_command_profile_catalog")
+    const profileCatalog = (await db.selectFrom("staff_command_profile_catalog")
       .select(["profile", "command_type", "token_default"])
-      .orderBy("profile")
-      .orderBy("command_type")
-      .execute();
+      .execute())
+      .sort(compareStaffProfileCatalogRows);
     const profileCatalogReady = profileCatalog.length === expectedStaffProfileCatalog.length
       && profileCatalog.every((row, index) => {
         const expected = expectedStaffProfileCatalog[index];
@@ -203,6 +210,18 @@ export async function databaseReady(
           ('subject_command_grants', 'created_at'),
           ('token_command_ceilings', 'created_at'),
           ('order_occupants', 'created_at'),
+          ('inventory_units', 'created_at'),
+          ('members', 'full_name'),
+          ('members', 'nickname'),
+          ('members', 'identity_card_number'),
+          ('members', 'phone'),
+          ('members', 'wechat'),
+          ('membership_payment_facts', 'created_at'),
+          ('stay_collection_membership_transfers', 'created_at'),
+          ('stay_segments', 'created_at'),
+          ('pricing_revisions', 'created_at'),
+          ('collection_facts', 'created_at'),
+          ('entitlement_ledger', 'created_at'),
           ('membership_orders', 'status'),
           ('membership_orders', 'activated_at'),
           ('membership_orders', 'valid_from'),
@@ -212,7 +231,12 @@ export async function databaseReady(
           ('membership_orders', 'version'),
           ('membership_orders', 'activated_by_command_id'),
           ('membership_orders', 'updated_at'),
+          ('member_contracts', 'status'),
+          ('member_contracts', 'valid_from'),
+          ('member_contracts', 'valid_until'),
           ('member_contracts', 'version'),
+          ('entitlement_lots', 'status'),
+          ('entitlement_lots', 'expires_on'),
           ('entitlement_lots', 'version'),
           ('orders', 'status'),
           ('orders', 'arrival_date'),
@@ -404,7 +428,22 @@ export async function databaseReady(
             )
             AND NOT has_function_privilege(
               runtime_role.oid,
+              'qintopia_guard_runtime_inventory_unit_update()'::regprocedure,
+              'EXECUTE'
+            )
+            AND NOT has_function_privilege(
+              runtime_role.oid,
               'qintopia_guard_runtime_token_mutation()'::regprocedure,
+              'EXECUTE'
+            )
+            AND has_function_privilege(
+              runtime_role.oid,
+              'qintopia_has_typed_runtime_command_evidence(text,text,text)'::regprocedure,
+              'EXECUTE'
+            )
+            AND NOT has_function_privilege(
+              runtime_role.oid,
+              'qintopia_guard_runtime_membership_projection_update_050()'::regprocedure,
               'EXECUTE'
             )
           FROM runtime_role
@@ -537,7 +576,7 @@ export async function databaseReady(
           ), false)
           AND COALESCE((
             SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
-                '3e4349ac6cad620f37a0b03f16f14d283a3617226068f5f2a5b02f3827dcb39a'
+                'df28beb16b7f39b71d7430c193fe9272056e402442d74ba4c43a18641209b46b'
               AND procedure_row.proowner = database_owner.datdba
               AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
               AND NOT procedure_row.prosecdef
@@ -602,7 +641,86 @@ export async function databaseReady(
           ), false)
           AND COALESCE((
             SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
-                '336e30e78aa3518a116126f27dcaa5b0c943e85fa0903c42fbb96342e262954c'
+                '3c31744fcbe0d1e2c41723a2074f3815800de7e5b3883d87f3475812d8a9c4fc'
+              AND procedure_row.proowner = database_owner.datdba
+              AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'sql')
+              AND NOT procedure_row.prosecdef
+              AND procedure_row.provolatile = 's'
+              AND procedure_row.prokind = 'f'
+              AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            FROM pg_proc AS procedure_row
+            CROSS JOIN database_owner
+            WHERE procedure_row.oid = to_regprocedure('qintopia_has_typed_runtime_command_evidence(text,text,text)')
+          ), false)
+          AND COALESCE((
+            SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+                'a0886c490f14301672fe64f766a5deba0c7ca42969758c7043e0504e3eda1e84'
+              AND procedure_row.proowner = database_owner.datdba
+              AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+              AND NOT procedure_row.prosecdef
+              AND procedure_row.provolatile = 'v'
+              AND procedure_row.prokind = 'f'
+              AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            FROM pg_proc AS procedure_row
+            CROSS JOIN database_owner
+            WHERE procedure_row.oid = to_regprocedure('qintopia_guard_runtime_membership_projection_update_050()')
+          ), false)
+          AND COALESCE((
+            SELECT count(*) = 3
+              AND bool_and(
+                NOT trigger.tgisinternal
+                AND trigger.tgenabled IN ('O', 'A')
+                AND trigger.tgdeferrable
+                AND trigger.tginitdeferred
+                AND trigger.tgnargs = 0
+                AND trigger.tgfoid = to_regprocedure('qintopia_guard_runtime_membership_projection_update_050()')
+                AND pg_get_triggerdef(trigger.oid, false) = format(
+                  'CREATE CONSTRAINT TRIGGER %s AFTER UPDATE ON public.%s DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_membership_projection_update_050()',
+                  expected.trigger_name,
+                  expected.table_name
+                )
+              )
+            FROM (VALUES
+              ('membership_orders', 'membership_orders_runtime_projection_guard'),
+              ('member_contracts', 'member_contracts_runtime_projection_guard'),
+              ('entitlement_lots', 'entitlement_lots_runtime_projection_guard')
+            ) AS expected(table_name, trigger_name)
+            JOIN pg_trigger AS trigger
+              ON trigger.tgrelid = to_regclass(expected.table_name)
+              AND trigger.tgname = expected.trigger_name
+          ), false)
+          AND COALESCE((
+            SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+                'fa752d37272a7baf8a435b8175fb98849a6d28cab61b1229b3b58d50b90f2430'
+              AND procedure_row.proowner = database_owner.datdba
+              AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+              AND NOT procedure_row.prosecdef
+              AND procedure_row.provolatile = 'v'
+              AND procedure_row.prokind = 'f'
+              AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            FROM pg_proc AS procedure_row
+            CROSS JOIN database_owner
+            WHERE procedure_row.oid = to_regprocedure('qintopia_guard_runtime_inventory_unit_update()')
+          ), false)
+          AND COALESCE((
+            SELECT count(*) = 1
+              AND bool_and(
+                NOT trigger.tgisinternal
+                AND trigger.tgenabled IN ('O', 'A')
+                AND NOT trigger.tgdeferrable
+                AND NOT trigger.tginitdeferred
+                AND trigger.tgnargs = 0
+                AND trigger.tgrelid = to_regclass('inventory_units')
+                AND trigger.tgname = 'inventory_units_runtime_update_guard'
+                AND pg_get_triggerdef(trigger.oid, false) =
+                  'CREATE TRIGGER inventory_units_runtime_update_guard BEFORE UPDATE ON public.inventory_units FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_inventory_unit_update()'
+              )
+            FROM pg_trigger AS trigger
+            WHERE trigger.tgfoid = to_regprocedure('qintopia_guard_runtime_inventory_unit_update()')
+          ), false)
+          AND COALESCE((
+            SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+                '4e497ba609510f74b51bd1299253d0479a0beb663275e701426b30c9f3ce4703'
               AND procedure_row.proowner = database_owner.datdba
               AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
               AND NOT procedure_row.prosecdef
@@ -614,7 +732,7 @@ export async function databaseReady(
             WHERE procedure_row.oid = to_regprocedure('qintopia_guard_runtime_mutable_projection_update()')
           ), false)
           AND COALESCE((
-            SELECT count(*) = 11
+            SELECT count(*) = 8
               AND bool_and(
                 NOT trigger.tgisinternal
                 AND trigger.tgenabled IN ('O', 'A')
@@ -629,9 +747,6 @@ export async function databaseReady(
                 )
               )
             FROM (VALUES
-              ('membership_orders', 'membership_orders_runtime_projection_guard'),
-              ('member_contracts', 'member_contracts_runtime_projection_guard'),
-              ('entitlement_lots', 'entitlement_lots_runtime_projection_guard'),
               ('stays', 'stays_runtime_projection_guard'),
               ('coverage_items', 'coverage_items_runtime_projection_guard'),
               ('inventory_room_days', 'inventory_room_days_runtime_projection_guard'),
@@ -866,46 +981,18 @@ export async function databaseReady(
             IN pg_get_functiondef(to_regprocedure('qintopia_protect_api_token_identity()'))) > 0, false)
         ) AS function_bodies_ready,
         COALESCE((
-          SELECT
-            regexp_replace(
-              btrim(procedure_row.prosrc),
-              '[[:space:]]+',
-              ' ',
-              'g'
-            ) = regexp_replace(
-              btrim($readiness$
-                BEGIN
-                  IF NEW.property_id IS DISTINCT FROM OLD.property_id
-                    OR NEW.member_id IS DISTINCT FROM OLD.member_id
-                    OR NEW.product_id IS DISTINCT FROM OLD.product_id
-                    OR NEW.product_code IS DISTINCT FROM OLD.product_code
-                    OR NEW.product_version IS DISTINCT FROM OLD.product_version
-                    OR NEW.product_name IS DISTINCT FROM OLD.product_name
-                    OR NEW.listed_price_minor IS DISTINCT FROM OLD.listed_price_minor
-                    OR NEW.agreed_price_minor IS DISTINCT FROM OLD.agreed_price_minor
-                    OR NEW.price_adjustment_minor IS DISTINCT FROM OLD.price_adjustment_minor
-                    OR NEW.price_adjustment_reason IS DISTINCT FROM OLD.price_adjustment_reason
-                    OR NEW.currency IS DISTINCT FROM OLD.currency
-                    OR NEW.entitlement_unit_kind IS DISTINCT FROM OLD.entitlement_unit_kind
-                    OR NEW.entitlement_units IS DISTINCT FROM OLD.entitlement_units
-                    OR NEW.allowed_room_type_code IS DISTINCT FROM OLD.allowed_room_type_code
-                    OR NEW.allowed_inventory_kind IS DISTINCT FROM OLD.allowed_inventory_kind
-                    OR NEW.created_by_command_id IS DISTINCT FROM OLD.created_by_command_id
-                    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
-                    RAISE EXCEPTION 'membership order ownership, product, and price snapshot are immutable'
-                      USING ERRCODE = '55000', CONSTRAINT = 'membership_orders_identity_immutable';
-                  END IF;
-                  IF OLD.status = 'ACTIVE' AND NEW IS DISTINCT FROM OLD THEN
-                    RAISE EXCEPTION 'active membership orders are immutable'
-                      USING ERRCODE = '55000', CONSTRAINT = 'membership_orders_active_immutable';
-                  END IF;
-                  RETURN NEW;
-                END;
-              $readiness$),
-              '[[:space:]]+',
-              ' ',
-              'g'
+          SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
+              '4b6871b7d4e398fcf05d19a0a2c8c22dc777a42d9332ae14ba70c6ce59e2706f'
+            AND procedure_row.proowner = (
+              SELECT database_row.datdba
+              FROM pg_database AS database_row
+              WHERE database_row.datname = current_database()
             )
+            AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+            AND NOT procedure_row.prosecdef
+            AND procedure_row.provolatile = 'v'
+            AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            AND procedure_row.prokind = 'f'
           FROM pg_proc AS procedure_row
           WHERE procedure_row.oid = to_regprocedure('qintopia_protect_membership_order_identity()')
         ), false) AS membership_order_identity_body_ready,
@@ -1641,7 +1728,7 @@ export async function databaseReady(
                 ('stay_collection_membership_transfers', 'stay_collection_membership_tr_source_collection_fact_id_or_fkey', 'f',
                   'FOREIGN KEY (source_collection_fact_id, order_id) REFERENCES collection_facts(fact_id, order_id)'),
                 ('entitlement_ledger', 'entitlement_ledger_entry_type_check', 'c',
-                  'CHECK ((entry_type = ANY (ARRAY[''ADJUST''::text, ''HOLD''::text, ''RELEASE''::text, ''CONSUME''::text, ''RESTORE''::text, ''EXPIRE''::text, ''CONVERSION_CONSUME''::text])))')
+                  'CHECK ((entry_type = ANY (ARRAY[''ADJUST''::text, ''HOLD''::text, ''RELEASE''::text, ''CONSUME''::text, ''RESTORE''::text, ''EXPIRE''::text, ''CONVERSION_CONSUME''::text, ''VOID''::text])))')
             ) AS expected(table_name, constraint_name, constraint_type, definition)
             WHERE NOT EXISTS (
               SELECT 1
@@ -1801,16 +1888,16 @@ export async function databaseReady(
               VALUES
                 ('qintopia_assert_stage13_stay_conversion_command(text)', '9f9d7311054a9c99b68999dcd799cd662996d0496573cdd783fc747ca1466459'),
                 ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '9d28e833682d7dd7a62b198b1f49a8760a3ca7b3ee4e916585550034fd5aba35'),
-                ('qintopia_reject_lodging_funds_after_membership_transfer()', 'bf22eef1c8964fbe29e7bf5054b64b2fa85ce7cb2ae90bbf9e0102412669c3bd'),
-                ('qintopia_reject_membership_funds_after_stay_transfer()', '99e9a57e0f4d7a9f48936eafd26dd809e892bbfc8c76d026a05871ccb23ffc24'),
+                ('qintopia_reject_lodging_funds_after_membership_transfer()', 'db65662dcfcffcde84fb0abc91d54a7a1b2b720b4cd42a8b34375f9499943d5e'),
+                ('qintopia_reject_membership_funds_after_stay_transfer()', '94efb540ae902ad6edf664b72ec170e1ea54fc3459a5e70af01783b0e484ebb6'),
                 ('qintopia_require_stage13_conversion_reversal_bridge()', '5f73c20a3019cdc3810ae4484eec1a898e700e954c20d6c6a65fe8493b8f5c2e'),
                 ('qintopia_require_transfer_membership_payment_bridge()', '1993430b9a865fa9ab62a4c88dab76e30dc0defc753016726bb1e21ed4920af2'),
-                ('qintopia_validate_conversion_consume_entitlement_fact()', '1e8d4b1b3754ee3c4962c080d6a01d8299f1a7a8f2df89bb22487108c45adefd'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', '10918d3fca13eb15e2b05cf3c661ad8289808589f1698ef04589099194e19b52'),
                 ('qintopia_validate_membership_payment_fact()', 'cce1edb6109475403047b936d164c8cb18b6577b9078c6c398c25ce0f22a41c1'),
                 ('qintopia_validate_stage13_stay_conversion_child()', '4d0ef7b2821a7286c2e6bb87fa936b1e6c6fc194e759acf09afe0645d36095b0'),
                 ('qintopia_validate_stage13_stay_conversion_execution()', '2b83d1f0c739a4bdc65e3114d0f6ddbcca1ac80a02ede73d687705da946d3f56'),
                 ('qintopia_validate_stage13_stay_conversion_membership_order()', '1baf9a5240b34e396eed0aca2da6165adec38227ee672e63623d33a3ad1ecae2'),
-                ('qintopia_validate_stay_collection_membership_transfer()', '1772cb165a798ee6dbf5d4c7c7a04c4b32e0bc40e27fb147235335f4c0c8b34b'),
+                ('qintopia_validate_stay_collection_membership_transfer()', 'c9787c3223d8e3a41fe6c9111be52c6711fae94a212c5fcf4d10fd3f791f6c43'),
                 ('qintopia_validate_new_collection_fact_shape()', '0922bb880a362c3fa315ef44c9cb20f8edc855263bcc03d4fb537bad3e2d8977')
             ) AS expected(signature, body_hash)
             WHERE NOT COALESCE((
@@ -1821,7 +1908,21 @@ export async function databaseReady(
                 AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
                 AND NOT procedure_row.prosecdef
                 AND procedure_row.provolatile = 'v'
-                AND procedure_row.proconfig IS NULL
+                AND (
+                  (expected.signature IN (
+                    'qintopia_reject_lodging_funds_after_membership_transfer()',
+                    'qintopia_reject_membership_funds_after_stay_transfer()',
+                    'qintopia_validate_conversion_consume_entitlement_fact()',
+                    'qintopia_validate_stay_collection_membership_transfer()'
+                  ) AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[])
+                  OR
+                  (expected.signature NOT IN (
+                    'qintopia_reject_lodging_funds_after_membership_transfer()',
+                    'qintopia_reject_membership_funds_after_stay_transfer()',
+                    'qintopia_validate_conversion_consume_entitlement_fact()',
+                    'qintopia_validate_stay_collection_membership_transfer()'
+                  ) AND procedure_row.proconfig IS NULL)
+                )
                 AND procedure_row.prokind = 'f'
               FROM pg_proc AS procedure_row
               WHERE procedure_row.oid = to_regprocedure(expected.signature)
@@ -1829,6 +1930,721 @@ export async function databaseReady(
           )
         ) AS function_bodies_ready
       FROM pg_trigger AS trigger
+    `.execute(db);
+    const historicalStayArrangementCorrectionObjects = await sql<{
+      table_count: string;
+      function_count: string;
+      function_bodies_ready: boolean;
+      runtime_privileges_ready: boolean;
+      trigger_bindings_ready: boolean;
+    }>`
+      SELECT
+        (
+          SELECT count(*)::text
+          FROM pg_class AS relation
+          WHERE relation.oid = to_regclass('historical_stay_arrangement_corrections')
+            AND relation.relkind = 'r'
+        ) AS table_count,
+        (
+          (to_regprocedure('qintopia_validate_historical_stay_arrangement_correction_amendment()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_assert_historical_stay_arrangement_correction_command(text)') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_historical_stay_arrangement_correction_execution()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_historical_stay_arrangement_correction_child()') IS NOT NULL)::integer
+        )::text AS function_count,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('qintopia_validate_historical_stay_arrangement_correction_amendment()',
+                  '3151c105776c9dd9de7a04f027af96853d7deb6f9e38a7e6fc12075ca2b8d798'),
+                ('qintopia_assert_historical_stay_arrangement_correction_command(text)',
+                  'adfa3da9534556c46b868fd5593a90b0da9363eebaf7ad14c9732f4fd9f0241c'),
+                ('qintopia_validate_historical_stay_arrangement_correction_execution()',
+                  'f174a2a75479defba13a8d6222f18e742d5c73391638365171869e15858c74ab'),
+                ('qintopia_validate_historical_stay_arrangement_correction_child()',
+                  '10ed1071d18d4d611271fc299a2a6a32877312a3d30bc43c9da52a2cc6f070bc')
+            ) AS expected(signature, body_hash)
+            WHERE NOT COALESCE((
+              SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') = expected.body_hash
+                AND procedure_row.proowner = database_owner.datdba
+                AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+                AND NOT procedure_row.prosecdef
+                AND procedure_row.provolatile = 'v'
+                AND procedure_row.prokind = 'f'
+                AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+              FROM pg_proc AS procedure_row
+              CROSS JOIN (
+                SELECT database_row.datdba
+                FROM pg_database AS database_row
+                WHERE database_row.datname = current_database()
+              ) AS database_owner
+              WHERE procedure_row.oid = to_regprocedure(expected.signature)
+            ), false)
+          )
+        ) AS function_bodies_ready,
+        COALESCE((
+          SELECT has_table_privilege(runtime_role.oid, 'historical_stay_arrangement_corrections', 'SELECT')
+            AND has_table_privilege(runtime_role.oid, 'historical_stay_arrangement_corrections', 'INSERT')
+            AND NOT has_table_privilege(runtime_role.oid, 'historical_stay_arrangement_corrections', 'UPDATE')
+            AND NOT has_table_privilege(runtime_role.oid, 'historical_stay_arrangement_corrections', 'DELETE')
+            AND NOT has_table_privilege(runtime_role.oid, 'historical_stay_arrangement_corrections', 'TRUNCATE')
+            AND NOT has_table_privilege(runtime_role.oid, 'historical_stay_arrangement_corrections', 'TRIGGER')
+            AND NOT has_table_privilege(runtime_role.oid, 'historical_stay_arrangement_corrections', 'REFERENCES')
+          FROM pg_roles AS runtime_role
+          WHERE runtime_role.rolname = 'qintopia_runtime'
+        ), false) AS runtime_privileges_ready,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('amendments', 'amendments_validate_historical_stay_arrangement_correction',
+                  'CREATE TRIGGER amendments_validate_historical_stay_arrangement_correction BEFORE INSERT ON public.amendments FOR EACH ROW EXECUTE FUNCTION qintopia_validate_historical_stay_arrangement_correction_amendm()'),
+                ('amendments', 'amendments_validate_historical_stay_arrangement_correction_chai',
+                  'CREATE CONSTRAINT TRIGGER amendments_validate_historical_stay_arrangement_correction_chai AFTER INSERT ON public.amendments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((new.command_id IS NOT NULL)) EXECUTE FUNCTION qintopia_validate_historical_stay_arrangement_correction_child()'),
+                ('command_executions', 'command_executions_validate_historical_stay_arrangement_correct',
+                  'CREATE CONSTRAINT TRIGGER command_executions_validate_historical_stay_arrangement_correct AFTER INSERT OR UPDATE OF state ON public.command_executions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_historical_stay_arrangement_correction_execut()'),
+                ('historical_stay_arrangement_corrections', 'historical_stay_arrangement_corrections_append_only',
+                  'CREATE TRIGGER historical_stay_arrangement_corrections_append_only BEFORE DELETE OR UPDATE ON public.historical_stay_arrangement_corrections FOR EACH ROW EXECUTE FUNCTION qintopia_prevent_fact_mutation()'),
+                ('historical_stay_arrangement_corrections', 'historical_stay_arrangement_corrections_validate_chain',
+                  'CREATE CONSTRAINT TRIGGER historical_stay_arrangement_corrections_validate_chain AFTER INSERT ON public.historical_stay_arrangement_corrections DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_historical_stay_arrangement_correction_child()'),
+                ('pricing_revisions', 'pricing_revisions_validate_historical_stay_arrangement_correcti',
+                  'CREATE CONSTRAINT TRIGGER pricing_revisions_validate_historical_stay_arrangement_correcti AFTER INSERT ON public.pricing_revisions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_historical_stay_arrangement_correction_child()'),
+                ('stay_segments', 'stay_segments_validate_historical_stay_arrangement_correction_c',
+                  'CREATE CONSTRAINT TRIGGER stay_segments_validate_historical_stay_arrangement_correction_c AFTER INSERT ON public.stay_segments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_historical_stay_arrangement_correction_child()')
+            ) AS expected(table_name, trigger_name, definition)
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM pg_trigger AS exact_trigger
+              WHERE exact_trigger.tgrelid = to_regclass(expected.table_name)
+                AND exact_trigger.tgname = expected.trigger_name
+                AND NOT exact_trigger.tgisinternal
+                AND exact_trigger.tgenabled IN ('O','A')
+                AND exact_trigger.tgnargs = 0
+                AND pg_get_triggerdef(exact_trigger.oid, false) = expected.definition
+            )
+          )
+        ) AS trigger_bindings_ready
+    `.execute(db);
+    const adminMembershipCorrectionObjects = await sql<{
+      table_count: string;
+      index_bindings_ready: boolean;
+      function_bodies_ready: boolean;
+      security_function_privileges_ready: boolean;
+      runtime_table_privileges_ready: boolean;
+      trigger_bindings_ready: boolean;
+    }>`
+      WITH
+      expected_table_shapes(table_name, expected_columns, expected_constraint_count) AS (
+        VALUES
+          ('admin_membership_payment_evidence_claims',
+            ARRAY[
+              'normalized_reference',
+              'membership_payment_fact_id',
+              'command_id',
+              'correction_type',
+              'created_at'
+            ]::text[],
+            7),
+          ('member_profile_corrections',
+            ARRAY[
+              'id',
+              'property_id',
+              'member_id',
+              'sequence',
+              'prior_full_name',
+              'prior_nickname',
+              'prior_identity_card_number',
+              'prior_phone',
+              'prior_wechat',
+              'corrected_full_name',
+              'corrected_nickname',
+              'corrected_identity_card_number',
+              'corrected_phone',
+              'corrected_wechat',
+              'changed_fields',
+              'evidence_note',
+              'command_id',
+              'created_at'
+            ]::text[],
+            11),
+          ('membership_effective_date_corrections',
+            ARRAY[
+              'id',
+              'property_id',
+              'member_id',
+              'membership_order_id',
+              'contract_id',
+              'entitlement_lot_id',
+              'sequence',
+              'prior_valid_from',
+              'prior_valid_until',
+              'corrected_valid_from',
+              'corrected_valid_until',
+              'prior_order_version',
+              'prior_contract_version',
+              'prior_lot_version',
+              'evidence_note',
+              'command_id',
+              'created_at'
+            ]::text[],
+            16),
+          ('historical_membership_backfills',
+            ARRAY[
+              'id',
+              'property_id',
+              'member_id',
+              'membership_order_id',
+              'contract_id',
+              'entitlement_lot_id',
+              'payment_fact_id',
+              'product_id',
+              'product_code',
+              'product_version',
+              'product_name',
+              'listed_price_minor',
+              'agreed_price_minor',
+              'currency',
+              'entitlement_unit_kind',
+              'entitlement_units',
+              'validity_period',
+              'allowed_room_type_code',
+              'allowed_inventory_kind',
+              'actual_membership_date',
+              'valid_until',
+              'business_date',
+              'transaction_reference',
+              'evidence_note',
+              'command_id',
+              'created_at'
+            ]::text[],
+            25),
+          ('membership_payment_reclassifications',
+            ARRAY[
+              'id',
+              'property_id',
+              'member_id',
+              'old_membership_order_id',
+              'old_payment_fact_id',
+              'old_reversal_fact_id',
+              'new_membership_order_id',
+              'new_payment_fact_id',
+              'amount_minor',
+              'currency',
+              'evidence_note',
+              'command_id',
+              'created_at'
+            ]::text[],
+            15),
+          ('membership_void_reconversions',
+            ARRAY[
+              'id',
+              'property_id',
+              'member_id',
+              'old_membership_order_id',
+              'old_contract_id',
+              'old_entitlement_lot_id',
+              'prior_old_order_version',
+              'prior_old_contract_version',
+              'prior_old_lot_version',
+              'source_order_id',
+              'source_stay_id',
+              'prior_source_order_version',
+              'new_membership_order_id',
+              'new_contract_id',
+              'new_entitlement_lot_id',
+              'replacement_payment_fact_id',
+              'replacement_business_date',
+              'replacement_transaction_reference',
+              'actual_membership_date',
+              'valid_until',
+              'old_direct_collection_total_minor',
+              'stay_transfer_total_minor',
+              'membership_agreed_price_minor',
+              'service_dates',
+              'evidence_note',
+              'command_id',
+              'created_at'
+            ]::text[],
+            36)
+      ),
+      expected_critical_constraints(table_name, constraint_name, constraint_type, definition) AS (
+        VALUES
+          ('admin_membership_payment_evidence_claims', 'admin_membership_payment_evidence_claims_pkey', 'p',
+            'PRIMARY KEY (normalized_reference)'),
+          ('admin_membership_payment_evidence_claims', 'admin_membership_payment_evidenc_membership_payment_fact_id_key', 'u',
+            'UNIQUE (membership_payment_fact_id)'),
+          ('admin_membership_payment_evidence_claims', 'admin_membership_payment_evidence_claims_command_id_key', 'u',
+            'UNIQUE (command_id)'),
+          ('admin_membership_payment_evidence_claims', 'admin_membership_payment_evidence_claims_correction_type_check', 'c',
+            'CHECK ((correction_type = ANY (ARRAY[''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text])))'),
+          ('admin_membership_payment_evidence_claims', 'admin_membership_payment_evidence_claims_reference_trimmed', 'c',
+            'CHECK (((NULLIF(regexp_replace(btrim(normalized_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text), ''''::text) IS NOT NULL) AND (normalized_reference = regexp_replace(btrim(normalized_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text))))'),
+          ('member_profile_corrections', 'member_profile_corrections_changed_fields_check', 'c',
+            'CHECK (((cardinality(changed_fields) >= 1) AND (cardinality(changed_fields) <= 5)))'),
+          ('member_profile_corrections', 'member_profile_corrections_changed_fields_check1', 'c',
+            'CHECK ((changed_fields <@ ARRAY[''fullName''::text, ''nickname''::text, ''identityCardNumber''::text, ''phone''::text, ''wechat''::text]))'),
+          ('member_profile_corrections', 'member_profile_corrections_evidence_note_check', 'c',
+            'CHECK ((NULLIF(btrim(evidence_note), ''''::text) IS NOT NULL))'),
+          ('member_profile_corrections', 'member_profile_corrections_member_id_sequence_key', 'u',
+            'UNIQUE (member_id, sequence)'),
+          ('membership_effective_date_corrections', 'membership_effective_date_corr_membership_order_id_sequence_key', 'u',
+            'UNIQUE (membership_order_id, sequence)'),
+          ('membership_effective_date_corrections', 'membership_effective_date_corrections_check', 'c',
+            'CHECK ((corrected_valid_until >= corrected_valid_from))'),
+          ('membership_effective_date_corrections', 'membership_effective_date_corrections_check1', 'c',
+            'CHECK (((prior_valid_from IS DISTINCT FROM corrected_valid_from) OR (prior_valid_until IS DISTINCT FROM corrected_valid_until)))'),
+          ('historical_membership_backfills', 'historical_membership_backfills_membership_order_id_key', 'u',
+            'UNIQUE (membership_order_id)'),
+          ('historical_membership_backfills', 'historical_membership_backfills_contract_id_key', 'u',
+            'UNIQUE (contract_id)'),
+          ('historical_membership_backfills', 'historical_membership_backfills_entitlement_lot_id_key', 'u',
+            'UNIQUE (entitlement_lot_id)'),
+          ('historical_membership_backfills', 'historical_membership_backfills_payment_fact_id_key', 'u',
+            'UNIQUE (payment_fact_id)'),
+          ('historical_membership_backfills', 'historical_membership_backfills_transaction_reference_check', 'c',
+            'CHECK (((NULLIF(regexp_replace(btrim(transaction_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text), ''''::text) IS NOT NULL) AND (transaction_reference = regexp_replace(btrim(transaction_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text))))'),
+          ('historical_membership_backfills', 'historical_membership_backfills_validity_period_check', 'c',
+            'CHECK ((validity_period = ''P1Y''::text))'),
+          ('membership_payment_reclassifications', 'membership_payment_reclassifications_old_payment_fact_id_key', 'u',
+            'UNIQUE (old_payment_fact_id)'),
+          ('membership_payment_reclassifications', 'membership_payment_reclassifications_old_reversal_fact_id_key', 'u',
+            'UNIQUE (old_reversal_fact_id)'),
+          ('membership_payment_reclassifications', 'membership_payment_reclassifications_void_command_fk', 'f',
+            'FOREIGN KEY (command_id) REFERENCES membership_void_reconversions(command_id) DEFERRABLE INITIALLY DEFERRED'),
+          ('membership_void_reconversions', 'membership_void_reconversions_old_membership_order_id_key', 'u',
+            'UNIQUE (old_membership_order_id)'),
+          ('membership_void_reconversions', 'membership_void_reconversions_source_order_id_key', 'u',
+            'UNIQUE (source_order_id)'),
+          ('membership_void_reconversions', 'membership_void_reconversions_source_stay_id_key', 'u',
+            'UNIQUE (source_stay_id)'),
+          ('membership_void_reconversions', 'membership_void_reconversions_check1', 'c',
+            'CHECK ((stay_transfer_total_minor <= membership_agreed_price_minor))'),
+          ('membership_void_reconversions', 'membership_void_reconversions_check2', 'c',
+            'CHECK ((((replacement_payment_fact_id IS NULL) AND (replacement_business_date IS NULL) AND (replacement_transaction_reference IS NULL)) OR ((replacement_payment_fact_id IS NOT NULL) AND (replacement_business_date IS NOT NULL) AND (replacement_transaction_reference IS NOT NULL))))'),
+          ('membership_void_reconversions', 'membership_void_reconversions_service_dates_check', 'c',
+            'CHECK ((cardinality(service_dates) > 0))')
+      ),
+      expected_indexes(table_name, index_name, is_unique, definition) AS (
+        VALUES
+          ('audit_entries', 'audit_entries_allowed_preview_id_unique_idx', true,
+            'CREATE UNIQUE INDEX audit_entries_allowed_preview_id_unique_idx ON public.audit_entries USING btree (((metadata ->> ''previewId''::text))) WHERE ((decision = ''ALLOWED''::text) AND (NULLIF(btrim((metadata ->> ''previewId''::text)), ''''::text) IS NOT NULL))'),
+          ('collection_facts', 'collection_facts_transaction_reference_lookup_idx', false,
+            'CREATE INDEX collection_facts_transaction_reference_lookup_idx ON public.collection_facts USING btree (regexp_replace(btrim(transaction_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text)) WHERE (transaction_reference IS NOT NULL)'),
+          ('membership_payment_facts', 'membership_payment_facts_transaction_reference_lookup_idx', false,
+            'CREATE INDEX membership_payment_facts_transaction_reference_lookup_idx ON public.membership_payment_facts USING btree (regexp_replace(btrim(transaction_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text)) WHERE (transaction_reference IS NOT NULL)'),
+          ('member_profile_corrections', 'member_profile_corrections_member_idx', false,
+            'CREATE INDEX member_profile_corrections_member_idx ON public.member_profile_corrections USING btree (member_id, sequence)'),
+          ('membership_effective_date_corrections', 'membership_effective_date_corrections_member_idx', false,
+            'CREATE INDEX membership_effective_date_corrections_member_idx ON public.membership_effective_date_corrections USING btree (member_id, created_at, id)'),
+          ('historical_membership_backfills', 'historical_membership_backfills_member_idx', false,
+            'CREATE INDEX historical_membership_backfills_member_idx ON public.historical_membership_backfills USING btree (member_id, created_at, id)'),
+          ('membership_payment_reclassifications', 'membership_payment_reclassifications_member_idx', false,
+            'CREATE INDEX membership_payment_reclassifications_member_idx ON public.membership_payment_reclassifications USING btree (member_id, created_at, id)'),
+          ('membership_void_reconversions', 'membership_void_reconversions_member_idx', false,
+            'CREATE INDEX membership_void_reconversions_member_idx ON public.membership_void_reconversions USING btree (member_id, created_at, id)')
+      ),
+      expected_functions(signature, body_hash, language_name, volatility, security_definer) AS (
+        VALUES
+          ('qintopia_guard_admin_membership_payment_evidence()', 'c599e3983a8e85dfcfe5341c07e9e3472811c6c3cf6c9b2e882c6ba558cab652', 'plpgsql', 'v', true),
+          ('qintopia_claim_admin_membership_payment_evidence()', '69f642bfd116c617121b38036489c43b367db117953ddabb9a6d4eb7422d6b35', 'plpgsql', 'v', true),
+          ('qintopia_validate_admin_membership_payment_evidence_scope()', '948c8577619342599b5f87c6687ebbfa5ccefa01e568ad70852ad646f85ff712', 'plpgsql', 'v', true),
+          ('qintopia_lock_historical_membership_backfill()', '6d2ed33d96583e0cd404932166f6de4085f81aaa41dd899b05151886777ea4fb', 'plpgsql', 'v', false),
+          ('qintopia_lock_membership_void_reconversion()', 'ec597339f2565e36d3ba4821edbbf2c013cd8a494fee9b304fc9a6bf6362c11c', 'plpgsql', 'v', false),
+          ('qintopia_has_historical_command_fact_evidence(text,text,text,text,text)', 'd7fde4c9df35af9e9a3bf1d87e2eb70db2e79c0e8cc3ad773bca088d22e5712e', 'sql', 's', false),
+          ('qintopia_has_exact_source_amendment_set(text,text,text)', '7bc120ec02f86adc183062354e7c6fd9d93bcd25fef482738b328a5a50c282a8', 'sql', 's', false),
+          ('qintopia_validate_member_profile_correction()', 'd3634973e89d2e602d4bdaf7d2cf119528fe31aea8bc51a82511dfd6b1e6d6f0', 'plpgsql', 'v', false),
+          ('qintopia_validate_membership_effective_date_correction()', '2a934ecfb22c081fbf886b07f624858e20ccde7a291c80ab982a5596bf829c63', 'plpgsql', 'v', false),
+          ('qintopia_validate_historical_membership_backfill()', '723b39cd35d1f92ee5e88d82548f0df7c3fccafd6db2ac9f68ee4ae8c9ba4285', 'plpgsql', 'v', false),
+          ('qintopia_validate_membership_void_entitlement_fact()', '31d8c60106bd143569dd22fc916bbfa525db1665060675f9e02030df606ef21e', 'plpgsql', 'v', false),
+          ('qintopia_validate_membership_void_reconversion()', '028e6a3435a8c1b049f17b8f5235b663a87aaba0fba515277ea1586a0e07011e', 'plpgsql', 'v', false),
+          ('qintopia_assert_admin_membership_correction_child(text)', 'd6600cf5ff86052d542c0e1ed6a8b34e2bc10c0c7a4a4d76035873a7b8a72d76', 'plpgsql', 'v', false),
+          ('qintopia_validate_admin_membership_direct_child()', 'fc83255e1e4977f18acd21a3bb3484e90abd55612ec167fcef1baccc50d85307', 'plpgsql', 'v', false),
+          ('qintopia_validate_admin_membership_order_child()', 'c61c4258b25c87cd1b6646b55340d88c6c0faf540d71711e214b46e979a3ef16', 'plpgsql', 'v', false),
+          ('qintopia_validate_admin_membership_contract_child()', 'a20ac82a98c3987ce86ddd304dde389ab41d0bc91674ccea3a7dbb8c601742ed', 'plpgsql', 'v', false),
+          ('qintopia_validate_admin_membership_lot_child()', '8ba79ebd971c03661399357ddfa15808fd8ad33305292aa2b015f29a75f68003', 'plpgsql', 'v', false),
+          ('qintopia_validate_admin_membership_revision_child()', '58a217a4eb30feffb736fead84256e37de4d210b39348b6390f46abf49dd26d7', 'plpgsql', 'v', false),
+          ('qintopia_require_admin_membership_correction_fact()', 'c7484c911d850ac81555ad14c1d242f9ac623a940b895923a2a3bc1dbf92aac8', 'plpgsql', 'v', false),
+          ('qintopia_protect_member_identity()', 'ed63332e5863d42a4ce835e4a12a1265db9a63f9bafd3c70866b5b61dc9627af', 'plpgsql', 'v', false),
+          ('qintopia_protect_order_identity()', '4d4499b14cc8c2aa14f4c8e85b18ddcb8b22e90ad7bae6a001b2f97d658cc0e9', 'plpgsql', 'v', false)
+      ),
+      expected_runtime_table_privileges(table_name, can_select, can_insert) AS (
+        VALUES
+          ('admin_membership_payment_evidence_claims', false, false),
+          ('member_profile_corrections', true, true),
+          ('membership_effective_date_corrections', true, true),
+          ('historical_membership_backfills', true, true),
+          ('membership_payment_reclassifications', true, true),
+          ('membership_void_reconversions', true, true)
+      ),
+      expected_triggers(table_name, trigger_name, definition) AS (
+        VALUES
+          ('admin_membership_payment_evidence_claims', 'admin_membership_payment_evidence_claims_append_only',
+            'CREATE TRIGGER admin_membership_payment_evidence_claims_append_only BEFORE DELETE OR UPDATE ON public.admin_membership_payment_evidence_claims FOR EACH ROW EXECUTE FUNCTION qintopia_prevent_fact_mutation()'),
+          ('member_property_links', 'member_property_links_validate_profile_correction_scope',
+            'CREATE CONSTRAINT TRIGGER member_property_links_validate_profile_correction_scope AFTER INSERT ON public.member_property_links DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_member_profile_correction()'),
+          ('member_profile_corrections', 'member_profile_corrections_append_only',
+            'CREATE TRIGGER member_profile_corrections_append_only BEFORE DELETE OR UPDATE ON public.member_profile_corrections FOR EACH ROW EXECUTE FUNCTION qintopia_prevent_fact_mutation()'),
+          ('member_profile_corrections', 'member_profile_corrections_validate_graph',
+            'CREATE CONSTRAINT TRIGGER member_profile_corrections_validate_graph AFTER INSERT ON public.member_profile_corrections DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_member_profile_correction()'),
+          ('member_profile_corrections', 'member_profile_corrections_validate_payment_evidence_scope',
+            'CREATE CONSTRAINT TRIGGER member_profile_corrections_validate_payment_evidence_scope AFTER INSERT ON public.member_profile_corrections DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_payment_evidence_scope()'),
+          ('membership_effective_date_corrections', 'membership_effective_date_corrections_append_only',
+            'CREATE TRIGGER membership_effective_date_corrections_append_only BEFORE DELETE OR UPDATE ON public.membership_effective_date_corrections FOR EACH ROW EXECUTE FUNCTION qintopia_prevent_fact_mutation()'),
+          ('membership_effective_date_corrections', 'membership_effective_date_corrections_validate_graph',
+            'CREATE CONSTRAINT TRIGGER membership_effective_date_corrections_validate_graph AFTER INSERT ON public.membership_effective_date_corrections DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_membership_effective_date_correction()'),
+          ('membership_effective_date_corrections', 'membership_effective_date_validate_payment_evidence_scope',
+            'CREATE CONSTRAINT TRIGGER membership_effective_date_validate_payment_evidence_scope AFTER INSERT ON public.membership_effective_date_corrections DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_payment_evidence_scope()'),
+          ('historical_membership_backfills', 'historical_membership_backfills_append_only',
+            'CREATE TRIGGER historical_membership_backfills_append_only BEFORE DELETE OR UPDATE ON public.historical_membership_backfills FOR EACH ROW EXECUTE FUNCTION qintopia_prevent_fact_mutation()'),
+          ('historical_membership_backfills', 'historical_membership_backfills_serialize',
+            'CREATE TRIGGER historical_membership_backfills_serialize BEFORE INSERT ON public.historical_membership_backfills FOR EACH ROW EXECUTE FUNCTION qintopia_lock_historical_membership_backfill()'),
+          ('historical_membership_backfills', 'historical_membership_backfills_claim_payment_evidence',
+            'CREATE TRIGGER historical_membership_backfills_claim_payment_evidence AFTER INSERT ON public.historical_membership_backfills FOR EACH ROW EXECUTE FUNCTION qintopia_claim_admin_membership_payment_evidence()'),
+          ('historical_membership_backfills', 'historical_membership_backfills_validate_graph',
+            'CREATE CONSTRAINT TRIGGER historical_membership_backfills_validate_graph AFTER INSERT ON public.historical_membership_backfills DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_historical_membership_backfill()'),
+          ('historical_membership_backfills', 'historical_membership_backfills_validate_payment_evidence_scope',
+            'CREATE CONSTRAINT TRIGGER historical_membership_backfills_validate_payment_evidence_scope AFTER INSERT ON public.historical_membership_backfills DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_payment_evidence_scope()'),
+          ('membership_payment_reclassifications', 'membership_payment_reclassifications_append_only',
+            'CREATE TRIGGER membership_payment_reclassifications_append_only BEFORE DELETE OR UPDATE ON public.membership_payment_reclassifications FOR EACH ROW EXECUTE FUNCTION qintopia_prevent_fact_mutation()'),
+          ('membership_payment_reclassifications', 'membership_payment_reclassifications_validate_admin_child',
+            'CREATE CONSTRAINT TRIGGER membership_payment_reclassifications_validate_admin_child AFTER INSERT ON public.membership_payment_reclassifications DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_direct_child()'),
+          ('membership_void_reconversions', 'membership_void_reconversions_append_only',
+            'CREATE TRIGGER membership_void_reconversions_append_only BEFORE DELETE OR UPDATE ON public.membership_void_reconversions FOR EACH ROW EXECUTE FUNCTION qintopia_prevent_fact_mutation()'),
+          ('membership_void_reconversions', 'membership_void_reconversions_serialize',
+            'CREATE TRIGGER membership_void_reconversions_serialize BEFORE INSERT ON public.membership_void_reconversions FOR EACH ROW EXECUTE FUNCTION qintopia_lock_membership_void_reconversion()'),
+          ('membership_void_reconversions', 'membership_void_reconversions_claim_payment_evidence',
+            'CREATE TRIGGER membership_void_reconversions_claim_payment_evidence AFTER INSERT ON public.membership_void_reconversions FOR EACH ROW EXECUTE FUNCTION qintopia_claim_admin_membership_payment_evidence()'),
+          ('membership_void_reconversions', 'membership_void_reconversions_validate_graph',
+            'CREATE CONSTRAINT TRIGGER membership_void_reconversions_validate_graph AFTER INSERT ON public.membership_void_reconversions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_membership_void_reconversion()'),
+          ('membership_void_reconversions', 'membership_void_reconversions_validate_payment_evidence_scope',
+            'CREATE CONSTRAINT TRIGGER membership_void_reconversions_validate_payment_evidence_scope AFTER INSERT ON public.membership_void_reconversions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_payment_evidence_scope()'),
+          ('collection_facts', 'collection_facts_guard_admin_membership_payment_evidence',
+            'CREATE TRIGGER collection_facts_guard_admin_membership_payment_evidence BEFORE INSERT ON public.collection_facts FOR EACH ROW EXECUTE FUNCTION qintopia_guard_admin_membership_payment_evidence()'),
+          ('membership_payment_facts', 'membership_payment_facts_guard_admin_membership_payment_evidenc',
+            'CREATE TRIGGER membership_payment_facts_guard_admin_membership_payment_evidenc BEFORE INSERT ON public.membership_payment_facts FOR EACH ROW EXECUTE FUNCTION qintopia_guard_admin_membership_payment_evidence()'),
+          ('entitlement_ledger', 'entitlement_ledger_validate_membership_void',
+            'CREATE TRIGGER entitlement_ledger_validate_membership_void BEFORE INSERT ON public.entitlement_ledger FOR EACH ROW EXECUTE FUNCTION qintopia_validate_membership_void_entitlement_fact()'),
+          ('collection_facts', 'collection_facts_validate_admin_child',
+            'CREATE CONSTRAINT TRIGGER collection_facts_validate_admin_child AFTER INSERT ON public.collection_facts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_direct_child()'),
+          ('membership_payment_facts', 'membership_payment_facts_validate_admin_child',
+            'CREATE CONSTRAINT TRIGGER membership_payment_facts_validate_admin_child AFTER INSERT ON public.membership_payment_facts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_direct_child()'),
+          ('stay_collection_membership_transfers', 'stay_collection_membership_transfers_validate_admin_child',
+            'CREATE CONSTRAINT TRIGGER stay_collection_membership_transfers_validate_admin_child AFTER INSERT ON public.stay_collection_membership_transfers DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_direct_child()'),
+          ('entitlement_ledger', 'entitlement_ledger_validate_admin_child',
+            'CREATE CONSTRAINT TRIGGER entitlement_ledger_validate_admin_child AFTER INSERT ON public.entitlement_ledger DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((new.command_id IS NOT NULL)) EXECUTE FUNCTION qintopia_validate_admin_membership_direct_child()'),
+          ('amendments', 'amendments_validate_admin_membership_child',
+            'CREATE CONSTRAINT TRIGGER amendments_validate_admin_membership_child AFTER INSERT ON public.amendments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((new.command_id IS NOT NULL)) EXECUTE FUNCTION qintopia_validate_admin_membership_direct_child()'),
+          ('membership_orders', 'membership_orders_validate_admin_child',
+            'CREATE CONSTRAINT TRIGGER membership_orders_validate_admin_child AFTER INSERT ON public.membership_orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_order_child()'),
+          ('member_contracts', 'member_contracts_validate_admin_membership_child',
+            'CREATE CONSTRAINT TRIGGER member_contracts_validate_admin_membership_child AFTER INSERT ON public.member_contracts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_contract_child()'),
+          ('entitlement_lots', 'entitlement_lots_validate_admin_membership_child',
+            'CREATE CONSTRAINT TRIGGER entitlement_lots_validate_admin_membership_child AFTER INSERT ON public.entitlement_lots DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_lot_child()'),
+          ('pricing_revisions', 'pricing_revisions_validate_admin_membership_child',
+            'CREATE CONSTRAINT TRIGGER pricing_revisions_validate_admin_membership_child AFTER INSERT ON public.pricing_revisions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_revision_child()'),
+          ('command_executions', 'command_executions_require_admin_membership_correction_fact',
+            'CREATE CONSTRAINT TRIGGER command_executions_require_admin_membership_correction_fact AFTER INSERT OR UPDATE OF state ON public.command_executions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_require_admin_membership_correction_fact()')
+      )
+      SELECT
+        (
+          SELECT count(*)::text
+          FROM expected_table_shapes AS expected
+          JOIN pg_class AS relation
+            ON relation.oid = to_regclass(expected.table_name)
+            AND relation.relkind = 'r'
+        ) AS table_count,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM expected_indexes AS expected
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM pg_index AS index_row
+              JOIN pg_class AS index_relation ON index_relation.oid = index_row.indexrelid
+              WHERE index_row.indrelid = to_regclass(expected.table_name)
+                AND index_relation.relname = expected.index_name
+                AND index_row.indisvalid
+                AND index_row.indisready
+                AND index_row.indisunique = expected.is_unique
+                AND pg_get_indexdef(index_row.indexrelid, 0, false) = expected.definition
+            )
+          )
+        ) AS index_bindings_ready,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM expected_functions AS expected
+            WHERE NOT COALESCE((
+              SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') = expected.body_hash
+                AND procedure_row.proowner = database_owner.datdba
+                AND procedure_row.prolang = (
+                  SELECT oid FROM pg_language WHERE lanname = expected.language_name
+                )
+                AND procedure_row.prosecdef = expected.security_definer
+                AND procedure_row.provolatile::text = expected.volatility
+                AND procedure_row.prokind = 'f'
+                AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+              FROM pg_proc AS procedure_row
+              CROSS JOIN (
+                SELECT database_row.datdba
+                FROM pg_database AS database_row
+                WHERE database_row.datname = current_database()
+              ) AS database_owner
+              WHERE procedure_row.oid = to_regprocedure(expected.signature)
+            ), false)
+          )
+        ) AS function_bodies_ready,
+        COALESCE((
+          SELECT NOT has_function_privilege(runtime_role.oid, 'qintopia_guard_admin_membership_payment_evidence()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege(runtime_role.oid, 'qintopia_claim_admin_membership_payment_evidence()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege(runtime_role.oid, 'qintopia_validate_admin_membership_payment_evidence_scope()'::regprocedure, 'EXECUTE')
+            AND has_function_privilege(runtime_role.oid, 'qintopia_assert_admin_membership_correction_child(text)'::regprocedure, 'EXECUTE')
+            AND has_function_privilege(runtime_role.oid, 'qintopia_has_historical_command_fact_evidence(text,text,text,text,text)'::regprocedure, 'EXECUTE')
+            AND has_function_privilege(runtime_role.oid, 'qintopia_has_exact_source_amendment_set(text,text,text)'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_guard_admin_membership_payment_evidence()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_claim_admin_membership_payment_evidence()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_validate_admin_membership_payment_evidence_scope()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_assert_admin_membership_correction_child(text)'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_has_historical_command_fact_evidence(text,text,text,text,text)'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_has_exact_source_amendment_set(text,text,text)'::regprocedure, 'EXECUTE')
+          FROM pg_roles AS runtime_role
+          WHERE runtime_role.rolname = 'qintopia_runtime'
+        ), false) AS security_function_privileges_ready,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM expected_runtime_table_privileges AS expected
+            WHERE NOT COALESCE((
+              SELECT has_table_privilege(runtime_role.oid, relation.oid, 'SELECT') = expected.can_select
+                AND has_table_privilege(runtime_role.oid, relation.oid, 'INSERT') = expected.can_insert
+                AND NOT has_table_privilege(runtime_role.oid, relation.oid, 'UPDATE')
+                AND NOT has_table_privilege(runtime_role.oid, relation.oid, 'DELETE')
+                AND NOT has_table_privilege(runtime_role.oid, relation.oid, 'TRUNCATE')
+                AND NOT has_table_privilege(runtime_role.oid, relation.oid, 'TRIGGER')
+                AND NOT has_table_privilege(runtime_role.oid, relation.oid, 'REFERENCES')
+              FROM pg_roles AS runtime_role
+              JOIN pg_class AS relation ON relation.oid = to_regclass(expected.table_name)
+              WHERE runtime_role.rolname = 'qintopia_runtime'
+            ), false)
+          )
+        ) AS runtime_table_privileges_ready,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM expected_triggers AS expected
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM pg_trigger AS exact_trigger
+              WHERE exact_trigger.tgrelid = to_regclass(expected.table_name)
+                AND exact_trigger.tgname = expected.trigger_name
+                AND NOT exact_trigger.tgisinternal
+                AND exact_trigger.tgenabled IN ('O','A')
+                AND exact_trigger.tgnargs = 0
+                AND pg_get_triggerdef(exact_trigger.oid, false) = expected.definition
+            )
+          )
+        ) AS trigger_bindings_ready
+    `.execute(db);
+    const step9CatalogIntegrity = await sql<{
+      new_table_catalog_ready: boolean;
+      altered_columns_ready: boolean;
+      altered_constraints_ready: boolean;
+    }>`
+      WITH
+      database_owner AS (
+        SELECT database_row.datdba
+        FROM pg_database AS database_row
+        WHERE database_row.datname = current_database()
+      ),
+      -- Each digest covers the ordered relation, column, constraint, index, and trigger catalog.
+      -- now() and transaction_timestamp() are canonicalized because both use transaction-start time.
+      expected_new_table_catalog(table_name, catalog_hash) AS (
+        VALUES
+          ('historical_stay_arrangement_corrections', '93a1126288413ed253a07c173368206c92ca49d37dbb437c14d1a0fbba218da7'),
+          ('admin_membership_payment_evidence_claims', '0674f8d9d3c380e5ddf15012c8d093628e38e86b1f107060b2a132f73133f4a5'),
+          ('member_profile_corrections', 'ec4f9226ec1011045d87727aad9139eae2ccc0962e31eab7ce25e8edb287e8d0'),
+          ('membership_effective_date_corrections', '034e1bede72f3feed95d34f0e8dc1df3cede4dad8560ffb826c83d17538a08ef'),
+          ('historical_membership_backfills', 'bce1b97d16ed25d13f89892003837eb9d1b2c9c652a355be9a22a99877e08327'),
+          ('membership_payment_reclassifications', '482bc6304c40f1e376f0c38ab34d70efae5ee808f727b0d719f2c00bcadeddde'),
+          ('membership_void_reconversions', '399a095d795db21b457e777c57c7df3fc0254514e16289b1687582b68e2a03ce')
+      ),
+      actual_new_table_catalog AS (
+        SELECT expected.table_name,
+          expected.catalog_hash,
+          encode(sha256(convert_to(jsonb_build_object(
+            'relation', jsonb_build_array(
+              relation_namespace.nspname,
+              relation.relkind,
+              relation.relpersistence,
+              relation.relrowsecurity,
+              relation.relforcerowsecurity,
+              relation.relowner = database_owner.datdba
+            ),
+            'columns', COALESCE((
+              SELECT jsonb_agg(jsonb_build_array(
+                attribute.attnum,
+                attribute.attname,
+                type_namespace.nspname,
+                type_row.typname,
+                format_type(attribute.atttypid, attribute.atttypmod),
+                attribute.attnotnull,
+                CASE
+                  WHEN pg_get_expr(default_value.adbin, default_value.adrelid)
+                    IN ('now()', 'transaction_timestamp()')
+                    THEN '<transaction_timestamp>'
+                  ELSE COALESCE(
+                    pg_get_expr(default_value.adbin, default_value.adrelid),
+                    '<none>'
+                  )
+                END,
+                attribute.attidentity,
+                attribute.attgenerated
+              ) ORDER BY attribute.attnum)
+              FROM pg_attribute AS attribute
+              JOIN pg_type AS type_row ON type_row.oid = attribute.atttypid
+              JOIN pg_namespace AS type_namespace ON type_namespace.oid = type_row.typnamespace
+              LEFT JOIN pg_attrdef AS default_value
+                ON default_value.adrelid = attribute.attrelid
+                AND default_value.adnum = attribute.attnum
+              WHERE attribute.attrelid = relation.oid
+                AND attribute.attnum > 0
+                AND NOT attribute.attisdropped
+            ), '[]'::jsonb),
+            'constraints', COALESCE((
+              SELECT jsonb_agg(jsonb_build_array(
+                constraint_row.conname,
+                constraint_row.contype,
+                constraint_row.condeferrable,
+                constraint_row.condeferred,
+                constraint_row.convalidated,
+                pg_get_constraintdef(constraint_row.oid, false)
+              ) ORDER BY constraint_row.conname)
+              FROM pg_constraint AS constraint_row
+              WHERE constraint_row.conrelid = relation.oid
+                AND constraint_row.contype IN ('p','u','f','c')
+            ), '[]'::jsonb),
+            'indexes', COALESCE((
+              SELECT jsonb_agg(jsonb_build_array(
+                index_relation.relname,
+                index_row.indisunique,
+                index_row.indisprimary,
+                index_row.indimmediate,
+                index_row.indisvalid,
+                index_row.indisready,
+                index_row.indisreplident,
+                index_row.indisclustered,
+                pg_get_indexdef(index_row.indexrelid, 0, false)
+              ) ORDER BY index_relation.relname)
+              FROM pg_index AS index_row
+              JOIN pg_class AS index_relation ON index_relation.oid = index_row.indexrelid
+              WHERE index_row.indrelid = relation.oid
+            ), '[]'::jsonb),
+            'triggers', COALESCE((
+              SELECT jsonb_agg(jsonb_build_array(
+                trigger_row.tgname,
+                trigger_row.tgenabled,
+                trigger_row.tgdeferrable,
+                trigger_row.tginitdeferred,
+                trigger_row.tgnargs,
+                trigger_row.tgtype,
+                trigger_row.tgfoid::regprocedure::text,
+                pg_get_triggerdef(trigger_row.oid, false)
+              ) ORDER BY trigger_row.tgname)
+              FROM pg_trigger AS trigger_row
+              WHERE trigger_row.tgrelid = relation.oid
+                AND NOT trigger_row.tgisinternal
+            ), '[]'::jsonb)
+          )::text, 'UTF8')), 'hex') AS actual_catalog_hash
+        FROM expected_new_table_catalog AS expected
+        CROSS JOIN database_owner
+        LEFT JOIN pg_class AS relation
+          ON relation.oid = to_regclass('public.' || quote_ident(expected.table_name))
+        LEFT JOIN pg_namespace AS relation_namespace
+          ON relation_namespace.oid = relation.relnamespace
+      ),
+      expected_altered_columns(
+        table_name,
+        column_name,
+        type_schema,
+        type_name,
+        formatted_type,
+        not_null,
+        default_expression
+      ) AS (
+        VALUES
+          ('entitlement_lots', 'status', 'pg_catalog', 'text', 'text', true, '''ACTIVE''::text'),
+          ('membership_payment_facts', 'business_date', 'pg_catalog', 'date',
+            'date', true, '<none>')
+      ),
+      expected_altered_constraints(table_name, constraint_name, constraint_type, definition) AS (
+        VALUES
+          ('command_catalog', 'command_catalog_feature_key_check', 'c',
+            'CHECK (((feature_key IS NULL) OR (command_type = ANY (ARRAY[''COMPLETE_CLEANING''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text]))))'),
+          ('subject_command_grants', 'subject_command_grants_human_exact_check', 'c',
+            'CHECK ((command_type = ANY (ARRAY[''CREATE_MEMBER''::text, ''CREATE_MEMBERSHIP_ORDER''::text, ''RECORD_MEMBERSHIP_PAYMENT''::text, ''CORRECT_MEMBERSHIP_PAYMENT''::text, ''ACTIVATE_MEMBERSHIP_ORDER''::text, ''CREATE_ORDER''::text, ''CORRECT_ORDER_OCCUPANT''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''CORRECT_MEMBER_PROFILE''::text, ''CORRECT_MEMBERSHIP_EFFECTIVE_DATE''::text, ''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text, ''RESCHEDULE_STAY''::text, ''EXTEND_STAY''::text, ''SHORTEN_STAY''::text, ''MOVE_UNIT''::text, ''REPRICE_ORDER''::text, ''CANCEL_ORDER''::text, ''MARK_NO_SHOW''::text, ''REVOKE_CHECK_IN''::text, ''LOCK_MAINTENANCE''::text, ''RELEASE_MAINTENANCE''::text, ''COMPLETE_CLEANING''::text, ''RECORD_COLLECTION''::text, ''RECORD_REFUND''::text, ''REVERSE_FACT''::text, ''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text, ''CHECK_IN''::text, ''CHECK_OUT''::text, ''COMPLETE_STAY''::text, ''CORRECT_MEMBER_ENTITLEMENT_BALANCE''::text, ''ISSUE_TOKEN''::text, ''ROTATE_TOKEN''::text, ''REVOKE_TOKEN''::text, ''PLACE_INTERNAL_USE''::text, ''RELEASE_INTERNAL_USE''::text, ''BACKFILL_COMPLETED_STAY''::text])))'),
+          ('membership_orders', 'membership_orders_status_check', 'c',
+            'CHECK ((status = ANY (ARRAY[''DRAFT''::text, ''ACTIVE''::text, ''VOIDED''::text])))'),
+          ('membership_orders', 'membership_orders_lifecycle_state_check', 'c',
+            'CHECK ((((status = ''DRAFT''::text) AND (activated_at IS NULL) AND (valid_from IS NULL) AND (valid_until IS NULL) AND (contract_id IS NULL) AND (entitlement_lot_id IS NULL) AND (activated_by_command_id IS NULL)) OR ((status = ANY (ARRAY[''ACTIVE''::text, ''VOIDED''::text])) AND (activated_at IS NOT NULL) AND (valid_from IS NOT NULL) AND (valid_until IS NOT NULL) AND (contract_id IS NOT NULL) AND (entitlement_lot_id IS NOT NULL) AND (activated_by_command_id IS NOT NULL))))'),
+          ('member_contracts', 'member_contracts_status_check', 'c',
+            'CHECK ((status = ANY (ARRAY[''ACTIVE''::text, ''EXPIRED''::text, ''VOIDED''::text])))'),
+          ('entitlement_lots', 'entitlement_lots_status_check', 'c',
+            'CHECK ((status = ANY (ARRAY[''ACTIVE''::text, ''VOIDED''::text])))'),
+          ('entitlement_ledger', 'entitlement_ledger_entry_type_check', 'c',
+            'CHECK ((entry_type = ANY (ARRAY[''ADJUST''::text, ''HOLD''::text, ''RELEASE''::text, ''CONSUME''::text, ''RESTORE''::text, ''EXPIRE''::text, ''CONVERSION_CONSUME''::text, ''VOID''::text])))')
+      )
+      SELECT
+        NOT EXISTS (
+          SELECT 1
+          FROM actual_new_table_catalog AS actual
+          WHERE actual.actual_catalog_hash IS DISTINCT FROM actual.catalog_hash
+        ) AS new_table_catalog_ready,
+        NOT EXISTS (
+          SELECT 1
+          FROM expected_altered_columns AS expected
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_attribute AS attribute
+            JOIN pg_type AS type_row ON type_row.oid = attribute.atttypid
+            JOIN pg_namespace AS type_namespace ON type_namespace.oid = type_row.typnamespace
+            LEFT JOIN pg_attrdef AS default_value
+              ON default_value.adrelid = attribute.attrelid
+              AND default_value.adnum = attribute.attnum
+            WHERE attribute.attrelid = to_regclass('public.' || quote_ident(expected.table_name))
+              AND attribute.attname = expected.column_name
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+              AND type_namespace.nspname = expected.type_schema
+              AND type_row.typname = expected.type_name
+              AND format_type(attribute.atttypid, attribute.atttypmod) = expected.formatted_type
+              AND attribute.attnotnull = expected.not_null
+              AND CASE
+                WHEN pg_get_expr(default_value.adbin, default_value.adrelid)
+                  IN ('now()', 'transaction_timestamp()')
+                  THEN '<transaction_timestamp>'
+                ELSE COALESCE(pg_get_expr(default_value.adbin, default_value.adrelid), '<none>')
+              END = expected.default_expression
+              AND attribute.attidentity = ''
+              AND attribute.attgenerated = ''
+          )
+        ) AS altered_columns_ready,
+        NOT EXISTS (
+          SELECT 1
+          FROM expected_altered_constraints AS expected
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint AS constraint_row
+            WHERE constraint_row.conrelid = to_regclass('public.' || quote_ident(expected.table_name))
+              AND constraint_row.conname = expected.constraint_name
+              AND constraint_row.contype::text = expected.constraint_type
+              AND NOT constraint_row.condeferrable
+              AND NOT constraint_row.condeferred
+              AND constraint_row.convalidated
+              AND pg_get_constraintdef(constraint_row.oid, false) = expected.definition
+          )
+        ) AS altered_constraints_ready
     `.execute(db);
     const inHouseMembershipFulfillmentObjects = await sql<{
       function_count: string;
@@ -2008,12 +2824,12 @@ export async function databaseReady(
                 ('qintopia_protect_coverage_identity()', 'b8eb365fa29712bfe2c26b9c8dfe17a87bdcd0091b012af88a5bb328b5af0750'),
                 ('qintopia_reject_stage10_entitlement_write()', 'd3450f298724fa9df85d09cc89175acf4d4cccb837963839b61dddbaac22756f'),
                 ('qintopia_validate_entitlement_lifecycle_fact()', 'c03dac8f3f8571b9908fb95929f91fa7ea6386b78af1e19aa7127c54ca65ab35'),
-                ('qintopia_validate_coverage_lifecycle_state()', '5cf2df24f2cbd33405d7289b424c972a37140ddf2418660fbbf70527b0adbc5f'),
+                ('qintopia_validate_coverage_lifecycle_state()', '5442a3840f8204eefb8a465ed5297634add72877de279ff371a8800bbd421596'),
                 ('qintopia_assert_stage11_move_combination(text)', 'c86f1de759ca3cef115c0e96bcffbe80aa9057c377b897088bc8ac286e6f12a3'),
                 ('qintopia_preserve_stage11_consumed_coverage()', '7152466eed2e839a9be9e38464e0fef91d5e615246f21dd372c7d487295dde58'),
-                ('qintopia_validate_conversion_consume_entitlement_fact()', '1e8d4b1b3754ee3c4962c080d6a01d8299f1a7a8f2df89bb22487108c45adefd'),
-                ('qintopia_reject_lodging_funds_after_membership_transfer()', 'bf22eef1c8964fbe29e7bf5054b64b2fa85ce7cb2ae90bbf9e0102412669c3bd'),
-                ('qintopia_reject_membership_funds_after_stay_transfer()', '99e9a57e0f4d7a9f48936eafd26dd809e892bbfc8c76d026a05871ccb23ffc24'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', '10918d3fca13eb15e2b05cf3c661ad8289808589f1698ef04589099194e19b52'),
+                ('qintopia_reject_lodging_funds_after_membership_transfer()', 'db65662dcfcffcde84fb0abc91d54a7a1b2b720b4cd42a8b34375f9499943d5e'),
+                ('qintopia_reject_membership_funds_after_stay_transfer()', '94efb540ae902ad6edf664b72ec170e1ea54fc3459a5e70af01783b0e484ebb6'),
                 ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '9d28e833682d7dd7a62b198b1f49a8760a3ca7b3ee4e916585550034fd5aba35'),
                 ('qintopia_assert_converted_stay_fulfillment_command(text)', '7b22fe62a3610462c82a4a54f95d62e478996454dfc312ff8e90c189dfa222a0'),
                 ('qintopia_validate_converted_stay_fulfillment_execution()', 'ed58ceb0d44795151d23b34912bf90809ca7f2e370b41d9f07b564a71c8404ce'),
@@ -2027,7 +2843,19 @@ export async function databaseReady(
                 AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
                 AND NOT procedure_row.prosecdef
                 AND procedure_row.provolatile = 'v'
-                AND procedure_row.proconfig IS NULL
+                AND (
+                  (expected.signature IN (
+                    'qintopia_validate_conversion_consume_entitlement_fact()',
+                    'qintopia_reject_lodging_funds_after_membership_transfer()',
+                    'qintopia_reject_membership_funds_after_stay_transfer()'
+                  ) AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[])
+                  OR
+                  (expected.signature NOT IN (
+                    'qintopia_validate_conversion_consume_entitlement_fact()',
+                    'qintopia_reject_lodging_funds_after_membership_transfer()',
+                    'qintopia_reject_membership_funds_after_stay_transfer()'
+                  ) AND procedure_row.proconfig IS NULL)
+                )
                 AND procedure_row.prokind = 'f'
               FROM pg_proc AS procedure_row
               WHERE procedure_row.oid = to_regprocedure(expected.signature)
@@ -2036,7 +2864,7 @@ export async function databaseReady(
         ) AS function_bodies_ready
       FROM pg_trigger AS trigger
     `.execute(db);
-    return memberProfileObjects.rows[0]?.columns_ready === true
+    const finalReady = memberProfileObjects.rows[0]?.columns_ready === true
       && memberProfileObjects.rows[0]?.constraints_ready === true
       && memberProfileObjects.rows[0]?.trigger_ready === true
       && memberProfileObjects.rows[0]?.function_body_ready === true
@@ -2089,6 +2917,20 @@ export async function databaseReady(
       && stage13Objects.rows[0]?.membership_order_wrapper_body_ready === true
       && stage13Objects.rows[0]?.trigger_bindings_ready === true
       && stage13Objects.rows[0]?.function_bodies_ready === true
+      && historicalStayArrangementCorrectionObjects.rows[0]?.table_count === "1"
+      && historicalStayArrangementCorrectionObjects.rows[0]?.function_count === "4"
+      && historicalStayArrangementCorrectionObjects.rows[0]?.function_bodies_ready === true
+      && historicalStayArrangementCorrectionObjects.rows[0]?.runtime_privileges_ready === true
+      && historicalStayArrangementCorrectionObjects.rows[0]?.trigger_bindings_ready === true
+      && adminMembershipCorrectionObjects.rows[0]?.table_count === "6"
+      && adminMembershipCorrectionObjects.rows[0]?.index_bindings_ready === true
+      && adminMembershipCorrectionObjects.rows[0]?.function_bodies_ready === true
+      && adminMembershipCorrectionObjects.rows[0]?.security_function_privileges_ready === true
+      && adminMembershipCorrectionObjects.rows[0]?.runtime_table_privileges_ready === true
+      && adminMembershipCorrectionObjects.rows[0]?.trigger_bindings_ready === true
+      && step9CatalogIntegrity.rows[0]?.new_table_catalog_ready === true
+      && step9CatalogIntegrity.rows[0]?.altered_columns_ready === true
+      && step9CatalogIntegrity.rows[0]?.altered_constraints_ready === true
       && inHouseMembershipFulfillmentObjects.rows[0]?.function_count === "15"
       && inHouseMembershipFulfillmentObjects.rows[0]?.index_ready === true
       && inHouseMembershipFulfillmentObjects.rows[0]?.coverage_trigger_count === "2"
@@ -2096,6 +2938,7 @@ export async function databaseReady(
       && inHouseMembershipFulfillmentObjects.rows[0]?.trigger_bindings_ready === true
       && inHouseMembershipFulfillmentObjects.rows[0]?.body_marker_count === "25"
       && inHouseMembershipFulfillmentObjects.rows[0]?.function_bodies_ready === true;
+    return finalReady;
   } catch {
     return false;
   }

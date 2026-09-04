@@ -139,7 +139,7 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   await expect(order).toContainText("已生效");
   await expect(activationSummary).toContainText(`${validFrom} 至 ${nextYear(validFrom)}`);
   await expect(activationSummary).toContainText("已发放 30 间夜");
-  await expect(order.getByTestId("record-membership-payment")).toHaveCount(0);
+  await expect(order.getByTestId("record-membership-payment")).toHaveText("收款");
   await expect(order.getByTestId("activate-membership-order")).toHaveCount(0);
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

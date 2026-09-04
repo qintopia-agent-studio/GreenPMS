@@ -54,6 +54,7 @@ const Note = Type.String({ minLength: 1, maxLength: 1000 });
 const OptionalNote = Type.String({ maxLength: 1000 });
 const SafeInteger = Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER });
 const PositiveAmount = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
+const NonNegativeAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const NonNegativeWholeYuanAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const PositiveWholeYuanAmount = Type.Integer({ minimum: 100, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const MembershipAgreedPriceAmount = Type.Integer({ minimum: 100, maximum: 2_147_483_600, multipleOf: 100 });
@@ -85,6 +86,9 @@ export const CommandGrantSchema = Type.Union([
 const EffectiveCommandCapabilitySchema = Type.Union(humanGrantableCommandTypes
   .filter((commandType) => commandType !== "COMPLETE_CLEANING" || currentReleaseFeatures.cleaningWorkflow)
   .filter((commandType) => commandType !== "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" || currentReleaseFeatures.historicalStayArrangementCorrection)
+  .filter((commandType) => commandType !== "CORRECT_MEMBER_PROFILE" || currentReleaseFeatures.memberProfileCorrection)
+  .filter((commandType) => commandType !== "CORRECT_MEMBERSHIP_EFFECTIVE_DATE" || currentReleaseFeatures.membershipEffectiveDateCorrection)
+  .filter((commandType) => commandType !== "BACKFILL_HISTORICAL_MEMBERSHIP" || currentReleaseFeatures.historicalMembershipBackfill)
   .filter((commandType) => commandType !== "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY" || currentReleaseFeatures.membershipConversionVoidCorrection)
   .map((commandType) => Type.Literal(commandType)));
 const CommandCeilingSchema = Type.Array(HumanGrantableCommandCapabilitySchema, { uniqueItems: true });
@@ -331,6 +335,32 @@ const OrderOccupantCorrectedSnapshotSchema = strictObject({
   phone: nullable(Type.String({ minLength: 1, maxLength: 80 })),
   documentNumber: nullable(Type.String({ minLength: 1, maxLength: 120 }))
 });
+const MemberProfileCorrectionSnapshotSchema = strictObject({
+  fullName: ShortText,
+  nickname: Nickname,
+  identityCardNumber: nullable(ShortText),
+  phone: ShortText,
+  wechat: ShortText
+});
+const HistoricalStayArrangementCorrectionItemSchema = strictObject({
+  orderId: Id,
+  expectedVersion: Type.Integer({ minimum: 1 }),
+  target: strictObject({
+    inventoryUnitId: Id,
+    arrivalDate: LocalDate,
+    departureDate: LocalDate
+  })
+});
+const HistoricalMembershipPaymentInputSchema = strictObject({
+  amountMinor: PositiveAmount,
+  businessDate: LocalDate,
+  transactionReference: ShortText,
+  note: Type.Optional(OptionalNote)
+});
+const ReplacementDirectPaymentInputSchema = strictObject({
+  businessDate: LocalDate,
+  transactionReference: ShortText
+});
 const PropertyInput = { propertyId: Id };
 const OrderInput = { ...PropertyInput, orderId: Id };
 
@@ -386,6 +416,40 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("ACTIVATE_MEMBERSHIP_ORDER", strictObject({
     ...PropertyInput,
     membershipOrderId: Id
+  })),
+  commandEnvelope("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", strictObject({
+    ...PropertyInput,
+    correctionSet: Type.Array(HistoricalStayArrangementCorrectionItemSchema, { minItems: 1, maxItems: 100 }),
+    evidenceNote: Type.Optional(Note)
+  })),
+  commandEnvelope("CORRECT_MEMBER_PROFILE", strictObject({
+    ...PropertyInput,
+    memberId: Id,
+    expectedPriorProfile: MemberProfileCorrectionSnapshotSchema,
+    correctedProfile: MemberProfileCorrectionSnapshotSchema,
+    evidenceNote: Note
+  })),
+  commandEnvelope("CORRECT_MEMBERSHIP_EFFECTIVE_DATE", strictObject({
+    ...PropertyInput,
+    membershipOrderId: Id,
+    actualMembershipDate: LocalDate,
+    evidenceNote: Note
+  })),
+  commandEnvelope("BACKFILL_HISTORICAL_MEMBERSHIP", strictObject({
+    ...PropertyInput,
+    memberId: Id,
+    membershipProductId: Id,
+    actualMembershipDate: LocalDate,
+    payment: HistoricalMembershipPaymentInputSchema,
+    evidenceNote: Note
+  })),
+  commandEnvelope("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", strictObject({
+    ...PropertyInput,
+    erroneousMembershipOrderId: Id,
+    sourceStayOrderId: Id,
+    actualMembershipDate: LocalDate,
+    replacementDirectPayment: Type.Optional(ReplacementDirectPaymentInputSchema),
+    evidenceNote: Note
   })),
   commandEnvelope("CREATE_ORDER", strictObject({
     ...PropertyInput,
@@ -798,6 +862,67 @@ const StayCollectionTransferItemSchema = strictObject({
   recordedAt: DateTime
 });
 
+const AdminMembershipProductEffectSchema = strictObject({
+  productId: Id,
+  code: ShortText,
+  version: Type.Integer({ minimum: 1 }),
+  name: ShortText,
+  listedPrice: Money,
+  agreedPrice: Money,
+  entitlementUnitKind: EntitlementUnitKindSchema,
+  entitlementUnits: Type.Integer({ minimum: 1 }),
+  validityPeriod: Type.Literal("P1Y"),
+  allowedRoomTypeCode: ShortText,
+  allowedInventoryKind: InventoryUnitKindSchema
+});
+
+const AdminMemberProfileChangedFieldSchema = Type.Union([
+  Type.Literal("fullName"),
+  Type.Literal("nickname"),
+  Type.Literal("identityCardNumber"),
+  Type.Literal("phone"),
+  Type.Literal("wechat")
+]);
+const AdminMembershipDirectCollectionSchema = strictObject({
+  factId: Id,
+  amount: Money,
+  transactionReference: ShortText,
+  businessDate: LocalDate
+});
+const AdminMembershipSourceIdentityEvidenceSchema = strictObject({
+  phoneMatched: Type.Boolean(),
+  documentMatched: Type.Boolean()
+});
+
+const HistoricalStayArrangementSnapshotSchema = strictObject({
+  inventoryUnitId: Id,
+  arrivalDate: LocalDate,
+  departureDate: LocalDate,
+  nights: Type.Integer({ minimum: 1, maximum: 366 }),
+  stayTimeline: StayTimelineSchema
+});
+
+const HistoricalStayArrangementOccupantSchema = strictObject({
+  ordinal: Type.Integer({ minimum: 1 }),
+  role: Type.Union([Type.Literal("PRIMARY"), Type.Literal("ADDITIONAL")]),
+  fullName: nullable(ShortText),
+  nickname: nullable(ShortText)
+});
+
+const HistoricalStayArrangementUnchangedSchema = strictObject({
+  orderStatus: Type.Literal("CHECKED_OUT"),
+  stayStatus: Type.Literal("COMPLETED"),
+  stayType: StayTypeSchema,
+  currentRevisionId: Id,
+  currentContractAmountMinor: SafeInteger,
+  currency: Type.String({ minLength: 3, maxLength: 3 }),
+  occupantCount: Type.Integer({ minimum: 1 }),
+  occupants: Type.Array(HistoricalStayArrangementOccupantSchema, { minItems: 1 }),
+  collectionFactCount: Type.Integer({ minimum: 0 }),
+  netRecordedCollectionMinor: SafeInteger,
+  collectionDifferenceMinor: SafeInteger
+});
+
 export const CommandEffectSchema = Type.Union([
   strictObject({
     operation: Type.Literal("CREATE_MEMBER_PROFILE"),
@@ -837,9 +962,14 @@ export const CommandEffectSchema = Type.Union([
     membershipOrderId: Id,
     memberName: ShortText,
     productName: ShortText,
-    payment: strictObject({ amount: Money, transactionReference: ShortText, note: OptionalNote }),
-    totals: strictObject({ before: Money, after: Money, agreedPrice: Money, differenceAfter: Money }),
-    status: Type.Literal("DRAFT")
+    payment: strictObject({ amount: Money, businessDate: LocalDate, transactionReference: ShortText, note: OptionalNote }),
+    totals: strictObject({
+      agreedPrice: Money,
+      previouslyCollected: Money,
+      currentCollection: Money,
+      differenceAfter: Money
+    }),
+    status: Type.Union([Type.Literal("DRAFT"), Type.Literal("ACTIVE")])
   }),
   strictObject({
     operation: Type.Literal("CORRECT_MEMBERSHIP_PAYMENT"),
@@ -847,8 +977,8 @@ export const CommandEffectSchema = Type.Union([
     memberName: ShortText,
     productName: ShortText,
     originalPaymentFactId: Id,
-    original: strictObject({ amount: Money, transactionReference: ShortText }),
-    replacement: strictObject({ amount: Money, transactionReference: ShortText, note: OptionalNote }),
+    original: strictObject({ amount: Money, businessDate: LocalDate, transactionReference: ShortText }),
+    replacement: strictObject({ amount: Money, businessDate: LocalDate, transactionReference: ShortText, note: OptionalNote }),
     totals: strictObject({ before: Money, after: Money, agreedPrice: Money, differenceAfter: Money }),
     status: Type.Literal("DRAFT")
   }),
@@ -866,6 +996,121 @@ export const CommandEffectSchema = Type.Union([
     entitlementUnits: Type.Integer({ minimum: 1 }),
     fromStatus: Type.Literal("DRAFT"),
     toStatus: Type.Literal("ACTIVE")
+  }),
+  strictObject({
+    operation: Type.Literal("CORRECT_MEMBER_PROFILE"),
+    memberId: Id,
+    before: MemberProfileCorrectionSnapshotSchema,
+    after: MemberProfileCorrectionSnapshotSchema,
+    changedFields: Type.Array(AdminMemberProfileChangedFieldSchema, { minItems: 1, maxItems: 5, uniqueItems: true }),
+    evidenceNote: Note
+  }),
+  strictObject({
+    operation: Type.Literal("CORRECT_HISTORICAL_STAY_ARRANGEMENTS"),
+    corrections: Type.Array(strictObject({
+      orderId: Id,
+      stayId: Id,
+      expectedVersion: Type.Integer({ minimum: 1 }),
+      before: HistoricalStayArrangementSnapshotSchema,
+      after: HistoricalStayArrangementSnapshotSchema,
+      unchanged: HistoricalStayArrangementUnchangedSchema
+    }), { minItems: 1, maxItems: 100 })
+  }),
+  strictObject({
+    operation: Type.Literal("CORRECT_MEMBERSHIP_EFFECTIVE_DATE"),
+    propertyToday: LocalDate,
+    memberId: Id,
+    membershipOrderId: Id,
+    contractId: Id,
+    entitlementLotId: Id,
+    evidenceNote: Note,
+    before: strictObject({
+      validFrom: LocalDate,
+      validUntil: LocalDate,
+      status: Type.Literal("ACTIVE")
+    }),
+    after: strictObject({
+      validFrom: LocalDate,
+      validUntil: LocalDate,
+      status: Type.Literal("ACTIVE")
+    }),
+    unchanged: strictObject({
+      memberId: Id,
+      productName: ShortText,
+      agreedPrice: Money,
+      entitlementUnitKind: EntitlementUnitKindSchema,
+      entitlementUnits: Type.Integer({ minimum: 1 }),
+      usedUnits: Type.Integer({ minimum: 0 }),
+      availableBalance: strictObject({
+        ROOM_NIGHT: Type.Integer({ minimum: 0 }),
+        BED_NIGHT: Type.Integer({ minimum: 0 })
+      }),
+      paymentFactCount: Type.Integer({ minimum: 0 }),
+      lifecycleStatus: Type.Literal("ACTIVE")
+    })
+  }),
+  strictObject({
+    operation: Type.Literal("BACKFILL_HISTORICAL_MEMBERSHIP"),
+    evidenceNote: Note,
+    member: strictObject({ memberId: Id, fullName: ShortText }),
+    product: AdminMembershipProductEffectSchema,
+    payment: strictObject({
+      amount: Money,
+      businessDate: LocalDate,
+      transactionReference: ShortText,
+      note: OptionalNote
+    }),
+    validFrom: LocalDate,
+    validUntil: LocalDate,
+    entitlementUnitKind: EntitlementUnitKindSchema,
+    entitlementUnits: Type.Integer({ minimum: 1 }),
+    status: Type.Literal("ACTIVE")
+  }),
+  strictObject({
+    operation: Type.Literal("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"),
+    evidenceNote: Note,
+    member: strictObject({ memberId: Id, fullName: ShortText }),
+    oldMembership: strictObject({
+      membershipOrderId: Id,
+      contractId: Id,
+      entitlementLotId: Id,
+      productId: Id,
+      status: Type.Literal("ACTIVE"),
+      directCollections: Type.Array(AdminMembershipDirectCollectionSchema, { minItems: 1 })
+    }),
+    sourceStay: strictObject({
+      orderId: Id,
+      stayId: Id,
+      arrivalDate: LocalDate,
+      departureDate: LocalDate,
+      serviceDates: Type.Array(LocalDate, { minItems: 1 }),
+      identityEvidence: AdminMembershipSourceIdentityEvidenceSchema
+    }),
+    funds: strictObject({
+      oldDirectCollectionTotal: Money,
+      oldReversalTotal: Money,
+      stayTransferTotal: Money,
+      replacementDirectPayment: nullable(strictObject({
+        amount: Money,
+        businessDate: LocalDate,
+        transactionReference: ShortText
+      })),
+      membershipAgreedPrice: Money,
+      reclassificationOnly: Type.Literal(true)
+    }),
+    newMembership: strictObject({
+      productId: Id,
+      productName: ShortText,
+      validFrom: LocalDate,
+      validUntil: LocalDate
+    }),
+    entitlement: strictObject({
+      unitKind: EntitlementUnitKindSchema,
+      totalUnits: Type.Integer({ minimum: 1 }),
+      consumedUnits: Type.Integer({ minimum: 1 }),
+      remainingUnits: Type.Integer({ minimum: 0 }),
+      serviceDates: Type.Array(LocalDate, { minItems: 1 })
+    })
   }),
   strictObject({
     quoteId: Id,
@@ -1617,7 +1862,7 @@ const MembershipOrderCreatedResultSchema = strictObject({
 const MembershipPaymentRecordedResultSchema = strictObject({
   membershipOrderId: Id,
   paymentFactId: Id,
-  status: Type.Literal("DRAFT")
+  status: Type.Union([Type.Literal("DRAFT"), Type.Literal("ACTIVE")])
 });
 const MembershipPaymentCorrectedResultSchema = strictObject({
   membershipOrderId: Id,
@@ -1659,6 +1904,187 @@ const StayCollectionMembershipConversionResultSchema = strictObject({
   remainingUnits: Type.Integer({ minimum: 0 }),
   effectHash: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }))
 });
+const AdminCorrectionReceiptActorSchema = strictObject({
+  subjectId: Id,
+  displayName: ShortText
+});
+const AdminCorrectionReceiptAuditFields = {
+  reason: CommandReasonSchema,
+  evidenceNote: Note,
+  actor: AdminCorrectionReceiptActorSchema,
+  recordedAt: DateTime
+};
+const HistoricalStayArrangementCorrectionResultSchema = strictObject({
+  operation: Type.Literal("CORRECT_HISTORICAL_STAY_ARRANGEMENTS"),
+  correctionSetHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  corrections: Type.Array(strictObject({
+    orderId: Id,
+    stayId: Id,
+    correctionId: Id,
+    amendmentId: Id,
+    staySegmentId: Id,
+    pricingRevisionId: Id,
+    claimIds: Type.Array(Id),
+    before: HistoricalStayArrangementSnapshotSchema,
+    after: HistoricalStayArrangementSnapshotSchema,
+    unchanged: HistoricalStayArrangementUnchangedSchema
+  }), { minItems: 1, maxItems: 100 }),
+  reason: CommandReasonSchema,
+  evidenceNote: Type.Optional(Note),
+  actor: AdminCorrectionReceiptActorSchema,
+  recordedAt: DateTime,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+});
+const MemberProfileCorrectedResultSchema = strictObject({
+  memberId: Id,
+  correctionId: Id,
+  changedFields: Type.Array(AdminMemberProfileChangedFieldSchema, { minItems: 1, maxItems: 5, uniqueItems: true }),
+  before: MemberProfileCorrectionSnapshotSchema,
+  after: MemberProfileCorrectionSnapshotSchema,
+  ...AdminCorrectionReceiptAuditFields,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+});
+const MembershipEffectiveDateCorrectedResultSchema = strictObject({
+  memberId: Id,
+  membershipOrderId: Id,
+  contractId: Id,
+  entitlementLotId: Id,
+  correctionId: Id,
+  validFrom: LocalDate,
+  validUntil: LocalDate,
+  status: Type.Literal("ACTIVE"),
+  before: strictObject({
+    validFrom: LocalDate,
+    validUntil: LocalDate,
+    status: Type.Literal("ACTIVE")
+  }),
+  after: strictObject({
+    validFrom: LocalDate,
+    validUntil: LocalDate,
+    status: Type.Literal("ACTIVE")
+  }),
+  unchanged: strictObject({
+    memberId: Id,
+    productName: ShortText,
+    agreedPrice: Money,
+    entitlementUnitKind: EntitlementUnitKindSchema,
+    entitlementUnits: Type.Integer({ minimum: 1 }),
+    usedUnits: Type.Integer({ minimum: 0 }),
+    availableBalance: strictObject({
+      ROOM_NIGHT: Type.Integer({ minimum: 0 }),
+      BED_NIGHT: Type.Integer({ minimum: 0 })
+    }),
+    paymentFactCount: Type.Integer({ minimum: 0 }),
+    lifecycleStatus: Type.Literal("ACTIVE")
+  }),
+  ...AdminCorrectionReceiptAuditFields,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+});
+const HistoricalMembershipBackfilledResultSchema = strictObject({
+  memberId: Id,
+  membershipOrderId: Id,
+  paymentFactId: Id,
+  contractId: Id,
+  entitlementLotId: Id,
+  backfillId: Id,
+  status: Type.Literal("ACTIVE"),
+  validFrom: LocalDate,
+  validUntil: LocalDate,
+  entitlementUnitKind: EntitlementUnitKindSchema,
+  entitlementUnits: Type.Integer({ minimum: 1 }),
+  member: strictObject({ memberId: Id, fullName: ShortText }),
+  product: AdminMembershipProductEffectSchema,
+  payment: strictObject({
+    amount: Money,
+    businessDate: LocalDate,
+    transactionReference: ShortText,
+    note: Type.Optional(OptionalNote)
+  }),
+  ...AdminCorrectionReceiptAuditFields,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+});
+const MembershipVoidReconvertedResultSchema = strictObject({
+  memberId: Id,
+  voidReconversionId: Id,
+  member: strictObject({ memberId: Id, fullName: ShortText }),
+  oldMembership: strictObject({
+    membershipOrderId: Id,
+    contractId: Id,
+    entitlementLotId: Id,
+    productId: Id,
+    status: Type.Literal("ACTIVE"),
+    directCollections: Type.Array(AdminMembershipDirectCollectionSchema, { minItems: 1 })
+  }),
+  oldMembershipOrderId: Id,
+  oldContractId: Id,
+  oldEntitlementLotId: Id,
+  oldStatus: Type.Literal("VOIDED"),
+  sourceStayOrderId: Id,
+  sourceStayId: Id,
+  sourceStay: strictObject({
+    orderId: Id,
+    stayId: Id,
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    serviceDates: Type.Array(LocalDate, { minItems: 1 }),
+    identityEvidence: AdminMembershipSourceIdentityEvidenceSchema
+  }),
+  amendmentId: Id,
+  pricingRevisionId: Id,
+  membershipOrderId: Id,
+  status: Type.Literal("ACTIVE"),
+  contractId: Id,
+  entitlementLotId: Id,
+  oldDirectCollectionTotal: Money,
+  transferredAmount: Money,
+  replacementDirectPaymentAmount: NonNegativeMoney,
+  membershipAgreedPrice: Money,
+  funds: strictObject({
+    oldDirectCollectionTotal: Money,
+    oldReversalTotal: Money,
+    stayTransferTotal: Money,
+    replacementDirectPayment: nullable(strictObject({
+      amount: Money,
+      businessDate: LocalDate,
+      transactionReference: ShortText
+    })),
+    membershipAgreedPrice: Money,
+    reclassificationOnly: Type.Literal(true)
+  }),
+  validFrom: LocalDate,
+  validUntil: LocalDate,
+  newMembership: strictObject({
+    productId: Id,
+    productName: ShortText,
+    validFrom: LocalDate,
+    validUntil: LocalDate,
+    membershipOrderId: Id,
+    contractId: Id,
+    entitlementLotId: Id
+  }),
+  entitlementUnitKind: EntitlementUnitKindSchema,
+  convertedUnits: Type.Integer({ minimum: 1 }),
+  remainingUnits: Type.Integer({ minimum: 0 }),
+  entitlement: strictObject({
+    unitKind: EntitlementUnitKindSchema,
+    totalUnits: Type.Integer({ minimum: 1 }),
+    consumedUnits: Type.Integer({ minimum: 1 }),
+    remainingUnits: Type.Integer({ minimum: 0 }),
+    serviceDates: Type.Array(LocalDate, { minItems: 1 })
+  }),
+  serviceDates: Type.Array(LocalDate, { minItems: 1 }),
+  sourceCollectionFactIds: Type.Array(Id, { minItems: 1 }),
+  oldPaymentReversalFactIds: Type.Array(Id, { minItems: 1 }),
+  paymentReclassificationFactIds: Type.Array(Id, { minItems: 1 }),
+  sourceReversalFactIds: Type.Array(Id, { minItems: 1 }),
+  transferPaymentFactIds: Type.Array(Id, { minItems: 1 }),
+  replacementPaymentFactId: nullable(Id),
+  transferIds: Type.Array(Id, { minItems: 1 }),
+  voidLedgerFactId: Id,
+  conversionLedgerFactIds: Type.Array(Id, { minItems: 1 }),
+  ...AdminCorrectionReceiptAuditFields,
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+});
 
 export const ExecutedCommandResultSchema = Type.Union([
   QuoteReceiptResultSchema,
@@ -1668,6 +2094,11 @@ export const ExecutedCommandResultSchema = Type.Union([
   MembershipPaymentCorrectedResultSchema,
   MembershipOrderActivatedResultSchema,
   StayCollectionMembershipConversionResultSchema,
+  HistoricalStayArrangementCorrectionResultSchema,
+  MemberProfileCorrectedResultSchema,
+  MembershipEffectiveDateCorrectedResultSchema,
+  HistoricalMembershipBackfilledResultSchema,
+  MembershipVoidReconvertedResultSchema,
   CreateOrderResultSchema,
   CorrectOrderOccupantResultSchema,
   MaintenanceLockResultSchema,
@@ -2202,7 +2633,7 @@ const PricingPolicyRowSchema = strictObject({
 });
 const MemberContractRowSchema = strictObject({
   id: Id, property_id: Id, member_id: nullable(Id), member_name: ShortText,
-  status: Type.Union([Type.Literal("ACTIVE"), Type.Literal("EXPIRED")]),
+  status: Type.Union([Type.Literal("ACTIVE"), Type.Literal("EXPIRED"), Type.Literal("VOIDED")]),
   valid_from: LocalDate, valid_until: LocalDate, version: Type.Integer({ minimum: 1 }), created_at: DateTime
 });
 const MemberRowSchema = strictObject({
@@ -2433,6 +2864,28 @@ const CurrentAmendmentRowSchema = strictObject({
   amendment_type: CommandTypeSchema,
   payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema])
 });
+const HistoricalStayArrangementCorrectionAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("CORRECT_HISTORICAL_STAY_ARRANGEMENT"),
+  payload: strictObject({
+    operation: Type.Literal("CORRECT_HISTORICAL_STAY_ARRANGEMENT"),
+    commandType: Type.Literal("CORRECT_HISTORICAL_STAY_ARRANGEMENTS"),
+    orderId: Id,
+    stayId: Id,
+    expectedVersion: Type.Integer({ minimum: 1 }),
+    correctionSetHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+    before: HistoricalStayArrangementSnapshotSchema,
+    after: strictObject({
+      ...HistoricalStayArrangementSnapshotSchema.properties,
+      pricing: strictObject({
+        coverageSet: Type.Array(CoverageItem),
+        cashLines: Type.Array(CashLine),
+        currentContractAmount: Money
+      })
+    }),
+    unchanged: HistoricalStayArrangementUnchangedSchema
+  })
+});
 const BackfillCheckInAmendmentRowSchema = strictObject({
   ...AmendmentRowBase,
   amendment_type: Type.Literal("CHECK_IN"),
@@ -2498,6 +2951,7 @@ const AmendmentRowSchema = Type.Union([
   BackfillCheckInAmendmentRowSchema,
   BackfillCheckOutAmendmentRowSchema,
   CurrentAmendmentRowSchema,
+  HistoricalStayArrangementCorrectionAmendmentRowSchema,
   LegacyStayChangeAmendmentRowSchema,
   LegacyShortenAmendmentRowSchema,
   LegacyMoveAmendmentRowSchema,
@@ -2572,6 +3026,23 @@ const OrderEffectiveArrangementSchema = strictObject({
   presentation: Type.Union(orderEffectiveArrangementPresentations.map((presentation) => Type.Literal(presentation))),
   businessDate: LocalDate
 });
+const OrderHistoricalStayCorrectionGroupSchema = strictObject({
+  correctionSetHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  corrections: Type.Array(strictObject({
+    orderId: Id,
+    stayId: Id,
+    correctionId: Id,
+    amendmentId: Id,
+    staySegmentId: Id,
+    pricingRevisionId: Id,
+    before: HistoricalStayArrangementSnapshotSchema,
+    after: HistoricalStayArrangementSnapshotSchema
+  }), { minItems: 1, maxItems: 100 }),
+  reason: RecordedCommandReasonSchema,
+  evidenceNote: Type.Optional(Note),
+  actor: strictObject({ subjectId: Id, displayName: ShortText }),
+  recordedAt: DateTime
+});
 const OrderArrangementHistoryItemSchema = strictObject({
   type: Type.Union(orderArrangementChangeTypes.map((type) => Type.Literal(type))),
   before: nullable(OrderArrangementSchema),
@@ -2589,7 +3060,8 @@ const OrderArrangementHistoryItemSchema = strictObject({
     collectionDifference: Money,
     refundReferenceAmount: NonNegativeMoney,
     factCount: Type.Integer({ minimum: 0 })
-  })
+  }),
+  correctionGroup: Type.Optional(OrderHistoricalStayCorrectionGroupSchema)
 });
 export const CollectionFactRowSchema = strictObject({
   fact_id: Id, order_id: Id,
@@ -2655,7 +3127,8 @@ export const OrderDetailResponseSchema = strictObject({
 
 const EntitlementLotRowSchema = strictObject({
   id: Id, contract_id: Id, unit_kind: EntitlementUnitKindSchema, total_units: Type.Integer({ minimum: 0 }),
-  expires_on: LocalDate, version: Type.Integer({ minimum: 1 }), created_at: DateTime
+  expires_on: LocalDate, status: Type.Union([Type.Literal("ACTIVE"), Type.Literal("VOIDED")]),
+  version: Type.Integer({ minimum: 1 }), created_at: DateTime
 });
 const MemberExternalReferenceRowSchema = strictObject({
   id: Id,
@@ -2691,9 +3164,10 @@ const MembershipOrderRowSchema = strictObject({
   currency: Type.String({ minLength: 3, maxLength: 3 }),
   entitlement_unit_kind: EntitlementUnitKindSchema,
   entitlement_units: Type.Integer({ minimum: 1 }),
+  validity_period: Type.Literal("P1Y"),
   allowed_room_type_code: ShortText,
   allowed_inventory_kind: InventoryUnitKindSchema,
-  status: Type.Union([Type.Literal("DRAFT"), Type.Literal("ACTIVE")]),
+  status: Type.Union([Type.Literal("DRAFT"), Type.Literal("ACTIVE"), Type.Literal("VOIDED")]),
   activated_at: nullable(DateTime),
   valid_from: nullable(LocalDate),
   valid_until: nullable(LocalDate),
@@ -2720,6 +3194,7 @@ const MembershipPaymentFactRowSchema = strictObject({
   source_collection_fact_id: nullable(Id),
   note: OptionalNote,
   command_id: Id,
+  business_date: LocalDate,
   created_at: DateTime
 });
 const MembershipOrderSummarySchema = strictObject({
@@ -2727,6 +3202,125 @@ const MembershipOrderSummarySchema = strictObject({
   paymentFacts: Type.Array(MembershipPaymentFactRowSchema),
   paymentTotalMinor: SafeInteger,
   paymentDifferenceMinor: SafeInteger
+});
+const MemberCorrectionActorSchema = AdminCorrectionReceiptActorSchema;
+const MaskedMemberProfileHistoryValueSchema = Type.String({ minLength: 3, maxLength: 200, pattern: "\\*{3,}" });
+const MemberProfileCorrectionRowSchema = strictObject({
+  id: Id,
+  property_id: Id,
+  member_id: Id,
+  sequence: Type.Integer({ minimum: 1 }),
+  prior_full_name: ShortText,
+  prior_nickname: ShortText,
+  prior_identity_card_number: nullable(MaskedMemberProfileHistoryValueSchema),
+  prior_phone: MaskedMemberProfileHistoryValueSchema,
+  prior_wechat: MaskedMemberProfileHistoryValueSchema,
+  corrected_full_name: ShortText,
+  corrected_nickname: ShortText,
+  corrected_identity_card_number: nullable(MaskedMemberProfileHistoryValueSchema),
+  corrected_phone: MaskedMemberProfileHistoryValueSchema,
+  corrected_wechat: MaskedMemberProfileHistoryValueSchema,
+  changed_fields: Type.Array(AdminMemberProfileChangedFieldSchema, { minItems: 1, maxItems: 5, uniqueItems: true }),
+  evidence_note: Note,
+  command_id: Id,
+  created_at: DateTime,
+  actor: MemberCorrectionActorSchema
+});
+const MembershipEffectiveDateCorrectionRowSchema = strictObject({
+  id: Id,
+  property_id: Id,
+  member_id: Id,
+  membership_order_id: Id,
+  contract_id: Id,
+  entitlement_lot_id: Id,
+  sequence: Type.Integer({ minimum: 1 }),
+  prior_valid_from: LocalDate,
+  prior_valid_until: LocalDate,
+  corrected_valid_from: LocalDate,
+  corrected_valid_until: LocalDate,
+  prior_order_version: Type.Integer({ minimum: 1 }),
+  prior_contract_version: Type.Integer({ minimum: 1 }),
+  prior_lot_version: Type.Integer({ minimum: 1 }),
+  evidence_note: Note,
+  command_id: Id,
+  created_at: DateTime,
+  actor: MemberCorrectionActorSchema
+});
+const HistoricalMembershipBackfillRowSchema = strictObject({
+  id: Id,
+  property_id: Id,
+  member_id: Id,
+  membership_order_id: Id,
+  contract_id: Id,
+  entitlement_lot_id: Id,
+  payment_fact_id: Id,
+  product_id: Id,
+  product_code: ShortText,
+  product_version: Type.Integer({ minimum: 1 }),
+  product_name: ShortText,
+  listed_price_minor: NonNegativeWholeYuanAmount,
+  agreed_price_minor: NonNegativeWholeYuanAmount,
+  currency: Type.String({ minLength: 3, maxLength: 3 }),
+  entitlement_unit_kind: EntitlementUnitKindSchema,
+  entitlement_units: Type.Integer({ minimum: 1 }),
+  validity_period: Type.Literal("P1Y"),
+  allowed_room_type_code: ShortText,
+  allowed_inventory_kind: InventoryUnitKindSchema,
+  actual_membership_date: LocalDate,
+  valid_until: LocalDate,
+  business_date: LocalDate,
+  transaction_reference: ShortText,
+  evidence_note: Note,
+  command_id: Id,
+  created_at: DateTime,
+  actor: MemberCorrectionActorSchema
+});
+const MembershipPaymentReclassificationRowSchema = strictObject({
+  id: Id,
+  property_id: Id,
+  member_id: Id,
+  old_membership_order_id: Id,
+  old_payment_fact_id: Id,
+  old_reversal_fact_id: Id,
+  new_membership_order_id: Id,
+  new_payment_fact_id: nullable(Id),
+  amount_minor: PositiveAmount,
+  currency: Type.String({ minLength: 3, maxLength: 3 }),
+  evidence_note: Note,
+  command_id: Id,
+  created_at: DateTime,
+  actor: MemberCorrectionActorSchema
+});
+const MembershipVoidReconversionRowSchema = strictObject({
+  id: Id,
+  property_id: Id,
+  member_id: Id,
+  old_membership_order_id: Id,
+  old_contract_id: Id,
+  old_entitlement_lot_id: Id,
+  prior_old_order_version: Type.Integer({ minimum: 1 }),
+  prior_old_contract_version: Type.Integer({ minimum: 1 }),
+  prior_old_lot_version: Type.Integer({ minimum: 1 }),
+  source_order_id: Id,
+  source_stay_id: Id,
+  prior_source_order_version: Type.Integer({ minimum: 1 }),
+  new_membership_order_id: Id,
+  new_contract_id: Id,
+  new_entitlement_lot_id: Id,
+  replacement_payment_fact_id: nullable(Id),
+  replacement_business_date: nullable(LocalDate),
+  replacement_transaction_reference: nullable(ShortText),
+  actual_membership_date: LocalDate,
+  valid_until: LocalDate,
+  old_direct_collection_total_minor: NonNegativeAmount,
+  stay_transfer_total_minor: PositiveAmount,
+  membership_agreed_price_minor: PositiveAmount,
+  currency: Type.String({ minLength: 3, maxLength: 3 }),
+  service_dates: Type.Array(LocalDate, { minItems: 1 }),
+  evidence_note: Note,
+  command_id: Id,
+  created_at: DateTime,
+  actor: MemberCorrectionActorSchema
 });
 const MemberSummarySchema = strictObject({
   member: MemberRowSchema
@@ -2745,6 +3339,7 @@ export const EntitlementLedgerRowSchema = strictObject({
     Type.Literal("CONSUME"),
     Type.Literal("RESTORE"),
     Type.Literal("EXPIRE"),
+    Type.Literal("VOID"),
     Type.Literal("CONVERSION_CONSUME")
   ]),
   quantity_delta: SafeInteger, service_date: nullable(LocalDate), order_id: nullable(Id), coverage_id: nullable(Id),
@@ -2760,7 +3355,12 @@ export const MemberResponseSchema = strictObject({
   availableBalance: MemberAvailableBalanceSchema,
   balanceAsOfDate: LocalDate,
   membershipProducts: Type.Array(MembershipProductRowSchema),
-  membershipOrders: Type.Array(MembershipOrderSummarySchema)
+  membershipOrders: Type.Array(MembershipOrderSummarySchema),
+  profileCorrections: Type.Array(MemberProfileCorrectionRowSchema),
+  effectiveDateCorrections: Type.Array(MembershipEffectiveDateCorrectionRowSchema),
+  historicalMembershipBackfills: Type.Array(HistoricalMembershipBackfillRowSchema),
+  paymentReclassifications: Type.Array(MembershipPaymentReclassificationRowSchema),
+  voidReconversions: Type.Array(MembershipVoidReconversionRowSchema)
 });
 
 const CollectionFactResponseSchema = strictObject({

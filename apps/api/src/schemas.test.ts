@@ -7,9 +7,11 @@ import {
   CommandEnvelopeSchema,
   CommandEffectSchema,
   CompleteStayResultSchema,
+  EntitlementLedgerRowSchema,
   ExecutedCommandResultSchema,
   HistoricalReceiptReadSchema,
   HistoricalStoredPreviewResponseSchema,
+  MemberResponseSchema,
   MeResponseSchema,
   OrdersListResponseSchema,
   ReceiptSchema,
@@ -40,6 +42,178 @@ const protocolPricingDecision = {
   differenceExceedsThreshold: false,
   reason: { code: "MEMBER_ENTITLEMENT", note: "" }
 };
+
+describe("member entitlement ledger response", () => {
+  const row = {
+    fact_id: "fact_void",
+    lot_id: "lot_void",
+    entry_type: "VOID",
+    quantity_delta: -30,
+    service_date: null,
+    order_id: null,
+    coverage_id: null,
+    reason: "错误会员链作废",
+    command_id: "command_void",
+    created_at: "2026-09-02T08:00:00.000Z"
+  };
+
+  it("accepts a typed erroneous-membership VOID fact without treating it as expiry", () => {
+    expect(Value.Check(EntitlementLedgerRowSchema, row)).toBe(true);
+    expect(Value.Check(EntitlementLedgerRowSchema, { ...row, entry_type: "UNKNOWN" })).toBe(false);
+  });
+});
+
+describe("member detail response privacy boundary", () => {
+  const currentMember = {
+    id: "member_current",
+    identity_card_number: "510000199001010022",
+    nickname: "晶晶",
+    full_name: "王晶晶",
+    phone: "13900000002",
+    wechat: "jingjing-current",
+    created_at: "2026-09-03T08:00:00.000Z"
+  };
+  const maskedResponse = {
+    member: currentMember,
+    contracts: [],
+    lots: [],
+    ledger: [],
+    externalReferences: [],
+    lotBalances: [],
+    availableBalance: { ROOM_NIGHT: 0, BED_NIGHT: 0 },
+    balanceAsOfDate: "2026-09-03",
+    membershipProducts: [],
+    membershipOrders: [],
+    profileCorrections: [{
+      id: "profile_correction_1",
+      property_id: "property_green",
+      member_id: currentMember.id,
+      sequence: 1,
+      prior_full_name: "王晶晶",
+      prior_nickname: "晶晶旧昵称",
+      prior_identity_card_number: "**************0011",
+      prior_phone: "138****0001",
+      prior_wechat: "j***ld",
+      corrected_full_name: "王晶晶",
+      corrected_nickname: "晶晶",
+      corrected_identity_card_number: "**************0022",
+      corrected_phone: "139****0002",
+      corrected_wechat: "j***nt",
+      changed_fields: ["nickname", "identityCardNumber", "phone", "wechat"],
+      evidence_note: "纸质资料与本人确认一致",
+      command_id: "command_profile_correction",
+      created_at: "2026-09-03T08:30:00.000Z",
+      actor: { subjectId: "subject_admin", displayName: "运营管理员" }
+    }],
+    effectiveDateCorrections: [],
+    historicalMembershipBackfills: [{
+      id: "historical_membership_backfill_1",
+      property_id: "property_green",
+      member_id: currentMember.id,
+      membership_order_id: "membership_order_backfill_1",
+      contract_id: "contract_backfill_1",
+      entitlement_lot_id: "lot_backfill_1",
+      payment_fact_id: "payment_backfill_1",
+      product_id: "membership_product_shared_quad_v1",
+      product_code: "MEMBER-SHARED-QUAD",
+      product_version: 1,
+      product_name: "公卫四人间会员",
+      listed_price_minor: 93_600,
+      agreed_price_minor: 93_600,
+      currency: "CNY",
+      entitlement_unit_kind: "BED_NIGHT",
+      entitlement_units: 30,
+      validity_period: "P1Y",
+      allowed_room_type_code: "shared_bath_quad",
+      allowed_inventory_kind: "BED",
+      actual_membership_date: "2026-08-10",
+      valid_until: "2027-08-10",
+      business_date: "2026-08-12",
+      transaction_reference: "WECOM-HISTORY-001",
+      evidence_note: "企微账单与合同已核对",
+      command_id: "command_backfill_1",
+      created_at: "2026-09-03T08:35:00.000Z",
+      actor: { subjectId: "subject_admin", displayName: "运营管理员" }
+    }],
+    paymentReclassifications: [],
+    voidReconversions: []
+  };
+
+  it("accepts only masked sensitive correction history while preserving the current member and non-sensitive audit fields", () => {
+    expect(Value.Check(MemberResponseSchema, maskedResponse)).toBe(true);
+    expect(maskedResponse.member).toEqual(currentMember);
+    expect(maskedResponse.profileCorrections[0]).toMatchObject({
+      prior_full_name: "王晶晶",
+      prior_nickname: "晶晶旧昵称",
+      evidence_note: "纸质资料与本人确认一致"
+    });
+    expect(maskedResponse.historicalMembershipBackfills[0]).toMatchObject({ validity_period: "P1Y" });
+
+    expect(Value.Check(MemberResponseSchema, {
+      ...maskedResponse,
+      historicalMembershipBackfills: maskedResponse.historicalMembershipBackfills.map(({ validity_period: _validityPeriod, ...row }) => row)
+    })).toBe(false);
+
+    const correctionHistoryBody = JSON.stringify(maskedResponse.profileCorrections);
+    for (const original of [
+      "510000199001010011",
+      "13800000001",
+      "jingjing-old",
+      "510000199001010022",
+      "13900000002",
+      "jingjing-current"
+    ]) {
+      expect(correctionHistoryBody).not.toContain(original);
+    }
+  });
+
+  it("rejects an API response that exposes an unmasked historical sensitive value", () => {
+    expect(Value.Check(MemberResponseSchema, {
+      ...maskedResponse,
+      profileCorrections: [{
+        ...maskedResponse.profileCorrections[0],
+        prior_phone: "13800000001"
+      }]
+    })).toBe(false);
+  });
+
+  it("accepts cent-precision void-reconversion history with its actual currency", () => {
+    expect(Value.Check(MemberResponseSchema, {
+      ...maskedResponse,
+      voidReconversions: [{
+        id: "void_reconversion_fractional",
+        property_id: "property_green",
+        member_id: currentMember.id,
+        old_membership_order_id: "membership_order_old",
+        old_contract_id: "contract_old",
+        old_entitlement_lot_id: "lot_old",
+        prior_old_order_version: 2,
+        prior_old_contract_version: 1,
+        prior_old_lot_version: 1,
+        source_order_id: "order_source",
+        source_stay_id: "stay_source",
+        prior_source_order_version: 3,
+        new_membership_order_id: "membership_order_new",
+        new_contract_id: "contract_new",
+        new_entitlement_lot_id: "lot_new",
+        replacement_payment_fact_id: "payment_replacement",
+        replacement_business_date: "2026-08-09",
+        replacement_transaction_reference: "WECOM-DIFFERENCE-001",
+        actual_membership_date: "2026-08-10",
+        valid_until: "2027-08-10",
+        old_direct_collection_total_minor: 93_650,
+        stay_transfer_total_minor: 20_050,
+        membership_agreed_price_minor: 93_650,
+        currency: "USD",
+        service_dates: ["2026-08-10", "2026-08-11"],
+        evidence_note: "原会员链与历史住宿已逐笔核对",
+        command_id: "command_void_reconversion",
+        created_at: "2026-09-03T08:30:00.000Z",
+        actor: { subjectId: "subject_admin", displayName: "运营管理员" }
+      }]
+    })).toBe(true);
+  });
+});
 
 describe("orders list operational context", () => {
   const orderRow = {
@@ -306,6 +480,20 @@ function historicalReceipt(result: Record<string, unknown>) {
   };
 }
 
+function currentReceipt(result: Record<string, unknown>) {
+  return {
+    receiptId: "receipt_current",
+    commandId: "command_current",
+    executionStatus: "EXECUTED",
+    businessCommitted: true,
+    correlationId: "correlation-current",
+    result,
+    resourceRefs: ["resource_current"],
+    factRefs: [],
+    committedAt: "2026-09-02T08:00:00.000Z"
+  };
+}
+
 function createBackfillEnvelope(collection: Record<string, unknown>) {
   return {
     commandType: "CREATE_ORDER",
@@ -539,8 +727,8 @@ describe("Token list response schema", () => {
       tokens: [{
         ...baseToken,
         access_ceiling: "WRITE",
-        commandCeiling: ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS"],
-        persistedCommandCeiling: ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS"],
+        commandCeiling: ["PLACE_INTERNAL_USE"],
+        persistedCommandCeiling: ["PLACE_INTERNAL_USE"],
         historicalReadCeilingPreserved: true
       }]
     })).toBe(false);
@@ -647,6 +835,258 @@ describe("stay-to-membership conversion command schema", () => {
     });
     expect(Value.Check(HistoricalReceiptReadSchema, historical)).toBe(true);
     expect(Value.Check(HistoricalReceiptReadSchema, { ...historical, recoveryMode: undefined })).toBe(false);
+  });
+});
+
+describe("administrator correction receipt schema", () => {
+  const audit = {
+    reason: { code: "DATA_ENTRY_CORRECTION", note: "管理员核对原始凭据" },
+    evidenceNote: "纸质记录与企微凭据一致",
+    actor: { subjectId: "subject_administrator", displayName: "运营主管" },
+    recordedAt: "2026-09-03T08:00:00.000Z"
+  };
+  const historicalArrangement = {
+    operation: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+    correctionSetHash: "a".repeat(64),
+    corrections: [{
+      orderId: "order_history",
+      stayId: "stay_history",
+      correctionId: "fact_history",
+      amendmentId: "amend_history",
+      staySegmentId: "segment_history",
+      pricingRevisionId: "revision_history",
+      claimIds: ["claim_history"],
+      before: {
+        inventoryUnitId: "unit_108",
+        arrivalDate: "2026-08-27",
+        departureDate: "2026-08-30",
+        nights: 3,
+        stayTimeline: [
+          { serviceDate: "2026-08-27", inventoryUnitId: "unit_108" },
+          { serviceDate: "2026-08-28", inventoryUnitId: "unit_108" },
+          { serviceDate: "2026-08-29", inventoryUnitId: "unit_108" }
+        ]
+      },
+      after: {
+        inventoryUnitId: "unit_109",
+        arrivalDate: "2026-08-28",
+        departureDate: "2026-08-31",
+        nights: 3,
+        stayTimeline: [
+          { serviceDate: "2026-08-28", inventoryUnitId: "unit_109" },
+          { serviceDate: "2026-08-29", inventoryUnitId: "unit_109" },
+          { serviceDate: "2026-08-30", inventoryUnitId: "unit_109" }
+        ]
+      },
+      unchanged: {
+        orderStatus: "CHECKED_OUT",
+        stayStatus: "COMPLETED",
+        stayType: "TRANSIENT",
+        currentRevisionId: "revision_previous",
+        currentContractAmountMinor: 58_000,
+        currency: "CNY",
+        occupantCount: 2,
+        occupants: [
+          { ordinal: 1, role: "PRIMARY", fullName: "鹏哥", nickname: "鹏哥" },
+          { ordinal: 2, role: "ADDITIONAL", fullName: "小尚", nickname: "小尚" }
+        ],
+        collectionFactCount: 1,
+        netRecordedCollectionMinor: 58_000,
+        collectionDifferenceMinor: 0
+      }
+    }],
+    ...audit,
+    effectHash: "a".repeat(64)
+  };
+  const profileCorrection = {
+    memberId: "member_profile",
+    correctionId: "fact_profile",
+    changedFields: ["phone", "wechat"],
+    before: {
+      fullName: "王晶晶",
+      nickname: "晶晶",
+      identityCardNumber: "510000000000000001",
+      phone: "13800000001",
+      wechat: "jingjing-old"
+    },
+    after: {
+      fullName: "王晶晶",
+      nickname: "晶晶",
+      identityCardNumber: "510000000000000001",
+      phone: "13800000002",
+      wechat: "jingjing"
+    },
+    ...audit,
+    effectHash: "b".repeat(64)
+  };
+  const effectiveDateCorrection = {
+    memberId: "member_effective",
+    membershipOrderId: "membership_order_effective",
+    contractId: "contract_effective",
+    entitlementLotId: "lot_effective",
+    correctionId: "fact_effective",
+    validFrom: "2026-08-10",
+    validUntil: "2027-08-10",
+    status: "ACTIVE",
+    before: { validFrom: "2026-08-20", validUntil: "2027-08-20", status: "ACTIVE" },
+    after: { validFrom: "2026-08-10", validUntil: "2027-08-10", status: "ACTIVE" },
+    unchanged: {
+      memberId: "member_effective",
+      productName: "公卫四人间会员",
+      agreedPrice: { currency: "CNY", minorUnits: 93_600 },
+      entitlementUnitKind: "ROOM_NIGHT",
+      entitlementUnits: 30,
+      usedUnits: 2,
+      availableBalance: { ROOM_NIGHT: 28, BED_NIGHT: 0 },
+      paymentFactCount: 1,
+      lifecycleStatus: "ACTIVE"
+    },
+    ...audit,
+    effectHash: "c".repeat(64)
+  };
+  const historicalBackfill = {
+    memberId: "member_backfill",
+    membershipOrderId: "membership_order_backfill",
+    paymentFactId: "membership_payment_backfill",
+    contractId: "contract_backfill",
+    entitlementLotId: "lot_backfill",
+    backfillId: "fact_backfill",
+    status: "ACTIVE",
+    validFrom: "2026-08-10",
+    validUntil: "2027-08-10",
+    entitlementUnitKind: "ROOM_NIGHT",
+    entitlementUnits: 30,
+    member: { memberId: "member_backfill", fullName: "晶晶" },
+    product: {
+      productId: "membership_product_shared_quad",
+      code: "MEMBER-SHARED-30",
+      version: 1,
+      name: "公卫四人间会员",
+      listedPrice: { currency: "CNY", minorUnits: 93_600 },
+      agreedPrice: { currency: "CNY", minorUnits: 93_600 },
+      entitlementUnitKind: "ROOM_NIGHT",
+      entitlementUnits: 30,
+      validityPeriod: "P1Y",
+      allowedRoomTypeCode: "SHARED_QUAD",
+      allowedInventoryKind: "ROOM"
+    },
+    payment: {
+      amount: { currency: "CNY", minorUnits: 93_600 },
+      businessDate: "2026-08-12",
+      transactionReference: "WECOM-BACKFILL-001",
+      note: "切换期晚录"
+    },
+    ...audit,
+    effectHash: "d".repeat(64)
+  };
+  const voidReconversion = {
+    memberId: "member_void",
+    voidReconversionId: "fact_void",
+    member: { memberId: "member_void", fullName: "Cathy" },
+    oldMembership: {
+      membershipOrderId: "membership_order_wrong",
+      contractId: "contract_wrong",
+      entitlementLotId: "lot_wrong",
+      productId: "membership_product_shared_quad",
+      status: "ACTIVE",
+      directCollections: [{
+        factId: "membership_payment_wrong",
+        amount: { currency: "CNY", minorUnits: 93_600 },
+        transactionReference: "WECOM-WRONG-001",
+        businessDate: "2026-08-20"
+      }]
+    },
+    oldMembershipOrderId: "membership_order_wrong",
+    oldContractId: "contract_wrong",
+    oldEntitlementLotId: "lot_wrong",
+    oldStatus: "VOIDED",
+    sourceStayOrderId: "order_source",
+    sourceStayId: "stay_source",
+    sourceStay: {
+      orderId: "order_source",
+      stayId: "stay_source",
+      arrivalDate: "2026-08-10",
+      departureDate: "2026-08-12",
+      serviceDates: ["2026-08-10", "2026-08-11"],
+      identityEvidence: { phoneMatched: true, documentMatched: false }
+    },
+    amendmentId: "amend_void",
+    pricingRevisionId: "revision_void",
+    membershipOrderId: "membership_order_new",
+    status: "ACTIVE",
+    contractId: "contract_new",
+    entitlementLotId: "lot_new",
+    oldDirectCollectionTotal: { currency: "CNY", minorUnits: 93_600 },
+    transferredAmount: { currency: "CNY", minorUnits: 58_000 },
+    replacementDirectPaymentAmount: { currency: "CNY", minorUnits: 35_600 },
+    membershipAgreedPrice: { currency: "CNY", minorUnits: 93_600 },
+    funds: {
+      oldDirectCollectionTotal: { currency: "CNY", minorUnits: 93_600 },
+      oldReversalTotal: { currency: "CNY", minorUnits: 93_600 },
+      stayTransferTotal: { currency: "CNY", minorUnits: 58_000 },
+      replacementDirectPayment: {
+        amount: { currency: "CNY", minorUnits: 35_600 },
+        businessDate: "2026-08-09",
+        transactionReference: "WECOM-DIFFERENCE-001"
+      },
+      membershipAgreedPrice: { currency: "CNY", minorUnits: 93_600 },
+      reclassificationOnly: true
+    },
+    validFrom: "2026-08-10",
+    validUntil: "2027-08-10",
+    newMembership: {
+      productId: "membership_product_shared_quad",
+      productName: "公卫四人间会员",
+      validFrom: "2026-08-10",
+      validUntil: "2027-08-10",
+      membershipOrderId: "membership_order_new",
+      contractId: "contract_new",
+      entitlementLotId: "lot_new"
+    },
+    entitlementUnitKind: "ROOM_NIGHT",
+    convertedUnits: 2,
+    remainingUnits: 28,
+    entitlement: {
+      unitKind: "ROOM_NIGHT",
+      totalUnits: 30,
+      consumedUnits: 2,
+      remainingUnits: 28,
+      serviceDates: ["2026-08-10", "2026-08-11"]
+    },
+    serviceDates: ["2026-08-10", "2026-08-11"],
+    sourceCollectionFactIds: ["collection_source"],
+    oldPaymentReversalFactIds: ["membership_payment_reversal_wrong"],
+    paymentReclassificationFactIds: ["membership_payment_reclassification_wrong"],
+    sourceReversalFactIds: ["collection_reversal_source"],
+    transferPaymentFactIds: ["membership_payment_transfer"],
+    replacementPaymentFactId: "membership_payment_difference",
+    transferIds: ["transfer_source"],
+    voidLedgerFactId: "ledger_void_wrong",
+    conversionLedgerFactIds: ["ledger_conversion_1", "ledger_conversion_2"],
+    ...audit,
+    effectHash: "e".repeat(64)
+  };
+
+  it.each([
+    historicalArrangement,
+    profileCorrection,
+    effectiveDateCorrection,
+    historicalBackfill,
+    voidReconversion
+  ])("accepts the persisted Step 9 administrator correction result shape", (result) => {
+    expect(Value.Check(ExecutedCommandResultSchema, result)).toBe(true);
+    expect(Value.Check(ReceiptSchema, currentReceipt(result))).toBe(true);
+  });
+
+  it("does not accept invented lifecycle states in administrator correction results", () => {
+    expect(Value.Check(ExecutedCommandResultSchema, {
+      ...voidReconversion,
+      oldStatus: "REFUNDED"
+    })).toBe(false);
+    expect(Value.Check(ExecutedCommandResultSchema, {
+      ...effectiveDateCorrection,
+      status: "EXPIRED"
+    })).toBe(false);
   });
 });
 

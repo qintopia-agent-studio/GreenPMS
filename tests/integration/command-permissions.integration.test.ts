@@ -191,6 +191,18 @@ async function securityAuditCount(): Promise<number> {
   return Number(row.rows[0]!.count);
 }
 
+async function securityAuditIds(): Promise<Set<string>> {
+  const rows = await db.selectFrom("security_audit_entries").select("id").execute();
+  return new Set(rows.map((row) => row.id));
+}
+
+async function securityAuditsAddedSince(beforeIds: ReadonlySet<string>) {
+  const rows = await db.selectFrom("security_audit_entries")
+    .selectAll()
+    .execute();
+  return rows.filter((row) => !beforeIds.has(row.id));
+}
+
 function commandFeatureEnabledInRelease(commandType: CommandCatalogType): boolean {
   if (commandType === "COMPLETE_CLEANING") return currentReleaseFeatures.cleaningWorkflow;
   if (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") return currentReleaseFeatures.historicalStayArrangementCorrection;
@@ -219,21 +231,15 @@ async function expectDeniedWithOneSecurityAudit(
   action: () => Promise<unknown>,
   expected: { code?: string; statusCode?: number; denialReason?: string } = {}
 ) {
-  const before = await securityAuditCount();
+  const beforeIds = await securityAuditIds();
   await expect(action()).rejects.toMatchObject({
     ...(expected.code ? { code: expected.code } : {}),
     ...(expected.statusCode ? { statusCode: expected.statusCode } : {})
   });
-  const after = await securityAuditCount();
-  expect(after).toBe(before + 1);
+  const addedAudits = await securityAuditsAddedSince(beforeIds);
+  expect(addedAudits).toHaveLength(1);
   if (expected.denialReason) {
-    const latest = await sql<{ denial_reason: string }>`
-      select denial_reason
-      from security_audit_entries
-      order by created_at desc
-      limit 1
-    `.execute(db);
-    expect(latest.rows[0]?.denial_reason).toBe(expected.denialReason);
+    expect(addedAudits[0]?.denial_reason).toBe(expected.denialReason);
   }
 }
 
@@ -242,19 +248,16 @@ async function expectTokenLifecycleDeniedWithoutWrites(
   expected: { code?: string; denialReason?: string } = {}
 ) {
   const before = await protocolQuoteAndTokenCounts();
-  const auditBefore = await securityAuditCount();
+  const auditBeforeIds = await securityAuditIds();
   await expect(action()).rejects.toMatchObject({
     code: expected.code ?? "INSUFFICIENT_ACCESS",
     statusCode: 403
   });
   expect(await protocolQuoteAndTokenCounts()).toEqual(before);
-  expect(await securityAuditCount()).toBe(auditBefore + 1);
+  const addedAudits = await securityAuditsAddedSince(auditBeforeIds);
+  expect(addedAudits).toHaveLength(1);
   if (expected.denialReason) {
-    const latest = await db.selectFrom("security_audit_entries")
-      .select("denial_reason")
-      .orderBy("created_at", "desc")
-      .executeTakeFirstOrThrow();
-    expect(latest.denial_reason).toBe(expected.denialReason);
+    expect(addedAudits[0]?.denial_reason).toBe(expected.denialReason);
   }
 }
 
@@ -312,8 +315,8 @@ afterAll(async () => {
 
 describe("exact command permissions on PostgreSQL", () => {
   it("covers every catalog command in the operator/admin authorization stage matrix", async () => {
-    expect(commandTypes).toHaveLength(33);
-    expect(commandCatalogTypes).toHaveLength(39);
+    expect(commandTypes).toHaveLength(38);
+    expect(commandCatalogTypes).toHaveLength(42);
     await grant(demo.operatorSubjectId, historicalReadCommands);
     await grant(demo.administratorSubjectId, historicalReadCommands);
 
@@ -565,7 +568,7 @@ describe("exact command permissions on PostgreSQL", () => {
   });
 
   it("rotates to the explicit narrowed ceiling without inheriting hidden recovery capabilities", async () => {
-    const disabledFeatureCommand = "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" as const;
+    const disabledFeatureCommand = "COMPLETE_CLEANING" as const;
     await grant(demo.operatorSubjectId, [...historicalReadCommands, disabledFeatureCommand]);
     const oldTokenId = newId("token");
     const previousExpiresAt = "2099-01-01T00:00:00.000Z";
@@ -704,8 +707,7 @@ describe("exact command permissions on PostgreSQL", () => {
              credential_type, credential_fingerprint, correlation_id,
              idempotency_key_hash, metadata
       from security_audit_entries
-      order by created_at desc
-      limit 1
+      where correlation_id = ${requestMetadata.correlationId}
     `.execute(db);
     expect(denialAudits.rows).toEqual([
       expect.objectContaining({
@@ -792,7 +794,7 @@ describe("exact command permissions on PostgreSQL", () => {
     expect(await securityAuditCount()).toBe(auditBefore + 1);
     const denial = await db.selectFrom("security_audit_entries")
       .select(["property_id", "command_type", "stage", "denial_reason"])
-      .orderBy("created_at", "desc")
+      .where("correlation_id", "=", confirmMetadata.correlationId)
       .executeTakeFirstOrThrow();
     expect(denial).toEqual({
       property_id: demo.propertyId,
@@ -970,6 +972,7 @@ describe("exact command permissions on PostgreSQL", () => {
     }, metadata("cross-subject-preview"));
     const before = await protocolAndBusinessCounts();
     const auditBefore = await securityAuditCount();
+    const confirmRequest = metadata("cross-subject-confirm");
 
     await expect(confirmCommandPreview(db, administratorPrincipal, prepared.preview.previewId, {
       propertyId: demo.propertyId,
@@ -977,13 +980,13 @@ describe("exact command permissions on PostgreSQL", () => {
       confirmation: true,
       expectedEffectHash: prepared.preview.effectHash,
       reason: { code: "CROSS_SUBJECT", note: "不得确认其他主体的 Preview" }
-    }, metadata("cross-subject-confirm"))).rejects.toMatchObject({ statusCode: 404 });
+    }, confirmRequest)).rejects.toMatchObject({ statusCode: 404 });
 
     expect(await protocolAndBusinessCounts()).toEqual(before);
     expect(await securityAuditCount()).toBe(auditBefore + 1);
     const latest = await db.selectFrom("security_audit_entries")
       .select(["subject_id", "command_type", "stage", "denial_reason"])
-      .orderBy("created_at", "desc")
+      .where("correlation_id", "=", confirmRequest.correlationId)
       .executeTakeFirstOrThrow();
     expect(latest).toEqual({
       subject_id: demo.administratorSubjectId,
@@ -1790,7 +1793,7 @@ describe("exact command permissions on PostgreSQL", () => {
             "correlation_id",
             "idempotency_key_hash"
           ])
-          .orderBy("created_at", "desc")
+          .where("correlation_id", "=", `${prefix}-correlation`)
           .executeTakeFirstOrThrow();
         expect(latest).toEqual({
           subject_id: expectedSubject,

@@ -2794,7 +2794,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   ), { timeout: 30_000 });
   await orderDetail.getByRole("button", { name: "打开订单", exact: true }).click();
   await selectedOrderResponse;
-  const mobileOrderDialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
+  const mobileOrderDialog = page.getByRole("dialog", { name: "订单详情", exact: true });
   const mobileOrderContext = mobileOrderDialog.locator(".room-status-order-context").filter({
     has: page.getByRole("heading", { name: `${guest}的住宿订单`, exact: true })
   });
@@ -2816,7 +2816,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     `${Number(restoredBoard.range.departureDate.slice(5, 7))}月${Number(restoredBoard.range.departureDate.slice(8, 10))}日`
   );
   await expect(page.locator(".room-status-return-notice")).toContainText(
-    "最新房态中找不到原住宿位置。已安全关闭订单上下文"
+    "最新房态中找不到原住宿位置。已安全关闭订单详情"
   );
   await expect.poll(() => page.evaluate(() => {
     const key = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
@@ -2831,7 +2831,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     selection: null
   });
 
-  const restoredOrderDialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
+  const restoredOrderDialog = page.getByRole("dialog", { name: "订单详情", exact: true });
   await expect(restoredOrderDialog).toBeHidden();
 
   await page.getByRole("tab", { name: /异常/ }).click();

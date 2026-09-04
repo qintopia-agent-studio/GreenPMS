@@ -90,6 +90,73 @@ async function activateProduct(memberId: string, productId: string, prefix: stri
   };
 }
 
+async function insertLegacyActiveMembershipChain(sourceMembershipOrderId: string, prefix: string) {
+  const source = await db.selectFrom("membership_orders")
+    .selectAll()
+    .where("id", "=", sourceMembershipOrderId)
+    .executeTakeFirstOrThrow();
+  if (!source.valid_from || !source.valid_until) throw new Error("Active fixture membership is missing its validity interval");
+  const orderId = `membership_order_step2c_${prefix}`;
+  const contractId = `contract_step2c_${prefix}`;
+  const lotId = `lot_step2c_${prefix}`;
+  await db.insertInto("membership_orders").values({
+    id: orderId,
+    property_id: source.property_id,
+    member_id: source.member_id,
+    product_id: source.product_id,
+    product_code: source.product_code,
+    product_version: source.product_version,
+    product_name: source.product_name,
+    listed_price_minor: source.listed_price_minor,
+    agreed_price_minor: source.agreed_price_minor,
+    price_adjustment_minor: source.price_adjustment_minor,
+    price_adjustment_reason: source.price_adjustment_reason,
+    currency: source.currency,
+    entitlement_unit_kind: source.entitlement_unit_kind,
+    entitlement_units: source.entitlement_units,
+    allowed_room_type_code: source.allowed_room_type_code,
+    allowed_inventory_kind: source.allowed_inventory_kind,
+    status: "DRAFT",
+    activated_at: null,
+    valid_from: null,
+    valid_until: null,
+    contract_id: null,
+    entitlement_lot_id: null,
+    version: 1,
+    created_by_command_id: source.created_by_command_id,
+    activated_by_command_id: null
+  }).execute();
+  await db.insertInto("member_contracts").values({
+    id: contractId,
+    property_id: source.property_id,
+    member_id: source.member_id,
+    member_name: `Legacy ${prefix}`,
+    status: "ACTIVE",
+    valid_from: source.valid_from,
+    valid_until: source.valid_until,
+    version: 1,
+    membership_order_id: orderId
+  }).execute();
+  await db.insertInto("entitlement_lots").values({
+    id: lotId,
+    contract_id: contractId,
+    unit_kind: source.entitlement_unit_kind,
+    total_units: source.entitlement_units,
+    expires_on: source.valid_until,
+    version: 1
+  }).execute();
+  await db.updateTable("membership_orders").set({
+    status: "ACTIVE",
+    activated_at: new Date(),
+    valid_from: source.valid_from,
+    valid_until: source.valid_until,
+    contract_id: contractId,
+    entitlement_lot_id: lotId,
+    version: 2,
+    activated_by_command_id: source.activated_by_command_id
+  }).where("id", "=", orderId).execute();
+}
+
 async function unitId(code: string) {
   return (await db.selectFrom("inventory_units").select("id").where("property_id", "=", demo.propertyId).where("code", "=", code).executeTakeFirstOrThrow()).id;
 }
@@ -240,8 +307,8 @@ describe("step 2C member balances and stays", () => {
     expect(zero.cashRemainder.minorUnits).toBe(39_000);
     expect(zero.memberId).toBe(memberId);
 
-    await activateProduct(memberId, products.sharedSingle, "ambiguous-a");
-    await activateProduct(memberId, products.sharedSingle, "ambiguous-b");
+    await insertLegacyActiveMembershipChain(membership.membershipOrderId, "ambiguous_a");
+    await insertLegacyActiveMembershipChain(membership.membershipOrderId, "ambiguous_b");
     await expect(memberQuote(memberId, d01, arrival, shiftDate(arrival, 2))).rejects.toMatchObject({
       code: "ENTITLEMENT_CONFLICT",
       message: expect.stringContaining("多份权益")
@@ -317,7 +384,7 @@ describe("step 2C member balances and stays", () => {
     expect((await getMemberView(db, demo.propertyId, cancelledMember)).lotBalances).toContainEqual({ lotId: cancelledMembership.lotId, unitKind: "ROOM_NIGHT", availableUnits: 30 });
   });
 
-  it("refreshes a zero-coverage member stay through an ordinary reprice after membership activation", async () => {
+  it("refreshes a zero-coverage member stay through an ordinary reprice after audited balance replenishment", async () => {
     const today = await propertyLocalToday(db, demo.propertyId);
     const arrival = shiftDate(today, 30);
     const departure = shiftDate(arrival, 2);
@@ -335,7 +402,16 @@ describe("step 2C member balances and stays", () => {
     const orderId = stay.result!.orderId as string;
     expect((await db.selectFrom("orders").select(["member_id", "member_contract_id"]).where("id", "=", orderId).executeTakeFirstOrThrow()).member_id).toBe(memberId);
 
-    const replenished = await activateProduct(memberId, products.sharedSingle, "refresh-replenished");
+    await confirm({
+      commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+      input: {
+        propertyId: demo.propertyId,
+        entitlementLotId: depleted.lotId,
+        expectedAvailableBalance: 0,
+        targetAvailableBalance: 30,
+        adjustmentReason: "核对后补足原会员合同权益"
+      }
+    }, "refresh-replenish");
     const refreshed = await confirm({
       commandType: "REPRICE_ORDER",
       input: { propertyId: demo.propertyId, orderId, targetCurrentContractAmountMinor: 0 }
@@ -343,8 +419,8 @@ describe("step 2C member balances and stays", () => {
     expect(refreshed.businessCommitted).toBe(true);
     const coverage = await db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("service_date").execute();
     expect(coverage).toHaveLength(2);
-    expect(new Set(coverage.map((item) => item.contract_id))).toEqual(new Set([replenished.contractId]));
-    expect(new Set(coverage.map((item) => item.lot_id))).toEqual(new Set([replenished.lotId]));
+    expect(new Set(coverage.map((item) => item.contract_id))).toEqual(new Set([depleted.contractId]));
+    expect(new Set(coverage.map((item) => item.lot_id))).toEqual(new Set([depleted.lotId]));
     expect(await db.selectFrom("entitlement_ledger").select("entry_type").where("order_id", "=", orderId).execute()).toEqual([{ entry_type: "HOLD" }, { entry_type: "HOLD" }]);
     expect(await db.selectFrom("pricing_revisions")
       .select("pricing_basis")

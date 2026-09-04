@@ -375,11 +375,12 @@ async function expectRemainingPaymentBindingRejects(options: {
       amount_minor: number;
       currency: string;
       transaction_reference: string | null;
+      business_date: string;
     } | undefined
   ) => Promise<void>;
 }) {
   const directFact = await db.selectFrom("membership_payment_facts")
-    .select(["fact_id", "amount_minor", "currency", "transaction_reference"])
+    .select(["fact_id", "amount_minor", "currency", "transaction_reference", "business_date"])
     .where("membership_order_id", "=", options.membershipOrderId)
     .where("source_type", "=", "DIRECT_WECOM")
     .executeTakeFirst();
@@ -988,7 +989,8 @@ describe("4.7 stay collection conversion to membership", () => {
           source_order_id: null,
           source_collection_fact_id: null,
           note: "损坏形状：把唯一差额收款拆成两笔",
-          command_id: splitFixture.commandId
+          command_id: splitFixture.commandId,
+          business_date: directFact!.business_date
         }).execute();
       }
     });
@@ -1062,7 +1064,8 @@ describe("4.7 stay collection conversion to membership", () => {
           source_order_id: null,
           source_collection_fact_id: null,
           note: "损坏形状：无差额仍登记直接企微收款",
-          command_id: zeroFixture.commandId
+          command_id: zeroFixture.commandId,
+          business_date: await propertyLocalToday(trx, demo.propertyId)
         }).execute();
       }
     });
@@ -1201,7 +1204,8 @@ describe("4.7 stay collection conversion to membership", () => {
       source_order_id: null,
       source_collection_fact_id: null,
       note: "不得复用已完成转会员命令登记无关会员收款",
-      command_id: receipt.commandId
+      command_id: receipt.commandId,
+      business_date: await propertyLocalToday(db, demo.propertyId)
     }).execute()).rejects.toMatchObject({
       constraint: "stage13_conversion_command_fact_exclusivity"
     });
@@ -1312,7 +1316,8 @@ describe("4.7 stay collection conversion to membership", () => {
               source_order_id: null,
               source_collection_fact_id: null,
               note: "未完成转换命令不得挂载会员资金",
-              command_id: commandId
+              command_id: commandId,
+              business_date: await propertyLocalToday(trx, demo.propertyId)
             }).execute();
           }
         },
@@ -1481,7 +1486,8 @@ describe("4.7 stay collection conversion to membership", () => {
         source_order_id: null,
         source_collection_fact_id: null,
         note: "不得借其他未完成转会员命令追加资金",
-        command_id: bypassCommandId
+        command_id: bypassCommandId,
+        business_date: await propertyLocalToday(db, demo.propertyId)
       }).execute()).rejects.toMatchObject({
         constraint: "stage13_conversion_membership_funds_closed"
       });
@@ -1759,10 +1765,20 @@ describe("4.7 stay collection conversion to membership", () => {
     });
     await db.transaction().execute(async (trx) => {
       await sql`ALTER TABLE collection_facts DISABLE TRIGGER collection_facts_append_only`.execute(trx);
-      await trx.updateTable("collection_facts")
-        .set({ currency: "USD" })
-        .where("fact_id", "=", stay.collectionFactId)
-        .executeTakeFirstOrThrow();
+      await sql`
+        UPDATE collection_facts
+        SET
+          currency = 'USD',
+          created_at = GREATEST(
+            created_at,
+            (
+              SELECT max(amendment.created_at) + interval '1 microsecond'
+              FROM amendments AS amendment
+              WHERE amendment.order_id = ${stay.orderId}
+            )
+          )
+        WHERE fact_id = ${stay.collectionFactId}
+      `.execute(trx);
       await sql`ALTER TABLE collection_facts ENABLE TRIGGER collection_facts_append_only`.execute(trx);
     });
 
@@ -2783,17 +2799,26 @@ describe("4.7 stay collection conversion to membership", () => {
     });
 
     it("keeps converted entitlement quantity stable for an applicable move and fails closed for an incompatible room type", async () => {
-      const converted = await createInHouseConversion({ prefix: "inhouse-move" });
+      const businessDate = await propertyLocalToday(db, demo.propertyId);
+      const arrivalDate = shiftDate(businessDate, -1);
+      const departureDate = shiftDate(businessDate, 6);
+      const effectiveDate = shiftDate(businessDate, 1);
+      const converted = await createInHouseConversion({
+        prefix: "inhouse-move",
+        businessDate,
+        arrivalDate,
+        departureDate
+      });
       const balanceBeforeMove = await conversionEntitlementBalance(converted.entitlementLotId);
       expect(balanceBeforeMove).toBe(23);
 
-      const move = await withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => execute({
+      const move = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => execute({
         commandType: "MOVE_UNIT",
         input: {
           propertyId: demo.propertyId,
           orderId: converted.stay.orderId,
           newInventoryUnitId: "unit_room_d_gen_04",
-          effectiveDate: "2026-09-03"
+          effectiveDate
         }
       }, "inhouse-move-compatible"));
       expect(move.businessCommitted).toBe(true);
@@ -2802,7 +2827,7 @@ describe("4.7 stay collection conversion to membership", () => {
         .select(["service_date", "inventory_unit_id", "status"])
         .where("order_id", "=", converted.stay.orderId)
         .orderBy("service_date")
-        .execute()).toEqual(serviceDates(stayDates.arrival, stayDates.departure).map((service_date) => ({
+        .execute()).toEqual(serviceDates(arrivalDate, departureDate).map((service_date) => ({
         service_date,
         inventory_unit_id: "unit_room_d_gen_01",
         status: "CONSUMED"
@@ -2814,19 +2839,19 @@ describe("4.7 stay collection conversion to membership", () => {
         .where("claim.active", "=", true)
         .where("segment.stay_id", "=", converted.stay.stayId)
         .orderBy("claim.service_date")
-        .execute()).toEqual(serviceDates(stayDates.arrival, stayDates.departure).map((service_date) => ({
+        .execute()).toEqual(serviceDates(arrivalDate, departureDate).map((service_date) => ({
         service_date,
-        inventory_unit_id: service_date < "2026-09-03" ? "unit_room_d_gen_01" : "unit_room_d_gen_04"
+        inventory_unit_id: service_date < effectiveDate ? "unit_room_d_gen_01" : "unit_room_d_gen_04"
       })));
       await assertConversionCommandStillValid(converted.receipt.commandId);
 
-      await expect(withPropertyClockForTesting(new Date("2026-09-02T12:00:00.000Z"), () => preview({
+      await expect(withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => preview({
         commandType: "MOVE_UNIT",
         input: {
           propertyId: demo.propertyId,
           orderId: converted.stay.orderId,
           newInventoryUnitId: "unit_room_e_gen_01",
-          effectiveDate: "2026-09-03"
+          effectiveDate
         }
       }, "inhouse-move-incompatible"))).rejects.toMatchObject({
         code: "ENTITLEMENT_CONFLICT"

@@ -20,8 +20,18 @@ import { amountSummary, enumerateServiceDates, newId, paidStayTypeForNights, sha
 import { createQuoteInTransaction, projectQuoteForExternalRead } from "../pricing-service.ts";
 import { bumpRoomStatusRevision } from "../room-status.ts";
 import { getOrderViewSnapshot } from "../orders.ts";
-import { sampleAuthoritativePropertyWallClock, withPropertyOperationClockSnapshot } from "../members.ts";
+import {
+  maskIdentityCardNumber,
+  maskPhone,
+  maskWechat,
+  sampleAuthoritativePropertyWallClock,
+  withPropertyOperationClockSnapshot
+} from "../members.ts";
 import type { Database } from "../schema.ts";
+import {
+  HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND,
+  normalizeHistoricalStayArrangementCorrectionInput
+} from "../admin-historical-stay-corrections.ts";
 import {
   historicalProtocolEpochMigration,
   legacyEffectProtocol,
@@ -41,6 +51,7 @@ import {
 } from "../command-authorization.ts";
 import { applyCommand, lockCommandResources } from "./apply.ts";
 import { buildCommandEffect, normalizePhoneNumber, projectCommandEffectForRead, projectPrimaryGuestForRead } from "./effects.ts";
+import { isMemberCorrectionCommandType, normalizeMemberCorrectionInput } from "./member-corrections.ts";
 
 export interface ConfirmRequest {
   propertyId: string;
@@ -89,6 +100,7 @@ function isExecutableCommandType(commandType: string): commandType is Executable
 const roomStatusVisibleCommands = new Set<CommandType>([
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
   "RESCHEDULE_STAY",
   "SHORTEN_STAY",
   "EXTEND_STAY",
@@ -102,6 +114,7 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "MARK_NO_SHOW",
   "REVOKE_CHECK_IN",
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
   "CHECK_IN",
   "CHECK_OUT",
   "COMPLETE_STAY",
@@ -119,7 +132,12 @@ const strictRecoveryEvidenceCommands = new Set<CommandType>([
   "MARK_NO_SHOW",
   "REVOKE_CHECK_IN",
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
-  "COMPLETE_STAY"
+  "COMPLETE_STAY",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+  "CORRECT_MEMBER_PROFILE",
+  "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+  "BACKFILL_HISTORICAL_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
 ]);
 
 function requiresStrictRecoveryEvidence(commandType: CommandType, effect: Record<string, unknown>): boolean {
@@ -245,6 +263,183 @@ async function bindPersistedEffectHash(
   confirmedEffect: Record<string, unknown>,
   rebuiltEffectHash: string
 ): Promise<string> {
+  if (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") {
+    const corrections = await trx.selectFrom("historical_stay_arrangement_corrections")
+      .innerJoin("amendments", "amendments.id", "historical_stay_arrangement_corrections.amendment_id")
+      .select([
+        "historical_stay_arrangement_corrections.order_id",
+        "historical_stay_arrangement_corrections.stay_id",
+        "historical_stay_arrangement_corrections.expected_version",
+        "amendments.payload"
+      ])
+      .where("historical_stay_arrangement_corrections.created_by_command_id", "=", commandId)
+      .orderBy("historical_stay_arrangement_corrections.order_id")
+      .execute();
+    const authoritativeCorrections = corrections.map((correction) => {
+      const payload = asRecord(correction.payload);
+      const after = asRecord(payload?.after);
+      if (!payload || !after) throw new Error("Persisted historical stay correction payload is malformed");
+      const { pricing: _pricing, ...arrangementAfter } = after;
+      return {
+        orderId: correction.order_id,
+        stayId: correction.stay_id,
+        expectedVersion: correction.expected_version,
+        before: payload.before,
+        after: arrangementAfter,
+        unchanged: payload.unchanged
+      };
+    });
+    const authoritativeEffect = {
+      operation: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+      corrections: authoritativeCorrections
+    };
+    if (authoritativeCorrections.length === 0
+      || stableHash(authoritativeEffect) !== stableHash(confirmedEffect)) {
+      throw new Error("Persisted historical stay correction set differs from the confirmed Preview");
+    }
+    return rebuiltEffectHash;
+  }
+  if (commandType === "CORRECT_MEMBER_PROFILE") {
+    const correction = await trx.selectFrom("member_profile_corrections")
+      .selectAll()
+      .where("command_id", "=", commandId)
+      .executeTakeFirst();
+    if (!correction) throw new Error("Persisted member profile correction is missing");
+    const authoritativeEffect = {
+      operation: "CORRECT_MEMBER_PROFILE",
+      memberId: correction.member_id,
+      before: {
+        fullName: correction.prior_full_name,
+        nickname: correction.prior_nickname,
+        identityCardNumber: correction.prior_identity_card_number,
+        phone: correction.prior_phone,
+        wechat: correction.prior_wechat
+      },
+      after: {
+        fullName: correction.corrected_full_name,
+        nickname: correction.corrected_nickname,
+        identityCardNumber: correction.corrected_identity_card_number,
+        phone: correction.corrected_phone,
+        wechat: correction.corrected_wechat
+      },
+      changedFields: correction.changed_fields,
+      evidenceNote: correction.evidence_note
+    };
+    if (stableHash(authoritativeEffect) !== stableHash(confirmedEffect)) {
+      throw new Error("Persisted member profile correction differs from the confirmed Preview");
+    }
+    return rebuiltEffectHash;
+  }
+  if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") {
+    const correction = await trx.selectFrom("membership_effective_date_corrections")
+      .selectAll()
+      .where("command_id", "=", commandId)
+      .executeTakeFirst();
+    const before = asRecord(confirmedEffect.before);
+    const after = asRecord(confirmedEffect.after);
+    if (!correction || !before || !after
+      || confirmedEffect.operation !== commandType
+      || confirmedEffect.memberId !== correction.member_id
+      || confirmedEffect.membershipOrderId !== correction.membership_order_id
+      || confirmedEffect.contractId !== correction.contract_id
+      || confirmedEffect.entitlementLotId !== correction.entitlement_lot_id
+      || confirmedEffect.evidenceNote !== correction.evidence_note
+      || before.validFrom !== correction.prior_valid_from
+      || before.validUntil !== correction.prior_valid_until
+      || after.validFrom !== correction.corrected_valid_from
+      || after.validUntil !== correction.corrected_valid_until) {
+      throw new Error("Persisted membership effective-date correction differs from the confirmed Preview");
+    }
+    return rebuiltEffectHash;
+  }
+  if (commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") {
+    const backfill = await trx.selectFrom("historical_membership_backfills")
+      .innerJoin("members", "members.id", "historical_membership_backfills.member_id")
+      .innerJoin("membership_payment_facts", "membership_payment_facts.fact_id", "historical_membership_backfills.payment_fact_id")
+      .select([
+        "historical_membership_backfills.member_id",
+        "historical_membership_backfills.actual_membership_date",
+        "historical_membership_backfills.valid_until",
+        "historical_membership_backfills.product_id",
+        "historical_membership_backfills.product_code",
+        "historical_membership_backfills.product_version",
+        "historical_membership_backfills.product_name",
+        "historical_membership_backfills.listed_price_minor",
+        "historical_membership_backfills.agreed_price_minor",
+        "historical_membership_backfills.currency",
+        "historical_membership_backfills.entitlement_unit_kind",
+        "historical_membership_backfills.entitlement_units",
+        "historical_membership_backfills.validity_period",
+        "historical_membership_backfills.allowed_room_type_code",
+        "historical_membership_backfills.allowed_inventory_kind",
+        "historical_membership_backfills.evidence_note",
+        "members.full_name",
+        "membership_payment_facts.amount_minor",
+        "membership_payment_facts.business_date",
+        "membership_payment_facts.transaction_reference",
+        "membership_payment_facts.note"
+      ])
+      .where("historical_membership_backfills.command_id", "=", commandId)
+      .executeTakeFirst();
+    if (!backfill) throw new Error("Persisted historical membership backfill is missing");
+    const authoritativeEffect = {
+      operation: commandType,
+      evidenceNote: backfill.evidence_note,
+      member: { memberId: backfill.member_id, fullName: backfill.full_name },
+      product: {
+        productId: backfill.product_id,
+        code: backfill.product_code,
+        version: backfill.product_version,
+        name: backfill.product_name,
+        listedPrice: { currency: backfill.currency, minorUnits: backfill.listed_price_minor },
+        agreedPrice: { currency: backfill.currency, minorUnits: backfill.agreed_price_minor },
+        entitlementUnitKind: backfill.entitlement_unit_kind,
+        entitlementUnits: backfill.entitlement_units,
+        validityPeriod: backfill.validity_period,
+        allowedRoomTypeCode: backfill.allowed_room_type_code,
+        allowedInventoryKind: backfill.allowed_inventory_kind
+      },
+      payment: {
+        amount: { currency: backfill.currency, minorUnits: backfill.amount_minor },
+        businessDate: backfill.business_date,
+        transactionReference: backfill.transaction_reference,
+        note: backfill.note
+      },
+      validFrom: backfill.actual_membership_date,
+      validUntil: backfill.valid_until,
+      entitlementUnitKind: backfill.entitlement_unit_kind,
+      entitlementUnits: backfill.entitlement_units,
+      status: "ACTIVE"
+    };
+    if (stableHash(authoritativeEffect) !== stableHash(confirmedEffect)) {
+      throw new Error("Persisted historical membership backfill differs from the confirmed Preview");
+    }
+    return rebuiltEffectHash;
+  }
+  if (commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") {
+    const correction = await trx.selectFrom("membership_void_reconversions")
+      .selectAll()
+      .where("command_id", "=", commandId)
+      .executeTakeFirst();
+    const member = asRecord(confirmedEffect.member);
+    const oldMembership = asRecord(confirmedEffect.oldMembership);
+    const sourceStay = asRecord(confirmedEffect.sourceStay);
+    const newMembership = asRecord(confirmedEffect.newMembership);
+    if (!correction || !member || !oldMembership || !sourceStay || !newMembership
+      || confirmedEffect.operation !== commandType
+      || member.memberId !== correction.member_id
+      || oldMembership.membershipOrderId !== correction.old_membership_order_id
+      || oldMembership.contractId !== correction.old_contract_id
+      || oldMembership.entitlementLotId !== correction.old_entitlement_lot_id
+      || sourceStay.orderId !== correction.source_order_id
+      || sourceStay.stayId !== correction.source_stay_id
+      || newMembership.validFrom !== correction.actual_membership_date
+      || newMembership.validUntil !== correction.valid_until
+      || confirmedEffect.evidenceNote !== correction.evidence_note) {
+      throw new Error("Persisted membership void and reconversion differs from the confirmed Preview");
+    }
+    return rebuiltEffectHash;
+  }
   const amendments = await trx.selectFrom("amendments")
     .select(["id", "payload"])
     .where("command_id", "=", commandId)
@@ -692,6 +887,18 @@ function normalizeCommandEnvelope(envelope: CommandEnvelope): CommandEnvelope {
       }
     };
   }
+  if (isMemberCorrectionCommandType(envelope.commandType)) {
+    return {
+      commandType: envelope.commandType,
+      input: normalizeMemberCorrectionInput(envelope.commandType, envelope.input)
+    };
+  }
+  if (envelope.commandType === HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND) {
+    return {
+      commandType: envelope.commandType,
+      input: normalizeHistoricalStayArrangementCorrectionInput(envelope.input)
+    };
+  }
   if (envelope.commandType !== "ISSUE_TOKEN" && envelope.commandType !== "ROTATE_TOKEN") return envelope;
   const value = envelope.input.tokenSecret;
   if (typeof value !== "string" || !opaqueTokenSecret.test(value) || new Set(value.slice(4)).size < 16) {
@@ -884,6 +1091,25 @@ export function projectReceiptResultForRead(
     return {
       ...result,
       quote: projectQuoteForExternalRead(quote as unknown as StoredQuoteDto | QuoteReadDto)
+    };
+  }
+  if (commandType === "CORRECT_MEMBER_PROFILE") {
+    const projectProfile = (value: unknown): Record<string, unknown> | null => {
+      const profile = asRecord(value);
+      if (!profile) return null;
+      return {
+        ...profile,
+        identityCardNumber: typeof profile.identityCardNumber === "string"
+          ? maskIdentityCardNumber(profile.identityCardNumber)
+          : null,
+        phone: typeof profile.phone === "string" ? maskPhone(profile.phone) : "****",
+        wechat: typeof profile.wechat === "string" ? maskWechat(profile.wechat) : "***"
+      };
+    };
+    return {
+      ...result,
+      before: projectProfile(result.before),
+      after: projectProfile(result.after)
     };
   }
   if (commandType === "RECORD_COLLECTION" || commandType === "RECORD_REFUND" || commandType === "REVERSE_FACT") {
@@ -1493,6 +1719,8 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
               || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
               || (commandType === "COMPLETE_STAY" && error.code === "VALIDATION_ERROR")
               || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
+              || (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" && error.code === "VALIDATION_ERROR")
+              || (isMemberCorrectionCommandType(commandType) && error.code === "VALIDATION_ERROR")
               || (commandType === "CREATE_MEMBER" && error.code === "VALIDATION_ERROR"))) {
               throw new DomainError("PREVIEW_STALE", "Preview basis changed; request a new preview", 409, false, { causeCode: error.code });
             }

@@ -373,7 +373,8 @@ describe("RoomStatusOrderContext", () => {
           { code: "CHECK_IN", enabled: true, disabledReason: null },
           { code: "CHECK_OUT", enabled: true, disabledReason: null },
           { code: "MOVE_UNIT", enabled: true, disabledReason: null },
-          { code: "REPRICE_ORDER", enabled: true, disabledReason: null }
+          { code: "REPRICE_ORDER", enabled: true, disabledReason: null },
+          { code: "REVERSE_FACT", enabled: true, disabledReason: null }
         ]
       })}
       units={units}
@@ -389,6 +390,7 @@ describe("RoomStatusOrderContext", () => {
     expect(html).toContain("办理退房");
     expect(html).toContain("换房");
     expect(html).toContain("调整订单金额");
+    expect(html).not.toContain("登记冲销");
   });
 
   it("keeps cancel, no-show and revoke check-in inside the current room-status context", () => {
@@ -458,6 +460,32 @@ describe("RoomStatusOrderContext", () => {
     expect(html).not.toContain('data-room-status-action="SHORTEN_STAY"');
     expect(html).not.toContain('data-room-status-action="EARLY_CHECK_OUT"');
     expect(html).not.toContain('data-room-status-action-mode="inline">办理退房');
+  });
+
+  it("keeps blocked date guidance behind the order-entry help icon", () => {
+    const base = orderView();
+    const reason = "入住当天暂不办理缩短或提前退房；当前版本尚未开放撤销入住，请在确认住客实际使用房间后再办理入住";
+    const html = renderToStaticMarkup(<RoomStatusOrderContext
+      view={orderView({
+        allowedActions: [{ code: "SHORTEN_STAY", enabled: false, disabledReason: reason }],
+        order: { ...base.order, status: "CHECKED_IN" },
+        stay: { ...base.stay, status: "IN_HOUSE" },
+        effectiveArrangement: {
+          ...base.effectiveArrangement,
+          businessDate: base.effectiveArrangement.arrivalDate
+        },
+        fulfillment: { ...base.fulfillment, state: "IN_HOUSE" }
+      })}
+      units={units}
+      onOpenOrder={() => undefined}
+      onFulfillmentAction={() => undefined}
+      onCorrectOccupant={() => undefined}
+      onLocateRange={() => undefined}
+    />);
+    expect(html).toContain('aria-label="订单操作说明：');
+    expect(html).toContain('class="info-hint-bubble" role="tooltip"');
+    expect(html).toContain("入住当天暂不办理缩短或提前退房");
+    expect(html).not.toContain('data-testid="stay-date-action-blocked"');
   });
 
   it("keeps Scheme B multi-room rescheduling and extension inside room status", () => {

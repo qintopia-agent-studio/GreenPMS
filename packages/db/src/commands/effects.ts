@@ -33,6 +33,14 @@ import { allocateCoverageCandidates, loadPricingPolicy, loadStoredQuote, resolve
 import { inventoryFingerprint, loadInventoryUnit, type DbExecutor } from "../inventory.ts";
 import { propertyLocalClock, propertyLocalToday } from "../members.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
+import {
+  HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND,
+  buildHistoricalStayArrangementCorrectionEffect
+} from "../admin-historical-stay-corrections.ts";
+import {
+  buildMemberCorrectionEffect,
+  isMemberCorrectionCommandType
+} from "./member-corrections.ts";
 
 export interface BuiltCommandEffect {
   propertyId: string;
@@ -470,7 +478,8 @@ async function membershipPaymentState(db: DbExecutor, membershipOrderId: string)
       netEffectMinor: fact.net_effect_minor,
       transactionReference: fact.transaction_reference,
       correctsFactId: fact.corrects_fact_id,
-      reversesFactId: fact.reverses_fact_id
+      reversesFactId: fact.reverses_fact_id,
+      businessDate: fact.business_date
     })))
   };
 }
@@ -830,6 +839,13 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   const input = requireObject(rawInput);
   const propertyId = requireString(input, "propertyId");
 
+  if (commandType === HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND) {
+    return buildHistoricalStayArrangementCorrectionEffect(db, rawInput);
+  }
+  if (isMemberCorrectionCommandType(commandType)) {
+    return buildMemberCorrectionEffect(db, commandType, rawInput);
+  }
+
   if (commandType === "CREATE_MEMBER") {
     const member = {
       fullName: requireString(input, "fullName"),
@@ -917,13 +933,19 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       .where("membership_orders.property_id", "=", propertyId)
       .executeTakeFirst();
     if (!order) throw new DomainError("NOT_FOUND", "会员订单不存在", 404);
-    if (order.status !== "DRAFT") throw new DomainError("AGGREGATE_VERSION_CONFLICT", "已生效的会员订单不能再修改", 409);
+    if (order.status !== "DRAFT" && order.status !== "ACTIVE") {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "已作废的会员订单不能再收款", 409);
+    }
     const paymentState = await membershipPaymentState(db, order.id);
 
     if (commandType === "RECORD_MEMBERSHIP_PAYMENT") {
+      if (order.status === "ACTIVE" && paymentState.total >= order.agreed_price_minor) {
+        throw new DomainError("AGGREGATE_VERSION_CONFLICT", "该会员订单已经足额或多收，不能继续登记收款", 409);
+      }
       const amountMinor = requireInteger(input, "amountMinor", { min: 1 });
       const transactionReference = requireTransactionReference(input.transactionReference);
       const note = optionalString(input, "note") ?? "";
+      const businessDate = await propertyLocalToday(db, propertyId);
       const after = paymentState.total + amountMinor;
       if (!Number.isSafeInteger(after) || after > 2_147_483_647) throw new DomainError("VALIDATION_ERROR", "会员订单收款合计超出支持范围");
       return finalize(propertyId, {
@@ -931,15 +953,19 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         membershipOrderId: order.id,
         memberName: order.member_name,
         productName: order.product_name,
-        payment: { amount: money(order.currency, amountMinor), transactionReference, note },
+        payment: { amount: money(order.currency, amountMinor), businessDate, transactionReference, note },
         totals: {
-          before: money(order.currency, paymentState.total),
-          after: money(order.currency, after),
           agreedPrice: money(order.currency, order.agreed_price_minor),
+          previouslyCollected: money(order.currency, paymentState.total),
+          currentCollection: money(order.currency, amountMinor),
           differenceAfter: money(order.currency, after - order.agreed_price_minor)
         },
-        status: "DRAFT"
+        status: order.status
       }, { membershipOrderVersion: order.version, paymentFactsHash: paymentState.hash });
+    }
+
+    if (order.status !== "DRAFT") {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "已生效的会员订单不能更正收款或重复激活", 409);
     }
 
     if (commandType === "CORRECT_MEMBERSHIP_PAYMENT") {
@@ -960,8 +986,17 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         memberName: order.member_name,
         productName: order.product_name,
         originalPaymentFactId: original.fact_id,
-        original: { amount: money(order.currency, original.amount_minor), transactionReference: requireTransactionReference(original.transaction_reference) },
-        replacement: { amount: money(order.currency, correctedAmountMinor), transactionReference: correctedTransactionReference, note },
+        original: {
+          amount: money(order.currency, original.amount_minor),
+          businessDate: original.business_date,
+          transactionReference: requireTransactionReference(original.transaction_reference)
+        },
+        replacement: {
+          amount: money(order.currency, correctedAmountMinor),
+          businessDate: original.business_date,
+          transactionReference: correctedTransactionReference,
+          note
+        },
         totals: {
           before: money(order.currency, paymentState.total),
           after: money(order.currency, after),
@@ -974,6 +1009,31 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 
     if (paymentState.total <= 0 || !paymentState.facts.some((fact) => fact.fact_type === "COLLECTION" && !paymentState.facts.some((candidate) => candidate.reverses_fact_id === fact.fact_id))) {
       throw new DomainError("VALIDATION_ERROR", "会员订单至少登记一笔有效企微收款后才能生效");
+    }
+    const [activeOrders, activeContracts, activeLots] = await Promise.all([
+      db.selectFrom("membership_orders").select("id")
+        .where("property_id", "=", propertyId)
+        .where("member_id", "=", order.member_id)
+        .where("status", "=", "ACTIVE")
+        .orderBy("id")
+        .execute(),
+      db.selectFrom("member_contracts").select("id")
+        .where("property_id", "=", propertyId)
+        .where("member_id", "=", order.member_id)
+        .where("status", "=", "ACTIVE")
+        .orderBy("id")
+        .execute(),
+      db.selectFrom("entitlement_lots")
+        .innerJoin("member_contracts", "member_contracts.id", "entitlement_lots.contract_id")
+        .select("entitlement_lots.id")
+        .where("member_contracts.property_id", "=", propertyId)
+        .where("member_contracts.member_id", "=", order.member_id)
+        .where("entitlement_lots.status", "=", "ACTIVE")
+        .orderBy("entitlement_lots.id")
+        .execute()
+    ]);
+    if (activeOrders.length > 0 || activeContracts.length > 0 || activeLots.length > 0) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "该会员已有生效中的会员记录，不能再次激活会员订单", 409);
     }
     const validFrom = await propertyLocalToday(db, propertyId);
     const validUntil = addOneCalendarYear(validFrom);
@@ -1314,9 +1374,12 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const adjustmentReason = requireString(input, "adjustmentReason");
     const propertyToday = await propertyLocalToday(db, propertyId);
     const lot = await db.selectFrom("entitlement_lots").innerJoin("member_contracts", "member_contracts.id", "entitlement_lots.contract_id")
-      .select(["entitlement_lots.id", "entitlement_lots.version", "entitlement_lots.contract_id", "entitlement_lots.unit_kind", "entitlement_lots.total_units", "entitlement_lots.expires_on", "member_contracts.property_id", "member_contracts.version as contract_version"])
+      .select(["entitlement_lots.id", "entitlement_lots.version", "entitlement_lots.contract_id", "entitlement_lots.unit_kind", "entitlement_lots.total_units", "entitlement_lots.expires_on", "entitlement_lots.status", "member_contracts.property_id", "member_contracts.status as contract_status", "member_contracts.version as contract_version"])
       .where("entitlement_lots.id", "=", lotId).where("member_contracts.property_id", "=", propertyId).executeTakeFirst();
     if (!lot) throw new DomainError("NOT_FOUND", "Entitlement lot not found", 404);
+    if (lot.contract_status !== "ACTIVE" || lot.status !== "ACTIVE") {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "Only an active member contract and active entitlement lot can be adjusted", 409);
+    }
     const expiration = await db.selectFrom("entitlement_ledger").select("fact_id")
       .where("lot_id", "=", lotId).where("entry_type", "=", "EXPIRE").executeTakeFirst();
     if (expiration) throw new DomainError("ENTITLEMENT_CONFLICT", "An expired entitlement lot cannot be adjusted", 409, false, { expirationFactId: expiration.fact_id });
@@ -1373,7 +1436,9 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         "entitlement_lots.unit_kind",
         "entitlement_lots.total_units",
         "entitlement_lots.expires_on",
+        "entitlement_lots.status",
         "member_contracts.property_id",
+        "member_contracts.status as contract_status",
         "member_contracts.version as contract_version",
         sql<string>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as text)`.as("ledger_delta"),
         sql<string>`cast(count(*) filter (where entitlement_ledger.entry_type = 'EXPIRE') as text)`.as("expire_count")
@@ -1387,11 +1452,16 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         "entitlement_lots.unit_kind",
         "entitlement_lots.total_units",
         "entitlement_lots.expires_on",
+        "entitlement_lots.status",
         "member_contracts.property_id",
+        "member_contracts.status",
         "member_contracts.version"
     ])
       .executeTakeFirst();
     if (!lot) throw new DomainError("NOT_FOUND", "Entitlement lot not found", 404);
+    if (lot.contract_status !== "ACTIVE" || lot.status !== "ACTIVE") {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "Only an active member contract and active entitlement lot can be expired", 409);
+    }
     if (parsePostgresBigInt(lot.expire_count, "Entitlement expiration count") > 0n) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "Entitlement lot is already expired", 409);
     }
@@ -1593,7 +1663,6 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         .select("property_id")
         .where("member_id", "=", memberId)
         .orderBy("property_id")
-        .forShare()
         .execute(),
       db.selectFrom("membership_products").selectAll()
         .where("id", "=", membershipProductId)

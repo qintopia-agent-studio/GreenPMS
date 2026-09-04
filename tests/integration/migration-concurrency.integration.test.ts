@@ -117,8 +117,26 @@ async function executeLegacyMigrationFixtureCommand(
         _occupantIds: [newId("occupant")]
       }
     : envelope.input;
+  const writesMembershipPayment = envelope.commandType === "RECORD_MEMBERSHIP_PAYMENT"
+    || envelope.commandType === "CORRECT_MEMBERSHIP_PAYMENT"
+    || envelope.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
+  const membershipPaymentBusinessDateColumn = writesMembershipPayment
+    ? await sql<{ present: boolean }>`
+        select exists (
+          select 1 from information_schema.columns
+          where table_schema = current_schema()
+            and table_name = 'membership_payment_facts'
+            and column_name = 'business_date'
+        ) as present
+      `.execute(db)
+    : null;
+  const needsLegacyPaymentShape = membershipPaymentBusinessDateColumn?.rows[0]?.present === false;
 
   return db.transaction().execute(async (trx) => {
+    if (needsLegacyPaymentShape) {
+      // Current writers need this field; drop it again so the committed fixture remains a true pre-050 schema.
+      await sql`ALTER TABLE membership_payment_facts ADD COLUMN business_date date`.execute(trx);
+    }
     await lockCommandResources(trx, envelope.commandType, input);
     const built = await buildCommandEffect(trx, envelope.commandType, input);
     await trx.insertInto("command_executions").values({
@@ -168,6 +186,10 @@ async function executeLegacyMigrationFixtureCommand(
       target_refs: JSON.stringify(applied.resourceRefs),
       metadata: { effectHash: built.effectHash, fixture: "legacy-044-to-047-migration" }
     }).execute();
+    if (needsLegacyPaymentShape) {
+      await sql`SET CONSTRAINTS ALL IMMEDIATE`.execute(trx);
+      await sql`ALTER TABLE membership_payment_facts DROP COLUMN business_date`.execute(trx);
+    }
     return {
       receiptId,
       commandId,
@@ -239,7 +261,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(48);
+      expect(expectedMigrations).toHaveLength(51);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -267,6 +289,9 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("046_command_authorization.sql");
       expect(expectedMigrations).toContain("047_runtime_database_role.sql");
       expect(expectedMigrations).toContain("048_runtime_isolation_guards.sql");
+      expect(expectedMigrations).toContain("049_historical_stay_arrangement_corrections.sql");
+      expect(expectedMigrations).toContain("050_admin_membership_corrections.sql");
+      expect(expectedMigrations).toContain("051_runtime_role_command_compatibility.sql");
 
       const readyDatabase = createDatabase(databaseUrl.toString());
       try {

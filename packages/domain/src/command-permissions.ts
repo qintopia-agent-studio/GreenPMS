@@ -1,6 +1,5 @@
 import {
   currentReleaseFeatures,
-  futureAdministratorCommandTypes,
   type AccessLevel,
   type CommandCapability,
   type CommandType
@@ -36,11 +35,15 @@ export const ordinaryStaffCommandGrants = [
 export const administratorCommandGrants = [
   ...ordinaryStaffCommandGrants,
   "CORRECT_ORDER_OCCUPANT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+  "CORRECT_MEMBER_PROFILE",
+  "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+  "BACKFILL_HISTORICAL_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
   "COMPLETE_CLEANING",
   "ISSUE_TOKEN",
   "ROTATE_TOKEN",
-  "REVOKE_TOKEN",
-  ...futureAdministratorCommandTypes
+  "REVOKE_TOKEN"
 ] as const satisfies readonly CommandCapability[];
 
 export const systemDerivedCommandTypes = [
@@ -73,6 +76,9 @@ export function commandFeatureEnabled(commandType: CommandCapability | string): 
   if (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") {
     return currentReleaseFeatures.historicalStayArrangementCorrection;
   }
+  if (commandType === "CORRECT_MEMBER_PROFILE") return currentReleaseFeatures.memberProfileCorrection;
+  if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") return currentReleaseFeatures.membershipEffectiveDateCorrection;
+  if (commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") return currentReleaseFeatures.historicalMembershipBackfill;
   if (commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") {
     return currentReleaseFeatures.membershipConversionVoidCorrection;
   }

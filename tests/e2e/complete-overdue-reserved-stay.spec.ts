@@ -237,7 +237,7 @@ async function openOrderFromRoomStatus(page: Page, target: CompleteStayFixture):
   await orderOption.click();
   const context = page.locator(".room-status-order-context").filter({ hasText: target.nickname });
   await expect(context).toBeVisible({ timeout: 30_000 });
-  await page.getByRole("dialog", { name: "订单上下文" }).locator(".modal-footer")
+  await page.getByRole("dialog", { name: "订单详情" }).locator(".modal-footer")
     .getByRole("button", { name: "查看完整订单", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/orders/${target.orderId}$`));
   await expect(page.getByRole("heading", { name: target.nickname, exact: true })).toBeVisible({ timeout: 30_000 });
@@ -350,7 +350,7 @@ test("完成住宿：已足额收款的逾期预订一次完成且不重复收�
   ]);
 });
 
-test("8.5：106 的零收款错误预订从标准 UI 受控纠正并保留单条审计记录", async ({ page }, testInfo) => {
+test("8.5：106 的零收款错误预订从标准 UI 受控补录并保留单条审计记录", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop browser journey");
   await login(page, {
     arrivalDate: incorrectFixture.arrivalDate,
@@ -376,7 +376,7 @@ test("8.5：106 的零收款错误预订从标准 UI 受控纠正并保留单条
   await page.getByTestId("complete-stay").click();
   const form = page.getByRole("dialog", { name: "完成住宿", exact: true });
   await form.getByTestId("complete-stay-confirmed").check();
-  await form.getByTestId("complete-stay-reason").fill("客人实际入住并已离店，纠正开发期间遗留的错误预订");
+  await form.getByTestId("complete-stay-reason").fill("客人实际入住并已离店，修复开发期间遗留的错误预订");
   await expect(form.getByTestId("complete-stay-record-collection")).not.toBeChecked();
 
   const previewResponse = page.waitForResponse((response) => (
@@ -415,10 +415,10 @@ test("8.5：106 的零收款错误预订从标准 UI 受控纠正并保留单条
   await openOrderFromRoomStatus(page, incorrectFixture);
 
   const correctionHistory = page.getByTestId("complete-stay-correction-history");
-  await expect(correctionHistory).toContainText("住宿纠正记录");
+  await expect(correctionHistory).toContainText("住宿补录记录");
   await expect(correctionHistory.getByTestId("complete-stay-correction-history-item")).toHaveCount(1);
   await expect(correctionHistory).toContainText("Demo Operator");
-  await expect(correctionHistory).toContainText("客人实际入住并已离店，纠正开发期间遗留的错误预订");
+  await expect(correctionHistory).toContainText("客人实际入住并已离店，修复开发期间遗留的错误预订");
   await expect(correctionHistory).toContainText(`${incorrectFixture.arrivalDate} 至 ${incorrectFixture.departureDate}`);
   await expect(correctionHistory).toContainText("欠款");
 
@@ -438,7 +438,7 @@ test("8.5：106 的零收款错误预订从标准 UI 受控纠正并保留单条
   expect(after.amendments.map((amendment) => amendment.amendment_type)).toEqual(["CREATE_ORDER", "CHECK_IN", "CHECK_OUT"]);
   expect(after.amendments.slice(1).every((amendment) => (
     amendment.reason_code === "COMPLETE_STAY"
-      && amendment.reason_note === "客人实际入住并已离店，纠正开发期间遗留的错误预订"
+      && amendment.reason_note === "客人实际入住并已离店，修复开发期间遗留的错误预订"
       && amendment.command_id === after.amendments[1]!.command_id
       && amendment.actor?.displayName === "Demo Operator"
   ))).toBe(true);

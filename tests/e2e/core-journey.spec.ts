@@ -1459,7 +1459,17 @@ test("desktop projects the exact two-level staff and administrator capabilities"
     "REVOKE_CHECK_IN",
     "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
   ]));
-  for (const administratorOnly of ["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN", "CORRECT_ORDER_OCCUPANT"]) {
+  for (const administratorOnly of [
+    "ISSUE_TOKEN",
+    "ROTATE_TOKEN",
+    "REVOKE_TOKEN",
+    "CORRECT_ORDER_OCCUPANT",
+    "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+    "CORRECT_MEMBER_PROFILE",
+    "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+    "BACKFILL_HISTORICAL_MEMBERSHIP",
+    "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+  ]) {
     expect(staff.allowedActions.prop_qintopia_demo).not.toContain(administratorOnly);
   }
 
@@ -1478,18 +1488,22 @@ test("desktop projects the exact two-level staff and administrator capabilities"
     "ISSUE_TOKEN",
     "ROTATE_TOKEN",
     "REVOKE_TOKEN",
-    "CORRECT_ORDER_OCCUPANT"
-  ]));
-  for (const disabledFeature of [
-    "COMPLETE_CLEANING",
+    "CORRECT_ORDER_OCCUPANT",
     "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+    "CORRECT_MEMBER_PROFILE",
+    "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+    "BACKFILL_HISTORICAL_MEMBERSHIP",
     "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
-  ]) {
+  ]));
+  for (const disabledFeature of ["COMPLETE_CLEANING"]) {
     expect(administrator.allowedActions.prop_qintopia_demo).not.toContain(disabledFeature);
   }
   expect(administrator.propertyCommandGrants.prop_qintopia_demo).toEqual(expect.arrayContaining([
     "COMPLETE_CLEANING",
     "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+    "CORRECT_MEMBER_PROFILE",
+    "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+    "BACKFILL_HISTORICAL_MEMBERSHIP",
     "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
   ]));
 });

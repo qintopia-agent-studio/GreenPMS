@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { AccommodationPositionSummary } from "../components/AccommodationPositionSummary";
 import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
 import type { InventoryUnitDto, MemberViewDto, OrderViewDto } from "../types";
-import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMoney, stayDateFundsAreOperatorFacing, StatusBadge } from "../ui";
+import { businessStatusLabel, formatDate, formatDateTime, formatMinor, formatMoney, InfoHint, stayDateFundsAreOperatorFacing, StatusBadge } from "../ui";
 import { stayDateChangeActionState, type StayDateChangeAction, type StayDateChangeMode } from "../components/StayDateChangeDrawer";
 import type { OrderLifecycleAction } from "../components/OrderLifecycleActionDrawer";
 import { stayMembershipUpgradeActionVisible } from "../stayMembershipUpgrade";
@@ -44,7 +44,8 @@ const arrangementChangeLabels: Record<OrderViewDto["arrangementHistory"][number]
   EXTENSION: "续住",
   SHORTENING: "缩短住宿",
   MOVE: "换房",
-  EARLY_CHECK_OUT: "提前退房"
+  EARLY_CHECK_OUT: "提前退房",
+  HISTORICAL_STAY_CORRECTION: "历史修改"
 };
 
 const effectiveArrangementLabels: Record<OrderViewDto["effectiveArrangement"]["presentation"], string> = {
@@ -248,8 +249,12 @@ export function RoomStatusOrderContext({
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
       && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY" && action.code !== "SHORTEN_STAY"
       && action.code !== "MOVE_UNIT" && action.code !== "CANCEL_ORDER" && action.code !== "MARK_NO_SHOW"
-      && action.code !== "REVOKE_CHECK_IN" && action.code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+      && action.code !== "REVOKE_CHECK_IN" && action.code !== "REVERSE_FACT"
+      && action.code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
   ));
+  const dateActionBlockedReasons = [...new Set(dateActionStates
+    .filter((state) => !state.enabled && state.reason)
+    .map((state) => state.reason!))];
   const amountDifference = view.amounts.collectionDifference;
   const currentPricingRevision = view.pricingRevisions.find((revision) => revision.id === view.order.current_revision_id)
     ?? view.pricingRevisions[view.pricingRevisions.length - 1];
@@ -288,7 +293,7 @@ export function RoomStatusOrderContext({
         <div className="room-status-order-context-header-actions">
           <StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} />
           {dueOut ? <RoomStatusAttentionBadges labels={["待退房"]} /> : null}
-          {onClose ? <button type="button" className="room-status-icon-button" onClick={onClose} aria-label="关闭订单上下文" title="关闭订单上下文"><X aria-hidden="true" size={17} /></button> : null}
+          {onClose ? <button type="button" className="room-status-icon-button" onClick={onClose} aria-label="关闭订单详情" title="关闭订单详情"><X aria-hidden="true" size={17} /></button> : null}
         </div>
       </header>
 
@@ -428,9 +433,14 @@ export function RoomStatusOrderContext({
       ) : null}
 
       <section className="room-status-context-actions" aria-labelledby="room-status-order-actions-heading">
-        <div className="room-status-context-section-heading"><ArrowRight aria-hidden="true" size={17} /><h3 id="room-status-order-actions-heading">订单入口</h3></div>
+        <div className="room-status-context-section-heading">
+          <ArrowRight aria-hidden="true" size={17} />
+          <h3 id="room-status-order-actions-heading">订单入口</h3>
+          {dateActionBlockedReasons.length
+            ? <InfoHint text={dateActionBlockedReasons.join("；")} label="订单操作说明" />
+            : null}
+        </div>
         {primaryActionPlacement === "CONTENT" ? <button type="button" className="room-status-button" onClick={() => onOpenOrder()}>查看完整订单<ArrowRight aria-hidden="true" size={16} /></button> : null}
-        {[...new Set(dateActionStates.filter((state) => !state.enabled && state.reason).map((state) => state.reason!))].map((reason) => <p key={reason} className="room-status-context-note" role="status" data-testid="stay-date-action-blocked">{reason}</p>)}
         {fulfillmentActions.length || lifecycleActions.length || dateActions.length || departureAdjustmentAction || moveUnitEnabled || routedActions.length || stayMembershipUpgradeVisible ? <ul>
           {fulfillmentActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action-mode="inline" onClick={() => onFulfillmentAction(action.code)}>{actionLabels[action.code]}</button></li>)}
           {dateActions.map((action) => <li key={action.code}><button type="button" className="room-status-button" disabled={writeBlocked} data-room-status-action={action.code} data-room-status-action-mode="inline" onClick={() => onDateAction?.(action.code, "DATE_CHANGE")}>{actionLabels[action.code]}</button></li>)}

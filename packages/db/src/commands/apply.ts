@@ -16,6 +16,16 @@ import { loadStoredQuote, lockEntitlementLots, lockMemberEntitlementLots } from 
 import type { Database } from "../schema.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
 import { normalizePhoneNumber, optionalIdentityCardNumber, requireInteger, requireObject, requireString } from "./effects.ts";
+import {
+  HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND,
+  applyHistoricalStayArrangementCorrection,
+  lockHistoricalStayArrangementCorrectionResources
+} from "../admin-historical-stay-corrections.ts";
+import {
+  applyMemberCorrectionCommand,
+  isMemberCorrectionCommandType,
+  lockMemberCorrectionResources
+} from "./member-corrections.ts";
 
 export interface AppliedCommand {
   persistedResult: Record<string, unknown>;
@@ -225,6 +235,15 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   const input = requireObject(rawInput);
   const propertyId = requireString(input, "propertyId");
 
+  if (commandType === HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND) {
+    await lockHistoricalStayArrangementCorrectionResources(trx, rawInput);
+    return;
+  }
+  if (isMemberCorrectionCommandType(commandType)) {
+    await lockMemberCorrectionResources(trx, commandType, rawInput);
+    return;
+  }
+
   if (commandType === "CREATE_MEMBER") {
     const phone = normalizePhoneNumber(input.phone);
     await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-phone:${phone}`}, 0::bigint))`.execute(trx);
@@ -237,22 +256,36 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     const memberId = requireString(input, "memberId");
     const productId = requireString(input, "membershipProductId");
     const member = await trx.selectFrom("member_property_links").select("member_id")
-      .where("member_id", "=", memberId).where("property_id", "=", propertyId).forShare().executeTakeFirst();
+      .where("member_id", "=", memberId).where("property_id", "=", propertyId).executeTakeFirst();
     if (!member) throw new DomainError("NOT_FOUND", "当前门店未找到该会员", 404);
-    const product = await trx.selectFrom("membership_products").select("id").where("id", "=", productId).forShare().executeTakeFirst();
+    const product = await trx.selectFrom("membership_products").select("id").where("id", "=", productId).executeTakeFirst();
     if (!product) throw new DomainError("NOT_FOUND", "会员产品不存在", 404);
     return;
   }
 
-  if (commandType === "RECORD_MEMBERSHIP_PAYMENT" || commandType === "CORRECT_MEMBERSHIP_PAYMENT" || commandType === "ACTIVATE_MEMBERSHIP_ORDER") {
+  if (commandType === "ACTIVATE_MEMBERSHIP_ORDER") {
     const membershipOrderId = requireString(input, "membershipOrderId");
-    const order = await trx.selectFrom("membership_orders").select(["id", "member_id"])
+    const identity = await trx.selectFrom("membership_orders").select(["id", "member_id"])
+      .where("id", "=", membershipOrderId).where("property_id", "=", propertyId).executeTakeFirst();
+    if (!identity) throw new DomainError("NOT_FOUND", "会员订单不存在", 404);
+    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${identity.member_id}`}, 0::bigint))`.execute(trx);
+    await trx.selectFrom("members").select("id").where("id", "=", identity.member_id).forUpdate().executeTakeFirst();
+    const order = await trx.selectFrom("membership_orders").select("id")
+      .where("id", "=", membershipOrderId)
+      .where("property_id", "=", propertyId)
+      .where("member_id", "=", identity.member_id)
+      .forUpdate().executeTakeFirst();
+    if (!order) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "会员订单身份已变化", 409);
+    await trx.selectFrom("membership_payment_facts").select("fact_id")
+      .where("membership_order_id", "=", membershipOrderId).forUpdate().execute();
+    return;
+  }
+
+  if (commandType === "RECORD_MEMBERSHIP_PAYMENT" || commandType === "CORRECT_MEMBERSHIP_PAYMENT") {
+    const membershipOrderId = requireString(input, "membershipOrderId");
+    const order = await trx.selectFrom("membership_orders").select("id")
       .where("id", "=", membershipOrderId).where("property_id", "=", propertyId).forUpdate().executeTakeFirst();
     if (!order) throw new DomainError("NOT_FOUND", "会员订单不存在", 404);
-    if (commandType === "ACTIVATE_MEMBERSHIP_ORDER") {
-      await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${order.member_id}`}, 0::bigint))`.execute(trx);
-      await trx.selectFrom("members").select("id").where("id", "=", order.member_id).forUpdate().executeTakeFirst();
-    }
     await trx.selectFrom("membership_payment_facts").select("fact_id")
       .where("membership_order_id", "=", membershipOrderId).forUpdate().execute();
     return;
@@ -317,12 +350,11 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
     const orderId = requireString(input, "orderId");
     const memberId = requireString(input, "memberId");
-    const context = await loadLockedOrderContextForProperty(trx, propertyId, orderId);
     await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${memberId}`}, 0::bigint))`.execute(trx);
+    await loadLockedOrderContextForProperty(trx, propertyId, orderId);
     await trx.selectFrom("members").select("id").where("id", "=", memberId).forUpdate().executeTakeFirst();
     await trx.selectFrom("membership_products").select("id")
       .where("id", "=", requireString(input, "membershipProductId"))
-      .forShare()
       .executeTakeFirst();
     const rawCollectionFactIds = input.collectionFactIds;
     if (Array.isArray(rawCollectionFactIds)) {
@@ -475,6 +507,16 @@ export async function applyCommand(trx: Transaction<Database>, options: {
   const propertyId = requireString(input, "propertyId");
   const effect = options.effect;
 
+  if (isMemberCorrectionCommandType(options.commandType)) {
+    return applyMemberCorrectionCommand(trx, {
+      commandType: options.commandType,
+      propertyId,
+      effect,
+      commandId: options.commandId,
+      reason: options.reason
+    });
+  }
+
   if (options.commandType === "CREATE_MEMBER") {
     const operation = requireString(effect, "operation");
     const memberProfile = nestedObject(effect, "member");
@@ -565,6 +607,10 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const amount = moneyMinor(payment.amount, "payment.amount");
     const factId = newId("membership_payment");
     const membershipOrderId = requireString(effect, "membershipOrderId");
+    const status = requireString(effect, "status");
+    if (status !== "DRAFT" && status !== "ACTIVE") {
+      throw new DomainError("INTERNAL_ERROR", "Membership payment effect has an invalid order status", 500);
+    }
     await trx.insertInto("membership_payment_facts").values({
       fact_id: factId,
       membership_order_id: membershipOrderId,
@@ -576,11 +622,14 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       corrects_fact_id: null,
       reverses_fact_id: null,
       note: typeof payment.note === "string" ? payment.note : "",
-      command_id: options.commandId
+      command_id: options.commandId,
+      business_date: requireString(payment, "businessDate")
     }).execute();
-    await trx.updateTable("membership_orders").set({ version: sql`version + 1`, updated_at: new Date() })
-      .where("id", "=", membershipOrderId).where("status", "=", "DRAFT").executeTakeFirstOrThrow();
-    return { persistedResult: { membershipOrderId, paymentFactId: factId, status: "DRAFT" }, resourceRefs: [membershipOrderId], factRefs: [factId] };
+    if (status === "DRAFT") {
+      await trx.updateTable("membership_orders").set({ version: sql`version + 1`, updated_at: new Date() })
+        .where("id", "=", membershipOrderId).where("status", "=", "DRAFT").executeTakeFirstOrThrow();
+    }
+    return { persistedResult: { membershipOrderId, paymentFactId: factId, status }, resourceRefs: [membershipOrderId], factRefs: [factId] };
   }
 
   if (options.commandType === "CORRECT_MEMBERSHIP_PAYMENT") {
@@ -604,7 +653,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       corrects_fact_id: null,
       reverses_fact_id: originalPaymentFactId,
       note: `更正原企微收款：${note}`,
-      command_id: options.commandId
+      command_id: options.commandId,
+      business_date: requireString(original, "businessDate")
     }).execute();
     await trx.insertInto("membership_payment_facts").values({
       fact_id: replacementFactId,
@@ -617,7 +667,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       corrects_fact_id: originalPaymentFactId,
       reverses_fact_id: null,
       note,
-      command_id: options.commandId
+      command_id: options.commandId,
+      business_date: requireString(replacement, "businessDate")
     }).execute();
     await trx.updateTable("membership_orders").set({ version: sql`version + 1`, updated_at: new Date() })
       .where("id", "=", membershipOrderId).where("status", "=", "DRAFT").executeTakeFirstOrThrow();
@@ -648,6 +699,31 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const entitlementUnits = effect.entitlementUnits;
     if ((entitlementUnitKind !== "ROOM_NIGHT" && entitlementUnitKind !== "BED_NIGHT") || !Number.isInteger(entitlementUnits) || (entitlementUnits as number) <= 0) {
       throw new DomainError("INTERNAL_ERROR", "Invalid activation entitlement", 500);
+    }
+    const [activeOrders, activeContracts, activeLots] = await Promise.all([
+      trx.selectFrom("membership_orders").select("id")
+        .where("property_id", "=", propertyId)
+        .where("member_id", "=", order.member_id)
+        .where("status", "=", "ACTIVE")
+        .orderBy("id")
+        .execute(),
+      trx.selectFrom("member_contracts").select("id")
+        .where("property_id", "=", propertyId)
+        .where("member_id", "=", order.member_id)
+        .where("status", "=", "ACTIVE")
+        .orderBy("id")
+        .execute(),
+      trx.selectFrom("entitlement_lots")
+        .innerJoin("member_contracts", "member_contracts.id", "entitlement_lots.contract_id")
+        .select("entitlement_lots.id")
+        .where("member_contracts.property_id", "=", propertyId)
+        .where("member_contracts.member_id", "=", order.member_id)
+        .where("entitlement_lots.status", "=", "ACTIVE")
+        .orderBy("entitlement_lots.id")
+        .execute()
+    ]);
+    if (activeOrders.length > 0 || activeContracts.length > 0 || activeLots.length > 0) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "该会员已有有效会员链，不能再次激活会员订单", 409);
     }
     await trx.insertInto("member_contracts").values({
       id: contractId,
@@ -1147,6 +1223,15 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     };
   }
 
+  if (options.commandType === HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND) {
+    return applyHistoricalStayArrangementCorrection(trx, {
+      input: options.input,
+      effect,
+      reason: options.reason,
+      commandId: options.commandId
+    });
+  }
+
   const orderId = requireString(effect, "orderId");
   const context = await loadLockedOrderContextForProperty(trx, propertyId, orderId);
 
@@ -1273,7 +1358,14 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         source_order_id: orderId,
         source_collection_fact_id: item.factId,
         note: "升级会员：住宿收款转入",
-        command_id: options.commandId
+        command_id: options.commandId,
+        business_date: sql<string>`(
+          SELECT (source.created_at AT TIME ZONE property_row.timezone)::date
+          FROM collection_facts AS source
+          JOIN orders AS source_order ON source_order.id = source.order_id
+          JOIN properties AS property_row ON property_row.id = source_order.property_id
+          WHERE source.fact_id = ${item.factId}
+        )`
       }).execute();
       const reversalFactId = newId("fact");
       await trx.insertInto("collection_facts").values({
@@ -1321,7 +1413,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         corrects_fact_id: null,
         reverses_fact_id: null,
         note: typeof remainingPayment.note === "string" ? remainingPayment.note : "",
-        command_id: options.commandId
+        command_id: options.commandId,
+        business_date: validFrom
       }).execute();
       membershipPaymentFactIds.push(remainingPaymentFactId);
     }

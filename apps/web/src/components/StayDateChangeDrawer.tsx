@@ -258,12 +258,12 @@ export function buildStayDateChangeRequest(
         ? "系统将按新日期核对完整库存、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
         : resolvedAction === "EXTEND_STAY"
           ? "系统将按完整新住宿周期核对新增库存、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
-          : "系统将原子核对缩短后的住宿安排、库存释放、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
+          : "系统将同时核对缩短后的住宿安排、库存释放、政策基础金额、本单渠道应结金额和渠道价格差异说明。"
       : resolvedAction === "RESCHEDULE_STAY"
         ? "系统将按新日期重新核对完整库存、原锁定价格政策、会员权益和已登记收款差额。"
         : resolvedAction === "EXTEND_STAY"
           ? "系统将按完整新住宿周期重新核对新增库存、原锁定价格政策、会员权益和已登记收款差额。"
-          : "系统将原子核对缩短后的住宿安排、完整重价、库存释放、已登记收款差额和建议退款。",
+          : "系统将同时核对缩短后的住宿安排、完整重价、库存释放、已登记收款差额和建议退款。",
     presentation: "STAY_DATES",
     bookingChannelCode: channel,
     initialReason: { code: resolvedAction, note: reason },

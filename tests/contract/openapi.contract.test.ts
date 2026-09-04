@@ -40,6 +40,26 @@ const commandInputContract: Record<PublicCommandEnvelopeType, { required: string
     required: ["propertyId", "membershipOrderId"],
     properties: ["propertyId", "membershipOrderId"]
   },
+  CORRECT_HISTORICAL_STAY_ARRANGEMENTS: {
+    required: ["propertyId", "correctionSet"],
+    properties: ["propertyId", "correctionSet", "evidenceNote"]
+  },
+  CORRECT_MEMBER_PROFILE: {
+    required: ["propertyId", "memberId", "expectedPriorProfile", "correctedProfile", "evidenceNote"],
+    properties: ["propertyId", "memberId", "expectedPriorProfile", "correctedProfile", "evidenceNote"]
+  },
+  CORRECT_MEMBERSHIP_EFFECTIVE_DATE: {
+    required: ["propertyId", "membershipOrderId", "actualMembershipDate", "evidenceNote"],
+    properties: ["propertyId", "membershipOrderId", "actualMembershipDate", "evidenceNote"]
+  },
+  BACKFILL_HISTORICAL_MEMBERSHIP: {
+    required: ["propertyId", "memberId", "membershipProductId", "actualMembershipDate", "payment", "evidenceNote"],
+    properties: ["propertyId", "memberId", "membershipProductId", "actualMembershipDate", "payment", "evidenceNote"]
+  },
+  VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY: {
+    required: ["propertyId", "erroneousMembershipOrderId", "sourceStayOrderId", "actualMembershipDate", "evidenceNote"],
+    properties: ["propertyId", "erroneousMembershipOrderId", "sourceStayOrderId", "actualMembershipDate", "replacementDirectPayment", "evidenceNote"]
+  },
   CREATE_ORDER: {
     required: ["propertyId", "quoteId", "primaryGuest"],
     properties: [

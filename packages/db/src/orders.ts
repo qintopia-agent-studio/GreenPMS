@@ -12,6 +12,8 @@ import {
   type OrderEffectiveArrangementDto,
   type OrderFulfillmentProjectionDto,
   type OrderFulfillmentRecordDto,
+  type OrderHistoricalStayCorrectionGroupDto,
+  type OrderHistoricalStayCorrectionSnapshotDto,
   type OrderAllowedActionDto,
   type OrderActionCode,
   type CommandCapability
@@ -200,64 +202,87 @@ export async function loadOrderMembershipConversion(
   context: OrderContext
 ): Promise<OrderMembershipConversion | null> {
   const amendments = await db.selectFrom("amendments")
-    .select(["id", "command_id"])
+    .select(["id", "command_id", "amendment_type"])
     .where("order_id", "=", context.order.id)
-    .where("amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
+    .where("amendment_type", "in", [
+      "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+    ])
     .orderBy("sequence")
     .execute();
   if (amendments.length === 0) return null;
 
-  const amendment = amendments[0]!;
-  if (amendments.length !== 1 || !amendment.command_id
-    || !context.order.member_id || !context.order.member_contract_id) {
+  if (!context.order.member_id || !context.order.member_contract_id) {
     throw new DomainError("INTERNAL_ERROR", "订单升级会员关联已损坏", 500, false, {
       orderId: context.order.id,
       conversionAmendmentIds: amendments.map((item) => item.id)
     });
   }
 
-  const [linked, commandMembershipOrders] = await Promise.all([
-    db.selectFrom("member_contracts as contract")
-      .innerJoin("membership_orders as membership_order", "membership_order.id", "contract.membership_order_id")
-      .innerJoin("entitlement_lots as lot", "lot.id", "membership_order.entitlement_lot_id")
-      .innerJoin("command_executions as execution", "execution.id", "membership_order.created_by_command_id")
-      .select([
-        "contract.id as contract_id",
-        "contract.property_id as contract_property_id",
-        "contract.member_id as contract_member_id",
-        "contract.membership_order_id as contract_membership_order_id",
-        "membership_order.id as membership_order_id",
-        "membership_order.property_id as membership_order_property_id",
-        "membership_order.member_id as membership_order_member_id",
-        "membership_order.contract_id as membership_order_contract_id",
-        "membership_order.entitlement_lot_id as membership_order_entitlement_lot_id",
-        "membership_order.created_by_command_id",
-        "membership_order.activated_by_command_id",
-        "membership_order.status as membership_order_status",
-        "membership_order.allowed_inventory_kind",
-        "membership_order.allowed_room_type_code",
-        "membership_order.entitlement_unit_kind",
-        "membership_order.entitlement_units",
-        "lot.id as lot_id",
-        "lot.contract_id as lot_contract_id",
-        "lot.unit_kind as lot_unit_kind",
-        "lot.total_units as lot_total_units",
-        "execution.id as execution_id",
-        "execution.property_id as execution_property_id",
-        "execution.command_type as execution_command_type",
-        "execution.state as execution_state"
-      ])
-      .where("contract.id", "=", context.order.member_contract_id)
-      .executeTakeFirst(),
-    db.selectFrom("membership_orders")
-      .select(({ fn }) => fn.countAll<string>().as("count"))
-      .where("created_by_command_id", "=", amendment.command_id)
-      .where("activated_by_command_id", "=", amendment.command_id)
-      .executeTakeFirstOrThrow()
-  ]);
+  const linked = await db.selectFrom("member_contracts as contract")
+    .innerJoin("membership_orders as membership_order", "membership_order.id", "contract.membership_order_id")
+    .innerJoin("entitlement_lots as lot", "lot.id", "membership_order.entitlement_lot_id")
+    .innerJoin("command_executions as execution", "execution.id", "membership_order.created_by_command_id")
+    .select([
+      "contract.id as contract_id",
+      "contract.property_id as contract_property_id",
+      "contract.member_id as contract_member_id",
+      "contract.membership_order_id as contract_membership_order_id",
+      "membership_order.id as membership_order_id",
+      "membership_order.property_id as membership_order_property_id",
+      "membership_order.member_id as membership_order_member_id",
+      "membership_order.contract_id as membership_order_contract_id",
+      "membership_order.entitlement_lot_id as membership_order_entitlement_lot_id",
+      "membership_order.created_by_command_id",
+      "membership_order.activated_by_command_id",
+      "membership_order.status as membership_order_status",
+      "membership_order.allowed_inventory_kind",
+      "membership_order.allowed_room_type_code",
+      "membership_order.entitlement_unit_kind",
+      "membership_order.entitlement_units",
+      "lot.id as lot_id",
+      "lot.contract_id as lot_contract_id",
+      "lot.unit_kind as lot_unit_kind",
+      "lot.total_units as lot_total_units",
+      "execution.id as execution_id",
+      "execution.property_id as execution_property_id",
+      "execution.command_type as execution_command_type",
+      "execution.state as execution_state"
+    ])
+    .where("contract.id", "=", context.order.member_contract_id)
+    .executeTakeFirst();
+  if (!linked) {
+    throw new DomainError("INTERNAL_ERROR", "订单升级会员合同与权益关联已损坏", 500, false, {
+      orderId: context.order.id,
+      contractId: context.order.member_contract_id
+    });
+  }
+  const matchingAmendments = amendments.filter((candidate) => {
+    return candidate.command_id === linked.created_by_command_id
+      && candidate.amendment_type === linked.execution_command_type;
+  });
+  const amendment = matchingAmendments.length === 1 ? matchingAmendments[0]! : undefined;
+  if (!amendment?.command_id) {
+    throw new DomainError("INTERNAL_ERROR", "订单升级会员关联已损坏", 500, false, {
+      orderId: context.order.id,
+      conversionAmendmentIds: amendments.map((item) => item.id),
+      currentMembershipCommandId: linked.created_by_command_id
+    });
+  }
+  if (amendments.length > 1 && amendment.amendment_type !== "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") {
+    throw new DomainError("INTERNAL_ERROR", "订单升级会员关联已损坏", 500, false, {
+      orderId: context.order.id,
+      conversionAmendmentIds: amendments.map((item) => item.id),
+      currentMembershipCommandId: amendment.command_id
+    });
+  }
+  const commandMembershipOrders = await db.selectFrom("membership_orders")
+    .select(({ fn }) => fn.countAll<string>().as("count"))
+    .where("created_by_command_id", "=", amendment.command_id)
+    .where("activated_by_command_id", "=", amendment.command_id)
+    .executeTakeFirstOrThrow();
 
-  if (!linked
-    || Number(commandMembershipOrders.count) !== 1
+  if (Number(commandMembershipOrders.count) !== 1
     || linked.contract_id !== context.order.member_contract_id
     || linked.contract_property_id !== context.order.property_id
     || linked.contract_member_id !== context.order.member_id
@@ -274,7 +299,7 @@ export async function loadOrderMembershipConversion(
     || linked.lot_total_units !== linked.entitlement_units
     || linked.execution_id !== amendment.command_id
     || linked.execution_property_id !== context.order.property_id
-    || linked.execution_command_type !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    || linked.execution_command_type !== amendment.amendment_type
     || linked.execution_state !== "APPLIED") {
     throw new DomainError("INTERNAL_ERROR", "订单升级会员合同与权益关联已损坏", 500, false, {
       orderId: context.order.id,
@@ -601,6 +626,7 @@ interface LifecycleAmendmentRow extends FulfillmentAmendmentRow {
   order_id: string;
   prior_version: number;
   new_version: number;
+  command_id?: string | null;
   protocolVersion?: HistoricalAmendmentProtocol;
 }
 
@@ -630,8 +656,10 @@ const orderLifecycleAmendmentTypes = new Set<string>([
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENT",
   "REPRICE_ORDER",
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
@@ -646,8 +674,10 @@ const pricingRevisionAmendmentTypes = new Set<string>([
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENT",
   "REPRICE_ORDER",
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
@@ -660,8 +690,10 @@ const requiredPricingRevisionAmendmentTypes = new Set<string>([
   "EXTEND_STAY",
   "SHORTEN_STAY",
   "MOVE_UNIT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENT",
   "REPRICE_ORDER",
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
   "REFRESH_MEMBER_COVERAGE",
   "CANCEL_ORDER",
   "MARK_NO_SHOW",
@@ -673,7 +705,8 @@ const staySegmentAmendmentTypes = new Set<string>([
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
-  "MOVE_UNIT"
+  "MOVE_UNIT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENT"
 ] as const);
 
 type LifecycleOrderStatus = "RESERVED" | "CHECKED_IN" | "CHECKED_OUT" | "CANCELLED" | "NO_SHOW" | "CHECK_IN_REVOKED";
@@ -709,6 +742,101 @@ function lifecycleDateTime(value: Date | string, field: string): string {
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) lifecycleFailure(`订单住宿生命周期的${field}损坏`);
   return parsed.toISOString();
+}
+
+function lifecycleString(value: unknown, field: string, allowEmpty = false): string {
+  if (typeof value !== "string" || (!allowEmpty && value.trim() === "")) {
+    lifecycleFailure(`订单住宿生命周期的${field}损坏`);
+  }
+  return value;
+}
+
+function historicalCorrectionSnapshotForHistory(
+  value: unknown,
+  field: string
+): OrderHistoricalStayCorrectionSnapshotDto {
+  const snapshot = recordValue(value);
+  if (!snapshot) lifecycleFailure(`历史住宿安排修改的${field}损坏`);
+  const inventoryUnitId = lifecycleString(snapshot.inventoryUnitId, `${field}房源`);
+  const arrivalDate = lifecycleDate(snapshot.arrivalDate, `${field}入住日期`);
+  const departureDate = lifecycleDate(snapshot.departureDate, `${field}退房日期`);
+  if (departureDate <= arrivalDate) lifecycleFailure(`历史住宿安排修改的${field}日期区间无效`);
+  if (!Number.isSafeInteger(snapshot.nights) || Number(snapshot.nights) < 1) {
+    lifecycleFailure(`历史住宿安排修改的${field}晚数损坏`);
+  }
+  if (!Array.isArray(snapshot.stayTimeline)) {
+    lifecycleFailure(`历史住宿安排修改的${field}每日房源明细损坏`);
+  }
+  const stayTimeline = snapshot.stayTimeline.map((item, index) => {
+    const row = recordValue(item);
+    if (!row) lifecycleFailure(`历史住宿安排修改的${field}每日房源明细损坏`);
+    return {
+      serviceDate: lifecycleDate(row.serviceDate, `${field}第 ${index + 1} 晚日期`),
+      inventoryUnitId: lifecycleString(row.inventoryUnitId, `${field}第 ${index + 1} 晚房源`)
+    };
+  });
+  if (stayTimeline.length !== snapshot.nights) {
+    lifecycleFailure(`历史住宿安排修改的${field}晚数与每日房源明细不一致`);
+  }
+  return {
+    inventoryUnitId,
+    arrivalDate,
+    departureDate,
+    nights: snapshot.nights as number,
+    stayTimeline
+  };
+}
+
+function historicalCorrectionGroupFromReceiptResult(
+  commandId: string,
+  result: unknown
+): OrderHistoricalStayCorrectionGroupDto {
+  const value = recordValue(result);
+  if (!value || value.operation !== "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") {
+    lifecycleFailure("历史住宿安排修改结果类型损坏", { commandId });
+  }
+  const correctionSetHash = lifecycleString(value.correctionSetHash, "同批修改标识");
+  if (!/^[a-f0-9]{64}$/.test(correctionSetHash)) {
+    lifecycleFailure("历史住宿安排同批修改标识损坏", { commandId });
+  }
+  if (!Array.isArray(value.corrections) || value.corrections.length === 0) {
+    lifecycleFailure("历史住宿安排修改结果缺少同批修改清单", { commandId });
+  }
+  const corrections = value.corrections.map((item, index) => {
+    const correction = recordValue(item);
+    if (!correction) lifecycleFailure("历史住宿安排同批修改记录损坏", { commandId, index });
+    return {
+      orderId: lifecycleString(correction.orderId, `第 ${index + 1} 笔修改订单`),
+      stayId: lifecycleString(correction.stayId, `第 ${index + 1} 笔修改住宿`),
+      correctionId: lifecycleString(correction.correctionId, `第 ${index + 1} 笔修改记录`),
+      amendmentId: lifecycleString(correction.amendmentId, `第 ${index + 1} 笔修改变更`),
+      staySegmentId: lifecycleString(correction.staySegmentId, `第 ${index + 1} 笔修改住宿安排版本`),
+      pricingRevisionId: lifecycleString(correction.pricingRevisionId, `第 ${index + 1} 笔修改计价版本`),
+      before: historicalCorrectionSnapshotForHistory(correction.before, `第 ${index + 1} 笔修改前`),
+      after: historicalCorrectionSnapshotForHistory(correction.after, `第 ${index + 1} 笔修改后`)
+    };
+  });
+  const reason = recordValue(value.reason);
+  if (!reason) lifecycleFailure("历史住宿安排修改结果的原因损坏", { commandId });
+  const actor = recordValue(value.actor);
+  if (!actor) lifecycleFailure("历史住宿安排修改结果的操作人损坏", { commandId });
+  const evidenceNote = value.evidenceNote === undefined
+    ? undefined
+    : lifecycleString(value.evidenceNote, "修改凭据说明", true);
+  return {
+    correctionSetHash,
+    corrections,
+    reason: {
+      code: lifecycleString(reason.code, "修改原因代码"),
+      note: lifecycleString(reason.note, "修改原因备注", true)
+    },
+    ...(evidenceNote !== undefined ? { evidenceNote } : {}),
+    actor: {
+      subjectId: lifecycleString(actor.subjectId, "修改操作人"),
+      displayName: lifecycleString(actor.displayName, "修改操作人姓名")
+    },
+    recordedAt: lifecycleDateTime(lifecycleString(value.recordedAt, "修改记录时间"), "修改记录时间")
+  };
 }
 
 function arrangement(intervals: readonly OrderArrangementIntervalDto[]): OrderArrangementDto {
@@ -905,7 +1033,36 @@ function arrangementChangeType(amendment: LifecycleAmendmentRow): OrderArrangeme
     return lifecycleFailure("缩短住宿记录的完成方式损坏", { amendmentId: amendment.id });
   }
   if (amendmentType === "MOVE_UNIT") return "MOVE";
+  if (amendmentType === "CORRECT_HISTORICAL_STAY_ARRANGEMENT") return "HISTORICAL_STAY_CORRECTION";
   return lifecycleFailure("订单住宿安排包含无法识别的变更类型", { amendmentType });
+}
+
+function historicalCorrectionGroupForAmendment(
+  groupsByCommandId: ReadonlyMap<string, OrderHistoricalStayCorrectionGroupDto> | undefined,
+  amendment: LifecycleAmendmentRow
+): OrderHistoricalStayCorrectionGroupDto | undefined {
+  if (amendment.amendment_type !== "CORRECT_HISTORICAL_STAY_ARRANGEMENT") return undefined;
+  if (!groupsByCommandId) return undefined;
+  if (!amendment.command_id) {
+    lifecycleFailure("历史住宿安排修改缺少操作关联", { amendmentId: amendment.id });
+  }
+  const group = groupsByCommandId?.get(amendment.command_id);
+  if (!group) {
+    lifecycleFailure("历史住宿安排修改缺少同一操作的成功结果", {
+      amendmentId: amendment.id,
+      commandId: amendment.command_id
+    });
+  }
+  const matchingCorrection = group.corrections.filter((correction) => {
+    return correction.orderId === amendment.order_id && correction.amendmentId === amendment.id;
+  });
+  if (matchingCorrection.length !== 1) {
+    lifecycleFailure("历史住宿安排修改结果与订单变更记录不一致", {
+      amendmentId: amendment.id,
+      commandId: amendment.command_id
+    });
+  }
+  return group;
 }
 
 function fulfillmentState(orderStatus: string): OrderFulfillmentProjectionDto["state"] {
@@ -993,8 +1150,10 @@ function validateLifecycleStatus(
       continue;
     }
 
-    const terminalPricingOnlyAllowed = amendmentType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
-      && projectedStatus === "CHECKED_OUT";
+    const terminalPricingOnlyAllowed = projectedStatus === "CHECKED_OUT"
+      && (amendmentType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+        || amendmentType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+        || amendmentType === "CORRECT_HISTORICAL_STAY_ARRANGEMENT");
     if (amendmentType !== "CORRECT_ORDER_OCCUPANT"
       && !terminalPricingOnlyAllowed
       && projectedStatus !== "RESERVED"
@@ -1033,6 +1192,7 @@ export function projectOrderLifecycle(input: {
   revisions: readonly LifecycleRevisionRow[];
   facts: readonly LifecycleCollectionFactRow[];
   activeTimeline: readonly StayTimelineItem[];
+  historicalCorrectionGroupsByCommandId?: ReadonlyMap<string, OrderHistoricalStayCorrectionGroupDto>;
 }): OrderLifecycleProjection {
   lifecycleDate(input.businessDate, "营业日期");
   if (input.amendments.length !== input.order.version) lifecycleFailure("订单版本与不可变变更记录数量不一致");
@@ -1179,9 +1339,14 @@ export function projectOrderLifecycle(input: {
       before = null;
     } else {
       const priorSegment = input.segments[index - 1]!;
+      const fullTimelineReplacement = segment.segment_type === "RESCHEDULE_STAY"
+        || segment.segment_type === "CORRECT_HISTORICAL_STAY_ARRANGEMENT";
       const expectedAmendment = segment.segment_type === "MOVE"
         ? "MOVE_UNIT"
-        : segment.segment_type === "RESCHEDULE_STAY" || segment.segment_type === "EXTEND_STAY" || segment.segment_type === "SHORTEN_STAY"
+        : segment.segment_type === "RESCHEDULE_STAY"
+          || segment.segment_type === "EXTEND_STAY"
+          || segment.segment_type === "SHORTEN_STAY"
+          || segment.segment_type === "CORRECT_HISTORICAL_STAY_ARRANGEMENT"
           ? segment.segment_type
           : null;
       const overlayType = segment.segment_type === "MOVE" ? "MOVE" : segment.segment_type;
@@ -1189,7 +1354,7 @@ export function projectOrderLifecycle(input: {
         lifecycleFailure("订单住宿安排 supersession 链或变更类型损坏", { segmentId: segment.id });
       }
       before = current;
-      next = segment.segment_type === "RESCHEDULE_STAY"
+      next = fullTimelineReplacement
         ? arrangementFromTimeline(payloadTimeline(amendment))
         : overlayArrangement(current, {
           inventoryUnitId: segment.inventory_unit_id,
@@ -1197,7 +1362,7 @@ export function projectOrderLifecycle(input: {
           departureDate: segment.departure_date
         }, overlayType as "EXTEND_STAY" | "SHORTEN_STAY" | "MOVE");
       const trailingInterval = next.intervals.at(-1)!;
-      if (segment.segment_type === "RESCHEDULE_STAY"
+      if (fullTimelineReplacement
         && (segment.inventory_unit_id !== trailingInterval.inventoryUnitId
           || segment.arrival_date !== trailingInterval.arrivalDate
           || segment.departure_date !== trailingInterval.departureDate)) {
@@ -1246,6 +1411,7 @@ export function projectOrderLifecycle(input: {
           factCount: factsAtChange.length
         };
       })();
+    const correctionGroup = historicalCorrectionGroupForAmendment(input.historicalCorrectionGroupsByCommandId, amendment);
     history.push({
       type: arrangementChangeType(amendment),
       before,
@@ -1261,7 +1427,8 @@ export function projectOrderLifecycle(input: {
           minorUnits: revision.current_contract_amount_minor - revision.policy_base_amount_minor
         }
       },
-      fundsSummary
+      fundsSummary,
+      ...(correctionGroup ? { correctionGroup } : {})
     });
     arrangementsByAmendmentSequence.push({ sequence: amendment.sequence, arrangement: next });
     current = next;
@@ -1379,7 +1546,7 @@ export async function getOrderViewSnapshot(
   commandGrants: ReadonlySet<CommandCapability | string> = new Set()
 ) {
   const context = await loadOrderContext(db, orderId);
-  const [localClock, protocolEpochRows, occupantRows, correctionRows, segments, amendments, revisions, coverage, facts, transfers, cleaningTasks, membershipConversion] = await Promise.all([
+  const [localClock, protocolEpochRows, occupantRows, correctionRows, segments, amendments, historicalCorrectionReceiptRows, revisions, coverage, facts, transfers, cleaningTasks, membershipConversion] = await Promise.all([
     propertyLocalClock(db, context.order.property_id),
     db.selectFrom("schema_migrations").select(["name", "applied_at"])
       .where("name", "in", [
@@ -1406,6 +1573,15 @@ export async function getOrderViewSnapshot(
       ])
       .where("amendments.order_id", "=", orderId)
       .orderBy("amendments.sequence")
+      .execute(),
+    db.selectFrom("amendments as anchor")
+      .innerJoin("command_receipts as receipt", "receipt.command_id", "anchor.command_id")
+      .select(["anchor.command_id as command_id", "receipt.result"])
+      .where("anchor.order_id", "=", orderId)
+      .where("anchor.amendment_type", "=", "CORRECT_HISTORICAL_STAY_ARRANGEMENT")
+      .where("receipt.execution_status", "=", "EXECUTED")
+      .where("receipt.business_committed", "=", true)
+      .orderBy("anchor.sequence")
       .execute(),
     db.selectFrom("pricing_revisions").selectAll().where("order_id", "=", orderId).orderBy("revision_no").execute(),
     db.selectFrom("coverage_items").selectAll().where("order_id", "=", orderId).orderBy("service_date").execute(),
@@ -1467,6 +1643,14 @@ export async function getOrderViewSnapshot(
     }
     return { ...amendment, protocolVersion, recoveryMode: "HISTORICAL_READ_ONLY" as const };
   });
+  const historicalCorrectionGroupsByCommandId = new Map<string, OrderHistoricalStayCorrectionGroupDto>();
+  for (const row of historicalCorrectionReceiptRows) {
+    const commandId = lifecycleString(row.command_id, "历史住宿安排修改操作");
+    if (historicalCorrectionGroupsByCommandId.has(commandId)) {
+      lifecycleFailure("历史住宿安排修改结果记录重复", { commandId });
+    }
+    historicalCorrectionGroupsByCommandId.set(commandId, historicalCorrectionGroupFromReceiptResult(commandId, row.result));
+  }
   const latestByOccupant = new Map<string, (typeof correctionRows)[number]>();
   const amendmentById = new Map(projectedAmendments.map((amendment) => [amendment.id, amendment]));
   for (const correction of correctionRows) {
@@ -1519,7 +1703,8 @@ export async function getOrderViewSnapshot(
     amendments: projectedAmendments,
     revisions,
     facts,
-    activeTimeline
+    activeTimeline,
+    historicalCorrectionGroupsByCommandId
   });
  return {
    accessLevel,

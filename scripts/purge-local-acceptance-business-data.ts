@@ -30,6 +30,13 @@ export const preservedBaseTables = [
 ] as const satisfies readonly (keyof Database)[];
 
 export const acceptanceBusinessTables = [
+  "member_profile_corrections",
+  "membership_effective_date_corrections",
+  "historical_membership_backfills",
+  "membership_payment_reclassifications",
+  "membership_void_reconversions",
+  "historical_stay_arrangement_corrections",
+  "admin_membership_payment_evidence_claims",
   "stay_collection_membership_transfers",
   "membership_payment_facts",
   "membership_orders",

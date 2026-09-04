@@ -299,7 +299,7 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
   await expect(blockedDialog.getByRole("button", { name: "确认办理入住", exact: true })).toBeDisabled();
   await expectRoomStatusRoot(page);
   await blockedDialog.getByRole("button", { name: "取消", exact: true }).click();
-  await context.getByRole("button", { name: "关闭订单上下文", exact: true }).click();
+  await context.getByRole("button", { name: "关闭订单详情", exact: true }).click();
   await page.unroute(roomStatusPattern);
   await refreshCurrentRoomStatus(page, fixture.arrivalDate, addDays(fixture.departureDate, 1), fixture.restoration.unitCode);
   const reopenedOrderResponse = page.waitForResponse((response) => (
@@ -346,7 +346,7 @@ test("阶段 8 4.1 从房态页内入住后仍定位并选中完整 Stay", async
   for (const date of [fixture.arrivalDate, addDays(fixture.arrivalDate, 1)]) {
     await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.restoration.unitId}"][data-service-date="${date}"]`)).toHaveClass(/is-stay-selected/);
   }
-  await page.getByRole("dialog", { name: "订单上下文" }).locator(".modal-footer")
+  await page.getByRole("dialog", { name: "订单详情" }).locator(".modal-footer")
     .getByRole("button", { name: "查看完整订单", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/orders/${fixture.restoration.orderId}$`));
   const checkInResult = page.getByTestId("check-in-result");
@@ -364,7 +364,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   const futureNotice = page.locator(".action-band").getByTestId("fulfillment-date-notice");
   await expect(futureNotice).toBeVisible();
   await expect(futureNotice).toContainText("暂不能办理入住");
-  await expect(futureNotice).toContainText("请在计划到店日办理");
+  await expect(futureNotice.locator("..")).toContainText("请在计划到店日办理");
 
   await openOrder(page, fixture.overdueCheckIn);
   await expect(page.getByText("已预订", { exact: true }).first()).toBeVisible();
@@ -387,8 +387,8 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
     const earlyDepartureNotice = page.locator(".action-band").getByTestId("stay-date-action-notice");
     await expect(earlyDepartureNotice).toBeVisible();
     await expect(earlyDepartureNotice).toContainText("暂不能缩短住宿或提前退房");
-    await expect(earlyDepartureNotice).toContainText("入住当天暂不办理缩短或提前退房");
-    await expect(earlyDepartureNotice).toContainText("当前版本尚未开放撤销入住");
+    await expect(earlyDepartureNotice.locator("..")).toContainText("入住当天暂不办理缩短或提前退房");
+    await expect(earlyDepartureNotice.locator("..")).toContainText("当前版本尚未开放撤销入住");
   }
 
   await page.goto("/");
@@ -518,10 +518,25 @@ test("阶段 8 4.1 日期门禁原因归位且逾期在住不延长当前房态"
     await openOrder(page, gated.stay);
     await expect(page.getByTestId(gated.action === "入住" ? "check-in" : "check-out")).toHaveCount(0);
     const notice = page.locator(".action-band").getByTestId(gated.noticeTestId);
+    const noticePopover = notice.locator("..");
     await expect(notice).toBeVisible();
     await expect(notice).toContainText(gated.title);
-    await expect(notice).toContainText(gated.reason);
-    if (gated.action === "退房") await expect(notice).toContainText("当前版本尚未开放撤销入住");
+    await expect(noticePopover).toContainText(gated.reason);
+    if (gated.action === "退房") {
+      await expect(noticePopover).toContainText("当前版本尚未开放撤销入住");
+      const beforeHover = await notice.boundingBox();
+      const actionBandBeforeHover = await page.locator(".action-band").boundingBox();
+      await notice.getByRole("note").hover();
+      const explanation = noticePopover.getByRole("tooltip");
+      await expect(explanation).toBeVisible();
+      const afterHover = await notice.boundingBox();
+      const actionBandAfterHover = await page.locator(".action-band").boundingBox();
+      const explanationBox = await explanation.boundingBox();
+      expect(afterHover?.x).toBe(beforeHover?.x);
+      expect(afterHover?.width).toBe(beforeHover?.width);
+      expect(actionBandAfterHover?.height).toBe(actionBandBeforeHover?.height);
+      expect(explanationBox?.y).toBeGreaterThanOrEqual((afterHover?.y ?? 0) + (afterHover?.height ?? 0));
+    }
   }
   await openOrder(page, fixture.overdueCheckIn);
   await expect(page.getByTestId("check-in")).toBeEnabled();
@@ -572,7 +587,7 @@ test("阶段 8 4.1 手机端履约使用相同中文核对和结果", async ({ p
   await expectRoomStatusRoot(page);
   await confirmFulfillmentDialog(page, "入住");
   await expect(freeContext).toContainText("在住");
-  const freeContextDialog = page.getByRole("dialog", { name: "订单上下文" });
+  const freeContextDialog = page.getByRole("dialog", { name: "订单详情" });
   await freeContextDialog.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(freeContextDialog).toBeHidden();
 
@@ -580,7 +595,7 @@ test("阶段 8 4.1 手机端履约使用相同中文核对和结果", async ({ p
   await checkoutContext.getByRole("button", { name: "办理退房", exact: true }).click();
   await expectRoomStatusRoot(page);
   await confirmFulfillmentDialog(page, "退房");
-  await expect(page.getByRole("dialog", { name: "订单上下文" })).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "订单详情" })).toBeHidden();
 
   await expect(page.locator(".room-status-interval-cleaning")).toHaveCount(0);
   await expect(page.getByText("待清洁", { exact: true })).toHaveCount(0);

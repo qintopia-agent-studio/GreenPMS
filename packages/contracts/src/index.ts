@@ -33,8 +33,11 @@ export const currentReleaseFeatures = {
   cleaningWorkflow: false,
   stayBackfillSubmission: false,
   completedStayBackfillCreation: true,
-  historicalStayArrangementCorrection: false,
-  membershipConversionVoidCorrection: false
+  historicalStayArrangementCorrection: true,
+  memberProfileCorrection: true,
+  membershipEffectiveDateCorrection: true,
+  historicalMembershipBackfill: true,
+  membershipConversionVoidCorrection: true
 } as const;
 
 export const commandTypes = [
@@ -45,6 +48,11 @@ export const commandTypes = [
   "ACTIVATE_MEMBERSHIP_ORDER",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+  "CORRECT_MEMBER_PROFILE",
+  "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+  "BACKFILL_HISTORICAL_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
@@ -75,10 +83,7 @@ export const commandTypes = [
 export type DeferredCommandType = "PLACE_INTERNAL_USE" | "RELEASE_INTERNAL_USE";
 export type ObsoleteCommandType = "BACKFILL_COMPLETED_STAY";
 export type CommandType = (typeof commandTypes)[number];
-export const futureAdministratorCommandTypes = [
-  "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
-  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
-] as const;
+export const futureAdministratorCommandTypes = [] as const;
 export type FutureAdministratorCommandType = (typeof futureAdministratorCommandTypes)[number];
 export const commandCapabilities = [...commandTypes, ...futureAdministratorCommandTypes] as const;
 export type CommandCapability = (typeof commandCapabilities)[number];
@@ -881,7 +886,8 @@ export const orderArrangementChangeTypes = [
   "EXTENSION",
   "SHORTENING",
   "MOVE",
-  "EARLY_CHECK_OUT"
+  "EARLY_CHECK_OUT",
+  "HISTORICAL_STAY_CORRECTION"
 ] as const;
 export type OrderArrangementChangeType = (typeof orderArrangementChangeTypes)[number];
 
@@ -915,6 +921,35 @@ export interface OrderArrangementFundsSummaryDto {
   factCount: number;
 }
 
+export interface OrderHistoricalStayCorrectionSnapshotDto {
+  inventoryUnitId: string;
+  arrivalDate: string;
+  departureDate: string;
+  nights: number;
+  stayTimeline: Array<{
+    serviceDate: string;
+    inventoryUnitId: string;
+  }>;
+}
+
+export interface OrderHistoricalStayCorrectionGroupDto {
+  correctionSetHash: string;
+  corrections: Array<{
+    orderId: string;
+    stayId: string;
+    correctionId: string;
+    amendmentId: string;
+    staySegmentId: string;
+    pricingRevisionId: string;
+    before: OrderHistoricalStayCorrectionSnapshotDto;
+    after: OrderHistoricalStayCorrectionSnapshotDto;
+  }>;
+  reason: { code: string; note: string };
+  evidenceNote?: string;
+  actor: { subjectId: string; displayName: string };
+  recordedAt: string;
+}
+
 export interface OrderArrangementHistoryItemDto {
   type: OrderArrangementChangeType;
   before: OrderArrangementDto | null;
@@ -924,6 +959,7 @@ export interface OrderArrangementHistoryItemDto {
   recordedAt: string;
   pricingSummary: OrderArrangementPricingSummaryDto;
   fundsSummary: OrderArrangementFundsSummaryDto;
+  correctionGroup?: OrderHistoricalStayCorrectionGroupDto;
 }
 
 export interface OrderFulfillmentRecordDto {

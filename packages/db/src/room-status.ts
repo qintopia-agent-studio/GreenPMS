@@ -125,7 +125,7 @@ interface CompletedOrderRoomStatusProjection {
   damaged: boolean;
 }
 
-interface ActiveReservedArrearsProjection {
+interface ActiveOrderArrearsProjection {
   attention: RoomStatusAttention | null;
   damaged: boolean;
   reason: string | null;
@@ -1817,20 +1817,21 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       rows.push(item);
       activeCoverageByOrder.set(item.order_id, rows);
     }
-    const activeReservedArrearsByOrder = new Map<string, ActiveReservedArrearsProjection>();
+    const activeArrearsByOrder = new Map<string, ActiveOrderArrearsProjection>();
     for (const row of activeOrderContexts) {
-      const potentiallyEligible = row.status === "RESERVED"
-        && row.stay_status === "PLANNED"
+      const lifecycleEligible = row.status === "RESERVED" && row.stay_status === "PLANNED"
+        || row.status === "CHECKED_IN" && row.stay_status === "IN_HOUSE";
+      const potentiallyEligible = lifecycleEligible
         && row.stay_type !== "FREE"
         && (row.booking_channel_code === null || row.booking_channel_code === "WECOM");
       if (!potentiallyEligible) continue;
       const coverageItems = activeCoverageByOrder.get(row.id) ?? [];
       if (row.member_id || row.member_contract_id) continue;
       if (coverageItems.length > 0) {
-        activeReservedArrearsByOrder.set(row.id, {
+        activeArrearsByOrder.set(row.id, {
           attention: null,
           damaged: true,
-          reason: "当前预订住宿的会员覆盖关系无法核对"
+          reason: "当前住宿的会员覆盖关系无法核对"
         });
         continue;
       }
@@ -1885,7 +1886,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
             && cashLineTotal === candidate.policy_base_amount_minor;
         });
         if (!revision || !revisionsAreConsistent) {
-          throw new DomainError("INTERNAL_ERROR", "当前预订住宿的计价链无法核对", 500);
+          throw new DomainError("INTERNAL_ERROR", "当前住宿的计价链无法核对", 500);
         }
         const revisionIds = new Set(revisions.map((candidate) => candidate.id));
         const factsById = new Map(facts.map((fact) => [fact.fact_id, fact]));
@@ -1987,18 +1988,18 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         if (!factsMatchRevisionCurrency
           || !Number.isSafeInteger(netRecordedCollectionMinor)
           || netRecordedCollectionMinor < 0) {
-          throw new DomainError("INTERNAL_ERROR", "当前预订住宿的资金链无法核对", 500);
+          throw new DomainError("INTERNAL_ERROR", "当前住宿的资金链无法核对", 500);
         }
-        activeReservedArrearsByOrder.set(row.id, {
+        activeArrearsByOrder.set(row.id, {
           attention: netRecordedCollectionMinor < revision.current_contract_amount_minor ? "ARREARS" : null,
           damaged: false,
           reason: null
         });
       } catch {
-        activeReservedArrearsByOrder.set(row.id, {
+        activeArrearsByOrder.set(row.id, {
           attention: null,
           damaged: true,
-          reason: "当前预订住宿的计价或资金链无法核对"
+          reason: "当前住宿的计价或资金链无法核对"
         });
       }
     }
@@ -2276,12 +2277,20 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     }
     const occupantsByOrder = await loadProjectedOccupants(trx, orderIdsForHistory);
 
-    const events: ProjectionEvent[] = [...syntheticOccupancyEvents];
     partial = partial || missingOperationalClaim || inconsistentOperationalLifecycle || operationalOrdersTruncated || inactiveUnitsTruncated;
-    const projectActiveReservedArrearsEvent = (event: ProjectionEvent): ProjectionEvent => {
-      if (!event.orderId || event.status !== "RESERVED") return event;
-      const projection = activeReservedArrearsByOrder.get(event.orderId);
+    const projectActiveArrearsEvent = (
+      event: ProjectionEvent,
+      target: "CURRENT_GRID" | "CURRENT_OPERATIONAL_TASK" = "CURRENT_GRID"
+    ): ProjectionEvent => {
+      if (!event.orderId || (event.status !== "RESERVED" && event.status !== "IN_HOUSE")) return event;
+      const projection = activeArrearsByOrder.get(event.orderId);
       if (!projection) return event;
+      const withinStayInterval = event.serviceDate >= event.sourceStartDate
+        && event.serviceDate < event.sourceEndDate;
+      const inCurrentDamageScope = target === "CURRENT_OPERATIONAL_TASK"
+        ? event.serviceDate === businessDate
+        : event.serviceDate >= businessDate && withinStayInterval;
+      if (!inCurrentDamageScope) return event;
       if (projection.damaged) {
         partial = true;
         return {
@@ -2291,14 +2300,18 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           operationalAttention: null,
           primaryOccupantLabel: null,
           occupants: [],
-          reason: projection.reason ?? "当前预订住宿的计价或资金链无法核对"
+          reason: projection.reason ?? "当前住宿的计价或资金链无法核对"
         };
       }
-      if (event.serviceDate < businessDate
-        || event.serviceDate < event.sourceStartDate
-        || event.serviceDate >= event.sourceEndDate) return event;
+      const inCurrentAttentionScope = target === "CURRENT_OPERATIONAL_TASK"
+        ? event.serviceDate === businessDate
+          && (withinStayInterval || event.status === "IN_HOUSE")
+        : event.serviceDate >= businessDate
+          && withinStayInterval;
+      if (!inCurrentAttentionScope) return event;
       return { ...event, attention: projection.attention };
     };
+    const events: ProjectionEvent[] = syntheticOccupancyEvents.map((event) => projectActiveArrearsEvent(event));
     for (const row of claimRows) {
       const claimRef = reference("CLAIM", row.claim_id, `Claim ${row.claim_id}`);
       const fallbackHistory: RoomStatusHistoryDto = {
@@ -2446,7 +2459,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         const claimOperationalAttention = projectedOperationalAttention === "DUE_OUT"
           ? null
           : projectedOperationalAttention;
-        events.push(projectActiveReservedArrearsEvent({
+        events.push(projectActiveArrearsEvent({
           actualInventoryUnitId: row.inventory_unit_id,
           roomId: row.room_id,
           serviceDate: row.service_date,
@@ -2741,7 +2754,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     const eventsWithAmendments = events.map(attachAmendments);
     const projectedOperationalTaskSeeds = operationalTaskSeeds.map((seed) => ({
       ...seed,
-      event: projectActiveReservedArrearsEvent(seed.event)
+      event: projectActiveArrearsEvent(seed.event, "CURRENT_OPERATIONAL_TASK")
     }));
     const taskSeedsWithAmendments = projectedOperationalTaskSeeds.map((seed) => ({ ...seed, event: attachAmendments(seed.event) }));
     const commandIds = [...new Set([

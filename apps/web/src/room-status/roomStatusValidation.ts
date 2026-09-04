@@ -421,11 +421,11 @@ function assertInterval(
     fail(`${path}.attention`, "历史欠款状态必须显式携带欠款注意事实");
   }
   if (projectedAttention === "ARREARS"
-    && (sourceKind !== "ORDER" || (status !== "RESERVED" && status !== "ARREARS"))) {
-    fail(`${path}.attention`, "欠款注意事实只能附着于当前预订或历史欠款订单");
+    && (sourceKind !== "ORDER" || (status !== "RESERVED" && status !== "IN_HOUSE" && status !== "ARREARS"))) {
+    fail(`${path}.attention`, "欠款注意事实只能附着于当前预订、在住或历史欠款订单");
   }
   if (constrainToRange && businessDate && projectedAttention === "ARREARS"
-    && ((status === "RESERVED" && startDate < businessDate)
+    && (((status === "RESERVED" || status === "IN_HOUSE") && startDate < businessDate)
       || (status === "ARREARS" && sourceEndDate > businessDate))) {
     fail(`${path}.attention`, "欠款注意事实与营业日分区不一致");
   }

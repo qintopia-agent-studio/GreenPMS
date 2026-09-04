@@ -57,6 +57,33 @@ afterAll(async () => {
 });
 
 describe.sequential("authoritative database readiness", () => {
+  it("compares the staff-profile catalog independently of database collation", async () => {
+    const rollback = new Error("rollback staff-profile collation probe");
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`
+        ALTER TABLE staff_command_profile_catalog
+        ALTER COLUMN command_type TYPE text COLLATE "en-x-icu"
+      `.execute(trx);
+
+      const orderedCommands = await sql<{ command_type: string }>`
+        SELECT command_type
+        FROM staff_command_profile_catalog
+        WHERE profile = 'ADMIN'
+          AND command_type LIKE 'CORRECT_MEMBER%'
+        ORDER BY command_type
+      `.execute(trx);
+      expect(orderedCommands.rows.map((row) => row.command_type)).toEqual([
+        "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+        "CORRECT_MEMBER_PROFILE",
+        "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+        "CORRECT_MEMBERSHIP_PAYMENT"
+      ]);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(true);
+      throw rollback;
+    })).rejects.toBe(rollback);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
+  });
+
   it("binds readiness to the configured reviewed staff-profile manifest", async () => {
     expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
     expect(await databaseReady(db, {
@@ -103,7 +130,10 @@ describe.sequential("authoritative database readiness", () => {
       "045_stay_membership_net_wecom_transfer.sql",
       "046_command_authorization.sql",
       "047_runtime_database_role.sql",
-      "048_runtime_isolation_guards.sql"
+      "048_runtime_isolation_guards.sql",
+      "049_historical_stay_arrangement_corrections.sql",
+      "050_admin_membership_corrections.sql",
+      "051_runtime_role_command_compatibility.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();
@@ -181,12 +211,13 @@ describe.sequential("authoritative database readiness", () => {
     });
 
     await expectReadinessFailure("FUTURE_DISABLED command in an existing Token ceiling", async (trx) => {
-      await trx.insertInto("token_command_ceilings").values({
-        token_id: "token_demo_admin_write",
-        subject_id: "subject_demo_administrator",
-        property_id: "prop_qintopia_demo",
-        command_type: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
-      }).execute();
+      await trx.updateTable("command_catalog")
+        .set({
+          command_class: "FUTURE_DISABLED",
+          feature_key: "historicalStayArrangementCorrection"
+        })
+        .where("command_type", "=", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS")
+        .execute();
     });
 
     await expectReadinessFailure("disabled HUMAN_COMMAND feature in an existing Token ceiling", async (trx) => {
@@ -291,6 +322,213 @@ describe.sequential("authoritative database readiness", () => {
         FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_token_mutation()
       `.execute(trx);
     });
+  });
+
+  it("rejects damaged historical stay arrangement correction table, guards, and runtime grants", async () => {
+    await expectReadinessFailure("historical stay arrangement correction table index missing", async (trx) => {
+      await sql`DROP INDEX historical_stay_arrangement_corrections_property_idx`.execute(trx);
+    });
+
+    await expectReadinessFailure("historical stay arrangement correction append-only trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER historical_stay_arrangement_corrections_append_only
+        ON historical_stay_arrangement_corrections
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical stay arrangement correction deferred command guard missing", async (trx) => {
+      await sql`
+        DROP TRIGGER command_executions_validate_historical_stay_arrangement_correct
+        ON command_executions
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical stay arrangement correction fact uniqueness missing", async (trx) => {
+      await sql`
+        ALTER TABLE historical_stay_arrangement_corrections
+        DROP CONSTRAINT historical_stay_arrangement_corrections_order_id_sequence_key
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical stay arrangement correction runtime INSERT grant missing", async (trx) => {
+      await sql`REVOKE INSERT ON historical_stay_arrangement_corrections FROM qintopia_runtime`.execute(trx);
+    });
+
+    await expectReadinessFailure("historical stay guard weakened while legacy markers remain", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_assert_historical_stay_arrangement_correction_command(
+          target_command_id text
+        ) RETURNS void
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          -- historical_stay_correction_execution_state
+          -- historical_stay_correction_exact_fact_set
+          -- historical_stay_correction_exact_chain
+          -- historical_stay_correction_claim_release
+          -- historical_stay_correction_claim_evidence
+          -- historical_stay_correction_claim_pointer_release
+          -- historical_stay_correction_final_set_overlap
+          -- historical_stay_correction_no_funds_or_entitlements
+          RETURN;
+        END;
+        $$
+      `.execute(trx);
+    });
+  });
+
+  it("rejects damaged administrator membership correction evidence, guards, and runtime grants", async () => {
+    await expectReadinessFailure("administrator membership payment evidence claim table missing", async (trx) => {
+      await sql`DROP TABLE admin_membership_payment_evidence_claims CASCADE`.execute(trx);
+    });
+
+    await expectReadinessFailure("ordinary payment reference lookup changed into a uniqueness constraint", async (trx) => {
+      await sql`DROP INDEX collection_facts_transaction_reference_lookup_idx`.execute(trx);
+      await sql`
+        CREATE UNIQUE INDEX collection_facts_transaction_reference_lookup_idx
+        ON collection_facts (
+          regexp_replace(btrim(transaction_reference), '^[[:space:]]+|[[:space:]]+$', '', 'g')
+        )
+        WHERE transaction_reference IS NOT NULL
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime can read administrator payment evidence claims", async (trx) => {
+      await sql`GRANT SELECT ON admin_membership_payment_evidence_claims TO qintopia_runtime`.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime can execute the payment evidence guard directly", async (trx) => {
+      await sql`
+        GRANT EXECUTE ON FUNCTION qintopia_guard_admin_membership_payment_evidence()
+        TO qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical membership backfill payment evidence trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER historical_membership_backfills_claim_payment_evidence
+        ON historical_membership_backfills
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical membership backfill root validator replaced", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_validate_historical_membership_backfill()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+  });
+
+  it("requires exact Step 9 table columns, types, nullability, defaults, and constraints", async () => {
+    await expectReadinessFailure("historical stay correction column type", async (trx) => {
+      await sql`
+        ALTER TABLE historical_stay_arrangement_corrections
+        ALTER COLUMN reason_code TYPE varchar(63)
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("member profile correction nullability", async (trx) => {
+      await sql`
+        ALTER TABLE member_profile_corrections
+        ALTER COLUMN prior_phone DROP NOT NULL
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical backfill created_at fixed default", async (trx) => {
+      await sql`
+        ALTER TABLE historical_membership_backfills
+        ALTER COLUMN created_at SET DEFAULT '2000-01-01T00:00:00Z'::timestamptz
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical backfill extra column", async (trx) => {
+      await sql`
+        ALTER TABLE historical_membership_backfills
+        ADD COLUMN readiness_extra text
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical backfill extra CHECK true", async (trx) => {
+      await sql`
+        ALTER TABLE historical_membership_backfills
+        ADD CONSTRAINT historical_membership_backfills_readiness_true CHECK (true)
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical backfill CHECK replaced by CHECK true", async (trx) => {
+      await sql`
+        ALTER TABLE historical_membership_backfills
+        DROP CONSTRAINT historical_membership_backfills_product_version_check
+      `.execute(trx);
+      await sql`
+        ALTER TABLE historical_membership_backfills
+        ADD CONSTRAINT historical_membership_backfills_product_version_check CHECK (true)
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical backfill validity period constraint", async (trx) => {
+      await sql`
+        ALTER TABLE historical_membership_backfills
+        DROP CONSTRAINT historical_membership_backfills_validity_period_check
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("membership payment business date nullability", async (trx) => {
+      await sql`
+        ALTER TABLE membership_payment_facts
+        ALTER COLUMN business_date DROP NOT NULL
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("entitlement lot status default", async (trx) => {
+      await sql`
+        ALTER TABLE entitlement_lots
+        ALTER COLUMN status SET DEFAULT 'VOIDED'
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("membership lifecycle CHECK replaced by CHECK true", async (trx) => {
+      await sql`
+        ALTER TABLE membership_orders
+        DROP CONSTRAINT membership_orders_lifecycle_state_check
+      `.execute(trx);
+      await sql`
+        ALTER TABLE membership_orders
+        ADD CONSTRAINT membership_orders_lifecycle_state_check CHECK (true)
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("human command grant CHECK replaced by CHECK true", async (trx) => {
+      await sql`
+        ALTER TABLE subject_command_grants
+        DROP CONSTRAINT subject_command_grants_human_exact_check
+      `.execute(trx);
+      await sql`
+        ALTER TABLE subject_command_grants
+        ADD CONSTRAINT subject_command_grants_human_exact_check CHECK (true)
+      `.execute(trx);
+    });
+  });
+
+  it("accepts transaction-start timestamp aliases for Step 9 created_at defaults", async () => {
+    const rollback = new Error("rollback transaction timestamp default probe");
+    await expect(db.transaction().execute(async (trx) => {
+      await sql`
+        ALTER TABLE historical_membership_backfills
+        ALTER COLUMN created_at SET DEFAULT transaction_timestamp()
+      `.execute(trx);
+      expect(await databaseReady(trx, demoOwnerReadinessOptions)).toBe(true);
+      throw rollback;
+    })).rejects.toBe(rollback);
+    expect(await databaseReady(db, demoOwnerReadinessOptions)).toBe(true);
   });
 
   it("rejects damaged foundational audit, identity, and idempotency controls", async () => {
@@ -979,6 +1217,393 @@ describe.sequential("authoritative database readiness", () => {
       await sql`
         ALTER FUNCTION qintopia_require_stage13_conversion_reversal_bridge()
         RENAME TO qintopia_require_stage13_conversion_reversal_bridge_missing
+      `.execute(trx);
+    });
+  });
+
+  it("rejects damaged administrator membership correction tables, evidence claims, guards, and grants", async () => {
+    await expectReadinessFailure("admin payment evidence claim table missing", async (trx) => {
+      await sql`
+        ALTER TABLE admin_membership_payment_evidence_claims
+        RENAME TO admin_membership_payment_evidence_claims_missing
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin payment evidence claim uniqueness missing", async (trx) => {
+      await sql`
+        ALTER TABLE admin_membership_payment_evidence_claims
+        DROP CONSTRAINT admin_membership_payment_evidence_claims_pkey
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin payment evidence claim append-only trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER admin_membership_payment_evidence_claims_append_only
+        ON admin_membership_payment_evidence_claims
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin payment evidence claim table exposed to runtime", async (trx) => {
+      await sql`GRANT SELECT, INSERT ON admin_membership_payment_evidence_claims TO qintopia_runtime`.execute(trx);
+    });
+
+    await expectReadinessFailure("admin evidence guard function exposed to runtime", async (trx) => {
+      await sql`GRANT EXECUTE ON FUNCTION qintopia_guard_admin_membership_payment_evidence() TO qintopia_runtime`.execute(trx);
+    });
+
+    await expectReadinessFailure("admin evidence claim function exposed to runtime", async (trx) => {
+      await sql`GRANT EXECUTE ON FUNCTION qintopia_claim_admin_membership_payment_evidence() TO qintopia_runtime`.execute(trx);
+    });
+
+    await expectReadinessFailure("admin evidence scope validator exposed to runtime", async (trx) => {
+      await sql`
+        GRANT EXECUTE ON FUNCTION qintopia_validate_admin_membership_payment_evidence_scope()
+        TO qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin evidence guard function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_guard_admin_membership_payment_evidence()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin evidence claim function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_claim_admin_membership_payment_evidence()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin evidence scope validator execution metadata", async (trx) => {
+      await sql`
+        ALTER FUNCTION qintopia_validate_admin_membership_payment_evidence_scope()
+        SECURITY INVOKER SET search_path = public
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical backfill payment evidence claim trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER historical_membership_backfills_claim_payment_evidence
+        ON historical_membership_backfills
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("void reconversion payment evidence claim trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER membership_void_reconversions_claim_payment_evidence
+        ON membership_void_reconversions
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("profile correction payment evidence scope trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER member_profile_corrections_validate_payment_evidence_scope
+        ON member_profile_corrections
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("void reconversion payment evidence scope trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER membership_void_reconversions_validate_payment_evidence_scope
+        ON membership_void_reconversions
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("collection reference evidence guard missing", async (trx) => {
+      await sql`
+        DROP TRIGGER collection_facts_guard_admin_membership_payment_evidence
+        ON collection_facts
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("membership payment reference evidence guard missing", async (trx) => {
+      await sql`
+        DROP TRIGGER membership_payment_facts_guard_admin_membership_payment_evidenc
+        ON membership_payment_facts
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("collection reference lookup index missing", async (trx) => {
+      await sql`DROP INDEX collection_facts_transaction_reference_lookup_idx`.execute(trx);
+    });
+
+    await expectReadinessFailure("membership payment reference lookup index shape", async (trx) => {
+      await sql`DROP INDEX membership_payment_facts_transaction_reference_lookup_idx`.execute(trx);
+      await sql`
+        CREATE INDEX membership_payment_facts_transaction_reference_lookup_idx
+        ON membership_payment_facts (transaction_reference)
+        WHERE transaction_reference IS NOT NULL
+      `.execute(trx);
+    });
+  });
+
+  it("requires the exact immutable-column row-lock affordances used by runtime commands", async () => {
+    await expectReadinessFailure("inventory unit row-lock affordance missing", async (trx) => {
+      await sql`
+        REVOKE UPDATE (created_at) ON inventory_units FROM qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("inventory unit row-lock affordance widened", async (trx) => {
+      await sql`
+        GRANT UPDATE (active) ON inventory_units TO qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("membership payment row-lock affordance missing", async (trx) => {
+      await sql`
+        REVOKE UPDATE (created_at) ON membership_payment_facts FROM qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("stay transfer row-lock affordance missing", async (trx) => {
+      await sql`
+        REVOKE UPDATE (created_at) ON stay_collection_membership_transfers FROM qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("membership payment lock affordance widened", async (trx) => {
+      await sql`
+        GRANT UPDATE (fact_id) ON membership_payment_facts TO qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("stay transfer lock affordance widened", async (trx) => {
+      await sql`
+        GRANT UPDATE (id) ON stay_collection_membership_transfers TO qintopia_runtime
+      `.execute(trx);
+    });
+  });
+
+  it("rejects damaged administrator membership correction root and child chain guards", async () => {
+    await expectReadinessFailure("runtime inventory update guard function missing", async (trx) => {
+      await sql`
+        DROP FUNCTION qintopia_guard_runtime_inventory_unit_update() CASCADE
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime inventory update guard missing", async (trx) => {
+      await sql`
+        DROP TRIGGER inventory_units_runtime_update_guard
+        ON inventory_units
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime inventory update guard body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_guard_runtime_inventory_unit_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime inventory update guard exposed", async (trx) => {
+      await sql`
+        GRANT EXECUTE ON FUNCTION qintopia_guard_runtime_inventory_unit_update()
+        TO qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime inventory update guard disabled", async (trx) => {
+      await sql`
+        ALTER TABLE inventory_units DISABLE TRIGGER inventory_units_runtime_update_guard
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime inventory update guard has an extra binding", async (trx) => {
+      await sql`
+        CREATE TRIGGER inventory_units_runtime_update_guard_extra
+        BEFORE UPDATE ON inventory_units
+        FOR EACH ROW EXECUTE FUNCTION qintopia_guard_runtime_inventory_unit_update()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime Stay lifecycle guard body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_guard_runtime_mutable_projection_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("member profile correction validator missing", async (trx) => {
+      await sql`
+        DROP TRIGGER member_profile_corrections_validate_graph
+        ON member_profile_corrections
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("membership effective date correction validator body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_validate_membership_effective_date_correction()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical command fact evidence helper body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_has_historical_command_fact_evidence(
+          target_command_id text,
+          expected_command_type text,
+          expected_property_id text,
+          expected_fact_id text,
+          expected_resource_id text
+        ) RETURNS boolean
+        LANGUAGE sql
+        STABLE
+        SET search_path = pg_catalog, public
+        AS $$ SELECT true $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("exact source amendment helper body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_has_exact_source_amendment_set(
+          target_command_id text,
+          target_command_type text,
+          target_order_id text
+        ) RETURNS boolean
+        LANGUAGE sql
+        STABLE
+        SET search_path = pg_catalog, public
+        AS $$ SELECT true $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("runtime lost historical command fact evidence helper", async (trx) => {
+      await sql`
+        REVOKE EXECUTE ON FUNCTION qintopia_has_historical_command_fact_evidence(
+          text, text, text, text, text
+        ) FROM qintopia_runtime
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("exact source amendment helper exposed to public", async (trx) => {
+      await sql`
+        GRANT EXECUTE ON FUNCTION qintopia_has_exact_source_amendment_set(
+          text, text, text
+        ) TO PUBLIC
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("historical membership backfill validator missing", async (trx) => {
+      await sql`
+        DROP TRIGGER historical_membership_backfills_validate_graph
+        ON historical_membership_backfills
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("void reconversion validator missing", async (trx) => {
+      await sql`
+        DROP TRIGGER membership_void_reconversions_validate_graph
+        ON membership_void_reconversions
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("void entitlement fact validator missing", async (trx) => {
+      await sql`
+        DROP TRIGGER entitlement_ledger_validate_membership_void
+        ON entitlement_ledger
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin correction child root assertion body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_assert_admin_membership_correction_child(
+          target_command_id text
+        ) RETURNS void
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN;
+        END;
+        $$
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin direct child trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER membership_payment_facts_validate_admin_child
+        ON membership_payment_facts
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin inserted membership order child trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER membership_orders_validate_admin_child
+        ON membership_orders
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("admin inserted contract child trigger rebound", async (trx) => {
+      await sql`
+        DROP TRIGGER member_contracts_validate_admin_membership_child
+        ON member_contracts
+      `.execute(trx);
+      await sql`
+        CREATE CONSTRAINT TRIGGER member_contracts_validate_admin_membership_child
+        AFTER INSERT ON member_contracts
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION qintopia_validate_admin_membership_direct_child()
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("applied admin command root fact trigger missing", async (trx) => {
+      await sql`
+        DROP TRIGGER command_executions_require_admin_membership_correction_fact
+        ON command_executions
+      `.execute(trx);
+    });
+
+    await expectReadinessFailure("applied admin command root fact function body", async (trx) => {
+      await sql`
+        CREATE OR REPLACE FUNCTION qintopia_require_admin_membership_correction_fact()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          RETURN NEW;
+        END;
+        $$
       `.execute(trx);
     });
   });

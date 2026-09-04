@@ -145,12 +145,22 @@ export function businessErrorMessage(error: unknown): string {
 }
 
 export function commandDialogBusinessErrorMessage(commandType: HistoricalCommandType, error: unknown): string {
+  if (isExistingMembershipBackfillConflict(commandType, error)) {
+    return "系统发现这位会员已有未作废的办卡订单、仍在生效的合同或可用权益。为避免重复生成合同和权益，本次补录没有写入。";
+  }
   if (commandType === "CORRECT_ORDER_OCCUPANT"
     && error instanceof ApiError
     && error.code === "VALIDATION_ERROR") {
     return "住宿人资料未通过校验。请返回修改，并确认至少更正一项资料。";
   }
   return businessErrorMessage(error);
+}
+
+function isExistingMembershipBackfillConflict(commandType: HistoricalCommandType, error: unknown): boolean {
+  return commandType === "BACKFILL_HISTORICAL_MEMBERSHIP"
+    && error instanceof ApiError
+    && error.code === "ENTITLEMENT_CONFLICT"
+    && /未作废会员订单|有效会员链|legacy ACTIVE/i.test(error.message);
 }
 
 export function commandPreviewFailureCanReload(error: unknown): boolean {
@@ -164,6 +174,9 @@ export function InfoHint({ text, label = "说明" }: { text: string; label?: str
     <span className="info-hint-bubble" role="tooltip">{text}</span>
   </span>;
 }
+
+export const membershipStartDateHelp = "会员合同和权益从该日期开始计算。会员开始日期与企业微信收款日期分别记录，二者无需相同，也没有先后顺序限制。";
+export const membershipPaymentDateHelp = "填写企业微信账单显示的实际收款日期，只记录到日。该日期仅用于核对收款，不影响会员权益的开始日期。";
 
 export function StatusBadge({ value, label }: { value: string; label?: string }) {
   const normalized = value.toLowerCase().replaceAll("_", "-");
@@ -183,6 +196,10 @@ const businessStatusLabels: Record<string, string> = {
   HELD: "已冻结",
   CONSUMED: "已核销",
   RELEASED: "已释放",
+  DRAFT: "待生效",
+  ACTIVE: "有效",
+  EXPIRED: "已过期",
+  VOIDED: "已作废",
   CHECK_IN_REVOKED: "入住已撤销",
   RESTORED: "已补偿恢复"
 };
@@ -426,12 +443,40 @@ function moneyFrom(value: unknown): MoneyDto | undefined {
   return { currency: value.currency, minorUnits: value.minorUnits };
 }
 
+function membershipPaymentDifferenceLabel(agreedPrice: MoneyDto | undefined, payment: MoneyDto | undefined): string {
+  if (!agreedPrice || !payment || agreedPrice.currency !== payment.currency) return "回放结果未提供";
+  const differenceMinor = payment.minorUnits - agreedPrice.minorUnits;
+  if (differenceMinor === 0) return "无差额";
+  return `收款比成交价${differenceMinor < 0 ? "少" : "多"} ${formatMinor(Math.abs(differenceMinor), agreedPrice.currency)}`;
+}
+
+function membershipValidityPeriodLabel(value: unknown): string {
+  return value === "P1Y" ? "1 年" : receiptValueOrUnavailable(value);
+}
+
+const administratorMembershipCorrectionCommands = new Set<CommandType>([
+  "CORRECT_MEMBER_PROFILE",
+  "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+  "BACKFILL_HISTORICAL_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+]);
+
+function isAdministratorMembershipCorrection(commandType: unknown): commandType is CommandType {
+  return typeof commandType === "string" && administratorMembershipCorrectionCommands.has(commandType as CommandType);
+}
+
+function isStrictAdministratorCorrection(commandType: unknown): commandType is CommandType {
+  return commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
+    || isAdministratorMembershipCorrection(commandType);
+}
+
 const membershipBusinessCommands = new Set<CommandType>([
   "CREATE_MEMBERSHIP_ORDER",
   "RECORD_MEMBERSHIP_PAYMENT",
   "CORRECT_MEMBERSHIP_PAYMENT",
   "ACTIVATE_MEMBERSHIP_ORDER",
-  "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
+  "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
+  ...administratorMembershipCorrectionCommands
 ]);
 const fulfillmentBusinessCommands = new Set<CommandType>(["CHECK_IN", "CHECK_OUT", "COMPLETE_CLEANING"]);
 const tokenBusinessCommands = new Set<CommandType>(["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"]);
@@ -515,10 +560,14 @@ export function fulfillmentReceiptCopy(
 
 function membershipCommandLabel(commandType: CommandType): string {
   if (commandType === "CREATE_MEMBERSHIP_ORDER") return "创建会员订单";
-  if (commandType === "RECORD_MEMBERSHIP_PAYMENT") return "登记企微收款";
+  if (commandType === "RECORD_MEMBERSHIP_PAYMENT") return "收款";
   if (commandType === "CORRECT_MEMBERSHIP_PAYMENT") return "更正企微收款";
   if (commandType === "ACTIVATE_MEMBERSHIP_ORDER") return "生效会员订单";
   if (commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE") return "更正会员余额";
+  if (commandType === "CORRECT_MEMBER_PROFILE") return "修改会员资料";
+  if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") return "修改会员生效日";
+  if (commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") return "补录历史办卡";
+  if (commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") return "撤销错误办卡并重新升级";
   return "会员操作";
 }
 
@@ -539,11 +588,16 @@ function scalar(value: unknown): string {
 export const commandCapabilityBusinessLabels: Record<CommandCapability, string> = {
   CREATE_MEMBER: "创建会员档案",
   CREATE_MEMBERSHIP_ORDER: "创建会员订单",
-  RECORD_MEMBERSHIP_PAYMENT: "登记企微收款",
+  RECORD_MEMBERSHIP_PAYMENT: "收款",
   CORRECT_MEMBERSHIP_PAYMENT: "更正企微收款",
   ACTIVATE_MEMBERSHIP_ORDER: "生效会员订单",
   CREATE_ORDER: "创建住宿订单",
   CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
+  CORRECT_HISTORICAL_STAY_ARRANGEMENTS: "修改历史住宿安排",
+  CORRECT_MEMBER_PROFILE: "修改会员资料",
+  CORRECT_MEMBERSHIP_EFFECTIVE_DATE: "修改会员生效日",
+  BACKFILL_HISTORICAL_MEMBERSHIP: "补录历史办卡",
+  VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY: "撤销错误办卡并重新升级",
   RESCHEDULE_STAY: "调整住宿日期",
   EXTEND_STAY: "延长住宿",
   SHORTEN_STAY: "缩短住宿或提前退房",
@@ -569,9 +623,7 @@ export const commandCapabilityBusinessLabels: Record<CommandCapability, string> 
   EXPIRE_MEMBER_ENTITLEMENT: "过期会员权益",
   ISSUE_TOKEN: "签发 Token",
   ROTATE_TOKEN: "轮换 Token",
-  REVOKE_TOKEN: "撤销 Token",
-  CORRECT_HISTORICAL_STAY_ARRANGEMENTS: "纠正历史住宿安排",
-  VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY: "撤销错误办卡并重新升级"
+  REVOKE_TOKEN: "撤销 Token"
 };
 
 export function commandCapabilityBusinessLabel(commandType: CommandCapability): string {
@@ -2155,8 +2207,43 @@ export function u1PreviewHasBusinessEvidence(
         && nonblankString(member.wechat));
     case "CREATE_MEMBERSHIP_ORDER":
       return Boolean(member && isRecord(effect.product) && isRecord(effect.pricing));
-    case "RECORD_MEMBERSHIP_PAYMENT":
-      return isRecord(effect.payment) && isRecord(effect.totals);
+    case "RECORD_MEMBERSHIP_PAYMENT": {
+      const payment = isRecord(effect.payment) ? effect.payment : undefined;
+      const totals = isRecord(effect.totals) ? effect.totals : undefined;
+      if (!payment || !totals
+        || !hasExactKeys(effect, ["operation", "membershipOrderId", "memberName", "productName", "payment", "totals", "status"])
+        || !hasExactKeys(payment, ["amount", "businessDate", "transactionReference", "note"])
+        || !hasExactKeys(totals, ["agreedPrice", "previouslyCollected", "currentCollection", "differenceAfter"])
+        || effect.operation !== "RECORD_MEMBERSHIP_PAYMENT"
+        || !nonblankString(effect.membershipOrderId)
+        || effect.membershipOrderId !== input.membershipOrderId
+        || !nonblankString(effect.memberName)
+        || !nonblankString(effect.productName)
+        || (effect.status !== "DRAFT" && effect.status !== "ACTIVE")
+        || localDateEpoch(payment.businessDate) === undefined
+        || !nonblankString(payment.transactionReference)
+        || payment.transactionReference !== input.transactionReference
+        || !hasMoney(payment.amount)
+        || !hasMoney(totals.agreedPrice)
+        || !hasMoney(totals.previouslyCollected)
+        || !hasMoney(totals.currentCollection)
+        || !hasMoney(totals.differenceAfter)
+        || !moneyMatches(payment.amount, totals.currentCollection)
+        || !Number.isSafeInteger(input.amountMinor)
+        || Number(input.amountMinor) <= 0
+        || payment.amount.minorUnits !== input.amountMinor
+        || totals.agreedPrice.minorUnits < 0
+        || totals.previouslyCollected.minorUnits < 0
+        || totals.currentCollection.minorUnits <= 0) return false;
+      const currency = totals.agreedPrice.currency;
+      if ([payment.amount, totals.previouslyCollected, totals.currentCollection, totals.differenceAfter]
+        .some((amount) => amount.currency !== currency)) return false;
+      const after = totals.previouslyCollected.minorUnits + totals.currentCollection.minorUnits;
+      const expectedDifference = after - totals.agreedPrice.minorUnits;
+      return Number.isSafeInteger(after)
+        && Number.isSafeInteger(expectedDifference)
+        && totals.differenceAfter.minorUnits === expectedDifference;
+    }
     case "CORRECT_MEMBERSHIP_PAYMENT":
       return isRecord(effect.original) && isRecord(effect.replacement) && isRecord(effect.totals);
     case "ACTIVATE_MEMBERSHIP_ORDER":
@@ -2237,6 +2324,289 @@ export function u1PreviewHasBusinessEvidence(
   }
 }
 
+const correctedMemberProfileFields = ["fullName", "nickname", "identityCardNumber", "phone", "wechat"] as const;
+
+function memberProfileSnapshotHasEvidence(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && hasExactKeys(value, correctedMemberProfileFields)
+    && correctedMemberProfileFields.every((field) => field === "identityCardNumber"
+      ? value[field] === null || nonblankString(value[field])
+      : nonblankString(value[field]));
+}
+
+function exactLocalDateList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && localDateEpoch(item) !== undefined)) return undefined;
+  return value as string[];
+}
+
+function historicalStayArrangementSnapshotHasEvidence(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ["inventoryUnitId", "arrivalDate", "departureDate", "nights", "stayTimeline"])
+    || !nonblankString(value.inventoryUnitId)
+    || !Number.isSafeInteger(value.nights)
+    || Number(value.nights) < 1) return false;
+  const dates = typeof value.arrivalDate === "string" && typeof value.departureDate === "string"
+    ? localDateRange(value.arrivalDate, value.departureDate)
+    : undefined;
+  if (!dates || Number(value.nights) !== dates.length || !Array.isArray(value.stayTimeline)
+    || value.stayTimeline.length !== dates.length) return false;
+  return value.stayTimeline.every((candidate, index) => isRecord(candidate)
+    && hasExactKeys(candidate, ["serviceDate", "inventoryUnitId"])
+    && candidate.serviceDate === dates[index]
+    && candidate.inventoryUnitId === value.inventoryUnitId);
+}
+
+function historicalStayOccupantsHaveEvidence(value: unknown, expectedCount: unknown): value is Array<Record<string, unknown>> {
+  if (!Array.isArray(value)
+    || !Number.isSafeInteger(expectedCount)
+    || Number(expectedCount) < 1
+    || value.length !== expectedCount) return false;
+  return value.every((candidate, index) => isRecord(candidate)
+    && hasExactKeys(candidate, ["ordinal", "role", "fullName", "nickname"])
+    && candidate.ordinal === index + 1
+    && candidate.role === (index === 0 ? "PRIMARY" : "ADDITIONAL")
+    && (candidate.fullName === null || nonblankString(candidate.fullName))
+    && (candidate.nickname === null || nonblankString(candidate.nickname)));
+}
+
+export function historicalStayCorrectionPreviewHasEvidence(
+  effect: Record<string, unknown>,
+  input: Record<string, unknown>
+): boolean {
+  if (effect.operation !== "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
+    || !hasExactKeys(effect, ["operation", "corrections"])
+    || !nonblankString(input.propertyId)
+    || !nonblankString(input.evidenceNote)
+    || !Array.isArray(input.correctionSet)
+    || !Array.isArray(effect.corrections)
+    || input.correctionSet.length < 1
+    || input.correctionSet.length !== effect.corrections.length) return false;
+
+  const expectedByOrderId = new Map<string, { expectedVersion: number; target: Record<string, unknown> }>();
+  for (const candidate of input.correctionSet) {
+    if (!isRecord(candidate)
+      || !hasExactKeys(candidate, ["orderId", "expectedVersion", "target"])
+      || !nonblankString(candidate.orderId)
+      || !Number.isSafeInteger(candidate.expectedVersion)
+      || Number(candidate.expectedVersion) < 1
+      || !isRecord(candidate.target)
+      || !hasExactKeys(candidate.target, ["inventoryUnitId", "arrivalDate", "departureDate"])
+      || !nonblankString(candidate.target.inventoryUnitId)
+      || localDateNightCount(candidate.target.arrivalDate, candidate.target.departureDate) === undefined
+      || expectedByOrderId.has(candidate.orderId)) return false;
+    expectedByOrderId.set(candidate.orderId, {
+      expectedVersion: Number(candidate.expectedVersion),
+      target: candidate.target
+    });
+  }
+
+  const seenOrderIds = new Set<string>();
+  for (const candidate of effect.corrections) {
+    if (!isRecord(candidate)
+      || !hasExactKeys(candidate, ["orderId", "stayId", "expectedVersion", "before", "after", "unchanged"])
+      || !nonblankString(candidate.orderId)
+      || !nonblankString(candidate.stayId)
+      || !Number.isSafeInteger(candidate.expectedVersion)
+      || !historicalStayArrangementSnapshotHasEvidence(candidate.before)
+      || !historicalStayArrangementSnapshotHasEvidence(candidate.after)
+      || !isRecord(candidate.unchanged)
+      || !hasExactKeys(candidate.unchanged, ["orderStatus", "stayStatus", "stayType", "currentRevisionId", "currentContractAmountMinor", "currency", "occupantCount", "occupants", "collectionFactCount", "netRecordedCollectionMinor", "collectionDifferenceMinor"])
+      || candidate.unchanged.orderStatus !== "CHECKED_OUT"
+      || candidate.unchanged.stayStatus !== "COMPLETED"
+      || !["TRANSIENT", "WEEKLY", "MONTHLY", "CUSTOM", "FIXED_TERM", "ROLLING", "FREE"].includes(String(candidate.unchanged.stayType))
+      || !nonblankString(candidate.unchanged.currentRevisionId)
+      || !Number.isSafeInteger(candidate.unchanged.currentContractAmountMinor)
+      || Number(candidate.unchanged.currentContractAmountMinor) < 0
+      || typeof candidate.unchanged.currency !== "string"
+      || !/^[A-Z]{3}$/.test(candidate.unchanged.currency)
+      || !Number.isSafeInteger(candidate.unchanged.occupantCount)
+      || Number(candidate.unchanged.occupantCount) < 1
+      || !historicalStayOccupantsHaveEvidence(candidate.unchanged.occupants, candidate.unchanged.occupantCount)
+      || !Number.isSafeInteger(candidate.unchanged.collectionFactCount)
+      || Number(candidate.unchanged.collectionFactCount) < 0
+      || !Number.isSafeInteger(candidate.unchanged.netRecordedCollectionMinor)
+      || !Number.isSafeInteger(candidate.unchanged.collectionDifferenceMinor)
+      || Number(candidate.unchanged.collectionDifferenceMinor) !== Number(candidate.unchanged.currentContractAmountMinor) - Number(candidate.unchanged.netRecordedCollectionMinor)
+      || evidenceValuesEqual(candidate.before, candidate.after)
+      || seenOrderIds.has(candidate.orderId)) return false;
+    const expected = expectedByOrderId.get(candidate.orderId);
+    if (!expected
+      || candidate.expectedVersion !== expected.expectedVersion
+      || candidate.after.inventoryUnitId !== expected.target.inventoryUnitId
+      || candidate.after.arrivalDate !== expected.target.arrivalDate
+      || candidate.after.departureDate !== expected.target.departureDate) return false;
+    seenOrderIds.add(candidate.orderId);
+  }
+  return seenOrderIds.size === expectedByOrderId.size;
+}
+
+export function administratorMembershipPreviewHasEvidence(
+  commandType: CommandType,
+  effect: Record<string, unknown>,
+  input: Record<string, unknown>
+): boolean {
+  if (!isAdministratorMembershipCorrection(commandType) || effect.operation !== commandType || effect.evidenceNote !== input.evidenceNote) return false;
+  if (commandType === "CORRECT_MEMBER_PROFILE") {
+    const before = isRecord(effect.before) ? effect.before : undefined;
+    const after = isRecord(effect.after) ? effect.after : undefined;
+    if (!hasExactKeys(effect, ["operation", "memberId", "before", "after", "changedFields", "evidenceNote"])
+      || effect.memberId !== input.memberId
+      || !before || !after
+      || !memberProfileSnapshotHasEvidence(before)
+      || !memberProfileSnapshotHasEvidence(after)
+      || !evidenceValuesEqual(before, input.expectedPriorProfile)
+      || !evidenceValuesEqual(after, input.correctedProfile)
+      || !Array.isArray(effect.changedFields)) return false;
+    const changedFields = effect.changedFields;
+    const actualChanged = correctedMemberProfileFields.filter((field) => !evidenceValuesEqual(before[field], after[field]));
+    return actualChanged.length > 0
+      && changedFields.length === actualChanged.length
+      && new Set(changedFields).size === changedFields.length
+      && changedFields.every((field) => typeof field === "string" && actualChanged.includes(field as typeof actualChanged[number]));
+  }
+  if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") {
+    const before = isRecord(effect.before) ? effect.before : undefined;
+    const after = isRecord(effect.after) ? effect.after : undefined;
+    const unchanged = isRecord(effect.unchanged) ? effect.unchanged : undefined;
+    if (!hasExactKeys(effect, ["operation", "propertyToday", "memberId", "membershipOrderId", "contractId", "entitlementLotId", "evidenceNote", "before", "after", "unchanged"])
+      || !before || !after || !unchanged
+      || !hasExactKeys(before, ["validFrom", "validUntil", "status"])
+      || !hasExactKeys(after, ["validFrom", "validUntil", "status"])
+      || !hasExactKeys(unchanged, ["memberId", "productName", "agreedPrice", "entitlementUnitKind", "entitlementUnits", "usedUnits", "availableBalance", "paymentFactCount", "lifecycleStatus"])
+      || effect.membershipOrderId !== input.membershipOrderId
+      || after.validFrom !== input.actualMembershipDate
+      || before.status !== "ACTIVE" || after.status !== "ACTIVE" || unchanged.lifecycleStatus !== "ACTIVE"
+      || unchanged.memberId !== effect.memberId
+      || !nonblankString(effect.memberId) || !nonblankString(effect.contractId) || !nonblankString(effect.entitlementLotId)
+      || localDateEpoch(effect.propertyToday) === undefined
+      || localDateEpoch(before.validFrom) === undefined || localDateEpoch(before.validUntil) === undefined
+      || localDateEpoch(after.validFrom) === undefined || localDateEpoch(after.validUntil) === undefined
+      || String(before.validFrom) >= String(before.validUntil)
+      || String(after.validFrom) >= String(after.validUntil)
+      || before.validFrom === after.validFrom
+      || String(after.validFrom) > String(effect.propertyToday)
+      || !nonblankString(unchanged.productName) || !hasMoney(unchanged.agreedPrice)
+      || unchanged.agreedPrice.minorUnits < 0
+      || (unchanged.entitlementUnitKind !== "ROOM_NIGHT" && unchanged.entitlementUnitKind !== "BED_NIGHT")
+      || !Number.isSafeInteger(unchanged.entitlementUnits) || Number(unchanged.entitlementUnits) < 1
+      || !Number.isSafeInteger(unchanged.usedUnits) || Number(unchanged.usedUnits) < 0
+      || !isRecord(unchanged.availableBalance)
+      || !hasExactKeys(unchanged.availableBalance, ["ROOM_NIGHT", "BED_NIGHT"])
+      || !Number.isSafeInteger(unchanged.availableBalance.ROOM_NIGHT)
+      || !Number.isSafeInteger(unchanged.availableBalance.BED_NIGHT)
+      || Number(unchanged.availableBalance.ROOM_NIGHT) < 0
+      || Number(unchanged.availableBalance.BED_NIGHT) < 0
+      || !Number.isSafeInteger(unchanged.paymentFactCount)) return false;
+    return Number(unchanged.paymentFactCount) >= 0;
+  }
+  if (commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") {
+    const member = isRecord(effect.member) ? effect.member : undefined;
+    const product = isRecord(effect.product) ? effect.product : undefined;
+    const payment = isRecord(effect.payment) ? effect.payment : undefined;
+    const inputPayment = isRecord(input.payment) ? input.payment : undefined;
+    if (!hasExactKeys(effect, ["operation", "evidenceNote", "member", "product", "payment", "validFrom", "validUntil", "entitlementUnitKind", "entitlementUnits", "status"])
+      || !member || !product || !payment || !inputPayment
+      || !hasExactKeys(member, ["memberId", "fullName"])
+      || !hasExactKeys(product, ["productId", "code", "version", "name", "listedPrice", "agreedPrice", "entitlementUnitKind", "entitlementUnits", "validityPeriod", "allowedRoomTypeCode", "allowedInventoryKind"])
+      || !hasExactKeys(payment, ["amount", "businessDate", "transactionReference", "note"])
+      || member.memberId !== input.memberId || product.productId !== input.membershipProductId
+      || effect.validFrom !== input.actualMembershipDate || effect.status !== "ACTIVE"
+      || effect.entitlementUnitKind !== product.entitlementUnitKind || effect.entitlementUnits !== product.entitlementUnits
+      || !nonblankString(member.fullName) || !nonblankString(product.code) || !nonblankString(product.name)
+      || !Number.isSafeInteger(product.version) || Number(product.version) < 1
+      || !hasMoney(product.listedPrice) || !hasMoney(product.agreedPrice)
+      || product.listedPrice.minorUnits < 0 || product.agreedPrice.minorUnits <= 0
+      || product.listedPrice.currency !== product.agreedPrice.currency
+      || !moneyMatches(product.listedPrice, product.agreedPrice)
+      || (product.entitlementUnitKind !== "ROOM_NIGHT" && product.entitlementUnitKind !== "BED_NIGHT")
+      || product.validityPeriod !== "P1Y"
+      || (product.allowedInventoryKind !== "ROOM" && product.allowedInventoryKind !== "BED")
+      || !nonblankString(product.allowedRoomTypeCode)
+      || !hasMoney(payment.amount) || payment.amount.minorUnits <= 0 || payment.amount.minorUnits !== inputPayment.amountMinor
+      || payment.businessDate !== inputPayment.businessDate
+      || localDateEpoch(payment.businessDate) === undefined
+      || payment.transactionReference !== inputPayment.transactionReference
+      || payment.note !== (inputPayment.note ?? "")
+      || localDateEpoch(effect.validFrom) === undefined || localDateEpoch(effect.validUntil) === undefined
+      || String(effect.validFrom) >= String(effect.validUntil)) return false;
+    return Number.isSafeInteger(effect.entitlementUnits) && Number(effect.entitlementUnits) > 0;
+  }
+  const member = isRecord(effect.member) ? effect.member : undefined;
+  const oldMembership = isRecord(effect.oldMembership) ? effect.oldMembership : undefined;
+  const sourceStay = isRecord(effect.sourceStay) ? effect.sourceStay : undefined;
+  const funds = isRecord(effect.funds) ? effect.funds : undefined;
+  const newMembership = isRecord(effect.newMembership) ? effect.newMembership : undefined;
+  const entitlement = isRecord(effect.entitlement) ? effect.entitlement : undefined;
+  const identityEvidence = sourceStay && isRecord(sourceStay.identityEvidence) ? sourceStay.identityEvidence : undefined;
+  const oldCollections = oldMembership && Array.isArray(oldMembership.directCollections) ? oldMembership.directCollections : undefined;
+  const replacementDirectPayment = funds && funds.replacementDirectPayment !== null && isRecord(funds.replacementDirectPayment)
+    ? funds.replacementDirectPayment
+    : null;
+  const inputReplacementDirectPayment = isRecord(input.replacementDirectPayment) ? input.replacementDirectPayment : undefined;
+  const sourceServiceDates = sourceStay ? exactLocalDateList(sourceStay.serviceDates) : undefined;
+  const entitlementServiceDates = entitlement ? exactLocalDateList(entitlement.serviceDates) : undefined;
+  const expectedServiceDates = sourceStay && typeof sourceStay.arrivalDate === "string" && typeof sourceStay.departureDate === "string"
+    ? localDateRange(sourceStay.arrivalDate, sourceStay.departureDate)
+    : undefined;
+  if (!hasExactKeys(effect, ["operation", "evidenceNote", "member", "oldMembership", "sourceStay", "funds", "newMembership", "entitlement"])
+    || !member || !oldMembership || !sourceStay || !funds || !newMembership || !entitlement || !oldCollections
+    || !hasExactKeys(member, ["memberId", "fullName"])
+    || !hasExactKeys(oldMembership, ["membershipOrderId", "contractId", "entitlementLotId", "productId", "status", "directCollections"])
+    || !hasExactKeys(sourceStay, ["orderId", "stayId", "arrivalDate", "departureDate", "serviceDates", "identityEvidence"])
+    || !identityEvidence || !hasExactKeys(identityEvidence, ["phoneMatched", "documentMatched"])
+    || !hasExactKeys(funds, ["oldDirectCollectionTotal", "oldReversalTotal", "stayTransferTotal", "replacementDirectPayment", "membershipAgreedPrice", "reclassificationOnly"])
+    || !hasExactKeys(newMembership, ["productId", "productName", "validFrom", "validUntil"])
+    || !hasExactKeys(entitlement, ["unitKind", "totalUnits", "consumedUnits", "remainingUnits", "serviceDates"])
+    || oldMembership.membershipOrderId !== input.erroneousMembershipOrderId || sourceStay.orderId !== input.sourceStayOrderId
+    || newMembership.validFrom !== input.actualMembershipDate
+    || !nonblankString(member.memberId) || !nonblankString(member.fullName)
+    || !nonblankString(oldMembership.contractId) || !nonblankString(oldMembership.entitlementLotId) || !nonblankString(oldMembership.productId)
+    || !nonblankString(sourceStay.stayId) || !nonblankString(newMembership.productName)
+    || oldMembership.status !== "ACTIVE" || funds.reclassificationOnly !== true
+    || newMembership.productId !== oldMembership.productId
+    || !sourceServiceDates || !entitlementServiceDates || !expectedServiceDates
+    || !evidenceValuesEqual(sourceServiceDates, expectedServiceDates)
+    || !evidenceValuesEqual(sourceServiceDates, entitlementServiceDates)
+    || localDateEpoch(sourceStay.arrivalDate) === undefined || localDateEpoch(sourceStay.departureDate) === undefined
+    || (identityEvidence.phoneMatched !== true && identityEvidence.documentMatched !== true)
+    || localDateEpoch(newMembership.validFrom) === undefined || localDateEpoch(newMembership.validUntil) === undefined
+    || !hasMoney(funds.oldDirectCollectionTotal) || !hasMoney(funds.oldReversalTotal)
+    || !hasMoney(funds.stayTransferTotal) || !hasMoney(funds.membershipAgreedPrice)
+    || funds.oldDirectCollectionTotal.minorUnits < 0 || funds.oldReversalTotal.minorUnits < 0
+    || funds.stayTransferTotal.minorUnits < 0 || funds.membershipAgreedPrice.minorUnits < 0
+    || !moneyMatches(funds.oldDirectCollectionTotal, funds.oldReversalTotal)
+    || (funds.replacementDirectPayment === null ? Object.hasOwn(input, "replacementDirectPayment") : !replacementDirectPayment)
+    || (replacementDirectPayment !== null && (!inputReplacementDirectPayment
+      || !hasExactKeys(inputReplacementDirectPayment, ["businessDate", "transactionReference"])
+      || !hasExactKeys(replacementDirectPayment, ["amount", "businessDate", "transactionReference"])
+      || !hasMoney(replacementDirectPayment.amount)
+      || replacementDirectPayment.amount.minorUnits <= 0
+      || !nonblankString(replacementDirectPayment.businessDate)
+      || localDateEpoch(replacementDirectPayment.businessDate) === undefined
+      || !nonblankString(replacementDirectPayment.transactionReference)
+      || replacementDirectPayment.businessDate !== inputReplacementDirectPayment.businessDate
+      || replacementDirectPayment.transactionReference !== inputReplacementDirectPayment.transactionReference))
+    || !Array.isArray(oldCollections) || !oldCollections.every((item) => isRecord(item)
+      && hasExactKeys(item, ["factId", "amount", "transactionReference", "businessDate"])
+      && nonblankString(item.factId) && hasMoney(item.amount) && nonblankString(item.transactionReference) && localDateEpoch(item.businessDate) !== undefined)
+    || (entitlement.unitKind !== "ROOM_NIGHT" && entitlement.unitKind !== "BED_NIGHT")
+    || !Number.isSafeInteger(entitlement.totalUnits) || !Number.isSafeInteger(entitlement.consumedUnits) || !Number.isSafeInteger(entitlement.remainingUnits)) return false;
+  const oldDirectCollectionTotal = funds.oldDirectCollectionTotal as EvidenceMoney;
+  const stayTransferTotal = funds.stayTransferTotal as EvidenceMoney;
+  const membershipAgreedPrice = funds.membershipAgreedPrice as EvidenceMoney;
+  const directCollectionTotal = oldCollections.reduce((total, item) => total + ((item as Record<string, unknown>).amount as EvidenceMoney).minorUnits, 0);
+  const directCollectionCurrencyMatches = oldCollections.every((item) => ((item as Record<string, unknown>).amount as EvidenceMoney).currency === oldDirectCollectionTotal.currency);
+  const replacementMoney = replacementDirectPayment === null ? { ...membershipAgreedPrice, minorUnits: 0 } : replacementDirectPayment.amount as EvidenceMoney;
+  return directCollectionCurrencyMatches
+    && stayTransferTotal.currency === membershipAgreedPrice.currency
+    && replacementMoney.currency === membershipAgreedPrice.currency
+    && directCollectionTotal === oldDirectCollectionTotal.minorUnits
+    && Number(entitlement.totalUnits) > 0
+    && Number(entitlement.consumedUnits) === entitlementServiceDates.length
+    && Number(entitlement.consumedUnits) + Number(entitlement.remainingUnits) === Number(entitlement.totalUnits)
+    && stayTransferTotal.minorUnits + replacementMoney.minorUnits === membershipAgreedPrice.minorUnits;
+}
+
 export function receiptTransactionReferenceLabel(result: Record<string, unknown>): string {
   if (result.factType === "REVERSAL") return "不适用";
   if (result.factType === "REFUND" && result.method === "WECOM" && typeof result.transactionReference !== "string") return "沿用原收款交易单号";
@@ -2274,7 +2644,15 @@ export function StayTimelineDisplay({ timeline, labels, testId }: {
   </ol>;
 }
 
-export function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode, inventoryUnitLabels, orderLifecycleContext, commandInput }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null; inventoryUnitLabels?: Record<string, string>; orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string }; commandInput?: Record<string, unknown> }) {
+function historicalCorrectionOccupantLabel(value: unknown): string {
+  if (!isRecord(value)) return "未登记姓名";
+  const nickname = typeof value.nickname === "string" ? value.nickname.trim() : "";
+  const fullName = typeof value.fullName === "string" ? value.fullName.trim() : "";
+  if (nickname && fullName && nickname !== fullName) return `${nickname}（${fullName}）`;
+  return nickname || fullName || "未登记姓名";
+}
+
+export function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode, inventoryUnitLabels, orderLifecycleContext, historicalStayCorrectionContexts, commandInput }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null; inventoryUnitLabels?: Record<string, string>; orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string }; historicalStayCorrectionContexts?: Record<string, { guestName: string }>; commandInput?: Record<string, unknown> }) {
   const effect = preview.effect;
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
@@ -2301,6 +2679,49 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     : typeof effect.manualAdjustmentMinor === "number" ? effect.manualAdjustmentMinor : undefined;
   const coverage = pricing && Array.isArray(pricing.coverageSet) ? pricing.coverageSet : [];
   const cashLines = pricing && Array.isArray(pricing.cashLines) ? pricing.cashLines : [];
+
+  if (businessCommand === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") {
+    if (!historicalStayCorrectionPreviewHasEvidence(effect, commandInput ?? {})) {
+      return <div className="effect-summary" data-testid="command-effect"><InlineError title="核对信息不完整" error={new Error("服务端没有返回完整的原安排、真实安排和保持不变事实，本次不能确认。")} /></div>;
+    }
+    const corrections = effect.corrections as Array<Record<string, unknown>>;
+    return <div className="effect-summary historical-stay-correction-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="historical-stay-correction-summary-heading">
+        <h3 id="historical-stay-correction-summary-heading">请核对历史住宿安排修改</h3>
+        <p className="muted compact">整组订单会一次确认；任一订单或库存事实变化，整组都不会写入。</p>
+      </section>
+      {corrections.map((correction) => {
+        const beforeArrangement = correction.before as Record<string, unknown>;
+        const afterArrangement = correction.after as Record<string, unknown>;
+        const unchangedFacts = correction.unchanged as Record<string, unknown>;
+        const orderId = correction.orderId as string;
+        const guestLabel = historicalStayCorrectionContexts?.[orderId]?.guestName ?? "历史住宿";
+        const beforeUnitLabel = inventoryUnitLabels?.[beforeArrangement.inventoryUnitId as string] ?? "原住宿房源";
+        const afterUnitLabel = inventoryUnitLabels?.[afterArrangement.inventoryUnitId as string] ?? "修改后房源";
+        const unchangedOccupants = Array.isArray(unchangedFacts.occupants)
+          ? unchangedFacts.occupants.map(historicalCorrectionOccupantLabel)
+          : [];
+        return <section className="effect-section historical-stay-correction-item-summary" key={orderId} aria-label={`${guestLabel}住宿安排修改`}>
+          <h4>{guestLabel}</h4>
+          <dl className="difference-grid">
+            <dt>原住宿安排</dt><dd><span className="before-value"><strong>{beforeUnitLabel}</strong> · {formatDate(beforeArrangement.arrivalDate as string)} 至 {formatDate(beforeArrangement.departureDate as string)}</span></dd>
+            <dt>核实后的安排</dt><dd><span className="after-value"><strong>{afterUnitLabel}</strong> · {formatDate(afterArrangement.arrivalDate as string)} 至 {formatDate(afterArrangement.departureDate as string)}</span></dd>
+            <dt>住宿人</dt><dd>{unchangedOccupants.join("、")}（共 {String(unchangedFacts.occupantCount)} 人；资料保持不变）</dd>
+            <dt>订单金额</dt><dd>{formatMinor(unchangedFacts.currentContractAmountMinor as number, unchangedFacts.currency as string)}；保持不变</dd>
+            <dt>已有收款</dt><dd>{String(unchangedFacts.collectionFactCount)} 笔，净收款 {formatMinor(unchangedFacts.netRecordedCollectionMinor as number, unchangedFacts.currency as string)}；保持不变</dd>
+            <dt>收款差额</dt><dd>{formatMinor(unchangedFacts.collectionDifferenceMinor as number, unchangedFacts.currency as string)}；保持不变</dd>
+            <dt>完成状态</dt><dd>订单已退房、住宿已完成；保持不变</dd>
+          </dl>
+        </section>;
+      })}
+      <section className="effect-section">
+        <dl className="difference-grid">
+          <dt>核对依据</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+          <dt>记录方式</dt><dd>新增一条修改记录；不覆盖原安排，不改住宿人、金额、收款或完成状态</dd>
+        </dl>
+      </section>
+    </div>;
+  }
 
   if (tokenBusinessCommands.has(preview.commandType)) {
     const label = typeof effect.label === "string" && effect.label.trim()
@@ -2641,7 +3062,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           <dt>补录原因</dt><dd>{String(backfill.reason)}</dd>
           <dt>确认后</dt><dd><strong>{inHouseBackfill ? "提交后直接成为在住" : settled ? "提交后直接成为已结单" : "提交后直接成为欠款"}</strong></dd>
         </dl>
-        <p className="muted compact">{inHouseBackfill ? "一次确认会原子写入订单、历史入住、完整住宿区间库存占用及本次真实收款；后续可继续续住、缩短、换房和退房。" : "一次确认会原子写入订单、历史入住、历史退房及本次真实收款；无需再逐步处理履约状态。"}</p>
+        <p className="muted compact">{inHouseBackfill ? "一次确认会同时记录订单、历史入住、完整住宿区间占用及本次真实收款；后续可继续续住、缩短、换房和退房。" : "一次确认会同时记录订单、历史入住、历史退房及本次真实收款；无需再分别办理入住和退房。"}</p>
       </section>
     </div>;
   }
@@ -2742,6 +3163,146 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     </div>;
   }
 
+  if (isAdministratorMembershipCorrection(preview.commandType)) {
+    const evidenceNote = typeof effect.evidenceNote === "string" ? effect.evidenceNote : "";
+    if (preview.commandType === "CORRECT_MEMBER_PROFILE") {
+      const prior = isRecord(effect.before) ? effect.before : {};
+      const corrected = isRecord(effect.after) ? effect.after : {};
+      return <div className="effect-summary membership-command-summary" data-testid="command-effect">
+        <section className="effect-section" aria-labelledby="administrator-membership-summary-heading">
+          <h3 id="administrator-membership-summary-heading">请核对会员资料修改</h3>
+          <dl className="difference-grid">
+            <dt>姓名</dt><dd>{scalar(prior.fullName)} <ChevronRight aria-label="变更为" size={15} /> <strong>{scalar(corrected.fullName)}</strong></dd>
+            <dt>昵称</dt><dd>{scalar(prior.nickname)} <ChevronRight aria-label="变更为" size={15} /> <strong>{scalar(corrected.nickname)}</strong></dd>
+            <dt>身份证号</dt><dd>{scalar(prior.identityCardNumber)} <ChevronRight aria-label="变更为" size={15} /> <strong>{scalar(corrected.identityCardNumber)}</strong></dd>
+            <dt>手机号</dt><dd>{scalar(prior.phone)} <ChevronRight aria-label="变更为" size={15} /> <strong>{scalar(corrected.phone)}</strong></dd>
+            <dt>微信号</dt><dd>{scalar(prior.wechat)} <ChevronRight aria-label="变更为" size={15} /> <strong>{scalar(corrected.wechat)}</strong></dd>
+            <dt>事实依据</dt><dd>{evidenceNote}</dd>
+          </dl>
+          <p className="muted compact">确认后保留原资料与历史住宿人记录，只更新当前会员资料并留下操作记录。</p>
+        </section>
+      </div>;
+    }
+    if (preview.commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") {
+      const prior = isRecord(effect.before) ? effect.before : {};
+      const corrected = isRecord(effect.after) ? effect.after : {};
+      const unchanged = isRecord(effect.unchanged) ? effect.unchanged : {};
+      const availableBalance = isRecord(unchanged.availableBalance) ? unchanged.availableBalance : {};
+      const unit = administratorReceiptUnitLabel(unchanged.entitlementUnitKind);
+      const applicableBalance = unchanged.entitlementUnitKind === "ROOM_NIGHT"
+        ? availableBalance.ROOM_NIGHT
+        : availableBalance.BED_NIGHT;
+      return <div className="effect-summary membership-command-summary" data-testid="command-effect">
+        <section className="effect-section" aria-labelledby="administrator-membership-summary-heading">
+          <h3 id="administrator-membership-summary-heading">请核对会员生效日修改</h3>
+          <div className="membership-subheading"><h4>主管核实的事实</h4></div>
+          <dl className="difference-grid">
+            <dt><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span></dt><dd><strong>{formatDate(String(corrected.validFrom))}</strong></dd>
+            <dt>事实依据</dt><dd>{evidenceNote}</dd>
+          </dl>
+          <div className="membership-subheading"><h4>系统重新计算</h4></div>
+          <dl className="difference-grid">
+            <dt>原合同有效期</dt><dd>{formatDate(String(prior.validFrom))} 至 {formatDate(String(prior.validUntil))}</dd>
+            <dt>修改后有效期</dt><dd><strong>{formatDate(String(corrected.validFrom))} 至 {formatDate(String(corrected.validUntil))}</strong></dd>
+            <dt>合同与权益状态</dt><dd>{businessStatusLabel(String(prior.status))} <ChevronRight aria-label="变更为" size={15} /> <strong>{businessStatusLabel(String(corrected.status))}</strong></dd>
+            <dt>主权益到期日</dt><dd><strong>{formatDate(String(corrected.validUntil))}</strong></dd>
+          </dl>
+          <div className="membership-subheading"><h4>保持不变</h4></div>
+          <dl className="difference-grid">
+            <dt>会员产品</dt><dd>{scalar(unchanged.productName)}</dd>
+            <dt>会员成交价</dt><dd>{formatMoney(moneyFrom(unchanged.agreedPrice))}</dd>
+            <dt>权益总量</dt><dd>{scalar(unchanged.entitlementUnits)} {unit}</dd>
+            <dt>历史已核销</dt><dd>{scalar(unchanged.usedUnits)} {unit}</dd>
+            <dt>当前剩余权益</dt><dd><strong>{scalar(applicableBalance)} {unit}</strong></dd>
+            <dt>收款事实</dt><dd>{scalar(unchanged.paymentFactCount)} 条，金额与状态保持不变</dd>
+          </dl>
+        </section>
+      </div>;
+    }
+    if (preview.commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") {
+      const correctionMember = isRecord(effect.member) ? effect.member : {};
+      const product = isRecord(effect.product) ? effect.product : {};
+      const payment = isRecord(effect.payment) ? effect.payment : {};
+      const agreedPrice = moneyFrom(product.agreedPrice);
+      const paymentAmount = moneyFrom(payment.amount);
+      const unit = effect.entitlementUnitKind === "BED_NIGHT" ? "床夜" : "间夜";
+      return <div className="effect-summary membership-command-summary" data-testid="command-effect">
+        <section className="effect-section" aria-labelledby="administrator-membership-summary-heading">
+          <h3 id="administrator-membership-summary-heading">请核对历史办卡补录</h3>
+          <div className="membership-subheading"><h4>你核实的办卡与收款信息</h4></div>
+          <dl className="difference-grid">
+            <dt>会员</dt><dd>{scalar(correctionMember.fullName)}</dd>
+            <dt><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span></dt><dd><strong>{formatDate(String(effect.validFrom))}</strong></dd>
+            <dt>企业微信实收</dt><dd>{formatMoney(paymentAmount)}</dd>
+            <dt><span className="form-label-with-hint">企业微信收款日期<InfoHint label="企业微信收款日期说明" text={membershipPaymentDateHelp} /></span></dt><dd>{formatDate(String(payment.businessDate))}</dd>
+            <dt>企微交易单号</dt><dd>{scalar(payment.transactionReference)}</dd>
+            <dt>核对依据</dt><dd>{evidenceNote}</dd>
+          </dl>
+          <div className="membership-subheading"><h4>系统将自动完成</h4></div>
+          <dl className="difference-grid">
+            <dt>会员产品</dt><dd>{scalar(product.name)}</dd>
+            <dt>产品标价</dt><dd>{formatMoney(moneyFrom(product.listedPrice))}</dd>
+            <dt>办卡价格</dt><dd><strong>{formatMoney(agreedPrice)}</strong></dd>
+            <dt>实收与办卡价格差额</dt><dd><strong>{membershipPaymentDifferenceLabel(agreedPrice, paymentAmount)}</strong></dd>
+            <dt>有效期规则</dt><dd>{membershipValidityPeriodLabel(product.validityPeriod)}</dd>
+            <dt>合同有效期</dt><dd><strong>{formatDate(String(effect.validFrom))} 至 {formatDate(String(effect.validUntil))}</strong></dd>
+            <dt>会员状态</dt><dd>{businessStatusLabel(String(effect.status))}</dd>
+            <dt>初始权益</dt><dd><strong>{scalar(effect.entitlementUnits)} {unit}</strong></dd>
+          </dl>
+          <p className="muted compact">实收与办卡价格不一致时，系统只提示差额，不会自动改价。</p>
+        </section>
+      </div>;
+    }
+    const correctionMember = isRecord(effect.member) ? effect.member : {};
+    const oldMembership = isRecord(effect.oldMembership) ? effect.oldMembership : {};
+    const sourceStay = isRecord(effect.sourceStay) ? effect.sourceStay : {};
+    const funds = isRecord(effect.funds) ? effect.funds : {};
+    const newMembership = isRecord(effect.newMembership) ? effect.newMembership : {};
+    const entitlement = isRecord(effect.entitlement) ? effect.entitlement : {};
+    const identityEvidence = isRecord(sourceStay.identityEvidence) ? sourceStay.identityEvidence : {};
+    const replacementDirectPayment = isRecord(funds.replacementDirectPayment) ? funds.replacementDirectPayment : undefined;
+    const unit = entitlement.unitKind === "BED_NIGHT" ? "床夜" : "间夜";
+    const directCollections = Array.isArray(oldMembership.directCollections)
+      ? oldMembership.directCollections.filter(isRecord)
+      : [];
+    const directCollectionCount = directCollections.length;
+    return <div className="effect-summary membership-command-summary" data-testid="command-effect">
+      <section className="effect-section" aria-labelledby="administrator-membership-summary-heading">
+        <h3 id="administrator-membership-summary-heading">请核对撤销错误办卡与重新升级</h3>
+        <div className="membership-payment-difference" role="note"><strong>这不是退款</strong><small>系统会冲销原错误收款，并把真实住宿收款记入重新办理的会员订单；不会向会员退回实际资金。</small></div>
+        <div className="membership-subheading"><h4>主管选择与核实</h4></div>
+        <dl className="difference-grid">
+          <dt>会员</dt><dd>{scalar(correctionMember.fullName)}</dd>
+          <dt>原错误办卡记录</dt><dd>{scalar(oldMembership.status)} · {directCollectionCount} 笔收款 · 权益完全未使用</dd>
+          <dt>原错误收款明细</dt><dd><ol className="compact-list">{directCollections.map((collection, index) => <li key={typeof collection.factId === "string" ? collection.factId : index}>{formatMoney(moneyFrom(collection.amount))} · {formatDate(String(collection.businessDate))} · {scalar(collection.transactionReference)}</li>)}</ol></dd>
+          <dt>历史住宿</dt><dd>{formatDate(String(sourceStay.arrivalDate))} 至 {formatDate(String(sourceStay.departureDate))}</dd>
+          <dt>身份核对</dt><dd>{identityEvidence.phoneMatched ? "手机号已核对" : "手机号未参与"} / {identityEvidence.documentMatched ? "证件号已核对" : "证件号未参与"}</dd>
+          <dt><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span></dt><dd><strong>{formatDate(String(newMembership.validFrom))}</strong></dd>
+          <dt>事实依据</dt><dd>{evidenceNote}</dd>
+        </dl>
+        <div className="membership-subheading"><h4>系统将完成的资金处理</h4></div>
+        <dl className="difference-grid">
+          <dt>原错误收款</dt><dd>{formatMoney(moneyFrom(funds.oldDirectCollectionTotal))}</dd>
+          <dt>冲销原错误收款</dt><dd>{formatMoney(moneyFrom(funds.oldReversalTotal))}</dd>
+          <dt>住宿净收款转入</dt><dd>{formatMoney(moneyFrom(funds.stayTransferTotal))}</dd>
+          <dt>真实会员差额收款</dt><dd>{replacementDirectPayment ? formatMoney(moneyFrom(replacementDirectPayment.amount)) : "无需新增"}</dd>
+          {replacementDirectPayment ? <><dt>企业微信差额收款日期</dt><dd>{formatDate(String(replacementDirectPayment.businessDate))}</dd></> : null}
+          {replacementDirectPayment ? <><dt>差额企微交易单号</dt><dd>{scalar(replacementDirectPayment.transactionReference)}</dd></> : null}
+          <dt>新会员成交价</dt><dd><strong>{formatMoney(moneyFrom(funds.membershipAgreedPrice))}</strong></dd>
+        </dl>
+        <div className="membership-subheading"><h4>系统合同与权益结果</h4></div>
+        <dl className="difference-grid">
+          <dt>会员产品</dt><dd>{scalar(newMembership.productName)}</dd>
+          <dt>新合同有效期</dt><dd><strong>{formatDate(String(newMembership.validFrom))} 至 {formatDate(String(newMembership.validUntil))}</strong></dd>
+          <dt>初始权益</dt><dd>{scalar(entitlement.totalUnits)} {unit}</dd>
+          <dt>历史住宿核销</dt><dd>{scalar(entitlement.consumedUnits)} {unit}</dd>
+          <dt>剩余权益</dt><dd><strong>{scalar(entitlement.remainingUnits)} {unit}</strong></dd>
+          <dt>会员档案</dt><dd>保持不变</dd>
+        </dl>
+      </section>
+    </div>;
+  }
+
   if (membershipBusinessCommands.has(preview.commandType)) {
     const product = isRecord(effect.product) ? effect.product : undefined;
     const membershipPricing = isRecord(effect.pricing) ? effect.pricing : undefined;
@@ -2749,6 +3310,16 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     const original = isRecord(effect.original) ? effect.original : undefined;
     const replacement = isRecord(effect.replacement) ? effect.replacement : undefined;
     const totals = isRecord(effect.totals) ? effect.totals : undefined;
+    const membershipPaymentTotals = preview.commandType === "RECORD_MEMBERSHIP_PAYMENT" ? totals : undefined;
+    const correctedPaymentTotals = preview.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? totals : undefined;
+    const paymentDifference = membershipPaymentTotals ? moneyFrom(membershipPaymentTotals.differenceAfter) : undefined;
+    const paymentDifferenceText = paymentDifference
+      ? paymentDifference.minorUnits < 0
+        ? `尚差 ${formatMoney({ ...paymentDifference, minorUnits: Math.abs(paymentDifference.minorUnits) })}`
+        : paymentDifference.minorUnits > 0
+          ? `多收 ${formatMoney(paymentDifference)}`
+          : "¥0.00（已收足）"
+      : undefined;
     return <div className="effect-summary membership-command-summary" data-testid="command-effect">
       <section className="effect-section" aria-labelledby="membership-command-summary-heading">
         <h3 id="membership-command-summary-heading">请核对{membershipCommandLabel(preview.commandType)}</h3>
@@ -2767,15 +3338,22 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
             <dt>调价差额</dt><dd>{formatMoney(moneyFrom(membershipPricing.adjustment))}</dd>
             {membershipPricing.adjustmentReason ? <><dt>调价原因</dt><dd>{scalar(membershipPricing.adjustmentReason)}</dd></> : null}
           </> : null}
-          {payment ? <><dt>本次收款</dt><dd>{formatMoney(moneyFrom(payment.amount))}</dd><dt>企微交易单号</dt><dd>{scalar(payment.transactionReference)}</dd></> : null}
+          {payment && !membershipPaymentTotals ? <><dt>本次收款</dt><dd>{formatMoney(moneyFrom(payment.amount))}</dd></> : null}
+          {payment ? <><dt>收款日期</dt><dd>{formatDate(String(payment.businessDate))}</dd><dt>企微交易单号</dt><dd>{scalar(payment.transactionReference)}</dd></> : null}
           {original && replacement ? <>
             <dt>原收款</dt><dd>{formatMoney(moneyFrom(original.amount))} · {scalar(original.transactionReference)}</dd>
             <dt>更正后收款</dt><dd>{formatMoney(moneyFrom(replacement.amount))} · {scalar(replacement.transactionReference)}</dd>
           </> : null}
-          {totals ? <>
-            <dt>更正/登记前有效收款</dt><dd>{formatMoney(moneyFrom(totals.before))}</dd>
-            <dt>操作后有效收款</dt><dd><strong>{formatMoney(moneyFrom(totals.after))}</strong></dd>
-            <dt>操作后与成交价差额</dt><dd>{formatMoney(moneyFrom(totals.differenceAfter))}</dd>
+          {membershipPaymentTotals ? <>
+            <dt>成交价</dt><dd>{formatMoney(moneyFrom(membershipPaymentTotals.agreedPrice))}</dd>
+            <dt>此前实收</dt><dd>{formatMoney(moneyFrom(membershipPaymentTotals.previouslyCollected))}</dd>
+            <dt>本次收款</dt><dd><strong>{formatMoney(moneyFrom(membershipPaymentTotals.currentCollection))}</strong></dd>
+            <dt>收款后差额</dt><dd>{paymentDifferenceText}</dd>
+          </> : null}
+          {correctedPaymentTotals ? <>
+            <dt>更正/登记前有效收款</dt><dd>{formatMoney(moneyFrom(correctedPaymentTotals.before))}</dd>
+            <dt>操作后有效收款</dt><dd><strong>{formatMoney(moneyFrom(correctedPaymentTotals.after))}</strong></dd>
+            <dt>操作后与成交价差额</dt><dd>{formatMoney(moneyFrom(correctedPaymentTotals.differenceAfter))}</dd>
           </> : null}
           {moneyFrom(effect.paymentTotal) ? <><dt>有效企微收款合计</dt><dd><strong>{formatMoney(moneyFrom(effect.paymentTotal))}</strong></dd></> : null}
           {moneyFrom(effect.agreedPrice) ? <><dt>成交价</dt><dd>{formatMoney(moneyFrom(effect.agreedPrice))}</dd></> : null}
@@ -2998,6 +3576,239 @@ export function lodgingReceiptCopy(committed: boolean, memberStay: boolean): { h
     : { heading: "住宿订单未创建", description: "本次操作没有写入住宿订单。" };
 }
 
+const correctedMemberProfileFieldLabels: Record<string, string> = {
+  fullName: "姓名",
+  nickname: "昵称",
+  identityCardNumber: "身份证号",
+  phone: "手机号码",
+  wechat: "微信号"
+};
+
+function administratorReceiptUnitLabel(value: unknown): string {
+  return value === "BED_NIGHT" ? "床夜" : "间夜";
+}
+
+function receiptValueOrUnavailable(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value : "回放结果未提供";
+}
+
+function maskAdministratorProfileReceiptValue(field: string, value: unknown): string {
+  if (value === null || value === undefined || value === "") return "未登记";
+  if (typeof value !== "string") return "回放结果不可识别";
+  const normalized = value.trim();
+  if (!normalized) return "未登记";
+  if (field === "fullName" || field === "nickname") return normalized;
+  const visiblePrefix = field === "phone" ? 3 : field === "identityCardNumber" ? 2 : 1;
+  const visibleSuffix = field === "phone" ? 4 : field === "identityCardNumber" ? 2 : 1;
+  if (normalized.length <= visiblePrefix + visibleSuffix) return "已登记";
+  return `${normalized.slice(0, visiblePrefix)}${"*".repeat(Math.max(3, normalized.length - visiblePrefix - visibleSuffix))}${normalized.slice(-visibleSuffix)}`;
+}
+
+function administratorReceiptOperator(result: Record<string, unknown>): string {
+  const operator = result.actor ?? result.operator;
+  if (typeof operator === "string" && operator.trim()) return operator.trim();
+  if (!isRecord(operator)) return "回放结果未提供";
+  for (const key of ["displayName", "name", "label"] as const) {
+    if (typeof operator[key] === "string" && operator[key].trim()) return operator[key].trim();
+  }
+  return "回放结果未提供";
+}
+
+function administratorReceiptEvidence(result: Record<string, unknown>): string {
+  for (const key of ["evidenceNote", "evidence"] as const) {
+    if (typeof result[key] === "string" && result[key].trim()) return result[key].trim();
+  }
+  return "回放结果未提供";
+}
+
+function administratorReceiptReason(result: Record<string, unknown>): string {
+  const reason = result.reason;
+  if (!isRecord(reason)) return "回放结果未提供";
+  if (typeof reason.note === "string" && reason.note.trim()) return reason.note.trim();
+  if (typeof reason.code === "string" && reason.code.trim()) return reason.code.trim();
+  return "回放结果未提供";
+}
+
+function AdministratorReceiptAuditMeta({ receipt, result }: { receipt: ReceiptDto; result: Record<string, unknown> }) {
+  return <dl className="receipt-grid">
+    <dt>操作原因</dt><dd>{administratorReceiptReason(result)}</dd>
+    <dt>事实依据</dt><dd>{administratorReceiptEvidence(result)}</dd>
+    <dt>操作人</dt><dd>{administratorReceiptOperator(result)}</dd>
+    <dt>执行时间</dt><dd>{typeof result.recordedAt === "string" ? formatDateTime(result.recordedAt) : typeof receipt.committedAt === "string" ? formatDateTime(receipt.committedAt) : "回放结果未提供"}</dd>
+  </dl>;
+}
+
+function HistoricalStayCorrectionReceiptDetails({ result }: { result: Record<string, unknown> }) {
+  const corrections = Array.isArray(result.corrections) ? result.corrections.filter(isRecord) : [];
+  if (!corrections.length) return <p className="muted compact">原操作结果没有提供每笔订单的修改明细。</p>;
+  return <div className="receipt-correction-list">
+    {corrections.map((correction, index) => {
+      const before = isRecord(correction.before) ? correction.before : undefined;
+      const after = isRecord(correction.after) ? correction.after : undefined;
+      const unchanged = isRecord(correction.unchanged) ? correction.unchanged : undefined;
+      const currency = typeof unchanged?.currency === "string" ? unchanged.currency : "CNY";
+      const currentContractAmount = typeof unchanged?.currentContractAmountMinor === "number"
+        ? formatMinor(unchanged.currentContractAmountMinor, currency)
+        : "回放结果未提供";
+      const netRecordedCollection = typeof unchanged?.netRecordedCollectionMinor === "number"
+        ? formatMinor(unchanged.netRecordedCollectionMinor, currency)
+        : "回放结果未提供";
+      const collectionDifference = typeof unchanged?.collectionDifferenceMinor === "number"
+        ? formatMinor(Math.abs(unchanged.collectionDifferenceMinor), currency)
+        : "回放结果未提供";
+      const occupants = Array.isArray(unchanged?.occupants) ? unchanged.occupants.filter(isRecord) : [];
+      const occupantNames = occupants.map(historicalCorrectionOccupantLabel);
+      return <section className="receipt-correction-item" key={typeof correction.orderId === "string" ? correction.orderId : index}>
+        <h4>第 {index + 1} 笔住宿</h4>
+        <dl className="receipt-grid">
+          <dt>修改前安排</dt><dd>{before ? `${formatDate(String(before.arrivalDate))} 至 ${formatDate(String(before.departureDate))}` : "原操作结果未提供"}</dd>
+          <dt>修改后安排</dt><dd>{after ? `${formatDate(String(after.arrivalDate))} 至 ${formatDate(String(after.departureDate))}` : "原操作结果未提供"}</dd>
+          <dt>修改前房源编号</dt><dd>{before ? receiptValueOrUnavailable(before.inventoryUnitId) : "原操作结果未提供"}</dd>
+          <dt>修改后房源编号</dt><dd>{after ? receiptValueOrUnavailable(after.inventoryUnitId) : "原操作结果未提供"}</dd>
+          <dt>住宿修订编号</dt><dd>{receiptValueOrUnavailable(correction.amendmentId)}</dd>
+          <dt>住宿段编号</dt><dd>{receiptValueOrUnavailable(correction.staySegmentId)}</dd>
+          <dt>计价修订编号</dt><dd>{receiptValueOrUnavailable(correction.pricingRevisionId)}</dd>
+          <dt>住宿人</dt><dd>{occupantNames.length ? `${occupantNames.join("、")}（未改变）` : typeof unchanged?.occupantCount === "number" ? `${unchanged.occupantCount} 位（未改变）` : "回放结果未提供"}</dd>
+          <dt>订单金额</dt><dd>{currentContractAmount}（未改变）</dd>
+          <dt>已记录净收款</dt><dd>{netRecordedCollection}（未改变）</dd>
+          <dt>当前收款差额</dt><dd>{collectionDifference}（未改变）</dd>
+        </dl>
+      </section>;
+    })}
+  </div>;
+}
+
+function MemberProfileCorrectionReceiptDetails({ receipt, result }: { receipt: ReceiptDto; result: Record<string, unknown> }) {
+  const before = isRecord(result.before) ? result.before : undefined;
+  const after = isRecord(result.after) ? result.after : undefined;
+  const changedFields = Array.isArray(result.changedFields)
+    ? result.changedFields.filter((field): field is string => typeof field === "string" && Object.hasOwn(correctedMemberProfileFieldLabels, field))
+    : [];
+  return <>
+    <dl className="receipt-grid">
+      <dt>已更正字段</dt><dd>{changedFields.length ? changedFields.map((field) => correctedMemberProfileFieldLabels[field]).join("、") : "回放结果未提供"}</dd>
+    </dl>
+    {before && after && changedFields.length ? <dl className="receipt-grid">
+      {changedFields.flatMap((field) => [
+        <dt key={`${field}-before-label`}>{correctedMemberProfileFieldLabels[field]}（原值）</dt>,
+        <dd key={`${field}-before-value`}>{maskAdministratorProfileReceiptValue(field, before[field])}</dd>,
+        <dt key={`${field}-after-label`}>{correctedMemberProfileFieldLabels[field]}（更正后）</dt>,
+        <dd key={`${field}-after-value`}>{maskAdministratorProfileReceiptValue(field, after[field])}</dd>
+      ])}
+    </dl> : <p className="muted compact">资料前后值、事实依据和操作人未随本次回放结果提供。</p>}
+    <AdministratorReceiptAuditMeta receipt={receipt} result={result} />
+  </>;
+}
+
+function MembershipEffectiveDateReceiptDetails({ receipt, result }: { receipt: ReceiptDto; result: Record<string, unknown> }) {
+  const before = isRecord(result.before) ? result.before : undefined;
+  const after = isRecord(result.after) ? result.after : undefined;
+  const unchanged = isRecord(result.unchanged) ? result.unchanged : undefined;
+  const unit = administratorReceiptUnitLabel(unchanged?.entitlementUnitKind);
+  const applicableBalance = unchanged?.entitlementUnitKind === "BED_NIGHT"
+    ? unchanged.availableBalance && isRecord(unchanged.availableBalance) ? unchanged.availableBalance.BED_NIGHT : undefined
+    : unchanged?.availableBalance && isRecord(unchanged.availableBalance) ? unchanged.availableBalance.ROOM_NIGHT : undefined;
+  return <>
+    <dl className="receipt-grid">
+      <dt>修改后有效期</dt><dd>{typeof result.validFrom === "string" && typeof result.validUntil === "string" ? `${formatDate(result.validFrom)} 至 ${formatDate(result.validUntil)}` : "回放结果未提供"}</dd>
+      {before && after ? <><dt>原有效期</dt><dd>{formatDate(String(before.validFrom))} 至 {formatDate(String(before.validUntil))}</dd><dt>系统重算后有效期</dt><dd>{formatDate(String(after.validFrom))} 至 {formatDate(String(after.validUntil))}</dd></> : null}
+      {unchanged ? <><dt>会员产品</dt><dd>{receiptValueOrUnavailable(unchanged.productName)}（未改变）</dd><dt>会员成交价</dt><dd>{formatMoney(moneyFrom(unchanged.agreedPrice))}（未改变）</dd><dt>系统计算的剩余权益</dt><dd>{typeof applicableBalance === "number" ? `${applicableBalance} ${unit}` : "回放结果未提供"}</dd></> : null}
+    </dl>
+    <AdministratorReceiptAuditMeta receipt={receipt} result={result} />
+  </>;
+}
+
+function HistoricalMembershipBackfillReceiptDetails({ receipt, result }: { receipt: ReceiptDto; result: Record<string, unknown> }) {
+  const member = isRecord(result.member) ? result.member : undefined;
+  const product = isRecord(result.product) ? result.product : undefined;
+  const payment = isRecord(result.payment) ? result.payment : undefined;
+  const agreedPrice = moneyFrom(product?.agreedPrice);
+  const paymentAmount = moneyFrom(payment?.amount);
+  const unit = administratorReceiptUnitLabel(result.entitlementUnitKind ?? product?.entitlementUnitKind);
+  return <>
+    <dl className="receipt-grid">
+      <dt>会员</dt><dd>{member ? receiptValueOrUnavailable(member.fullName) : "回放结果未提供"}</dd>
+      <dt><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span></dt><dd>{typeof result.validFrom === "string" ? formatDate(result.validFrom) : "回放结果未提供"}</dd>
+      <dt>合同有效期</dt><dd>{typeof result.validFrom === "string" && typeof result.validUntil === "string" ? `${formatDate(result.validFrom)} 至 ${formatDate(result.validUntil)}` : "回放结果未提供"}</dd>
+      {product ? <><dt>会员产品</dt><dd>{receiptValueOrUnavailable(product.name)}</dd><dt>产品标价 / 成交价</dt><dd>{formatMoney(moneyFrom(product.listedPrice))} / {formatMoney(agreedPrice)}</dd><dt>有效期规则</dt><dd>{membershipValidityPeriodLabel(product.validityPeriod)}</dd><dt>系统计算的初始权益</dt><dd>{typeof result.entitlementUnits === "number" ? `${result.entitlementUnits} ${unit}` : "回放结果未提供"}</dd></> : null}
+      {payment ? <><dt>真实收款</dt><dd>{formatMoney(paymentAmount)}</dd><dt>收款与成交价差额</dt><dd>{membershipPaymentDifferenceLabel(agreedPrice, paymentAmount)}</dd><dt><span className="form-label-with-hint">企业微信收款日期<InfoHint label="企业微信收款日期说明" text={membershipPaymentDateHelp} /></span></dt><dd>{typeof payment.businessDate === "string" ? formatDate(payment.businessDate) : "回放结果未提供"}</dd><dt>交易单号</dt><dd>{receiptValueOrUnavailable(payment.transactionReference)}</dd></> : null}
+    </dl>
+    <AdministratorReceiptAuditMeta receipt={receipt} result={result} />
+  </>;
+}
+
+function MembershipVoidRebuildReceiptDetails({ receipt, result }: { receipt: ReceiptDto; result: Record<string, unknown> }) {
+  const oldMembership = isRecord(result.oldMembership) ? result.oldMembership : undefined;
+  const sourceStay = isRecord(result.sourceStay) ? result.sourceStay : undefined;
+  const funds = isRecord(result.funds) ? result.funds : undefined;
+  const newMembership = isRecord(result.newMembership) ? result.newMembership : undefined;
+  const entitlement = isRecord(result.entitlement) ? result.entitlement : undefined;
+  const transferredAmount = moneyFrom(funds?.stayTransferTotal ?? result.transferredAmount);
+  const replacementPaymentAmount = moneyFrom(funds?.replacementDirectPayment && isRecord(funds.replacementDirectPayment)
+    ? funds.replacementDirectPayment.amount
+    : result.replacementDirectPaymentAmount);
+  const unit = administratorReceiptUnitLabel(entitlement?.unitKind ?? result.entitlementUnitKind);
+  const validFrom = newMembership?.validFrom ?? result.validFrom;
+  const validUntil = newMembership?.validUntil ?? result.validUntil;
+  const oldDirectCollectionTotal = moneyFrom(funds?.oldDirectCollectionTotal ?? result.oldDirectCollectionTotal);
+  const membershipAgreedPrice = moneyFrom(funds?.membershipAgreedPrice ?? result.membershipAgreedPrice);
+  const convertedUnits = entitlement?.consumedUnits ?? result.convertedUnits;
+  const remainingUnits = entitlement?.remainingUnits ?? result.remainingUnits;
+  const oldDirectCollections = Array.isArray(oldMembership?.directCollections)
+    ? oldMembership.directCollections.filter(isRecord)
+    : [];
+  const replacementDirectPayment = isRecord(funds?.replacementDirectPayment)
+    ? funds.replacementDirectPayment
+    : undefined;
+  return <>
+    <dl className="receipt-grid">
+      <dt>会员</dt><dd>{isRecord(result.member) ? receiptValueOrUnavailable(result.member.fullName) : "回放结果未提供"}</dd>
+      {sourceStay?.arrivalDate && sourceStay?.departureDate ? <><dt>历史住宿日期</dt><dd>{formatDate(String(sourceStay.arrivalDate))} 至 {formatDate(String(sourceStay.departureDate))}</dd></> : null}
+      {validFrom && validUntil ? <><dt>新合同有效期</dt><dd>{formatDate(String(validFrom))} 至 {formatDate(String(validUntil))}</dd></> : null}
+      <dt>原错误直接收款</dt><dd>{oldDirectCollectionTotal ? formatMoney(oldDirectCollectionTotal) : "回放结果未提供"}</dd>
+      <dt>原错误收款明细</dt><dd>{oldDirectCollections.length ? <ol className="compact-list">{oldDirectCollections.map((collection, index) => <li key={typeof collection.factId === "string" ? collection.factId : index}>{formatMoney(moneyFrom(collection.amount))} · {formatDate(String(collection.businessDate))} · {receiptValueOrUnavailable(collection.transactionReference)}</li>)}</ol> : "回放结果未提供"}</dd>
+      <dt>住宿收款转入</dt><dd>{formatMoney(transferredAmount)}</dd>
+      <dt>真实会员差额收款</dt><dd>{replacementPaymentAmount ? formatMoney(replacementPaymentAmount) : "无差额收款"}</dd>
+      {replacementDirectPayment ? <><dt>企业微信差额收款日期</dt><dd>{formatDate(String(replacementDirectPayment.businessDate))}</dd><dt>差额企微交易单号</dt><dd>{receiptValueOrUnavailable(replacementDirectPayment.transactionReference)}</dd></> : null}
+      <dt>新会员成交价</dt><dd>{membershipAgreedPrice ? formatMoney(membershipAgreedPrice) : "回放结果未提供"}</dd>
+      <dt>历史住宿已核销</dt><dd>{typeof convertedUnits === "number" ? `${convertedUnits} ${unit}` : "回放结果未提供"}</dd>
+      <dt>剩余权益</dt><dd>{typeof remainingUnits === "number" ? `${remainingUnits} ${unit}` : "回放结果未提供"}</dd>
+      <dt>账务处理</dt><dd>原错误收款已冲销，住宿实收已转入新会员订单</dd>
+    </dl>
+    <AdministratorReceiptAuditMeta receipt={receipt} result={result} />
+  </>;
+}
+
+function AdministratorMembershipCorrectionReceipt({ receipt, commandType, result }: { receipt: ReceiptDto; commandType: CommandType; result?: Record<string, unknown> }) {
+  const committed = receipt.businessCommitted;
+  const label = membershipCommandLabel(commandType);
+  const description = commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+    ? "错误办卡记录已作废，原错误收款已冲销，并已按真实住宿重新办理；这不是退款，会员档案保持不变。"
+    : commandType === "CORRECT_MEMBER_PROFILE"
+      ? "会员档案已修改；敏感字段仅显示遮蔽后的前后值。"
+      : commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE"
+        ? "会员合同和权益有效期已按会员开始日期整体重算。"
+        : "历史办卡已补录。系统已分别保留会员开始日期和企业微信收款日期，并完成会员订单、合同和权益登记。";
+  return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+    <div className="receipt-title-row">
+      <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+      <div>
+        <h3 id="receipt-heading">{committed ? `${label}已完成` : `${label}未完成`}</h3>
+        <p>{committed ? description : "本次操作没有写入会员、合同、资金或权益记录。"}</p>
+      </div>
+    </div>
+    {!committed && receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+    {committed && result ? commandType === "CORRECT_MEMBER_PROFILE"
+      ? <MemberProfileCorrectionReceiptDetails receipt={receipt} result={result} />
+      : commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE"
+        ? <MembershipEffectiveDateReceiptDetails receipt={receipt} result={result} />
+        : commandType === "BACKFILL_HISTORICAL_MEMBERSHIP"
+          ? <HistoricalMembershipBackfillReceiptDetails receipt={receipt} result={result} />
+          : <MembershipVoidRebuildReceiptDetails receipt={receipt} result={result} />
+      : null}
+  </section>;
+}
+
 export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, commandType, memberStay = false, backfillStay = false, completeStay = false, bookingChannelCode: requestBookingChannelCode }: {
   receipt: ReceiptDto;
   onNavigateToResource?: () => void;
@@ -3135,20 +3946,35 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
       {memberErrorMessage ? <div className="receipt-error"><p>{memberErrorMessage}</p></div> : null}
     </section>;
   }
+  if (businessCommand && isAdministratorMembershipCorrection(businessCommand)) {
+    return <AdministratorMembershipCorrectionReceipt receipt={receipt} commandType={businessCommand} {...(result ? { result } : {})} />;
+  }
   if (businessCommand && membershipBusinessCommands.has(businessCommand)) {
     const label = membershipCommandLabel(businessCommand);
+    const correctionDescription = businessCommand === "CORRECT_MEMBER_PROFILE"
+      ? "会员档案已修改，原资料和历史住宿人信息仍可追溯。"
+      : businessCommand === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE"
+        ? "会员合同与权益已按会员开始日期整体重算，收款、产品和权益余额保持一致。"
+        : businessCommand === "BACKFILL_HISTORICAL_MEMBERSHIP"
+          ? "历史办卡已按当前时间补录，会员开始日期、企业微信收款日期、合同和权益已建立关联。"
+          : businessCommand === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+            ? "错误办卡记录已作废，原错误收款已冲销，并已按真实住宿重新办理；这不是退款，会员档案保持不变。"
+            : undefined;
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
       <div className="receipt-title-row">
         <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
         <div>
           <h3 id="receipt-heading">{committed ? `${label}已完成` : `${label}未完成`}</h3>
           <p>{committed
-            ? businessCommand === "ACTIVATE_MEMBERSHIP_ORDER"
+            ? correctionDescription
+              ?? (businessCommand === "ACTIVATE_MEMBERSHIP_ORDER"
               ? "会员订单已生效，有效期和 30 夜权益已经生成。"
               : businessCommand === "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
                 ? "会员可住宿余额和权益变动历史已经更新。"
-                : "会员订单页面已更新。"
-            : "本次操作没有写入会员订单或收款事实。"}</p>
+                : "会员订单页面已更新。")
+            : isAdministratorMembershipCorrection(businessCommand)
+              ? "本次操作没有写入会员、合同、资金或权益记录。"
+              : "本次操作没有写入会员订单或收款事实。"}</p>
         </div>
       </div>
       {receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
@@ -3202,6 +4028,23 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
         <dt>交易单号</dt><dd>{transactionReference}</dd>
       </dl> : null}
       {receiptErrorMessage ? <div className="receipt-error"><p>{receiptErrorMessage}</p></div> : null}
+    </section>;
+  }
+  if (businessCommand === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") {
+    const correctionCount = result && Array.isArray(result.corrections) ? result.corrections.length : 0;
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div>
+          <h3 id="receipt-heading">{committed ? "历史住宿安排修改已完成" : "历史住宿安排修改未完成"}</h3>
+          <p>{committed
+            ? `${correctionCount} 笔住宿的真实日期和房源已作为一个整体更新；原安排、住宿人、金额、收款和完成状态仍可追溯。`
+            : "本次修改没有改变订单、住宿、库存或资金记录。"}</p>
+        </div>
+      </div>
+      {receipt.error?.message ? <div className="receipt-error"><p>{receipt.error.message}</p></div> : null}
+      {committed && result ? <HistoricalStayCorrectionReceiptDetails result={result} /> : null}
+      {committed && result ? <AdministratorReceiptAuditMeta receipt={receipt} result={result} /> : null}
     </section>;
   }
   if (memberStay || commandType === "CREATE_ORDER") {
@@ -3448,6 +4291,10 @@ const readableRecoveryCommandTypes = new Set<HistoricalCommandType>([
 const recoveryReferenceKeys = [
   "orderId",
   "memberId",
+  "membershipOrderId",
+  "erroneousMembershipOrderId",
+  "sourceStayOrderId",
+  "correctionOrderId",
   "memberContractId",
   "inventoryUnitId",
   "maintenanceLockId",
@@ -3458,19 +4305,26 @@ const recoveryReferenceKeys = [
 ] as const;
 const recoveryReferenceKeySet = new Set<string>(recoveryReferenceKeys);
 
-function parsedRecoveryTargetRefs(targetRefs: readonly string[]): Record<string, string> | undefined {
-  if (targetRefs.length > recoveryReferenceKeys.length) return undefined;
-  const parsed: Record<string, string> = {};
+function parsedRecoveryTargetRefs(targetRefs: readonly string[]): Record<string, unknown> | undefined {
+  if (targetRefs.length > 100) return undefined;
+  const parsed: Record<string, unknown> = {};
+  const correctionOrderIds: string[] = [];
   for (const reference of targetRefs) {
     const separator = reference.indexOf("=");
     const key = separator > 0 ? reference.slice(0, separator) : "";
     const value = separator > 0 ? reference.slice(separator + 1) : "";
     if (!recoveryReferenceKeySet.has(key)
       || !value
-      || value !== value.trim()
-      || Object.hasOwn(parsed, key)) return undefined;
+      || value !== value.trim()) return undefined;
+    if (key === "correctionOrderId") {
+      if (correctionOrderIds.includes(value)) return undefined;
+      correctionOrderIds.push(value);
+      continue;
+    }
+    if (Object.hasOwn(parsed, key)) return undefined;
     parsed[key] = value;
   }
+  if (correctionOrderIds.length > 0) parsed.correctionOrderIds = correctionOrderIds;
   return parsed;
 }
 
@@ -3486,6 +4340,24 @@ function recoveryTargetRefsAreValid(commandType: unknown, targetRefs: readonly s
       && targetRefs.length === 2
       && Object.keys(parsed).every((key) => key === "orderId" || key === "memberId");
   }
+  if (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") {
+    return targetRefs.length > 0
+      && Array.isArray(parsed.correctionOrderIds)
+      && parsed.correctionOrderIds.length === targetRefs.length
+      && Object.keys(parsed).length === 1;
+  }
+  if (commandType === "CORRECT_MEMBER_PROFILE" || commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") {
+    return targetRefs.length === 1 && typeof parsed.memberId === "string" && Object.keys(parsed).length === 1;
+  }
+  if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") {
+    return targetRefs.length === 1 && typeof parsed.membershipOrderId === "string" && Object.keys(parsed).length === 1;
+  }
+  if (commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") {
+    return targetRefs.length === 2
+      && typeof parsed.erroneousMembershipOrderId === "string"
+      && typeof parsed.sourceStayOrderId === "string"
+      && Object.keys(parsed).length === 2;
+  }
   return true;
 }
 
@@ -3498,10 +4370,17 @@ function requiredRecoveryPresentation(commandType: HistoricalCommandType): Persi
 }
 
 function recoveryTargetRefs(input: Record<string, unknown>): string[] {
-  return recoveryReferenceKeys.flatMap((key) => {
+  const direct = recoveryReferenceKeys.flatMap((key) => {
+    if (key === "correctionOrderId") return [];
     const value = input[key];
     return typeof value === "string" && value ? [`${key}=${value}`] : [];
   });
+  const correctionOrderRefs = Array.isArray(input.correctionSet)
+    ? input.correctionSet.flatMap((candidate) => isRecord(candidate) && nonblankString(candidate.orderId)
+      ? [`correctionOrderId=${candidate.orderId}`]
+      : [])
+    : [];
+  return [...direct, ...correctionOrderRefs];
 }
 
 function isPersistableCommandType(value: unknown): value is CommandType {
@@ -3901,6 +4780,293 @@ export function completedStayBackfillReceiptHasEvidence(
   return true;
 }
 
+function administratorCorrectionAuditHasEvidence(result: Record<string, unknown>): boolean {
+  const reason = isRecord(result.reason) ? result.reason : undefined;
+  const actor = isRecord(result.actor) ? result.actor : undefined;
+  return Boolean(reason
+    && hasExactKeys(reason, ["code", "note"])
+    && nonblankString(reason.code)
+    && typeof reason.note === "string"
+    && nonblankString(result.evidenceNote)
+    && actor
+    && hasExactKeys(actor, ["subjectId", "displayName"])
+    && nonblankString(actor.subjectId)
+    && nonblankString(actor.displayName)
+    && typeof result.recordedAt === "string"
+    && !Number.isNaN(Date.parse(result.recordedAt)));
+}
+
+function historicalCorrectionTargetOrderIds(input: Record<string, unknown>): string[] | undefined {
+  if (Array.isArray(input.correctionOrderIds)
+    && input.correctionOrderIds.length > 0
+    && input.correctionOrderIds.every(nonblankString)
+    && new Set(input.correctionOrderIds).size === input.correctionOrderIds.length) {
+    return input.correctionOrderIds as string[];
+  }
+  if (!Array.isArray(input.correctionSet) || input.correctionSet.length === 0) return undefined;
+  const orderIds = input.correctionSet.flatMap((candidate) => isRecord(candidate) && nonblankString(candidate.orderId)
+    ? [candidate.orderId]
+    : []);
+  return orderIds.length === input.correctionSet.length && new Set(orderIds).size === orderIds.length
+    ? orderIds
+    : undefined;
+}
+
+function historicalStayCorrectionReceiptHasEvidence(
+  receipt: ReceiptDto,
+  input: Record<string, unknown>,
+  previewEffect: Record<string, unknown> | undefined,
+  expectedEffectHash: string | undefined
+): boolean {
+  if (!isEffectHash(expectedEffectHash)
+    || !isRecord(receipt.result)
+    || !hasOnlyKeys(receipt as unknown as Record<string, unknown>, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || receipt.executionStatus !== "EXECUTED"
+    || receipt.businessCommitted !== true
+    || receipt.error !== undefined) return false;
+  const result = receipt.result;
+  if (!hasOnlyKeys(result, ["operation", "correctionSetHash", "corrections", "reason", "actor", "recordedAt", "effectHash"], ["evidenceNote"])
+    || result.operation !== "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
+    || !isEffectHash(result.correctionSetHash)
+    || result.effectHash !== expectedEffectHash
+    || !administratorCorrectionAuditHasEvidence({ ...result, evidenceNote: result.evidenceNote ?? input.evidenceNote })
+    || !Array.isArray(result.corrections)
+    || result.corrections.length < 1) return false;
+
+  const expectedOrderIds = historicalCorrectionTargetOrderIds(input);
+  const resultOrderIds: string[] = [];
+  const requiredResourceRefs: string[] = [];
+  const requiredFactRefs: string[] = [];
+  for (const candidate of result.corrections) {
+    if (!isRecord(candidate)
+      || !hasExactKeys(candidate, ["orderId", "stayId", "correctionId", "amendmentId", "staySegmentId", "pricingRevisionId", "claimIds", "before", "after", "unchanged"])
+      || !nonblankString(candidate.orderId)
+      || !nonblankString(candidate.stayId)
+      || !nonblankString(candidate.correctionId)
+      || !nonblankString(candidate.amendmentId)
+      || !nonblankString(candidate.staySegmentId)
+      || !nonblankString(candidate.pricingRevisionId)
+      || !historicalStayArrangementSnapshotHasEvidence(candidate.before)
+      || !historicalStayArrangementSnapshotHasEvidence(candidate.after)
+      || !isRecord(candidate.unchanged)
+      || !hasExactKeys(candidate.unchanged, ["orderStatus", "stayStatus", "stayType", "currentRevisionId", "currentContractAmountMinor", "currency", "occupantCount", "occupants", "collectionFactCount", "netRecordedCollectionMinor", "collectionDifferenceMinor"])
+      || candidate.unchanged.orderStatus !== "CHECKED_OUT"
+      || candidate.unchanged.stayStatus !== "COMPLETED"
+      || !historicalStayOccupantsHaveEvidence(candidate.unchanged.occupants, candidate.unchanged.occupantCount)
+      || !Array.isArray(candidate.claimIds)
+      || candidate.claimIds.length !== Number(candidate.after.nights)
+      || !candidate.claimIds.every(nonblankString)
+      || new Set(candidate.claimIds).size !== candidate.claimIds.length
+      || resultOrderIds.includes(candidate.orderId)) return false;
+    resultOrderIds.push(candidate.orderId);
+    requiredResourceRefs.push(candidate.orderId, candidate.stayId, candidate.amendmentId, candidate.staySegmentId, candidate.pricingRevisionId, ...candidate.claimIds);
+    requiredFactRefs.push(candidate.correctionId);
+  }
+  if (!expectedOrderIds || !evidenceValuesEqual([...resultOrderIds].sort(), [...expectedOrderIds].sort())
+    || !evidenceValuesEqual(receipt.resourceRefs, [...new Set(requiredResourceRefs)])
+    || !evidenceValuesEqual(receipt.factRefs, [...new Set(requiredFactRefs)])) return false;
+
+  if (previewEffect) {
+    if (!historicalStayCorrectionPreviewHasEvidence(previewEffect, input)) return false;
+    const inputByOrderId = new Map((input.correctionSet as unknown[]).filter(isRecord).map((candidate) => [candidate.orderId, candidate]));
+    const projected = result.corrections.map((candidate) => {
+      const resultItem = candidate as Record<string, unknown>;
+      const inputItem = inputByOrderId.get(resultItem.orderId) as Record<string, unknown>;
+      return {
+        orderId: resultItem.orderId,
+        stayId: resultItem.stayId,
+        expectedVersion: inputItem.expectedVersion,
+        before: resultItem.before,
+        after: resultItem.after,
+        unchanged: resultItem.unchanged
+      };
+    });
+    if (!evidenceValuesEqual(previewEffect.corrections, projected)) return false;
+  }
+  return true;
+}
+
+function maskProfileReceiptIdentityCard(value: string | null): string | null {
+  if (value === null) return null;
+  const characters = Array.from(value);
+  if (characters.length <= 4) return "****";
+  return `${"*".repeat(Math.max(4, characters.length - 4))}${characters.slice(-4).join("")}`;
+}
+
+function maskProfileReceiptPhone(value: string): string {
+  const characters = Array.from(value);
+  if (characters.length <= 7) return "****";
+  return `${characters.slice(0, 3).join("")}****${characters.slice(-4).join("")}`;
+}
+
+function maskProfileReceiptWechat(value: string): string {
+  const characters = Array.from(value);
+  if (characters.length <= 3) return "***";
+  return `${characters[0]}***${characters.slice(-2).join("")}`;
+}
+
+function projectProfileCorrectionEffectForReceipt(effect: Record<string, unknown>): Record<string, unknown> | undefined {
+  const projectProfile = (value: unknown): Record<string, unknown> | undefined => {
+    if (!isRecord(value)
+      || !hasExactKeys(value, ["fullName", "nickname", "identityCardNumber", "phone", "wechat"])
+      || typeof value.fullName !== "string"
+      || typeof value.nickname !== "string"
+      || (value.identityCardNumber !== null && typeof value.identityCardNumber !== "string")
+      || typeof value.phone !== "string"
+      || typeof value.wechat !== "string") return undefined;
+    return {
+      ...value,
+      identityCardNumber: maskProfileReceiptIdentityCard(value.identityCardNumber),
+      phone: maskProfileReceiptPhone(value.phone),
+      wechat: maskProfileReceiptWechat(value.wechat)
+    };
+  };
+  const before = projectProfile(effect.before);
+  const after = projectProfile(effect.after);
+  if (!before || !after) return undefined;
+  return { ...effect, before, after };
+}
+
+const memberProfileCorrectionFields = ["fullName", "nickname", "identityCardNumber", "phone", "wechat"] as const;
+
+function maskedProfileIdentityHasEvidence(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value !== "string") return false;
+  const characters = Array.from(value);
+  if (characters.length === 4) return characters.every((character) => character === "*");
+  return characters.length >= 8
+    && characters.slice(0, -4).every((character) => character === "*");
+}
+
+function maskedProfilePhoneHasEvidence(value: unknown): boolean {
+  if (typeof value !== "string" || /\s/u.test(value)) return false;
+  const characters = Array.from(value);
+  return (characters.length === 4 && characters.every((character) => character === "*"))
+    || (characters.length === 11 && characters.slice(3, 7).every((character) => character === "*"));
+}
+
+function maskedProfileWechatHasEvidence(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const characters = Array.from(value);
+  return (characters.length === 3 && characters.every((character) => character === "*"))
+    || (characters.length === 6 && characters.slice(1, 4).every((character) => character === "*"));
+}
+
+function recoveredProfileCorrectionEffectHasEvidence(effect: Record<string, unknown>): boolean {
+  if (effect.operation !== "CORRECT_MEMBER_PROFILE"
+    || !nonblankString(effect.memberId)
+    || !nonblankString(effect.evidenceNote)
+    || !isRecord(effect.before)
+    || !isRecord(effect.after)
+    || !hasExactKeys(effect.before, memberProfileCorrectionFields)
+    || !hasExactKeys(effect.after, memberProfileCorrectionFields)
+    || !Array.isArray(effect.changedFields)
+    || effect.changedFields.length < 1
+    || !effect.changedFields.every((field) => memberProfileCorrectionFields.includes(field as typeof memberProfileCorrectionFields[number]))
+    || new Set(effect.changedFields).size !== effect.changedFields.length) return false;
+  const before = effect.before;
+  const after = effect.after;
+  if (![before.fullName, before.nickname, before.phone, before.wechat, after.fullName, after.nickname, after.phone, after.wechat]
+    .every((value) => typeof value === "string")
+    || !nonblankString(before.fullName)
+    || !nonblankString(before.nickname)
+    || !nonblankString(after.fullName)
+    || !nonblankString(after.nickname)
+    || !maskedProfileIdentityHasEvidence(before.identityCardNumber)
+    || !maskedProfileIdentityHasEvidence(after.identityCardNumber)
+    || !maskedProfilePhoneHasEvidence(before.phone)
+    || !maskedProfilePhoneHasEvidence(after.phone)
+    || !maskedProfileWechatHasEvidence(before.wechat)
+    || !maskedProfileWechatHasEvidence(after.wechat)) return false;
+  const changedFields = new Set(effect.changedFields as string[]);
+  return memberProfileCorrectionFields.every((field) => {
+    if (!changedFields.has(field)) return before[field] === after[field];
+    return field === "fullName" || field === "nickname"
+      ? before[field] !== after[field]
+      : true;
+  });
+}
+
+function administratorMembershipCorrectionReceiptHasEvidence(
+  commandType: CommandType,
+  receipt: ReceiptDto,
+  input: Record<string, unknown>,
+  previewEffect: Record<string, unknown> | undefined,
+  expectedEffectHash: string | undefined
+): boolean {
+  if (!isAdministratorMembershipCorrection(commandType)
+    || !isEffectHash(expectedEffectHash)
+    || !isRecord(receipt.result)
+    || !hasOnlyKeys(receipt as unknown as Record<string, unknown>, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || receipt.executionStatus !== "EXECUTED"
+    || receipt.businessCommitted !== true
+    || receipt.error !== undefined) return false;
+  const result = receipt.result;
+  if (result.effectHash !== expectedEffectHash || !administratorCorrectionAuditHasEvidence(result)) return false;
+
+  let effect: Record<string, unknown>;
+  let validationInput: Record<string, unknown>;
+  let requiredResourceRefs: string[];
+  let requiredFactRefs: string[];
+  if (commandType === "CORRECT_MEMBER_PROFILE") {
+    if (!hasExactKeys(result, ["memberId", "correctionId", "changedFields", "before", "after", "reason", "evidenceNote", "actor", "recordedAt", "effectHash"])
+      || result.memberId !== input.memberId
+      || !nonblankString(result.correctionId)) return false;
+    effect = { operation: commandType, memberId: result.memberId, before: result.before, after: result.after, changedFields: result.changedFields, evidenceNote: result.evidenceNote };
+    validationInput = input;
+    requiredResourceRefs = [result.memberId as string];
+    requiredFactRefs = [result.correctionId];
+  } else if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") {
+    if (!hasExactKeys(result, ["memberId", "membershipOrderId", "contractId", "entitlementLotId", "correctionId", "validFrom", "validUntil", "status", "before", "after", "unchanged", "reason", "evidenceNote", "actor", "recordedAt", "effectHash"])
+      || result.membershipOrderId !== input.membershipOrderId
+      || !nonblankString(result.memberId) || !nonblankString(result.contractId) || !nonblankString(result.entitlementLotId) || !nonblankString(result.correctionId)
+      || !isRecord(result.after)
+      || result.validFrom !== result.after.validFrom || result.validUntil !== result.after.validUntil || result.status !== "ACTIVE") return false;
+    effect = { operation: commandType, propertyToday: previewEffect?.propertyToday ?? result.validFrom, memberId: result.memberId, membershipOrderId: result.membershipOrderId, contractId: result.contractId, entitlementLotId: result.entitlementLotId, evidenceNote: result.evidenceNote, before: result.before, after: result.after, unchanged: result.unchanged };
+    validationInput = { membershipOrderId: result.membershipOrderId, actualMembershipDate: result.validFrom, evidenceNote: result.evidenceNote };
+    requiredResourceRefs = [result.memberId, result.membershipOrderId, result.contractId, result.entitlementLotId] as string[];
+    requiredFactRefs = [result.correctionId];
+  } else if (commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") {
+    if (!hasExactKeys(result, ["memberId", "membershipOrderId", "paymentFactId", "contractId", "entitlementLotId", "backfillId", "status", "validFrom", "validUntil", "entitlementUnitKind", "entitlementUnits", "member", "product", "payment", "reason", "evidenceNote", "actor", "recordedAt", "effectHash"])
+      || result.memberId !== input.memberId
+      || !isRecord(result.member) || result.member.memberId !== result.memberId
+      || !isRecord(result.product) || !isRecord(result.payment)
+      || ![result.membershipOrderId, result.paymentFactId, result.contractId, result.entitlementLotId, result.backfillId].every(nonblankString)) return false;
+    effect = { operation: commandType, evidenceNote: result.evidenceNote, member: result.member, product: result.product, payment: result.payment, validFrom: result.validFrom, validUntil: result.validUntil, entitlementUnitKind: result.entitlementUnitKind, entitlementUnits: result.entitlementUnits, status: result.status };
+    validationInput = { memberId: result.memberId, membershipProductId: result.product.productId, actualMembershipDate: result.validFrom, payment: { amountMinor: (result.payment.amount as Record<string, unknown>)?.minorUnits, businessDate: result.payment.businessDate, transactionReference: result.payment.transactionReference, ...(Object.hasOwn(result.payment, "note") ? { note: result.payment.note } : {}) }, evidenceNote: result.evidenceNote };
+    requiredResourceRefs = [result.memberId, result.membershipOrderId, result.contractId, result.entitlementLotId] as string[];
+    requiredFactRefs = [result.paymentFactId, result.backfillId] as string[];
+  } else {
+    if (!hasExactKeys(result, ["memberId", "voidReconversionId", "member", "oldMembership", "oldMembershipOrderId", "oldContractId", "oldEntitlementLotId", "oldStatus", "sourceStayOrderId", "sourceStayId", "sourceStay", "amendmentId", "pricingRevisionId", "membershipOrderId", "status", "contractId", "entitlementLotId", "oldDirectCollectionTotal", "transferredAmount", "replacementDirectPaymentAmount", "membershipAgreedPrice", "funds", "validFrom", "validUntil", "newMembership", "entitlementUnitKind", "convertedUnits", "remainingUnits", "entitlement", "serviceDates", "sourceCollectionFactIds", "oldPaymentReversalFactIds", "paymentReclassificationFactIds", "sourceReversalFactIds", "transferPaymentFactIds", "replacementPaymentFactId", "transferIds", "voidLedgerFactId", "conversionLedgerFactIds", "reason", "evidenceNote", "actor", "recordedAt", "effectHash"])
+      || result.oldMembershipOrderId !== input.erroneousMembershipOrderId
+      || result.sourceStayOrderId !== input.sourceStayOrderId
+      || !isRecord(result.member) || !isRecord(result.oldMembership) || !isRecord(result.sourceStay) || !isRecord(result.funds) || !isRecord(result.newMembership) || !isRecord(result.entitlement)
+      || ![result.memberId, result.voidReconversionId, result.oldMembershipOrderId, result.oldContractId, result.oldEntitlementLotId, result.sourceStayOrderId, result.sourceStayId, result.amendmentId, result.pricingRevisionId, result.membershipOrderId, result.contractId, result.entitlementLotId, result.voidLedgerFactId].every(nonblankString)) return false;
+    effect = { operation: commandType, evidenceNote: result.evidenceNote, member: result.member, oldMembership: result.oldMembership, sourceStay: result.sourceStay, funds: result.funds, newMembership: { productId: result.newMembership.productId, productName: result.newMembership.productName, validFrom: result.newMembership.validFrom, validUntil: result.newMembership.validUntil }, entitlement: result.entitlement };
+    const replacement = result.funds.replacementDirectPayment;
+    validationInput = { erroneousMembershipOrderId: result.oldMembershipOrderId, sourceStayOrderId: result.sourceStayOrderId, actualMembershipDate: result.validFrom, ...(replacement === null ? {} : { replacementDirectPayment: { businessDate: (replacement as Record<string, unknown>).businessDate, transactionReference: (replacement as Record<string, unknown>).transactionReference } }), evidenceNote: result.evidenceNote };
+    const transferIds = exactNonblankStringList(result.transferIds);
+    const factLists = [result.oldPaymentReversalFactIds, result.paymentReclassificationFactIds, result.sourceReversalFactIds, result.transferPaymentFactIds, result.conversionLedgerFactIds].map(exactNonblankStringList);
+    if (!transferIds || factLists.some((value) => value === undefined)) return false;
+    requiredResourceRefs = [result.memberId, result.oldMembershipOrderId, result.oldContractId, result.oldEntitlementLotId, result.sourceStayOrderId, result.amendmentId, result.pricingRevisionId, result.membershipOrderId, result.contractId, result.entitlementLotId, ...transferIds] as string[];
+    const replacementPaymentFactIds = nonblankString(result.replacementPaymentFactId)
+      ? [result.replacementPaymentFactId as string]
+      : [];
+    requiredFactRefs = [result.voidReconversionId as string, ...factLists[0]!, ...factLists[1]!, result.voidLedgerFactId as string, ...factLists[2]!, ...factLists[3]!, ...replacementPaymentFactIds, ...factLists[4]!];
+  }
+  const effectHasEvidence = commandType === "CORRECT_MEMBER_PROFILE"
+    ? previewEffect !== undefined
+      ? administratorMembershipPreviewHasEvidence(commandType, previewEffect, input)
+        && evidenceValuesEqual(effect, projectProfileCorrectionEffectForReceipt(previewEffect))
+      : recoveredProfileCorrectionEffectHasEvidence(effect)
+    : administratorMembershipPreviewHasEvidence(commandType, effect, validationInput)
+      && (!previewEffect || evidenceValuesEqual(effect, previewEffect));
+  if (!effectHasEvidence
+    || !evidenceValuesEqual(receipt.resourceRefs, requiredResourceRefs)
+    || !evidenceValuesEqual(receipt.factRefs, requiredFactRefs)) return false;
+  return true;
+}
+
 export function receiptHasCommandEvidence(
   commandType: HistoricalCommandType,
   receipt: ReceiptDto,
@@ -3957,6 +5123,12 @@ export function receiptHasCommandEvidence(
   }
   if (commandType === "COMPLETE_STAY" && receipt.businessCommitted) {
     return completeStayReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
+  if (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" && receipt.businessCommitted) {
+    return historicalStayCorrectionReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
+  if (isAdministratorMembershipCorrection(commandType) && receipt.businessCommitted) {
+    return administratorMembershipCorrectionReceiptHasEvidence(commandType, receipt, input, previewEffect, expectedEffectHash);
   }
   return true;
 }
@@ -4079,7 +5251,7 @@ export function createSharedCommandRecoveryStorage(
         }
         if (compatibilityValue !== null && compatibilityValue !== authoritativeValue) {
           if (!serializedRecoveriesShareCommandIdentity(authoritativeValue, compatibilityValue)) {
-            throw new Error("当前标签保留着另一笔未决操作；请先在原标签依次恢复，系统不会覆盖任一幂等键");
+            throw new Error("当前标签保留着另一笔未完成操作；请先在原标签依次查询，系统不会覆盖任何原操作记录");
           }
           compatibilityStorage.setItem(key, authoritativeValue);
         }
@@ -4106,7 +5278,7 @@ export function createSharedCommandRecoveryStorage(
       if (authoritativeValue !== null
         && compatibilityValue !== null
         && authoritativeValue !== compatibilityValue) {
-        throw new Error("当前标签保留着另一笔未决操作；系统不会覆盖任一幂等键");
+        throw new Error("当前标签保留着另一笔未完成操作；系统不会覆盖任何原操作记录");
       }
       authoritativeStorage.setItem(key, value);
       authoritativeStorage.setItem(sharedRecoveryMarkerKey(key), sharedRecoveryMarkerValue(value));
@@ -4370,7 +5542,8 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
       || value.presentation === "STAY_DATES"
       || value.presentation === "MOVE_UNIT"
       || value.presentation === "ORDER_LIFECYCLE"
-      || value.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") && !isEffectHash(value.effectHash))
+      || value.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+      || isStrictAdministratorCorrection(value.commandType)) && !isEffectHash(value.effectHash))
     || (value.effectHash !== undefined && !isEffectHash(value.effectHash))
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
     || typeof value.updatedAt !== "string") {
@@ -4452,7 +5625,8 @@ export function transitionPersistedCommandRecovery(
     const requiredPresentation = requiredRecoveryPresentation(context.request.commandType);
     const strictRecoveryEvidence = context.request.presentation === "BACKFILL_STAY"
       || requiredPresentation !== undefined
-      || context.request.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
+      || context.request.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+      || isStrictAdministratorCorrection(context.request.commandType);
     if (!isPersistableCommandType(context.request.commandType) || typeof propertyId !== "string" || !propertyId) {
       return { accepted: false, recovery: current };
     }
@@ -4509,11 +5683,14 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const orderLifecycle = recovery.presentation === "ORDER_LIFECYCLE";
   const commandType = isExecutableCommandType(recovery.commandType) ? recovery.commandType : undefined;
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
+  const administratorMembershipCorrection = commandType && isAdministratorMembershipCorrection(commandType) ? commandType : undefined;
+  const historicalStayCorrection = recovery.commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS";
   const restoreTargetInputs = completeStay
     || stayDates
     || moveUnit
     || orderLifecycle
-    || recovery.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP";
+    || recovery.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    || isStrictAdministratorCorrection(recovery.commandType);
   const targetInputs = restoreTargetInputs ? parsedRecoveryTargetRefs(recovery.targetRefs) ?? {} : {};
   return {
     commandType: recovery.commandType,
@@ -4531,6 +5708,10 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
           ? `恢复${commandShellLabel(u1CommandType)}结果`
         : moveUnit && u1CommandType
           ? `恢复${commandShellLabel(u1CommandType)}结果`
+        : administratorMembershipCorrection
+          ? `查询${membershipCommandLabel(administratorMembershipCorrection)}结果`
+        : historicalStayCorrection
+          ? "查询历史住宿安排修改结果"
         : u1CommandType
           ? `查询${commandShellLabel(u1CommandType)}结果`
         : `${recovery.commandType} · 原命令恢复`,
@@ -4548,9 +5729,13 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
         : moveUnit && u1CommandType
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
+        : administratorMembershipCorrection
+          ? `系统只查询刚才的${membershipCommandLabel(administratorMembershipCorrection)}结果，不会重新修改或重复写入记录。`
+        : historicalStayCorrection
+          ? "系统只查询刚才的历史住宿安排修改结果，不会重新修改或重复写入记录。"
         : u1CommandType
           ? `系统只查询刚才的${commandShellLabel(u1CommandType)}结果，不会重复提交。`
-        : "仅使用已保存的原幂等键查询服务端命令结果，不会发起新的业务写入。",
+        : "只查询已保存的原操作结果，不会发起新的业务操作。",
     ...(recovery.presentation ? { presentation: recovery.presentation } : {}),
     ...(recovery.effectHash ? { recoveryEffectHash: recovery.effectHash } : {}),
     input: {
@@ -4986,14 +6171,18 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
   const fundBusiness = recovery.commandType === "RECORD_COLLECTION" || recovery.commandType === "RECORD_REFUND";
   const tokenBusiness = tokenBusinessCommands.has(recovery.commandType as CommandType);
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
-  const businessMode = businessFacing || memberStay || backfillStay || completeStay || fulfillment || fundBusiness || tokenBusiness || Boolean(u1CommandType);
+  const administratorMembershipLabel = isAdministratorMembershipCorrection(recovery.commandType)
+    ? membershipCommandLabel(recovery.commandType)
+    : undefined;
+  const historicalStayCorrectionLabel = recovery.commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" ? "历史住宿安排修改" : undefined;
+  const businessMode = businessFacing || memberStay || backfillStay || completeStay || fulfillment || fundBusiness || tokenBusiness || Boolean(u1CommandType) || Boolean(administratorMembershipLabel) || Boolean(historicalStayCorrectionLabel);
   const memberRegistration = businessMode && recovery.commandType === "CREATE_MEMBER";
   const fulfillmentLabel = isExecutableCommandType(recovery.commandType) ? fulfillmentCommandLabel(recovery.commandType) : "履约操作";
   const u1Label = u1CommandType ? commandShellLabel(u1CommandType) : undefined;
   const fundLabel = fundBusiness ? (recovery.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款") : undefined;
   const tokenLabel = tokenBusiness ? tokenCommandLabel(recovery.commandType) : undefined;
   return (
-    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : backfillStay ? "待恢复补录住宿" : completeStay ? "待恢复完成住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : fundLabel ? `待恢复${fundLabel}` : tokenLabel ? `待恢复${tokenLabel}` : businessMode ? "待恢复会员操作" : "待恢复命令"} data-testid={testId}>
+    <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : backfillStay ? "待恢复补录住宿" : completeStay ? "待恢复完成住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : fundLabel ? `待恢复${fundLabel}` : tokenLabel ? `待恢复${tokenLabel}` : administratorMembershipLabel ? `待恢复${administratorMembershipLabel}` : historicalStayCorrectionLabel ? `待恢复${historicalStayCorrectionLabel}` : businessMode ? "待恢复业务操作" : "待恢复命令"} data-testid={testId}>
       <div>
         <strong>{submitting
           ? "原操作正在提交"
@@ -5014,12 +6203,16 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
                   ? (resolved ? `${fundLabel}结果已确认` : `${fundLabel}结果需要恢复查询`)
                 : tokenLabel
                   ? (resolved ? `${tokenLabel}结果已确认` : `${tokenLabel}结果需要查询`)
-              : (resolved ? "原会员操作结果已确认" : "会员操作结果需要恢复查询")
+                : administratorMembershipLabel
+                  ? (resolved ? `${administratorMembershipLabel}结果已确认` : `${administratorMembershipLabel}结果需要恢复查询`)
+                : historicalStayCorrectionLabel
+                  ? (resolved ? `${historicalStayCorrectionLabel}结果已确认` : `${historicalStayCorrectionLabel}结果需要恢复查询`)
+              : (resolved ? "原业务操作结果已确认" : "业务操作结果需要恢复查询")
           : (resolved ? "原命令结果已确认" : "原命令执行状态需要恢复查询")}</strong>
         {!businessMode ? <>
           <p><code>{recovery.commandType}</code> · {recovery.state} · Property <code>{recovery.propertyId}</code></p>
           {recovery.targetRefs.length ? <p>业务目标 {recovery.targetRefs.map((reference) => <code key={reference}>{reference}</code>)}</p> : null}
-          <p>原幂等键 <code>{recovery.confirmationKey}</code></p>
+          <p>原操作标识 <code>{recovery.confirmationKey}</code></p>
         </> : null}
         <p>{submitting
           ? "新的写入已暂停。可以等待原标签完成；如果原标签已经关闭，可核对原操作结果，系统会阻止迟到请求重复写入。"
@@ -5040,7 +6233,11 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
                   ? (resolved ? `${fundLabel}结果已经确认，打开后将刷新当前页面。` : `新的${fundLabel}已暂停，请先查询刚才的结果。`)
                 : tokenLabel
                   ? (resolved ? `${tokenLabel}结果已经确认，打开后将刷新 Token 列表。` : `新的 Token 操作已暂停，请先查询刚才的结果。`)
-              : (resolved ? "查看并关闭原操作结果后，可继续处理会员业务。" : "新的会员操作已暂停，请先恢复查询原结果。")
+                : administratorMembershipLabel
+                  ? (resolved ? `${administratorMembershipLabel}结果已经确认，打开后将刷新会员资料。` : `新的${administratorMembershipLabel}已暂停，请先查询刚才的结果；系统不会重复执行修改。`)
+                : historicalStayCorrectionLabel
+                  ? (resolved ? `${historicalStayCorrectionLabel}结果已经确认，打开后将刷新订单列表。` : `新的${historicalStayCorrectionLabel}已暂停，请先查询刚才的结果；系统不会重复修改。`)
+              : (resolved ? "查看并关闭原操作结果后，可继续处理业务。" : "新的业务操作已暂停，请先恢复查询原结果。")
           : (resolved ? "查看并关闭 Receipt 后恢复新的业务写入。" : "新的业务写入已暂停，必须继续查询原命令。")}</p>
       </div>
       <button className="button button-secondary" type="button" onClick={onOpen} data-testid={`${testId}-open`}>
@@ -5061,7 +6258,11 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
                   ? (resolved ? `刷新${fundLabel}结果` : `查询${fundLabel}结果`)
                 : tokenLabel
                   ? (resolved ? `刷新${tokenLabel}结果` : `查询${tokenLabel}结果`)
-              : (resolved ? "查看会员操作结果" : "恢复会员操作结果")
+                : administratorMembershipLabel
+                  ? (resolved ? `刷新${administratorMembershipLabel}结果` : `查询${administratorMembershipLabel}结果`)
+                : historicalStayCorrectionLabel
+                  ? (resolved ? `刷新${historicalStayCorrectionLabel}结果` : `查询${historicalStayCorrectionLabel}结果`)
+              : (resolved ? "查看业务操作结果" : "恢复业务操作结果")
           : (resolved ? "查看已确认结果" : "恢复原命令")}
       </button>
     </section>
@@ -5089,7 +6290,8 @@ export function CommandDialog({
 }: CommandDialogProps) {
   const backfillStay = request.commandType === "CREATE_ORDER" && request.presentation === "BACKFILL_STAY";
   const completeStay = request.commandType === "COMPLETE_STAY" && request.presentation === "COMPLETE_STAY";
-  const initialReceiptHasEvidence = (!backfillStay && !completeStay)
+  const strictAdministratorCorrection = isStrictAdministratorCorrection(request.commandType);
+  const initialReceiptHasEvidence = (!backfillStay && !completeStay && !strictAdministratorCorrection)
     || !initialReceipt
     || receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, undefined, request.recoveryEffectHash);
   const [preview, setPreview] = useState<PreviewDto>();
@@ -5100,6 +6302,8 @@ export function CommandDialog({
   const u1CommandType = !backfillStay && isU1CommandType(request.commandType) ? request.commandType : undefined;
   const memberProfile = request.commandType === "CREATE_MEMBER";
   const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
+  const administratorMembershipCorrection = Boolean(executableCommandType && isAdministratorMembershipCorrection(executableCommandType));
+  const historicalStayCorrection = request.commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS";
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const fundBusiness = request.commandType === "RECORD_COLLECTION" || request.commandType === "RECORD_REFUND";
@@ -5115,7 +6319,7 @@ export function CommandDialog({
     : undefined;
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
   const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
-  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || createOrderBusiness || completeStay || fulfillment || fundBusiness || tokenBusiness;
+  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || historicalStayCorrection || createOrderBusiness || completeStay || fulfillment || fundBusiness || tokenBusiness;
   const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : completeStay ? "COMPLETE_STAY" : fulfillment && executableCommandType ? executableCommandType : fundBusiness ? request.commandType : tokenBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
   const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment || completeStay ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : tokenBusiness ? tokenCommandLabel(request.commandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
@@ -5142,8 +6346,9 @@ export function CommandDialog({
       ? `${commandShellLabel(u1CommandType)}未写入；原操作已安全收口，可以关闭后重新发起。`
       : commandShellNotExecutedMessage(u1CommandType)
     : "本次操作未执行。";
-  const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || tokenBusiness) && executableCommandType ? executableCommandType : undefined);
+  const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || tokenBusiness || historicalStayCorrection) && executableCommandType ? executableCommandType : undefined);
   const deterministicPreviewFailure = Boolean(error && !preview && !receipt && !commandPreviewFailureCanReload(error));
+  const existingMembershipBackfillConflict = isExistingMembershipBackfillConflict(request.commandType, error);
 
   function applyShellEvent(event: CommandShellEvent): boolean {
     let accepted = false;
@@ -5182,6 +6387,8 @@ export function CommandDialog({
     && !networkUncertain
     && !confirmationKey
     && (!u1CommandType || u1PreviewHasBusinessEvidence(u1CommandType, preview.effect, request.input))
+    && (!historicalStayCorrection || historicalStayCorrectionPreviewHasEvidence(preview.effect, request.input))
+    && (!administratorMembershipCorrection || (executableCommandType && administratorMembershipPreviewHasEvidence(executableCommandType, preview.effect, request.input)))
     && (!backfillStay || completedStayBackfillPreviewHasEvidence(preview.effect, request.input))
     && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));
   const dialogCloseDisabled = busy && (!u1CommandType || Boolean(confirmationKey) || shellState.phase === "CONFIRMING");
@@ -5361,7 +6568,7 @@ export function CommandDialog({
   }
 
   useEffect(() => {
-    if (!initialReceipt?.businessCommitted || (!u1CommandType && !backfillStay && !completeStay)) return;
+    if (!initialReceipt?.businessCommitted || (!u1CommandType && !backfillStay && !completeStay && !strictAdministratorCorrection)) return;
     if (!receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, preview?.effect, request.recoveryEffectHash ?? preview?.effectHash)) {
       setReceipt(undefined);
       setError(new Error("服务端返回的操作结果无法核对；系统将只查询原操作结果，不会重复提交。"));
@@ -5375,6 +6582,10 @@ export function CommandDialog({
     if (!preview || !reasonCode.trim()
       || (!createOrderBusiness && !lodgingFulfillment && !tokenBusiness && !(fundBusiness && (request.commandType === "RECORD_COLLECTION" || reasonNote.trim())) && !reasonNote.trim())
       || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
+    if (historicalStayCorrection && !historicalStayCorrectionPreviewHasEvidence(preview.effect, request.input)) {
+      setError(new Error("原安排、核实后的安排或保持不变事实不完整，本次没有提交。"));
+      return;
+    }
     if (backfillStay && !completedStayBackfillPreviewHasEvidence(preview.effect, request.input)) {
       setError(new Error("补录日期、退房状态或收款事实与本次填写不一致，本次没有提交。"));
       return;
@@ -5601,7 +6812,11 @@ export function CommandDialog({
         error={error && businessFacing ? new Error(fulfillment && networkUncertain
           ? "暂时无法确认本次操作结果。请使用下方按钮查询刚才的结果，系统不会重复办理。"
           : commandDialogBusinessErrorMessage(request.commandType, error)) : error}
-        title={failedNotExecuted ? "操作未执行" : deterministicPreviewFailure ? "填写内容需要修改" : "操作处理失败"}
+        title={failedNotExecuted
+          ? "操作未执行"
+          : existingMembershipBackfillConflict
+            ? "这位会员已有办卡记录"
+            : deterministicPreviewFailure ? "填写内容需要修改" : "操作处理失败"}
         hideTechnicalDetails={businessFacing}
       />
       {u1CommandType && failedNotExecuted && !error ? <InlineError
@@ -5623,8 +6838,10 @@ export function CommandDialog({
       {!preview && !receipt ? (
         <div className="command-pending">
           {businessFacing ? <p>{deterministicPreviewFailure
-            ? request.commandType === "CORRECT_ORDER_OCCUPANT" ? "请返回修改住宿人资料后重新核对。" : "请返回修改填写内容后重新核对。"
-            : busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+            ? existingMembershipBackfillConflict
+              ? "请关闭本窗口，先核对这位会员现有的办卡记录；如原记录有误，请使用对应的会员修改功能。"
+              : request.commandType === "CORRECT_ORDER_OCCUPANT" ? "请返回修改住宿人资料后重新核对。" : "请返回修改填写内容后重新核对。"
+            : busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : administratorMembershipCorrection ? `正在载入${membershipCommandLabel(request.commandType as CommandType)}核对信息。` : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : administratorMembershipCorrection ? `系统将重新载入${membershipCommandLabel(request.commandType as CommandType)}的只读核对信息。` : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">
@@ -5652,6 +6869,7 @@ export function CommandDialog({
             commandInput={request.input}
             {...(request.inventoryUnitLabels ? { inventoryUnitLabels: request.inventoryUnitLabels } : {})}
             {...(request.orderLifecycleContext ? { orderLifecycleContext: request.orderLifecycleContext } : {})}
+            {...(request.historicalStayCorrectionContexts ? { historicalStayCorrectionContexts: request.historicalStayCorrectionContexts } : {})}
             {...(requestBookingChannelCode !== undefined ? { bookingChannelCode: requestBookingChannelCode } : {})}
             {...(request.initialReason?.note ? { reasonNote: request.initialReason.note } : {})}
             {...(summaryBusinessCommand ? { businessCommand: summaryBusinessCommand } : {})}
@@ -5681,7 +6899,7 @@ export function CommandDialog({
           data-command-state="duplicate-returned-original-receipt"
         >
           <strong>{businessFacing ? "已找到原操作结果" : "已返回原 Receipt"}</strong>
-          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : backfillStay ? "系统返回了原补录住宿结果，没有重复创建订单、退房记录或收款事实。" : completeStay ? "系统返回了刚才的办理结果，没有重复完成订单或重复登记收款。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : tokenBusiness ? "系统返回了原来的 Token 操作结果，没有重复提交。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "服务端按原幂等键解析既有结果，没有重复执行业务命令。"}</p>
+          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : administratorMembershipCorrection ? "系统返回了原来的会员修改结果，没有重复修改资料、合同、资金或权益。" : historicalStayCorrection ? "系统返回了原来的历史住宿安排修改结果，没有重复修改订单、房态或历史记录。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : backfillStay ? "系统返回了原补录住宿结果，没有重复创建订单、退房记录或收款事实。" : completeStay ? "系统返回了刚才的办理结果，没有重复完成订单或重复登记收款。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : tokenBusiness ? "系统返回了原来的 Token 操作结果，没有重复提交。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "系统找到了原来的操作结果，没有重复执行。"}</p>
         </div>
       ) : null}
       {receipt && !u1CommandType ? <ReceiptPanel
@@ -5696,9 +6914,9 @@ export function CommandDialog({
       /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
-          <div><strong>{memberProfile ? "建档结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : backfillStay ? "补录住宿结果需要恢复查询" : completeStay ? "完成住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : tokenBusiness ? "Token 操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : backfillStay ? "系统会查询原补录结果，不会重复创建订单、退房记录或收款事实。" : completeStay ? "系统只查询刚才的办理结果，不会重复完成订单或重复登记收款。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : tokenBusiness ? "系统会查询刚才的 Token 操作结果，不会重复提交。" : u1CommandType ? "系统只查询原操作使用的幂等身份，不会重复提交。" : "使用原幂等键查询，不会发起新的业务命令。"}</p></div>
+          <div><strong>{memberProfile ? "建档结果需要恢复查询" : administratorMembershipCorrection ? `${membershipCommandLabel(request.commandType as CommandType)}结果需要恢复查询` : historicalStayCorrection ? "历史住宿安排修改结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : backfillStay ? "补录住宿结果需要恢复查询" : completeStay ? "完成住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : tokenBusiness ? "Token 操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : administratorMembershipCorrection ? "系统只查询原修改结果，不会重新修改或重复写入记录。" : historicalStayCorrection ? "系统只查询原来的修改结果，不会重新修改订单、房态或历史记录。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : backfillStay ? "系统会查询原补录结果，不会重复创建订单、退房记录或收款事实。" : completeStay ? "系统只查询刚才的办理结果，不会重复完成订单或重复登记收款。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : tokenBusiness ? "系统会查询刚才的 Token 操作结果，不会重复提交。" : u1CommandType ? "系统只查询原操作结果，不会重复提交。" : "系统只查询原操作结果，不会发起新的操作。"}</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recover()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : backfillStay ? "查询补录结果" : completeStay ? "查询完成住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : tokenBusiness ? "查询 Token 结果" : u1CommandType ? "查询原操作结果" : "查询命令结果"}
+            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : administratorMembershipCorrection ? "查询会员修改结果" : historicalStayCorrection ? "查询历史住宿修改结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : backfillStay ? "查询补录结果" : completeStay ? "查询完成住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : tokenBusiness ? "查询 Token 结果" : u1CommandType ? "查询原操作结果" : "查询操作结果"}
           </button>
         </div>
       ) : null}

@@ -160,7 +160,7 @@ export function commandShellLabel(commandType: U1CommandType): string {
     case "CREATE_ORDER": return "创建住宿订单";
     case "CREATE_MEMBER": return "创建会员档案";
     case "CREATE_MEMBERSHIP_ORDER": return "创建会员订单";
-    case "RECORD_MEMBERSHIP_PAYMENT": return "登记企微收款";
+    case "RECORD_MEMBERSHIP_PAYMENT": return "收款";
     case "CORRECT_MEMBERSHIP_PAYMENT": return "更正企微收款";
     case "ACTIVATE_MEMBERSHIP_ORDER": return "生效会员订单";
     case "CORRECT_MEMBER_ENTITLEMENT_BALANCE": return "更正会员余额";

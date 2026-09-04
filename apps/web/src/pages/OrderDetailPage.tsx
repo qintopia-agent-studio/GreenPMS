@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertTriangle,
   ArrowLeft,
   ArrowRightLeft,
   CalendarRange,
+  CircleHelp,
   CircleDollarSign,
   ClipboardCheck,
   LogIn,
@@ -345,6 +347,29 @@ export function orderActionHelpRequired(
   return actions.some((action) => visibleCodes.has(action.code) && !action.enabled);
 }
 
+export function itemCountLabel(count: number): string {
+  return `${count} 条`;
+}
+
+export function OrderActionNotice({ title, body, testId, action }: {
+  title: string;
+  body: string;
+  testId: string;
+  action?: string;
+}) {
+  const helpId = useId();
+  return <span className="action-notice-popover">
+    <span className="action-notice" role="status" data-testid={testId} data-action={action}>
+      <AlertTriangle aria-hidden="true" size={14} />
+      {title}
+      <span className="info-hint action-notice-help-trigger" tabIndex={0} role="note" aria-label={`说明：${body}`} aria-describedby={helpId}>
+        <CircleHelp aria-hidden="true" size={14} />
+      </span>
+    </span>
+    <span className="action-notice-bubble" id={helpId} role="tooltip">{body}</span>
+  </span>;
+}
+
 export function orderDetailBackTarget(state: unknown): "/" | "/orders" {
   if (!state || typeof state !== "object") return "/orders";
   const source = state as Record<string, unknown>;
@@ -463,6 +488,7 @@ export function arrangementChangeLabel(type: OrderArrangementHistoryItemDto["typ
     case "SHORTENING": return "缩短住宿";
     case "MOVE": return "更换房源";
     case "EARLY_CHECK_OUT": return "提前退房";
+    case "HISTORICAL_STAY_CORRECTION": return "历史住宿安排修改";
   }
 }
 
@@ -569,6 +595,35 @@ function ArrangementHistoryAmounts({ item, showPerOrderFunds, isLatest = false }
   </dl>;
 }
 
+function HistoricalStayCorrectionGroup({ item, units }: {
+  item: OrderArrangementHistoryItemDto;
+  units: ReadonlyMap<string, Pick<InventoryUnitDto, "code" | "name" | "building_code">>;
+}) {
+  const group = item.correctionGroup;
+  if (!group) return null;
+  const reasonNote = group.reason.note.trim();
+  return <div className="historical-correction-group" data-testid="historical-stay-correction-group">
+    {group.evidenceNote?.trim() ? <p className="muted compact">凭据说明：{group.evidenceNote.trim()}</p> : null}
+    <div className="amendment-list compact-list">{group.corrections.map((correction, index) => (
+      <section key={`${correction.correctionId}:${correction.orderId}`} data-testid="historical-stay-correction-atom">
+        <header className="amendment-head">
+          <strong>第 {index + 1} 笔同批修改</strong>
+          <Link className="inline-link" to={`/orders/${encodeURIComponent(correction.orderId)}`}>查看第 {index + 1} 笔关联订单</Link>
+        </header>
+        <dl className="detail-list">
+          <div><dt>修改前日期</dt><dd>{formatDate(correction.before.arrivalDate)} 至 {formatDate(correction.before.departureDate)}</dd></div>
+          <div><dt>修改前房源</dt><dd><strong>{arrangementUnitLabel(units, correction.before.inventoryUnitId)}</strong></dd></div>
+          <div><dt>修改后日期</dt><dd>{formatDate(correction.after.arrivalDate)} 至 {formatDate(correction.after.departureDate)}</dd></div>
+          <div><dt>修改后房源</dt><dd><strong>{arrangementUnitLabel(units, correction.after.inventoryUnitId)}</strong></dd></div>
+          <div><dt>修改原因</dt><dd>{reasonNote || "未填写修改说明"}</dd></div>
+          <div><dt>操作人</dt><dd>{group.actor.displayName}</dd></div>
+          <div><dt>操作时间</dt><dd>{formatDateTime(group.recordedAt)}</dd></div>
+        </dl>
+      </section>
+    ))}</div>
+  </div>;
+}
+
 export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds = true, channelPriceDifferenceReason }: {
   view: Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
   inventoryUnits: Array<Pick<InventoryUnitDto, "id" | "code" | "name" | "building_code">>;
@@ -595,8 +650,10 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
 
     <section className="detail-section full-detail" aria-labelledby="fulfillment-heading" data-testid="order-fulfillment">
       <div className="section-title-row">
-        <h2 id="fulfillment-heading">入住与退房结果</h2>
-        <InfoHint text="这里显示的是系统办理营业日和记录时间，不代表住客实际到店或离店的精确时刻。" />
+        <div className="section-title-with-help">
+          <h2 id="fulfillment-heading">入住与退房结果</h2>
+          <InfoHint text="这里显示的是系统办理营业日和记录时间，不代表住客实际到店或离店的精确时刻。" />
+        </div>
       </div>
       <div className="amendment-list">
         <FulfillmentResult type="CHECK_IN" record={view.fulfillment.checkIn} />
@@ -608,7 +665,7 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
     </section>
 
     <section className="detail-section full-detail" aria-labelledby="arrangement-history-heading" data-testid="arrangement-history">
-      <div className="section-title-row"><h2 id="arrangement-history-heading">住宿安排变更历史</h2><span>{view.arrangementHistory.length} 条</span></div>
+      <div className="section-title-row"><h2 id="arrangement-history-heading">住宿安排变更历史</h2><span>{itemCountLabel(view.arrangementHistory.length)}</span></div>
       {!showPerOrderFunds && channelPriceDifferenceReason?.trim() ? <p className="muted compact">渠道价格差异说明：{channelPriceDifferenceReason.trim()}</p> : null}
       <div className="amendment-list">{view.arrangementHistory.map((item, index) => {
         const isCreation = !item.before;
@@ -644,6 +701,7 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
               <ArrangementHistoryAmounts item={item} showPerOrderFunds={showPerOrderFunds} isLatest={index === view.arrangementHistory.length - 1} />
             </div>
           </div>
+          <HistoricalStayCorrectionGroup item={item} units={units} />
         </article>;
       })}</div>
     </section>
@@ -666,21 +724,21 @@ export function CompleteStayCorrectionHistory({ view }: {
 
   return <section className="detail-section full-detail" aria-labelledby="complete-stay-correction-history-heading" data-testid="complete-stay-correction-history">
     <div className="section-title-row">
-      <h2 id="complete-stay-correction-history-heading">住宿纠正记录</h2>
+      <h2 id="complete-stay-correction-history-heading">住宿补录记录</h2>
       <span>{records.length} 条</span>
     </div>
     <div className="amendment-list">{records.map((record) => (
       <article key={record.commandId} data-testid="complete-stay-correction-history-item">
         <header className="amendment-head">
-          <strong>完成住宿纠正</strong>
+          <strong>完成住宿补录</strong>
           <span>{record.actor?.displayName ?? "历史未记录操作人"} · {formatDateTime(record.recordedAt)}</span>
         </header>
-        <p className="amendment-reason">{record.reasonNote.trim() || "未填写纠正说明"}</p>
+        <p className="amendment-reason">{record.reasonNote.trim() || "未填写补录说明"}</p>
         <dl className="detail-list">
-          <div><dt>纠正方式</dt><dd>保留原订单，由已预订一次完成为已退房</dd></div>
+          <div><dt>处理方式</dt><dd>保留原订单，由已预订一次完成为已退房</dd></div>
           <div><dt>住宿日期</dt><dd>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</dd></div>
           <div><dt>订单金额</dt><dd>{formatMoney(view.amounts.currentContractAmount)}</dd></div>
-          <div><dt>纠正结果</dt><dd>{settlementResult}</dd></div>
+          <div><dt>处理结果</dt><dd>{settlementResult}</dd></div>
         </dl>
       </article>
     ))}</div>
@@ -823,7 +881,9 @@ export interface StayConversionEntitlementDisplay {
 }
 
 export function stayConversionEntitlementDisplay(view: OrderViewDto): StayConversionEntitlementDisplay | undefined {
-  const conversion = [...view.amendments].reverse().find((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
+  const conversion = [...view.amendments].reverse().find((amendment) =>
+    amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+      || amendment.amendment_type === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY");
   if (!conversion || !isRecord(conversion.payload)) return undefined;
   const entitlement = isRecord(conversion.payload.entitlement) ? conversion.payload.entitlement : undefined;
   const serviceDates = Array.isArray(entitlement?.serviceDates)
@@ -837,6 +897,7 @@ export function stayConversionEntitlementDisplay(view: OrderViewDto): StayConver
   const serviceEnd = serviceDates.length ? shiftDate(serviceDates[serviceDates.length - 1]!, 1) : view.order.departure_date;
   const member = isRecord(conversion.payload.member) ? conversion.payload.member : undefined;
   const product = isRecord(conversion.payload.product) ? conversion.payload.product : undefined;
+  const newMembership = isRecord(conversion.payload.newMembership) ? conversion.payload.newMembership : undefined;
   const transferredFact = view.collectionFacts.find((fact) => fact.transfer);
   const memberId = view.membershipConversion?.memberId
     ?? (typeof member?.memberId === "string" ? member.memberId : transferredFact?.transfer?.memberId);
@@ -845,9 +906,13 @@ export function stayConversionEntitlementDisplay(view: OrderViewDto): StayConver
     serviceStart,
     serviceEnd,
     consumedUnits,
-    unitLabel: entitlement?.entitlementUnitKind === "BED_NIGHT" ? "床夜" : "间夜",
+    unitLabel: entitlement?.entitlementUnitKind === "BED_NIGHT" || entitlement?.unitKind === "BED_NIGHT" ? "床夜" : "间夜",
     ...(typeof member?.fullName === "string" && member.fullName.trim() ? { memberName: member.fullName } : {}),
-    ...(typeof product?.name === "string" && product.name.trim() ? { productName: product.name } : {}),
+    ...(typeof product?.name === "string" && product.name.trim()
+      ? { productName: product.name }
+      : typeof newMembership?.productName === "string" && newMembership.productName.trim()
+        ? { productName: newMembership.productName }
+        : {}),
     ...(memberId ? { memberId } : {}),
     ...(membershipOrderId ? { membershipOrderId } : {})
   };
@@ -861,7 +926,7 @@ export function OrderMembershipCoverageSection({ view, unitMap }: {
   const coverageDisplayCount = view.coverageSet.length ? view.coverageSet.length : conversionEntitlement ? 1 : 0;
   return (
     <section className="detail-section full-detail" aria-labelledby="coverage-table-heading">
-      <div className="section-title-row"><h2 id="coverage-table-heading">会员权益覆盖</h2><span>{coverageDisplayCount}</span></div>
+      <div className="section-title-row"><h2 id="coverage-table-heading">会员权益覆盖</h2><span>{itemCountLabel(coverageDisplayCount)}</span></div>
       {view.coverageSet.length ? (
         <>
           <div className="table-region" role="region" aria-label="会员覆盖" tabIndex={0}>
@@ -1482,6 +1547,29 @@ function countArray(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
 }
 
+export interface ReverseFactHelpPosition {
+  left: number;
+  bottom: number;
+  width: number;
+}
+
+export function reverseFactHelpPosition(
+  button: Pick<DOMRect, "right" | "top">,
+  viewportWidth: number,
+  viewportHeight: number
+): ReverseFactHelpPosition {
+  const viewportInset = 12;
+  const width = Math.max(0, Math.min(280, viewportWidth - viewportInset * 2));
+  return {
+    left: Math.min(
+      Math.max(viewportInset, button.right - width - 4),
+      Math.max(viewportInset, viewportWidth - width - viewportInset)
+    ),
+    bottom: Math.max(viewportInset, viewportHeight - button.top + 8),
+    width
+  };
+}
+
 export function FactActions({ fact, facts, canRefund, canReverse, disabled, onRefund, onReverse }: {
   fact: CollectionFactDto;
   facts: readonly CollectionFactDto[];
@@ -1491,10 +1579,38 @@ export function FactActions({ fact, facts, canRefund, canReverse, disabled, onRe
   onRefund: () => void;
   onReverse: () => void;
 }) {
+  const reverseHelpId = useId();
+  const reverseButtonRef = useRef<HTMLButtonElement>(null);
+  const [reverseHelpPosition, setReverseHelpPosition] = useState<ReverseFactHelpPosition>();
+  const reverseHelpText = "仅用于撤销录错的收款或退款。系统会新增一笔反向记录抵消原记录，并保留原记录和操作痕迹；如果确实把钱退给客人，请使用“退款”。";
+  const showReverseHelp = () => {
+    const button = reverseButtonRef.current;
+    if (!button) return;
+    setReverseHelpPosition(reverseFactHelpPosition(button.getBoundingClientRect(), window.innerWidth, window.innerHeight));
+  };
+
+  useEffect(() => {
+    if (!reverseHelpPosition) return undefined;
+    const hide = () => setReverseHelpPosition(undefined);
+    window.addEventListener("resize", hide);
+    window.addEventListener("scroll", hide, true);
+    return () => {
+      window.removeEventListener("resize", hide);
+      window.removeEventListener("scroll", hide, true);
+    };
+  }, [reverseHelpPosition]);
+
   return (
     <div className="row-actions">
-      {canRefund && fact.fact_type === "COLLECTION" ? <button className="button button-secondary fact-refund-button" type="button" onClick={onRefund} disabled={disabled} aria-label={`为 ${fact.transaction_reference ?? "这笔收款"} 记录退款`} data-order-action="RECORD_REFUND">退款</button> : null}
-      {canReverse ? <button className="button button-secondary fact-reverse-button" type="button" onClick={onReverse} disabled={disabled} aria-label={`冲销${collectionFactTypeLabel(fact.fact_type)} ${collectionFactTransactionReferenceLabel(facts, fact)}`} data-order-action="REVERSE_FACT">冲销</button> : null}
+      {canRefund && fact.fact_type === "COLLECTION" ? <button className="button button-secondary fact-action-button fact-refund-button" type="button" onClick={onRefund} disabled={disabled} aria-label={`为 ${fact.transaction_reference ?? "这笔收款"} 记录退款`} data-order-action="RECORD_REFUND">退款</button> : null}
+      {canReverse ? <span className="fact-reverse-action">
+        <button ref={reverseButtonRef} className="button button-secondary fact-action-button fact-reverse-button" type="button" onClick={onReverse} onMouseEnter={showReverseHelp} onMouseLeave={() => setReverseHelpPosition(undefined)} onFocus={showReverseHelp} onBlur={() => setReverseHelpPosition(undefined)} disabled={disabled} aria-label={`冲销${collectionFactTypeLabel(fact.fact_type)} ${collectionFactTransactionReferenceLabel(facts, fact)}`} aria-describedby={reverseHelpId} data-order-action="REVERSE_FACT">冲销</button>
+        <span className="sr-only" id={reverseHelpId}>{reverseHelpText}</span>
+        {reverseHelpPosition && typeof document !== "undefined" ? createPortal(
+          <span className="fact-reverse-help" role="tooltip" style={reverseHelpPosition}>{reverseHelpText}</span>,
+          document.body
+        ) : null}
+      </span> : null}
     </div>
   );
 }
@@ -1928,19 +2044,13 @@ export function OrderDetailPage() {
             </div>
           ) : null}
           <div className="action-toolbar">
-            {fulfillmentNotice ? (
-              <span className="action-notice" role="status" data-testid="fulfillment-date-notice" data-action={fulfillmentNotice.action}>
-                <AlertTriangle aria-hidden="true" size={14} />
-                {fulfillmentNotice.title}
-                <InfoHint text={fulfillmentNotice.body} />
-              </span>
-            ) : null}
+            {fulfillmentNotice ? <OrderActionNotice title={fulfillmentNotice.title} body={fulfillmentNotice.body} testId="fulfillment-date-notice" action={fulfillmentNotice.action} /> : null}
             {blockedStayDateState && !blockedStayDateState.enabled && blockedStayDateState.reason ? (
-              <span className="action-notice" role="status" data-testid="stay-date-action-notice">
-                <AlertTriangle aria-hidden="true" size={14} />
-                {view.order.status === "RESERVED" ? "暂不能调整住宿日期" : "暂不能缩短住宿或提前退房"}
-                <InfoHint text={blockedStayDateState.reason} />
-              </span>
+              <OrderActionNotice
+                title={view.order.status === "RESERVED" ? "暂不能调整住宿日期" : "暂不能缩短住宿或提前退房"}
+                body={blockedStayDateState.reason}
+                testId="stay-date-action-notice"
+              />
             ) : null}
             {convertActionDisabledReason ? (
               <span className="action-notice action-notice-detailed" role="status" data-testid="stay-membership-upgrade-action-notice">
@@ -2009,7 +2119,7 @@ export function OrderDetailPage() {
       </section> : null}
 
       <section className="detail-section full-detail" aria-labelledby="occupant-corrections-heading">
-        <div className="section-title-row"><h2 id="occupant-corrections-heading">住宿人资料更正记录</h2><span>{view.occupantCorrections.length}</span></div>
+        <div className="section-title-row"><h2 id="occupant-corrections-heading">住宿人资料更正记录</h2><span>{itemCountLabel(view.occupantCorrections.length)}</span></div>
         {view.occupantCorrections.length ? <div className="amendment-list" data-testid="occupant-correction-history">{view.occupantCorrections.map((correction) => {
           const occupant = occupants.find((candidate) => candidate.id === correction.occupantId);
           return <article key={correction.id} data-testid="occupant-correction-history-item">
@@ -2021,7 +2131,7 @@ export function OrderDetailPage() {
       </section>
 
       <section className="detail-section full-detail" aria-labelledby="revisions-heading">
-        <div className="section-title-row"><h2 id="revisions-heading">计价记录</h2><span>{view.pricingRevisions.length}</span></div>
+        <div className="section-title-row"><h2 id="revisions-heading">计价记录</h2><span>{itemCountLabel(view.pricingRevisions.length)}</span></div>
         <div className="table-region" role="region" aria-label="计价记录表格" tabIndex={0}>
           <table className="data-table compact-table">
             <thead><tr><th scope="col">计价记录</th><th scope="col">锁定政策</th><th scope="col">周期</th><th scope="col">权益覆盖</th><th scope="col">政策基础金额</th><th scope="col">与政策基础金额差额</th><th scope="col">订单金额</th><th scope="col">计价方式与说明</th></tr></thead>
@@ -2043,7 +2153,7 @@ export function OrderDetailPage() {
 
       <OrderMembershipCoverageSection view={view} unitMap={unitMap} />
 
-      <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{view.collectionFacts.length}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
+      <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{itemCountLabel(view.collectionFacts.length)}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
 
       {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {completeStayAction ? <CompleteStayDialog view={view} {...(commandDraft?.commandType === "COMPLETE_STAY" ? { draft: commandDraft } : {})} onClose={() => { setCompleteStayAction(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("COMPLETE_STAY")) return; setCompleteStayAction(false); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}

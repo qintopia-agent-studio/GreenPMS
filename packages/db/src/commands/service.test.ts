@@ -43,6 +43,46 @@ describe("command receipt read projection", () => {
     expect(projectReceiptResultForRead("CHECK_IN", unrelated)).toBe(unrelated);
   });
 
+  it("masks sensitive member profile values in receipt API projections", () => {
+    const stored = {
+      memberId: "member_sensitive",
+      correctionId: "fact_profile_correction",
+      changedFields: ["identityCardNumber", "phone", "wechat"],
+      before: {
+        fullName: "Cathy",
+        nickname: "Cathy",
+        identityCardNumber: "310000199001010001",
+        phone: "13812345678",
+        wechat: "cathy-private-wechat"
+      },
+      after: {
+        fullName: "Cathy",
+        nickname: "Cathy",
+        identityCardNumber: "310000199001010099",
+        phone: "13987654321",
+        wechat: "cathy-corrected-wechat"
+      }
+    };
+
+    expect(projectReceiptResultForRead("CORRECT_MEMBER_PROFILE", stored)).toEqual({
+      ...stored,
+      before: {
+        ...stored.before,
+        identityCardNumber: "**************0001",
+        phone: "138****5678",
+        wechat: "c***at"
+      },
+      after: {
+        ...stored.after,
+        identityCardNumber: "**************0099",
+        phone: "139****4321",
+        wechat: "c***at"
+      }
+    });
+    expect(JSON.stringify(projectReceiptResultForRead("CORRECT_MEMBER_PROFILE", stored)))
+      .not.toContain("310000199001010001");
+  });
+
   it("derives a pre-mode conversion from immutable ledger evidence and rejects a forged completed shape", () => {
     const preMode = {
       convertedUnits: 2,

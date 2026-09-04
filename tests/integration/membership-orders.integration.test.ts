@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
-import { confirmCommandPreview, createCommandPreview, getMemberView, propertyLocalToday, type Database } from "@qintopia/db";
+import {
+  confirmCommandPreview,
+  createCommandPreview,
+  getMemberView,
+  propertyLocalToday,
+  withPropertyClockForTesting,
+  type Database
+} from "@qintopia/db";
 import { parseLocalDate } from "@qintopia/domain";
 import type { Kysely } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -26,6 +33,7 @@ const products = {
 
 let db: Kysely<Database>;
 let sequence = 0;
+const memberId = "member_membership_orders_test";
 
 function metadata(prefix: string) {
   sequence += 1;
@@ -52,7 +60,7 @@ async function createMembershipOrder(productId: string = products.sharedSingle, 
     commandType: "CREATE_MEMBERSHIP_ORDER",
     input: {
       propertyId: demo.propertyId,
-      memberId: demo.memberId,
+      memberId,
       membershipProductId: productId,
       agreedPriceMinor,
       ...(reason ? { priceAdjustmentReason: reason } : {})
@@ -78,6 +86,18 @@ function addCalendarYear(localDate: string): string {
 
 beforeEach(async () => {
   db = await resetDatabase(databaseUrl);
+  await db.insertInto("members").values({
+    id: memberId,
+    identity_card_number: "MEMBERSHIP-ORDERS-TEST",
+    nickname: "会员订单测试",
+    full_name: "会员订单测试",
+    phone: "13900009991",
+    wechat: "membership-orders-test"
+  }).execute();
+  await db.insertInto("member_property_links").values({
+    member_id: memberId,
+    property_id: demo.propertyId
+  }).execute();
 });
 
 afterEach(async () => {
@@ -182,7 +202,7 @@ describe("2B membership orders and WeCom collections", () => {
       expect.objectContaining({ fact_type: "REVERSAL", amount_minor: 90000, net_effect_minor: -90000, reverses_fact_id: originalFactId }),
       expect.objectContaining({ fact_type: "COLLECTION", amount_minor: 93600, net_effect_minor: 93600, transaction_reference: "WX-CORRECTED-001", corrects_fact_id: originalFactId })
     ]));
-    const view = await getMemberView(db, demo.propertyId, demo.memberId);
+    const view = await getMemberView(db, demo.propertyId, memberId);
     const summary = view.membershipOrders.find((candidate) => candidate.order.id === orderId)!;
     expect(summary.paymentTotalMinor).toBe(93600);
     expect(summary.paymentDifferenceMinor).toBe(0);
@@ -225,5 +245,90 @@ describe("2B membership orders and WeCom collections", () => {
     ]);
     expect(await db.selectFrom("member_contracts").select("id").where("membership_order_id", "=", orderId).execute()).toHaveLength(1);
     expect(await db.selectFrom("membership_orders").select("entitlement_lot_id").where("id", "=", orderId).executeTakeFirstOrThrow()).toMatchObject({ entitlement_lot_id: expect.stringMatching(/^lot_/) });
+  });
+
+  it("records a real overpayment on an underpaid ACTIVE order without changing its membership chain and stales a competing preview", async () => {
+    const orderId = await createMembershipOrder();
+    await recordPayment(orderId, 60_000, "WX-ACTIVE-PARTIAL-001");
+    await confirm({
+      commandType: "ACTIVATE_MEMBERSHIP_ORDER",
+      input: { propertyId: demo.propertyId, membershipOrderId: orderId }
+    }, "activate-underpaid-membership");
+
+    const orderBefore = await db.selectFrom("membership_orders").selectAll().where("id", "=", orderId).executeTakeFirstOrThrow();
+    const contractBefore = await db.selectFrom("member_contracts").selectAll().where("id", "=", orderBefore.contract_id!).executeTakeFirstOrThrow();
+    const lotBefore = await db.selectFrom("entitlement_lots").selectAll().where("id", "=", orderBefore.entitlement_lot_id!).executeTakeFirstOrThrow();
+    const ledgerBefore = await db.selectFrom("entitlement_ledger").selectAll().where("lot_id", "=", lotBefore.id).orderBy("fact_id").execute();
+    const businessDate = "2026-09-04";
+
+    await withPropertyClockForTesting(new Date("2026-09-04T23:30:00.000+08:00"), async () => {
+      const paymentEnvelope: CommandEnvelope = {
+        commandType: "RECORD_MEMBERSHIP_PAYMENT",
+        input: {
+          propertyId: demo.propertyId,
+          membershipOrderId: orderId,
+          amountMinor: 120_000,
+          transactionReference: "WX-ACTIVE-OVERPAYMENT-001"
+        }
+      };
+      const first = await preview(paymentEnvelope, "active-overpayment-first");
+      const competing = await preview(paymentEnvelope, "active-overpayment-competing");
+      expect(first.preview.effect).toMatchObject({
+        payment: {
+          amount: { currency: "CNY", minorUnits: 120_000 },
+          businessDate
+        },
+        totals: {
+          agreedPrice: { currency: "CNY", minorUnits: 162_000 },
+          previouslyCollected: { currency: "CNY", minorUnits: 60_000 },
+          currentCollection: { currency: "CNY", minorUnits: 120_000 },
+          differenceAfter: { currency: "CNY", minorUnits: 18_000 }
+        },
+        status: "ACTIVE"
+      });
+
+      const confirmation = {
+        propertyId: demo.propertyId,
+        commandType: "RECORD_MEMBERSHIP_PAYMENT" as const,
+        confirmation: true,
+        expectedEffectHash: first.preview.effectHash,
+        reason: { code: "RECORD_MEMBERSHIP_PAYMENT", note: "登记欠费会员真实企微分笔收款" }
+      };
+      const receipt = await confirmCommandPreview(
+        db,
+        principal,
+        first.preview.previewId,
+        confirmation,
+        metadata("active-overpayment-confirm")
+      );
+      expect(receipt).toMatchObject({
+        businessCommitted: true,
+        executionStatus: "EXECUTED",
+        result: { membershipOrderId: orderId, status: "ACTIVE" }
+      });
+
+      const stale = await confirmCommandPreview(db, principal, competing.preview.previewId, {
+        ...confirmation,
+        expectedEffectHash: competing.preview.effectHash
+      }, metadata("active-overpayment-stale"));
+      expect(stale).toMatchObject({
+        businessCommitted: false,
+        executionStatus: "NOT_EXECUTED",
+        error: { code: "PREVIEW_STALE" }
+      });
+    });
+
+    expect(await db.selectFrom("membership_orders").selectAll().where("id", "=", orderId).executeTakeFirstOrThrow()).toEqual(orderBefore);
+    expect(await db.selectFrom("member_contracts").selectAll().where("id", "=", contractBefore.id).executeTakeFirstOrThrow()).toEqual(contractBefore);
+    expect(await db.selectFrom("entitlement_lots").selectAll().where("id", "=", lotBefore.id).executeTakeFirstOrThrow()).toEqual(lotBefore);
+    expect(await db.selectFrom("entitlement_ledger").selectAll().where("lot_id", "=", lotBefore.id).orderBy("fact_id").execute()).toEqual(ledgerBefore);
+    expect(await db.selectFrom("membership_payment_facts").selectAll()
+      .where("membership_order_id", "=", orderId)
+      .where("transaction_reference", "=", "WX-ACTIVE-OVERPAYMENT-001")
+      .execute()).toEqual([expect.objectContaining({
+        amount_minor: 120_000,
+        net_effect_minor: 120_000,
+        business_date: businessDate
+      })]);
   });
 });

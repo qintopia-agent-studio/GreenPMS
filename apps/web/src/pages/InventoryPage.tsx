@@ -2649,7 +2649,7 @@ export function roomStatusActionPresentationBlock(input: {
         ? "正在更新房态，更新完成前暂不能写入。"
         : input.projectionReady
           ? "正在更新房态，更新完成前暂不能写入。"
-          : "房态投影尚未就绪。请刷新房态；就绪前不能发起补录或其他写入。",
+          : "房态数据尚未完整载入。请刷新房态；载入完成前不能补录或进行其他操作。",
     };
   }
   if (!input.recoveryReady || input.recoveryError) {
@@ -3196,7 +3196,7 @@ export function InventoryPage() {
       .then((response) => {
         if (!current) return;
         if (response.order.property_id !== propertyId || response.stay.id !== selectedOrderIdentity.stayId) {
-          throw new Error("订单上下文与当前房态的稳定引用不一致，已停止显示");
+          throw new Error("订单详情与当前房态的住宿记录不一致，已停止显示");
         }
         assertOrderViewAllowedActions(response, currentPropertyAllowedActions);
         setSelectedOrderView(response);
@@ -4034,7 +4034,7 @@ export function InventoryPage() {
       orderReturnEnvelopePresent.current = false;
       navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
       dispatchView({ type: "SET_SELECTION", selection: null });
-      setReturnNotice("订单返回信息已损坏，未恢复旧的订单上下文。请按最新房态重新选择。");
+      setReturnNotice("订单返回信息已损坏，未恢复原订单详情。请按最新房态重新选择。");
       return;
     }
     if (target.propertyId !== propertyId) {
@@ -4043,7 +4043,7 @@ export function InventoryPage() {
       orderReturnEnvelopePresent.current = false;
       navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
       dispatchView({ type: "SET_SELECTION", selection: null });
-      setReturnNotice("订单所属物业与当前房态不一致，未恢复订单上下文。请切换到正确物业后重新选择。");
+      setReturnNotice("订单所属物业与当前房态不一致，未恢复订单详情。请切换到正确物业后重新选择。");
       return;
     }
     orderReturnResolutionStarted.current = true;
@@ -4109,7 +4109,7 @@ export function InventoryPage() {
     };
     const resolveReturnedStay = async () => {
       if (renderedBoard.projectionState !== "READY") {
-        throw new Error("最新房态投影不完整，不能安全恢复订单位置");
+        throw new Error("最新房态数据不完整，暂时不能恢复订单位置");
       }
       const boards = [renderedBoard];
       for (let pageIndex = 0; pageIndex < renderedBoard.page.totalPages; pageIndex += 1) {
@@ -4154,8 +4154,8 @@ export function InventoryPage() {
       consumeReturnState();
       clearReturnedContext();
       setReturnNotice(resolution.kind === "AMBIGUOUS"
-        ? "订单处理完成，但最新房态存在多个相互冲突的住宿位置。已安全关闭订单上下文，请刷新后重新核对。"
-        : "订单处理完成，但最新房态中找不到原住宿位置。已安全关闭订单上下文，请按最新房态重新选择。");
+        ? "订单处理完成，但最新房态存在多个相互冲突的住宿位置。已安全关闭订单详情，请刷新后重新核对。"
+        : "订单处理完成，但最新房态中找不到原住宿位置。已安全关闭订单详情，请按最新房态重新选择。");
     };
     void resolveReturnedStay().catch((error: unknown) => {
       if (!current) return;
@@ -4164,7 +4164,7 @@ export function InventoryPage() {
       consumeReturnState();
       clearReturnedContext();
       setActionError(error);
-      setReturnNotice("订单处理完成，但暂时无法核对最新住宿位置。订单上下文已安全关闭，请按最新房态重新选择。");
+      setReturnNotice("订单处理完成，但暂时无法核对最新住宿位置。订单详情已安全关闭，请按最新房态重新选择。");
     });
     return () => {
       current = false;
@@ -4230,7 +4230,7 @@ export function InventoryPage() {
       setReturnNotice(notice);
     };
     if (currentResolution.kind === "AMBIGUOUS") {
-      failClosed("最新房态存在多个相互冲突的住宿位置，订单上下文已安全关闭。请刷新后重新核对。");
+      failClosed("最新房态存在多个相互冲突的住宿位置，订单详情已安全关闭。请刷新后重新核对。");
       return;
     }
     const sameFilters = (
@@ -4320,8 +4320,8 @@ export function InventoryPage() {
       if (pageChanged || filtersChanged) focusAfterNextBoard.current = true;
       else setFocusRequestToken((value) => value + 1);
       setReturnNotice(filtersChanged
-        ? "住宿已移动到筛选外的房源；已仅清除遮挡目标的筛选条件，并保留订单上下文定位到最新安排。"
-        : "房态数据已变化，住宿已移动到其他房源页；已保留订单上下文并定位到最新安排。");
+        ? "住宿已移动到筛选外的房源；已仅清除遮挡目标的筛选条件，并保留订单详情定位到最新安排。"
+        : "房态数据已变化，住宿已移动到其他房源页；已保留订单详情并定位到最新安排。");
     };
     const findMovedStay = async () => {
       const filteredBoards = await loadPageSet(viewState.filters, renderedBoard);
@@ -4332,11 +4332,11 @@ export function InventoryPage() {
         return;
       }
       if (filtered.resolution.kind === "AMBIGUOUS") {
-        failClosed("最新房态存在多个相互冲突的住宿位置，订单上下文已安全关闭。请刷新后重新核对。");
+        failClosed("最新房态存在多个相互冲突的住宿位置，订单详情已安全关闭。请刷新后重新核对。");
         return;
       }
       if (!hasActiveRoomStatusFilters(viewState.filters)) {
-        failClosed("原先选中的住宿已不在最新房态投影中，订单上下文已安全关闭。请按最新房态重新选择。");
+        failClosed("原先选中的住宿已不在最新房态中，订单详情已安全关闭。请按最新房态重新选择。");
         return;
       }
       const unfilteredBoards = await loadPageSet(DEFAULT_ROOM_STATUS_FILTERS);
@@ -4344,8 +4344,8 @@ export function InventoryPage() {
       const unfiltered = resolveOnBoards(unfilteredBoards);
       if (unfiltered.resolution.kind !== "MATCH" || !unfiltered.targetBoard) {
         failClosed(unfiltered.resolution.kind === "AMBIGUOUS"
-          ? "最新房态存在多个相互冲突的住宿位置，订单上下文已安全关闭。请刷新后重新核对。"
-          : "原先选中的住宿已不在最新房态投影中，订单上下文已安全关闭。请按最新房态重新选择。");
+          ? "最新房态存在多个相互冲突的住宿位置，订单详情已安全关闭。请刷新后重新核对。"
+          : "原先选中的住宿已不在最新房态中，订单详情已安全关闭。请按最新房态重新选择。");
         return;
       }
       const targetRoom = unfiltered.targetBoard.rooms.find((room) => (
@@ -4365,14 +4365,14 @@ export function InventoryPage() {
       if (!current) return;
       const final = resolveOnBoards(finalBoards);
       if (final.resolution.kind !== "MATCH" || !final.targetBoard) {
-        throw new Error("清除遮挡筛选后房态事实发生变化，未改写当前订单上下文");
+        throw new Error("清除遮挡筛选后房态记录发生变化，未改写当前订单详情");
       }
       applyMovedStay(final.resolution.identity, final.targetBoard, relaxedFilters);
     };
     void findMovedStay().catch((error: unknown) => {
       if (!current) return;
       setActionError(error);
-      setReturnNotice("房态数据已变化，但暂时无法核对该住宿是否移动到其他房源页；订单上下文保持打开，请刷新后重试。");
+      setReturnNotice("房态数据已变化，但暂时无法核对该住宿是否移动到其他房源页；订单详情保持打开，请刷新后重试。");
     });
     return () => { current = false; };
   }, [
@@ -4438,7 +4438,7 @@ export function InventoryPage() {
   const desktopDrawerTitle = desktopContextKind === "QUOTE_RECOVERY" || (desktopContextKind === "SELECTION" && showQuoteWorkbench)
     ? desktopQuoteDrawerTitle
     : desktopContextKind === "ORDER"
-      ? "订单上下文"
+      ? "订单详情"
       : "选中对象上下文";
 
   useEffect(() => {
@@ -4841,7 +4841,7 @@ export function InventoryPage() {
     const identity = selectedOrderIdentity;
     const action = view?.allowedActions.find((candidate) => candidate.code === commandType);
     if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
-      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未发送办理命令。请重新选择住宿后再试。"));
+      setActionError(new Error("当前订单详情与房态住宿记录不一致，未发送办理命令。请重新选择住宿后再试。"));
       return;
     }
     if (commandsBlocked || view.accessLevel !== "WRITE") {
@@ -4870,7 +4870,7 @@ export function InventoryPage() {
     const identity = selectedOrderIdentity;
     const action = view?.allowedActions.find((candidate) => candidate.code === commandType);
     if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
-      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未打开日期调整。请重新选择住宿后再试。"));
+      setActionError(new Error("当前订单详情与房态住宿记录不一致，未打开日期调整。请重新选择住宿后再试。"));
       return;
     }
     if (commandsBlocked || view.accessLevel !== "WRITE") {
@@ -4894,7 +4894,7 @@ export function InventoryPage() {
     const identity = selectedOrderIdentity;
     const action = view?.allowedActions.find((candidate) => candidate.code === "MOVE_UNIT");
     if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
-      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未打开换房。请重新选择住宿后再试。"));
+      setActionError(new Error("当前订单详情与房态住宿记录不一致，未打开换房。请重新选择住宿后再试。"));
       return;
     }
     if (commandsBlocked || view.accessLevel !== "WRITE" || !action?.enabled) {
@@ -4913,7 +4913,7 @@ export function InventoryPage() {
     const identity = selectedOrderIdentity;
     const action = view?.allowedActions.find((candidate) => candidate.code === commandType);
     if (!view || !identity || view.order.id !== identity.orderId || view.stay.id !== identity.stayId) {
-      setActionError(new Error("当前订单上下文与房态住宿引用不一致，未打开操作表单。请重新选择住宿后再试。"));
+      setActionError(new Error("当前订单详情与房态住宿记录不一致，未打开操作表单。请重新选择住宿后再试。"));
       return;
     }
     if (commandsBlocked || view.accessLevel !== "WRITE" || !action?.enabled) {
@@ -5421,7 +5421,7 @@ export function InventoryPage() {
         if (orderResponse.order.id !== refreshOrderIdentity.orderId
           || orderResponse.order.property_id !== refreshPropertyId
           || orderResponse.stay.id !== refreshOrderIdentity.stayId) {
-          throw new Error("刷新后的订单上下文与当前房态引用不一致");
+          throw new Error("刷新后的订单详情与当前房态记录不一致");
         }
         setSelectedOrderView(orderResponse);
         setSelectedOrderLoadedScope(orderPrincipalScope);
@@ -5488,9 +5488,9 @@ export function InventoryPage() {
         onLocateRange={(target) => { void locateOrderRange(target); }}
       />
     ) : (
-      <aside className="room-status-context room-status-order-context" aria-label="订单上下文">
-        <header className="room-status-context-header"><div><span>选中对象上下文</span><h2>订单上下文</h2></div><button type="button" className="room-status-icon-button" onClick={closeSelectedOrderContext} aria-label="关闭订单上下文" title="关闭订单上下文"><X aria-hidden="true" size={17} /></button></header>
-        {selectedOrderLoading || !selectedOrderError ? <LoadingBlock label="正在载入权威订单上下文" /> : <InlineError error={selectedOrderError} title="订单上下文不可用" />}
+      <aside className="room-status-context room-status-order-context" aria-label="订单详情">
+        <header className="room-status-context-header"><div><span>订单概览</span><h2>订单详情</h2></div><button type="button" className="room-status-icon-button" onClick={closeSelectedOrderContext} aria-label="关闭订单详情" title="关闭订单详情"><X aria-hidden="true" size={17} /></button></header>
+        {selectedOrderLoading || !selectedOrderError ? <LoadingBlock label="正在载入订单详情" /> : <InlineError error={selectedOrderError} title="订单详情不可用" />}
       </aside>
     )
   ) : null;
@@ -5814,7 +5814,7 @@ export function InventoryPage() {
 
           {isMobile && selectedOrderIdentity && orderContextOpen ? (
             <Modal
-              title="订单上下文"
+              title="订单详情"
               size="mobile-fullscreen"
               modal
               onClose={closeSelectedOrderContext}
@@ -5826,7 +5826,7 @@ export function InventoryPage() {
 
           {!isMobile && desktopContextCollapsed && !pendingOrderContextIdentity && !quickPopoverTarget && (selectedUnit || selectedOrderIdentity || viewState.selection || showQuoteWorkbench) ? (
             <button type="button" className="button button-primary room-status-context-reopen" onClick={reopenDesktopContext}>
-              <PanelRightOpen aria-hidden="true" size={17} />打开{pageQuoteRecovery.kind !== "ABSENT" ? "报价恢复" : selectedOrderIdentity ? "订单上下文" : "选中对象上下文"}
+              <PanelRightOpen aria-hidden="true" size={17} />打开{pageQuoteRecovery.kind !== "ABSENT" ? "报价恢复" : selectedOrderIdentity ? "订单详情" : "选中对象上下文"}
             </button>
           ) : null}
 

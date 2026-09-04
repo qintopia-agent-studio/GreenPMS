@@ -2,17 +2,20 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AuthPrincipal, CommandCapability } from "@qintopia/contracts";
+import type { AuthPrincipal, CommandCapability, CommandEnvelope, ReceiptDto } from "@qintopia/contracts";
 import {
   confirmCommandPreview,
   createCommandPreview,
   createDatabase,
   databaseReady,
   executeQuoteCommand,
+  propertyLocalToday,
+  withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
-import { newOpaqueSecret, sha256 } from "@qintopia/domain";
+import { newOpaqueSecret, ordinaryStaffCommandGrants, sha256 } from "@qintopia/domain";
 import { sql, type Kysely } from "kysely";
+import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { demo, seedDemo } from "../../packages/db/src/seed.ts";
 
 const execFileAsync = promisify(execFile);
@@ -27,9 +30,14 @@ const runtimeUrl = new URL(ownerUrl);
 runtimeUrl.username = "qintopia_runtime";
 runtimeUrl.password = runtimePassword;
 
-const runtimeCommandGrants = ["CREATE_ORDER", "REPRICE_ORDER", "LOCK_MAINTENANCE"] as const satisfies readonly CommandCapability[];
+const runtimeCommandGrants = [...ordinaryStaffCommandGrants] as const satisfies readonly CommandCapability[];
 const tokenManagementCommands = ["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"] as const satisfies readonly CommandCapability[];
-const administratorRuntimeCommands = [...tokenManagementCommands, "CORRECT_ORDER_OCCUPANT"] as const satisfies readonly CommandCapability[];
+const administratorRuntimeCommands = [
+  ...runtimeCommandGrants,
+  ...tokenManagementCommands,
+  "CORRECT_ORDER_OCCUPANT",
+  "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
+] as const satisfies readonly CommandCapability[];
 const noTokenCommandCeiling = [] as const satisfies readonly CommandCapability[];
 const demoRuntimeReadinessOptions = { staffProfileManifestName: "demo" } as const;
 
@@ -81,6 +89,33 @@ let sequence = 0;
 function metadata(prefix: string) {
   sequence += 1;
   return { idempotencyKey: `${prefix}-${sequence}`, correlationId: `${prefix}-${sequence}` };
+}
+
+function shiftLocalDate(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+async function executeRuntime(
+  envelope: CommandEnvelope,
+  prefix: string,
+  actor: AuthPrincipal = writePrincipal
+): Promise<ReceiptDto> {
+  const prepared = await createCommandPreview(db, actor, envelope, metadata(`${prefix}-preview`));
+  const receipt = await confirmCommandPreview(db, actor, prepared.preview.previewId, {
+    propertyId: envelope.input.propertyId as string,
+    commandType: envelope.commandType,
+    confirmation: true,
+    expectedEffectHash: prepared.preview.effectHash,
+    reason: envelope.commandType === "CREATE_ORDER"
+      ? { code: "CREATE_STANDARD_ORDER", note: "" }
+      : envelope.commandType === "COMPLETE_STAY"
+        ? { code: "COMPLETE_STAY", note: String(envelope.input.reasonNote ?? "") }
+        : { code: "RUNTIME_DATABASE_GUARD", note: `Runtime role ${envelope.commandType} journey` }
+  }, metadata(`${prefix}-confirm`));
+  expect(receipt, JSON.stringify(receipt.error)).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+  return receipt;
 }
 
 async function withClient<T>(connectionString: string, callback: (client: pg.Client) => Promise<T>): Promise<T> {
@@ -595,6 +630,28 @@ describe.sequential("API runtime database role", () => {
   });
 
   it("allows representative API command DML through the runtime role", async () => {
+    const membershipPreview = await createCommandPreview(db, writePrincipal, {
+      commandType: "CREATE_MEMBERSHIP_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        memberId: demo.memberId,
+        membershipProductId: "membership_product_shared_bath_quad_v1",
+        agreedPriceMinor: 93_600
+      }
+    }, metadata("runtime-create-membership-order-preview"));
+    const membershipReceipt = await confirmCommandPreview(db, writePrincipal, membershipPreview.preview.previewId, {
+      propertyId: demo.propertyId,
+      commandType: "CREATE_MEMBERSHIP_ORDER",
+      confirmation: true,
+      expectedEffectHash: membershipPreview.preview.effectHash,
+      reason: { code: "CREATE_MEMBERSHIP_ORDER", note: "Runtime role existing membership-order flow" }
+    }, metadata("runtime-create-membership-order-confirm"));
+    expect(membershipReceipt).toMatchObject({
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      result: { membershipOrderId: expect.stringMatching(/^membership_order_/) }
+    });
+
     const quoted = await executeQuoteCommand(db, readPrincipal, {
       propertyId: demo.propertyId,
       inventoryUnitId: demo.secondRoomId,
@@ -693,6 +750,26 @@ describe.sequential("API runtime database role", () => {
       }
     });
 
+    const movePreview = await createCommandPreview(db, writePrincipal, {
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        newInventoryUnitId: demo.roomId,
+        effectiveDate: "2028-11-01"
+      }
+    }, metadata("runtime-move-unit-preview"));
+    await expect(confirmCommandPreview(db, writePrincipal, movePreview.preview.previewId, {
+      propertyId: demo.propertyId,
+      commandType: "MOVE_UNIT",
+      confirmation: true,
+      expectedEffectHash: movePreview.preview.effectHash,
+      reason: { code: "RUNTIME_DATABASE_GUARD", note: "Runtime role target inventory lock coverage" }
+    }, metadata("runtime-move-unit-confirm"))).resolves.toMatchObject({
+      executionStatus: "EXECUTED",
+      businessCommitted: true
+    });
+
     const bedQuote = await executeQuoteCommand(db, readPrincipal, {
       propertyId: demo.propertyId,
       inventoryUnitId: demo.bedAId,
@@ -761,41 +838,539 @@ describe.sequential("API runtime database role", () => {
         reason: "Runtime typed maintenance fixture"
       }
     }, metadata("runtime-maintenance-preview"));
-    await expect(confirmCommandPreview(db, writePrincipal, maintenancePreview.preview.previewId, {
+    const maintenanceReceipt = await confirmCommandPreview(db, writePrincipal, maintenancePreview.preview.previewId, {
       propertyId: demo.propertyId,
       commandType: "LOCK_MAINTENANCE",
       confirmation: true,
       expectedEffectHash: maintenancePreview.preview.effectHash,
       reason: { code: "RUNTIME_DATABASE_GUARD", note: "Positive typed maintenance guard coverage" }
-    }, metadata("runtime-maintenance-confirm"))).resolves.toMatchObject({
+    }, metadata("runtime-maintenance-confirm"));
+    expect(maintenanceReceipt).toMatchObject({
       executionStatus: "EXECUTED",
       businessCommitted: true
     });
   });
 
+  it("keeps ordinary member and lodging money/lifecycle journeys executable through the runtime role", async () => {
+    const memberReceipt = await executeRuntime({
+      commandType: "CREATE_MEMBER",
+      input: {
+        propertyId: demo.propertyId,
+        fullName: "Runtime Member Lifecycle",
+        nickname: "Runtime Member",
+        identityCardNumber: "RUNTIME-MEMBER-LIFECYCLE",
+        phone: "13900009701",
+        wechat: "runtime-member-lifecycle"
+      }
+    }, "runtime-member-lifecycle-create");
+    const memberId = memberReceipt.result!.memberId as string;
+    const membershipOrder = await executeRuntime({
+      commandType: "CREATE_MEMBERSHIP_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        memberId,
+        membershipProductId: "membership_product_shared_bath_quad_v1",
+        agreedPriceMinor: 93_600
+      }
+    }, "runtime-member-lifecycle-order");
+    const membershipOrderId = membershipOrder.result!.membershipOrderId as string;
+    const payment = await executeRuntime({
+      commandType: "RECORD_MEMBERSHIP_PAYMENT",
+      input: {
+        propertyId: demo.propertyId,
+        membershipOrderId,
+        amountMinor: 93_000,
+        transactionReference: "WX-RUNTIME-MEMBER-ORIGINAL"
+      }
+    }, "runtime-member-lifecycle-payment");
+    await executeRuntime({
+      commandType: "CORRECT_MEMBERSHIP_PAYMENT",
+      input: {
+        propertyId: demo.propertyId,
+        membershipOrderId,
+        originalPaymentFactId: payment.result!.paymentFactId as string,
+        correctedAmountMinor: 93_600,
+        correctedTransactionReference: "WX-RUNTIME-MEMBER-CORRECTED",
+        note: "受限运行账号会员收款更正回归"
+      }
+    }, "runtime-member-lifecycle-correct-payment");
+    await executeRuntime({
+      commandType: "ACTIVATE_MEMBERSHIP_ORDER",
+      input: { propertyId: demo.propertyId, membershipOrderId }
+    }, "runtime-member-lifecycle-activate");
+    await expect(db.selectFrom("membership_orders")
+      .select(["status", "contract_id"])
+      .where("id", "=", membershipOrderId)
+      .executeTakeFirstOrThrow()).resolves.toMatchObject({
+      status: "ACTIVE",
+      contract_id: expect.stringMatching(/^contract_/)
+    });
+
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const memberArrivalDate = shiftLocalDate(businessDate, 10);
+    const memberDepartureDate = shiftLocalDate(memberArrivalDate, 1);
+    const memberQuote = await executeQuoteCommand(db, readPrincipal, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.bedBId,
+      stayType: "TRANSIENT",
+      arrivalDate: memberArrivalDate,
+      departureDate: memberDepartureDate,
+      pricingPolicyVersionId: demo.transientPolicyId,
+      memberId
+    }, metadata("runtime-member-id-quote"));
+    await executeRuntime({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: memberQuote.quote.quoteId,
+        primaryGuest: { fullName: "Runtime Member Lifecycle", nickname: "Runtime Member" }
+      }
+    }, "runtime-member-id-order");
+
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const lodgingQuote = await executeQuoteCommand(db, readPrincipal, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: "unit_room_a01",
+      stayType: "TRANSIENT",
+      arrivalDate: businessDate,
+      departureDate,
+      pricingPolicyVersionId: demo.transientPolicyId
+    }, metadata("runtime-lodging-lifecycle-quote"));
+    const lodging = await executeRuntime({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: lodgingQuote.quote.quoteId,
+        primaryGuest: { fullName: "Runtime Lodging Lifecycle", nickname: "Runtime Lodging" },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: lodgingQuote.quote.currentContractAmount.minorUnits
+      }
+    }, "runtime-lodging-lifecycle-order");
+    const orderId = lodging.result!.orderId as string;
+    const firstCollection = await executeRuntime({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 100,
+        method: "BANK_TRANSFER",
+        transactionReference: "RUNTIME-LODGING-FIRST",
+        note: "入住前首笔收款"
+      }
+    }, "runtime-lodging-first-collection");
+    await executeRuntime({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId }
+    }, "runtime-lodging-check-in");
+    await executeRuntime({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: lodgingQuote.quote.currentContractAmount.minorUnits - 100,
+        method: "BANK_TRANSFER",
+        transactionReference: "RUNTIME-LODGING-BALANCE",
+        note: "入住后补足收款"
+      }
+    }, "runtime-lodging-balance-collection");
+    const refund = await executeRuntime({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 50,
+        referencesFactId: firstCollection.factRefs[0]!,
+        method: "BANK_TRANSFER",
+        transactionReference: "RUNTIME-LODGING-REFUND",
+        note: "受限运行账号退款回归"
+      }
+    }, "runtime-lodging-refund");
+    await executeRuntime({
+      commandType: "REVERSE_FACT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        reversesFactId: refund.factRefs[0]!,
+        note: "撤销误录退款"
+      }
+    }, "runtime-lodging-reverse-refund");
+    await withPropertyClockForTesting(new Date(`${departureDate}T04:00:00.000Z`), () => executeRuntime({
+      commandType: "CHECK_OUT",
+      input: { propertyId: demo.propertyId, orderId }
+    }, "runtime-lodging-check-out"));
+    await expect(db.selectFrom("orders as order")
+      .innerJoin("stays as stay", "stay.order_id", "order.id")
+      .select(["order.status as orderStatus", "stay.status as stayStatus"])
+      .where("order.id", "=", orderId)
+      .executeTakeFirstOrThrow()).resolves.toEqual({
+      orderStatus: "CHECKED_OUT",
+      stayStatus: "COMPLETED"
+    });
+
+    const maintenanceArrivalDate = shiftLocalDate(businessDate, 20);
+    const maintenanceDepartureDate = shiftLocalDate(maintenanceArrivalDate, 1);
+    const maintenance = await executeRuntime({
+      commandType: "LOCK_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        inventoryUnitId: "unit_room_a02",
+        arrivalDate: maintenanceArrivalDate,
+        departureDate: maintenanceDepartureDate,
+        reason: "受限运行账号维修释放回归"
+      }
+    }, "runtime-maintenance-release-lock");
+    await executeRuntime({
+      commandType: "RELEASE_MAINTENANCE",
+      input: {
+        propertyId: demo.propertyId,
+        maintenanceLockId: maintenance.result!.maintenanceLockId as string
+      }
+    }, "runtime-maintenance-release");
+  });
+
+  it("keeps every supported Stay terminal transition executable through the runtime role", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const createRuntimeStay = async (
+      prefix: string,
+      arrivalDate: string,
+      departureDate: string
+    ): Promise<string> => {
+      const quoted = await executeQuoteCommand(db, readPrincipal, {
+        propertyId: demo.propertyId,
+        inventoryUnitId: demo.secondRoomId,
+        stayType: "TRANSIENT",
+        arrivalDate,
+        departureDate,
+        pricingPolicyVersionId: demo.transientPolicyId
+      }, metadata(`${prefix}-quote`));
+      const created = await executeRuntime({
+        commandType: "CREATE_ORDER",
+        input: {
+          propertyId: demo.propertyId,
+          quoteId: quoted.quote.quoteId,
+          primaryGuest: { fullName: `Runtime ${prefix}`, nickname: prefix },
+          bookingChannelCode: "WECOM",
+          channelOrderReference: null,
+          targetCurrentContractAmountMinor: quoted.quote.currentContractAmount.minorUnits
+        }
+      }, `${prefix}-create`);
+      return created.result!.orderId as string;
+    };
+
+    const cancellationArrival = shiftLocalDate(businessDate, 30);
+    const cancellationOrderId = await createRuntimeStay(
+      "stay-cancel",
+      cancellationArrival,
+      shiftLocalDate(cancellationArrival, 1)
+    );
+    await executeRuntime({
+      commandType: "CANCEL_ORDER",
+      input: { propertyId: demo.propertyId, orderId: cancellationOrderId }
+    }, "runtime-stay-cancel");
+
+    const noShowArrival = shiftLocalDate(businessDate, -1);
+    const noShowOrderId = await withPropertyClockForTesting(
+      new Date(`${noShowArrival}T04:00:00.000Z`),
+      () => createRuntimeStay("stay-no-show", noShowArrival, shiftLocalDate(businessDate, 1))
+    );
+    await executeRuntime({
+      commandType: "MARK_NO_SHOW",
+      input: { propertyId: demo.propertyId, orderId: noShowOrderId }
+    }, "runtime-stay-no-show");
+
+    const revokeArrival = businessDate;
+    const revokeOrderId = await createRuntimeStay(
+      "stay-revoke-check-in",
+      revokeArrival,
+      shiftLocalDate(revokeArrival, 2)
+    );
+    await executeRuntime({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId: revokeOrderId }
+    }, "runtime-stay-revoke-check-in-start");
+    await executeRuntime({
+      commandType: "REVOKE_CHECK_IN",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: revokeOrderId,
+        unusedRoomConfirmed: true
+      }
+    }, "runtime-stay-revoke-check-in");
+
+    const shortenArrival = shiftLocalDate(businessDate, -1);
+    const shortenOrderId = await withPropertyClockForTesting(
+      new Date(`${shortenArrival}T04:00:00.000Z`),
+      () => createRuntimeStay("stay-shorten-complete", shortenArrival, shiftLocalDate(businessDate, 1))
+    );
+    await executeRuntime({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId: shortenOrderId }
+    }, "runtime-stay-shorten-check-in");
+    await executeRuntime({
+      commandType: "SHORTEN_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: shortenOrderId,
+        newDepartureDate: businessDate
+      }
+    }, "runtime-stay-shorten-complete");
+
+    const completeArrival = shiftLocalDate(businessDate, -2);
+    const completeDeparture = shiftLocalDate(completeArrival, 1);
+    const completeOrderId = await withPropertyClockForTesting(
+      new Date(`${completeArrival}T04:00:00.000Z`),
+      () => createRuntimeStay("stay-complete", completeArrival, completeDeparture)
+    );
+    const completionReason = "受限运行账号核对计划中住宿直接完成";
+    await executeRuntime({
+      commandType: "COMPLETE_STAY",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: completeOrderId,
+        actualStayCompletedConfirmed: true,
+        reasonNote: completionReason
+      }
+    }, "runtime-stay-complete");
+
+    await expect(db.selectFrom("orders as order")
+      .innerJoin("stays as stay", "stay.order_id", "order.id")
+      .select(["order.id", "order.status as orderStatus", "stay.status as stayStatus"])
+      .where("order.id", "in", [
+        cancellationOrderId,
+        noShowOrderId,
+        revokeOrderId,
+        shortenOrderId,
+        completeOrderId
+      ])
+      .execute()).resolves.toEqual(expect.arrayContaining([
+      { id: cancellationOrderId, orderStatus: "CANCELLED", stayStatus: "CANCELLED" },
+      { id: noShowOrderId, orderStatus: "NO_SHOW", stayStatus: "NO_SHOW" },
+      { id: revokeOrderId, orderStatus: "CHECK_IN_REVOKED", stayStatus: "CHECK_IN_REVOKED" },
+      { id: shortenOrderId, orderStatus: "CHECKED_OUT", stayStatus: "COMPLETED" },
+      { id: completeOrderId, orderStatus: "CHECKED_OUT", stayStatus: "COMPLETED" }
+    ]));
+  });
+
+  it("keeps in-house stay collection conversion executable through the runtime role", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const phone = "13900009702";
+    const documentNumber = "RUNTIME-CONVERSION-MEMBER";
+    const member = await executeRuntime({
+      commandType: "CREATE_MEMBER",
+      input: {
+        propertyId: demo.propertyId,
+        fullName: "Runtime Conversion Member",
+        nickname: "Runtime Convert",
+        identityCardNumber: documentNumber,
+        phone,
+        wechat: "runtime-conversion-member"
+      }
+    }, "runtime-conversion-member");
+    const memberId = member.result!.memberId as string;
+    const quote = await executeQuoteCommand(db, readPrincipal, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.bedCId,
+      stayType: "TRANSIENT",
+      arrivalDate: businessDate,
+      departureDate,
+      pricingPolicyVersionId: demo.transientPolicyId
+    }, metadata("runtime-conversion-quote"));
+    const stay = await executeRuntime({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quote.quoteId,
+        primaryGuest: {
+          fullName: "Runtime Conversion Member",
+          nickname: "Runtime Convert",
+          phone,
+          documentNumber
+        },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: quote.quote.currentContractAmount.minorUnits
+      }
+    }, "runtime-conversion-stay");
+    const orderId = stay.result!.orderId as string;
+    const collection = await executeRuntime({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: quote.quote.currentContractAmount.minorUnits,
+        method: "WECOM",
+        transactionReference: "WX-RUNTIME-CONVERSION-SOURCE",
+        note: "住宿实收转会员"
+      }
+    }, "runtime-conversion-collection");
+    await executeRuntime({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId }
+    }, "runtime-conversion-check-in");
+    const conversion = await executeRuntime({
+      commandType: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        memberId,
+        membershipProductId: "membership_product_shared_bath_quad_v1",
+        collectionFactIds: [collection.factRefs[0]!],
+        agreedPriceMinor: quote.quote.currentContractAmount.minorUnits,
+        priceAdjustmentReason: "按本次真实住宿实收确认会员成交价"
+      }
+    }, "runtime-conversion-confirm");
+    expect(conversion.result).toMatchObject({
+      orderId,
+      memberId,
+      membershipOrderId: expect.stringMatching(/^membership_order_/)
+    });
+  });
+
+  it("allows a typed historical correction to shift a completed stay across partially overlapping dates in the same room", async () => {
+    const arrivalDate = "2026-08-01";
+    const departureDate = "2026-08-03";
+    const correctedArrivalDate = "2026-08-02";
+    const correctedDepartureDate = "2026-08-04";
+    const reason = "Runtime historical correction overlap regression";
+    const quote = await createQuote(db, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.secondRoomId,
+      stayType: "TRANSIENT",
+      arrivalDate,
+      departureDate,
+      pricingPolicyVersionId: demo.transientPolicyId
+    });
+    const createPreview = await createCommandPreview(db, administratorPrincipal, {
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quote.quoteId,
+        primaryGuest: { fullName: "Runtime 历史纠正", nickname: "历史纠正" },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits,
+        backfill: true,
+        backfillReason: reason,
+        backfillCollection: {
+          amountMinor: quote.currentContractAmount.minorUnits,
+          method: "WECOM",
+          transactionReference: `WX-RUNTIME-HISTORICAL-${process.pid}`
+        }
+      }
+    }, metadata("runtime-historical-create-preview"));
+    const created = await confirmCommandPreview(db, administratorPrincipal, createPreview.preview.previewId, {
+      propertyId: demo.propertyId,
+      commandType: "CREATE_ORDER",
+      confirmation: true,
+      expectedEffectHash: createPreview.preview.effectHash,
+      reason: { code: "BACKFILL_STAY", note: reason }
+    }, metadata("runtime-historical-create-confirm"));
+    expect(created).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+
+    const orderId = created.result!.orderId as string;
+    const order = await db.selectFrom("orders")
+      .select(["version", "arrival_date", "departure_date"])
+      .where("id", "=", orderId)
+      .executeTakeFirstOrThrow();
+    expect(order).toMatchObject({ arrival_date: arrivalDate, departure_date: departureDate });
+
+    const correctionPreview = await createCommandPreview(db, administratorPrincipal, {
+      commandType: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+      input: {
+        propertyId: demo.propertyId,
+        correctionSet: [{
+          orderId,
+          expectedVersion: order.version,
+          target: {
+            inventoryUnitId: demo.secondRoomId,
+            arrivalDate: correctedArrivalDate,
+            departureDate: correctedDepartureDate
+          }
+        }],
+        evidenceNote: "运行时角色同房部分重叠日期凭据已复核"
+      }
+    }, metadata("runtime-historical-correction-preview"));
+    const corrected = await confirmCommandPreview(db, administratorPrincipal, correctionPreview.preview.previewId, {
+      propertyId: demo.propertyId,
+      commandType: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+      confirmation: true,
+      expectedEffectHash: correctionPreview.preview.effectHash,
+      reason: { code: "HISTORICAL_STAY_ARRANGEMENT_CORRECTION", note: "管理员按历史凭据纠正同房住宿日期" }
+    }, metadata("runtime-historical-correction-confirm"));
+
+    expect(corrected).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
+    await expect(db.selectFrom("orders")
+      .select(["version", "arrival_date", "departure_date"])
+      .where("id", "=", orderId)
+      .executeTakeFirstOrThrow()).resolves.toEqual({
+      version: order.version + 1,
+      arrival_date: correctedArrivalDate,
+      departure_date: correctedDepartureDate
+    });
+  });
+
   it("denies runtime DDL, role changes, trigger bypasses, TEMP objects, and protected fact mutation", async () => {
-    const appendOnlyTables = [
+    const appendOnlyTablesWithoutRuntimeUpdate = [
       "pricing_policy_versions",
-      "stay_segments",
       "amendments",
-      "pricing_revisions",
-      "entitlement_ledger",
-      "collection_facts",
-      "membership_payment_facts",
+      "admin_membership_payment_evidence_claims",
+      "historical_stay_arrangement_corrections",
+      "member_profile_corrections",
+      "membership_effective_date_corrections",
+      "historical_membership_backfills",
+      "membership_payment_reclassifications",
+      "membership_void_reconversions",
       "security_audit_entries",
       "command_receipts",
       "audit_entries",
       "order_occupant_corrections"
     ];
-    for (const tableName of appendOnlyTables) {
+    for (const tableName of appendOnlyTablesWithoutRuntimeUpdate) {
       await expectRuntimeQueryToFail(`UPDATE ${tableName} SET created_at = created_at WHERE false`);
       await expectRuntimeQueryToFail(`DELETE FROM ${tableName} WHERE false`);
+    }
+
+    const lockOnlyAppendTables = [
+      { tableName: "stay_segments", protectedColumn: "id", requireExistingRow: true },
+      { tableName: "pricing_revisions", protectedColumn: "id", requireExistingRow: true },
+      { tableName: "entitlement_ledger", protectedColumn: "fact_id", requireExistingRow: true },
+      { tableName: "collection_facts", protectedColumn: "fact_id", requireExistingRow: false },
+      { tableName: "membership_payment_facts", protectedColumn: "fact_id", requireExistingRow: true },
+      { tableName: "stay_collection_membership_transfers", protectedColumn: "id", requireExistingRow: false }
+    ] as const;
+    for (const { tableName, protectedColumn, requireExistingRow } of lockOnlyAppendTables) {
+      await expect(withClient(runtimeUrl.toString(), (client) => client.query(
+        `UPDATE ${tableName} SET created_at = created_at WHERE false`
+      ))).resolves.toMatchObject({ rowCount: 0 });
+      await expectRuntimeQueryToFail(`UPDATE ${tableName} SET ${protectedColumn} = ${protectedColumn} WHERE false`);
+      await expectRuntimeQueryToFail(`DELETE FROM ${tableName} WHERE false`);
+      if (requireExistingRow) {
+        await expectRuntimeQueryToFail(
+          `UPDATE ${tableName} SET created_at = created_at WHERE ctid = (SELECT ctid FROM ${tableName} LIMIT 1)`,
+          /is append-only/i
+        );
+      }
     }
 
     const occupant = await db.selectFrom("order_occupants").select("id").executeTakeFirstOrThrow();
     await expectRuntimeQueryToFail(
       `UPDATE order_occupants SET created_at = created_at WHERE id = '${occupant.id.replaceAll("'", "''")}'`,
       /order_occupants is append-only/i
+    );
+    await expect(withClient(runtimeUrl.toString(), (client) => client.query(
+      "UPDATE inventory_units SET created_at = created_at WHERE false"
+    ))).resolves.toMatchObject({ rowCount: 0 });
+    await expectRuntimeQueryToFail("UPDATE inventory_units SET active = active WHERE false");
+    await expectRuntimeQueryToFail("UPDATE inventory_units SET name = name WHERE false");
+    await expectRuntimeQueryToFail(
+      `UPDATE inventory_units SET created_at = created_at + interval '1 second' WHERE id = '${demo.secondRoomId}'`,
+      /immutable/i
+    );
+    await expectRuntimeQueryToFail(
+      `UPDATE inventory_units SET created_at = created_at WHERE id = '${demo.secondRoomId}'`,
+      /runtime inventory unit updates are forbidden/i
     );
 
     await expectRuntimeQueryToFail("UPDATE api_tokens SET secret_hash = repeat('0', 64) WHERE false");
@@ -805,6 +1380,11 @@ describe.sequential("API runtime database role", () => {
     await expectRuntimeQueryToFail("DELETE FROM subject_command_grants WHERE false");
     await expectRuntimeQueryToFail(`UPDATE token_command_ceilings SET created_at = created_at WHERE token_id = 'token_demo_write' AND subject_id = '${demo.agentSubjectId}' AND property_id = '${demo.propertyId}' AND command_type = 'CREATE_ORDER'`);
     await expectRuntimeQueryToFail("DELETE FROM token_command_ceilings WHERE false");
+    await expectRuntimeQueryToFail(
+      "INSERT INTO admin_membership_payment_evidence_claims(normalized_reference, membership_payment_fact_id, command_id, correction_type) VALUES ('RUNTIME-FORBIDDEN', 'missing-fact', 'missing-command', 'BACKFILL_HISTORICAL_MEMBERSHIP')"
+    );
+    await expectRuntimeQueryToFail("SELECT qintopia_guard_admin_membership_payment_evidence()");
+    await expectRuntimeQueryToFail("SELECT qintopia_claim_admin_membership_payment_evidence()");
     await expectRuntimeQueryToFail("ALTER TABLE collection_facts ADD COLUMN runtime_forbidden text");
     await expectRuntimeQueryToFail("CREATE TABLE runtime_forbidden(id text)");
     await expectRuntimeQueryToFail("DROP TABLE properties");
@@ -879,8 +1459,8 @@ describe.sequential("API runtime database role", () => {
       { label: "audit-credential-mismatch", evidence: { auditCredentialId: "token_demo_write" } },
       {
         label: "caller-ceiling-escalation",
-        evidence: { receiptCommandCeiling: ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS"] },
-        persistedCeiling: ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS"]
+        evidence: { receiptCommandCeiling: ["COMPLETE_CLEANING"] },
+        persistedCeiling: ["COMPLETE_CLEANING"]
       },
       {
         label: "caller-expiry-escalation",
@@ -1102,6 +1682,88 @@ describe.sequential("API runtime database role", () => {
     await expect(databaseReady(db, demoRuntimeReadinessOptions)).resolves.toBe(true);
   });
 
+  it("binds a completed Stay transition to both its source state and exact command type", async () => {
+    const arrivalDate = "2040-01-01";
+    const departureDate = "2040-01-02";
+    const quoted = await executeQuoteCommand(db, readPrincipal, {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.secondRoomId,
+      stayType: "TRANSIENT",
+      arrivalDate,
+      departureDate,
+      pricingPolicyVersionId: demo.transientPolicyId
+    }, metadata("runtime-stay-source-command-quote"));
+    const created = await executeRuntime({
+      commandType: "CREATE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        quoteId: quoted.quote.quoteId,
+        primaryGuest: { fullName: "Runtime Stay Source Guard", nickname: "Source Guard" },
+        bookingChannelCode: "WECOM",
+        channelOrderReference: null,
+        targetCurrentContractAmountMinor: quoted.quote.currentContractAmount.minorUnits
+      }
+    }, "runtime-stay-source-command-order");
+    const orderId = created.result!.orderId as string;
+    const stay = await db.selectFrom("stays").select(["id", "status"]).where("order_id", "=", orderId).executeTakeFirstOrThrow();
+    expect(stay.status).toBe("PLANNED");
+
+    const suffix = `${process.pid}-${++sequence}`;
+    const commandId = `command_runtime_wrong_checkout_${suffix}`;
+    const amendmentId = `amend_runtime_wrong_checkout_${suffix}`;
+    const receiptId = `receipt_runtime_wrong_checkout_${suffix}`;
+    const auditId = `audit_runtime_wrong_checkout_${suffix}`;
+    await expect(withClient(runtimeUrl.toString(), async (client) => {
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          INSERT INTO command_executions (
+            id, subject_id, credential_id, property_id, command_type,
+            idempotency_key, request_hash, correlation_id, state, completed_at
+          ) VALUES ($1, $2, 'token_demo_write', $3, 'CHECK_OUT', $1, repeat('d', 64), $1, 'APPLIED', now())
+        `, [commandId, demo.agentSubjectId, demo.propertyId]);
+        await client.query(`
+          INSERT INTO amendments (
+            id, order_id, sequence, amendment_type, reason_code, reason_note,
+            prior_version, new_version, payload, command_id
+          )
+          SELECT $1, id, version + 1, 'CHECK_OUT', 'RUNTIME_DATABASE_GUARD',
+            'A checkout command must not complete a planned Stay', version, version + 1,
+            jsonb_build_object(
+              'orderId', id,
+              'fromStatus', 'CHECKED_IN',
+              'toStatus', 'CHECKED_OUT',
+              'businessDate', departure_date,
+              'effectiveDate', departure_date,
+              'recordingMode', 'ON_SCHEDULE'
+            ),
+            $2
+          FROM orders
+          WHERE id = $3
+        `, [amendmentId, commandId, orderId]);
+        await client.query("UPDATE stays SET status = 'COMPLETED' WHERE id = $1", [stay.id]);
+        await client.query(`
+          INSERT INTO command_receipts (
+            id, command_id, execution_status, business_committed,
+            result, error, resource_refs, fact_refs, committed_at
+          ) VALUES ($1, $2, 'EXECUTED', true, '{}'::jsonb, NULL, '[]'::jsonb, '[]'::jsonb, now())
+        `, [receiptId, commandId]);
+        await client.query(`
+          INSERT INTO audit_entries (
+            id, subject_id, credential_id, action, decision, command_id,
+            correlation_id, reason, target_refs, metadata
+          ) VALUES ($1, $2, 'token_demo_write', 'CHECK_OUT', 'ALLOWED', $3, $3, NULL, '[]'::jsonb, '{}'::jsonb)
+        `, [auditId, demo.agentSubjectId, commandId]);
+        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+      } finally {
+        await client.query("ROLLBACK").catch(() => undefined);
+      }
+    })).rejects.toThrow(/exact source state and command type/i);
+
+    await expect(db.selectFrom("stays").select("status").where("id", "=", stay.id).executeTakeFirstOrThrow())
+      .resolves.toEqual({ status: "PLANNED" });
+  });
+
   it("rejects forged SYSTEM_DERIVED evidence and rolls back the complete entitlement attack", async () => {
     const commandId = `command_runtime_derived_attack_${process.pid}`;
     const factId = `fact_runtime_derived_attack_${process.pid}`;
@@ -1275,7 +1937,7 @@ describe.sequential("API runtime database role", () => {
   });
 
   it("removes disabled-feature ceilings without adding them to other Tokens during reconciliation", async () => {
-    const preservedCommand = "CORRECT_HISTORICAL_STAY_ARRANGEMENTS";
+    const preservedCommand = "COMPLETE_CLEANING";
     const demoManifest = [
       { subjectId: demo.operatorSubjectId, propertyId: demo.propertyId, profile: "STAFF" },
       { subjectId: demo.agentSubjectId, propertyId: demo.propertyId, profile: "STAFF" },

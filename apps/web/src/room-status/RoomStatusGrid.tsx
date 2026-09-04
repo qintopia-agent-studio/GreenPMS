@@ -1319,7 +1319,7 @@ export function RoomStatusGrid({
 
       {board.projectionState === "PARTIAL" ? (
         <div className="room-status-grid-notice" role="status">
-          <RoomStatusWarning>投影不完整。页面保留已返回事实，但不能把缺失内容解释为可售。</RoomStatusWarning>
+          <RoomStatusWarning>房态数据不完整。页面会保留已经载入的记录，但暂时不能把缺失位置当作可售。</RoomStatusWarning>
         </div>
       ) : null}
 

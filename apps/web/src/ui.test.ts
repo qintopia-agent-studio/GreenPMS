@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
-import { businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
@@ -492,6 +492,110 @@ describe("operator-facing business errors", () => {
       correlationId: "correlation_retryable"
     }))).toBe(true);
   });
+
+  it("explains an existing membership in operator language when historical backfill is no longer eligible", () => {
+    const conflict = new ApiError(409, {
+      code: "ENTITLEMENT_CONFLICT",
+      message: "该会员已有未作废会员订单、有效会员链或 legacy ACTIVE 投影，不能使用历史办卡补录",
+      correlationId: "correlation_existing_membership_backfill"
+    });
+    const message = commandDialogBusinessErrorMessage("BACKFILL_HISTORICAL_MEMBERSHIP", conflict);
+    expect(message).toBe("系统发现这位会员已有未作废的办卡订单、仍在生效的合同或可用权益。为避免重复生成合同和权益，本次补录没有写入。");
+    expect(message).not.toMatch(/legacy|ACTIVE|投影|会员链/i);
+    expect(commandPreviewFailureCanReload(conflict)).toBe(false);
+  });
+
+  it("uses business labels for membership lifecycle states", () => {
+    expect(businessStatusLabel("DRAFT")).toBe("待生效");
+    expect(businessStatusLabel("ACTIVE")).toBe("有效");
+    expect(businessStatusLabel("EXPIRED")).toBe("已过期");
+    expect(businessStatusLabel("VOIDED")).toBe("已作废");
+  });
+});
+
+describe("membership payment presentation and evidence", () => {
+  const money = (minorUnits: number, currency = "CNY") => ({ currency, minorUnits });
+  const input = {
+    propertyId: "property_green",
+    membershipOrderId: "membership_order_underpaid",
+    amountMinor: 10_000,
+    transactionReference: "WX-MEMBER-PAYMENT-SECOND"
+  };
+  const effect = {
+    operation: "RECORD_MEMBERSHIP_PAYMENT",
+    membershipOrderId: input.membershipOrderId,
+    memberName: "会员收款核对",
+    productName: "公卫四人间会员",
+    payment: {
+      amount: money(input.amountMinor),
+      businessDate: "2026-09-04",
+      transactionReference: input.transactionReference,
+      note: ""
+    },
+    totals: {
+      agreedPrice: money(93_600),
+      previouslyCollected: money(80_000),
+      currentCollection: money(input.amountMinor),
+      differenceAfter: money(-3_600)
+    },
+    status: "ACTIVE"
+  };
+
+  it("shows one clear collection review for an underpaid active membership", () => {
+    const preview: PreviewDto = {
+      previewId: "preview_membership_payment",
+      commandType: "RECORD_MEMBERSHIP_PAYMENT",
+      effectHash: "a".repeat(64),
+      effect,
+      expiresAt: "2026-09-04T10:00:00.000Z"
+    };
+    const html = renderToStaticMarkup(createElement(EffectSummary, {
+      preview,
+      businessCommand: "RECORD_MEMBERSHIP_PAYMENT"
+    }));
+
+    expect(html).toContain("请核对收款");
+    expect(html).toContain("成交价");
+    expect(html).toContain("此前实收");
+    expect(html).toContain("本次收款");
+    expect(html).toContain("收款后差额");
+    expect(html).toContain("尚差 ¥36.00");
+    expect(html).toContain("2026-09-04");
+    expect(html).not.toContain("继续收款");
+    expect(html).not.toContain("更正/登记前有效收款");
+  });
+
+  it("accepts exact underpaid and overpaid totals but rejects inconsistent payment evidence", () => {
+    expect(u1PreviewHasBusinessEvidence("RECORD_MEMBERSHIP_PAYMENT", effect, input)).toBe(true);
+
+    const overpaidInput = { ...input, amountMinor: 20_000 };
+    const overpaid = {
+      ...effect,
+      payment: { ...effect.payment, amount: money(20_000) },
+      totals: {
+        ...effect.totals,
+        currentCollection: money(20_000),
+        differenceAfter: money(6_400)
+      }
+    };
+    expect(u1PreviewHasBusinessEvidence("RECORD_MEMBERSHIP_PAYMENT", overpaid, overpaidInput)).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("RECORD_MEMBERSHIP_PAYMENT", {
+      ...effect,
+      totals: { ...effect.totals, differenceAfter: money(-3_599) }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("RECORD_MEMBERSHIP_PAYMENT", {
+      ...effect,
+      totals: { ...effect.totals, currentCollection: money(10_000, "USD") }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("RECORD_MEMBERSHIP_PAYMENT", {
+      ...effect,
+      payment: { ...effect.payment, amount: money(9_999) }
+    }, input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("RECORD_MEMBERSHIP_PAYMENT", {
+      ...effect,
+      unexpected: true
+    }, input)).toBe(false);
+  });
 });
 
 describe("stay collection upgrade membership presentation", () => {
@@ -638,6 +742,1057 @@ describe("stay collection upgrade membership presentation", () => {
     })));
     expect(receiptHtml).toContain("住宿净收款为 0，未创建转入事实");
     expect(receiptHtml).not.toContain("住宿收款已转入会员订单");
+  });
+});
+
+describe("historical stay arrangement correction presentation", () => {
+  const input = {
+    propertyId: "property_green",
+    correctionSet: [{
+      orderId: "order_peng",
+      expectedVersion: 4,
+      target: {
+        inventoryUnitId: "unit_108_b",
+        arrivalDate: "2026-08-27",
+        departureDate: "2026-08-30"
+      }
+    }],
+    evidenceNote: "纸质入住记录和房号安排已复核"
+  };
+  const effect = {
+    operation: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+    corrections: [{
+      orderId: "order_peng",
+      stayId: "stay_peng",
+      expectedVersion: 4,
+      before: {
+        inventoryUnitId: "unit_108_a",
+        arrivalDate: "2026-08-28",
+        departureDate: "2026-08-31",
+        nights: 3,
+        stayTimeline: [
+          { serviceDate: "2026-08-28", inventoryUnitId: "unit_108_a" },
+          { serviceDate: "2026-08-29", inventoryUnitId: "unit_108_a" },
+          { serviceDate: "2026-08-30", inventoryUnitId: "unit_108_a" }
+        ]
+      },
+      after: {
+        inventoryUnitId: "unit_108_b",
+        arrivalDate: "2026-08-27",
+        departureDate: "2026-08-30",
+        nights: 3,
+        stayTimeline: [
+          { serviceDate: "2026-08-27", inventoryUnitId: "unit_108_b" },
+          { serviceDate: "2026-08-28", inventoryUnitId: "unit_108_b" },
+          { serviceDate: "2026-08-29", inventoryUnitId: "unit_108_b" }
+        ]
+      },
+      unchanged: {
+        orderStatus: "CHECKED_OUT",
+        stayStatus: "COMPLETED",
+        stayType: "TRANSIENT",
+        currentRevisionId: "revision_peng",
+        currentContractAmountMinor: 10_000,
+        currency: "CNY",
+        occupantCount: 2,
+        occupants: [
+          { ordinal: 1, role: "PRIMARY", fullName: "鹏哥", nickname: "鹏哥" },
+          { ordinal: 2, role: "ADDITIONAL", fullName: "尚鹏", nickname: "小尚" }
+        ],
+        collectionFactCount: 1,
+        netRecordedCollectionMinor: 10_000,
+        collectionDifferenceMinor: 0
+      }
+    }]
+  };
+
+  it("accepts only an exact Preview that matches the administrator's correction set", () => {
+    expect(historicalStayCorrectionPreviewHasEvidence(effect, input)).toBe(true);
+
+    const mismatchedTarget = structuredClone(effect);
+    mismatchedTarget.corrections[0]!.after.departureDate = "2026-08-29";
+    expect(historicalStayCorrectionPreviewHasEvidence(mismatchedTarget, input)).toBe(false);
+
+    const inconsistentFunds = structuredClone(effect);
+    inconsistentFunds.corrections[0]!.unchanged.collectionDifferenceMinor = 100;
+    expect(historicalStayCorrectionPreviewHasEvidence(inconsistentFunds, input)).toBe(false);
+
+    const malformedTimeline = structuredClone(effect);
+    malformedTimeline.corrections[0]!.after.stayTimeline[1]!.inventoryUnitId = "unit_108_a";
+    expect(historicalStayCorrectionPreviewHasEvidence(malformedTimeline, input)).toBe(false);
+  });
+
+  it("shows each order's before and after arrangement plus the facts that remain unchanged", () => {
+    const html = renderToStaticMarkup(createElement(EffectSummary, {
+      preview: {
+        previewId: "preview_historical_stay",
+        commandType: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+        effectHash: "f".repeat(64),
+        effect,
+        expiresAt: "2026-09-02T09:00:00.000Z"
+      },
+      businessCommand: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+      commandInput: input,
+      reasonNote: input.evidenceNote,
+      inventoryUnitLabels: { unit_108_a: "108A · 单人间", unit_108_b: "108B · 单人间" },
+      historicalStayCorrectionContexts: { order_peng: { guestName: "鹏哥" } }
+    }));
+    expect(html).toContain("鹏哥");
+    expect(html).toContain("小尚（尚鹏）");
+    expect(html).toContain("108A · 单人间");
+    expect(html).toContain("108B · 单人间");
+    expect(html).toContain("2026-08-27");
+    expect(html).toContain("住宿人");
+    expect(html).toContain("订单金额");
+    expect(html).toContain("已有收款");
+    expect(html).toContain("保持不变");
+    expect(html).not.toContain("order_peng");
+    expect(html).not.toContain("stay_peng");
+  });
+
+  it("uses a business receipt after the atomic correction commits", () => {
+    const html = renderToStaticMarkup(createElement(ReceiptPanel, {
+      receipt: {
+        receiptId: "receipt_historical_stay",
+        commandId: "command_historical_stay",
+        executionStatus: "EXECUTED",
+        businessCommitted: true,
+        correlationId: "correlation_historical_stay",
+        result: { operation: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS", corrections: [{}] },
+        resourceRefs: [],
+        factRefs: [],
+        committedAt: "2026-09-02T08:00:00.000Z"
+      },
+      businessCommand: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
+    }));
+    expect(html).toContain("历史住宿安排修改已完成");
+    expect(html).toContain("1 笔住宿");
+    expect(html).not.toContain("CORRECT_HISTORICAL_STAY_ARRANGEMENTS");
+  });
+
+  it("accepts recovery only when the historical target, facts, resources, and effect hash are exact", () => {
+    const effectHash = "6".repeat(64);
+    const result = {
+      operation: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+      correctionSetHash: "7".repeat(64),
+      corrections: [{
+        orderId: "order_peng",
+        stayId: "stay_peng",
+        correctionId: "correction_peng",
+        amendmentId: "amendment_peng",
+        staySegmentId: "segment_peng",
+        pricingRevisionId: "revision_new_peng",
+        claimIds: ["claim_peng_1", "claim_peng_2", "claim_peng_3"],
+        before: effect.corrections[0]!.before,
+        after: effect.corrections[0]!.after,
+        unchanged: effect.corrections[0]!.unchanged
+      }],
+      reason: { code: "DATA_ENTRY_CORRECTION", note: "历史安排录入错误" },
+      evidenceNote: input.evidenceNote,
+      actor: { subjectId: "subject_admin", displayName: "运营管理员" },
+      recordedAt: "2026-09-02T08:00:00.000Z",
+      effectHash
+    };
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_historical_exact",
+      commandId: "command_historical_exact",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_historical_exact",
+      result,
+      resourceRefs: ["order_peng", "stay_peng", "amendment_peng", "segment_peng", "revision_new_peng", "claim_peng_1", "claim_peng_2", "claim_peng_3"],
+      factRefs: ["correction_peng"],
+      committedAt: "2026-09-02T08:00:00.000Z"
+    };
+    expect(receiptHasCommandEvidence("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", receipt, input, effect, effectHash)).toBe(true);
+    const attacks: ReceiptDto[] = [
+      { ...receipt, result: { ...result, effectHash: undefined } },
+      { ...receipt, result: { ...result, effectHash: "8".repeat(64) } },
+      { ...receipt, factRefs: [] },
+      { ...receipt, resourceRefs: receipt.resourceRefs.slice(1) },
+      { ...receipt, result: { ...result, corrections: [{ ...result.corrections[0]!, orderId: "order_other" }] } }
+    ];
+    for (const attack of attacks) {
+      expect(receiptHasCommandEvidence("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", attack, input, effect, effectHash)).toBe(false);
+    }
+  });
+});
+
+describe("administrator membership correction presentation", () => {
+  const money = (minorUnits: number) => ({ currency: "CNY", minorUnits });
+  const evidenceNote = "已核对纸质合同与企微交易记录";
+  const profileInput = {
+    propertyId: "property_green",
+    memberId: "member_cathy",
+    expectedPriorProfile: {
+      fullName: "Cathy",
+      nickname: "Cathy",
+      identityCardNumber: null,
+      phone: "13800000000",
+      wechat: "cathy-old"
+    },
+    correctedProfile: {
+      fullName: "Cathy Chen",
+      nickname: "Cathy",
+      identityCardNumber: null,
+      phone: "13800000000",
+      wechat: "cathy-new"
+    },
+    evidenceNote
+  };
+  const profileEffect = {
+    operation: "CORRECT_MEMBER_PROFILE",
+    memberId: "member_cathy",
+    before: profileInput.expectedPriorProfile,
+    after: profileInput.correctedProfile,
+    changedFields: ["fullName", "wechat"],
+    evidenceNote
+  };
+  const effectiveDateInput = {
+    propertyId: "property_green",
+    membershipOrderId: "membership_order_cathy",
+    actualMembershipDate: "2026-07-15",
+    evidenceNote
+  };
+  const effectiveDateEffect = {
+    operation: "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+    propertyToday: "2026-09-02",
+    memberId: "member_cathy",
+    membershipOrderId: "membership_order_cathy",
+    contractId: "contract_cathy",
+    entitlementLotId: "lot_cathy",
+    evidenceNote,
+    before: { validFrom: "2026-08-01", validUntil: "2027-08-01", status: "ACTIVE" },
+    after: { validFrom: "2026-07-15", validUntil: "2027-07-15", status: "ACTIVE" },
+    unchanged: {
+      memberId: "member_cathy",
+      productName: "公卫四人间会员",
+      agreedPrice: money(93_600),
+      entitlementUnitKind: "ROOM_NIGHT",
+      entitlementUnits: 30,
+      usedUnits: 2,
+      availableBalance: { ROOM_NIGHT: 28, BED_NIGHT: 0 },
+      paymentFactCount: 1,
+      lifecycleStatus: "ACTIVE"
+    }
+  };
+  const backfillInput = {
+    propertyId: "property_green",
+    memberId: "member_jingjing",
+    membershipProductId: "product_shared_room",
+    actualMembershipDate: "2026-06-20",
+    payment: {
+      amountMinor: 93_600,
+      businessDate: "2026-06-18",
+      transactionReference: "WX-JINGJING-20260620",
+      note: "历史会员收款"
+    },
+    evidenceNote
+  };
+  const backfillEffect = {
+    operation: "BACKFILL_HISTORICAL_MEMBERSHIP",
+    evidenceNote,
+    member: { memberId: "member_jingjing", fullName: "晶晶" },
+    product: {
+      productId: "product_shared_room",
+      code: "MEMBER-SHARED-30",
+      version: 1,
+      name: "公卫四人间会员",
+      listedPrice: money(93_600),
+      agreedPrice: money(93_600),
+      entitlementUnitKind: "ROOM_NIGHT",
+      entitlementUnits: 30,
+      validityPeriod: "P1Y",
+      allowedRoomTypeCode: "SHARED",
+      allowedInventoryKind: "ROOM"
+    },
+    payment: {
+      amount: money(93_600),
+      businessDate: "2026-06-18",
+      transactionReference: "WX-JINGJING-20260620",
+      note: "历史会员收款"
+    },
+    validFrom: "2026-06-20",
+    validUntil: "2027-06-20",
+    entitlementUnitKind: "ROOM_NIGHT",
+    entitlementUnits: 30,
+    status: "ACTIVE"
+  };
+  const rebuildInput = {
+    propertyId: "property_green",
+    erroneousMembershipOrderId: "membership_order_wrong",
+    sourceStayOrderId: "order_108",
+    actualMembershipDate: "2026-08-10",
+    replacementDirectPayment: {
+      businessDate: "2026-08-12",
+      transactionReference: "WX-REPLACEMENT-736"
+    },
+    evidenceNote
+  };
+  const rebuildEffect = {
+    operation: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
+    evidenceNote,
+    member: { memberId: "member_cathy", fullName: "Cathy" },
+    oldMembership: {
+      membershipOrderId: "membership_order_wrong",
+      contractId: "contract_wrong",
+      entitlementLotId: "lot_wrong",
+      productId: "product_shared_room",
+      status: "ACTIVE",
+      directCollections: [{
+        factId: "fact_wrong_collection",
+        amount: money(93_600),
+        transactionReference: "WX-WRONG-936",
+        businessDate: "2026-08-09"
+      }]
+    },
+    sourceStay: {
+      orderId: "order_108",
+      stayId: "stay_108",
+      arrivalDate: "2026-08-10",
+      departureDate: "2026-08-12",
+      serviceDates: ["2026-08-10", "2026-08-11"],
+      identityEvidence: { phoneMatched: true, documentMatched: false }
+    },
+    funds: {
+      oldDirectCollectionTotal: money(93_600),
+      oldReversalTotal: money(93_600),
+      stayTransferTotal: money(20_000),
+      replacementDirectPayment: {
+        amount: money(73_600),
+        businessDate: "2026-08-12",
+        transactionReference: "WX-REPLACEMENT-736"
+      },
+      membershipAgreedPrice: money(93_600),
+      reclassificationOnly: true
+    },
+    newMembership: {
+      productId: "product_shared_room",
+      productName: "公卫四人间会员",
+      validFrom: "2026-08-10",
+      validUntil: "2027-08-10"
+    },
+    entitlement: {
+      unitKind: "ROOM_NIGHT",
+      totalUnits: 30,
+      consumedUnits: 2,
+      remainingUnits: 28,
+      serviceDates: ["2026-08-10", "2026-08-11"]
+    }
+  };
+
+  it("accepts only the four complete, typed Preview evidence shapes", () => {
+    expect(administratorMembershipPreviewHasEvidence("CORRECT_MEMBER_PROFILE", profileEffect, profileInput)).toBe(true);
+    expect(administratorMembershipPreviewHasEvidence("CORRECT_MEMBERSHIP_EFFECTIVE_DATE", effectiveDateEffect, effectiveDateInput)).toBe(true);
+    expect(administratorMembershipPreviewHasEvidence("BACKFILL_HISTORICAL_MEMBERSHIP", backfillEffect, backfillInput)).toBe(true);
+
+    const backfillWithoutOptionalNote = structuredClone(backfillInput);
+    delete (backfillWithoutOptionalNote.payment as { note?: string }).note;
+    const backfillEffectWithNormalizedEmptyNote = structuredClone(backfillEffect);
+    backfillEffectWithNormalizedEmptyNote.payment.note = "";
+    expect(administratorMembershipPreviewHasEvidence(
+      "BACKFILL_HISTORICAL_MEMBERSHIP",
+      backfillEffectWithNormalizedEmptyNote,
+      backfillWithoutOptionalNote
+    )).toBe(true);
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", rebuildEffect, rebuildInput)).toBe(true);
+
+    const duplicateProfileField = { ...profileEffect, changedFields: ["fullName", "fullName"] };
+    expect(administratorMembershipPreviewHasEvidence("CORRECT_MEMBER_PROFILE", duplicateProfileField, profileInput)).toBe(false);
+
+    const missingRecalculatedExpiry = structuredClone(effectiveDateEffect) as Record<string, unknown>;
+    delete (missingRecalculatedExpiry.after as Record<string, unknown>).validUntil;
+    expect(administratorMembershipPreviewHasEvidence("CORRECT_MEMBERSHIP_EFFECTIVE_DATE", missingRecalculatedExpiry, effectiveDateInput)).toBe(false);
+
+    const invalidBalance = structuredClone(effectiveDateEffect);
+    invalidBalance.unchanged.availableBalance.ROOM_NIGHT = -1;
+    expect(administratorMembershipPreviewHasEvidence("CORRECT_MEMBERSHIP_EFFECTIVE_DATE", invalidBalance, effectiveDateInput)).toBe(false);
+
+    const missingPayment = structuredClone(backfillEffect) as Record<string, unknown>;
+    delete missingPayment.payment;
+    expect(administratorMembershipPreviewHasEvidence("BACKFILL_HISTORICAL_MEMBERSHIP", missingPayment, backfillInput)).toBe(false);
+
+    const mismatchedBackfillDate = structuredClone(backfillEffect);
+    mismatchedBackfillDate.payment.businessDate = "2026-06-19";
+    expect(administratorMembershipPreviewHasEvidence("BACKFILL_HISTORICAL_MEMBERSHIP", mismatchedBackfillDate, backfillInput)).toBe(false);
+
+    for (const paymentAmountMinor of [50_000, 93_600, 100_000]) {
+      const paymentInput = structuredClone(backfillInput);
+      const paymentEffect = structuredClone(backfillEffect);
+      paymentInput.payment.amountMinor = paymentAmountMinor;
+      paymentEffect.payment.amount.minorUnits = paymentAmountMinor;
+      expect(administratorMembershipPreviewHasEvidence(
+        "BACKFILL_HISTORICAL_MEMBERSHIP",
+        paymentEffect,
+        paymentInput
+      )).toBe(true);
+    }
+
+    const backfillWithAdministratorPrice = structuredClone(backfillEffect);
+    backfillWithAdministratorPrice.product.agreedPrice.minorUnits = 50_000;
+    backfillWithAdministratorPrice.payment.amount.minorUnits = 50_000;
+    expect(administratorMembershipPreviewHasEvidence(
+      "BACKFILL_HISTORICAL_MEMBERSHIP",
+      backfillWithAdministratorPrice,
+      { ...backfillInput, payment: { ...backfillInput.payment, amountMinor: 50_000 } }
+    )).toBe(false);
+
+    const refundLikeRebuild = structuredClone(rebuildEffect);
+    refundLikeRebuild.funds.reclassificationOnly = false;
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", refundLikeRebuild, rebuildInput)).toBe(false);
+
+    const legacyFlatReplacementPayment = structuredClone(rebuildEffect);
+    (legacyFlatReplacementPayment.funds as Record<string, unknown>).replacementDirectPayment = money(73_600);
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", legacyFlatReplacementPayment, rebuildInput)).toBe(false);
+
+    const mismatchedReplacementDate = structuredClone(rebuildEffect);
+    mismatchedReplacementDate.funds.replacementDirectPayment.businessDate = "2026-08-13";
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", mismatchedReplacementDate, rebuildInput)).toBe(false);
+
+    const mismatchedReplacementReference = structuredClone(rebuildEffect);
+    mismatchedReplacementReference.funds.replacementDirectPayment.transactionReference = "WX-REPLACEMENT-OTHER";
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", mismatchedReplacementReference, rebuildInput)).toBe(false);
+
+    const mismatchedReplacementAmount = structuredClone(rebuildEffect);
+    mismatchedReplacementAmount.funds.replacementDirectPayment.amount.minorUnits = 73_700;
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", mismatchedReplacementAmount, rebuildInput)).toBe(false);
+
+    const inconsistentRebuild = structuredClone(rebuildEffect);
+    inconsistentRebuild.entitlement.remainingUnits = 27;
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", inconsistentRebuild, rebuildInput)).toBe(false);
+
+    const missingHistoricalNight = structuredClone(rebuildEffect);
+    missingHistoricalNight.sourceStay.serviceDates = ["2026-08-10"];
+    missingHistoricalNight.entitlement.serviceDates = ["2026-08-10"];
+    missingHistoricalNight.entitlement.consumedUnits = 1;
+    missingHistoricalNight.entitlement.remainingUnits = 29;
+    expect(administratorMembershipPreviewHasEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", missingHistoricalNight, rebuildInput)).toBe(false);
+  });
+
+  it("separates administrator facts from system-calculated dates, funds, and entitlements", () => {
+    const dateHtml = renderToStaticMarkup(createElement(EffectSummary, {
+      preview: {
+        previewId: "preview_effective_date",
+        commandType: "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+        effectHash: "d".repeat(64),
+        effect: effectiveDateEffect,
+        expiresAt: "2026-09-02T09:00:00.000Z"
+      },
+      businessCommand: "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+      commandInput: effectiveDateInput
+    }));
+    expect(dateHtml).toContain("主管核实的事实");
+    expect(dateHtml).toContain("系统重新计算");
+    expect(dateHtml).toContain("历史已核销");
+    expect(dateHtml).toContain("2 间夜");
+    expect(dateHtml).toContain("当前剩余权益");
+    expect(dateHtml).toContain("28 间夜");
+    expect(dateHtml).toContain("保持不变");
+
+    const backfillHtml = renderToStaticMarkup(createElement(EffectSummary, {
+      preview: {
+        previewId: "preview_backfill",
+        commandType: "BACKFILL_HISTORICAL_MEMBERSHIP",
+        effectHash: "f".repeat(64),
+        effect: backfillEffect,
+        expiresAt: "2026-09-02T09:00:00.000Z"
+      },
+      businessCommand: "BACKFILL_HISTORICAL_MEMBERSHIP",
+      commandInput: backfillInput
+    }));
+    expect(backfillHtml).toContain("你核实的办卡与收款信息");
+    expect(backfillHtml).toContain("企业微信实收");
+    expect(backfillHtml).toContain("¥936.00");
+    expect(backfillHtml).toContain("企业微信收款日期");
+    expect(backfillHtml).toContain("2026-06-18");
+    expect(backfillHtml).toContain("企微交易单号");
+    expect(backfillHtml).toContain("WX-JINGJING-20260620");
+    expect(backfillHtml).toContain("实收与办卡价格差额");
+    expect(backfillHtml).toContain("无差额");
+    expect(backfillHtml).toContain("有效期规则");
+    expect(backfillHtml).toContain("1 年");
+    expect(backfillHtml).toContain("系统只提示差额，不会自动改价");
+    expect(backfillHtml).not.toMatch(/主管核实的历史事实|系统创建与计算|历史成交价|收款事实|原子|legacy|ACTIVE|投影|会员链/i);
+
+    const underpaidBackfillEffect = structuredClone(backfillEffect);
+    underpaidBackfillEffect.payment.amount.minorUnits = 50_000;
+    const underpaidBackfillHtml = renderToStaticMarkup(createElement(EffectSummary, {
+      preview: {
+        previewId: "preview_underpaid_backfill",
+        commandType: "BACKFILL_HISTORICAL_MEMBERSHIP",
+        effectHash: "b".repeat(64),
+        effect: underpaidBackfillEffect,
+        expiresAt: "2026-09-02T09:00:00.000Z"
+      },
+      businessCommand: "BACKFILL_HISTORICAL_MEMBERSHIP",
+      commandInput: { ...backfillInput, payment: { ...backfillInput.payment, amountMinor: 50_000 } }
+    }));
+    expect(underpaidBackfillHtml).toContain("收款比成交价少");
+    expect(underpaidBackfillHtml).toContain("¥436.00");
+
+    const rebuildHtml = renderToStaticMarkup(createElement(EffectSummary, {
+      preview: {
+        previewId: "preview_rebuild",
+        commandType: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
+        effectHash: "e".repeat(64),
+        effect: rebuildEffect,
+        expiresAt: "2026-09-02T09:00:00.000Z"
+      },
+      businessCommand: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
+      commandInput: rebuildInput
+    }));
+    expect(rebuildHtml).toContain("这不是退款");
+    expect(rebuildHtml).toContain("不会向会员退回实际资金");
+    expect(rebuildHtml).toContain("历史住宿核销");
+    expect(rebuildHtml).toContain("剩余权益");
+    expect(rebuildHtml).toContain("会员档案");
+    expect(rebuildHtml).toContain("保持不变");
+    expect(rebuildHtml).toContain("真实会员差额收款");
+    expect(rebuildHtml).toContain("¥736.00");
+    expect(rebuildHtml).toContain("原错误收款明细");
+    expect(rebuildHtml).toContain("WX-WRONG-936");
+    expect(rebuildHtml).toContain("2026-08-09");
+    expect(rebuildHtml).toContain("企业微信差额收款日期");
+    expect(rebuildHtml).toContain("2026-08-12");
+    expect(rebuildHtml).toContain("差额企微交易单号");
+    expect(rebuildHtml).toContain("WX-REPLACEMENT-736");
+  });
+
+  it("renders replayable historical-stay, membership-backfill, and void-rebuild Receipt results without inventing omitted details", () => {
+    const historicalReceipt: ReceiptDto = {
+      receiptId: "receipt_historical_stay",
+      commandId: "command_historical_stay",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_historical_stay",
+      result: {
+        operation: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+        correctionSetHash: "a".repeat(64),
+        reason: { code: "HISTORICAL_ARRANGEMENT_CORRECTION", note: "复核了原始入住登记" },
+        evidenceNote: "已核对纸质登记与房态记录",
+        actor: { subjectId: "subject_manager", displayName: "值班主管" },
+        recordedAt: "2026-09-02T09:00:00.000Z",
+        corrections: [{
+          orderId: "order_108",
+          stayId: "stay_108",
+          correctionId: "fact_historical_108",
+          amendmentId: "amendment_historical_108",
+          staySegmentId: "segment_historical_108",
+          pricingRevisionId: "revision_historical_108",
+          claimIds: ["claim_historical_108"],
+          before: {
+            inventoryUnitId: "unit_d01",
+            arrivalDate: "2026-08-01",
+            departureDate: "2026-08-03",
+            nights: 2,
+            stayTimeline: [
+              { serviceDate: "2026-08-01", inventoryUnitId: "unit_d01" },
+              { serviceDate: "2026-08-02", inventoryUnitId: "unit_d01" }
+            ]
+          },
+          after: {
+            inventoryUnitId: "unit_d02",
+            arrivalDate: "2026-08-02",
+            departureDate: "2026-08-04",
+            nights: 2,
+            stayTimeline: [
+              { serviceDate: "2026-08-02", inventoryUnitId: "unit_d02" },
+              { serviceDate: "2026-08-03", inventoryUnitId: "unit_d02" }
+            ]
+          },
+          unchanged: {
+            orderStatus: "CHECKED_OUT",
+            stayStatus: "COMPLETED",
+            stayType: "TRANSIENT",
+            currentRevisionId: "revision_prior_108",
+            currentContractAmountMinor: 69_600,
+            currency: "CNY",
+            occupantCount: 2,
+            occupants: [
+              { ordinal: 1, role: "PRIMARY", fullName: "鹏哥", nickname: "鹏哥" },
+              { ordinal: 2, role: "ADDITIONAL", fullName: "尚鹏", nickname: "小尚" }
+            ],
+            collectionFactCount: 1,
+            netRecordedCollectionMinor: 20_000,
+            collectionDifferenceMinor: 49_600
+          }
+        }]
+      },
+      resourceRefs: ["order_108", "stay_108", "amendment_historical_108", "segment_historical_108", "revision_historical_108"],
+      factRefs: ["fact_historical_108"],
+      committedAt: "2026-09-02T09:00:00.000Z"
+    };
+    const historicalHtml = renderToStaticMarkup(createElement(ReceiptPanel, {
+      receipt: historicalReceipt,
+      businessCommand: "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"
+    }));
+    expect(historicalHtml).toContain("第 1 笔住宿");
+    expect(historicalHtml).toContain("修改前安排");
+    expect(historicalHtml).toContain("修改后安排");
+    expect(historicalHtml).toContain("鹏哥、小尚（尚鹏）");
+    for (const internalId of ["order_108", "revision_prior_108"]) {
+      expect(historicalHtml).not.toContain(internalId);
+    }
+    expect(historicalHtml).toContain("修改前房源编号");
+    expect(historicalHtml).toContain("unit_d01");
+    expect(historicalHtml).toContain("修改后房源编号");
+    expect(historicalHtml).toContain("unit_d02");
+    expect(historicalHtml).toContain("amendment_historical_108");
+    expect(historicalHtml).toContain("segment_historical_108");
+    expect(historicalHtml).toContain("revision_historical_108");
+    expect(historicalHtml).toContain("住宿人");
+    expect(historicalHtml).toContain("订单金额");
+    expect(historicalHtml).toContain("已记录净收款");
+    expect(historicalHtml).toContain("复核了原始入住登记");
+    expect(historicalHtml).toContain("已核对纸质登记与房态记录");
+    expect(historicalHtml).toContain("值班主管");
+    expect(historicalHtml).toContain(formatDateTime("2026-09-02T09:00:00.000Z"));
+
+    const backfillReceipt: ReceiptDto = {
+      receiptId: "receipt_membership_backfill_detail",
+      commandId: "command_membership_backfill_detail",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_membership_backfill_detail",
+      result: {
+        memberId: "member_jingjing",
+        membershipOrderId: "membership_order_backfilled",
+        paymentFactId: "membership_payment_backfilled",
+        contractId: "contract_backfilled",
+        entitlementLotId: "lot_backfilled",
+        backfillId: "fact_backfilled",
+        status: "ACTIVE",
+        validFrom: "2026-06-20",
+        validUntil: "2027-06-20",
+        entitlementUnitKind: "ROOM_NIGHT",
+        entitlementUnits: 30,
+        member: backfillEffect.member,
+        product: backfillEffect.product,
+        payment: { ...backfillEffect.payment, amount: money(50_000) },
+        reason: { code: "HISTORICAL_MEMBERSHIP_BACKFILL", note: "补录真实历史办卡" },
+        evidenceNote,
+        actor: { subjectId: "subject_manager", displayName: "值班主管" },
+        recordedAt: "2026-09-02T09:03:00.000Z"
+      },
+      resourceRefs: ["member_jingjing", "membership_order_backfilled", "contract_backfilled", "lot_backfilled"],
+      factRefs: ["membership_payment_backfilled", "fact_backfilled"],
+      committedAt: "2026-09-02T09:03:00.000Z"
+    };
+    const backfillReceiptHtml = renderToStaticMarkup(createElement(ReceiptPanel, {
+      receipt: backfillReceipt,
+      businessCommand: "BACKFILL_HISTORICAL_MEMBERSHIP"
+    }));
+    expect(backfillReceiptHtml).toContain("产品标价 / 成交价");
+    expect(backfillReceiptHtml).toContain("¥936.00 / ¥936.00");
+    expect(backfillReceiptHtml).toContain("有效期规则");
+    expect(backfillReceiptHtml).toContain("1 年");
+    expect(backfillReceiptHtml).toContain("收款与成交价差额");
+    expect(backfillReceiptHtml).toContain("收款比成交价少");
+    expect(backfillReceiptHtml).toContain("¥436.00");
+    expect(backfillReceiptHtml).not.toContain("membership_payment_backfilled");
+    expect(backfillReceiptHtml).not.toContain("fact_backfilled");
+
+    const rebuildReceipt: ReceiptDto = {
+      receiptId: "receipt_rebuild_detail",
+      commandId: "command_rebuild_detail",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_rebuild_detail",
+      result: {
+        memberId: "member_cathy",
+        voidReconversionId: "fact_void_rebuild",
+        member: { memberId: "member_cathy", fullName: "Cathy" },
+        oldMembershipOrderId: "membership_order_wrong",
+        oldContractId: "contract_wrong",
+        oldEntitlementLotId: "lot_wrong",
+        oldStatus: "VOIDED",
+        sourceStayOrderId: "order_108",
+        sourceStayId: "stay_108",
+        amendmentId: "amendment_rebuild",
+        pricingRevisionId: "revision_rebuild",
+        membershipOrderId: "membership_order_rebuilt",
+        status: "ACTIVE",
+        contractId: "contract_rebuilt",
+        entitlementLotId: "lot_rebuilt",
+        oldDirectCollectionTotal: money(93_600),
+        transferredAmount: money(20_000),
+        replacementDirectPaymentAmount: money(73_600),
+        membershipAgreedPrice: money(93_600),
+        validFrom: "2026-08-10",
+        validUntil: "2027-08-10",
+        entitlementUnitKind: "ROOM_NIGHT",
+        convertedUnits: 2,
+        remainingUnits: 28,
+        serviceDates: ["2026-08-10", "2026-08-11"],
+        sourceCollectionFactIds: ["fact_stay_collection"],
+        oldPaymentReversalFactIds: ["fact_old_payment_reversal"],
+        sourceReversalFactIds: ["fact_stay_reversal"],
+        transferPaymentFactIds: ["fact_transfer_payment"],
+        replacementPaymentFactId: "fact_replacement_payment",
+        transferIds: ["transfer_stay_collection"],
+        voidLedgerFactId: "fact_void_ledger",
+        conversionLedgerFactIds: ["fact_conversion_1", "fact_conversion_2"],
+        reason: { code: "VOID_ERRONEOUS_MEMBERSHIP", note: "原会员办卡误记为直接收款" },
+        evidenceNote: "已核对住宿收款与错误会员收款凭证",
+        actor: { subjectId: "subject_manager", displayName: "运营主管" },
+        recordedAt: "2026-09-02T09:05:00.000Z",
+        oldMembership: {
+          membershipOrderId: "membership_order_wrong",
+          contractId: "contract_wrong",
+          entitlementLotId: "lot_wrong",
+          productId: "product_shared_room",
+          status: "ACTIVE",
+          directCollections: [{
+            factId: "fact_old_payment",
+            amount: money(93_600),
+            transactionReference: "WX-WRONG-936",
+            businessDate: "2026-08-09"
+          }]
+        },
+        sourceStay: {
+          orderId: "order_108",
+          stayId: "stay_108",
+          arrivalDate: "2026-08-10",
+          departureDate: "2026-08-12",
+          serviceDates: ["2026-08-10", "2026-08-11"],
+          identityEvidence: { phoneMatched: true, documentMatched: false }
+        },
+        funds: {
+          oldDirectCollectionTotal: money(93_600),
+          oldReversalTotal: money(93_600),
+          stayTransferTotal: money(20_000),
+          replacementDirectPayment: {
+            amount: money(73_600),
+            businessDate: "2026-08-12",
+            transactionReference: "WX-REPLACEMENT-736"
+          },
+          membershipAgreedPrice: money(93_600),
+          reclassificationOnly: true
+        },
+        newMembership: {
+          productId: "product_shared_room",
+          productName: "公卫四人间会员",
+          membershipOrderId: "membership_order_rebuilt",
+          contractId: "contract_rebuilt",
+          entitlementLotId: "lot_rebuilt",
+          validFrom: "2026-08-10",
+          validUntil: "2027-08-10"
+        },
+        entitlement: { unitKind: "ROOM_NIGHT", totalUnits: 30, consumedUnits: 2, remainingUnits: 28, serviceDates: ["2026-08-10", "2026-08-11"] }
+      },
+      resourceRefs: ["membership_order_wrong", "order_108", "amendment_rebuild", "revision_rebuild", "membership_order_rebuilt", "contract_rebuilt", "lot_rebuilt"],
+      factRefs: ["fact_void_rebuild"],
+      committedAt: "2026-09-02T09:05:00.000Z"
+    };
+    const rebuildHtml = renderToStaticMarkup(createElement(ReceiptPanel, {
+      receipt: rebuildReceipt,
+      businessCommand: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+    }));
+    for (const internalId of ["membership_order_wrong", "membership_order_rebuilt", "contract_rebuilt", "lot_rebuilt", "fact_old_payment", "fact_stay_collection", "fact_old_payment_reversal", "stay_108", "fact_void_rebuild"]) {
+      expect(rebuildHtml).not.toContain(internalId);
+    }
+    expect(rebuildHtml).toContain("¥200.00");
+    expect(rebuildHtml).toContain("¥736.00");
+    expect(rebuildHtml).toContain("原错误收款明细");
+    expect(rebuildHtml).toContain("WX-WRONG-936");
+    expect(rebuildHtml).toContain("2026-08-09");
+    expect(rebuildHtml).toContain("差额企微交易单号");
+    expect(rebuildHtml).toContain("WX-REPLACEMENT-736");
+    expect(rebuildHtml).toContain("历史住宿已核销");
+    expect(rebuildHtml).toContain("剩余权益");
+    expect(rebuildHtml).toContain("原会员办卡误记为直接收款");
+    expect(rebuildHtml).toContain("已核对住宿收款与错误会员收款凭证");
+    expect(rebuildHtml).toContain("运营主管");
+    expect(rebuildHtml).toContain(formatDateTime("2026-09-02T09:05:00.000Z"));
+
+    const incompleteProfileReplay: ReceiptDto = {
+      receiptId: "receipt_profile_minimal",
+      commandId: "command_profile_minimal",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_profile_minimal",
+      result: { memberId: "member_cathy", correctionId: "fact_profile", changedFields: ["phone", "wechat"] },
+      resourceRefs: ["member_cathy"],
+      factRefs: ["fact_profile"],
+      committedAt: "2026-09-02T09:10:00.000Z"
+    };
+    const profileHtml = renderToStaticMarkup(createElement(ReceiptPanel, {
+      receipt: incompleteProfileReplay,
+      businessCommand: "CORRECT_MEMBER_PROFILE"
+    }));
+    expect(profileHtml).toContain("手机号码、微信号");
+    expect(profileHtml).toContain("资料前后值、事实依据和操作人未随本次回放结果提供");
+    expect(profileHtml).toContain(formatDateTime("2026-09-02T09:10:00.000Z"));
+
+    const detailedProfileReplay: ReceiptDto = {
+      receiptId: "receipt_profile_detail",
+      commandId: "command_profile_detail",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_profile_detail",
+      result: {
+        memberId: "member_cathy",
+        correctionId: "fact_profile_detail",
+        changedFields: ["identityCardNumber", "phone", "wechat"],
+        before: {
+          fullName: "陈晓雨",
+          nickname: "小雨",
+          identityCardNumber: "110101199001011234",
+          phone: "13800000000",
+          wechat: "xiaoyu-old"
+        },
+        after: {
+          fullName: "陈晓雨",
+          nickname: "小雨",
+          identityCardNumber: "110101199001015678",
+          phone: "13911112222",
+          wechat: "xiaoyu-new"
+        },
+        reason: { code: "PROFILE_CORRECTION", note: "更正录入时的联系方式" },
+        evidenceNote: "已核对会员本人提供的资料",
+        actor: { subjectId: "subject_manager", displayName: "运营主管" },
+        recordedAt: "2026-09-02T09:15:00.000Z"
+      },
+      resourceRefs: ["member_cathy"],
+      factRefs: ["fact_profile_detail"],
+      committedAt: "2026-09-02T09:15:00.000Z"
+    };
+    const detailedProfileHtml = renderToStaticMarkup(createElement(ReceiptPanel, {
+      receipt: detailedProfileReplay,
+      businessCommand: "CORRECT_MEMBER_PROFILE"
+    }));
+    expect(detailedProfileHtml).toContain("11**************34");
+    expect(detailedProfileHtml).toContain("11**************78");
+    expect(detailedProfileHtml).toContain("138****0000");
+    expect(detailedProfileHtml).toContain("139****2222");
+    expect(detailedProfileHtml).toContain("x********d");
+    expect(detailedProfileHtml).toContain("x********w");
+    expect(detailedProfileHtml).not.toContain("110101199001011234");
+    expect(detailedProfileHtml).not.toContain("110101199001015678");
+    expect(detailedProfileHtml).not.toContain("13800000000");
+    expect(detailedProfileHtml).not.toContain("13911112222");
+    expect(detailedProfileHtml).not.toContain("xiaoyu-old");
+    expect(detailedProfileHtml).not.toContain("xiaoyu-new");
+    expect(detailedProfileHtml).toContain("更正录入时的联系方式");
+    expect(detailedProfileHtml).toContain("已核对会员本人提供的资料");
+    expect(detailedProfileHtml).toContain("运营主管");
+  });
+
+  it("uses business wording in receipts and recovery instead of internal command names", () => {
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_rebuild",
+      commandId: "command_rebuild",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_rebuild",
+      result: {},
+      resourceRefs: [],
+      factRefs: [],
+      committedAt: "2026-09-02T08:55:00.000Z"
+    };
+    const receiptHtml = renderToStaticMarkup(createElement(ReceiptPanel, {
+      receipt,
+      businessCommand: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+    }));
+    expect(receiptHtml).toContain("撤销错误办卡并重新升级已完成");
+    expect(receiptHtml).toContain("这不是退款");
+    expect(receiptHtml).not.toContain("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY");
+
+    const recoveryHtml = renderToStaticMarkup(createElement(CommandRecoveryBar, {
+      recovery: {
+        version: 1,
+        subjectId: "subject_admin",
+        scopeId: "property:property_green",
+        propertyId: "property_green",
+        commandType: "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+        confirmationKey: "confirmation_internal",
+        targetRefs: ["membershipOrderId=membership_order_cathy"],
+        state: "UNKNOWN",
+        updatedAt: "2026-09-02T08:55:00.000Z"
+      },
+      onOpen: () => undefined
+    }));
+    expect(recoveryHtml).toContain("修改会员生效日结果需要恢复查询");
+    expect(recoveryHtml).not.toContain("CORRECT_MEMBERSHIP_EFFECTIVE_DATE");
+    expect(recoveryHtml).not.toContain("confirmation_internal");
+    expect(recoveryHtml).not.toContain("membership_order_cathy");
+  });
+
+  it("fails closed when any administrator membership recovery changes its target, facts, or effect hash", () => {
+    const effectHash = "9".repeat(64);
+    const audit = {
+      reason: { code: "DATA_ENTRY_CORRECTION", note: "已复核原始凭证" },
+      evidenceNote,
+      actor: { subjectId: "subject_admin", displayName: "运营管理员" },
+      recordedAt: "2026-09-02T08:00:00.000Z",
+      effectHash
+    };
+    const profileReceipt: ReceiptDto = {
+      receiptId: "receipt_profile_exact", commandId: "command_profile_exact", executionStatus: "EXECUTED", businessCommitted: true, correlationId: "correlation_profile_exact",
+      result: {
+        memberId: profileEffect.memberId,
+        correctionId: "correction_profile",
+        changedFields: profileEffect.changedFields,
+        before: { ...profileEffect.before, phone: "138****0000", wechat: "c***ld" },
+        after: { ...profileEffect.after, phone: "138****0000", wechat: "c***ew" },
+        ...audit
+      },
+      resourceRefs: [profileEffect.memberId], factRefs: ["correction_profile"], committedAt: audit.recordedAt
+    };
+    const effectiveReceipt: ReceiptDto = {
+      receiptId: "receipt_effective_exact", commandId: "command_effective_exact", executionStatus: "EXECUTED", businessCommitted: true, correlationId: "correlation_effective_exact",
+      result: {
+        memberId: effectiveDateEffect.memberId,
+        membershipOrderId: effectiveDateEffect.membershipOrderId,
+        contractId: effectiveDateEffect.contractId,
+        entitlementLotId: effectiveDateEffect.entitlementLotId,
+        correctionId: "correction_effective",
+        validFrom: effectiveDateEffect.after.validFrom,
+        validUntil: effectiveDateEffect.after.validUntil,
+        status: "ACTIVE",
+        before: effectiveDateEffect.before,
+        after: effectiveDateEffect.after,
+        unchanged: effectiveDateEffect.unchanged,
+        ...audit
+      },
+      resourceRefs: [effectiveDateEffect.memberId, effectiveDateEffect.membershipOrderId, effectiveDateEffect.contractId, effectiveDateEffect.entitlementLotId],
+      factRefs: ["correction_effective"], committedAt: audit.recordedAt
+    };
+    const backfillReceipt: ReceiptDto = {
+      receiptId: "receipt_backfill_exact", commandId: "command_backfill_exact", executionStatus: "EXECUTED", businessCommitted: true, correlationId: "correlation_backfill_exact",
+      result: {
+        memberId: backfillEffect.member.memberId,
+        membershipOrderId: "membership_order_backfill",
+        paymentFactId: "payment_backfill",
+        contractId: "contract_backfill",
+        entitlementLotId: "lot_backfill",
+        backfillId: "backfill_fact",
+        status: "ACTIVE",
+        validFrom: backfillEffect.validFrom,
+        validUntil: backfillEffect.validUntil,
+        entitlementUnitKind: backfillEffect.entitlementUnitKind,
+        entitlementUnits: backfillEffect.entitlementUnits,
+        member: backfillEffect.member,
+        product: backfillEffect.product,
+        payment: backfillEffect.payment,
+        ...audit
+      },
+      resourceRefs: [backfillEffect.member.memberId, "membership_order_backfill", "contract_backfill", "lot_backfill"],
+      factRefs: ["payment_backfill", "backfill_fact"], committedAt: audit.recordedAt
+    };
+    const rebuildReceipt: ReceiptDto = {
+      receiptId: "receipt_rebuild_exact", commandId: "command_rebuild_exact", executionStatus: "EXECUTED", businessCommitted: true, correlationId: "correlation_rebuild_exact",
+      result: {
+        memberId: rebuildEffect.member.memberId,
+        voidReconversionId: "void_reconversion_fact",
+        member: rebuildEffect.member,
+        oldMembership: rebuildEffect.oldMembership,
+        oldMembershipOrderId: rebuildEffect.oldMembership.membershipOrderId,
+        oldContractId: rebuildEffect.oldMembership.contractId,
+        oldEntitlementLotId: rebuildEffect.oldMembership.entitlementLotId,
+        oldStatus: "VOIDED",
+        sourceStayOrderId: rebuildEffect.sourceStay.orderId,
+        sourceStayId: rebuildEffect.sourceStay.stayId,
+        sourceStay: rebuildEffect.sourceStay,
+        amendmentId: "amendment_rebuild_exact",
+        pricingRevisionId: "revision_rebuild_exact",
+        membershipOrderId: "membership_order_rebuild_exact",
+        status: "ACTIVE",
+        contractId: "contract_rebuild_exact",
+        entitlementLotId: "lot_rebuild_exact",
+        oldDirectCollectionTotal: rebuildEffect.funds.oldDirectCollectionTotal,
+        transferredAmount: rebuildEffect.funds.stayTransferTotal,
+        replacementDirectPaymentAmount: rebuildEffect.funds.replacementDirectPayment.amount,
+        membershipAgreedPrice: rebuildEffect.funds.membershipAgreedPrice,
+        funds: rebuildEffect.funds,
+        validFrom: rebuildEffect.newMembership.validFrom,
+        validUntil: rebuildEffect.newMembership.validUntil,
+        newMembership: {
+          ...rebuildEffect.newMembership,
+          membershipOrderId: "membership_order_rebuild_exact",
+          contractId: "contract_rebuild_exact",
+          entitlementLotId: "lot_rebuild_exact"
+        },
+        entitlementUnitKind: rebuildEffect.entitlement.unitKind,
+        convertedUnits: rebuildEffect.entitlement.consumedUnits,
+        remainingUnits: rebuildEffect.entitlement.remainingUnits,
+        entitlement: rebuildEffect.entitlement,
+        serviceDates: rebuildEffect.entitlement.serviceDates,
+        sourceCollectionFactIds: ["source_collection"],
+        oldPaymentReversalFactIds: ["old_reversal"],
+        paymentReclassificationFactIds: ["payment_reclassification"],
+        sourceReversalFactIds: ["source_reversal"],
+        transferPaymentFactIds: ["transfer_payment"],
+        replacementPaymentFactId: "replacement_payment",
+        transferIds: ["stay_transfer"],
+        voidLedgerFactId: "void_ledger",
+        conversionLedgerFactIds: ["conversion_1", "conversion_2"],
+        ...audit
+      },
+      resourceRefs: [rebuildEffect.member.memberId, rebuildEffect.oldMembership.membershipOrderId, rebuildEffect.oldMembership.contractId, rebuildEffect.oldMembership.entitlementLotId, rebuildEffect.sourceStay.orderId, "amendment_rebuild_exact", "revision_rebuild_exact", "membership_order_rebuild_exact", "contract_rebuild_exact", "lot_rebuild_exact", "stay_transfer"],
+      factRefs: ["void_reconversion_fact", "old_reversal", "payment_reclassification", "void_ledger", "source_reversal", "transfer_payment", "replacement_payment", "conversion_1", "conversion_2"],
+      committedAt: audit.recordedAt
+    };
+    const cases = [
+      { commandType: "CORRECT_MEMBER_PROFILE" as const, receipt: profileReceipt, input: profileInput, effect: profileEffect },
+      { commandType: "CORRECT_MEMBERSHIP_EFFECTIVE_DATE" as const, receipt: effectiveReceipt, input: effectiveDateInput, effect: effectiveDateEffect },
+      { commandType: "BACKFILL_HISTORICAL_MEMBERSHIP" as const, receipt: backfillReceipt, input: backfillInput, effect: backfillEffect },
+      { commandType: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY" as const, receipt: rebuildReceipt, input: rebuildInput, effect: rebuildEffect }
+    ];
+    for (const candidate of cases) {
+      expect(receiptHasCommandEvidence(candidate.commandType, candidate.receipt, candidate.input, candidate.effect, effectHash), candidate.commandType).toBe(true);
+      expect(receiptHasCommandEvidence(candidate.commandType, { ...candidate.receipt, factRefs: [] }, candidate.input, candidate.effect, effectHash), `${candidate.commandType}: facts`).toBe(false);
+      expect(receiptHasCommandEvidence(candidate.commandType, { ...candidate.receipt, resourceRefs: [] }, candidate.input, candidate.effect, effectHash), `${candidate.commandType}: resources`).toBe(false);
+      expect(receiptHasCommandEvidence(candidate.commandType, { ...candidate.receipt, result: { ...candidate.receipt.result, effectHash: undefined } }, candidate.input, candidate.effect, effectHash), `${candidate.commandType}: missing hash`).toBe(false);
+      expect(receiptHasCommandEvidence(candidate.commandType, { ...candidate.receipt, result: { ...candidate.receipt.result, effectHash: "0".repeat(64) } }, candidate.input, candidate.effect, effectHash), `${candidate.commandType}: changed hash`).toBe(false);
+    }
+    const changedProjectedProfileReceipt = structuredClone(profileReceipt);
+    ((changedProjectedProfileReceipt.result as Record<string, unknown>).after as Record<string, unknown>).wechat = "c***xx";
+    expect(receiptHasCommandEvidence(
+      "CORRECT_MEMBER_PROFILE",
+      changedProjectedProfileReceipt,
+      profileInput,
+      profileEffect,
+      effectHash
+    )).toBe(false);
+    expect(receiptHasCommandEvidence(
+      "CORRECT_MEMBER_PROFILE",
+      profileReceipt,
+      { propertyId: "property_green", memberId: profileEffect.memberId },
+      undefined,
+      effectHash
+    )).toBe(true);
+    const malformedRecoveredProfileReceipt = structuredClone(profileReceipt);
+    ((malformedRecoveredProfileReceipt.result as Record<string, unknown>).after as Record<string, unknown>).phone = "13800000009";
+    expect(receiptHasCommandEvidence(
+      "CORRECT_MEMBER_PROFILE",
+      malformedRecoveredProfileReceipt,
+      { propertyId: "property_green", memberId: profileEffect.memberId },
+      undefined,
+      effectHash
+    )).toBe(false);
+    const forgedRecoveredChangedFields = structuredClone(profileReceipt);
+    (forgedRecoveredChangedFields.result as Record<string, unknown>).changedFields = ["fullName", "unknownField"];
+    expect(receiptHasCommandEvidence(
+      "CORRECT_MEMBER_PROFILE",
+      forgedRecoveredChangedFields,
+      { propertyId: "property_green", memberId: profileEffect.memberId },
+      undefined,
+      effectHash
+    )).toBe(false);
+    const unprojectedProfileReceipt = structuredClone(profileReceipt);
+    Object.assign(unprojectedProfileReceipt.result!, { before: profileEffect.before, after: profileEffect.after });
+    expect(receiptHasCommandEvidence(
+      "CORRECT_MEMBER_PROFILE",
+      unprojectedProfileReceipt,
+      profileInput,
+      profileEffect,
+      effectHash
+    )).toBe(false);
+    expect(receiptHasCommandEvidence("CORRECT_MEMBER_PROFILE", profileReceipt, { ...profileInput, memberId: "member_other" }, profileEffect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence("CORRECT_MEMBERSHIP_EFFECTIVE_DATE", effectiveReceipt, { ...effectiveDateInput, membershipOrderId: "membership_order_other" }, effectiveDateEffect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence("BACKFILL_HISTORICAL_MEMBERSHIP", backfillReceipt, { ...backfillInput, memberId: "member_other" }, backfillEffect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence("VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", rebuildReceipt, { ...rebuildInput, sourceStayOrderId: "order_other" }, rebuildEffect, effectHash)).toBe(false);
   });
 });
 

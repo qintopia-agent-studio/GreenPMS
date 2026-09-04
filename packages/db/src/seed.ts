@@ -320,7 +320,15 @@ export async function seedDemo(db: Kysely<Database>, options: { includeProtocolF
       .limit(1)
       .executeTakeFirst();
     if (!existingPaymentFact) {
-      await db.insertInto("membership_payment_facts").values({
+      const paymentBusinessDateColumn = await sql<{ present: boolean }>`
+        select exists (
+          select 1 from information_schema.columns
+          where table_schema = current_schema()
+            and table_name = 'membership_payment_facts'
+            and column_name = 'business_date'
+        ) as present
+      `.execute(db);
+      const paymentFactRow = {
         fact_id: demo.membershipPaymentFactId,
         membership_order_id: demo.membershipOrderId,
         fact_type: "COLLECTION",
@@ -331,8 +339,11 @@ export async function seedDemo(db: Kysely<Database>, options: { includeProtocolF
         corrects_fact_id: null,
         reverses_fact_id: null,
         note: "Demo 会员订单企微收款",
-        command_id: "seed_demo_membership_payment"
-      }).onConflict((oc) => oc.column("fact_id").doNothing()).execute();
+        command_id: "seed_demo_membership_payment",
+        ...(paymentBusinessDateColumn.rows[0]?.present ? { business_date: "2026-01-01" } : {})
+      } as Insertable<Database["membership_payment_facts"]>;
+      await db.insertInto("membership_payment_facts").values(paymentFactRow)
+        .onConflict((oc) => oc.column("fact_id").doNothing()).execute();
     }
     await db.updateTable("member_contracts").set({ membership_order_id: demo.membershipOrderId })
       .where("id", "=", demo.memberContractId)

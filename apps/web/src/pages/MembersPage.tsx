@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { BadgeCheck, CircleDollarSign, CreditCard, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
+import { BadgeCheck, CalendarClock, CircleDollarSign, CreditCard, FilePenLine, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
 import {
   continueStayUpgradeAfterMemberCreated,
+  normalizeStayUpgradePhone,
   parseStayUpgradeMemberCreationIntent,
   stayUpgradeMemberCreationState,
   stayUpgradeOccupantCorrectionHref,
   stayUpgradeOrderHref,
   type StayUpgradeMemberCreationState
 } from "../stayMembershipUpgrade";
-import type { CommandCapability, CommandRequest, MemberContractDto, MemberSummaryDto, MemberViewDto, MembershipOrderSummaryDto, MembershipPaymentFactDto, MembershipProductDto } from "../types";
+import type { CommandCapability, CommandRequest, MemberContractDto, MemberSummaryDto, MemberViewDto, MembershipOrderSummaryDto, MembershipPaymentFactDto, MembershipProductDto, OrderRowDto, OrderViewDto } from "../types";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -20,10 +21,15 @@ import {
   DamagedCommandRecoveryNotice,
   EmptyState,
   formatDate,
+  formatDateTime,
   formatMinor,
+  guestName,
+  InfoHint,
   InlineError,
   isTerminalCommandRecovery,
   LoadingBlock,
+  membershipPaymentDateHelp,
+  membershipStartDateHelp,
   Modal,
   QuoteRecoveryConflictNotice,
   recoveryCommandRequest,
@@ -73,6 +79,79 @@ export function normalizeMemberQuery(query: string): string {
 
 export function shouldClearMemberSearchAfterCommit(commandType: CommandRequest["commandType"]): boolean {
   return commandType === "CREATE_MEMBER";
+}
+
+export const memberCorrectionCommandTypes = [
+  "CORRECT_MEMBER_PROFILE",
+  "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+  "BACKFILL_HISTORICAL_MEMBERSHIP",
+  "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
+] as const satisfies readonly CommandCapability[];
+
+export type MemberCorrectionCommandType = (typeof memberCorrectionCommandTypes)[number];
+
+export function availableMemberCorrectionCommandTypes(
+  canRun: (commandType: MemberCorrectionCommandType) => boolean
+): MemberCorrectionCommandType[] {
+  return memberCorrectionCommandTypes.filter(canRun);
+}
+
+export interface MembershipReconversionStayCandidate {
+  order: OrderRowDto;
+  primaryOccupant: Pick<OrderViewDto["occupants"][number], "fullName" | "nickname" | "phone" | "documentNumber">;
+}
+
+function isMembershipReconversionStayRow(order: OrderRowDto): boolean {
+  return order.status === "CHECKED_OUT"
+    && order.stay_status === "COMPLETED"
+    && order.booking_channel_code === "WECOM"
+    && !order.member_id
+    && !order.member_contract_id;
+}
+
+export async function loadMembershipReconversionStayCandidates(
+  orders: OrderRowDto[],
+  loadOrder: (orderId: string) => Promise<Pick<OrderViewDto, "order" | "occupants">>
+): Promise<MembershipReconversionStayCandidate[]> {
+  const candidateOrders = orders.filter(isMembershipReconversionStayRow);
+  const views = await Promise.allSettled(candidateOrders.map((order) => loadOrder(order.id)));
+  const loadedCandidates = candidateOrders.flatMap((order, index) => {
+    const loaded = views[index]!;
+    if (loaded.status === "rejected") return [];
+    const view = loaded.value;
+    if (view.order.id !== order.id || view.order.property_id !== order.property_id) {
+      throw new Error("载入的住宿详情与订单列表不一致");
+    }
+    const primaryOccupant = view.occupants.find((occupant) => occupant.role === "PRIMARY");
+    return primaryOccupant ? [{ order, primaryOccupant }] : [];
+  });
+  const firstFailure = views.find((loaded) => loaded.status === "rejected");
+  if (candidateOrders.length > 0 && views.every((loaded) => loaded.status === "rejected") && firstFailure?.status === "rejected") {
+    throw firstFailure.reason;
+  }
+  return loadedCandidates;
+}
+
+export function eligibleMembershipReconversionStays(
+  candidates: MembershipReconversionStayCandidate[],
+  memberPhone: string,
+  memberIdentityCardNumber: string | null
+): MembershipReconversionStayCandidate[] {
+  const normalizedMemberPhone = normalizeStayUpgradePhone(memberPhone);
+  const normalizedMemberIdentity = memberIdentityCardNumber?.trim().toUpperCase() ?? "";
+  if (!normalizedMemberPhone) return [];
+  return candidates.filter(({ order, primaryOccupant }) => {
+    if (!isMembershipReconversionStayRow(order)) return false;
+    const sourcePhone = normalizeStayUpgradePhone(primaryOccupant.phone);
+    const sourceIdentity = primaryOccupant.documentNumber?.trim().toUpperCase() ?? "";
+    if (sourcePhone !== normalizedMemberPhone) return false;
+    if (sourceIdentity && normalizedMemberIdentity && sourceIdentity !== normalizedMemberIdentity) return false;
+    return true;
+  });
+}
+
+export function currentOrFirstCandidateId(currentId: string, candidateIds: readonly string[]): string {
+  return candidateIds.includes(currentId) ? currentId : candidateIds[0] ?? "";
 }
 
 export function formalEntitlementLotIds(membershipOrders: MembershipOrderSummaryDto[]): Set<string> {
@@ -189,9 +268,11 @@ export function parseEntitlementBalance(value: string): number | undefined {
 export function isEntitlementLotActive(
   contract: Pick<MemberContractDto, "status" | "valid_from" | "valid_until"> | undefined,
   lotExpiresOn: string,
-  asOfDate: string
+  asOfDate: string,
+  lotStatus: "ACTIVE" | "VOIDED" = "ACTIVE"
 ): boolean {
-  return contract?.status === "ACTIVE"
+  return lotStatus === "ACTIVE"
+    && contract?.status === "ACTIVE"
     && contract.valid_from <= asOfDate
     && contract.valid_until >= asOfDate
     && lotExpiresOn >= asOfDate;
@@ -335,7 +416,11 @@ function MembershipPaymentDialog({ propertyId, summary, correction, draft, onClo
 }) {
   const draftAmount = draft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? draft.input.correctedAmountMinor : draft?.input.amountMinor;
   const draftReference = draft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? draft.input.correctedTransactionReference : draft?.input.transactionReference;
-  const [amountYuan, setAmountYuan] = useState(() => typeof draftAmount === "number" ? String(draftAmount / 100) : correction ? String(correction.amount_minor / 100) : "");
+  const [amountYuan, setAmountYuan] = useState(() => typeof draftAmount === "number"
+    ? String(draftAmount / 100)
+    : correction
+      ? String(correction.amount_minor / 100)
+      : String(Math.max(0, -summary.paymentDifferenceMinor) / 100));
   const [transactionReference, setTransactionReference] = useState(() => typeof draftReference === "string" ? draftReference : correction?.transaction_reference ?? "");
   const [note, setNote] = useState(() => typeof draft?.input.note === "string" ? draft.input.note : "");
   const [validationError, setValidationError] = useState<string>();
@@ -357,12 +442,12 @@ function MembershipPaymentDialog({ propertyId, summary, correction, draft, onClo
       input: { propertyId, membershipOrderId: summary.order.id, originalPaymentFactId: correction.fact_id, correctedAmountMinor: amountMinor, correctedTransactionReference: transactionReference.trim(), ...(note.trim() ? { note: note.trim() } : {}) }
     } : {
       commandType: "RECORD_MEMBERSHIP_PAYMENT",
-      title: "登记企微收款",
-      description: "确认本次独立企微收款的金额和交易单号。",
+      title: "收款",
+      description: "请核对本次企业微信实际收款的金额和交易单号。",
       input: { propertyId, membershipOrderId: summary.order.id, amountMinor, transactionReference: transactionReference.trim(), ...(note.trim() ? { note: note.trim() } : {}) }
     });
   }
-  return <Modal title={correction ? "更正企微收款" : "登记企微收款"} onClose={onClose} footer={null}>
+  return <Modal title={correction ? "更正企微收款" : "收款"} onClose={onClose} footer={null}>
     <form className="modal-form" onSubmit={submit}>
       <div className="form-grid">
         <label>收款金额（人民币元）<input type="number" min="0.01" step="0.01" inputMode="decimal" value={amountYuan} onChange={(event) => { setAmountYuan(event.target.value); setValidationError(undefined); }} required data-testid="membership-payment-yuan" /></label>
@@ -405,13 +490,19 @@ function MemberList({ members, selectedMemberId, onSelect }: {
   </section>;
 }
 
-function MemberProfile({ member }: { member: MemberViewDto }) {
+export function MemberProfile({ member, canCorrect, disabled, onCorrect }: {
+  member: MemberViewDto;
+  canCorrect: boolean;
+  disabled: boolean;
+  onCorrect: () => void;
+}) {
   return <section className="member-profile-panel" aria-labelledby="member-profile-heading">
     <div className="section-title-row">
       <div>
         <span className="section-kicker">会员档案</span>
         <h2 id="member-profile-heading">{member.member.full_name}</h2>
       </div>
+      {canCorrect ? <button type="button" className="button button-secondary" disabled={disabled} onClick={onCorrect} data-testid="open-member-corrections"><FilePenLine aria-hidden="true" size={17} />修改会员记录</button> : null}
     </div>
     <dl className="member-profile-fields">
       <div><dt>姓名</dt><dd>{member.member.full_name}</dd></div>
@@ -421,6 +512,353 @@ function MemberProfile({ member }: { member: MemberViewDto }) {
       <div><dt>微信号</dt><dd>{member.member.wechat}</dd></div>
     </dl>
   </section>;
+}
+
+const memberProfileAuditFieldLabels = {
+  fullName: "姓名",
+  nickname: "昵称",
+  identityCardNumber: "身份证号",
+  phone: "手机号",
+  wechat: "微信号"
+} as const;
+
+function maskedMemberAuditValue(field: keyof typeof memberProfileAuditFieldLabels, value: string | null): string {
+  if (!value) return "未填写";
+  if (field === "phone") return value.length > 7 ? `${value.slice(0, 3)}****${value.slice(-4)}` : "****";
+  if (field === "identityCardNumber") return `${"*".repeat(Math.max(4, value.length - 4))}${value.slice(-4)}`;
+  if (field === "wechat") return value.length > 3 ? `${value.slice(0, 1)}***${value.slice(-2)}` : "***";
+  return value;
+}
+
+function memberProfileAuditValues(
+  correction: MemberViewDto["profileCorrections"][number],
+  field: keyof typeof memberProfileAuditFieldLabels
+): { before: string; after: string } {
+  const keys = {
+    fullName: ["prior_full_name", "corrected_full_name"],
+    nickname: ["prior_nickname", "corrected_nickname"],
+    identityCardNumber: ["prior_identity_card_number", "corrected_identity_card_number"],
+    phone: ["prior_phone", "corrected_phone"],
+    wechat: ["prior_wechat", "corrected_wechat"]
+  } as const;
+  const [beforeKey, afterKey] = keys[field];
+  return {
+    before: maskedMemberAuditValue(field, correction[beforeKey]),
+    after: maskedMemberAuditValue(field, correction[afterKey])
+  };
+}
+
+function memberCorrectionAuditMeta(row: { actor: { displayName: string }; created_at: string; evidence_note: string; command_id: string }) {
+  return <>
+    <p>{row.evidence_note}</p>
+    <small>{row.actor.displayName} · 系统记录 {formatDateTime(row.created_at)}</small>
+  </>;
+}
+
+export function MemberCorrectionHistoryPanel({ view }: { view: MemberViewDto }) {
+  const entries = [
+    ...view.profileCorrections.map((row) => ({ kind: "PROFILE" as const, row })),
+    ...view.effectiveDateCorrections.map((row) => ({ kind: "EFFECTIVE_DATE" as const, row })),
+    ...view.historicalMembershipBackfills.map((row) => ({ kind: "BACKFILL" as const, row })),
+    ...view.paymentReclassifications.map((row) => ({ kind: "RECLASSIFICATION" as const, row })),
+    ...view.voidReconversions.map((row) => ({ kind: "VOID_RECONVERSION" as const, row }))
+  ].sort((left, right) => right.row.created_at.localeCompare(left.row.created_at));
+
+  if (entries.length === 0) return null;
+  return <section className="member-correction-history" aria-labelledby="member-correction-history-heading" data-testid="member-correction-history">
+    <div className="section-title-row">
+      <div><span className="section-kicker">审计记录</span><h2 id="member-correction-history-heading">修改与补录记录</h2></div>
+      <span>{entries.length} 条</span>
+    </div>
+    <ol>
+      {entries.map((entry) => {
+        if (entry.kind === "PROFILE") return <li key={entry.row.id}>
+          <strong>会员资料修改</strong>
+          <dl>{entry.row.changed_fields.map((field) => {
+            const values = memberProfileAuditValues(entry.row, field);
+            return <div key={field}><dt>{memberProfileAuditFieldLabels[field]}</dt><dd>{values.before} → {values.after}</dd></div>;
+          })}</dl>
+          {memberCorrectionAuditMeta(entry.row)}
+        </li>;
+        if (entry.kind === "EFFECTIVE_DATE") return <li key={entry.row.id}>
+          <strong>会员生效日修改</strong>
+          <dl>
+            <div><dt>合同有效期</dt><dd>{formatDate(entry.row.prior_valid_from)} 至 {formatDate(entry.row.prior_valid_until)} → {formatDate(entry.row.corrected_valid_from)} 至 {formatDate(entry.row.corrected_valid_until)}</dd></div>
+          </dl>
+          {memberCorrectionAuditMeta(entry.row)}
+        </li>;
+        if (entry.kind === "BACKFILL") return <li key={entry.row.id}>
+          <strong>历史办卡补录</strong>
+          <dl>
+            <div><dt>会员产品</dt><dd>{entry.row.product_name}</dd></div>
+            <div><dt>会员开始日期</dt><dd>{formatDate(entry.row.actual_membership_date)}</dd></div>
+            <div><dt>合同有效期</dt><dd>{formatDate(entry.row.actual_membership_date)} 至 {formatDate(entry.row.valid_until)}</dd></div>
+            <div><dt>有效期规则</dt><dd>{entry.row.validity_period === "P1Y" ? "1 年" : entry.row.validity_period}</dd></div>
+            <div><dt>成交价与权益</dt><dd>{formatMinor(entry.row.agreed_price_minor, entry.row.currency)} · {entitlementLabel(entry.row.entitlement_unit_kind, entry.row.entitlement_units)}</dd></div>
+            <div><dt>企业微信收款日期</dt><dd>{formatDate(entry.row.business_date)}</dd></div>
+            <div><dt>交易单号</dt><dd><code>{entry.row.transaction_reference}</code></dd></div>
+          </dl>
+          {memberCorrectionAuditMeta(entry.row)}
+        </li>;
+        if (entry.kind === "RECLASSIFICATION") return <li key={entry.row.id}>
+          <strong>错误收款已冲销</strong>
+          <dl>
+            <div><dt>原错误收款冲销</dt><dd>{formatMinor(entry.row.amount_minor, entry.row.currency)}</dd></div>
+            <div><dt>处理结果</dt><dd>原错误收款不再计入会员实收，也未计入新会员订单</dd></div>
+          </dl>
+          {memberCorrectionAuditMeta(entry.row)}
+        </li>;
+        return <li key={entry.row.id}>
+          <strong>撤销错误办卡并重新升级</strong>
+          <dl>
+            <div><dt>会员开始日期</dt><dd>{formatDate(entry.row.actual_membership_date)}</dd></div>
+            <div><dt>系统合同期</dt><dd>{formatDate(entry.row.actual_membership_date)} 至 {formatDate(entry.row.valid_until)}</dd></div>
+            <div><dt>原收款冲销</dt><dd>{formatMinor(entry.row.old_direct_collection_total_minor, entry.row.currency)}</dd></div>
+            <div><dt>住宿收款转入</dt><dd>{formatMinor(entry.row.stay_transfer_total_minor, entry.row.currency)}</dd></div>
+            <div><dt>历史核销</dt><dd>{entry.row.service_dates.length} 夜</dd></div>
+            {entry.row.replacement_business_date ? <div><dt>企业微信差额收款日期</dt><dd>{formatDate(entry.row.replacement_business_date)}</dd></div> : null}
+            {entry.row.replacement_transaction_reference ? <div><dt>差额企微交易单号</dt><dd><code>{entry.row.replacement_transaction_reference}</code></dd></div> : null}
+          </dl>
+          <Link className="room-status-text-button" to={`/orders/${encodeURIComponent(entry.row.source_order_id)}`}>查看来源住宿</Link>
+          {memberCorrectionAuditMeta(entry.row)}
+        </li>;
+      })}
+    </ol>
+  </section>;
+}
+
+const memberCorrectionLabels: Record<MemberCorrectionCommandType, string> = {
+  CORRECT_MEMBER_PROFILE: "修改会员资料",
+  CORRECT_MEMBERSHIP_EFFECTIVE_DATE: "修改会员生效日",
+  BACKFILL_HISTORICAL_MEMBERSHIP: "补录历史办卡",
+  VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY: "撤销错误办卡并重新升级"
+};
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function membershipOrderOptionLabel(summary: MembershipOrderSummaryDto): string {
+  const dates = summary.order.valid_from && summary.order.valid_until
+    ? ` · ${formatDate(summary.order.valid_from)} 至 ${formatDate(summary.order.valid_until)}`
+    : "";
+  return `${summary.order.product_name}${dates}`;
+}
+
+function stayOrderOptionLabel(candidate: MembershipReconversionStayCandidate): string {
+  const location = candidate.order.current_unit_code ? ` · ${candidate.order.current_unit_code}` : "";
+  const currentPrimaryGuest = {
+    fullName: candidate.primaryOccupant.fullName,
+    nickname: candidate.primaryOccupant.nickname
+  };
+  return `${guestName(currentPrimaryGuest)} · ${formatDate(candidate.order.arrival_date)} 至 ${formatDate(candidate.order.departure_date)}${location}`;
+}
+
+export function MemberCorrectionDialog({ propertyId, view, availableCommands, stayOrders, stayOrdersLoading, draft, onClose, onSubmit }: {
+  propertyId: string;
+  view: MemberViewDto;
+  availableCommands: MemberCorrectionCommandType[];
+  stayOrders: MembershipReconversionStayCandidate[];
+  stayOrdersLoading: boolean;
+  draft?: CommandRequest;
+  onClose: () => void;
+  onSubmit: (request: CommandRequest) => void;
+}) {
+  const draftCommand = availableCommands.includes(draft?.commandType as MemberCorrectionCommandType)
+    ? draft?.commandType as MemberCorrectionCommandType
+    : undefined;
+  const [mode, setMode] = useState<MemberCorrectionCommandType>(() => draftCommand ?? availableCommands[0]!);
+  const correctedProfileDraft = recordValue(draft?.input.correctedProfile);
+  const paymentDraft = recordValue(draft?.input.payment);
+  const replacementDraft = recordValue(draft?.input.replacementDirectPayment);
+  const activeOrders = view.membershipOrders.filter(({ order }) => order.status === "ACTIVE");
+  const eligibleStays = eligibleMembershipReconversionStays(stayOrders, view.member.phone, view.member.identity_card_number);
+  const [fullName, setFullName] = useState(() => typeof correctedProfileDraft?.fullName === "string" ? correctedProfileDraft.fullName : view.member.full_name);
+  const [nickname, setNickname] = useState(() => typeof correctedProfileDraft?.nickname === "string" ? correctedProfileDraft.nickname : view.member.nickname);
+  const [identityCardNumber, setIdentityCardNumber] = useState(() => typeof correctedProfileDraft?.identityCardNumber === "string" ? correctedProfileDraft.identityCardNumber : view.member.identity_card_number ?? "");
+  const [phone, setPhone] = useState(() => typeof correctedProfileDraft?.phone === "string" ? correctedProfileDraft.phone : view.member.phone);
+  const [wechat, setWechat] = useState(() => typeof correctedProfileDraft?.wechat === "string" ? correctedProfileDraft.wechat : view.member.wechat);
+  const [membershipOrderId, setMembershipOrderId] = useState(() => typeof draft?.input.membershipOrderId === "string" ? draft.input.membershipOrderId : activeOrders[0]?.order.id ?? "");
+  const [membershipProductId, setMembershipProductId] = useState(() => typeof draft?.input.membershipProductId === "string" ? draft.input.membershipProductId : view.membershipProducts[0]?.id ?? "");
+  const [actualMembershipDate, setActualMembershipDate] = useState(() => typeof draft?.input.actualMembershipDate === "string" ? draft.input.actualMembershipDate : "");
+  const [paymentAmountYuan, setPaymentAmountYuan] = useState(() => typeof paymentDraft?.amountMinor === "number" ? String(paymentDraft.amountMinor / 100) : "");
+  const [paymentDate, setPaymentDate] = useState(() => typeof paymentDraft?.businessDate === "string" ? paymentDraft.businessDate : "");
+  const [paymentReference, setPaymentReference] = useState(() => typeof paymentDraft?.transactionReference === "string" ? paymentDraft.transactionReference : "");
+  const [paymentNote, setPaymentNote] = useState(() => typeof paymentDraft?.note === "string" ? paymentDraft.note : "");
+  const [erroneousMembershipOrderId, setErroneousMembershipOrderId] = useState(() => typeof draft?.input.erroneousMembershipOrderId === "string" ? draft.input.erroneousMembershipOrderId : activeOrders[0]?.order.id ?? "");
+  const [sourceStayOrderId, setSourceStayOrderId] = useState(() => typeof draft?.input.sourceStayOrderId === "string" ? draft.input.sourceStayOrderId : eligibleStays[0]?.order.id ?? "");
+  const [hasReplacementPayment, setHasReplacementPayment] = useState(Boolean(replacementDraft));
+  const [replacementPaymentDate, setReplacementPaymentDate] = useState(() => typeof replacementDraft?.businessDate === "string" ? replacementDraft.businessDate : "");
+  const [replacementReference, setReplacementReference] = useState(() => typeof replacementDraft?.transactionReference === "string" ? replacementDraft.transactionReference : "");
+  const [evidenceNote, setEvidenceNote] = useState(() => typeof draft?.input.evidenceNote === "string" ? draft.input.evidenceNote : "");
+  const [validationError, setValidationError] = useState<string>();
+  const selectedErroneousMembershipOrderId = currentOrFirstCandidateId(erroneousMembershipOrderId, activeOrders.map(({ order }) => order.id));
+  const selectedSourceStayOrderId = currentOrFirstCandidateId(sourceStayOrderId, eligibleStays.map(({ order }) => order.id));
+
+  function correctionRequest(commandType: MemberCorrectionCommandType, title: string, description: string, input: Record<string, unknown>): CommandRequest {
+    return {
+      commandType,
+      title,
+      description,
+      input,
+      initialReason: { code: "DATA_ENTRY_CORRECTION", note: evidenceNote.trim() }
+    };
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setValidationError(undefined);
+    const evidence = evidenceNote.trim();
+    if (!evidence) {
+      setValidationError("请填写事实依据和修改原因");
+      return;
+    }
+    if (mode === "CORRECT_MEMBER_PROFILE") {
+      const expectedPriorProfile = {
+        fullName: view.member.full_name,
+        nickname: view.member.nickname,
+        identityCardNumber: view.member.identity_card_number,
+        phone: view.member.phone,
+        wechat: view.member.wechat
+      };
+      const correctedProfile = {
+        fullName: fullName.trim(),
+        nickname: nickname.trim(),
+        identityCardNumber: identityCardNumber.trim() ? identityCardNumber.trim().toUpperCase() : null,
+        phone: phone.trim(),
+        wechat: wechat.trim()
+      };
+      if (!correctedProfile.fullName || !correctedProfile.nickname || !correctedProfile.phone || !correctedProfile.wechat) {
+        setValidationError("姓名、昵称、手机号和微信号均不能为空");
+        return;
+      }
+      if (JSON.stringify(expectedPriorProfile) === JSON.stringify(correctedProfile)) {
+        setValidationError("请至少修改一项会员资料");
+        return;
+      }
+      onSubmit(correctionRequest(mode, "修改会员资料", "请核对本次修改内容。", {
+        propertyId,
+        memberId: view.member.id,
+        expectedPriorProfile,
+        correctedProfile,
+        evidenceNote: evidence
+      }));
+      return;
+    }
+    if (!actualMembershipDate) {
+      setValidationError("请填写会员开始日期");
+      return;
+    }
+    if (mode === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") {
+      if (!membershipOrderId) {
+        setValidationError("当前会员没有可以修改生效日的有效会员订单");
+        return;
+      }
+      onSubmit(correctionRequest(mode, "修改会员生效日", "请核对会员开始日期和系统重新计算的结果。", {
+        propertyId,
+        membershipOrderId,
+        actualMembershipDate,
+        evidenceNote: evidence
+      }));
+      return;
+    }
+    if (mode === "BACKFILL_HISTORICAL_MEMBERSHIP") {
+      const amountMinor = yuanInputToMinor(paymentAmountYuan);
+      if (!membershipProductId || !amountMinor || !paymentDate || !paymentReference.trim()) {
+        setValidationError("请完整填写会员产品、会员开始日期、实际收款金额、企业微信收款日期和交易单号");
+        return;
+      }
+      onSubmit(correctionRequest(mode, "补录历史办卡", "请核对实际办卡和企业微信收款记录。", {
+        propertyId,
+        memberId: view.member.id,
+        membershipProductId,
+        actualMembershipDate,
+        payment: {
+          amountMinor,
+          businessDate: paymentDate,
+          transactionReference: paymentReference.trim(),
+          ...(paymentNote.trim() ? { note: paymentNote.trim() } : {})
+        },
+        evidenceNote: evidence
+      }));
+      return;
+    }
+    if (!selectedErroneousMembershipOrderId || !selectedSourceStayOrderId) {
+      setValidationError("必须选择错误会员订单和对应的已完成历史住宿");
+      return;
+    }
+    if (hasReplacementPayment && (!replacementPaymentDate || !replacementReference.trim())) {
+      setValidationError("存在真实差额收款时，请填写企业微信收款日期和交易单号");
+      return;
+    }
+    onSubmit(correctionRequest(mode, "撤销错误办卡并重新升级", "请核对撤销、收款和重新升级结果。", {
+      propertyId,
+      erroneousMembershipOrderId: selectedErroneousMembershipOrderId,
+      sourceStayOrderId: selectedSourceStayOrderId,
+      actualMembershipDate,
+      ...(hasReplacementPayment ? { replacementDirectPayment: { businessDate: replacementPaymentDate, transactionReference: replacementReference.trim() } } : {}),
+      evidenceNote: evidence
+    }));
+  }
+
+  return <Modal title="修改会员记录" onClose={onClose} footer={null}>
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-grid">
+        <label className="span-two">修改类型<select value={mode} onChange={(event) => { setMode(event.target.value as MemberCorrectionCommandType); setValidationError(undefined); }} data-testid="member-correction-mode">
+          {availableCommands.map((commandType) => <option key={commandType} value={commandType}>{memberCorrectionLabels[commandType]}</option>)}
+        </select></label>
+
+        {mode === "CORRECT_MEMBER_PROFILE" ? <>
+          <label>姓名<input value={fullName} onChange={(event) => setFullName(event.target.value)} required maxLength={200} data-testid="correct-member-full-name" /></label>
+          <label>昵称<input value={nickname} onChange={(event) => setNickname(event.target.value)} required maxLength={200} data-testid="correct-member-nickname" /></label>
+          <label>身份证号（选填）<input value={identityCardNumber} onChange={(event) => setIdentityCardNumber(event.target.value)} maxLength={200} data-testid="correct-member-identity" /></label>
+          <label>手机号<input value={phone} onChange={(event) => setPhone(event.target.value)} required maxLength={200} inputMode="tel" data-testid="correct-member-phone" /></label>
+          <label className="span-two">微信号<input value={wechat} onChange={(event) => setWechat(event.target.value)} required maxLength={200} data-testid="correct-member-wechat" /></label>
+        </> : null}
+
+        {mode === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE" ? <>
+          <label className="span-two">会员订单<select value={membershipOrderId} onChange={(event) => setMembershipOrderId(event.target.value)} required data-testid="effective-date-membership-order">
+            {!activeOrders.length ? <option value="">没有有效会员订单</option> : activeOrders.map((summary) => <option key={summary.order.id} value={summary.order.id}>{membershipOrderOptionLabel(summary)}</option>)}
+          </select></label>
+          <label className="span-two"><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={actualMembershipDate} onChange={(event) => setActualMembershipDate(event.target.value)} required data-testid="actual-membership-date" /></label>
+          <div className="membership-product-summary span-two" aria-label="系统保持一致的会员事实"><div><span>合同截止日</span><strong>系统计算</strong></div><div><span>权益有效期</span><strong>系统计算</strong></div><div><span>资金与产品</span><strong>保持不变</strong></div><div><span>已用与剩余权益</span><strong>保持不变</strong></div></div>
+        </> : null}
+
+        {mode === "BACKFILL_HISTORICAL_MEMBERSHIP" ? <>
+          <label className="span-two">会员产品<select value={membershipProductId} onChange={(event) => setMembershipProductId(event.target.value)} required data-testid="backfill-membership-product">
+            {view.membershipProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {entitlementLabel(product.entitlement_unit_kind, product.entitlement_units)}</option>)}
+          </select></label>
+          <label><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={actualMembershipDate} onChange={(event) => setActualMembershipDate(event.target.value)} required data-testid="actual-membership-date" /></label>
+          <label>真实企微收款金额（人民币元）<input type="number" min="0.01" step="0.01" inputMode="decimal" value={paymentAmountYuan} onChange={(event) => setPaymentAmountYuan(event.target.value)} required data-testid="historical-membership-payment-yuan" /></label>
+          <label><span className="form-label-with-hint">企业微信收款日期<InfoHint label="企业微信收款日期说明" text={membershipPaymentDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} required data-testid="historical-membership-payment-date" /></label>
+          <label>企微交易单号<input value={paymentReference} onChange={(event) => setPaymentReference(event.target.value)} required maxLength={200} data-testid="historical-membership-payment-reference" /></label>
+          <label className="span-two">收款备注（可选）<textarea rows={2} value={paymentNote} onChange={(event) => setPaymentNote(event.target.value)} maxLength={1000} /></label>
+        </> : null}
+
+        {mode === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY" ? <>
+          <div className="membership-payment-difference span-two" role="note"><strong>这不是退款</strong><small>这里只处理办卡记录错误且权益从未使用的情况。确实需要把钱退给会员时，不能使用本操作。</small></div>
+          <label className="span-two">错误会员订单<select value={selectedErroneousMembershipOrderId} onChange={(event) => setErroneousMembershipOrderId(event.target.value)} required data-testid="erroneous-membership-order">
+            {!activeOrders.length ? <option value="">没有可选择的有效会员订单</option> : activeOrders.map((summary) => <option key={summary.order.id} value={summary.order.id}>{membershipOrderOptionLabel(summary)}</option>)}
+          </select></label>
+          <label className="span-two">对应历史住宿<select value={selectedSourceStayOrderId} onChange={(event) => setSourceStayOrderId(event.target.value)} required disabled={stayOrdersLoading} data-testid="membership-reconversion-source-stay">
+            {stayOrdersLoading ? <option value="">正在载入已完成住宿</option> : !eligibleStays.length ? <option value="">没有身份一致的已完成企微住宿</option> : eligibleStays.map((candidate) => <option key={candidate.order.id} value={candidate.order.id}>{stayOrderOptionLabel(candidate)}</option>)}
+          </select></label>
+          <label className="span-two"><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={actualMembershipDate} onChange={(event) => setActualMembershipDate(event.target.value)} required data-testid="actual-membership-date" /></label>
+          <label className="span-two check-row"><input type="checkbox" checked={hasReplacementPayment} onChange={(event) => setHasReplacementPayment(event.target.checked)} data-testid="has-replacement-direct-payment" /><span>存在一笔真实企微差额收款</span></label>
+          {hasReplacementPayment ? <>
+            <label><span className="form-label-with-hint">企业微信收款日期<InfoHint label="企业微信收款日期说明" text={membershipPaymentDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={replacementPaymentDate} onChange={(event) => setReplacementPaymentDate(event.target.value)} required data-testid="replacement-payment-date" /></label>
+            <label>企微交易单号<input value={replacementReference} onChange={(event) => setReplacementReference(event.target.value)} required maxLength={200} data-testid="replacement-payment-reference" /></label>
+          </> : null}
+        </> : null}
+
+        <label className="span-two">事实依据和修改原因<textarea rows={4} value={evidenceNote} onChange={(event) => { setEvidenceNote(event.target.value); setValidationError(undefined); }} required maxLength={1000} data-testid="member-correction-evidence" /></label>
+      </div>
+      {validationError ? <InlineError error={new Error(validationError)} /> : null}
+      <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary"><CalendarClock aria-hidden="true" size={17} />生成只读核对</button></div>
+    </form>
+  </Modal>;
 }
 
 export function ledgerEntryLabel(
@@ -434,7 +872,8 @@ export function ledgerEntryLabel(
   if (entryType === "CONVERSION_CONSUME") return "住宿转会员核销";
   if (entryType === "RESTORE") return "权益恢复";
   if (entryType === "EXPIRE") return "权益到期";
-  return "权益到期";
+  if (entryType === "VOID") return "错误权益作废";
+  return entryType;
 }
 
 export function ledgerEntryDisplayQuantity(
@@ -442,6 +881,7 @@ export function ledgerEntryDisplayQuantity(
   quantityDelta: number
 ): { label: string; quantity: number; prefix: string; tone: string } {
   if (entryType === "CONSUME" || entryType === "CONVERSION_CONSUME") return { label: "本次核销", quantity: Math.abs(quantityDelta) || 1, prefix: "", tone: "is-negative" };
+  if (entryType === "VOID") return { label: "本次作废", quantity: Math.abs(quantityDelta), prefix: "", tone: "is-negative" };
   return {
     label: "余额",
     quantity: quantityDelta,
@@ -552,10 +992,11 @@ function MemberEntitlementsPanel({ view, disabled, targetContractId, canCorrect,
         const contract = contractById.get(lot.contract_id);
         const available = balanceByLot.get(lot.id) ?? 0;
         const unit = lot.unit_kind === "ROOM_NIGHT" ? "间夜" : "床夜";
-        const active = isEntitlementLotActive(contract, lot.expires_on, view.balanceAsOfDate);
+        const active = isEntitlementLotActive(contract, lot.expires_on, view.balanceAsOfDate, lot.status);
+        const voided = lot.status === "VOIDED" || contract?.status === "VOIDED" || order.status === "VOIDED";
         const targeted = lot.contract_id === targetContractId;
         return <article key={lot.id} className="member-entitlement-lot" data-testid={targeted ? "member-entitlement-target" : "member-entitlement-lot"} {...(targeted ? { ref: targetArticleRef, tabIndex: -1, "aria-current": "true" as const } : {})}>
-          <div className="member-entitlement-heading"><div>{targeted ? <span className="section-kicker">当前住宿使用</span> : null}<h3>{order.product_name}</h3><p>{active ? "有效" : "已失效"}</p></div><strong>{available} {unit}</strong></div>
+          <div className="member-entitlement-heading"><div>{targeted ? <span className="section-kicker">当前住宿使用</span> : null}<h3>{order.product_name}</h3><p>{voided ? "已作废" : active ? "有效" : "已失效"}</p></div><strong>{available} {unit}</strong></div>
           <dl>
             <div><dt>会员类型</dt><dd>{order.product_name}</dd></div>
             <div><dt>有效期</dt><dd>{contract ? `${formatDate(contract.valid_from)} 至 ${formatDate(contract.valid_until)}` : `至 ${formatDate(lot.expires_on)}`}</dd></div>
@@ -626,13 +1067,14 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
     {!view.membershipOrders.length ? <EmptyState title="尚无会员订单" detail="办理会员后，可登记多笔企微收款并由工作人员明确生效。" /> : <div className="membership-order-list">
       {view.membershipOrders.map((summary) => {
         const { order, paymentFacts } = summary;
+        const canCollect = canRecordPayment && order.status !== "VOIDED" && summary.paymentDifferenceMinor < 0;
         const targeted = order.id === targetMembershipOrderId;
         const reversedIds = new Set(paymentFacts.filter((fact) => fact.reverses_fact_id).map((fact) => fact.reverses_fact_id));
         const activeCollections = paymentFacts.filter((fact) => fact.fact_type === "COLLECTION" && !reversedIds.has(fact.fact_id));
         return <article className="membership-order-item" key={order.id} data-testid={targeted ? "membership-order-target" : "membership-order-item"} data-membership-order-id={order.id} {...(targeted ? { ref: targetOrderRef, tabIndex: -1, "aria-current": "true" as const } : {})}>
           <div className="membership-order-heading">
             <div>{targeted ? <span className="section-kicker">当前住宿升级</span> : null}<h3>{order.product_name}</h3><p>{entitlementLabel(order.entitlement_unit_kind, order.entitlement_units)} · {order.allowed_inventory_kind === "ROOM" ? "按房使用" : "按床使用"}</p></div>
-            <span className={`membership-status membership-status-${order.status.toLowerCase()}`}>{order.status === "ACTIVE" ? "已生效" : "待生效"}</span>
+            <span className={`membership-status membership-status-${order.status.toLowerCase()}`}>{order.status === "ACTIVE" ? "已生效" : order.status === "VOIDED" ? "已作废" : "待生效"}</span>
           </div>
           <dl className="membership-order-pricing">
             <div><dt>标价</dt><dd>{formatMinor(order.listed_price_minor, order.currency)}</dd></div>
@@ -661,6 +1103,7 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
                     <span>{formatMinor(fact.net_effect_minor, fact.currency)}</span>
                     {fact.transaction_reference ? <code>{fact.transaction_reference}</code> : null}
                     {fact.source_type === "STAY_COLLECTION_TRANSFER" && fact.source_order_id ? <Link className="inline-link" to={`/orders/${encodeURIComponent(fact.source_order_id)}`}>查看住宿订单</Link> : null}
+                    <small>收款日期 {formatDate(fact.business_date)} · 系统记录 {formatDateTime(fact.created_at)}</small>
                     {reversed ? <small>已由后续更正冲销</small> : fact.note ? <small>{fact.note}</small> : null}
                   </div>
                   {order.status === "DRAFT" && fact.fact_type === "COLLECTION" && !reversed && canCorrectPayment ? <button type="button" className="button button-secondary button-small" onClick={() => onCorrect(summary, fact)} disabled={disabled}><PencilLine aria-hidden="true" size={15} />更正</button> : null}
@@ -668,9 +1111,9 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
               })}
             </ol>}
           </section>
-          {order.status === "DRAFT" ? <div className="membership-order-actions">
-            {canRecordPayment ? <button type="button" className="button button-secondary" onClick={() => onPayment(summary)} disabled={disabled} data-testid="record-membership-payment"><CircleDollarSign aria-hidden="true" size={17} />登记企微收款</button> : null}
-            {canActivate ? <button type="button" className="button button-primary" onClick={() => onActivate(summary)} disabled={disabled} data-testid="activate-membership-order"><BadgeCheck aria-hidden="true" size={17} />生效会员订单</button> : null}
+          {canCollect || (order.status === "DRAFT" && canActivate) ? <div className="membership-order-actions">
+            {canCollect ? <button type="button" className="button button-secondary" onClick={() => onPayment(summary)} disabled={disabled} data-testid="record-membership-payment"><CircleDollarSign aria-hidden="true" size={17} />收款</button> : null}
+            {order.status === "DRAFT" && canActivate ? <button type="button" className="button button-primary" onClick={() => onActivate(summary)} disabled={disabled} data-testid="activate-membership-order"><BadgeCheck aria-hidden="true" size={17} />生效会员订单</button> : null}
           </div> : null}
         </article>;
       })}
@@ -694,6 +1137,8 @@ export function MembersPage() {
   const canCorrectMembershipPayment = principalCan(principal, propertyId, "CORRECT_MEMBERSHIP_PAYMENT");
   const canActivateMembershipOrder = principalCan(principal, propertyId, "ACTIVATE_MEMBERSHIP_ORDER");
   const canCorrectEntitlementBalance = principalCan(principal, propertyId, "CORRECT_MEMBER_ENTITLEMENT_BALANCE");
+  const availableMemberCorrections = availableMemberCorrectionCommandTypes((commandType) => principalCan(principal, propertyId, commandType));
+  const canCorrectMemberRecords = availableMemberCorrections.length > 0;
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [members, setMembers] = useState<MemberSummaryDto[]>([]);
@@ -711,6 +1156,9 @@ export function MembersPage() {
   const [paymentOrder, setPaymentOrder] = useState<MembershipOrderSummaryDto>();
   const [correctingPayment, setCorrectingPayment] = useState<{ summary: MembershipOrderSummaryDto; fact: MembershipPaymentFactDto }>();
   const [correctingEntitlement, setCorrectingEntitlement] = useState<{ lot: MemberViewDto["lots"][number]; currentBalance: number }>();
+  const [correctingMemberRecords, setCorrectingMemberRecords] = useState(false);
+  const [correctionStayOrders, setCorrectionStayOrders] = useState<MembershipReconversionStayCandidate[]>([]);
+  const [loadingCorrectionStays, setLoadingCorrectionStays] = useState(false);
   const [command, setCommand] = useState<CommandRequest>();
   const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
@@ -722,6 +1170,9 @@ export function MembersPage() {
     setPaymentOrder(undefined);
     setCorrectingPayment(undefined);
     setCorrectingEntitlement(undefined);
+    setCorrectingMemberRecords(false);
+    setCorrectionStayOrders([]);
+    setLoadingCorrectionStays(false);
     setCommand(undefined);
     setCommandDraft(undefined);
     setRecoveryDialogOpen(false);
@@ -803,6 +1254,8 @@ export function MembersPage() {
 
   function selectMember(memberId: string) {
     setSelectedMemberId(memberId);
+    setCorrectingMemberRecords(false);
+    setCommandDraft(undefined);
     setTargetContractId(undefined);
     setTargetMembershipOrderId(undefined);
     navigate(`/members?memberId=${encodeURIComponent(memberId)}`, { replace: true });
@@ -811,6 +1264,20 @@ export function MembersPage() {
   function refresh() {
     setRefreshToken((value) => value + 1);
     void refreshMeta();
+  }
+
+  function openMemberCorrections() {
+    if (!canCorrectMemberRecords || commandsBlocked) return;
+    setCorrectingMemberRecords(true);
+    setLoadingCorrectionStays(true);
+    api.orders(propertyId, "CHECKED_OUT")
+      .then((response) => loadMembershipReconversionStayCandidates(response.orders, (orderId) => api.order(orderId)))
+      .then(setCorrectionStayOrders)
+      .catch((nextError) => {
+        setCorrectionStayOrders([]);
+        setError(nextError);
+      })
+      .finally(() => setLoadingCorrectionStays(false));
   }
 
   function startCommand(request: CommandRequest) {
@@ -826,6 +1293,7 @@ export function MembersPage() {
     setPaymentOrder(undefined);
     setCorrectingPayment(undefined);
     setCorrectingEntitlement(undefined);
+    setCorrectingMemberRecords(false);
     startCommand(request);
   }
 
@@ -860,6 +1328,10 @@ export function MembersPage() {
       return;
     }
     if (!member) return;
+    if (memberCorrectionCommandTypes.includes(request.commandType as MemberCorrectionCommandType)) {
+      openMemberCorrections();
+      return;
+    }
     if (request.commandType === "CREATE_MEMBERSHIP_ORDER") {
       setCreatingMembershipOrder(true);
       return;
@@ -913,7 +1385,7 @@ export function MembersPage() {
     {loadingList ? <LoadingBlock label="正在载入会员列表" /> : !members.length ? <EmptyState title="未找到会员" detail="可更换搜索条件，或新建一位会员。" /> : <div className="member-directory">
       <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
-        <MemberProfile member={member} />
+        <MemberProfile member={member} canCorrect={canCorrectMemberRecords} disabled={commandsBlocked} onCorrect={openMemberCorrections} />
         <MemberEntitlementsPanel view={member} disabled={commandsBlocked} canCorrect={canCorrectEntitlementBalance} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
         <MembershipOrdersPanel
           view={member}
@@ -933,6 +1405,7 @@ export function MembersPage() {
             input: { propertyId, membershipOrderId: summary.order.id }
           })}
         />
+        <MemberCorrectionHistoryPanel view={member} />
       </div> : null}
     </div>}
 
@@ -944,6 +1417,17 @@ export function MembersPage() {
     {paymentOrder && canRecordMembershipPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={paymentOrder} {...(commandDraft?.commandType === "RECORD_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setPaymentOrder(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
     {correctingPayment && canCorrectMembershipPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={correctingPayment.summary} correction={correctingPayment.fact} {...(commandDraft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingPayment(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
     {correctingEntitlement && canCorrectEntitlementBalance ? <CorrectEntitlementBalanceDialog propertyId={propertyId} lot={correctingEntitlement.lot} currentBalance={correctingEntitlement.currentBalance} {...(commandDraft?.commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingEntitlement(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { setCorrectingEntitlement(undefined); submitBusinessCommand(request); }} /> : null}
+    {correctingMemberRecords && member && canCorrectMemberRecords ? <MemberCorrectionDialog
+      key={`${member.member.id}:${commandDraft?.commandType ?? "new"}`}
+      propertyId={propertyId}
+      view={member}
+      availableCommands={availableMemberCorrections}
+      stayOrders={correctionStayOrders}
+      stayOrdersLoading={loadingCorrectionStays}
+      {...(commandDraft && memberCorrectionCommandTypes.includes(commandDraft.commandType as MemberCorrectionCommandType) ? { draft: commandDraft } : {})}
+      onClose={() => { setCorrectingMemberRecords(false); setCommandDraft(undefined); }}
+      onSubmit={submitBusinessCommand}
+    /> : null}
     {command ? <CommandDialog
       key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}` : "new-member-command"}
       request={command}

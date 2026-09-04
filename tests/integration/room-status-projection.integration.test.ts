@@ -338,7 +338,7 @@ async function updateOrderIdentityForProjectionTest(
   }
 }
 
-async function recordFullCollectionForProjectionTest(orderId: string, prefix: string): Promise<void> {
+async function recordFullCollectionForProjectionTest(orderId: string, prefix: string): Promise<ReceiptDto> {
   const revision = await db.selectFrom("orders as order")
     .innerJoin("pricing_revisions as revision", "revision.id", "order.current_revision_id")
     .select("revision.current_contract_amount_minor as amountMinor")
@@ -348,7 +348,7 @@ async function recordFullCollectionForProjectionTest(orderId: string, prefix: st
   if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
     throw new Error(`Expected a positive current contract amount for ${prefix}`);
   }
-  await execute({
+  return execute({
     commandType: "RECORD_COLLECTION",
     input: {
       propertyId: demo.propertyId,
@@ -1225,6 +1225,7 @@ describe("PostgreSQL room-status projection", () => {
       orderArrivalDate: yesterday,
       orderDepartureDate: businessDate,
       status: "IN_HOUSE",
+      attention: "ARREARS",
       operationalAttention: "DUE_OUT",
       available: false,
       blocking: true,
@@ -1293,6 +1294,7 @@ describe("PostgreSQL room-status projection", () => {
       sourceStartDate: twoDaysAgo,
       sourceEndDate: yesterday,
       status: "IN_HOUSE",
+      attention: "ARREARS",
       operationalAttention: "OVERDUE_IN_HOUSE",
       available: true,
       blocking: false,
@@ -1329,12 +1331,17 @@ describe("PostgreSQL room-status projection", () => {
       startDate: twoDaysAgo,
       endDate: yesterday,
       status: "IN_HOUSE",
+      attention: null,
       operationalAttention: "OVERDUE_IN_HOUSE"
     });
     expect(overdueHistoricalInterval.endDate < businessDate).toBe(true);
 
     const departureUnit = unitIn(todayBoard, rooms[2]!.id);
-    expect(departureUnit.days[0]).toMatchObject({ serviceDate: businessDate, status: "IN_HOUSE", available: false });
+    expect(departureUnit.days[0]).toMatchObject({
+      serviceDate: businessDate,
+      status: "IN_HOUSE",
+      available: false
+    });
     expect(departureUnit.intervals).toEqual(expect.arrayContaining([expect.objectContaining({
       startDate: businessDate,
       endDate: tomorrow,
@@ -1343,6 +1350,7 @@ describe("PostgreSQL room-status projection", () => {
       orderArrivalDate: yesterday,
       orderDepartureDate: businessDate,
       status: "IN_HOUSE",
+      attention: "ARREARS",
       operationalAttention: "DUE_OUT",
       blocking: true,
       conflicts: [expect.objectContaining({
@@ -1361,12 +1369,14 @@ describe("PostgreSQL room-status projection", () => {
       expect.objectContaining({
         startDate: yesterday,
         endDate: businessDate,
+        attention: null,
         operationalAttention: null,
         conflicts: [expect.objectContaining({ blockingFactKind: "CLAIM", claimId: expect.any(String) })]
       }),
       expect.objectContaining({
         startDate: businessDate,
         endDate: tomorrow,
+        attention: "ARREARS",
         operationalAttention: "DUE_OUT",
         conflicts: [expect.objectContaining({ blockingFactKind: "DUE_OUT", claimId: null })]
       })
@@ -3587,6 +3597,199 @@ describe("PostgreSQL room-status projection", () => {
     });
   });
 
+  it("keeps ordinary WECOM arrears visible after check-in and clears or restores attention with funds", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const created = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "in-house-arrears"
+    });
+    const orderId = created.result!.orderId as string;
+
+    expect(intervalForOrder(await board({ arrivalDate: businessDate, departureDate }), demo.secondRoomId, orderId)).toMatchObject({
+      status: "RESERVED",
+      attention: "ARREARS"
+    });
+
+    await execute({
+      commandType: "CHECK_IN",
+      input: { propertyId: demo.propertyId, orderId }
+    }, "in-house-arrears-check-in");
+
+    const afterCheckIn = await board({ arrivalDate: businessDate, departureDate });
+    expect(intervalForOrder(afterCheckIn, demo.secondRoomId, orderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: "ARREARS",
+      available: false,
+      blocking: true
+    });
+    expect(taskForOrder(afterCheckIn, orderId)).toMatchObject({
+      taskKind: "IN_HOUSE",
+      status: "IN_HOUSE",
+      attention: "ARREARS"
+    });
+
+    const revision = await db.selectFrom("orders as order")
+      .innerJoin("pricing_revisions as revision", "revision.id", "order.current_revision_id")
+      .select("revision.current_contract_amount_minor as amountMinor")
+      .where("order.id", "=", orderId)
+      .executeTakeFirstOrThrow();
+    const collection = await execute({
+      commandType: "RECORD_COLLECTION",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: Number(revision.amountMinor),
+        method: "WECOM",
+        transactionReference: "ROOM-STATUS-IN-HOUSE-ARREARS-FULL",
+        note: "足额补收后清除在住欠款提示"
+      }
+    }, "in-house-arrears-full-collection");
+
+    const afterFullCollection = await board({ arrivalDate: businessDate, departureDate });
+    expect(intervalForOrder(afterFullCollection, demo.secondRoomId, orderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: null
+    });
+    expect(taskForOrder(afterFullCollection, orderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: null
+    });
+
+    await execute({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId,
+        amountMinor: 100,
+        referencesFactId: collection.factRefs[0]!,
+        method: "WECOM",
+        note: "退款后再次显示在住欠款提示"
+      }
+    }, "in-house-arrears-refund");
+
+    const afterRefund = await board({ arrivalDate: businessDate, departureDate });
+    expect(intervalForOrder(afterRefund, demo.secondRoomId, orderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: "ARREARS"
+    });
+    expect(taskForOrder(afterRefund, orderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: "ARREARS"
+    });
+  });
+
+  it("clears and restores due-out or overdue in-house arrears without extending occupancy", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const yesterday = shiftLocalDate(businessDate, -1);
+    const twoDaysAgo = shiftLocalDate(businessDate, -2);
+    const tomorrow = shiftLocalDate(businessDate, 1);
+    const dueOut = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: yesterday,
+      departureDate: businessDate,
+      prefix: "due-out-arrears-funds"
+    });
+    const overdue = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: twoDaysAgo,
+      departureDate: yesterday,
+      prefix: "overdue-in-house-arrears-funds"
+    });
+    const dueOutOrderId = dueOut.result!.orderId as string;
+    const overdueOrderId = overdue.result!.orderId as string;
+    await markOrderInHouseFixture(dueOutOrderId);
+    await markOrderInHouseFixture(overdueOrderId);
+
+    const initial = await board({ arrivalDate: businessDate, departureDate: tomorrow });
+    expect(intervalForOrder(initial, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: "ARREARS",
+      operationalAttention: "DUE_OUT",
+      available: false,
+      blocking: true
+    });
+    expect(taskForOrder(initial, dueOutOrderId)).toMatchObject({
+      taskKind: "DEPARTURE",
+      status: "IN_HOUSE",
+      attention: "ARREARS",
+      operationalAttention: "DUE_OUT"
+    });
+    expect(taskForOrder(initial, overdueOrderId)).toMatchObject({
+      taskKind: "EXCEPTION",
+      status: "IN_HOUSE",
+      attention: "ARREARS",
+      operationalAttention: "OVERDUE_IN_HOUSE"
+    });
+    expect(unitIn(initial, demo.roomId).intervals.some((interval) => interval.references
+      .some((reference) => reference.type === "ORDER" && reference.id === overdueOrderId))).toBe(false);
+    expect(unitIn(initial, demo.roomId).days[0]).toMatchObject({ available: true });
+
+    const dueOutCollection = await recordFullCollectionForProjectionTest(dueOutOrderId, "due-out-arrears-funds");
+    const overdueCollection = await recordFullCollectionForProjectionTest(overdueOrderId, "overdue-in-house-arrears-funds");
+    const afterFullCollection = await board({ arrivalDate: businessDate, departureDate: tomorrow });
+    expect(intervalForOrder(afterFullCollection, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: null,
+      operationalAttention: "DUE_OUT"
+    });
+    expect(taskForOrder(afterFullCollection, dueOutOrderId)).toMatchObject({ attention: null });
+    expect(taskForOrder(afterFullCollection, overdueOrderId)).toMatchObject({ attention: null });
+    expect(unitIn(afterFullCollection, demo.roomId).intervals.some((interval) => interval.references
+      .some((reference) => reference.type === "ORDER" && reference.id === overdueOrderId))).toBe(false);
+    expect(unitIn(afterFullCollection, demo.roomId).days[0]).toMatchObject({ available: true });
+
+    await execute({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: dueOutOrderId,
+        amountMinor: 100,
+        referencesFactId: dueOutCollection.factRefs[0]!,
+        method: "WECOM",
+        note: "退款后恢复今日待退房欠款提示"
+      }
+    }, "due-out-arrears-funds-refund");
+    await execute({
+      commandType: "RECORD_REFUND",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: overdueOrderId,
+        amountMinor: 100,
+        referencesFactId: overdueCollection.factRefs[0]!,
+        method: "WECOM",
+        note: "退款后恢复逾期未退欠款提示"
+      }
+    }, "overdue-in-house-arrears-funds-refund");
+    const afterRefund = await board({ arrivalDate: businessDate, departureDate: tomorrow });
+    expect(intervalForOrder(afterRefund, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+      status: "IN_HOUSE",
+      attention: "ARREARS",
+      operationalAttention: "DUE_OUT"
+    });
+    expect(taskForOrder(afterRefund, dueOutOrderId)).toMatchObject({ attention: "ARREARS" });
+    expect(taskForOrder(afterRefund, overdueOrderId)).toMatchObject({ attention: "ARREARS" });
+    expect(unitIn(afterRefund, demo.roomId).intervals.some((interval) => interval.references
+      .some((reference) => reference.type === "ORDER" && reference.id === overdueOrderId))).toBe(false);
+    expect(unitIn(afterRefund, demo.roomId).days[0]).toMatchObject({ available: true });
+
+    const historical = await board({ arrivalDate: twoDaysAgo, departureDate: businessDate });
+    expect(intervalForOrder(historical, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+      startDate: yesterday,
+      endDate: businessDate,
+      status: "IN_HOUSE",
+      attention: null
+    });
+    expect(intervalForOrder(historical, demo.roomId, overdueOrderId)).toMatchObject({
+      startDate: twoDaysAgo,
+      endDate: yesterday,
+      status: "IN_HOUSE",
+      attention: null
+    });
+  });
+
   it("limits active arrears attention to eligible service dates and excludes external, free, and member orders", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const priorDate = shiftLocalDate(businessDate, -1);
@@ -3694,6 +3897,67 @@ describe("PostgreSQL room-status projection", () => {
       freeStayCategoryCode: null,
       freeStayReason: null
     });
+  });
+
+  it("keeps external, free, and member stays excluded from ordinary arrears after check-in", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const departureDate = shiftLocalDate(businessDate, 1);
+    const thirdRoom = await db.selectFrom("inventory_units")
+      .select("id")
+      .where("property_id", "=", demo.propertyId)
+      .where("kind", "=", "ROOM")
+      .where("active", "=", true)
+      .where("id", "not in", [demo.roomId, demo.secondRoomId])
+      .orderBy("id")
+      .executeTakeFirstOrThrow();
+    const external = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "in-house-external-no-arrears",
+      bookingChannelCode: "CTRIP",
+      channelOrderReference: "CTRIP-IN-HOUSE-NO-ARREARS"
+    });
+    const free = await createOrder({
+      unitId: thirdRoom.id,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "in-house-free-no-arrears",
+      stayType: "FREE"
+    });
+    const member = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: businessDate,
+      departureDate,
+      prefix: "in-house-member-no-arrears",
+      memberContractId: demo.memberContractId
+    });
+    const fixtures = [
+      { unitId: demo.secondRoomId, orderId: external.result!.orderId as string, sourceCategory: "CTRIP" },
+      { unitId: thirdRoom.id, orderId: free.result!.orderId as string, sourceCategory: "FREE_STAY" },
+      { unitId: demo.roomId, orderId: member.result!.orderId as string, sourceCategory: "MEMBER" }
+    ] as const;
+    for (const fixture of fixtures) {
+      await execute({
+        commandType: "CHECK_IN",
+        input: { propertyId: demo.propertyId, orderId: fixture.orderId }
+      }, `${fixture.sourceCategory.toLowerCase()}-no-arrears-check-in`);
+    }
+
+    const result = await board({ arrivalDate: businessDate, departureDate });
+    for (const fixture of fixtures) {
+      expect(intervalForOrder(result, fixture.unitId, fixture.orderId)).toMatchObject({
+        status: "IN_HOUSE",
+        attention: null,
+        sourceCategory: fixture.sourceCategory
+      });
+      expect(taskForOrder(result, fixture.orderId)).toMatchObject({
+        taskKind: "IN_HOUSE",
+        status: "IN_HOUSE",
+        attention: null,
+        sourceCategory: fixture.sourceCategory
+      });
+    }
   });
 
   it("classifies legal active member links from either member field while tolerating conversion-style WECOM residue", async () => {
@@ -3899,6 +4163,75 @@ describe("PostgreSQL room-status projection", () => {
     });
   });
 
+  it("limits damaged due-out or overdue in-house money state to the current task scope", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const yesterday = shiftLocalDate(businessDate, -1);
+    const twoDaysAgo = shiftLocalDate(businessDate, -2);
+    const tomorrow = shiftLocalDate(businessDate, 1);
+    const dueOut = await createOrder({
+      unitId: demo.secondRoomId,
+      arrivalDate: yesterday,
+      departureDate: businessDate,
+      prefix: "due-out-damaged-money"
+    });
+    const overdue = await createOrder({
+      unitId: demo.roomId,
+      arrivalDate: twoDaysAgo,
+      departureDate: yesterday,
+      prefix: "overdue-in-house-damaged-money"
+    });
+    const dueOutOrderId = dueOut.result!.orderId as string;
+    const overdueOrderId = overdue.result!.orderId as string;
+    await markOrderInHouseFixture(dueOutOrderId);
+    await markOrderInHouseFixture(overdueOrderId);
+    await db.updateTable("orders")
+      .set({ current_revision_id: null })
+      .where("id", "in", [dueOutOrderId, overdueOrderId])
+      .execute();
+
+    const current = await board({ arrivalDate: businessDate, departureDate: tomorrow });
+    expect(current.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(current, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+      status: "UNKNOWN",
+      attention: null,
+      operationalAttention: null,
+      available: false,
+      blocking: true,
+      allowedActions: []
+    });
+    expect(taskForOrder(current, dueOutOrderId)).toMatchObject({
+      taskKind: "DEPARTURE",
+      status: "UNKNOWN",
+      attention: null,
+      operationalAttention: null,
+      allowedActions: []
+    });
+    expect(taskForOrder(current, overdueOrderId)).toMatchObject({
+      taskKind: "EXCEPTION",
+      status: "UNKNOWN",
+      attention: null,
+      operationalAttention: null,
+      allowedActions: []
+    });
+    expect(unitIn(current, demo.roomId).intervals.some((interval) => interval.references
+      .some((reference) => reference.type === "ORDER" && reference.id === overdueOrderId))).toBe(false);
+    expect(unitIn(current, demo.roomId).days[0]).toMatchObject({ available: true });
+
+    const historical = await board({ arrivalDate: twoDaysAgo, departureDate: businessDate });
+    expect(intervalForOrder(historical, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+      startDate: yesterday,
+      endDate: businessDate,
+      status: "IN_HOUSE",
+      attention: null
+    });
+    expect(intervalForOrder(historical, demo.roomId, overdueOrderId)).toMatchObject({
+      startDate: twoDaysAgo,
+      endDate: yesterday,
+      status: "IN_HOUSE",
+      attention: null
+    });
+  });
+
   it("fails closed instead of guessing active reserved arrears when the current pricing revision is missing", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const departureDate = shiftLocalDate(businessDate, 1);
@@ -3929,15 +4262,17 @@ describe("PostgreSQL room-status projection", () => {
 
   it("fails closed when current cash lines keep the same amount but no longer match the stay timeline", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftLocalDate(businessDate, -1);
     const departureDate = shiftLocalDate(businessDate, 1);
     const created = await createOrder({
       unitId: demo.secondRoomId,
-      arrivalDate: businessDate,
+      arrivalDate,
       departureDate,
       prefix: "damaged-cash-line-timeline",
       pricingPolicyVersionId: demo.publicPricingPolicyId
     });
     const orderId = created.result!.orderId as string;
+    await markOrderInHouseFixture(orderId);
     const revision = await db.selectFrom("orders as order")
       .innerJoin("pricing_revisions as revision", "revision.id", "order.current_revision_id")
       .select(["revision.id", "revision.cash_lines"])
@@ -3976,9 +4311,21 @@ describe("PostgreSQL room-status projection", () => {
     expect(damagedCashLines[0]!.amount.minorUnits).toBe(unchangedAmount);
     expect(damagedCashLines[0]!.calculationSegments[0]!.inventoryUnitId).toBe(demo.roomId);
 
-    const result = await board({ arrivalDate: businessDate, departureDate });
+    const result = await board({ arrivalDate, departureDate });
     expect(result.projectionState).toBe("PARTIAL");
-    expect(intervalForOrder(result, demo.secondRoomId, orderId)).toMatchObject({
+    const intervals = unitIn(result, demo.secondRoomId).intervals.filter((interval) => interval.references
+      .some((reference) => reference.type === "ORDER" && reference.id === orderId));
+    expect(intervals.find((interval) => interval.startDate === arrivalDate)).toMatchObject({
+      startDate: arrivalDate,
+      endDate: businessDate,
+      status: "IN_HOUSE",
+      attention: null,
+      available: false,
+      blocking: true
+    });
+    expect(intervals.find((interval) => interval.startDate === businessDate)).toMatchObject({
+      startDate: businessDate,
+      endDate: departureDate,
       status: "UNKNOWN",
       attention: null,
       available: false,

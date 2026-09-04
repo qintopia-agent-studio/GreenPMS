@@ -657,13 +657,13 @@ describe("assertRoomStatusBoard", () => {
 
     const maintenanceAttention = boardWithMaintenance();
     maintenanceAttention.rooms[0]!.intervals[0]!.attention = "ARREARS";
-    expect(() => assertRoomStatusBoard(maintenanceAttention, expected)).toThrow(/只能附着于当前预订或历史欠款订单/);
+    expect(() => assertRoomStatusBoard(maintenanceAttention, expected)).toThrow(/只能附着于当前预订、在住或历史欠款订单/);
 
     const inHouseAttention = boardWithWholeRoomLodging();
     inHouseAttention.rooms[0]!.intervals[0]!.status = "IN_HOUSE";
     inHouseAttention.rooms[0]!.days[0]!.status = "IN_HOUSE";
     inHouseAttention.rooms[0]!.intervals[0]!.attention = "ARREARS";
-    expect(() => assertRoomStatusBoard(inHouseAttention, expected)).toThrow(/只能附着于当前预订或历史欠款订单/);
+    expect(() => assertRoomStatusBoard(inHouseAttention, expected)).not.toThrow();
 
     const historicalReservedAttention = boardWithWholeRoomLodging();
     historicalReservedAttention.businessDate = "2028-01-02";
@@ -712,7 +712,7 @@ describe("assertRoomStatusBoard", () => {
       freeStayReason: "Validation",
       attention: "ARREARS"
     }];
-    expect(() => assertRoomStatusBoard(freeTaskAttention, expected)).toThrow(/只能附着于当前预订或历史欠款订单/);
+    expect(() => assertRoomStatusBoard(freeTaskAttention, expected)).toThrow(/只能附着于当前预订、在住或历史欠款订单/);
   });
 
   it("requires each daily status to match its authoritative covering intervals", () => {

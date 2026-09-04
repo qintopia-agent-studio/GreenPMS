@@ -21,6 +21,11 @@ const expectedMatrix: Record<CommandType, ExpectedAuthority> = {
   ACTIVATE_MEMBERSHIP_ORDER: { ordinaryStaff: true, administrator: true, systemDerived: false },
   CREATE_ORDER: { ordinaryStaff: true, administrator: true, systemDerived: false },
   CORRECT_ORDER_OCCUPANT: { ordinaryStaff: false, administrator: true, systemDerived: false },
+  CORRECT_HISTORICAL_STAY_ARRANGEMENTS: { ordinaryStaff: false, administrator: true, systemDerived: false },
+  CORRECT_MEMBER_PROFILE: { ordinaryStaff: false, administrator: true, systemDerived: false },
+  CORRECT_MEMBERSHIP_EFFECTIVE_DATE: { ordinaryStaff: false, administrator: true, systemDerived: false },
+  BACKFILL_HISTORICAL_MEMBERSHIP: { ordinaryStaff: false, administrator: true, systemDerived: false },
+  VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY: { ordinaryStaff: false, administrator: true, systemDerived: false },
   RESCHEDULE_STAY: { ordinaryStaff: true, administrator: true, systemDerived: false },
   EXTEND_STAY: { ordinaryStaff: true, administrator: true, systemDerived: false },
   SHORTEN_STAY: { ordinaryStaff: true, administrator: true, systemDerived: false },
@@ -63,8 +68,8 @@ function authorized(overrides: Partial<Parameters<typeof evaluateCommandAuthoriz
 }
 
 describe("exact command permission profiles", () => {
-  it("freezes the complete 33-command ordinary staff, administrator, and system-derived matrix", () => {
-    expect(commandTypes).toHaveLength(33);
+  it("freezes the complete 38-command ordinary staff, administrator, and system-derived matrix", () => {
+    expect(commandTypes).toHaveLength(38);
     expect(Object.keys(expectedMatrix).sort()).toEqual([...commandTypes].sort());
 
     const ordinary = new Set<string>(ordinaryStaffCommandGrants);
@@ -86,13 +91,19 @@ describe("exact command permission profiles", () => {
     expect(systemDerivedCommandTypes).not.toContain("CREATE_QUOTE");
   });
 
-  it("reserves the two future administrator corrections as exact disabled capabilities", () => {
+  it("publishes the five administrator corrections as exact enabled capabilities", () => {
     expect(administratorCommandGrants).toEqual(expect.arrayContaining([
       "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+      "CORRECT_MEMBER_PROFILE",
+      "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+      "BACKFILL_HISTORICAL_MEMBERSHIP",
       "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
     ]));
     for (const commandType of [
       "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
+      "CORRECT_MEMBER_PROFILE",
+      "CORRECT_MEMBERSHIP_EFFECTIVE_DATE",
+      "BACKFILL_HISTORICAL_MEMBERSHIP",
       "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
     ] as const) {
       expect(evaluateCommandAuthorization({
@@ -102,8 +113,8 @@ describe("exact command permission profiles", () => {
         subjectCommandGrants: new Set(administratorCommandGrants),
         credentialType: "SESSION",
         tokenCommandCeiling: null,
-        featureEnabled: false
-      })).toMatchObject({ allowed: false, reason: "FEATURE_DISABLED" });
+        featureEnabled: true
+      })).toEqual({ allowed: true, reason: null });
     }
   });
 

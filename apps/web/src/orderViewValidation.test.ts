@@ -350,7 +350,7 @@ describe("parseOrderView", () => {
       reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
       prior_version: 2,
       new_version: 3,
-      command_id: "command_conversion_duplicate",
+      command_id: "command_conversion_only",
       payload: { operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" }
     }));
     expect(() => parseOrderView(input)).toThrow("没有唯一对应的升级会员事实");
@@ -394,7 +394,7 @@ describe("parseOrderView", () => {
     input.order.status = "CHECKED_OUT";
     input.order.current_revision_id = "revision_2";
     input.order.current_contract_amount_minor = 0;
-    input.order.version = 4;
+    input.order.version = 5;
     input.stay.status = "COMPLETED";
     input.effectiveArrangement.presentation = "LAST";
     input.fulfillment.state = "CHECKED_OUT";
@@ -452,6 +452,86 @@ describe("parseOrderView", () => {
     input.amounts.currentContractAmount.minorUnits = 0;
     input.amounts.collectionDifference.minorUnits = 0;
     expect(parseOrderView(input)).toBe(input);
+  });
+
+  it("accepts a checked-out source stay zeroed by voiding an erroneous membership and reconverting it", () => {
+    const input = orderView();
+    input.order.status = "CHECKED_OUT";
+    input.order.current_revision_id = "revision_2";
+    input.order.current_contract_amount_minor = 0;
+    input.order.version = 4;
+    input.stay.status = "COMPLETED";
+    input.effectiveArrangement.presentation = "LAST";
+    input.fulfillment.state = "CHECKED_OUT";
+    input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    input.fulfillment.checkOut = fulfillmentFact("CHECK_OUT", "2026-07-30", "2026-07-30T08:00:00.000Z");
+    input.amendments.push(amendment({
+      id: "amendment_2",
+      sequence: 2,
+      amendment_type: "CHECK_IN",
+      reason_code: "CHECK_IN",
+      prior_version: 1,
+      new_version: 2,
+      command_id: "command_2",
+      created_at: "2026-07-28T08:00:00.000Z"
+    }), amendment({
+      id: "amendment_3",
+      sequence: 3,
+      amendment_type: "CHECK_OUT",
+      reason_code: "CHECK_OUT",
+      prior_version: 2,
+      new_version: 3,
+      command_id: "command_3",
+      created_at: "2026-07-30T08:00:00.000Z"
+    }), amendment({
+      id: "amendment_4",
+      sequence: 4,
+      amendment_type: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      reason_code: "STAY_COLLECTION_TO_MEMBERSHIP",
+      reason_note: "早先错误升级会员",
+      prior_version: 3,
+      new_version: 4,
+      command_id: "command_old_conversion",
+      payload: { operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" },
+      created_at: "2026-07-30T08:30:00.000Z"
+    }), amendment({
+      id: "amendment_5",
+      sequence: 5,
+      amendment_type: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
+      reason_code: "DATA_ENTRY_CORRECTION",
+      reason_note: "错误办卡作废后按真实住宿重新升级",
+      prior_version: 4,
+      new_version: 5,
+      command_id: "command_5",
+      payload: { operation: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY" },
+      created_at: "2026-07-30T09:00:00.000Z"
+    }));
+    input.pricingRevisions.push({
+      ...input.pricingRevisions[0]!,
+      id: "revision_2",
+      revision_no: 2,
+      amendment_id: "amendment_5",
+      policy_base_amount_minor: 0,
+      pricing_basis: "MEMBER_ENTITLEMENT",
+      current_contract_amount_minor: 0,
+      difference_from_policy_minor: 0,
+      reason: { code: "DATA_ENTRY_CORRECTION", note: "错误办卡作废后按真实住宿重新升级" },
+      created_at: "2026-07-30T09:00:00.000Z"
+    });
+    Object.assign(input.order, { member_id: "member_rebuilt", member_contract_id: "contract_rebuilt" });
+    input.membershipConversion = {
+      membershipOrderId: "membership_order_rebuilt",
+      memberId: "member_rebuilt",
+      contractId: "contract_rebuilt",
+      entitlementLotId: "lot_rebuilt",
+      commandId: "command_5"
+    };
+    input.amounts.currentContractAmount.minorUnits = 0;
+    input.amounts.collectionDifference.minorUnits = 0;
+    expect(parseOrderView(input)).toBe(input);
+
+    input.membershipConversion = { ...input.membershipConversion, commandId: "command_other" };
+    expect(() => parseOrderView(input)).toThrow("没有唯一对应的升级会员事实");
   });
 
   it.each([
@@ -581,13 +661,13 @@ describe("parseOrderView", () => {
     expect(() => parseOrderView(input)).toThrow(expected);
   });
 
-  it("rejects fulfillment facts whose planned dates do not match the effective arrangement", () => {
+  it("rejects fulfillment facts whose planned dates do not match the arrangement at fulfillment", () => {
     const input = orderView();
     input.order.status = "CHECKED_IN";
     input.stay.status = "IN_HOUSE";
     input.fulfillment.state = "IN_HOUSE";
     input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-29", "2026-07-29T08:00:00.000Z");
-    expect(() => parseOrderView(input)).toThrow("与当前安排入住日不一致");
+    expect(() => parseOrderView(input)).toThrow("与履约时安排入住日不一致");
 
     input.order.status = "CHECKED_OUT";
     input.stay.status = "COMPLETED";
@@ -595,7 +675,7 @@ describe("parseOrderView", () => {
     input.fulfillment.state = "CHECKED_OUT";
     input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
     input.fulfillment.checkOut = fulfillmentFact("CHECK_OUT", "2026-07-29", "2026-07-30T08:00:00.000Z");
-    expect(() => parseOrderView(input)).toThrow("与当前安排退房日不一致");
+    expect(() => parseOrderView(input)).toThrow("与履约时安排退房日不一致");
   });
 
   it("rejects internally inconsistent recording modes and reversed fulfillment record times", () => {
@@ -717,6 +797,94 @@ describe("parseOrderView", () => {
       ]
     });
     expect(parseOrderView(extended)).toBe(extended);
+  });
+
+  it("accepts receipt-backed historical date corrections without rewriting prior fulfillment facts", () => {
+    const input = orderView();
+    const before = arrangement("room_101");
+    const after = arrangement("room_102", "2026-07-29", "2026-07-31");
+    input.order.status = "CHECKED_OUT";
+    input.order.arrival_date = after.arrivalDate;
+    input.order.departure_date = after.departureDate;
+    input.stay.status = "COMPLETED";
+    input.order.current_revision_id = "revision_1";
+    input.currentSegment = {
+      id: "segment_historical",
+      sequence: 2,
+      inventoryUnitId: "room_102",
+      arrivalDate: after.arrivalDate,
+      departureDate: after.departureDate
+    };
+    input.pricingRevisions[0]!.arrival_date = after.arrivalDate;
+    input.pricingRevisions[0]!.departure_date = after.departureDate;
+    input.effectiveArrangement = { ...after, presentation: "LAST", businessDate: "2026-07-30" };
+    input.fulfillment.state = "CHECKED_OUT";
+    input.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+    input.fulfillment.checkOut = fulfillmentFact("CHECK_OUT", "2026-07-30", "2026-07-30T08:00:00.000Z");
+    input.arrangementHistory[0]!.after = before;
+    input.arrangementHistory.push({
+      type: "HISTORICAL_STAY_CORRECTION",
+      before,
+      after,
+      reason: { code: "HISTORICAL_STAY_ARRANGEMENT_CORRECTION", note: "主管核对真实房源后修改" },
+      actor: { subjectId: "administrator", displayName: "主管" },
+      recordedAt: "2026-07-30T09:00:00.000Z",
+      pricingSummary: {
+        policyBaseAmount: money(20_000),
+        currentContractAmount: money(20_000),
+        differenceFromPolicy: money(0)
+      },
+      fundsSummary: {
+        netRecordedCollection: money(0),
+        collectionDifference: money(20_000),
+        refundReferenceAmount: money(0),
+        factCount: 0
+      },
+      correctionGroup: {
+        correctionSetHash: "b".repeat(64),
+        corrections: [{
+          orderId: "order_u2",
+          stayId: "stay_u2",
+          correctionId: "correction_1",
+          amendmentId: "amendment_historical",
+          staySegmentId: "segment_historical",
+          pricingRevisionId: "revision_1",
+          before: {
+            inventoryUnitId: "room_101",
+            arrivalDate: "2026-07-28",
+            departureDate: "2026-07-30",
+            nights: 2,
+            stayTimeline: [
+              { serviceDate: "2026-07-28", inventoryUnitId: "room_101" },
+              { serviceDate: "2026-07-29", inventoryUnitId: "room_101" }
+            ]
+          },
+          after: {
+            inventoryUnitId: "room_102",
+            arrivalDate: "2026-07-29",
+            departureDate: "2026-07-31",
+            nights: 2,
+            stayTimeline: [
+              { serviceDate: "2026-07-29", inventoryUnitId: "room_102" },
+              { serviceDate: "2026-07-30", inventoryUnitId: "room_102" }
+            ]
+          }
+        }],
+        reason: { code: "HISTORICAL_STAY_ARRANGEMENT_CORRECTION", note: "主管核对真实房源后修改" },
+        actor: { subjectId: "administrator", displayName: "主管" },
+        recordedAt: "2026-07-30T09:00:00.000Z"
+      }
+    });
+    expect(parseOrderView(input)).toBe(input);
+
+    input.fulfillment.checkIn!.plannedBusinessDate = "2026-07-27";
+    input.fulfillment.checkIn!.recordedBusinessDate = "2026-07-27";
+    expect(() => parseOrderView(input)).toThrow("与履约时安排入住日不一致");
+    input.fulfillment.checkIn!.plannedBusinessDate = "2026-07-28";
+    input.fulfillment.checkIn!.recordedBusinessDate = "2026-07-28";
+
+    delete input.arrangementHistory[1]!.correctionGroup;
+    expect(() => parseOrderView(input)).toThrow("历史住宿安排修改必须包含完整的同批修改记录");
   });
 
   it("accepts a suffix-overlay extension but rejects appending an unrelated room after departure", () => {

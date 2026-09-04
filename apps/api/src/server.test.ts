@@ -53,16 +53,16 @@ describe("projectMeResponse", () => {
     expect(response.propertyCommandGrants).toEqual({
       property_write: [
         "CREATE_ORDER",
+        "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
         "REPRICE_ORDER",
         "COMPLETE_CLEANING",
         "ISSUE_TOKEN",
-        "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
         "BACKFILL_COMPLETED_STAY"
       ],
       property_read: ["CREATE_ORDER", "PLACE_INTERNAL_USE"]
     });
     expect(response.allowedActions).toEqual({
-      property_write: ["CREATE_ORDER", "REPRICE_ORDER", "ISSUE_TOKEN"],
+      property_write: ["CREATE_ORDER", "REPRICE_ORDER", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS", "ISSUE_TOKEN"],
       property_read: []
     });
   });
@@ -106,8 +106,8 @@ describe("projectTokenListCommandCeiling", () => {
       "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
       "UNKNOWN_COMMAND"
     ]))).toEqual({
-      commandCeiling: ["REPRICE_ORDER"],
-      persistedCommandCeiling: ["REPRICE_ORDER", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS", "PLACE_INTERNAL_USE"],
+      commandCeiling: ["REPRICE_ORDER", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"],
+      persistedCommandCeiling: ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS", "REPRICE_ORDER", "PLACE_INTERNAL_USE"],
       historicalReadCeilingPreserved: true
     });
   });

@@ -9,6 +9,7 @@ import {
   effectiveArrangementTitle,
   fulfillmentResultLabel,
   initialRepriceTargetYuan,
+  itemCountLabel,
   collectionDifferencePresentation,
   completeStayCorrectionRecords,
   formalMembershipAgreedPriceMinor,
@@ -24,6 +25,7 @@ import {
   occupantSnapshotEntries,
   OrderAmountStrip,
   OrderActionButton,
+  OrderActionNotice,
   FactActions,
   OverdueInHouseAlert,
   CompleteStayCorrectionHistory,
@@ -46,6 +48,7 @@ import {
   overdueInHouseNotice,
   primaryOrderOccupant,
   remainingRefundableMinor,
+  reverseFactHelpPosition,
   buildReverseFactRequest,
   requestedOrderAction,
   stayMembershipUpgradeAutoOpenBlockedNotice,
@@ -74,7 +77,7 @@ describe("completed-stay correction audit history", () => {
     const common = {
       order_id: "order_324",
       reason_code: "COMPLETE_STAY",
-      reason_note: "客人实际入住并已离店，纠正开发期间遗留的错误预订",
+      reason_note: "客人实际入住并已离店，修复开发期间遗留的错误预订",
       command_id: "command_complete_324",
       actor: { subjectId: "subject_operator", displayName: "前台操作员" },
       created_at: "2026-08-25T02:30:00.000Z"
@@ -121,7 +124,7 @@ describe("completed-stay correction audit history", () => {
       commandId: "command_complete_324",
       actor: { subjectId: "subject_operator", displayName: "前台操作员" },
       recordedAt: "2026-08-25T02:30:00.000Z",
-      reasonNote: "客人实际入住并已离店，纠正开发期间遗留的错误预订"
+      reasonNote: "客人实际入住并已离店，修复开发期间遗留的错误预订"
     }]);
   });
 
@@ -129,10 +132,10 @@ describe("completed-stay correction audit history", () => {
     const html = renderToStaticMarkup(createElement(CompleteStayCorrectionHistory, {
       view: correctedOrderView()
     }));
-    expect(html).toContain("住宿纠正记录");
+    expect(html).toContain("住宿补录记录");
     expect(html).toContain("1 条");
     expect(html).toContain("前台操作员");
-    expect(html).toContain("客人实际入住并已离店，纠正开发期间遗留的错误预订");
+    expect(html).toContain("客人实际入住并已离店，修复开发期间遗留的错误预订");
     expect(html).toContain("2026-08-06 至 2026-08-12");
     expect(html).toContain("¥1,392.00");
     expect(html).toContain("欠款");
@@ -311,6 +314,48 @@ describe("upgrade membership entitlement presentation", () => {
     });
   });
 
+  it("keeps the rebuilt membership and consumed nights visible after an erroneous membership is voided", () => {
+    const base = conversionOrderView();
+    const view = {
+      ...base,
+      amendments: [{
+        ...base.amendments[0],
+        amendment_type: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY",
+        payload: {
+          entitlement: {
+            consumedUnits: 2,
+            unitKind: "BED_NIGHT",
+            serviceDates: ["2026-07-26", "2026-07-27"]
+          },
+          member: {
+            memberId: "member_rebuilt",
+            fullName: "重建会员"
+          },
+          newMembership: { productName: "公卫四人间会员" }
+        }
+      }],
+      collectionFacts: [],
+      membershipConversion: {
+        membershipOrderId: "membership_order_rebuilt",
+        memberId: "member_rebuilt",
+        contractId: "contract_rebuilt",
+        entitlementLotId: "lot_rebuilt",
+        commandId: "command_conversion"
+      }
+    } as OrderViewDto;
+
+    expect(stayConversionEntitlementDisplay(view)).toEqual({
+      serviceStart: "2026-07-26",
+      serviceEnd: "2026-07-28",
+      consumedUnits: 2,
+      unitLabel: "床夜",
+      memberName: "重建会员",
+      productName: "公卫四人间会员",
+      memberId: "member_rebuilt",
+      membershipOrderId: "membership_order_rebuilt"
+    });
+  });
+
   it("does not tell operators that an upgraded stay used no membership entitlement", () => {
     const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(OrderMembershipCoverageSection, {
       view: conversionOrderView(),
@@ -469,6 +514,26 @@ describe("fulfillment result presentation", () => {
 });
 
 describe("operator-facing order lifecycle presentation", () => {
+  it("places a complete wrapping explanation below an unavailable action notice", () => {
+    const html = renderToStaticMarkup(createElement(OrderActionNotice, {
+      title: "暂不能缩短住宿或提前退房",
+      body: "入住当天暂不办理缩短住宿或提前退房；请在确认住客实际使用房间后再办理入住。",
+      testId: "stay-date-action-notice"
+    }));
+
+    expect(html).toContain('class="action-notice-popover"');
+    expect(html).toContain('class="action-notice"');
+    expect(html).toContain('data-testid="stay-date-action-notice"');
+    expect(html).toContain('class="action-notice-bubble"');
+    expect(html).toContain('role="tooltip"');
+    expect(html).toContain("入住当天暂不办理缩短住宿或提前退房");
+  });
+
+  it("labels section totals as record counts", () => {
+    expect(itemCountLabel(0)).toBe("0 条");
+    expect(itemCountLabel(1)).toBe("1 条");
+  });
+
   const money = (minorUnits: number) => ({ currency: "CNY", minorUnits });
   const originalArrangement = {
     arrivalDate: "2026-07-25",
@@ -563,6 +628,7 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("原始预订安排");
     expect(html).toContain("最后住宿安排");
     expect(html).toContain("入住与退房结果");
+    expect(html).toContain('class="section-title-with-help"');
     expect(html).toContain("住宿安排变更历史");
     expect(html).toContain("创建预订");
     expect(html).toContain("更换房源");
@@ -571,6 +637,123 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(html).toContain("与政策基础金额差额");
     expect(html).toContain("差额");
     expect(html).not.toMatch(/INITIAL_BOOKING|MOVE_UNIT_INTERNAL|subject_internal|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision/);
+  });
+
+  it("renders historical stay corrections as a receipt-backed group without calling unit-only changes a date adjustment", () => {
+    const unitOnlyAfter = {
+      arrivalDate: "2026-07-25",
+      departureDate: "2026-07-27",
+      intervals: [{ inventoryUnitId: "unit_d02", arrivalDate: "2026-07-25", departureDate: "2026-07-27" }]
+    };
+    const view = {
+      ...lifecycle,
+      effectiveArrangement: { ...unitOnlyAfter, presentation: "LAST" as const, businessDate: "2026-07-28" },
+      arrangementHistory: [
+        lifecycle.arrangementHistory[0]!,
+        {
+          type: "HISTORICAL_STAY_CORRECTION" as const,
+          before: originalArrangement,
+          after: unitOnlyAfter,
+          reason: { code: "HISTORICAL_STAY_ARRANGEMENT_CORRECTION", note: "主管核对住宿凭据后更正" },
+          actor: { subjectId: "admin_1", displayName: "主管甲" },
+          recordedAt: "2026-07-29T08:00:00.000Z",
+          pricingSummary: {
+            policyBaseAmount: money(20_000),
+            currentContractAmount: money(18_000),
+            differenceFromPolicy: money(-2_000)
+          },
+          fundsSummary: {
+            netRecordedCollection: money(18_000),
+            collectionDifference: money(0),
+            refundReferenceAmount: money(0),
+            factCount: 1
+          },
+          correctionGroup: {
+            correctionSetHash: "a".repeat(64),
+            reason: { code: "HISTORICAL_STAY_ARRANGEMENT_CORRECTION", note: "主管核对住宿凭据后更正" },
+            evidenceNote: "纸质交接表与房态记录一致",
+            actor: { subjectId: "admin_1", displayName: "主管甲" },
+            recordedAt: "2026-07-29T08:00:00.000Z",
+            corrections: [{
+              orderId: "order_hist_left",
+              stayId: "stay_hist_left",
+              correctionId: "correction_hist_left",
+              amendmentId: "amendment_hist_left",
+              staySegmentId: "segment_hist_left",
+              pricingRevisionId: "revision_hist_left",
+              before: {
+                inventoryUnitId: "unit_d01",
+                arrivalDate: "2026-07-25",
+                departureDate: "2026-07-27",
+                nights: 2,
+                stayTimeline: [
+                  { serviceDate: "2026-07-25", inventoryUnitId: "unit_d01" },
+                  { serviceDate: "2026-07-26", inventoryUnitId: "unit_d01" }
+                ]
+              },
+              after: {
+                inventoryUnitId: "unit_d02",
+                arrivalDate: "2026-07-25",
+                departureDate: "2026-07-27",
+                nights: 2,
+                stayTimeline: [
+                  { serviceDate: "2026-07-25", inventoryUnitId: "unit_d02" },
+                  { serviceDate: "2026-07-26", inventoryUnitId: "unit_d02" }
+                ]
+              }
+            }, {
+              orderId: "order_hist_right",
+              stayId: "stay_hist_right",
+              correctionId: "correction_hist_right",
+              amendmentId: "amendment_hist_right",
+              staySegmentId: "segment_hist_right",
+              pricingRevisionId: "revision_hist_right",
+              before: {
+                inventoryUnitId: "unit_d02",
+                arrivalDate: "2026-07-28",
+                departureDate: "2026-07-30",
+                nights: 2,
+                stayTimeline: [
+                  { serviceDate: "2026-07-28", inventoryUnitId: "unit_d02" },
+                  { serviceDate: "2026-07-29", inventoryUnitId: "unit_d02" }
+                ]
+              },
+              after: {
+                inventoryUnitId: "unit_d01",
+                arrivalDate: "2026-07-28",
+                departureDate: "2026-07-30",
+                nights: 2,
+                stayTimeline: [
+                  { serviceDate: "2026-07-28", inventoryUnitId: "unit_d01" },
+                  { serviceDate: "2026-07-29", inventoryUnitId: "unit_d01" }
+                ]
+              }
+            }]
+          }
+        }
+      ]
+    } satisfies Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
+
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(OrderLifecycleSections, {
+      view,
+      inventoryUnits: [
+        { id: "unit_d01", code: "D01", name: "D01 · 单人间", building_code: "1" },
+        { id: "unit_d02", code: "D02", name: "D02 · 标准间", building_code: "1" }
+      ]
+    })));
+
+    expect(html).toContain("历史住宿安排修改");
+    expect(html).toContain("第 1 笔同批修改");
+    expect(html).toContain("第 2 笔同批修改");
+    expect(html).toContain('href="/orders/order_hist_left"');
+    expect(html).toContain("查看第 1 笔关联订单");
+    expect(html).toContain('href="/orders/order_hist_right"');
+    expect(html).toContain("查看第 2 笔关联订单");
+    expect(html).not.toContain("<code>order_hist_left</code>");
+    expect(html).not.toContain("<code>order_hist_right</code>");
+    expect(html).toContain("纸质交接表与房态记录一致");
+    expect(html).toContain("主管甲");
+    expect(html).not.toContain("调整住宿日期");
   });
 
   it("keeps the original check-in visible alongside the later revocation fact", () => {
@@ -751,6 +934,7 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT"].map((value) => arrangementChangeLabel(value as Parameters<typeof arrangementChangeLabel>[0]))).toEqual([
       "创建预订", "调整住宿日期", "延长住宿", "缩短住宿", "更换房源", "提前退房"
     ]);
+    expect(arrangementChangeLabel("HISTORICAL_STAY_CORRECTION")).toBe("历史住宿安排修改");
     expect(["COLLECTION", "REFUND", "REVERSAL"].map((value) => collectionFactTypeLabel(value as CollectionFactDto["fact_type"]))).toEqual(["收款", "退款", "冲销"]);
     expect(["CASH", "BANK_TRANSFER", "CARD", "WECOM", "OTHER", "LEGACY_UNKNOWN"].map(collectionMethodLabel)).toEqual(["现金", "银行转账", "银行卡", "企业微信", "其他方式", "其他方式"]);
     expect(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"].map((value) => pricingBasisLabel(value as Parameters<typeof pricingBasisLabel>[0]))).toEqual([
@@ -1570,8 +1754,39 @@ describe("server-authoritative order actions", () => {
     }));
     expect(html).toContain('data-order-action="REVERSE_FACT"');
     expect(html).toContain("冲销");
+    expect(html).toContain('class="fact-reverse-action"');
+    expect(html).toContain('class="sr-only"');
+    expect(html).toContain("aria-describedby=");
+    expect(html).toContain("仅用于撤销录错的收款或退款");
+    expect(html).toContain("如果确实把钱退给客人，请使用“退款”");
     expect(html).not.toContain(refund.fact_id);
     expect(html).not.toContain(collection.fact_id);
+
+    const pairedActionsHtml = renderToStaticMarkup(createElement(FactActions, {
+      fact: collection,
+      facts: [collection],
+      canRefund: true,
+      canReverse: true,
+      disabled: false,
+      onRefund: () => undefined,
+      onReverse: () => undefined
+    }));
+    expect(pairedActionsHtml.match(/fact-action-button/g)).toHaveLength(2);
+    expect(pairedActionsHtml).toContain("fact-refund-button");
+    expect(pairedActionsHtml).toContain("fact-reverse-button");
+  });
+
+  it("positions the reverse-fact explanation above the button within the viewport", () => {
+    expect(reverseFactHelpPosition({ right: 727, top: 2_803 }, 743, 3_055)).toEqual({
+      left: 443,
+      bottom: 260,
+      width: 280
+    });
+    expect(reverseFactHelpPosition({ right: 50, top: 100 }, 240, 500)).toEqual({
+      left: 12,
+      bottom: 408,
+      width: 216
+    });
   });
 
   it("builds a controlled reverse-fact command request from one selected fact", () => {

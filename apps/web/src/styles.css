@@ -643,12 +643,30 @@ textarea:focus-visible {
   gap: 16px;
 }
 
+.page-heading-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .panel-heading,
 .section-title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.section-title-with-help {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.section-title-with-help .info-hint {
+  flex: 0 0 auto;
 }
 
 .panel-heading p,
@@ -903,7 +921,8 @@ textarea:focus-visible {
 .member-list-panel,
 .member-profile-panel,
 .member-entitlements-panel,
-.membership-orders-panel {
+.membership-orders-panel,
+.member-correction-history {
   min-width: 0;
   overflow: hidden;
   background: var(--surface);
@@ -914,7 +933,8 @@ textarea:focus-visible {
 .member-list-panel > .section-title-row,
 .member-profile-panel > .section-title-row,
 .member-entitlements-panel > .section-title-row,
-.membership-orders-panel > .section-title-row {
+.membership-orders-panel > .section-title-row,
+.member-correction-history > .section-title-row {
   min-height: 56px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
@@ -1140,6 +1160,12 @@ textarea:focus-visible {
   border-color: #b5d4bf;
 }
 
+.membership-status-voided {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: #e1b9b6;
+}
+
 .membership-order-pricing {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1212,6 +1238,30 @@ textarea:focus-visible {
 .membership-payments li code { color: var(--muted); font-size: 12px; }
 .membership-payments li small { color: var(--muted); }
 .membership-payments li.is-reversed { background: var(--surface-muted); color: var(--muted); }
+
+.member-correction-history > ol {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.member-correction-history > ol > li {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.member-correction-history > ol > li:last-child { border-bottom: 0; }
+.member-correction-history dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 0; }
+.member-correction-history dt { color: var(--muted); font-size: 11px; }
+.member-correction-history dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.member-correction-history p,
+.member-correction-history small { color: var(--muted); overflow-wrap: anywhere; }
+.member-correction-history code { font-size: 12px; overflow-wrap: anywhere; }
 
 .membership-order-actions { justify-content: flex-end; padding-top: 2px; }
 .button-small { min-height: 32px; padding: 5px 9px; font-size: 12px; }
@@ -1754,10 +1804,34 @@ thead .sticky-column {
   text-decoration: underline;
 }
 
-.fact-refund-button {
+.fact-action-button {
+  width: 56px;
   min-height: 28px;
   padding: 3px 12px;
   font-size: 12px;
+}
+
+.fact-reverse-action {
+  display: inline-flex;
+}
+
+.fact-reverse-help {
+  position: fixed;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+  z-index: 1000;
 }
 
 .quote-workbench {
@@ -1832,6 +1906,29 @@ thead .sticky-column {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.form-grid-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.historical-correction-list {
+  display: grid;
+  gap: 14px;
+  max-height: min(52vh, 520px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.historical-correction-item {
+  display: grid;
+  gap: 12px;
+  padding-block: 14px;
+  border-block-start: 1px solid var(--border);
+}
+
+.historical-correction-item:first-child {
+  border-block-start: 0;
+}
+
 .form-grid label {
   min-width: 0;
   display: grid;
@@ -1874,6 +1971,16 @@ thead .sticky-column {
   font-size: 12px;
   font-weight: 500;
   line-height: 1.5;
+}
+
+.form-label-with-hint {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.form-label-with-hint .info-hint {
+  flex: 0 0 auto;
 }
 
 .form-field-note {
@@ -3292,6 +3399,47 @@ pre {
   white-space: nowrap;
 }
 
+.action-notice-popover {
+  display: inline-grid;
+  position: relative;
+  align-self: flex-start;
+  justify-items: start;
+  width: max-content;
+  max-width: 100%;
+}
+
+.action-notice-popover > .action-notice {
+  max-width: 100%;
+}
+
+.action-notice-bubble {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 48px;
+  z-index: 1000;
+  box-sizing: border-box;
+  margin-top: 0;
+  width: min(360px, calc(100vw - 32px));
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.action-notice-popover:hover .action-notice-bubble,
+.action-notice-popover:focus-within .action-notice-bubble {
+  display: block;
+}
+
 .action-notice-detailed {
   flex: 1 1 100%;
   justify-content: flex-end;
@@ -3304,7 +3452,7 @@ pre {
   min-width: 0;
   display: flex;
   flex: 1;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 6px;
@@ -4008,6 +4156,14 @@ pre {
     align-items: center;
   }
 
+  .page-heading-buttons {
+    flex-wrap: nowrap;
+  }
+
+  .page-heading-buttons .button {
+    min-width: 44px;
+  }
+
   .page-heading-actions > .button {
     width: 44px;
     padding: 0;
@@ -4086,6 +4242,10 @@ pre {
   }
 
   .form-grid-two {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .form-grid-three {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -4213,7 +4373,8 @@ pre {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .member-entitlement-lot dl {
+  .member-entitlement-lot dl,
+  .member-correction-history dl {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -4285,6 +4446,11 @@ pre {
     width: 100%;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .action-notice-popover {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
   .action-toolbar .button {

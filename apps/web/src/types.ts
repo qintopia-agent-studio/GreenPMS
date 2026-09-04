@@ -138,7 +138,7 @@ export interface MemberContractDto {
   property_id: string;
   member_id: string | null;
   member_name: string;
-  status: "ACTIVE" | "EXPIRED";
+  status: "ACTIVE" | "EXPIRED" | "VOIDED";
   valid_from: string;
   valid_until: string;
   version: number;
@@ -183,6 +183,7 @@ export interface EntitlementLotDto {
   unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
   total_units: number;
   expires_on: string;
+  status: "ACTIVE" | "VOIDED";
   version: number;
   created_at: string;
 }
@@ -190,7 +191,7 @@ export interface EntitlementLotDto {
 export interface EntitlementLedgerDto {
   fact_id: string;
   lot_id: string;
-  entry_type: "ADJUST" | "HOLD" | "RELEASE" | "CONSUME" | "RESTORE" | "EXPIRE" | "CONVERSION_CONSUME";
+  entry_type: "ADJUST" | "HOLD" | "RELEASE" | "CONSUME" | "RESTORE" | "EXPIRE" | "VOID" | "CONVERSION_CONSUME";
   quantity_delta: number;
   service_date: string | null;
   order_id: string | null;
@@ -211,6 +212,11 @@ export interface MemberViewDto {
   balanceAsOfDate: string;
   membershipProducts: MembershipProductDto[];
   membershipOrders: MembershipOrderSummaryDto[];
+  profileCorrections: MemberProfileCorrectionDto[];
+  effectiveDateCorrections: MembershipEffectiveDateCorrectionDto[];
+  historicalMembershipBackfills: HistoricalMembershipBackfillDto[];
+  paymentReclassifications: MembershipPaymentReclassificationDto[];
+  voidReconversions: MembershipVoidReconversionDto[];
 }
 
 export interface MembershipProductDto {
@@ -244,9 +250,10 @@ export interface MembershipOrderDto {
   currency: string;
   entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
   entitlement_units: number;
+  validity_period: "P1Y";
   allowed_room_type_code: string;
   allowed_inventory_kind: "ROOM" | "BED";
-  status: "DRAFT" | "ACTIVE";
+  status: "DRAFT" | "ACTIVE" | "VOIDED";
   activated_at: string | null;
   valid_from: string | null;
   valid_until: string | null;
@@ -274,6 +281,7 @@ export interface MembershipPaymentFactDto {
   source_collection_fact_id: string | null;
   note: string;
   command_id: string;
+  business_date: string;
   created_at: string;
 }
 
@@ -282,6 +290,108 @@ export interface MembershipOrderSummaryDto {
   paymentFacts: MembershipPaymentFactDto[];
   paymentTotalMinor: number;
   paymentDifferenceMinor: number;
+}
+
+export interface MemberCorrectionActorDto {
+  subjectId: string;
+  displayName: string;
+}
+
+interface MemberCorrectionAuditDto {
+  id: string;
+  property_id: string;
+  member_id: string;
+  evidence_note: string;
+  command_id: string;
+  created_at: string;
+  actor: MemberCorrectionActorDto;
+}
+
+export interface MemberProfileCorrectionDto extends MemberCorrectionAuditDto {
+  sequence: number;
+  prior_full_name: string;
+  prior_nickname: string;
+  prior_identity_card_number: string | null;
+  prior_phone: string;
+  prior_wechat: string;
+  corrected_full_name: string;
+  corrected_nickname: string;
+  corrected_identity_card_number: string | null;
+  corrected_phone: string;
+  corrected_wechat: string;
+  changed_fields: Array<"fullName" | "nickname" | "identityCardNumber" | "phone" | "wechat">;
+}
+
+export interface MembershipEffectiveDateCorrectionDto extends MemberCorrectionAuditDto {
+  membership_order_id: string;
+  contract_id: string;
+  entitlement_lot_id: string;
+  sequence: number;
+  prior_valid_from: string;
+  prior_valid_until: string;
+  corrected_valid_from: string;
+  corrected_valid_until: string;
+  prior_order_version: number;
+  prior_contract_version: number;
+  prior_lot_version: number;
+}
+
+export interface HistoricalMembershipBackfillDto extends MemberCorrectionAuditDto {
+  membership_order_id: string;
+  contract_id: string;
+  entitlement_lot_id: string;
+  payment_fact_id: string;
+  product_id: string;
+  product_code: string;
+  product_version: number;
+  product_name: string;
+  listed_price_minor: number;
+  agreed_price_minor: number;
+  currency: string;
+  entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
+  entitlement_units: number;
+  validity_period: "P1Y";
+  allowed_room_type_code: string;
+  allowed_inventory_kind: "ROOM" | "BED";
+  actual_membership_date: string;
+  valid_until: string;
+  business_date: string;
+  transaction_reference: string;
+}
+
+export interface MembershipPaymentReclassificationDto extends MemberCorrectionAuditDto {
+  old_membership_order_id: string;
+  old_payment_fact_id: string;
+  old_reversal_fact_id: string;
+  new_membership_order_id: string;
+  new_payment_fact_id: string | null;
+  amount_minor: number;
+  currency: string;
+}
+
+export interface MembershipVoidReconversionDto extends MemberCorrectionAuditDto {
+  old_membership_order_id: string;
+  old_contract_id: string;
+  old_entitlement_lot_id: string;
+  prior_old_order_version: number;
+  prior_old_contract_version: number;
+  prior_old_lot_version: number;
+  source_order_id: string;
+  source_stay_id: string;
+  prior_source_order_version: number;
+  new_membership_order_id: string;
+  new_contract_id: string;
+  new_entitlement_lot_id: string;
+  replacement_payment_fact_id: string | null;
+  replacement_business_date: string | null;
+  replacement_transaction_reference: string | null;
+  actual_membership_date: string;
+  valid_until: string;
+  old_direct_collection_total_minor: number;
+  stay_transfer_total_minor: number;
+  membership_agreed_price_minor: number;
+  currency: string;
+  service_dates: string[];
 }
 
 export interface MemberSummaryDto {
@@ -537,6 +647,7 @@ export interface CommandRequest {
   recoveryEffectHash?: string;
   inventoryUnitLabels?: Record<string, string>;
   orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string };
+  historicalStayCorrectionContexts?: Record<string, { guestName: string }>;
   initialReason?: CommandReason;
 }
 

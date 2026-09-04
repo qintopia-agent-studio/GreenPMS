@@ -79,7 +79,7 @@ function orderContext(page: Page, _orderId?: string): Locator {
 }
 
 function orderDrawer(page: Page): Locator {
-  return page.getByRole("dialog", { name: "订单上下文", exact: true });
+  return page.getByRole("dialog", { name: "订单详情", exact: true });
 }
 
 async function login(
@@ -176,7 +176,7 @@ async function selectOccupiedCell(
 }
 
 async function closeOrderContext(context: Locator): Promise<void> {
-  await context.getByRole("button", { name: "关闭订单上下文", exact: true }).click();
+  await context.getByRole("button", { name: "关闭订单详情", exact: true }).click();
   await expect(context).toBeHidden();
 }
 

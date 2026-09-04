@@ -162,10 +162,13 @@ describe("restore script contract", () => {
   });
 
   it("creates a new target, upgrades a stage 9 backup, and validates the current stage 13 schema", async () => {
-    expect(currentMigrationNames).toHaveLength(48);
+    expect(currentMigrationNames).toHaveLength(51);
     expect(currentMigrationNames).toContain("046_command_authorization.sql");
     expect(currentMigrationNames).toContain("047_runtime_database_role.sql");
     expect(currentMigrationNames).toContain("048_runtime_isolation_guards.sql");
+    expect(currentMigrationNames).toContain("049_historical_stay_arrangement_corrections.sql");
+    expect(currentMigrationNames).toContain("050_admin_membership_corrections.sql");
+    expect(currentMigrationNames).toContain("051_runtime_role_command_compatibility.sql");
 
     const fixture = await fakeDockerEnvironment(false);
     try {

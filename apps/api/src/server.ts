@@ -123,6 +123,9 @@ function isCommandGrant(value: unknown): value is CommandCatalogType {
 function commandFeatureEnabledForProjection(commandType: CommandCapability): boolean {
   if (commandType === "COMPLETE_CLEANING") return currentReleaseFeatures.cleaningWorkflow;
   if (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") return currentReleaseFeatures.historicalStayArrangementCorrection;
+  if (commandType === "CORRECT_MEMBER_PROFILE") return currentReleaseFeatures.memberProfileCorrection;
+  if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") return currentReleaseFeatures.membershipEffectiveDateCorrection;
+  if (commandType === "BACKFILL_HISTORICAL_MEMBERSHIP") return currentReleaseFeatures.historicalMembershipBackfill;
   if (commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") return currentReleaseFeatures.membershipConversionVoidCorrection;
   return true;
 }

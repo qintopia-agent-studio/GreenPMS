@@ -511,7 +511,7 @@ test("U2 a delayed response for an invalidated order cannot reopen or overwrite 
   await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
   const drawer = page.locator("dialog.room-status-view-drawer");
   await expect(drawer).toBeHidden();
-  await expect(page.getByText("正在载入权威订单上下文", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("正在载入订单详情", { exact: true })).toHaveCount(0);
 
   const other = roomCell(page, fixture.stage6.emptyCreationRoomId, fixture.dates.arrivalDate);
   await other.click();
@@ -864,7 +864,7 @@ test("U2 mobile order context is full-screen, machine-free, and returns focus to
     const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
     const trigger = occupancy.getByRole("button", { name: "查看订单信息", exact: true });
     await trigger.click();
-    const dialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
+    const dialog = page.getByRole("dialog", { name: "订单详情", exact: true });
     await expect(dialog).toBeVisible();
     await expect(dialog).not.toContainText(/order_|INITIAL|Segment|Amendment|payload|Fact ID|Receipt ID|Command ID|Correlation ID|Claim|Revision|渠道合同价/);
     const geometry = await dialog.evaluate((element) => {
@@ -906,7 +906,7 @@ test("U2 order context remains reachable at 200 percent desktop zoom", async ({ 
     const occupancy = page.locator(".room-status-mobile-occupancies li").filter({ hasText: "小川" }).first();
     const trigger = occupancy.getByRole("button", { name: "查看订单信息", exact: true });
     await trigger.click();
-    const dialog = page.getByRole("dialog", { name: "订单上下文", exact: true });
+    const dialog = page.getByRole("dialog", { name: "订单详情", exact: true });
     await expect(dialog).toBeVisible();
     const geometry = await dialog.evaluate((element) => {
       const box = element.getBoundingClientRect();
