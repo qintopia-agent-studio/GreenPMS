@@ -13,6 +13,9 @@ const reviewedStaffProfileManifests = {
   // Production mappings must be added here with verified subject/property IDs
   // and pass code review before deployment selects the new manifest name.
   unconfigured: [],
+  qintopia_production_20260904: [
+    { subjectId: "subject_qintopia_admin", propertyId: "prop_qintopia", profile: "ADMIN" }
+  ],
   // Test/demo identities are deliberately isolated from production selection.
   demo: [
     { subjectId: "subject_demo_operator", propertyId: "prop_qintopia_demo", profile: "STAFF" },
