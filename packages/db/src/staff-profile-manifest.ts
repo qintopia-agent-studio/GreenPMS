@@ -16,6 +16,10 @@ const reviewedStaffProfileManifests = {
   qintopia_production_20260904: [
     { subjectId: "subject_qintopia_admin", propertyId: "prop_qintopia", profile: "ADMIN" }
   ],
+  qintopia_production_20260904_accounts_v2: [
+    { subjectId: "subject_qintopia_admin", propertyId: "prop_qintopia", profile: "ADMIN" },
+    { subjectId: "subject_qintopia_operator", propertyId: "prop_qintopia", profile: "STAFF" }
+  ],
   // Test/demo identities are deliberately isolated from production selection.
   demo: [
     { subjectId: "subject_demo_operator", propertyId: "prop_qintopia_demo", profile: "STAFF" },
