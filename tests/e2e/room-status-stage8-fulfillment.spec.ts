@@ -443,7 +443,7 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   await showFixtureRange(page);
   await filterRoomStatus(page, fixture.overdueCheckout.unitCode, fixture.arrivalDate, addDays(fixture.departureDate, 1));
   const overdueAvailableCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueCheckout.unitId}"][data-service-date="${fixture.businessDate}"]`);
-  await expect(overdueAvailableCell).toContainText("可售");
+  await expect(overdueAvailableCell).toHaveAccessibleName(/可售/);
   await expect(overdueAvailableCell).not.toContainText(new RegExp(`在住|${fixture.overdueCheckout.nickname}`));
 
   await page.goto("/today");
@@ -476,11 +476,11 @@ test("阶段 8 4.1 普通、会员和免费住宿只在计划日期完成中文�
   await showFixtureRange(page);
   await filterRoomStatus(page, fixture.plannedCheckout.unitCode, fixture.arrivalDate, addDays(fixture.departureDate, 1));
   const releasedCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.plannedCheckout.unitId}"][data-service-date="${fixture.businessDate}"]`);
-  await expect(releasedCell).toContainText("可售");
+  await expect(releasedCell).toHaveAccessibleName(/可售/);
   await expect(releasedCell).not.toContainText(new RegExp(`在住|${fixture.plannedCheckout.nickname}`));
   await filterRoomStatus(page, fixture.overdueCheckout.unitCode, fixture.arrivalDate, addDays(fixture.departureDate, 1));
   const overdueReleasedCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueCheckout.unitId}"][data-service-date="${fixture.businessDate}"]`);
-  await expect(overdueReleasedCell).toContainText("可售");
+  await expect(overdueReleasedCell).toHaveAccessibleName(/可售/);
   await expect(overdueReleasedCell).not.toContainText(new RegExp(`在住|${fixture.overdueCheckout.nickname}`));
 });
 
@@ -498,7 +498,7 @@ test("阶段 8 4.1 保留的前一日待清洁历史不影响次日房态和订�
   await showFixtureRange(page);
   expect(fixture.arrivalDate).toBe(addDays(fixture.legacyCleaning.serviceDate, 1));
   const nextDayCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.legacyCleaning.unitId}"][data-service-date="${fixture.arrivalDate}"]`);
-  await expect(nextDayCell).toContainText("可售");
+  await expect(nextDayCell).toHaveAccessibleName(/可售/);
   await expect(nextDayCell).not.toContainText("待清洁");
   await expect(page.locator(".room-status-interval-cleaning")).toHaveCount(0);
   await expect(page.getByText("待清洁", { exact: true })).toHaveCount(0);
@@ -546,7 +546,7 @@ test("阶段 8 4.1 日期门禁原因归位且逾期在住不延长当前房态"
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await showFixtureRange(page);
   const overdueCell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueGrid.unitId}"][data-service-date="${fixture.businessDate}"]`);
-  await expect(overdueCell).toContainText("可售");
+  await expect(overdueCell).toHaveAccessibleName(/可售/);
   await expect(overdueCell).not.toContainText(new RegExp(`在住|${fixture.overdueGrid.nickname}`));
 
   await page.goto("/today");
@@ -568,7 +568,7 @@ test("阶段 8 4.1 日期门禁原因归位且逾期在住不延长当前房态"
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })).toBeVisible();
   await showFixtureRange(page);
-  await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueGrid.unitId}"][data-service-date="${fixture.businessDate}"]`)).toContainText("可售");
+  await expect(page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.overdueGrid.unitId}"][data-service-date="${fixture.businessDate}"]`)).toHaveAccessibleName(/可售/);
 });
 
 test("阶段 8 4.1 手机端履约使用相同中文核对和结果", async ({ page }, testInfo) => {
@@ -595,7 +595,10 @@ test("阶段 8 4.1 手机端履约使用相同中文核对和结果", async ({ p
   await checkoutContext.getByRole("button", { name: "办理退房", exact: true }).click();
   await expectRoomStatusRoot(page);
   await confirmFulfillmentDialog(page, "退房");
-  await expect(page.getByRole("dialog", { name: "订单详情" })).toBeHidden();
+  await expect(checkoutContext).toContainText("已退房");
+  const checkoutContextDialog = page.getByRole("dialog", { name: "订单详情" });
+  await checkoutContextDialog.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(checkoutContextDialog).toBeHidden();
 
   await expect(page.locator(".room-status-interval-cleaning")).toHaveCount(0);
   await expect(page.getByText("待清洁", { exact: true })).toHaveCount(0);

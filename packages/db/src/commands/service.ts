@@ -17,9 +17,9 @@ import {
   type StoredQuoteDto
 } from "@qintopia/contracts";
 import { amountSummary, enumerateServiceDates, newId, paidStayTypeForNights, sha256, stableHash } from "@qintopia/domain";
-import { createQuoteInTransaction, projectQuoteForExternalRead } from "../pricing-service.ts";
+import { createQuoteInTransaction, loadStoredQuote, projectQuoteForExternalRead } from "../pricing-service.ts";
 import { bumpRoomStatusRevision } from "../room-status.ts";
-import { getOrderViewSnapshot } from "../orders.ts";
+import { getOrderViewSnapshot, loadTemporaryOtherRoomCreateEvidence } from "../orders.ts";
 import {
   maskIdentityCardNumber,
   maskPhone,
@@ -123,6 +123,12 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "COMPLETE_CLEANING"
 ]);
 
+const createOrderConfirmationReasonCodes = new Set([
+  "CREATE_STANDARD_ORDER",
+  "BACKFILL_STAY",
+  "TEMPORARY_OTHER_ROOM"
+]);
+
 const strictRecoveryEvidenceCommands = new Set<CommandType>([
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
@@ -142,7 +148,10 @@ const strictRecoveryEvidenceCommands = new Set<CommandType>([
 
 function requiresStrictRecoveryEvidence(commandType: CommandType, effect: Record<string, unknown>): boolean {
   return strictRecoveryEvidenceCommands.has(commandType)
-    || (commandType === "CREATE_ORDER" && asRecord(effect.backfill) !== undefined);
+    || asRecord(effect.temporaryOtherRoomArrangement) !== undefined
+    || (commandType === "CREATE_ORDER" && (
+      asRecord(effect.backfill) !== undefined
+    ));
 }
 
 async function lockCommandProtocolEpoch(trx: Transaction<Database>): Promise<void> {
@@ -227,6 +236,45 @@ const completeStayExternalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function assertCreateOrderConfirmationReason(effect: Record<string, unknown>, reason: CommandReason): void {
+  const backfill = asRecord(effect.backfill);
+  if (backfill) {
+    const lockedReason = typeof backfill.reason === "string" ? backfill.reason.trim() : "";
+    if (!lockedReason
+      || reason.code !== "BACKFILL_STAY"
+      || reason.note.trim() !== lockedReason) {
+      throw new DomainError(
+        "CONFIRMATION_MISMATCH",
+        "补录确认原因必须与核对页锁定的原因一致",
+        409
+      );
+    }
+    return;
+  }
+
+  const temporaryOtherRoomArrangement = asRecord(effect.temporaryOtherRoomArrangement);
+  if (temporaryOtherRoomArrangement) {
+    const lockedReason = typeof effect.temporaryOtherRoomReason === "string"
+      ? effect.temporaryOtherRoomReason.trim()
+      : "";
+    if (!lockedReason
+      || lockedReason.length > 200
+      || reason.code !== "TEMPORARY_OTHER_ROOM"
+      || reason.note !== lockedReason) {
+      throw new DomainError(
+        "CONFIRMATION_MISMATCH",
+        "临时安排确认原因必须与核对页锁定的原因一致",
+        409
+      );
+    }
+    return;
+  }
+
+  if (reason.code !== "CREATE_STANDARD_ORDER" || reason.note !== "") {
+    throw new DomainError("CONFIRMATION_MISMATCH", "普通创建订单必须使用标准建单确认原因", 409);
+  }
 }
 
 async function historicalProtocolEpoch(
@@ -441,7 +489,7 @@ async function bindPersistedEffectHash(
     return rebuiltEffectHash;
   }
   const amendments = await trx.selectFrom("amendments")
-    .select(["id", "payload"])
+    .select(["id", "reason_code", "reason_note", "payload"])
     .where("command_id", "=", commandId)
     .where("amendment_type", "=", commandType)
     .execute();
@@ -676,6 +724,51 @@ async function bindPersistedEffectHash(
   if (!persistedEffect) {
     throw new Error("Persisted command effect is malformed");
   }
+  if (commandType === "CREATE_ORDER" && asRecord(confirmedEffect.temporaryOtherRoomArrangement)) {
+    const amendment = amendments[0]!;
+    const inventoryUnit = asRecord(confirmedEffect.inventoryUnit);
+    const lockedReason = typeof confirmedEffect.temporaryOtherRoomReason === "string"
+      ? confirmedEffect.temporaryOtherRoomReason.trim()
+      : "";
+    const authoritativeEffect = {
+      quoteId: confirmedEffect.quoteId,
+      inventoryUnitId: inventoryUnit?.id,
+      arrivalDate: confirmedEffect.arrivalDate,
+      departureDate: confirmedEffect.departureDate,
+      primaryGuest: confirmedEffect.primaryGuest,
+      occupants: Array.isArray(confirmedEffect.occupants)
+        ? confirmedEffect.occupants.map((value) => {
+          const occupant = asRecord(value);
+          return {
+            id: occupant?.id,
+            ordinal: occupant?.ordinal,
+            role: occupant?.role,
+            fullName: occupant?.fullName,
+            nickname: occupant?.nickname,
+            phone: typeof occupant?.phone === "string" && occupant.phone.trim() ? occupant.phone.trim() : null,
+            documentNumber: typeof occupant?.documentNumber === "string" && occupant.documentNumber.trim()
+              ? occupant.documentNumber.trim()
+              : null
+          };
+        })
+        : confirmedEffect.occupants,
+      bookingChannelCode: confirmedEffect.bookingChannelCode,
+      channelOrderReference: confirmedEffect.channelOrderReference,
+      freeStayReason: confirmedEffect.freeStayReason,
+      freeStayCategoryCode: confirmedEffect.freeStayCategoryCode,
+      temporaryOtherRoomArrangement: confirmedEffect.temporaryOtherRoomArrangement,
+      pricingDecision: confirmedEffect.pricingDecision
+    };
+    if (!inventoryUnit?.id
+      || !lockedReason
+      || lockedReason.length > 200
+      || amendment.reason_code !== "TEMPORARY_OTHER_ROOM"
+      || amendment.reason_note !== lockedReason
+      || stableHash(persistedEffect) !== stableHash(authoritativeEffect)) {
+      throw new Error("Persisted temporary other-room create-order evidence differs from the confirmed Preview");
+    }
+    return rebuiltEffectHash;
+  }
   const authoritativeEffect = commandType === "CREATE_ORDER" && asRecord(confirmedEffect.backfill)
     ? asRecord(persistedEffect.confirmedEffect)
     : persistedEffect;
@@ -709,6 +802,7 @@ export async function projectStoredPreviewForRead(
   const effect = asRecord(preview.effect);
   if (!effect) return response;
   const projectedEffect = projectCommandEffectForRead(preview.command_type, effect);
+  await assertTemporaryOtherRoomEvidenceForRead(db, preview.command_type, projectedEffect);
   const protocolVersion = legacyEffectProtocol(preview.command_type, projectedEffect);
   if (!protocolVersion) return { ...response, effect: projectedEffect };
   await assertHistoricalReadPredatesProtocolEpoch(db, protocolVersion, preview.created_at, "Stored preview");
@@ -1006,6 +1100,159 @@ async function existingQuoteCommand(
   });
 }
 
+function temporaryOtherRoomRecoveryError(message: string): DomainError {
+  return new DomainError("INTERNAL_ERROR", `临时安排恢复证据${message}`, 500);
+}
+
+async function assertTemporaryOtherRoomCreatePreviewEvidence(
+  db: Kysely<Database> | Transaction<Database>,
+  effect: Record<string, unknown>
+): Promise<void> {
+  const arrangement = asRecord(effect.temporaryOtherRoomArrangement);
+  const inventoryUnit = asRecord(effect.inventoryUnit);
+  const requiredArrangementFields = [
+    "membershipOrderId",
+    "memberContractId",
+    "entitlementLotId",
+    "originalRoomTypeCode",
+    "actualInventoryUnitId",
+    "actualRoomTypeCode",
+    "arrivalDate",
+    "departureDate"
+  ] as const;
+  const reason = typeof effect.temporaryOtherRoomReason === "string"
+    ? effect.temporaryOtherRoomReason.trim()
+    : "";
+  const arrangementArrivalDate = typeof arrangement?.arrivalDate === "string" ? arrangement.arrivalDate : "";
+  const arrangementDepartureDate = typeof arrangement?.departureDate === "string" ? arrangement.departureDate : "";
+  if (!arrangement
+    || Object.keys(arrangement).length !== 12
+    || arrangement.kind !== "TEMPORARY_OTHER_ROOM"
+    || arrangement.originalInventoryKind !== "ROOM"
+    || arrangement.entitlementUnitKind !== "ROOM_NIGHT"
+    || arrangement.actualInventoryKind !== "ROOM"
+    || requiredArrangementFields.some((field) => (
+      typeof arrangement[field] !== "string" || (arrangement[field] as string).trim() === ""
+    ))
+    || arrangement.originalRoomTypeCode === arrangement.actualRoomTypeCode
+    || arrangementDepartureDate <= arrangementArrivalDate
+    || !reason
+    || reason.length > 200
+    || typeof effect.memberId !== "string"
+    || effect.memberId.trim() === ""
+    || effect.memberContractId !== arrangement.memberContractId
+    || inventoryUnit?.id !== arrangement.actualInventoryUnitId
+    || inventoryUnit?.kind !== "ROOM"
+    || inventoryUnit?.roomTypeCode !== arrangement.actualRoomTypeCode
+    || effect.arrivalDate !== arrangementArrivalDate
+    || effect.departureDate !== arrangementDepartureDate) {
+    throw temporaryOtherRoomRecoveryError("已损坏");
+  }
+  const quoteId = typeof effect.quoteId === "string" && effect.quoteId.trim() !== "" ? effect.quoteId : null;
+  if (!quoteId) throw temporaryOtherRoomRecoveryError("缺少原报价");
+  let quote: Awaited<ReturnType<typeof loadStoredQuote>>;
+  try {
+    quote = await loadStoredQuote(db, quoteId, false);
+  } catch {
+    throw temporaryOtherRoomRecoveryError("无法核对原报价");
+  }
+  if (!quote.temporaryOtherRoomArrangement
+    || stableHash(arrangement) !== stableHash(quote.temporaryOtherRoomArrangement)
+    || quote.memberId !== effect.memberId
+    || quote.memberContractId !== effect.memberContractId
+    || quote.inventoryUnitId !== inventoryUnit?.id
+    || quote.arrivalDate !== effect.arrivalDate
+    || quote.departureDate !== effect.departureDate) {
+    throw temporaryOtherRoomRecoveryError("与原报价不一致");
+  }
+}
+
+async function assertTemporaryOtherRoomEvidenceForRead(
+  db: Kysely<Database> | Transaction<Database>,
+  commandType: string,
+  value: Record<string, unknown>
+): Promise<void> {
+  const previewCommandType = commandType.startsWith("PREVIEW:")
+    ? commandType.slice("PREVIEW:".length)
+    : null;
+  const preview = previewCommandType ? asRecord(value.preview) : undefined;
+  const target = previewCommandType ? asRecord(preview?.effect) : value;
+  if (!target) return;
+
+  const hasArrangement = Object.hasOwn(target, "temporaryOtherRoomArrangement");
+  const hasCreateAmendmentId = Object.hasOwn(target, "temporaryOtherRoomCreateAmendmentId");
+  const effectiveCommandType = previewCommandType ?? commandType;
+  const orderId = typeof target.orderId === "string" && target.orderId.trim() !== ""
+    ? target.orderId
+    : null;
+
+  if (effectiveCommandType === "CREATE_ORDER" && !orderId) {
+    if (!hasArrangement && !hasCreateAmendmentId) {
+      if (Object.hasOwn(target, "temporaryOtherRoomReason")) {
+        throw temporaryOtherRoomRecoveryError("不完整");
+      }
+      const quoteId = typeof target.quoteId === "string" && target.quoteId.trim() !== ""
+        ? target.quoteId
+        : null;
+      if (quoteId) {
+        try {
+          const quote = await loadStoredQuote(db, quoteId, false);
+          if (quote.temporaryOtherRoomArrangement) throw temporaryOtherRoomRecoveryError("缺少安排快照");
+        } catch (error) {
+          if (error instanceof DomainError && error.code === "INTERNAL_ERROR") throw error;
+        }
+      }
+      return;
+    }
+    if (!hasArrangement || hasCreateAmendmentId) throw temporaryOtherRoomRecoveryError("不完整");
+    await assertTemporaryOtherRoomCreatePreviewEvidence(db, target);
+    return;
+  }
+
+  if (!orderId) {
+    if (hasArrangement || hasCreateAmendmentId) throw temporaryOtherRoomRecoveryError("缺少所属订单");
+    return;
+  }
+
+  const authoritative = await loadTemporaryOtherRoomCreateEvidence(db, orderId);
+  if (!authoritative) {
+    if (hasArrangement || hasCreateAmendmentId) {
+      throw temporaryOtherRoomRecoveryError("与订单创建记录不一致");
+    }
+    return;
+  }
+  const arrangement = asRecord(target.temporaryOtherRoomArrangement);
+  if (!hasArrangement
+    || !hasCreateAmendmentId
+    || !arrangement
+    || target.temporaryOtherRoomCreateAmendmentId !== authoritative.createAmendmentId
+    || stableHash(arrangement) !== stableHash(authoritative.arrangement)) {
+    throw temporaryOtherRoomRecoveryError("与订单创建记录不一致");
+  }
+}
+
+async function assertTemporaryOtherRoomQuoteReceiptEvidenceForRead(
+  db: Kysely<Database> | Transaction<Database>,
+  result: Record<string, unknown>
+): Promise<void> {
+  const receiptQuote = asRecord(result.quote);
+  const quoteId = typeof receiptQuote?.quoteId === "string" && receiptQuote.quoteId.trim() !== ""
+    ? receiptQuote.quoteId
+    : null;
+  if (!receiptQuote || !quoteId) return;
+  let authoritative: Awaited<ReturnType<typeof loadStoredQuote>>;
+  try {
+    authoritative = await loadStoredQuote(db, quoteId, false);
+  } catch {
+    return;
+  }
+  if (!authoritative.temporaryOtherRoomArrangement
+    && !Object.hasOwn(receiptQuote, "temporaryOtherRoomArrangement")) return;
+  if (stableHash(receiptQuote) !== stableHash(projectQuoteForExternalRead(authoritative))) {
+    throw temporaryOtherRoomRecoveryError("与原报价不一致");
+  }
+}
+
 async function receiptByCommand(
   db: Kysely<Database> | Transaction<Database>,
   commandId: string,
@@ -1035,6 +1282,12 @@ async function receiptByCommand(
   }
   if (row.command_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && result) {
     result = await projectStayMembershipConversionResultForRead(db, row.command_id, result);
+  }
+  if (result) {
+    await assertTemporaryOtherRoomEvidenceForRead(db, row.command_type, result);
+    if (row.command_type === "CREATE_QUOTE") {
+      await assertTemporaryOtherRoomQuoteReceiptEvidenceForRead(db, result);
+    }
   }
   const error = asRecord(row.error) as ErrorDto | undefined;
   const receipt: ReceiptReadDto = {
@@ -1183,7 +1436,8 @@ export async function executeQuoteCommand(
     departureDate: input.departureDate,
     pricingPolicyVersionId: input.pricingPolicyVersionId,
     ...(input.memberId ? { memberId: input.memberId } : {}),
-    ...(input.memberContractId ? { memberContractId: input.memberContractId } : {})
+    ...(input.memberContractId ? { memberContractId: input.memberContractId } : {}),
+    ...(input.temporaryOtherRoom === true ? { temporaryOtherRoom: true } : {})
   };
   const requestHash = stableHash(normalizedInput);
   const commandLockKey = executionLockKey(principal.subjectId, propertyId, commandType, headers.idempotencyKey);
@@ -1470,11 +1724,10 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         throw new DomainError("REASON_REQUIRED", "A structured reason is required");
       }
       if (confirmation.commandType === "CREATE_ORDER"
-        && confirmation.reason.code !== "CREATE_STANDARD_ORDER"
-        && confirmation.reason.code !== "BACKFILL_STAY") {
+        && !createOrderConfirmationReasonCodes.has(confirmation.reason.code)) {
         throw new DomainError(
           "VALIDATION_ERROR",
-          "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER or BACKFILL_STAY"
+          "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER, BACKFILL_STAY, or TEMPORARY_OTHER_ROOM"
         );
       }
       return db.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
@@ -1579,11 +1832,10 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           throw new DomainError("REASON_REQUIRED", "A structured reason is required");
         }
         if (commandType === "CREATE_ORDER"
-          && confirmation.reason.code !== "CREATE_STANDARD_ORDER"
-          && confirmation.reason.code !== "BACKFILL_STAY") {
+          && !createOrderConfirmationReasonCodes.has(confirmation.reason.code)) {
           throw new DomainError(
             "VALIDATION_ERROR",
-            "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER or BACKFILL_STAY"
+            "CREATE_ORDER confirmation reason must be CREATE_STANDARD_ORDER, BACKFILL_STAY, or TEMPORARY_OTHER_ROOM"
           );
         }
         const replay = await replayOrConflict(trx, {
@@ -1659,21 +1911,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           throw new HistoricalPreviewReadOnlyError();
         }
         if (commandType === "CREATE_ORDER") {
-          const backfill = asRecord(storedEffect.backfill);
-          if (backfill) {
-            const lockedReason = typeof backfill.reason === "string" ? backfill.reason.trim() : "";
-            if (!lockedReason
-              || confirmation.reason.code !== "BACKFILL_STAY"
-              || confirmation.reason.note.trim() !== lockedReason) {
-              throw new DomainError(
-                "CONFIRMATION_MISMATCH",
-                "补录确认原因必须与核对页锁定的原因一致",
-                409
-              );
-            }
-          } else if (confirmation.reason.code !== "CREATE_STANDARD_ORDER") {
-            throw new DomainError("CONFIRMATION_MISMATCH", "普通创建订单必须使用标准建单确认原因", 409);
-          }
+          assertCreateOrderConfirmationReason(storedEffect, confirmation.reason);
         }
         if (commandType === "COMPLETE_STAY") {
           const lockedReason = typeof storedEffect.reasonNote === "string" ? storedEffect.reasonNote.trim() : "";

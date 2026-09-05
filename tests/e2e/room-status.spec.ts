@@ -5,7 +5,7 @@ import type { AuthPrincipal, CommandEnvelope, RoomStatusBoardDto } from "@qintop
 import { confirmCommandPreview, createCommandPreview, executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
-import { authScope } from "../helpers/auth-principals.ts";
+import { authScope, commandGrantsForProfile } from "../helpers/auth-principals.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
@@ -279,10 +279,15 @@ async function ensureRevocationPrincipal() {
       status: "ACTIVE",
       auth_version: 1
     })).execute();
+    await setPrincipalPropertyAccess(revocationOperator.username, "WRITE");
+    await db.insertInto("subject_command_grants").values(commandGrantsForProfile("ordinary").map((commandType) => ({
+      subject_id: revocationOperator.id,
+      property_id: propertyId,
+      command_type: commandType
+    }))).onConflict((conflict) => conflict.doNothing()).execute();
   } finally {
     await db.destroy();
   }
-  await setPrincipalPropertyAccess(revocationOperator.username, "WRITE");
 }
 
 async function enableRestorationSwitchProperty() {
@@ -2808,6 +2813,10 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await page.getByRole("link", { name: "返回房态", exact: true }).click();
   const restoredBoard = await (await restoredResponse).json() as RoomStatusBoardDto;
   await expect(page.getByRole("heading", { name: "今日运营任务" })).toBeVisible();
+  expect(restoredBoard.range).toEqual({
+    arrivalDate: today,
+    departureDate: addDays(today, roomStatusTimelineDays)
+  });
   const restoredMobileRange = page.locator(".room-status-mobile-range");
   await expect(restoredMobileRange).toContainText(
     `${Number(restoredBoard.range.arrivalDate.slice(5, 7))}月${Number(restoredBoard.range.arrivalDate.slice(8, 10))}日`
@@ -2816,7 +2825,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     `${Number(restoredBoard.range.departureDate.slice(5, 7))}月${Number(restoredBoard.range.departureDate.slice(8, 10))}日`
   );
   await expect(page.locator(".room-status-return-notice")).toContainText(
-    "最新房态中找不到原住宿位置。已安全关闭订单详情"
+    "订单处理完成，已按最新房态恢复原住宿选择。"
   );
   await expect.poll(() => page.evaluate(() => {
     const key = Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.key(index))
@@ -2828,10 +2837,19 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     return { range: snapshot?.range, selection: snapshot?.state?.selection };
   })).toEqual({
     range: restoredBoard.range,
-    selection: null
+    selection: {
+      unitId: "unit_room_201",
+      anchorDate: today,
+      focusDate: today,
+      arrivalDate: today,
+      departureDate: orderDepartureDate
+    }
   });
 
   const restoredOrderDialog = page.getByRole("dialog", { name: "订单详情", exact: true });
+  await expect(restoredOrderDialog.getByRole("heading", { name: `${guest}的住宿订单`, exact: true })).toBeVisible();
+  await expect(restoredOrderDialog).not.toContainText(overdueGuest);
+  await restoredOrderDialog.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await expect(restoredOrderDialog).toBeHidden();
 
   await page.getByRole("tab", { name: /异常/ }).click();

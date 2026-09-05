@@ -131,6 +131,7 @@ function orderView(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
         factCount: 1
       }
     }],
+    referencedInventoryUnits: [],
     amendments: [{
       id: "amendment_2",
       order_id: "order_stage7",

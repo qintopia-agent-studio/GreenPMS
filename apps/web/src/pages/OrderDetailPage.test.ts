@@ -29,6 +29,7 @@ import {
   FactActions,
   OverdueInHouseAlert,
   CompleteStayCorrectionHistory,
+  TemporaryOtherRoomArrangementHistory,
   OrderLifecycleSections,
   OrderMembershipCoverageSection,
   pricingBasisLabel,
@@ -148,6 +149,74 @@ describe("completed-stay correction audit history", () => {
       ...amendment,
       reason_code: "NORMAL_FULFILLMENT"
     })))).toEqual([]);
+  });
+});
+
+describe("temporary other-room arrangement history", () => {
+  const arrangement = {
+    kind: "TEMPORARY_OTHER_ROOM",
+    membershipOrderId: "membership_order_1",
+    memberContractId: "contract_1",
+    entitlementLotId: "lot_1",
+    originalRoomTypeCode: "shared_bath_single",
+    originalInventoryKind: "ROOM",
+    entitlementUnitKind: "ROOM_NIGHT",
+    actualInventoryUnitId: "room_private_101",
+    actualRoomTypeCode: "private_bath_single",
+    actualInventoryKind: "ROOM",
+    arrivalDate: "2026-09-06",
+    departureDate: "2026-09-08"
+  } as const;
+
+  function view(payload: unknown = { temporaryOtherRoomArrangement: arrangement }) {
+    return {
+      amendments: [{
+        id: "amendment_create",
+        order_id: "order_1",
+        sequence: 1,
+        amendment_type: "CREATE_ORDER",
+        reason_code: "TEMPORARY_OTHER_ROOM",
+        reason_note: "现场协调安排",
+        prior_version: 0,
+        new_version: 1,
+        payload,
+        command_id: "command_1",
+        actor: { subjectId: "subject_front_desk", displayName: "前台甲" },
+        created_at: "2026-09-05T08:30:00.000Z"
+      }]
+    } as unknown as OrderViewDto;
+  }
+
+  it("renders the immutable business record with Chinese room labels and readable room identity", () => {
+    const html = renderToStaticMarkup(createElement(TemporaryOtherRoomArrangementHistory, {
+      view: view(),
+      inventoryUnits: [{ id: "room_private_101", code: "101", name: "101 独卫单人间", building_code: "1" }]
+    }));
+    expect(html).toContain("本次临时安排其他房型");
+    expect(html).toContain("单人间（公卫）");
+    expect(html).toContain("单人间（独卫）");
+    expect(html).toContain("101 · 1栋 · 101 独卫单人间");
+    expect(html).toContain("2026-09-06 至 2026-09-08");
+    expect(html).toContain("现场协调安排");
+    expect(html).toContain("前台甲");
+    expect(html).not.toMatch(/membershipOrderId|entitlementLotId|temporaryOtherRoomArrangement/);
+  });
+
+  it("fails closed when the first creation record is incomplete or not a temporary arrangement", () => {
+    expect(renderToStaticMarkup(createElement(TemporaryOtherRoomArrangementHistory, {
+      view: view({ temporaryOtherRoomArrangement: { ...arrangement, actualInventoryKind: "BED" } }),
+      inventoryUnits: []
+    }))).toBe("");
+    expect(renderToStaticMarkup(createElement(TemporaryOtherRoomArrangementHistory, {
+      view: view({ temporaryOtherRoomArrangement: arrangement },),
+      inventoryUnits: []
+    }))).toContain("room_private_101");
+    const ordinary = view();
+    ordinary.amendments[0]!.reason_code = "CREATE_STANDARD_ORDER";
+    expect(renderToStaticMarkup(createElement(TemporaryOtherRoomArrangementHistory, {
+      view: ordinary,
+      inventoryUnits: []
+    }))).toBe("");
   });
 });
 
@@ -2085,9 +2154,9 @@ describe("shared Web command recovery persistence", () => {
       subjectId: context.subjectId,
       scopeId: context.scopeId,
       request: memberStayRequest
-    }, { ...confirming, confirmationKey: "web-confirm-member-stay" }).recovery!;
+    }, { ...confirming, confirmationKey: "web-confirm-member-stay", effectHash: "a".repeat(64) }).recovery!;
 
-    expect(recovery).toMatchObject({ commandType: "CREATE_ORDER", presentation: "MEMBER_STAY" });
+    expect(recovery).toMatchObject({ commandType: "CREATE_ORDER", presentation: "MEMBER_STAY", effectHash: "a".repeat(64) });
     expect(recoveryCommandRequest(recovery)).toMatchObject({ commandType: "CREATE_ORDER", presentation: "MEMBER_STAY", input: { propertyId: "property_qintopia" } });
     expect(JSON.stringify(recovery)).not.toContain("不应持久化");
   });
@@ -2104,9 +2173,9 @@ describe("shared Web command recovery persistence", () => {
       subjectId: context.subjectId,
       scopeId: context.scopeId,
       request
-    }, { ...confirming, confirmationKey: "web-confirm-check-out" }).recovery!;
+    }, { ...confirming, confirmationKey: "web-confirm-check-out", effectHash: "b".repeat(64) }).recovery!;
 
-    expect(recovery).toMatchObject({ commandType: "CHECK_OUT", presentation: "FULFILLMENT" });
+    expect(recovery).toMatchObject({ commandType: "CHECK_OUT", presentation: "FULFILLMENT", effectHash: "b".repeat(64) });
     expect(recoveryCommandRequest(recovery)).toMatchObject({
       commandType: "CHECK_OUT",
       presentation: "FULFILLMENT",

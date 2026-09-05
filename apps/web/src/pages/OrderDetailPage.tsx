@@ -30,6 +30,7 @@ import {
 } from "@qintopia/contracts";
 import { api } from "../api";
 import { accommodationPositionItems, type AccommodationPositionItem } from "../components/AccommodationPositionSummary";
+import { roomStatusRoomTypeLabel } from "../room-status/roomStatusPresentation";
 import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { MoveUnitDrawer } from "../components/MoveUnitDrawer";
@@ -77,6 +78,7 @@ import {
   isTerminalCommandRecovery,
   recoveryCommandRequest,
   stayDateFundsAreOperatorFacing,
+  temporaryOtherRoomArrangementPresentation,
   usePersistentCommandRecovery,
   StatusBadge
 } from "../ui";
@@ -149,6 +151,47 @@ export function completeStayCorrectionRecords(amendments: readonly AmendmentDto[
       reasonNote: checkOut.reason_note
     }];
   });
+}
+
+export interface TemporaryOtherRoomOrderRecord {
+  originalRoomTypeCode: string;
+  actualInventoryUnitId: string;
+  actualRoomTypeCode: string;
+  arrivalDate: string;
+  departureDate: string;
+  reasonNote: string;
+  actor: NonNullable<AmendmentDto["actor"]>;
+  recordedAt: string;
+}
+
+function validRecordedAt(value: string): boolean {
+  return !Number.isNaN(Date.parse(value));
+}
+
+export function temporaryOtherRoomOrderRecord(amendments: readonly AmendmentDto[]): TemporaryOtherRoomOrderRecord | undefined {
+  const creation = amendments
+    .filter((amendment) => amendment.amendment_type === "CREATE_ORDER")
+    .sort((left, right) => left.sequence - right.sequence)[0];
+  if (!creation
+    || creation.reason_code !== "TEMPORARY_OTHER_ROOM"
+    || !creation.reason_note.trim()
+    || creation.reason_note.trim().length > 200
+    || !creation.actor?.subjectId.trim()
+    || !creation.actor.displayName.trim()
+    || !validRecordedAt(creation.created_at)
+    || !creation.payload
+    || typeof creation.payload !== "object"
+    || Array.isArray(creation.payload)) return undefined;
+  const arrangement = temporaryOtherRoomArrangementPresentation(
+    (creation.payload as Record<string, unknown>).temporaryOtherRoomArrangement
+  );
+  if (!arrangement) return undefined;
+  return {
+    ...arrangement,
+    reasonNote: creation.reason_note.trim(),
+    actor: creation.actor,
+    recordedAt: creation.created_at
+  };
 }
 
 export function orderRefreshMustCloseEditor(
@@ -742,6 +785,36 @@ export function CompleteStayCorrectionHistory({ view }: {
         </dl>
       </article>
     ))}</div>
+  </section>;
+}
+
+function temporaryOtherRoomActualUnitLabel(unit: Pick<InventoryUnitDto, "code" | "name" | "building_code"> | undefined): string | undefined {
+  if (!unit) return undefined;
+  const roomName = unit.name.trim();
+  const roomCode = unit.code.trim();
+  const location = unit.building_code?.trim() ? `${unit.building_code.trim()}栋` : "";
+  return [roomCode, location, roomName].filter(Boolean).join(" · ") || undefined;
+}
+
+export function TemporaryOtherRoomArrangementHistory({ view, inventoryUnits }: {
+  view: Pick<OrderViewDto, "amendments">;
+  inventoryUnits: readonly Pick<InventoryUnitDto, "id" | "code" | "name" | "building_code">[];
+}) {
+  const record = temporaryOtherRoomOrderRecord(view.amendments);
+  if (!record) return null;
+  const actualRoom = temporaryOtherRoomActualUnitLabel(inventoryUnits.find((unit) => unit.id === record.actualInventoryUnitId))
+    ?? record.actualInventoryUnitId;
+  return <section className="detail-section full-detail" aria-labelledby="temporary-other-room-arrangement-heading" data-testid="temporary-other-room-arrangement-history">
+    <div className="section-title-row"><h2 id="temporary-other-room-arrangement-heading">本次临时安排其他房型</h2></div>
+    <dl className="detail-list">
+      <div><dt>原适用房型</dt><dd>{roomStatusRoomTypeLabel(record.originalRoomTypeCode)}</dd></div>
+      <div><dt>实际房型</dt><dd>{roomStatusRoomTypeLabel(record.actualRoomTypeCode)}</dd></div>
+      <div><dt>实际安排房间</dt><dd>{actualRoom}</dd></div>
+      <div><dt>住宿日期</dt><dd>{formatDate(record.arrivalDate)} 至 {formatDate(record.departureDate)}</dd></div>
+      <div><dt>安排原因</dt><dd>{record.reasonNote}</dd></div>
+      <div><dt>操作人</dt><dd>{record.actor.displayName}</dd></div>
+      <div><dt>操作时间</dt><dd>{formatDateTime(record.recordedAt)}</dd></div>
+    </dl>
   </section>;
 }
 
@@ -1797,7 +1870,12 @@ export function OrderDetailPage() {
     setCommandDraft(undefined);
   }, [orderId, requestedAction, view]);
 
-  const unitMap = useMemo(() => new Map(meta.inventoryUnits.map((unit) => [unit.id, unit])), [meta.inventoryUnits]);
+  const orderInventoryUnits = useMemo(() => {
+    const units = new Map(meta.inventoryUnits.map((unit) => [unit.id, unit]));
+    for (const unit of view?.referencedInventoryUnits ?? []) units.set(unit.id, unit);
+    return [...units.values()];
+  }, [meta.inventoryUnits, view?.referencedInventoryUnits]);
+  const unitMap = useMemo(() => new Map(orderInventoryUnits.map((unit) => [unit.id, unit])), [orderInventoryUnits]);
 
   function openForm(action: FormAction, factId?: string) {
     if (!view || orderActionsBlocked || !orderActionWithUpgradeGuard(view, actionByCode.get(action))?.enabled) return;
@@ -2099,10 +2177,12 @@ export function OrderDetailPage() {
 
       <OrderLifecycleSections
         view={view}
-        inventoryUnits={meta.inventoryUnits}
+        inventoryUnits={orderInventoryUnits}
         showPerOrderFunds={showPerOrderFunds}
         channelPriceDifferenceReason={currentPricingRevision?.reason.note}
       />
+
+      <TemporaryOtherRoomArrangementHistory view={view} inventoryUnits={orderInventoryUnits} />
 
       <CompleteStayCorrectionHistory view={view} />
 
@@ -2229,7 +2309,7 @@ export function OrderDetailPage() {
       {lifecycleAction ? <OrderLifecycleActionDrawer
         action={lifecycleAction}
         view={view}
-        inventoryUnitLabels={Object.fromEntries(meta.inventoryUnits.map((unit) => [unit.id, [unit.building_code ? `${unit.building_code}栋` : null, unit.name].filter(Boolean).join(" ")]))}
+        inventoryUnitLabels={Object.fromEntries(orderInventoryUnits.map((unit) => [unit.id, [unit.building_code ? `${unit.building_code}栋` : null, unit.name].filter(Boolean).join(" ")]))}
         writeBlocked={orderActionsBlocked}
         {...(commandDraft?.commandType === lifecycleAction ? { draft: commandDraft } : {})}
         onClose={() => { setLifecycleAction(undefined); setCommandDraft(undefined); }}

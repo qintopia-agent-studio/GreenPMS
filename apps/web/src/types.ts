@@ -618,6 +618,7 @@ export interface OrderViewDto {
   effectiveArrangement: OrderEffectiveArrangementDto;
   fulfillment: OrderFulfillmentProjectionDto;
   arrangementHistory: OrderArrangementHistoryItemDto[];
+  referencedInventoryUnits: InventoryUnitDto[];
   amendments: AmendmentDto[];
   pricingRevisions: PricingRevisionDto[];
   membershipConversion: {

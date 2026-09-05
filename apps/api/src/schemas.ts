@@ -124,6 +124,24 @@ export const CoverageItem = strictObject({
   unitKind: EntitlementUnitKindSchema,
   entitlementLotId: Id
 });
+const TemporaryOtherRoomArrangementSchema = strictObject({
+  kind: Type.Literal("TEMPORARY_OTHER_ROOM"),
+  membershipOrderId: Id,
+  memberContractId: Id,
+  entitlementLotId: Id,
+  originalRoomTypeCode: ShortText,
+  originalInventoryKind: Type.Literal("ROOM"),
+  entitlementUnitKind: Type.Literal("ROOM_NIGHT"),
+  actualInventoryUnitId: Id,
+  actualRoomTypeCode: ShortText,
+  actualInventoryKind: Type.Literal("ROOM"),
+  arrivalDate: LocalDate,
+  departureDate: LocalDate
+});
+const TemporaryOtherRoomLifecycleEvidenceFields = {
+  temporaryOtherRoomArrangement: Type.Optional(TemporaryOtherRoomArrangementSchema),
+  temporaryOtherRoomCreateAmendmentId: Type.Optional(Id)
+};
 const NightlyCashLine = strictObject({
   lineKind: Type.Optional(Type.Literal("NIGHT")),
   serviceDate: LocalDate,
@@ -272,6 +290,12 @@ const ErrorDetailsSchema = Type.Union([
   }),
   strictObject({ orderId: Id, serviceDate: LocalDate, coverageId: Id }),
   strictObject({ orderId: Id, serviceDate: LocalDate, activeClaimIds: Type.Array(Id) }),
+  strictObject({
+    temporaryOtherRoomAvailable: Type.Literal(true),
+    originalRoomTypeCode: ShortText,
+    actualRoomTypeCode: ShortText,
+    originalRoomTypeAvailable: Type.Boolean()
+  }),
   strictObject({ cleaningTaskId: Id, status: Type.Union([Type.Literal("PENDING"), Type.Literal("COMPLETED")]) })
 ]);
 
@@ -469,7 +493,8 @@ export const CommandEnvelopeSchema = Type.Union([
     freeStayCategoryCode: Type.Optional(FreeStayCategoryCodeSchema),
     backfill: Type.Optional(Type.Literal(true)),
     backfillReason: Type.Optional(Note),
-    backfillCollection: Type.Optional(BackfillCollectionInputSchema)
+    backfillCollection: Type.Optional(BackfillCollectionInputSchema),
+    temporaryOtherRoomReason: Type.Optional(ShortText)
   })),
   commandEnvelope("CORRECT_ORDER_OCCUPANT", strictObject({
     ...OrderInput,
@@ -572,7 +597,8 @@ export const ConfirmSchema = Type.Union([
     commandType: Type.Literal("CREATE_ORDER"),
     reason: Type.Union([
       strictObject({ code: Type.Literal("CREATE_STANDARD_ORDER"), note: Type.Literal("") }),
-      strictObject({ code: Type.Literal("BACKFILL_STAY"), note: Note })
+      strictObject({ code: Type.Literal("BACKFILL_STAY"), note: Note }),
+      strictObject({ code: Type.Literal("TEMPORARY_OTHER_ROOM"), note: ShortText })
     ])
   }),
   strictObject({
@@ -659,6 +685,7 @@ export const QuoteSchema = strictObject({
   expiresAt: DateTime,
   memberId: Type.Optional(Id),
   memberContractId: Type.Optional(Id),
+  temporaryOtherRoomArrangement: Type.Optional(TemporaryOtherRoomArrangementSchema),
   inputHash: Type.String({ minLength: 64, maxLength: 64 })
 });
 
@@ -669,7 +696,8 @@ export const QuoteRequestSchema = strictObject({
   arrivalDate: LocalDate,
   departureDate: LocalDate,
   pricingPolicyVersionId: Id,
-  memberId: Type.Optional(Id)
+  memberId: Type.Optional(Id),
+  temporaryOtherRoom: Type.Optional(Type.Literal(true))
 });
 const StayTimelineItemSchema = strictObject({ serviceDate: LocalDate, inventoryUnitId: Id });
 const StayTimelineSchema = Type.Array(StayTimelineItemSchema, { minItems: 1 });
@@ -1128,6 +1156,8 @@ export const CommandEffectSchema = Type.Union([
     pricingPolicyVersionId: Id,
     memberId: nullable(Id),
     memberContractId: nullable(Id),
+    temporaryOtherRoomArrangement: Type.Optional(TemporaryOtherRoomArrangementSchema),
+    temporaryOtherRoomReason: Type.Optional(ShortText),
     backfill: Type.Optional(strictObject({
       reason: Note,
       businessDate: LocalDate,
@@ -1149,7 +1179,8 @@ export const CommandEffectSchema = Type.Union([
     ordinal: Type.Integer({ minimum: 1 }),
     role: Type.Union([Type.Literal("PRIMARY"), Type.Literal("ADDITIONAL")]),
     before: OrderOccupantPriorSnapshotSchema,
-    after: OrderOccupantCorrectedSnapshotSchema
+    after: OrderOccupantCorrectedSnapshotSchema,
+    ...TemporaryOtherRoomLifecycleEvidenceFields
   }),
   strictObject({ inventoryUnit: InventoryUnitRecordSchema, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note }),
   strictObject({ maintenanceLockId: Id, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate }),
@@ -1249,7 +1280,8 @@ export const CommandEffectSchema = Type.Union([
     pricingDecision: CreateOrderPricingDecisionSchema,
     inventoryChange: StayChangeDateDiffSchema,
     entitlementChange: StayChangeEntitlementDiffSchema,
-    fundsSummary: StayChangeFundsSummarySchema
+    fundsSummary: StayChangeFundsSummarySchema,
+    ...TemporaryOtherRoomLifecycleEvidenceFields
   }),
   strictObject({
     operation: Type.Literal("SHORTEN_STAY"),
@@ -1276,7 +1308,8 @@ export const CommandEffectSchema = Type.Union([
     inventoryChange: StayChangeDateDiffSchema,
     entitlementSummary: ShortenStayEntitlementSummarySchema,
     fundsSummary: ShortenStayFundsSummarySchema,
-    refundReferenceAmount: NonNegativeMoney
+    refundReferenceAmount: NonNegativeMoney,
+    ...TemporaryOtherRoomLifecycleEvidenceFields
   }),
   strictObject({
     operation: Type.Literal("MOVE_UNIT"),
@@ -1449,7 +1482,8 @@ export const CommandEffectSchema = Type.Union([
       coverageCount: Type.Integer({ minimum: 0 }),
       coverageIds: Type.Array(Id)
     }),
-    collection: nullable(BackfillCompletedStayCollectionEffectSchema)
+    collection: nullable(BackfillCompletedStayCollectionEffectSchema),
+    ...TemporaryOtherRoomLifecycleEvidenceFields
   }),
   strictObject({
     orderId: Id,
@@ -1477,7 +1511,8 @@ export const CommandEffectSchema = Type.Union([
     pricingRevision: Type.Optional(strictObject({
       currentContractAmount: Money,
       pricingBasis: Type.Union(createOrderPricingBasisCodes.map((code) => Type.Literal(code)))
-    }))
+    })),
+    ...TemporaryOtherRoomLifecycleEvidenceFields
   })
 ]);
 
@@ -1501,6 +1536,8 @@ const CreateOrderResultSchema = strictObject({
   channelOrderReference: nullable(ShortText),
   freeStayReason: nullable(Note),
   freeStayCategoryCode: nullable(FreeStayCategoryCodeSchema),
+  temporaryOtherRoomArrangement: Type.Optional(TemporaryOtherRoomArrangementSchema),
+  temporaryOtherRoomCreateAmendmentId: Type.Optional(Id),
   effectHash: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })),
   status: Type.Optional(Type.Union([Type.Literal("RESERVED"), Type.Literal("CHECKED_IN"), Type.Literal("CHECKED_OUT")])),
   backfill: Type.Optional(strictObject({
@@ -1519,7 +1556,9 @@ const CorrectOrderOccupantResultSchema = strictObject({
   occupantId: Id,
   correctionId: Id,
   amendmentId: Id,
-  occupant: OrderOccupantCorrectedSnapshotSchema
+  occupant: OrderOccupantCorrectedSnapshotSchema,
+  effectHash: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })),
+  ...TemporaryOtherRoomLifecycleEvidenceFields
 });
 const CreateMemberResultSchema = strictObject({
   memberId: Id,
@@ -1616,7 +1655,8 @@ const StayChangeResultSchema = strictObject({
   pricingDecision: CreateOrderPricingDecisionSchema,
   inventoryChange: StayChangeDateDiffSchema,
   entitlementChange: StayChangeEntitlementDiffSchema,
-  fundsSummary: StayChangeFundsSummarySchema
+  fundsSummary: StayChangeFundsSummarySchema,
+  ...TemporaryOtherRoomLifecycleEvidenceFields
 });
 const ShortenStayResultSchema = strictObject({
   orderId: Id,
@@ -1653,7 +1693,8 @@ const ShortenStayResultSchema = strictObject({
     effectiveDate: LocalDate,
     recordedBusinessDate: LocalDate,
     recordingMode: Type.Literal("ON_SCHEDULE")
-  }))
+  })),
+  ...TemporaryOtherRoomLifecycleEvidenceFields
 });
 const MoveUnitResultSchema = strictObject({
   orderId: Id,
@@ -1820,7 +1861,8 @@ const OrderStatusResultSchema = strictObject({
     from: Type.Union([Type.Literal("HELD"), Type.Literal("CONSUMED")]),
     to: Type.Union([Type.Literal("CONSUMED"), Type.Literal("RELEASED"), Type.Literal("RESTORED")]),
     coverageCount: Type.Integer({ minimum: 0 })
-  }))
+  })),
+  ...TemporaryOtherRoomLifecycleEvidenceFields
 });
 const PreviewReceiptResultSchema = strictObject({ preview: PreviewSchema });
 const QuoteReceiptResultSchema = strictObject({ quote: QuoteSchema });
@@ -1853,7 +1895,8 @@ export const CompleteStayResultSchema = strictObject({
     recordedBusinessDate: LocalDate,
     recordingMode: Type.Union([Type.Literal("ON_SCHEDULE"), Type.Literal("LATE_RECORDED")])
   }),
-  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" })
+  effectHash: Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" }),
+  ...TemporaryOtherRoomLifecycleEvidenceFields
 });
 const MembershipOrderCreatedResultSchema = strictObject({
   membershipOrderId: Id,
@@ -2849,6 +2892,7 @@ const CreateOrderAmendmentPayloadSchema = strictObject({
   channelOrderReference: Type.Optional(nullable(ShortText)),
   freeStayReason: Type.Optional(nullable(Note)),
   freeStayCategoryCode: Type.Optional(nullable(FreeStayCategoryCodeSchema)),
+  temporaryOtherRoomArrangement: Type.Optional(TemporaryOtherRoomArrangementSchema),
   pricingDecision: Type.Optional(CreateOrderPricingDecisionSchema)
 });
 const AmendmentRowBase = {
@@ -3110,6 +3154,7 @@ export const OrderDetailResponseSchema = strictObject({
   effectiveArrangement: OrderEffectiveArrangementSchema,
   fulfillment: OrderFulfillmentProjectionSchema,
   arrangementHistory: Type.Array(OrderArrangementHistoryItemSchema, { minItems: 1 }),
+  referencedInventoryUnits: Type.Array(InventoryUnitRowSchema, { minItems: 1 }),
   amendments: Type.Array(AmendmentRowSchema),
   pricingRevisions: Type.Array(PricingRevisionRowSchema),
   membershipConversion: nullable(strictObject({

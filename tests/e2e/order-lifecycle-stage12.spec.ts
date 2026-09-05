@@ -43,6 +43,7 @@ async function openLifecycleDrawer(
   action: "取消订单" | "标记未到" | "撤销入住",
   stay: Stage12StayFixture
 ): Promise<Locator> {
+  await expect.poll(() => page.evaluate(() => window.innerWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
   await page.getByRole("button", { name: action, exact: true }).click();
   const drawer = page.getByRole("dialog", { name: action, exact: true });
   await expect(drawer).toBeVisible();

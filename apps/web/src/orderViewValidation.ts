@@ -94,6 +94,11 @@ function nullableString(value: unknown, path: string): string | null {
   return stringValue(value, path, true);
 }
 
+function nullableNonEmptyString(value: unknown, path: string): string | null {
+  if (value === null) return null;
+  return stringValue(value, path);
+}
+
 function safeInteger(value: unknown, path: string, minimum?: number): number {
   if (!Number.isSafeInteger(value) || (minimum !== undefined && Number(value) < minimum)) {
     fail(path, minimum === undefined ? "必须是安全整数" : `必须是大于或等于 ${minimum} 的安全整数`);
@@ -164,6 +169,46 @@ function money(value: unknown, path: string): { currency: string; minorUnits: nu
     currency,
     minorUnits: result.minorUnits as number
   };
+}
+
+function referencedInventoryUnit(value: unknown, path: string): { id: string; propertyId: string } {
+  const unit = record(value, path);
+  exactKeys(unit, path, [
+    "id", "property_id", "kind", "parent_room_id", "code", "name", "active", "catalog_version",
+    "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance",
+    "physical_bed_count", "occupancy_capacity", "created_at"
+  ]);
+  const id = stringValue(unit.id, `${path}.id`);
+  const propertyId = stringValue(unit.property_id, `${path}.property_id`);
+  const kind = stringValue(unit.kind, `${path}.kind`);
+  if (kind !== "ROOM" && kind !== "BED") fail(`${path}.kind`, "不是支持的房源类型");
+  nullableNonEmptyString(unit.parent_room_id, `${path}.parent_room_id`);
+  stringValue(unit.code, `${path}.code`);
+  stringValue(unit.name, `${path}.name`);
+  if (typeof unit.active !== "boolean") fail(`${path}.active`, "必须是布尔值");
+  nullableNonEmptyString(unit.catalog_version, `${path}.catalog_version`);
+  nullableNonEmptyString(unit.building_code, `${path}.building_code`);
+  nullableNonEmptyString(unit.room_type_code, `${path}.room_type_code`);
+  nullableNonEmptyString(unit.pricing_product_code, `${path}.pricing_product_code`);
+  if (unit.inventory_basis !== null
+    && unit.inventory_basis !== "INDEPENDENT"
+    && unit.inventory_basis !== "WHOLE_ROOM_COMBINATION") {
+    fail(`${path}.inventory_basis`, "不是支持的库存口径");
+  }
+  if (unit.code_provenance !== null
+    && unit.code_provenance !== "SOURCE_EXPLICIT"
+    && unit.code_provenance !== "USER_CONFIRMED_RENAMED"
+    && unit.code_provenance !== "PMS_GENERATED") {
+    fail(`${path}.code_provenance`, "不是支持的编号来源");
+  }
+  if (unit.physical_bed_count !== null) {
+    const physicalBedCount = safeInteger(unit.physical_bed_count, `${path}.physical_bed_count`, 1);
+    if (physicalBedCount > 4) fail(`${path}.physical_bed_count`, "不能大于 4");
+  }
+  const occupancyCapacity = safeInteger(unit.occupancy_capacity, `${path}.occupancy_capacity`, 1);
+  if (occupancyCapacity > 1000) fail(`${path}.occupancy_capacity`, "不能大于 1000");
+  dateTime(unit.created_at, `${path}.created_at`);
+  return { id, propertyId };
 }
 
 function arrangement(value: unknown, path: string): OrderArrangementDto {
@@ -563,7 +608,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const result = record(value, "根节点");
   exactKeys(result, "根节点", [
     "accessLevel", "allowedActions", "order", "occupants", "occupantCorrections", "stay", "currentSegment",
-    "segments", "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory", "amendments",
+    "segments", "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory", "referencedInventoryUnits", "amendments",
     "pricingRevisions", "membershipConversion", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
   ]);
   const order = record(result.order, "order");
@@ -596,7 +641,16 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     if (action.enabled && (code === "CANCEL_ORDER" || code === "MARK_NO_SHOW" || code === "REVOKE_CHECK_IN")) enabledLifecycleActions.push(code);
   });
   const orderId = stringValue(order.id, "order.id");
-  stringValue(order.property_id, "order.property_id");
+  const orderPropertyId = stringValue(order.property_id, "order.property_id");
+  const referencedUnits = arrayValue(result.referencedInventoryUnits, "referencedInventoryUnits");
+  if (referencedUnits.length === 0) fail("referencedInventoryUnits", "必须包含订单涉及的房源");
+  const referencedUnitIds = new Set<string>();
+  referencedUnits.forEach((item, index) => {
+    const unit = referencedInventoryUnit(item, `referencedInventoryUnits[${index}]`);
+    if (unit.propertyId !== orderPropertyId) fail(`referencedInventoryUnits[${index}].property_id`, "与订单物业不一致");
+    if (referencedUnitIds.has(unit.id)) fail(`referencedInventoryUnits[${index}].id`, "重复");
+    referencedUnitIds.add(unit.id);
+  });
   const orderStatus = stringValue(order.status, "order.status");
   if (!Object.hasOwn(orderProjectionExpectations, orderStatus)) fail("order.status", "不是支持的订单状态");
   const conversionAmendments = (arrayValue(result.amendments, "amendments") as unknown[]).flatMap((item, index): JsonRecord[] => {
@@ -694,6 +748,12 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     fail("arrangementHistory", "必须包含初始预订记录");
   }
   const history = result.arrangementHistory.map((item, index) => historyItem(item, `arrangementHistory[${index}]`));
+  const arrangementUnitIds = new Set(history.flatMap((item) => [
+    ...(item.before?.intervals ?? []),
+    ...item.after.intervals
+  ]).map((interval) => interval.inventoryUnitId));
+  const missingReferencedUnitId = [...arrangementUnitIds].find((unitId) => !referencedUnitIds.has(unitId));
+  if (missingReferencedUnitId) fail("referencedInventoryUnits", `缺少住宿安排引用房源 ${missingReferencedUnitId}`);
   if (history[0]?.type !== "INITIAL_BOOKING" || history[0].before !== null || !sameArrangement(history[0].after, original)) {
     fail("arrangementHistory[0]", "必须与原始预订安排一致");
   }

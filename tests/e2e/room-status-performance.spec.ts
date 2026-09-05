@@ -4,7 +4,7 @@ import { todayInTimeZone, sha256 } from "@qintopia/domain";
 import { confirmCommandPreview, createCommandPreview } from "../../packages/db/src/commands/service.ts";
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createRoomStatusViewState, serializeRoomStatusRestoration } from "../../apps/web/src/room-status/roomStatusState.ts";
-import { authScope } from "../helpers/auth-principals.ts";
+import { authScope, commandGrantsForProfile, tokenCeilingForProfile } from "../helpers/auth-principals.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
@@ -33,6 +33,8 @@ function addDays(value: string, days: number): string {
 
 async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
   const db = createDatabase(e2eDatabaseUrl);
+  const ordinaryStaffCommandGrants = commandGrantsForProfile("ordinary");
+  const ordinaryStaffTokenCeiling = tokenCeilingForProfile("ordinary");
   try {
     const operatorSubject = await db.selectFrom("subjects")
       .select("id")
@@ -83,6 +85,14 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
       }).onConflict((conflict) => conflict.columns(["subject_id", "property_id"]).doUpdateSet({
         access_level: "WRITE"
       })).execute();
+      await trx.insertInto("subject_command_grants")
+        .values([agentSubjectId, operatorSubject.id].flatMap((subjectId) => ordinaryStaffCommandGrants.map((commandType) => ({
+          subject_id: subjectId,
+          property_id: performancePropertyId,
+          command_type: commandType
+        }))))
+        .onConflict((conflict) => conflict.columns(["subject_id", "property_id", "command_type"]).doNothing())
+        .execute();
       await trx.insertInto("api_tokens").values({
         id: performanceTokenId,
         subject_id: agentSubjectId,
@@ -99,6 +109,15 @@ async function preparePerformanceProperty(arrivalDate: string): Promise<void> {
         replaced_by_id: null,
         expires_at: "2035-01-01T00:00:00.000Z"
       })).execute();
+      await trx.insertInto("token_command_ceilings")
+        .values(ordinaryStaffTokenCeiling.map((commandType) => ({
+          token_id: performanceTokenId,
+          subject_id: agentSubjectId,
+          property_id: performancePropertyId,
+          command_type: commandType
+        })))
+        .onConflict((conflict) => conflict.columns(["token_id", "command_type"]).doNothing())
+        .execute();
     });
 
     const principal: AuthPrincipal = {

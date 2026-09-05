@@ -959,6 +959,113 @@ textarea:focus-visible {
 
 .member-benefit-controls .checkbox-label input { width: 16px; height: 16px; margin: 0; }
 
+.temporary-other-room-fields {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #e6ddc6;
+  border-radius: 6px;
+  background: #fffaf0;
+}
+
+.temporary-other-room-fields .checkbox-label {
+  position: relative;
+  align-items: center;
+  min-width: 0;
+  min-height: 32px;
+  cursor: pointer;
+}
+
+.temporary-other-room-fields input[type="checkbox"] {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--brand);
+}
+
+.temporary-other-room-fields .form-label-with-hint {
+  line-height: 20px;
+}
+
+.temporary-other-room-fields .info-hint {
+  position: static;
+}
+
+.temporary-other-room-fields .info-hint-bubble {
+  left: 0;
+  top: calc(100% + 8px);
+  transform: none;
+  width: 260px;
+  max-width: 100%;
+}
+
+.temporary-other-room-fields .form-label-with-hint,
+.temporary-other-room-fields label,
+.temporary-other-room-fields textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.temporary-other-room-warning {
+  margin: 0;
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.temporary-other-room-summary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid #e6ddc6;
+}
+
+.temporary-other-room-summary div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+}
+
+.temporary-other-room-summary dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.temporary-other-room-summary dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.temporary-other-room-fields > label:not(.checkbox-label) {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.temporary-other-room-fields textarea {
+  min-height: 76px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
 .member-balance-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1812,6 +1919,7 @@ thead .sticky-column {
 }
 
 .fact-reverse-action {
+  position: relative;
   display: inline-flex;
 }
 

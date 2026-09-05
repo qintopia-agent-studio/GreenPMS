@@ -6,6 +6,7 @@ import {
   RoomStatusCommandAttemptGuard,
   RoomStatusQueryAttemptGuard,
   SelectedMemberViewRequestGuard,
+  TemporaryOtherRoomFields,
   GUEST_FULL_NAME_MAX_LENGTH,
   applyMemberSelectionToGuestForms,
   backfillCollectionCommandInput,
@@ -27,8 +28,11 @@ import {
   formatMinorForYuanInput,
   inventoryRecoveryIsBusinessFacing,
   membershipCoverageSummary,
+  orderContextInventoryUnits,
   parseBackfillCollectionYuanToMinor,
   parseYuanAmountToMinor,
+  quoteRecoveryInputForCurrentContext,
+  quoteRecoveryMemberSelectionForUnit,
   quotePricingSummary,
   QuoteRecoveryPageEntry,
   staffQuoteError,
@@ -63,6 +67,10 @@ import {
   shouldAutoResolveOwnSendingQuoteRecovery,
   shouldOfferManualOwnSendingQuoteRecovery,
   shouldRenderDetachedQuoteRecoveryWorkbench,
+  temporaryOtherRoomCreateOrderCommand,
+  temporaryOtherRoomOfferFromQuoteError,
+  temporaryOtherRoomQuoteInput,
+  resetTemporaryOtherRoomDraftForContext,
   roomStatusOrderCommandScope,
   roomStatusProjectionRefreshAllowed,
   roomStatusProjectionRefreshDecision,
@@ -92,6 +100,20 @@ import {
   browserQuoteRecoveryOwnerId,
   saveQuoteCommandRecovery
 } from "./InventoryPage";
+
+describe("room-status order context inventory", () => {
+  it("merges inactive order references without duplicating active inventory", () => {
+    const active = [{ id: "room_active", code: "101", active: true }];
+    const referenced = [
+      { id: "room_active", code: "101 historical", active: false },
+      { id: "room_inactive", code: "B01", active: false }
+    ];
+    expect(orderContextInventoryUnits(active, referenced)).toEqual([
+      active[0],
+      referenced[1]
+    ]);
+  });
+});
 import { quoteRecoveryStorageKey } from "../ui";
 import { ApiError } from "../api";
 import { createSharedCommandRecoveryStorage } from "../ui";
@@ -795,6 +817,207 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(staffQuoteError(error, "104", "2026-02-24", "2026-02-25").message).toBe(
       "104 在 2026-02-24 至 2026-02-25 暂无已生效价格，请调整日期。"
     );
+  });
+
+  describe("temporary other-room member stay", () => {
+    const quoteInput = {
+      propertyId,
+      inventoryUnitId: "unit_room_b01",
+      arrivalDate: "2026-08-01",
+      departureDate: "2026-08-03",
+      pricingPolicyVersionId: "policy_public",
+      memberId: "member_shared_single"
+    };
+    const offerDetails = {
+      temporaryOtherRoomAvailable: true,
+      originalRoomTypeCode: "shared_bath_single",
+      actualRoomTypeCode: "private_bath_single",
+      originalRoomTypeAvailable: true
+    } as const;
+
+    it("renders the eligible option, warning, focusable help, and a bounded required reason", () => {
+      const render = (confirmed: boolean, reason = "") => renderToStaticMarkup(createElement(TemporaryOtherRoomFields, {
+        offer: offerDetails,
+        confirmed,
+        reason,
+        disabled: false,
+        onConfirmedChange: () => undefined,
+        onReasonChange: () => undefined
+      }));
+
+      const offered = render(false);
+      expect(offered).toContain("本次临时安排其他房型");
+      expect(offered).toContain("系统显示原会员房型仍可能有空房，请确认现场安排原因。");
+      expect(offered).toContain('role="tooltip"');
+      expect(offered).not.toContain('data-testid="temporary-other-room-reason"');
+
+      const confirmed = render(true, "现场协调");
+      expect(confirmed).toContain('data-testid="temporary-other-room-reason"');
+      expect(confirmed).toContain("现场协调");
+      expect(confirmed).toContain('maxLength="200"');
+      expect(confirmed).toContain("required");
+      expect(confirmed).not.toMatch(/entitlementLotId|projection|override|temporaryOtherRoomAvailable/);
+    });
+
+    it("reveals the option only from an eligible structured 409 and never from message text", () => {
+      const eligible = new ApiError(409, {
+        code: "ENTITLEMENT_CONFLICT",
+        message: "arbitrary localized text",
+        retryable: false,
+        details: offerDetails
+      });
+      expect(temporaryOtherRoomOfferFromQuoteError(eligible)).toEqual(offerDetails);
+
+      expect(temporaryOtherRoomOfferFromQuoteError(new ApiError(409, {
+        code: "ENTITLEMENT_CONFLICT",
+        message: "本次临时安排其他房型",
+        retryable: false,
+        details: { ...offerDetails, temporaryOtherRoomAvailable: false }
+      }))).toBeUndefined();
+      expect(temporaryOtherRoomOfferFromQuoteError(new ApiError(409, {
+        code: "INVENTORY_CONFLICT",
+        message: "本次临时安排其他房型",
+        retryable: false,
+        details: offerDetails
+      }))).toBeUndefined();
+      expect(temporaryOtherRoomOfferFromQuoteError(new ApiError(422, {
+        code: "ENTITLEMENT_CONFLICT",
+        message: "same structured details, wrong status",
+        retryable: false,
+        details: offerDetails
+      }))).toBeUndefined();
+      expect(temporaryOtherRoomOfferFromQuoteError(new ApiError(409, {
+        code: "ENTITLEMENT_CONFLICT",
+        message: "missing safe presentation fields",
+        retryable: false,
+        details: { temporaryOtherRoomAvailable: true }
+      }))).toBeUndefined();
+    });
+
+    it("keeps both directions involving a bed on the hard-rejection path", () => {
+      for (const details of [
+        { temporaryOtherRoomAvailable: false, originalInventoryKind: "BED", actualInventoryKind: "ROOM" },
+        { temporaryOtherRoomAvailable: false, originalInventoryKind: "ROOM", actualInventoryKind: "BED" }
+      ]) {
+        const conflict = new ApiError(409, {
+          code: "ENTITLEMENT_CONFLICT",
+          message: "本次权益不能用于所选库存",
+          retryable: false,
+          details
+        });
+        expect(temporaryOtherRoomOfferFromQuoteError(conflict)).toBeUndefined();
+      }
+    });
+
+    it("keeps an exact-match request unchanged and adds the literal flag only after an eligible confirmation", () => {
+      expect(temporaryOtherRoomQuoteInput(quoteInput, undefined, false)).toEqual(quoteInput);
+      expect(temporaryOtherRoomQuoteInput(quoteInput, undefined, true)).toEqual(quoteInput);
+      expect(temporaryOtherRoomQuoteInput(quoteInput, offerDetails, false)).toEqual(quoteInput);
+      expect(temporaryOtherRoomQuoteInput(quoteInput, offerDetails, true)).toEqual({
+        ...quoteInput,
+        temporaryOtherRoom: true
+      });
+    });
+
+    it("trims a 1-200 character reason into CREATE_ORDER input and the locked Confirm reason", () => {
+      const orderInput = {
+        propertyId,
+        quoteId: "quote_temporary_other_room",
+        primaryGuest: { fullName: "会员住客", nickname: "住客" },
+        additionalGuests: []
+      };
+      expect(temporaryOtherRoomCreateOrderCommand(orderInput, "  现场安排  ")).toMatchObject({
+        commandType: "CREATE_ORDER",
+        presentation: "MEMBER_STAY",
+        initialReason: { code: "TEMPORARY_OTHER_ROOM", note: "现场安排" },
+        input: {
+          ...orderInput,
+          temporaryOtherRoomReason: "现场安排"
+        }
+      });
+      expect(temporaryOtherRoomCreateOrderCommand(orderInput, "   ")).toBeUndefined();
+      expect(temporaryOtherRoomCreateOrderCommand(orderInput, "理".repeat(201))).toBeUndefined();
+    });
+
+    it.each([
+      ["member", { memberId: "member_other" }],
+      ["arrival date", { arrivalDate: "2026-08-02" }],
+      ["departure date", { departureDate: "2026-08-04" }],
+      ["inventory unit", { inventoryUnitId: "unit_room_b02" }]
+    ])("clears the confirmation and reason after changing %s", (_label, changed) => {
+      const context = {
+        memberId: quoteInput.memberId,
+        inventoryUnitId: quoteInput.inventoryUnitId,
+        arrivalDate: quoteInput.arrivalDate,
+        departureDate: quoteInput.departureDate
+      };
+      const draft = { offer: offerDetails, confirmed: true, reason: "夜间满房协调" };
+      const reset = resetTemporaryOtherRoomDraftForContext(draft, context, { ...context, ...changed });
+
+      expect(reset).toMatchObject({ confirmed: false, reason: "" });
+      expect(reset.offer).toBeUndefined();
+    });
+
+    it("preserves the draft while the member, dates, and room identity are unchanged", () => {
+      const context = {
+        memberId: quoteInput.memberId,
+        inventoryUnitId: quoteInput.inventoryUnitId,
+        arrivalDate: quoteInput.arrivalDate,
+        departureDate: quoteInput.departureDate
+      };
+      const draft = { offer: offerDetails, confirmed: true, reason: "夜间满房协调" };
+      expect(resetTemporaryOtherRoomDraftForContext(draft, context, { ...context })).toEqual(draft);
+    });
+
+    it("persists the accepted arrangement in quote recovery without matching a normal quote identity", () => {
+      const input = temporaryOtherRoomQuoteInput(quoteInput, offerDetails, true);
+      expect(quoteRecoveryInputForCurrentContext(quoteInput, input)).toEqual(input);
+      expect(quoteRecoveryInputForCurrentContext({ ...quoteInput, memberId: "member_other" }, input)).toBeUndefined();
+      const temporaryPending = {
+        ...pending,
+        input,
+        inputSignature: JSON.stringify(input)
+      };
+      const storage = new MemoryStorage();
+
+      expect(saveQuoteCommandRecovery(storage, temporaryPending)).toBe(true);
+      expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toEqual({
+        kind: "VALID",
+        pending: temporaryPending
+      });
+
+      storage.setItem(scope, JSON.stringify({
+        ...temporaryPending,
+        inputSignature: JSON.stringify(quoteInput)
+      }));
+      expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toMatchObject({ kind: "CORRUPT" });
+    });
+
+    it("restores the member selection only after the original quote target unit is loaded", () => {
+      const input = { ...quoteInput, temporaryOtherRoom: true as const };
+      expect(quoteRecoveryMemberSelectionForUnit(input, undefined)).toBeUndefined();
+      expect(quoteRecoveryMemberSelectionForUnit(input, "unit_room_other")).toBeUndefined();
+      expect(quoteRecoveryMemberSelectionForUnit(input, quoteInput.inventoryUnitId)).toEqual({
+        useMemberEntitlement: true,
+        memberId: quoteInput.memberId
+      });
+    });
+
+    it("rejects recovery records that forge a non-literal or ineligible temporary flag", () => {
+      const storage = new MemoryStorage();
+      for (const input of [
+        { ...quoteInput, temporaryOtherRoom: false },
+        { ...quoteInput, memberId: undefined, temporaryOtherRoom: true },
+        { ...quoteInput, stayType: "FREE", temporaryOtherRoom: true }
+      ]) {
+        storage.setItem(scope, JSON.stringify({
+          ...pending,
+          input,
+          inputSignature: JSON.stringify(input)
+        }));
+        expect(readQuoteCommandRecovery(storage, subjectId, propertyId)).toMatchObject({ kind: "CORRUPT" });
+      }
+    });
   });
 
   it("leaves the original SENDING recovery record untouched after unmount", () => {

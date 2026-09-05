@@ -1013,7 +1013,7 @@ describe.sequential("booking channels and external transaction references on Pos
     expect(await db.selectFrom("collection_facts").select("fact_id").where("command_id", "=", "command_direct_fact_guard").execute()).toHaveLength(0);
   });
 
-  it("applies migrations 009 through 051, preserves historical facts and identity guards, and upgrades the legacy demo catalog", async () => {
+  it("applies migrations 009 through 052, preserves historical facts and identity guards, and upgrades the legacy demo catalog", async () => {
     let historicalDb: Kysely<Database> | undefined;
     try {
       historicalDb = await recreateDatabaseThrough008(historicalDatabaseUrl);
@@ -1795,7 +1795,8 @@ describe.sequential("booking channels and external transaction references on Pos
           "048_runtime_isolation_guards.sql",
           "049_historical_stay_arrangement_corrections.sql",
           "050_admin_membership_corrections.sql",
-          "051_runtime_role_command_compatibility.sql"
+          "051_runtime_role_command_compatibility.sql",
+          "052_temporary_other_room_member_stays.sql"
         ]) {
           await client.query(await readFile(resolve(process.cwd(), "packages/db/src/migrations", migrationName), "utf8"));
           await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [migrationName]);

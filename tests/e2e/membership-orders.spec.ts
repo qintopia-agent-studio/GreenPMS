@@ -113,7 +113,11 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   await expect(order).toContainText(secondReference);
   await expect(order.getByTestId("membership-payment-difference")).toContainText("收款比成交价少 ¥500.00");
 
-  await order.getByRole("button", { name: "更正", exact: true }).first().click();
+  const firstPayment = order.locator("section.membership-payments li").filter({
+    has: page.getByText(firstReference, { exact: true })
+  });
+  await expect(firstPayment).toHaveCount(1);
+  await firstPayment.getByRole("button", { name: "更正", exact: true }).click();
   await expect(page.getByTestId("membership-payment-yuan")).toHaveValue("600");
   await expect(page.getByTestId("membership-payment-reference")).toHaveValue(firstReference);
   await page.getByTestId("membership-payment-yuan").fill("700");

@@ -61,7 +61,8 @@ export const currentMigrationNames = [
   "048_runtime_isolation_guards.sql",
   "049_historical_stay_arrangement_corrections.sql",
   "050_admin_membership_corrections.sql",
-  "051_runtime_role_command_compatibility.sql"
+  "051_runtime_role_command_compatibility.sql",
+  "052_temporary_other_room_member_stays.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -2820,7 +2821,7 @@ export async function databaseReady(
             FROM (
               VALUES
                 ('qintopia_assert_stage10_shorten_combination(text)', 'a9ea4fc40b6f4e204db8b9c9ec05869b493f5220c389bbd6443ee355cc30db4b'),
-                ('qintopia_validate_coverage_ownership()', '4c4693e86174f88262a9ab6cefef660f0d09609abaf4ff096c0b7a5778d4b664'),
+                ('qintopia_validate_coverage_ownership()', 'eceea85cdea1d5a9e591684a9f94dc66f492477cc8e303da8e28d0194a1e0669'),
                 ('qintopia_protect_coverage_identity()', 'b8eb365fa29712bfe2c26b9c8dfe17a87bdcd0091b012af88a5bb328b5af0750'),
                 ('qintopia_reject_stage10_entitlement_write()', 'd3450f298724fa9df85d09cc89175acf4d4cccb837963839b61dddbaac22756f'),
                 ('qintopia_validate_entitlement_lifecycle_fact()', 'c03dac8f3f8571b9908fb95929f91fa7ea6386b78af1e19aa7127c54ca65ab35'),
@@ -2863,6 +2864,220 @@ export async function databaseReady(
           )
         ) AS function_bodies_ready
       FROM pg_trigger AS trigger
+    `.execute(db);
+    const temporaryOtherRoomObjects = await sql<{
+      quote_column_ready: boolean;
+      quote_constraint_ready: boolean;
+      function_count: string;
+      trigger_binding_ready: boolean;
+      body_marker_count: string;
+      function_bodies_ready: boolean;
+      runtime_privileges_ready: boolean;
+    }>`
+      WITH
+      database_owner AS (
+        SELECT database_row.datdba
+        FROM pg_database AS database_row
+        WHERE database_row.datname = current_database()
+      ),
+      runtime_role AS (
+        SELECT oid
+        FROM pg_roles
+        WHERE rolname = 'qintopia_runtime'
+      )
+      SELECT
+        EXISTS (
+          SELECT 1
+          FROM pg_attribute AS attribute
+          WHERE attribute.attrelid = to_regclass('quotes')
+            AND attribute.attname = 'temporary_other_room_arrangement'
+            AND attribute.atttypid = 'jsonb'::regtype
+            AND attribute.attnum > 0
+            AND NOT attribute.attisdropped
+            AND NOT attribute.attnotnull
+        ) AS quote_column_ready,
+        EXISTS (
+          SELECT 1
+          FROM pg_constraint AS constraint_row
+          WHERE constraint_row.conrelid = to_regclass('quotes')
+            AND constraint_row.conname = 'quotes_temporary_other_room_arrangement_shape'
+            AND constraint_row.contype = 'c'
+            AND NOT constraint_row.condeferrable
+            AND NOT constraint_row.condeferred
+            AND constraint_row.convalidated
+            AND pg_get_constraintdef(constraint_row.oid, false) = 'CHECK (((temporary_other_room_arrangement IS NULL) OR ((jsonb_typeof(temporary_other_room_arrangement) = ''object''::text) AND ((temporary_other_room_arrangement ->> ''kind''::text) = ''TEMPORARY_OTHER_ROOM''::text) AND ((temporary_other_room_arrangement ->> ''originalInventoryKind''::text) = ''ROOM''::text) AND ((temporary_other_room_arrangement ->> ''entitlementUnitKind''::text) = ''ROOM_NIGHT''::text) AND ((temporary_other_room_arrangement ->> ''actualInventoryKind''::text) = ''ROOM''::text) AND ((temporary_other_room_arrangement ->> ''originalRoomTypeCode''::text) IS DISTINCT FROM (temporary_other_room_arrangement ->> ''actualRoomTypeCode''::text)) AND (temporary_other_room_arrangement ? ''membershipOrderId''::text) AND (temporary_other_room_arrangement ? ''memberContractId''::text) AND (temporary_other_room_arrangement ? ''entitlementLotId''::text) AND (temporary_other_room_arrangement ? ''actualInventoryUnitId''::text) AND (temporary_other_room_arrangement ? ''originalRoomTypeCode''::text) AND (temporary_other_room_arrangement ? ''actualRoomTypeCode''::text) AND (temporary_other_room_arrangement ? ''arrivalDate''::text) AND (temporary_other_room_arrangement ? ''departureDate''::text) AND ((temporary_other_room_arrangement ->> ''arrivalDate''::text) ~ ''^\\d{4}-\\d{2}-\\d{2}$''::text) AND ((temporary_other_room_arrangement ->> ''departureDate''::text) ~ ''^\\d{4}-\\d{2}-\\d{2}$''::text) AND (((temporary_other_room_arrangement ->> ''arrivalDate''::text))::date < ((temporary_other_room_arrangement ->> ''departureDate''::text))::date))))'
+        ) AS quote_constraint_ready,
+        (
+          (to_regprocedure('qintopia_validate_coverage_ownership()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_validate_temporary_other_room_create_order()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_reject_temporary_other_room_lifecycle_amendment()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_protect_temporary_other_room_member_chain()') IS NOT NULL)::integer
+          + (to_regprocedure('qintopia_reject_temporary_other_room_funds()') IS NOT NULL)::integer
+        )::text AS function_count,
+        (EXISTS (
+          SELECT 1
+          FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('amendments')
+            AND trigger.tgname = 'amendments_validate_temporary_other_room_create'
+            AND NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND trigger.tgdeferrable
+            AND trigger.tginitdeferred
+            AND trigger.tgnargs = 0
+            AND trigger.tgfoid = to_regprocedure('qintopia_validate_temporary_other_room_create_order()')
+            AND pg_get_triggerdef(trigger.oid, false) = 'CREATE CONSTRAINT TRIGGER amendments_validate_temporary_other_room_create AFTER INSERT ON public.amendments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (((new.amendment_type = ''CREATE_ORDER''::text) AND ((new.reason_code = ''TEMPORARY_OTHER_ROOM''::text) OR (new.payload ? ''temporaryOtherRoomArrangement''::text)))) EXECUTE FUNCTION qintopia_validate_temporary_other_room_create_order()'
+        ) AND EXISTS (
+          SELECT 1
+          FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('amendments')
+            AND trigger.tgname = 'amendments_reject_temporary_other_room_lifecycle'
+            AND NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgnargs = 0
+            AND trigger.tgfoid = to_regprocedure('qintopia_reject_temporary_other_room_lifecycle_amendment()')
+            AND pg_get_triggerdef(trigger.oid, false) = 'CREATE TRIGGER amendments_reject_temporary_other_room_lifecycle BEFORE INSERT ON public.amendments FOR EACH ROW EXECUTE FUNCTION qintopia_reject_temporary_other_room_lifecycle_amendment()'
+        ) AND EXISTS (
+          SELECT 1
+          FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('member_contracts')
+            AND trigger.tgname = 'member_contracts_protect_temporary_other_room_source'
+            AND NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgnargs = 0
+            AND trigger.tgfoid = to_regprocedure('qintopia_protect_temporary_other_room_member_chain()')
+            AND pg_get_triggerdef(trigger.oid, false) = 'CREATE TRIGGER member_contracts_protect_temporary_other_room_source BEFORE DELETE OR UPDATE ON public.member_contracts FOR EACH ROW EXECUTE FUNCTION qintopia_protect_temporary_other_room_member_chain()'
+        ) AND EXISTS (
+          SELECT 1
+          FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('entitlement_lots')
+            AND trigger.tgname = 'entitlement_lots_protect_temporary_other_room_source'
+            AND NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgnargs = 0
+            AND trigger.tgfoid = to_regprocedure('qintopia_protect_temporary_other_room_member_chain()')
+            AND pg_get_triggerdef(trigger.oid, false) = 'CREATE TRIGGER entitlement_lots_protect_temporary_other_room_source BEFORE INSERT OR DELETE OR UPDATE ON public.entitlement_lots FOR EACH ROW EXECUTE FUNCTION qintopia_protect_temporary_other_room_member_chain()'
+        ) AND EXISTS (
+          SELECT 1
+          FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('entitlement_ledger')
+            AND trigger.tgname = 'entitlement_ledger_protect_temporary_other_room_source'
+            AND NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND NOT trigger.tgdeferrable
+            AND NOT trigger.tginitdeferred
+            AND trigger.tgnargs = 0
+            AND trigger.tgfoid = to_regprocedure('qintopia_protect_temporary_other_room_member_chain()')
+            AND pg_get_triggerdef(trigger.oid, false) = 'CREATE TRIGGER entitlement_ledger_protect_temporary_other_room_source BEFORE INSERT ON public.entitlement_ledger FOR EACH ROW EXECUTE FUNCTION qintopia_protect_temporary_other_room_member_chain()'
+        ) AND EXISTS (
+          SELECT 1
+          FROM pg_trigger AS trigger
+          WHERE trigger.tgrelid = to_regclass('collection_facts')
+            AND trigger.tgname = 'collection_facts_reject_temporary_other_room_funds'
+            AND NOT trigger.tgisinternal
+            AND trigger.tgenabled IN ('O','A')
+            AND trigger.tgdeferrable
+            AND trigger.tginitdeferred
+            AND trigger.tgnargs = 0
+            AND trigger.tgfoid = to_regprocedure('qintopia_reject_temporary_other_room_funds()')
+            AND pg_get_triggerdef(trigger.oid, false) = 'CREATE CONSTRAINT TRIGGER collection_facts_reject_temporary_other_room_funds AFTER INSERT ON public.collection_facts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_reject_temporary_other_room_funds()'
+        )) AS trigger_binding_ready,
+        (
+          COALESCE(position('created.reason_code = ''TEMPORARY_OTHER_ROOM'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
+          + COALESCE(position('temporaryOtherRoomArrangement'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
+          + COALESCE(position('membership_room_type_code IS DISTINCT FROM inventory_room_type_code'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
+          + COALESCE(position('coverage_items_membership_product_match'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_zero_pricing'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_command_evidence'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('claim.source_type = ''ORDER_SEGMENT'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('ledger.entry_type = ''HOLD'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_exact_initial_segment'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_exact_source_priority'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_post_hold_balance'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_exact_claim_set'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_quote_evidence'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_preview_evidence'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_current_transaction'
+            IN pg_get_functiondef(to_regprocedure('qintopia_validate_temporary_other_room_create_order()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_lifecycle_closed'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_temporary_other_room_lifecycle_amendment()'))) > 0, false)::integer
+          + COALESCE(position('''REFRESH_MEMBER_COVERAGE'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_temporary_other_room_lifecycle_amendment()'))) > 0, false)::integer
+          + COALESCE(position('''CORRECT_HISTORICAL_STAY_ARRANGEMENT'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_temporary_other_room_lifecycle_amendment()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_reschedule_subset'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_temporary_other_room_lifecycle_amendment()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_member_chain_closed'
+            IN pg_get_functiondef(to_regprocedure('qintopia_protect_temporary_other_room_member_chain()'))) > 0, false)::integer
+          + COALESCE(position('temporary_other_room_no_funds'
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_temporary_other_room_funds()'))) > 0, false)::integer
+          + COALESCE(position('created.payload ? ''temporaryOtherRoomArrangement'''
+            IN pg_get_functiondef(to_regprocedure('qintopia_reject_temporary_other_room_funds()'))) > 0, false)::integer
+        )::text AS body_marker_count,
+        (
+          SELECT NOT EXISTS (
+            SELECT 1
+            FROM (
+              VALUES
+                ('qintopia_validate_coverage_ownership()', 'eceea85cdea1d5a9e591684a9f94dc66f492477cc8e303da8e28d0194a1e0669'),
+                ('qintopia_validate_temporary_other_room_create_order()', '7591e6b8e9d6cac8f3625807ab56ec2f743b3d4f96accd8c7d759a9c435c72b8'),
+                ('qintopia_reject_temporary_other_room_lifecycle_amendment()', 'f48371f00b8377485122ef26f988ace3a1cf6a54711e94937f9c74d45c1f6a54'),
+                ('qintopia_protect_temporary_other_room_member_chain()', 'b26f75a93c4f5e0580847d61c267c72db734f1a4dc2ed7fe3590c43ff0798004'),
+                ('qintopia_reject_temporary_other_room_funds()', '31abb8a611888eb8364029b30dea6050df13da1df75d6615f923238fb912957f')
+            ) AS expected(signature, body_hash)
+            WHERE NOT COALESCE((
+              SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') = expected.body_hash
+                AND procedure_row.proowner = database_owner.datdba
+                AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+                AND NOT procedure_row.prosecdef
+                AND procedure_row.provolatile = 'v'
+                AND procedure_row.prokind = 'f'
+                AND procedure_row.proconfig IS NULL
+              FROM pg_proc AS procedure_row
+              CROSS JOIN database_owner
+              WHERE procedure_row.oid = to_regprocedure(expected.signature)
+            ), false)
+          )
+        ) AS function_bodies_ready,
+        COALESCE((
+          SELECT has_table_privilege(runtime_role.oid, 'quotes', 'SELECT')
+            AND has_table_privilege(runtime_role.oid, 'quotes', 'INSERT')
+            AND NOT has_table_privilege(runtime_role.oid, 'quotes', 'UPDATE')
+            AND NOT has_table_privilege(runtime_role.oid, 'quotes', 'DELETE')
+            AND NOT has_table_privilege(runtime_role.oid, 'quotes', 'TRUNCATE')
+            AND NOT has_table_privilege(runtime_role.oid, 'quotes', 'TRIGGER')
+            AND NOT has_table_privilege(runtime_role.oid, 'quotes', 'REFERENCES')
+            AND NOT has_function_privilege(runtime_role.oid, 'qintopia_validate_coverage_ownership()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_validate_coverage_ownership()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege(runtime_role.oid, 'qintopia_validate_temporary_other_room_create_order()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_validate_temporary_other_room_create_order()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege(runtime_role.oid, 'qintopia_reject_temporary_other_room_lifecycle_amendment()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_reject_temporary_other_room_lifecycle_amendment()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege(runtime_role.oid, 'qintopia_protect_temporary_other_room_member_chain()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_protect_temporary_other_room_member_chain()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege(runtime_role.oid, 'qintopia_reject_temporary_other_room_funds()'::regprocedure, 'EXECUTE')
+            AND NOT has_function_privilege('public', 'qintopia_reject_temporary_other_room_funds()'::regprocedure, 'EXECUTE')
+          FROM runtime_role
+        ), false) AS runtime_privileges_ready
     `.execute(db);
     const finalReady = memberProfileObjects.rows[0]?.columns_ready === true
       && memberProfileObjects.rows[0]?.constraints_ready === true
@@ -2937,7 +3152,14 @@ export async function databaseReady(
       && inHouseMembershipFulfillmentObjects.rows[0]?.deferred_trigger_count === "4"
       && inHouseMembershipFulfillmentObjects.rows[0]?.trigger_bindings_ready === true
       && inHouseMembershipFulfillmentObjects.rows[0]?.body_marker_count === "25"
-      && inHouseMembershipFulfillmentObjects.rows[0]?.function_bodies_ready === true;
+      && inHouseMembershipFulfillmentObjects.rows[0]?.function_bodies_ready === true
+      && temporaryOtherRoomObjects.rows[0]?.quote_column_ready === true
+      && temporaryOtherRoomObjects.rows[0]?.quote_constraint_ready === true
+      && temporaryOtherRoomObjects.rows[0]?.function_count === "5"
+      && temporaryOtherRoomObjects.rows[0]?.trigger_binding_ready === true
+      && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
+      && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
+      && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
     return finalReady;
   } catch {
     return false;

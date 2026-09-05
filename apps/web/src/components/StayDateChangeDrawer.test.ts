@@ -57,6 +57,7 @@ function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
     },
     fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null, checkInRevocation: null },
     arrangementHistory: [],
+    referencedInventoryUnits: [],
     amendments: [],
     pricingRevisions: [],
     coverageSet: [],

@@ -30,6 +30,7 @@
     "test:pricing-facts": "node --import tsx tests/pricing-facts/verify-pricing-facts.ts",
     "data:purge:local-acceptance": "node --import tsx scripts/purge-local-acceptance-business-data.ts",
     "data:setup:room-status-visual": "node --import tsx tests/e2e/setup-room-status-visual-acceptance.ts",
+    "data:setup:temporary-other-room": "node --import tsx tests/e2e/setup-temporary-other-room-acceptance.ts",
     "backup": "./scripts/backup.sh",
     "verify:restore": "bash ./scripts/verify-backup-restore.sh",
     "verify:cold-start": "bash ./scripts/verify-cold-start.sh",

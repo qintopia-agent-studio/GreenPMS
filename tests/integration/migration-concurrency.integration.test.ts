@@ -261,7 +261,7 @@ describe("database migration concurrency", () => {
       expect(chronologicalRows.rows.map((row) => row.name)).toEqual(expectedMigrations);
       expect((await client.query("SELECT count(*)::int AS count FROM schema_migrations WHERE applied_at IS NULL")).rows[0]?.count)
         .toBe(0);
-      expect(expectedMigrations).toHaveLength(51);
+      expect(expectedMigrations).toHaveLength(52);
       expect(expectedMigrations).toContain("015_generated_room_operational_codes.sql");
       expect(expectedMigrations).toContain("016_member_property_links.sql");
       expect(expectedMigrations).toContain("017_membership_orders.sql");
@@ -292,6 +292,7 @@ describe("database migration concurrency", () => {
       expect(expectedMigrations).toContain("049_historical_stay_arrangement_corrections.sql");
       expect(expectedMigrations).toContain("050_admin_membership_corrections.sql");
       expect(expectedMigrations).toContain("051_runtime_role_command_compatibility.sql");
+      expect(expectedMigrations).toContain("052_temporary_other_room_member_stays.sql");
 
       const readyDatabase = createDatabase(databaseUrl.toString());
       try {

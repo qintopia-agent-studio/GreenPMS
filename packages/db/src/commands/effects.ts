@@ -1,5 +1,5 @@
 import { sql } from "kysely";
-import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandCapability, type CommandCatalogType, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType } from "@qintopia/contracts";
+import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandCapability, type CommandCatalogType, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType, type StoredQuoteDto, type TemporaryOtherRoomArrangementDto } from "@qintopia/contracts";
 import {
   amountSummary,
   calculatePricing,
@@ -23,13 +23,16 @@ import {
   loadActiveStayTimeline,
   loadOrderMembershipConversion,
   loadOrderContext,
+  loadTemporaryOtherRoomCreateEvidence,
+  hasTemporaryOtherRoomMemberChainEvidence,
   getOrderViewSnapshot,
   orderAmountSummary,
   projectOrderLifecycle,
   type OrderContext,
-  type StayTimelineItem
+  type StayTimelineItem,
+  type TemporaryOtherRoomCreateEvidence
 } from "../orders.ts";
-import { allocateCoverageCandidates, loadPricingPolicy, loadStoredQuote, resolveMemberCoverage } from "../pricing-service.ts";
+import { allocateCoverageCandidates, loadPricingPolicy, loadStoredQuote, resolveMemberCoverage, resolveTemporaryOtherRoomCoverage, sameTemporaryOtherRoomArrangement } from "../pricing-service.ts";
 import { inventoryFingerprint, loadInventoryUnit, type DbExecutor } from "../inventory.ts";
 import { propertyLocalClock, propertyLocalToday } from "../members.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
@@ -252,6 +255,114 @@ async function hasStayMembershipConversion(db: DbExecutor, orderId: string): Pro
     .where("amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
     .executeTakeFirst();
   return Boolean(existingConversion);
+}
+
+const temporaryOtherRoomLifecycleClosedMessage = "临时安排的订单如需增加日期或再次换房，请重新建立符合现场安排的订单";
+
+const temporaryOtherRoomBlockedOrderCommands = new Set<CommandType>([
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+  "EXTEND_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "REFRESH_MEMBER_COVERAGE",
+  "RECORD_COLLECTION",
+  "RECORD_REFUND",
+  "REVERSE_FACT"
+]);
+
+function temporaryOtherRoomEffectEvidence(evidence: TemporaryOtherRoomCreateEvidence | null): Record<string, unknown> {
+  return evidence
+    ? {
+        temporaryOtherRoomArrangement: evidence.arrangement,
+        temporaryOtherRoomCreateAmendmentId: evidence.createAmendmentId
+      }
+    : {};
+}
+
+function rejectTemporaryOtherRoomLifecycleChange(): never {
+  throw new DomainError("VALIDATION_ERROR", temporaryOtherRoomLifecycleClosedMessage, 409);
+}
+
+async function rejectTemporaryOtherRoomMemberChainChange(
+  db: DbExecutor,
+  propertyId: string,
+  target: Parameters<typeof hasTemporaryOtherRoomMemberChainEvidence>[2]
+): Promise<void> {
+  if (await hasTemporaryOtherRoomMemberChainEvidence(db, propertyId, target)) {
+    rejectTemporaryOtherRoomLifecycleChange();
+  }
+}
+
+function assertNoTemporaryOtherRoomStayPricingInputs(input: Record<string, unknown>): void {
+  if (input.targetCurrentContractAmountMinor !== undefined
+    || input.channelPriceDifferenceReason !== undefined
+    || input.manualPriceAdjustmentReason !== undefined) {
+    rejectTemporaryOtherRoomLifecycleChange();
+  }
+}
+
+function assertTemporaryOtherRoomReservedSubset(options: {
+  oldDates: readonly string[];
+  newDates: readonly string[];
+  inventoryChange: { releasedDates: readonly string[]; addedDates: readonly string[] };
+}): void {
+  const oldDateSet = new Set(options.oldDates);
+  const newDateSet = new Set(options.newDates);
+  if (options.newDates.length === 0
+    || options.newDates.length >= options.oldDates.length
+    || options.newDates.some((date) => !oldDateSet.has(date))
+    || options.oldDates.filter((date) => newDateSet.has(date)).join("\u0000") !== options.newDates.join("\u0000")
+    || options.inventoryChange.addedDates.length !== 0
+    || options.inventoryChange.releasedDates.length !== options.oldDates.length - options.newDates.length) {
+    rejectTemporaryOtherRoomLifecycleChange();
+  }
+}
+
+function temporaryOtherRoomSubsetPricing(options: {
+  evidence: TemporaryOtherRoomCreateEvidence;
+  coverageRows: ReadonlyArray<{
+    service_date: string;
+    inventory_unit_id: string;
+    contract_id: string;
+    lot_id: string;
+    unit_kind: string;
+    status: string;
+  }>;
+  currentTimeline: readonly StayTimelineItem[];
+  newDates: readonly string[];
+  currency: string;
+}): PricingResult {
+  const oldDates = options.currentTimeline.map((item) => item.serviceDate);
+  const newDateSet = new Set(options.newDates);
+  const timelineByDate = new Map(options.currentTimeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
+  const coverageByDate = new Map(options.coverageRows.map((row) => [row.service_date, row]));
+  if (options.coverageRows.length !== oldDates.length
+    || coverageByDate.size !== oldDates.length
+    || oldDates.some((date) => {
+      const row = coverageByDate.get(date);
+      return !row
+        || row.status !== "HELD"
+        || row.contract_id !== options.evidence.arrangement.memberContractId
+        || row.lot_id !== options.evidence.arrangement.entitlementLotId
+        || row.unit_kind !== "ROOM_NIGHT"
+        || row.inventory_unit_id !== timelineByDate.get(date)
+        || row.inventory_unit_id !== options.evidence.arrangement.actualInventoryUnitId;
+    })) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排会员权益冻结与原创建证据不一致，不能调整日期", 409);
+  }
+  return {
+    coverageSet: options.coverageRows
+      .filter((row) => newDateSet.has(row.service_date))
+      .map((row) => ({
+        serviceDate: row.service_date,
+        inventoryUnitId: row.inventory_unit_id,
+        unitKind: "ROOM_NIGHT",
+        entitlementLotId: row.lot_id
+      })),
+    cashLines: [],
+    cashRemainder: money(options.currency, 0),
+    currentContractAmount: money(options.currency, 0)
+  };
 }
 
 export function isExactConvertedCoverageGraph(
@@ -565,6 +676,67 @@ async function priceSingleUnit(db: DbExecutor, options: {
   });
 }
 
+function requireTemporaryOtherRoomReason(input: Record<string, unknown>): string {
+  const value = input.temporaryOtherRoomReason;
+  if (typeof value !== "string") {
+    throw new DomainError("VALIDATION_ERROR", "临时安排其他房型必须填写现场原因");
+  }
+  const normalized = value.trim();
+  if (normalized === "") {
+    throw new DomainError("VALIDATION_ERROR", "临时安排其他房型必须填写现场原因");
+  }
+  if (normalized.length > 200) {
+    throw new DomainError("VALIDATION_ERROR", "临时安排其他房型原因不能超过 200 个字符");
+  }
+  return normalized;
+}
+
+async function priceTemporaryOtherRoomQuote(
+  db: DbExecutor,
+  quote: StoredQuoteDto,
+  arrangement: TemporaryOtherRoomArrangementDto
+): Promise<PricingResult> {
+  if (!quote.memberId || quote.memberContractId !== arrangement.memberContractId) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排会员权益身份已变化", 409);
+  }
+  const unit = await loadInventoryUnit(db, quote.propertyId, quote.inventoryUnitId);
+  const dates = enumerateServiceDates(quote.arrivalDate, quote.departureDate);
+  const resolution = await resolveTemporaryOtherRoomCoverage(db, {
+    propertyId: quote.propertyId,
+    memberId: quote.memberId,
+    actualInventoryUnitId: unit.id,
+    actualInventoryKind: unit.kind,
+    actualRoomTypeCode: unit.roomTypeCode,
+    arrivalDate: quote.arrivalDate,
+    departureDate: quote.departureDate,
+    dates
+  });
+  if (!sameTemporaryOtherRoomArrangement(resolution.arrangement, arrangement)) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排会员权益来源已变化", 409);
+  }
+  const policy = await loadPricingPolicy(db, quote.propertyId, quote.pricingPolicyVersionId);
+  const pricing = calculatePricing({
+    propertyId: quote.propertyId,
+    inventoryUnitId: unit.id,
+    inventoryUnitKind: unit.kind,
+    inventoryProductCode: unit.pricingProductCode,
+    arrivalDate: quote.arrivalDate,
+    departureDate: quote.departureDate,
+    stayType: quote.stayType,
+    policy,
+    memberCoverage: true,
+    coverageCandidates: resolution.coverageCandidates,
+    manualAdjustmentMinor: 0
+  });
+  if (pricing.coverageSet.length !== dates.length
+    || pricing.cashLines.length !== 0
+    || pricing.cashRemainder.minorUnits !== 0
+    || pricing.currentContractAmount.minorUnits !== 0) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排必须由同一原整房权益完整覆盖且不产生现金差额", 409);
+  }
+  return pricing;
+}
+
 function nextServiceDate(serviceDate: string): string {
   const date = parseLocalDate(serviceDate);
   date.setUTCDate(date.getUTCDate() + 1);
@@ -843,6 +1015,17 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     return buildHistoricalStayArrangementCorrectionEffect(db, rawInput);
   }
   if (isMemberCorrectionCommandType(commandType)) {
+    if (commandType === "CORRECT_MEMBERSHIP_EFFECTIVE_DATE") {
+      await rejectTemporaryOtherRoomMemberChainChange(db, propertyId, {
+        membershipOrderId: requireString(input, "membershipOrderId")
+      });
+    }
+    if (commandType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") {
+      await rejectTemporaryOtherRoomMemberChainChange(db, propertyId, {
+        membershipOrderId: requireString(input, "erroneousMembershipOrderId"),
+        sourceStayOrderId: requireString(input, "sourceStayOrderId")
+      });
+    }
     return buildMemberCorrectionEffect(db, commandType, rawInput);
   }
 
@@ -1091,6 +1274,15 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     });
     const quote = await loadStoredQuote(db, quoteId);
     if (quote.propertyId !== propertyId) throw new DomainError("RESOURCE_SCOPE_DENIED", "Quote belongs to another property", 403);
+    const temporaryOtherRoomArrangement = quote.temporaryOtherRoomArrangement;
+    const temporaryOtherRoomReason = temporaryOtherRoomArrangement
+      ? requireTemporaryOtherRoomReason(input)
+      : null;
+    if (!temporaryOtherRoomArrangement
+      && input.temporaryOtherRoomReason !== undefined
+      && input.temporaryOtherRoomReason !== null) {
+      throw new DomainError("VALIDATION_ERROR", "普通创建订单不应填写临时安排其他房型原因");
+    }
     if (input.backfill !== undefined && input.backfill !== true) {
       throw new DomainError("VALIDATION_ERROR", "backfill must be true when submitted");
     }
@@ -1113,6 +1305,9 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const freeStay = quote.stayType === "FREE";
     if (backfill && memberStay) {
       throw new DomainError("VALIDATION_ERROR", "当前补录只支持普通住宿或免费入住，不支持会员权益住宿");
+    }
+    if (backfill && temporaryOtherRoomArrangement) {
+      throw new DomainError("VALIDATION_ERROR", "临时安排其他房型不支持补录创建");
     }
     const channelSubmitted = (input.bookingChannelCode !== undefined && input.bookingChannelCode !== null)
       || (input.channelOrderReference !== undefined && input.channelOrderReference !== null && input.channelOrderReference !== "");
@@ -1179,17 +1374,19 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     }));
     const fingerprint = await inventoryFingerprint(db, propertyId, unit.id, quote.arrivalDate, quote.departureDate);
     if (fingerprint.length > 0) throw new DomainError("INVENTORY_CONFLICT", "Quoted inventory is no longer available", 409);
-    const policyPricing = await priceSingleUnit(db, {
-      propertyId,
-      memberId: quote.memberId ?? null,
-      memberContractId: quote.memberContractId ?? null,
-      unitId: quote.inventoryUnitId,
-      arrivalDate: quote.arrivalDate,
-      departureDate: quote.departureDate,
-      stayType: quote.stayType,
-      policyVersionId: quote.pricingPolicyVersionId,
-      manualAdjustmentMinor: 0
-    });
+    const policyPricing = temporaryOtherRoomArrangement
+      ? await priceTemporaryOtherRoomQuote(db, quote, temporaryOtherRoomArrangement)
+      : await priceSingleUnit(db, {
+        propertyId,
+        memberId: quote.memberId ?? null,
+        memberContractId: quote.memberContractId ?? null,
+        unitId: quote.inventoryUnitId,
+        arrivalDate: quote.arrivalDate,
+        departureDate: quote.departureDate,
+        stayType: quote.stayType,
+        policyVersionId: quote.pricingPolicyVersionId,
+        manualAdjustmentMinor: 0
+      });
     const pricingDecision = createOrderPricingDecision({
       bookingChannelCode,
       stayType: quote.stayType,
@@ -1246,6 +1443,10 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       pricingPolicyVersionId: quote.pricingPolicyVersionId,
       memberId: quote.memberId ?? null,
       memberContractId: quote.memberContractId ?? null,
+      ...(temporaryOtherRoomArrangement ? {
+        temporaryOtherRoomArrangement,
+        temporaryOtherRoomReason
+      } : {}),
       pricingDecision: pricingDecisionEffect,
       pricing,
       ...(backfill ? {
@@ -1359,6 +1560,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const contract = await db.selectFrom("member_contracts").selectAll()
       .where("id", "=", contractId).where("property_id", "=", propertyId).executeTakeFirst();
     if (!contract) throw new DomainError("NOT_FOUND", "Member contract not found", 404);
+    await rejectTemporaryOtherRoomMemberChainChange(db, propertyId, { memberContractId: contractId });
     if (contract.status !== "ACTIVE") throw new DomainError("ENTITLEMENT_CONFLICT", "Member contract is not active", 409);
     if (expiresOn < propertyToday) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "Entitlement lot is already naturally expired in the property timezone", 409, false, { expiresOn, propertyToday });
@@ -1377,6 +1579,10 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       .select(["entitlement_lots.id", "entitlement_lots.version", "entitlement_lots.contract_id", "entitlement_lots.unit_kind", "entitlement_lots.total_units", "entitlement_lots.expires_on", "entitlement_lots.status", "member_contracts.property_id", "member_contracts.status as contract_status", "member_contracts.version as contract_version"])
       .where("entitlement_lots.id", "=", lotId).where("member_contracts.property_id", "=", propertyId).executeTakeFirst();
     if (!lot) throw new DomainError("NOT_FOUND", "Entitlement lot not found", 404);
+    await rejectTemporaryOtherRoomMemberChainChange(db, propertyId, {
+      memberContractId: lot.contract_id,
+      entitlementLotId: lot.id
+    });
     if (lot.contract_status !== "ACTIVE" || lot.status !== "ACTIVE") {
       throw new DomainError("ENTITLEMENT_CONFLICT", "Only an active member contract and active entitlement lot can be adjusted", 409);
     }
@@ -1459,6 +1665,10 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     ])
       .executeTakeFirst();
     if (!lot) throw new DomainError("NOT_FOUND", "Entitlement lot not found", 404);
+    await rejectTemporaryOtherRoomMemberChainChange(db, propertyId, {
+      memberContractId: lot.contract_id,
+      entitlementLotId: lot.id
+    });
     if (lot.contract_status !== "ACTIVE" || lot.status !== "ACTIVE") {
       throw new DomainError("ENTITLEMENT_CONFLICT", "Only an active member contract and active entitlement lot can be expired", 409);
     }
@@ -1606,11 +1816,19 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 
   const orderId = requireString(input, "orderId");
   const context = await loadOrderContextForProperty(db, propertyId, orderId);
+  const temporaryOtherRoomEvidence = await loadTemporaryOtherRoomCreateEvidence(db, orderId);
+  if (temporaryOtherRoomEvidence && temporaryOtherRoomBlockedOrderCommands.has(commandType)) {
+    rejectTemporaryOtherRoomLifecycleChange();
+  }
+  const temporaryOtherRoomEvidenceEffect = temporaryOtherRoomEffectEvidence(temporaryOtherRoomEvidence);
   const baseBasis: Record<string, unknown> = {
     orderVersion: context.order.version,
     orderStatus: context.order.status,
     policyVersionId: context.order.pricing_policy_version_id,
-    membership: await memberBasis(db, propertyId, context.order.member_contract_id, context.order.member_id)
+    membership: await memberBasis(db, propertyId, context.order.member_contract_id, context.order.member_id),
+    ...(temporaryOtherRoomEvidence ? {
+      temporaryOtherRoomCreateAmendmentId: temporaryOtherRoomEvidence.createAmendmentId
+    } : {})
   };
 
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
@@ -1994,7 +2212,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       ordinal: occupant.ordinal,
       role: occupant.role,
       before,
-      after
+      after,
+      ...temporaryOtherRoomEvidenceEffect
     }, {
       ...baseBasis,
       latestCorrectionId: latest?.id ?? null,
@@ -2042,6 +2261,9 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     }
     if (newDepartureDate <= context.order.arrival_date) {
       throw new DomainError("VALIDATION_ERROR", "退房日期必须晚于入住日期");
+    }
+    if (temporaryOtherRoomEvidence) {
+      assertNoTemporaryOtherRoomStayPricingInputs(input);
     }
     const completionMode = newDepartureDate === businessDate ? "EARLY_CHECK_OUT" : "SHORTEN_IN_HOUSE";
     const oldDates = currentTimeline.map((item) => item.serviceDate);
@@ -2130,6 +2352,13 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       manualAdjustmentMinor: 0,
       preservedCoverageOnly: true
     });
+    if (temporaryOtherRoomEvidence
+      && (policyPricing.coverageSet.length !== newDates.length
+        || policyPricing.cashLines.length !== 0
+        || policyPricing.cashRemainder.minorUnits !== 0
+        || policyPricing.currentContractAmount.minorUnits !== 0)) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排缩短后必须保留原整房权益完整零元覆盖", 409);
+    }
     const decision = stayChangePricingDecision({
       commandType,
       bookingChannelCode: context.order.booking_channel_code,
@@ -2145,7 +2374,9 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       currentContractAmount: money(policyPricing.currentContractAmount.currency, decision.currentContractAmountMinor)
     };
     const oldAmountSummary = await orderAmountSummary(db, context);
-    const restoredFutureCoverageDates = membershipConversion
+    const restoredFutureCoverageDates = temporaryOtherRoomEvidence
+      ? []
+      : membershipConversion
       ? activeCoverage
         .filter((item) => !newDates.includes(item.serviceDate) && item.serviceDate >= businessDate)
         .map((item) => item.serviceDate)
@@ -2212,7 +2443,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         ledgerWriteCount: restoredFutureCoverageDates.length
       },
       fundsSummary,
-      refundReferenceAmount
+      refundReferenceAmount,
+      ...temporaryOtherRoomEvidenceEffect
     }, {
       ...baseBasis,
       businessDate,
@@ -2244,6 +2476,12 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       if (newArrivalDate === context.order.arrival_date && newDepartureDate === context.order.departure_date) {
         throw new DomainError("VALIDATION_ERROR", "调整后的入住和退房日期必须发生变化");
       }
+      if (temporaryOtherRoomEvidence) {
+        if (context.stay.status !== "PLANNED") {
+          throw new DomainError("INVALID_ORDER_STATE", "只有未入住订单可以调整临时安排日期", 409);
+        }
+        assertNoTemporaryOtherRoomStayPricingInputs(input);
+      }
     } else {
       if (newDepartureDate <= context.order.departure_date) {
         throw new DomainError("VALIDATION_ERROR", "新的退房日期必须晚于原计划退房日期");
@@ -2267,6 +2505,13 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       releasedDates: pairDiff.released.map((item) => item.serviceDate),
       addedDates: pairDiff.added.map((item) => item.serviceDate)
     };
+    if (reschedule && temporaryOtherRoomEvidence) {
+      assertTemporaryOtherRoomReservedSubset({
+        oldDates,
+        newDates,
+        inventoryChange
+      });
+    }
     const inventoryUnitId = stayTimeline.at(-1)!.inventoryUnitId;
     const fingerprintParts = await Promise.all(pairDiff.added.map(async (item) => ({
       item,
@@ -2318,20 +2563,28 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         return !active || afterUnitByDate.get(item.serviceDate) !== active.inventory_unit_id;
       })
       : [];
-    const policyPricing = await priceStayTimeline(db, {
-      propertyId,
-      orderId,
-      memberId: context.order.member_id,
-      memberContractId: context.order.member_contract_id,
-      arrivalDate: newArrivalDate,
-      departureDate: newDepartureDate,
-      stayType: context.order.stay_type as StayType,
-      policyVersionId: context.order.pricing_policy_version_id,
-      timeline: stayTimeline,
-      manualAdjustmentMinor: 0,
-      coverageAllocationDates: reschedule ? newDates : pairDiff.added.map((item) => item.serviceDate),
-      reallocatableHeld
-    });
+    const policyPricing = temporaryOtherRoomEvidence
+      ? temporaryOtherRoomSubsetPricing({
+        evidence: temporaryOtherRoomEvidence,
+        coverageRows: activeCoverageRows,
+        currentTimeline,
+        newDates,
+        currency: context.revision.currency
+      })
+      : await priceStayTimeline(db, {
+        propertyId,
+        orderId,
+        memberId: context.order.member_id,
+        memberContractId: context.order.member_contract_id,
+        arrivalDate: newArrivalDate,
+        departureDate: newDepartureDate,
+        stayType: context.order.stay_type as StayType,
+        policyVersionId: context.order.pricing_policy_version_id,
+        timeline: stayTimeline,
+        manualAdjustmentMinor: 0,
+        coverageAllocationDates: reschedule ? newDates : pairDiff.added.map((item) => item.serviceDate),
+        reallocatableHeld
+      });
     if (membershipConversion) {
       const coverageByDate = new Map(policyPricing.coverageSet.map((item) => [item.serviceDate, item]));
       if (policyPricing.coverageSet.length !== newDates.length
@@ -2409,7 +2662,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       pricingDecision: effectDecision,
       inventoryChange,
       entitlementChange,
-      fundsSummary
+      fundsSummary,
+      ...temporaryOtherRoomEvidenceEffect
     }, {
       ...baseBasis,
       businessDate,
@@ -2769,7 +3023,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       businessDate,
       effectiveDate: context.order.arrival_date,
       recordingMode: businessDate === context.order.arrival_date ? "ON_SCHEDULE" : "LATE_RECORDED",
-      entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: heldCoverage.length }
+      entitlementTransition: { from: "HELD", to: "CONSUMED", coverageCount: heldCoverage.length },
+      ...temporaryOtherRoomEvidenceEffect
     }, {
       ...baseBasis,
       heldCoverageIds: heldCoverage.map((coverage) => coverage.id),
@@ -2812,7 +3067,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         inventoryUnitId: context.currentSegment.inventoryUnitId,
         serviceDate: businessDate,
         status: "PENDING"
-      } } : {})
+      } } : {}),
+      ...temporaryOtherRoomEvidenceEffect
     }, { ...baseBasis, heldCoverageIds: [], cleaningTask: null, businessDate });
   }
 
@@ -3059,7 +3315,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         to: "CONSUMED",
         coverageCount: heldCoverage.length,
         coverageIds: heldCoverage.map((coverage) => coverage.id)
-      }
+      },
+      ...temporaryOtherRoomEvidenceEffect
     }, {
       ...baseBasis,
       heldCoverageIds: heldCoverage.map((coverage) => coverage.id),
@@ -3218,7 +3475,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         currentContractAmount: { currency: context.revision.currency, minorUnits: 0 },
         pricingBasis
       },
-      entitlementTransition: { from: "HELD", to: "RELEASED", coverageCount: heldCoverage.length }
+      entitlementTransition: { from: "HELD", to: "RELEASED", coverageCount: heldCoverage.length },
+      ...temporaryOtherRoomEvidenceEffect
     }, {
       ...baseBasis,
       heldCoverageIds: heldCoverage.map((coverage) => coverage.id),
@@ -3274,7 +3532,8 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
         currentContractAmount: { currency: context.revision.currency, minorUnits: 0 },
         pricingBasis
       },
-      entitlementTransition: { from: "CONSUMED", to: "RESTORED", coverageCount: consumedCoverage.length }
+      entitlementTransition: { from: "CONSUMED", to: "RESTORED", coverageCount: consumedCoverage.length },
+      ...temporaryOtherRoomEvidenceEffect
     }, {
       ...baseBasis,
       businessDate,

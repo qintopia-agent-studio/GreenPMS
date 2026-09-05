@@ -10,6 +10,7 @@ import {
   databaseReady,
   executeQuoteCommand,
   propertyLocalToday,
+  withMutablePropertyWallClockForTesting,
   withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
@@ -1107,14 +1108,17 @@ describe.sequential("API runtime database role", () => {
       commandType: "CHECK_IN",
       input: { propertyId: demo.propertyId, orderId: shortenOrderId }
     }, "runtime-stay-shorten-check-in");
-    await executeRuntime({
-      commandType: "SHORTEN_STAY",
-      input: {
-        propertyId: demo.propertyId,
-        orderId: shortenOrderId,
-        newDepartureDate: businessDate
-      }
-    }, "runtime-stay-shorten-complete");
+    await withMutablePropertyWallClockForTesting(
+      new Date(`${shiftLocalDate(businessDate, 1)}T04:00:00.000Z`),
+      () => executeRuntime({
+        commandType: "SHORTEN_STAY",
+        input: {
+          propertyId: demo.propertyId,
+          orderId: shortenOrderId,
+          newDepartureDate: businessDate
+        }
+      }, "runtime-stay-shorten-complete")
+    );
 
     const completeArrival = shiftLocalDate(businessDate, -2);
     const completeDeparture = shiftLocalDate(completeArrival, 1);

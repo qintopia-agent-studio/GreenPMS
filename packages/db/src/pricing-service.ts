@@ -1,5 +1,5 @@
 import { sql, type Kysely, type Transaction } from "kysely";
-import { DomainError, type InventoryUnitKind, type QuotePricingExplanationDto, type QuoteReadDto, type StayType, type StoredQuoteDto } from "@qintopia/contracts";
+import { DomainError, type InventoryUnitKind, type QuotePricingExplanationDto, type QuoteReadDto, type StayType, type StoredQuoteDto, type TemporaryOtherRoomArrangementDto } from "@qintopia/contracts";
 import { calculatePricing, entitlementKindFor, enumerateServiceDates, isTransientDuration, newId, stableHash, type CoverageCandidate, type DurationBandAnchors, type PricingPolicy } from "@qintopia/domain";
 import { entitlementAvailableBalance, parsePostgresBigInt } from "./entitlement-balance.ts";
 import { listAvailability, loadInventoryUnit, type DbExecutor } from "./inventory.ts";
@@ -15,12 +15,19 @@ export interface QuoteRequest {
   pricingPolicyVersionId: string;
   memberId?: string;
   memberContractId?: string;
+  temporaryOtherRoom?: true;
   requesterSubjectId?: string;
 }
 
 interface MemberCoverageResolution {
   memberContractId?: string;
   coverageCandidates: CoverageCandidate[];
+}
+
+interface TemporaryOtherRoomResolution {
+  memberContractId: string;
+  coverageCandidates: CoverageCandidate[];
+  arrangement: TemporaryOtherRoomArrangementDto;
 }
 
 type QuotePricingExplanationInput = Pick<StoredQuoteDto,
@@ -232,6 +239,167 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
   return { ...(memberContractId ? { memberContractId } : {}), coverageCandidates };
 }
 
+type TemporaryOtherRoomSourceRow = {
+  membership_order_id: string;
+  allowed_room_type_code: string;
+  allowed_inventory_kind: "ROOM" | "BED";
+  entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
+  membership_status: "DRAFT" | "ACTIVE" | "VOIDED";
+  contract_id: string;
+  contract_status: "ACTIVE" | "EXPIRED" | "VOIDED";
+  valid_from: string;
+  valid_until: string;
+  lot_id: string;
+  lot_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
+  lot_status: "ACTIVE" | "VOIDED";
+  expires_on: string;
+  total_units: number;
+  ledger_delta: string;
+  expire_count: string;
+};
+
+function isActiveTemporaryWholeRoomSource(
+  row: TemporaryOtherRoomSourceRow,
+  propertyToday: string
+): boolean {
+  return row.membership_status === "ACTIVE"
+    && row.contract_status === "ACTIVE"
+    && row.lot_status === "ACTIVE"
+    && row.allowed_inventory_kind === "ROOM"
+    && row.entitlement_unit_kind === "ROOM_NIGHT"
+    && row.lot_unit_kind === "ROOM_NIGHT"
+    && row.expires_on >= propertyToday
+    && parsePostgresBigInt(row.expire_count, "Entitlement expiration count") === 0n;
+}
+
+function temporarySourceCoversCompleteStay(
+  row: TemporaryOtherRoomSourceRow,
+  dates: readonly string[],
+  propertyToday: string
+): boolean {
+  return isActiveTemporaryWholeRoomSource(row, propertyToday)
+    && entitlementAvailableBalance(row.total_units, row.ledger_delta) >= dates.length
+    && dates.every((date) => row.valid_from <= date && date <= row.valid_until && date <= row.expires_on);
+}
+
+export function sameTemporaryOtherRoomArrangement(
+  left: TemporaryOtherRoomArrangementDto | undefined,
+  right: TemporaryOtherRoomArrangementDto | undefined
+): boolean {
+  if (!left || !right) return left === right;
+  return left.kind === right.kind
+    && left.membershipOrderId === right.membershipOrderId
+    && left.memberContractId === right.memberContractId
+    && left.entitlementLotId === right.entitlementLotId
+    && left.originalRoomTypeCode === right.originalRoomTypeCode
+    && left.originalInventoryKind === right.originalInventoryKind
+    && left.entitlementUnitKind === right.entitlementUnitKind
+    && left.actualInventoryUnitId === right.actualInventoryUnitId
+    && left.actualRoomTypeCode === right.actualRoomTypeCode
+    && left.actualInventoryKind === right.actualInventoryKind
+    && left.arrivalDate === right.arrivalDate
+    && left.departureDate === right.departureDate;
+}
+
+export async function resolveTemporaryOtherRoomCoverage(db: DbExecutor, options: {
+  propertyId: string;
+  memberId: string;
+  actualInventoryUnitId: string;
+  actualInventoryKind: InventoryUnitKind;
+  actualRoomTypeCode: string | null;
+  arrivalDate: string;
+  departureDate: string;
+  dates: string[];
+}): Promise<TemporaryOtherRoomResolution> {
+  const member = await db.selectFrom("member_property_links")
+    .select("member_id")
+    .where("member_id", "=", options.memberId)
+    .where("property_id", "=", options.propertyId)
+    .executeTakeFirst();
+  if (!member) throw new DomainError("NOT_FOUND", "当前门店未找到该会员档案", 404);
+  if (options.actualInventoryKind !== "ROOM" || !options.actualRoomTypeCode) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排只支持安排到整间房", 409);
+  }
+
+  const propertyToday = await propertyLocalToday(db, options.propertyId);
+  const rows = await db.selectFrom("membership_orders")
+    .innerJoin("member_contracts", "member_contracts.id", "membership_orders.contract_id")
+    .innerJoin("entitlement_lots", "entitlement_lots.id", "membership_orders.entitlement_lot_id")
+    .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
+    .select([
+      "membership_orders.id as membership_order_id",
+      "membership_orders.allowed_room_type_code",
+      "membership_orders.allowed_inventory_kind",
+      "membership_orders.entitlement_unit_kind",
+      "membership_orders.status as membership_status",
+      "member_contracts.id as contract_id",
+      "member_contracts.status as contract_status",
+      "member_contracts.valid_from",
+      "member_contracts.valid_until",
+      "entitlement_lots.id as lot_id",
+      "entitlement_lots.unit_kind as lot_unit_kind",
+      "entitlement_lots.status as lot_status",
+      "entitlement_lots.expires_on",
+      "entitlement_lots.total_units",
+      sql<string>`cast(coalesce(sum(entitlement_ledger.quantity_delta), 0) as text)`.as("ledger_delta"),
+      sql<string>`cast(count(*) filter (where entitlement_ledger.entry_type = 'EXPIRE') as text)`.as("expire_count")
+    ])
+    .where("membership_orders.member_id", "=", options.memberId)
+    .where("membership_orders.property_id", "=", options.propertyId)
+    .where("member_contracts.member_id", "=", options.memberId)
+    .groupBy([
+      "membership_orders.id",
+      "membership_orders.allowed_room_type_code",
+      "membership_orders.allowed_inventory_kind",
+      "membership_orders.entitlement_unit_kind",
+      "membership_orders.status",
+      "member_contracts.id",
+      "member_contracts.status",
+      "member_contracts.valid_from",
+      "member_contracts.valid_until",
+      "entitlement_lots.id",
+      "entitlement_lots.unit_kind",
+      "entitlement_lots.status",
+      "entitlement_lots.expires_on",
+      "entitlement_lots.total_units"
+    ])
+    .execute() as TemporaryOtherRoomSourceRow[];
+
+  const completeWholeRoomSources = rows.filter((row) => temporarySourceCoversCompleteStay(row, options.dates, propertyToday));
+  if (rows.some((row) => row.allowed_room_type_code === options.actualRoomTypeCode
+    && isActiveTemporaryWholeRoomSource(row, propertyToday)
+    && options.dates.some((date) => row.valid_from <= date && date <= row.valid_until && date <= row.expires_on))) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "该会员权益已适用于所选房型，请按普通会员订单创建", 409);
+  }
+  const mismatchedSources = completeWholeRoomSources.filter((row) => row.allowed_room_type_code !== options.actualRoomTypeCode);
+  if (mismatchedSources.length !== 1) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "该会员没有唯一可完整覆盖本次整房临时安排的原权益", 409);
+  }
+
+  const source = mismatchedSources[0]!;
+  return {
+    memberContractId: source.contract_id,
+    coverageCandidates: options.dates.map((serviceDate) => ({
+      serviceDate,
+      entitlementLotId: source.lot_id
+    })),
+    arrangement: {
+      kind: "TEMPORARY_OTHER_ROOM",
+      membershipOrderId: source.membership_order_id,
+      memberContractId: source.contract_id,
+      entitlementLotId: source.lot_id,
+      originalRoomTypeCode: source.allowed_room_type_code,
+      originalInventoryKind: "ROOM",
+      entitlementUnitKind: "ROOM_NIGHT",
+      actualInventoryUnitId: options.actualInventoryUnitId,
+      actualRoomTypeCode: options.actualRoomTypeCode,
+      actualInventoryKind: "ROOM",
+      arrivalDate: options.arrivalDate,
+      departureDate: options.departureDate
+    }
+  };
+}
+
 export type StoredQuote = StoredQuoteDto;
 
 export async function loadPricingPolicy(db: DbExecutor, propertyId: string, policyVersionId: string): Promise<PricingPolicy> {
@@ -357,6 +525,9 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
   if (stayType === "FREE" && (request.memberId || request.memberContractId)) {
     throw new DomainError("PRICING_POLICY_UNCONFIGURED", "Free stays cannot use member entitlement coverage", 409);
   }
+  if (request.temporaryOtherRoom === true && (!request.memberId || request.memberContractId || stayType === "FREE")) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排其他房型只支持会员整房权益报价", 409);
+  }
   if (!selected) throw new DomainError("NOT_FOUND", "Inventory unit not found", 404);
   if (!selected.available) {
     const firstBlockedIndex = selected.nights.findIndex((night) => !night.available);
@@ -377,16 +548,72 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
       }
     );
   }
-  const memberCoverage = request.memberId
-    ? await resolveMemberCoverage(db, {
-      propertyId: request.propertyId,
-      memberId: request.memberId,
-      inventoryUnitKind: unit.kind,
-      roomTypeCode: unit.roomTypeCode,
-      dates
-    })
-    : {
-      memberContractId: request.memberContractId,
+  let temporaryOtherRoomArrangement: TemporaryOtherRoomArrangementDto | undefined;
+  let memberCoverage: { memberContractId?: string; coverageCandidates: CoverageCandidate[] };
+  if (request.memberId && request.temporaryOtherRoom === true) {
+    memberCoverage = await resolveTemporaryOtherRoomCoverage(db, {
+        propertyId: request.propertyId,
+        memberId: request.memberId,
+        actualInventoryUnitId: unit.id,
+        actualInventoryKind: unit.kind,
+        actualRoomTypeCode: unit.roomTypeCode,
+        arrivalDate: request.arrivalDate,
+        departureDate: request.departureDate,
+        dates
+      }).then((resolution) => {
+      temporaryOtherRoomArrangement = resolution.arrangement;
+      return {
+        memberContractId: resolution.memberContractId,
+        coverageCandidates: resolution.coverageCandidates
+      };
+    });
+  } else if (request.memberId) {
+    let ordinaryCoverage: Awaited<ReturnType<typeof resolveMemberCoverage>> | undefined;
+    let ordinaryConflict: DomainError | undefined;
+    try {
+      ordinaryCoverage = await resolveMemberCoverage(db, {
+        propertyId: request.propertyId,
+        memberId: request.memberId,
+        inventoryUnitKind: unit.kind,
+        roomTypeCode: unit.roomTypeCode,
+        dates
+      });
+    } catch (error: unknown) {
+      if (!(error instanceof DomainError) || error.code !== "ENTITLEMENT_CONFLICT") throw error;
+      ordinaryConflict = error;
+    }
+
+    if (ordinaryCoverage?.coverageCandidates.length !== dates.length) {
+      let eligibility: TemporaryOtherRoomResolution | undefined;
+      try {
+        eligibility = await resolveTemporaryOtherRoomCoverage(db, {
+          propertyId: request.propertyId,
+          memberId: request.memberId,
+          actualInventoryUnitId: unit.id,
+          actualInventoryKind: unit.kind,
+          actualRoomTypeCode: unit.roomTypeCode,
+          arrivalDate: request.arrivalDate,
+          departureDate: request.departureDate,
+          dates
+        });
+      } catch {
+        if (ordinaryConflict) throw ordinaryConflict;
+      }
+      if (eligibility) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "该会员权益不适用于所选房型，可确认后临时安排到其他整间房", 409, false, {
+          temporaryOtherRoomAvailable: true,
+          originalRoomTypeCode: eligibility.arrangement.originalRoomTypeCode,
+          actualRoomTypeCode: eligibility.arrangement.actualRoomTypeCode,
+          originalRoomTypeAvailable: availability.some((candidate) => candidate.kind === "ROOM"
+            && candidate.roomTypeCode === eligibility.arrangement.originalRoomTypeCode
+            && candidate.available)
+        });
+      }
+    }
+    memberCoverage = ordinaryCoverage!;
+  } else {
+    memberCoverage = {
+      ...(request.memberContractId ? { memberContractId: request.memberContractId } : {}),
       coverageCandidates: await allocateCoverageCandidates(db, {
         propertyId: request.propertyId,
         inventoryUnitKind: unit.kind,
@@ -394,6 +621,7 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
         ...(request.memberContractId ? { memberContractId: request.memberContractId } : {})
       })
     };
+  }
   const coverageCandidates = memberCoverage.coverageCandidates;
   const calculated = calculatePricing({
     propertyId: request.propertyId,
@@ -407,6 +635,13 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
     memberCoverage: Boolean(request.memberId || request.memberContractId),
     coverageCandidates
   });
+  if (temporaryOtherRoomArrangement
+    && (calculated.coverageSet.length !== dates.length
+      || calculated.cashLines.length !== 0
+      || calculated.cashRemainder.minorUnits !== 0
+      || calculated.currentContractAmount.minorUnits !== 0)) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "临时安排必须由同一原整房权益完整覆盖且不产生现金差额", 409);
+  }
   const quoteId = newId("quote");
   const expiresAt = new Date(Date.now() + 15 * 60_000);
   const normalizedRequest = { ...request, stayType };
@@ -423,6 +658,9 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
     member_contract_id: memberCoverage.memberContractId ?? null,
     requester_subject_id: request.requesterSubjectId ?? null,
     input_hash: inputHash,
+    ...(temporaryOtherRoomArrangement
+      ? { temporary_other_room_arrangement: JSON.stringify(temporaryOtherRoomArrangement) }
+      : {}),
     coverage_set: JSON.stringify(calculated.coverageSet),
     cash_lines: JSON.stringify(calculated.cashLines),
     cash_remainder_minor: calculated.cashRemainder.minorUnits,
@@ -445,6 +683,7 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
     expiresAt: expiresAt.toISOString(),
     ...(request.memberId ? { memberId: request.memberId } : {}),
     ...(memberCoverage.memberContractId ? { memberContractId: memberCoverage.memberContractId } : {}),
+    ...(temporaryOtherRoomArrangement ? { temporaryOtherRoomArrangement } : {}),
     inputHash
   };
   return {
@@ -470,11 +709,21 @@ export async function createQuoteForTesting(db: Kysely<Database>, request: Quote
   });
 }
 
+function temporaryOtherRoomArrangementFromJson(value: unknown): TemporaryOtherRoomArrangementDto | undefined {
+  if (value === null || value === undefined) return undefined;
+  const parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new DomainError("INTERNAL_ERROR", "Stored temporary room arrangement is malformed", 500);
+  }
+  return parsed as TemporaryOtherRoomArrangementDto;
+}
+
 export async function loadStoredQuote(db: DbExecutor, quoteId: string, requireFresh = true): Promise<StoredQuote> {
   const row = await db.selectFrom("quotes").selectAll().where("id", "=", quoteId).executeTakeFirst();
   if (!row) throw new DomainError("NOT_FOUND", "Quote not found", 404);
   const expiresAt = row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at);
   if (requireFresh && expiresAt.getTime() <= Date.now()) throw new DomainError("QUOTE_EXPIRED", "Quote has expired", 409);
+  const temporaryOtherRoomArrangement = temporaryOtherRoomArrangementFromJson(row.temporary_other_room_arrangement);
   const storedQuote: StoredQuote = {
     quoteId: row.id,
     propertyId: row.property_id,
@@ -490,6 +739,7 @@ export async function loadStoredQuote(db: DbExecutor, quoteId: string, requireFr
     expiresAt: expiresAt.toISOString(),
     ...(row.member_id ? { memberId: row.member_id } : {}),
     ...(row.member_contract_id ? { memberContractId: row.member_contract_id } : {}),
+    ...(temporaryOtherRoomArrangement ? { temporaryOtherRoomArrangement } : {}),
     inputHash: row.input_hash
   };
   return {
@@ -498,10 +748,12 @@ export async function loadStoredQuote(db: DbExecutor, quoteId: string, requireFr
   };
 }
 
-export async function lockEntitlementLots(trx: Transaction<Database>, contractId?: string): Promise<void> {
-  if (!contractId) return;
-  await trx.selectFrom("member_contracts").select("id").where("id", "=", contractId).forUpdate().executeTakeFirstOrThrow();
+export async function lockEntitlementLots(trx: Transaction<Database>, contractId?: string): Promise<string | null> {
+  if (!contractId) return null;
+  const contract = await trx.selectFrom("member_contracts").select(["id", "member_id"])
+    .where("id", "=", contractId).forUpdate().executeTakeFirstOrThrow();
   await trx.selectFrom("entitlement_lots").select("id").where("contract_id", "=", contractId).orderBy("id").forUpdate().execute();
+  return contract.member_id;
 }
 
 export async function lockMemberEntitlementLots(

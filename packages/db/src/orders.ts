@@ -16,7 +16,8 @@ import {
   type OrderHistoricalStayCorrectionSnapshotDto,
   type OrderAllowedActionDto,
   type OrderActionCode,
-  type CommandCapability
+  type CommandCapability,
+  type TemporaryOtherRoomArrangementDto
 } from "@qintopia/contracts";
 import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
 import {
@@ -70,6 +71,136 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+export interface TemporaryOtherRoomCreateEvidence {
+  createAmendmentId: string;
+  arrangement: TemporaryOtherRoomArrangementDto;
+}
+
+const temporaryOtherRoomArrangementKeys = [
+  "kind",
+  "membershipOrderId",
+  "memberContractId",
+  "entitlementLotId",
+  "originalRoomTypeCode",
+  "originalInventoryKind",
+  "entitlementUnitKind",
+  "actualInventoryUnitId",
+  "actualRoomTypeCode",
+  "actualInventoryKind",
+  "arrivalDate",
+  "departureDate"
+] as const;
+
+function temporaryOtherRoomArrangementFromCreatePayload(
+  payload: unknown,
+  amendmentId: string
+): TemporaryOtherRoomArrangementDto | null {
+  const value = recordValue(payload);
+  if (!value || value.temporaryOtherRoomArrangement === undefined) return null;
+  const raw = recordValue(value.temporaryOtherRoomArrangement);
+  if (!raw
+    || Object.keys(raw).length !== temporaryOtherRoomArrangementKeys.length
+    || temporaryOtherRoomArrangementKeys.some((key) => !Object.hasOwn(raw, key))) {
+    throw new DomainError("INTERNAL_ERROR", "临时安排创建证据已损坏", 500, false, { amendmentId });
+  }
+  const stringField = (field: (typeof temporaryOtherRoomArrangementKeys)[number]): string => {
+    const fieldValue = raw[field];
+    if (typeof fieldValue !== "string" || fieldValue.trim() === "") {
+      throw new DomainError("INTERNAL_ERROR", "临时安排创建证据已损坏", 500, false, { amendmentId, field });
+    }
+    return fieldValue;
+  };
+  const arrangement: TemporaryOtherRoomArrangementDto = {
+    kind: stringField("kind") as TemporaryOtherRoomArrangementDto["kind"],
+    membershipOrderId: stringField("membershipOrderId"),
+    memberContractId: stringField("memberContractId"),
+    entitlementLotId: stringField("entitlementLotId"),
+    originalRoomTypeCode: stringField("originalRoomTypeCode"),
+    originalInventoryKind: stringField("originalInventoryKind") as TemporaryOtherRoomArrangementDto["originalInventoryKind"],
+    entitlementUnitKind: stringField("entitlementUnitKind") as TemporaryOtherRoomArrangementDto["entitlementUnitKind"],
+    actualInventoryUnitId: stringField("actualInventoryUnitId"),
+    actualRoomTypeCode: stringField("actualRoomTypeCode"),
+    actualInventoryKind: stringField("actualInventoryKind") as TemporaryOtherRoomArrangementDto["actualInventoryKind"],
+    arrivalDate: stringField("arrivalDate"),
+    departureDate: stringField("departureDate")
+  };
+  parseLocalDate(arrangement.arrivalDate);
+  parseLocalDate(arrangement.departureDate);
+  if (arrangement.kind !== "TEMPORARY_OTHER_ROOM"
+    || arrangement.originalInventoryKind !== "ROOM"
+    || arrangement.entitlementUnitKind !== "ROOM_NIGHT"
+    || arrangement.actualInventoryKind !== "ROOM"
+    || arrangement.originalRoomTypeCode === arrangement.actualRoomTypeCode
+    || arrangement.departureDate <= arrangement.arrivalDate) {
+    throw new DomainError("INTERNAL_ERROR", "临时安排创建证据已损坏", 500, false, { amendmentId });
+  }
+  return arrangement;
+}
+
+export async function loadTemporaryOtherRoomCreateEvidence(
+  db: DbExecutor,
+  orderId: string
+): Promise<TemporaryOtherRoomCreateEvidence | null> {
+  const createAmendments = await db.selectFrom("amendments")
+    .select(["id", "sequence", "reason_code", "reason_note", "payload"])
+    .where("order_id", "=", orderId)
+    .where("amendment_type", "=", "CREATE_ORDER")
+    .orderBy("sequence")
+    .execute();
+  if (createAmendments.length === 0) return null;
+  if (createAmendments.length !== 1 || createAmendments[0]!.sequence !== 1) {
+    throw new DomainError("INTERNAL_ERROR", "订单创建变更记录链已损坏", 500, false, { orderId });
+  }
+  const createAmendment = createAmendments[0]!;
+  const arrangement = temporaryOtherRoomArrangementFromCreatePayload(createAmendment.payload, createAmendment.id);
+  if (!arrangement) {
+    if (createAmendment.reason_code === "TEMPORARY_OTHER_ROOM") {
+      throw new DomainError("INTERNAL_ERROR", "临时安排创建证据已损坏", 500, false, {
+        orderId,
+        amendmentId: createAmendment.id
+      });
+    }
+    return null;
+  }
+  if (createAmendment.reason_code !== "TEMPORARY_OTHER_ROOM" || createAmendment.reason_note.trim() === "") {
+    throw new DomainError("INTERNAL_ERROR", "临时安排创建原因证据已损坏", 500, false, {
+      orderId,
+      amendmentId: createAmendment.id
+    });
+  }
+  return {
+    createAmendmentId: createAmendment.id,
+    arrangement
+  };
+}
+
+export async function hasTemporaryOtherRoomMemberChainEvidence(
+  db: DbExecutor,
+  propertyId: string,
+  target: {
+    membershipOrderId?: string;
+    memberContractId?: string;
+    entitlementLotId?: string;
+    sourceStayOrderId?: string;
+  }
+): Promise<boolean> {
+  const rows = await db.selectFrom("amendments")
+    .innerJoin("orders", "orders.id", "amendments.order_id")
+    .select(["amendments.id", "amendments.order_id", "amendments.payload"])
+    .where("orders.property_id", "=", propertyId)
+    .where("amendments.amendment_type", "=", "CREATE_ORDER")
+    .where("amendments.reason_code", "=", "TEMPORARY_OTHER_ROOM")
+    .execute();
+  return rows.some((row) => {
+    if (target.sourceStayOrderId && row.order_id === target.sourceStayOrderId) return true;
+    const arrangement = temporaryOtherRoomArrangementFromCreatePayload(row.payload, row.id);
+    return Boolean(arrangement
+      && ((target.membershipOrderId && arrangement.membershipOrderId === target.membershipOrderId)
+        || (target.memberContractId && arrangement.memberContractId === target.memberContractId)
+        || (target.entitlementLotId && arrangement.entitlementLotId === target.entitlementLotId)));
+  });
+}
+
 function amendmentPayloadForRead(amendmentType: string, payload: unknown): unknown {
   const value = recordValue(payload);
   if (amendmentType !== "CREATE_ORDER" || !value || !Object.hasOwn(value, "confirmedEffect")) return payload;
@@ -79,6 +210,15 @@ function amendmentPayloadForRead(amendmentType: string, payload: unknown): unkno
 
 type HistoricalAmendmentProtocol = HistoricalProtocolVersion;
 const externalChannelCodes = new Set(["YOUMUDAO", "CTRIP", "MEITUAN"]);
+const temporaryOtherRoomHiddenActionCodes = new Set<OrderActionCode>([
+  "EXTEND_STAY",
+  "MOVE_UNIT",
+  "REPRICE_ORDER",
+  "RECORD_COLLECTION",
+  "RECORD_REFUND",
+  "REVERSE_FACT",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+]);
 
 function externalChannelFundsDisabledReason(bookingChannelCode: string | null): string | null {
   return bookingChannelCode && externalChannelCodes.has(bookingChannelCode)
@@ -1546,7 +1686,7 @@ export async function getOrderViewSnapshot(
   commandGrants: ReadonlySet<CommandCapability | string> = new Set()
 ) {
   const context = await loadOrderContext(db, orderId);
-  const [localClock, protocolEpochRows, occupantRows, correctionRows, segments, amendments, historicalCorrectionReceiptRows, revisions, coverage, facts, transfers, cleaningTasks, membershipConversion] = await Promise.all([
+  const [localClock, protocolEpochRows, occupantRows, correctionRows, segments, referencedInventoryUnits, amendments, historicalCorrectionReceiptRows, revisions, coverage, facts, transfers, cleaningTasks, membershipConversion, temporaryOtherRoomEvidence] = await Promise.all([
     propertyLocalClock(db, context.order.property_id),
     db.selectFrom("schema_migrations").select(["name", "applied_at"])
       .where("name", "in", [
@@ -1563,6 +1703,13 @@ export async function getOrderViewSnapshot(
       .orderBy("order_occupant_corrections.id")
       .execute(),
     db.selectFrom("stay_segments").selectAll().where("stay_id", "=", context.stay.id).orderBy("sequence").execute(),
+    db.selectFrom("inventory_units")
+      .innerJoin("stay_segments", "stay_segments.inventory_unit_id", "inventory_units.id")
+      .selectAll("inventory_units")
+      .distinct()
+      .where("stay_segments.stay_id", "=", context.stay.id)
+      .orderBy("inventory_units.code")
+      .execute(),
     db.selectFrom("amendments")
       .leftJoin("command_executions", "command_executions.id", "amendments.command_id")
       .leftJoin("subjects", "subjects.id", "command_executions.subject_id")
@@ -1615,7 +1762,8 @@ export async function getOrderViewSnapshot(
       .orderBy("task.service_date")
       .orderBy("task.created_at")
       .execute() : Promise.resolve([]),
-    loadOrderMembershipConversion(db, context)
+    loadOrderMembershipConversion(db, context),
+    loadTemporaryOtherRoomCreateEvidence(db, orderId)
   ]);
   const businessDate = localClock.date;
   const protocolEpochByMigration = new Map(protocolEpochRows.map((row) => [
@@ -1718,7 +1866,8 @@ export async function getOrderViewSnapshot(
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
-   }, commandGrants),
+   }, commandGrants).filter((action) => !temporaryOtherRoomEvidence
+     || !temporaryOtherRoomHiddenActionCodes.has(action.code)),
     order: {
       ...context.order,
       current_contract_amount_minor: context.revision.currentContractAmountMinor,
@@ -1758,6 +1907,7 @@ export async function getOrderViewSnapshot(
     effectiveArrangement: lifecycle.effectiveArrangement,
     fulfillment: lifecycle.fulfillment,
     arrangementHistory: lifecycle.arrangementHistory,
+    referencedInventoryUnits,
     amendments: projectedAmendments.map((amendment) => ({
       id: amendment.id,
       order_id: amendment.order_id,

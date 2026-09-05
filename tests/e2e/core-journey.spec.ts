@@ -702,6 +702,7 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await expect(reverseDialog.getByRole("alert")).toContainText("必须填写冲销原因");
   await reverseDialog.getByTestId("reverse-fact-note").fill("退款事实登记错单，冲销后重新核对");
   await reverseDialog.getByRole("button", { name: "继续核对", exact: true }).click();
+  await page.getByTestId("create-command-preview").click();
   await confirmCommand(page, "Reverse refund fact", ["¥30.00"]);
   await closeReceipt(page);
   await expect(fundsRegion.getByRole("rowheader", { name: "冲销", exact: true })).toBeVisible();
@@ -722,7 +723,11 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   const arrivalDayRestrictionHint = page.locator(".info-hint[aria-label*='入住当天暂不办理缩短或提前退房']");
   await expect(arrivalDayRestrictionHint).toBeVisible();
   await arrivalDayRestrictionHint.focus();
-  await expect(arrivalDayRestrictionHint.getByRole("tooltip")).toBeVisible();
+  const arrivalDayRestrictionTooltipId = await arrivalDayRestrictionHint.getAttribute("aria-describedby");
+  if (!arrivalDayRestrictionTooltipId) throw new Error("入住当天限制提示缺少 aria-describedby");
+  const arrivalDayRestrictionTooltip = page.locator(`[id="${arrivalDayRestrictionTooltipId}"]`);
+  await expect(arrivalDayRestrictionTooltip).toHaveAttribute("role", "tooltip");
+  await expect(arrivalDayRestrictionTooltip).toBeVisible();
   await assertNoA11yViolations(page);
   await assertNoPageOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("desktop-order.png"), fullPage: true });
@@ -782,11 +787,12 @@ test("desktop whole-room order records every occupant and room status exposes ni
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 15_000 });
   const cell = page.locator('[data-room-status-cell="true"][data-unit-id="unit_room_a03"][data-service-date="2026-10-01"]');
   await expect(cell.locator(".room-status-direct-occupants > span")).toHaveText(["山峰", "小满"]);
-  await expect(cell).toContainText("2人");
+  await expect(cell.locator(".room-status-direct-count")).toHaveText("2/1");
   await expect(page.locator('[data-room-status-row="unit_room_a03"] .room-status-interval').filter({ hasText: /山峰|小满/ })).toHaveCount(0);
   const accessibleText = `${await cell.getAttribute("aria-label") ?? ""} ${await cell.getAttribute("title") ?? ""}`;
   expect(accessibleText).toContain("山峰");
   expect(accessibleText).toContain("小满");
+  expect(accessibleText).toContain("2人");
   expect(accessibleText).not.toContain("大床房主要入住人");
   expect(accessibleText).not.toContain("大床房同行真实姓名");
   expect(accessibleText).not.toContain("13800138000");
@@ -1394,7 +1400,7 @@ test("desktop order command recovery survives close refresh and navigation witho
       commandType: "RECORD_COLLECTION",
       idempotencyKey: originalConfirmationKey
     })),
-    recoveryDialog.getByRole("button", { name: "查询命令结果", exact: true }).click()
+    recoveryDialog.getByRole("button", { name: "查询操作结果", exact: true }).click()
   ]);
   const receipt = await assertOperatorReceipt(page);
   await expect(receipt).toContainText(transactionReference);
@@ -1416,24 +1422,44 @@ test("desktop quote workbench only offers recovery after a real response interru
 
   let originalQuoteKey = "";
   await page.route("**/api/v1/quotes", async (route) => {
+    const input = route.request().postDataJSON() as {
+      propertyId?: string;
+      inventoryUnitId?: string;
+      stayType?: string;
+      arrivalDate?: string;
+      departureDate?: string;
+    };
+    if (input.propertyId !== "prop_qintopia_demo"
+      || input.inventoryUnitId !== "unit_room_101"
+      || input.stayType !== "FREE"
+      || input.arrivalDate !== "2026-10-13"
+      || input.departureDate !== "2026-10-15"
+      || originalQuoteKey !== "") {
+      await route.continue();
+      return;
+    }
     originalQuoteKey = route.request().headers()["idempotency-key"] ?? "";
-    await route.fetch();
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
     await route.abort("failed");
-  }, { times: 1 });
+  });
 
   await chooseDatesAndUnit(page, "101", "2026-10-15", "2026-10-13", "FREE");
   const recovery = page.getByTestId("quote-recovery");
   await expect(recovery).toContainText("报价结果尚未确认", { timeout: 15_000 });
   await expect(recovery).not.toContainText(/web-create-quote-|Quote|幂等/);
   await expect(recovery.getByRole("button", { name: "核对原报价结果" })).toBeVisible();
+  expect(originalQuoteKey).toMatch(/^web-create-quote-/);
 
-  const recoveryRequest = page.waitForRequest((request) => isResolvedCommandRequest(request, {
+  const recoveryResponse = page.waitForResponse((response) => isResolvedCommandRequest(response.request(), {
     propertyId: "prop_qintopia_demo",
     commandType: "CREATE_QUOTE",
     idempotencyKey: originalQuoteKey
-  }));
+  }), { timeout: 15_000 });
   await recovery.getByRole("button", { name: "核对原报价结果" }).click();
-  await recoveryRequest;
+  const resolvedResponse = await recoveryResponse;
+  expect(resolvedResponse.status()).toBe(200);
+  expect(await resolvedResponse.json()).toMatchObject({ businessCommitted: true });
   await expect(recovery).toBeHidden();
   await expect(page.getByTestId("request-quote")).toHaveCount(0);
   await expect(page.getByText(/当前筛选条件已变化/)).toBeHidden();

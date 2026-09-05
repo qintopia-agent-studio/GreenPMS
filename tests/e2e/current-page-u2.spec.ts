@@ -284,9 +284,15 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
     const box = element.getBoundingClientRect();
     const rowElement = document.querySelector<HTMLElement>(`[data-room-status-row="${element.getAttribute("data-unit-id") ?? ""}"]`);
     if (!rowElement) throw new Error("快捷操作框缺少房源行");
-    return { bottom: box.bottom, rowTop: rowElement.getBoundingClientRect().top };
+    const row = rowElement.getBoundingClientRect();
+    return { top: box.top, bottom: box.bottom, rowTop: row.top, rowBottom: row.bottom, viewportHeight: window.innerHeight };
   });
-  expect(upperGeometry.bottom).toBeLessThanOrEqual(upperGeometry.rowTop - 7);
+  expect(upperGeometry.top).toBeGreaterThanOrEqual(8);
+  expect(upperGeometry.bottom).toBeLessThanOrEqual(upperGeometry.viewportHeight - 8);
+  expect(
+    upperGeometry.top >= upperGeometry.rowBottom + 7
+      || upperGeometry.bottom <= upperGeometry.rowTop - 7
+  ).toBe(true);
   await popover.getByRole("button", { name: "维修锁房", exact: true }).click();
   await expect(writeDrawer).toBeVisible();
   await expect(writeDrawer.getByLabel("开始日期", { exact: true })).toHaveValue(targetDate);

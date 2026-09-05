@@ -43,6 +43,7 @@ function view(): OrderViewDto {
     effectiveArrangement: { arrivalDate: "2026-08-01", departureDate: "2026-08-03", intervals: [{ inventoryUnitId: "room_101", arrivalDate: "2026-08-01", departureDate: "2026-08-03" }], presentation: "CURRENT", businessDate: "2026-07-31" },
     fulfillment: { state: "NOT_CHECKED_IN", checkIn: null, checkOut: null, checkInRevocation: null },
     arrangementHistory: [],
+    referencedInventoryUnits: [],
     amendments: [],
     pricingRevisions: [],
     coverageSet: [],

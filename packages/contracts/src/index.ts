@@ -276,6 +276,21 @@ export interface CoverageItemDto {
   entitlementLotId: string;
 }
 
+export interface TemporaryOtherRoomArrangementDto {
+  kind: "TEMPORARY_OTHER_ROOM";
+  membershipOrderId: string;
+  memberContractId: string;
+  entitlementLotId: string;
+  originalRoomTypeCode: string;
+  originalInventoryKind: "ROOM";
+  entitlementUnitKind: "ROOM_NIGHT";
+  actualInventoryUnitId: string;
+  actualRoomTypeCode: string;
+  actualInventoryKind: "ROOM";
+  arrivalDate: string;
+  departureDate: string;
+}
+
 export interface NightlyCashLineDto {
   lineKind?: "NIGHT";
   serviceDate: string;
@@ -359,6 +374,7 @@ export interface QuoteDto {
   expiresAt: string;
   memberId?: string;
   memberContractId?: string;
+  temporaryOtherRoomArrangement?: TemporaryOtherRoomArrangementDto;
 }
 
 export interface CreateQuoteCommandInputDto {
@@ -370,6 +386,7 @@ export interface CreateQuoteCommandInputDto {
   pricingPolicyVersionId: string;
   memberId?: string;
   memberContractId?: string;
+  temporaryOtherRoom?: true;
 }
 
 export interface StoredQuoteDto extends Omit<QuoteDto, "cashLines"> {
@@ -724,6 +741,7 @@ export interface CreateOrderInputDto {
   backfill?: true;
   backfillCollection?: BackfillCompletedStayCollectionInputDto;
   backfillReason?: string;
+  temporaryOtherRoomReason?: string;
 }
 
 export interface RescheduleStayInputDto {
@@ -1012,6 +1030,8 @@ export interface CreateOrderResultDto {
   channelOrderReference: string | null;
   freeStayReason: string | null;
   freeStayCategoryCode: FreeStayCategoryCode | null;
+  temporaryOtherRoomArrangement?: TemporaryOtherRoomArrangementDto;
+  temporaryOtherRoomCreateAmendmentId?: string;
   pricingDecision?: {
     pricingBasis: CreateOrderPricingBasis;
     policyBaseAmount: MoneyDto;

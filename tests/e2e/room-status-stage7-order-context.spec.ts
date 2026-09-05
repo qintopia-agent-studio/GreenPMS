@@ -629,7 +629,7 @@ test("an external occupant correction refreshes the open context and remains vis
 
   const correctionAmendment = context.getByRole("region", { name: "资料更正记录", exact: true }).getByRole("listitem")
     .filter({ hasText: "另一位操作员核对后更正" });
-  await expect(correctionAmendment).toContainText("Demo Agent");
+  await expect(correctionAmendment).toContainText(externalAdministrator.displayName);
   await expect(correctionAmendment).toContainText("昵称：小满 → 秋实");
 });
 
@@ -880,7 +880,10 @@ test("375px mobile split-bed summary keeps the parent neutral and opens each exa
   await expect(parent).toBeVisible();
   await expect(parent.getByRole("button", { name: "查看订单信息", exact: true })).toHaveCount(0);
 
-  const bedA = occupancies.filter({ hasText: "1人" }).filter({ hasText: "山峰" }).first();
+  const bedA = occupancies
+    .filter({ has: page.locator("[data-mobile-bed-occupant-line]", { hasText: "山峰" }) })
+    .filter({ has: page.getByRole("button", { name: "查看订单信息", exact: true }) })
+    .first();
   const selectedOrderResponse = orderResponse(page, fixture.splitBed.bedAOrderId);
   await bedA.getByRole("button", { name: "查看订单信息", exact: true }).click();
   await selectedOrderResponse;

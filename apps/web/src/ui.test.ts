@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
-import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, temporaryOtherRoomArrangementPresentation, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
@@ -21,6 +21,24 @@ class MemoryStorage {
     this.values.delete(key);
   }
 }
+
+const temporaryOtherRoomLifecycleEvidence = {
+  temporaryOtherRoomArrangement: {
+    kind: "TEMPORARY_OTHER_ROOM",
+    membershipOrderId: "membership_order_temporary",
+    memberContractId: "contract_temporary",
+    entitlementLotId: "lot_temporary",
+    originalRoomTypeCode: "shared_bath_single",
+    originalInventoryKind: "ROOM",
+    entitlementUnitKind: "ROOM_NIGHT",
+    actualInventoryUnitId: "room_101",
+    actualRoomTypeCode: "private_bath_single",
+    actualInventoryKind: "ROOM",
+    arrivalDate: "2026-08-01",
+    departureDate: "2026-08-03"
+  },
+  temporaryOtherRoomCreateAmendmentId: "amendment_temporary_create"
+} as const;
 
 describe("cross-tab command recovery storage", () => {
   const subjectId = "subject_operator";
@@ -436,6 +454,55 @@ describe("cross-tab command recovery storage", () => {
   });
 });
 
+describe("temporary other-room member stay presentation", () => {
+  const arrangement = {
+    kind: "TEMPORARY_OTHER_ROOM",
+    membershipOrderId: "membership_order_1",
+    memberContractId: "contract_1",
+    entitlementLotId: "lot_1",
+    originalRoomTypeCode: "shared_bath_single",
+    originalInventoryKind: "ROOM",
+    entitlementUnitKind: "ROOM_NIGHT",
+    actualInventoryUnitId: "room_private_101",
+    actualRoomTypeCode: "private_bath_single",
+    actualInventoryKind: "ROOM",
+    arrivalDate: "2026-09-06",
+    departureDate: "2026-09-08"
+  } as const;
+
+  it("shows only a complete server arrangement in the member CREATE_ORDER review", () => {
+    expect(temporaryOtherRoomArrangementPresentation(arrangement)).toMatchObject({
+      originalRoomTypeCode: "shared_bath_single",
+      actualRoomTypeCode: "private_bath_single"
+    });
+    expect(temporaryOtherRoomArrangementPresentation({ ...arrangement, actualInventoryKind: "BED" })).toBeUndefined();
+
+    const html = renderToStaticMarkup(createElement(EffectSummary, {
+      preview: {
+        previewId: "preview_temporary_room",
+        commandType: "CREATE_ORDER",
+        effectHash: "a".repeat(64),
+        effect: {
+          memberId: "member_1",
+          arrivalDate: arrangement.arrivalDate,
+          departureDate: arrangement.departureDate,
+          inventoryUnit: { id: arrangement.actualInventoryUnitId, code: "101", name: "101 独卫单人间" },
+          pricing: { coverageSet: [{ serviceDate: "2026-09-06" }, { serviceDate: "2026-09-07" }], cashRemainder: { currency: "CNY", minorUnits: 0 } },
+          temporaryOtherRoomArrangement: arrangement
+        },
+        expiresAt: "2026-09-05T10:00:00.000Z"
+      },
+      reasonNote: "现场协调安排"
+    }));
+    expect(html).toContain("本次临时安排其他房型");
+    expect(html).toContain("单人间（公卫）");
+    expect(html).toContain("单人间（独卫）");
+    expect(html).toContain("101 · 101 独卫单人间");
+    expect(html).toContain("现场协调安排");
+    expect(html).not.toMatch(/membershipOrderId|entitlementLotId|actualInventoryUnitId/);
+  });
+});
+
 describe("operator-facing business errors", () => {
   it("distinguishes a mismatched page origin from a read-only account", () => {
     expect(businessErrorMessage(new ApiError(403, {
@@ -461,6 +528,12 @@ describe("operator-facing business errors", () => {
       message: "目标房源在所选换房日期内已有占用，请选择其他房源。",
       correlationId: "correlation_inventory_conflict_cn"
     }))).toBe("目标房源在所选换房日期内已有占用，请选择其他房源。");
+    expect(businessErrorMessage(new ApiError(409, {
+      code: "PREVIEW_STALE",
+      message: "Preview basis changed; request a new preview",
+      correlationId: "correlation_inventory_conflict_preview_stale",
+      details: { causeCode: "INVENTORY_CONFLICT" }
+    }))).toBe("目标房间在所选日期已被占用，请重新选择房间或日期。");
   });
 
   it("describes refund amount limits instead of a generic state change", () => {
@@ -3154,6 +3227,10 @@ describe("Order lifecycle evidence", () => {
     expect(u1PreviewHasBusinessEvidence("CANCEL_ORDER", cancelEffect, { orderId: "order_cancel" })).toBe(true);
     expect(u1PreviewHasBusinessEvidence("CANCEL_ORDER", {
       ...cancelEffect,
+      ...temporaryOtherRoomLifecycleEvidence
+    }, { orderId: "order_cancel" })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("CANCEL_ORDER", {
+      ...cancelEffect,
       amounts: { ...cancelEffect.amounts, refundReferenceAmount: money(19_999) }
     }, { orderId: "order_cancel" })).toBe(false);
     expect(u1PreviewHasBusinessEvidence("CANCEL_ORDER", {
@@ -3209,12 +3286,168 @@ describe("Order lifecycle evidence", () => {
     expect(receiptHasCommandEvidence("CANCEL_ORDER", receipt, { orderId: "order_cancel" }, cancelEffect)).toBe(true);
     expect(receiptHasCommandEvidence("CANCEL_ORDER", {
       ...receipt,
+      result: { ...result, ...temporaryOtherRoomLifecycleEvidence }
+    }, { orderId: "order_cancel" }, { ...cancelEffect, ...temporaryOtherRoomLifecycleEvidence })).toBe(true);
+    expect(receiptHasCommandEvidence("CANCEL_ORDER", {
+      ...receipt,
       resourceRefs: ["order_cancel", "amendment_cancel"]
     }, { orderId: "order_cancel" }, cancelEffect)).toBe(false);
     expect(receiptHasCommandEvidence("CANCEL_ORDER", {
       ...receipt,
       result: { ...result, status: "NO_SHOW" }
     }, { orderId: "order_cancel" }, cancelEffect)).toBe(false);
+  });
+});
+
+describe("Temporary other-room browser command evidence", () => {
+  const effectHash = "e".repeat(64);
+  const createInput = {
+    propertyId: "property_green",
+    quoteId: "quote_temporary",
+    temporaryOtherRoomReason: "对应房型现场保留，已与会员确认"
+  };
+  const createPreviewEffect = {
+    quoteId: createInput.quoteId,
+    memberId: "member_temporary",
+    memberContractId: temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement.memberContractId,
+    inventoryUnit: {
+      id: temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement.actualInventoryUnitId,
+      code: "101",
+      name: "独卫单人间 101",
+      kind: "ROOM",
+      roomTypeCode: temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement.actualRoomTypeCode
+    },
+    arrivalDate: temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement.arrivalDate,
+    departureDate: temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement.departureDate,
+    stayType: "NIGHTLY",
+    primaryGuest: { nickname: "山风" },
+    pricing: { currentContractAmount: { currency: "CNY", minorUnits: 0 } },
+    temporaryOtherRoomArrangement: temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement,
+    temporaryOtherRoomReason: createInput.temporaryOtherRoomReason
+  };
+
+  function committedReceipt(result: Record<string, unknown>): ReceiptDto {
+    return {
+      receiptId: "receipt_temporary_browser_evidence",
+      commandId: "command_temporary_browser_evidence",
+      executionStatus: "EXECUTED",
+      businessCommitted: true,
+      correlationId: "correlation_temporary_browser_evidence",
+      result,
+      resourceRefs: ["order_temporary", "amendment_temporary_create"],
+      factRefs: [],
+      committedAt: "2026-08-01T10:00:00.000Z"
+    };
+  }
+
+  it("rejects a temporary CREATE_ORDER Preview with missing, partial, or inconsistent arrangement evidence", () => {
+    expect(u1PreviewHasBusinessEvidence("CREATE_ORDER", createPreviewEffect, createInput)).toBe(true);
+    const { temporaryOtherRoomArrangement: _arrangement, ...missingArrangement } = createPreviewEffect;
+    expect(u1PreviewHasBusinessEvidence("CREATE_ORDER", missingArrangement, createInput)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("CREATE_ORDER", {
+      ...createPreviewEffect,
+      temporaryOtherRoomCreateAmendmentId: "amendment_must_not_exist_before_confirmation"
+    }, createInput)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("CREATE_ORDER", {
+      ...createPreviewEffect,
+      memberContractId: "contract_other"
+    }, createInput)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("CREATE_ORDER", {
+      ...createPreviewEffect,
+      inventoryUnit: { ...createPreviewEffect.inventoryUnit, id: "room_other" }
+    }, createInput)).toBe(false);
+  });
+
+  it.each([
+    ["CORRECT_ORDER_OCCUPANT", { before: { fullName: "甲" }, after: { fullName: "乙" }, ...temporaryOtherRoomLifecycleEvidence }, { orderId: "order_temporary" }],
+    ["CHECK_IN", { fromStatus: "RESERVED", toStatus: "CHECKED_IN", businessDate: "2026-08-01", effectiveDate: "2026-08-01", recordingMode: "ON_SCHEDULE", ...temporaryOtherRoomLifecycleEvidence }, { orderId: "order_temporary" }],
+    ["CHECK_OUT", { fromStatus: "CHECKED_IN", toStatus: "CHECKED_OUT", businessDate: "2026-08-03", effectiveDate: "2026-08-03", recordingMode: "ON_SCHEDULE", ...temporaryOtherRoomLifecycleEvidence }, { orderId: "order_temporary" }]
+  ] as const)("rejects damaged temporary evidence in %s Preview and committed receipt", (commandType, previewEffect, input) => {
+    expect(u1PreviewHasBusinessEvidence(commandType, previewEffect, input)).toBe(true);
+    const { temporaryOtherRoomArrangement: _arrangement, ...missingArrangement } = previewEffect;
+    expect(u1PreviewHasBusinessEvidence(commandType, missingArrangement, input)).toBe(false);
+    const { temporaryOtherRoomCreateAmendmentId: _amendmentId, ...missingAmendment } = previewEffect;
+    expect(u1PreviewHasBusinessEvidence(commandType, missingAmendment, input)).toBe(false);
+
+    const result = {
+      orderId: input.orderId,
+      amendmentId: `amendment_${commandType.toLowerCase()}`,
+      effectHash,
+      ...temporaryOtherRoomLifecycleEvidence
+    };
+    const receipt = committedReceipt(result);
+    expect(receiptHasCommandEvidence(commandType, receipt, input, previewEffect, effectHash)).toBe(true);
+    expect(receiptHasCommandEvidence(commandType, {
+      ...receipt,
+      result: { ...result, temporaryOtherRoomArrangement: undefined }
+    }, input, previewEffect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence(commandType, {
+      ...receipt,
+      result: {
+        ...result,
+        temporaryOtherRoomArrangement: {
+          ...temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement,
+          actualInventoryUnitId: "room_other"
+        }
+      }
+    }, input, previewEffect, effectHash)).toBe(false);
+  });
+
+  it("requires complete temporary CREATE_ORDER receipt evidence matching its Preview", () => {
+    const result = { orderId: "order_temporary", effectHash, ...temporaryOtherRoomLifecycleEvidence };
+    const receipt = committedReceipt(result);
+    expect(receiptHasCommandEvidence("CREATE_ORDER", receipt, createInput, createPreviewEffect, effectHash)).toBe(true);
+    const { temporaryOtherRoomArrangement: _arrangement, temporaryOtherRoomCreateAmendmentId: _amendmentId, ...missingEvidence } = result;
+    expect(receiptHasCommandEvidence("CREATE_ORDER", {
+      ...receipt,
+      result: missingEvidence
+    }, createInput, createPreviewEffect, effectHash)).toBe(false);
+    expect(receiptHasCommandEvidence("CREATE_ORDER", {
+      ...receipt,
+      result: {
+        ...result,
+        temporaryOtherRoomArrangement: {
+          ...temporaryOtherRoomLifecycleEvidence.temporaryOtherRoomArrangement,
+          entitlementLotId: "lot_other"
+        }
+      }
+    }, createInput, createPreviewEffect, effectHash)).toBe(false);
+  });
+
+  it.each([
+    ["CREATE_ORDER", "MEMBER_STAY", { propertyId: "property_green", quoteId: "quote_temporary" }],
+    ["CORRECT_ORDER_OCCUPANT", undefined, { propertyId: "property_green", orderId: "order_temporary" }],
+    ["CHECK_IN", "FULFILLMENT", { propertyId: "property_green", orderId: "order_temporary" }],
+    ["CHECK_OUT", "FULFILLMENT", { propertyId: "property_green", orderId: "order_temporary" }]
+  ] as const)("persists the Preview effect hash for %s recovery", (commandType, presentation, input) => {
+    const request = {
+      commandType,
+      title: "核对临时安排",
+      description: "核对临时安排",
+      ...(presentation ? { presentation } : {}),
+      input
+    };
+    expect(transitionPersistedCommandRecovery(undefined, {
+      subjectId: "subject_temporary",
+      scopeId: "property:property_green",
+      request
+    }, {
+      state: "CONFIRMING",
+      previewId: "preview_temporary",
+      confirmationKey: `confirmation_${commandType.toLowerCase()}`
+    })).toEqual({ accepted: false, recovery: undefined });
+
+    const transition = transitionPersistedCommandRecovery(undefined, {
+      subjectId: "subject_temporary",
+      scopeId: "property:property_green",
+      request
+    }, {
+      state: "CONFIRMING",
+      previewId: "preview_temporary",
+      confirmationKey: `confirmation_${commandType.toLowerCase()}`,
+      effectHash
+    });
+    expect(transition).toMatchObject({ accepted: true, recovery: { effectHash } });
   });
 });
 
@@ -3775,6 +4008,14 @@ describe("U1 confirmation evidence", () => {
       committedAt: "2026-08-03T10:00:00.000Z"
     };
     expect(receiptHasCommandEvidence("SHORTEN_STAY", receipt, input, effect, effectHash)).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", {
+      ...effect,
+      ...temporaryOtherRoomLifecycleEvidence
+    }, input)).toBe(true);
+    expect(receiptHasCommandEvidence("SHORTEN_STAY", {
+      ...receipt,
+      result: { ...result, ...temporaryOtherRoomLifecycleEvidence }
+    }, input, { ...effect, ...temporaryOtherRoomLifecycleEvidence }, effectHash)).toBe(true);
     expect(receiptHasCommandEvidence("SHORTEN_STAY", {
       ...receipt,
       result: { ...result, businessDate: undefined }

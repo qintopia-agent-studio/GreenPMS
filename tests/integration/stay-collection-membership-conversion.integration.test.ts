@@ -2700,6 +2700,47 @@ describe("4.7 stay collection conversion to membership", () => {
       });
       expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(23);
 
+      const temporaryArrivalDate = shiftDate(departureDate, 2);
+      const temporaryDepartureDate = shiftDate(temporaryArrivalDate, 1);
+      const temporaryInventoryUnit = await db.selectFrom("inventory_units")
+        .select("id")
+        .where("property_id", "=", demo.propertyId)
+        .where("code", "=", "B01")
+        .executeTakeFirstOrThrow();
+      const temporaryQuote = await createQuoteForTesting(db, {
+        propertyId: demo.propertyId,
+        inventoryUnitId: temporaryInventoryUnit.id,
+        arrivalDate: temporaryArrivalDate,
+        departureDate: temporaryDepartureDate,
+        pricingPolicyVersionId: demo.publicPricingPolicyId,
+        memberId: converted.memberId,
+        temporaryOtherRoom: true
+      });
+      expect(temporaryQuote.temporaryOtherRoomArrangement).toMatchObject({
+        memberContractId: converted.contractId,
+        entitlementLotId: converted.entitlementLotId
+      });
+      const temporaryReason = "转换入住后另行临时安排其他房型";
+      const temporaryEnvelope: CommandEnvelope = {
+        commandType: "CREATE_ORDER",
+        input: {
+          propertyId: demo.propertyId,
+          quoteId: temporaryQuote.quoteId,
+          primaryGuest: { fullName: "转换会员临时安排", nickname: "转换临时安排" },
+          temporaryOtherRoomReason: temporaryReason
+        }
+      };
+      const temporaryPrepared = await preview(temporaryEnvelope, "inhouse-shorten-temporary-reference");
+      const temporaryReceipt = await confirmCommandPreview(db, principal, temporaryPrepared.preview.previewId, {
+        propertyId: demo.propertyId,
+        commandType: "CREATE_ORDER",
+        confirmation: true,
+        expectedEffectHash: temporaryPrepared.preview.effectHash,
+        reason: { code: "TEMPORARY_OTHER_ROOM", note: temporaryReason }
+      }, metadata("inhouse-shorten-temporary-reference-confirm"));
+      expect(temporaryReceipt).toMatchObject({ businessCommitted: true, executionStatus: "EXECUTED" });
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(22);
+
       const receipt = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => execute({
         commandType: "SHORTEN_STAY",
         input: {
@@ -2709,7 +2750,7 @@ describe("4.7 stay collection conversion to membership", () => {
         }
       }, "inhouse-shorten-future-nights"));
       expect(receipt.businessCommitted).toBe(true);
-      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(26);
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(25);
 
       const restoredDates = await db.selectFrom("entitlement_ledger")
         .select("service_date")
@@ -2742,7 +2783,7 @@ describe("4.7 stay collection conversion to membership", () => {
           newDepartureDate: shiftDate(newDepartureDate, 1)
         }
       }, "inhouse-shorten-then-extend"));
-      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(25);
+      expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(24);
       await assertConversionCommandStillValid(converted.receipt.commandId);
       const reusedDateCoverage = await db.selectFrom("coverage_items")
         .select(["id", "status"])

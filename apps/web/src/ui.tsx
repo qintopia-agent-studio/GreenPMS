@@ -12,6 +12,7 @@ import {
   type MoneyDto
 } from "@qintopia/contracts";
 import { api, ApiError } from "./api";
+import { roomStatusRoomTypeLabel } from "./room-status/roomStatusPresentation";
 import {
   commandShellLabel,
   commandShellNotExecutedMessage,
@@ -124,6 +125,9 @@ export function businessErrorMessage(error: unknown): string {
       return /[\u3400-\u9fff]/.test(error.message)
         ? error.message
         : "退款金额不能超过所选原收款的剩余可退金额，请返回修改退款金额。";
+    }
+    if (error.code === "PREVIEW_STALE" && isRecord(error.details) && error.details.causeCode === "INVENTORY_CONFLICT") {
+      return "目标房间在所选日期已被占用，请重新选择房间或日期。";
     }
     if (error.code === "PREVIEW_STALE" && isRecord(error.details) && error.details.causeCode === "REFUND_LIMIT_EXCEEDED") {
       return "退款金额不能超过所选原收款的剩余可退金额，请返回修改退款金额。";
@@ -399,6 +403,143 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export interface TemporaryOtherRoomArrangementPresentation {
+  originalRoomTypeCode: string;
+  actualInventoryUnitId: string;
+  actualRoomTypeCode: string;
+  arrivalDate: string;
+  departureDate: string;
+}
+
+export function temporaryOtherRoomArrangementPresentation(value: unknown): TemporaryOtherRoomArrangementPresentation | undefined {
+  if (!isRecord(value)
+    || value.kind !== "TEMPORARY_OTHER_ROOM"
+    || value.originalInventoryKind !== "ROOM"
+    || value.entitlementUnitKind !== "ROOM_NIGHT"
+    || value.actualInventoryKind !== "ROOM") return undefined;
+  const required = [
+    value.membershipOrderId,
+    value.memberContractId,
+    value.entitlementLotId,
+    value.originalRoomTypeCode,
+    value.actualInventoryUnitId,
+    value.actualRoomTypeCode,
+    value.arrivalDate,
+    value.departureDate
+  ];
+  if (!required.every((item) => typeof item === "string" && item.trim())) return undefined;
+  if (value.originalRoomTypeCode === value.actualRoomTypeCode
+    || localDateNightCount(value.arrivalDate, value.departureDate) === undefined) return undefined;
+  return {
+    originalRoomTypeCode: value.originalRoomTypeCode as string,
+    actualInventoryUnitId: value.actualInventoryUnitId as string,
+    actualRoomTypeCode: value.actualRoomTypeCode as string,
+    arrivalDate: value.arrivalDate as string,
+    departureDate: value.departureDate as string
+  };
+}
+
+const temporaryOtherRoomArrangementKeys = [
+  "kind",
+  "membershipOrderId",
+  "memberContractId",
+  "entitlementLotId",
+  "originalRoomTypeCode",
+  "originalInventoryKind",
+  "entitlementUnitKind",
+  "actualInventoryUnitId",
+  "actualRoomTypeCode",
+  "actualInventoryKind",
+  "arrivalDate",
+  "departureDate"
+] as const;
+
+const temporaryOtherRoomLifecycleKeys = [
+  "temporaryOtherRoomArrangement",
+  "temporaryOtherRoomCreateAmendmentId"
+] as const;
+
+function temporaryOtherRoomLifecycleEvidenceIsValid(value: Record<string, unknown>): boolean {
+  const hasArrangement = Object.hasOwn(value, "temporaryOtherRoomArrangement");
+  const hasCreateAmendmentId = Object.hasOwn(value, "temporaryOtherRoomCreateAmendmentId");
+  if (!hasArrangement && !hasCreateAmendmentId) return true;
+  return hasArrangement
+    && hasCreateAmendmentId
+    && isRecord(value.temporaryOtherRoomArrangement)
+    && hasExactKeys(value.temporaryOtherRoomArrangement, temporaryOtherRoomArrangementKeys)
+    && temporaryOtherRoomArrangementPresentation(value.temporaryOtherRoomArrangement) !== undefined
+    && nonblankString(value.temporaryOtherRoomCreateAmendmentId);
+}
+
+function temporaryOtherRoomCreatePreviewEvidenceIsValid(
+  value: Record<string, unknown>,
+  input: Record<string, unknown>
+): boolean {
+  const hasArrangement = Object.hasOwn(value, "temporaryOtherRoomArrangement");
+  const hasCreateAmendmentId = Object.hasOwn(value, "temporaryOtherRoomCreateAmendmentId");
+  const hasReason = Object.hasOwn(value, "temporaryOtherRoomReason")
+    || Object.hasOwn(input, "temporaryOtherRoomReason");
+  if (!hasArrangement && !hasCreateAmendmentId && !hasReason) return true;
+  const arrangement = isRecord(value.temporaryOtherRoomArrangement)
+    ? value.temporaryOtherRoomArrangement
+    : undefined;
+  const inventoryUnit = isRecord(value.inventoryUnit) ? value.inventoryUnit : undefined;
+  return Boolean(arrangement
+    && !hasCreateAmendmentId
+    && hasExactKeys(arrangement, temporaryOtherRoomArrangementKeys)
+    && temporaryOtherRoomArrangementPresentation(arrangement)
+    && nonblankString(value.temporaryOtherRoomReason)
+    && (value.temporaryOtherRoomReason as string).length <= 200
+    && value.temporaryOtherRoomReason === input.temporaryOtherRoomReason
+    && nonblankString(value.quoteId)
+    && value.quoteId === input.quoteId
+    && nonblankString(value.memberId)
+    && value.memberContractId === arrangement.memberContractId
+    && inventoryUnit
+    && inventoryUnit.id === arrangement.actualInventoryUnitId
+    && inventoryUnit.kind === "ROOM"
+    && inventoryUnit.roomTypeCode === arrangement.actualRoomTypeCode
+    && value.arrivalDate === arrangement.arrivalDate
+    && value.departureDate === arrangement.departureDate);
+}
+
+function hasExactKeysWithTemporaryOtherRoomLifecycleEvidence(
+  value: Record<string, unknown>,
+  requiredKeys: readonly string[]
+): boolean {
+  if (!temporaryOtherRoomLifecycleEvidenceIsValid(value)) return false;
+  const hasTemporaryEvidence = Object.hasOwn(value, "temporaryOtherRoomArrangement");
+  return hasExactKeys(value, hasTemporaryEvidence
+    ? [...requiredKeys, ...temporaryOtherRoomLifecycleKeys]
+    : requiredKeys);
+}
+
+function temporaryOtherRoomLifecycleEvidenceMatches(
+  result: Record<string, unknown>,
+  previewEffect?: Record<string, unknown>
+): boolean {
+  if (!temporaryOtherRoomLifecycleEvidenceIsValid(result)) return false;
+  if (!previewEffect) return true;
+  if (!temporaryOtherRoomLifecycleEvidenceIsValid(previewEffect)) return false;
+  const resultHasArrangement = Object.hasOwn(result, "temporaryOtherRoomArrangement");
+  const previewHasArrangement = Object.hasOwn(previewEffect, "temporaryOtherRoomArrangement");
+  return resultHasArrangement === previewHasArrangement
+    && (!resultHasArrangement || (
+      evidenceValuesEqual(result.temporaryOtherRoomArrangement, previewEffect.temporaryOtherRoomArrangement)
+      && result.temporaryOtherRoomCreateAmendmentId === previewEffect.temporaryOtherRoomCreateAmendmentId
+    ));
+}
+
+function temporaryOtherRoomActualRoomLabel(
+  arrangement: TemporaryOtherRoomArrangementPresentation,
+  inventoryUnit: Record<string, unknown> | undefined
+): string | undefined {
+  if (!inventoryUnit || inventoryUnit.id !== arrangement.actualInventoryUnitId) return undefined;
+  const code = typeof inventoryUnit.code === "string" && inventoryUnit.code.trim() ? inventoryUnit.code.trim() : "";
+  const name = typeof inventoryUnit.name === "string" && inventoryUnit.name.trim() ? inventoryUnit.name.trim() : "";
+  return [code, name].filter(Boolean).join(" · ") || undefined;
 }
 
 export interface OccupantSummaryItem {
@@ -883,7 +1024,7 @@ function dateChangePreviewHasEvidence(
   const expectedKeys = shorten
     ? ["operation", "orderId", "stayId", "inventoryUnitId", "businessDate", "completionMode", "before", "after", "pricingDecision", "inventoryChange", "entitlementSummary", "fundsSummary", "refundReferenceAmount"]
     : ["operation", "orderId", "stayId", "inventoryUnitId", "before", "after", "pricingDecision", "inventoryChange", "entitlementChange", "fundsSummary"];
-  if (!hasExactKeys(effect, expectedKeys)
+  if (!hasExactKeysWithTemporaryOtherRoomLifecycleEvidence(effect, expectedKeys)
     || effect.operation !== commandType
     || !nonblankString(effect.orderId)
     || effect.orderId !== input.orderId
@@ -1757,7 +1898,7 @@ export function orderLifecyclePreviewHasEvidence(
   const expectedKeys = commandType === "REVOKE_CHECK_IN"
     ? ["orderId", "fromStatus", "toStatus", "inventoryUnitId", "businessDate", "effectiveDate", "recordingMode", "currentContractAmount", "amounts", "entitlementTransition", "unusedRoomConfirmed", "pricingRevision"]
     : ["orderId", "fromStatus", "toStatus", "inventoryUnitId", "businessDate", "freeStayReason", "freeStayCategoryCode", "currentContractAmount", "amounts", "entitlementTransition", "pricingRevision"];
-  if (!hasExactKeys(effect, expectedKeys)
+  if (!hasExactKeysWithTemporaryOtherRoomLifecycleEvidence(effect, expectedKeys)
     || !nonblankString(effect.orderId)
     || (input.orderId !== undefined && effect.orderId !== input.orderId)
     || !nonblankString(effect.inventoryUnitId)
@@ -2198,7 +2339,8 @@ export function u1PreviewHasBusinessEvidence(
         && (effect.stayType === "FREE"
           ? nonblankString(effect.freeStayCategoryCode) && nonblankString(effect.freeStayReason)
           : (pricingDecision && hasMoney(pricingDecision.policyBaseAmount) && hasMoney(pricingDecision.targetCurrentContractAmount))
-            || (pricing && (hasMoney(pricing.currentContractAmount) || hasMoney(pricing.cashRemainder)))));
+            || (pricing && (hasMoney(pricing.currentContractAmount) || hasMoney(pricing.cashRemainder))))
+        && temporaryOtherRoomCreatePreviewEvidenceIsValid(effect, input));
     case "CREATE_MEMBER":
       return Boolean(member
         && nonblankString(member.fullName)
@@ -2272,7 +2414,9 @@ export function u1PreviewHasBusinessEvidence(
         && nonblankString(effect.inventoryUnitId)
         && localDateNightCount(effect.arrivalDate, effect.departureDate) !== undefined);
     case "CORRECT_ORDER_OCCUPANT":
-      return isRecord(effect.before) && isRecord(effect.after);
+      return isRecord(effect.before)
+        && isRecord(effect.after)
+        && temporaryOtherRoomLifecycleEvidenceIsValid(effect);
     case "REPRICE_ORDER":
       {
         const policyBaseAmount = effect.policyBaseAmount;
@@ -2320,7 +2464,8 @@ export function u1PreviewHasBusinessEvidence(
       return conversionPreviewHasEvidence(effect, input);
     case "CHECK_IN":
     case "CHECK_OUT":
-      return fulfillmentTransitionIsExpected(commandType, effect);
+      return fulfillmentTransitionIsExpected(commandType, effect)
+        && temporaryOtherRoomLifecycleEvidenceIsValid(effect);
   }
 }
 
@@ -2679,6 +2824,12 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     : typeof effect.manualAdjustmentMinor === "number" ? effect.manualAdjustmentMinor : undefined;
   const coverage = pricing && Array.isArray(pricing.coverageSet) ? pricing.coverageSet : [];
   const cashLines = pricing && Array.isArray(pricing.cashLines) ? pricing.cashLines : [];
+  const temporaryOtherRoom = preview.commandType === "CREATE_ORDER"
+    ? temporaryOtherRoomArrangementPresentation(effect.temporaryOtherRoomArrangement)
+    : undefined;
+  const temporaryOtherRoomActualRoom = temporaryOtherRoom
+    ? temporaryOtherRoomActualRoomLabel(temporaryOtherRoom, inventoryUnit)
+    : undefined;
 
   if (businessCommand === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS") {
     if (!historicalStayCorrectionPreviewHasEvidence(effect, commandInput ?? {})) {
@@ -3388,6 +3539,13 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           <dt>会员权益覆盖</dt><dd>{coveredNights} 晚</dd>
           {uncoveredNights !== undefined ? <><dt>未覆盖晚数</dt><dd>{uncoveredNights} 晚</dd></> : null}
           <dt>未覆盖金额</dt><dd><strong>{formatMoney(pricing ? moneyFrom(pricing.cashRemainder) : undefined)}</strong></dd>
+          {temporaryOtherRoom ? <>
+            <dt>本次安排</dt><dd>本次临时安排其他房型</dd>
+            <dt>原适用房型</dt><dd>{roomStatusRoomTypeLabel(temporaryOtherRoom.originalRoomTypeCode)}</dd>
+            <dt>实际房型</dt><dd>{roomStatusRoomTypeLabel(temporaryOtherRoom.actualRoomTypeCode)}</dd>
+            {temporaryOtherRoomActualRoom ? <><dt>实际安排房间</dt><dd>{temporaryOtherRoomActualRoom}</dd></> : null}
+            <dt>安排原因</dt><dd>{reasonNote?.trim() || "未填写"}</dd>
+          </> : null}
         </dl>
         <p className="muted compact">确认后创建会员住宿订单，并按本次核对结果冻结可用会员权益。</p>
       </section>
@@ -4369,6 +4527,23 @@ function requiredRecoveryPresentation(commandType: HistoricalCommandType): Persi
   return undefined;
 }
 
+function recoveryRequiresEffectHash(
+  commandType: HistoricalCommandType,
+  presentation: PersistedCommandRecovery["presentation"] | undefined
+): boolean {
+  return presentation === "MEMBER_STAY"
+    || presentation === "BACKFILL_STAY"
+    || presentation === "COMPLETE_STAY"
+    || presentation === "STAY_DATES"
+    || presentation === "MOVE_UNIT"
+    || presentation === "ORDER_LIFECYCLE"
+    || commandType === "CORRECT_ORDER_OCCUPANT"
+    || commandType === "CHECK_IN"
+    || commandType === "CHECK_OUT"
+    || commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    || isStrictAdministratorCorrection(commandType);
+}
+
 function recoveryTargetRefs(input: Record<string, unknown>): string[] {
   const direct = recoveryReferenceKeys.flatMap((key) => {
     if (key === "correctionOrderId") return [];
@@ -4452,7 +4627,8 @@ function dateChangeReceiptHasEvidence(
   const requiredResultKeys = shorten
     ? ["orderId", "stayId", "arrangementAmendmentId", "checkoutAmendmentId", "staySegmentId", "pricingRevisionId", "completionMode", "businessDate", "arrivalDate", "departureDate", "before", "after", "pricingDecision", "inventoryChange", "entitlementSummary", "fundsSummary", "refundReferenceAmount", "fulfillmentTiming", "effectHash"]
     : ["orderId", "stayId", "amendmentId", "staySegmentId", "pricingRevisionId", "arrivalDate", "departureDate", "before", "after", "pricingDecision", "inventoryChange", "entitlementChange", "fundsSummary", "effectHash"];
-  if (!hasExactKeys(result, requiredResultKeys)
+  if (!hasExactKeysWithTemporaryOtherRoomLifecycleEvidence(result, requiredResultKeys)
+    || !temporaryOtherRoomLifecycleEvidenceMatches(result, previewEffect)
     || !isEffectHash(result.effectHash)
     || (expectedEffectHash !== undefined && result.effectHash !== expectedEffectHash)
     || !nonblankString(result.orderId)
@@ -4557,7 +4733,8 @@ function orderLifecycleReceiptHasEvidence(
     : ["orderId", "amendmentId", "status", "pricingRevisionId", "effectHash", "entitlementTransition"];
   const transition = orderLifecycleExpectedTransition(commandType);
   const entitlement = isRecord(result.entitlementTransition) ? result.entitlementTransition : undefined;
-  if (!hasExactKeys(result, expectedResultKeys)
+  if (!hasExactKeysWithTemporaryOtherRoomLifecycleEvidence(result, expectedResultKeys)
+    || !temporaryOtherRoomLifecycleEvidenceMatches(result, previewEffect)
     || !nonblankString(result.orderId)
     || (input.orderId !== undefined && result.orderId !== input.orderId)
     || !nonblankString(result.amendmentId)
@@ -5067,6 +5244,43 @@ function administratorMembershipCorrectionReceiptHasEvidence(
   return true;
 }
 
+function temporaryOtherRoomCommittedReceiptHasEvidence(
+  commandType: "CREATE_ORDER" | "CORRECT_ORDER_OCCUPANT" | "CHECK_IN" | "CHECK_OUT",
+  receipt: ReceiptDto,
+  input: Record<string, unknown>,
+  previewEffect: Record<string, unknown> | undefined,
+  expectedEffectHash: string | undefined
+): boolean {
+  const result = isRecord(receipt.result) ? receipt.result : undefined;
+  if (!result) return false;
+  const resultHasArrangement = Object.hasOwn(result, "temporaryOtherRoomArrangement");
+  const previewHasArrangement = Boolean(previewEffect
+    && Object.hasOwn(previewEffect, "temporaryOtherRoomArrangement"));
+  const inputExpectsArrangement = commandType === "CREATE_ORDER"
+    && Object.hasOwn(input, "temporaryOtherRoomReason");
+  if (!resultHasArrangement && !previewHasArrangement && !inputExpectsArrangement) return true;
+  if (!resultHasArrangement
+    || !temporaryOtherRoomLifecycleEvidenceIsValid(result)
+    || !nonblankString(result.orderId)
+    || !isEffectHash(result.effectHash)
+    || !isEffectHash(expectedEffectHash)
+    || result.effectHash !== expectedEffectHash) return false;
+
+  if (commandType === "CREATE_ORDER") {
+    if (previewEffect) {
+      if (!temporaryOtherRoomCreatePreviewEvidenceIsValid(previewEffect, input)
+        || !evidenceValuesEqual(
+          result.temporaryOtherRoomArrangement,
+          previewEffect.temporaryOtherRoomArrangement
+        )) return false;
+    }
+    return true;
+  }
+
+  return result.orderId === input.orderId
+    && temporaryOtherRoomLifecycleEvidenceMatches(result, previewEffect);
+}
+
 export function receiptHasCommandEvidence(
   commandType: HistoricalCommandType,
   receipt: ReceiptDto,
@@ -5075,6 +5289,18 @@ export function receiptHasCommandEvidence(
   expectedEffectHash?: string
 ): boolean {
   if (!receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
+  if ((commandType === "CREATE_ORDER"
+    || commandType === "CORRECT_ORDER_OCCUPANT"
+    || commandType === "CHECK_IN"
+    || commandType === "CHECK_OUT")
+    && receipt.businessCommitted
+    && !temporaryOtherRoomCommittedReceiptHasEvidence(
+      commandType,
+      receipt,
+      input,
+      previewEffect,
+      expectedEffectHash
+    )) return false;
   if (commandType === "CREATE_ORDER" && input.backfill === true) {
     if (receipt.businessCommitted) {
       return completedStayBackfillReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
@@ -5537,13 +5763,7 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || (value.presentation === "ORDER_LIFECYCLE" && value.commandType !== "CANCEL_ORDER" && value.commandType !== "MARK_NO_SHOW" && value.commandType !== "REVOKE_CHECK_IN")
     || (requiredRecoveryPresentation(value.commandType) !== undefined
       && value.presentation !== requiredRecoveryPresentation(value.commandType))
-    || ((value.presentation === "BACKFILL_STAY"
-      || value.presentation === "COMPLETE_STAY"
-      || value.presentation === "STAY_DATES"
-      || value.presentation === "MOVE_UNIT"
-      || value.presentation === "ORDER_LIFECYCLE"
-      || value.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
-      || isStrictAdministratorCorrection(value.commandType)) && !isEffectHash(value.effectHash))
+    || (recoveryRequiresEffectHash(value.commandType, value.presentation) && !isEffectHash(value.effectHash))
     || (value.effectHash !== undefined && !isEffectHash(value.effectHash))
     || (value.state !== "CONFIRMING" && value.state !== "UNKNOWN" && value.state !== "EXECUTED" && value.state !== "NOT_EXECUTED")
     || typeof value.updatedAt !== "string") {
@@ -5623,10 +5843,10 @@ export function transitionPersistedCommandRecovery(
     const propertyId = context.request.input.propertyId;
     const targetRefs = recoveryTargetRefs(context.request.input);
     const requiredPresentation = requiredRecoveryPresentation(context.request.commandType);
-    const strictRecoveryEvidence = context.request.presentation === "BACKFILL_STAY"
-      || requiredPresentation !== undefined
-      || context.request.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
-      || isStrictAdministratorCorrection(context.request.commandType);
+    const strictRecoveryEvidence = recoveryRequiresEffectHash(
+      context.request.commandType,
+      context.request.presentation
+    );
     if (!isPersistableCommandType(context.request.commandType) || typeof propertyId !== "string" || !propertyId) {
       return { accepted: false, recovery: current };
     }

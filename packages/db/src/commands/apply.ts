@@ -7,7 +7,8 @@ import {
   type CommandReason,
   type CommandType,
   type CoverageItemDto,
-  type CreateOrderPricingBasis
+  type CreateOrderPricingBasis,
+  type TemporaryOtherRoomArrangementDto
 } from "@qintopia/contracts";
 import { enumerateServiceDates, newId, parseLocalDate, requireTransactionReference, validateBookingChannel } from "@qintopia/domain";
 import { assertUnitAvailable, createInventoryClaims, loadInventoryUnit, loadInventoryUnitIncludingInactive, lockRoomDays, lockUnitDates, releaseInventoryClaims, releaseInventoryClaimsOnDates } from "../inventory.ts";
@@ -81,6 +82,44 @@ function moneyMinor(value: unknown, field: string): { currency: string; minorUni
   const currency = requireString(money, "currency");
   if (!Number.isInteger(money.minorUnits)) throw new DomainError("INTERNAL_ERROR", `${field}.minorUnits is invalid`, 500);
   return { currency, minorUnits: money.minorUnits as number };
+}
+
+function temporaryOtherRoomArrangementFromEffect(effect: Record<string, unknown>): TemporaryOtherRoomArrangementDto | null {
+  if (effect.temporaryOtherRoomArrangement === undefined || effect.temporaryOtherRoomArrangement === null) return null;
+  const raw = requireObject(effect.temporaryOtherRoomArrangement, "temporaryOtherRoomArrangement");
+  const arrangement: TemporaryOtherRoomArrangementDto = {
+    kind: requireString(raw, "kind") as TemporaryOtherRoomArrangementDto["kind"],
+    membershipOrderId: requireString(raw, "membershipOrderId"),
+    memberContractId: requireString(raw, "memberContractId"),
+    entitlementLotId: requireString(raw, "entitlementLotId"),
+    originalRoomTypeCode: requireString(raw, "originalRoomTypeCode"),
+    originalInventoryKind: requireString(raw, "originalInventoryKind") as TemporaryOtherRoomArrangementDto["originalInventoryKind"],
+    entitlementUnitKind: requireString(raw, "entitlementUnitKind") as TemporaryOtherRoomArrangementDto["entitlementUnitKind"],
+    actualInventoryUnitId: requireString(raw, "actualInventoryUnitId"),
+    actualRoomTypeCode: requireString(raw, "actualRoomTypeCode"),
+    actualInventoryKind: requireString(raw, "actualInventoryKind") as TemporaryOtherRoomArrangementDto["actualInventoryKind"],
+    arrivalDate: requireString(raw, "arrivalDate"),
+    departureDate: requireString(raw, "departureDate")
+  };
+  if (arrangement.kind !== "TEMPORARY_OTHER_ROOM"
+    || arrangement.originalInventoryKind !== "ROOM"
+    || arrangement.entitlementUnitKind !== "ROOM_NIGHT"
+    || arrangement.actualInventoryKind !== "ROOM"
+    || arrangement.originalRoomTypeCode === arrangement.actualRoomTypeCode
+    || Object.keys(raw).length !== 12) {
+    throw new DomainError("INTERNAL_ERROR", "Temporary other-room arrangement is invalid", 500);
+  }
+  return arrangement;
+}
+
+function temporaryOtherRoomReceiptEvidenceFromEffect(effect: Record<string, unknown>): Record<string, unknown> {
+  const arrangement = temporaryOtherRoomArrangementFromEffect(effect);
+  return arrangement
+    ? {
+        temporaryOtherRoomArrangement: arrangement,
+        temporaryOtherRoomCreateAmendmentId: requireString(effect, "temporaryOtherRoomCreateAmendmentId")
+      }
+    : {};
 }
 
 function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
@@ -231,6 +270,37 @@ async function lockTokenLifecycleTarget(trx: Transaction<Database>, propertyId: 
   return { subjectId: token.subject_id };
 }
 
+async function lockMemberEntitlementIdentity(trx: Transaction<Database>, memberId: string | null): Promise<void> {
+  if (!memberId) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "Member entitlement owner is missing", 409);
+  }
+  await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${memberId}`}, 0::bigint))`.execute(trx);
+  const member = await trx.selectFrom("members").select("id").where("id", "=", memberId).forUpdate().executeTakeFirst();
+  if (!member) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "Member entitlement owner is missing", 409);
+  }
+}
+
+async function resolveQuoteMemberEntitlementOwner(
+  trx: Transaction<Database>,
+  propertyId: string,
+  quoteMemberId: string | undefined,
+  memberContractId: string | undefined
+): Promise<string | null> {
+  if (!memberContractId) return quoteMemberId ?? null;
+  const contract = await trx.selectFrom("member_contracts").select("member_id")
+    .where("id", "=", memberContractId)
+    .where("property_id", "=", propertyId)
+    .executeTakeFirst();
+  if (!contract?.member_id) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "Member entitlement owner is missing", 409);
+  }
+  if (quoteMemberId && quoteMemberId !== contract.member_id) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "Quoted member entitlement owner is inconsistent", 409);
+  }
+  return contract.member_id;
+}
+
 export async function lockCommandResources(trx: Transaction<Database>, commandType: CommandType, rawInput: unknown): Promise<void> {
   const input = requireObject(rawInput);
   const propertyId = requireString(input, "propertyId");
@@ -268,8 +338,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     const identity = await trx.selectFrom("membership_orders").select(["id", "member_id"])
       .where("id", "=", membershipOrderId).where("property_id", "=", propertyId).executeTakeFirst();
     if (!identity) throw new DomainError("NOT_FOUND", "会员订单不存在", 404);
-    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${identity.member_id}`}, 0::bigint))`.execute(trx);
-    await trx.selectFrom("members").select("id").where("id", "=", identity.member_id).forUpdate().executeTakeFirst();
+    await lockMemberEntitlementIdentity(trx, identity.member_id);
     const order = await trx.selectFrom("membership_orders").select("id")
       .where("id", "=", membershipOrderId)
       .where("property_id", "=", propertyId)
@@ -293,11 +362,19 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
 
   if (commandType === "CREATE_ORDER") {
     const quote = await loadStoredQuote(trx, requireString(input, "quoteId"));
-    if (quote.memberId) {
-      await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${quote.memberId}`}, 0::bigint))`.execute(trx);
-      await trx.selectFrom("members").select("id").where("id", "=", quote.memberId).forUpdate().executeTakeFirst();
+    const entitlementOwnerId = await resolveQuoteMemberEntitlementOwner(
+      trx,
+      propertyId,
+      quote.memberId,
+      quote.memberContractId
+    );
+    if (entitlementOwnerId) {
+      await lockMemberEntitlementIdentity(trx, entitlementOwnerId);
     }
-    await lockEntitlementLots(trx, quote.memberContractId);
+    const lockedContractOwnerId = await lockEntitlementLots(trx, quote.memberContractId);
+    if (quote.memberContractId && lockedContractOwnerId !== entitlementOwnerId) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", "Quoted member entitlement owner is inconsistent", 409);
+    }
     await lockUnitDates(trx, propertyId, quote.inventoryUnitId, quote.arrivalDate, quote.departureDate);
     return;
   }
@@ -322,18 +399,20 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   }
   if (commandType === "ADD_MEMBER_ENTITLEMENT_LOT") {
     const contractId = requireString(input, "memberContractId");
-    const contract = await trx.selectFrom("member_contracts").select("id")
+    const contract = await trx.selectFrom("member_contracts").select(["id", "member_id"])
       .where("id", "=", contractId).where("property_id", "=", propertyId).executeTakeFirst();
     if (!contract) throw new DomainError("NOT_FOUND", "Member contract not found", 404);
+    await lockMemberEntitlementIdentity(trx, contract.member_id);
     await lockEntitlementLots(trx, contractId);
     return;
   }
   if (commandType === "ADJUST_MEMBER_ENTITLEMENT" || commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE" || commandType === "EXPIRE_MEMBER_ENTITLEMENT") {
     const lot = await trx.selectFrom("entitlement_lots").innerJoin("member_contracts", "member_contracts.id", "entitlement_lots.contract_id")
-      .select(["entitlement_lots.id", "entitlement_lots.contract_id"])
+      .select(["entitlement_lots.id", "entitlement_lots.contract_id", "member_contracts.member_id"])
       .where("entitlement_lots.id", "=", requireString(input, "entitlementLotId"))
       .where("member_contracts.property_id", "=", propertyId).executeTakeFirst();
     if (!lot) throw new DomainError("NOT_FOUND", "Entitlement lot not found", 404);
+    await lockMemberEntitlementIdentity(trx, lot.member_id);
     await lockEntitlementLots(trx, lot.contract_id);
     return;
   }
@@ -350,9 +429,8 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
     const orderId = requireString(input, "orderId");
     const memberId = requireString(input, "memberId");
-    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${memberId}`}, 0::bigint))`.execute(trx);
+    await lockMemberEntitlementIdentity(trx, memberId);
     await loadLockedOrderContextForProperty(trx, propertyId, orderId);
-    await trx.selectFrom("members").select("id").where("id", "=", memberId).forUpdate().executeTakeFirst();
     await trx.selectFrom("membership_products").select("id")
       .where("id", "=", requireString(input, "membershipProductId"))
       .executeTakeFirst();
@@ -381,10 +459,28 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   }
 
   const orderId = requireString(input, "orderId");
+  const orderIdentity = await trx.selectFrom("orders")
+    .select(["member_id", "member_contract_id"])
+    .where("id", "=", orderId)
+    .where("property_id", "=", propertyId)
+    .executeTakeFirst();
+  if (!orderIdentity) throw new DomainError("NOT_FOUND", "Order not found", 404);
+  const entitlementOwnerId = await resolveQuoteMemberEntitlementOwner(
+    trx,
+    propertyId,
+    orderIdentity.member_id ?? undefined,
+    orderIdentity.member_contract_id ?? undefined
+  );
+  if (entitlementOwnerId) {
+    await lockMemberEntitlementIdentity(trx, entitlementOwnerId);
+  }
   const context = await loadLockedOrderContextForProperty(trx, propertyId, orderId);
-  if (context.order.member_id) {
-    await sql`select pg_advisory_xact_lock(hashtextextended(${`qintopia:member-entitlements:${context.order.member_id}`}, 0::bigint))`.execute(trx);
-    await lockMemberEntitlementLots(trx, propertyId, context.order.member_id);
+  if (context.order.member_id !== orderIdentity.member_id
+    || context.order.member_contract_id !== orderIdentity.member_contract_id) {
+    throw new DomainError("AGGREGATE_VERSION_CONFLICT", "Order membership identity changed", 409);
+  }
+  if (entitlementOwnerId) {
+    await lockMemberEntitlementLots(trx, propertyId, entitlementOwnerId);
   } else {
     await lockEntitlementLots(trx, context.order.member_contract_id ?? undefined);
   }
@@ -770,6 +866,11 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const segmentId = newId("segment");
     const pricing = pricingSnapshot(effect);
     const inventoryUnit = nestedObject(effect, "inventoryUnit");
+    const temporaryOtherRoomArrangement = temporaryOtherRoomArrangementFromEffect(effect);
+    const temporaryOtherRoomReason = temporaryOtherRoomArrangement ? requireString(effect, "temporaryOtherRoomReason") : null;
+    if (temporaryOtherRoomReason && temporaryOtherRoomReason.length > 200) {
+      throw new DomainError("INTERNAL_ERROR", "Temporary other-room reason is too long", 500);
+    }
     const primaryGuest = nestedObject(effect, "primaryGuest");
     requireString(primaryGuest, "fullName");
     requireString(primaryGuest, "nickname");
@@ -808,6 +909,26 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const memberId = typeof effect.memberId === "string" ? effect.memberId : null;
     const memberContractId = typeof effect.memberContractId === "string" ? effect.memberContractId : null;
     const memberStay = Boolean(memberId || memberContractId);
+    if (temporaryOtherRoomArrangement) {
+      const effectInventoryKind = requireString(inventoryUnit, "kind");
+      const effectRoomTypeCode = requireString(inventoryUnit, "roomTypeCode");
+      if (!memberId
+        || memberContractId !== temporaryOtherRoomArrangement.memberContractId
+        || unitId !== temporaryOtherRoomArrangement.actualInventoryUnitId
+        || effectInventoryKind !== "ROOM"
+        || effectRoomTypeCode !== temporaryOtherRoomArrangement.actualRoomTypeCode
+        || arrivalDate !== temporaryOtherRoomArrangement.arrivalDate
+        || departureDate !== temporaryOtherRoomArrangement.departureDate
+        || pricing.coverageSet.length !== enumerateServiceDates(arrivalDate, departureDate).length
+        || pricing.coverageSet.some((item) => item.inventoryUnitId !== unitId
+          || item.entitlementLotId !== temporaryOtherRoomArrangement.entitlementLotId
+          || item.unitKind !== "ROOM_NIGHT")
+        || pricing.cashLines.length !== 0
+        || pricing.currentContractAmountMinor !== 0
+        || pricing.manualAdjustmentMinor !== 0) {
+        throw new DomainError("INTERNAL_ERROR", "Temporary other-room create-order effect is inconsistent", 500);
+      }
+    }
     const backfill = effect.backfill && typeof effect.backfill === "object" && !Array.isArray(effect.backfill)
       ? effect.backfill as Record<string, unknown>
       : null;
@@ -836,6 +957,14 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       if (options.reason.code !== "BACKFILL_STAY" || options.reason.note.trim() !== lockedReason) {
         throw new DomainError("CONFIRMATION_MISMATCH", "补录确认原因必须与核对页锁定的原因一致", 409);
       }
+    } else if (temporaryOtherRoomArrangement) {
+      if (options.reason.code !== "TEMPORARY_OTHER_ROOM"
+        || !temporaryOtherRoomReason
+        || options.reason.note !== temporaryOtherRoomReason) {
+        throw new DomainError("CONFIRMATION_MISMATCH", "临时安排确认原因必须与核对页锁定的原因一致", 409);
+      }
+    } else if (options.reason.code !== "CREATE_STANDARD_ORDER" || options.reason.note !== "") {
+      throw new DomainError("CONFIRMATION_MISMATCH", "普通创建订单必须使用标准建单确认原因", 409);
     }
     if (memberStay && (effect.bookingChannelCode !== null || effect.channelOrderReference !== null)) {
       throw new DomainError("VALIDATION_ERROR", "会员住宿不得写入订单来源渠道或渠道订单号");
@@ -891,6 +1020,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         channelOrderReference,
         freeStayReason,
         freeStayCategoryCode,
+        ...(temporaryOtherRoomArrangement ? { temporaryOtherRoomArrangement } : {}),
         pricingDecision: effect.pricingDecision,
         ...(backfill ? { confirmedEffect: effect } : {})
       },
@@ -976,7 +1106,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       collectionFactId: backfillCollectionFactId
     } : undefined;
     return {
-      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode, pricingPolicyVersionId: policyVersionId, pricingDecision: effect.pricingDecision, ...(backfill ? { status: backfillStatus, backfill: backfillResult } : {}) },
+      persistedResult: { orderId, stayId, segmentId, pricingRevisionId: revisionId, primaryGuest, occupants: persistedOccupants, bookingChannelCode, channelOrderReference, freeStayReason, freeStayCategoryCode, pricingPolicyVersionId: policyVersionId, pricingDecision: effect.pricingDecision, ...(temporaryOtherRoomArrangement ? { temporaryOtherRoomArrangement, temporaryOtherRoomCreateAmendmentId: amendmentId } : {}), ...(backfill ? { status: backfillStatus, backfill: backfillResult } : {}) },
       resourceRefs: [orderId, stayId, segmentId, revisionId, ...backfillAmendmentIds, ...persistedOccupants.map((occupant) => occupant.id), ...coverageRefs.coverageIds],
       factRefs: [...coverageRefs.factIds, ...(backfillCollectionFactId ? [backfillCollectionFactId] : [])]
     };
@@ -1605,7 +1735,14 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       updated_at: new Date()
     }).where("id", "=", orderId).execute();
     return {
-      persistedResult: { orderId, occupantId, correctionId, amendmentId, occupant: after },
+      persistedResult: {
+        orderId,
+        occupantId,
+        correctionId,
+        amendmentId,
+        occupant: after,
+        ...temporaryOtherRoomReceiptEvidenceFromEffect(effect)
+      },
       resourceRefs: [orderId, occupantId, correctionId, amendmentId],
       factRefs: []
     };
@@ -1761,7 +1898,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         pricingDecision,
         inventoryChange,
         entitlementChange,
-        fundsSummary
+        fundsSummary,
+        ...temporaryOtherRoomReceiptEvidenceFromEffect(effect)
       },
       resourceRefs: [...new Set([
         orderId,
@@ -1894,7 +2032,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         entitlementSummary,
         fundsSummary,
         refundReferenceAmount,
-        fulfillmentTiming
+        fulfillmentTiming,
+        ...temporaryOtherRoomReceiptEvidenceFromEffect(effect)
       },
       resourceRefs: [...new Set([
         orderId,
@@ -2325,7 +2464,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
           effectiveDate: requireString(checkOut, "effectiveDate"),
           recordedBusinessDate: requireString(checkOut, "businessDate"),
           recordingMode: requireString(checkOut, "recordingMode")
-        }
+        },
+        ...temporaryOtherRoomReceiptEvidenceFromEffect(effect)
       },
       resourceRefs: [...new Set([
         orderId,
@@ -2538,7 +2678,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
             recordingMode: requireString(effect, "recordingMode")
           }
         } : {}),
-        ...(cleaningTaskId ? { cleaningTaskId } : {})
+        ...(cleaningTaskId ? { cleaningTaskId } : {}),
+        ...temporaryOtherRoomReceiptEvidenceFromEffect(effect)
       },
       resourceRefs: [orderId, amendmentId, ...(statusPricingRevisionId ? [statusPricingRevisionId] : []), ...(cleaningTaskId ? [cleaningTaskId] : []), ...coverageRefs.coverageIds],
       factRefs: coverageRefs.factIds

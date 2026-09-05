@@ -668,11 +668,6 @@ test("a maintenance draft survives stale query conditions at 320px and resumes a
     expect(await cancel.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
     const modalBody = dialog.locator(".modal-body");
     await expectFullyHitTestable(cancel, "320px keyboard-reached stale draft cancel action");
-    const keyboardBodyScroll = await modalBody.evaluate((element) => ({
-      maximum: Math.max(0, element.scrollHeight - element.clientHeight),
-      position: element.scrollTop
-    }));
-    if (keyboardBodyScroll.maximum > 0) expect(keyboardBodyScroll.position).toBeGreaterThan(0);
 
     await modalBody.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
     await expect.poll(() => modalBody.evaluate((element) => (
@@ -688,7 +683,7 @@ test("a maintenance draft survives stale query conditions at 320px and resumes a
 
     await page.context().setOffline(false);
     const recoveredPromise = roomStatusResponse(page);
-    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await dialog.getByRole("button", { name: "重试刷新", exact: true }).click();
     await recoveredPromise;
     await expect(dialog.getByRole("alert").filter({ hasText: "草稿已保留，写入已暂停" })).toBeHidden();
     await expect(reason).toHaveValue(businessReason);

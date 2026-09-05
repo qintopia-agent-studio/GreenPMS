@@ -49,6 +49,7 @@ import {
   EmptyState,
   formatDateTime,
   formatMoney,
+  InfoHint,
   InlineError,
   isTerminalCommandRecovery,
   LoadingBlock,
@@ -108,6 +109,15 @@ import {
   type RoomStatusSelection,
   type RoomStatusViewState
 } from "../room-status";
+import { roomStatusRoomTypeLabel } from "../room-status/roomStatusPresentation";
+
+export function orderContextInventoryUnits<T extends { id: string }>(
+  activeUnits: readonly T[],
+  referencedUnits: readonly T[]
+): T[] {
+  const activeIds = new Set(activeUnits.map((unit) => unit.id));
+  return [...activeUnits, ...referencedUnits.filter((unit) => !activeIds.has(unit.id))];
+}
 
 export function roomStatusQuickPopoverAttentionLabels(
   unit: Pick<RoomStatusUnitDto, "intervals"> | null | undefined,
@@ -423,6 +433,157 @@ interface QuoteCommandInput {
   departureDate: string;
   pricingPolicyVersionId: string;
   memberId?: string;
+  temporaryOtherRoom?: true;
+}
+
+export interface TemporaryOtherRoomOffer {
+  temporaryOtherRoomAvailable: true;
+  originalRoomTypeCode: string;
+  actualRoomTypeCode: string;
+  originalRoomTypeAvailable?: boolean;
+}
+
+export interface TemporaryOtherRoomDraft {
+  offer?: TemporaryOtherRoomOffer;
+  confirmed: boolean;
+  reason: string;
+}
+
+export interface TemporaryOtherRoomContext {
+  memberId: string;
+  inventoryUnitId: string;
+  arrivalDate: string;
+  departureDate: string;
+}
+
+function temporaryOtherRoomOfferDetails(value: unknown): TemporaryOtherRoomOffer | undefined {
+  const details = recordValue(value);
+  if (!details
+    || details.temporaryOtherRoomAvailable !== true
+    || typeof details.originalRoomTypeCode !== "string"
+    || !details.originalRoomTypeCode.trim()
+    || typeof details.actualRoomTypeCode !== "string"
+    || !details.actualRoomTypeCode.trim()
+    || (details.originalRoomTypeAvailable !== undefined && typeof details.originalRoomTypeAvailable !== "boolean")) {
+    return undefined;
+  }
+  return {
+    temporaryOtherRoomAvailable: true,
+    originalRoomTypeCode: details.originalRoomTypeCode,
+    actualRoomTypeCode: details.actualRoomTypeCode,
+    ...(typeof details.originalRoomTypeAvailable === "boolean" ? { originalRoomTypeAvailable: details.originalRoomTypeAvailable } : {})
+  };
+}
+
+export function temporaryOtherRoomOfferFromQuoteError(error: unknown): TemporaryOtherRoomOffer | undefined {
+  if (!(error instanceof ApiError) || error.status !== 409 || error.code !== "ENTITLEMENT_CONFLICT") return undefined;
+  return temporaryOtherRoomOfferDetails(error.details);
+}
+
+export function temporaryOtherRoomQuoteInput<T extends QuoteCommandInput>(
+  input: T,
+  offer: TemporaryOtherRoomOffer | undefined,
+  confirmed: boolean
+): T | (T & { temporaryOtherRoom: true }) {
+  return offer && confirmed ? { ...input, temporaryOtherRoom: true } : input;
+}
+
+export function quoteRecoveryInputForCurrentContext(
+  current: QuoteCommandInput | undefined,
+  recovery: QuoteCommandInput | undefined
+): QuoteCommandInput | undefined {
+  if (!current || !recovery) return undefined;
+  const { temporaryOtherRoom: _temporaryOtherRoom, ...recoveryContext } = recovery;
+  return quoteInputSignature(current) === quoteInputSignature(recoveryContext)
+    ? recovery
+    : undefined;
+}
+
+export function quoteRecoveryMemberSelectionForUnit(
+  recovery: QuoteCommandInput | undefined,
+  inventoryUnitId: string | undefined
+): { useMemberEntitlement: boolean; memberId: string } | undefined {
+  if (!recovery || !inventoryUnitId || recovery.inventoryUnitId !== inventoryUnitId) return undefined;
+  return {
+    useMemberEntitlement: Boolean(recovery.memberId),
+    memberId: recovery.memberId ?? ""
+  };
+}
+
+export function resetTemporaryOtherRoomDraftForContext(
+  draft: TemporaryOtherRoomDraft,
+  previous: TemporaryOtherRoomContext,
+  next: TemporaryOtherRoomContext
+): TemporaryOtherRoomDraft {
+  return previous.memberId === next.memberId
+    && previous.inventoryUnitId === next.inventoryUnitId
+    && previous.arrivalDate === next.arrivalDate
+    && previous.departureDate === next.departureDate
+    ? draft
+    : { confirmed: false, reason: "" };
+}
+
+export function temporaryOtherRoomCreateOrderCommand(
+  input: Record<string, unknown>,
+  reason: string
+): CommandRequest | undefined {
+  const temporaryOtherRoomReason = reason.trim();
+  if (!temporaryOtherRoomReason || temporaryOtherRoomReason.length > 200) return undefined;
+  return {
+    commandType: "CREATE_ORDER",
+    title: "创建订单",
+    description: "核对本次临时安排、住宿人名单及会员权益。",
+    presentation: "MEMBER_STAY",
+    initialReason: { code: "TEMPORARY_OTHER_ROOM", note: temporaryOtherRoomReason },
+    input: { ...input, temporaryOtherRoomReason }
+  };
+}
+
+export function TemporaryOtherRoomFields({
+  offer,
+  confirmed,
+  reason,
+  disabled,
+  onConfirmedChange,
+  onReasonChange
+}: {
+  offer: TemporaryOtherRoomOffer;
+  confirmed: boolean;
+  reason: string;
+  disabled: boolean;
+  onConfirmedChange: (confirmed: boolean) => void;
+  onReasonChange: (reason: string) => void;
+}) {
+  return <section className="temporary-other-room-fields" aria-label="临时安排其他房型">
+    <label className="checkbox-label">
+      <input
+        type="checkbox"
+        checked={confirmed}
+        onChange={(event) => onConfirmedChange(event.target.checked)}
+        disabled={disabled}
+        data-testid="temporary-other-room-confirmed"
+      />
+      <span className="form-label-with-hint">本次临时安排其他房型<InfoHint label="临时安排说明" text="仅用于本次实际安排，会员原有房型与后续权益不会改变。" /></span>
+    </label>
+    {offer.originalRoomTypeAvailable ? <p className="temporary-other-room-warning">系统显示原会员房型仍可能有空房，请确认现场安排原因。</p> : null}
+    {confirmed ? <>
+      <dl className="temporary-other-room-summary">
+        <div><dt>原适用房型</dt><dd>{roomStatusRoomTypeLabel(offer.originalRoomTypeCode)}</dd></div>
+        <div><dt>实际安排房型</dt><dd>{roomStatusRoomTypeLabel(offer.actualRoomTypeCode)}</dd></div>
+      </dl>
+      <label>现场安排原因
+        <textarea
+          value={reason}
+          onChange={(event) => onReasonChange(event.target.value)}
+          required
+          maxLength={200}
+          rows={2}
+          disabled={disabled}
+          data-testid="temporary-other-room-reason"
+        />
+      </label>
+    </> : null}
+  </section>;
 }
 
 export type RoomStatusQuoteActionCode = "CREATE_ORDER" | "CREATE_FREE_STAY" | "BACKFILL_ORDER";
@@ -782,7 +943,8 @@ function validQuoteInput(value: unknown): value is QuoteCommandInput {
     "arrivalDate",
     "departureDate",
     "pricingPolicyVersionId",
-    "memberId"
+    "memberId",
+    "temporaryOtherRoom"
   ]);
   return Object.keys(input).every((key) => allowedKeys.has(key))
     && typeof input.propertyId === "string" && input.propertyId === input.propertyId.trim() && Boolean(input.propertyId)
@@ -797,7 +959,13 @@ function validQuoteInput(value: unknown): value is QuoteCommandInput {
     && Boolean(input.pricingPolicyVersionId)
     && !Object.hasOwn(input, "memberContractId")
     && (input.memberId === undefined
-      || (typeof input.memberId === "string" && input.memberId === input.memberId.trim() && Boolean(input.memberId)));
+      || (typeof input.memberId === "string" && input.memberId === input.memberId.trim() && Boolean(input.memberId)))
+    && (input.temporaryOtherRoom === undefined
+      || (input.temporaryOtherRoom === true
+        && input.stayType === undefined
+        && typeof input.memberId === "string"
+        && input.memberId === input.memberId.trim()
+        && Boolean(input.memberId)));
 }
 
 export function readQuoteCommandRecovery(storage: CommandRecoveryStorage, subjectId: string, propertyId: string): QuoteRecoveryReadResult {
@@ -972,6 +1140,21 @@ function quoteFromReceipt(receipt: ReceiptDto, pending: PendingQuoteCommand): Qu
   const memberMatches = pending.input.memberId === undefined
     ? record.memberId === undefined
     : record.memberId === pending.input.memberId;
+  const arrangement = recordValue(record.temporaryOtherRoomArrangement);
+  const temporaryOtherRoomMatches = pending.input.temporaryOtherRoom === true
+    ? Boolean(arrangement
+      && arrangement.kind === "TEMPORARY_OTHER_ROOM"
+      && arrangement.originalInventoryKind === "ROOM"
+      && arrangement.entitlementUnitKind === "ROOM_NIGHT"
+      && arrangement.actualInventoryKind === "ROOM"
+      && typeof arrangement.originalRoomTypeCode === "string"
+      && typeof arrangement.actualRoomTypeCode === "string"
+      && arrangement.originalRoomTypeCode !== arrangement.actualRoomTypeCode
+      && arrangement.actualInventoryUnitId === pending.input.inventoryUnitId
+      && arrangement.arrivalDate === pending.input.arrivalDate
+      && arrangement.departureDate === pending.input.departureDate
+      && arrangement.memberContractId === record.memberContractId)
+    : record.temporaryOtherRoomArrangement === undefined;
   if (typeof record.quoteId !== "string" || !record.quoteId
     || record.propertyId !== pending.input.propertyId
     || record.inventoryUnitId !== pending.input.inventoryUnitId
@@ -980,6 +1163,7 @@ function quoteFromReceipt(receipt: ReceiptDto, pending: PendingQuoteCommand): Qu
     || record.pricingPolicyVersionId !== pending.input.pricingPolicyVersionId
     || record.stayType !== expectedStayType
     || !memberMatches
+    || !temporaryOtherRoomMatches
     || !Array.isArray(record.coverageSet)
     || !Array.isArray(record.cashLines)
     || !validQuoteMoney(record.cashRemainder)
@@ -1156,6 +1340,7 @@ function QuoteWorkbench({
   departureDate,
   businessDate,
   policies,
+  recoveryQuoteInput,
   initialStayType,
   quoteActionCode,
   backfill = false,
@@ -1174,6 +1359,7 @@ function QuoteWorkbench({
   departureDate: string;
   businessDate?: string;
   policies: PricingPolicyVersionDto[];
+  recoveryQuoteInput?: QuoteCommandInput;
   initialStayType?: StayType;
   quoteActionCode?: RoomStatusQuoteActionCode;
   backfill?: boolean;
@@ -1200,9 +1386,13 @@ function QuoteWorkbench({
     ? policy.calculation_kind === "FREE" && policy.stay_type === "FREE"
     : policy.calculation_kind === "DURATION_BAND_TOTAL" && policy.stay_type === null);
   const policyId = selectedPolicy?.id ?? "";
-  const [useMemberEntitlement, setUseMemberEntitlement] = useState(false);
-  const [memberId, setMemberId] = useState("");
+  const [useMemberEntitlement, setUseMemberEntitlement] = useState(() => Boolean(recoveryQuoteInput?.memberId));
+  const [memberId, setMemberId] = useState(() => recoveryQuoteInput?.memberId ?? "");
   const [memberSearch, setMemberSearch] = useState("");
+  const [temporaryOtherRoomDraft, setTemporaryOtherRoomDraft] = useState<TemporaryOtherRoomDraft>(() => ({
+    confirmed: recoveryQuoteInput?.temporaryOtherRoom === true,
+    reason: ""
+  }));
   const [quote, setQuote] = useState<QuoteDto>();
   const [quoteSignature, setQuoteSignature] = useState("");
   const [orphanQuoteReviewConfirmed, setOrphanQuoteReviewConfirmed] = useState(false);
@@ -1238,6 +1428,7 @@ function QuoteWorkbench({
   if (!quoteRequestGuardRef.current) quoteRequestGuardRef.current = new QuoteRequestGuard(quoteRecoveryScope);
   const quoteRequestGuard = quoteRequestGuardRef.current;
   const activeQuoteSubmissionKey = useRef<string | undefined>(undefined);
+  const temporaryOtherRoomContextRef = useRef<TemporaryOtherRoomContext | undefined>(undefined);
   quoteRequestGuard.enterScope(quoteRecoveryScope);
   const quoteRecoveryReady = quoteRecoverySnapshot.scope === quoteRecoveryScope;
   const quoteRecoveryRead = quoteRecoveryReady
@@ -1375,6 +1566,7 @@ function QuoteWorkbench({
     setUseMemberEntitlement(false);
     setMemberId("");
     setMemberSearch("");
+    setTemporaryOtherRoomDraft({ confirmed: false, reason: "" });
     setError(undefined);
   }, [initialStayType, resetToken]);
 
@@ -1391,9 +1583,22 @@ function QuoteWorkbench({
     setUseMemberEntitlement(false);
     setMemberId("");
     setMemberSearch("");
+    setTemporaryOtherRoomDraft({ confirmed: false, reason: "" });
   }, [backfill]);
 
   useEffect(() => {
+    const recoverySelection = quoteRecoveryMemberSelectionForUnit(recoveryQuoteInput, unit?.id);
+    if (recoveryQuoteInput && !unit) return;
+    if (recoverySelection) {
+      setUseMemberEntitlement(recoverySelection.useMemberEntitlement);
+      setMemberId(recoverySelection.memberId);
+      setMemberSearch("");
+      setTemporaryOtherRoomDraft({
+        confirmed: recoveryQuoteInput?.temporaryOtherRoom === true,
+        reason: ""
+      });
+      return;
+    }
     setUseMemberEntitlement(false);
     setMemberId("");
     setMemberSearch("");
@@ -1465,11 +1670,26 @@ function QuoteWorkbench({
     if (memberId && !quoteMemberId) setMemberId("");
   }, [memberId, quoteMemberId]);
 
+  const temporaryOtherRoomContext: TemporaryOtherRoomContext = {
+    memberId: quoteMemberId,
+    inventoryUnitId: unit?.id ?? "",
+    arrivalDate,
+    departureDate
+  };
+
+  useEffect(() => {
+    const previous = temporaryOtherRoomContextRef.current;
+    if (previous) {
+      setTemporaryOtherRoomDraft((draft) => resetTemporaryOtherRoomDraftForContext(draft, previous, temporaryOtherRoomContext));
+    }
+    temporaryOtherRoomContextRef.current = temporaryOtherRoomContext;
+  }, [temporaryOtherRoomContext.memberId, temporaryOtherRoomContext.inventoryUnitId, temporaryOtherRoomContext.arrivalDate, temporaryOtherRoomContext.departureDate]);
+
   const quoteNightCount = isIsoLocalDate(arrivalDate) && isIsoLocalDate(departureDate)
     ? rangeNights({ arrivalDate, departureDate })
     : 0;
   const quoteDatesValid = quoteNightCount >= 1 && quoteNightCount <= MAX_STAY_SELECTION_NIGHTS;
-  const currentQuoteInput: QuoteCommandInput | undefined = unit && policyId && selectionDraftValid && quoteDatesValid && (!useMemberEntitlement || quoteMemberId) ? {
+  const baseQuoteInput: QuoteCommandInput | undefined = unit && policyId && selectionDraftValid && quoteDatesValid && (!useMemberEntitlement || quoteMemberId) ? {
     propertyId,
     inventoryUnitId: unit.id,
     ...(stayType === "FREE" ? { stayType } : {}),
@@ -1478,6 +1698,10 @@ function QuoteWorkbench({
     pricingPolicyVersionId: policyId,
     ...(useMemberEntitlement && quoteMemberId ? { memberId: quoteMemberId } : {})
   } : undefined;
+  const currentQuoteInput = quoteRecoveryInputForCurrentContext(baseQuoteInput, recoveryQuoteInput)
+    ?? (baseQuoteInput
+      ? temporaryOtherRoomQuoteInput(baseQuoteInput, temporaryOtherRoomDraft.offer, temporaryOtherRoomDraft.confirmed)
+      : undefined);
   const currentQuoteSignature = currentQuoteInput ? quoteInputSignature(currentQuoteInput) : "";
   const quoteIsCurrent = Boolean(quote && quoteSignature === currentQuoteSignature);
   latestQuoteSignature.current = currentQuoteSignature;
@@ -1594,6 +1818,12 @@ function QuoteWorkbench({
           setError(new Error("报价处理结果已返回，但本地恢复记录已经变化；当前结果未应用。"));
           return;
         }
+        const temporaryOffer = temporaryOtherRoomOfferFromQuoteError(nextError);
+        if (temporaryOffer) {
+          setTemporaryOtherRoomDraft((draft) => ({ ...draft, offer: temporaryOffer }));
+        } else if (nextError.code === "ENTITLEMENT_CONFLICT") {
+          setTemporaryOtherRoomDraft({ confirmed: false, reason: "" });
+        }
         settledQuoteSignature.current = inputSignature;
         setError(staffQuoteError(nextError, unit?.code ?? "所选房源", arrivalDate, departureDate));
         return;
@@ -1652,6 +1882,26 @@ function QuoteWorkbench({
         setError(new Error("已确认原报价结果，但当前房态与报价目标尚未载入；恢复记录继续保留，待房态恢复后再应用原结果。"));
         return;
       }
+      if (!recoveredQuoteExpired && latestQuoteSignature.current !== pendingQuote.inputSignature) {
+        setError(new Error("已确认原报价结果，但当前房态与原报价选择不一致；恢复记录继续保留，请重新打开原房源和日期。"));
+        return;
+      }
+      if (!recoveredQuoteExpired) {
+        setUseMemberEntitlement(Boolean(pendingQuote.input.memberId));
+        setMemberId(pendingQuote.input.memberId ?? "");
+        setMemberSearch("");
+        setTemporaryOtherRoomDraft(pendingQuote.input.temporaryOtherRoom === true
+          ? {
+              offer: {
+                temporaryOtherRoomAvailable: true,
+                originalRoomTypeCode: recoveredQuote.temporaryOtherRoomArrangement!.originalRoomTypeCode,
+                actualRoomTypeCode: recoveredQuote.temporaryOtherRoomArrangement!.actualRoomTypeCode
+              },
+              confirmed: true,
+              reason: ""
+            }
+          : { confirmed: false, reason: "" });
+      }
       const completed = await transitionQuoteRecovery(pendingQuote.metadata.idempotencyKey, "CLEAR");
       if (!quoteRequestGuard.isActive(requestLease)) return;
       updateQuoteRecoverySnapshot(completed.read);
@@ -1661,10 +1911,6 @@ function QuoteWorkbench({
       }
       if (recoveredQuoteExpired) {
         onRecoveryOutcome(new Error("原报价结果已确认，但报价已经过期；请重新报价。"));
-        return;
-      }
-      if (latestQuoteSignature.current !== pendingQuote.inputSignature) {
-        onRecoveryOutcome(new Error("报价已恢复，但当前筛选条件已变化；旧结果未应用，请重新报价。"));
         return;
       }
       settledQuoteSignature.current = pendingQuote.inputSignature;
@@ -1799,6 +2045,13 @@ function QuoteWorkbench({
       if (backfill) setError(new Error("请完整填写主要入住人及所有同行人的姓名和昵称"));
       return;
     }
+    const temporaryOtherRoomCommand = temporaryOtherRoomDraft.confirmed
+      ? temporaryOtherRoomCreateOrderCommand({}, temporaryOtherRoomDraft.reason)
+      : undefined;
+    if (temporaryOtherRoomDraft.confirmed && !temporaryOtherRoomCommand) {
+      setError(new Error("请填写 1 至 200 个字符的现场安排原因"));
+      return;
+    }
     if (!backfill && ((channelRequired && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode)))) return;
     const guestInputs = createOrderGuestInputs(primaryGuestForm, additionalGuests);
     const orderInput: Record<string, unknown> = {
@@ -1863,6 +2116,10 @@ function QuoteWorkbench({
         ...orderInput,
         ...(backfillCollection ? { backfillCollection } : {})
       }, backfillReason));
+      return;
+    }
+    if (temporaryOtherRoomCommand) {
+      onCommand(temporaryOtherRoomCreateOrderCommand(orderInput, temporaryOtherRoomDraft.reason)!);
       return;
     }
     onCommand({
@@ -1982,6 +2239,17 @@ function QuoteWorkbench({
                 </select>
               </label>
             </div> : null}
+            {temporaryOtherRoomDraft.offer ? <TemporaryOtherRoomFields
+              offer={temporaryOtherRoomDraft.offer}
+              confirmed={temporaryOtherRoomDraft.confirmed}
+              reason={temporaryOtherRoomDraft.reason}
+              disabled={busy || quoteRecoveryRead.kind !== "ABSENT"}
+              onConfirmedChange={(confirmed) => {
+                setTemporaryOtherRoomDraft((draft) => ({ ...draft, confirmed }));
+                setError(undefined);
+              }}
+              onReasonChange={(reason) => setTemporaryOtherRoomDraft((draft) => ({ ...draft, reason }))}
+            /> : null}
           </div> : null}
           <div
             className={`room-status-pricing-progress${busy ? "" : " is-idle"}`}
@@ -2002,6 +2270,12 @@ function QuoteWorkbench({
                   <div><span>覆盖晚数</span><strong>{memberSummary.coveredNights} 晚</strong></div>
                   <div><span>未覆盖晚数</span><strong>{memberSummary.uncoveredNights} 晚</strong></div>
                   <div><span>未覆盖金额</span><strong>{formatMoney(memberSummary.uncoveredAmount)}</strong></div>
+                  {temporaryOtherRoomDraft.confirmed && temporaryOtherRoomDraft.offer ? <>
+                    <div><span>原适用房型</span><strong>{roomStatusRoomTypeLabel(temporaryOtherRoomDraft.offer.originalRoomTypeCode)}</strong></div>
+                    <div><span>实际安排</span><strong>{unitName(unit)}</strong></div>
+                    <div><span>本次覆盖晚数</span><strong>{memberSummary.coveredNights} 晚</strong></div>
+                    <div><span>本次补差</span><strong>{formatMoney({ currency: quote.cashRemainder.currency, minorUnits: 0 })}</strong></div>
+                  </> : null}
                 </> : <>
                   <div><span>住宿晚数</span><strong>{summary.nights} 晚</strong></div>
                   <div><span>计价依据</span><strong>{summary.pricingBasis}</strong></div>
@@ -2114,7 +2388,7 @@ function QuoteWorkbench({
                 </div>
                 {backfill ? <InlineError error={error} title="无法进入补录核对" /> : null}
                 {backfillSubmitBlockReason ? <InlineError error={new Error(backfillSubmitBlockReason)} title="暂时不能核对补录" /> : null}
-                <button className="button button-primary full-width" type="submit" disabled={backfill ? Boolean(backfillSubmitBlockReason) : quoteCommandsBlocked || !quoteIsCurrent || guestCount > unit.occupancyCapacity || !guestsComplete || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid={backfill ? "backfill-submit" : "create-order"}>
+                <button className="button button-primary full-width" type="submit" disabled={backfill ? Boolean(backfillSubmitBlockReason) : quoteCommandsBlocked || !quoteIsCurrent || guestCount > unit.occupancyCapacity || !guestsComplete || (temporaryOtherRoomDraft.confirmed && !temporaryOtherRoomCreateOrderCommand({}, temporaryOtherRoomDraft.reason)) || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid={backfill ? "backfill-submit" : "create-order"}>
                   <FilePlus2 aria-hidden="true" size={17} />{backfill ? "核对并补录住宿" : "核对并创建订单"}
                 </button>
               </form>
@@ -4423,6 +4697,14 @@ export function InventoryPage() {
   const quoteActionUnit = activeQuoteTarget && quoteUnit
     ? actionUnit(quoteUnit, projectionWritable && Boolean(activeQuoteAuthorizedAction))
     : undefined;
+  const recoveryQuoteInputForWorkbench = pageQuoteRecovery.kind === "VALID"
+    && roomStatusQuoteRecoveryMatchesTarget(
+      pageQuoteRecovery.pending.state,
+      recoveryQuoteTarget,
+      activeQuoteTarget
+    )
+    ? pageQuoteRecovery.pending.input
+    : undefined;
   const quoteRecoveryDrawerOpen = quoteRecoveryUiOpen;
   const desktopContextKind = roomStatusDesktopContextKind(quoteRecoveryDrawerOpen, Boolean(selectedOrderIdentity));
   const desktopDrawerModal = desktopContextKind === "QUOTE_RECOVERY"
@@ -5468,7 +5750,7 @@ export function InventoryPage() {
     authorizedSelectedOrderView ? (
       <RoomStatusOrderContext
         view={authorizedSelectedOrderView}
-        units={meta.inventoryUnits}
+        units={orderContextInventoryUnits(meta.inventoryUnits, authorizedSelectedOrderView.referencedInventoryUnits)}
         {...(selectedMemberView ? { memberView: selectedMemberView } : {})}
         loading={false}
         writeBlocked={selectedOrderLoading || commandsBlocked || authorizedSelectedOrderView.accessLevel !== "WRITE"}
@@ -5503,6 +5785,7 @@ export function InventoryPage() {
         departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
         businessDate={renderedBoard.businessDate}
         policies={policies}
+        {...(recoveryQuoteInputForWorkbench ? { recoveryQuoteInput: recoveryQuoteInputForWorkbench } : {})}
         {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
         {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
         backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
@@ -5866,6 +6149,7 @@ export function InventoryPage() {
                 departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
                 businessDate={renderedBoard.businessDate}
                 policies={policies}
+                {...(recoveryQuoteInputForWorkbench ? { recoveryQuoteInput: recoveryQuoteInputForWorkbench } : {})}
                 {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
                 {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
                 backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
@@ -5905,6 +6189,7 @@ export function InventoryPage() {
               departureDate={activeQuoteTarget?.departureDate ?? range.departureDate}
               {...(renderedBoard?.businessDate ? { businessDate: renderedBoard.businessDate } : {})}
               policies={policies}
+              {...(recoveryQuoteInputForWorkbench ? { recoveryQuoteInput: recoveryQuoteInputForWorkbench } : {})}
               {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
               {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
               backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}

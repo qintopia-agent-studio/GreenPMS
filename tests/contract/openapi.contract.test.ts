@@ -65,7 +65,8 @@ const commandInputContract: Record<PublicCommandEnvelopeType, { required: string
     properties: [
       "propertyId", "quoteId", "primaryGuest", "additionalGuests", "bookingChannelCode", "channelOrderReference",
       "targetCurrentContractAmountMinor", "channelPriceDifferenceReason", "manualPriceAdjustmentReason",
-      "freeStayReason", "freeStayCategoryCode", "backfill", "backfillReason", "backfillCollection"
+      "freeStayReason", "freeStayCategoryCode", "backfill", "backfillReason", "backfillCollection",
+      "temporaryOtherRoomReason"
     ]
   },
   CORRECT_ORDER_OCCUPANT: { required: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"], properties: ["propertyId", "orderId", "occupantId", "expectedPriorSnapshot", "correctedSnapshot"] },
@@ -1215,7 +1216,7 @@ describe("OpenAPI 3.1 command contract", () => {
     const errorSchema = document.paths["/api/v1/quotes"].post.responses["400"].content["application/json"].schema;
     expect(errorSchema.additionalProperties).toBe(false);
     const detailVariants = errorSchema.properties.details.anyOf as Array<{ required?: string[] }>;
-    expect(detailVariants).toHaveLength(16);
+    expect(detailVariants).toHaveLength(17);
     expect(detailVariants.some((variant) => variant.required?.includes("businessDate")
       && variant.required.includes("arrivalDate"))).toBe(true);
     expect(detailVariants.some((variant) => variant.required?.includes("businessDate")

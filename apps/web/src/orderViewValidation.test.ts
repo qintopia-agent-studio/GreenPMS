@@ -17,6 +17,27 @@ function arrangement(inventoryUnitId = "room_101", arrivalDate = "2026-07-28", d
   };
 }
 
+function inventoryUnit(id = "room_101") {
+  return {
+    id,
+    property_id: "property_qintopia",
+    kind: "ROOM" as const,
+    parent_room_id: null,
+    code: id === "room_101" ? "101" : id,
+    name: id === "room_101" ? "101 房" : `${id} 房`,
+    active: true,
+    catalog_version: "test-v1",
+    building_code: "1",
+    room_type_code: "private_bath_single",
+    pricing_product_code: "private_bath_single",
+    inventory_basis: "INDEPENDENT" as const,
+    code_provenance: "SOURCE_EXPLICIT" as const,
+    physical_bed_count: null,
+    occupancy_capacity: 1,
+    created_at: "2026-07-01T00:00:00.000Z"
+  };
+}
+
 function fulfillmentFact(type: "CHECK_IN" | "CHECK_OUT" | "REVOKE_CHECK_IN", plannedBusinessDate: string, recordedAt: string) {
   return {
     type,
@@ -113,6 +134,7 @@ function orderView() {
       checkOut: null as ReturnType<typeof fulfillmentFact> | null,
       checkInRevocation: null as ReturnType<typeof fulfillmentFact> | null
     },
+    referencedInventoryUnits: [inventoryUnit()],
     arrangementHistory: [{
       type: "INITIAL_BOOKING",
       before: null,
@@ -235,6 +257,11 @@ function appendHistoryTransition(
   recordedAt = "2026-07-28T09:00:00.000Z"
 ) {
   const before = input.arrangementHistory.at(-1)!.after;
+  for (const inventoryUnitId of new Set([...before.intervals, ...after.intervals].map((interval) => interval.inventoryUnitId))) {
+    if (!input.referencedInventoryUnits.some((unit) => unit.id === inventoryUnitId)) {
+      input.referencedInventoryUnits.push(inventoryUnit(inventoryUnitId));
+    }
+  }
   input.order.arrival_date = after.arrivalDate;
   input.order.departure_date = after.departureDate;
   input.effectiveArrangement.arrivalDate = after.arrivalDate;
@@ -286,6 +313,17 @@ function roundTripMoveArrangement(): OrderArrangementDto {
 }
 
 describe("parseOrderView", () => {
+  it("requires complete, same-property inventory references for the immutable arrangement history", () => {
+    const input = orderView();
+    expect(parseOrderView(input)).toBe(input);
+
+    input.referencedInventoryUnits[0]!.property_id = "property_other";
+    expect(() => parseOrderView(input)).toThrow("与订单物业不一致");
+
+    input.referencedInventoryUnits = [];
+    expect(() => parseOrderView(input)).toThrow("必须包含订单涉及的房源");
+  });
+
   it("requires an explicit membership conversion projection on every order view", () => {
     const missing = orderView() as Record<string, unknown>;
     delete missing.membershipConversion;
@@ -803,6 +841,7 @@ describe("parseOrderView", () => {
     const input = orderView();
     const before = arrangement("room_101");
     const after = arrangement("room_102", "2026-07-29", "2026-07-31");
+    input.referencedInventoryUnits.push(inventoryUnit("room_102"));
     input.order.status = "CHECKED_OUT";
     input.order.arrival_date = after.arrivalDate;
     input.order.departure_date = after.departureDate;
