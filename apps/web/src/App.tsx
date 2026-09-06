@@ -10,6 +10,7 @@ import { OrderDetailPage } from "./pages/OrderDetailPage";
 import { OrdersPage } from "./pages/OrdersPage";
 import { TodayPage } from "./pages/TodayPage";
 import { TokensPage } from "./pages/TokensPage";
+import { AccountsPage } from "./pages/AccountsPage";
 
 export default function App() {
   const [principal, setPrincipal] = useState<PrincipalDto>();
@@ -59,6 +60,7 @@ export default function App() {
             <Route path="orders/:orderId" element={<OrderDetailPage />} />
             <Route path="today" element={<TodayPage />} />
             <Route path="tokens" element={<TokensPage />} />
+            <Route path="accounts" element={<AccountsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

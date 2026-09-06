@@ -164,17 +164,20 @@ export function requireScopedResourceAccess(principal: AuthPrincipal, propertyId
 }
 
 export async function login(db: Kysely<Database>, username: string, password: string, reply: FastifyReply) {
-  const subject = await db.selectFrom("subjects").selectAll().where("username", "=", username).executeTakeFirst();
-  const passwordMatches = await verifyPassword(password, subject?.password_salt ?? dummyPasswordSalt, subject?.password_hash ?? dummyPasswordHash);
-  if (!subject || subject.status !== "ACTIVE" || !passwordMatches) {
-    throw new DomainError("INVALID_CREDENTIALS", "Username or password is incorrect", 401);
-  }
   const secret = newOpaqueSecret("qts");
   const sessionId = newId("session");
   const expiresAt = new Date(Date.now() + 12 * 60 * 60_000);
-  await db.insertInto("web_sessions").values({
-    id: sessionId, subject_id: subject.id, secret_hash: sha256(secret), expires_at: expiresAt, revoked_at: null
-  }).execute();
+  const subject = await db.transaction().execute(async (trx) => {
+    const current = await trx.selectFrom("subjects").selectAll().where("username", "=", username).forShare().executeTakeFirst();
+    const passwordMatches = await verifyPassword(password, current?.password_salt ?? dummyPasswordSalt, current?.password_hash ?? dummyPasswordHash);
+    if (!current || current.status !== "ACTIVE" || !passwordMatches) {
+      throw new DomainError("INVALID_CREDENTIALS", "Username or password is incorrect", 401);
+    }
+    await trx.insertInto("web_sessions").values({
+      id: sessionId, subject_id: current.id, secret_hash: sha256(secret), expires_at: expiresAt, revoked_at: null
+    }).execute();
+    return current;
+  });
   reply.setCookie(sessionCookieName, secret, {
     path: "/",
     httpOnly: true,

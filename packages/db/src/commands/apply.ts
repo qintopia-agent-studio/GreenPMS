@@ -1,4 +1,5 @@
 import { sql, type Transaction } from "kysely";
+import { applyCheckoutReversal, lockCheckoutReversalInventory } from "./checkout-reversal.ts";
 import {
   createOrderPricingBasisCodes,
   currentReleaseFeatures,
@@ -494,6 +495,10 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     return;
   }
 
+  if (commandType === "REVOKE_CHECK_OUT") {
+    await lockCheckoutReversalInventory(trx, context);
+    return;
+  }
   if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"].includes(commandType)) {
     const timeline = await loadActiveStayTimeline(trx, context);
     const roomDates = await roomDatesForTimeline(trx, propertyId, timeline);
@@ -2316,6 +2321,9 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     REVOKE_CHECK_IN: { orderStatus: "CHECK_IN_REVOKED", stayStatus: "CHECK_IN_REVOKED" }
   };
   const target = statusCommands[options.commandType];
+  if (options.commandType === "REVOKE_CHECK_OUT") {
+    return applyCheckoutReversal(trx, context, options.commandId, options.reason, effect);
+  }
   if (options.commandType === "COMPLETE_STAY") {
     if (requireString(effect, "operation") !== "COMPLETE_STAY") {
       throw new DomainError("INTERNAL_ERROR", "Complete-stay effect has an invalid operation", 500);

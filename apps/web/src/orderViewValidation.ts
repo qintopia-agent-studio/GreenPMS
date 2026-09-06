@@ -10,7 +10,7 @@ import type { OrderViewDto } from "./types";
 type JsonRecord = Record<string, unknown>;
 
 const localDatePattern = /^\d{4}-\d{2}-\d{2}$/;
-const arrangementChangeTypes = new Set(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT", "HISTORICAL_STAY_CORRECTION"]);
+const arrangementChangeTypes = new Set(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT", "CHECK_OUT_REVOCATION", "HISTORICAL_STAY_CORRECTION"]);
 const effectivePresentations = new Set(["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER", "BEFORE_CHECK_IN_REVOCATION"]);
 const fulfillmentStates = new Set(["NOT_CHECKED_IN", "IN_HOUSE", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"]);
 const recordingModes = new Set(["ON_SCHEDULE", "LATE_RECORDED", "LEGACY_UNCLASSIFIED"]);
@@ -378,6 +378,13 @@ function validateArrangementChange(item: OrderArrangementHistoryItemDto, path: s
     }
     return;
   }
+  if (item.type === "CHECK_OUT_REVOCATION") {
+    if (before.arrivalDate !== after.arrivalDate || after.departureDate < before.departureDate
+      || !sameInventoryTimeline(before, after, before.arrivalDate, before.departureDate)) {
+      fail(path, "撤销退房必须恢复原安排并保留已住宿区间");
+    }
+    return;
+  }
   if (item.type === "SHORTENING" || item.type === "EARLY_CHECK_OUT") {
     if (before.arrivalDate !== after.arrivalDate
       || after.departureDate >= before.departureDate
@@ -638,7 +645,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     if (accessLevel === "READ" && action.enabled) fail(`allowedActions[${index}]`, "只读权限不能包含可执行写操作");
     if (action.enabled && (code === "RESCHEDULE_STAY" || code === "EXTEND_STAY" || code === "SHORTEN_STAY")) enabledDateActions.push(code);
     if (action.enabled && code === "MOVE_UNIT") moveUnitEnabled = true;
-    if (action.enabled && (code === "CANCEL_ORDER" || code === "MARK_NO_SHOW" || code === "REVOKE_CHECK_IN")) enabledLifecycleActions.push(code);
+    if (action.enabled && (code === "CANCEL_ORDER" || code === "MARK_NO_SHOW" || code === "REVOKE_CHECK_IN" || code === "REVOKE_CHECK_OUT")) enabledLifecycleActions.push(code);
   });
   const orderId = stringValue(order.id, "order.id");
   const orderPropertyId = stringValue(order.property_id, "order.property_id");
@@ -692,9 +699,9 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     ? new Set(["CANCEL_ORDER", "MARK_NO_SHOW"])
     : orderStatus === "CHECKED_IN"
       ? new Set(["REVOKE_CHECK_IN"])
-      : new Set<string>();
+      : orderStatus === "CHECKED_OUT" ? new Set(["REVOKE_CHECK_OUT"]) : new Set<string>();
   if (enabledLifecycleActions.some((code) => !allowedLifecycleActions.has(code))) {
-    fail("allowedActions", "取消、未到或撤销入住操作与订单状态不一致");
+    fail("allowedActions", "履约操作与订单状态不一致");
   }
   const expectation = orderProjectionExpectations[orderStatus as keyof typeof orderProjectionExpectations];
   const orderArrivalDate = localDate(order.arrival_date, "order.arrival_date");

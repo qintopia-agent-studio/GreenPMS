@@ -493,6 +493,7 @@ export function orderAllowedActions(
     CORRECT_ORDER_OCCUPANT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
     CHECK_IN: ["RESERVED"],
     CHECK_OUT: ["CHECKED_IN"],
+    REVOKE_CHECK_OUT: ["CHECKED_OUT"],
     COMPLETE_STAY: ["RESERVED"],
     RESCHEDULE_STAY: ["RESERVED"],
     SHORTEN_STAY: ["CHECKED_IN"],
@@ -722,14 +723,25 @@ export function projectOrderFulfillment(
   parseLocalDate(dates.arrivalDate);
   parseLocalDate(dates.departureDate);
   const checkIns = amendments.filter((amendment) => amendment.amendment_type === "CHECK_IN");
-  const checkOuts = amendments.filter((amendment) => amendment.amendment_type === "CHECK_OUT");
+  let effectiveCheckout: FulfillmentAmendmentRow | undefined;
+  for (const amendment of amendments) {
+    if (amendment.amendment_type === "CHECK_OUT") {
+      if (effectiveCheckout) throw new DomainError("INTERNAL_ERROR", "订单履约记录存在重复状态事实", 500);
+      effectiveCheckout = amendment;
+    } else if (amendment.amendment_type === "REVOKE_CHECK_OUT") {
+      if (!effectiveCheckout || fulfillmentPayload(amendment).checkoutSequence !== effectiveCheckout.sequence) {
+        throw new DomainError("INTERNAL_ERROR", "撤销退房没有关联当前有效退房", 500);
+      }
+      effectiveCheckout = undefined;
+    }
+  }
   const checkInRevocations = amendments.filter((amendment) => amendment.amendment_type === "REVOKE_CHECK_IN");
-  if (checkIns.length > 1 || checkOuts.length > 1 || checkInRevocations.length > 1) {
+  if (checkIns.length > 1 || checkInRevocations.length > 1) {
     throw new DomainError("INTERNAL_ERROR", "订单履约记录存在重复状态事实", 500);
   }
   return {
     checkIn: fulfillmentRecord(checkIns[0], "CHECK_IN", dates.arrivalDate),
-    checkOut: fulfillmentRecord(checkOuts[0], "CHECK_OUT", dates.departureDate),
+    checkOut: fulfillmentRecord(effectiveCheckout, "CHECK_OUT", dates.departureDate),
     checkInRevocation: fulfillmentRecord(checkInRevocations[0], "REVOKE_CHECK_IN", dates.arrivalDate)
   };
 }
@@ -790,6 +802,7 @@ interface LifecycleCollectionFactRow {
 }
 
 const orderLifecycleAmendmentTypes = new Set<string>([
+  "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
   "RESCHEDULE_STAY",
@@ -809,6 +822,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
 ] as const);
 
 const pricingRevisionAmendmentTypes = new Set<string>([
+  "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
@@ -825,6 +839,7 @@ const pricingRevisionAmendmentTypes = new Set<string>([
 ] as const);
 
 const requiredPricingRevisionAmendmentTypes = new Set<string>([
+  "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
@@ -841,6 +856,7 @@ const requiredPricingRevisionAmendmentTypes = new Set<string>([
 ] as const);
 
 const staySegmentAmendmentTypes = new Set<string>([
+  "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
@@ -1166,6 +1182,7 @@ function arrangementChangeType(amendment: LifecycleAmendmentRow): OrderArrangeme
   if (amendmentType === "CREATE_ORDER") return "INITIAL_BOOKING";
   if (amendmentType === "RESCHEDULE_STAY") return "RESCHEDULE";
   if (amendmentType === "EXTEND_STAY") return "EXTENSION";
+  if (amendmentType === "REVOKE_CHECK_OUT") return "CHECK_OUT_REVOCATION";
   if (amendmentType === "SHORTEN_STAY") {
     const payload = recordValue(amendment.payload);
     if (payload?.completionMode === "SHORTEN_IN_HOUSE") return "SHORTENING";
@@ -1269,6 +1286,7 @@ function validateLifecycleStatus(
     let transition: { from: LifecycleOrderStatus; to: LifecycleOrderStatus } | null = null;
     if (amendmentType === "CHECK_IN") transition = { from: "RESERVED", to: "CHECKED_IN" };
     else if (amendmentType === "CHECK_OUT") transition = { from: "CHECKED_IN", to: "CHECKED_OUT" };
+    else if (amendmentType === "REVOKE_CHECK_OUT") transition = { from: "CHECKED_OUT", to: "CHECKED_IN" };
     else if (amendmentType === "CANCEL_ORDER") transition = { from: "RESERVED", to: "CANCELLED" };
     else if (amendmentType === "MARK_NO_SHOW") transition = { from: "RESERVED", to: "NO_SHOW" };
     else if (amendmentType === "REVOKE_CHECK_IN") transition = { from: "CHECKED_IN", to: "CHECK_IN_REVOKED" };
@@ -1480,12 +1498,14 @@ export function projectOrderLifecycle(input: {
     } else {
       const priorSegment = input.segments[index - 1]!;
       const fullTimelineReplacement = segment.segment_type === "RESCHEDULE_STAY"
+        || segment.segment_type === "REVOKE_CHECK_OUT"
         || segment.segment_type === "CORRECT_HISTORICAL_STAY_ARRANGEMENT";
       const expectedAmendment = segment.segment_type === "MOVE"
         ? "MOVE_UNIT"
         : segment.segment_type === "RESCHEDULE_STAY"
           || segment.segment_type === "EXTEND_STAY"
           || segment.segment_type === "SHORTEN_STAY"
+          || segment.segment_type === "REVOKE_CHECK_OUT"
           || segment.segment_type === "CORRECT_HISTORICAL_STAY_ARRANGEMENT"
           ? segment.segment_type
           : null;
@@ -2277,7 +2297,7 @@ export async function releaseCoverage(trx: Transaction<Database>, orderId: strin
 
 export async function consumeCoverage(trx: Transaction<Database>, orderId: string, commandId: string, options: {
   serviceDates?: string[];
-  reason?: "CHECK_IN_ENTITLEMENT_CONSUMED" | "EXTEND_STAY_ENTITLEMENT_CONSUMED";
+  reason?: "CHECK_IN_ENTITLEMENT_CONSUMED" | "EXTEND_STAY_ENTITLEMENT_CONSUMED" | "REVOKE_CHECK_OUT_ENTITLEMENT_CONSUMED";
 } = {}): Promise<{ coverageIds: string[]; factIds: string[] }> {
   let requestedServiceDates: string[] | undefined;
   let query = trx.selectFrom("coverage_items")

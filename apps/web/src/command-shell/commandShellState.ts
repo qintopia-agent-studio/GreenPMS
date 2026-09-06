@@ -14,6 +14,7 @@ export const u1CommandTypes = [
   "REPRICE_ORDER",
   "CHECK_IN",
   "CHECK_OUT",
+  "REVOKE_CHECK_OUT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
@@ -144,6 +145,7 @@ export function commandShellSuccessMessage(commandType: U1CommandType): string {
     case "REPRICE_ORDER": return "订单金额已调整，订单信息已刷新。";
     case "CHECK_IN": return "办理入住已完成，住宿状态已刷新。";
     case "CHECK_OUT": return "办理退房已完成，住宿状态已刷新。";
+    case "REVOKE_CHECK_OUT": return "退房已撤销，原住宿安排已恢复。";
     case "RESCHEDULE_STAY": return "住宿日期已调整，订单和房态已刷新。";
     case "EXTEND_STAY": return "住宿已延长，订单和房态已刷新。";
     case "SHORTEN_STAY": return "住宿已缩短，订单和房态已刷新。";
@@ -170,6 +172,7 @@ export function commandShellLabel(commandType: U1CommandType): string {
     case "REPRICE_ORDER": return "调整订单金额";
     case "CHECK_IN": return "办理入住";
     case "CHECK_OUT": return "办理退房";
+    case "REVOKE_CHECK_OUT": return "撤销退房";
     case "RESCHEDULE_STAY": return "调整住宿日期";
     case "EXTEND_STAY": return "延长住宿";
     case "SHORTEN_STAY": return "缩短住宿或提前退房";

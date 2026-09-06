@@ -1,4 +1,4 @@
-import type { CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
+import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
 import type {
   AvailabilityDto,
   ClientCommandMetadata,
@@ -112,6 +112,9 @@ export const api = {
     return { idempotencyKey: headers["Idempotency-Key"], correlationId: headers["X-Correlation-ID"] };
   },
   me: () => request<PrincipalDto>("/api/v1/me"),
+  accountManagement: (propertyId: string) => request<AccountManagementContext>(`/api/v1/account-management?${new URLSearchParams({ propertyId })}`),
+  manageAccount: (body: AccountManagementRequest) => request<AccountManagementResult>("/api/v1/account-management", { method: "POST", body: JSON.stringify(body) }),
+  memberDeletionPreview: (propertyId: string, memberId: string) => request<MemberDeletionPreview>(`/api/v1/members/${encodeURIComponent(memberId)}/deletion-preview?${new URLSearchParams({ propertyId })}`),
   login: async (username: string, password: string) => {
     await request<unknown>("/api/v1/auth/login", {
       method: "POST",

@@ -7,6 +7,7 @@ import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
+import { registerAccountManagement } from "./account-management.ts";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import Fastify, { type FastifyRequest } from "fastify";
@@ -651,6 +652,8 @@ export async function buildServer(db: Kysely<Database>) {
     return projectMeResponse(principal);
   });
 
+  registerAccountManagement(app, db);
+
   app.get("/api/v1/meta", { schema: { tags: ["queries"], response: { 200: MetaResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
     const propertyIds = [...principal.propertyAccess.keys()];
@@ -659,6 +662,7 @@ export async function buildServer(db: Kysely<Database>) {
       propertyIds.length ? db.selectFrom("inventory_units").selectAll().where("property_id", "in", propertyIds).where("active", "=", true).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("pricing_policy_versions").selectAll().where("property_id", "in", propertyIds).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("members")
+        .where("members.deleted_at", "is", null)
         .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
         .selectAll("members")
         .distinct()

@@ -12,7 +12,7 @@ import {
   type Database
 } from "@qintopia/db";
 import type { Kysely } from "kysely";
-import { CommandEffectSchema, ReceiptSchema } from "../../apps/api/src/schemas.ts";
+import { CommandEffectSchema, ErrorResponse, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { authScope } from "../helpers/auth-principals.ts";
@@ -54,6 +54,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   REVERSE_FACT: ["amountMinor", "currency", "netEffectMinor", "note", "orderId", "reversesFactId"],
   CHECK_IN: ["businessDate", "effectiveDate", "entitlementTransition", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
   CHECK_OUT: ["amounts", "businessDate", "effectiveDate", "fromStatus", "inventoryUnitId", "orderId", "recordingMode", "toStatus"],
+  REVOKE_CHECK_OUT: ["after", "before", "businessDate", "checkoutAmendmentId", "checkoutSequence", "entitlementReconsumeDates", "fromStatus", "fundsSummary", "mode", "operation", "orderId", "sourceRevisionId", "toStatus"],
   COMPLETE_STAY: [
     "amounts", "arrivalDate", "businessDate", "checkIn", "checkOut", "collection", "departureDate",
     "entitlementTransition", "inventoryRelease", "inventoryUnitId", "operation", "orderId", "reasonNote",
@@ -994,6 +995,8 @@ describe("Command effect HTTP contract", () => {
     expect(checkOut.effect).toMatchObject({ businessDate: propertyToday, effectiveDate: propertyToday, recordingMode: "ON_SCHEDULE" });
     const checkOutResult = await confirm(checkOut);
     expect(checkOutResult).not.toHaveProperty("cleaningTaskId");
+    const reversal = await capture("REVOKE_CHECK_OUT", { propertyId: demo.propertyId, orderId: checkoutOrderId }, demo.administratorWriteToken);
+    expect(reversal.effect).toMatchObject({ fromStatus: "CHECKED_OUT", toStatus: "CHECKED_IN", mode: "UNDO_CHECK_OUT" });
     const checkoutOrderVersion = await db.selectFrom("orders").select("version")
       .where("id", "=", checkoutOrderId).executeTakeFirstOrThrow();
     await capture("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", {
@@ -1008,6 +1011,32 @@ describe("Command effect HTTP contract", () => {
         }
       }]
     }, demo.administratorWriteToken);
+
+    const checkoutConflictMaintenance = await executeSetupCommand("LOCK_MAINTENANCE", {
+      propertyId: demo.propertyId,
+      inventoryUnitId: demo.secondRoomId,
+      arrivalDate: propertyToday,
+      departureDate: shiftLocalDate(propertyToday, 1),
+      reason: "撤销退房冲突响应验收"
+    }, "effect-checkout-conflict");
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/api/v1/command-previews",
+      headers: headers("effect-checkout-conflict-preview", demo.administratorWriteToken),
+      payload: { commandType: "REVOKE_CHECK_OUT", input: { propertyId: demo.propertyId, orderId: checkoutOrderId } }
+    });
+    expect(conflict.statusCode, conflict.body).toBe(409);
+    expect(Value.Check(ErrorResponse, conflict.json())).toBe(true);
+    expect(conflict.json()).toMatchObject({
+      code: "INVENTORY_CONFLICT",
+      details: { serviceDate: propertyToday, inventoryUnitId: demo.secondRoomId }
+    });
+    expect(await db.selectFrom("orders").select(["status", "version"])
+      .where("id", "=", checkoutOrderId).executeTakeFirstOrThrow())
+      .toEqual({ status: "CHECKED_OUT", version: checkoutOrderVersion.version });
+    await executeSetupCommand("RELEASE_MAINTENANCE", {
+      propertyId: demo.propertyId, maintenanceLockId: checkoutConflictMaintenance.maintenanceLockId
+    }, "effect-checkout-conflict-release");
 
     // 逾期已预订订单完成住宿：一次补记入住与退房并按真实结算显示。
     const completeStayArrival = shiftLocalDate(propertyToday, -5);

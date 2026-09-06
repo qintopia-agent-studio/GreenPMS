@@ -3,7 +3,7 @@ import type { OrderActionCode } from "@qintopia/contracts";
 import type { CommandRequest, OrderViewDto } from "../types";
 import { formatDate, guestName, InlineError, Modal } from "../ui";
 
-export type OrderLifecycleAction = Extract<OrderActionCode, "CANCEL_ORDER" | "MARK_NO_SHOW" | "REVOKE_CHECK_IN">;
+export type OrderLifecycleAction = Extract<OrderActionCode, "CANCEL_ORDER" | "MARK_NO_SHOW" | "REVOKE_CHECK_IN" | "REVOKE_CHECK_OUT">;
 
 export interface OrderLifecycleActionCopy {
   title: string;
@@ -13,6 +13,10 @@ export interface OrderLifecycleActionCopy {
 }
 
 export function lifecycleActionCopy(action: OrderLifecycleAction): OrderLifecycleActionCopy {
+  if (action === "REVOKE_CHECK_OUT") return {
+    title: "撤销退房", reasonLabel: "撤销原因", reasonPlaceholder: "请填写误办退房或客人决定继续住宿的情况",
+    consequence: "恢复退房前的住宿安排；提前退房同时恢复原退房日期、房费和会员权益核销。原收退款和操作历史保留。"
+  };
   if (action === "CANCEL_ORDER") return {
     title: "取消订单",
     reasonLabel: "取消原因",
@@ -49,8 +53,8 @@ export function buildOrderLifecycleRequest(
   return {
     commandType: action,
     title: copy.title,
-    description: `${copy.consequence}请核对状态、库存、权益、归零后的订单金额与退款参考。`,
-    presentation: "ORDER_LIFECYCLE",
+    description: action === "REVOKE_CHECK_OUT" ? copy.consequence : `${copy.consequence}请核对状态、库存、权益、归零后的订单金额与退款参考。`,
+    ...(action === "REVOKE_CHECK_OUT" ? {} : { presentation: "ORDER_LIFECYCLE" as const }),
     input: {
       propertyId: view.order.property_id,
       orderId: view.order.id,

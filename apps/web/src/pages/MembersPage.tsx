@@ -3,6 +3,7 @@ import { BadgeCheck, CalendarClock, CircleDollarSign, CreditCard, FilePenLine, P
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
+import { MemberDeletionButton } from "../components/MemberDeletionButton";
 import {
   continueStayUpgradeAfterMemberCreated,
   normalizeStayUpgradePhone,
@@ -490,11 +491,12 @@ function MemberList({ members, selectedMemberId, onSelect }: {
   </section>;
 }
 
-export function MemberProfile({ member, canCorrect, disabled, onCorrect }: {
+export function MemberProfile({ member, canCorrect, disabled, onCorrect, deletionControl }: {
   member: MemberViewDto;
   canCorrect: boolean;
   disabled: boolean;
   onCorrect: () => void;
+  deletionControl?: React.ReactNode;
 }) {
   return <section className="member-profile-panel" aria-labelledby="member-profile-heading">
     <div className="section-title-row">
@@ -502,7 +504,7 @@ export function MemberProfile({ member, canCorrect, disabled, onCorrect }: {
         <span className="section-kicker">会员档案</span>
         <h2 id="member-profile-heading">{member.member.full_name}</h2>
       </div>
-      {canCorrect ? <button type="button" className="button button-secondary" disabled={disabled} onClick={onCorrect} data-testid="open-member-corrections"><FilePenLine aria-hidden="true" size={17} />修改会员记录</button> : null}
+      <div className="account-actions">{canCorrect ? <button type="button" className="button button-secondary" disabled={disabled} onClick={onCorrect} data-testid="open-member-corrections"><FilePenLine aria-hidden="true" size={17} />修改会员记录</button> : null}{deletionControl}</div>
     </div>
     <dl className="member-profile-fields">
       <div><dt>姓名</dt><dd>{member.member.full_name}</dd></div>
@@ -1385,7 +1387,7 @@ export function MembersPage() {
     {loadingList ? <LoadingBlock label="正在载入会员列表" /> : !members.length ? <EmptyState title="未找到会员" detail="可更换搜索条件，或新建一位会员。" /> : <div className="member-directory">
       <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
-        <MemberProfile member={member} canCorrect={canCorrectMemberRecords} disabled={commandsBlocked} onCorrect={openMemberCorrections} />
+        <MemberProfile member={member} canCorrect={canCorrectMemberRecords} disabled={commandsBlocked} onCorrect={openMemberCorrections} deletionControl={canCorrectMemberRecords && principal.credentialType === "SESSION" ? <MemberDeletionButton key={`${propertyId}:${member.member.id}`} propertyId={propertyId} memberId={member.member.id} disabled={commandsBlocked} onDeleted={() => { setSelectedMemberId(""); setMember(undefined); setCommandNotice("会员已删除，原档案与删除记录已保留。"); refresh(); }} /> : undefined} />
         <MemberEntitlementsPanel view={member} disabled={commandsBlocked} canCorrect={canCorrectEntitlementBalance} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
         <MembershipOrdersPanel
           view={member}

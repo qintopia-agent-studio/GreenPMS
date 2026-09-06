@@ -267,6 +267,7 @@ const BackfillCompletedStayCollectionEffectSchema = Type.Union([
 
 const ErrorDetailsSchema = Type.Union([
   strictObject({ serviceDate: LocalDate, claimId: Id }),
+  strictObject({ serviceDate: LocalDate, inventoryUnitId: Id }),
   strictObject({
     inventoryUnitCode: Type.String({ minLength: 1, maxLength: 120 }),
     overlapStartDate: LocalDate,
@@ -554,6 +555,7 @@ export const CommandEnvelopeSchema = Type.Union([
   })),
   commandEnvelope("CHECK_IN", strictObject(OrderInput)),
   commandEnvelope("CHECK_OUT", strictObject(OrderInput)),
+  commandEnvelope("REVOKE_CHECK_OUT", strictObject(OrderInput)),
   commandEnvelope("COMPLETE_STAY", strictObject({
     ...OrderInput,
     actualStayCompletedConfirmed: Type.Literal(true),
@@ -951,7 +953,21 @@ const HistoricalStayArrangementUnchangedSchema = strictObject({
   collectionDifferenceMinor: SafeInteger
 });
 
+const RevokeCheckOutEffectSchema = strictObject({
+  operation: Type.Literal("REVOKE_CHECK_OUT"), orderId: Id,
+  fromStatus: Type.Literal("CHECKED_OUT"), toStatus: Type.Literal("CHECKED_IN"),
+  checkoutAmendmentId: Id, checkoutSequence: Type.Integer({ minimum: 1 }), sourceRevisionId: Id,
+  mode: Type.Union([Type.Literal("UNDO_EARLY_CHECK_OUT"), Type.Literal("UNDO_CHECK_OUT")]),
+  businessDate: LocalDate,
+  before: strictObject({ arrivalDate: LocalDate, departureDate: LocalDate, currentContractAmount: Money }),
+  after: strictObject({ arrivalDate: LocalDate, departureDate: LocalDate, currentContractAmount: Money,
+    stayTimeline: Type.Array(strictObject({ serviceDate: LocalDate, inventoryUnitId: Id }), { minItems: 1 }) }),
+  entitlementReconsumeDates: Type.Array(LocalDate),
+  fundsSummary: strictObject({ netRecordedCollection: Money, collectionDifference: Money, refundReferenceAmount: Money })
+});
+
 export const CommandEffectSchema = Type.Union([
+  RevokeCheckOutEffectSchema,
   strictObject({
     operation: Type.Literal("CREATE_MEMBER_PROFILE"),
     memberId: Type.Null(),
@@ -2130,6 +2146,9 @@ const MembershipVoidReconvertedResultSchema = strictObject({
 });
 
 export const ExecutedCommandResultSchema = Type.Union([
+  strictObject({ ...RevokeCheckOutEffectSchema.properties, stayId: Id, amendmentId: Id,
+    staySegmentId: Id, pricingRevisionId: Id, status: Type.Literal("CHECKED_IN"),
+    effectHash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
   QuoteReceiptResultSchema,
   CreateMemberResultSchema,
   MembershipOrderCreatedResultSchema,

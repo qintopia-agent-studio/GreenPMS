@@ -5565,7 +5565,7 @@ export function InventoryPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
-    if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN") {
+    if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN" || request.commandType === "REVOKE_CHECK_OUT") {
       if (authorizedSelectedOrderView) {
         setSelectedLifecycleAction(request.commandType);
         setSelectedLifecycleRevision(boardRef.current?.revision);

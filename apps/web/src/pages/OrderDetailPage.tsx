@@ -531,6 +531,7 @@ export function arrangementChangeLabel(type: OrderArrangementHistoryItemDto["typ
     case "SHORTENING": return "缩短住宿";
     case "MOVE": return "更换房源";
     case "EARLY_CHECK_OUT": return "提前退房";
+    case "CHECK_OUT_REVOCATION": return "撤销退房";
     case "HISTORICAL_STAY_CORRECTION": return "历史住宿安排修改";
   }
 }
@@ -1959,7 +1960,7 @@ export function OrderDetailPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
-    if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN") {
+    if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN" || request.commandType === "REVOKE_CHECK_OUT") {
       setLifecycleAction(request.commandType);
       return;
     }
@@ -2070,7 +2071,7 @@ export function OrderDetailPage() {
   const repriceAction = orderActionWithUpgradeGuard(view, actionByCode.get("REPRICE_ORDER"));
   const repriceClosedByUpgrade = Boolean(repriceAction && !repriceAction.enabled
     && repriceAction.disabledReason === "STAY_MEMBERSHIP_UPGRADE_REPRICE_CLOSED");
-  const showLifecycleSeparator = actionVisible("CANCEL_ORDER") || actionVisible("MARK_NO_SHOW") || actionVisible("REVOKE_CHECK_IN");
+  const showLifecycleSeparator = actionVisible("CANCEL_ORDER") || actionVisible("MARK_NO_SHOW") || actionVisible("REVOKE_CHECK_IN") || actionVisible("REVOKE_CHECK_OUT");
   const visibleActionCodes: OrderActionCode[] = ([
     "RECORD_COLLECTION",
     "RECORD_REFUND",
@@ -2083,7 +2084,8 @@ export function OrderDetailPage() {
     "COMPLETE_STAY",
     "CANCEL_ORDER",
     "MARK_NO_SHOW",
-    "REVOKE_CHECK_IN"
+    "REVOKE_CHECK_IN",
+    "REVOKE_CHECK_OUT"
   ] as const).filter((code) => actionVisible(code)
     || (code === "RECORD_REFUND" && refundActionVisible)
     || (code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && convertActionVisible));
@@ -2150,6 +2152,7 @@ export function OrderDetailPage() {
             <OrderActionButton action={actionByCode.get("CANCEL_ORDER")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CANCEL_ORDER")} className="button button-secondary danger-button" onClick={() => openLifecycleAction("CANCEL_ORDER")}><XCircle aria-hidden="true" size={18} />取消订单</OrderActionButton>
             <OrderActionButton action={actionByCode.get("MARK_NO_SHOW")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("MARK_NO_SHOW")} className="button button-secondary danger-button" onClick={() => openLifecycleAction("MARK_NO_SHOW")}><UserX aria-hidden="true" size={18} />标记未到</OrderActionButton>
             <OrderActionButton action={actionByCode.get("REVOKE_CHECK_IN")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("REVOKE_CHECK_IN")} className="button button-secondary danger-button" onClick={() => openLifecycleAction("REVOKE_CHECK_IN")}><Undo2 aria-hidden="true" size={18} />撤销入住</OrderActionButton>
+            <OrderActionButton action={actionByCode.get("REVOKE_CHECK_OUT")} blocked={orderActionsBlocked} className="button button-secondary danger-button" onClick={() => openLifecycleAction("REVOKE_CHECK_OUT")} testId="revoke-check-out"><Undo2 aria-hidden="true" size={18} />撤销退房</OrderActionButton>
             {showOrderActionHelp ? <span className="action-help-hint"><InfoHint text="灰色按钮表示当前条件下暂不可用。" label="订单操作说明" /></span> : null}
             {enabledActions.size === 0 ? <span>当前没有可执行操作</span> : null}
           </div>

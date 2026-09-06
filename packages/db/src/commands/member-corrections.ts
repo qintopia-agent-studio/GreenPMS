@@ -409,6 +409,7 @@ async function buildProfileCorrection(db: DbExecutor, input: Record<string, unkn
   const expected = profileSnapshot(input, "expectedPriorProfile");
   const after = profileSnapshot(input, "correctedProfile");
   const linkedMembers = await db.selectFrom("members")
+    .where("members.deleted_at", "is", null)
     .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
     .selectAll("members")
     .select("member_property_links.property_id")
@@ -438,6 +439,7 @@ async function buildProfileCorrection(db: DbExecutor, input: Record<string, unkn
   const changedFields = fields.filter((field) => before[field] !== after[field]);
   if (changedFields.length === 0) throw new DomainError("VALIDATION_ERROR", "会员资料必须至少修改一项");
   const conflict = await db.selectFrom("members").select("id")
+    .where("deleted_at", "is", null)
     .where("phone", "=", after.phone).where("id", "!=", memberId).executeTakeFirst();
   if (conflict) throw new DomainError("VALIDATION_ERROR", "该手机号已属于另一位会员，不能合并或迁移会员资料", 409);
   const latest = await db.selectFrom("member_profile_corrections")
@@ -1213,7 +1215,7 @@ async function buildHistoricalBackfill(db: DbExecutor, input: Record<string, unk
   const transactionReference = requireTransactionReference(paymentInput.transactionReference);
   const note = typeof paymentInput.note === "string" ? paymentInput.note.trim() : "";
   const [member, product, property, propertyToday, blockingOrders, activeProjections, duplicateMembershipPayment, duplicateStayPayment] = await Promise.all([
-    db.selectFrom("members").innerJoin("member_property_links", "member_property_links.member_id", "members.id")
+    db.selectFrom("members").where("members.deleted_at", "is", null).innerJoin("member_property_links", "member_property_links.member_id", "members.id")
       .select(["members.id", "members.full_name"]).where("members.id", "=", memberId)
       .where("member_property_links.property_id", "=", propertyId).executeTakeFirst(),
     db.selectFrom("membership_products").selectAll().where("id", "=", membershipProductId)

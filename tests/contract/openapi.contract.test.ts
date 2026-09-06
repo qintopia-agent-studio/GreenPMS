@@ -108,6 +108,7 @@ const commandInputContract: Record<PublicCommandEnvelopeType, { required: string
   REVERSE_FACT: { required: ["propertyId", "orderId", "reversesFactId", "note"], properties: ["propertyId", "orderId", "reversesFactId", "note"] },
   CHECK_IN: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   CHECK_OUT: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
+  REVOKE_CHECK_OUT: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   COMPLETE_STAY: {
     required: ["propertyId", "orderId", "actualStayCompletedConfirmed", "reasonNote"],
     properties: ["propertyId", "orderId", "actualStayCompletedConfirmed", "reasonNote", "collection"]
@@ -1216,7 +1217,9 @@ describe("OpenAPI 3.1 command contract", () => {
     const errorSchema = document.paths["/api/v1/quotes"].post.responses["400"].content["application/json"].schema;
     expect(errorSchema.additionalProperties).toBe(false);
     const detailVariants = errorSchema.properties.details.anyOf as Array<{ required?: string[] }>;
-    expect(detailVariants).toHaveLength(17);
+    expect(detailVariants).toHaveLength(18);
+    expect(detailVariants.some((variant) => variant.required?.includes("serviceDate")
+      && variant.required.includes("inventoryUnitId"))).toBe(true);
     expect(detailVariants.some((variant) => variant.required?.includes("businessDate")
       && variant.required.includes("arrivalDate"))).toBe(true);
     expect(detailVariants.some((variant) => variant.required?.includes("businessDate")

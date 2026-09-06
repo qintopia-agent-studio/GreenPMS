@@ -34,6 +34,7 @@ export const ordinaryStaffCommandGrants = [
 
 export const administratorCommandGrants = [
   ...ordinaryStaffCommandGrants,
+  "REVOKE_CHECK_OUT",
   "CORRECT_ORDER_OCCUPANT",
   "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
   "CORRECT_MEMBER_PROFILE",

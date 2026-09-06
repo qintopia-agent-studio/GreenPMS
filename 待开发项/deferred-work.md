@@ -25,6 +25,10 @@
 - source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
   summary: 统一设计已取消、未到、撤销入住及已退房订单的受控事实纠错入口。
   evidence: 这些终态不可重开，已退房也不能重价；误操作、旧渠道资料缺失或终态金额录错时目前只能停留在错误事实，需另行定义审计、资金和库存补偿规则。
+- source_spec: `待开发项/QinTopia-PMS-分步开发与人工验收计划.md`
+  summary: 管理员撤销退房并恢复在住（2026-09-06 已实现，自动检查通过，待人工验收）。
+  implementation_spec: `待开发项/spec-revoke-checkout.md`
+  evidence: 已实现提前退房一次恢复原离店日、房费、权益和占房，保留真实收退款及原操作历史；仅管理员填写原因并二次确认，冲突整笔拒绝。TypeScript、1097 项单元、217 项相关集成/契约、4 项桌面/手机浏览器、production build 和独立验收库 readiness 通过，冲突提示已以真实 HTTP 回归验证。验收地址 http://127.0.0.1:4209/，三项合成样例及预期见主验收计划；原 4197 环境及其数据保留。未提交、推送或部署，撤销入住恢复预订仍待单独规则确认。
 - source_spec: `待开发项/spec-complete-overdue-reserved-stay.md`
   summary: 为历史回执结果增加命令级 discriminator，消除通用 Receipt schema 的结构重叠。
   evidence: `COMPLETE_STAY` 已强制 64 位效果哈希，但历史 `BACKFILL_COMPLETED_STAY` 仍需兼容读取无 hash 结果；若要由通用 Receipt schema 绝对区分，需要新增持久 metadata 并迁移历史读取契约。
@@ -35,7 +39,8 @@
   summary: 对生产 108、Cathy、晶晶及其他不满足永久管理员命令资格的切换期异常，实施固定目标的一次性数据过渡收口程序。
   evidence: 2026-09-03 已用只读生产快照确认三组真人记录分别存在仍在住合并住宿、身份或来源住宿事实不足等差异，不能通过放宽 9.3-9.5 通用状态机处理。程序必须在补齐权威事实后固定记录 ID 与预期版本，提供只读 dry-run、逐项 before/after、幂等键、单事务执行、审计、生产执行前重新 Preview 和执行后对账；不得演变为任意 SQL、万能管理员或永久 UI。
 - source_spec: `待开发项/QinTopia-PMS-运营主管受控纠错与房态异常修复-实施规格.md`
-  summary: 在 9.3-9.5 收口并部署后，单独实施 9.6 工作人员账号管理。
+  summary: 9.6 工作人员账号管理与误建会员删除（2026-09-06 已实现，待人工验收）。
+  implementation_spec: `待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md`
   evidence: 2026-09-04 用户确认先完成并上线 9.3-9.5，再讨论 9.6。管理员页面应支持受控创建账号、设置初始密码、停用账号和撤销会话；停用后保留历史操作者身份与审计。仅对误建且从未登录、从未产生任何操作记录的空账号评估真正删除；不得删除历史责任链、停用最后一个管理员或通过账号管理获得数据库权限。
 - source_spec: `待开发项/QinTopia-PMS-运营主管受控纠错与房态异常修复-实施规格.md`
   summary: 修复 9.2 受限数据库运行身份导致的既有命令兼容性回归，并完成最小定向审查与发布硬门禁。

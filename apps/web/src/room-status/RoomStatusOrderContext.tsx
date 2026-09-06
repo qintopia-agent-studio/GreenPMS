@@ -16,6 +16,7 @@ const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], strin
   CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
   CHECK_IN: "办理入住",
   CHECK_OUT: "办理退房",
+  REVOKE_CHECK_OUT: "撤销退房",
   COMPLETE_STAY: "完成住宿",
   RESCHEDULE_STAY: "调整住宿日期",
   SHORTEN_STAY: "缩短住宿",
@@ -45,6 +46,7 @@ const arrangementChangeLabels: Record<OrderViewDto["arrangementHistory"][number]
   SHORTENING: "缩短住宿",
   MOVE: "换房",
   EARLY_CHECK_OUT: "提前退房",
+  CHECK_OUT_REVOCATION: "撤销退房",
   HISTORICAL_STAY_CORRECTION: "历史修改"
 };
 
@@ -243,13 +245,13 @@ export function RoomStatusOrderContext({
     : undefined;
   const moveUnitEnabled = enabledActions.some((action) => action.code === "MOVE_UNIT");
   const lifecycleActions = enabledActions.filter((action): action is typeof action & { code: OrderLifecycleAction } => (
-    action.code === "CANCEL_ORDER" || action.code === "MARK_NO_SHOW" || action.code === "REVOKE_CHECK_IN"
+    action.code === "CANCEL_ORDER" || action.code === "MARK_NO_SHOW" || action.code === "REVOKE_CHECK_IN" || action.code === "REVOKE_CHECK_OUT"
   ));
   const routedActions = enabledActions.filter((action) => (
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
       && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY" && action.code !== "SHORTEN_STAY"
       && action.code !== "MOVE_UNIT" && action.code !== "CANCEL_ORDER" && action.code !== "MARK_NO_SHOW"
-      && action.code !== "REVOKE_CHECK_IN" && action.code !== "REVERSE_FACT"
+      && action.code !== "REVOKE_CHECK_IN" && action.code !== "REVOKE_CHECK_OUT" && action.code !== "REVERSE_FACT"
       && action.code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
   ));
   const dateActionBlockedReasons = [...new Set(dateActionStates

@@ -1,4 +1,5 @@
 import { sql } from "kysely";
+import { buildCheckoutReversalEffect } from "./checkout-reversal.ts";
 import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandCapability, type CommandCatalogType, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType, type StoredQuoteDto, type TemporaryOtherRoomArrangementDto } from "@qintopia/contracts";
 import {
   amountSummary,
@@ -1038,6 +1039,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       wechat: requireString(input, "wechat")
     };
     const existingMember = await db.selectFrom("members").selectAll()
+      .where("deleted_at", "is", null)
       .where("phone", "=", member.phone)
       .executeTakeFirst();
     if (existingMember) {
@@ -1060,6 +1062,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const agreedPriceMinor = requireNonNegativeWholeYuanMinor(input, "agreedPriceMinor");
     const adjustmentReason = optionalString(input, "priceAdjustmentReason");
     const member = await db.selectFrom("members")
+      .where("members.deleted_at", "is", null)
       .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
       .select(["members.id", "members.full_name"])
       .where("members.id", "=", memberId)
@@ -1816,6 +1819,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 
   const orderId = requireString(input, "orderId");
   const context = await loadOrderContextForProperty(db, propertyId, orderId);
+  if (commandType === "REVOKE_CHECK_OUT") return buildCheckoutReversalEffect(db, context);
   const temporaryOtherRoomEvidence = await loadTemporaryOtherRoomCreateEvidence(db, orderId);
   if (temporaryOtherRoomEvidence && temporaryOtherRoomBlockedOrderCommands.has(commandType)) {
     rejectTemporaryOtherRoomLifecycleChange();
@@ -1872,6 +1876,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 
     const [member, memberPropertyLinks, product] = await Promise.all([
       db.selectFrom("members")
+        .where("members.deleted_at", "is", null)
         .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
         .select(["members.id", "members.full_name", "members.phone"])
         .where("members.id", "=", memberId)
@@ -2294,11 +2299,18 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
       }
     }
     const timelineByDate = new Map(currentTimeline.map((item) => [item.serviceDate, item.inventoryUnitId]));
-    const latestShortening = await db.selectFrom("amendments")
-      .select("payload")
-      .where("order_id", "=", orderId)
-      .where("amendment_type", "=", "SHORTEN_STAY")
-      .orderBy("sequence", "desc")
+    const latestShortening = await db.selectFrom("amendments as shortening")
+      .select("shortening.payload")
+      .where("shortening.order_id", "=", orderId)
+      .where("shortening.amendment_type", "=", "SHORTEN_STAY")
+      .where(sql<boolean>`not exists (
+        select 1 from amendments as checkout join amendments as reversal
+          on reversal.payload ->> 'checkoutAmendmentId' = checkout.id
+          and reversal.amendment_type = 'REVOKE_CHECK_OUT'
+        where checkout.command_id = shortening.command_id and checkout.amendment_type = 'CHECK_OUT'
+          and checkout.sequence = shortening.sequence + 1
+      )`)
+      .orderBy("shortening.sequence", "desc")
       .executeTakeFirst();
     const previousEntitlementSummary = latestShortening?.payload
       && typeof latestShortening.payload === "object"

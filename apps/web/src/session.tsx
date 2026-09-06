@@ -184,7 +184,8 @@ const navigation = [
   { to: "/orders", label: "订单", icon: ClipboardList, end: false },
   { to: "/members", label: "会员", icon: BadgeCheck, end: false },
   { to: "/tokens", label: "Token", icon: KeyRound, end: false, requiresTokenManagement: true },
-  { to: "/today", label: "今日履约", icon: Smartphone, end: false }
+  { to: "/today", label: "今日履约", icon: Smartphone, end: false },
+  { to: "/accounts", label: "账号", icon: UserRound, end: false }
 ] as const;
 
 const tokenManagementCommands = new Set<CommandCapability>(["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"]);

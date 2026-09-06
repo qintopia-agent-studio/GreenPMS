@@ -98,6 +98,7 @@ function isExecutableCommandType(commandType: string): commandType is Executable
 }
 
 const roomStatusVisibleCommands = new Set<CommandType>([
+  "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
   "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
@@ -130,6 +131,7 @@ const createOrderConfirmationReasonCodes = new Set([
 ]);
 
 const strictRecoveryEvidenceCommands = new Set<CommandType>([
+  "REVOKE_CHECK_OUT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",

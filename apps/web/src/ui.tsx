@@ -756,6 +756,7 @@ export const commandCapabilityBusinessLabels: Record<CommandCapability, string> 
   CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: "升级会员",
   CHECK_IN: "办理入住",
   CHECK_OUT: "办理退房",
+  REVOKE_CHECK_OUT: "撤销退房",
   COMPLETE_STAY: "完成住宿",
   REFRESH_MEMBER_COVERAGE: "刷新会员住宿覆盖",
   ADD_MEMBER_ENTITLEMENT_LOT: "增加会员权益",
@@ -2341,6 +2342,8 @@ export function u1PreviewHasBusinessEvidence(
           : (pricingDecision && hasMoney(pricingDecision.policyBaseAmount) && hasMoney(pricingDecision.targetCurrentContractAmount))
             || (pricing && (hasMoney(pricing.currentContractAmount) || hasMoney(pricing.cashRemainder))))
         && temporaryOtherRoomCreatePreviewEvidenceIsValid(effect, input));
+    case "REVOKE_CHECK_OUT":
+      return checkoutReversalPreviewHasEvidence(effect, input);
     case "CREATE_MEMBER":
       return Boolean(member
         && nonblankString(member.fullName)
@@ -2801,6 +2804,27 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
   const effect = preview.effect;
   const before = isRecord(effect.before) ? effect.before : undefined;
   const after = isRecord(effect.after) ? effect.after : undefined;
+  if (businessCommand === "REVOKE_CHECK_OUT") {
+    const funds = isRecord(effect.fundsSummary) ? effect.fundsSummary : {};
+    if (!checkoutReversalPreviewHasEvidence(effect, commandInput ?? {})) {
+      return <InlineError title="核对信息不完整" error={new Error("无法核对原住宿安排，请重新加载。")}/>;
+    }
+    const labels = [...new Set((after!.stayTimeline as Array<{ inventoryUnitId: string }>).map((item) => inventoryUnitLabels?.[item.inventoryUnitId] ?? "原住宿房源"))];
+    return <div className="effect-summary" data-testid="command-effect"><section className="effect-section">
+      <dl className="difference-grid">
+        {orderLifecycleContext ? <><dt>住客</dt><dd>{orderLifecycleContext.guestName}</dd></> : null}
+        <dt>住宿状态</dt><dd>已退房 → <strong>在住</strong></dd>
+        <dt>撤销前退房日</dt><dd>{formatDate(String(before!.departureDate))}</dd>
+        <dt>恢复住宿日期</dt><dd><strong>{formatDate(String(after!.arrivalDate))} 至 {formatDate(String(after!.departureDate))}</strong></dd>
+        <dt>恢复占房</dt><dd>{labels.join("、")}</dd>
+        <dt>恢复后房费</dt><dd>{formatMoney(moneyFrom(after!.currentContractAmount)!)}</dd>
+        <dt>已登记净收款</dt><dd>{formatMoney(moneyFrom(funds.netRecordedCollection)!)}</dd>
+        <dt>应收与实收差额</dt><dd>{formatMoney(moneyFrom(funds.collectionDifference)!)}</dd>
+        <dt>重新核销权益</dt><dd>{(effect.entitlementReconsumeDates as string[]).length} 晚</dd>
+        <dt>撤销原因</dt><dd>{reasonNote}</dd>
+      </dl><p className="muted compact">原收退款及退房历史保留，本次不自动收款或退款。</p>
+    </section></div>;
+  }
   const pricing = pricingFromEffect(effect);
   const createPricingDecision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
   const inventoryUnit = isRecord(effect.inventoryUnit) ? effect.inventoryUnit : undefined;
@@ -4000,6 +4024,20 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
   const differenceFromPolicy = result ? moneyFrom(pricingDecision?.differenceFromPolicy) : undefined;
   const pricingReason = pricingDecision && isRecord(pricingDecision.reason) ? pricingDecision.reason : undefined;
   const committed = receipt.businessCommitted;
+  if (businessCommand === "REVOKE_CHECK_OUT") {
+    const restored = result && isRecord(result.after) ? result.after : undefined;
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row"><span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div><h3 id="receipt-heading">{committed ? "退房已撤销" : "退房未撤销"}</h3>
+          <p>{committed ? "订单已恢复在住，原收退款和退房历史保留。" : receipt.error?.message ?? "住宿安排未变更。"}</p></div>
+      </div>
+      {committed && restored ? <dl className="receipt-grid">
+        <dt>恢复住宿日期</dt><dd>{formatDate(String(restored.arrivalDate))} 至 {formatDate(String(restored.departureDate))}</dd>
+        <dt>恢复后房费</dt><dd>{formatMoney(moneyFrom(restored.currentContractAmount))}</dd>
+      </dl> : null}
+      {committed && orderId ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
+    </section>;
+  }
   if (backfillStay && commandType === "CREATE_ORDER") {
     const backfillResult = result && isRecord(result.backfill) ? result.backfill : undefined;
     const inHouse = result?.status === "CHECKED_IN" || backfillResult?.checkOutAmendmentId === null;
@@ -4538,6 +4576,7 @@ function recoveryRequiresEffectHash(
     || presentation === "MOVE_UNIT"
     || presentation === "ORDER_LIFECYCLE"
     || commandType === "CORRECT_ORDER_OCCUPANT"
+    || commandType === "REVOKE_CHECK_OUT"
     || commandType === "CHECK_IN"
     || commandType === "CHECK_OUT"
     || commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
@@ -5281,6 +5320,35 @@ function temporaryOtherRoomCommittedReceiptHasEvidence(
     && temporaryOtherRoomLifecycleEvidenceMatches(result, previewEffect);
 }
 
+export function checkoutReversalPreviewHasEvidence(effect: Record<string, unknown>, input: Record<string, unknown>): boolean {
+  const before = isRecord(effect.before) ? effect.before : undefined;
+  const after = isRecord(effect.after) ? effect.after : undefined;
+  const funds = isRecord(effect.fundsSummary) ? effect.fundsSummary : undefined;
+  if (!before || !after || !funds || typeof after.arrivalDate !== "string" || typeof after.departureDate !== "string") return false;
+  const dates = localDateRange(after.arrivalDate, after.departureDate);
+  const reconsumeDates = exactDateList(effect.entitlementReconsumeDates);
+  const amount = after.currentContractAmount;
+  const net = funds.netRecordedCollection;
+  const difference = funds.collectionDifference;
+  const refund = funds.refundReferenceAmount;
+  return effect.operation === "REVOKE_CHECK_OUT" && effect.orderId === input.orderId && nonblankString(effect.orderId)
+    && effect.fromStatus === "CHECKED_OUT" && effect.toStatus === "CHECKED_IN"
+    && nonblankString(effect.checkoutAmendmentId) && nonblankString(effect.sourceRevisionId)
+    && Number.isSafeInteger(effect.checkoutSequence) && Number(effect.checkoutSequence) > 0
+    && (effect.mode === "UNDO_CHECK_OUT" || effect.mode === "UNDO_EARLY_CHECK_OUT")
+    && localDateEpoch(effect.businessDate) !== undefined && before.arrivalDate === after.arrivalDate
+    && localDateEpoch(before.departureDate) !== undefined && String(before.departureDate) <= after.departureDate
+    && (effect.mode !== "UNDO_CHECK_OUT" || before.departureDate === after.departureDate)
+    && hasMoney(before.currentContractAmount) && hasMoney(amount) && amount.minorUnits >= 0
+    && hasMoney(net) && hasMoney(difference) && hasMoney(refund)
+    && [before.currentContractAmount, net, difference, refund].every((money) => money.currency === amount.currency)
+    && difference.minorUnits === amount.minorUnits - net.minorUnits
+    && refund.minorUnits === Math.max(0, net.minorUnits - amount.minorUnits)
+    && Boolean(dates && Array.isArray(after.stayTimeline) && after.stayTimeline.length === dates.length
+      && after.stayTimeline.every((item, index) => isRecord(item) && item.serviceDate === dates[index] && nonblankString(item.inventoryUnitId)))
+    && Boolean(reconsumeDates && reconsumeDates.every((date) => dates?.includes(date)));
+}
+
 export function receiptHasCommandEvidence(
   commandType: HistoricalCommandType,
   receipt: ReceiptDto,
@@ -5289,6 +5357,14 @@ export function receiptHasCommandEvidence(
   expectedEffectHash?: string
 ): boolean {
   if (!receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
+  if (commandType === "REVOKE_CHECK_OUT" && receipt.businessCommitted) {
+    const result = isRecord(receipt.result) ? receipt.result : undefined;
+    if (!result || !checkoutReversalPreviewHasEvidence(result, input) || result.status !== "CHECKED_IN"
+      || !isEffectHash(result.effectHash) || result.effectHash !== expectedEffectHash
+      || ![result.orderId, result.stayId, result.amendmentId, result.staySegmentId, result.pricingRevisionId]
+        .every((value) => nonblankString(value) && receipt.resourceRefs.includes(value))) return false;
+    return !previewEffect || Object.entries(previewEffect).every(([key, value]) => evidenceValuesEqual(value, result[key]));
+  }
   if ((commandType === "CREATE_ORDER"
     || commandType === "CORRECT_ORDER_OCCUPANT"
     || commandType === "CHECK_IN"
@@ -6608,6 +6684,7 @@ export function CommandDialog({
     && !confirmationKey
     && (!u1CommandType || u1PreviewHasBusinessEvidence(u1CommandType, preview.effect, request.input))
     && (!historicalStayCorrection || historicalStayCorrectionPreviewHasEvidence(preview.effect, request.input))
+    && (request.commandType !== "REVOKE_CHECK_OUT" || checkoutReversalPreviewHasEvidence(preview.effect, request.input))
     && (!administratorMembershipCorrection || (executableCommandType && administratorMembershipPreviewHasEvidence(executableCommandType, preview.effect, request.input)))
     && (!backfillStay || completedStayBackfillPreviewHasEvidence(preview.effect, request.input))
     && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));

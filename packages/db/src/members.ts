@@ -143,6 +143,7 @@ export function projectMemberViewForRead<T extends { profileCorrections: readonl
 export async function getMemberView(db: DbExecutor, propertyId: string, memberId: string) {
   const balanceAsOfDate = await propertyLocalToday(db, propertyId);
   const member = await db.selectFrom("members")
+    .where("members.deleted_at", "is", null)
     .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
     .selectAll("members")
     .where("members.id", "=", memberId)
@@ -333,6 +334,7 @@ function escapeLikePattern(value: string): string {
 
 export async function listMemberSummaries(db: DbExecutor, propertyId: string, query?: string) {
   let selection = db.selectFrom("members")
+    .where("members.deleted_at", "is", null)
     .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
     .selectAll("members")
     .where("member_property_links.property_id", "=", propertyId);
