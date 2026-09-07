@@ -14,6 +14,7 @@ import {
   Sparkles,
   Undo2,
   UserX,
+  UserPlus,
   XCircle
 } from "lucide-react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -33,6 +34,7 @@ import { accommodationPositionItems, type AccommodationPositionItem } from "../c
 import { roomStatusRoomTypeLabel } from "../room-status/roomStatusPresentation";
 import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
+import { OrderCompanionDialog } from "../components/OrderCompanionDialog";
 import { MoveUnitDrawer } from "../components/MoveUnitDrawer";
 import {
   OrderLifecycleActionDrawer,
@@ -1737,6 +1739,7 @@ export function OrderDetailPage() {
   const [lifecycleAction, setLifecycleAction] = useState<OrderLifecycleAction>();
   const [stayDateMode, setStayDateMode] = useState<StayDateChangeMode>("DATE_CHANGE");
   const [correctingOccupant, setCorrectingOccupant] = useState<OrderOccupant>();
+  const [companionAction, setCompanionAction] = useState<{ occupantId?: string }>();
   const [pendingStayMembershipUpgrade, setPendingStayMembershipUpgrade] = useState<StayMembershipUpgradeIntent>();
   const [initialFactId, setInitialFactId] = useState<string>();
   const [command, setCommand] = useState<CommandRequest>();
@@ -1749,7 +1752,7 @@ export function OrderDetailPage() {
   const editorIsOpenRef = useRef(false);
   const focusedActionKeyRef = useRef<string | undefined>(undefined);
 
-  editorIsOpenRef.current = Boolean(formAction || completeStayAction || stayDateAction || movingUnit || convertingToMembership || correctingOccupant || lifecycleAction);
+  editorIsOpenRef.current = Boolean(formAction || completeStayAction || stayDateAction || movingUnit || convertingToMembership || correctingOccupant || companionAction || lifecycleAction);
 
   const pendingRecovery = commandRecovery.pending;
   const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, pendingRecovery?.commandType);
@@ -1771,6 +1774,7 @@ export function OrderDetailPage() {
     setLifecycleAction(undefined);
     setStayDateMode("DATE_CHANGE");
     setCorrectingOccupant(undefined);
+    setCompanionAction(undefined);
     setPendingStayMembershipUpgrade(undefined);
     setInitialFactId(undefined);
     setCommand(undefined);
@@ -1960,6 +1964,10 @@ export function OrderDetailPage() {
 
   function returnCommandToEdit(request: CommandRequest) {
     setCommandDraft(request);
+    if (request.commandType === "MANAGE_ORDER_OCCUPANTS") {
+      setCompanionAction(typeof request.input.occupantId === "string" ? { occupantId: request.input.occupantId } : {});
+      return;
+    }
     if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN" || request.commandType === "REVOKE_CHECK_OUT") {
       setLifecycleAction(request.commandType);
       return;
@@ -2161,7 +2169,7 @@ export function OrderDetailPage() {
 
       <div className="detail-grid">
         <section className="detail-section order-occupants-section" aria-labelledby="guest-snapshot-heading">
-          <div className="section-title-row"><h2 id="guest-snapshot-heading">住宿人</h2><span>{occupants.length} 人</span></div>
+          <div className="section-title-row"><h2 id="guest-snapshot-heading">住宿人</h2><span>{occupants.length} 人</span>{enabledActions.has("MANAGE_ORDER_OCCUPANTS") ? <button type="button" className="button button-secondary" disabled={orderActionsBlocked} data-order-action="MANAGE_ORDER_OCCUPANTS" onClick={() => setCompanionAction({})}><UserPlus aria-hidden="true" size={16} />添加同住人</button> : null}</div>
           <ol className="order-occupant-list">
             {occupants.map((occupant) => (
               <li key={occupant.id} data-occupant-id={occupant.id} data-testid="order-occupant">
@@ -2169,6 +2177,7 @@ export function OrderDetailPage() {
                   <span className="order-occupant-role">{occupant.role === "PRIMARY" ? "主要联系人" : `同行人 ${occupant.ordinal - 1}`}</span>
                   <strong>{occupant.nickname?.trim() || "历史未记录"}</strong>
                   {enabledActions.has("CORRECT_ORDER_OCCUPANT") ? <button className="button button-secondary" type="button" onClick={() => setCorrectingOccupant(occupant)} disabled={orderActionsBlocked} data-order-action="CORRECT_ORDER_OCCUPANT" data-testid={`correct-occupant-${occupant.id}`}><Pencil aria-hidden="true" size={16} />更正资料</button> : null}
+                  {occupant.role === "ADDITIONAL" && enabledActions.has("MANAGE_ORDER_OCCUPANTS") ? <button className="button button-secondary" type="button" disabled={orderActionsBlocked} onClick={() => setCompanionAction({ occupantId: occupant.id })}><UserX aria-hidden="true" size={16} />撤销登记</button> : null}
                 </div>
                 <dl className="detail-list">{occupantSnapshotEntries(occupant).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}</dl>
               </li>
@@ -2184,6 +2193,15 @@ export function OrderDetailPage() {
         showPerOrderFunds={showPerOrderFunds}
         channelPriceDifferenceReason={currentPricingRevision?.reason.note}
       />
+
+      {view.amendments.some((amendment) => amendment.amendment_type === "MANAGE_ORDER_OCCUPANTS") ? <section className="detail-section full-detail" aria-labelledby="companion-history-heading">
+        <div className="section-title-row"><h2 id="companion-history-heading">同住人登记记录</h2></div>
+        <div className="amendment-list">{view.amendments.filter((amendment) => amendment.amendment_type === "MANAGE_ORDER_OCCUPANTS").map((amendment) => {
+          const payload = amendment.payload as Record<string, unknown>;
+          const person = payload.guest as { nickname?: string; fullName?: string } | undefined;
+          return <article key={amendment.id}><div><strong>{payload.action === "ADD" ? "添加同住人" : "撤销登记"} · {person?.nickname || person?.fullName}</strong><span>{amendment.actor?.displayName ?? "工作人员"} · {formatDateTime(amendment.created_at)}</span><p>{amendment.reason_note}</p></div><div className="companion-history-summary"><span>{String(payload.beforeCount)} 人 → {String(payload.afterCount)} 人</span><span>{formatDate(String(payload.arrivalDate))} 至 {formatDate(String(payload.departureDate))}</span></div></article>;
+        })}</div>
+      </section> : null}
 
       <TemporaryOtherRoomArrangementHistory view={view} inventoryUnits={orderInventoryUnits} />
 
@@ -2286,6 +2304,19 @@ export function OrderDetailPage() {
         onSubmit={(request) => {
           if (orderActionsBlocked || !enabledActions.has("MOVE_UNIT")) return;
           setMovingUnit(false);
+          setCommandDraft(undefined);
+          setRecoveryDialogOpen(false);
+          setCommand(request);
+        }}
+      /> : null}
+      {companionAction ? <OrderCompanionDialog
+        view={view}
+        {...companionAction}
+        {...(commandDraft?.commandType === "MANAGE_ORDER_OCCUPANTS" ? { draft: commandDraft } : {})}
+        onClose={() => { setCompanionAction(undefined); setCommandDraft(undefined); }}
+        onSubmit={(request) => {
+          if (orderActionsBlocked || !enabledActions.has("MANAGE_ORDER_OCCUPANTS")) return;
+          setCompanionAction(undefined);
           setCommandDraft(undefined);
           setRecoveryDialogOpen(false);
           setCommand(request);

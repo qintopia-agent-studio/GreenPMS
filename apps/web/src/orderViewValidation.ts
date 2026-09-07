@@ -859,7 +859,14 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     ]);
     stringValue(correction.id, `occupantCorrections[${index}].id`);
     if (stringValue(correction.orderId, `occupantCorrections[${index}].orderId`) !== order.id) fail(`occupantCorrections[${index}].orderId`, "与订单不一致");
-    if (!occupantIds.has(stringValue(correction.occupantId, `occupantCorrections[${index}].occupantId`))) fail(`occupantCorrections[${index}].occupantId`, "没有对应住宿人");
+    const correctedOccupantId = stringValue(correction.occupantId, `occupantCorrections[${index}].occupantId`);
+    const removed = arrayValue(result.amendments, "amendments").some((item) => {
+      const amendment = record(item, "amendments[companion]");
+      if (amendment.amendment_type !== "MANAGE_ORDER_OCCUPANTS") return false;
+      const payload = record(amendment.payload, "amendments[companion].payload");
+      return payload.action === "REMOVE" && payload.occupantId === correctedOccupantId && payload.orderId === order.id;
+    });
+    if (!occupantIds.has(correctedOccupantId) && !removed) fail(`occupantCorrections[${index}].occupantId`, "没有对应住宿人或撤销登记记录");
     safeInteger(correction.sequence, `occupantCorrections[${index}].sequence`, 1);
     if (!nullableActor(correction.actor, `occupantCorrections[${index}].actor`)) fail(`occupantCorrections[${index}].actor`, "必须包含工作人员");
     occupantSnapshot(correction.priorSnapshot, `occupantCorrections[${index}].priorSnapshot`);

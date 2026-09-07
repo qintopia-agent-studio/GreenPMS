@@ -503,6 +503,10 @@ export const CommandEnvelopeSchema = Type.Union([
     expectedPriorSnapshot: OrderOccupantPriorSnapshotSchema,
     correctedSnapshot: OrderOccupantCorrectedSnapshotSchema
   })),
+  commandEnvelope("MANAGE_ORDER_OCCUPANTS", strictObject({
+    ...OrderInput, action: Type.Union([Type.Literal("ADD"), Type.Literal("REMOVE")]),
+    guest: Type.Optional(OrderOccupantCorrectedSnapshotSchema), occupantId: Type.Optional(Id)
+  })),
   commandEnvelope("RESCHEDULE_STAY", strictObject({
     ...OrderInput,
     newArrivalDate: LocalDate,
@@ -1197,6 +1201,20 @@ export const CommandEffectSchema = Type.Union([
     before: OrderOccupantPriorSnapshotSchema,
     after: OrderOccupantCorrectedSnapshotSchema,
     ...TemporaryOtherRoomLifecycleEvidenceFields
+  }),
+  strictObject({
+    operation: Type.Literal("MANAGE_ORDER_OCCUPANTS"),
+    ...TemporaryOtherRoomLifecycleEvidenceFields,
+    action: Type.Union([Type.Literal("ADD"), Type.Literal("REMOVE")]),
+    orderId: Id,
+    occupantId: Id,
+    ordinal: Type.Integer({ minimum: 2 }),
+    guest: OrderOccupantPriorSnapshotSchema,
+    arrivalDate: LocalDate,
+    departureDate: LocalDate,
+    beforeCount: Type.Integer({ minimum: 1 }),
+    afterCount: Type.Integer({ minimum: 1 }),
+    occupancyCapacity: Type.Integer({ minimum: 1 })
   }),
   strictObject({ inventoryUnit: InventoryUnitRecordSchema, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note }),
   strictObject({ maintenanceLockId: Id, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate }),
@@ -2146,6 +2164,14 @@ const MembershipVoidReconvertedResultSchema = strictObject({
 });
 
 export const ExecutedCommandResultSchema = Type.Union([
+  strictObject({ operation: Type.Literal("MANAGE_ORDER_OCCUPANTS"),
+    ...TemporaryOtherRoomLifecycleEvidenceFields,
+    action: Type.Union([Type.Literal("ADD"), Type.Literal("REMOVE")]),
+    orderId: Id, occupantId: Id, ordinal: Type.Integer({ minimum: 2 }),
+    guest: OrderOccupantPriorSnapshotSchema, arrivalDate: LocalDate, departureDate: LocalDate,
+    beforeCount: Type.Integer({ minimum: 1 }), afterCount: Type.Integer({ minimum: 1 }),
+    occupancyCapacity: Type.Integer({ minimum: 1 }), amendmentId: Id, removalId: nullable(Id),
+    effectHash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
   strictObject({ ...RevokeCheckOutEffectSchema.properties, stayId: Id, amendmentId: Id,
     staySegmentId: Id, pricingRevisionId: Id, status: Type.Literal("CHECKED_IN"),
     effectHash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),

@@ -11,6 +11,7 @@ export const u1CommandTypes = [
   "LOCK_MAINTENANCE",
   "RELEASE_MAINTENANCE",
   "CORRECT_ORDER_OCCUPANT",
+  "MANAGE_ORDER_OCCUPANTS",
   "REPRICE_ORDER",
   "CHECK_IN",
   "CHECK_OUT",
@@ -142,6 +143,7 @@ export function commandShellSuccessMessage(commandType: U1CommandType): string {
     case "LOCK_MAINTENANCE": return "维修锁房已设置，房态已刷新。";
     case "RELEASE_MAINTENANCE": return "维修锁房已释放，房态已刷新。";
     case "CORRECT_ORDER_OCCUPANT": return "住宿人资料已更正，订单信息已刷新。";
+    case "MANAGE_ORDER_OCCUPANTS": return "同住人登记已更新，订单人数已刷新。";
     case "REPRICE_ORDER": return "订单金额已调整，订单信息已刷新。";
     case "CHECK_IN": return "办理入住已完成，住宿状态已刷新。";
     case "CHECK_OUT": return "办理退房已完成，住宿状态已刷新。";
@@ -169,6 +171,7 @@ export function commandShellLabel(commandType: U1CommandType): string {
     case "LOCK_MAINTENANCE": return "设置维修锁房";
     case "RELEASE_MAINTENANCE": return "释放维修锁房";
     case "CORRECT_ORDER_OCCUPANT": return "更正住宿人资料";
+    case "MANAGE_ORDER_OCCUPANTS": return "管理同住人";
     case "REPRICE_ORDER": return "调整订单金额";
     case "CHECK_IN": return "办理入住";
     case "CHECK_OUT": return "办理退房";

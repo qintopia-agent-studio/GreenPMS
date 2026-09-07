@@ -1,5 +1,6 @@
 import { sql, type Transaction } from "kysely";
 import { applyCheckoutReversal, lockCheckoutReversalInventory } from "./checkout-reversal.ts";
+import { applyCompanionEffect } from "./companions.ts";
 import {
   createOrderPricingBasisCodes,
   currentReleaseFeatures,
@@ -497,6 +498,14 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
 
   if (commandType === "REVOKE_CHECK_OUT") {
     await lockCheckoutReversalInventory(trx, context);
+    return;
+  }
+  if (commandType === "MANAGE_ORDER_OCCUPANTS") {
+    if (!["RESERVED", "CHECKED_IN"].includes(context.order.status)) return;
+    const timeline = await loadActiveStayTimeline(trx, context);
+    await trx.selectFrom("inventory_units").select("id")
+      .where("id", "in", [...new Set(timeline.map((day) => day.inventoryUnitId))].sort())
+      .orderBy("id").forShare().execute();
     return;
   }
   if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"].includes(commandType)) {
@@ -1369,6 +1378,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
 
   const orderId = requireString(effect, "orderId");
   const context = await loadLockedOrderContextForProperty(trx, propertyId, orderId);
+
+  if (options.commandType === "MANAGE_ORDER_OCCUPANTS") return applyCompanionEffect(trx, context, effect, options);
 
   if (options.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
     if (requireString(effect, "operation") !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {

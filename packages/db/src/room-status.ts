@@ -293,7 +293,7 @@ async function loadProjectedOccupants(
 ): Promise<Map<string, RoomStatusOccupantDto[]>> {
   if (orderIds.length === 0) return new Map();
   const [rows, corrections] = await Promise.all([
-    trx.selectFrom("order_occupants")
+    trx.selectFrom("active_order_occupants")
       .select(["id", "order_id", "nickname", "ordinal"])
       .where("order_id", "in", [...orderIds])
       .orderBy("order_id")

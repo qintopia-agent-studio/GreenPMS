@@ -14,6 +14,7 @@ type OrderOccupant = OrderViewDto["occupants"][number];
 
 const actionLabels: Record<OrderViewDto["allowedActions"][number]["code"], string> = {
   CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
+  MANAGE_ORDER_OCCUPANTS: "管理同住人",
   CHECK_IN: "办理入住",
   CHECK_OUT: "办理退房",
   REVOKE_CHECK_OUT: "撤销退房",

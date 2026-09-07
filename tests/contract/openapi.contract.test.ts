@@ -20,6 +20,7 @@ const publicCommandEnvelopeTypes = commandTypes.filter((commandType): commandTyp
 );
 
 const commandInputContract: Record<PublicCommandEnvelopeType, { required: string[]; properties: string[] }> = {
+  MANAGE_ORDER_OCCUPANTS: { required: ["propertyId", "orderId", "action"], properties: ["propertyId", "orderId", "action", "guest", "occupantId"] },
   CREATE_MEMBER: {
     required: ["propertyId", "fullName", "nickname", "phone", "wechat"],
     properties: ["propertyId", "fullName", "nickname", "identityCardNumber", "phone", "wechat"]

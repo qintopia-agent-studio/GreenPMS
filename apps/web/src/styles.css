@@ -434,6 +434,12 @@ textarea:focus-visible {
   padding: 2px 6px;
 }
 
+.sidebar-brand-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .sidebar-brand-compact {
   display: none;
 }
@@ -487,15 +493,22 @@ textarea:focus-visible {
 
 .application-version {
   align-self: flex-start;
-  padding: 8px 6px;
+  margin-left: 6px;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 20px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 14px;
+  text-decoration: none;
   white-space: nowrap;
 }
 
+.application-version:hover {
+  color: var(--brand);
+  text-decoration: underline;
+}
+
 .sidebar-is-collapsed .application-version {
-  padding-inline: 0;
+  margin-left: 0;
   align-self: center;
 }
 
@@ -3683,6 +3696,7 @@ pre {
 
 .order-occupant-heading {
   display: flex;
+  flex-wrap: wrap;
   min-width: 0;
   align-items: baseline;
   gap: 10px;
@@ -3704,6 +3718,12 @@ pre {
 
 .order-occupant-heading .button {
   margin-left: auto;
+}
+
+.companion-history-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
 }
 
 .full-detail {
@@ -4109,8 +4129,9 @@ pre {
 
   .application-version,
   .sidebar-is-collapsed .application-version {
-    margin-left: auto;
-    padding: 8px 0 8px 12px;
+    align-self: flex-start;
+    margin-left: 0;
+    line-height: 12px;
   }
 
   .sidebar-brand-row,

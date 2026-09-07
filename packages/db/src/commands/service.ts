@@ -101,6 +101,7 @@ const roomStatusVisibleCommands = new Set<CommandType>([
   "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
+  "MANAGE_ORDER_OCCUPANTS",
   "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
   "RESCHEDULE_STAY",
   "SHORTEN_STAY",
@@ -131,6 +132,7 @@ const createOrderConfirmationReasonCodes = new Set([
 ]);
 
 const strictRecoveryEvidenceCommands = new Set<CommandType>([
+  "MANAGE_ORDER_OCCUPANTS",
   "REVOKE_CHECK_OUT",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
@@ -1957,6 +1959,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
               || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
               || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
               || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
+              || (commandType === "MANAGE_ORDER_OCCUPANTS" && ["VALIDATION_ERROR", "NOT_FOUND"].includes(error.code))
               || (commandType === "COMPLETE_STAY" && error.code === "VALIDATION_ERROR")
               || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
               || (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" && error.code === "VALIDATION_ERROR")

@@ -491,6 +491,7 @@ export function orderAllowedActions(
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
     CORRECT_ORDER_OCCUPANT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
+    MANAGE_ORDER_OCCUPANTS: ["RESERVED", "CHECKED_IN"],
     CHECK_IN: ["RESERVED"],
     CHECK_OUT: ["CHECKED_IN"],
     REVOKE_CHECK_OUT: ["CHECKED_OUT"],
@@ -805,6 +806,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
   "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
+  "MANAGE_ORDER_OCCUPANTS",
   "RESCHEDULE_STAY",
   "EXTEND_STAY",
   "SHORTEN_STAY",
@@ -1713,7 +1715,7 @@ export async function getOrderViewSnapshot(
         "028_stage11_move_unit_guards.sql",
         "044_inhouse_membership_fulfillment_guards.sql"
       ]).execute(),
-    db.selectFrom("order_occupants").selectAll().where("order_id", "=", orderId).orderBy("ordinal").execute(),
+    db.selectFrom("active_order_occupants").selectAll().where("order_id", "=", orderId).orderBy("ordinal").execute(),
     db.selectFrom("order_occupant_corrections")
       .innerJoin("subjects", "subjects.id", "order_occupant_corrections.actor_subject_id")
       .selectAll("order_occupant_corrections")
@@ -1887,7 +1889,9 @@ export async function getOrderViewSnapshot(
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
    }, commandGrants).filter((action) => !temporaryOtherRoomEvidence
-     || !temporaryOtherRoomHiddenActionCodes.has(action.code)),
+     || !temporaryOtherRoomHiddenActionCodes.has(action.code))
+     .filter((action) => action.code !== "MANAGE_ORDER_OCCUPANTS"
+       || (activeTimeline.length > 0 && activeTimeline.every((day) => referencedInventoryUnits.some((unit) => unit.id === day.inventoryUnitId && unit.kind === "ROOM")))),
     order: {
       ...context.order,
       current_contract_amount_minor: context.revision.currentContractAmountMinor,

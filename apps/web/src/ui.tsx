@@ -734,6 +734,7 @@ export const commandCapabilityBusinessLabels: Record<CommandCapability, string> 
   ACTIVATE_MEMBERSHIP_ORDER: "生效会员订单",
   CREATE_ORDER: "创建住宿订单",
   CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
+  MANAGE_ORDER_OCCUPANTS: "管理同住人",
   CORRECT_HISTORICAL_STAY_ARRANGEMENTS: "修改历史住宿安排",
   CORRECT_MEMBER_PROFILE: "修改会员资料",
   CORRECT_MEMBERSHIP_EFFECTIVE_DATE: "修改会员生效日",
@@ -2416,6 +2417,8 @@ export function u1PreviewHasBusinessEvidence(
         && effect.maintenanceLockId === input.maintenanceLockId
         && nonblankString(effect.inventoryUnitId)
         && localDateNightCount(effect.arrivalDate, effect.departureDate) !== undefined);
+    case "MANAGE_ORDER_OCCUPANTS":
+      return companionEffectHasEvidence(effect, input);
     case "CORRECT_ORDER_OCCUPANT":
       return isRecord(effect.before)
         && isRecord(effect.after)
@@ -3655,6 +3658,20 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     </div>;
   }
 
+  if (businessCommand === "MANAGE_ORDER_OCCUPANTS") {
+    const guest = isRecord(effect.guest) ? effect.guest : {};
+    return <div className="effect-summary" data-testid="command-effect"><section className="effect-section">
+      <h3>{effect.action === "ADD" ? "核对添加同住人" : "核对撤销同住人登记"}</h3>
+      <dl className="difference-grid">
+        <dt>同住人</dt><dd>{scalar(guest.nickname)} · {scalar(guest.fullName)}</dd>
+        <dt>共同住宿期间</dt><dd>{formatDate(String(effect.arrivalDate))} 至 {formatDate(String(effect.departureDate))}</dd>
+        <dt>订单住宿人数</dt><dd>{scalar(effect.beforeCount)} 人 → <strong>{scalar(effect.afterCount)} 人</strong></dd>
+        <dt>核定容量</dt><dd>{scalar(effect.occupancyCapacity)} 人</dd>
+        <dt>操作原因</dt><dd>{reasonNote}</dd>
+      </dl>
+    </section></div>;
+  }
+
   if (businessCommand === "CORRECT_ORDER_OCCUPANT") {
     const fieldLabels: Record<string, string> = { nickname: "昵称", fullName: "姓名", phone: "联系电话", documentNumber: "证件号码" };
     return <div className="effect-summary occupant-correction-command-summary" data-testid="command-effect">
@@ -4024,6 +4041,13 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
   const differenceFromPolicy = result ? moneyFrom(pricingDecision?.differenceFromPolicy) : undefined;
   const pricingReason = pricingDecision && isRecord(pricingDecision.reason) ? pricingDecision.reason : undefined;
   const committed = receipt.businessCommitted;
+  if (businessCommand === "MANAGE_ORDER_OCCUPANTS") {
+    const guest = result && isRecord(result.guest) ? result.guest : {};
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt">
+      <h3>{committed ? result?.action === "ADD" ? "同住人已添加" : "同住人登记已撤销" : "同住人登记未变更"}</h3>
+      {committed ? <dl className="receipt-grid"><dt>同住人</dt><dd>{scalar(guest.nickname)} · {scalar(guest.fullName)}</dd><dt>订单住宿人数</dt><dd>{scalar(result?.afterCount)} 人</dd></dl> : <p>{receipt.error?.message}</p>}
+    </section>;
+  }
   if (businessCommand === "REVOKE_CHECK_OUT") {
     const restored = result && isRecord(result.after) ? result.after : undefined;
     return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
@@ -4486,6 +4510,7 @@ const readableRecoveryCommandTypes = new Set<HistoricalCommandType>([
 ]);
 const recoveryReferenceKeys = [
   "orderId",
+  "occupantId",
   "memberId",
   "membershipOrderId",
   "erroneousMembershipOrderId",
@@ -4527,6 +4552,9 @@ function parsedRecoveryTargetRefs(targetRefs: readonly string[]): Record<string,
 function recoveryTargetRefsAreValid(commandType: unknown, targetRefs: readonly string[]): boolean {
   const parsed = parsedRecoveryTargetRefs(targetRefs);
   if (!parsed) return false;
+  if (commandType === "MANAGE_ORDER_OCCUPANTS") {
+    return nonblankString(parsed.orderId) && Object.keys(parsed).every((key) => key === "orderId" || key === "occupantId");
+  }
   if (commandType === "COMPLETE_STAY") {
     return targetRefs.length === 1 && typeof parsed.orderId === "string";
   }
@@ -4576,6 +4604,7 @@ function recoveryRequiresEffectHash(
     || presentation === "MOVE_UNIT"
     || presentation === "ORDER_LIFECYCLE"
     || commandType === "CORRECT_ORDER_OCCUPANT"
+    || commandType === "MANAGE_ORDER_OCCUPANTS"
     || commandType === "REVOKE_CHECK_OUT"
     || commandType === "CHECK_IN"
     || commandType === "CHECK_OUT"
@@ -5349,6 +5378,27 @@ export function checkoutReversalPreviewHasEvidence(effect: Record<string, unknow
     && Boolean(reconsumeDates && reconsumeDates.every((date) => dates?.includes(date)));
 }
 
+export function companionEffectHasEvidence(effect: Record<string, unknown>, input: Record<string, unknown>, recovering = false): boolean {
+  const guest = isRecord(effect.guest) ? effect.guest : undefined;
+  const before = effect.beforeCount;
+  const after = effect.afterCount;
+  return effect.operation === "MANAGE_ORDER_OCCUPANTS"
+    && nonblankString(effect.orderId) && effect.orderId === input.orderId
+    && nonblankString(effect.occupantId)
+    && Number.isSafeInteger(effect.ordinal) && Number(effect.ordinal) > 1
+    && (effect.action === "ADD" || effect.action === "REMOVE")
+    && (recovering ? effect.action === (input.occupantId ? "REMOVE" : "ADD") : effect.action === input.action)
+    && Boolean(guest && (effect.action === "REMOVE" || (nonblankString(guest.nickname) && nonblankString(guest.fullName)))
+      && [guest.fullName, guest.nickname, guest.phone, guest.documentNumber].every((value) => value === null || nonblankString(value)))
+    && (effect.action === "ADD" ? recovering || evidenceValuesEqual(guest, input.guest) : effect.occupantId === input.occupantId)
+    && temporaryOtherRoomLifecycleEvidenceIsValid(effect)
+    && localDateNightCount(effect.arrivalDate, effect.departureDate) !== undefined
+    && typeof before === "number" && Number.isSafeInteger(before) && before >= 1
+    && typeof after === "number" && Number.isSafeInteger(after) && after >= 1
+    && after === before + (effect.action === "ADD" ? 1 : -1)
+    && Number.isSafeInteger(effect.occupancyCapacity) && after <= Number(effect.occupancyCapacity);
+}
+
 export function receiptHasCommandEvidence(
   commandType: HistoricalCommandType,
   receipt: ReceiptDto,
@@ -5357,6 +5407,14 @@ export function receiptHasCommandEvidence(
   expectedEffectHash?: string
 ): boolean {
   if (!receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
+  if (commandType === "MANAGE_ORDER_OCCUPANTS" && receipt.businessCommitted) {
+    const result = isRecord(receipt.result) ? receipt.result : undefined;
+    if (!result || !companionEffectHasEvidence(result, input, !previewEffect && input.action === undefined)
+      || !isEffectHash(result.effectHash) || result.effectHash !== expectedEffectHash
+      || ![result.orderId, result.occupantId, result.amendmentId].every((value) => nonblankString(value) && receipt.resourceRefs.includes(value))
+      || (result.action === "REMOVE" ? !nonblankString(result.removalId) || !receipt.factRefs.includes(result.removalId) : result.removalId !== null)) return false;
+    return !previewEffect || Object.entries(previewEffect).every(([key, value]) => evidenceValuesEqual(value, result[key]));
+  }
   if (commandType === "REVOKE_CHECK_OUT" && receipt.businessCommitted) {
     const result = isRecord(receipt.result) ? receipt.result : undefined;
     if (!result || !checkoutReversalPreviewHasEvidence(result, input) || result.status !== "CHECKED_IN"
@@ -5982,6 +6040,7 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const administratorMembershipCorrection = commandType && isAdministratorMembershipCorrection(commandType) ? commandType : undefined;
   const historicalStayCorrection = recovery.commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS";
   const restoreTargetInputs = completeStay
+    || recovery.commandType === "MANAGE_ORDER_OCCUPANTS"
     || stayDates
     || moveUnit
     || orderLifecycle

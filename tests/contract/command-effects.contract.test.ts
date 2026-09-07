@@ -29,6 +29,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   ACTIVATE_MEMBERSHIP_ORDER: ["agreedPrice", "entitlementUnitKind", "entitlementUnits", "fromStatus", "memberName", "membershipOrderId", "operation", "paymentDifference", "paymentTotal", "productName", "toStatus", "validFrom", "validUntil"],
   CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayCategoryCode", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingDecision", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
+  MANAGE_ORDER_OCCUPANTS: ["action", "afterCount", "arrivalDate", "beforeCount", "departureDate", "guest", "occupancyCapacity", "occupantId", "operation", "orderId", "ordinal"],
   CORRECT_HISTORICAL_STAY_ARRANGEMENTS: ["corrections", "operation"],
   CORRECT_MEMBER_PROFILE: ["after", "before", "changedFields", "evidenceNote", "memberId", "operation"],
   CORRECT_MEMBERSHIP_EFFECTIVE_DATE: ["after", "before", "contractId", "entitlementLotId", "evidenceNote", "memberId", "membershipOrderId", "operation", "propertyToday", "unchanged"],
@@ -830,6 +831,10 @@ describe("Command effect HTTP contract", () => {
       })
     ]));
     const orderId = createOrderResult.orderId as string;
+    await capture("MANAGE_ORDER_OCCUPANTS", {
+      propertyId: demo.propertyId, orderId, action: "ADD",
+      guest: { fullName: "Companion", nickname: "Companion", phone: null, documentNumber: null }
+    });
     await capture("CORRECT_ORDER_OCCUPANT", {
       propertyId: demo.propertyId,
       orderId,

@@ -628,7 +628,7 @@ export async function buildServer(db: Kysely<Database>) {
     });
   });
 
-  app.get("/api/v1/version", { schema: { tags: ["operations"], security: [], response: { 200: Type.Object({ version: Type.String() }) } } }, async () => ({ version: applicationVersion }));
+  app.get("/api/v1/version", { schema: { tags: ["operations"], security: [], response: { 200: Type.Object({ version: Type.String() }), ...InternalErrorResponses } } }, async () => ({ version: applicationVersion }));
   app.get("/health/live", { schema: { tags: ["operations"], security: [], response: { 200: Type.Object({ status: Type.Literal("ok") }) } } }, async () => ({ status: "ok" as const }));
   app.get("/health/ready", { schema: { tags: ["operations"], security: [], response: { 200: Type.Object({ status: Type.Literal("ready") }), 503: ErrorResponse } } }, async (_request, reply) => {
     if (!(await databaseReady(db))) {

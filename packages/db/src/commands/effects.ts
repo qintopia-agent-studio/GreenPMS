@@ -1,5 +1,6 @@
 import { sql } from "kysely";
 import { buildCheckoutReversalEffect } from "./checkout-reversal.ts";
+import { buildCompanionEffect } from "./companions.ts";
 import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandCapability, type CommandCatalogType, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType, type StoredQuoteDto, type TemporaryOtherRoomArrangementDto } from "@qintopia/contracts";
 import {
   amountSummary,
@@ -1820,6 +1821,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
   const orderId = requireString(input, "orderId");
   const context = await loadOrderContextForProperty(db, propertyId, orderId);
   if (commandType === "REVOKE_CHECK_OUT") return buildCheckoutReversalEffect(db, context);
+  if (commandType === "MANAGE_ORDER_OCCUPANTS") return buildCompanionEffect(db, context, input);
   const temporaryOtherRoomEvidence = await loadTemporaryOtherRoomCreateEvidence(db, orderId);
   if (temporaryOtherRoomEvidence && temporaryOtherRoomBlockedOrderCommands.has(commandType)) {
     rejectTemporaryOtherRoomLifecycleChange();
@@ -2151,7 +2153,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 
   if (commandType === "CORRECT_ORDER_OCCUPANT") {
     const occupantId = requireString(input, "occupantId");
-    const occupant = await db.selectFrom("order_occupants")
+    const occupant = await db.selectFrom("active_order_occupants")
       .selectAll()
       .where("id", "=", occupantId)
       .where("order_id", "=", orderId)
@@ -2713,7 +2715,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     if (stayTimeline.every((item, index) => item.inventoryUnitId === currentTimeline[index]?.inventoryUnitId)) {
       throw new DomainError("VALIDATION_ERROR", "换房后的住宿安排必须发生变化");
     }
-    const occupantCountRow = await db.selectFrom("order_occupants")
+    const occupantCountRow = await db.selectFrom("active_order_occupants")
       .select(({ fn }) => fn.countAll<string>().as("count"))
       .where("order_id", "=", orderId)
       .executeTakeFirstOrThrow();

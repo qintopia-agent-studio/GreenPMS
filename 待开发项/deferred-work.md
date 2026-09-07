@@ -1,3 +1,12 @@
+- source_spec: `待开发项/spec-whole-room-companions.md`
+  summary: 2026-09-07 整房订单建立后/入住后补充同住人（A 级，工程完成，人工验收待反馈；用户已授权发布 v1.1.0）。
+  evidence: 共享订单完整日期，追加登记及误录撤销历史，主入住人不可撤销；普通、免费和符合容量的会员整房一致，床位/终态拒绝。1105 项单元测试、11 项受限数据库契约、6 项命令效果契约、TypeScript 与生产构建通过；桌面/手机添加撤销和断线刷新恢复已验证。独立验收 http://127.0.0.1:4217/；正式版本号保持 v1.0.0，Logo 下方版本位置改动保留。
+- source_spec: `tests/contract/openapi.contract.test.ts`
+  summary: 2026-09-07 已修复版本接口错误响应声明缺失。
+  evidence: GET /api/v1/version 沿用 InternalErrorResponses 声明 500 响应，OpenAPI 21 项及运行身份隔离 4 项契约通过。无数据库或业务规则变更，不声称全部契约通过。
+- source_spec: `docs/releases/README.md`
+  summary: 2026-09-07 版本号移至左上角 QinTopia PMS Logo 下方（B 级，已实现，待反馈，暂不提交或部署）。
+  evidence: 版本链接收纳进品牌区，使用 10px 低对比文字；桌面展开、收起及手机均位于 Logo 下方，保留更新说明入口。TypeScript、生产构建、1440/390/320 px 本地浏览器位置和无溢出检查通过，截图位于 `test-results/version-logo-*.png`；预览 http://127.0.0.1:4216/。按用户要求保留未提交改动，当前正式版本号不递增。
 - source_spec: `docs/releases/v1.0.0.md`
   summary: 2026-09-07 11:52 v1.0.0 已上线并正式发布 GitHub Release，应用提交 f3099ad。
   evidence: 生产健康与版本检查、8 栋实时去重名册和人数显示对账、员工桌面及管理员手机 7 天登录/权限/刷新/退出验证通过；无数据库迁移或业务数据修正。旧镜像和升级前备份已保留。下述同项“未部署”为历史阶段状态，人工反馈仍单独保留。构建另报告 11 项既有依赖安全警告（3 moderate、8 high），本次依赖版本未变，额外生产依赖分类审计未执行，待独立评估。

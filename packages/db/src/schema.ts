@@ -9,6 +9,8 @@ type NullableInsert<T> = ColumnType<T | null, T | null | undefined, T | null>;
 type Json = ColumnType<unknown, unknown, unknown>;
 
 export interface Database {
+  active_order_occupants: Database["order_occupants"];
+  order_occupant_removals: { id: string; order_id: string; occupant_id: string; amendment_id: string; created_by_command_id: string; created_at: GeneratedTimestamp };
   schema_migrations: { name: string; applied_at: GeneratedTimestamp };
   properties: { id: string; code: string; name: string; timezone: string; currency: string; created_at: GeneratedTimestamp };
   catalog_import_batches: { id: string; property_id: string; source_document_token: string; source_revision: number; source_version_date: string | null; source_snapshot: Json; content_hash: string; execution_state: "REFERENCE_ONLY"; sealed_at: NullableGeneratedTimestamp; created_at: GeneratedTimestamp };

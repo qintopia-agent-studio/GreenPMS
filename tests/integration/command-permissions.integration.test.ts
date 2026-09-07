@@ -315,8 +315,10 @@ afterAll(async () => {
 
 describe("exact command permissions on PostgreSQL", () => {
   it("covers every catalog command in the operator/admin authorization stage matrix", async () => {
-    expect(commandTypes).toHaveLength(38);
-    expect(commandCatalogTypes).toHaveLength(42);
+    expect(commandTypes).toHaveLength(40);
+    expect(commandCatalogTypes).toHaveLength(44);
+    expect(ordinaryCommands).toContain("MANAGE_ORDER_OCCUPANTS");
+    expect(administratorCommands).toContain("MANAGE_ORDER_OCCUPANTS");
     await grant(demo.operatorSubjectId, historicalReadCommands);
     await grant(demo.administratorSubjectId, historicalReadCommands);
 

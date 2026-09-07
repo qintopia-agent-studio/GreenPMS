@@ -351,9 +351,14 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
       <a className="skip-link" href="#main-content">跳至主要内容</a>
       <aside className="sidebar">
         <div className="sidebar-brand-row">
-          <div className="sidebar-brand" aria-label="QinTopia PMS">
-            <span className="brand-word"><span className="sidebar-brand-full">QinTopia</span><span className="sidebar-brand-compact" aria-hidden="true">Q</span></span>
-            <span className="sidebar-brand-product">PMS</span>
+          <div className="sidebar-brand-identity">
+            <div className="sidebar-brand" aria-label="QinTopia PMS">
+              <span className="brand-word"><span className="sidebar-brand-full">QinTopia</span><span className="sidebar-brand-compact" aria-hidden="true">Q</span></span>
+              <span className="sidebar-brand-product">PMS</span>
+            </div>
+            <a className="application-version" href={`https://github.com/qintopia-agent-studio/GreenPMS/releases/tag/v${applicationVersion}`} target="_blank" rel="noopener noreferrer" title={`QinTopia PMS v${applicationVersion} · 更新说明`} aria-label={`版本 v${applicationVersion}，查看更新说明`}>
+              v{applicationVersion}
+            </a>
           </div>
           <button
             className="icon-button sidebar-toggle"
@@ -369,9 +374,6 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
           <button className="mobile-logout icon-button" type="button" onClick={() => void logout()} disabled={loggingOut} aria-label="退出登录" title="退出登录"><LogOut aria-hidden="true" size={19} /></button>
         </div>
         <Navigation principal={principal} propertyId={propertyId} collapsed={sidebarCollapsed} />
-        <a className="application-version" href={`https://github.com/qintopia-agent-studio/GreenPMS/releases/tag/v${applicationVersion}`} target="_blank" rel="noopener noreferrer" title={`QinTopia PMS v${applicationVersion} · 更新说明`} aria-label={`版本 v${applicationVersion}，查看更新说明`}>
-          v{applicationVersion}
-        </a>
         <div className="sidebar-property" title={propertyLabel}>
           <Building2 aria-hidden="true" size={15} />
           <label className="sr-only" htmlFor="property-select">门店</label>
