@@ -354,7 +354,7 @@ describe("building occupancy summary", () => {
     id: "room_101",
     buildingCode: "1",
     occupancyCapacity: 4,
-    intervals: [inHouseBedInterval],
+    intervals: [{ ...inHouseBedInterval, id: "interval_bed_101_a_on_room" }],
     children: [bed]
   } as RoomStatusUnitDto;
   const wholeRoom = {
@@ -376,6 +376,77 @@ describe("building occupancy summary", () => {
 
   it("formats the building summary exactly as business copy", () => {
     expect(roomStatusBuildingOccupancySummaryLabel({ occupants: 3, capacity: 6 })).toBe("今日 3人 / 总容量 6 人");
+  });
+
+  it.each(["ORDER", "FREE_STAY"] as const)("counts %s whole-room stays once across every building", (sourceKind) => {
+    const buildingCodes = ["1", "2", "3", "A", "B", "C", "D", "E", null];
+    const rooms = buildingCodes.map((buildingCode) => {
+      const id = `room_${buildingCode ?? "unassigned"}`;
+      const lodging = {
+        ...wholeRoomInterval,
+        id: `interval_${id}`,
+        actualInventoryUnitId: id,
+        sourceKind
+      };
+      const children = ["a", "b"].map((suffix) => ({
+        ...bed,
+        id: `${id}_${suffix}`,
+        intervals: [{ ...lodging, id: `${lodging.id}_on_${suffix}` }]
+      }));
+      return { room: { ...wholeRoom, id, buildingCode, intervals: [lodging], children }, children };
+    });
+
+    const summaries = roomStatusBuildingOccupancySummariesForDate(rooms, "2026-08-02");
+
+    expect([...summaries.keys()]).toEqual(["1", "2", "3", "A", "B", "C", "D", "E", "未分栋"]);
+    for (const summary of summaries.values()) {
+      expect(summary).toEqual({ occupants: 2, capacity: 2 });
+    }
+  });
+
+  it.each(["ORDER", "FREE_STAY"] as const)("counts separate %s bed stays once each", (sourceKind) => {
+    const children = ["a", "b"].map((suffix) => ({
+      ...bed,
+      id: `bed_101_${suffix}`,
+      intervals: [{
+        ...inHouseBedInterval,
+        id: `interval_bed_101_${suffix}`,
+        actualInventoryUnitId: `bed_101_${suffix}`,
+        sourceKind
+      }]
+    }));
+    const room = {
+      ...splitRoom,
+      children,
+      intervals: children.flatMap((child) => child.intervals.map((interval) => ({
+        ...interval,
+        id: `${interval.id}_on_room`
+      })))
+    };
+
+    expect(roomStatusBuildingOccupancySummariesForDate([{ room, children }], "2026-08-02").get("1"))
+      .toEqual({ occupants: 2, capacity: 4 });
+    expect(roomStatusBuildingOccupancySummariesForDate([{ room, children: [children[0]!] }], "2026-08-02").get("1"))
+      .toEqual({ occupants: 1, capacity: 4 });
+  });
+
+  it("counts only in-house lodging on the requested date", () => {
+    const room = {
+      ...wholeRoom,
+      intervals: [
+        wholeRoomInterval,
+        { ...wholeRoomInterval, id: "reserved", status: "RESERVED" as const },
+        { ...wholeRoomInterval, id: "unknown", status: "UNKNOWN" as const },
+        { ...wholeRoomInterval, id: "future", startDate: "2026-08-03" },
+        { ...wholeRoomInterval, id: "departed", endDate: "2026-08-02" }
+      ]
+    };
+    expect(roomStatusBuildingOccupancySummariesForDate([{ room, children: [] }], "2026-08-02").get("1"))
+      .toEqual({ occupants: 2, capacity: 2 });
+    expect(roomStatusBuildingOccupancySummariesForDate([{ room: wholeRoom, children: [] }], "2026-08-01").get("1"))
+      .toEqual({ occupants: 2, capacity: 2 });
+    expect(roomStatusBuildingOccupancySummariesForDate([{ room: wholeRoom, children: [] }], "2026-08-03").get("1"))
+      .toEqual({ occupants: 0, capacity: 2 });
   });
 });
 

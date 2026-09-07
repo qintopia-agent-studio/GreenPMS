@@ -1,3 +1,15 @@
+- source_spec: `docs/releases/README.md`
+  summary: 2026-09-07 用户授权发布 v1.0.0，包含所有楼栋人数统计、固定 7 天登录和正式版本管理。
+  evidence: 以下楼栋/登录项的“未部署”为本轮发布授权前状态。版本元数据、每版优化/升级/验证/回退说明纳入构建检查；本轮类型检查、1102 项单元测试及 Web 构建通过，1440/390/320 px 浏览器验证版本展示、版本接口、持久会话恢复与主动退出通过。实际部署提交、镜像、备份和线上验证记录以 https://github.com/qintopia-agent-studio/GreenPMS/releases/tag/v1.0.0 为准；人工反馈不因发布授权而自动通过。
+- source_spec: `待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md`
+  summary: 2026-09-07 固定保持登录 7 天（已实现，相关自动检查通过，待人工反馈，未部署）。
+  evidence: 用户最终确认仅固定 7 x 24 小时，无 12 小时空闲退出及滑动续期；旧会话保留原期限，新登录响应、Cookie、数据库共享到期时间。TypeScript、安全契约 25 项、定向账号回归 5 项、桌面与手机浏览器恢复登录/主动退出验证通过。主验收计划提供本地 http://127.0.0.1:4216/ 和两项操作；扩展检查的四项既有失败另记下项。
+- source_spec: `待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md`
+  summary: 2026-09-07 排查受限运行身份下账号管理与会员删除的四项既有契约失败（待修复）。
+  evidence: `tests/contract/account-management.contract.test.ts` 中持独立 API Token 员工停用失败，数据库 42501 `runtime Token mutations require same-transaction typed command evidence`；真实会员命令回执与手机号复用用例失败，23514 `runtime membership payment may only advance order version metadata`；已办卡未核销删除、取消预订后删除两项失败，23514 `runtime entitlement commands may only advance lot version`。在独立测试库临时恢复旧 12 小时会话实现重跑四项，均以相同错误失败，证明不是本次改为 7 天引入；随后恢复最终代码。无独立 Token 的网页登录撤销、停用、启用、改密定向测试通过。需单独协调受控函数和数据库触发器契约，不在登录期限修复中放宽权限或资金/权益不变量；尚未据此认定生产同类操作必然失败。
+- source_spec: `待开发项/QinTopia-PMS-分步开发与人工验收计划.md`
+  summary: 2026-09-07 楼栋今日人数重复统计修复（已实现，待反馈，未部署）。
+  evidence: 线上只读核对确认展示投影 ID 随父房和子床变化，原统计无法去重。统一改为只在住宿实际所属库存单元计数，覆盖所有楼栋的普通与免费住宿、床位和整房入住；总容量计算保持不变。用户确认 108 为录入错误，本次不修改任何住宿人资料。按当次生产快照应为一栋 9 人/容量 32、二栋 8 人/容量 16。5 个回归用例先复现失败，修复后房态相关 215 项测试、TypeScript、Web 构建通过；桌面隔离组件验证 8 栋汇总及展开/收起稳定，手机沿用独立列表且不显示该标签。浏览器证据为 `test-results/building-occupancy-browser-check.mjs` 和 `test-results/building-occupancy-1440.png`；预览 http://127.0.0.1:4173/，使用现有本地验收账号登录，原演示密码已不适用。
 - source_spec: `待开发项/QinTopia-PMS-第4步-阶段7R-实施规格.md`
   summary: 独立审计房态订单上下文保持打开时由后台 revision 触发的跨页住宿位置迁移。
   evidence: 该扫描逻辑在 7R 基线提交 `bf1f37d` 中已存在，仍使用逐页首个 Stay 命中且未统一复用 7R 的全分页一致性、歧义、超时和父房/床位 canonical 解析；不是本次完整订单详情返回补丁引入，故不在 7R 内跨层重构。

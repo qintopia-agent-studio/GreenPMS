@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { sql, type Kysely } from "kysely";
 import type { AccountManagementContext, AccountManagementRequest, MemberDeletionPreview } from "@qintopia/contracts";
@@ -98,6 +98,55 @@ beforeAll(async () => {
 afterAll(async () => { await app?.close(); await owner?.destroy(); });
 
 describe("9.6 account management with the restricted runtime identity", () => {
+  it("keeps new Web sessions for a fixed seven days with matching persistent cookies", async () => {
+    const startedAt = Date.now();
+    const response = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "operator", password: "demo-pass-2026" } });
+    expect(response.statusCode, response.body).toBe(200);
+    const expiresAt = Date.parse(response.json().expiresAt);
+    const sevenDays = 7 * 24 * 60 * 60_000;
+    expect(expiresAt).toBeGreaterThanOrEqual(startedAt + sevenDays);
+    expect(expiresAt).toBeLessThanOrEqual(Date.now() + sevenDays);
+    const cookie = response.cookies.find((entry) => entry.name === "qintopia_session")!;
+    expect(cookie).toMatchObject({ httpOnly: true, sameSite: "Strict", path: "/" });
+    expect(new Date(cookie.expires!).getTime()).toBe(Math.floor(expiresAt / 1_000) * 1_000);
+    const session = await owner.selectFrom("web_sessions").selectAll().where("secret_hash", "=", sha256(cookie.value)).executeTakeFirstOrThrow();
+    expect(new Date(session.expires_at).getTime()).toBe(expiresAt);
+
+    const clock = vi.spyOn(Date, "now");
+    try {
+      for (const instant of [startedAt + 13 * 60 * 60_000, expiresAt - 1]) {
+        clock.mockReturnValue(instant);
+        expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: cookie.value } })).statusCode).toBe(200);
+      }
+      clock.mockReturnValue(expiresAt);
+      expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: cookie.value } })).statusCode).toBe(401);
+    } finally {
+      clock.mockRestore();
+    }
+    const after = await owner.selectFrom("web_sessions").select("expires_at").where("id", "=", session.id).executeTakeFirstOrThrow();
+    expect(new Date(after.expires_at).getTime()).toBe(expiresAt);
+  });
+
+  it("preserves old session expiry and allows immediate logout of seven-day sessions", async () => {
+    const cookie = await login();
+    const legacyExpiry = new Date(Date.now() + 12 * 60 * 60_000);
+    await owner.updateTable("web_sessions").set({ expires_at: legacyExpiry }).where("secret_hash", "=", sha256(cookie)).execute();
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(legacyExpiry.getTime() - 1);
+      expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: cookie } })).statusCode).toBe(200);
+      clock.mockReturnValue(legacyExpiry.getTime());
+      expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: cookie } })).statusCode).toBe(401);
+    } finally {
+      clock.mockRestore();
+    }
+
+    const activeCookie = await login();
+    const loggedOut = await app.inject({ method: "POST", url: "/api/v1/auth/logout", cookies: { qintopia_session: activeCookie } });
+    expect(loggedOut.statusCode, loggedOut.body).toBe(204);
+    expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: activeCookie } })).statusCode).toBe(401);
+  });
+
   it("exposes staff management only to a current administrator session", async () => {
     expect((await context()).canManageStaff).toBe(true);
     const staff = await context(staffCookie);
@@ -108,6 +157,24 @@ describe("9.6 account management with the restricted runtime identity", () => {
     expect(token.statusCode).toBe(403);
     const foreign = await app.inject({ method: "GET", url: "/api/v1/account-management?propertyId=prop_foreign", cookies: { qintopia_session: adminCookie } });
     expect(foreign.statusCode).toBe(403);
+  });
+
+  it("revokes, disables, and resets seven-day Web sessions without restoring old credentials", async () => {
+    const staff = await createStaff();
+    const cookies = await Promise.all([login(staff.username, "test-password-2026"), login(staff.username, "test-password-2026")]);
+    expect((await manage(request("REVOKE_SESSIONS", { targetId: staff.id, expectedVersion: "1" }))).statusCode).toBe(200);
+    for (const cookie of cookies) {
+      expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: cookie } })).statusCode).toBe(401);
+    }
+    const freshCookie = await login(staff.username, "test-password-2026");
+    expect((await manage(request("DISABLE_STAFF", { targetId: staff.id, expectedVersion: "2" }))).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: freshCookie } })).statusCode).toBe(401);
+    expect((await manage(request("ENABLE_STAFF", { targetId: staff.id, expectedVersion: "3" }))).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: freshCookie } })).statusCode).toBe(401);
+    const resetCookie = await login(staff.username, "test-password-2026");
+    expect((await manage(request("RESET_PASSWORD", { targetId: staff.id, expectedVersion: "4", newPassword: "seven-day-reset-2026" }))).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/v1/me", cookies: { qintopia_session: resetCookie } })).statusCode).toBe(401);
+    await login(staff.username, "seven-day-reset-2026");
   });
 
   it("cannot substitute the stored session digest for possession of an administrator's session secret", async () => {

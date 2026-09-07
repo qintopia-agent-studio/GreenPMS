@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from "react";
 import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, UserRound } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
+import { version as applicationVersion } from "../../../package.json";
 import { api, ApiError } from "./api";
 import type { CommandCapability, CommandCatalogType, MetaDto, PendingTokenCommand, PrincipalDto, RetainedTokenSecret } from "./types";
 import { errorMessage, LoadingBlock } from "./ui";
@@ -83,7 +84,7 @@ export function LoginPage({ onLogin }: { onLogin: (principal: PrincipalDto) => v
       <section className="login-panel" aria-labelledby="login-title">
         <div className="login-brand">
           <span className="brand-word">QinTopia</span>
-          <span>PMS Core Operations</span>
+          <span>PMS v{applicationVersion}</span>
         </div>
         <div>
           <p className="eyebrow">运营工作台</p>
@@ -368,6 +369,9 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
           <button className="mobile-logout icon-button" type="button" onClick={() => void logout()} disabled={loggingOut} aria-label="退出登录" title="退出登录"><LogOut aria-hidden="true" size={19} /></button>
         </div>
         <Navigation principal={principal} propertyId={propertyId} collapsed={sidebarCollapsed} />
+        <a className="application-version" href={`https://github.com/qintopia-agent-studio/GreenPMS/releases/tag/v${applicationVersion}`} target="_blank" rel="noopener noreferrer" title={`QinTopia PMS v${applicationVersion} · 更新说明`} aria-label={`版本 v${applicationVersion}，查看更新说明`}>
+          v{applicationVersion}
+        </a>
         <div className="sidebar-property" title={propertyLabel}>
           <Building2 aria-hidden="true" size={15} />
           <label className="sr-only" htmlFor="property-select">门店</label>

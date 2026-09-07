@@ -571,7 +571,6 @@ export function roomStatusBuildingOccupancySummariesForDate(
   for (const { room, children } of rooms) {
     const buildingCode = room.buildingCode?.trim() || "未分栋";
     const units = [room, ...children];
-    const visibleUnitIds = new Set(units.map((unit) => unit.id));
     const countedIntervals = new Set<string>();
     let occupants = 0;
     for (const unit of units) {
@@ -580,7 +579,8 @@ export function roomStatusBuildingOccupancySummariesForDate(
           || interval.status !== "IN_HOUSE"
           || interval.startDate > serviceDate
           || serviceDate >= interval.endDate
-          || !visibleUnitIds.has(interval.actualInventoryUnitId)) continue;
+          // Parent/child display copies have different interval IDs; count only the actual unit.
+          || interval.actualInventoryUnitId !== unit.id) continue;
         const key = `${interval.id}:${interval.actualInventoryUnitId}`;
         if (countedIntervals.has(key)) continue;
         countedIntervals.add(key);

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { version as applicationVersion } from "../../../package.json";
 import compress from "@fastify/compress";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
@@ -547,7 +548,7 @@ export async function buildServer(db: Kysely<Database>) {
   await app.register(swagger, {
     openapi: {
       openapi: "3.1.0",
-      info: { title: "QinTopia PMS Core Operations API", version: "1.0.0" },
+      info: { title: "QinTopia PMS Core Operations API", version: applicationVersion },
       servers: [{ url: "/" }],
       tags: [
         { name: "auth" }, { name: "queries" }, { name: "commands" }, { name: "receipts" }, { name: "operations" }
@@ -627,6 +628,7 @@ export async function buildServer(db: Kysely<Database>) {
     });
   });
 
+  app.get("/api/v1/version", { schema: { tags: ["operations"], security: [], response: { 200: Type.Object({ version: Type.String() }) } } }, async () => ({ version: applicationVersion }));
   app.get("/health/live", { schema: { tags: ["operations"], security: [], response: { 200: Type.Object({ status: Type.Literal("ok") }) } } }, async () => ({ status: "ok" as const }));
   app.get("/health/ready", { schema: { tags: ["operations"], security: [], response: { 200: Type.Object({ status: Type.Literal("ready") }), 503: ErrorResponse } } }, async (_request, reply) => {
     if (!(await databaseReady(db))) {

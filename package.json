@@ -1,6 +1,6 @@
 {
   "name": "qintopia-pms",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -10,7 +10,8 @@
     "node": "22.x"
   },
   "scripts": {
-    "build": "npm run build -w @qintopia/web",
+    "release:check": "node scripts/check-release.mjs",
+    "build": "npm run release:check && npm run build -w @qintopia/web",
     "dev": "concurrently -k -n api,web -c green,blue \"npm run dev -w @qintopia/api\" \"npm run dev -w @qintopia/web\"",
     "start": "npm run start -w @qintopia/api",
     "db:migrate": "npm run migrate -w @qintopia/db",

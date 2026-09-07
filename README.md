@@ -2,6 +2,10 @@
 
 QinTopia PMS is the source of truth for room/bed inventory, orders, stay fulfillment, member-night coverage, immutable pricing revisions, and manually recorded collection facts. The Web client and external-agent API use the same authenticated `/api/v1` command handlers and PostgreSQL transactions.
 
+## Releases
+
+Application versions follow semantic versioning, starting with `v1.0.0`. Every deployed release must have a unique Git tag, optimization notes and upgrade instructions. See [CHANGELOG](CHANGELOG.md) and the [release procedure](docs/releases/README.md). `npm run build` checks release metadata and documentation; `/api/v1/version` reports the running application version.
+
 ## Prerequisites
 
 - Docker Engine with Compose v2 for the one-command path; this path does not require host Node.js

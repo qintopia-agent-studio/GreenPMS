@@ -485,6 +485,20 @@ textarea:focus-visible {
   gap: 4px;
 }
 
+.application-version {
+  align-self: flex-start;
+  padding: 8px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.sidebar-is-collapsed .application-version {
+  padding-inline: 0;
+  align-self: center;
+}
+
 .nav-link {
   min-height: 42px;
   display: flex;
@@ -4091,6 +4105,12 @@ pre {
 
   .sidebar-brand {
     padding: 0;
+  }
+
+  .application-version,
+  .sidebar-is-collapsed .application-version {
+    margin-left: auto;
+    padding: 8px 0 8px 12px;
   }
 
   .sidebar-brand-row,

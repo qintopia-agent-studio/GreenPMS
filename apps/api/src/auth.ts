@@ -166,7 +166,7 @@ export function requireScopedResourceAccess(principal: AuthPrincipal, propertyId
 export async function login(db: Kysely<Database>, username: string, password: string, reply: FastifyReply) {
   const secret = newOpaqueSecret("qts");
   const sessionId = newId("session");
-  const expiresAt = new Date(Date.now() + 12 * 60 * 60_000);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60_000);
   const subject = await db.transaction().execute(async (trx) => {
     const current = await trx.selectFrom("subjects").selectAll().where("username", "=", username).forShare().executeTakeFirst();
     const passwordMatches = await verifyPassword(password, current?.password_salt ?? dummyPasswordSalt, current?.password_hash ?? dummyPasswordHash);
