@@ -6,6 +6,8 @@ QinTopia PMS is the source of truth for room/bed inventory, orders, stay fulfill
 
 Application versions follow semantic versioning, starting with `v1.0.0`. Every deployed release must have a unique Git tag, optimization notes and upgrade instructions. See [CHANGELOG](CHANGELOG.md) and the [release procedure](docs/releases/README.md). `npm run build` checks release metadata and documentation; `/api/v1/version` reports the running application version.
 
+Production uses prebuilt immutable images with `compose.server.yaml`. The repository-owned [production release runbook](docs/operations/production-release-runbook.md) covers Actions, private COS artifacts, approval, restricted SSH, recovery, and retention. Initial server/COS configuration and migration from the existing source-build deployment are still pending authorization. Run `npm run test:release` for offline release harness checks.
+
 ## Prerequisites
 
 - Docker Engine with Compose v2 for the one-command path; this path does not require host Node.js
@@ -150,7 +152,7 @@ npm run verify:compose
 For a workspace where the host TypeScript runtime cannot execute reliably, build one immutable verification image and use it for the two operational proofs. The default host paths remain unchanged:
 
 ```bash
-docker build -t qintopia-pms:verify .
+docker build --target build -t qintopia-pms:verify .
 VERIFY_APP_IMAGE=qintopia-pms:verify npm run verify:cold-start
 VERIFY_APP_IMAGE=qintopia-pms:verify npm run verify:restore
 ```

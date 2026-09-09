@@ -1,0 +1,264 @@
+name: GreenPMS Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+# Upload, deployment, and maintenance share one lock. A retention run cannot
+# delete a candidate while this workflow is uploading or promoting it.
+concurrency:
+  group: greenpms-production
+  cancel-in-progress: false
+
+env:
+  COS_PREFIX: greenpms/releases/
+  DOCKER_DEFAULT_PLATFORM: linux/amd64
+
+jobs:
+  validate:
+    name: Validate tagged release
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CI: true
+      NODE_ENV: test
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag identity and main ancestry
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Release ref is not a vX.Y.Z tag" >&2; exit 1 ;;
+          esac
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          test -z "$(git status --porcelain)"
+
+      - name: Check package, lockfile, changelog, and notes
+        run: node scripts/check-release.mjs --tag "$GITHUB_REF_NAME"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Test release harness
+        run: python3 -m unittest discover -s scripts/release/tests -v
+
+  package-upload:
+    name: Package and upload immutable release
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      revision: ${{ steps.package.outputs.revision }}
+      key: ${{ steps.package.outputs.key }}
+      manifest_sha: ${{ steps.package.outputs.manifest_sha }}
+    env:
+      COS_BUCKET: ${{ vars.COS_BUCKET }}
+      COS_REGION: ${{ vars.COS_REGION }}
+      UPLOAD_COS_BUCKET: ${{ vars.COS_BUCKET }}
+      UPLOAD_COS_REGION: ${{ vars.COS_REGION }}
+      UPLOAD_COS_SECRET_ID: ${{ secrets.UPLOAD_COS_SECRET_ID }}
+      UPLOAD_COS_SECRET_KEY: ${{ secrets.UPLOAD_COS_SECRET_KEY }}
+      UPLOAD_COS_TOKEN: ${{ secrets.UPLOAD_COS_TOKEN }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install COS client dependencies
+        run: python3 -m pip install --disable-pip-version-check --no-input -r scripts/release/requirements.txt
+
+      - name: Install pinned Syft and verify its official checksum
+        env:
+          SYFT_VERSION: 1.18.1
+        run: |
+          set -eu
+          syft_dir="$RUNNER_TEMP/greenpms-syft"
+          mkdir -p "$syft_dir"
+          archive="syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "$syft_dir/checksums.txt" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_checksums.txt"
+          curl --fail --silent --show-error --location \
+            --output "$syft_dir/$archive" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/$archive"
+          expected="$(awk -v name="$archive" '$2 == name { print $1 }' "$syft_dir/checksums.txt")"
+          test -n "$expected"
+          printf '%s  %s\n' "$expected" "$syft_dir/$archive" | sha256sum --check --status
+          tar -xzf "$syft_dir/$archive" -C "$syft_dir"
+          test -x "$syft_dir/syft"
+          echo "$syft_dir" >> "$GITHUB_PATH"
+
+      - name: Package and upload release
+        id: package
+        env:
+          RELEASE_DIR_ROOT: ${{ runner.temp }}/greenpms-release
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_REVISION: ${{ github.sha }}
+        run: |
+          set -eu
+          version="$RELEASE_VERSION"
+          revision="$RELEASE_REVISION"
+          release_dir="$(mktemp -d "${RELEASE_DIR_ROOT}.XXXXXX")"
+          test -z "$(git status --porcelain)"
+          python3 scripts/release/package.py \
+            --version "$version" \
+            --revision "$revision" \
+            --output "$release_dir"
+          test -f "$release_dir/manifest.json"
+          test -f "$release_dir/SHA256SUMS"
+          test -f "$release_dir/sbom.spdx.json"
+          python3 scripts/release/cos.py upload \
+            --directory "$release_dir" \
+            --prefix "$COS_PREFIX"
+          manifest_sha="$(sha256sum "$release_dir/manifest.json" | awk '{print $1}')"
+          key="${COS_PREFIX}${version}/${revision}/"
+          {
+            printf 'version=%s\n' "$version"
+            printf 'revision=%s\n' "$revision"
+            printf 'key=%s\n' "$key"
+            printf 'manifest_sha=%s\n' "$manifest_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write release summary
+        if: success()
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_REVISION: ${{ github.sha }}
+        run: |
+          set -eu
+          printf '### GreenPMS release package\n\n- Version: `%s`\n- Commit: `%s`\n- Checks: metadata, tests, image labels, archive, checksum, and SBOM passed\n' \
+            "$RELEASE_VERSION" "$RELEASE_REVISION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean runner release files and BuildKit cache
+        if: always()
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP/greenpms-release."* "$RUNNER_TEMP/greenpms-syft"
+          docker buildx prune --all --force >/dev/null 2>&1
+          docker buildx rm --all-inactive --force >/dev/null 2>&1
+          exit 0
+
+  deploy:
+    name: Deploy approved release
+    needs: package-upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_SSH_KEY_FILE: ${{ runner.temp }}/greenpms-deploy-key
+      DEPLOY_KNOWN_HOSTS_FILE: ${{ runner.temp }}/greenpms-deploy-known-hosts
+      COS_BUCKET: ${{ vars.COS_BUCKET }}
+      COS_REGION: ${{ vars.COS_REGION }}
+      MARKER_COS_BUCKET: ${{ vars.COS_BUCKET }}
+      MARKER_COS_REGION: ${{ vars.COS_REGION }}
+      MARKER_COS_SECRET_ID: ${{ secrets.MARKER_COS_SECRET_ID }}
+      MARKER_COS_SECRET_KEY: ${{ secrets.MARKER_COS_SECRET_KEY }}
+      MARKER_COS_TOKEN: ${{ secrets.MARKER_COS_TOKEN }}
+      RETENTION_COS_BUCKET: ${{ vars.COS_BUCKET }}
+      RETENTION_COS_REGION: ${{ vars.COS_REGION }}
+      RETENTION_COS_SECRET_ID: ${{ secrets.RETENTION_COS_SECRET_ID }}
+      RETENTION_COS_SECRET_KEY: ${{ secrets.RETENTION_COS_SECRET_KEY }}
+      RETENTION_COS_TOKEN: ${{ secrets.RETENTION_COS_TOKEN }}
+    steps:
+      - name: Check out deployment tools
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install COS client dependencies
+        run: python3 -m pip install --disable-pip-version-check --no-input -r scripts/release/requirements.txt
+
+      - name: Materialize restricted SSH files
+        run: |
+          set -eu
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$DEPLOY_KNOWN_HOSTS_FILE"
+          chmod 600 "$DEPLOY_SSH_KEY_FILE" "$DEPLOY_KNOWN_HOSTS_FILE"
+
+      - name: Deploy through the restricted server entry point
+        env:
+          RELEASE_VERSION: ${{ needs.package-upload.outputs.version }}
+          RELEASE_REVISION: ${{ needs.package-upload.outputs.revision }}
+          RELEASE_KEY: ${{ needs.package-upload.outputs.key }}
+          RELEASE_MANIFEST_SHA: ${{ needs.package-upload.outputs.manifest_sha }}
+        run: |
+          set -eu
+          python3 scripts/release/orchestrate.py deploy \
+            --version "$RELEASE_VERSION" \
+            --revision "$RELEASE_REVISION" \
+            --key "$RELEASE_KEY" \
+            --manifest-sha "$RELEASE_MANIFEST_SHA"
+
+      - name: Write deployment summary
+        if: success()
+        env:
+          RELEASE_VERSION: ${{ needs.package-upload.outputs.version }}
+          RELEASE_REVISION: ${{ needs.package-upload.outputs.revision }}
+        run: |
+          set -eu
+          printf '### GreenPMS deployment\n\n- Version: `%s`\n- Commit: `%s`\n- Checks: server deployment, health checks, and success marker passed\n' \
+            "$RELEASE_VERSION" "$RELEASE_REVISION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary SSH files
+        if: always()
+        run: |
+          set +e
+          rm -f -- "$DEPLOY_SSH_KEY_FILE" "$DEPLOY_KNOWN_HOSTS_FILE"
+          exit 0

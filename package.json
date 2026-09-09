@@ -37,7 +37,8 @@
     "verify:cold-start": "bash ./scripts/verify-cold-start.sh",
     "verify:compose": "bash ./scripts/verify-compose-cold-start.sh",
     "verify": "npm run typecheck && npm run test",
-    "test:all": "npm run verify && npm run test:integration && npm run test:contract && npm run test:e2e && npm run test:pricing-facts"
+    "test:all": "npm run verify && npm run test:integration && npm run test:contract && npm run test:e2e && npm run test:pricing-facts",
+    "test:release": "python3 -m unittest discover -s scripts/release/tests -v"
   },
   "dependencies": {
     "@fastify/compress": "^9.1.0",

@@ -1,5 +1,11 @@
 # Green PMS 项目约定
 
+## 发布 harness 索引
+
+- 生产发布与恢复：`docs/operations/production-release-runbook.md`；只读现场证据：`docs/operations/production-release-investigation.md`。
+- 使用既有 npm workspaces / package-lock：`npm ci`、`npm run release:check`、`npm run typecheck`、`npm test`、`npm run build`；离线发布测试：`npm run test:release`（Python 3，fake COS/Docker/SSH）。
+- 生产 `compose.server.yaml` 只接收预构建 `GREENPMS_IMAGE`；不要在生产工作目录构建，不读凭据文件，不把外部 TencentDB/备份列入清理。部署和清理统一通过 `scripts/release/` 正式入口。
+
 本文件补充全局 `AGENTS.md`，定义本项目的业务来源、风险分级和验收要求。
 
 ## 业务来源
