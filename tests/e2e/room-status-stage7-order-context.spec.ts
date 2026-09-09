@@ -109,7 +109,7 @@ async function loginMobile(
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: "今日运营任务", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房态任务", exact: true, level: 1 })).toBeVisible();
   await expect(page.locator(".room-status-mobile")).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }

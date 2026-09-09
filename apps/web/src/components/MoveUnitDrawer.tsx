@@ -256,6 +256,7 @@ export function MoveUnitDrawer({
   units,
   draft: recovered,
   writeBlocked = false,
+  writeBlockedReason,
   runPreview,
   onClose,
   onSubmit
@@ -264,6 +265,7 @@ export function MoveUnitDrawer({
   units: readonly InventoryUnitDto[];
   draft?: CommandRequest;
   writeBlocked?: boolean;
+  writeBlockedReason?: string;
   runPreview: RecoveryCoordinatedPreviewRunner;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
@@ -478,7 +480,7 @@ export function MoveUnitDrawer({
     </div>
     <InlineError error={error} title="无法继续核对" />
     <InlineError error={!allowed?.enabled ? new Error(allowed?.disabledReason || "当前订单状态暂不能办理换房") : undefined} title="暂不能办理" hideTechnicalDetails />
-    <InlineError error={writeBlocked ? new Error("当前订单或房态事实已经变化，请关闭后重新打开换房") : undefined} title="写入已暂停" hideTechnicalDetails />
+    <InlineError error={writeBlocked ? new Error(writeBlockedReason ?? "当前订单或房态事实已经变化，请关闭后重新打开换房") : undefined} title="写入已暂停" hideTechnicalDetails />
     <form id="move-unit-form" className="modal-form" onSubmit={submit}>
       <div className="form-grid">
         <label>换房生效日期<input type="date" min={minEffectiveDate} max={shiftDate(view.effectiveArrangement.departureDate, -1)} value={draft.effectiveDate} onChange={(event) => update({ effectiveDate: event.target.value })} required data-testid="move-effective-date" /></label>

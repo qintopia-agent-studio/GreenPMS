@@ -619,12 +619,12 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     "pricingRevisions", "membershipConversion", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
   ]);
   const order = record(result.order, "order");
-  exactKeys(order, "order", [
+  exactKeysWithOptional(order, "order", [
     "id", "property_id", "status", "stay_type", "arrival_date", "departure_date", "primary_guest_snapshot",
     "booking_channel_code", "channel_order_reference", "free_stay_reason", "free_stay_category_code",
     "pricing_policy_version_id", "member_id", "member_contract_id", "current_revision_id",
     "current_contract_amount_minor", "currency", "version", "created_at", "updated_at"
-  ]);
+  ], ["current_primary_guest"]);
   const stay = record(result.stay, "stay");
   exactKeys(stay, "stay", ["id", "status"]);
   const accessLevel = stringValue(result.accessLevel, "accessLevel");
@@ -835,6 +835,16 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   }
 
   const occupants = arrayValue(result.occupants, "occupants");
+  if ("current_primary_guest" in order) {
+    const current = record(order.current_primary_guest, "order.current_primary_guest");
+    exactKeysWithOptional(current, "order.current_primary_guest", ["fullName"], ["nickname", "phone", "documentNumber"]);
+    const primary = arrayValue(result.occupants, "occupants").map((item) => record(item, "occupants")).find((item) => item.role === "PRIMARY");
+    if (!primary) fail("order.current_primary_guest", "缺少主要住宿人依据");
+    for (const field of ["fullName", "nickname", "phone", "documentNumber"]) {
+      if (field in current) nullableString(current[field], `order.current_primary_guest.${field}`);
+      if ((current[field] ?? null) !== primary[field]) fail(`order.current_primary_guest.${field}`, "与当前主要住宿人不一致");
+    }
+  }
   const occupantIds = new Set<string>();
   occupants.forEach((item, index) => {
     const occupant = record(item, `occupants[${index}]`);

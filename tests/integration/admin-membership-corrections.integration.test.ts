@@ -5,6 +5,7 @@ import {
   createDatabase,
   createCommandPreview,
   getMemberView,
+  listOrders,
   getOrderView,
   propertyLocalToday,
   withPropertyClockForTesting,
@@ -14,6 +15,7 @@ import { parseLocalDate } from "@qintopia/domain";
 import fastJsonStringify from "fast-json-stringify";
 import { sql, type Kysely, type Transaction } from "kysely";
 import pg from "pg";
+import { buildServer } from "../../apps/api/src/server.ts";
 import { MemberResponseSchema, OrderDetailResponseSchema } from "../../apps/api/src/schemas.ts";
 import {
   applyMemberCorrectionCommand,
@@ -1261,6 +1263,54 @@ afterEach(async () => {
 });
 
 describe("step 9 administrator membership corrections", () => {
+  it("filters funds follow-up using signed facts without confusing settled stays with pending refunds", async () => {
+    const due = await createCompletedWecomStay({ prefix: "funds-due", phone: "17700990000", documentNumber: "FUNDS-DUE", collectionAmountMinor: 10_000 });
+    const over = await createCompletedWecomStay({ prefix: "funds-over", phone: "17700990001", documentNumber: "FUNDS-OVER", collectionAmountMinor: 30_000, arrivalDate: "2026-09-04", departureDate: "2026-09-06" });
+    const query = { propertyId: demo.propertyId };
+    expect((await listOrders(db, { ...query, funds: "BALANCE_DUE" })).orders.map((row) => row.id)).toEqual([due.orderId]);
+    expect((await listOrders(db, { ...query, funds: "OVERPAID" })).orders.map((row) => row.id)).toEqual([over.orderId]);
+    await confirm(envelope("RECORD_REFUND", { propertyId: demo.propertyId, orderId: over.orderId, amountMinor: 10_000, method: "WECOM", referencesFactId: over.collectionFactId, note: "核对后退回多收款" }), "funds-refund", ordinaryStaff);
+    expect((await listOrders(db, { ...query, funds: "OVERPAID" })).orders).toEqual([]);
+    await expect(listOrders(db, { ...query, funds: "BALANCE_DUE", workDate: "2026-09-09" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("paginates reconstruction candidates by current identity without loading order details", async () => {
+    const memberId = await createMember("candidate-pages");
+    const member = await db.selectFrom("members").selectAll().where("id", "=", memberId).executeTakeFirstOrThrow();
+    const first = await createCompletedWecomStay({ prefix: "candidate-first", phone: member.phone, documentNumber: member.identity_card_number! });
+    const second = await createCompletedWecomStay({ prefix: "candidate-second", phone: "13999999999", documentNumber: member.identity_card_number!, arrivalDate: "2026-09-04", departureDate: "2026-09-06" });
+    await createCompletedWecomStay({ prefix: "candidate-other-document", phone: member.phone, documentNumber: "OTHER-DOCUMENT", arrivalDate: "2026-09-07", departureDate: "2026-09-08" });
+    const historicalDay = await listOrders(db, { propertyId: demo.propertyId, workDate: "2026-09-09" });
+    expect(historicalDay.orders.map((order) => order.id)).not.toContain(first.orderId);
+    const query = { propertyId: demo.propertyId, reconversionMemberId: memberId, pageSize: 1 };
+    expect((await listOrders(db, query)).orders.map((row) => row.id)).toEqual([first.orderId]);
+    const occupant = (await getOrderView(db, second.orderId)).occupants.find((row) => row.role === "PRIMARY")!;
+    await confirm(envelope("CORRECT_ORDER_OCCUPANT", {
+      propertyId: demo.propertyId, orderId: second.orderId, occupantId: occupant.id,
+      expectedPriorSnapshot: { fullName: occupant.fullName, nickname: occupant.nickname, phone: occupant.phone, documentNumber: occupant.documentNumber },
+      correctedSnapshot: { fullName: occupant.fullName, nickname: occupant.nickname, phone: member.phone, documentNumber: null }
+    }), "candidate-correct-phone");
+    const page1 = await listOrders(db, query);
+    expect(page1.orders).toHaveLength(1);
+    const runtimeDb = createDatabase(runtimeDatabaseUrlForTesting(databaseUrl));
+    try { expect((await listOrders(runtimeDb, query)).orders.map((row) => row.id)).toEqual(page1.orders.map((row) => row.id)); }
+    finally { await runtimeDb.destroy(); }
+    expect(page1.nextCursor).toBe(page1.orders[0]!.id);
+    const page2 = await listOrders(db, { ...query, beforeId: page1.nextCursor! });
+    expect(page2.nextCursor).toBeNull();
+    expect([...page1.orders, ...page2.orders].map((row) => row.id).sort()).toEqual([first.orderId, second.orderId].sort());
+    await expect(listOrders(db, { ...query, reconversionMemberId: "member_missing" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const app = await buildServer(db);
+    try {
+      const response = await app.inject({ method: "GET", url: `/api/v1/orders?propertyId=${demo.propertyId}&reconversionMemberId=${memberId}&pageSize=1`, headers: { authorization: `Bearer ${demo.readToken}` } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().orders).toHaveLength(1);
+      expect(response.json().nextCursor).toBe(page1.nextCursor);
+      const denied = await app.inject({ method: "GET", url: `/api/v1/orders?propertyId=property_unavailable&reconversionMemberId=${memberId}`, headers: { authorization: `Bearer ${demo.readToken}` } });
+      expect(denied.statusCode).toBe(403);
+    } finally { await app.close(); }
+  });
+
   it("replays all administrator membership previews for equivalent normalized input without merging different facts", async () => {
     const replayEquivalentPreview = async (
       label: string,

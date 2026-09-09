@@ -225,6 +225,7 @@ describe("orders list operational context", () => {
     arrival_date: "2026-08-11",
     departure_date: "2026-08-19",
     primary_guest_snapshot: { fullName: "测试住客", nickname: "测试住客" },
+    current_primary_guest: { fullName: "当前姓名", nickname: "当前昵称", phone: null, documentNumber: null },
     booking_channel_code: "WECOM",
     channel_order_reference: null,
     free_stay_reason: null,

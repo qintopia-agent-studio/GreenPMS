@@ -514,7 +514,7 @@ describe("operator-facing business errors", () => {
       code: "INSUFFICIENT_ACCESS",
       message: "WRITE access is required",
       correlationId: "correlation_read_only"
-    }))).toBe("当前账号无权完成这项操作，本次没有写入。");
+    }))).toBe("当前账号权限不足，本次没有写入。");
   });
 
   it("does not misreport an inventory conflict as a generic state change", () => {

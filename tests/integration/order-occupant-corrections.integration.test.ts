@@ -4,6 +4,7 @@ import {
   confirmCommandPreview,
   createCommandPreview,
   getOrderView,
+  listOrders,
   getRoomStatusBoard,
   type Database
 } from "@qintopia/db";
@@ -40,7 +41,11 @@ function metadata(prefix: string) {
   return { idempotencyKey: `${prefix}-${sequence}`, correlationId: `${prefix}-${sequence}` };
 }
 
-async function createTwoPersonOrder() {
+async function createTwoPersonOrder(index = 0) {
+  const date = new Date(Date.UTC(2033, 4 + Math.floor(index / 9), 1 + index % 9 * 3));
+  const arrivalDate = date.toISOString().slice(0, 10);
+  date.setUTCDate(date.getUTCDate() + 2);
+  const departureDate = date.toISOString().slice(0, 10);
   const unit = await db.selectFrom("inventory_units")
     .select("id")
     .where("property_id", "=", demo.propertyId)
@@ -53,8 +58,8 @@ async function createTwoPersonOrder() {
     propertyId: demo.propertyId,
     inventoryUnitId: unit.id,
     stayType: "TRANSIENT",
-    arrivalDate: "2033-05-01",
-    departureDate: "2033-05-03",
+    arrivalDate,
+    departureDate,
     pricingPolicyVersionId: demo.transientPolicyId
   });
   const preview = await createCommandPreview(db, writePrincipal, {
@@ -129,6 +134,70 @@ afterEach(async () => {
 });
 
 describe("order occupant corrections", () => {
+  it("bounds default order reads and keeps a stable next page when new orders arrive", async () => {
+    const fixtures = [];
+    for (let index = 0; index < 53; index += 1) fixtures.push(await createTwoPersonOrder(index));
+    const first = await listOrders(db, { propertyId: demo.propertyId });
+    expect(first.orders).toHaveLength(50);
+    expect(first.nextCursor).toBe(first.orders.at(-1)!.id);
+    const insertedLater = await createTwoPersonOrder(53);
+    const next = await listOrders(db, { propertyId: demo.propertyId, beforeId: first.nextCursor! });
+    expect(next.orders).toHaveLength(3);
+    expect(next.nextCursor).toBeNull();
+    expect([...first.orders, ...next.orders].map((order) => order.id).sort()).toEqual(fixtures.map((fixture) => fixture.orderId).sort());
+    expect(next.orders.some((order) => order.id === insertedLater.orderId)).toBe(false);
+    const arrivals = await listOrders(db, { propertyId: demo.propertyId, workDate: "2033-05-01" });
+    expect(arrivals.orders.map((order) => order.id)).toEqual([fixtures[0]!.orderId]);
+    const selected = await listOrders(db, { propertyId: demo.propertyId, orderIds: [fixtures[0]!.orderId, fixtures[52]!.orderId], pageSize: 100 });
+    expect(selected.orders).toHaveLength(2);
+  });
+
+  it("projects the latest primary guest identically in list and detail without rewriting original or member facts", async () => {
+    const fixture = await createTwoPersonOrder();
+    const before = await getOrderView(db, fixture.orderId);
+    const primary = before.occupants.find((occupant) => occupant.role === "PRIMARY")!;
+    const originalOccupant = await db.selectFrom("order_occupants").selectAll().where("id", "=", primary.id).executeTakeFirstOrThrow();
+    const membersBefore = await db.selectFrom("members").selectAll().orderBy("id").execute();
+    await confirmCorrection(await previewCorrection(fixture.orderId, primary.id, "第一次更正"), "primary-first");
+    const { receipt } = await confirmCorrection(await previewCorrection(fixture.orderId, primary.id, "当前昵称"), "primary-second");
+    const view = await getOrderView(db, fixture.orderId);
+    expect(view.order.primary_guest_snapshot).toEqual(before.order.primary_guest_snapshot);
+    expect(view.order.current_primary_guest).toEqual({ fullName: "李山风（已核对）", nickname: "当前昵称", phone: "13800000002", documentNumber: "DOC-2" });
+    expect(view.occupantCorrections).toHaveLength(2);
+    expect(view.occupantCorrections[1]).toMatchObject({
+      commandId: receipt.commandId, priorSnapshot: { nickname: "第一次更正" }, correctedSnapshot: { nickname: "当前昵称" }
+    });
+    expect(await db.selectFrom("order_occupants").selectAll().where("id", "=", primary.id).executeTakeFirstOrThrow()).toEqual(originalOccupant);
+    expect(await db.selectFrom("members").selectAll().orderBy("id").execute()).toEqual(membersBefore);
+    const app = await buildServer(db);
+    try {
+      const headers = { authorization: `Bearer ${demo.readToken}` };
+      const list = await app.inject({ method: "GET", url: `/api/v1/orders?propertyId=${demo.propertyId}`, headers });
+      const detail = await app.inject({ method: "GET", url: `/api/v1/orders/${fixture.orderId}`, headers });
+      expect(list.statusCode).toBe(200); expect(detail.statusCode).toBe(200);
+      const row = list.json().orders.find((order: { id: string }) => order.id === fixture.orderId);
+      expect(row.current_primary_guest).toEqual(view.order.current_primary_guest);
+      expect(detail.json().order.current_primary_guest).toEqual(row.current_primary_guest);
+      expect(row.primary_guest_snapshot).toEqual(before.order.primary_guest_snapshot);
+      for (const query of ["当前昵称", "13800000002", row.current_unit_code, "游牧岛", "CORRECTION-FIXTURE"]) {
+        const filtered = await app.inject({ method: "GET", url: `/api/v1/orders?propertyId=${demo.propertyId}&pageSize=1&query=${encodeURIComponent(query)}`, headers });
+        expect(filtered.statusCode, filtered.body).toBe(200);
+        expect(filtered.json().orders.map((order: { id: string }) => order.id)).toEqual([fixture.orderId]);
+      }
+      for (const query of ["第一次更正", "13800000001", "%", "当前_昵称"]) {
+        expect((await listOrders(db, { propertyId: demo.propertyId, query })).orders).toHaveLength(0);
+      }
+      const one = await app.inject({ method: "GET", url: `/api/v1/orders?propertyId=${demo.propertyId}&orderIds=${fixture.orderId}&pageSize=100`, headers });
+      expect(one.statusCode, one.body).toBe(200);
+      expect(one.json().orders).toHaveLength(1);
+      const work = await listOrders(db, { propertyId: demo.propertyId, workDate: "2033-05-01" });
+      expect(work.orders.map((order) => order.id)).toContain(fixture.orderId);
+      const unrelatedDate = await listOrders(db, { propertyId: demo.propertyId, workDate: "2033-05-02" });
+      expect(unrelatedDate.orders.map((order) => order.id)).not.toContain(fixture.orderId);
+
+    } finally { await app.close(); }
+  });
+
   it("appends a complete audited correction while preserving the initial row and projecting the latest occupant everywhere", async () => {
     const fixture = await createTwoPersonOrder();
     const initial = await db.selectFrom("order_occupants").selectAll().where("id", "=", fixture.occupantId).executeTakeFirstOrThrow();

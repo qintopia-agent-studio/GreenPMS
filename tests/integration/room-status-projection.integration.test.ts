@@ -18,6 +18,7 @@ import {
   getOrderView,
   getRoomStatusBoard,
   listAvailability,
+  listOrders,
   propertyLocalToday,
   withMutablePropertyWallClockForTesting,
   withPropertyClockForTesting,
@@ -1826,6 +1827,11 @@ describe("PostgreSQL room-status projection", () => {
       }
     }, "overdue-prearranged-bed-move");
     expect(moved.executionStatus).toBe("EXECUTED");
+    const currentDirectory = await listOrders(db, { propertyId: demo.propertyId, orderIds: [orderId] });
+    expect(currentDirectory.orders[0]).toMatchObject({ current_unit_code: "OVERDUE-MOVE-A", current_unit_room_type_code: "shared_bath_double" });
+    const movedDirectory = await withPropertyClockForTesting(new Date(`${moveDate}T12:00:00.000Z`), () => listOrders(db, { propertyId: demo.propertyId, orderIds: [orderId] }));
+    expect(movedDirectory.orders[0]!.current_unit_code).toBe("OVERDUE-MOVE-B");
+
     await db.updateTable("orders")
       .set({ arrival_date: orderArrivalDate })
       .where("id", "=", orderId)
@@ -4759,6 +4765,7 @@ describe("PostgreSQL room-status projection", () => {
     }
     samples.sort((left, right) => left - right);
     const p95 = samples[Math.ceil(samples.length * 0.95) - 1]!;
+    console.info("room-status-performance", JSON.stringify({ units: 200, nights: 30, firstPageElapsedMs, p95Ms: p95, samplesMs: samples }));
     expect(p95).toBeLessThanOrEqual(500);
   }, 30_000);
 

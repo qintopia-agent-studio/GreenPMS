@@ -407,7 +407,7 @@ export function RoomStatusMobileTasks({
       <header>
         <div>
           <span>移动房态</span>
-          <h1 id={`${tabsId}-heading`}>今日运营任务</h1>
+          <h1 id={`${tabsId}-heading`}>房态任务</h1>
         </div>
         <div className="room-status-mobile-header-actions">
           <small>更新于 {formatRoomStatusDateTime(board.asOf)}</small>
@@ -728,7 +728,7 @@ export function RoomStatusMobileTasks({
                 <dt>有效至</dt><dd>{formatRoomStatusDateTime(board.freshUntil)}</dd>
               </dl>
             </section>
-            {!detailAction ? <p className="room-status-mobile-detail-no-action">服务端未为当前任务下发可执行动作。查看详情不会写入业务事实。</p> : null}
+            {!detailAction ? <p className="room-status-mobile-detail-no-action">当前任务暂无可执行操作，请查看任务说明；需要办理住宿业务时可打开对应订单。</p> : null}
           </div>
         </Modal>
       ) : null}

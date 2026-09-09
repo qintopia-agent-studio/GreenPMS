@@ -40,7 +40,7 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-password").fill(active.operator.password);
   await page.getByTestId("login-submit").click();
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
 async function openOrder(page: Page, stay: Stage11StayFixture): Promise<void> {

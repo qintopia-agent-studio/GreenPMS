@@ -62,7 +62,7 @@ async function login(
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
-  await expect(page.getByRole("heading", { name: /^(房间与床位逐日房态|今日运营任务)$/ }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^(房间与床位逐日房态|房态任务)$/ }).first()).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
 
@@ -826,6 +826,7 @@ test("U2 full order page uses four Chinese business layers and never exposes mac
   await expect(page).toHaveURL(new RegExp(`/orders/${fixture.wholeRoom.orderId}$`));
 
   const main = page.locator("main");
+  await page.locator("details[data-testid=arrangement-history] > summary").click();
   for (const heading of ["原始预订安排", "当前住宿安排", "入住与退房结果", "住宿安排变更历史"]) {
     await expect(main.getByRole("heading", { name: heading, exact: true })).toBeVisible();
   }

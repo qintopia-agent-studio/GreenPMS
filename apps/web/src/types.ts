@@ -458,6 +458,7 @@ export interface OrderDetailRowDto {
   arrival_date: string;
   departure_date: string;
   primary_guest_snapshot: Record<string, unknown>;
+  current_primary_guest?: Record<string, unknown>;
   booking_channel_code: BookingChannelCode | null;
   channel_order_reference: string | null;
   free_stay_reason: string | null;
@@ -470,6 +471,7 @@ export interface OrderDetailRowDto {
   currency: string | null;
   current_unit_name?: string | null;
   current_unit_code?: string | null;
+  current_unit_room_type_code?: string | null;
   version: number;
   created_at: string;
   updated_at: string;

@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { prepareStage13Acceptance } from "./setup-stage13-acceptance.ts";
 import {
   advanceStage15CompleteJourneyBusinessDate,
@@ -153,6 +153,7 @@ async function recordReferencedWecomRefund(
   await expect(form.getByTestId("transaction-reference")).toHaveCount(0);
   await form.getByTestId("fact-amount-yuan").fill(amountYuan);
   await form.getByTestId("refund-reason").fill(`阶段 15 逐笔退回 ${transactionReference}`);
+  await assertDraftSurvivesReadFailure(page, form, "refund-reason");
   await form.getByRole("button", { name: "下一步", exact: true }).click();
 
   const effect = page.getByTestId("command-effect");
@@ -181,6 +182,28 @@ async function fulfill(page: Page, action: "入住" | "退房"): Promise<void> {
   await expect(page.getByText("正在载入订单详情", { exact: true })).toBeHidden({ timeout: 30_000 });
 }
 
+async function assertDraftSurvivesReadFailure(page: Page, form: Locator, fieldId: string): Promise<void> {
+  const field = form.getByTestId(fieldId);
+  const draft = await field.inputValue();
+  await field.focus();
+  const orderPath = `**/api/v1${new URL(page.url()).pathname}`;
+  await page.route(orderPath, (route) => route.fulfill({
+    status: 503, json: { code: "TEMPORARILY_UNAVAILABLE", message: "草稿恢复回归测试" }
+  }));
+  try {
+    await expect(form.getByText("订单刷新失败，草稿已保留；读取恢复前暂不能提交", { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(field).toHaveValue(draft);
+    await expect(field).toBeFocused();
+    await expect(form).not.toContainText(/请关闭后重新打开|请收口后重新打开/);
+    await expect(form.getByRole("button", { name: /^(下一步|继续核对)$/ })).toBeDisabled();
+  } finally {
+    await page.unroute(orderPath);
+  }
+  await expect(form.getByText("订单刷新失败，草稿已保留；读取恢复前暂不能提交", { exact: true })).toBeHidden({ timeout: 10_000 });
+  await expect(field).toHaveValue(draft);
+  await expect(field).toBeFocused();
+}
+
 async function changeDeparture(
   page: Page,
   departureDate: string,
@@ -195,6 +218,7 @@ async function changeDeparture(
   const price = form.getByTestId("stay-date-price-preview");
   await expect(price).toBeVisible({ timeout: 30_000 });
   await expect(form.getByTestId("stay-date-new-amount")).toHaveText(yuanDisplay(expectedAmountMinor));
+  await assertDraftSurvivesReadFailure(page, form, "stay-date-reason");
   const continueButton = form.getByRole("button", { name: "继续核对", exact: true });
   await expect(continueButton).toBeEnabled();
   await continueButton.click();
@@ -217,6 +241,7 @@ async function moveStay(page: Page, fixture: Stage15CompleteJourneyFixture): Pro
   await expect(form.getByTestId("move-unit-target-status")).toContainText("目标区间可用", { timeout: 30_000 });
   await form.getByTestId("move-unit-reason").fill("阶段 15 住客确认换房");
   await expect(form.getByTestId("move-unit-preview")).toBeVisible({ timeout: 30_000 });
+  await assertDraftSurvivesReadFailure(page, form, "move-unit-reason");
   const continueButton = form.getByRole("button", { name: "继续核对", exact: true });
   await expect(continueButton).toBeEnabled();
   await continueButton.click();

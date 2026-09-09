@@ -1,0 +1,446 @@
+[
+  {
+    "arrivalDate": "2026-09-06",
+    "pageSize": 50,
+    "durationMs": 52,
+    "totalRooms": 44,
+    "returnedRooms": 44,
+    "jsonBytes": 531611,
+    "gzipBytes": 13458,
+    "queryCount": 10,
+    "queries": [
+      {
+        "sql": "start transaction isolation level repeatable read",
+        "durationMs": 1.4723749999999995
+      },
+      {
+        "sql": "set transaction read only",
+        "durationMs": 1.1838329999999928
+      },
+      {
+        "sql": "select \"property\".\"id\", \"property\".\"timezone\", \"room_status_revision\".\"revision\", transaction_timestamp() as \"as_of\" from \"properties\" as \"property\" left join \"room_status_revisions\" as \"room_status_revision\" on \"room_status_revision\".\"property_id\" = \"property\".\"id\" where \"property\".\"id\" = $1",
+        "durationMs": 3.4704169999999976
+      },
+      {
+        "sql": "select * from \"inventory_units\" where \"property_id\" = $1 and \"kind\" in ($2, $3) order by \"code\"",
+        "durationMs": 7.436792000000025
+      },
+      {
+        "sql": "select \"order\".\"id\" from \"orders\" as \"order\" where \"order\".\"property_id\" = $1 and ((\"order\".\"status\" = $2 and \"order\".\"arrival_date\" <= $3) or (\"order\".\"status\" = $4 and \"order\".\"arrival_date\" <= $5)) order by \"order\".\"id\" limit $6",
+        "durationMs": 2.349041999999997
+      },
+      {
+        "sql": "select \"id\", \"kind\", \"parent_room_id\", \"code\", \"name\" from \"inventory_units\" where \"property_id\" = $1 and \"active\" = $2 order by \"code\", \"id\" limit $3",
+        "durationMs": 1.388249999999971
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"room_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"claim\".\"source_type\", \"claim\".\"source_id\", \"claim\".\"active\", \"claim\".\"created_at\", \"claim\".\"released_at\", \"segment\".\"id\" as \"segment_id\", \"segment\".\"stay_id\", \"segment\".\"segment_type\", \"segment\".\"arrival_date\" as \"segment_arrival_date\", \"segment\".\"departure_date\" as \"segment_departure_date\", \"segment\".\"created_at\" as \"segment_created_at\", \"stay\".\"status\" as \"stay_status\", \"order\".\"id\" as \"order_id\", \"order\".\"status\" as \"order_status\", \"order\".\"stay_type\", \"order\".\"arrival_date\" as \"order_arrival_date\", \"order\".\"departure_date\" as \"order_departure_date\", \"order\".\"primary_guest_snapshot\", \"order\".\"member_id\", \"order\".\"member_contract_id\", \"order\".\"booking_channel_code\", \"order\".\"channel_order_reference\", \"order\".\"current_revision_id\", to_jsonb(\"order\") ->> 'free_stay_category_code' as \"free_stay_category_code\", to_jsonb(\"order\") ->> 'free_stay_reason' as \"free_stay_reason\", \"amendment\".\"command_id\" as \"segment_command_id\", \"maintenance\".\"id\" as \"maintenance_id\", \"maintenance\".\"arrival_date\" as \"maintenance_arrival_date\", \"maintenance\".\"departure_date\" as \"maintenance_departure_date\", \"maintenance\".\"reason\" as \"maintenance_reason\", \"maintenance\".\"status\" as \"maintenance_status\", \"maintenance\".\"created_by_command_id\" as \"maintenance_created_command_id\", \"maintenance\".\"released_by_command_id\" as \"maintenance_released_command_id\", \"internal\".\"id\" as \"internal_id\", \"internal\".\"arrival_date\" as \"internal_arrival_date\", \"internal\".\"departure_date\" as \"internal_departure_date\", \"internal\".\"reason\" as \"internal_reason\", \"internal\".\"status\" as \"internal_status\", \"internal\".\"created_by_command_id\" as \"internal_created_command_id\", \"internal\".\"released_by_command_id\" as \"internal_released_command_id\" from \"inventory_claims\" as \"claim\" left join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 left join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" left join \"orders\" as \"order\" on \"order\".\"id\" = \"stay\".\"order_id\" left join \"amendments\" as \"amendment\" on \"amendment\".\"id\" = \"segment\".\"amendment_id\" left join \"maintenance_locks\" as \"maintenance\" on \"maintenance\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $2 left join \"internal_use_blocks\" as \"internal\" on \"internal\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $3 where \"claim\".\"property_id\" = $4 and (\"claim\".\"service_date\" = $5 or (\"claim\".\"service_date\" >= $6 and \"claim\".\"service_date\" < $7)) order by \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 11.73679100000004
+      },
+      {
+        "sql": "select \"id\", \"inventory_unit_id\", \"room_id\", \"arrival_date\", \"departure_date\", \"status\", \"created_at\" from \"internal_use_blocks\" where \"property_id\" = $1 and \"status\" = $2 and \"arrival_date\" < $3 and \"departure_date\" > $4 order by \"id\"",
+        "durationMs": 1.1802089999999907
+      },
+      {
+        "sql": "select \"name\", \"applied_at\" from \"schema_migrations\" where \"name\" in ($1, $2)",
+        "durationMs": 1.1611669999999776
+      },
+      {
+        "sql": "commit",
+        "durationMs": 1.4236669999999663
+      }
+    ]
+  },
+  {
+    "arrivalDate": "2026-09-06",
+    "pageSize": 1,
+    "durationMs": 26,
+    "totalRooms": 44,
+    "returnedRooms": 1,
+    "jsonBytes": 39483,
+    "gzipBytes": 2019,
+    "queryCount": 10,
+    "queries": [
+      {
+        "sql": "start transaction isolation level repeatable read",
+        "durationMs": 1.3533749999999714
+      },
+      {
+        "sql": "set transaction read only",
+        "durationMs": 2.226875000000007
+      },
+      {
+        "sql": "select \"property\".\"id\", \"property\".\"timezone\", \"room_status_revision\".\"revision\", transaction_timestamp() as \"as_of\" from \"properties\" as \"property\" left join \"room_status_revisions\" as \"room_status_revision\" on \"room_status_revision\".\"property_id\" = \"property\".\"id\" where \"property\".\"id\" = $1",
+        "durationMs": 2.080791999999974
+      },
+      {
+        "sql": "select * from \"inventory_units\" where \"property_id\" = $1 and \"kind\" in ($2, $3) order by \"code\"",
+        "durationMs": 3.8476670000000013
+      },
+      {
+        "sql": "select \"order\".\"id\" from \"orders\" as \"order\" where \"order\".\"property_id\" = $1 and ((\"order\".\"status\" = $2 and \"order\".\"arrival_date\" <= $3) or (\"order\".\"status\" = $4 and \"order\".\"arrival_date\" <= $5)) order by \"order\".\"id\" limit $6",
+        "durationMs": 1.5225409999999897
+      },
+      {
+        "sql": "select \"id\", \"kind\", \"parent_room_id\", \"code\", \"name\" from \"inventory_units\" where \"property_id\" = $1 and \"active\" = $2 order by \"code\", \"id\" limit $3",
+        "durationMs": 1.2860000000000014
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"room_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"claim\".\"source_type\", \"claim\".\"source_id\", \"claim\".\"active\", \"claim\".\"created_at\", \"claim\".\"released_at\", \"segment\".\"id\" as \"segment_id\", \"segment\".\"stay_id\", \"segment\".\"segment_type\", \"segment\".\"arrival_date\" as \"segment_arrival_date\", \"segment\".\"departure_date\" as \"segment_departure_date\", \"segment\".\"created_at\" as \"segment_created_at\", \"stay\".\"status\" as \"stay_status\", \"order\".\"id\" as \"order_id\", \"order\".\"status\" as \"order_status\", \"order\".\"stay_type\", \"order\".\"arrival_date\" as \"order_arrival_date\", \"order\".\"departure_date\" as \"order_departure_date\", \"order\".\"primary_guest_snapshot\", \"order\".\"member_id\", \"order\".\"member_contract_id\", \"order\".\"booking_channel_code\", \"order\".\"channel_order_reference\", \"order\".\"current_revision_id\", to_jsonb(\"order\") ->> 'free_stay_category_code' as \"free_stay_category_code\", to_jsonb(\"order\") ->> 'free_stay_reason' as \"free_stay_reason\", \"amendment\".\"command_id\" as \"segment_command_id\", \"maintenance\".\"id\" as \"maintenance_id\", \"maintenance\".\"arrival_date\" as \"maintenance_arrival_date\", \"maintenance\".\"departure_date\" as \"maintenance_departure_date\", \"maintenance\".\"reason\" as \"maintenance_reason\", \"maintenance\".\"status\" as \"maintenance_status\", \"maintenance\".\"created_by_command_id\" as \"maintenance_created_command_id\", \"maintenance\".\"released_by_command_id\" as \"maintenance_released_command_id\", \"internal\".\"id\" as \"internal_id\", \"internal\".\"arrival_date\" as \"internal_arrival_date\", \"internal\".\"departure_date\" as \"internal_departure_date\", \"internal\".\"reason\" as \"internal_reason\", \"internal\".\"status\" as \"internal_status\", \"internal\".\"created_by_command_id\" as \"internal_created_command_id\", \"internal\".\"released_by_command_id\" as \"internal_released_command_id\" from \"inventory_claims\" as \"claim\" left join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 left join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" left join \"orders\" as \"order\" on \"order\".\"id\" = \"stay\".\"order_id\" left join \"amendments\" as \"amendment\" on \"amendment\".\"id\" = \"segment\".\"amendment_id\" left join \"maintenance_locks\" as \"maintenance\" on \"maintenance\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $2 left join \"internal_use_blocks\" as \"internal\" on \"internal\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $3 where \"claim\".\"property_id\" = $4 and (\"claim\".\"service_date\" = $5 or (\"claim\".\"service_date\" >= $6 and \"claim\".\"service_date\" < $7)) order by \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 3.972250000000031
+      },
+      {
+        "sql": "select \"id\", \"inventory_unit_id\", \"room_id\", \"arrival_date\", \"departure_date\", \"status\", \"created_at\" from \"internal_use_blocks\" where \"property_id\" = $1 and \"status\" = $2 and \"arrival_date\" < $3 and \"departure_date\" > $4 order by \"id\"",
+        "durationMs": 1.7059580000000096
+      },
+      {
+        "sql": "select \"name\", \"applied_at\" from \"schema_migrations\" where \"name\" in ($1, $2)",
+        "durationMs": 1.6020840000000476
+      },
+      {
+        "sql": "commit",
+        "durationMs": 1.791417000000024
+      }
+    ]
+  },
+  {
+    "arrivalDate": "2026-09-06",
+    "pageSize": 50,
+    "durationMs": 27,
+    "totalRooms": 44,
+    "returnedRooms": 44,
+    "jsonBytes": 531611,
+    "gzipBytes": 13458,
+    "queryCount": 10,
+    "queries": [
+      {
+        "sql": "start transaction isolation level repeatable read",
+        "durationMs": 0.6732499999999959
+      },
+      {
+        "sql": "set transaction read only",
+        "durationMs": 0.95962499999996
+      },
+      {
+        "sql": "select \"property\".\"id\", \"property\".\"timezone\", \"room_status_revision\".\"revision\", transaction_timestamp() as \"as_of\" from \"properties\" as \"property\" left join \"room_status_revisions\" as \"room_status_revision\" on \"room_status_revision\".\"property_id\" = \"property\".\"id\" where \"property\".\"id\" = $1",
+        "durationMs": 1.4340839999999844
+      },
+      {
+        "sql": "select * from \"inventory_units\" where \"property_id\" = $1 and \"kind\" in ($2, $3) order by \"code\"",
+        "durationMs": 3.0563750000000027
+      },
+      {
+        "sql": "select \"order\".\"id\" from \"orders\" as \"order\" where \"order\".\"property_id\" = $1 and ((\"order\".\"status\" = $2 and \"order\".\"arrival_date\" <= $3) or (\"order\".\"status\" = $4 and \"order\".\"arrival_date\" <= $5)) order by \"order\".\"id\" limit $6",
+        "durationMs": 2.2426249999999754
+      },
+      {
+        "sql": "select \"id\", \"kind\", \"parent_room_id\", \"code\", \"name\" from \"inventory_units\" where \"property_id\" = $1 and \"active\" = $2 order by \"code\", \"id\" limit $3",
+        "durationMs": 6.1115839999999935
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"room_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"claim\".\"source_type\", \"claim\".\"source_id\", \"claim\".\"active\", \"claim\".\"created_at\", \"claim\".\"released_at\", \"segment\".\"id\" as \"segment_id\", \"segment\".\"stay_id\", \"segment\".\"segment_type\", \"segment\".\"arrival_date\" as \"segment_arrival_date\", \"segment\".\"departure_date\" as \"segment_departure_date\", \"segment\".\"created_at\" as \"segment_created_at\", \"stay\".\"status\" as \"stay_status\", \"order\".\"id\" as \"order_id\", \"order\".\"status\" as \"order_status\", \"order\".\"stay_type\", \"order\".\"arrival_date\" as \"order_arrival_date\", \"order\".\"departure_date\" as \"order_departure_date\", \"order\".\"primary_guest_snapshot\", \"order\".\"member_id\", \"order\".\"member_contract_id\", \"order\".\"booking_channel_code\", \"order\".\"channel_order_reference\", \"order\".\"current_revision_id\", to_jsonb(\"order\") ->> 'free_stay_category_code' as \"free_stay_category_code\", to_jsonb(\"order\") ->> 'free_stay_reason' as \"free_stay_reason\", \"amendment\".\"command_id\" as \"segment_command_id\", \"maintenance\".\"id\" as \"maintenance_id\", \"maintenance\".\"arrival_date\" as \"maintenance_arrival_date\", \"maintenance\".\"departure_date\" as \"maintenance_departure_date\", \"maintenance\".\"reason\" as \"maintenance_reason\", \"maintenance\".\"status\" as \"maintenance_status\", \"maintenance\".\"created_by_command_id\" as \"maintenance_created_command_id\", \"maintenance\".\"released_by_command_id\" as \"maintenance_released_command_id\", \"internal\".\"id\" as \"internal_id\", \"internal\".\"arrival_date\" as \"internal_arrival_date\", \"internal\".\"departure_date\" as \"internal_departure_date\", \"internal\".\"reason\" as \"internal_reason\", \"internal\".\"status\" as \"internal_status\", \"internal\".\"created_by_command_id\" as \"internal_created_command_id\", \"internal\".\"released_by_command_id\" as \"internal_released_command_id\" from \"inventory_claims\" as \"claim\" left join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 left join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" left join \"orders\" as \"order\" on \"order\".\"id\" = \"stay\".\"order_id\" left join \"amendments\" as \"amendment\" on \"amendment\".\"id\" = \"segment\".\"amendment_id\" left join \"maintenance_locks\" as \"maintenance\" on \"maintenance\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $2 left join \"internal_use_blocks\" as \"internal\" on \"internal\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $3 where \"claim\".\"property_id\" = $4 and (\"claim\".\"service_date\" = $5 or (\"claim\".\"service_date\" >= $6 and \"claim\".\"service_date\" < $7)) order by \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 3.968250000000012
+      },
+      {
+        "sql": "select \"id\", \"inventory_unit_id\", \"room_id\", \"arrival_date\", \"departure_date\", \"status\", \"created_at\" from \"internal_use_blocks\" where \"property_id\" = $1 and \"status\" = $2 and \"arrival_date\" < $3 and \"departure_date\" > $4 order by \"id\"",
+        "durationMs": 1.0741669999999885
+      },
+      {
+        "sql": "select \"name\", \"applied_at\" from \"schema_migrations\" where \"name\" in ($1, $2)",
+        "durationMs": 0.8974169999999617
+      },
+      {
+        "sql": "commit",
+        "durationMs": 1.2536669999999503
+      }
+    ]
+  },
+  {
+    "arrivalDate": "2026-10-13",
+    "pageSize": 50,
+    "durationMs": 68,
+    "totalRooms": 44,
+    "returnedRooms": 44,
+    "jsonBytes": 681152,
+    "gzipBytes": 25653,
+    "queryCount": 21,
+    "queries": [
+      {
+        "sql": "start transaction isolation level repeatable read",
+        "durationMs": 1.9018750000000182
+      },
+      {
+        "sql": "set transaction read only",
+        "durationMs": 0.9457089999999653
+      },
+      {
+        "sql": "select \"property\".\"id\", \"property\".\"timezone\", \"room_status_revision\".\"revision\", transaction_timestamp() as \"as_of\" from \"properties\" as \"property\" left join \"room_status_revisions\" as \"room_status_revision\" on \"room_status_revision\".\"property_id\" = \"property\".\"id\" where \"property\".\"id\" = $1",
+        "durationMs": 1.3760839999999916
+      },
+      {
+        "sql": "select * from \"inventory_units\" where \"property_id\" = $1 and \"kind\" in ($2, $3) order by \"code\"",
+        "durationMs": 2.52312500000005
+      },
+      {
+        "sql": "select \"order\".\"id\" from \"orders\" as \"order\" where \"order\".\"property_id\" = $1 and ((\"order\".\"status\" = $2 and \"order\".\"arrival_date\" <= $3) or (\"order\".\"status\" = $4 and \"order\".\"arrival_date\" <= $5)) order by \"order\".\"id\" limit $6",
+        "durationMs": 1.3691250000000537
+      },
+      {
+        "sql": "select \"id\", \"kind\", \"parent_room_id\", \"code\", \"name\" from \"inventory_units\" where \"property_id\" = $1 and \"active\" = $2 order by \"code\", \"id\" limit $3",
+        "durationMs": 1.1315839999999753
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"room_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"claim\".\"source_type\", \"claim\".\"source_id\", \"claim\".\"active\", \"claim\".\"created_at\", \"claim\".\"released_at\", \"segment\".\"id\" as \"segment_id\", \"segment\".\"stay_id\", \"segment\".\"segment_type\", \"segment\".\"arrival_date\" as \"segment_arrival_date\", \"segment\".\"departure_date\" as \"segment_departure_date\", \"segment\".\"created_at\" as \"segment_created_at\", \"stay\".\"status\" as \"stay_status\", \"order\".\"id\" as \"order_id\", \"order\".\"status\" as \"order_status\", \"order\".\"stay_type\", \"order\".\"arrival_date\" as \"order_arrival_date\", \"order\".\"departure_date\" as \"order_departure_date\", \"order\".\"primary_guest_snapshot\", \"order\".\"member_id\", \"order\".\"member_contract_id\", \"order\".\"booking_channel_code\", \"order\".\"channel_order_reference\", \"order\".\"current_revision_id\", to_jsonb(\"order\") ->> 'free_stay_category_code' as \"free_stay_category_code\", to_jsonb(\"order\") ->> 'free_stay_reason' as \"free_stay_reason\", \"amendment\".\"command_id\" as \"segment_command_id\", \"maintenance\".\"id\" as \"maintenance_id\", \"maintenance\".\"arrival_date\" as \"maintenance_arrival_date\", \"maintenance\".\"departure_date\" as \"maintenance_departure_date\", \"maintenance\".\"reason\" as \"maintenance_reason\", \"maintenance\".\"status\" as \"maintenance_status\", \"maintenance\".\"created_by_command_id\" as \"maintenance_created_command_id\", \"maintenance\".\"released_by_command_id\" as \"maintenance_released_command_id\", \"internal\".\"id\" as \"internal_id\", \"internal\".\"arrival_date\" as \"internal_arrival_date\", \"internal\".\"departure_date\" as \"internal_departure_date\", \"internal\".\"reason\" as \"internal_reason\", \"internal\".\"status\" as \"internal_status\", \"internal\".\"created_by_command_id\" as \"internal_created_command_id\", \"internal\".\"released_by_command_id\" as \"internal_released_command_id\" from \"inventory_claims\" as \"claim\" left join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 left join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" left join \"orders\" as \"order\" on \"order\".\"id\" = \"stay\".\"order_id\" left join \"amendments\" as \"amendment\" on \"amendment\".\"id\" = \"segment\".\"amendment_id\" left join \"maintenance_locks\" as \"maintenance\" on \"maintenance\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $2 left join \"internal_use_blocks\" as \"internal\" on \"internal\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $3 where \"claim\".\"property_id\" = $4 and (\"claim\".\"service_date\" = $5 or (\"claim\".\"service_date\" >= $6 and \"claim\".\"service_date\" < $7)) order by \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 8.316499999999905
+      },
+      {
+        "sql": "select \"id\", \"inventory_unit_id\", \"room_id\", \"arrival_date\", \"departure_date\", \"status\", \"created_at\" from \"internal_use_blocks\" where \"property_id\" = $1 and \"status\" = $2 and \"arrival_date\" < $3 and \"departure_date\" > $4 order by \"id\"",
+        "durationMs": 1.601666000000023
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"stay\".\"order_id\", \"timeline_order\".\"arrival_date\" as \"order_arrival_date\", \"timeline_order\".\"departure_date\" as \"order_departure_date\" from \"inventory_claims\" as \"claim\" inner join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 inner join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" inner join \"orders\" as \"timeline_order\" on \"timeline_order\".\"id\" = \"stay\".\"order_id\" where \"claim\".\"property_id\" = $2 and \"claim\".\"active\" = $3 and \"stay\".\"order_id\" in ($4, $5, $6, $7, $8, $9, $10) order by \"stay\".\"order_id\", \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 2.0105839999999944
+      },
+      {
+        "sql": "select \"name\", \"applied_at\" from \"schema_migrations\" where \"name\" in ($1, $2)",
+        "durationMs": 0.8855829999999969
+      },
+      {
+        "sql": "select \"order\".\"id\" as \"id\", \"order\".\"status\" as \"status\", \"order\".\"stay_type\" as \"stay_type\", \"order\".\"arrival_date\" as \"arrival_date\", \"order\".\"departure_date\" as \"departure_date\", \"order\".\"current_revision_id\" as \"current_revision_id\", \"order\".\"version\" as \"version\", \"order\".\"member_id\" as \"member_id\", \"order\".\"member_contract_id\" as \"member_contract_id\", \"order\".\"booking_channel_code\" as \"booking_channel_code\", \"order\".\"channel_order_reference\" as \"channel_order_reference\", \"order\".\"free_stay_category_code\" as \"free_stay_category_code\", \"order\".\"free_stay_reason\" as \"free_stay_reason\", \"order\".\"pricing_policy_version_id\" as \"pricing_policy_version_id\", \"stay\".\"id\" as \"stay_id\", \"stay\".\"status\" as \"stay_status\" from \"orders\" as \"order\" inner join \"stays\" as \"stay\" on \"stay\".\"order_id\" = \"order\".\"id\" where \"order\".\"id\" in ($1, $2, $3, $4, $5, $6, $7)",
+        "durationMs": 1.13900000000001
+      },
+      {
+        "sql": "select \"id\", \"stay_id\", \"sequence\", \"inventory_unit_id\", \"arrival_date\", \"departure_date\", \"segment_type\", \"supersedes_segment_id\", \"amendment_id\" from \"stay_segments\" where \"stay_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"stay_id\", \"sequence\"",
+        "durationMs": 1.297125000000051
+      },
+      {
+        "sql": "select \"amendment\".\"id\", \"amendment\".\"order_id\", \"amendment\".\"sequence\", \"amendment\".\"prior_version\", \"amendment\".\"new_version\", \"amendment\".\"amendment_type\", \"amendment\".\"payload\", \"amendment\".\"reason_code\", \"amendment\".\"reason_note\", \"amendment\".\"created_at\", \"amendment\".\"command_id\", \"command\".\"subject_id\" as \"actor_subject_id\", \"subject\".\"display_name\" as \"actor_display_name\" from \"amendments\" as \"amendment\" left join \"command_executions\" as \"command\" on \"command\".\"id\" = \"amendment\".\"command_id\" left join \"subjects\" as \"subject\" on \"subject\".\"id\" = \"command\".\"subject_id\" where \"amendment\".\"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"amendment\".\"order_id\", \"amendment\".\"sequence\"",
+        "durationMs": 4.533916999999974
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"revision_no\", \"amendment_id\", \"arrival_date\", \"departure_date\", \"policy_base_amount_minor\", \"current_contract_amount_minor\", \"currency\", \"pricing_basis\", \"policy_version_id\", \"coverage_set\", \"cash_lines\", \"manual_adjustment_minor\" from \"pricing_revisions\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"revision_no\"",
+        "durationMs": 3.2571249999999736
+      },
+      {
+        "sql": "select \"fact_id\", \"order_id\", \"fact_type\", \"amount_minor\", \"net_effect_minor\", \"currency\", \"references_fact_id\", \"reverses_fact_id\", \"pricing_revision_id\", \"created_at\" from \"collection_facts\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"created_at\", \"fact_id\"",
+        "durationMs": 3.68908399999998
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"contract_id\", \"status\", \"held_by_revision_id\" from \"coverage_items\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7)",
+        "durationMs": 1.960540999999921
+      },
+      {
+        "sql": "select \"order_id\", \"amendment_type\", \"command_id\", \"created_at\" from \"amendments\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"sequence\"",
+        "durationMs": 2.3934999999999036
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"nickname\", \"ordinal\" from \"order_occupants\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"ordinal\"",
+        "durationMs": 2.390166999999906
+      },
+      {
+        "sql": "select \"occupant_id\", \"corrected_nickname\", \"sequence\" from \"order_occupant_corrections\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"occupant_id\", \"sequence\"",
+        "durationMs": 4.636582999999973
+      },
+      {
+        "sql": "select \"command\".\"id\", \"command\".\"subject_id\", \"command\".\"credential_id\", \"command\".\"command_type\", \"command\".\"correlation_id\", \"command\".\"completed_at\", \"command\".\"created_at\", \"receipt\".\"id\" as \"receipt_id\" from \"command_executions\" as \"command\" left join \"command_receipts\" as \"receipt\" on \"receipt\".\"command_id\" = \"command\".\"id\" where \"command\".\"id\" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        "durationMs": 2.6099590000000035
+      },
+      {
+        "sql": "commit",
+        "durationMs": 1.4237920000000486
+      }
+    ]
+  },
+  {
+    "arrivalDate": "2026-10-13",
+    "pageSize": 1,
+    "durationMs": 31,
+    "totalRooms": 44,
+    "returnedRooms": 1,
+    "jsonBytes": 85943,
+    "gzipBytes": 6347,
+    "queryCount": 21,
+    "queries": [
+      {
+        "sql": "start transaction isolation level repeatable read",
+        "durationMs": 4.905375000000049
+      },
+      {
+        "sql": "set transaction read only",
+        "durationMs": 0.5800829999999451
+      },
+      {
+        "sql": "select \"property\".\"id\", \"property\".\"timezone\", \"room_status_revision\".\"revision\", transaction_timestamp() as \"as_of\" from \"properties\" as \"property\" left join \"room_status_revisions\" as \"room_status_revision\" on \"room_status_revision\".\"property_id\" = \"property\".\"id\" where \"property\".\"id\" = $1",
+        "durationMs": 0.8036250000000109
+      },
+      {
+        "sql": "select * from \"inventory_units\" where \"property_id\" = $1 and \"kind\" in ($2, $3) order by \"code\"",
+        "durationMs": 1.5237500000000637
+      },
+      {
+        "sql": "select \"order\".\"id\" from \"orders\" as \"order\" where \"order\".\"property_id\" = $1 and ((\"order\".\"status\" = $2 and \"order\".\"arrival_date\" <= $3) or (\"order\".\"status\" = $4 and \"order\".\"arrival_date\" <= $5)) order by \"order\".\"id\" limit $6",
+        "durationMs": 0.8736670000000686
+      },
+      {
+        "sql": "select \"id\", \"kind\", \"parent_room_id\", \"code\", \"name\" from \"inventory_units\" where \"property_id\" = $1 and \"active\" = $2 order by \"code\", \"id\" limit $3",
+        "durationMs": 0.5304999999999609
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"room_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"claim\".\"source_type\", \"claim\".\"source_id\", \"claim\".\"active\", \"claim\".\"created_at\", \"claim\".\"released_at\", \"segment\".\"id\" as \"segment_id\", \"segment\".\"stay_id\", \"segment\".\"segment_type\", \"segment\".\"arrival_date\" as \"segment_arrival_date\", \"segment\".\"departure_date\" as \"segment_departure_date\", \"segment\".\"created_at\" as \"segment_created_at\", \"stay\".\"status\" as \"stay_status\", \"order\".\"id\" as \"order_id\", \"order\".\"status\" as \"order_status\", \"order\".\"stay_type\", \"order\".\"arrival_date\" as \"order_arrival_date\", \"order\".\"departure_date\" as \"order_departure_date\", \"order\".\"primary_guest_snapshot\", \"order\".\"member_id\", \"order\".\"member_contract_id\", \"order\".\"booking_channel_code\", \"order\".\"channel_order_reference\", \"order\".\"current_revision_id\", to_jsonb(\"order\") ->> 'free_stay_category_code' as \"free_stay_category_code\", to_jsonb(\"order\") ->> 'free_stay_reason' as \"free_stay_reason\", \"amendment\".\"command_id\" as \"segment_command_id\", \"maintenance\".\"id\" as \"maintenance_id\", \"maintenance\".\"arrival_date\" as \"maintenance_arrival_date\", \"maintenance\".\"departure_date\" as \"maintenance_departure_date\", \"maintenance\".\"reason\" as \"maintenance_reason\", \"maintenance\".\"status\" as \"maintenance_status\", \"maintenance\".\"created_by_command_id\" as \"maintenance_created_command_id\", \"maintenance\".\"released_by_command_id\" as \"maintenance_released_command_id\", \"internal\".\"id\" as \"internal_id\", \"internal\".\"arrival_date\" as \"internal_arrival_date\", \"internal\".\"departure_date\" as \"internal_departure_date\", \"internal\".\"reason\" as \"internal_reason\", \"internal\".\"status\" as \"internal_status\", \"internal\".\"created_by_command_id\" as \"internal_created_command_id\", \"internal\".\"released_by_command_id\" as \"internal_released_command_id\" from \"inventory_claims\" as \"claim\" left join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 left join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" left join \"orders\" as \"order\" on \"order\".\"id\" = \"stay\".\"order_id\" left join \"amendments\" as \"amendment\" on \"amendment\".\"id\" = \"segment\".\"amendment_id\" left join \"maintenance_locks\" as \"maintenance\" on \"maintenance\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $2 left join \"internal_use_blocks\" as \"internal\" on \"internal\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $3 where \"claim\".\"property_id\" = $4 and (\"claim\".\"service_date\" = $5 or (\"claim\".\"service_date\" >= $6 and \"claim\".\"service_date\" < $7)) order by \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 3.7333339999999
+      },
+      {
+        "sql": "select \"id\", \"inventory_unit_id\", \"room_id\", \"arrival_date\", \"departure_date\", \"status\", \"created_at\" from \"internal_use_blocks\" where \"property_id\" = $1 and \"status\" = $2 and \"arrival_date\" < $3 and \"departure_date\" > $4 order by \"id\"",
+        "durationMs": 0.7454999999999927
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"stay\".\"order_id\", \"timeline_order\".\"arrival_date\" as \"order_arrival_date\", \"timeline_order\".\"departure_date\" as \"order_departure_date\" from \"inventory_claims\" as \"claim\" inner join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 inner join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" inner join \"orders\" as \"timeline_order\" on \"timeline_order\".\"id\" = \"stay\".\"order_id\" where \"claim\".\"property_id\" = $2 and \"claim\".\"active\" = $3 and \"stay\".\"order_id\" in ($4, $5, $6, $7, $8, $9, $10) order by \"stay\".\"order_id\", \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 1.019042000000013
+      },
+      {
+        "sql": "select \"name\", \"applied_at\" from \"schema_migrations\" where \"name\" in ($1, $2)",
+        "durationMs": 0.5459160000000338
+      },
+      {
+        "sql": "select \"order\".\"id\" as \"id\", \"order\".\"status\" as \"status\", \"order\".\"stay_type\" as \"stay_type\", \"order\".\"arrival_date\" as \"arrival_date\", \"order\".\"departure_date\" as \"departure_date\", \"order\".\"current_revision_id\" as \"current_revision_id\", \"order\".\"version\" as \"version\", \"order\".\"member_id\" as \"member_id\", \"order\".\"member_contract_id\" as \"member_contract_id\", \"order\".\"booking_channel_code\" as \"booking_channel_code\", \"order\".\"channel_order_reference\" as \"channel_order_reference\", \"order\".\"free_stay_category_code\" as \"free_stay_category_code\", \"order\".\"free_stay_reason\" as \"free_stay_reason\", \"order\".\"pricing_policy_version_id\" as \"pricing_policy_version_id\", \"stay\".\"id\" as \"stay_id\", \"stay\".\"status\" as \"stay_status\" from \"orders\" as \"order\" inner join \"stays\" as \"stay\" on \"stay\".\"order_id\" = \"order\".\"id\" where \"order\".\"id\" in ($1, $2, $3, $4, $5, $6, $7)",
+        "durationMs": 0.7094580000000406
+      },
+      {
+        "sql": "select \"id\", \"stay_id\", \"sequence\", \"inventory_unit_id\", \"arrival_date\", \"departure_date\", \"segment_type\", \"supersedes_segment_id\", \"amendment_id\" from \"stay_segments\" where \"stay_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"stay_id\", \"sequence\"",
+        "durationMs": 0.6260409999999865
+      },
+      {
+        "sql": "select \"amendment\".\"id\", \"amendment\".\"order_id\", \"amendment\".\"sequence\", \"amendment\".\"prior_version\", \"amendment\".\"new_version\", \"amendment\".\"amendment_type\", \"amendment\".\"payload\", \"amendment\".\"reason_code\", \"amendment\".\"reason_note\", \"amendment\".\"created_at\", \"amendment\".\"command_id\", \"command\".\"subject_id\" as \"actor_subject_id\", \"subject\".\"display_name\" as \"actor_display_name\" from \"amendments\" as \"amendment\" left join \"command_executions\" as \"command\" on \"command\".\"id\" = \"amendment\".\"command_id\" left join \"subjects\" as \"subject\" on \"subject\".\"id\" = \"command\".\"subject_id\" where \"amendment\".\"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"amendment\".\"order_id\", \"amendment\".\"sequence\"",
+        "durationMs": 1.2157499999999573
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"revision_no\", \"amendment_id\", \"arrival_date\", \"departure_date\", \"policy_base_amount_minor\", \"current_contract_amount_minor\", \"currency\", \"pricing_basis\", \"policy_version_id\", \"coverage_set\", \"cash_lines\", \"manual_adjustment_minor\" from \"pricing_revisions\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"revision_no\"",
+        "durationMs": 0.7231249999999818
+      },
+      {
+        "sql": "select \"fact_id\", \"order_id\", \"fact_type\", \"amount_minor\", \"net_effect_minor\", \"currency\", \"references_fact_id\", \"reverses_fact_id\", \"pricing_revision_id\", \"created_at\" from \"collection_facts\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"created_at\", \"fact_id\"",
+        "durationMs": 0.609958000000006
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"contract_id\", \"status\", \"held_by_revision_id\" from \"coverage_items\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7)",
+        "durationMs": 0.5751670000000786
+      },
+      {
+        "sql": "select \"order_id\", \"amendment_type\", \"command_id\", \"created_at\" from \"amendments\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"sequence\"",
+        "durationMs": 0.7061659999999392
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"nickname\", \"ordinal\" from \"order_occupants\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"ordinal\"",
+        "durationMs": 0.650957999999946
+      },
+      {
+        "sql": "select \"occupant_id\", \"corrected_nickname\", \"sequence\" from \"order_occupant_corrections\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"occupant_id\", \"sequence\"",
+        "durationMs": 0.5985409999999547
+      },
+      {
+        "sql": "select \"command\".\"id\", \"command\".\"subject_id\", \"command\".\"credential_id\", \"command\".\"command_type\", \"command\".\"correlation_id\", \"command\".\"completed_at\", \"command\".\"created_at\", \"receipt\".\"id\" as \"receipt_id\" from \"command_executions\" as \"command\" left join \"command_receipts\" as \"receipt\" on \"receipt\".\"command_id\" = \"command\".\"id\" where \"command\".\"id\" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        "durationMs": 0.8130409999999983
+      },
+      {
+        "sql": "commit",
+        "durationMs": 0.635167000000024
+      }
+    ]
+  },
+  {
+    "arrivalDate": "2026-10-13",
+    "pageSize": 50,
+    "durationMs": 26,
+    "totalRooms": 44,
+    "returnedRooms": 44,
+    "jsonBytes": 681152,
+    "gzipBytes": 25652,
+    "queryCount": 21,
+    "queries": [
+      {
+        "sql": "start transaction isolation level repeatable read",
+        "durationMs": 0.5105839999999944
+      },
+      {
+        "sql": "set transaction read only",
+        "durationMs": 0.33720800000003237
+      },
+      {
+        "sql": "select \"property\".\"id\", \"property\".\"timezone\", \"room_status_revision\".\"revision\", transaction_timestamp() as \"as_of\" from \"properties\" as \"property\" left join \"room_status_revisions\" as \"room_status_revision\" on \"room_status_revision\".\"property_id\" = \"property\".\"id\" where \"property\".\"id\" = $1",
+        "durationMs": 0.5627090000000408
+      },
+      {
+        "sql": "select * from \"inventory_units\" where \"property_id\" = $1 and \"kind\" in ($2, $3) order by \"code\"",
+        "durationMs": 1.0735830000000988
+      },
+      {
+        "sql": "select \"order\".\"id\" from \"orders\" as \"order\" where \"order\".\"property_id\" = $1 and ((\"order\".\"status\" = $2 and \"order\".\"arrival_date\" <= $3) or (\"order\".\"status\" = $4 and \"order\".\"arrival_date\" <= $5)) order by \"order\".\"id\" limit $6",
+        "durationMs": 0.4823340000000371
+      },
+      {
+        "sql": "select \"id\", \"kind\", \"parent_room_id\", \"code\", \"name\" from \"inventory_units\" where \"property_id\" = $1 and \"active\" = $2 order by \"code\", \"id\" limit $3",
+        "durationMs": 0.4506659999999556
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"room_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"claim\".\"source_type\", \"claim\".\"source_id\", \"claim\".\"active\", \"claim\".\"created_at\", \"claim\".\"released_at\", \"segment\".\"id\" as \"segment_id\", \"segment\".\"stay_id\", \"segment\".\"segment_type\", \"segment\".\"arrival_date\" as \"segment_arrival_date\", \"segment\".\"departure_date\" as \"segment_departure_date\", \"segment\".\"created_at\" as \"segment_created_at\", \"stay\".\"status\" as \"stay_status\", \"order\".\"id\" as \"order_id\", \"order\".\"status\" as \"order_status\", \"order\".\"stay_type\", \"order\".\"arrival_date\" as \"order_arrival_date\", \"order\".\"departure_date\" as \"order_departure_date\", \"order\".\"primary_guest_snapshot\", \"order\".\"member_id\", \"order\".\"member_contract_id\", \"order\".\"booking_channel_code\", \"order\".\"channel_order_reference\", \"order\".\"current_revision_id\", to_jsonb(\"order\") ->> 'free_stay_category_code' as \"free_stay_category_code\", to_jsonb(\"order\") ->> 'free_stay_reason' as \"free_stay_reason\", \"amendment\".\"command_id\" as \"segment_command_id\", \"maintenance\".\"id\" as \"maintenance_id\", \"maintenance\".\"arrival_date\" as \"maintenance_arrival_date\", \"maintenance\".\"departure_date\" as \"maintenance_departure_date\", \"maintenance\".\"reason\" as \"maintenance_reason\", \"maintenance\".\"status\" as \"maintenance_status\", \"maintenance\".\"created_by_command_id\" as \"maintenance_created_command_id\", \"maintenance\".\"released_by_command_id\" as \"maintenance_released_command_id\", \"internal\".\"id\" as \"internal_id\", \"internal\".\"arrival_date\" as \"internal_arrival_date\", \"internal\".\"departure_date\" as \"internal_departure_date\", \"internal\".\"reason\" as \"internal_reason\", \"internal\".\"status\" as \"internal_status\", \"internal\".\"created_by_command_id\" as \"internal_created_command_id\", \"internal\".\"released_by_command_id\" as \"internal_released_command_id\" from \"inventory_claims\" as \"claim\" left join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 left join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" left join \"orders\" as \"order\" on \"order\".\"id\" = \"stay\".\"order_id\" left join \"amendments\" as \"amendment\" on \"amendment\".\"id\" = \"segment\".\"amendment_id\" left join \"maintenance_locks\" as \"maintenance\" on \"maintenance\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $2 left join \"internal_use_blocks\" as \"internal\" on \"internal\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $3 where \"claim\".\"property_id\" = $4 and (\"claim\".\"service_date\" = $5 or (\"claim\".\"service_date\" >= $6 and \"claim\".\"service_date\" < $7)) order by \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 2.839334000000008
+      },
+      {
+        "sql": "select \"id\", \"inventory_unit_id\", \"room_id\", \"arrival_date\", \"departure_date\", \"status\", \"created_at\" from \"internal_use_blocks\" where \"property_id\" = $1 and \"status\" = $2 and \"arrival_date\" < $3 and \"departure_date\" > $4 order by \"id\"",
+        "durationMs": 0.5601669999999785
+      },
+      {
+        "sql": "select \"claim\".\"id\" as \"claim_id\", \"claim\".\"inventory_unit_id\", \"claim\".\"service_date\", \"stay\".\"order_id\", \"timeline_order\".\"arrival_date\" as \"order_arrival_date\", \"timeline_order\".\"departure_date\" as \"order_departure_date\" from \"inventory_claims\" as \"claim\" inner join \"stay_segments\" as \"segment\" on \"segment\".\"id\" = \"claim\".\"source_id\" and \"claim\".\"source_type\" = $1 inner join \"stays\" as \"stay\" on \"stay\".\"id\" = \"segment\".\"stay_id\" inner join \"orders\" as \"timeline_order\" on \"timeline_order\".\"id\" = \"stay\".\"order_id\" where \"claim\".\"property_id\" = $2 and \"claim\".\"active\" = $3 and \"stay\".\"order_id\" in ($4, $5, $6, $7, $8, $9, $10) order by \"stay\".\"order_id\", \"claim\".\"service_date\", \"claim\".\"id\"",
+        "durationMs": 1.0885419999999613
+      },
+      {
+        "sql": "select \"name\", \"applied_at\" from \"schema_migrations\" where \"name\" in ($1, $2)",
+        "durationMs": 0.5197080000000369
+      },
+      {
+        "sql": "select \"order\".\"id\" as \"id\", \"order\".\"status\" as \"status\", \"order\".\"stay_type\" as \"stay_type\", \"order\".\"arrival_date\" as \"arrival_date\", \"order\".\"departure_date\" as \"departure_date\", \"order\".\"current_revision_id\" as \"current_revision_id\", \"order\".\"version\" as \"version\", \"order\".\"member_id\" as \"member_id\", \"order\".\"member_contract_id\" as \"member_contract_id\", \"order\".\"booking_channel_code\" as \"booking_channel_code\", \"order\".\"channel_order_reference\" as \"channel_order_reference\", \"order\".\"free_stay_category_code\" as \"free_stay_category_code\", \"order\".\"free_stay_reason\" as \"free_stay_reason\", \"order\".\"pricing_policy_version_id\" as \"pricing_policy_version_id\", \"stay\".\"id\" as \"stay_id\", \"stay\".\"status\" as \"stay_status\" from \"orders\" as \"order\" inner join \"stays\" as \"stay\" on \"stay\".\"order_id\" = \"order\".\"id\" where \"order\".\"id\" in ($1, $2, $3, $4, $5, $6, $7)",
+        "durationMs": 0.6931250000000091
+      },
+      {
+        "sql": "select \"id\", \"stay_id\", \"sequence\", \"inventory_unit_id\", \"arrival_date\", \"departure_date\", \"segment_type\", \"supersedes_segment_id\", \"amendment_id\" from \"stay_segments\" where \"stay_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"stay_id\", \"sequence\"",
+        "durationMs": 0.6015840000000026
+      },
+      {
+        "sql": "select \"amendment\".\"id\", \"amendment\".\"order_id\", \"amendment\".\"sequence\", \"amendment\".\"prior_version\", \"amendment\".\"new_version\", \"amendment\".\"amendment_type\", \"amendment\".\"payload\", \"amendment\".\"reason_code\", \"amendment\".\"reason_note\", \"amendment\".\"created_at\", \"amendment\".\"command_id\", \"command\".\"subject_id\" as \"actor_subject_id\", \"subject\".\"display_name\" as \"actor_display_name\" from \"amendments\" as \"amendment\" left join \"command_executions\" as \"command\" on \"command\".\"id\" = \"amendment\".\"command_id\" left join \"subjects\" as \"subject\" on \"subject\".\"id\" = \"command\".\"subject_id\" where \"amendment\".\"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"amendment\".\"order_id\", \"amendment\".\"sequence\"",
+        "durationMs": 1.211541000000011
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"revision_no\", \"amendment_id\", \"arrival_date\", \"departure_date\", \"policy_base_amount_minor\", \"current_contract_amount_minor\", \"currency\", \"pricing_basis\", \"policy_version_id\", \"coverage_set\", \"cash_lines\", \"manual_adjustment_minor\" from \"pricing_revisions\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"revision_no\"",
+        "durationMs": 0.7988750000000664
+      },
+      {
+        "sql": "select \"fact_id\", \"order_id\", \"fact_type\", \"amount_minor\", \"net_effect_minor\", \"currency\", \"references_fact_id\", \"reverses_fact_id\", \"pricing_revision_id\", \"created_at\" from \"collection_facts\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"created_at\", \"fact_id\"",
+        "durationMs": 0.5478749999999764
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"contract_id\", \"status\", \"held_by_revision_id\" from \"coverage_items\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7)",
+        "durationMs": 0.46833399999991343
+      },
+      {
+        "sql": "select \"order_id\", \"amendment_type\", \"command_id\", \"created_at\" from \"amendments\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"sequence\"",
+        "durationMs": 0.5669579999999996
+      },
+      {
+        "sql": "select \"id\", \"order_id\", \"nickname\", \"ordinal\" from \"order_occupants\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"order_id\", \"ordinal\"",
+        "durationMs": 0.529042000000004
+      },
+      {
+        "sql": "select \"occupant_id\", \"corrected_nickname\", \"sequence\" from \"order_occupant_corrections\" where \"order_id\" in ($1, $2, $3, $4, $5, $6, $7) order by \"occupant_id\", \"sequence\"",
+        "durationMs": 0.5078750000000127
+      },
+      {
+        "sql": "select \"command\".\"id\", \"command\".\"subject_id\", \"command\".\"credential_id\", \"command\".\"command_type\", \"command\".\"correlation_id\", \"command\".\"completed_at\", \"command\".\"created_at\", \"receipt\".\"id\" as \"receipt_id\" from \"command_executions\" as \"command\" left join \"command_receipts\" as \"receipt\" on \"receipt\".\"command_id\" = \"command\".\"id\" where \"command\".\"id\" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        "durationMs": 1.112292000000025
+      },
+      {
+        "sql": "commit",
+        "durationMs": 0.4913329999999405
+      }
+    ]
+  }
+]

@@ -28,7 +28,7 @@ async function login(page: Page): Promise<void> {
   await page.getByTestId("login-password").fill(fixture.operator.password);
   await page.getByTestId("login-submit").click();
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态", exact: true })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
 async function openOrder(page: Page, stay: Stage12StayFixture): Promise<void> {
@@ -215,7 +215,7 @@ test("4.5 no-show uses the 20:00 gate, is operator initiated and becomes termina
   await login(page);
 
   await page.goto("/today");
-  await expect(page.getByRole("heading", { name: "今日履约", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "工作台", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("tab", { name: /异常/ }).click();
   const row = page.locator(".queue-row").filter({ hasText: fixture.noShow.nickname });
   await expect(row).toBeVisible();

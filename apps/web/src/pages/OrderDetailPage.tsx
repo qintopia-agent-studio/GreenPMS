@@ -1,3 +1,5 @@
+import { createReadPoller } from "../readPoller";
+import { orderListBackHref } from "../orderListNavigation";
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -29,7 +31,7 @@ import {
   type OrderEffectiveArrangementPresentation,
   type OrderFulfillmentRecordDto
 } from "@qintopia/contracts";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { accommodationPositionItems, type AccommodationPositionItem } from "../components/AccommodationPositionSummary";
 import { roomStatusRoomTypeLabel } from "../room-status/roomStatusPresentation";
 import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
@@ -60,6 +62,7 @@ import {
 } from "../stayMembershipUpgrade";
 import type { AmendmentDto, CollectionFactDto, CommandRequest, InventoryUnitDto, MemberDto, MembershipProductDto, OrderViewDto, PricingRevisionDto } from "../types";
 import {
+  errorMessage,
   CommandDialog,
   type CommandDialogCloseContext,
   CommandResultNotice,
@@ -76,6 +79,7 @@ import {
   InfoHint,
   LoadingBlock,
   Modal,
+  ModalNoticeProvider,
   QuoteRecoveryConflictNotice,
   isTerminalCommandRecovery,
   recoveryCommandRequest,
@@ -415,14 +419,14 @@ export function OrderActionNotice({ title, body, testId, action }: {
   </span>;
 }
 
-export function orderDetailBackTarget(state: unknown): "/" | "/orders" {
+export function orderDetailBackTarget(state: unknown): string {
   if (!state || typeof state !== "object") return "/orders";
   const source = state as Record<string, unknown>;
   return source.fromRoomStatus === true
     || source.source === "room-status"
     || source.returnTo === "/"
     ? "/"
-    : "/orders";
+    : orderListBackHref(state);
 }
 
 export function requestedOrderAction(search: string, actions: readonly OrderAllowedActionDto[]): OrderActionCode | undefined {
@@ -568,11 +572,11 @@ export function pricingBasisLabel(basis: PricingRevisionDto["pricing_basis"]): s
 }
 
 export function collectionDifferencePresentation(amount: MoneyDto): {
-  label: "差额";
+  label: "收款差额";
   amount: MoneyDto;
 } {
   return {
-    label: "差额",
+    label: "收款差额",
     amount
   };
 }
@@ -632,7 +636,7 @@ function ArrangementHistoryAmounts({ item, showPerOrderFunds, isLatest = false }
     <div><dt>与政策基础金额差额</dt><dd>{formatMoney(item.pricingSummary.differenceFromPolicy)}</dd></div>
     {showPerOrderFunds ? <>
       <div><dt>已记录净收款</dt><dd>{formatMoney(item.fundsSummary.netRecordedCollection)}</dd></div>
-      <div><dt>{difference.label}</dt><dd>{formatMoney(difference.amount)}</dd></div>
+      <div><dt>当时{difference.label}</dt><dd>{formatMoney(difference.amount)}<small>当时订单金额减已记录净收款</small></dd></div>
     </> : null}
     {showPerOrderFunds && item.fundsSummary.refundReferenceAmount.minorUnits > 0 ? <>
       <div><dt>退款参考</dt><dd><strong>{formatMoney(item.fundsSummary.refundReferenceAmount)}</strong></dd></div>
@@ -679,10 +683,6 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
   const units = new Map(inventoryUnits.map((unit) => [unit.id, unit]));
   return <>
     <div className="detail-grid" data-testid="order-arrangements">
-      <section className="detail-section" aria-labelledby="original-arrangement-heading">
-        <div className="section-title-row"><h2 id="original-arrangement-heading">原始预订安排</h2></div>
-        <ArrangementDetails arrangement={view.originalArrangement} units={units} />
-      </section>
       <section className="detail-section" aria-labelledby="effective-arrangement-heading">
         <div className="section-title-row"><h2 id="effective-arrangement-heading">{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</h2></div>
         <ArrangementDetails
@@ -710,7 +710,12 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
       </div>
     </section>
 
-    <section className="detail-section full-detail" aria-labelledby="arrangement-history-heading" data-testid="arrangement-history">
+    <details className="detail-disclosure" data-testid="arrangement-history"><summary>住宿安排变更历史 · {view.arrangementHistory.length} 条</summary>
+      <section className="detail-section" aria-labelledby="original-arrangement-heading">
+        <div className="section-title-row"><h2 id="original-arrangement-heading">原始预订安排</h2></div>
+        <ArrangementDetails arrangement={view.originalArrangement} units={units} />
+      </section>
+    <section className="detail-section full-detail" aria-labelledby="arrangement-history-heading">
       <div className="section-title-row"><h2 id="arrangement-history-heading">住宿安排变更历史</h2><span>{itemCountLabel(view.arrangementHistory.length)}</span></div>
       {!showPerOrderFunds && channelPriceDifferenceReason?.trim() ? <p className="muted compact">渠道价格差异说明：{channelPriceDifferenceReason.trim()}</p> : null}
       <div className="amendment-list">{view.arrangementHistory.map((item, index) => {
@@ -751,6 +756,7 @@ export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds
         </article>;
       })}</div>
     </section>
+    </details>
   </>;
 }
 
@@ -839,7 +845,7 @@ export function OrderAmountStrip({ amounts, pricingRevision, bookingChannelCode 
   return <section className="amount-strip" aria-label="订单可复算金额" data-testid="order-amounts">
     <div><span>住宿金额</span><strong>{formatMoney(amounts.currentContractAmount)}</strong></div>
     <div><span>已记录净收款</span><strong>{formatMoney(amounts.netRecordedCollection)}</strong></div>
-    <div><span>{difference.label}</span><strong>{formatMoney(difference.amount)}</strong></div>
+    <div><span>{difference.label}</span><strong>{formatMoney(difference.amount)}</strong><small>{difference.amount.minorUnits > 0 ? "住宿金额减净收款，正数为尚差金额" : difference.amount.minorUnits < 0 ? "住宿金额减净收款，负数为多收；退款需核对原收款" : "住宿金额与已记录净收款一致"}</small></div>
     {amounts.refundReferenceAmount.minorUnits > 0 ? <div><span>退款参考</span><strong>{formatMoney(amounts.refundReferenceAmount)}</strong><small>尚未登记退款</small></div> : null}
   </section>;
 }
@@ -1401,11 +1407,12 @@ function CompleteStayDialog({ view, draft, onClose, onSubmit }: {
   </Modal>;
 }
 
-function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmit }: {
+function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = false, onClose, onSubmit }: {
   action: FormAction;
   view: OrderViewDto;
   initialFactId?: string;
   draft?: CommandRequest;
+  writeBlocked?: boolean;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
@@ -1465,6 +1472,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (writeBlocked) return;
     setValidationError(undefined);
     const base: Record<string, unknown> = { propertyId: view.order.property_id, orderId: view.order.id };
     let description = "请核对本次操作信息。";
@@ -1613,7 +1621,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, onClose, onSubmi
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={(action === "RECORD_REFUND" && refundableCollections.length === 0) || (action === "REVERSE_FACT" && reversibleFacts.length === 0)}>{action === "RECORD_COLLECTION" || action === "RECORD_REFUND" ? "下一步" : "继续核对"}</button></div>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked || (action === "RECORD_REFUND" && refundableCollections.length === 0) || (action === "REVERSE_FACT" && reversibleFacts.length === 0)}>{action === "RECORD_COLLECTION" || action === "RECORD_REFUND" ? "下一步" : "继续核对"}</button></div>
       </form>
     </Modal>
   );
@@ -1719,6 +1727,13 @@ export function OrderActionButton({ action, blocked, showWhenDisabled = false, c
 
 export function OrderDetailPage() {
   const { orderId } = useParams<{ orderId: string }>();
+  const { principal, propertyId } = useWorkspace();
+  const scope = JSON.stringify([orderId, propertyId, principal]);
+  return <ScopedOrderDetailPage key={scope} />;
+}
+
+function ScopedOrderDetailPage() {
+  const { orderId } = useParams<{ orderId: string }>();
   const location = useLocation();
   const navigate = useNavigate();
   const { meta, principal, propertyId } = useWorkspace();
@@ -1736,6 +1751,9 @@ export function OrderDetailPage() {
   const [stayDateAction, setStayDateAction] = useState<StayDateChangeAction>();
   const [movingUnit, setMovingUnit] = useState(false);
   const [convertingToMembership, setConvertingToMembership] = useState(false);
+  const [upgradeMembers, setUpgradeMembers] = useState<import("../types").MemberDto[]>([]);
+  const upgradeLookupRef = useRef<AbortController | undefined>(undefined);
+  useEffect(() => () => { upgradeLookupRef.current?.abort(); }, [orderId, propertyId]);
   const [lifecycleAction, setLifecycleAction] = useState<OrderLifecycleAction>();
   const [stayDateMode, setStayDateMode] = useState<StayDateChangeMode>("DATE_CHANGE");
   const [correctingOccupant, setCorrectingOccupant] = useState<OrderOccupant>();
@@ -1745,7 +1763,7 @@ export function OrderDetailPage() {
   const [command, setCommand] = useState<CommandRequest>();
   const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
-  const [refreshToken, setRefreshToken] = useState(0);
+  const refreshOrderRef = useRef<() => void>(() => {});
   const [refreshNotice, setRefreshNotice] = useState<string>();
   const [commandNotice, setCommandNotice] = useState<string>();
   const viewRef = useRef<OrderViewDto | undefined>(undefined);
@@ -1756,7 +1774,7 @@ export function OrderDetailPage() {
 
   const pendingRecovery = commandRecovery.pending;
   const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, pendingRecovery?.commandType);
-  const orderActionsBlocked = commandRecovery.blocked && recoveryPendingAllowed;
+  const orderActionsBlocked = Boolean(error) || (commandRecovery.blocked && recoveryPendingAllowed);
   const enabledActions = useMemo(() => new Set(enabledOrderActionCodes(view?.allowedActions ?? [])), [view]);
   const actionByCode = useMemo(() => new Map((view?.allowedActions ?? []).map((action) => [action.code, action])), [view]);
   const fulfillmentNotice = useMemo(() => orderFulfillmentNotice(view?.allowedActions ?? []), [view]);
@@ -1790,27 +1808,18 @@ export function OrderDetailPage() {
   }, [view]);
 
   useEffect(() => {
-    const refreshVisible = () => {
-      if (document.visibilityState === "visible") setRefreshToken((value) => value + 1);
-    };
-    const interval = window.setInterval(refreshVisible, ORDER_DETAIL_POLL_MS);
-    document.addEventListener("visibilitychange", refreshVisible);
-    return () => {
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", refreshVisible);
-    };
-  }, [orderId]);
-
-  useEffect(() => {
     if (!orderId) return;
-    let current = true;
-    const prior = viewRef.current;
-    if (!prior) setLoading(true);
-    setError(undefined);
-    api.order(orderId)
-      .then((response) => {
-        if (!current) return;
+    const poller = createReadPoller({
+      intervalMs: ORDER_DETAIL_POLL_MS,
+      timeoutMs: 20_000,
+      visible: () => document.visibilityState === "visible",
+      read: (signal) => api.order(orderId, signal),
+      onValue: (response) => {
+        const prior = viewRef.current;
+        if (response.order.id !== orderId || response.order.property_id !== propertyId) throw new Error("订单响应与当前订单或门店不一致，已停止更新");
         assertOrderViewAllowedActions(response, currentPropertyAllowedActions);
+        // A read begun before a committed command must not roll back its refreshed view.
+        if (prior && response.order.version < prior.order.version) return;
         const payloadChanged = !prior || orderViewPayloadChanged(prior, response);
         if (prior && orderRefreshMustCloseEditor(prior, response, editorIsOpenRef.current)) {
           editorIsOpenRef.current = false;
@@ -1821,6 +1830,8 @@ export function OrderDetailPage() {
           setConvertingToMembership(false);
           setLifecycleAction(undefined);
           setCorrectingOccupant(undefined);
+          setCompanionAction(undefined);
+          setPendingStayMembershipUpgrade(undefined);
           setInitialFactId(undefined);
           setCommandDraft(undefined);
           setRefreshNotice("订单已被其他操作刷新。为避免使用旧数据，原编辑表单已关闭；请重新打开后核对。");
@@ -1830,11 +1841,37 @@ export function OrderDetailPage() {
           viewRef.current = response;
         }
         setLoadedPrincipalOrderScope(principalOrderScope);
-      })
-      .catch((nextError) => current && setError(nextError))
-      .finally(() => current && setLoading(false));
-    return () => { current = false; };
-  }, [currentPropertyAllowedActions, orderId, principalOrderScope, refreshToken]);
+        setError(undefined);
+        setLoading(false);
+      },
+      onError: (nextError) => {
+        setError(nextError);
+        setLoading(false);
+        if (nextError instanceof ApiError && (nextError.status === 401 || nextError.status === 403 || nextError.status === 404)) {
+          setView(undefined);
+          viewRef.current = undefined;
+          setFormAction(undefined);
+          setStayDateAction(undefined);
+          setMovingUnit(false);
+          setCompleteStayAction(false);
+          setConvertingToMembership(false);
+          setCorrectingOccupant(undefined);
+          setCompanionAction(undefined);
+          setLifecycleAction(undefined);
+          setCommandDraft(undefined);
+        }
+      }
+    });
+    refreshOrderRef.current = poller.refresh;
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") poller.refresh();
+    };
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      poller.dispose();
+      document.removeEventListener("visibilitychange", refreshVisible);
+    };
+  }, [currentPropertyAllowedActions, orderId, principalOrderScope, propertyId]);
 
   useEffect(() => {
     if (view && view.order.property_id !== propertyId) navigate("/orders", { replace: true });
@@ -1908,8 +1945,27 @@ export function OrderDetailPage() {
     setLifecycleAction(action);
   }
 
-  function beginStayMembershipUpgrade(currentView: OrderViewDto) {
-    const entry = stayMembershipUpgradeEntry(currentView, meta.members, meta.membershipProducts, unitMap);
+  async function beginStayMembershipUpgrade(currentView: OrderViewDto) {
+    upgradeLookupRef.current?.abort();
+    const controller = new AbortController();
+    upgradeLookupRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(new Error("会员查找超时，请再次点击升级会员")), 12_000);
+    let members: import("../types").MemberDto[] = [];
+    const phone = currentView.occupants.find((occupant) => occupant.role === "PRIMARY")?.phone?.replace(/\s+/g, "");
+    try {
+      if (phone) {
+        setCommandNotice("正在核对会员档案…");
+        const response = await api.members(currentView.order.property_id, undefined, { phone, pageSize: 2, signal: controller.signal });
+        members = response.members.map((row) => row.member);
+      }
+      if (upgradeLookupRef.current !== controller || controller.signal.aborted || viewRef.current?.order.id !== currentView.order.id) return;
+      setUpgradeMembers(members);
+      setCommandNotice(undefined);
+    } catch (error) {
+      if (upgradeLookupRef.current === controller) setCommandNotice(`无法核对会员档案：${errorMessage(controller.signal.reason ?? error)}。请再次点击升级会员重试。`);
+      return;
+    } finally { window.clearTimeout(timeout); }
+    const entry = stayMembershipUpgradeEntry(currentView, members, meta.membershipProducts, unitMap);
     if (entry.state === "CORRECT_PRIMARY_OCCUPANT") {
       const occupant = currentView.occupants.find((candidate) => candidate.id === entry.primaryOccupantId);
       if (!occupant || !enabledActions.has("CORRECT_ORDER_OCCUPANT")) {
@@ -1959,7 +2015,7 @@ export function OrderDetailPage() {
     }
     setCommand(undefined);
     setRecoveryDialogOpen(false);
-    setRefreshToken((value) => value + 1);
+    refreshOrderRef.current();
   }
 
   function returnCommandToEdit(request: CommandRequest) {
@@ -2013,7 +2069,7 @@ export function OrderDetailPage() {
     if (focusedActionKeyRef.current === focusKey) return;
     focusedActionKeyRef.current = focusKey;
     beginStayMembershipUpgrade(view);
-  }, [location.search, meta.members, orderActionsBlocked, orderId, requestedAction, view]);
+  }, [location.search, orderActionsBlocked, orderId, requestedAction, view]);
 
   useEffect(() => {
     const notice = stayMembershipUpgradeAutoOpenBlockedNotice(requestedAction, orderActionsBlocked);
@@ -2040,7 +2096,7 @@ export function OrderDetailPage() {
 
   if (loading) return <LoadingBlock label="正在载入订单详情" />;
   if (view && !orderViewMatchesPrincipalScope(loadedPrincipalOrderScope, principalOrderScope)) return <LoadingBlock label="正在切换订单访问权限" />;
-  if (error || !view) return <div><Link className="back-link" to={backTarget} state={backTarget === "/" ? location.state : undefined}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link><InlineError error={error ?? new Error("Order not found")} title="无法载入订单" /></div>;
+  if (!view) return <div><Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link><InlineError error={error ?? new Error("Order not found")} title="无法载入订单" /></div>;
 
   const occupants = orderedOrderOccupants(view.occupants);
   const primaryOccupant = primaryOrderOccupant(occupants);
@@ -2100,18 +2156,21 @@ export function OrderDetailPage() {
   const showOrderActionHelp = orderActionHelpRequired(view.allowedActions, visibleActionCodes);
   const overdueNotice = overdueInHouseNotice(view);
 
+  const readFailureNotice = error ? <InlineError error={error} title="订单刷新失败，草稿已保留；读取恢复前暂不能提交" /> : null;
   return (
+    <ModalNoticeProvider notice={readFailureNotice}>
     <div className="order-detail-page">
-      <Link className="back-link" to={backTarget} state={backTarget === "/" ? location.state : undefined}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link>
+      <Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link>
       <header className="order-heading">
-        <div><div className="order-title-row"><h1>{guestName(primaryOccupant ? { nickname: primaryOccupant.nickname, fullName: primaryOccupant.fullName } : view.order.primary_guest_snapshot)}</h1><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div></div>
-        <div className="order-unit"><span>{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</span><strong>{visibleArrangementUnits.join("、")}</strong></div>
+        <div><div className="order-title-row"><h1>{guestName(view.order.current_primary_guest ?? (primaryOccupant ? { nickname: primaryOccupant.nickname, fullName: primaryOccupant.fullName } : view.order.primary_guest_snapshot))}</h1><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div></div>
+        <div className="order-unit"><span>{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</span><strong>{visibleArrangementUnits.join("、")}</strong><small>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</small></div>
       </header>
 
       {overdueNotice ? <OverdueInHouseAlert notice={overdueNotice} /> : null}
 
       <OrderAmountStrip amounts={view.amounts} pricingRevision={currentPricingRevision} bookingChannelCode={view.order.booking_channel_code} />
 
+      {!editorIsOpenRef.current && !command ? readFailureNotice : null}
       <InlineError error={recoveryError} title="恢复记录未收口" />
       {commandRecovery.canDiscardCorrupt
         ? <DamagedCommandRecoveryNotice error={commandRecovery.error} onDiscard={commandRecovery.discardCorruptAfterReview} testId="order-damaged-command-recovery" />
@@ -2167,6 +2226,8 @@ export function OrderDetailPage() {
         </div>
       </section>
 
+      <nav className="detail-jump-links" aria-label="订单详情导航"><a href="#stay-heading">住宿资料</a><a href="#effective-arrangement-heading">住宿安排</a><a href="#order-funds">收退款记录</a></nav>
+
       <div className="detail-grid">
         <section className="detail-section order-occupants-section" aria-labelledby="guest-snapshot-heading">
           <div className="section-title-row"><h2 id="guest-snapshot-heading">住宿人</h2><span>{occupants.length} 人</span>{enabledActions.has("MANAGE_ORDER_OCCUPANTS") ? <button type="button" className="button button-secondary" disabled={orderActionsBlocked} data-order-action="MANAGE_ORDER_OCCUPANTS" onClick={() => setCompanionAction({})}><UserPlus aria-hidden="true" size={16} />添加同住人</button> : null}</div>
@@ -2194,14 +2255,16 @@ export function OrderDetailPage() {
         channelPriceDifferenceReason={currentPricingRevision?.reason.note}
       />
 
-      {view.amendments.some((amendment) => amendment.amendment_type === "MANAGE_ORDER_OCCUPANTS") ? <section className="detail-section full-detail" aria-labelledby="companion-history-heading">
+      <section id="order-funds" className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{itemCountLabel(view.collectionFacts.length)}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
+
+      {view.amendments.some((amendment) => amendment.amendment_type === "MANAGE_ORDER_OCCUPANTS") ? <details className="detail-disclosure"><summary>同住人登记记录</summary><section className="detail-section full-detail" aria-labelledby="companion-history-heading">
         <div className="section-title-row"><h2 id="companion-history-heading">同住人登记记录</h2></div>
         <div className="amendment-list">{view.amendments.filter((amendment) => amendment.amendment_type === "MANAGE_ORDER_OCCUPANTS").map((amendment) => {
           const payload = amendment.payload as Record<string, unknown>;
           const person = payload.guest as { nickname?: string; fullName?: string } | undefined;
           return <article key={amendment.id}><div><strong>{payload.action === "ADD" ? "添加同住人" : "撤销登记"} · {person?.nickname || person?.fullName}</strong><span>{amendment.actor?.displayName ?? "工作人员"} · {formatDateTime(amendment.created_at)}</span><p>{amendment.reason_note}</p></div><div className="companion-history-summary"><span>{String(payload.beforeCount)} 人 → {String(payload.afterCount)} 人</span><span>{formatDate(String(payload.arrivalDate))} 至 {formatDate(String(payload.departureDate))}</span></div></article>;
         })}</div>
-      </section> : null}
+      </section></details> : null}
 
       <TemporaryOtherRoomArrangementHistory view={view} inventoryUnits={orderInventoryUnits} />
 
@@ -2219,6 +2282,7 @@ export function OrderDetailPage() {
         })}</ol>
       </section> : null}
 
+      <details className="detail-disclosure"><summary>住宿人资料更正记录</summary>
       <section className="detail-section full-detail" aria-labelledby="occupant-corrections-heading">
         <div className="section-title-row"><h2 id="occupant-corrections-heading">住宿人资料更正记录</h2><span>{itemCountLabel(view.occupantCorrections.length)}</span></div>
         {view.occupantCorrections.length ? <div className="amendment-list" data-testid="occupant-correction-history">{view.occupantCorrections.map((correction) => {
@@ -2230,7 +2294,9 @@ export function OrderDetailPage() {
           </article>;
         })}</div> : <EmptyState title="尚无资料更正" detail="住宿人创建时的原始资料保持不变；人工更正会在此追加审计记录。" />}
       </section>
+      </details>
 
+      <details className="detail-disclosure"><summary>计价记录</summary>
       <section className="detail-section full-detail" aria-labelledby="revisions-heading">
         <div className="section-title-row"><h2 id="revisions-heading">计价记录</h2><span>{itemCountLabel(view.pricingRevisions.length)}</span></div>
         <div className="table-region" role="region" aria-label="计价记录表格" tabIndex={0}>
@@ -2251,16 +2317,17 @@ export function OrderDetailPage() {
           </table>
         </div>
       </section>
+      </details>
 
       <OrderMembershipCoverageSection view={view} unitMap={unitMap} />
 
-      <section className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{itemCountLabel(view.collectionFacts.length)}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
 
-      {formAction ? <ActionFormDialog action={formAction} view={view} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
+
+      {formAction ? <ActionFormDialog action={formAction} view={view} writeBlocked={orderActionsBlocked} {...(initialFactId ? { initialFactId } : {})} {...(commandDraft?.commandType === formAction ? { draft: commandDraft } : {})} onClose={() => { setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has(formAction)) return; setFormAction(undefined); setInitialFactId(undefined); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {completeStayAction ? <CompleteStayDialog view={view} {...(commandDraft?.commandType === "COMPLETE_STAY" ? { draft: commandDraft } : {})} onClose={() => { setCompleteStayAction(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (orderActionsBlocked || !enabledActions.has("COMPLETE_STAY")) return; setCompleteStayAction(false); setCommandDraft(undefined); setRecoveryDialogOpen(false); setCommand(request); }} /> : null}
       {convertingToMembership ? <StayCollectionConversionDialog
         view={view}
-        members={meta.members}
+        members={upgradeMembers}
         membershipProducts={meta.membershipProducts}
         unitMap={unitMap}
         {...(commandDraft?.commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" ? { draft: commandDraft } : {})}
@@ -2280,6 +2347,7 @@ export function OrderDetailPage() {
         inventoryUnitLabel={visibleArrangementUnits.join(" → ")}
         inventoryUnits={meta.inventoryUnits}
         writeBlocked={orderActionsBlocked}
+        {...(error ? { writeBlockedReason: "订单刷新失败，草稿已保留；读取恢复后可继续核对。" } : {})}
         runPreview={commandRecovery.runPreview}
         {...(commandDraft?.commandType === stayDateAction ? { draft: commandDraft } : {})}
         onClose={() => { setStayDateAction(undefined); setStayDateMode("DATE_CHANGE"); setCommandDraft(undefined); }}
@@ -2298,6 +2366,7 @@ export function OrderDetailPage() {
         view={view}
         units={meta.inventoryUnits}
         writeBlocked={orderActionsBlocked}
+        {...(error ? { writeBlockedReason: "订单刷新失败，草稿已保留；读取恢复后可继续核对。" } : {})}
         runPreview={commandRecovery.runPreview}
         {...(commandDraft?.commandType === "MOVE_UNIT" ? { draft: commandDraft } : {})}
         onClose={() => { setMovingUnit(false); setCommandDraft(undefined); }}
@@ -2384,5 +2453,6 @@ export function OrderDetailPage() {
         onProgress={(progress) => commandRecovery.track(command, progress)}
       /> : null}
     </div>
+    </ModalNoticeProvider>
   );
 }

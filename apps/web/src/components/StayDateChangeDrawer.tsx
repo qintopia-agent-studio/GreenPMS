@@ -280,6 +280,7 @@ export function StayDateChangeDrawer({
   inventoryUnits = [],
   draft: recovered,
   writeBlocked = false,
+  writeBlockedReason,
   runPreview,
   onClose,
   onSubmit
@@ -291,6 +292,7 @@ export function StayDateChangeDrawer({
   inventoryUnits?: Array<Pick<InventoryUnitDto, "id" | "code" | "name">>;
   draft?: CommandRequest;
   writeBlocked?: boolean;
+  writeBlockedReason?: string;
   runPreview: RecoveryCoordinatedPreviewRunner;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
@@ -461,7 +463,7 @@ export function StayDateChangeDrawer({
     <InlineError error={error} title="无法继续核对" />
     <InlineError error={dateConstraintError} title="日期不符合办理条件" hideTechnicalDetails />
     <InlineError error={!actionState?.enabled ? new Error(actionState?.reason || "当前订单状态暂不能办理日期调整") : undefined} title="暂不能办理" hideTechnicalDetails />
-    <InlineError error={writeBlocked ? new Error("当前页面正在恢复未完成操作或订单事实已经变化，请收口后重新打开") : undefined} title="写入已暂停" hideTechnicalDetails />
+    <InlineError error={writeBlocked ? new Error(writeBlockedReason ?? "当前页面正在恢复未完成操作或订单事实已经变化，请收口后重新打开") : undefined} title="写入已暂停" hideTechnicalDetails />
     <form id="stay-date-change-form" className="modal-form" onSubmit={submit}>
       <div className="form-grid form-grid-two">
         <label>入住日期<input type="date" value={draft.newArrivalDate} min={view.effectiveArrangement.businessDate} disabled={action !== "RESCHEDULE_STAY"} onChange={(event) => update({ newArrivalDate: event.target.value })} required data-testid="stay-date-arrival" /></label>

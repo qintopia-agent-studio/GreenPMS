@@ -70,7 +70,7 @@ async function login(page: Page) {
   await page.getByTestId("login-password").fill("demo-pass-2026");
   await page.getByTestId("login-submit").click();
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible();
 }
 
 function appNavigation(page: Page): Locator {
@@ -78,7 +78,7 @@ function appNavigation(page: Page): Locator {
   return page.getByRole("navigation", { name: mobile ? "移动主导航" : "主导航", exact: true });
 }
 
-async function followAppNavigation(page: Page, name: "房态" | "会员" | "今日履约"): Promise<void> {
+async function followAppNavigation(page: Page, name: "房态" | "会员" | "工作台"): Promise<void> {
   const link = appNavigation(page).getByRole("link", { name, exact: true });
   if ((page.viewportSize()?.width ?? 0) < 576) {
     await link.focus();
@@ -160,6 +160,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await followAppNavigation(page, "会员");
   await page.getByTestId("member-search-query").fill(fixture.phone);
   await page.getByRole("button", { name: "搜索", exact: true }).click();
+  await page.getByTestId("member-list-item").filter({ hasText: fixture.phone }).click();
   await expect(page.getByRole("heading", { name: fixture.name, exact: true })).toBeVisible();
   const balance = page.getByTestId("member-balance-summary");
   await expect(balance).toContainText("3 间夜");
@@ -248,7 +249,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await expect(page.getByText("订单来源渠道", { exact: true })).toHaveCount(0);
   await expect(page.getByText("渠道订单号", { exact: true })).toHaveCount(0);
 
-  await followAppNavigation(page, "今日履约");
+  await followAppNavigation(page, "工作台");
   await expect(page).toHaveURL(/\/today$/);
   await page.getByLabel("营业日期", { exact: true }).fill(arrival);
   const arrivalRow = page.locator("article.queue-row").filter({ hasText: "2C住客" });
@@ -272,6 +273,7 @@ test("2C shows ledger balance, corrects by target, and creates a partially cover
   await followAppNavigation(page, "会员");
   await page.getByTestId("member-search-query").fill(fixture.phone);
   await page.getByRole("button", { name: "搜索", exact: true }).click();
+  await page.getByTestId("member-list-item").filter({ hasText: fixture.phone }).click();
   await expect(page.getByRole("heading", { name: fixture.name, exact: true })).toBeVisible();
   await expect(page.getByTestId("member-balance-summary")).toContainText("0 间夜");
   await expect(page.getByTestId("member-ledger-history")).toContainText("预订冻结");

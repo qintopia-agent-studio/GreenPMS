@@ -21,10 +21,11 @@ describe("permission-aware staff navigation", () => {
     const staffItems = navigationItemsForAccess(staff, "property_test").map(({ label, to }) => ({ label, to }));
     const managerItems = navigationItemsForAccess(tokenManager, "property_test").map(({ label, to }) => ({ label, to }));
 
-    expect(staffItems).toContainEqual({ label: "今日履约", to: "/today" });
+    expect(staffItems).toContainEqual({ label: "工作台", to: "/today" });
     expect(staffItems).not.toContainEqual({ label: "Token", to: "/tokens" });
-    expect(managerItems).toContainEqual({ label: "今日履约", to: "/today" });
-    expect(managerItems).toContainEqual({ label: "Token", to: "/tokens" });
+    expect(managerItems).toContainEqual({ label: "工作台", to: "/today" });
+    expect(managerItems).toContainEqual({ label: "设置", to: "/settings" });
+    expect(managerItems.some(({ to }) => String(to) === "/tokens")).toBe(false);
     expect(principalCan(staff, "property_test", "REPRICE_ORDER")).toBe(true);
     expect(canManageTokens(staff, "property_test")).toBe(false);
     expect(canManageTokens(tokenManager, "property_test")).toBe(true);

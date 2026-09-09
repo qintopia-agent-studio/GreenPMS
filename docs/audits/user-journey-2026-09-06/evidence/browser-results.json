@@ -1,0 +1,4464 @@
+{
+  "pages": [
+    {
+      "name": "login-failure",
+      "url": "http://127.0.0.1:4197/",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "进入工作台",
+            "width": 354,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "inventory-1440",
+      "url": "http://127.0.0.1:4197/",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 3986,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新房态",
+            "width": 104,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "查看前 30 夜",
+            "width": 28,
+            "height": 30,
+            "disabled": false
+          },
+          {
+            "text": "今天",
+            "width": 40,
+            "height": 30,
+            "disabled": false
+          },
+          {
+            "text": "查看后 30 夜",
+            "width": 28,
+            "height": 30,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 101 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 101四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 102 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 102四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 103 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 103四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 104 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 104四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 105 两人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 105两人间（公卫）房间，整房/单床，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 106 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 106四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 107 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 107四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 108 两人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 108两人间（公卫）房间，整房/单床，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 109 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 109四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 201单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 202 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 202四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 203 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 203四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 204 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 204四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 205单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 206 两人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 206两人间（公卫）房间，整房/单床，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 301标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 302单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 303标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 304单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 305单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 306标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 307标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 308单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 309标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A01标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A02标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A03大床房（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A04大床房（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B01单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B02单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B03标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B04标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C01单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C02单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C03单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C04单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D01单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D02标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D03标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D04单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D05标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "E栋 E01标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "E栋 E02单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "E栋 E03套房（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "orders-1440",
+      "url": "http://127.0.0.1:4197/orders",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "修改历史安排",
+            "width": 138,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "members-1440",
+      "url": "http://127.0.0.1:4197/members",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 1532,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "新建会员",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "搜索",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "演示会员13800000000姓名：Demo Member微信：qintopia-demo-member",
+            "width": 450,
+            "height": 90,
+            "disabled": false
+          },
+          {
+            "text": "修改会员记录",
+            "width": 138,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "删除误建会员",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "更正余额",
+            "width": 90,
+            "height": 32,
+            "disabled": false
+          },
+          {
+            "text": "办理会员",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "today-1440",
+      "url": "http://127.0.0.1:4197/today",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新今日履约",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "今日到店0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "异常0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "tokens-1440",
+      "url": "http://127.0.0.1:4197/tokens",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "签发 Token",
+            "width": 126,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo read-only agent",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo write agent",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo administrator",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "accounts-1440",
+      "url": "http://127.0.0.1:4197/accounts",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "修改密码",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "创建员工",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "重设 agent-demo 的密码",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 agent-demo 的全部会话",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "停用 agent-demo",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "删除 agent-demo",
+            "width": 40,
+            "height": 40,
+            "disabled": true
+          },
+          {
+            "text": "重设 operator 的密码",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 operator 的全部会话",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "停用 operator",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "删除 operator",
+            "width": 40,
+            "height": 40,
+            "disabled": true
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "inventory-768",
+      "url": "http://127.0.0.1:4197/",
+      "layout": {
+        "viewport": {
+          "width": 768,
+          "height": 900
+        },
+        "scrollWidth": 768,
+        "scrollHeight": 4172,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新房态",
+            "width": 104,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "查看前 30 夜",
+            "width": 28,
+            "height": 30,
+            "disabled": false
+          },
+          {
+            "text": "今天",
+            "width": 40,
+            "height": 30,
+            "disabled": false
+          },
+          {
+            "text": "查看后 30 夜",
+            "width": 28,
+            "height": 30,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 101 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 101四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 102 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 102四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 103 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 103四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 104 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 104四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 105 两人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 105两人间（公卫）房间，整房/单床，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 106 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 106四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 107 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 107四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 108 两人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 108两人间（公卫）房间，整房/单床，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开1栋 109 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "1栋 109四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 201单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 202 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 202四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 203 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 203四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 204 四人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 204四人间（公卫）房间，整房/单床，容纳 4 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 205单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "展开2栋 206 两人间（公卫）床位",
+            "width": 36,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "2栋 206两人间（公卫）房间，整房/单床，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 301标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 302单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 303标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 304单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 305单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 306标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 307标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 308单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "3栋 309标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A01标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A02标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A03大床房（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "A栋 A04大床房（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B01单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B02单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B03标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "B栋 B04标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C01单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C02单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C03单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "C栋 C04单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D01单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D02标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D03标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D04单人间（公卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "D栋 D05标间（公卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "E栋 E01标间（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "E栋 E02单人间（独卫）房间，整房销售，容纳 1 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "E栋 E03套房（独卫）房间，整房销售，容纳 2 人",
+            "width": 201,
+            "height": 79,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "orders-768",
+      "url": "http://127.0.0.1:4197/orders",
+      "layout": {
+        "viewport": {
+          "width": 768,
+          "height": 900
+        },
+        "scrollWidth": 768,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "修改历史安排",
+            "width": 138,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "members-768",
+      "url": "http://127.0.0.1:4197/members",
+      "layout": {
+        "viewport": {
+          "width": 768,
+          "height": 900
+        },
+        "scrollWidth": 768,
+        "scrollHeight": 1669,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "新建会员",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "搜索",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "演示会员13800000000姓名：Demo Member微信：qintopia-demo-member",
+            "width": 278,
+            "height": 90,
+            "disabled": false
+          },
+          {
+            "text": "修改会员记录",
+            "width": 138,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "删除误建会员",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "更正余额",
+            "width": 90,
+            "height": 32,
+            "disabled": false
+          },
+          {
+            "text": "办理会员",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "today-768",
+      "url": "http://127.0.0.1:4197/today",
+      "layout": {
+        "viewport": {
+          "width": 768,
+          "height": 900
+        },
+        "scrollWidth": 768,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新今日履约",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "今日到店0",
+            "width": 183,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 183,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 183,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "异常0",
+            "width": 183,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "tokens-768",
+      "url": "http://127.0.0.1:4197/tokens",
+      "layout": {
+        "viewport": {
+          "width": 768,
+          "height": 900
+        },
+        "scrollWidth": 768,
+        "scrollHeight": 2912,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "签发 Token",
+            "width": 126,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo read-only agent",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo write agent",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo administrator",
+            "width": 48,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "accounts-768",
+      "url": "http://127.0.0.1:4197/accounts",
+      "layout": {
+        "viewport": {
+          "width": 768,
+          "height": 900
+        },
+        "scrollWidth": 768,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "修改密码",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "创建员工",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "重设 agent-demo 的密码",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 agent-demo 的全部会话",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "停用 agent-demo",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "删除 agent-demo",
+            "width": 40,
+            "height": 40,
+            "disabled": true
+          },
+          {
+            "text": "重设 operator 的密码",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "撤销 operator 的全部会话",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "停用 operator",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "删除 operator",
+            "width": 40,
+            "height": 40,
+            "disabled": true
+          },
+          {
+            "text": "房态",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 125,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "inventory-375",
+      "url": "http://127.0.0.1:4197/",
+      "layout": {
+        "viewport": {
+          "width": 375,
+          "height": 812
+        },
+        "scrollWidth": 375,
+        "scrollHeight": 812,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "新建住宿或锁房",
+            "width": 73,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "调整",
+            "width": 28,
+            "height": 32,
+            "disabled": false
+          },
+          {
+            "text": "今日到店0",
+            "width": 176,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 176,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 176,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "异常0",
+            "width": 176,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "orders-375",
+      "url": "http://127.0.0.1:4197/orders",
+      "layout": {
+        "viewport": {
+          "width": 375,
+          "height": 812
+        },
+        "scrollWidth": 375,
+        "scrollHeight": 812,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "修改历史安排",
+            "width": 138,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "members-375",
+      "url": "http://127.0.0.1:4197/members",
+      "layout": {
+        "viewport": {
+          "width": 375,
+          "height": 812
+        },
+        "scrollWidth": 375,
+        "scrollHeight": 2356,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "新建会员",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "搜索",
+            "width": 351,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "演示会员13800000000姓名：Demo Member微信：qintopia-demo-member",
+            "width": 349,
+            "height": 90,
+            "disabled": false
+          },
+          {
+            "text": "修改会员记录",
+            "width": 138,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "删除误建会员",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "更正余额",
+            "width": 90,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "办理会员",
+            "width": 110,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "today-375",
+      "url": "http://127.0.0.1:4197/today",
+      "layout": {
+        "viewport": {
+          "width": 375,
+          "height": 812
+        },
+        "scrollWidth": 375,
+        "scrollHeight": 812,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新今日履约",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "今日到店0",
+            "width": 87,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 87,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 87,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "异常0",
+            "width": 87,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "tokens-375",
+      "url": "http://127.0.0.1:4197/tokens",
+      "layout": {
+        "viewport": {
+          "width": 375,
+          "height": 812
+        },
+        "scrollWidth": 375,
+        "scrollHeight": 3080,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 93,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "签发 Token",
+            "width": 93,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo read-only agent",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo write agent",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo administrator",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "accounts-375",
+      "url": "http://127.0.0.1:4197/accounts",
+      "layout": {
+        "viewport": {
+          "width": 375,
+          "height": 812
+        },
+        "scrollWidth": 375,
+        "scrollHeight": 922,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "修改密码",
+            "width": 110,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "创建员工",
+            "width": 110,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "重设 agent-demo 的密码",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 agent-demo 的全部会话",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "停用 agent-demo",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "删除 agent-demo",
+            "width": 44,
+            "height": 44,
+            "disabled": true
+          },
+          {
+            "text": "重设 operator 的密码",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 operator 的全部会话",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "停用 operator",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "删除 operator",
+            "width": 44,
+            "height": 44,
+            "disabled": true
+          },
+          {
+            "text": "房态",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 60,
+            "height": 53,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "inventory-320",
+      "url": "http://127.0.0.1:4197/",
+      "layout": {
+        "viewport": {
+          "width": 320,
+          "height": 812
+        },
+        "scrollWidth": 320,
+        "scrollHeight": 812,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "新建住宿或锁房",
+            "width": 73,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "调整",
+            "width": 28,
+            "height": 32,
+            "disabled": false
+          },
+          {
+            "text": "今日到店0",
+            "width": 148,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 148,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 148,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "异常0",
+            "width": 148,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "orders-320",
+      "url": "http://127.0.0.1:4197/orders",
+      "layout": {
+        "viewport": {
+          "width": 320,
+          "height": 812
+        },
+        "scrollWidth": 320,
+        "scrollHeight": 812,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "修改历史安排",
+            "width": 138,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "members-320",
+      "url": "http://127.0.0.1:4197/members",
+      "layout": {
+        "viewport": {
+          "width": 320,
+          "height": 812
+        },
+        "scrollWidth": 320,
+        "scrollHeight": 2445,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 41,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "新建会员",
+            "width": 41,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "搜索",
+            "width": 296,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "演示会员13800000000姓名：Demo Member微信：qintopia-demo-member",
+            "width": 294,
+            "height": 90,
+            "disabled": false
+          },
+          {
+            "text": "修改会员记录",
+            "width": 138,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "删除误建会员",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "更正余额",
+            "width": 90,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "办理会员",
+            "width": 110,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "today-320",
+      "url": "http://127.0.0.1:4197/today",
+      "layout": {
+        "viewport": {
+          "width": 320,
+          "height": 812
+        },
+        "scrollWidth": 320,
+        "scrollHeight": 812,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新今日履约",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "今日到店0",
+            "width": 82,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 82,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 82,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "异常0",
+            "width": 82,
+            "height": 60,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "tokens-320",
+      "url": "http://127.0.0.1:4197/tokens",
+      "layout": {
+        "viewport": {
+          "width": 320,
+          "height": 812
+        },
+        "scrollWidth": 320,
+        "scrollHeight": 3080,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 72,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "签发 Token",
+            "width": 72,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo read-only agent",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo write agent",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "轮换",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 Token Demo administrator",
+            "width": 48,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "accounts-320",
+      "url": "http://127.0.0.1:4197/accounts",
+      "layout": {
+        "viewport": {
+          "width": 320,
+          "height": 812
+        },
+        "scrollWidth": 320,
+        "scrollHeight": 1002,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "修改密码",
+            "width": 110,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "创建员工",
+            "width": 110,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "重设 agent-demo 的密码",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 agent-demo 的全部会话",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "停用 agent-demo",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "删除 agent-demo",
+            "width": 44,
+            "height": 44,
+            "disabled": true
+          },
+          {
+            "text": "重设 operator 的密码",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "撤销 operator 的全部会话",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "停用 operator",
+            "width": 44,
+            "height": 44,
+            "disabled": false
+          },
+          {
+            "text": "删除 operator",
+            "width": 44,
+            "height": 44,
+            "disabled": true
+          },
+          {
+            "text": "房态",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 51,
+            "height": 62,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "new-member-desktop",
+      "url": "http://127.0.0.1:4197/members",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 1532,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "新建会员",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "搜索",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "演示会员13800000000姓名：Demo Member微信：qintopia-demo-member",
+            "width": 450,
+            "height": 90,
+            "disabled": false
+          },
+          {
+            "text": "修改会员记录",
+            "width": 138,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "删除误建会员",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "更正余额",
+            "width": 90,
+            "height": 32,
+            "disabled": false
+          },
+          {
+            "text": "办理会员",
+            "width": 110,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "关闭",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "取消",
+            "width": 58,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "核对并创建",
+            "width": 100,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "resolved-order-still-exception",
+      "url": "http://127.0.0.1:4197/today",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新今日履约",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "今日到店0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "异常1",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "查看六年前已取消的订单",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "future-arrival-enabled",
+      "url": "http://127.0.0.1:4197/today",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新今日履约",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "今日到店1",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "在住0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "今日离店0",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "异常1",
+            "width": 303,
+            "height": 52,
+            "disabled": false
+          },
+          {
+            "text": "入住",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "查看三天后才到店的订单",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "session-expired-orders",
+      "url": "http://127.0.0.1:4197/orders",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": [
+          {
+            "text": "跳至主要内容",
+            "width": 112,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "收起左侧导航",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "房态",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "订单",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "会员",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "Token",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "今日履约",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "账号",
+            "width": 155,
+            "height": 42,
+            "disabled": false
+          },
+          {
+            "text": "退出登录",
+            "width": 40,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "修改历史安排",
+            "width": 138,
+            "height": 40,
+            "disabled": false
+          },
+          {
+            "text": "刷新",
+            "width": 82,
+            "height": 40,
+            "disabled": false
+          }
+        ]
+      },
+      "violations": []
+    },
+    {
+      "name": "no-property-endless-loading",
+      "url": "http://127.0.0.1:4197/",
+      "layout": {
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "scrollWidth": 1440,
+        "scrollHeight": 900,
+        "visibleButtons": []
+      },
+      "violations": []
+    }
+  ],
+  "probes": {
+    "loginFailure": "QinTopia\nPMS Core Operations\n\n运营工作台\n\n登录\n登录失败\n\nINVALID_CREDENTIALS: Username or password is incorrect\n\n账号\n密码\n进入工作台",
+    "newMember": "跳至主要内容\nQinTopia\nPMS\n房态\n订单\n会员\nToken\n今日履约\n账号\n门店\nQinTopia·西安\nDemo Administrator\n可写\n\n会员管理\n\n会员档案\n\n查询和维护当前门店的会员资料\n\n刷新\n新建会员\n搜索会员\n搜索\n会员列表\n1 位\n演示会员\n13800000000\n姓名：Demo Member\n微信：qintopia-demo-member\n会员档案\nDemo Member\n修改会员记录\n姓名\nDemo Member\n昵称\n演示会员\n身份证号\n-\n手机号\n13800000000\n微信号\nqintopia-demo-member\n会员权益\n可住宿余额\n截至 2026-09-06\n间夜余额\n2 间夜\n床夜余额\n0 床夜\n公卫单人间会员\n\n有效\n\n2 间夜\n会员类型\n公卫单人间会员\n有效期\n2026-01-01 至 2029-12-31\n初始发放\n2 间夜\n当前可用\n2 间夜\n更正余额\n权益变动历史\n0 条\n\n尚无冻结、释放、核销或更正记录\n\n会员购买\n会员订单\n办理会员\n公卫单人间会员\n\n2 间夜 · 按房使用\n\n已生效\n标价\n¥1,620.00\n成交价\n¥1,620.00\n调价差额\n¥0.00\n有效收款\n¥1,620.00\n收款合计与成交价一致\n仅提示差额，不代表自动到账、结清或改价。\n2026-01-01 至 2029-12-31\n已发放 2 间夜\n收款记录\n1 笔有效收款\n企微收款\n¥1,620.00\nDEMO-WECOM-20260101-001\n收款日期 2026-01-01 · 系统记录 2026/09/06 02:35\nDemo 会员订单企微收款\n新建会员\n姓名\n昵称\n身份证号（选填）\n手机号\n微信号\n取消\n核对并创建",
+    "resolvedException": "跳至主要内容\nQinTopia\nPMS\n房态\n订单\n会员\nToken\n今日履约\n账号\n门店\nQinTopia·西安\nDemo Administrator\n可写\n\n前台日常\n\n今日履约\n\n2026-09-06\n\n营业日期\n今日到店\n0\n在住\n0\n今日离店\n0\n异常\n1\n六年前已取消\n2020-01-01 至 2020-01-02\n已取消",
+    "futureArrivalAction": {
+      "today": "2026-09-06",
+      "future": "2026-09-09",
+      "enabled": true,
+      "text": "跳至主要内容\nQinTopia\nPMS\n房态\n订单\n会员\nToken\n今日履约\n账号\n门店\nQinTopia·西安\nDemo Administrator\n可写\n\n前台日常\n\n今日履约\n\n2026-09-09\n\n营业日期\n今日到店\n1\n在住\n0\n今日离店\n0\n异常\n1\n三天后才到店\n2026-09-09 至 2026-09-11\n已预订\n入住"
+    },
+    "expiredSession": {
+      "text": "跳至主要内容\nQinTopia\nPMS\n房态\n订单\n会员\nToken\n今日履约\n账号\n门店\nQinTopia·西安\nDemo Administrator\n可写\n\n订单管理\n\n订单\n\n查询住宿订单、收款与履约进度\n\n修改历史安排\n刷新\n搜索订单\n状态\n全部状态\n0 / 0\n无法载入订单\n\nAUTHENTICATION_REQUIRED: Authentication is required\n\nCorrelation ID: 35354f3b-b5fa-4c08-ab9b-0ad32a7dda10\n没有匹配订单\n\n调整筛选条件或从房态页创建新订单。",
+      "loginFormVisible": 0,
+      "reloginLinks": 0
+    },
+    "noProperty": "正在载入运营数据"
+  },
+  "requests": [
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 401,
+      "duration": 8,
+      "bytes": 146
+    },
+    {
+      "path": "/api/v1/auth/login",
+      "method": "POST",
+      "status": 401,
+      "duration": 99,
+      "bytes": 149
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 401,
+      "duration": 5,
+      "bytes": 146
+    },
+    {
+      "path": "/api/v1/auth/login",
+      "method": "POST",
+      "status": 200,
+      "duration": 52,
+      "bytes": 116
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 40,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 46,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 12,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 16,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 47,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 35,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 49,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 50,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 47,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 39,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 36,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 11,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 16,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/members",
+      "method": "GET",
+      "status": 200,
+      "duration": 12,
+      "bytes": 227
+    },
+    {
+      "path": "/api/v1/members/member_demo_profile",
+      "method": "GET",
+      "status": 200,
+      "duration": 38,
+      "bytes": 3821
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 11,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 10,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/tokens",
+      "method": "GET",
+      "status": 200,
+      "duration": 32,
+      "bytes": 3649
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/token-targets",
+      "method": "GET",
+      "status": 200,
+      "duration": 38,
+      "bytes": 2033
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 11,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/account-management",
+      "method": "GET",
+      "status": 200,
+      "duration": 28,
+      "bytes": 793
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 11,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 42,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 49,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 72,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 78,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 68,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 53,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 12,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 44,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 21,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/members",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 227
+    },
+    {
+      "path": "/api/v1/members/member_demo_profile",
+      "method": "GET",
+      "status": 200,
+      "duration": 43,
+      "bytes": 3821
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 17,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 15,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 10,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 14,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/tokens",
+      "method": "GET",
+      "status": 200,
+      "duration": 30,
+      "bytes": 3649
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/token-targets",
+      "method": "GET",
+      "status": 200,
+      "duration": 37,
+      "bytes": 2033
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/account-management",
+      "method": "GET",
+      "status": 200,
+      "duration": 19,
+      "bytes": 793
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 15,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 38,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 14,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 10,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 11,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/members",
+      "method": "GET",
+      "status": 200,
+      "duration": 12,
+      "bytes": 227
+    },
+    {
+      "path": "/api/v1/members/member_demo_profile",
+      "method": "GET",
+      "status": 200,
+      "duration": 23,
+      "bytes": 3821
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 12,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/token-targets",
+      "method": "GET",
+      "status": 200,
+      "duration": 26,
+      "bytes": 2033
+    },
+    {
+      "path": "/api/v1/tokens",
+      "method": "GET",
+      "status": 200,
+      "duration": 41,
+      "bytes": 3649
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/account-management",
+      "method": "GET",
+      "status": 200,
+      "duration": 23,
+      "bytes": 793
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 26,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 13,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 10,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 11,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/members",
+      "method": "GET",
+      "status": 200,
+      "duration": 12,
+      "bytes": 227
+    },
+    {
+      "path": "/api/v1/members/member_demo_profile",
+      "method": "GET",
+      "status": 200,
+      "duration": 26,
+      "bytes": 3821
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 10,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 16,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/token-targets",
+      "method": "GET",
+      "status": 200,
+      "duration": 16,
+      "bytes": 2033
+    },
+    {
+      "path": "/api/v1/tokens",
+      "method": "GET",
+      "status": 200,
+      "duration": 29,
+      "bytes": 3649
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 17,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/account-management",
+      "method": "GET",
+      "status": 200,
+      "duration": 22,
+      "bytes": 793
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 7,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 10,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/members",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 227
+    },
+    {
+      "path": "/api/v1/members/member_demo_profile",
+      "method": "GET",
+      "status": 200,
+      "duration": 23,
+      "bytes": 3821
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 5,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 3,
+      "bytes": 1232
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 12,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 200,
+      "duration": 14,
+      "bytes": 41
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "GET",
+      "status": 401,
+      "duration": 37,
+      "bytes": 146
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 401,
+      "duration": 2,
+      "bytes": 146
+    },
+    {
+      "path": "/api/v1/auth/login",
+      "method": "POST",
+      "status": 200,
+      "duration": 51,
+      "bytes": 116
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 5,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 8,
+      "bytes": 48442
+    },
+    {
+      "path": "/api/v1/properties/prop_qintopia_demo/room-status",
+      "method": "GET",
+      "status": 200,
+      "duration": 24,
+      "bytes": 531610
+    },
+    {
+      "path": "/api/v1/me",
+      "method": "GET",
+      "status": 200,
+      "duration": 9,
+      "bytes": 1709
+    },
+    {
+      "path": "/api/v1/meta",
+      "method": "GET",
+      "status": 200,
+      "duration": 25,
+      "bytes": 48297
+    }
+  ],
+  "pageErrors": []
+}

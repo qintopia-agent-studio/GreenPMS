@@ -1,10 +1,10 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from "react";
-import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, UserRound } from "lucide-react";
+import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, Settings, UserRound } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { version as applicationVersion } from "../../../package.json";
 import { api, ApiError } from "./api";
 import type { CommandCapability, CommandCatalogType, MetaDto, PendingTokenCommand, PrincipalDto, RetainedTokenSecret } from "./types";
-import { errorMessage, LoadingBlock } from "./ui";
+import { errorMessage, LoadingBlock } from "./uiBasic";
 
 function propertyDisplayName(property: MetaDto["properties"][number] | undefined) {
   if (!property) return "";
@@ -37,6 +37,20 @@ export function ServiceFailureState({ error, title, onRetry, testId }: {
   );
 }
 
+export function NoPropertyAccessState({ onRetry }: { onRetry: () => void }) {
+  return (
+    <main className="startup-state">
+      <section className="service-failure" role="status" data-testid="no-property-access">
+        <Building2 aria-hidden="true" size={20} />
+        <div><h1>尚未分配门店</h1><p>当前账号没有可访问的门店，请联系管理员分配权限后重新检查。</p></div>
+      </section>
+      <button className="button button-secondary" type="button" onClick={onRetry} data-testid="no-property-access-retry">
+        <RefreshCw aria-hidden="true" size={17} />重新检查授权
+      </button>
+    </main>
+  );
+}
+
 interface WorkspaceContextValue {
   principal: PrincipalDto;
   meta: MetaDto;
@@ -57,7 +71,7 @@ export function useWorkspace() {
   return value;
 }
 
-export function LoginPage({ onLogin }: { onLogin: (principal: PrincipalDto) => void }) {
+export function LoginPage({ onLogin, expired = false }: { onLogin: (principal: PrincipalDto) => void; expired?: boolean }) {
   const demoLoginEnabled = import.meta.env.DEV || import.meta.env.VITE_DEMO_LOGIN === "true";
   const [username, setUsername] = useState(demoLoginEnabled ? "operator" : "");
   const [password, setPassword] = useState(demoLoginEnabled ? "demo-pass-2026" : "");
@@ -90,6 +104,7 @@ export function LoginPage({ onLogin }: { onLogin: (principal: PrincipalDto) => v
           <p className="eyebrow">运营工作台</p>
           <h1 id="login-title">登录</h1>
         </div>
+        {expired ? <p role="alert" data-testid="session-expired">登录已过期，请重新登录。未确认结果的操作将在登录后按原记录查询，请勿重复提交。</p> : null}
         {error ? (
           <div className="inline-error" role="alert" tabIndex={-1} ref={errorRef}>
             <div><strong>登录失败</strong><p>{errorMessage(error)}</p></div>
@@ -100,7 +115,7 @@ export function LoginPage({ onLogin }: { onLogin: (principal: PrincipalDto) => v
           <input id="username" name="username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required autoFocus data-testid="login-username" />
           <label htmlFor="password">密码</label>
           <input id="password" name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required data-testid="login-password" />
-          <button className="button button-primary login-submit" type="submit" disabled={busy} data-testid="login-submit">{busy ? "正在登录..." : "进入工作台"}</button>
+          <button className="button button-primary login-submit" type="submit" disabled={busy} data-testid="login-submit">{busy ? "正在登录..." : expired ? "重新登录" : "进入工作台"}</button>
         </form>
         {demoLoginEnabled ? (
           <div className="demo-account" aria-label="演示账号">
@@ -175,6 +190,7 @@ export function WorkspaceProvider({ principal, children }: {
   if (error) {
     return <ServiceFailureState error={error} title="无法载入工作区" onRetry={retryMeta} testId="workspace-startup-error" />;
   }
+  if (meta && meta.properties.length === 0) return <NoPropertyAccessState onRetry={retryMeta} />;
   if (!value) return <main className="startup-state"><LoadingBlock label="正在载入运营数据" /></main>;
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
@@ -184,9 +200,8 @@ const navigation = [
   { to: "/", label: "房态", icon: BedDouble, end: true },
   { to: "/orders", label: "订单", icon: ClipboardList, end: false },
   { to: "/members", label: "会员", icon: BadgeCheck, end: false },
-  { to: "/tokens", label: "Token", icon: KeyRound, end: false, requiresTokenManagement: true },
-  { to: "/today", label: "今日履约", icon: Smartphone, end: false },
-  { to: "/accounts", label: "账号", icon: UserRound, end: false }
+  { to: "/today", label: "工作台", icon: Smartphone, end: false },
+  { to: "/settings", label: "设置", icon: Settings, end: false }
 ] as const;
 
 const tokenManagementCommands = new Set<CommandCapability>(["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"]);
@@ -223,7 +238,7 @@ export function commandRecoveryAvailable(principal: PrincipalDto, propertyId: st
 }
 
 export function navigationItemsForAccess(principal: PrincipalDto, propertyId: string) {
-  return navigation.filter((item) => !("requiresTokenManagement" in item && item.requiresTokenManagement && !canManageTokens(principal, propertyId)));
+  return navigation;
 }
 
 const sidebarStoragePrefix = "qintopia:pms:sidebar-collapsed:v1";

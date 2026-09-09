@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { MemberSummaryDto, MembershipOrderSummaryDto, OrderRowDto } from "../types";
-import { availableMemberCorrectionCommandTypes, continueStayUpgradeAfterMemberCreated, currentOrFirstCandidateId, effectiveMemberId, eligibleMembershipReconversionStays, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, ledgerEntryLabel, ledgerOrderHref, loadMembershipReconversionStayCandidates, memberCorrectionCommandTypes, memberDeepLinkSelection, memberLedgerDisplayItems, MemberCorrectionDialog, MemberCorrectionHistoryPanel, MemberProfile, MembershipOrdersPanel, normalizeMemberQuery, parseEntitlementBalance, parseMemberDeepLink, parseStayUpgradeMemberCreationIntent, shouldClearMemberSearchAfterCommit, stayUpgradeMemberCreationAutoOpenBlockedNotice, stayUpgradeMemberCreationShouldOpen, stayUpgradeMemberCreationState, stayUpgradeOrderHref, targetEntitlementContractId, targetMembershipOrderDeepLinkId, yuanInputToMinor } from "./MembersPage";
+import { availableMemberCorrectionCommandTypes, continueStayUpgradeAfterMemberCreated, currentOrFirstCandidateId, effectiveMemberId, eligibleMembershipReconversionStays, formalEntitlementLotIds, isEntitlementLotActive, ledgerEntryDisplayQuantity, ledgerEntryLabel, ledgerOrderHref, reconversionCandidatesFromRows, memberCorrectionCommandTypes, memberDeepLinkSelection, memberLedgerDisplayItems, MemberCorrectionDialog, MemberCorrectionHistoryPanel, MemberProfile, MembershipOrdersPanel, normalizeMemberQuery, parseEntitlementBalance, parseMemberDeepLink, parseStayUpgradeMemberCreationIntent, shouldClearMemberSearchAfterCommit, stayUpgradeMemberCreationAutoOpenBlockedNotice, stayUpgradeMemberCreationShouldOpen, stayUpgradeMemberCreationState, stayUpgradeOrderHref, targetEntitlementContractId, targetMembershipOrderDeepLinkId, yuanInputToMinor } from "./MembersPage";
 
 const members = [
   { member: { id: "member_first" } },
@@ -70,38 +70,33 @@ describe("member directory state", () => {
       member_contract_id: null,
       primary_guest_snapshot: { fullName: "旧姓名", phone: "13900000000" }
     } as unknown as OrderRowDto;
-    const loaded = await loadMembershipReconversionStayCandidates([staleOrder], async () => ({
-      order: staleOrder,
-      occupants: [{ role: "PRIMARY", fullName: "会员甲", nickname: "甲", phone: "13800000000", documentNumber: "510000199001010011" }]
-    } as never));
+    const loaded = reconversionCandidatesFromRows([{ ...staleOrder,
+      current_primary_guest: { fullName: "会员甲", nickname: "甲", phone: "13800000000", documentNumber: "510000199001010011" }
+    }]);
 
     expect(eligibleMembershipReconversionStays(loaded, "13800000000", "510000199001010011").map(({ order }) => order.id)).toEqual(["order_corrected_phone"]);
   });
 
-  it("isolates an unreadable legacy order without hiding other membership reconstruction candidates", async () => {
+  it("rejects an incomplete candidate page instead of silently dropping individual records", () => {
     const candidate = {
-      id: "order_readable",
-      property_id: "property_green",
-      status: "CHECKED_OUT",
-      stay_status: "COMPLETED",
-      booking_channel_code: "WECOM",
-      member_id: null,
-      member_contract_id: null
+      id: "order_readable", property_id: "property_green", status: "CHECKED_OUT", stay_status: "COMPLETED",
+      booking_channel_code: "WECOM", member_id: null, member_contract_id: null,
+      current_primary_guest: { fullName: "会员甲", nickname: null, phone: "13800000000", documentNumber: null }
     } as unknown as OrderRowDto;
-    const unreadable = { ...candidate, id: "order_unreadable" };
-    const loadOrder = async (orderId: string) => {
-      if (orderId === unreadable.id) throw new Error("遗留订单详情无法解析");
-      return {
-        order: candidate,
-        occupants: [{ role: "PRIMARY", fullName: "会员甲", nickname: null, phone: "13800000000", documentNumber: null }]
-      } as never;
-    };
+    expect(reconversionCandidatesFromRows([candidate])).toHaveLength(1);
+    expect(() => reconversionCandidatesFromRows([candidate, { ...candidate, current_primary_guest: {} }])).toThrow("候选资料不完整");
+  });
 
-    await expect(loadMembershipReconversionStayCandidates([unreadable], loadOrder)).rejects.toThrow("遗留订单详情无法解析");
-    await expect(loadMembershipReconversionStayCandidates([unreadable, candidate], loadOrder)).resolves.toEqual([{
-      order: candidate,
-      primaryOccupant: { role: "PRIMARY", fullName: "会员甲", nickname: null, phone: "13800000000", documentNumber: null }
-    }]);
+  it("keeps an unloaded draft stay explicit instead of substituting the first page candidate", () => {
+    const html = renderToStaticMarkup(createElement(MemberCorrectionDialog, {
+      propertyId: "property_green",
+      view: { member: { id: "member_a", full_name: "甲", nickname: "甲", phone: "13800000000", identity_card_number: null }, membershipOrders: [], membershipProducts: [] } as never,
+      availableCommands: ["VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"], stayOrders: [], stayOrdersLoading: false,
+      draft: { commandType: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", title: "返回修改", description: "", input: { sourceStayOrderId: "order_on_later_page" } },
+      onSubmit: () => undefined, onClose: () => undefined
+    }));
+    expect(html).toContain('value="order_on_later_page" selected=""');
+    expect(html).toContain("原选住宿尚未载入");
   });
 
   it("selects the first real ids after correction candidates load asynchronously", () => {

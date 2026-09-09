@@ -412,7 +412,7 @@ async function login(
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 2 })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible();
   return {
     board: await response.json() as RoomStatusBoardDto
   };
@@ -425,7 +425,7 @@ async function expectDesktopGrid(page: Page) {
 }
 
 async function expectMobileRoomStatus(page: Page) {
-  await expect(page.getByRole("heading", { name: "今日运营任务", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房态任务", exact: true })).toBeVisible();
   await expect(page.locator(".room-status-mobile")).toBeVisible();
   await expect(page.getByRole("button", { name: "新建住宿或锁房", exact: true })).toBeVisible();
 }
@@ -2060,7 +2060,7 @@ test("desktop rejects a slow room-status renewal across wall-clock rollback with
       .toBeLessThanOrEqual(2);
     await expect(createButton).toBeDisabled();
     await expect(page.locator(".room-status-stale-notice")).toHaveCount(1);
-    await expect(page.locator(".room-status-stale-notice")).toContainText("正在更新房态，更新完成前暂不能写入。");
+    await expect(page.locator(".room-status-stale-notice")).toContainText("响应到达时剩余有效时间不足，仅供查看");
     await expect(page.locator(".room-status-quick-gate")).toHaveCount(0);
 
     const transitions = slowRenewalStability.disabledStates
@@ -2163,7 +2163,7 @@ test("desktop stops repeated low-freshness renewals and requires one manual retr
   try {
     const failureNotice = page.locator(".room-status-stale-notice");
     await expect(failureNotice).toContainText(
-      "房态刷新失败，当前仍显示上次成功结果。刷新成功前不能发起补录或其他写入。",
+      "响应到达时剩余有效时间不足，仅供查看",
       { timeout: 15_000 }
     );
     await expect(failureNotice).toHaveAttribute("role", "alert");
@@ -2775,7 +2775,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await expect(page.getByTestId("departure-date")).toHaveCount(0);
 
   await page.setViewportSize({ width: 375, height: 812 });
-  await expect(page.getByRole("heading", { name: "今日运营任务" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房态任务" })).toBeVisible();
   await expect(page.getByRole("grid")).toHaveCount(0);
   await expect(page.locator(".room-status-context")).toBeHidden();
   await expect(page.getByRole("tablist", { name: "房态任务分类" })).toBeVisible();
@@ -2812,7 +2812,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   const restoredResponse = roomStatusResponse(page);
   await page.getByRole("link", { name: "返回房态", exact: true }).click();
   const restoredBoard = await (await restoredResponse).json() as RoomStatusBoardDto;
-  await expect(page.getByRole("heading", { name: "今日运营任务" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房态任务" })).toBeVisible();
   expect(restoredBoard.range).toEqual({
     arrivalDate: today,
     departureDate: addDays(today, roomStatusTimelineDays)

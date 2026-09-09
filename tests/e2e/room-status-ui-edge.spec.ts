@@ -39,7 +39,7 @@ async function login(page: Page): Promise<RoomStatusBoardDto> {
   await page.getByTestId("login-submit").click();
   const response = await responsePromise;
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态", level: 2 })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible();
   return response.json() as Promise<RoomStatusBoardDto>;
 }
 
@@ -257,7 +257,7 @@ test("a restoration mounted at 375px restores its focused date cell and scroll a
   const responsePromise = roomStatusResponse(page);
   await page.getByTestId("login-submit").click();
   await responsePromise;
-  await expect(page.getByRole("heading", { name: "今日运营任务" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "房态任务" })).toBeVisible();
   await expect(page.getByRole("grid")).toHaveCount(0);
   await expect(page.locator(".room-status-return-notice")).toHaveCount(0);
 

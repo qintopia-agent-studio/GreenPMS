@@ -1009,9 +1009,9 @@ describe("operator-facing order lifecycle presentation", () => {
     expect(["POLICY", "CHANNEL_CONTRACT", "MANUAL_ADJUSTMENT", "MEMBER_ENTITLEMENT", "FREE"].map((value) => pricingBasisLabel(value as Parameters<typeof pricingBasisLabel>[0]))).toEqual([
       "政策价", "本单渠道应结金额", "人工调价", "会员权益计价", "免费入住"
     ]);
-    expect(collectionDifferencePresentation(money(200))).toEqual({ label: "差额", amount: money(200) });
-    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "差额", amount: money(-300) });
-    expect(collectionDifferencePresentation(money(0))).toEqual({ label: "差额", amount: money(0) });
+    expect(collectionDifferencePresentation(money(200))).toEqual({ label: "收款差额", amount: money(200) });
+    expect(collectionDifferencePresentation(money(-300))).toEqual({ label: "收款差额", amount: money(-300) });
+    expect(collectionDifferencePresentation(money(0))).toEqual({ label: "收款差额", amount: money(0) });
   });
 });
 

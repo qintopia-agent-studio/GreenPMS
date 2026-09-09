@@ -93,7 +93,7 @@ async function ensureLoggedIn(page: Page): Promise<void> {
   await page.goto("/");
   const username = page.getByTestId("login-username");
   const authenticatedHeading = page.getByRole("heading", { name: "房间与床位逐日房态" })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }));
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }));
   await expect(username.or(authenticatedHeading)).toBeVisible({ timeout: 30_000 });
   if (await username.isVisible()) {
     await username.fill("operator");
@@ -335,7 +335,7 @@ test("desktop temporary arrangement restores the committed Quote after response 
 
   await page.reload();
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible({ timeout: 30_000 });
   drawer = page.locator("dialog.room-status-write-drawer");
   if (!await drawer.getByTestId("quote-recovery").isVisible().catch(() => false)) {
     const entry = page.getByTestId("inventory-quote-recovery-entry");

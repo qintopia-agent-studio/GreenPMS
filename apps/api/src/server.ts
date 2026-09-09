@@ -36,10 +36,12 @@ import {
   getCommand,
   getMemberView,
   getOrderView,
+  listOrders,
+  type OrderListQuery,
   getReceipt,
   getRoomStatusBoard,
   listAvailability,
-  listMemberSummaries,
+  listMemberPage,
   loadReferenceCatalog,
   propertyLocalToday,
   projectStoredPreviewForRead,
@@ -85,6 +87,7 @@ import {
   OrderDetailResponseSchema,
   OrderStatusSchema,
   OrdersListResponseSchema,
+  OrdersQuerySchema,
   PreviewParams,
   QuoteRequestSchema,
   QuoteCommandResponseSchema,
@@ -659,22 +662,13 @@ export async function buildServer(db: Kysely<Database>) {
   app.get("/api/v1/meta", { schema: { tags: ["queries"], response: { 200: MetaResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
     const propertyIds = [...principal.propertyAccess.keys()];
-    const [properties, units, policies, members, memberContracts, membershipProducts] = await Promise.all([
+    const [properties, units, policies, membershipProducts] = await Promise.all([
       propertyIds.length ? db.selectFrom("properties").selectAll().where("id", "in", propertyIds).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("inventory_units").selectAll().where("property_id", "in", propertyIds).where("active", "=", true).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("pricing_policy_versions").selectAll().where("property_id", "in", propertyIds).orderBy("code").execute() : [],
-      propertyIds.length ? db.selectFrom("members")
-        .where("members.deleted_at", "is", null)
-        .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
-        .selectAll("members")
-        .distinct()
-        .where("member_property_links.property_id", "in", propertyIds)
-        .orderBy("members.full_name")
-        .execute() : [],
-      propertyIds.length ? db.selectFrom("member_contracts").selectAll().where("property_id", "in", propertyIds).orderBy("member_name").execute() : [],
       propertyIds.length ? db.selectFrom("membership_products").selectAll().where("status", "=", "PUBLISHED").orderBy("code").execute() : []
     ]);
-    return { properties, inventoryUnits: units, pricingPolicyVersions: policies, members, memberContracts, membershipProducts };
+    return { properties, inventoryUnits: units, pricingPolicyVersions: policies, members: [], memberContracts: [], membershipProducts };
   });
 
   app.get("/api/v1/properties/:id/availability", {
@@ -781,39 +775,12 @@ export async function buildServer(db: Kysely<Database>) {
   });
 
   app.get("/api/v1/orders", {
-    schema: { tags: ["queries"], querystring: Type.Object({ propertyId: Id, status: Type.Optional(OrderStatusSchema) }, { additionalProperties: false }), response: { 200: OrdersListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["queries"], summary: "Search orders (default 50, maximum 100 per page), or read current work by workDate", querystring: OrdersQuerySchema, response: { 200: OrdersListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
-    const query = request.query as { propertyId: string; status?: string };
+    const query = request.query as OrderListQuery;
     const principal = await requirePrincipal(db, request);
     requirePropertyAccess(principal, query.propertyId, "READ");
-    let selection = db.selectFrom("orders")
-      .leftJoin("pricing_revisions as current_revision", "current_revision.id", "orders.current_revision_id")
-      .leftJoin("stays", "stays.order_id", "orders.id")
-      .leftJoin(
-        (qb) => qb.selectFrom("stay_segments")
-          .select(["stay_id", "inventory_unit_id"])
-          .distinctOn("stay_id")
-          .orderBy("stay_id")
-          .orderBy("sequence", "desc")
-          .as("current_segment"),
-        (join) => join.onRef("current_segment.stay_id", "=", "stays.id")
-      )
-      .leftJoin("inventory_units as current_unit", "current_unit.id", "current_segment.inventory_unit_id")
-      .selectAll("orders")
-      .select([
-        "stays.status as stay_status",
-        "current_revision.current_contract_amount_minor as current_contract_amount_minor",
-        "current_revision.currency as currency",
-        "current_unit.name as current_unit_name",
-        "current_unit.code as current_unit_code"
-      ])
-      .where("orders.property_id", "=", query.propertyId);
-    if (query.status) selection = selection.where("orders.status", "=", query.status);
-    const [businessDate, orders] = await Promise.all([
-      propertyLocalToday(db, query.propertyId),
-      selection.orderBy("orders.created_at", "desc").execute()
-    ]);
-    return { businessDate, orders };
+    return listOrders(db, query);
   });
 
   app.get("/api/v1/orders/:id", { schema: { tags: ["queries"], params: IdParams, response: { 200: OrderDetailResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
@@ -826,10 +793,10 @@ export async function buildServer(db: Kysely<Database>) {
   });
 
   app.get("/api/v1/members", { schema: { tags: ["queries"], querystring: MembersQuerySchema, response: { 200: MembersListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
-    const query = request.query as { propertyId: string; query?: string };
+    const query = request.query as { propertyId: string; query?: string; beforeId?: string; pageSize?: number; memberId?: string; phone?: string; hasContract?: boolean };
     const principal = await requirePrincipal(db, request);
     requirePropertyAccess(principal, query.propertyId, "READ");
-    return { members: await listMemberSummaries(db, query.propertyId, query.query) };
+    return listMemberPage(db, query.propertyId, query.query, query);
   });
 
   app.get("/api/v1/members/:id", { schema: { tags: ["queries"], params: IdParams, querystring: Type.Object({ propertyId: Id }, { additionalProperties: false }), response: { 200: MemberResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {

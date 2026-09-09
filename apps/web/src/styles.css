@@ -1648,7 +1648,7 @@ textarea:focus-visible {
 
 .token-principal-band {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, 0.45fr) minmax(300px, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
   margin-bottom: 16px;
   overflow: hidden;
@@ -1684,6 +1684,19 @@ textarea:focus-visible {
 
 .token-chain {
   min-width: 210px;
+}
+
+.token-permissions summary {
+  min-height: 40px;
+  align-content: center;
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.token-permissions[open] small {
+  display: block;
+  max-width: 28rem;
+  padding: 6px 0;
 }
 
 .token-chain span {
@@ -4574,9 +4587,12 @@ pre {
     font-size: 13px;
   }
 
-  .token-secret-value,
-  .token-principal-band {
+  .token-secret-value {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .token-principal-band {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .token-secret-value .button,
@@ -4686,7 +4702,7 @@ pre {
 .accounts-page > .page-header h1 { margin: 0; font-size: 26px; }
 .account-self, .account-staff, .account-history { padding: 22px 0; border-bottom: 1px solid #dce2df; }
 .account-self { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-.accounts-page h2 { font-size: 18px; margin: 0 0 12px; }
+.accounts-page h2 { display: flex; align-items: center; gap: 8px; font-size: 18px; margin: 0 0 12px; }
 .account-history h2, .account-actions { display: flex; align-items: center; gap: 8px; }
 .account-table-scroll { overflow-x: auto; }
 .account-table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -4731,3 +4747,110 @@ pre {
   .account-table .account-actions { flex-wrap: nowrap; gap: 4px; }
   .account-form .form-actions { flex-wrap: wrap; }
 }
+
+.member-stay-continuation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+.member-stay-continuation .muted { font-size: 13px; line-height: 1.6; }
+
+.list-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; }
+.list-pagination .muted { font-size: 13px; }
+
+/* Journey hierarchy: current work first, audit records available on demand. */
+.detail-disclosure { margin: 18px 0; border: 1px solid var(--border, #dce3e0); border-radius: 12px; background: var(--surface, #fff); }
+.detail-disclosure > summary { padding: 18px 20px; font-weight: 600; cursor: pointer; color: var(--text, #24392f); }
+.detail-disclosure > summary:hover { background: #f2f6f3; }
+.detail-disclosure > summary:focus-visible { outline: 2px solid #387857; outline-offset: -3px; border-radius: 12px; }
+.detail-disclosure > .detail-section { border: 0; margin: 0; box-shadow: none; }
+.detail-disclosure[open] > summary { border-bottom: 1px solid #e3e9e5; }
+.detail-jump-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+.detail-jump-links a { padding: 9px 14px; border: 1px solid #dae4de; border-radius: 8px; color: #315842; background: #f5f8f6; text-decoration: none; }
+.order-detail-page [id] { scroll-margin-top: 24px; }
+.order-unit small { display: block; color: #52685b; margin-top: 4px; }
+.settings-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.settings-page-heading { margin-bottom: 12px; }
+.settings-link { display: flex; align-items: center; gap: 14px; padding: 22px; border: 1px solid #dce5df; border-radius: 12px; color: #254d38; background: #fff; text-decoration: none; }
+.settings-link small { display: block; color: #56665c; margin-top: 6px; }
+.settings-link:hover, .settings-link.active { background: #eef5f0; border-color: #8fae9b; }
+.settings-tabs { display: flex; gap: 10px; margin-bottom: 24px; }
+.settings-tabs .settings-link { padding: 12px 16px; }
+.member-directory-list { min-width: 0; }
+.member-list-return { display: none; }
+.room-status-advanced-filters {
+  display: none;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding-top: 2px;
+}
+.room-status-advanced-filters.is-open { display: grid; }
+.advanced-filter-toggle { display: inline-flex; white-space: nowrap; }
+@media (max-width: 767px) {
+  .settings-cards { grid-template-columns: minmax(0, 1fr); }
+  .member-directory-detail-open .member-directory-list { display: none; }
+  .member-directory-detail-open .member-list-return { display: inline-flex; justify-self: start; }
+  .member-detail-stack { min-width: 0; }
+  .room-status-advanced-filters { grid-template-columns: minmax(0, 1fr); }
+  .detail-disclosure > summary { padding: 16px; }
+  .order-heading { gap: 12px; }
+  .order-unit { text-align: left; }
+  .detail-jump-links a { flex: 1; text-align: center; padding: 11px 8px; font-size: 13px; }
+}
+@media (min-width: 576px) and (max-width: 767px) {
+  .room-status-advanced-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  .member-detail-visible .member-search { display: none; }
+  .member-profile-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .member-profile-fields > div { padding: 12px; }
+  .member-profile-fields > div:nth-child(odd) { border-right: 1px solid var(--border); }
+  .member-profile-fields > div:last-child { grid-column: 1 / -1; border: 0; }
+  .member-profile-fields > div:nth-last-child(2) { border-bottom: 1px solid var(--border); }
+  .member-profile-fields dd { font-size: 14px; }
+  .member-entitlement-lot dl, .membership-order-pricing, .member-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.orders-filter-toolbar { align-items: center; }
+.orders-filter-toolbar .filter-select-control { min-width: 148px; }
+.orders-filter-toolbar .filter-select-control select { width: 100%; }
+.orders-funds-notice {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  margin: -4px 0 16px;
+  padding: 9px 11px;
+  border: 1px solid #d7bd91;
+  border-radius: 6px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.orders-funds-notice svg { margin-top: 2px; }
+.orders-funds-notice p { margin: 0; }
+
+/* Keep the account management page compact while retaining clear section breaks. */
+.accounts-page > .page-header { margin-bottom: 10px; }
+.accounts-page > .page-header h1 { font-size: 22px; }
+.accounts-page > .page-header .button { min-height: 36px; }
+.account-self, .account-staff, .account-history { padding: 16px 0; }
+.account-staff-collapsible > summary,
+.account-history > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style-position: outside;
+}
+.account-staff-collapsible > summary::-webkit-details-marker,
+.account-history > summary::-webkit-details-marker { color: var(--muted); }
+.account-staff-collapsible > summary h2,
+.account-history > summary h2 { margin-bottom: 0; }
+.account-history > summary { justify-content: flex-start; }
+.account-history > summary .muted { margin-left: auto; font-size: 12px; }

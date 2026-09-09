@@ -8,6 +8,7 @@ import {
   TodayExceptionAction,
   TodayExceptionReason,
   todayExceptionPresentation,
+  todayArrivalActionAllowed,
   todayQueueStatusLabel
 } from "./TodayPage";
 
@@ -55,6 +56,12 @@ describe("today fulfillment buckets", () => {
     const noShow = order("no-show", "NO_SHOW", "2026-07-31", "2026-08-02");
     const cancelled = order("cancelled", "CANCELLED", "2026-08-01", "2026-08-02");
     expect(buildTodayBuckets([noShow, cancelled], "2026-08-01").EXCEPTIONS).toEqual([noShow, cancelled]);
+  });
+
+  it("does not carry terminal records from unrelated historical dates into today's queue", () => {
+    const oldCancelled = order("old-cancelled", "CANCELLED", "2020-01-01", "2020-01-02");
+    const oldNoShow = order("old-no-show", "NO_SHOW", "2020-02-01", "2020-02-02");
+    expect(buildTodayBuckets([oldCancelled, oldNoShow], "2026-08-01").EXCEPTIONS).toEqual([]);
   });
 
   it("explains an overdue in-house exception and links to order review without issuing a command", () => {
@@ -112,5 +119,11 @@ describe("today fulfillment buckets", () => {
 
     const future = order("future-departure", "CHECKED_IN", "2026-08-28", "2026-09-03");
     expect(todayQueueStatusLabel("DEPARTURES", future, "2026-09-01")).toBe("在住");
+  });
+
+  it("only exposes check-in on the current business date", () => {
+    const arrival = order("arrival", "RESERVED", "2026-09-08", "2026-09-10");
+    expect(todayArrivalActionAllowed(arrival, "2026-09-08", "2026-09-08")).toBe(true);
+    expect(todayArrivalActionAllowed(arrival, "2026-09-09", "2026-09-08")).toBe(false);
   });
 });

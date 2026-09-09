@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { KeyRound, LogOut, Plus, RefreshCw, ShieldCheck, Trash2, UserCheck, UserX } from "lucide-react";
+import { History, KeyRound, LogOut, Plus, RefreshCw, Trash2, UserCheck, UserRound, UserX, Users } from "lucide-react";
 import type { AccountManagementAction, AccountManagementContext, AccountManagementRequest, StaffAccountDto } from "@qintopia/contracts";
 import { api, ApiError } from "../api";
 import { useWorkspace } from "../session";
@@ -121,18 +121,23 @@ export function AccountsPage() {
     {passwordChanged ? <section role="status"><p>密码已修改，请使用新密码重新登录。</p><button className="button button-primary" onClick={() => window.location.assign("/accounts")}>重新登录</button></section> : <>
       {notice ? <p role="status" className="account-notice">{notice}</p> : null}
       {error ? <div role="alert" className="inline-error">{errorMessage(error)}</div> : !context ? <LoadingBlock label="正在读取账号" /> : <>
-        <section className="account-self"><div><h2>我的账号</h2><p>{context.self.displayName} · {context.self.username}</p></div><button className="button button-secondary" onClick={() => open("CHANGE_PASSWORD", context.self)}><KeyRound size={17} aria-hidden="true" />修改密码</button></section>
+        <section className="account-self"><div><h2><UserRound aria-hidden="true" size={18} />我的账号</h2><p>{context.self.displayName} · {context.self.username}</p></div><button className="button button-secondary" onClick={() => open("CHANGE_PASSWORD", context.self)}><KeyRound size={17} aria-hidden="true" />修改密码</button></section>
         {context.canManageStaff ? (["ACTIVE", "DISABLED"] as const).map((status) => {
           const accounts = context.accounts.filter((account) => account.status === status);
           const title = status === "ACTIVE" ? "在用员工" : "已停用员工";
-          return <section className="account-staff" aria-label={title} key={status}><div className="section-title-row"><h2>{title}</h2>{status === "ACTIVE" ? <button className="button button-primary" onClick={() => open("CREATE_STAFF")}><Plus size={17} aria-hidden="true" />创建员工</button> : null}</div>
-          {accounts.length === 0 ? <p className="muted">{status === "ACTIVE" ? "暂无在用员工" : "暂无已停用员工"}</p> : <div className="account-table-scroll"><table className="account-table"><thead><tr><th>员工 / 账号</th><th>状态</th><th>最近登录</th><th>有效会话</th><th>操作</th></tr></thead><tbody>{accounts.map((account) => <tr key={account.id}>
+          const sectionBody = accounts.length === 0 ? <p className="muted">{status === "ACTIVE" ? "暂无在用员工" : "暂无已停用员工"}</p> : <div className="account-table-scroll"><table className="account-table"><thead><tr><th>员工 / 账号</th><th>状态</th><th>最近登录</th><th>有效会话</th><th>操作</th></tr></thead><tbody>{accounts.map((account) => <tr key={account.id}>
             <td><strong>{account.displayName}</strong><span className="account-username">{account.username}</span></td><td><span className={account.status === "ACTIVE" ? "account-active" : "muted"}>{account.status === "ACTIVE" ? "已启用" : "已停用"}</span></td><td>{account.lastLoginAt ? new Date(account.lastLoginAt).toLocaleString("zh-CN") : "从未登录"}</td><td>{account.activeSessions}</td>
             <td><div className="account-actions"><button className="icon-button" title="重设密码" aria-label={`重设 ${account.username} 的密码`} onClick={() => open("RESET_PASSWORD", account)}><KeyRound size={17} /></button><button className="icon-button" title="撤销全部会话" aria-label={`撤销 ${account.username} 的全部会话`} onClick={() => open("REVOKE_SESSIONS", account)}><LogOut size={17} /></button><button className="icon-button" title={account.status === "ACTIVE" ? "停用账号" : "启用账号"} aria-label={`${account.status === "ACTIVE" ? "停用" : "启用"} ${account.username}`} onClick={() => open(account.status === "ACTIVE" ? "DISABLE_STAFF" : "ENABLE_STAFF", account)}>{account.status === "ACTIVE" ? <UserX size={17} /> : <UserCheck size={17} />}</button><button className="icon-button account-danger" title={account.canDelete ? "删除误建账号" : "仅可删除本页新建且从未使用的误建账号"} aria-label={`删除 ${account.username}`} disabled={!account.canDelete} onClick={() => open("DELETE_STAFF", account)}><Trash2 size={17} /></button></div></td>
-          </tr>)}</tbody></table></div>}
-        </section>;
+          </tr>)}</tbody></table></div>;
+          if (status === "DISABLED") {
+            return <details className="account-staff account-staff-collapsible" aria-label={title} key={status}>
+              <summary><h2><UserX aria-hidden="true" size={18} />{title}</h2><span className="muted">{accounts.length} 个</span></summary>
+              {sectionBody}
+            </details>;
+          }
+          return <section className="account-staff" aria-label={title} key={status}><div className="section-title-row"><h2><Users aria-hidden="true" size={18} />{title}</h2><button className="button button-primary" onClick={() => open("CREATE_STAFF")}><Plus size={17} aria-hidden="true" />创建员工</button></div>{sectionBody}</section>;
         }) : null}
-        <section className="account-history"><h2><ShieldCheck size={18} aria-hidden="true" />最近操作</h2>{context.history.length ? <ol>{context.history.map((item) => <li key={item.operationId}><div><strong>{accountActionLabels[item.action]}</strong><span>{item.displayName}</span></div><p>{item.reason}</p><small>{item.actorName} · {new Date(item.completedAt).toLocaleString("zh-CN")}</small></li>)}</ol> : <p className="muted">暂无账号操作记录</p>}</section>
+        <details className="account-history"><summary><h2><History aria-hidden="true" size={18} />最近操作</h2><span className="muted">{context.history.length} 条</span></summary>{context.history.length ? <ol>{context.history.map((item) => <li key={item.operationId}><div><strong>{accountActionLabels[item.action]}</strong><span>{item.displayName}</span></div><p>{item.reason}</p><small>{item.actorName} · {new Date(item.completedAt).toLocaleString("zh-CN")}</small></li>)}</ol> : <p className="muted">暂无账号操作记录</p>}</details>
       </>}
     </>}
     {dialog ? <AccountActionDialog {...dialog} propertyId={propertyId} onClose={() => setDialog(undefined)} onDone={() => {

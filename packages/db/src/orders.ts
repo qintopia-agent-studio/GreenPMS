@@ -1,3 +1,4 @@
+import { currentPrimaryGuest, projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import {
   currentReleaseFeatures,
@@ -1821,12 +1822,8 @@ export async function getOrderViewSnapshot(
     }
     historicalCorrectionGroupsByCommandId.set(commandId, historicalCorrectionGroupFromReceiptResult(commandId, row.result));
   }
-  const latestByOccupant = new Map<string, (typeof correctionRows)[number]>();
+  const currentOccupants = projectCurrentOrderOccupants(occupantRows, correctionRows);
   const amendmentById = new Map(projectedAmendments.map((amendment) => [amendment.id, amendment]));
-  for (const correction of correctionRows) {
-    const current = latestByOccupant.get(correction.occupant_id);
-    if (!current || correction.sequence > current.sequence) latestByOccupant.set(correction.occupant_id, correction);
-  }
   const snapshot = (correction: (typeof correctionRows)[number], prefix: "prior" | "corrected") => ({
     fullName: correction[`${prefix}_full_name`],
     nickname: correction[`${prefix}_nickname`],
@@ -1894,23 +1891,11 @@ export async function getOrderViewSnapshot(
        || (activeTimeline.length > 0 && activeTimeline.every((day) => referencedInventoryUnits.some((unit) => unit.id === day.inventoryUnitId && unit.kind === "ROOM")))),
     order: {
       ...context.order,
+      current_primary_guest: currentPrimaryGuest(currentOccupants, context.order.primary_guest_snapshot),
       current_contract_amount_minor: context.revision.currentContractAmountMinor,
       currency: context.revision.currency
     },
-    occupants: occupantRows.map((occupant) => {
-      const correction = latestByOccupant.get(occupant.id);
-      return {
-        id: occupant.id,
-        orderId: occupant.order_id,
-        ordinal: occupant.ordinal,
-        role: occupant.role,
-        fullName: correction?.corrected_full_name ?? occupant.full_name,
-        nickname: correction?.corrected_nickname ?? occupant.nickname,
-        phone: correction ? correction.corrected_phone : occupant.phone,
-        documentNumber: correction ? correction.corrected_document_number : occupant.document_number,
-        createdAt: occupant.created_at instanceof Date ? occupant.created_at.toISOString() : new Date(occupant.created_at).toISOString()
-      };
-    }),
+    occupants: currentOccupants,
     occupantCorrections: correctionRows.map((correction) => ({
       id: correction.id,
       orderId: correction.order_id,

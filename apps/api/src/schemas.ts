@@ -2893,6 +2893,12 @@ export const OrderRowSchema = strictObject({
   arrival_date: LocalDate,
   departure_date: LocalDate,
   primary_guest_snapshot: PrimaryGuestSnapshotSchema,
+  current_primary_guest: strictObject({
+    fullName: nullable(ShortText),
+    nickname: Type.Optional(nullable(Nickname)),
+    phone: Type.Optional(nullable(ShortText)),
+    documentNumber: Type.Optional(nullable(ShortText))
+  }),
   booking_channel_code: nullable(BookingChannelCodeSchema),
   channel_order_reference: nullable(ShortText),
   free_stay_reason: nullable(Note),
@@ -2905,6 +2911,7 @@ export const OrderRowSchema = strictObject({
   currency: nullable(Type.String({ minLength: 1, maxLength: 16 })),
   current_unit_name: Type.Optional(nullable(ShortText)),
   current_unit_code: Type.Optional(nullable(ShortText)),
+  current_unit_room_type_code: Type.Optional(nullable(ShortText)),
   version: Type.Integer({ minimum: 1 }),
   created_at: DateTime,
   updated_at: DateTime
@@ -2916,8 +2923,20 @@ const OrderListRowSchema = strictObject({
     Type.Literal("CANCELLED"), Type.Literal("NO_SHOW"), Type.Literal("CHECK_IN_REVOKED")
   ])
 });
+export const OrdersQuerySchema = strictObject({
+  propertyId: Id,
+  orderIds: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 100 })),
+  status: Type.Optional(OrderStatusSchema),
+  query: Type.Optional(Type.String({ maxLength: 200 })),
+  workDate: Type.Optional(LocalDate),
+  funds: Type.Optional(Type.Union([Type.Literal("BALANCE_DUE"), Type.Literal("OVERPAID")])),
+  reconversionMemberId: Type.Optional(Id),
+  beforeId: Type.Optional(Id),
+  pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 }))
+});
 export const OrdersListResponseSchema = strictObject({
   businessDate: LocalDate,
+  nextCursor: Type.Optional(nullable(Id)),
   orders: Type.Array(OrderListRowSchema)
 });
 
@@ -3417,9 +3436,14 @@ const MemberSummarySchema = strictObject({
 });
 export const MembersQuerySchema = strictObject({
   propertyId: Id,
-  query: Type.Optional(Type.String({ maxLength: 200 }))
+  query: Type.Optional(Type.String({ maxLength: 200 })),
+  beforeId: Type.Optional(Id),
+  pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
+  memberId: Type.Optional(Id),
+  phone: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  hasContract: Type.Optional(Type.Boolean())
 });
-export const MembersListResponseSchema = strictObject({ members: Type.Array(MemberSummarySchema) });
+export const MembersListResponseSchema = strictObject({ members: Type.Array(MemberSummarySchema), nextCursor: nullable(Id) });
 export const EntitlementLedgerRowSchema = strictObject({
   fact_id: Id, lot_id: Id,
   entry_type: Type.Union([

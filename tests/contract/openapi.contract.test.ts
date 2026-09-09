@@ -1919,8 +1919,7 @@ describe("OpenAPI 3.1 command contract", () => {
       headers: { authorization: `Bearer ${demo.writeToken}` }
     });
     expect(metaAfterMemberCreate.statusCode).toBe(200);
-    expect((metaAfterMemberCreate.json() as { members: Array<{ id: string }> }).members)
-      .toEqual(expect.arrayContaining([expect.objectContaining({ id: memberId })]));
+    expect(metaAfterMemberCreate.json()).toMatchObject({ members: [], memberContracts: [] });
     const member = await app.inject({
       method: "GET", url: `/api/v1/members/${memberId}?propertyId=${demo.propertyId}`,
       headers: { authorization: `Bearer ${demo.writeToken}` }

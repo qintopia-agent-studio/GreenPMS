@@ -1,0 +1,116 @@
+{
+  "room-status": {
+    "delay": 2100,
+    "delayedResponses": 3,
+    "requests": [
+      {
+        "url": "http://127.0.0.1:4207/api/v1/me",
+        "time": 1788661790239
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/meta",
+        "time": 1788661790257
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/properties/prop_qintopia_demo/room-status?arrivalDate=2026-09-06&departureDate=2026-10-06&page=0&pageSize=50",
+        "time": 1788661790326
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/properties/prop_qintopia_demo/room-status?arrivalDate=2026-09-06&departureDate=2026-10-06&page=0&pageSize=50",
+        "time": 1788661793025
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/properties/prop_qintopia_demo/room-status?arrivalDate=2026-09-06&departureDate=2026-10-06&page=0&pageSize=50",
+        "time": 1788661796211
+      }
+    ],
+    "responses": [
+      {
+        "url": "http://127.0.0.1:4207/api/v1/me",
+        "status": 200,
+        "time": 1788661790254
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/meta",
+        "status": 200,
+        "time": 1788661790307
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/properties/prop_qintopia_demo/room-status?arrivalDate=2026-09-06&departureDate=2026-10-06&page=0&pageSize=50",
+        "status": 200,
+        "time": 1788661792500
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/properties/prop_qintopia_demo/room-status?arrivalDate=2026-09-06&departureDate=2026-10-06&page=0&pageSize=50",
+        "status": 200,
+        "time": 1788661795194
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/properties/prop_qintopia_demo/room-status?arrivalDate=2026-09-06&departureDate=2026-10-06&page=0&pageSize=50",
+        "status": 200,
+        "time": 1788661798378
+      }
+    ],
+    "cells": 0,
+    "body": "跳至主要内容\nQinTopia\nPMS\n房态\n订单\n会员\nToken\n今日履约\n账号\n门店\nQinTopia·西安\nDemo Administrator\n可写\n房态运营\n状态未知，未显示为可售\n\n重新查询成功前，页面不会开放房态写入。\n\n重试查询"
+  },
+  "order-detail": {
+    "delay": 4500,
+    "delayedResponses": 4,
+    "requests": [
+      {
+        "url": "http://127.0.0.1:4207/api/v1/me",
+        "time": 1788661804428
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/meta",
+        "time": 1788661804439
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/orders/order_f06039db-d2df-46d4-b6e2-ca8bfe8ba386",
+        "time": 1788661804491
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/orders/order_f06039db-d2df-46d4-b6e2-ca8bfe8ba386",
+        "time": 1788661808495
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/orders/order_f06039db-d2df-46d4-b6e2-ca8bfe8ba386",
+        "time": 1788661812497
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/orders/order_f06039db-d2df-46d4-b6e2-ca8bfe8ba386",
+        "time": 1788661816495
+      }
+    ],
+    "responses": [
+      {
+        "url": "http://127.0.0.1:4207/api/v1/me",
+        "status": 200,
+        "time": 1788661804438
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/meta",
+        "status": 200,
+        "time": 1788661804478
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/orders/order_f06039db-d2df-46d4-b6e2-ca8bfe8ba386",
+        "status": 200,
+        "time": 1788661809028
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/orders/order_f06039db-d2df-46d4-b6e2-ca8bfe8ba386",
+        "status": 200,
+        "time": 1788661813061
+      },
+      {
+        "url": "http://127.0.0.1:4207/api/v1/orders/order_f06039db-d2df-46d4-b6e2-ca8bfe8ba386",
+        "status": 200,
+        "time": 1788661817044
+      }
+    ],
+    "cells": 0,
+    "body": "跳至主要内容\nQinTopia\nPMS\n房态\n订单\n会员\nToken\n今日履约\n账号\n门店\nQinTopia·西安\nDemo Administrator\n可写\n正在载入订单详情"
+  }
+}

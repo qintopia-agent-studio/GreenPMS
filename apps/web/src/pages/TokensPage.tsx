@@ -352,7 +352,7 @@ function RetainedSecretPanel({ secret, onClear, onRecover }: {
   };
   return (
     <section className="retained-secret-panel" aria-labelledby="retained-secret-heading">
-      <div className="retained-secret-heading"><KeyRound aria-hidden="true" size={20} /><div><h2 id="retained-secret-heading">一次性 secret 待清除</h2><p>{stateText[secret.state]}</p></div></div>
+      <div className="retained-secret-heading"><KeyRound aria-hidden="true" size={20} /><div><h2 id="retained-secret-heading">一次性密钥待清除</h2><p>{stateText[secret.state]}</p></div></div>
       <dl className="retained-secret-meta"><div><dt>操作</dt><dd>{tokenOperationLabel(secret.operation)}</dd></div><div><dt>处理状态</dt><dd>{tokenCommandStateText(secret.state)}</dd></div><div><dt>Token 标签</dt><dd>{secret.label}</dd></div></dl>
       <SecretValue value={secret.value} />
       <div className="retained-secret-actions">
@@ -529,7 +529,7 @@ export function TokensPage() {
   return (
     <div className="tokens-page">
       <header className="page-heading page-heading-actions">
-        <div><p className="eyebrow">外部系统接入</p><h1>Token 生命周期</h1><p>本物业接入 Token、权限范围与有效状态</p></div>
+        <div><p className="eyebrow">外部系统接入</p><h1>外部访问</h1><p>管理外部系统的访问密钥（Token）、可用权限与有效期</p></div>
         <div className="token-page-actions"><button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)} disabled={loading || !canManage}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={17} />刷新</button><button className="button button-primary" type="button" onClick={() => setSecretAction({ operation: "ISSUE" })} disabled={!canIssue || loading || Boolean(error) || commandRecovery.blocked || Boolean(retainedTokenSecret) || Boolean(pendingTokenCommand) || targets.length === 0}><KeyRound aria-hidden="true" size={17} />签发 Token</button></div>
       </header>
 
@@ -562,7 +562,7 @@ export function TokensPage() {
                 <th scope="row"><strong>{token.label}</strong><small>签发于 {formatDateTime(token.created_at)}</small></th>
                 <td><strong>{token.displayName}</strong></td>
                 <td><StatusBadge value={tokenAccessCeilingLabel(token.access_ceiling)} /></td>
-                <td>{token.commandCeiling.length ? <small>{token.commandCeiling.map(commandCapabilityBusinessLabel).join(" / ")}</small> : <small>无写入能力</small>}{historicalReadCeilingHint ? <small>{historicalReadCeilingHint}</small> : null}</td>
+                <td>{token.commandCeiling.length ? <details className="token-permissions"><summary>查看 {token.commandCeiling.length} 项操作权限</summary><small>{token.commandCeiling.map(commandCapabilityBusinessLabel).join(" / ")}</small></details> : <small>无写入能力</small>}{historicalReadCeilingHint ? <small>{historicalReadCeilingHint}</small> : null}</td>
                 <td><StatusBadge value={tokenLifecycleStatusLabel(status)} />{token.revoked_at ? <small>{formatDateTime(token.revoked_at)}</small> : null}</td>
                 <td>{formatDateTime(token.expires_at)}</td>
                 <td className="token-chain"><span>{tokenRotationRelationshipLabel(token)}</span></td>

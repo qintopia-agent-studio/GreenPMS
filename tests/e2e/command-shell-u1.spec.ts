@@ -17,7 +17,7 @@ function mobileOnly(testInfo: TestInfo): boolean {
 
 async function expectRoomStatusLanding(page: Page) {
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible();
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible();
 }
 
 function addDay(value: string): string {

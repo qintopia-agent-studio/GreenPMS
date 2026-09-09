@@ -1,0 +1,115 @@
+{
+  "probes": {
+    "correctedIdentity": {
+      "businessCommitted": true,
+      "orderId": "order_49010411-5bc1-4814-acbf-3f0ee858fd96",
+      "original": "小满",
+      "listSnapshot": {
+        "fullName": "跨分段住宿住客",
+        "nickname": "小满",
+        "phone": "13800000001",
+        "documentNumber": "STAGE7-stage7-2026-10-13-moved-stay"
+      },
+      "detailPrimary": {
+        "id": "occupant_60d52293-a5e0-48f2-bae0-c664f8cb0f05",
+        "orderId": "order_49010411-5bc1-4814-acbf-3f0ee858fd96",
+        "ordinal": 1,
+        "role": "PRIMARY",
+        "fullName": "审查更正后的姓名",
+        "nickname": "审查更正后的昵称",
+        "phone": "19900001099",
+        "documentNumber": "STAGE7-stage7-2026-10-13-moved-stay",
+        "createdAt": "2026-09-06T02:19:54.727Z"
+      },
+      "search": "跳至主要内容\nQinTopia\n\n订单管理\n\n订单\n\n查询住宿订单、收款与履约进度\n\n修改历史安排\n刷新\n搜索订单\n状态\n全部状态\n已预订\n已退房\n0 / 8\n没有匹配订单\n\n调整筛选条件或从房态页创建新订单。\n\n房态\n订单\n会员\nToken\n今日履约\n账号"
+    },
+    "idleRoomStatus": {
+      "elapsedMs": 12004,
+      "resources": [
+        {
+          "durationMs": 87,
+          "encodedBodySize": 6322,
+          "decodedBodySize": 531611,
+          "transferSize": 6622
+        },
+        {
+          "durationMs": 73,
+          "encodedBodySize": 6320,
+          "decodedBodySize": 531611,
+          "transferSize": 6620
+        },
+        {
+          "durationMs": 44,
+          "encodedBodySize": 6320,
+          "decodedBodySize": 531611,
+          "transferSize": 6620
+        },
+        {
+          "durationMs": 53,
+          "encodedBodySize": 6322,
+          "decodedBodySize": 531611,
+          "transferSize": 6622
+        },
+        {
+          "durationMs": 47,
+          "encodedBodySize": 6322,
+          "decodedBodySize": 531611,
+          "transferSize": 6622
+        },
+        {
+          "durationMs": 55,
+          "encodedBodySize": 6321,
+          "decodedBodySize": 531611,
+          "transferSize": 6621
+        }
+      ]
+    }
+  },
+  "pages": [
+    {
+      "name": "populated-order-1440",
+      "layout": {
+        "viewport": 1440,
+        "scrollWidth": 1440,
+        "scrollHeight": 3365
+      },
+      "violations": []
+    },
+    {
+      "name": "populated-orders-1440",
+      "layout": {
+        "viewport": 1440,
+        "scrollWidth": 1440,
+        "scrollHeight": 900
+      },
+      "violations": []
+    },
+    {
+      "name": "populated-order-375",
+      "layout": {
+        "viewport": 375,
+        "scrollWidth": 375,
+        "scrollHeight": 5173
+      },
+      "violations": []
+    },
+    {
+      "name": "populated-orders-375",
+      "layout": {
+        "viewport": 375,
+        "scrollWidth": 375,
+        "scrollHeight": 1243
+      },
+      "violations": []
+    },
+    {
+      "name": "corrected-name-search-empty",
+      "layout": {
+        "viewport": 375,
+        "scrollWidth": 375,
+        "scrollHeight": 812
+      },
+      "violations": []
+    }
+  ]
+}

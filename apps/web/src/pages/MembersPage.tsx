@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { BadgeCheck, CalendarClock, CircleDollarSign, CreditCard, FilePenLine, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { memberStayHref } from "../memberStayIntent";
 import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
 import { MemberDeletionButton } from "../components/MemberDeletionButton";
 import {
@@ -110,27 +111,16 @@ function isMembershipReconversionStayRow(order: OrderRowDto): boolean {
     && !order.member_contract_id;
 }
 
-export async function loadMembershipReconversionStayCandidates(
-  orders: OrderRowDto[],
-  loadOrder: (orderId: string) => Promise<Pick<OrderViewDto, "order" | "occupants">>
-): Promise<MembershipReconversionStayCandidate[]> {
-  const candidateOrders = orders.filter(isMembershipReconversionStayRow);
-  const views = await Promise.allSettled(candidateOrders.map((order) => loadOrder(order.id)));
-  const loadedCandidates = candidateOrders.flatMap((order, index) => {
-    const loaded = views[index]!;
-    if (loaded.status === "rejected") return [];
-    const view = loaded.value;
-    if (view.order.id !== order.id || view.order.property_id !== order.property_id) {
-      throw new Error("载入的住宿详情与订单列表不一致");
+export function reconversionCandidatesFromRows(orders: OrderRowDto[]): MembershipReconversionStayCandidate[] {
+  return orders.map((order) => {
+    const guest = order.current_primary_guest;
+    if (!isMembershipReconversionStayRow(order) || !guest || typeof guest.fullName !== "string"
+      || !(guest.nickname === null || typeof guest.nickname === "string") || typeof guest.phone !== "string"
+      || !(guest.documentNumber === null || typeof guest.documentNumber === "string")) {
+      throw new Error("历史住宿候选资料不完整，请重试或联系管理员核对");
     }
-    const primaryOccupant = view.occupants.find((occupant) => occupant.role === "PRIMARY");
-    return primaryOccupant ? [{ order, primaryOccupant }] : [];
+    return { order, primaryOccupant: { fullName: guest.fullName, nickname: guest.nickname, phone: guest.phone, documentNumber: guest.documentNumber } };
   });
-  const firstFailure = views.find((loaded) => loaded.status === "rejected");
-  if (candidateOrders.length > 0 && views.every((loaded) => loaded.status === "rejected") && firstFailure?.status === "rejected") {
-    throw firstFailure.reason;
-  }
-  return loadedCandidates;
 }
 
 export function eligibleMembershipReconversionStays(
@@ -479,12 +469,11 @@ function MemberList({ members, selectedMemberId, onSelect }: {
           aria-pressed={member.id === selectedMemberId}
           onClick={() => onSelect(member.id)}
           data-testid="member-list-item"
+          data-member-id={member.id}
         >
           <strong>{member.nickname}</strong>
           <span>{member.phone}</span>
           <small>姓名：{member.full_name}</small>
-          <small>{member.identity_card_number}</small>
-          <small>微信：{member.wechat}</small>
         </button>
       </li>)}
     </ul>
@@ -502,7 +491,7 @@ export function MemberProfile({ member, canCorrect, disabled, onCorrect, deletio
     <div className="section-title-row">
       <div>
         <span className="section-kicker">会员档案</span>
-        <h2 id="member-profile-heading">{member.member.full_name}</h2>
+        <h2 id="member-profile-heading" tabIndex={-1}>{member.member.full_name}</h2>
       </div>
       <div className="account-actions">{canCorrect ? <button type="button" className="button button-secondary" disabled={disabled} onClick={onCorrect} data-testid="open-member-corrections"><FilePenLine aria-hidden="true" size={17} />修改会员记录</button> : null}{deletionControl}</div>
     </div>
@@ -658,7 +647,7 @@ function stayOrderOptionLabel(candidate: MembershipReconversionStayCandidate): s
   return `${guestName(currentPrimaryGuest)} · ${formatDate(candidate.order.arrival_date)} 至 ${formatDate(candidate.order.departure_date)}${location}`;
 }
 
-export function MemberCorrectionDialog({ propertyId, view, availableCommands, stayOrders, stayOrdersLoading, draft, onClose, onSubmit }: {
+export function MemberCorrectionDialog({ propertyId, view, availableCommands, stayOrders, stayOrdersLoading, draft, onClose, onSubmit, onRequestStayOrders, stayOrdersError, hasMoreStayOrders, onLoadMoreStayOrders, onRetryStayOrders }: {
   propertyId: string;
   view: MemberViewDto;
   availableCommands: MemberCorrectionCommandType[];
@@ -667,6 +656,11 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
   draft?: CommandRequest;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
+  onRequestStayOrders?: () => void;
+  stayOrdersError?: unknown;
+  hasMoreStayOrders?: boolean;
+  onLoadMoreStayOrders?: () => void;
+  onRetryStayOrders?: () => void;
 }) {
   const draftCommand = availableCommands.includes(draft?.commandType as MemberCorrectionCommandType)
     ? draft?.commandType as MemberCorrectionCommandType
@@ -697,7 +691,12 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
   const [evidenceNote, setEvidenceNote] = useState(() => typeof draft?.input.evidenceNote === "string" ? draft.input.evidenceNote : "");
   const [validationError, setValidationError] = useState<string>();
   const selectedErroneousMembershipOrderId = currentOrFirstCandidateId(erroneousMembershipOrderId, activeOrders.map(({ order }) => order.id));
-  const selectedSourceStayOrderId = currentOrFirstCandidateId(sourceStayOrderId, eligibleStays.map(({ order }) => order.id));
+  const selectedSourceStayOrderId = sourceStayOrderId || eligibleStays[0]?.order.id || "";
+  const sourceStayNotLoaded = Boolean(selectedSourceStayOrderId && !eligibleStays.some(({ order }) => order.id === selectedSourceStayOrderId));
+
+  useEffect(() => {
+    if (mode === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY") onRequestStayOrders?.();
+  }, [mode, onRequestStayOrders]);
 
   function correctionRequest(commandType: MemberCorrectionCommandType, title: string, description: string, input: Record<string, unknown>): CommandRequest {
     return {
@@ -787,7 +786,7 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
       }));
       return;
     }
-    if (!selectedErroneousMembershipOrderId || !selectedSourceStayOrderId) {
+    if (!selectedErroneousMembershipOrderId || !selectedSourceStayOrderId || sourceStayNotLoaded) {
       setValidationError("必须选择错误会员订单和对应的已完成历史住宿");
       return;
     }
@@ -845,8 +844,14 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
             {!activeOrders.length ? <option value="">没有可选择的有效会员订单</option> : activeOrders.map((summary) => <option key={summary.order.id} value={summary.order.id}>{membershipOrderOptionLabel(summary)}</option>)}
           </select></label>
           <label className="span-two">对应历史住宿<select value={selectedSourceStayOrderId} onChange={(event) => setSourceStayOrderId(event.target.value)} required disabled={stayOrdersLoading} data-testid="membership-reconversion-source-stay">
-            {stayOrdersLoading ? <option value="">正在载入已完成住宿</option> : !eligibleStays.length ? <option value="">没有身份一致的已完成企微住宿</option> : eligibleStays.map((candidate) => <option key={candidate.order.id} value={candidate.order.id}>{stayOrderOptionLabel(candidate)}</option>)}
+            {sourceStayNotLoaded ? <option value={selectedSourceStayOrderId}>原选住宿尚未载入，请载入更多或重新选择</option> : null}
+            {!eligibleStays.length && stayOrdersLoading ? <option value="">正在载入已完成住宿</option> : !eligibleStays.length ? <option value="">{stayOrdersError ? "住宿尚未载入，请重试" : "没有身份一致的已完成企微住宿"}</option> : eligibleStays.map((candidate) => <option key={candidate.order.id} value={candidate.order.id}>{stayOrderOptionLabel(candidate)}</option>)}
           </select></label>
+          <div className="span-two" aria-live="polite">
+            {stayOrdersError ? <><InlineError error={stayOrdersError} title="历史住宿未能完整载入" /><button type="button" className="button button-secondary" disabled={stayOrdersLoading} onClick={onRetryStayOrders}>重试载入住宿</button></> : null}
+            {hasMoreStayOrders && !stayOrdersError ? <button type="button" className="button button-secondary" disabled={stayOrdersLoading} onClick={onLoadMoreStayOrders}>{stayOrdersLoading ? "正在载入" : "载入更多历史住宿"}</button> : null}
+            {eligibleStays.length ? <p className="muted compact">已载入 {eligibleStays.length} 条身份一致的住宿；最终可用性将在核对时重新检查。</p> : null}
+          </div>
           <label className="span-two"><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={actualMembershipDate} onChange={(event) => setActualMembershipDate(event.target.value)} required data-testid="actual-membership-date" /></label>
           <label className="span-two check-row"><input type="checkbox" checked={hasReplacementPayment} onChange={(event) => setHasReplacementPayment(event.target.checked)} data-testid="has-replacement-direct-payment" /><span>存在一笔真实企微差额收款</span></label>
           {hasReplacementPayment ? <>
@@ -1062,7 +1067,7 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
     targetOrderRef.current.scrollIntoView({ block: "center", inline: "nearest" });
   }, [targetMembershipOrderId]);
   return <section className="membership-orders-panel" aria-labelledby="membership-orders-heading">
-    <div className="section-title-row">
+      <div className="section-title-row">
       <div><span className="section-kicker">会员购买</span><h2 id="membership-orders-heading">会员订单</h2></div>
       {canCreate ? <button type="button" className="button button-primary" onClick={onCreate} disabled={disabled || view.membershipProducts.length === 0} data-testid="create-membership-order"><CreditCard aria-hidden="true" size={17} />办理会员</button> : null}
     </div>
@@ -1129,7 +1134,16 @@ export function MembersPage() {
   const { principal, propertyId, refreshMeta } = useWorkspace();
   const initialDeepLink = useRef(parseMemberDeepLink(location.search));
   const initialStayUpgradeCreation = useRef(stayUpgradeMemberCreationState(parseStayUpgradeMemberCreationIntent(location.search)));
-  const deepLinkSelectionPending = useRef(true);
+  const memberParams = new URLSearchParams(location.search);
+  const pageBeforeId = memberParams.get("before") ?? "";
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const previousPages: string[] = Array.isArray(location.state?.memberPreviousPages) ? location.state.memberPreviousPages : [];
+  function changeMemberUrl(changes: Record<string, string | undefined>, pages = previousPages) {
+    const params = new URLSearchParams(location.search);
+    for (const [key, value] of Object.entries(changes)) { if (value) params.set(key, value); else params.delete(key); }
+    params.set("propertyId", propertyId);
+    navigate(`/members?${params}`, { state: { memberPreviousPages: pages } });
+  }
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
   const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
   const commandsBlocked = commandRecovery.blocked && recoveryPendingAllowed;
@@ -1141,13 +1155,29 @@ export function MembersPage() {
   const canCorrectEntitlementBalance = principalCan(principal, propertyId, "CORRECT_MEMBER_ENTITLEMENT_BALANCE");
   const availableMemberCorrections = availableMemberCorrectionCommandTypes((commandType) => principalCan(principal, propertyId, commandType));
   const canCorrectMemberRecords = availableMemberCorrections.length > 0;
-  const [searchInput, setSearchInput] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchInput, setSearchInput] = useState(memberParams.get("q") ?? "");
+  const searchQuery = memberParams.get("q") ?? "";
+  function setSearchQuery(value: string) { changeMemberUrl({ q: value, before: undefined, memberId: undefined }, []); }
+  useEffect(() => { setSearchInput(searchQuery); }, [searchQuery]);
   const [members, setMembers] = useState<MemberSummaryDto[]>([]);
-  const [selectedMemberId, setSelectedMemberId] = useState("");
+  const [selectedMemberId, setSelectedMemberId] = useState(memberParams.get("memberId") ?? "");
+  useEffect(() => { setSelectedMemberId(new URLSearchParams(location.search).get("memberId") ?? ""); }, [location.search]);
+  const memberPropertyRef = useRef(propertyId);
+  const memberListReturnRef = useRef<{ id: string; scrollY: number } | undefined>(undefined);
+  useEffect(() => {
+    if (selectedMemberId || !memberListReturnRef.current) return;
+    const target = memberListReturnRef.current;
+    const frame = requestAnimationFrame(() => {
+      document.querySelector<HTMLButtonElement>(`[data-member-id="${CSS.escape(target.id)}"]`)?.focus({ preventScroll: true });
+      window.scrollTo({ top: target.scrollY });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selectedMemberId]);
   const [targetContractId, setTargetContractId] = useState<string | undefined>(initialDeepLink.current.contractId);
   const [targetMembershipOrderId, setTargetMembershipOrderId] = useState<string | undefined>(initialDeepLink.current.membershipOrderId);
-  const [member, setMember] = useState<MemberViewDto>();
+  const [memberState, setMemberState] = useState<{ propertyId: string; view: MemberViewDto }>();
+  const member = memberState?.propertyId === propertyId ? memberState.view : undefined;
+  function setMember(value: MemberViewDto | undefined) { setMemberState(value ? { propertyId, view: value } : undefined); }
   const [loadingList, setLoadingList] = useState(true);
   const [loadingMember, setLoadingMember] = useState(false);
   const [error, setError] = useState<unknown>();
@@ -1161,6 +1191,11 @@ export function MembersPage() {
   const [correctingMemberRecords, setCorrectingMemberRecords] = useState(false);
   const [correctionStayOrders, setCorrectionStayOrders] = useState<MembershipReconversionStayCandidate[]>([]);
   const [loadingCorrectionStays, setLoadingCorrectionStays] = useState(false);
+  const correctionStayOrdersRequested = useRef(false);
+  const correctionStayRequest = useRef<AbortController | undefined>(undefined);
+  const correctionStayCursor = useRef<string | undefined>(undefined);
+  const [hasMoreCorrectionStays, setHasMoreCorrectionStays] = useState(false);
+  const [correctionStayError, setCorrectionStayError] = useState<unknown>();
   const [command, setCommand] = useState<CommandRequest>();
   const [commandDraft, setCommandDraft] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
@@ -1180,7 +1215,11 @@ export function MembersPage() {
     setRecoveryDialogOpen(false);
     setRecoveryError(undefined);
     setCommandNotice(undefined);
-    setSelectedMemberId("");
+    if (memberPropertyRef.current !== propertyId) {
+      memberPropertyRef.current = propertyId;
+      setSelectedMemberId("");
+      changeMemberUrl({ before: undefined, memberId: undefined }, []);
+    }
     setTargetContractId(initialDeepLink.current.contractId);
     setTargetMembershipOrderId(initialDeepLink.current.membershipOrderId);
   }, [propertyId]);
@@ -1197,27 +1236,29 @@ export function MembersPage() {
     setError(undefined);
     setMembers([]);
     setMember(undefined);
-    api.members(propertyId, searchQuery || undefined)
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(new Error("会员列表读取超时，请重试")), 12_000);
+    api.members(propertyId, searchQuery || undefined, { ...(pageBeforeId ? { beforeId: pageBeforeId } : {}), signal: controller.signal })
       .then((response) => {
         if (current) {
-          const linkedMemberId = deepLinkSelectionPending.current
-            ? memberDeepLinkSelection(response.members, initialDeepLink.current.memberId)
-            : undefined;
-          deepLinkSelectionPending.current = false;
           setMembers(response.members);
-          setSelectedMemberId((selected) => selected || linkedMemberId || "");
+          setNextCursor(response.nextCursor);
         }
       })
       .catch((nextError) => {
-        if (current) setError(nextError);
+        if (current) setError(controller.signal.aborted ? controller.signal.reason : nextError);
       })
       .finally(() => {
+        window.clearTimeout(timeout);
         if (current) setLoadingList(false);
       });
-    return () => { current = false; };
-  }, [propertyId, searchQuery, refreshToken]);
+    return () => { current = false; controller.abort(); window.clearTimeout(timeout); };
+  }, [propertyId, searchQuery, pageBeforeId, refreshToken]);
 
-  const currentMemberId = effectiveMemberId(members, selectedMemberId);
+  const currentMemberId = !memberParams.get("propertyId") || memberParams.get("propertyId") === propertyId ? selectedMemberId : "";
+  useEffect(() => {
+    if (member?.member.id === currentMemberId && window.matchMedia("(max-width: 767px)").matches) document.getElementById("member-profile-heading")?.focus();
+  }, [member?.member.id, currentMemberId]);
   const activeTargetContractId = member ? targetEntitlementContractId(member, targetContractId) : undefined;
   const activeTargetMembershipOrderId = member
     ? targetMembershipOrderDeepLinkId(member, targetMembershipOrderId)
@@ -1233,7 +1274,9 @@ export function MembersPage() {
     setMember(undefined);
     setLoadingMember(true);
     setError(undefined);
-    api.member(currentMemberId, propertyId)
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(new Error("会员档案读取超时，请重试")), 12_000);
+    api.member(currentMemberId, propertyId, controller.signal)
       .then((response) => current && setMember(response))
       .catch((nextError) => {
         if (current) {
@@ -1241,8 +1284,8 @@ export function MembersPage() {
           setError(nextError);
         }
       })
-      .finally(() => current && setLoadingMember(false));
-    return () => { current = false; };
+      .finally(() => { window.clearTimeout(timeout); if (current) setLoadingMember(false); });
+    return () => { current = false; controller.abort(); window.clearTimeout(timeout); };
   }, [currentMemberId, propertyId, refreshToken]);
 
   function search(event: FormEvent<HTMLFormElement>) {
@@ -1250,17 +1293,17 @@ export function MembersPage() {
     setSelectedMemberId("");
     setTargetContractId(undefined);
     setTargetMembershipOrderId(undefined);
-    navigate("/members", { replace: true });
     setSearchQuery(normalizeMemberQuery(searchInput));
   }
 
   function selectMember(memberId: string) {
+    memberListReturnRef.current = { id: memberId, scrollY: window.scrollY };
     setSelectedMemberId(memberId);
     setCorrectingMemberRecords(false);
     setCommandDraft(undefined);
     setTargetContractId(undefined);
     setTargetMembershipOrderId(undefined);
-    navigate(`/members?memberId=${encodeURIComponent(memberId)}`, { replace: true });
+    changeMemberUrl({ memberId });
   }
 
   function refresh() {
@@ -1268,19 +1311,66 @@ export function MembersPage() {
     void refreshMeta();
   }
 
+  const resetCorrectionStays = useCallback(() => {
+    correctionStayRequest.current?.abort();
+    correctionStayRequest.current = undefined;
+    correctionStayCursor.current = undefined;
+    correctionStayOrdersRequested.current = false;
+    setCorrectionStayOrders([]);
+    setLoadingCorrectionStays(false);
+    setHasMoreCorrectionStays(false);
+    setCorrectionStayError(undefined);
+  }, []);
+
+  useEffect(() => {
+    resetCorrectionStays();
+    return () => correctionStayRequest.current?.abort();
+  }, [propertyId, currentMemberId, resetCorrectionStays]);
+
   function openMemberCorrections() {
     if (!canCorrectMemberRecords || commandsBlocked) return;
+    resetCorrectionStays();
     setCorrectingMemberRecords(true);
-    setLoadingCorrectionStays(true);
-    api.orders(propertyId, "CHECKED_OUT")
-      .then((response) => loadMembershipReconversionStayCandidates(response.orders, (orderId) => api.order(orderId)))
-      .then(setCorrectionStayOrders)
-      .catch((nextError) => {
-        setCorrectionStayOrders([]);
-        setError(nextError);
-      })
-      .finally(() => setLoadingCorrectionStays(false));
   }
+
+  const loadCorrectionStayPage = useCallback(() => {
+    if (correctionStayRequest.current || !currentMemberId) return;
+    const controller = new AbortController();
+    correctionStayRequest.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(new Error("历史住宿读取超时，请重试")), 12_000);
+    setLoadingCorrectionStays(true);
+    setCorrectionStayError(undefined);
+    const beforeId = correctionStayCursor.current;
+    api.orders(propertyId, "CHECKED_OUT", {
+      reconversionMemberId: currentMemberId, pageSize: 25,
+      ...(beforeId ? { beforeId } : {}), signal: controller.signal
+    }).then((response) => {
+      if (controller.signal.aborted) return;
+      if (!(response.nextCursor === null || typeof response.nextCursor === "string" && response.nextCursor.length > 0)) {
+        throw new Error("历史住宿分页信息不完整，请重试");
+      }
+      const candidates = reconversionCandidatesFromRows(response.orders);
+      setCorrectionStayOrders((prior) => {
+        const existing = new Set(prior.map(({ order }) => order.id));
+        return [...prior, ...candidates.filter(({ order }) => !existing.has(order.id))];
+      });
+      correctionStayCursor.current = response.nextCursor ?? undefined;
+      setHasMoreCorrectionStays(Boolean(response.nextCursor));
+    }).catch((nextError) => {
+      if (correctionStayRequest.current === controller) setCorrectionStayError(controller.signal.aborted ? controller.signal.reason : nextError);
+    }).finally(() => {
+      window.clearTimeout(timeout);
+      if (correctionStayRequest.current !== controller) return;
+      correctionStayRequest.current = undefined;
+      setLoadingCorrectionStays(false);
+    });
+  }, [propertyId, currentMemberId]);
+
+  const requestCorrectionStayOrders = useCallback(() => {
+    if (correctionStayOrdersRequested.current) return;
+    correctionStayOrdersRequested.current = true;
+    loadCorrectionStayPage();
+  }, [loadCorrectionStayPage]);
 
   function startCommand(request: CommandRequest) {
     if (!principalCan(principal, propertyId, request.commandType as CommandCapability)) return;
@@ -1331,7 +1421,7 @@ export function MembersPage() {
     }
     if (!member) return;
     if (memberCorrectionCommandTypes.includes(request.commandType as MemberCorrectionCommandType)) {
-      openMemberCorrections();
+      setCorrectingMemberRecords(true);
       return;
     }
     if (request.commandType === "CREATE_MEMBERSHIP_ORDER") {
@@ -1357,7 +1447,7 @@ export function MembersPage() {
     }
   }
 
-  return <div className="members-page">
+  return <div className={`members-page${currentMemberId ? " member-detail-visible" : ""}`}>
     <header className="page-heading page-heading-actions">
       <div><p className="eyebrow">会员管理</p><h1>会员档案</h1><p>查询和维护当前门店的会员资料</p></div>
       <button className="button button-secondary" type="button" onClick={refresh} disabled={loadingList || loadingMember}><RefreshCw className={loadingList || loadingMember ? "spin" : ""} aria-hidden="true" size={17} />刷新</button>
@@ -1380,14 +1470,24 @@ export function MembersPage() {
     <form className="member-search" role="search" aria-label="搜索会员" onSubmit={search}>
       <label htmlFor="member-search-query">搜索会员<input id="member-search-query" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="昵称、姓名、手机号或微信号" data-testid="member-search-query" /></label>
       <button className="button button-secondary" type="submit" disabled={loadingList}><Search aria-hidden="true" size={17} />搜索</button>
-      {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); setTargetContractId(undefined); setTargetMembershipOrderId(undefined); navigate("/members", { replace: true }); }}>清除</button> : null}
+      {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); setTargetContractId(undefined); setTargetMembershipOrderId(undefined); }}>清除</button> : null}
     </form>
 
     <InlineError error={error} title="无法载入会员档案" />
-    {loadingList ? <LoadingBlock label="正在载入会员列表" /> : !members.length ? <EmptyState title="未找到会员" detail="可更换搜索条件，或新建一位会员。" /> : <div className="member-directory">
-      <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />
+    {error ? <button type="button" className="button button-secondary" onClick={refresh}>重新载入</button> : null}
+    <div className={`member-directory${currentMemberId ? " member-directory-detail-open" : ""}`}>
+      <div className="member-directory-list">
+        {loadingList ? <LoadingBlock label="正在载入会员列表" /> : !members.length ? <EmptyState title="未找到会员" detail="可更换搜索条件，或新建一位会员。" /> : <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />}
+        <nav className="list-pagination" aria-label="会员分页">
+          <button type="button" className="button button-secondary" disabled={loadingList || !pageBeforeId} onClick={() => changeMemberUrl({ before: previousPages.at(-1), memberId: undefined }, previousPages.slice(0, -1))}>上一页</button>
+          <span>本页 {members.length} 位会员</span>
+          <button type="button" className="button button-secondary" disabled={loadingList || !nextCursor} onClick={() => changeMemberUrl({ before: nextCursor ?? undefined, memberId: undefined }, [...previousPages, pageBeforeId])}>下一页</button>
+        </nav>
+      </div>
+      {currentMemberId ? <button type="button" className="button button-secondary member-list-return" onClick={() => { setSelectedMemberId(""); changeMemberUrl({ memberId: undefined }); }}>返回会员列表</button> : null}
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
         <MemberProfile member={member} canCorrect={canCorrectMemberRecords} disabled={commandsBlocked} onCorrect={openMemberCorrections} deletionControl={canCorrectMemberRecords && principal.credentialType === "SESSION" ? <MemberDeletionButton key={`${propertyId}:${member.member.id}`} propertyId={propertyId} memberId={member.member.id} disabled={commandsBlocked} onDeleted={() => { setSelectedMemberId(""); setMember(undefined); setCommandNotice("会员已删除，原档案与删除记录已保留。"); refresh(); }} /> : undefined} />
+        {principalCan(principal, propertyId, "CREATE_ORDER") ? <div className="member-stay-continuation"><button type="button" className="button button-primary" disabled={commandsBlocked} onClick={() => navigate(memberStayHref(propertyId, member.member.id))} data-testid="arrange-member-stay"><CalendarClock aria-hidden="true" size={17} />安排住宿</button><span className="muted">前往房态选择日期与房间，自动带入当前会员。</span></div> : null}
         <MemberEntitlementsPanel view={member} disabled={commandsBlocked} canCorrect={canCorrectEntitlementBalance} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
         <MembershipOrdersPanel
           view={member}
@@ -1409,7 +1509,7 @@ export function MembersPage() {
         />
         <MemberCorrectionHistoryPanel view={member} />
       </div> : null}
-    </div>}
+    </div>
 
     {creatingMember && canCreateMember ? <CreateMemberDialog propertyId={propertyId} {...(commandDraft?.commandType === "CREATE_MEMBER" ? { draft: commandDraft } : {})} {...(initialStayUpgradeCreation.current ? {
       prefill: initialStayUpgradeCreation.current,
@@ -1427,8 +1527,13 @@ export function MembersPage() {
       stayOrders={correctionStayOrders}
       stayOrdersLoading={loadingCorrectionStays}
       {...(commandDraft && memberCorrectionCommandTypes.includes(commandDraft.commandType as MemberCorrectionCommandType) ? { draft: commandDraft } : {})}
-      onClose={() => { setCorrectingMemberRecords(false); setCommandDraft(undefined); }}
+      onClose={() => { resetCorrectionStays(); setCorrectingMemberRecords(false); setCommandDraft(undefined); }}
       onSubmit={submitBusinessCommand}
+      onRequestStayOrders={requestCorrectionStayOrders}
+      stayOrdersError={correctionStayError}
+      hasMoreStayOrders={hasMoreCorrectionStays}
+      onLoadMoreStayOrders={loadCorrectionStayPage}
+      onRetryStayOrders={loadCorrectionStayPage}
     /> : null}
     {command ? <CommandDialog
       key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}` : "new-member-command"}
@@ -1443,15 +1548,16 @@ export function MembersPage() {
           ? receipt.result.memberId
           : currentMemberId || undefined;
         const [listResponse, memberResponse] = await Promise.all([
-          api.members(propertyId, clearSearch ? undefined : searchQuery || undefined),
+          api.members(propertyId, clearSearch ? undefined : searchQuery || undefined, { ...(!clearSearch && pageBeforeId ? { beforeId: pageBeforeId } : {}) }),
           nextMemberId ? api.member(nextMemberId, propertyId) : Promise.resolve(undefined)
         ]);
         setMembers(listResponse.members);
+        setNextCursor(listResponse.nextCursor);
         if (memberResponse) setMember(memberResponse);
         applyCommittedReceipt(receipt);
         if (clearSearch) {
           setSearchInput("");
-          setSearchQuery("");
+          changeMemberUrl({ q: undefined, before: undefined, memberId: nextMemberId }, []);
         }
         if (command.commandType === "CREATE_MEMBER" && initialStayUpgradeCreation.current && memberResponse) {
           const continuation = continueStayUpgradeAfterMemberCreated(initialStayUpgradeCreation.current, memberResponse.member);

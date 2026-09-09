@@ -1276,7 +1276,55 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .orderBy("order.id")
       .orderBy("segment.sequence")
       .execute();
-    const operationalOccupantsByOrder = await loadProjectedOccupants(trx, operationalOrderIds);
+    const claimRows = await trx.selectFrom("inventory_claims as claim")
+      .leftJoin("stay_segments as segment", (join) => join
+        .onRef("segment.id", "=", "claim.source_id")
+        .on("claim.source_type", "=", "ORDER_SEGMENT"))
+      .leftJoin("stays as stay", "stay.id", "segment.stay_id")
+      .leftJoin("orders as order", "order.id", "stay.order_id")
+      .leftJoin("amendments as amendment", "amendment.id", "segment.amendment_id")
+      .leftJoin("maintenance_locks as maintenance", (join) => join
+        .onRef("maintenance.id", "=", "claim.source_id")
+        .on("claim.source_type", "=", "MAINTENANCE"))
+      .leftJoin("internal_use_blocks as internal", (join) => join
+        .onRef("internal.id", "=", "claim.source_id")
+        .on("claim.source_type", "=", "INTERNAL_USE"))
+      .select([
+        "claim.id as claim_id", "claim.room_id", "claim.inventory_unit_id", "claim.service_date",
+        "claim.source_type", "claim.source_id", "claim.active", "claim.created_at", "claim.released_at",
+        "segment.id as segment_id", "segment.stay_id", "segment.segment_type",
+        "segment.arrival_date as segment_arrival_date", "segment.departure_date as segment_departure_date",
+        "segment.created_at as segment_created_at",
+        "stay.status as stay_status", "order.id as order_id", "order.status as order_status", "order.stay_type",
+        "order.arrival_date as order_arrival_date", "order.departure_date as order_departure_date", "order.primary_guest_snapshot",
+        "order.member_id", "order.member_contract_id", "order.booking_channel_code", "order.channel_order_reference",
+        "order.current_revision_id",
+        sql<string | null>`to_jsonb("order") ->> 'free_stay_category_code'`.as("free_stay_category_code"),
+        sql<string | null>`to_jsonb("order") ->> 'free_stay_reason'`.as("free_stay_reason"),
+        "amendment.command_id as segment_command_id",
+        "maintenance.id as maintenance_id", "maintenance.arrival_date as maintenance_arrival_date",
+        "maintenance.departure_date as maintenance_departure_date", "maintenance.reason as maintenance_reason", "maintenance.status as maintenance_status",
+        "maintenance.created_by_command_id as maintenance_created_command_id",
+        "maintenance.released_by_command_id as maintenance_released_command_id",
+        "internal.id as internal_id", "internal.arrival_date as internal_arrival_date",
+        "internal.departure_date as internal_departure_date", "internal.reason as internal_reason", "internal.status as internal_status",
+        "internal.created_by_command_id as internal_created_command_id",
+        "internal.released_by_command_id as internal_released_command_id"
+      ])
+      .where("claim.property_id", "=", options.propertyId)
+      .where((expression) => expression.or([
+        expression("claim.service_date", "=", businessDate),
+        expression.and([
+          expression("claim.service_date", ">=", options.arrivalDate),
+          expression("claim.service_date", "<", options.departureDate)
+        ])
+      ]))
+      .orderBy("claim.service_date")
+      .orderBy("claim.id")
+      .execute();
+
+    const occupantOrderIds = [...new Set([...operationalOrderIds, ...claimRows.flatMap((row) => row.order_id ? [row.order_id] : [])])];
+    const occupantsByOrder = await loadProjectedOccupants(trx, occupantOrderIds);
 
     const operationalOrderGroups = new Map<string, typeof operationalOrderRows>();
     for (const row of operationalOrderRows) {
@@ -1338,7 +1386,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         departureDayInHouse ? `计划退房日 ${businessDate}，订单仍待办理退房` : null,
         freeStayReason ? `免费入住原因：${freeStayReason}` : null
       ].filter(Boolean).join("；") || null;
-      const projectedOccupants = operationalOccupantsByOrder.get(order.order_id) ?? [];
+      const projectedOccupants = occupantsByOrder.get(order.order_id) ?? [];
       const taskEvent: ProjectionEvent = {
         actualInventoryUnitId: segment.inventory_unit_id,
         roomId: segment.parent_room_id ?? segment.inventory_unit_id,
@@ -1544,52 +1592,6 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       }
     }
 
-    const claimRows = await trx.selectFrom("inventory_claims as claim")
-      .leftJoin("stay_segments as segment", (join) => join
-        .onRef("segment.id", "=", "claim.source_id")
-        .on("claim.source_type", "=", "ORDER_SEGMENT"))
-      .leftJoin("stays as stay", "stay.id", "segment.stay_id")
-      .leftJoin("orders as order", "order.id", "stay.order_id")
-      .leftJoin("amendments as amendment", "amendment.id", "segment.amendment_id")
-      .leftJoin("maintenance_locks as maintenance", (join) => join
-        .onRef("maintenance.id", "=", "claim.source_id")
-        .on("claim.source_type", "=", "MAINTENANCE"))
-      .leftJoin("internal_use_blocks as internal", (join) => join
-        .onRef("internal.id", "=", "claim.source_id")
-        .on("claim.source_type", "=", "INTERNAL_USE"))
-      .select([
-        "claim.id as claim_id", "claim.room_id", "claim.inventory_unit_id", "claim.service_date",
-        "claim.source_type", "claim.source_id", "claim.active", "claim.created_at", "claim.released_at",
-        "segment.id as segment_id", "segment.stay_id", "segment.segment_type",
-        "segment.arrival_date as segment_arrival_date", "segment.departure_date as segment_departure_date",
-        "segment.created_at as segment_created_at",
-        "stay.status as stay_status", "order.id as order_id", "order.status as order_status", "order.stay_type",
-        "order.arrival_date as order_arrival_date", "order.departure_date as order_departure_date", "order.primary_guest_snapshot",
-        "order.member_id", "order.member_contract_id", "order.booking_channel_code", "order.channel_order_reference",
-        "order.current_revision_id",
-        sql<string | null>`to_jsonb("order") ->> 'free_stay_category_code'`.as("free_stay_category_code"),
-        sql<string | null>`to_jsonb("order") ->> 'free_stay_reason'`.as("free_stay_reason"),
-        "amendment.command_id as segment_command_id",
-        "maintenance.id as maintenance_id", "maintenance.arrival_date as maintenance_arrival_date",
-        "maintenance.departure_date as maintenance_departure_date", "maintenance.reason as maintenance_reason", "maintenance.status as maintenance_status",
-        "maintenance.created_by_command_id as maintenance_created_command_id",
-        "maintenance.released_by_command_id as maintenance_released_command_id",
-        "internal.id as internal_id", "internal.arrival_date as internal_arrival_date",
-        "internal.departure_date as internal_departure_date", "internal.reason as internal_reason", "internal.status as internal_status",
-        "internal.created_by_command_id as internal_created_command_id",
-        "internal.released_by_command_id as internal_released_command_id"
-      ])
-      .where("claim.property_id", "=", options.propertyId)
-      .where((expression) => expression.or([
-        expression("claim.service_date", "=", businessDate),
-        expression.and([
-          expression("claim.service_date", ">=", options.arrivalDate),
-          expression("claim.service_date", "<", options.departureDate)
-        ])
-      ]))
-      .orderBy("claim.service_date")
-      .orderBy("claim.id")
-      .execute();
 
     const deferredUnavailableRows = await trx.selectFrom("internal_use_blocks")
       .select(["id", "inventory_unit_id", "room_id", "arrival_date", "departure_date", "status", "created_at"])
@@ -2092,6 +2094,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         "amendment.reason_code",
         "amendment.reason_note",
         "amendment.created_at",
+        "amendment.command_id",
         "command.subject_id as actor_subject_id",
         "subject.display_name as actor_display_name"
       ])
@@ -2263,19 +2266,21 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       ...operationalOrderRows.map((row) => row.order_id),
       ...claimRows.flatMap((row) => row.order_id ? [row.order_id] : [])
     ])];
-    const amendmentRows = orderIdsForHistory.length === 0 ? [] : await trx.selectFrom("amendments")
+    const alreadyLoadedHistoryIds = new Set([...activePricingOrderIds, ...completedOrderIds]);
+    const remainingHistoryIds = orderIdsForHistory.filter((id) => !alreadyLoadedHistoryIds.has(id));
+    const remainingAmendmentRows = remainingHistoryIds.length === 0 ? [] : await trx.selectFrom("amendments")
       .select(["order_id", "amendment_type", "command_id", "created_at"])
-      .where("order_id", "in", orderIdsForHistory)
+      .where("order_id", "in", remainingHistoryIds)
       .orderBy("order_id")
       .orderBy("sequence")
       .execute();
+    const amendmentRows = [...activeAmendments, ...completedAmendments, ...remainingAmendmentRows];
     const amendmentsByOrder = new Map<string, typeof amendmentRows>();
     for (const amendment of amendmentRows) {
       const rows = amendmentsByOrder.get(amendment.order_id) ?? [];
       rows.push(amendment);
       amendmentsByOrder.set(amendment.order_id, rows);
     }
-    const occupantsByOrder = await loadProjectedOccupants(trx, orderIdsForHistory);
 
     partial = partial || missingOperationalClaim || inconsistentOperationalLifecycle || operationalOrdersTruncated || inactiveUnitsTruncated;
     const projectActiveArrearsEvent = (

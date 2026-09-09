@@ -1,3 +1,4 @@
+import { useMemberChoices } from "../useMemberChoices";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import { FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -15,6 +16,7 @@ import type {
 import { currentReleaseFeatures } from "@qintopia/contracts";
 import { api, ApiError, type ClientCommandMetadata } from "../api";
 import { addLocalDateDays, localDateInTimeZone } from "../dates";
+import { memberStayIntent } from "../memberStayIntent";
 import { commandRecoveryAvailable, principalCan, propertyAllowedActions, useWorkspace } from "../session";
 import { assertOrderViewAllowedActions } from "../orderViewValidation";
 import type {
@@ -319,6 +321,28 @@ export function backfillSubmitBlockedReason(input: {
   if (input.commandsBlocked) return "当前房态已变化、正在刷新、权限受限或有操作尚未收口，请按页面提示处理后重试";
   if (!input.quoteIsCurrent) return "房源或住宿日期的最新报价尚未载入，请稍候";
   if (input.guestCount > input.occupancyCapacity) return "住宿人数超过当前房源可入住人数";
+  return undefined;
+}
+
+export function createOrderSubmitBlockedReason(input: {
+  commandsBlocked: boolean;
+  quoteIsCurrent: boolean;
+  guestsComplete: boolean;
+  guestCount: number;
+  occupancyCapacity: number;
+  temporaryOtherRoomConfirmed: boolean;
+  temporaryOtherRoomReasonValid: boolean;
+  channelRequired: boolean;
+  pricingComplete: boolean;
+  freeStayMissing: boolean;
+}): string | undefined {
+  if (input.commandsBlocked) return "当前房态或操作恢复记录尚未收口，请按页面提示处理后重试";
+  if (!input.quoteIsCurrent) return "房源或住宿日期的最新报价尚未载入，请稍候";
+  if (!input.guestsComplete) return "请补全每位住宿人的姓名和昵称";
+  if (input.guestCount > input.occupancyCapacity) return "住宿人数超过当前房源可入住人数";
+  if (input.temporaryOtherRoomConfirmed && !input.temporaryOtherRoomReasonValid) return "请填写临时安排其他房型的具体原因";
+  if (input.channelRequired && !input.pricingComplete) return "请补全渠道订单号、成交金额和价格差异说明";
+  if (input.freeStayMissing) return "请填写免费入住类型和具体原因";
   return undefined;
 }
 
@@ -1342,6 +1366,7 @@ function QuoteWorkbench({
   policies,
   recoveryQuoteInput,
   initialStayType,
+  initialMemberId,
   quoteActionCode,
   backfill = false,
   commandsBlocked,
@@ -1361,6 +1386,7 @@ function QuoteWorkbench({
   policies: PricingPolicyVersionDto[];
   recoveryQuoteInput?: QuoteCommandInput;
   initialStayType?: StayType;
+  initialMemberId?: string;
   quoteActionCode?: RoomStatusQuoteActionCode;
   backfill?: boolean;
   commandsBlocked: boolean;
@@ -1386,8 +1412,12 @@ function QuoteWorkbench({
     ? policy.calculation_kind === "FREE" && policy.stay_type === "FREE"
     : policy.calculation_kind === "DURATION_BAND_TOTAL" && policy.stay_type === null);
   const policyId = selectedPolicy?.id ?? "";
-  const [useMemberEntitlement, setUseMemberEntitlement] = useState(() => Boolean(recoveryQuoteInput?.memberId));
-  const [memberId, setMemberId] = useState(() => recoveryQuoteInput?.memberId ?? "");
+  const initialMemberLookup = useMemberChoices(propertyId, "", initialMemberId ?? "", Boolean(initialMemberId), true);
+  const initialMember = !backfill && initialStayType !== "FREE" && !recoveryQuoteInput
+    ? initialMemberLookup.members.find((member) => member.id === initialMemberId)
+    : undefined;
+  const [useMemberEntitlement, setUseMemberEntitlement] = useState(() => Boolean(recoveryQuoteInput?.memberId || initialMemberId));
+  const [memberId, setMemberId] = useState(() => recoveryQuoteInput?.memberId ?? initialMemberId ?? "");
   const [memberSearch, setMemberSearch] = useState("");
   const [temporaryOtherRoomDraft, setTemporaryOtherRoomDraft] = useState<TemporaryOtherRoomDraft>(() => ({
     confirmed: recoveryQuoteInput?.temporaryOtherRoom === true,
@@ -1400,10 +1430,10 @@ function QuoteWorkbench({
     scope: quoteRecoveryScope,
     read: browserQuoteRecovery(principal.subjectId, propertyId).read
   }));
-  const [guestName, setGuestName] = useState("");
-  const [guestNickname, setGuestNickname] = useState("");
-  const [guestPhone, setGuestPhone] = useState("");
-  const [guestDocument, setGuestDocument] = useState("");
+  const [guestName, setGuestName] = useState(() => initialMember?.full_name ?? "");
+  const [guestNickname, setGuestNickname] = useState(() => initialMember?.nickname ?? "");
+  const [guestPhone, setGuestPhone] = useState(() => initialMember?.phone ?? "");
+  const [guestDocument, setGuestDocument] = useState(() => initialMember?.identity_card_number ?? "");
   const [additionalGuests, setAdditionalGuests] = useState<AdditionalGuestDraft[]>([]);
   const [bookingChannelCode, setBookingChannelCode] = useState<BookingChannelCode | "">("");
   const [channelOrderReference, setChannelOrderReference] = useState("");
@@ -1599,13 +1629,13 @@ function QuoteWorkbench({
       });
       return;
     }
-    setUseMemberEntitlement(false);
-    setMemberId("");
+    setUseMemberEntitlement(Boolean(initialMember));
+    setMemberId(initialMember?.id ?? "");
     setMemberSearch("");
-    setGuestName("");
-    setGuestNickname("");
-    setGuestPhone("");
-    setGuestDocument("");
+    setGuestName(initialMember?.full_name ?? "");
+    setGuestNickname(initialMember?.nickname ?? "");
+    setGuestPhone(initialMember?.phone ?? "");
+    setGuestDocument(initialMember?.identity_card_number ?? "");
     setAdditionalGuests([]);
     setBookingChannelCode("");
     setChannelOrderReference("");
@@ -1621,7 +1651,7 @@ function QuoteWorkbench({
     setBackfillCashCollector("");
     setBackfillCashNote("");
     setError(undefined);
-  }, [unit?.id]);
+  }, [unit?.id, initialMember?.id]);
 
   useEffect(() => {
     settledQuoteSignature.current = "";
@@ -1663,12 +1693,9 @@ function QuoteWorkbench({
     setManualPriceAdjustmentReason("");
   }, [useMemberEntitlement]);
 
-  const memberProfiles = eligibleMemberProfiles(meta.members, meta.memberContracts, propertyId, memberSearch);
-  const quoteMemberId = effectiveQuoteMemberId(memberProfiles, memberId);
-
-  useEffect(() => {
-    if (memberId && !quoteMemberId) setMemberId("");
-  }, [memberId, quoteMemberId]);
+  const memberChoices = useMemberChoices(propertyId, memberSearch, memberId, useMemberEntitlement);
+  const memberProfiles = memberChoices.members;
+  const quoteMemberId = memberChoices.error ? "" : effectiveQuoteMemberId(memberProfiles, memberId);
 
   const temporaryOtherRoomContext: TemporaryOtherRoomContext = {
     memberId: quoteMemberId,
@@ -2008,6 +2035,20 @@ function QuoteWorkbench({
         occupancyCapacity: unit.occupancyCapacity
       })
     : undefined;
+  const createOrderSubmitBlockReason = !backfill && unit && quote
+    ? createOrderSubmitBlockedReason({
+        commandsBlocked: quoteCommandsBlocked,
+        quoteIsCurrent,
+        guestsComplete,
+        guestCount,
+        occupancyCapacity: unit.occupancyCapacity,
+        temporaryOtherRoomConfirmed: temporaryOtherRoomDraft.confirmed,
+        temporaryOtherRoomReasonValid: Boolean(temporaryOtherRoomCreateOrderCommand({}, temporaryOtherRoomDraft.reason)),
+        channelRequired: bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType),
+        pricingComplete: Boolean(paidPricingDraft?.complete),
+        freeStayMissing: quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode)
+      })
+    : undefined;
 
   function addAdditionalGuest() {
     if (!unit || !canAddGuest(unit.occupancyCapacity, additionalGuests.length)) return;
@@ -2238,6 +2279,11 @@ function QuoteWorkbench({
                   {memberProfiles.map((member) => <option key={member.id} value={member.id}>{member.nickname} · {member.full_name} · {member.phone}</option>)}
                 </select>
               </label>
+              {memberChoices.loading ? <p role="status">正在查找会员…</p> : null}
+              <InlineError error={memberChoices.error} title="无法查找会员" />
+              {memberChoices.error ? <button type="button" className="button button-secondary" onClick={memberChoices.retry}>重试查找</button> : null}
+              {memberChoices.nextCursor ? <button type="button" className="button button-secondary" disabled={memberChoices.loading} onClick={memberChoices.loadMore}>加载更多会员</button> : null}
+              {!memberChoices.loading && !memberChoices.error && !memberProfiles.length ? <p role="status">未找到有本店住宿合同的会员，请更换关键词或先办理会员订单。</p> : null}
             </div> : null}
             {temporaryOtherRoomDraft.offer ? <TemporaryOtherRoomFields
               offer={temporaryOtherRoomDraft.offer}
@@ -2388,7 +2434,8 @@ function QuoteWorkbench({
                 </div>
                 {backfill ? <InlineError error={error} title="无法进入补录核对" /> : null}
                 {backfillSubmitBlockReason ? <InlineError error={new Error(backfillSubmitBlockReason)} title="暂时不能核对补录" /> : null}
-                <button className="button button-primary full-width" type="submit" disabled={backfill ? Boolean(backfillSubmitBlockReason) : quoteCommandsBlocked || !quoteIsCurrent || guestCount > unit.occupancyCapacity || !guestsComplete || (temporaryOtherRoomDraft.confirmed && !temporaryOtherRoomCreateOrderCommand({}, temporaryOtherRoomDraft.reason)) || (bookingChannelRequiredForStay(useMemberEntitlement, quote.stayType) && !paidPricingDraft?.complete) || (quote.stayType === "FREE" && (!freeStayReason.trim() || !freeStayCategoryCode))} data-testid={backfill ? "backfill-submit" : "create-order"}>
+                {createOrderSubmitBlockReason ? <InlineError error={new Error(createOrderSubmitBlockReason)} title="暂时不能核对订单" /> : null}
+                <button className="button button-primary full-width" type="submit" disabled={backfill ? Boolean(backfillSubmitBlockReason) : Boolean(createOrderSubmitBlockReason)} data-testid={backfill ? "backfill-submit" : "create-order"}>
                   <FilePlus2 aria-hidden="true" size={17} />{backfill ? "核对并补录住宿" : "核对并创建订单"}
                 </button>
               </form>
@@ -2722,7 +2769,7 @@ export function roomStatusProjectionHasWriteHeadroom(freshUntil: string | number
   return Number.isFinite(deadline) && deadline - now > ROOM_STATUS_WRITE_HEADROOM_MS;
 }
 
-export function roomStatusProjectionResponseCanBeInstalled(
+export function roomStatusProjectionResponseCanEnableWrites(
   freshUntil: string | number,
   now = Date.now(),
   requiredHeadroomMs = ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
@@ -3156,6 +3203,10 @@ export function InventoryPage() {
   const isMobile = useRoomStatusMobileViewport();
   const { meta, principal, propertyId } = useWorkspace();
   const property = meta.properties.find((item) => item.id === propertyId);
+  const initialMemberId = memberStayIntent(location.search, propertyId);
+  const requestedMemberLookup = useMemberChoices(propertyId, "", initialMemberId ?? "", Boolean(initialMemberId), true);
+  const requestedMember = requestedMemberLookup.members.find((member) => member.id === initialMemberId);
+  const requestedMemberHasContract = Boolean(requestedMember);
   const propertyTimezone = property?.timezone ?? "UTC";
   const principalPropertyAccess = principal.propertyAccess[propertyId];
   const currentPropertyAllowedActions = useMemo(() => propertyAllowedActions(principal, propertyId), [principal, propertyId]);
@@ -3208,6 +3259,7 @@ export function InventoryPage() {
   const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
   const [board, setBoard] = useState<RoomStatusBoardDto>();
   const [boardFreshnessDeadline, setBoardFreshnessDeadline] = useState<number>();
+  const [boardWriteAdmitted, setBoardWriteAdmitted] = useState(false);
   const boardRef = useRef<RoomStatusBoardDto | undefined>(undefined);
   const [boardQueryKey, setBoardQueryKey] = useState<string>();
   const boardQueryKeyRef = useRef<string | undefined>(undefined);
@@ -3345,7 +3397,7 @@ export function InventoryPage() {
   const [maintenanceTarget, setMaintenanceTarget] = useState<InventoryActionUnit>();
   const [quoteTarget, setQuoteTarget] = useState<RoomStatusQuoteTarget>();
   const [mobileTab, setMobileTab] = useState<RoomStatusMobileTab>("ARRIVALS");
-  const [mobileCreateOpen, setMobileCreateOpen] = useState(false);
+  const [createSelectionOpen, setCreateSelectionOpen] = useState(false);
   const [mobileFocusRequest, setMobileFocusRequest] = useState<RoomStatusMobileFocusRequest>();
   const [commandContextInvalidated, setCommandContextInvalidated] = useState(false);
   const [focusRequestToken, setFocusRequestToken] = useState(0);
@@ -3599,7 +3651,7 @@ export function InventoryPage() {
 
   useEffect(() => {
     if (!board || !boardMatchesCurrentQuery || boardFreshnessDeadline === undefined
-      || queryError || permissionDeniedRef.current) return;
+      || !boardWriteAdmitted || queryError || permissionDeniedRef.current) return;
     let timer = 0;
     const refreshWhenAllowed = () => {
       setClock(roomStatusFreshnessNow());
@@ -3621,7 +3673,7 @@ export function InventoryPage() {
       roomStatusRefreshDelay(boardFreshnessDeadline, roomStatusFreshnessNow())
     );
     return () => window.clearTimeout(timer);
-  }, [board, boardFreshnessDeadline, boardMatchesCurrentQuery, commandPhaseScheduleToken, propertyId, queryError, queryAttemptGuard]);
+  }, [board, boardFreshnessDeadline, boardWriteAdmitted, boardMatchesCurrentQuery, commandPhaseScheduleToken, propertyId, queryError, queryAttemptGuard]);
 
   useEffect(() => {
     const refreshVisible = () => {
@@ -3691,7 +3743,7 @@ export function InventoryPage() {
     deferredMaintenanceIntentRef.current = undefined;
     setActiveQuoteSubmissionIdentity(undefined);
     setMaintenanceTarget(undefined);
-    setMobileCreateOpen(false);
+    setCreateSelectionOpen(false);
     setMobileFocusRequest(undefined);
     pendingMobileTaskFocus.current = undefined;
     setCommandPhase("IDLE");
@@ -3754,33 +3806,27 @@ export function InventoryPage() {
         const writeContinuityPreserved = !writeContinuityExpected
           || existingFreshnessDeadline !== undefined
             && roomStatusProjectionHasWriteHeadroom(existingFreshnessDeadline, responseReceivedAt);
-        if (!writeContinuityPreserved || !roomStatusProjectionResponseCanBeInstalled(
+        const admitWrites = writeContinuityPreserved && roomStatusProjectionResponseCanEnableWrites(
           localFreshnessDeadline,
           responseReceivedAt,
-          recoveryHeadroomRequired
-            ? ROOM_STATUS_RECOVERY_INSTALL_HEADROOM_MS
-            : ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
-        )) {
+          recoveryHeadroomRequired ? ROOM_STATUS_RECOVERY_INSTALL_HEADROOM_MS : ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
+        );
+        setBoardWriteAdmitted(admitWrites);
+        let slowReadError: Error | undefined;
+        if (!admitWrites) {
           if (sameQuery && existing) continuityLostQueryKeyRef.current = requestQueryKey;
           lowFreshnessResponseCountRef.current += 1;
-          setClock(responseReceivedAt);
           if (roomStatusLowFreshnessResponseRequiresManualRetry(lowFreshnessResponseCountRef.current)) {
             clearLowFreshnessRetry();
-            rememberRefreshReturnFocus(document.activeElement);
-            setQueryError(new Error("房态响应持续过慢，无法取得足够安全的写入时间。请在网络恢复后重试刷新。"));
-            setQueryPhase("ERROR");
-            return;
+            slowReadError = new Error("房态响应持续过慢，无法取得足够安全的写入时间。请在网络恢复后重试刷新。");
+          } else {
+            scheduleLowFreshnessRetry(roomStatusStaleResponseRetryDelay(lowFreshnessResponseCountRef.current));
           }
-          setQueryError(undefined);
-          setQueryPhase(existing ? "REFRESHING" : "LOADING");
-          scheduleLowFreshnessRetry(
-            roomStatusStaleResponseRetryDelay(lowFreshnessResponseCountRef.current)
-          );
-          return;
+        } else {
+          lowFreshnessResponseCountRef.current = 0;
+          continuityLostQueryKeyRef.current = undefined;
+          clearLowFreshnessRetry();
         }
-        lowFreshnessResponseCountRef.current = 0;
-        continuityLostQueryKeyRef.current = undefined;
-        clearLowFreshnessRetry();
         if (commandPhaseRef.current === "CONFIRMING" && existing) {
           setQueryError(undefined);
           setQueryPhase("READY");
@@ -3835,8 +3881,8 @@ export function InventoryPage() {
         boardRef.current = response;
         setBoardQueryKey(requestQueryKey);
         boardQueryKeyRef.current = requestQueryKey;
-        setQueryError(undefined);
-        setQueryPhase("READY");
+        setQueryError(slowReadError);
+        setQueryPhase(slowReadError ? "ERROR" : "READY");
         setClock(responseReceivedAt);
         restoreRefreshReturnFocus();
         if (reloadOrderContext) setOrderRefreshToken((value) => value + 1);
@@ -3897,7 +3943,7 @@ export function InventoryPage() {
           setDesktopContextCollapsed(false);
           setQuoteTarget(undefined);
           setMaintenanceTarget(undefined);
-          setMobileCreateOpen(false);
+          setCreateSelectionOpen(false);
           setCommandPhase("IDLE");
           commandAttemptGuard.invalidate();
           commandRevisionRef.current = undefined;
@@ -4012,7 +4058,7 @@ export function InventoryPage() {
   });
   const projectionWritable = roomStatusProjectionWritable({
     projectionReady: projectionReadyForWrite,
-    projectionExpired: boardWriteWindowClosed,
+    projectionExpired: boardWriteWindowClosed || !boardWriteAdmitted,
     boardAccess: boardForCurrentProperty?.accessLevel,
     principalAccess: principalPropertyAccess
   });
@@ -4764,7 +4810,7 @@ export function InventoryPage() {
     setQuoteTarget(undefined);
     setSelectionDraftValid(true);
     setMaintenanceTarget(undefined);
-    setMobileCreateOpen(false);
+    setCreateSelectionOpen(false);
     setActionError(undefined);
     setQuoteRecoveryOutcome(undefined);
   }
@@ -5254,7 +5300,7 @@ export function InventoryPage() {
   function openQuoteRecoveryContext() {
     cancelQuoteSectionScroll();
     setQuickPopoverTarget(undefined);
-    setMobileCreateOpen(false);
+    setCreateSelectionOpen(false);
     setPendingOrderContextIdentity(undefined);
     setOrderContextOpen(false);
     if (currentQuoteRecoveryIdentity) browserDismissedQuoteRecoveryIdentities.delete(currentQuoteRecoveryIdentity);
@@ -5651,40 +5697,34 @@ export function InventoryPage() {
       const writeContinuityPreserved = !writeContinuityExpected
         || existingFreshnessDeadline !== undefined
           && roomStatusProjectionHasWriteHeadroom(existingFreshnessDeadline, responseReceivedAt);
-      if (!writeContinuityPreserved || !roomStatusProjectionResponseCanBeInstalled(
+      const admitWrites = writeContinuityPreserved && roomStatusProjectionResponseCanEnableWrites(
         localFreshnessDeadline,
         responseReceivedAt,
-        recoveryHeadroomRequired
-          ? ROOM_STATUS_RECOVERY_INSTALL_HEADROOM_MS
-          : ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
-      )) {
+        recoveryHeadroomRequired ? ROOM_STATUS_RECOVERY_INSTALL_HEADROOM_MS : ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
+      );
+      setBoardWriteAdmitted(admitWrites);
+      let slowReadError: Error | undefined;
+      if (!admitWrites) {
         if (sameQuery && existing) continuityLostQueryKeyRef.current = queryKey;
         lowFreshnessResponseCountRef.current += 1;
-        setClock(responseReceivedAt);
         if (roomStatusLowFreshnessResponseRequiresManualRetry(lowFreshnessResponseCountRef.current)) {
           clearLowFreshnessRetry();
-          rememberRefreshReturnFocus(document.activeElement);
-          setQueryError(new Error("房态响应持续过慢，无法取得足够安全的写入时间。请在网络恢复后重试刷新。"));
-          setQueryPhase("ERROR");
-          return;
+          slowReadError = new Error("房态响应持续过慢，无法取得足够安全的写入时间。请在网络恢复后重试刷新。");
+        } else {
+          scheduleLowFreshnessRetry(roomStatusStaleResponseRetryDelay(lowFreshnessResponseCountRef.current));
         }
-        setQueryError(undefined);
-        setQueryPhase(boardRef.current ? "REFRESHING" : "LOADING");
-        scheduleLowFreshnessRetry(
-          roomStatusStaleResponseRetryDelay(lowFreshnessResponseCountRef.current)
-        );
-        return;
+      } else {
+        lowFreshnessResponseCountRef.current = 0;
+        continuityLostQueryKeyRef.current = undefined;
+        clearLowFreshnessRetry();
       }
-      lowFreshnessResponseCountRef.current = 0;
-      continuityLostQueryKeyRef.current = undefined;
-      clearLowFreshnessRetry();
       setBoard(response);
       setBoardFreshnessDeadline(localFreshnessDeadline);
       boardRef.current = response;
       setBoardQueryKey(queryKey);
       boardQueryKeyRef.current = queryKey;
-      setQueryError(undefined);
-      setQueryPhase("READY");
+      setQueryError(slowReadError);
+      setQueryPhase(slowReadError ? "ERROR" : "READY");
       setClock(responseReceivedAt);
       restoreRefreshReturnFocus();
       if (refreshOrderIdentity) {
@@ -5738,11 +5778,13 @@ export function InventoryPage() {
     <RoomStatusToolbar
       filters={viewState.filters}
       filterOptions={filterOptions}
-      loading={queryBusy}
       focusSearchRequestToken={filterFocusRequestToken}
+      actions={!isMobile && currentPropertyAllowedActions.has("CREATE_ORDER") ? <>
+        <button type="button" className="button button-primary" onClick={() => setCreateSelectionOpen(true)} disabled={!renderedBoard || commandsBlocked}>新建住宿</button>
+        <button type="button" className="button button-secondary" onClick={requestRoomStatusRefresh} disabled={queryBusy}><RefreshCw aria-hidden="true" className={queryBusy ? "spin" : undefined} size={16} />{queryBusy ? "正在刷新" : "刷新房态"}</button>
+      </> : null}
       onFiltersChange={applyFilters}
       onClearFilters={clearFilters}
-      onRefresh={requestRoomStatusRefresh}
     />
   ) : null;
 
@@ -5787,6 +5829,7 @@ export function InventoryPage() {
         policies={policies}
         {...(recoveryQuoteInputForWorkbench ? { recoveryQuoteInput: recoveryQuoteInputForWorkbench } : {})}
         {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
+        {...(initialMemberId ? { initialMemberId } : {})}
         {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
         backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
         commandsBlocked={quoteWorkbenchBlocked}
@@ -5840,10 +5883,22 @@ export function InventoryPage() {
     && (!selectedOrderIdentity || orderContextOpen || quoteRecoveryDrawerOpen));
   const detachedQuoteRecoveryWorkbenchOpen = queryPhase !== "PERMISSION_DENIED"
     && shouldRenderDetachedQuoteRecoveryWorkbench(Boolean(renderedBoard), quoteRecoveryContextOpen, pageQuoteRecovery);
+  const createEntryHandled = useRef("");
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("createStay") !== "1" || params.get("propertyId") !== propertyId || !renderedBoard || commandsBlocked) return;
+    const key = `${location.key}:${propertyId}`;
+    if (createEntryHandled.current === key) return;
+    createEntryHandled.current = key;
+    setCreateSelectionOpen(true);
+    params.delete("createStay");
+    navigate({ pathname: "/", search: params.toString() }, { replace: true });
+  }, [location.key, location.search, propertyId, renderedBoard, commandsBlocked, navigate]);
+
   const roomStatusBlockingModalOpen = Boolean(
     (desktopContextDrawerOpen && desktopDrawerModal)
     || (isMobile && selectedOrderIdentity && orderContextOpen)
-    || (isMobile && mobileCreateOpen)
+    || createSelectionOpen
     || detachedQuoteRecoveryWorkbenchOpen
     || (maintenanceTarget && viewState.selection && !command)
     || (authorizedSelectedOrderView && selectedCorrectionOccupant)
@@ -5852,10 +5907,16 @@ export function InventoryPage() {
     || (authorizedSelectedOrderView && selectedLifecycleAction)
     || (command && commandTargetScopeCurrent)
   );
-  const roomStatusRefreshNotice = actionPresentationBlock?.kind === "REFRESH" && renderedBoard ? (
-    <div className="room-status-stale-notice" role={boardRefreshFailed ? "alert" : "status"}>
-      <span>{actionPresentationBlock.reason}</span>
-      {actionPresentationBlock.actionLabel
+  const roomStatusRefreshNotice = renderedBoard && (actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted || boardExpired) ? (
+    <div className="room-status-stale-notice" role={boardRefreshFailed ? "alert" : "status"} data-testid="room-status-stale-notice">
+      <span>
+        房态数据时间：<time dateTime={renderedBoard.asOf}>{new Date(renderedBoard.asOf).toLocaleString("zh-CN", { hour12: false })}</time>。
+        {boardRefreshFailed ? actionPresentationBlock?.reason : null}
+        {!boardWriteAdmitted
+          ? "响应到达时剩余有效时间不足，仅供查看；不能创建订单、换房或调整日期。"
+          : !boardRefreshFailed ? actionPresentationBlock?.reason ?? "房态已经过期，仅供查看；更新完成前暂不能写入。" : null}
+      </span>
+      {actionPresentationBlock?.actionLabel
         ? <button
             type="button"
             className="button button-secondary"
@@ -5871,6 +5932,10 @@ export function InventoryPage() {
     <ModalNoticeProvider notice={roomStatusBlockingModalOpen ? roomStatusRefreshNotice : null}>
     <div className="inventory-page room-status-page">
       <h1 className="sr-only">房态运营</h1>
+      {initialMemberId ? <div className="room-status-return-notice" role="status">
+        {requestedMemberLookup.loading ? "正在核对会员资料…" : requestedMemberLookup.error ? "会员资料读取失败，请返回会员档案重试。" : requestedMember ? requestedMemberHasContract ? `正在为 ${requestedMember.nickname || requestedMember.full_name} 安排住宿。请选择日期与可用房间，系统将在核对时检查会员权益。` : "该会员尚无本店住宿合同，请先返回会员档案办理并生效会员订单。" : "该会员没有本店住宿合同，或档案已不可用，请返回会员页核对。"}
+        <button type="button" className="button button-secondary button-small" onClick={() => navigate(`/members?memberId=${encodeURIComponent(initialMemberId)}`)}>返回会员档案</button>
+      </div> : null}
       {queryPhase !== "PERMISSION_DENIED" ? <InlineError error={recoveryError} title="恢复记录未收口" /> : null}
       {queryPhase !== "PERMISSION_DENIED" && commandRecovery.canDiscardCorrupt
         ? <DamagedCommandRecoveryNotice error={commandRecovery.error} onDiscard={commandRecovery.discardCorruptAfterReview} testId="inventory-damaged-command-recovery" />
@@ -5963,7 +6028,7 @@ export function InventoryPage() {
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}
                 onRangeChange={applyRange}
                 onToday={() => applyRange(roomStatusTimelineRangeFromStart(todayDate))}
-                onCreate={() => setMobileCreateOpen(true)}
+                onCreate={() => setCreateSelectionOpen(true)}
                 onOpenReference={openReference}
                 onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
                 onOpenOrderContext={(identity, serviceDate, trigger) => {
@@ -6113,8 +6178,8 @@ export function InventoryPage() {
             </button>
           ) : null}
 
-          {isMobile && mobileCreateOpen ? (
-            <Modal title="新建住宿或锁房" size="mobile-fullscreen" onClose={() => setMobileCreateOpen(false)} footer={null}>
+          {createSelectionOpen ? (
+            <Modal title="新建住宿或锁房" size={isMobile ? "mobile-fullscreen" : "wide"} onClose={() => setCreateSelectionOpen(false)} footer={null}>
               <RoomStatusContext
                 board={renderedBoard}
                 selectedUnit={selectedUnit}
@@ -6133,7 +6198,7 @@ export function InventoryPage() {
                 onOpenReference={openReference}
                 onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
                 onAction={(action) => {
-                  if (handleAction(action)) setMobileCreateOpen(false);
+                  if (handleAction(action)) setCreateSelectionOpen(false);
                 }}
                 onRefresh={requestRoomStatusRefresh}
                 onOpenRecovery={openRoomStatusRecoveryEntry}
@@ -6151,6 +6216,7 @@ export function InventoryPage() {
                 policies={policies}
                 {...(recoveryQuoteInputForWorkbench ? { recoveryQuoteInput: recoveryQuoteInputForWorkbench } : {})}
                 {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
+                {...(initialMemberId ? { initialMemberId } : {})}
                 {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
                 backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
                 commandsBlocked={quoteWorkbenchBlocked}
@@ -6191,6 +6257,7 @@ export function InventoryPage() {
               policies={policies}
               {...(recoveryQuoteInputForWorkbench ? { recoveryQuoteInput: recoveryQuoteInputForWorkbench } : {})}
               {...(activeQuoteTarget ? { initialStayType: activeQuoteTarget.initialStayType } : {})}
+              {...(initialMemberId ? { initialMemberId } : {})}
               {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
               backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
               commandsBlocked
@@ -6338,12 +6405,12 @@ export function InventoryPage() {
           if (command.commandType === "CREATE_ORDER") {
             setQuoteTarget(undefined);
             setDesktopContextCollapsed(true);
-            setMobileCreateOpen(false);
+            setCreateSelectionOpen(false);
           }
           if (command.commandType === "LOCK_MAINTENANCE") {
             setMaintenanceTarget(undefined);
             setDesktopContextCollapsed(true);
-            setMobileCreateOpen(false);
+            setCreateSelectionOpen(false);
             roomStatusInteractionSnapshotRef.current = undefined;
           }
         }}

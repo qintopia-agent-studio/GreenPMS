@@ -17,7 +17,7 @@ async function login(page: Page, username: "operator" | "admin" = "admin") {
   await page.getByTestId("login-username").fill(username);
   await page.getByTestId("login-password").fill("demo-pass-2026");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByRole("heading", { name: /房间与床位逐日房态|今日运营任务/ })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: /房间与床位逐日房态|房态任务/ })).toBeVisible({ timeout: 30_000 });
 }
 
 async function confirmAndClose(page: Page, expectedTexts: string[]) {

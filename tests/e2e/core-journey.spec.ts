@@ -21,7 +21,7 @@ function isResolvedCommandRequest(
 
 async function expectRoomStatusLanding(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "房间与床位逐日房态" })
-    .or(page.getByRole("heading", { name: "今日运营任务", exact: true }))).toBeVisible({ timeout: 30_000 });
+    .or(page.getByRole("heading", { name: "房态任务", exact: true }))).toBeVisible({ timeout: 30_000 });
 }
 
 const ordinaryStaffCredentials = { username: "operator", password: "demo-pass-2026" } as const;
@@ -528,7 +528,7 @@ async function forceNavigateAwayAndBackToTokens(page: Page) {
     history.pushState({}, "", "/tokens");
     window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
   });
-  await expect(page.getByRole("heading", { name: "Token 生命周期" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "外部访问" })).toBeVisible();
   await expect(page.getByText("正在载入 Token", { exact: true })).toBeHidden();
 }
 
@@ -652,6 +652,7 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await page.getByRole("button", { name: "继续核对" }).click();
   await confirmU1Command(page, ["¥130.00", "¥110.00", "-¥20.00", "Set this revision final total to CNY 110"]);
   await expect(page.getByTestId("order-amounts")).toContainText("¥110.00");
+  await page.locator("details > summary").filter({ hasText: /^计价记录$/ }).click();
   const revisionRegion = page.locator('.table-region[aria-label="计价记录表格"]');
   await expect(revisionRegion.getByRole("row")).toHaveCount(3);
   const manualRevision = revisionRegion.getByRole("row").filter({ hasText: "第 2 次计价" });
@@ -807,7 +808,7 @@ test("mobile today check-in journey", async ({ page }, testInfo: TestInfo) => {
   await login(page);
   const businessDate = todayInTimeZone("Asia/Shanghai");
   await createOrder(page, { stayMode: "NORMAL", unitCode: "102", guest: "Mobile Guest", arrivalDate: businessDate, departureDate: addDays(businessDate, 1), bookingChannelCode: "WECOM" });
-  await page.getByRole("link", { name: "今日履约" }).click();
+  await page.getByRole("link", { name: "工作台" }).click();
   await page.getByLabel("营业日期").fill(businessDate);
   await page.getByRole("tab", { name: /今日到店/ }).click();
   await expect(page.getByText("Mobile Guest", { exact: true })).toBeVisible();
@@ -882,6 +883,7 @@ test("desktop stay changes and exception commands remain operable through Web", 
   await page.goto("/");
   const noShowOrderId = await createOrder(page, { stayMode: "NORMAL", unitCode: "102", guest: "E2E No Show Guest", arrivalDate: "2026-09-15", departureDate: "2026-09-16", bookingChannelCode: "WECOM" });
   await page.goto(`/orders/${encodeURIComponent(noShowOrderId)}`);
+  await expect(page.getByRole("heading", { name: "E2E No Show Guest", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "标记未到", exact: true })).toHaveCount(0);
   const noShowView = await page.request.get(`/api/v1/orders/${encodeURIComponent(noShowOrderId)}`);
   expect(noShowView.ok()).toBe(true);
@@ -903,6 +905,7 @@ test("member directory creates a five-field profile without identity, searches c
   const initialSearch = page.getByRole("search", { name: "搜索会员" });
   await page.getByTestId("member-search-query").fill("Demo Member");
   await initialSearch.getByRole("button", { name: "搜索" }).click();
+  await page.getByTestId("member-list-item").filter({ hasText: "Demo Member" }).click();
   await expect(page.getByRole("heading", { name: "Demo Member" })).toBeVisible();
 
   const memberProfile = {
@@ -937,9 +940,11 @@ test("member directory creates a five-field profile without identity, searches c
     memberProfile.phone.slice(-6),
     `member-${testInfo.project.name}`
   ]) {
+    if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "返回会员列表", exact: true }).click();
     await searchInput.fill(query);
     await memberSearch.getByRole("button", { name: "搜索" }).click();
     await expect(page.getByText("正在载入会员列表", { exact: true })).toBeHidden();
+    await page.getByTestId("member-list-item").filter({ hasText: memberProfile.fullName }).click();
     await expect(page.getByRole("heading", { name: memberProfile.fullName })).toBeVisible();
     const detail = page.locator(".member-profile-fields");
     await expect(detail.locator("div").filter({ hasText: "身份证号" }).getByText("-", { exact: true })).toBeVisible();
@@ -954,9 +959,10 @@ test("member directory creates a five-field profile without identity, searches c
       body: JSON.stringify({ code: "REQUEST_FAILED", message: "Member directory unavailable", retryable: true })
     });
   }, { times: 1 });
+  if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "返回会员列表", exact: true }).click();
   await searchInput.fill("fail-closed-member-query");
   await memberSearch.getByRole("button", { name: "搜索" }).click();
-  await expect(page.getByRole("alert")).toContainText("Member directory unavailable");
+  await expect(page.getByRole("alert")).toContainText("服务暂时不可用");
   await expect(page.getByTestId("member-list-item")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: memberProfile.fullName })).toHaveCount(0);
 
@@ -1502,7 +1508,8 @@ test("desktop projects the exact two-level staff and administrator capabilities"
   const logoutResponse = await page.request.post("/api/v1/auth/logout");
   expect(logoutResponse.ok()).toBe(true);
   await login(page, administratorCredentials);
-  await expect(page.getByRole("link", { name: "Token", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ })).toBeVisible();
 
   const administratorResponse = await page.request.get("/api/v1/me");
   expect(administratorResponse.ok()).toBe(true);
@@ -1537,8 +1544,9 @@ test("desktop projects the exact two-level staff and administrator capabilities"
 test("desktop Token lifecycle retains client secrets and uses Preview Confirm Receipt", async ({ page }, testInfo: TestInfo) => {
   test.skip(testInfo.project.name !== "desktop", "desktop-only Token lifecycle");
   await login(page, administratorCredentials);
-  await page.getByRole("link", { name: "Token", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Token 生命周期" })).toBeVisible();
+  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
+  await expect(page.getByRole("heading", { name: "外部访问" })).toBeVisible();
 
   await page.getByRole("button", { name: "签发 Token" }).click();
   await page.getByLabel("标签").fill("E2E external agent");
@@ -1559,7 +1567,7 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   }, { times: 1 });
   await page.getByLabel(/我已将一次性 secret 安全保存/).check();
   await page.getByRole("button", { name: "下一步" }).click();
-  const retainedIssueSecret = page.getByRole("region", { name: /一次性 secret 待清除/ });
+  const retainedIssueSecret = page.getByRole("region", { name: /一次性密钥待清除/ });
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(retainedIssueSecret).toContainText("核对中断");
   await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
@@ -1570,7 +1578,8 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
   await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
   await page.getByRole("link", { name: "订单", exact: true }).click();
-  await page.getByRole("link", { name: "Token", exact: true }).click();
+  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
   await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
   const issueEffect = page.getByTestId("command-effect");
   await expect(issueEffect).toBeVisible();
@@ -1594,7 +1603,8 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await expect(retainedIssueSecret).toContainText("提交结果待查询");
   await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
   await page.getByRole("link", { name: "订单", exact: true }).click();
-  await page.getByRole("link", { name: "Token", exact: true }).click();
+  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
   await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
   await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
   await page.getByRole("button", { name: "查询 Token 结果" }).click();
@@ -1632,7 +1642,7 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await expect(activeRow).toHaveCount(1);
   await expect(activeRow).toContainText("由旧 Token 轮换生成");
   await expect(activeRow).not.toContainText(/(?:token_|subject_|CREATE_ORDER)/);
-  await page.getByRole("region", { name: /一次性 secret 待清除/ }).getByRole("button", { name: "已保存，清除本机显示" }).click();
+  await page.getByRole("region", { name: /一次性密钥待清除/ }).getByRole("button", { name: "已保存，清除本机显示" }).click();
 
   await activeRow.getByRole("button", { name: /^撤销/ }).click();
   const revokeEffect = page.getByTestId("command-effect");
@@ -1665,7 +1675,8 @@ test("desktop expired Token Preview rotates preview metadata without changing th
   test.skip(testInfo.project.name !== "desktop", "desktop-only Token Preview expiry recovery");
   await page.clock.install();
   await login(page, administratorCredentials);
-  await page.getByRole("link", { name: "Token", exact: true }).click();
+  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
   await page.getByRole("button", { name: "签发 Token" }).click();
   await page.getByLabel("标签").fill("E2E expired preview agent");
   const secret = await page.getByLabel("一次性 Token secret").inputValue();
@@ -1689,7 +1700,7 @@ test("desktop expired Token Preview rotates preview metadata without changing th
   expect(previewKeys[1]).not.toBe(previewKeys[0]);
   await expect(page.getByTestId("confirm-command")).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(page.getByRole("region", { name: /一次性 secret 待清除/ }).getByLabel("一次性 Token secret")).toHaveValue(secret);
+  await expect(page.getByRole("region", { name: /一次性密钥待清除/ }).getByLabel("一次性 Token secret")).toHaveValue(secret);
 });
 
 test("desktop Token lifecycle ignores deferred callbacks from unmounted command attempts", async ({ page }, testInfo: TestInfo) => {
@@ -1700,8 +1711,9 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
   });
 
   await login(page, administratorCredentials);
-  await page.getByRole("link", { name: "Token", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Token 生命周期" })).toBeVisible();
+  await page.getByRole("link", { name: "设置", exact: true }).click();
+  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
+  await expect(page.getByRole("heading", { name: "外部访问" })).toBeVisible();
 
   await page.getByRole("button", { name: "签发 Token" }).click();
   await page.getByLabel("标签").fill("E2E deferred callback agent");
@@ -1714,7 +1726,7 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
   await delayedIssue.fetched;
   await forceNavigateAwayAndBackToTokens(page);
 
-  const retained = page.getByRole("region", { name: /一次性 secret 待清除/ });
+  const retained = page.getByRole("region", { name: /一次性密钥待清除/ });
   await expect(retained).toContainText("正在提交");
   await retained.getByRole("button", { name: "继续处理" }).click();
   const issueRequestBaseline = tokenListRequests;
@@ -1852,12 +1864,12 @@ test("responsive shell and 200 percent zoom stay contiguous without page overflo
   for (const width of [320, 375, 768, 1024, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/today");
-    await expect(page.getByRole("heading", { name: "今日履约" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "工作台" })).toBeVisible();
     await assertNoPageOverflow(page);
     await assertShellDoesNotOverlap(page, width);
 
     await page.goto("/tokens");
-    await expect(page.getByRole("heading", { name: "Token 生命周期" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "外部访问" })).toBeVisible();
     await assertNoPageOverflow(page);
     await assertShellDoesNotOverlap(page, width);
   }
@@ -1872,6 +1884,7 @@ test("responsive shell and 200 percent zoom stay contiguous without page overflo
     screenHeight: 1800
   });
   await page.goto("/today");
+  await expect(page.getByRole("heading", { name: "工作台", exact: true })).toBeVisible();
   expect(await page.evaluate(() => ({ width: window.innerWidth, pixelRatio: window.devicePixelRatio }))).toEqual({ width: 720, pixelRatio: 2 });
   await assertNoPageOverflow(page);
   await assertShellDoesNotOverlap(page, 720);
@@ -1893,7 +1906,7 @@ test("property timezone controls default operating dates across local midnight",
   await expect(page.getByTestId("arrival-date")).toHaveValue("2026-07-21");
   await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-departure", "2026-08-20");
 
-  await page.getByRole("link", { name: "今日履约" }).click();
+  await page.getByRole("link", { name: "工作台" }).click();
   await expect(page.getByLabel("营业日期")).toHaveValue("2026-07-21");
 });
 

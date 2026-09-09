@@ -14,7 +14,6 @@ import type {
   TokenDto,
   TokenTargetDto
 } from "./types";
-import { parseOrderView } from "./orderViewValidation";
 import { parseAvailability } from "./availabilityValidation";
 
 interface ErrorPayload {
@@ -57,7 +56,27 @@ function isReceipt(value: unknown): value is ReceiptDto {
   return typeof record.executionStatus === "string" && typeof record.businessCommitted === "boolean";
 }
 
+let sessionGeneration = 0;
+let sessionExpired = false;
+const sessionExpiredListeners = new Set<() => void>();
+
+export function onSessionExpired(listener: () => void): () => void {
+  sessionExpiredListeners.add(listener);
+  return () => { sessionExpiredListeners.delete(listener); };
+}
+
+function expireSession(generation: number) {
+  if (generation !== sessionGeneration || sessionExpired) return;
+  sessionExpired = true;
+  sessionGeneration += 1;
+  for (const listener of sessionExpiredListeners) listener();
+}
+
 async function request<T>(path: string, init: RequestInit = {}, acceptRejectedReceipt = false): Promise<T> {
+  const generation = sessionGeneration;
+  if (sessionExpired && !path.startsWith("/api/v1/auth/")) {
+    throw new ApiError(401, { code: "AUTHENTICATION_REQUIRED", message: "登录已过期，请重新登录" });
+  }
   const response = await fetch(path, {
     credentials: "include",
     ...init,
@@ -67,7 +86,12 @@ async function request<T>(path: string, init: RequestInit = {}, acceptRejectedRe
       ...init.headers
     }
   });
+  // An old account's late read or command result cannot enter a new workspace.
+  // A plain Error keeps a possibly submitted command in UNKNOWN recovery.
+  if (generation !== sessionGeneration) throw new Error("登录身份已变化，请重新登录后查询原操作结果");
+  if (response.status === 401 && path !== "/api/v1/auth/login") expireSession(generation);
   const body = await parseBody(response);
+  if (response.status !== 401 && generation !== sessionGeneration) throw new Error("登录身份已变化，请查询原操作结果");
   if (!response.ok && !(acceptRejectedReceipt && isReceipt(body))) {
     throw new ApiError(response.status, (body ?? {}) as ErrorPayload);
   }
@@ -116,6 +140,8 @@ export const api = {
   manageAccount: (body: AccountManagementRequest) => request<AccountManagementResult>("/api/v1/account-management", { method: "POST", body: JSON.stringify(body) }),
   memberDeletionPreview: (propertyId: string, memberId: string) => request<MemberDeletionPreview>(`/api/v1/members/${encodeURIComponent(memberId)}/deletion-preview?${new URLSearchParams({ propertyId })}`),
   login: async (username: string, password: string) => {
+    sessionGeneration += 1;
+    sessionExpired = false;
     await request<unknown>("/api/v1/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password })
@@ -177,23 +203,33 @@ export const api = {
     body: JSON.stringify(input),
     ...(signal ? { signal } : {})
   }),
-  orders: (propertyId: string, status?: string) => {
+  orders: (propertyId: string, status?: string, options: { reconversionMemberId?: string; beforeId?: string; pageSize?: number; query?: string; workDate?: string; funds?: "BALANCE_DUE" | "OVERPAID"; orderIds?: string[]; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams({ propertyId });
     if (status) query.set("status", status);
-    return request<{ businessDate: string; orders: OrderRowDto[] }>(`/api/v1/orders?${query.toString()}`);
+    for (const id of options.orderIds ?? []) query.append("orderIds", id);
+    if (options.query?.trim()) query.set("query", options.query.trim());
+    if (options.funds) query.set("funds", options.funds);
+    if (options.workDate) query.set("workDate", options.workDate);
+    if (options.reconversionMemberId) query.set("reconversionMemberId", options.reconversionMemberId);
+    if (options.beforeId) query.set("beforeId", options.beforeId);
+    if (options.pageSize !== undefined) query.set("pageSize", String(options.pageSize));
+    return request<{ businessDate: string; orders: OrderRowDto[]; nextCursor?: string | null }>(`/api/v1/orders?${query.toString()}`, options.signal ? { signal: options.signal } : {});
   },
   order: (orderId: string, signal?: AbortSignal) => request<unknown>(
     `/api/v1/orders/${encodeURIComponent(orderId)}`,
     signal ? { signal } : {}
-  ).then(parseOrderView),
-  members: (propertyId: string, memberQuery?: string) => {
+  ).then(async (value) => (await import("./orderViewValidation")).parseOrderView(value)),
+  members: (propertyId: string, memberQuery?: string, options: { beforeId?: string; pageSize?: number; memberId?: string; phone?: string; hasContract?: boolean; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams({ propertyId });
     if (memberQuery?.trim()) query.set("query", memberQuery.trim());
-    return request<{ members: MemberSummaryDto[] }>(`/api/v1/members?${query.toString()}`);
+    for (const key of ["beforeId", "pageSize", "memberId", "phone", "hasContract"] as const) {
+      if (options[key] !== undefined) query.set(key, String(options[key]));
+    }
+    return request<{ members: MemberSummaryDto[]; nextCursor: string | null }>(`/api/v1/members?${query.toString()}`, options.signal ? { signal: options.signal } : {});
   },
-  member: (memberId: string, propertyId: string) => {
+  member: (memberId: string, propertyId: string, signal?: AbortSignal) => {
     const query = new URLSearchParams({ propertyId });
-    return request<MemberViewDto>(`/api/v1/members/${encodeURIComponent(memberId)}?${query.toString()}`);
+    return request<MemberViewDto>(`/api/v1/members/${encodeURIComponent(memberId)}?${query.toString()}`, signal ? { signal } : {});
   },
   tokens: (propertyId: string) => {
     const query = new URLSearchParams({ propertyId });

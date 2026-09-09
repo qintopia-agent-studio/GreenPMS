@@ -40,7 +40,7 @@ function roomCell(page: Page, unitId: string, serviceDate: string): Locator {
 async function expectRoomStatusLanding(page: Page): Promise<void> {
   const mobile = (page.viewportSize()?.width ?? 0) < 576;
   await expect(page.getByRole("heading", {
-    name: mobile ? "今日运营任务" : "房间与床位逐日房态",
+    name: mobile ? "房态任务" : "房间与床位逐日房态",
     level: mobile ? 1 : 2
   })).toBeVisible({ timeout: 30_000 });
 }
@@ -216,6 +216,7 @@ async function createOrderAndOpenDetail(page: Page, options: {
   await expect(stay).toBeVisible({ timeout: 15_000 });
   await expect(stay).toContainText(options.expectedChannel === "WECOM" ? "企业微信" : { YOUMUDAO: "游牧岛", CTRIP: "携程", MEITUAN: "美团" }[options.expectedChannel]);
   await expect(stay).toContainText(options.expectedReference ?? "不适用");
+  await page.locator("details > summary").filter({ hasText: /^计价记录$/ }).click();
   const revision = page.locator('.table-region[aria-label="计价记录表格"]');
   await expect(revision.locator("tbody tr")).toHaveCount(1);
   await expect(revision).toContainText(money(options.expectedPolicyBaseMinor));

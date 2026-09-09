@@ -332,12 +332,33 @@ function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
 
-export async function listMemberSummaries(db: DbExecutor, propertyId: string, query?: string) {
+export interface MemberDirectoryOptions {
+  beforeId?: string;
+  pageSize?: number;
+  memberId?: string;
+  phone?: string;
+  hasContract?: boolean;
+}
+
+export async function listMemberSummaries(db: DbExecutor, propertyId: string, query?: string, options: MemberDirectoryOptions = {}) {
+  return (await listMemberPage(db, propertyId, query, options)).members;
+}
+
+export async function listMemberPage(db: DbExecutor, propertyId: string, query?: string, options: MemberDirectoryOptions = {}) {
   let selection = db.selectFrom("members")
     .where("members.deleted_at", "is", null)
     .innerJoin("member_property_links", "member_property_links.member_id", "members.id")
     .selectAll("members")
     .where("member_property_links.property_id", "=", propertyId);
+  if (options.memberId) selection = selection.where("members.id", "=", options.memberId);
+  if (options.phone) selection = selection.where("members.phone", "=", options.phone.replace(/\s+/g, ""));
+  if (options.hasContract) selection = selection.where(({ exists, selectFrom }) => exists(
+    selectFrom("member_contracts").select("id")
+      .whereRef("member_contracts.member_id", "=", "members.id").where("property_id", "=", propertyId)
+  ));
+  // ID ordering is immutable under profile corrections and keeps cursors usable after deletion.
+  if (options.beforeId) selection = selection.where("members.id", ">", options.beforeId);
+  const pageSize = Math.min(100, Math.max(1, options.pageSize ?? 50));
   const normalizedQuery = query?.trim();
   if (normalizedQuery) {
     const pattern = `%${escapeLikePattern(normalizedQuery)}%`;
@@ -348,6 +369,8 @@ export async function listMemberSummaries(db: DbExecutor, propertyId: string, qu
       OR members.wechat ILIKE ${pattern} ESCAPE '\\'
     )`);
   }
-  const members = await selection.orderBy("members.full_name").orderBy("members.id").execute();
-  return members.map((member) => ({ member }));
+  const rows = await selection.orderBy("members.id").limit(pageSize + 1).execute();
+  const members = rows.slice(0, pageSize).map((member) => ({ member }));
+  return { members, nextCursor: rows.length > pageSize ? members.at(-1)!.member.id : null };
+
 }
