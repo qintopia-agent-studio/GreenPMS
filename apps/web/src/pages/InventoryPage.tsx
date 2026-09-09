@@ -1,6 +1,6 @@
 import { useMemberChoices } from "../useMemberChoices";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
-import { FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
+import { AlertTriangle, FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type {
   CreateOrderAdditionalGuestInputDto,
@@ -2455,6 +2455,8 @@ const ROOM_STATUS_WRITE_HEADROOM_MS = 750;
 const ROOM_STATUS_REFRESH_RETRY_MS = 250;
 const ROOM_STATUS_STALE_RESPONSE_RETRY_BASE_MS = 500;
 const ROOM_STATUS_STALE_RESPONSE_RETRY_MAX_MS = 4_000;
+const ROOM_STATUS_QUERY_FAILURE_RETRY_BASE_MS = 1_000;
+const ROOM_STATUS_QUERY_FAILURE_RETRY_MAX_MS = 8_000;
 const ROOM_STATUS_LOW_FRESHNESS_RESPONSE_LIMIT = 3;
 const ROOM_STATUS_QUERY_TIMEOUT_MS = 15_000;
 const ROOM_STATUS_RANGE_LOADING_NOTICE_DELAY_MS = 250;
@@ -2786,6 +2788,14 @@ export function roomStatusStaleResponseRetryDelay(consecutiveLowFreshnessRespons
   return Math.min(
     ROOM_STATUS_STALE_RESPONSE_RETRY_MAX_MS,
     ROOM_STATUS_STALE_RESPONSE_RETRY_BASE_MS * (2 ** exponent)
+  );
+}
+
+export function roomStatusQueryFailureRetryDelay(consecutiveFailures: number): number {
+  const exponent = Math.min(3, Math.max(0, Math.trunc(consecutiveFailures) - 1));
+  return Math.min(
+    ROOM_STATUS_QUERY_FAILURE_RETRY_MAX_MS,
+    ROOM_STATUS_QUERY_FAILURE_RETRY_BASE_MS * (2 ** exponent)
   );
 }
 
@@ -3444,6 +3454,37 @@ export function InventoryPage() {
     };
     lowFreshnessRetryTimerRef.current = window.setTimeout(retryWhenSafe, delay);
   }, [queryAttemptGuard]);
+  const queryFailureRetryTimerRef = useRef<number | undefined>(undefined);
+  const queryFailureRetryAttemptRef = useRef(0);
+  const clearQueryFailureRetry = useCallback(() => {
+    if (queryFailureRetryTimerRef.current === undefined) return;
+    window.clearTimeout(queryFailureRetryTimerRef.current);
+    queryFailureRetryTimerRef.current = undefined;
+  }, []);
+  const resetQueryFailureRetry = useCallback(() => {
+    clearQueryFailureRetry();
+    queryFailureRetryAttemptRef.current = 0;
+  }, [clearQueryFailureRetry]);
+  const scheduleQueryFailureRetry = useCallback((delay: number) => {
+    if (queryFailureRetryTimerRef.current !== undefined) return;
+    const retryWhenSafe = () => {
+      queryFailureRetryTimerRef.current = undefined;
+      if (permissionDeniedRef.current) return;
+      const decision = roomStatusProjectionRefreshDecision({
+        visible: document.visibilityState === "visible",
+        permissionDenied: permissionDeniedRef.current,
+        phase: commandPhaseRef.current,
+        queryInFlight: queryAttemptGuard.isInFlight()
+      });
+      if (decision === "STOP") return;
+      if (decision === "WAIT") {
+        queryFailureRetryTimerRef.current = window.setTimeout(retryWhenSafe, ROOM_STATUS_REFRESH_RETRY_MS);
+        return;
+      }
+      setRefreshToken((value) => value + 1);
+    };
+    queryFailureRetryTimerRef.current = window.setTimeout(retryWhenSafe, delay);
+  }, [queryAttemptGuard]);
   const commandAttemptGuardRef = useRef<RoomStatusCommandAttemptGuard | null>(null);
   if (!commandAttemptGuardRef.current) commandAttemptGuardRef.current = new RoomStatusCommandAttemptGuard();
   const commandAttemptGuard = commandAttemptGuardRef.current;
@@ -3483,7 +3524,10 @@ export function InventoryPage() {
   }
 
   useEffect(() => () => cancelQuoteSectionScroll(), []);
-  useEffect(() => () => clearLowFreshnessRetry(), [clearLowFreshnessRetry]);
+  useEffect(() => () => {
+    clearLowFreshnessRetry();
+    clearQueryFailureRetry();
+  }, [clearLowFreshnessRetry, clearQueryFailureRetry]);
 
   useLayoutEffect(() => {
     if (!quoteSectionScrollPendingRef.current) return;
@@ -3677,7 +3721,7 @@ export function InventoryPage() {
 
   useEffect(() => {
     const refreshVisible = () => {
-      if (queryError || document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible") return;
       setClock(roomStatusFreshnessNow());
       if (roomStatusProjectionRefreshDecision({
         visible: true,
@@ -3694,7 +3738,7 @@ export function InventoryPage() {
       document.removeEventListener("visibilitychange", refreshVisible);
       window.removeEventListener("focus", refreshVisible);
     };
-  }, [propertyId, queryAttemptGuard, queryError]);
+  }, [propertyId, queryAttemptGuard]);
 
   useEffect(() => {
     if (previousPropertyId.current === propertyId && previousSubjectId.current === principal.subjectId) return;
@@ -3788,6 +3832,7 @@ export function InventoryPage() {
       lowFreshnessQueryKeyRef.current = requestQueryKey;
       continuityLostQueryKeyRef.current = undefined;
       clearLowFreshnessRetry();
+      resetQueryFailureRetry();
     }
     const projectionRefreshPaused = !roomStatusProjectionRefreshAllowed(commandPhaseRef.current) && Boolean(existing);
     if (!sameQuery) {
@@ -3828,6 +3873,7 @@ export function InventoryPage() {
           clearLowFreshnessRetry();
         }
         if (commandPhaseRef.current === "CONFIRMING" && existing) {
+          resetQueryFailureRetry();
           setQueryError(undefined);
           setQueryPhase("READY");
           setClock(responseReceivedAt);
@@ -3882,6 +3928,12 @@ export function InventoryPage() {
         setBoardQueryKey(requestQueryKey);
         boardQueryKeyRef.current = requestQueryKey;
         setQueryError(slowReadError);
+        if (slowReadError) {
+          queryFailureRetryAttemptRef.current += 1;
+          scheduleQueryFailureRetry(roomStatusQueryFailureRetryDelay(queryFailureRetryAttemptRef.current));
+        } else {
+          resetQueryFailureRetry();
+        }
         setQueryPhase(slowReadError ? "ERROR" : "READY");
         setClock(responseReceivedAt);
         restoreRefreshReturnFocus();
@@ -3917,6 +3969,7 @@ export function InventoryPage() {
         clearLowFreshnessRetry();
         setQueryError(error);
         if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+          resetQueryFailureRetry();
           permissionDeniedRef.current = true;
           latestRestoration.current = undefined;
           setBoard(undefined);
@@ -3958,6 +4011,8 @@ export function InventoryPage() {
           setQueryPhase("PERMISSION_DENIED");
         } else {
           rememberRefreshReturnFocus(document.activeElement);
+          queryFailureRetryAttemptRef.current += 1;
+          scheduleQueryFailureRetry(roomStatusQueryFailureRetryDelay(queryFailureRetryAttemptRef.current));
           setQueryPhase("ERROR");
         }
       })
@@ -3975,6 +4030,7 @@ export function InventoryPage() {
   }, [
     initializedPropertyId,
     clearLowFreshnessRetry,
+    resetQueryFailureRetry,
     orderPrincipalScope,
     propertyId,
     range.arrivalDate,
@@ -3983,6 +4039,7 @@ export function InventoryPage() {
     refreshToken,
     restoreRefreshReturnFocus,
     scheduleLowFreshnessRetry,
+    scheduleQueryFailureRetry,
     viewState.roomPageIndex,
     viewState.filters.search,
     viewState.filters.roomTypeCode,
@@ -5908,22 +5965,25 @@ export function InventoryPage() {
     || (command && commandTargetScopeCurrent)
   );
   const roomStatusRefreshNotice = renderedBoard && (actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted || boardExpired) ? (
-    <div className="room-status-stale-notice" role={boardRefreshFailed ? "alert" : "status"} data-testid="room-status-stale-notice">
-      <span>
-        房态数据时间：<time dateTime={renderedBoard.asOf}>{new Date(renderedBoard.asOf).toLocaleString("zh-CN", { hour12: false })}</time>。
-        {boardRefreshFailed ? actionPresentationBlock?.reason : null}
-        {!boardWriteAdmitted
-          ? "响应到达时剩余有效时间不足，仅供查看；不能创建订单、换房或调整日期。"
-          : !boardRefreshFailed ? actionPresentationBlock?.reason ?? "房态已经过期，仅供查看；更新完成前暂不能写入。" : null}
+    <div className={`room-status-stale-notice${boardRefreshFailed ? " is-failed" : ""}`} role="status" aria-live="polite" data-testid="room-status-stale-notice">
+      <AlertTriangle className="room-status-stale-icon" aria-hidden="true" size={16} />
+      <span className="room-status-stale-copy">
+        <strong>{boardRefreshFailed ? "房态暂时未更新" : "房态正在更新"}</strong>
+        <span>
+          当前显示 <time dateTime={renderedBoard.asOf}>{new Date(renderedBoard.asOf).toLocaleString("zh-CN", { hour12: false })}</time> 的结果。
+          {boardRefreshFailed ? "正在自动重试，恢复前不能发起写入。" : "更新完成前不能发起写入。"}
+        </span>
       </span>
       {actionPresentationBlock?.actionLabel
         ? <button
             type="button"
-            className="button button-secondary"
+            className="icon-button room-status-stale-retry"
             onPointerDown={() => rememberRefreshReturnFocus(document.activeElement)}
             onFocus={(event) => rememberRefreshReturnFocus(event.relatedTarget)}
             onClick={requestRoomStatusRefresh}
-          ><RefreshCw aria-hidden="true" size={16} />{actionPresentationBlock.actionLabel}</button>
+            aria-label="立即重试房态"
+            title="立即重试房态"
+          ><RefreshCw aria-hidden="true" size={16} /></button>
         : null}
     </div>
   ) : null;

@@ -80,6 +80,7 @@ import {
   roomStatusProjectionHasWriteHeadroom,
   roomStatusProjectionResponseCanEnableWrites,
   roomStatusLowFreshnessResponseRequiresManualRetry,
+  roomStatusQueryFailureRetryDelay,
   roomStatusRefreshDelay,
   roomStatusStaleResponseRetryDelay,
   roomStatusCommittedRefreshScopeIsCurrent,
@@ -1657,6 +1658,14 @@ describe("Room-status query attempt lifecycle", () => {
     expect(roomStatusLowFreshnessResponseRequiresManualRetry(2)).toBe(false);
     expect(roomStatusLowFreshnessResponseRequiresManualRetry(3)).toBe(true);
     expect(roomStatusLowFreshnessResponseRequiresManualRetry(20)).toBe(true);
+  });
+
+  it("backs off transient query failures without requiring a manual browser refresh", () => {
+    expect(roomStatusQueryFailureRetryDelay(1)).toBe(1_000);
+    expect(roomStatusQueryFailureRetryDelay(2)).toBe(2_000);
+    expect(roomStatusQueryFailureRetryDelay(3)).toBe(4_000);
+    expect(roomStatusQueryFailureRetryDelay(4)).toBe(8_000);
+    expect(roomStatusQueryFailureRetryDelay(20)).toBe(8_000);
   });
 
   it("applies the same minimum freshness gate to a committed refresh response", () => {
