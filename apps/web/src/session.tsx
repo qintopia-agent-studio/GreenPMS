@@ -97,6 +97,7 @@ export function LoginPage({ onLogin, expired = false }: { onLogin: (principal: P
     <main className="login-page">
       <section className="login-panel" aria-labelledby="login-title">
         <div className="login-brand">
+          <img className="brand-mark brand-mark-login" src="/qintopia-logo.png" alt="QinTopia" />
           <span className="brand-word">QinTopia</span>
           <span>PMS v{applicationVersion}</span>
         </div>
@@ -365,12 +366,13 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
     <div className={`app-shell${sidebarCollapsed ? " sidebar-is-collapsed" : ""}`}>
       <a className="skip-link" href="#main-content">跳至主要内容</a>
       <aside className="sidebar">
-        <div className="sidebar-brand-row">
-          <div className="sidebar-brand-identity">
-            <div className="sidebar-brand" aria-label="QinTopia PMS">
-              <span className="brand-word"><span className="sidebar-brand-full">QinTopia</span><span className="sidebar-brand-compact" aria-hidden="true">Q</span></span>
-              <span className="sidebar-brand-product">PMS</span>
-            </div>
+          <div className="sidebar-brand-row">
+            <div className="sidebar-brand-identity">
+              <div className="sidebar-brand" aria-label="QinTopia PMS">
+                <img className="brand-mark brand-mark-sidebar" src="/qintopia-logo.png" alt="" />
+                <span className="brand-word"><span className="sidebar-brand-full">QinTopia</span><span className="sidebar-brand-compact" aria-hidden="true">Q</span></span>
+                <span className="sidebar-brand-product">PMS</span>
+              </div>
             <a className="application-version" href={`https://github.com/qintopia-agent-studio/GreenPMS/releases/tag/v${applicationVersion}`} target="_blank" rel="noopener noreferrer" title={`QinTopia PMS v${applicationVersion} · 更新说明`} aria-label={`版本 v${applicationVersion}，查看更新说明`}>
               v{applicationVersion}
             </a>
