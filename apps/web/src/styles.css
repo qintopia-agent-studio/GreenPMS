@@ -343,24 +343,6 @@ textarea:focus-visible {
   font-weight: 600;
 }
 
-.brand-mark {
-  display: block;
-  flex: 0 0 auto;
-  object-fit: contain;
-}
-
-.brand-mark-login {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-}
-
-.brand-mark-sidebar {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-}
-
 .brand-word {
   color: var(--text);
   font-size: 20px;
@@ -480,11 +462,6 @@ textarea:focus-visible {
 .sidebar-is-collapsed .sidebar-brand .brand-word,
 .sidebar-is-collapsed .sidebar-brand-product {
   display: none;
-}
-
-.sidebar-is-collapsed .brand-mark-sidebar {
-  width: 32px;
-  height: 32px;
 }
 
 .sidebar-is-collapsed .sidebar-brand-full,

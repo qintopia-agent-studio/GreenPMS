@@ -97,7 +97,6 @@ export function LoginPage({ onLogin, expired = false }: { onLogin: (principal: P
     <main className="login-page">
       <section className="login-panel" aria-labelledby="login-title">
         <div className="login-brand">
-          <img className="brand-mark brand-mark-login" src="/qintopia-logo.png" alt="QinTopia" />
           <span className="brand-word">QinTopia</span>
           <span>PMS v{applicationVersion}</span>
         </div>
@@ -369,7 +368,6 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
           <div className="sidebar-brand-row">
             <div className="sidebar-brand-identity">
               <div className="sidebar-brand" aria-label="QinTopia PMS">
-                <img className="brand-mark brand-mark-sidebar" src="/qintopia-logo.png" alt="" />
                 <span className="brand-word"><span className="sidebar-brand-full">QinTopia</span><span className="sidebar-brand-compact" aria-hidden="true">Q</span></span>
                 <span className="sidebar-brand-product">PMS</span>
               </div>
