@@ -1,0 +1,15 @@
+{
+  "application": "greenpms",
+  "version": "v1.2.3",
+  "rollbackCompatibility": {
+    "mode": "same-migrations-only",
+    "reason": "本版本不包含数据库迁移；旧镜像只允许在相同迁移基线上直接回退，不回退数据库或业务数据。",
+    "releaseNotes": {
+      "path": "docs/releases/v1.2.3.md",
+      "requiredText": [
+        "无数据库迁移，无新增运行时配置，不改变订单、资金、库存、会员、权限或会话数据。",
+        "无需回退数据库或业务数据。"
+      ]
+    }
+  }
+}

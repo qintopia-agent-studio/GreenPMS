@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import os
+import json
+import re
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+APP_VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+CURRENT_TAG = f"v{APP_VERSION}"
+MISMATCH_TAG = f"v{int(APP_VERSION.split('.')[0]) + 1}.0.0"
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+class ReleaseCheckTests(unittest.TestCase):
+    def run_check(self, *arguments: str, **environment: str) -> subprocess.CompletedProcess[str]:
+        child_environment = os.environ.copy()
+        child_environment.pop("GITHUB_REF", None)
+        child_environment.update(environment)
+        return subprocess.run(
+            ["node", str(ROOT / "scripts/check-release.mjs"), *arguments],
+            cwd=ROOT,
+            env=child_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_current_release_accepts_matching_explicit_tag(self) -> None:
+        result = self.run_check("--tag", CURRENT_TAG)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Release {CURRENT_TAG}", result.stdout)
+
+    def test_tag_event_is_checked_and_mismatch_fails(self) -> None:
+        matching = self.run_check(GITHUB_REF=f"refs/tags/{CURRENT_TAG}")
+        self.assertEqual(matching.returncode, 0, matching.stderr)
+
+        mismatch = self.run_check("--tag", MISMATCH_TAG)
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("must match package.json version", mismatch.stderr)
+
+        conflicting_ref = self.run_check("--tag", CURRENT_TAG, GITHUB_REF=f"refs/tags/{MISMATCH_TAG}")
+        self.assertNotEqual(conflicting_ref.returncode, 0)
+        self.assertIn("does not match GITHUB_REF", conflicting_ref.stderr)
+
+    def test_tag_format_is_strict(self) -> None:
+        for tag in ("1.2.3", "v1.2", "v1.2.3-rc.1", "v01.2.3"):
+            result = self.run_check("--tag", tag)
+            self.assertNotEqual(result.returncode, 0, tag)
+            self.assertIn("vX.Y.Z", result.stderr)
+
+
+class WorkflowContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ci = read(".github/workflows/ci.yml")
+        cls.release = read(".github/workflows/release.yml")
+        cls.retention = read(".github/workflows/retention.yml")
+        cls.rollback = read(".github/workflows/rollback.yml")
+        cls.workflows = cls.ci + cls.release + cls.retention + cls.rollback
+
+    def test_ci_runs_required_checks_without_production_inputs(self) -> None:
+        for fragment in (
+            "pull_request:",
+            "branches: [main]",
+            "name: PR format",
+            "if: github.event_name == 'pull_request'",
+            "node --test scripts/check-pr-tests.mjs",
+            "node scripts/check-pr.mjs",
+            "name: Node and release checks",
+            "node-version: 22.x",
+            "run: npm ci",
+            "run: npm run release:check",
+            "run: npm run typecheck",
+            "run: npm test",
+            "run: npm run build",
+            "python3 -m unittest discover -s scripts/release/tests -v",
+        ):
+            self.assertIn(fragment, self.ci)
+        self.assertNotIn("environment: production", self.ci)
+        self.assertNotIn("COS_", self.ci)
+        self.assertNotIn("DEPLOY_", self.ci)
+
+    def test_release_is_tagged_immutable_and_main_reachable(self) -> None:
+        for fragment in (
+            "release:\n    types: [published]",
+            "github.event.release.prerelease == false",
+            "github.event.release.tag_name",
+            "greenpms-production",
+            "cancel-in-progress: false",
+            "git merge-base --is-ancestor \"$RELEASE_SHA\" origin/main",
+            "node scripts/check-release.mjs --tag \"$RELEASE_TAG\"",
+            "DOCKER_DEFAULT_PLATFORM: linux/amd64",
+            "python3 scripts/release/package.py",
+            "python3 scripts/release/cos.py upload",
+            "greenpms/releases/",
+            "UPLOAD_COS_SECRET_KEY",
+            "environment: production",
+            "persist-credentials: false",
+            "DEPLOY_SSH_KEY_FILE",
+            "DEPLOY_KNOWN_HOSTS_FILE",
+            "python3 scripts/release/orchestrate.py deploy",
+            "--manifest-sha",
+        ):
+            self.assertIn(fragment, self.release)
+        package_upload = self.release.split("  package-upload:", 1)[1].split("  deploy:", 1)[0]
+        package_checkout = package_upload.split("      - name: Check out the tagged commit", 1)[1].split(
+            "      - name: Set up Node.js 22", 1
+        )[0]
+        self.assertIn("fetch-depth: 0", package_checkout)
+        self.assertIn("ref: ${{ github.sha }}", package_checkout)
+        deploy = self.release.split("  deploy:", 1)[1]
+        self.assertIn("environment: production", package_upload)
+        self.assertIn("UPLOAD_COS_SECRET_ID", package_upload)
+        self.assertNotIn("DEPLOY_SSH_KEY", package_upload)
+        self.assertNotIn("MARKER_COS_SECRET_ID", package_upload)
+        self.assertIn("environment: production", deploy)
+        for fragment in ("DEPLOY_SSH_KEY", "MARKER_COS_SECRET_ID", "RETENTION_COS_SECRET_ID"):
+            self.assertIn(fragment, deploy)
+        self.assertEqual(self.release.count("environment: production"), 2)
+        self.assertNotIn("secrets.MARKER_COS_", self.workflows)
+        self.assertNotIn("environment: release-build", self.workflows)
+        self.assertNotIn("environment: release-maintenance", self.workflows)
+        self.assertIn("python3 scripts/release/cos.py fetch", package_upload)
+        self.assertIn("if: steps.bundle.outputs.fetch_status == '3'", package_upload)
+        self.assertIn('exit "$fetch_status"', package_upload)
+        self.assertIn("if: always()", self.release)
+        self.assertNotIn("steps.metadata", self.release)
+        self.assertNotIn("python3 scripts/release/orchestrate.py maintenance", self.release)
+
+    def test_release_keeps_v_in_package_identity_and_cos_key(self) -> None:
+        self.assertIn('version="$RELEASE_VERSION"', self.release)
+        self.assertNotIn('version="${RELEASE_VERSION#v}"', self.release)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ.copy()
+            environment.update({"RELEASE_VERSION": "v1.2.3", "RELEASE_REVISION": "a" * 40})
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-eu",
+                    "-c",
+                    'version="$RELEASE_VERSION"; key="greenpms/releases/${version}/${RELEASE_REVISION}/"; test "$version" = v1.2.3; test "$key" = greenpms/releases/v1.2.3/'
+                    + "a" * 40
+                    + "/",
+                ],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_ancestry_command_accepts_tag_before_later_main_commit(self) -> None:
+        command = 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main'
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Workflow Test"], cwd=repository, check=True)
+            (repository / "release.txt").write_text("release\n", encoding="utf-8")
+            subprocess.run(["git", "add", "release.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "release"], cwd=repository, check=True)
+            release_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+            (repository / "docs.txt").write_text("post-release docs\n", encoding="utf-8")
+            subprocess.run(["git", "add", "docs.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "docs"], cwd=repository, check=True)
+            main_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+            subprocess.run(["git", "update-ref", "refs/remotes/origin/main", main_sha], cwd=repository, check=True)
+
+            environment = os.environ.copy()
+            environment["RELEASE_SHA"] = release_sha
+            result = subprocess.run(
+                ["bash", "-eu", "-c", command],
+                cwd=repository,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_retention_shares_lock_and_has_dry_run(self) -> None:
+        for fragment in (
+            "schedule:",
+            "workflow_dispatch:",
+            "dry_run:",
+            "greenpms-production",
+            "if: github.ref == 'refs/heads/main'",
+            "environment: production",
+            "RETENTION_COS_SECRET_ID",
+            "RETENTION_COS_SECRET_KEY",
+            "DEPLOY_SSH_KEY",
+            "python3 scripts/release/orchestrate.py maintenance --dry-run",
+            "python3 scripts/release/orchestrate.py maintenance",
+            "if: always()",
+        ):
+            self.assertIn(fragment, self.retention)
+        self.assertIn("secrets.DEPLOY_SSH_KEY", self.retention)
+        self.assertNotIn("MAINTENANCE_SSH_KEY", self.workflows)
+
+    def test_rollback_runs_trusted_main_tools_with_shared_environment_and_lock(self) -> None:
+        for fragment in ("workflow_dispatch:", "if: github.ref == 'refs/heads/main'",
+                         "environment: production", "group: greenpms-production",
+                         'args=(rollback-release --version "$RELEASE_VERSION")',
+                         "secrets.UPLOAD_COS_SECRET_KEY", "secrets.DEPLOY_SSH_KEY",
+                         "if: always()"):
+            self.assertIn(fragment, self.rollback)
+        self.assertNotIn("ref: ${{ inputs.", self.rollback)
+        self.assertNotIn("--manifest-sha", self.rollback)
+
+    def test_secrets_are_not_inherited_by_setup_or_build_steps(self) -> None:
+        for workflow in (self.release, self.retention, self.rollback):
+            jobs = re.split(r"(?m)^  [a-z][a-z-]*:\n", workflow.split("jobs:\n", 1)[1])
+            for job in jobs:
+                self.assertNotIn("secrets.", job.split("    steps:", 1)[0])
+            for step in workflow.split("      - name: ")[1:]:
+                name = step.splitlines()[0]
+                if name.startswith(("Set up", "Install", "Check out", "Build and package")):
+                    self.assertNotIn("secrets.", step)
+
+    def test_workflows_do_not_publish_github_or_registry_binaries(self) -> None:
+        forbidden = (
+            "actions/upload-artifact",
+            "docker/build-push-action",
+            "docker push",
+            "gh release upload",
+            "softprops/action-gh-release",
+        )
+        for fragment in forbidden:
+            self.assertNotIn(fragment, self.workflows)
+        self.assertNotIn("set -x", self.workflows)
+
+
+if __name__ == "__main__":
+    unittest.main()

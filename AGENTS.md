@@ -3,6 +3,12 @@
 - 修改通过 PR 合入 main；标题、正文与合并保护见 `docs/repository-contributing.md`，模板为 `.github/PULL_REQUEST_TEMPLATE.md`。
 - PR 格式本地验证：`node --test scripts/check-pr-tests.mjs`。保护配置记录在 `.github/main-protection.json`；不要通过降低保护要求绕过失败检查或待审批。
 
+## 发布 harness 索引
+
+- 日常发布、回退与首次配置：`docs/operations/production-release-quickstart.md`；实现细节与恢复：`docs/operations/production-release-runbook.md`；参考方案映射：`docs/operations/production-release-investigation.md`。
+- 遵循 npm workspaces / package-lock：`npm ci`、`npm run release:check`、`npm run typecheck`、`npm test`、`npm run build`；离线发布测试：`npm run test:release`（Python 3，fake COS/Docker/SSH）。
+- 生产 `compose.server.yaml` 只接收预构建 `GREENPMS_IMAGE`；不要在生产目录构建，不读凭据文件，不把外部 TencentDB/备份列入清理。部署与清理使用 `scripts/release/` 正式入口。
+
 本文件补充全局 `AGENTS.md`，定义本项目的业务来源、风险分级和验收要求。
 
 ## 业务来源
