@@ -263,6 +263,19 @@ class CosStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ReleaseError, "unknown"):
                 complete_store(UnknownVersioning(), role="UPLOAD").put_immutable(key, source.name)
 
+    def test_sdk_empty_versioning_configuration_allows_upload(self):
+        class NeverVersioned(FakeCos):
+            def get_bucket_versioning(self, Bucket):
+                self.versioning_calls += 1
+                return {"VersioningConfiguration": None}
+
+        client = NeverVersioned()
+        key = ROOT + "v1.2.3/" + "a" * 40 + "/greenpms-linux-amd64.docker.tar.zst"
+        complete_store(client, role="UPLOAD").put_immutable(key, b"archive")
+
+        self.assertEqual(client.versioning_calls, 1)
+        self.assertEqual(client.objects[key], b"archive")
+
     def test_upload_failure_does_not_create_marker(self):
         client = FakeCos()
         client.fail_put = 500

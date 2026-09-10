@@ -207,7 +207,12 @@ class CosStore:
         # The SDK returns an empty dict for a bucket that has never had
         # versioning enabled. Any non-empty response without a known status is
         # treated as an unknown configuration and fails closed.
-        if status in {None, ""} and response not in ({}, {"VersioningConfiguration": {}}):
+        empty_configurations = (
+            {},
+            {"VersioningConfiguration": {}},
+            {"VersioningConfiguration": None},
+        )
+        if status in {None, ""} and response not in empty_configurations:
             raise ReleaseError("COS versioning status is unknown; refusing mutation")
         if status not in {None, "", "Disabled"}:
             raise ReleaseError("COS bucket versioning status is unknown; refusing mutation")
