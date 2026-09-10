@@ -1,36 +1,42 @@
-# QinTopia PMS 更新记录
+# Changelog
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
-## v1.3.0 · 2026-09-10
+## [1.3.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.3.0...v1.3.1) (2026-09-10)
 
 - 接入企业微信对外收退款流水同步、昵称展示、推荐匹配和完整清单查询。
 - 收退款支持独立退款单号、原收款关联、历史边界和并发防重复匹配。
 - 统一弹窗显式关闭，避免点击外部或按 Esc 误丢失填写内容。
 - 完善 PMS 事件投影与智能体读取接口基础。
 
-[完整优化说明与升级说明](docs/releases/v1.3.0.md)
+[完整优化说明与升级说明](docs/releases/v1.3.1.md)
 
-## v1.2.3 · 2026-09-09
+## [1.3.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.2.3...v1.3.0) (2026-09-10)
+
+### CI / Deployment
+
+* 建立 GreenPMS 生产发布流水线、版本保护和回退约束。
+
+## [1.2.3](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.2.2...v1.2.3) (2026-09-09)
 
 - 房态后台刷新失败后自动退避重试，恢复前保留写入安全门禁。
 - 将房态失败提示改为紧凑状态条，减少黄色大提示和手动刷新依赖。
 
 [完整优化说明与升级说明](docs/releases/v1.2.3.md)
 
-## v1.2.1 · 2026-09-09
-
-- 使用 QinTopia 品牌图片作为登录页、侧边栏和浏览器标签页 Logo。
-
-[完整优化说明与升级说明](docs/releases/v1.2.1.md)
-
-## v1.2.2 · 2026-09-09
+## [1.2.2](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.2.1...v1.2.2) (2026-09-09)
 
 - 保留浏览器标签页 Logo，撤回登录页和主界面左上角的图片展示，恢复文字品牌布局。
 
 [完整优化说明与升级说明](docs/releases/v1.2.2.md)
 
-## v1.2.0 · 2026-09-09
+## [1.2.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.2.0...v1.2.1) (2026-09-09)
+
+- 使用 QinTopia 品牌图片作为登录页、侧边栏和浏览器标签页 Logo。
+
+[完整优化说明与升级说明](docs/releases/v1.2.1.md)
+
+## [1.2.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.1.0...v1.2.0) (2026-09-09)
 
 - 修复订单、房态、会员和工作台的慢读取、失败恢复、分页与跨入口显示一致性问题。
 - 补齐会员安排住宿、订单房号识别、资金筛选说明和房态高级筛选等工作入口与反馈。
@@ -38,7 +44,7 @@
 
 [完整优化说明与升级说明](docs/releases/v1.2.0.md)
 
-## v1.1.0 · 2026-09-07
+## [1.1.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.0.0...v1.1.0) (2026-09-07)
 
 - 支持已预订及在住整房订单补录同住人，共用订单完整住宿日期。
 - 支持撤销误录同住人并保留原因和登记历史，同步更新名册及人数。
@@ -46,7 +52,7 @@
 
 [完整优化说明与升级说明](docs/releases/v1.1.0.md)
 
-## v1.0.0 · 2026-09-07
+## [1.0.0](https://github.com/qintopia-agent-studio/GreenPMS/releases/tag/v1.0.0) (2026-09-07)
 
 首个正式编号版本，基于既有线上系统建立版本基线。
 

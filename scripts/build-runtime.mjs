@@ -1,0 +1,136 @@
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { dirname, extname, relative, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { transform } from "esbuild";
+
+const runtimeTrees = [
+  ["apps/api/src", "apps/api/src"],
+  ["packages/contracts/src", "packages/contracts/src"],
+  ["packages/domain/src", "packages/domain/src"],
+  ["packages/db/src", "packages/db/src"]
+];
+const excludedRuntimeFiles = new Set(["migrate.ts", "ready.ts", "reset.ts", "seed.ts"]);
+const sourceFilePattern = /\.(?:ts|tsx)$/u;
+const testFilePattern = /(?:\.test|\.spec)\.(?:ts|tsx)$/u;
+
+function parseOptions() {
+  const { values } = parseArgs({
+    options: {
+      output: { type: "string", default: "runtime" },
+      "source-root": { type: "string", default: process.cwd() }
+    },
+    allowPositionals: false
+  });
+  return {
+    root: resolve(values["source-root"]),
+    output: resolve(values.output)
+  };
+}
+
+function assertOutputIsSeparate(root, output) {
+  if (root === output) throw new Error("runtime output must be separate from the source root");
+}
+
+function rewriteTypeScriptSpecifiers(code) {
+  return code.replace(/(\b(?:from|import)\s*(?:\(\s*)?)(["'])([^"']+)\.ts\2/gu, "$1$2$3.js$2");
+}
+
+function runtimePackageJson(packageJson, relativePath) {
+  const value = JSON.parse(packageJson);
+  delete value.devDependencies;
+
+  if (relativePath === "package.json") {
+    value.scripts = { start: "node apps/api/src/main.js" };
+  } else if (relativePath === "apps/api/package.json") {
+    value.scripts = { start: "node src/main.js" };
+  } else {
+    delete value.scripts;
+  }
+
+  const rewriteExports = (entry) => {
+    if (typeof entry === "string") return entry.replace(/\.ts$/u, ".js");
+    if (Array.isArray(entry)) return entry.map(rewriteExports);
+    if (entry && typeof entry === "object") {
+      return Object.fromEntries(Object.entries(entry).map(([key, child]) => [key, rewriteExports(child)]));
+    }
+    return entry;
+  };
+  if (value.exports) value.exports = rewriteExports(value.exports);
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function rewriteRuntimeJsonImports(source, packageVersion) {
+  return source.replace(
+    /^\s*import\s*\{\s*version\s+as\s+applicationVersion\s*\}\s*from\s*["']\.\.\/\.\.\/\.\.\/package\.json["'];?\s*$/mu,
+    `const applicationVersion = ${JSON.stringify(packageVersion)};`
+  );
+}
+
+async function writeRuntimePackageJson(root, output, relativePath) {
+  const source = resolve(root, relativePath);
+  const target = resolve(output, relativePath);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, runtimePackageJson(await readFile(source, "utf8"), relativePath));
+}
+
+async function transformTree(root, output, sourceRelative, outputRelative, packageVersion) {
+  const sourceDirectory = resolve(root, sourceRelative);
+  const outputDirectory = resolve(output, outputRelative);
+
+  async function visit(sourceDirectoryPath, outputDirectoryPath) {
+    await mkdir(outputDirectoryPath, { recursive: true });
+    for (const entry of await readdir(sourceDirectoryPath, { withFileTypes: true })) {
+      const sourcePath = resolve(sourceDirectoryPath, entry.name);
+      const outputPath = resolve(outputDirectoryPath, entry.name);
+      if (entry.isDirectory()) {
+        await visit(sourcePath, outputPath);
+        continue;
+      }
+      if (!entry.isFile() || !sourceFilePattern.test(entry.name) || testFilePattern.test(entry.name)) continue;
+      if (sourceRelative === "packages/db/src" && excludedRuntimeFiles.has(entry.name)) continue;
+
+      const extension = extname(entry.name);
+      const source = rewriteRuntimeJsonImports(await readFile(sourcePath, "utf8"), packageVersion);
+      const transformed = await transform(source, {
+        format: "esm",
+        loader: extension === ".tsx" ? "tsx" : "ts",
+        sourcefile: relative(root, sourcePath),
+        target: "node22",
+        sourcemap: false
+      });
+      await writeFile(outputPath.replace(/\.tsx?$/u, ".js"), rewriteTypeScriptSpecifiers(transformed.code));
+    }
+  }
+
+  await visit(sourceDirectory, outputDirectory);
+}
+
+async function main() {
+  const { root, output } = parseOptions();
+  assertOutputIsSeparate(root, output);
+  await rm(output, { recursive: true, force: true });
+  await mkdir(output, { recursive: true });
+  const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+
+  for (const [sourceRelative, outputRelative] of runtimeTrees) {
+    await transformTree(root, output, sourceRelative, outputRelative, packageJson.version);
+  }
+
+  await cp(resolve(root, "packages/db/src/migrations"), resolve(output, "packages/db/src/migrations"), { recursive: true });
+  await cp(resolve(root, "packages/db/catalog"), resolve(output, "packages/db/catalog"), { recursive: true });
+  await cp(resolve(root, "apps/web/dist"), resolve(output, "apps/web/dist"), { recursive: true });
+  await cp(resolve(root, "package-lock.json"), resolve(output, "package-lock.json"));
+
+  for (const relativePath of [
+    "package.json",
+    "apps/api/package.json",
+    "apps/web/package.json",
+    "packages/contracts/package.json",
+    "packages/domain/package.json",
+    "packages/db/package.json"
+  ]) {
+    await writeRuntimePackageJson(root, output, relativePath);
+  }
+}
+
+await main();

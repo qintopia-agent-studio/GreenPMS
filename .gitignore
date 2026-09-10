@@ -9,3 +9,6 @@ test-results/
 .DS_Store
 coverage/
 backups/*.dump
+# Python release tooling creates no versioned bytecode.
+__pycache__/
+*.pyc

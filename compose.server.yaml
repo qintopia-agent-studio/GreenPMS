@@ -2,7 +2,8 @@
 # Database is TencentDB for PostgreSQL (private network), provided via DATABASE_URL in .env.
 services:
   app:
-    build: .
+    image: ${GREENPMS_IMAGE:?GREENPMS_IMAGE must name an immutable prebuilt release}
+    pull_policy: never
     container_name: qintopia-pms-app
     restart: unless-stopped
     environment:
