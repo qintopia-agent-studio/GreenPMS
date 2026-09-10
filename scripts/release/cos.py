@@ -32,7 +32,9 @@ _RELEASE_PREFIX = re.compile(
     r"^greenpms/releases/v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)/[0-9a-f]{40}/$"
 )
 _JSON_LIMIT = 4 * 1024 * 1024
-_SDK_TIMEOUT = 60
+# qcloud_cos passes this value unchanged to requests. A tuple bounds the
+# connection separately from a potentially slow archive read.
+_SDK_TIMEOUT = (10, 60)
 _ALLOWED_ENDPOINTS = frozenset({"cos.accelerate.myqcloud.com"})
 
 # Tencent contracts used here:
@@ -192,12 +194,21 @@ class CosStore:
             response = method(Bucket=self.bucket)
         except Exception as exc:
             raise ReleaseError("COS versioning status check failed; refusing mutation") from exc
-        status = response.get("Status") if isinstance(response, dict) else None
+        if not isinstance(response, dict):
+            raise ReleaseError("COS versioning status is unavailable; refusing mutation")
+        status = response.get("Status")
         if status is None and isinstance(response, dict):
             configuration = response.get("VersioningConfiguration") or {}
+            if not isinstance(configuration, dict):
+                raise ReleaseError("COS versioning status is unknown; refusing mutation")
             status = configuration.get("Status")
         if status in {"Enabled", "Suspended"}:
             raise ReleaseError("COS bucket versioning must be Disabled or never enabled")
+        # The SDK returns an empty dict for a bucket that has never had
+        # versioning enabled. Any non-empty response without a known status is
+        # treated as an unknown configuration and fails closed.
+        if status in {None, ""} and response not in ({}, {"VersioningConfiguration": {}}):
+            raise ReleaseError("COS versioning status is unknown; refusing mutation")
         if status not in {None, "", "Disabled"}:
             raise ReleaseError("COS bucket versioning status is unknown; refusing mutation")
         self._versioning_checked = True
@@ -449,7 +460,15 @@ def fetch_bundle(store: CosStore, version: str, revision: str, directory: str | 
     objects = store.list(key_prefix)
     if not objects:
         return 3
-    names = {item["key"][len(key_prefix):] for item in objects if isinstance(item.get("key"), str) and item["key"].startswith(key_prefix)}
+    names: set[str] = set()
+    for item in objects:
+        object_key = item.get("key")
+        if not isinstance(object_key, str) or not object_key.startswith(key_prefix):
+            raise ReleaseError("COS release listing returned an invalid object key")
+        name = object_key[len(key_prefix):]
+        if name not in set(FILES) | {MARKER} or name in names:
+            raise ReleaseError("COS release prefix contains unexpected objects")
+        names.add(name)
     if not set(FILES).issubset(names):
         raise ReleaseError("COS release prefix is partial; refusing rebuild reuse")
     destination = Path(directory)

@@ -25,6 +25,10 @@
 
 GitHub Release 的 **Publish release** 是批准动作。只有一个 `production` Environment，允许 `main` 和 `v*`，不配置 reviewer 或 wait timer，因此 workflow 不会再暂停等待第二次批准。release、rollback 和定时 retention 共用 `greenpms-production` concurrency，避免上传、切换和清理并行破坏状态。
 
+Release job 使用两个独立 checkout：`validate` 从受保护 `main` 解析并固定一个 harness commit，目标 tag 提供不可变应用源码。版本、构建上下文和 OCI revision 都从 tag 目录校验；后续 job 的打包、COS 和 SSH 编排脚本都 checkout 同一个 harness commit。这样修复发布基础设施后可以重放旧 tag，而不会修改旧 tag、读取运行中变化的 `main`，或把 `main` 的应用代码混入旧版本镜像。打包前会一次检查 COS、retention 和受限 SSH 的必需 Variables/Secrets，只输出缺少的配置名称，不输出任何值。
+
+修复 harness 后必须从 Actions 页面用 **Run workflow** 创建新的手动重放。旧失败 run 的 **Re-run jobs** 固定使用旧 workflow 内容，不会读取刚合并到 `main` 的修复。
+
 管理员负责一次性 bootstrap 和故障入口；发布人负责审核并合并 Release Please 版本 PR、发布 GitHub Release、观察 workflow 和执行 GitHub Actions 回退。GitHub Release 的 **Publish release**（`release.published`）是唯一批准点。
 
 ## 2. 发布身份和产物

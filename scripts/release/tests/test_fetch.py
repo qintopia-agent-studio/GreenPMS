@@ -37,6 +37,19 @@ class FetchRetryTests(unittest.TestCase):
         self.assertFalse(fake.put_calls)
         self.assertFalse(fake.delete_calls)
 
+    def test_deployed_release_retry_ignores_only_the_valid_marker(self):
+        fake, prefix, expected = self.bundle()
+        fake.objects[prefix + "deployed.json"] = json_bytes({"status": "marker is validated by deploy flow"})
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "bundle"
+            result = fetch_bundle(complete_store(fake, role="UPLOAD"), VERSION, REVISION, destination)
+            self.assertEqual(result, 0)
+            self.assertEqual({path.name: path.read_bytes() for path in destination.iterdir()}, expected)
+
+        fake.objects[prefix + "unexpected.txt"] = b"unexpected"
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(ReleaseError, "unexpected"):
+            fetch_bundle(complete_store(fake, role="UPLOAD"), VERSION, REVISION, Path(temporary) / "bundle")
+
     def test_only_empty_prefix_allows_fresh_build(self):
         with tempfile.TemporaryDirectory() as temporary:
             result = fetch_bundle(complete_store(FakeCos(), role="UPLOAD"), VERSION, REVISION, temporary)
