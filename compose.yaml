@@ -17,7 +17,9 @@ services:
       - qintopia-postgres:/var/lib/postgresql/data
 
   migrate:
-    build: .
+    build:
+      context: .
+      target: build
     command: ["sh", "-c", "npm run db:migrate"]
     environment:
       DATABASE_URL: postgres://${RUNTIME_DATABASE_USER:-qintopia_runtime}:${RUNTIME_DATABASE_PASSWORD:-qintopia_runtime}@postgres:5432/qintopia
@@ -30,7 +32,9 @@ services:
     restart: "no"
 
   seed:
-    build: .
+    build:
+      context: .
+      target: build
     command: ["sh", "-c", "if [ \"${SEED_DEMO_DATA:-false}\" = \"true\" ]; then npm run db:seed; fi"]
     environment:
       DATABASE_URL: postgres://${MIGRATION_DATABASE_USER:-qintopia_migrator}:${MIGRATION_DATABASE_PASSWORD:-qintopia_migrator}@postgres:5432/qintopia
@@ -40,7 +44,9 @@ services:
     restart: "no"
 
   reference-import:
-    build: .
+    build:
+      context: .
+      target: build
     command: ["sh", "-c", "if [ \"${IMPORT_2026_REFERENCE_CATALOG:-false}\" = \"true\" ]; then npm run db:import:2026; fi"]
     environment:
       DATABASE_URL: postgres://${MIGRATION_DATABASE_USER:-qintopia_migrator}:${MIGRATION_DATABASE_PASSWORD:-qintopia_migrator}@postgres:5432/qintopia

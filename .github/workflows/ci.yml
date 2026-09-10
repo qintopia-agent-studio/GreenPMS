@@ -52,3 +52,5 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Test release harness
+        run: python3 -m unittest discover -s scripts/release/tests -v
