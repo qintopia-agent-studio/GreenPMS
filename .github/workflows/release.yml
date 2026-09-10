@@ -124,7 +124,8 @@ jobs:
         run: npm run build
 
       - name: Test release harness
-        run: python3 -m unittest discover -s harness/scripts/release/tests -v
+        working-directory: harness
+        run: python3 -m unittest discover -s scripts/release/tests -v
 
   package-upload:
     name: Package and upload immutable release
