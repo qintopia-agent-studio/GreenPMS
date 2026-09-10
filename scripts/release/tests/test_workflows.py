@@ -165,9 +165,18 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("python3 scripts/release/cos.py fetch", package_upload)
         self.assertIn("if: steps.bundle.outputs.fetch_status == '3'", package_upload)
         self.assertIn('exit "$fetch_status"', package_upload)
+        self.assertNotIn("RELEASE_TAG: ${{ github.event.release.tag_name }}", self.release)
+        self.assertNotIn("RELEASE_VERSION: ${{ github.event.release.tag_name }}", self.release)
         self.assertIn("if: always()", self.release)
         self.assertNotIn("steps.metadata", self.release)
         self.assertNotIn("python3 scripts/release/orchestrate.py maintenance", self.release)
+
+    def test_runner_temp_is_step_scoped(self) -> None:
+        for workflow in (self.release, self.retention, self.rollback):
+            jobs = re.split(r"(?m)^  [a-z][a-z-]*:\n", workflow.split("jobs:\n", 1)[1])
+            for job in jobs:
+                job_env = job.split("    steps:", 1)[0]
+                self.assertNotIn("runner.temp", job_env)
 
     def test_release_keeps_v_in_package_identity_and_cos_key(self) -> None:
         self.assertIn('version="$RELEASE_VERSION"', self.release)
