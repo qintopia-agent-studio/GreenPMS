@@ -202,7 +202,7 @@ class Deployer:
 
     @staticmethod
     def uncompress(source, target):
-        command(["zstd", "--decompress", "--force", "--output", str(target), str(source)], timeout=600)
+        command(["zstd", "--decompress", "--force", "-o", str(target), str(source)], timeout=600)
 
     def audit(self, event, **fields):
         with (self.directory / "audit.jsonl").open("a") as stream:

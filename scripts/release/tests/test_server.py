@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -350,6 +351,25 @@ def _hold_lock(directory: str, ready: object, release: object, result: object) -
 class ServerImportTests(unittest.TestCase):
     def test_server_import_contract(self) -> None:
         self.assertIsNone(SERVER_IMPORT_ERROR, f"server.py import failed: {SERVER_IMPORT_ERROR!r}")
+
+
+@unittest.skipIf(server is None, "server.py import contract must be fixed first")
+@unittest.skipUnless(shutil.which("zstd"), "zstd is required for archive decompression")
+class CompressionTests(unittest.TestCase):
+    def test_deployer_uncompresses_zstd_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = root / "image.tar"
+            compressed = root / "image.tar.zst"
+            target = root / "uncompressed.tar"
+            raw.write_bytes(b"archive bytes")
+            subprocess.run(
+                ["zstd", "--quiet", "--force", "-o", str(compressed), str(raw)],
+                check=True,
+            )
+
+            server.Deployer.uncompress(compressed, target)  # type: ignore[union-attr]
+            self.assertEqual(target.read_bytes(), raw.read_bytes())
 
 
 @unittest.skipIf(server is None, "server.py import contract must be fixed first")

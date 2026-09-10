@@ -65,8 +65,10 @@ def command(argv: list[str], cwd: Path | None = None, *, binary: bool = False) -
             stderr=subprocess.PIPE,
             text=not binary,
         )
-    except (OSError, subprocess.CalledProcessError):
-        raise ReleaseError("release tool command failed") from None
+    except OSError:
+        raise ReleaseError(f"release tool unavailable: {argv[0]}") from None
+    except subprocess.CalledProcessError:
+        raise ReleaseError(f"release tool command failed: {argv[0]}") from None
     return result.stdout
 
 
@@ -269,7 +271,7 @@ def indexed_archive_path(path: Path):
         return None, path
     temporary = tempfile.TemporaryDirectory(prefix="greenpms-archive-")
     raw = Path(temporary.name) / "image.tar"
-    command(["zstd", "--quiet", "--decompress", "--force", "--output", str(raw), str(path)])
+    command(["zstd", "--quiet", "--decompress", "--force", "-o", str(raw), str(path)])
     return temporary, raw
 
 
@@ -419,7 +421,7 @@ def build_bundle(source_root: Path, version: str, revision: str, output: Path) -
         command(["docker", "save", "--output", str(raw_archive), tag])
         inspect_archive(raw_archive, provisional)
         archive_path = output / ARCHIVE
-        command(["zstd", "--quiet", "--threads=0", "--force", str(raw_archive), "--output", str(archive_path)])
+        command(["zstd", "--quiet", "--threads=0", "--force", str(raw_archive), "-o", str(archive_path)])
         sbom_path = output / "sbom.spdx.json"
         command(["syft", f"docker:{tag}", "-o", f"spdx-json={sbom_path}"])
         provisional["archiveSha256"] = sha256_file(archive_path)
@@ -448,8 +450,8 @@ def main() -> int:
     args = arguments()
     try:
         manifest = build_bundle(args.source_root.resolve(), args.version, args.revision, args.output.resolve())
-    except (OSError, ReleaseError):
-        print("release packaging failed", file=__import__("sys").stderr)
+    except (OSError, ReleaseError) as error:
+        print(f"release packaging failed: {error}", file=__import__("sys").stderr)
         return 1
     print(json.dumps(manifest, sort_keys=True))
     return 0
