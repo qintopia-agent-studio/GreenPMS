@@ -12,7 +12,7 @@ from unittest.mock import patch
 from scripts.release.common import FILES, ReleaseError, json_bytes, sha256_file
 from scripts.release.cos import CosStore, upload_bundle
 from scripts.release.orchestrate import (MAX_RECEIPT_BYTES, deploy, maintenance,
-                                          retention_plan)
+                                          retention_plan, validate_receipt)
 
 
 ROOT = "greenpms/releases/"
@@ -202,7 +202,7 @@ class CosStoreTests(unittest.TestCase):
 
         self.assertEqual(captured["Endpoint"], "cos.accelerate.myqcloud.com")
         self.assertEqual(captured["Region"], "ap-guangzhou")
-        self.assertEqual(captured["Timeout"], 60)
+        self.assertEqual(captured["Timeout"], (10, 60))
 
     def test_sdk_config_keeps_regional_default_when_endpoint_is_unset(self):
         captured = {}
@@ -248,6 +248,20 @@ class CosStoreTests(unittest.TestCase):
                 complete_store(FakeCos(), role="MARKER").put_immutable(key, data)
             with self.assertRaises(ReleaseError):
                 complete_store(FakeCos(status="Suspended"), role="UPLOAD").put_immutable(key, source.name)
+
+    def test_versioning_unknown_status_is_rejected(self):
+        class UnknownVersioning(FakeCos):
+            def get_bucket_versioning(self, Bucket):
+                self.versioning_calls += 1
+                return {"Unexpected": "value"}
+
+        data = b"x"
+        key = ROOT + "v1.2.3/" + "a" * 40 + "/greenpms-linux-amd64.docker.tar.zst"
+        with tempfile.NamedTemporaryFile() as source:
+            source.write(data)
+            source.flush()
+            with self.assertRaisesRegex(ReleaseError, "unknown"):
+                complete_store(UnknownVersioning(), role="UPLOAD").put_immutable(key, source.name)
 
     def test_upload_failure_does_not_create_marker(self):
         client = FakeCos()
@@ -305,6 +319,20 @@ class RetentionTests(unittest.TestCase):
         self.assertIn(releases[1], result["deleted"])
         self.assertIn(releases[2], result["deleted"])
         self.assertTrue(all(key.startswith(releases[0]) for key in client.objects if key.startswith(releases[0])))
+
+        client = FakeCos()
+        store = complete_store(client)
+        releases = []
+        for index in range(6):
+            releases.append(add_release(client, f"v1.2.{index + 10}", f"{index + 32:040x}",
+                                        f"2026-08-{index + 1:02d}T00:00:00Z")[0])
+        client.objects[releases[0] + "extra/nested.txt"] = b"keep"
+        result = retention_plan(store, keep=0,
+                                now=__import__("datetime").datetime.fromisoformat("2026-09-20T00:00:00+00:00"))
+        self.assertNotIn(releases[0], result["deleted"])
+        self.assertTrue(any(item.get("prefix") == releases[0] and item.get("reason") == "unknown-extra-object"
+                            for item in result["skipped"]))
+        self.assertTrue(any(key.startswith(releases[0]) for key in client.objects))
 
     def test_corrupt_complete_release_is_skipped_and_partial_delete_retries(self):
         client = FakeCos()
@@ -415,6 +443,18 @@ class OrchestrationTests(unittest.TestCase):
             with self.assertRaises(ReleaseError):
                 deploy("v2.1.0", "b" * 40, prefix, manifest_sha, dry_run=True, store=store,
                        ssh_factory=lambda argv: FakeSSH(empty_receipt))
+
+    def test_receipt_schema_rejects_unexpected_fields(self):
+        prefix = f"{ROOT}v2.1.0/{'b' * 40}/"
+        manifest = make_manifest("v2.1.0", "b" * 40)
+        current = {"prefix": prefix, "manifestSha256": "c" * 64, "manifest": manifest}
+        receipt = {"application": "greenpms", "status": "healthy", "deployedAt": "2026-09-09T10:00:00Z",
+                   "current": current, "previous": None, "rollbackFrom": None}
+        validate_receipt(receipt)
+        with self.assertRaisesRegex(ReleaseError, "unexpected schema"):
+            validate_receipt({**receipt, "untrusted": "value"})
+        with self.assertRaisesRegex(ReleaseError, "unexpected schema"):
+            validate_receipt({**receipt, "current": {**current, "untrusted": "value"}})
 
 
 if __name__ == "__main__":

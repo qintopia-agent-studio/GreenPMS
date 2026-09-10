@@ -14,7 +14,9 @@
 
 成功条件是 Release workflow 绿色、`/health/ready` 和 `/api/v1/version` 通过，COS 版本目录出现 `deployed.json`。下载/校验、Compose 启动或健康检查失败时，服务器不写成功标记，启动或健康失败会尽力恢复部署前容器，也不执行成功版本 retention；如果健康检查已经通过而 marker、retention 或本地清理失败，新版本保持运行，marker 可能已经创建，workflow 报错后可重试，不自动回退。
 
-同一 Release 重跑时，Actions 先用 `scripts/release/cos.py fetch` 查找该版本的完整且已校验 bundle，并复用不可变产物，不重新构建。若 COS 前缀只有部分文件或内容校验失败，流程会拒绝重建和覆盖；等待候选按 7 天策略清理，或使用新的版本/tag。
+同一 Release 重放时，Actions 从受保护的 `main` 解析并固定一个发布 harness commit，再把目标 tag checkout 到独立目录。应用源码和版本身份始终来自不可变 tag；所有 job 的打包、COS 和 SSH 工具来自同一个 harness commit，所以修复发布工具后可以重放旧 tag。Actions 随后查找该版本的完整且已校验 bundle，并复用不可变产物，不重新构建。若 COS 前缀只有部分文件或内容校验失败，流程会拒绝重建和覆盖；等待候选按 7 天策略清理，或使用新的版本/tag。
+
+基础设施修复合并后，在 Actions 页面使用 **Run workflow** 新建一次 `workflow_dispatch` 并填写已发布 tag。不要点击旧失败 run 的 **Re-run jobs**：GitHub 会沿用旧 run 固定的 workflow 内容，无法验证刚合并的修复。
 
 ## 回退
 

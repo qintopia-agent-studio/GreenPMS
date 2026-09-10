@@ -17,12 +17,12 @@ from typing import Any, Callable
 try:
     from .common import (FILES, HEX, ReleaseError, image_tag, json_bytes,
                          release_prefix, sha256_file, utcnow, validate_manifest,
-                         validate_identity)
+                         validate_identity, validate_migrations)
     from .cos import CosStore, ROOT_PREFIX
 except ImportError:
     from common import (FILES, HEX, ReleaseError, image_tag, json_bytes,
                         release_prefix, sha256_file, utcnow, validate_manifest,
-                        validate_identity)
+                        validate_identity, validate_migrations)
     from cos import CosStore, ROOT_PREFIX
 
 
@@ -64,18 +64,26 @@ def _prefix_from_ref(reference: Any) -> str | None:
 def _validate_legacy(reference: dict[str, Any]) -> None:
     if not reference.get("legacy"):
         return
+    if set(reference) != {"legacy", "prefix", "manifestSha256", "manifest"}:
+        raise ReleaseError("legacy receipt reference has an unexpected schema")
     if reference.get("prefix") is not None or reference.get("manifestSha256") is not None:
         raise ReleaseError("legacy receipt reference has an unexpected release key")
     manifest = reference.get("manifest")
     if not isinstance(manifest, dict):
         raise ReleaseError("legacy receipt reference has no manifest")
+    if set(manifest) != {"version", "gitRevision", "imageId", "imageTag", "requiredMigrations", "rollbackCompatibility"}:
+        raise ReleaseError("legacy receipt manifest has an unexpected schema")
     validate_identity(manifest.get("version"), manifest.get("gitRevision"))
+    if not isinstance(manifest.get("imageId"), str) or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest["imageId"]) is None:
+        raise ReleaseError("legacy receipt image identity is invalid")
     if manifest.get("imageTag") != manifest.get("imageId"):
         raise ReleaseError("legacy receipt image identity is invalid")
-    if not isinstance(manifest.get("requiredMigrations"), list):
-        raise ReleaseError("legacy receipt migration baseline is invalid")
+    validate_migrations(manifest.get("requiredMigrations"))
     compatibility = manifest.get("rollbackCompatibility")
-    if not isinstance(compatibility, dict) or compatibility.get("mode") not in {"same-migrations-only", "forward-only"}:
+    if (not isinstance(compatibility, dict) or set(compatibility) != {"mode", "reason"}
+            or compatibility.get("mode") not in {"same-migrations-only", "forward-only"}
+            or not isinstance(compatibility.get("reason"), str)
+            or not compatibility["reason"].strip()):
         raise ReleaseError("legacy receipt rollback compatibility is invalid")
 
 
@@ -92,9 +100,13 @@ def _validate_ref(reference: Any, *, allow_legacy: bool = True) -> None:
     prefix = reference.get("prefix")
     manifest_sha = reference.get("manifestSha256")
     manifest = reference.get("manifest")
+    if set(reference) != {"prefix", "manifestSha256", "manifest"}:
+        raise ReleaseError("receipt release reference has an unexpected schema")
     if not isinstance(prefix, str) or not prefix.endswith("/"):
         raise ReleaseError("receipt release prefix is invalid")
-    parts = prefix.removeprefix(ROOT_PREFIX).split("/")
+    if not prefix.startswith(ROOT_PREFIX):
+        raise ReleaseError("receipt release prefix is invalid")
+    parts = prefix[len(ROOT_PREFIX):].split("/")
     if len(parts) != 3 or not parts[2] == "":
         raise ReleaseError("receipt release prefix is invalid")
     validate_identity(parts[0], parts[1])
@@ -125,6 +137,10 @@ def validate_receipt(receipt: Any, *, expected_prefix: str | None = None,
                      expected_manifest: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(receipt, dict):
         raise ReleaseError("server receipt is not JSON")
+    required = {"application", "status", "deployedAt", "current", "previous", "rollbackFrom"}
+    allowed = required | {"localImagePlan"}
+    if not required.issubset(receipt) or not set(receipt).issubset(allowed):
+        raise ReleaseError("server receipt has an unexpected schema")
     if receipt.get("application") != "greenpms" or receipt.get("status") != "healthy":
         raise ReleaseError("server did not report a healthy GreenPMS release")
     _timestamp(receipt.get("deployedAt"))
@@ -186,7 +202,7 @@ def _ensure_marker(store: CosStore, prefix: str, manifest: dict[str, Any], manif
             raise
         existing = None
     if existing is not None:
-        if existing.get("schemaVersion") != 1 or existing.get("application") != "greenpms":
+        if set(existing) != set(expected) or existing.get("schemaVersion") != 1 or existing.get("application") != "greenpms":
             raise ReleaseError("existing deployed marker is invalid")
         for field in ("version", "gitRevision", "imageId", "manifestSha256"):
             if existing.get(field) != expected[field]:
@@ -231,7 +247,7 @@ def _release_groups(store: CosStore) -> tuple[dict[str, dict[str, dict[str, Any]
             continue
         remainder = key[len(root):]
         parts = remainder.split("/")
-        if len(parts) != 3 or not parts[2]:
+        if len(parts) < 3 or not parts[0] or not parts[1]:
             malformed.append(item)
             continue
         candidate_prefix = root + parts[0] + "/" + parts[1] + "/"
@@ -240,7 +256,7 @@ def _release_groups(store: CosStore) -> tuple[dict[str, dict[str, dict[str, Any]
         except ReleaseError:
             malformed.append(item)
             continue
-        if parts[2] not in SUCCESS_FILES:
+        if len(parts) != 3 or not parts[2] or parts[2] not in SUCCESS_FILES:
             unknown[candidate_prefix].append(item)
         else:
             groups[candidate_prefix][parts[2]] = item
@@ -330,13 +346,17 @@ def retention_plan(store: CosStore, protected_prefixes: set[str] | None = None, 
     successful: list[tuple[datetime, str]] = []
     partial: list[tuple[datetime, str, dict[str, dict[str, Any]]]] = []
     for prefix, files in sorted(groups.items()):
-        if prefix in protected:
-            result["kept"].append({"prefix": prefix, "reason": "protected"})
-            if prefix in unknown or MARKER not in files:
-                continue
+        # An extra object makes the whole immutable prefix untrusted. Do this
+        # before validating or deleting any of its known release objects.
         if prefix in unknown:
+            if prefix in protected:
+                result["kept"].append({"prefix": prefix, "reason": "protected"})
             result["skipped"].append({"prefix": prefix, "reason": "unknown-extra-object"})
             continue
+        if prefix in protected:
+            result["kept"].append({"prefix": prefix, "reason": "protected"})
+            if MARKER not in files:
+                continue
         if MARKER not in files:
             try:
                 if "manifest.json" in files:
@@ -402,7 +422,10 @@ def retention_plan(store: CosStore, protected_prefixes: set[str] | None = None, 
         else:
             _delete_keys(store, prefix, list(files), result)
     for prefix, items in sorted(unknown.items()):
-        result["skipped"].append({"prefix": prefix, "reason": "unknown-extra-object", "count": len(items)})
+        if prefix not in groups:
+            if prefix in protected:
+                result["kept"].append({"prefix": prefix, "reason": "protected"})
+            result["skipped"].append({"prefix": prefix, "reason": "unknown-extra-object", "count": len(items)})
     for item in malformed:
         result["skipped"].append({"key": item.get("key"), "reason": "invalid-release-key"})
     if result["deleteFailures"]:

@@ -93,12 +93,23 @@ export function checkRelease({ rootDir = root, tag, environment = process.env } 
 
 export function parseArguments(argumentsList = process.argv.slice(2)) {
   const tagIndex = argumentsList.indexOf("--tag");
-  if (tagIndex === -1) return {};
-  const tag = argumentsList[tagIndex + 1];
-  if (!tag || tag.startsWith("--")) {
-    throw new Error("--tag requires a vX.Y.Z value");
+  const rootIndex = argumentsList.indexOf("--root");
+  const result = {};
+  if (tagIndex !== -1) {
+    const tag = argumentsList[tagIndex + 1];
+    if (!tag || tag.startsWith("--")) {
+      throw new Error("--tag requires a vX.Y.Z value");
+    }
+    result.tag = tag;
   }
-  return { tag };
+  if (rootIndex !== -1) {
+    const rootDir = argumentsList[rootIndex + 1];
+    if (!rootDir || rootDir.startsWith("--")) {
+      throw new Error("--root requires a source directory");
+    }
+    result.rootDir = resolve(rootDir);
+  }
+  return result;
 }
 
 export function main({ argumentsList = process.argv.slice(2), environment = process.env } = {}) {

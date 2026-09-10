@@ -38,6 +38,11 @@ class ReleaseCheckTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Release {CURRENT_TAG}", result.stdout)
 
+    def test_explicit_root_is_checked_with_the_same_v_tag_contract(self) -> None:
+        result = self.run_check("--root", str(ROOT), "--tag", CURRENT_TAG)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Release {CURRENT_TAG}", result.stdout)
+
     def test_tag_event_is_checked_and_mismatch_fails(self) -> None:
         matching = self.run_check(GITHUB_REF=f"refs/tags/{CURRENT_TAG}")
         self.assertEqual(matching.returncode, 0, matching.stderr)
@@ -130,35 +135,50 @@ class WorkflowContractTests(unittest.TestCase):
             "greenpms-production",
             "cancel-in-progress: false",
             "git merge-base --is-ancestor \"$RELEASE_SHA\" origin/main",
-            "node scripts/check-release.mjs --tag \"$RELEASE_TAG\"",
+            "node harness/scripts/check-release.mjs --root source --tag \"$RELEASE_TAG\"",
             "DOCKER_DEFAULT_PLATFORM: linux/amd64",
-            "python3 scripts/release/package.py",
-            "python3 scripts/release/cos.py upload",
+            "python3 harness/scripts/release/package.py",
+            "python3 harness/scripts/release/cos.py upload",
             "greenpms/releases/",
             "UPLOAD_COS_SECRET_KEY",
             "environment: production",
             "persist-credentials: false",
             "DEPLOY_SSH_KEY_FILE",
             "DEPLOY_KNOWN_HOSTS_FILE",
-            "python3 scripts/release/orchestrate.py deploy",
+            "python3 harness/scripts/release/orchestrate.py deploy",
             "--manifest-sha",
+            "path: harness",
+            "path: source",
+            "--source-root \"$GITHUB_WORKSPACE/source\"",
+            "harness_sha: ${{ steps.release.outputs.harness_sha }}",
+            "HARNESS_SHA: ${{ needs.validate.outputs.harness_sha }}",
         ):
             self.assertIn(fragment, self.release)
         tagged_ref = "ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}"
-        self.assertEqual(self.release.count(tagged_ref), 2)
-        self.assertEqual(self.release.count('git rev-parse "refs/tags/$RELEASE_TAG^{commit}"'), 3)
+        self.assertEqual(self.release.count(tagged_ref), 1)
+        self.assertEqual(self.release.count("ref: main"), 1)
+        self.assertEqual(self.release.count("ref: ${{ needs.validate.outputs.harness_sha }}"), 2)
+        self.assertNotIn("github.workflow_sha", self.release)
+        self.assertIn("ref: ${{ needs.validate.outputs.release_tag }}", self.release)
+        self.assertNotIn("ref: ${{ github.sha }}", self.release)
+        self.assertIn("needs: [validate, package-upload]", self.release)
         self.assertNotIn("RELEASE_SHA: ${{ github.sha }}", self.release)
         self.assertNotIn("RELEASE_REVISION: ${{ github.sha }}", self.release)
         package_upload = self.release.split("  package-upload:", 1)[1].split("  deploy:", 1)[0]
-        package_checkout = package_upload.split("      - name: Check out the tagged commit", 1)[1].split(
-            "      - name: Set up Node.js 22", 1
+        package_checkout = package_upload.split("      - name: Check out immutable release source", 1)[1].split(
+            "      - name: Resolve release identity", 1
         )[0]
         self.assertIn("fetch-depth: 0", package_checkout)
-        self.assertIn(tagged_ref, package_checkout)
+        self.assertIn("ref: ${{ needs.validate.outputs.release_tag }}", package_checkout)
+        self.assertIn("persist-credentials: false", package_checkout)
+        self.assertIn("--source-root \"$GITHUB_WORKSPACE/source\"", package_upload)
+        self.assertIn('test "$(git -C harness rev-parse HEAD)" = "$HARNESS_SHA"', package_upload)
+        self.assertIn("working-directory: source", self.release.split("  package-upload:", 1)[0])
+        self.assertIn("--version \"$RELEASE_VERSION\"", package_upload)
         deploy = self.release.split("  deploy:", 1)[1]
         self.assertIn("environment: production", package_upload)
         self.assertIn("UPLOAD_COS_SECRET_ID", package_upload)
-        self.assertNotIn("DEPLOY_SSH_KEY", package_upload)
+        self.assertIn("DEPLOY_SSH_KEY", package_upload)
         self.assertNotIn("MARKER_COS_SECRET_ID", package_upload)
         self.assertIn("environment: production", deploy)
         for fragment in ("DEPLOY_SSH_KEY", "MARKER_COS_SECRET_ID", "RETENTION_COS_SECRET_ID"):
@@ -167,7 +187,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("secrets.MARKER_COS_", self.workflows)
         self.assertNotIn("environment: release-build", self.workflows)
         self.assertNotIn("environment: release-maintenance", self.workflows)
-        self.assertIn("python3 scripts/release/cos.py fetch", package_upload)
+        self.assertIn("python3 harness/scripts/release/cos.py fetch", package_upload)
         self.assertIn("if: steps.bundle.outputs.fetch_status == '3'", package_upload)
         self.assertIn('exit "$fetch_status"', package_upload)
         self.assertNotIn("RELEASE_TAG: ${{ github.event.release.tag_name }}", self.release)
@@ -175,6 +195,45 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if: always()", self.release)
         self.assertNotIn("steps.metadata", self.release)
         self.assertNotIn("python3 scripts/release/orchestrate.py maintenance", self.release)
+
+    def test_release_checks_all_external_configuration_before_packaging(self) -> None:
+        package_upload = self.release.split("  package-upload:", 1)[1].split("  deploy:", 1)[0]
+        preflight = package_upload.split("      - name: Verify release infrastructure configuration", 1)[1].split(
+            "      - name: Check out trusted release harness", 1
+        )[0]
+        for name in (
+            "COS_BUCKET", "COS_REGION", "UPLOAD_COS_SECRET_ID", "UPLOAD_COS_SECRET_KEY",
+            "RETENTION_COS_SECRET_ID", "RETENTION_COS_SECRET_KEY", "DEPLOY_HOST",
+            "DEPLOY_USER", "DEPLOY_SSH_KEY", "DEPLOY_KNOWN_HOSTS",
+        ):
+            self.assertIn(name, preflight)
+        self.assertIn("Missing GreenPMS release configuration", preflight)
+        self.assertNotIn("set -x", preflight)
+
+    def test_package_key_command_preserves_v_prefix(self) -> None:
+        package_step = self.release.split("      - name: Upload immutable release and verify stored bytes", 1)[1]
+        package_step = package_step.split("      - name: Write release summary", 1)[0]
+        version_line = next(line.strip() for line in package_step.splitlines() if line.strip().startswith("version="))
+        key_line = next(line.strip() for line in package_step.splitlines() if line.strip().startswith("key="))
+        self.assertEqual(version_line, 'version="$RELEASE_VERSION"')
+        self.assertEqual(key_line, 'key="${COS_PREFIX}${version}/${revision}/"')
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ.copy()
+            environment.update({
+                "RELEASE_VERSION": "v1.2.3",
+                "RELEASE_REVISION": "a" * 40,
+                "COS_PREFIX": "greenpms/releases/",
+            })
+            result = subprocess.run(
+                ["bash", "-eu", "-c", "\n".join((version_line, "revision=\"$RELEASE_REVISION\"", key_line, "printf '%s\\n' \"$version|$key\""))],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), f"v1.2.3|greenpms/releases/v1.2.3/{'a' * 40}/")
 
     def test_runner_temp_is_step_scoped(self) -> None:
         for workflow in (self.release, self.retention, self.rollback):
@@ -208,7 +267,7 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_release_ancestry_command_accepts_tag_before_later_main_commit(self) -> None:
-        command = 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main'
+        command = next(line.strip() for line in self.release.splitlines() if line.strip().startswith("git merge-base --is-ancestor"))
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary)
             subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repository, check=True)
