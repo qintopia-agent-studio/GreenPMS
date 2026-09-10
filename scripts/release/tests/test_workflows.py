@@ -144,12 +144,17 @@ class WorkflowContractTests(unittest.TestCase):
             "--manifest-sha",
         ):
             self.assertIn(fragment, self.release)
+        tagged_ref = "ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}"
+        self.assertEqual(self.release.count(tagged_ref), 2)
+        self.assertEqual(self.release.count('git rev-parse "refs/tags/$RELEASE_TAG^{commit}"'), 3)
+        self.assertNotIn("RELEASE_SHA: ${{ github.sha }}", self.release)
+        self.assertNotIn("RELEASE_REVISION: ${{ github.sha }}", self.release)
         package_upload = self.release.split("  package-upload:", 1)[1].split("  deploy:", 1)[0]
         package_checkout = package_upload.split("      - name: Check out the tagged commit", 1)[1].split(
             "      - name: Set up Node.js 22", 1
         )[0]
         self.assertIn("fetch-depth: 0", package_checkout)
-        self.assertIn("ref: ${{ github.sha }}", package_checkout)
+        self.assertIn(tagged_ref, package_checkout)
         deploy = self.release.split("  deploy:", 1)[1]
         self.assertIn("environment: production", package_upload)
         self.assertIn("UPLOAD_COS_SECRET_ID", package_upload)
