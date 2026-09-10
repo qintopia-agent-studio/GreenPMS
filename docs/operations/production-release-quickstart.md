@@ -6,16 +6,9 @@
 
 日常发布不需要登录服务器，也不需要手工上传镜像：
 
-1. 将版本、`package.json`、`package-lock.json`、`CHANGELOG`、发布说明和 `deploy/release-policy.json` 一起合并到 `main`。
-2. 在本地确认版本和 tag 一致，然后创建并推送严格的 `vX.Y.Z` tag：
-
-   ```bash
-   rtk npm run release:check -- --tag v1.2.4
-   rtk git tag -a v1.2.4 -m 'GreenPMS v1.2.4'
-   rtk git push origin v1.2.4
-   ```
-
-3. 打开 GitHub 的 Releases，使用刚推送的 tag 创建 Release，确认不是 Draft、不是 Pre-release，点击 **Publish release**。
+1. 合并业务 PR 到 `main`。`GreenPMS Release Please` 会自动创建或更新版本 PR；它自动更新 `package.json`、`package-lock.json`、`CHANGELOG.md`、`deploy/release-policy.json` 的版本字段。无需本地执行版本命令或 Git tag 命令。
+2. 检查自动版本 PR 的版本和 `CHANGELOG.md`。本次若有数据库迁移或回退不兼容变化，在这个 PR 中修改 `deploy/release-policy.json` 的 `rollbackCompatibility`；没有迁移时保持 `same-migrations-only`。合并版本 PR。
+3. Release Please 自动创建不可变的 `vX.Y.Z` tag 和 Draft GitHub Release。确认说明和上线时机后，打开 GitHub Releases，点击 **Publish release**。
 4. `release.published` 自动启动 **GreenPMS Release**。它会验证 tag 指向 `main` 历史中的提交，运行测试和构建，生成 linux/amd64 镜像、archive、checksum、SBOM，上传并回读 COS，然后通过受限 SSH 自动更新服务器。
 5. 不需要再点击 Environment 审批。GitHub Release 的 **Publish release**（`release.published`）就是本次生产发布的唯一批准点；只使用一个 `production` Environment，且不设置 reviewer 或 wait timer。
 
@@ -81,6 +74,8 @@ rtk proxy python3 scripts/release/setup.py \
 | Variable | `DEPLOY_HOST` | 生产服务器地址 |
 | Variable | `DEPLOY_USER` | `greenpms-deploy` |
 | Variable（可选） | `COS_ENDPOINT` | 全局加速时为 `cos.accelerate.myqcloud.com` |
+
+在 Repository secrets（不是 `production` Environment）中增加 `RELEASE_PLEASE_TOKEN`。它使用两位合并人之一的专用 Fine-grained PAT，仅授予本仓库的 Contents read/write 和 Pull requests read/write；它只用于 Release Please 创建版本 PR 并让 PR CI 正常触发，不授予 COS、SSH、数据库或其他仓库权限。
 
 只创建一个名为 `production` 的 Environment。Deployment branches and tags 选择 `main` 和 `v*`，不设置 required reviewers 和 wait timer。将以下六个值放入这个 Environment 的 Secrets：
 

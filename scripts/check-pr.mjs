@@ -8,6 +8,8 @@ const TITLE_PATTERN = new RegExp(
   `^(${VALID_TYPES})(?:\\([^()\\s]+\\))?!?: ([^\\r\\n]+)$`,
   'u',
 );
+const RELEASE_TITLE_PATTERN = /^chore\(release\): release (0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+const RELEASE_PLEASE_MARKER = 'This PR was generated with [Release Please].';
 const H2_PATTERN = /^##(?!#)[ \t]+(.+?)[ \t]*$/u;
 const HTML_COMMENT_PATTERN = /<!--[\s\S]*?(?:-->|$)/gu;
 const UNCHECKED_CHECKLIST_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[\s*\](?:\s+.*)?$/u;
@@ -125,11 +127,50 @@ function validateBody(body, errors) {
   }
 }
 
+function validateAutomatedReleaseBody(input, errors) {
+  const { title, body } = isRecord(input) ? input : {};
+  if (typeof title !== 'string' || !RELEASE_TITLE_PATTERN.test(title)) {
+    errors.push(ERRORS.TITLE_FORMAT);
+  }
+  if (typeof body !== 'string' || body.trim() === '') {
+    errors.push(ERRORS.BODY_REQUIRED);
+    return;
+  }
+
+  const lines = stripHtmlComments(body).replace(/\r\n?/gu, '\n').split('\n');
+  const headings = findH2Headings(lines);
+  const required = new Set(REQUIRED_SECTIONS);
+  for (const section of REQUIRED_SECTIONS) {
+    const matching = headings.filter(({ name }) => name === section);
+    if (matching.length !== 1) {
+      errors.push(SECTION_COUNT_ERRORS[section]);
+      continue;
+    }
+    const start = matching[0].index + 1;
+    const nextHeading = headings.find(({ index }) => index > matching[0].index);
+    const end = nextHeading?.index ?? lines.length;
+    if (!hasMeaningfulContent(lines.slice(start, end).join('\n'))) {
+      errors.push(SECTION_CONTENT_ERRORS[section]);
+    }
+  }
+
+  const changelogHeadings = headings.filter(({ name }) => !required.has(name));
+  if (changelogHeadings.some(({ name }) => !/^\[?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\]?/u.test(name))) {
+    errors.push(ERRORS.UNEXPECTED_H2);
+  }
+}
+
 export function validatePullRequest(input = {}) {
   const { title, body } = isRecord(input) ? input : {};
   const errors = [];
   validateTitle(title, errors);
   validateBody(body, errors);
+  return errors;
+}
+
+export function validateAutomatedReleasePullRequest(input = {}) {
+  const errors = [];
+  validateAutomatedReleaseBody(input, errors);
   return errors;
 }
 
@@ -162,12 +203,17 @@ function readPullRequestFromEvent() {
     return { errors: [ERRORS.EVENT_SHAPE] };
   }
 
-  return { pullRequest: event.pull_request };
+  const isAutomatedRelease = RELEASE_TITLE_PATTERN.test(event.pull_request.title)
+    && event.pull_request.head?.ref?.startsWith('release-please--branches--')
+    && event.pull_request.body.includes(RELEASE_PLEASE_MARKER);
+  return { pullRequest: event.pull_request, isAutomatedRelease };
 }
 
 function runCli() {
-  const { errors, pullRequest } = readPullRequestFromEvent();
-  const validationErrors = errors ?? validatePullRequest(pullRequest);
+  const { errors, pullRequest, isAutomatedRelease } = readPullRequestFromEvent();
+  const validationErrors = errors ?? (isAutomatedRelease
+    ? validateAutomatedReleasePullRequest(pullRequest)
+    : validatePullRequest(pullRequest));
   if (validationErrors.length > 0) {
     process.stderr.write(`${validationErrors.join('\n')}\n`);
     return 1;

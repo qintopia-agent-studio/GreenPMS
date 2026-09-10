@@ -100,36 +100,47 @@ def validate_release_identity(source_root: Path, version: str, revision: str) ->
     lock_root = lock.get("packages", {}).get("") if isinstance(lock.get("packages"), dict) else None
     require(isinstance(lock_root, dict) and lock_root.get("version") == version[1:], "workspace lock version mismatch")
 
-    notes_path = source_root / "docs" / "releases" / f"{version}.md"
     try:
-        notes = notes_path.read_text()
         changelog = (source_root / "CHANGELOG.md").read_text()
     except (OSError, UnicodeError):
         raise ReleaseError("release notes are missing") from None
-    require(notes.startswith(f"# QinTopia PMS {version}\n"), "release notes version mismatch")
-    require(f"docs/releases/{version}.md" in changelog, "CHANGELOG does not link release notes")
-    validate_policy(source_root, version, notes)
+    changelog_version = version[1:]
+    require(
+        re.search(
+            rf"^## (?:\[{re.escape(changelog_version)}\](?:\([^\n]+\))?|v{re.escape(changelog_version)}\b)",
+            changelog,
+            re.MULTILINE,
+        ) is not None,
+        "CHANGELOG version entry is missing",
+    )
+    validate_policy(source_root, version)
 
 
-def validate_policy(source_root: Path, version: str, notes: str) -> dict[str, str]:
+def validate_policy(source_root: Path, version: str) -> dict[str, str]:
     policy = read_json(source_root / "deploy" / "release-policy.json")
     require(isinstance(policy, dict), "invalid release policy")
     require(policy.get("application") == "greenpms", "release policy application mismatch")
-    require(policy.get("version") == version, "release policy version mismatch")
+    require(policy.get("version") in {version, version[1:]}, "release policy version mismatch")
     compatibility = policy.get("rollbackCompatibility")
     require(isinstance(compatibility, dict), "release policy compatibility is missing")
-    require(set(compatibility) == {"mode", "reason", "releaseNotes"}, "invalid release policy fields")
+    require(set(compatibility) in ({"mode", "reason"}, {"mode", "reason", "releaseNotes"}), "invalid release policy fields")
     mode = compatibility.get("mode")
     reason = compatibility.get("reason")
-    release_notes = compatibility.get("releaseNotes")
     require(mode in {"same-migrations-only", "forward-only"}, "invalid release policy mode")
     require(isinstance(reason, str) and 0 < len(reason) <= 1000, "invalid release policy reason")
-    require(isinstance(release_notes, dict), "release notes policy is missing")
-    require(set(release_notes) == {"path", "requiredText"}, "invalid release notes policy")
-    require(release_notes.get("path") == f"docs/releases/{version}.md", "release notes policy path mismatch")
-    required_text = release_notes.get("requiredText")
-    require(isinstance(required_text, list) and required_text, "release notes policy text is missing")
-    require(all(isinstance(text, str) and text and text in notes for text in required_text), "release notes do not match policy")
+    release_notes = compatibility.get("releaseNotes")
+    if release_notes is not None:
+        require(isinstance(release_notes, dict), "release notes policy is invalid")
+        require(set(release_notes) == {"path", "requiredText"}, "invalid release notes policy")
+        require(release_notes.get("path") == f"docs/releases/{version}.md", "release notes policy path mismatch")
+        required_text = release_notes.get("requiredText")
+        require(isinstance(required_text, list) and required_text, "release notes policy text is missing")
+        notes_path = source_root / "docs" / "releases" / f"{version}.md"
+        try:
+            notes = notes_path.read_text()
+        except (OSError, UnicodeError):
+            raise ReleaseError("release notes are missing") from None
+        require(all(isinstance(text, str) and text and text in notes for text in required_text), "release notes do not match policy")
     return {"mode": mode, "reason": reason}
 
 
@@ -355,11 +366,7 @@ def build_bundle(source_root: Path, version: str, revision: str, output: Path) -
     validate_build_context(source_root)
     output.mkdir(parents=True, exist_ok=True)
     require(not any(output.iterdir()), "release output directory must be empty")
-    rollback = validate_policy(
-        source_root,
-        version,
-        (source_root / "docs" / "releases" / f"{version}.md").read_text(),
-    )
+    rollback = validate_policy(source_root, version)
     tag = image_tag(version, revision)
     created_at = utcnow()
     build_args = [

@@ -6,6 +6,7 @@
 ## 发布 harness 索引
 
 - 日常发布、回退与首次配置：`docs/operations/production-release-quickstart.md`；实现细节与恢复：`docs/operations/production-release-runbook.md`；参考方案映射：`docs/operations/production-release-investigation.md`。
+- `main` 合并后由 `.github/workflows/release-please.yml` 自动生成版本 PR、tag 和 Draft Release；正式部署仍只响应 `release.published`。
 - 遵循 npm workspaces / package-lock：`npm ci`、`npm run release:check`、`npm run typecheck`、`npm test`、`npm run build`；离线发布测试：`npm run test:release`（Python 3，fake COS/Docker/SSH）。
 - 生产 `compose.server.yaml` 只接收预构建 `GREENPMS_IMAGE`；不要在生产目录构建，不读凭据文件，不把外部 TencentDB/备份列入清理。部署与清理使用 `scripts/release/` 正式入口。
 

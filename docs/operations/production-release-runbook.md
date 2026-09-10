@@ -7,7 +7,9 @@
 ## 1. 目标流程
 
 ```text
-main 中的精确 vX.Y.Z tag
+业务 PR 合并到 main
+  -> Release Please 创建/更新版本 PR
+  -> 合并版本 PR，自动创建精确 vX.Y.Z tag 和 Draft Release
   -> 发布非 Draft、非 Pre-release 的 GitHub Release
   -> release.published 触发 GreenPMS Release
   -> npm ci / release check / typecheck / test / build
@@ -23,11 +25,11 @@ main 中的精确 vX.Y.Z tag
 
 GitHub Release 的 **Publish release** 是批准动作。只有一个 `production` Environment，允许 `main` 和 `v*`，不配置 reviewer 或 wait timer，因此 workflow 不会再暂停等待第二次批准。release、rollback 和定时 retention 共用 `greenpms-production` concurrency，避免上传、切换和清理并行破坏状态。
 
-管理员负责一次性 bootstrap 和故障入口；发布人负责发布 GitHub Release、观察 workflow 和执行 GitHub Actions 回退。GitHub Release 的 **Publish release**（`release.published`）是唯一批准点。
+管理员负责一次性 bootstrap 和故障入口；发布人负责审核并合并 Release Please 版本 PR、发布 GitHub Release、观察 workflow 和执行 GitHub Actions 回退。GitHub Release 的 **Publish release**（`release.published`）是唯一批准点。
 
 ## 2. 发布身份和产物
 
-tag 必须严格匹配 `vX.Y.Z`，并指向 `main` 历史中的提交。Actions 同时核对 tag、package/lock、CHANGELOG、发布说明和 `deploy/release-policy.json`。服务器不从 Git checkout 构建，生产 Compose 只接受明确的预构建 `GREENPMS_IMAGE`，固定容器名是 `qintopia-pms-app`，Compose 项目名是 `green-pms`。
+Release Please 创建的 tag 必须严格匹配 `vX.Y.Z`，并指向 `main` 历史中的提交。Actions 同时核对 tag、package/lock、Release Please 生成的 `CHANGELOG` 条目和 `deploy/release-policy.json`。服务器不从 Git checkout 构建，生产 Compose 只接受明确的预构建 `GREENPMS_IMAGE`，固定容器名是 `qintopia-pms-app`，Compose 项目名是 `green-pms`。
 
 镜像使用不可变本地 tag：
 
@@ -317,6 +319,8 @@ rtk proxy ssh "$ADMIN_ALIAS" \
 | Secret（可选） | `UPLOAD_COS_TOKEN` |
 | Secret（可选） | `RETENTION_COS_TOKEN` |
 
+另外，在 Repository secrets（不是 `production` Environment）配置 `RELEASE_PLEASE_TOKEN`。它是只用于 Release Please 创建版本 PR 和触发 PR CI 的本仓库 Fine-grained PAT，权限为本仓库 Contents read/write、Pull requests read/write；不包含 COS、SSH、数据库或其他仓库权限。
+
 只创建 `production` Environment，允许 tag `v*` 和 branch `main`，不设置 reviewers/wait timer。Environment 的 branch/tag 限制不是身份授权的替代品；CAM policy 仍必须只允许 GreenPMS 前缀。
 
 首次真实发布前完成：
@@ -324,7 +328,7 @@ rtk proxy ssh "$ADMIN_ALIAS" \
 1. `rtk npm run test:release`、`rtk npm run release:check`、`rtk npm run typecheck`、`rtk npm test` 和 `rtk npm run build`。
 2. GitHub Retention 在 `main` 上以 `dry_run=true` 运行，确认只列出 GreenPMS 前缀且保护 current/previous。
 3. 若初始化检查发现凭据需要轮换或旧镜像来源不明，将其纳入授权窗口，按组织流程轮换凭据并从干净 checkout 重建和核验镜像；清理源码、临时 build 目录、归档和 BuildKit cache 时逐项确认归属，绝不全局 prune。
-4. 创建新的未发布严格版本 tag，发布非 Draft、非 Pre-release GitHub Release。Publish 是批准动作，之后不再等待 Environment 审批。
+4. 合并 Release Please 生成的版本 PR，确认它创建了新的未发布严格版本 tag 和 Draft GitHub Release；发布该 Release。Publish 是批准动作，之后不再等待 Environment 审批。
 5. 首发通过后人工检查公网 ready/version、登录和房态读取、Docker health、COS marker、retention 结果和服务器 audit。人工验收通过前，状态只记为“工程完成，待生产验收”。
 
 ## 附录 D：故障入口和验证

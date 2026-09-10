@@ -6,7 +6,10 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { validatePullRequest } from './check-pr.mjs';
+import {
+  validateAutomatedReleasePullRequest,
+  validatePullRequest,
+} from './check-pr.mjs';
 
 const scriptPath = fileURLToPath(new URL('./check-pr.mjs', import.meta.url));
 
@@ -54,6 +57,54 @@ test('accepts English and Chinese pull requests', () => {
     }),
     [],
   );
+});
+
+test('accepts the fixed Release Please pull request format', () => {
+  const releaseBody = [
+    '## 改动说明',
+    '',
+    'Release Please 自动更新版本元数据。',
+    '',
+    '## 验证结果',
+    '',
+    'GreenPMS CI 自动运行检查。',
+    '',
+    '## 风险与回退',
+    '',
+    '只有发布正式 Release 才会部署。',
+    '',
+    '## [1.2.4](https://example.invalid/compare/v1.2.3...v1.2.4)',
+    '',
+    '### Bug Fixes',
+    '',
+    '* fix a release issue',
+  ].join('\n');
+
+  assert.deepEqual(
+    validateAutomatedReleasePullRequest({
+      title: 'chore(release): release 1.2.4',
+      body: releaseBody,
+    }),
+    [],
+  );
+});
+
+test('CLI recognizes only the fixed Release Please branch as an automated release PR', () => {
+  const release = runCli(JSON.stringify({
+    pull_request: {
+      title: 'chore(release): release 1.2.4',
+      body: `This PR was generated with [Release Please].\n\n${body('Release Please 自动更新版本。', 'GreenPMS CI 自动运行。', '只有发布正式 Release 才会部署。')}`,
+      head: { ref: 'release-please--branches--main' },
+      user: { login: 'noraincode' },
+    },
+  }), fs.mkdtempSync(path.join(os.tmpdir(), 'greenpms-release-pr-')) + '/event.json');
+  assert.equal(release.status, 0, release.stderr);
+
+  const ordinary = validatePullRequest({
+    title: 'chore(release): release 1.2.4',
+    body: 'automated-looking text',
+  });
+  assert.ok(ordinary.length > 0);
 });
 
 test('rejects missing and duplicate required headings', () => {

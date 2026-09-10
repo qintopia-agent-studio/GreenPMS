@@ -8,6 +8,32 @@ const TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 const read = (path, rootDir = root) => readFileSync(resolve(rootDir, path), "utf8");
 
+function changelogReleaseSection(changelog, version) {
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const heading = new RegExp(`^## (?:\\[${escaped}\\](?:\\([^\\n]+\\))?|v${escaped}\\b)`, "m");
+  const match = heading.exec(changelog);
+  if (!match) return undefined;
+  const section = changelog.slice(match.index + match[0].length).split(/^## /m)[0].trim();
+  return section || undefined;
+}
+
+function checkPolicy(rootDir, version) {
+  const policy = JSON.parse(read("deploy/release-policy.json", rootDir));
+  if (policy.application !== "greenpms") {
+    throw new Error("release policy application must be greenpms");
+  }
+  if (policy.version !== version && policy.version !== `v${version}`) {
+    throw new Error("release policy version must match package.json");
+  }
+  const compatibility = policy.rollbackCompatibility;
+  if (!compatibility || !["same-migrations-only", "forward-only"].includes(compatibility.mode)) {
+    throw new Error("release policy rollbackCompatibility mode is invalid");
+  }
+  if (typeof compatibility.reason !== "string" || !compatibility.reason.trim()) {
+    throw new Error("release policy rollbackCompatibility reason is required");
+  }
+}
+
 export function parseReleaseTag(value) {
   if (typeof value !== "string" || !TAG.test(value)) {
     throw new Error(`Release tag must match vX.Y.Z: ${value || "(missing)"}`);
@@ -47,19 +73,20 @@ export function checkRelease({ rootDir = root, tag, environment = process.env } 
     }
   }
 
-  const notes = read(`docs/releases/v${version}.md`, rootDir);
-  if (!notes.startsWith(`# QinTopia PMS v${version}\n`)) {
-    throw new Error("Release notes must name the current version");
+  const changelog = read("CHANGELOG.md", rootDir);
+  if (!changelogReleaseSection(changelog, version)) {
+    throw new Error("CHANGELOG must contain a nonempty entry for the current version");
   }
-  for (const section of ["优化说明", "升级说明", "验证与已知问题", "回退说明"]) {
-    const content = notes.split(`## ${section}\n`)[1]?.split(/\n## /)[0]?.trim();
-    if (!content) {
-      throw new Error(`Release notes require a nonempty ${section} section`);
+  const optionalNotes = resolve(rootDir, `docs/releases/v${version}.md`);
+  try {
+    const notes = readFileSync(optionalNotes, "utf8");
+    if (!notes.startsWith(`# QinTopia PMS v${version}\n`)) {
+      throw new Error("Detailed release notes must name the current version");
     }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
   }
-  if (!read("CHANGELOG.md", rootDir).includes(`docs/releases/v${version}.md`)) {
-    throw new Error("CHANGELOG must link the current release notes");
-  }
+  checkPolicy(rootDir, version);
 
   return { version, tag: effectiveTag ?? `v${version}` };
 }
@@ -76,7 +103,7 @@ export function parseArguments(argumentsList = process.argv.slice(2)) {
 
 export function main({ argumentsList = process.argv.slice(2), environment = process.env } = {}) {
   const result = checkRelease({ ...parseArguments(argumentsList), environment });
-  console.log(`Release ${result.tag}: metadata, optimization notes, upgrade notes and recovery notes verified.`);
+  console.log(`Release ${result.tag}: package, changelog, rollback policy and tag identity verified.`);
   return result;
 }
 
