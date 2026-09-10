@@ -219,6 +219,25 @@ class DockerAdapterTests(unittest.TestCase):
         self.assertIn('index .State "Health"', template)
         self.assertNotIn(".State.Health", template)
 
+    def test_image_inspection_handles_images_without_labels(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_command(args: list[str], **_kwargs: object) -> str:
+            calls.append(args)
+            return '{"Id":"sha256:db","RepoTags":["postgres:18"],"Os":"linux","Architecture":"amd64","Labels":null}'
+
+        original = server.command
+        server.command = fake_command
+        try:
+            image = server.Docker({}).inspect_image("sha256:db")
+        finally:
+            server.command = original
+
+        self.assertIsNone(image["Labels"])
+        template = calls[0][calls[0].index("--format") + 1]
+        self.assertIn('index .Config "Labels"', template)
+        self.assertNotIn(".Config.Labels", template)
+
 
 class FakeHealth:
     def __init__(self, *, failures: set[str] | None = None, interruptions: set[str] | None = None) -> None:

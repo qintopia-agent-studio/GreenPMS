@@ -93,7 +93,7 @@ class Docker:
         return current
 
     def inspect_image(self, identity):
-        template = '{"Id":{{json .Id}},"RepoTags":{{json .RepoTags}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Labels":{{json .Config.Labels}}}'
+        template = '{"Id":{{json .Id}},"RepoTags":{{json .RepoTags}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Labels":{{if index .Config "Labels"}}{{json (index .Config "Labels")}}{{else}}null{{end}}}'
         return json.loads(command(["docker", "image", "inspect", "--format", template, identity]))
 
     def load(self, archive):
