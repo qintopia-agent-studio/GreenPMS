@@ -1,6 +1,6 @@
 {
   "application": "greenpms",
-  "version": "1.2.3",
+  "version": "1.3.0",
   "rollbackCompatibility": {
     "mode": "same-migrations-only",
     "reason": "本版本不包含数据库迁移；旧镜像只允许在相同迁移基线上直接回退，不回退数据库或业务数据。"
