@@ -194,6 +194,32 @@ class FakeDocker:
         self.image_records[image_id]["RepoTags"] = [value for value in tags if value != tag]
 
 
+class DockerAdapterTests(unittest.TestCase):
+    def test_container_inspection_handles_containers_without_healthchecks(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_command(args: list[str], **_kwargs: object) -> str:
+            calls.append(args)
+            if args[:3] == ["docker", "ps", "-aq"]:
+                return "healthy-id\nplain-id\n"
+            return "\n".join((
+                '{"id":"healthy-id","imageId":"sha256:a","name":"/qintopia-pms-app","running":true,"health":"healthy","labels":{}}',
+                '{"id":"plain-id","imageId":"sha256:b","name":"/other","running":true,"health":"none","labels":{}}',
+            ))
+
+        original = server.command
+        server.command = fake_command
+        try:
+            containers = server.Docker({}).containers()
+        finally:
+            server.command = original
+
+        self.assertEqual([item["health"] for item in containers], ["healthy", "none"])
+        template = calls[1][calls[1].index("--format") + 1]
+        self.assertIn('index .State "Health"', template)
+        self.assertNotIn(".State.Health", template)
+
+
 class FakeHealth:
     def __init__(self, *, failures: set[str] | None = None, interruptions: set[str] | None = None) -> None:
         self.failures = failures or set()

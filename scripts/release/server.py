@@ -80,7 +80,7 @@ class Docker:
         if not ids:
             return []
         # Do not inspect Env or healthcheck output (either can contain secrets).
-        template = '{"id":{{json .Id}},"imageId":{{json .Image}},"name":{{json .Name}},"running":{{json .State.Running}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"labels":{{json .Config.Labels}}}'
+        template = '{"id":{{json .Id}},"imageId":{{json .Image}},"name":{{json .Name}},"running":{{json .State.Running}},"health":{{if index .State "Health"}}{{json (index .State "Health").Status}}{{else}}"none"{{end}},"labels":{{json .Config.Labels}}}'
         return [json.loads(line) for line in command(["docker", "inspect", "--format", template, *ids]).splitlines()]
 
     def current(self):
