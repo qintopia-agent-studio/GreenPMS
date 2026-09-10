@@ -115,6 +115,7 @@ export const commandCatalogTypes = [
 export type CommandCatalogType = (typeof commandCatalogTypes)[number];
 
 export const errorCodes = [
+  "CURSOR_EXPIRED",
   "AUTHENTICATION_REQUIRED",
   "INVALID_CREDENTIALS",
   "TOKEN_EXPIRED",

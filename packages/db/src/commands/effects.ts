@@ -412,7 +412,7 @@ function requireCollectionMethod(input: Record<string, unknown>): string {
   return method;
 }
 
-function fundsTransactionAndNote(input: Record<string, unknown>, method: string, isRefund: boolean): { transactionReference: string | null; note: string } {
+function fundsTransactionAndNote(input: Record<string, unknown>, method: string, isRefund: boolean): { transactionReference: string | null; note: string; refundReference?: string } {
   const rawReference = typeof input.transactionReference === "string" ? input.transactionReference.trim() : "";
   const note = optionalString(input, "note")?.trim() ?? "";
   const referenceRequired = method === "BANK_TRANSFER" || (!isRefund && method === "WECOM");
@@ -420,7 +420,7 @@ function fundsTransactionAndNote(input: Record<string, unknown>, method: string,
     throw new DomainError(
       "VALIDATION_ERROR",
       method === "WECOM"
-        ? "企业微信退款沿用原收款交易单号，不填写新的退款交易单号"
+        ? "企业微信退款请填写独立的退款单号，原收款通过所选收款记录关联"
         : method === "CASH"
           ? "现金收退款不填写交易单号"
           : "其他收退款不填写交易单号"
@@ -432,10 +432,17 @@ function fundsTransactionAndNote(input: Record<string, unknown>, method: string,
   if (isRefund && !note) {
     throw new DomainError("VALIDATION_ERROR", "必须填写退款原因");
   }
+  const refundReference = typeof input.refundReference === "string" ? input.refundReference.trim() : "";
+  if (isRefund && method === "WECOM" && (!refundReference || refundReference.length > 200)) {
+    throw new DomainError("VALIDATION_ERROR", "必须填写本次企业微信退款单号");
+  }
+  if (input.refundReference !== undefined && (!isRefund || method !== "WECOM")) {
+    throw new DomainError("VALIDATION_ERROR", "独立退款单号仅用于企业微信退款");
+  }
   if (!isRefund && !referenceRequired && !note) {
     throw new DomainError("VALIDATION_ERROR", method === "CASH" ? "必须填写收款人" : "必须填写其他收款说明");
   }
-  return { transactionReference: rawReference || null, note };
+  return { transactionReference: rawReference || null, note, ...(refundReference ? { refundReference } : {}) };
 }
 
 export type NormalizedBackfillCollection =
@@ -1009,7 +1016,14 @@ function pricingDecisionEffect(
   };
 }
 
-export async function buildCommandEffect(db: DbExecutor, commandType: CommandType, rawInput: unknown): Promise<BuiltCommandEffect> {
+export async function buildCommandEffect(db: DbExecutor, commandType: CommandType, rawInput: unknown, lockPayments = false): Promise<BuiltCommandEffect> {
+  const built = await buildRawCommandEffect(db, commandType, rawInput);
+  const { externalPaymentBasis } = await import("../external-payments.ts");
+  const payments = await externalPaymentBasis(db, built.propertyId, commandType, built.effect, lockPayments);
+  return payments.length ? finalize(built.propertyId, built.effect, { ...built.basisVersions, externalPayments: payments }) : built;
+}
+
+async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, rawInput: unknown): Promise<BuiltCommandEffect> {
   const input = requireObject(rawInput);
   const propertyId = requireString(input, "propertyId");
 
@@ -2970,6 +2984,12 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     const referencesFactId = requireString(input, "referencesFactId");
     const method = requireCollectionMethod(input);
     const refundFunds = fundsTransactionAndNote(input, method, true);
+    if (refundFunds.refundReference) {
+      const recorded = await db.selectFrom("collection_facts").innerJoin("orders", "orders.id", "collection_facts.order_id")
+        .select("collection_facts.fact_id").where("orders.property_id", "=", propertyId)
+        .where("collection_facts.refund_reference", "=", refundFunds.refundReference).executeTakeFirst();
+      if (recorded) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "该企业微信退款单号已经登记，请核对原记录", 409);
+    }
     const original = await db.selectFrom("collection_facts")
       .innerJoin("orders", "orders.id", "collection_facts.order_id")
       .selectAll("collection_facts")
@@ -2988,7 +3008,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
     if (activeRefunded + amountMinor > original.amount_minor) {
       throw new DomainError("REFUND_LIMIT_EXCEEDED", "退款金额不能超过所选原收款的剩余可退金额", 409);
     }
-    return finalize(propertyId, { orderId, amountMinor, currency: original.currency, referencesFactId, method, transactionReference: refundFunds.transactionReference, note: refundFunds.note }, { ...baseBasis, originalFact: original, activeRefunded });
+    return finalize(propertyId, { orderId, amountMinor, currency: original.currency, referencesFactId, method, ...refundFunds }, { ...baseBasis, originalFact: original, activeRefunded });
   }
 
   if (commandType === "REVERSE_FACT") {

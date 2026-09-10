@@ -2452,6 +2452,7 @@ describe.sequential("4.3 checked-in SHORTEN_STAY", () => {
         amountMinor: 100,
         referencesFactId: collection.factRefs[0]!,
         method: "WECOM",
+        refundReference: "REFUND-stay-date-changes-0",
         note: "构造净额不变的新增退款事实"
       }
     }, "stage10-funds-hash-refund");

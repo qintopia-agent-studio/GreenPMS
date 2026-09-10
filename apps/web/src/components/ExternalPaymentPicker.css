@@ -1,0 +1,26 @@
+.external-payment-picker { position: relative; display: grid; gap: 6px; min-width: 0; }
+.external-payment-label { font-weight: 600; }
+.external-payment-trigger { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; border: 1px solid #b7c4be; border-radius: 8px; padding: 12px; background: white; color: #233c31; text-align: left; font: inherit; }
+.external-payment-dropdown { border: 1px solid #d5dfd9; border-radius: 10px; background: #fff; padding: 8px; box-shadow: 0 8px 20px #203f3212; }
+.external-payment-dropdown ul { margin-bottom: 8px; }
+.external-payment-dropdown li { position: relative; }
+.external-payment-dropdown .external-payment-option { padding: 8px; gap: 4px; }
+.external-payment-dropdown .external-payment-option > span:nth-child(2) { font-size: 12px; padding-right: 75px; }
+.external-payment-dropdown li > details:not([open]) { position: absolute; right: 0; top: 32px; padding: 0 8px; font-size: 11px; }
+.external-payment-picker ul { list-style: none; margin: 0; padding: 0; }
+.external-payment-picker li { border-bottom: 1px solid #e8eeea; padding: 5px 0; }
+.external-payment-option { display: grid; gap: 5px; width: 100%; background: transparent; border: 0; padding: 10px; border-radius: 6px; color: #334b40; text-align: left; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.external-payment-option:not(:disabled):hover, .external-payment-option:focus-visible { background: #edf7f0; }
+.external-payment-option:disabled { color: #6b746f; background: #f4f5f4; cursor: default; }
+.external-payment-primary { display: flex; justify-content: space-between; gap: 18px; }
+.external-payment-clear { border: none; background: transparent; color: #376b50; text-decoration: underline; cursor: pointer; }
+.external-payment-picker details { padding: 0 10px 5px; font-size: 12px; overflow-wrap: anywhere; }
+.external-payment-filters { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-bottom: 16px; }
+.external-payment-full-list { list-style: none; padding: 0; }
+/* Keep filters and rows in the same scroll flow. The modal body owns scrolling;
+   its inactive parent and the page resume scrolling when the list closes. */
+.external-payment-modal > .modal-shell > .modal-body { overscroll-behavior: contain; }
+.external-payment-modal > .modal-shell > .modal-header { flex-shrink: 0; }
+body:has(.external-payment-modal[open]),
+.modal-body:has(.external-payment-modal[open]) { overflow: hidden; }
+@media (max-width: 600px) { .external-payment-filters { grid-template-columns: 1fr; } }

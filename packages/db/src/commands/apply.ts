@@ -2310,6 +2310,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const netEffectMinor = factType === "COLLECTION" ? amountMinor : factType === "REFUND" ? -amountMinor : effect.netEffectMinor as number;
     const transactionReference = factType === "REVERSAL" ? null
       : typeof effect.transactionReference === "string" && effect.transactionReference.trim() !== "" ? effect.transactionReference.trim() : null;
+    const refundReference = factType === "REFUND" && typeof effect.refundReference === "string" ? effect.refundReference : undefined;
     await trx.insertInto("collection_facts").values({
       fact_id: factId, order_id: orderId, fact_type: factType, amount_minor: amountMinor,
       net_effect_minor: netEffectMinor, currency: requireString(effect, "currency"),
@@ -2318,10 +2319,11 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       method: typeof effect.method === "string" ? effect.method : "REVERSAL",
       note: typeof effect.note === "string" ? effect.note : options.reason.note,
       transaction_reference: transactionReference,
+      refund_reference: refundReference ?? null,
       pricing_revision_id: context.revision.id,
       command_id: options.commandId
     }).execute();
-    return { persistedResult: { orderId, factId, factType, netEffectMinor, transactionReference }, resourceRefs: [orderId], factRefs: [factId] };
+    return { persistedResult: { orderId, factId, factType, netEffectMinor, transactionReference, ...(refundReference ? { refundReference } : {}) }, resourceRefs: [orderId], factRefs: [factId] };
   }
 
   const statusCommands: Partial<Record<CommandType, { orderStatus: string; stayStatus: string }>> = {

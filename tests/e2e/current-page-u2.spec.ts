@@ -347,6 +347,8 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
     await expect(correctionAction).toBeEnabled();
 
     await page.keyboard.press("Escape");
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole("button", { name: "关闭", exact: true }).click();
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();
   }
@@ -885,6 +887,8 @@ test("U2 mobile order context is full-screen, machine-free, and returns focus to
     expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width + 1);
 
     await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "关闭", exact: true }).click();
     await expect(dialog).toBeHidden();
     await expect(trigger).toBeFocused();
   }
@@ -935,6 +939,8 @@ test("U2 order context remains reachable at 200 percent desktop zoom", async ({ 
     await expect(dialog.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
 
     await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "关闭", exact: true }).click();
     await expect(dialog).toBeHidden();
     await expect(trigger).toBeFocused();
   } finally {

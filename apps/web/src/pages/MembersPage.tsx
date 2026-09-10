@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { BadgeCheck, CalendarClock, CircleDollarSign, CreditCard, FilePenLine, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { ExternalPaymentPicker } from "../components/ExternalPaymentPicker";
 import { memberStayHref } from "../memberStayIntent";
 import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
 import { MemberDeletionButton } from "../components/MemberDeletionButton";
@@ -442,7 +443,7 @@ function MembershipPaymentDialog({ propertyId, summary, correction, draft, onClo
     <form className="modal-form" onSubmit={submit}>
       <div className="form-grid">
         <label>收款金额（人民币元）<input type="number" min="0.01" step="0.01" inputMode="decimal" value={amountYuan} onChange={(event) => { setAmountYuan(event.target.value); setValidationError(undefined); }} required data-testid="membership-payment-yuan" /></label>
-        <label>企微交易单号<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="membership-payment-reference" /></label>
+        <ExternalPaymentPicker propertyId={propertyId} value={transactionReference} amountMinor={yuanInputToMinor(amountYuan)} testId="membership-payment-reference" onChange={(reference, item) => { setTransactionReference(reference); if (item?.amountMinor) setAmountYuan(String(item.amountMinor / 100)); setValidationError(undefined); }} />
         <label className="span-two">备注（可选）<textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} maxLength={1000} /></label>
       </div>
       {validationError ? <InlineError error={new Error(validationError)} /> : null}
@@ -834,7 +835,7 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
           <label><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={actualMembershipDate} onChange={(event) => setActualMembershipDate(event.target.value)} required data-testid="actual-membership-date" /></label>
           <label>真实企微收款金额（人民币元）<input type="number" min="0.01" step="0.01" inputMode="decimal" value={paymentAmountYuan} onChange={(event) => setPaymentAmountYuan(event.target.value)} required data-testid="historical-membership-payment-yuan" /></label>
           <label><span className="form-label-with-hint">企业微信收款日期<InfoHint label="企业微信收款日期说明" text={membershipPaymentDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} required data-testid="historical-membership-payment-date" /></label>
-          <label>企微交易单号<input value={paymentReference} onChange={(event) => setPaymentReference(event.target.value)} required maxLength={200} data-testid="historical-membership-payment-reference" /></label>
+          <ExternalPaymentPicker propertyId={propertyId} value={paymentReference} amountMinor={yuanInputToMinor(paymentAmountYuan)} testId="historical-membership-payment-reference" onChange={(reference, item) => { setPaymentReference(reference); if (item?.amountMinor) { setPaymentAmountYuan(String(item.amountMinor / 100)); setPaymentDate(new Date(new Date(item.occurredAt).getTime() + 8 * 3600000).toISOString().slice(0, 10)); } }} />
           <label className="span-two">收款备注（可选）<textarea rows={2} value={paymentNote} onChange={(event) => setPaymentNote(event.target.value)} maxLength={1000} /></label>
         </> : null}
 
@@ -856,7 +857,7 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
           <label className="span-two check-row"><input type="checkbox" checked={hasReplacementPayment} onChange={(event) => setHasReplacementPayment(event.target.checked)} data-testid="has-replacement-direct-payment" /><span>存在一笔真实企微差额收款</span></label>
           {hasReplacementPayment ? <>
             <label><span className="form-label-with-hint">企业微信收款日期<InfoHint label="企业微信收款日期说明" text={membershipPaymentDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={replacementPaymentDate} onChange={(event) => setReplacementPaymentDate(event.target.value)} required data-testid="replacement-payment-date" /></label>
-            <label>企微交易单号<input value={replacementReference} onChange={(event) => setReplacementReference(event.target.value)} required maxLength={200} data-testid="replacement-payment-reference" /></label>
+            <ExternalPaymentPicker propertyId={propertyId} value={replacementReference} testId="replacement-payment-reference" onChange={(reference, item) => { setReplacementReference(reference); if (item) setReplacementPaymentDate(new Date(new Date(item.occurredAt).getTime() + 8 * 3600000).toISOString().slice(0, 10)); }} />
           </> : null}
         </> : null}
 

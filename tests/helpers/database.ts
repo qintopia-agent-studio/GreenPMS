@@ -28,6 +28,12 @@ async function migrateAndSeedDatabase(databaseUrl: string): Promise<Kysely<Datab
   }
   const db = createDatabase(databaseUrl);
   await seedDemo(db, { includeProtocolFixturePolicy: true });
+  if (process.env.PMS_TEST_CAPTURE_BASELINE === "true") {
+    await db.transaction().execute(async trx => {
+      const { sql } = await import("kysely");
+      await sql`SELECT qintopia_integration_configure('synthetic-regression', 'baseline')`.execute(trx);
+    });
+  }
   return db;
 }
 

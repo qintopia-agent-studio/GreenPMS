@@ -414,7 +414,7 @@ export function RoomStatusOrderContext({
             {view.collectionFacts.map((fact) => <li key={fact.fact_id}>
               <strong>{collectionFactLabels[fact.fact_type]} · {formatMoney({ currency: fact.currency, minorUnits: fact.amount_minor })}</strong>
               <span>净影响：{formatMoney({ currency: fact.currency, minorUnits: fact.net_effect_minor })}</span>
-              <span>外部交易单号：{fact.transaction_reference ?? (fact.fact_type === "REVERSAL" ? "不适用" : "历史未记录")}</span>
+              <span>外部交易单号：{fact.refund_reference ?? fact.transaction_reference ?? (fact.fact_type === "REVERSAL" ? "不适用" : fact.fact_type === "REFUND" && fact.method === "WECOM" ? "历史未记录退款单号" : "历史未记录")}</span>
               <span>方式：{collectionMethodLabel(fact.method)}</span>
               {fact.note ? <span>{fact.note}</span> : null}
               <small>{formatDateTime(fact.created_at)}</small>

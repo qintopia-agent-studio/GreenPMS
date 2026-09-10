@@ -329,6 +329,8 @@ test("4.2 desktop room-status entry restores selection, released dates are avail
   await action.click();
   const form = await fillRescheduleForm(page, fixture.shift as Stage9AcceptanceFixture["external"], "房态入口改期");
   await form.press("Escape");
+  await expect(form).toBeVisible();
+  await form.getByRole("button", { name: "关闭", exact: true }).click();
   await expect(form).toBeHidden();
   await expect(oldFirst).toBeFocused();
   action = await refreshAction();

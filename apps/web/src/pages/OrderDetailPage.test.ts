@@ -1916,7 +1916,8 @@ describe("server-authoritative order actions", () => {
     });
     const collection = fact({ fact_id: "collection_wecom", fact_type: "COLLECTION", amount_minor: 10_000, transaction_reference: "WX-COLLECTION-001" });
     const refund = fact({ fact_id: "refund_wecom", fact_type: "REFUND", amount_minor: 1_000, references_fact_id: collection.fact_id });
-    expect(collectionFactTransactionReferenceLabel([collection, refund], refund)).toBe("WX-COLLECTION-001（原路退回）");
+    expect(collectionFactTransactionReferenceLabel([collection, refund], refund)).toBe("历史未记录退款单号 · 原收款 WX-COLLECTION-001");
+    expect(collectionFactTransactionReferenceLabel([collection, { ...refund, refund_reference: "RF-001" }], { ...refund, refund_reference: "RF-001" })).toBe("退款 RF-001 · 原收款 WX-COLLECTION-001");
   });
 
   it("shows both the collector and note for a historical cash collection", () => {

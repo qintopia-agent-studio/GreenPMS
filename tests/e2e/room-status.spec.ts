@@ -2903,6 +2903,8 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   await page.screenshot({ path: testInfo.outputPath("room-status-mobile-detail-375.png"), fullPage: true });
 
   await page.keyboard.press("Escape");
+  await expect(detail).toBeVisible();
+  await detail.getByRole("button", { name: "关闭", exact: true }).click();
   await expect(detail).toBeHidden();
   await expect(task.locator(".room-status-mobile-task-open")).toBeFocused();
 

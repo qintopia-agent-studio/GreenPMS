@@ -161,8 +161,9 @@ describe("restore script contract", () => {
     }
   });
 
-  it("creates a new target, upgrades a stage 9 backup, and validates the current stage 13 schema", async () => {
-    expect(currentMigrationNames).toHaveLength(52);
+  it("creates a new target, upgrades a stage 9 backup, and validates the current schema including integration capture", async () => {
+    expect(currentMigrationNames).toHaveLength(60);
+    expect(currentMigrationNames.at(-1)).toBe("060_external_payments.sql");
     expect(currentMigrationNames).toContain("046_command_authorization.sql");
     expect(currentMigrationNames).toContain("047_runtime_database_role.sql");
     expect(currentMigrationNames).toContain("048_runtime_isolation_guards.sql");

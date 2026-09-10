@@ -8,6 +8,8 @@ import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
+import { registerPmsIntegration } from "./integration.ts";
+import { registerExternalPayments } from "./external-payments.ts";
 import { registerAccountManagement } from "./account-management.ts";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -658,6 +660,8 @@ export async function buildServer(db: Kysely<Database>) {
   });
 
   registerAccountManagement(app, db);
+  registerPmsIntegration(app, db);
+  registerExternalPayments(app, db);
 
   app.get("/api/v1/meta", { schema: { tags: ["queries"], response: { 200: MetaResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
@@ -894,7 +898,7 @@ export async function buildServer(db: Kysely<Database>) {
     const factId = (request.params as { id: string }).id;
     const principal = await requirePrincipal(db, request);
     const collection = await db.selectFrom("collection_facts").innerJoin("orders", "orders.id", "collection_facts.order_id")
-      .select(["collection_facts.fact_id", "collection_facts.order_id", "collection_facts.fact_type", "collection_facts.amount_minor", "collection_facts.net_effect_minor", "collection_facts.currency", "collection_facts.references_fact_id", "collection_facts.reverses_fact_id", "collection_facts.method", "collection_facts.note", "collection_facts.transaction_reference", "collection_facts.cash_collector", "collection_facts.pricing_revision_id", "collection_facts.created_at", "orders.property_id"])
+      .select(["collection_facts.fact_id", "collection_facts.order_id", "collection_facts.fact_type", "collection_facts.amount_minor", "collection_facts.net_effect_minor", "collection_facts.currency", "collection_facts.references_fact_id", "collection_facts.reverses_fact_id", "collection_facts.method", "collection_facts.note", "collection_facts.transaction_reference", "collection_facts.refund_reference", "collection_facts.cash_collector", "collection_facts.pricing_revision_id", "collection_facts.created_at", "orders.property_id"])
       .where("collection_facts.fact_id", "=", factId).executeTakeFirst();
     if (collection) {
       requireScopedResourceAccess(principal, collection.property_id);

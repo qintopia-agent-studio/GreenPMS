@@ -19,6 +19,7 @@ import {
 import { amountSummary, enumerateServiceDates, newId, paidStayTypeForNights, sha256, stableHash } from "@qintopia/domain";
 import { createQuoteInTransaction, loadStoredQuote, projectQuoteForExternalRead } from "../pricing-service.ts";
 import { bumpRoomStatusRevision } from "../room-status.ts";
+import { bindExternalPayments, type ExternalPaymentBasis } from "../external-payments.ts";
 import { getOrderViewSnapshot, loadTemporaryOtherRoomCreateEvidence } from "../orders.ts";
 import {
   maskIdentityCardNumber,
@@ -1937,7 +1938,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         const rebuildAndApply = async () => {
           let rebuilt: Awaited<ReturnType<typeof buildCommandEffect>>;
           try {
-            rebuilt = await buildCommandEffect(trx, commandType, preview.normalized_input);
+            rebuilt = await buildCommandEffect(trx, commandType, preview.normalized_input, true);
             const authorizationAttempt = {
               stage: "CONFIRM" as const,
               idempotencyKey: headers.idempotencyKey,
@@ -1977,6 +1978,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
             reason: confirmation.reason,
             commandId: inserted.id
           });
+          await bindExternalPayments(trx, inserted.id, (rebuilt.basisVersions.externalPayments ?? []) as ExternalPaymentBasis[]);
           return { rebuilt, applied };
         };
         const { rebuilt, applied } = authoritativeWallInstant

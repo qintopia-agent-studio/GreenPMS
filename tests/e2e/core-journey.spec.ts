@@ -375,6 +375,9 @@ async function openFactFormAndSubmit(
   }
   await amountInput.fill(amountYuan);
   if (note) await factDialog.getByTestId(actionName === "退款" ? "refund-reason" : "collection-note").fill(note);
+  if (actionName === "退款" && await factDialog.getByTestId("refund-reference").count()) {
+    await factDialog.getByTestId("refund-reference").fill(`E2E-REFUND-${crypto.randomUUID()}`);
+  }
   const transactionInput = factDialog.getByTestId("transaction-reference");
   if (await transactionInput.count()) {
     await continueButton.click();
@@ -683,7 +686,8 @@ test("desktop core operating journey", async ({ page }, testInfo: TestInfo) => {
   await openFactFormAndSubmit(page, "退款", "30", "", "60");
   const refundEffect = page.getByTestId("command-effect");
   await expect(refundEffect).toContainText("原路退回");
-  await expect(refundEffect).toContainText("沿用原收款交易单号");
+  await expect(refundEffect).toContainText("企业微信退款单号");
+  await expect(refundEffect).toContainText("E2E-REFUND-");
   await confirmCommand(page, "Partial refund references first collection");
   await closeReceipt(page);
   const fundsRegion = page.locator('.table-region[aria-label="收退款与冲销记录表格"]');

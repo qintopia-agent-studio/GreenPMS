@@ -2425,7 +2425,8 @@ export function administratorMembershipPreviewHasEvidence(
 
 export function receiptTransactionReferenceLabel(result: Record<string, unknown>): string {
   if (result.factType === "REVERSAL") return "不适用";
-  if (result.factType === "REFUND" && result.method === "WECOM" && typeof result.transactionReference !== "string") return "沿用原收款交易单号";
+  if (result.factType === "REFUND" && typeof result.refundReference === "string") return result.refundReference;
+  if (result.factType === "REFUND" && result.method === "WECOM" && typeof result.transactionReference !== "string") return "历史未记录退款单号";
   return typeof result.transactionReference === "string" ? result.transactionReference : "历史未记录";
 }
 
@@ -2631,7 +2632,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           <dt>金额</dt><dd><strong>{amountMinor === undefined ? "-" : formatMinor(amountMinor, currency)}</strong></dd>
           <dt>{businessCommand === "RECORD_REFUND" ? "退款方式" : "收款方式"}</dt><dd>{fundMethodLabel(effect.method)}</dd>
           {transactionReference ? <><dt>{effect.method === "WECOM" ? "企业微信交易单号" : "交易单号 / 流水号"}</dt><dd>{transactionReference}</dd></> : null}
-          {businessCommand === "RECORD_REFUND" && effect.method === "WECOM" && !transactionReference ? <><dt>企业微信交易单号</dt><dd>原路退回，沿用原收款交易单号</dd></> : null}
+          {businessCommand === "RECORD_REFUND" && effect.method === "WECOM" ? <><dt>企业微信退款单号</dt><dd>{typeof effect.refundReference === "string" ? effect.refundReference : "历史未记录退款单号"}</dd></> : null}
           {businessCommand === "RECORD_REFUND" ? <><dt>对应原收款</dt><dd>{referencesFactId ? "已选择同订单原收款" : "未选择"}</dd></> : null}
           <dt>{noteLabel}</dt><dd>{reasonNote?.trim() || (businessCommand === "RECORD_REFUND" ? "未填写" : "未填写备注")}</dd>
         </dl>
@@ -3894,6 +3895,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const label = businessCommand === "RECORD_REFUND" ? "退款" : "收款";
     const transactionReference = result && typeof result.transactionReference === "string" ? result.transactionReference : undefined;
+    const refundReference = result && typeof result.refundReference === "string" ? result.refundReference : undefined;
     const receiptErrorMessage = receipt.error
       ? receipt.error.code === "COMMAND_INTERRUPTED" || receipt.error.code === "COMMAND_STATUS_UNKNOWN"
         ? `本次${label}没有登记。请返回订单后重新登记，系统不会重复写入。`
@@ -3912,6 +3914,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
       {committed && transactionReference ? <dl className="receipt-grid">
         <dt>交易单号</dt><dd>{transactionReference}</dd>
       </dl> : null}
+      {committed && refundReference ? <dl className="receipt-grid"><dt>退款单号</dt><dd>{refundReference}</dd></dl> : null}
       {receiptErrorMessage ? <div className="receipt-error"><p>{receiptErrorMessage}</p></div> : null}
     </section>;
   }
