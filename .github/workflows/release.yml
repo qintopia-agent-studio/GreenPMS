@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
 
       - name: Set up Node.js 22
@@ -50,10 +50,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify tag identity and main ancestry
+      - name: Resolve release identity
+        id: release
         env:
           RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          release_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          printf 'tag=%s\nsha=%s\n' "$RELEASE_TAG" "$release_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag identity and main ancestry
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: |
           set -eu
           printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -111,8 +121,17 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
+
+      - name: Resolve release identity
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -eu
+          release_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          printf 'tag=%s\nsha=%s\n' "$RELEASE_TAG" "$release_sha" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js 22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -152,8 +171,8 @@ jobs:
         id: bundle
         env:
           RELEASE_DIR_ROOT: ${{ runner.temp }}/greenpms-release
-          RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.tag }}
+          RELEASE_REVISION: ${{ steps.release.outputs.sha }}
           UPLOAD_COS_SECRET_ID: ${{ secrets.UPLOAD_COS_SECRET_ID }}
           UPLOAD_COS_SECRET_KEY: ${{ secrets.UPLOAD_COS_SECRET_KEY }}
           UPLOAD_COS_TOKEN: ${{ secrets.UPLOAD_COS_TOKEN }}
@@ -176,8 +195,8 @@ jobs:
       - name: Build and package without cloud credentials
         if: steps.bundle.outputs.fetch_status == '3'
         env:
-          RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.tag }}
+          RELEASE_REVISION: ${{ steps.release.outputs.sha }}
           RELEASE_DIRECTORY: ${{ steps.bundle.outputs.directory }}
         run: |
           set -eu
@@ -187,8 +206,8 @@ jobs:
       - name: Upload immutable release and verify stored bytes
         id: package
         env:
-          RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.tag }}
+          RELEASE_REVISION: ${{ steps.release.outputs.sha }}
           RELEASE_DIRECTORY: ${{ steps.bundle.outputs.directory }}
           UPLOAD_COS_SECRET_ID: ${{ secrets.UPLOAD_COS_SECRET_ID }}
           UPLOAD_COS_SECRET_KEY: ${{ secrets.UPLOAD_COS_SECRET_KEY }}
@@ -216,8 +235,8 @@ jobs:
       - name: Write release summary
         if: success()
         env:
-          RELEASE_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
-          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.tag }}
+          RELEASE_REVISION: ${{ steps.release.outputs.sha }}
         run: |
           set -eu
           printf '### GreenPMS release package\n\n- Version: `%s`\n- Commit: `%s`\n- Checks: metadata, tests, image labels, archive, checksum, and SBOM passed\n' \
