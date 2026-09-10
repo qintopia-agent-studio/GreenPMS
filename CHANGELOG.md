@@ -2,6 +2,28 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.3.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.2.3...v1.3.0) (2026-09-10)
+
+
+### Features
+
+* automate GreenPMS production releases through private COS ([dcb6b3a](https://github.com/qintopia-agent-studio/GreenPMS/commit/dcb6b3a895c38b84f51c95f8cfa9d7f9680b0b1d))
+* automate GreenPMS production releases through private COS ([486b4bf](https://github.com/qintopia-agent-studio/GreenPMS/commit/486b4bf8f7446a1a7336542d0e40e030cbaa5f00))
+
+
+### CI / Deployment
+
+* allow authors to merge without required approvals ([e0beeb2](https://github.com/qintopia-agent-studio/GreenPMS/commit/e0beeb26189f4ce0d7a76c835ef16cf1acd412fb))
+* automate version PR and release tag creation ([1420227](https://github.com/qintopia-agent-studio/GreenPMS/commit/142022776477c505133cffa583dc5bbdfbe7b623))
+* automate version PR and release tag creation ([cab1e57](https://github.com/qintopia-agent-studio/GreenPMS/commit/cab1e578dc83651350e010b4897b635bbbba3aae))
+* enforce main protection and standard pull requests ([32355e4](https://github.com/qintopia-agent-studio/GreenPMS/commit/32355e45239c145d1f5c39bb970ae59391f1766f))
+* enforce main protection and standard pull requests ([9e25378](https://github.com/qintopia-agent-studio/GreenPMS/commit/9e253789a1449e43f281bc024b8eba6fe12015ba))
+
+
+### Documentation
+
+* **release:** record v1.2.3 deployment ([a0fbdd5](https://github.com/qintopia-agent-studio/GreenPMS/commit/a0fbdd55595530d2a07b70136b4e73aee47cc2fb))
+
 ## [1.2.3](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.2.2...v1.2.3) (2026-09-09)
 
 - 房态后台刷新失败后自动退避重试，恢复前保留写入安全门禁。
