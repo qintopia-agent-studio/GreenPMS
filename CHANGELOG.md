@@ -2,6 +2,12 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.3.2](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.3.1...v1.3.2) (2026-09-10)
+
+- 修正企业微信收退款 readiness 的生产 PostgreSQL 18 schema fingerprint，使迁移后的运行账号可以正常通过启动门禁。
+
+[完整优化说明与升级说明](docs/releases/v1.3.2.md)
+
 ## [1.3.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.3.0...v1.3.1) (2026-09-10)
 
 - 接入企业微信对外收退款流水同步、昵称展示、推荐匹配和完整清单查询。
