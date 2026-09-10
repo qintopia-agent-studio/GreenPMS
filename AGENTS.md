@@ -1,5 +1,8 @@
 # Green PMS 项目约定
 
+- 修改通过 PR 合入 main；标题、正文与合并保护见 `docs/repository-contributing.md`，模板为 `.github/PULL_REQUEST_TEMPLATE.md`。
+- PR 格式本地验证：`node --test scripts/check-pr-tests.mjs`。保护配置记录在 `.github/main-protection.json`；不要通过降低保护要求绕过失败检查或待审批。
+
 本文件补充全局 `AGENTS.md`，定义本项目的业务来源、风险分级和验收要求。
 
 ## 业务来源
