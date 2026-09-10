@@ -8,7 +8,7 @@ Changes to `main` go through pull requests. See the [PR format and repository pr
 
 Application versions follow semantic versioning, starting with `v1.0.0`. Every deployed release must have a unique Git tag, optimization notes and upgrade instructions. See [CHANGELOG](CHANGELOG.md) and the [release procedure](docs/releases/README.md). `npm run build` checks release metadata and documentation; `/api/v1/version` reports the running application version.
 
-Production release setup and daily operations are described in the [quickstart](docs/operations/production-release-quickstart.md), with recovery details in the [runbook](docs/operations/production-release-runbook.md). Publishing a GitHub Release triggers testing, a clean image build, private COS storage, and automatic deployment through restricted SSH. Rollback is available from GitHub Actions. Initial COS and server setup still requires operator configuration and real deployment validation. Run `npm run test:release` for the offline fake COS/Docker/SSH checks.
+Production release setup and daily operations are described in the [quickstart](docs/operations/production-release-quickstart.md), with recovery details in the [runbook](docs/operations/production-release-runbook.md). Merging a Release Please version PR and publishing its Draft GitHub Release triggers testing, a clean image build, private COS storage, and automatic deployment through restricted SSH. Rollback is available from GitHub Actions. Initial COS and server setup still requires operator configuration and real deployment validation. Run `npm run test:release` for the offline fake COS/Docker/SSH checks.
 
 ## Prerequisites
 

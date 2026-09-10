@@ -18,6 +18,7 @@
 - [x] 受限部署、回退、恢复、引用保护、审计与临时目录清理。
 - [x] GitHub Release/rollback/retention workflows，以及离线 fake 测试。
 - [x] 一次性配置生成器、安装器、quickstart 和 runbook。
+- [x] Release Please 自动版本 PR、package/lock/changelog/policy 同步、tag 和 Draft Release。
 - [x] 集成 main 的 PR format 和 Node and release checks，保留作者自行合并规则。
 - [ ] 用户审核并合并发布 PR。
 - [ ] 经明确授权配置真实 COS、CAM、GitHub Secrets 与服务器。

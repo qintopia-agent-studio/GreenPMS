@@ -61,10 +61,44 @@ class WorkflowContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.ci = read(".github/workflows/ci.yml")
+        cls.release_please = read(".github/workflows/release-please.yml")
+        cls.release_please_config = json.loads(read(".release-please-config.json"))
+        cls.release_please_manifest = json.loads(read(".release-please-manifest.json"))
         cls.release = read(".github/workflows/release.yml")
         cls.retention = read(".github/workflows/retention.yml")
         cls.rollback = read(".github/workflows/rollback.yml")
         cls.workflows = cls.ci + cls.release + cls.retention + cls.rollback
+
+    def test_release_please_prepares_version_pr_and_tag(self) -> None:
+        for fragment in (
+            "push:\n    branches:\n      - main",
+            "workflow_dispatch:",
+            "contents: write",
+            "pull-requests: write",
+            "release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5",
+            "config-file: .release-please-config.json",
+            "manifest-file: .release-please-manifest.json",
+            "token: ${{ secrets.RELEASE_PLEASE_TOKEN }}",
+        ):
+            self.assertIn(fragment, self.release_please)
+        self.assertNotIn("environment: production", self.release_please)
+        package = self.release_please_config["packages"]["."]
+        self.assertEqual(package["release-type"], "node")
+        self.assertTrue(package["include-v-in-tag"])
+        self.assertTrue(package["draft"])
+        self.assertTrue(package["force-tag-creation"])
+        self.assertEqual(package["pull-request-title-pattern"], "chore(release): release ${version}")
+        for section in ("## 改动说明", "## 验证结果", "## 风险与回退"):
+            self.assertIn(section, package["pull-request-header"])
+        self.assertIn("This PR was generated with [Release Please]", package["pull-request-header"])
+        self.assertEqual(package["extra-files"][0], {
+            "type": "json",
+            "path": "deploy/release-policy.json",
+            "jsonpath": "$.version",
+        })
+        self.assertEqual(self.release_please_manifest["."], APP_VERSION)
+        self.assertNotIn("actions/upload-artifact", self.release_please)
+        self.assertNotIn("docker push", self.release_please)
 
     def test_ci_runs_required_checks_without_production_inputs(self) -> None:
         for fragment in (
