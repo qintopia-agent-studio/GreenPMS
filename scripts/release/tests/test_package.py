@@ -1,6 +1,8 @@
 import io
 import hashlib
 import json
+import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -10,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from scripts.release.common import ReleaseError, json_bytes, sha256_file, validate_bundle
-from scripts.release.package import forbidden_path, inspect_archive
+from scripts.release.package import forbidden_path, indexed_archive_path, inspect_archive
 
 
 IMAGE_ID = "sha256:" + "0" * 64
@@ -157,6 +159,27 @@ class PackageScannerTests(unittest.TestCase):
         current = manifest()
         with self.assertRaises(ReleaseError):
             inspect_archive(self.write_archive(docker_archive(current, layer_name="app/.env.example")), current)
+
+
+@unittest.skipUnless(shutil.which("zstd"), "zstd is required for archive compression")
+class CompressionTests(unittest.TestCase):
+    def test_indexed_archive_path_decompresses_with_zstd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = root / "image.tar"
+            compressed = root / "image.tar.zst"
+            raw.write_bytes(b"archive bytes")
+            subprocess.run(
+                ["zstd", "--quiet", "--force", "-o", str(compressed), str(raw)],
+                check=True,
+            )
+
+            temporary_directory, indexed = indexed_archive_path(compressed)
+            try:
+                self.assertEqual(indexed.read_bytes(), raw.read_bytes())
+            finally:
+                if temporary_directory is not None:
+                    temporary_directory.cleanup()
 
 
 class BundleValidationTests(unittest.TestCase):
