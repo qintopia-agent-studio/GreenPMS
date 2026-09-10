@@ -1,6 +1,6 @@
 {
   "name": "qintopia-pms",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -14,6 +14,8 @@
     "build": "npm run release:check && npm run build -w @qintopia/web",
     "dev": "concurrently -k -n api,web -c green,blue \"npm run dev -w @qintopia/api\" \"npm run dev -w @qintopia/web\"",
     "start": "npm run start -w @qintopia/api",
+    "integration:worker": "node --import tsx packages/db/src/integration-worker-main.ts",
+    "wecom:worker": "node --import tsx packages/db/src/wecom-worker-main.ts",
     "db:migrate": "npm run migrate -w @qintopia/db",
     "db:ready": "npm run ready -w @qintopia/db",
     "db:import:2026": "npm run import:reference-catalog -w @qintopia/db --",

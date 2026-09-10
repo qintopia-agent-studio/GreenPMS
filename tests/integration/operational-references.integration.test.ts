@@ -376,12 +376,13 @@ describe.sequential("booking channels and external transaction references on Pos
         amountMinor: 100,
         referencesFactId: collectionOne.factRefs[0],
         method: "WECOM",
+        refundReference: "REFUND-operational-references-0",
         transactionReference: "MUST-NOT-ACCEPT-WECOM-REFUND",
         note: "企业微信原路退款"
       }
     }, metadata("forbidden-wecom-refund-reference"))).rejects.toMatchObject({
       code: "VALIDATION_ERROR",
-      message: "企业微信退款沿用原收款交易单号，不填写新的退款交易单号"
+      message: "企业微信退款请填写独立的退款单号，原收款通过所选收款记录关联"
     });
 
     const beforeInvalidRefunds = await commandArtifactCounts();
@@ -394,6 +395,7 @@ describe.sequential("booking channels and external transaction references on Pos
           amountMinor: 100,
           referencesFactId: collectionOne.factRefs[0],
           method: "WECOM",
+          refundReference: "REFUND-operational-references-1",
           note
         }
       }, metadata("missing-refund-reason"))).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "必须填写退款原因" });
@@ -419,6 +421,7 @@ describe.sequential("booking channels and external transaction references on Pos
         amountMinor: 1_500,
         referencesFactId: collectionOne.factRefs[0],
         method: "WECOM",
+        refundReference: "REFUND-operational-references-2",
         note: "WECOM original-route refund"
       }
     }, "refund-one");
@@ -736,6 +739,7 @@ describe.sequential("booking channels and external transaction references on Pos
     await db.insertInto("collection_facts").values({
       ...baseFact,
       fact_id: "fact_direct_wecom_refund_original_route",
+      refund_reference: "REFUND-DIRECT-ORIGINAL-ROUTE",
       fact_type: "REFUND",
       net_effect_minor: -10,
       amount_minor: 10,

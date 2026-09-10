@@ -3672,6 +3672,7 @@ describe("PostgreSQL room-status projection", () => {
         amountMinor: 100,
         referencesFactId: collection.factRefs[0]!,
         method: "WECOM",
+        refundReference: "REFUND-room-status-projection-0",
         note: "退款后再次显示在住欠款提示"
       }
     }, "in-house-arrears-refund");
@@ -3755,6 +3756,7 @@ describe("PostgreSQL room-status projection", () => {
         amountMinor: 100,
         referencesFactId: dueOutCollection.factRefs[0]!,
         method: "WECOM",
+        refundReference: "REFUND-room-status-projection-1",
         note: "退款后恢复今日待退房欠款提示"
       }
     }, "due-out-arrears-funds-refund");
@@ -3766,6 +3768,7 @@ describe("PostgreSQL room-status projection", () => {
         amountMinor: 100,
         referencesFactId: overdueCollection.factRefs[0]!,
         method: "WECOM",
+        refundReference: "REFUND-room-status-projection-2",
         note: "退款后恢复逾期未退欠款提示"
       }
     }, "overdue-in-house-arrears-funds-refund");

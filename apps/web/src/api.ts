@@ -15,6 +15,7 @@ import type {
   TokenTargetDto
 } from "./types";
 import { parseAvailability } from "./availabilityValidation";
+import type { ExternalPaymentList } from "../../../packages/contracts/src/external-payments.ts";
 
 interface ErrorPayload {
   code?: unknown;
@@ -131,6 +132,8 @@ function normalizeCommandResult(
 }
 
 export const api = {
+  externalPayments: (query: Record<string, string>, signal?: AbortSignal) => request<ExternalPaymentList>(
+    `/api/v1/external-payments?${new URLSearchParams(query)}`, signal ? { signal } : {}),
   commandMetadata: (scope: string): ClientCommandMetadata => {
     const headers = commandHeaders(scope);
     return { idempotencyKey: headers["Idempotency-Key"], correlationId: headers["X-Correlation-ID"] };

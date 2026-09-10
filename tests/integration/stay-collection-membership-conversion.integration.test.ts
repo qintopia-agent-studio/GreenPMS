@@ -787,6 +787,7 @@ describe("4.7 stay collection conversion to membership", () => {
         referencesFactId: stay.collectionFactId,
         amountMinor: 1_000,
         method: "WECOM",
+        refundReference: "REFUND-stay-collection-membership-conversion-0",
         note: "升级会员后不能再从住宿订单退款"
       }
     }, "after-conversion-refund")).rejects.toMatchObject({
@@ -1662,6 +1663,7 @@ describe("4.7 stay collection conversion to membership", () => {
         referencesFactId: stay.collectionFactId,
         amountMinor: 1_000,
         method: "WECOM",
+        refundReference: "REFUND-stay-collection-membership-conversion-1",
         note: "部分退款后按剩余企微净额升级会员"
       }
     }, "refunded-source-refund");
@@ -1724,6 +1726,7 @@ describe("4.7 stay collection conversion to membership", () => {
         referencesFactId: stay.collectionFactId,
         amountMinor: 1_000,
         method: "WECOM",
+        refundReference: "REFUND-stay-collection-membership-conversion-2",
         note: "构造迁移 032 前遗留的企微退款交易单号"
       }
     }, "legacy-refund-reference-refund");
@@ -2355,6 +2358,7 @@ describe("4.7 stay collection conversion to membership", () => {
           referencesFactId: stay.collectionFactId,
           amountMinor: 59_000,
           method: "WECOM",
+          refundReference: "REFUND-stay-collection-membership-conversion-3",
           note: "全额退款后本订单企微净额为零"
         }
       }, "net-zero-refund-allowed-wecom-refund");
@@ -2427,6 +2431,7 @@ describe("4.7 stay collection conversion to membership", () => {
           referencesFactId: stay.collectionFactId,
           amountMinor: 3_300,
           method: "WECOM",
+          refundReference: "REFUND-stay-collection-membership-conversion-4",
           note: "第一笔企微住宿收款全额退回"
         }
       }, "net-recollect-refund-a");
@@ -2538,6 +2543,7 @@ describe("4.7 stay collection conversion to membership", () => {
               referencesFactId: stay.collectionFactId,
               amountMinor: 59_000,
               method: "WECOM",
+              refundReference: "REFUND-stay-collection-membership-conversion-5",
               note: "企微收款已全额退回，但订单还存在混合资金历史"
             }
           }, "net-zero-mixed-wecom-refund");

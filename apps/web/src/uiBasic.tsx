@@ -278,25 +278,12 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
     };
   }, [modal]);
 
-  useEffect(() => {
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || closeDisabled || !dialogRef.current?.open) return;
-      if (document.querySelector("[data-testid='room-status-quick-popover']")) return;
-      const openDialogs = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")];
-      if (openDialogs.at(-1) !== dialogRef.current) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    };
-    document.addEventListener("keydown", closeOnEscape, true);
-    return () => document.removeEventListener("keydown", closeOnEscape, true);
-  }, [closeDisabled, onClose]);
-
   function trapFocus(event: KeyboardEvent<HTMLDialogElement>) {
+    // Dismiss only through an explicit close/cancel control. Escape may still
+    // dismiss a child picker, but must not discard the surrounding form.
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      if (!closeDisabled) onClose();
       return;
     }
     if (!modal) return;
@@ -335,10 +322,6 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
       onKeyDown={trapFocus}
       onCancel={(event) => {
         event.preventDefault();
-        if (!closeDisabled) onClose();
-      }}
-      onClick={(event) => {
-        if (!closeDisabled && event.target === dialogRef.current) onClose();
       }}
     >
       <div className="modal-shell">

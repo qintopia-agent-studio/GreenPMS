@@ -32,6 +32,7 @@ import {
   type OrderFulfillmentRecordDto
 } from "@qintopia/contracts";
 import { api, ApiError } from "../api";
+import { ExternalPaymentPicker } from "../components/ExternalPaymentPicker";
 import { accommodationPositionItems, type AccommodationPositionItem } from "../components/AccommodationPositionSummary";
 import { roomStatusRoomTypeLabel } from "../room-status/roomStatusPresentation";
 import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
@@ -484,7 +485,7 @@ export function collectionFactTransactionReferenceLabel(facts: readonly Collecti
   if (fact.transaction_reference) return fact.transaction_reference;
   if (fact.fact_type === "REFUND" && fact.method === "WECOM") {
     const original = facts.find((item) => item.fact_id === fact.references_fact_id);
-    return original?.transaction_reference ? `${original.transaction_reference}（原路退回）` : "沿用原收款交易单号";
+    return `${fact.refund_reference ? `退款 ${fact.refund_reference}` : "历史未记录退款单号"}${original?.transaction_reference ? ` · 原收款 ${original.transaction_reference}` : ""}`;
   }
   return fact.method === "CASH" || fact.method === "OTHER" ? "不适用" : "历史未记录";
 }
@@ -1247,7 +1248,7 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
         <div className="form-calculated-field"><span>差额企微收款</span><strong>{remainingMinor === undefined ? "-" : formatMinor(Math.max(0, remainingMinor), view.amounts.netRecordedCollection.currency)}</strong></div>
         {selectedProduct && agreedPriceMinor !== undefined && agreedPriceMinor !== selectedProduct.list_price_minor ? <label className="span-two">调价原因<textarea rows={2} value={priceAdjustmentReason} onChange={(event) => { setPriceAdjustmentReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} /></label> : null}
         {remainingMinor !== undefined && remainingMinor > 0 ? <>
-          <label className="span-two">差额企业微信交易单号<input value={remainingPaymentTransactionReference} onChange={(event) => { setRemainingPaymentTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="conversion-remaining-payment-reference" /><small className="form-field-help">差额是本次新收的会员款，请填写新的企业微信交易单号；住宿收款原单号只保留追溯。</small></label>
+          <ExternalPaymentPicker propertyId={view.order.property_id} value={remainingPaymentTransactionReference} amountMinor={remainingMinor} label="选择差额企业微信收款" testId="conversion-remaining-payment-reference" onChange={reference => { setRemainingPaymentTransactionReference(reference); setValidationError(undefined); }} />
           <label className="span-two">差额收款备注（选填）<textarea rows={2} value={remainingPaymentNote} onChange={(event) => setRemainingPaymentNote(event.target.value)} maxLength={1000} /></label>
         </> : null}
       </div>
@@ -1392,7 +1393,7 @@ function CompleteStayDialog({ view, draft, onClose, onSubmit }: {
               <label>收款人<input value={cashCollector} onChange={(event) => { setCashCollector(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="complete-stay-cash-collector" /></label>
               <label className="span-two">现金备注<textarea rows={2} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} required maxLength={1000} data-testid="complete-stay-cash-note" /></label>
             </> : <>
-              <label className="span-two">{method === "WECOM" ? "企业微信交易单号" : "银行转账单号 / 流水号"}<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="complete-stay-transaction-reference" /></label>
+              method === "WECOM" ? <ExternalPaymentPicker propertyId={view.order.property_id} value={transactionReference} amountMinor={Math.round(Number(amountYuan) * 100) || outstandingMinor} testId="complete-stay-transaction-reference" onChange={(reference, item) => { setTransactionReference(reference); if (item?.amountMinor) setAmountYuan(collectionAmountMinorToYuanInput(item.amountMinor)); setValidationError(undefined); }} /> : <label className="span-two">银行转账单号 / 流水号<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="complete-stay-transaction-reference" /></label>
               <label className="span-two">备注（选填）<textarea rows={2} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} maxLength={1000} /></label>
             </>}
           </div>
@@ -1446,6 +1447,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
   const [method, setMethod] = useState(initialRefundMethod);
   const [note, setNote] = useState(action === "REVERSE_FACT" ? initialReverseNote : "");
   const [transactionReference, setTransactionReference] = useState("");
+  const [refundReference, setRefundReference] = useState("");
   const [factId, setFactId] = useState(initialSelectedFactId);
   const [reverseFactId, setReverseFactId] = useState(initialReverseFactId);
   const selectedRefundCollection = action === "RECORD_REFUND" ? selectedRefundCollectionFor(factId) : undefined;
@@ -1524,10 +1526,15 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
         setValidationError(new Error(method === "WECOM" ? "必须填写企业微信交易单号" : "必须填写交易单号或流水号"));
         return;
       }
+      if (action === "RECORD_REFUND" && method === "WECOM" && !refundReference.trim()) {
+        setValidationError(new Error("必须填写本次企业微信退款单号"));
+        return;
+      }
       Object.assign(base, { amountMinor: parsedAmount, method, note: trimmedNote });
       if (transactionReference.trim()) Object.assign(base, { transactionReference: transactionReference.trim() });
       if (action === "RECORD_REFUND") {
         Object.assign(base, { referencesFactId: factId });
+        if (method === "WECOM") Object.assign(base, { refundReference: refundReference.trim() });
       }
       description = "";
     }
@@ -1581,15 +1588,17 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
               setFactId(nextFactId);
               if (nextFact?.method) setMethod(nextFact.method);
               setTransactionReference("");
+              setRefundReference("");
               setValidationError(undefined);
             }} required>{refundableCollections.map((fact) => <option key={fact.fact_id} value={fact.fact_id}>{formatDateTime(fact.created_at)} · {collectionFactTransactionReferenceLabel(view.collectionFacts, fact)} · 可退 {formatMinor(remainingRefundableMinor(view.collectionFacts, fact), fact.currency)} · {collectionMethodLabel(fact.method)}</option>)}</select></label> : null}
             <label>金额（元）<input type="text" value={amountYuan} onChange={(event) => { setAmountYuan(event.target.value); setValidationError(undefined); }} required inputMode="decimal" placeholder="例如 1280.50" data-testid="fact-amount-yuan" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0} /></label>
             <label>{action === "RECORD_REFUND" ? "退款方式" : "收款方式"}<select value={method} onChange={(event) => { setMethod(event.target.value); setTransactionReference(""); setValidationError(undefined); }} disabled={(action === "RECORD_REFUND" && refundableCollections.length === 0) || selectedRefundCollection?.method === "WECOM"}><option value="WECOM">企业微信</option><option value="BANK_TRANSFER">银行转账</option><option value="CASH">现金</option><option value="OTHER">其他</option></select></label>
             {action === "RECORD_REFUND" && method === "WECOM" ? <div className="span-two form-field-note" role="status">
               <strong>企业微信原路退回</strong>
-              <span>沿用所选原收款的企业微信交易单号，不需要另填退款单号。</span>
+              <span>对应所选原收款；本次退款需记录独立退款单号。</span>
             </div> : null}
-            {transactionReferenceRequired ? <label className="span-two">{method === "WECOM" ? "企业微信交易单号" : "交易单号 / 流水号"}<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="transaction-reference" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0} /></label> : null}
+            {action === "RECORD_REFUND" && method === "WECOM" ? <ExternalPaymentPicker key={factId} propertyId={view.order.property_id} kind="REFUND" originalCollectionFactId={factId} value={refundReference} amountMinor={Math.round(Number(amountYuan) * 100)} testId="refund-reference" disabled={refundableCollections.length === 0} onChange={(reference, item) => { setRefundReference(reference); if (item?.amountMinor) setAmountYuan(collectionAmountMinorToYuanInput(item.amountMinor)); setValidationError(undefined); }} /> : null}
+            {transactionReferenceRequired ? method === "WECOM" ? <ExternalPaymentPicker propertyId={view.order.property_id} value={transactionReference} amountMinor={Math.round(Number(amountYuan) * 100) || Math.max(0, view.amounts.collectionDifference.minorUnits)} testId="transaction-reference" onChange={(reference, item) => { setTransactionReference(reference); if (item?.amountMinor) setAmountYuan(collectionAmountMinorToYuanInput(item.amountMinor)); setValidationError(undefined); }} /> : <label className="span-two">交易单号 / 流水号<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="transaction-reference" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0} /></label> : null}
             <label className="span-two">{action === "RECORD_REFUND" ? "退款原因" : method === "CASH" ? "收款人" : method === "OTHER" ? "其他收款说明" : "备注（选填）"}<textarea rows={3} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} required={action === "RECORD_REFUND" || method === "CASH" || method === "OTHER"} maxLength={1000} data-testid={action === "RECORD_REFUND" ? "refund-reason" : "collection-note"} /></label>
           </div>
         ) : null}

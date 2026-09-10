@@ -2414,7 +2414,7 @@ function QuoteWorkbench({
                       <label>补录实收金额（元）<input inputMode="decimal" min="0" max={targetContractAmountYuan || undefined} step="0.01" pattern={"[0-9]+(?:\\.[0-9]{1,2})?"} value={backfillAmountYuan} onChange={(event) => { const value = event.target.value; setBackfillAmountYuan(value); const amountMinor = parseBackfillCollectionYuanToMinor(value); if (amountMinor === undefined || amountMinor === 0) { setBackfillMethod("WECOM"); setBackfillTransactionReference(""); setBackfillCashCollector(""); setBackfillCashNote(""); } }} placeholder="可填 0" required data-testid="backfill-amount" /></label>
                       {backfillCollectionAmountMinor !== undefined && backfillCollectionAmountMinor > 0 ? <>
                         <label>收款方式<select value={backfillMethod} onChange={(event) => { setBackfillMethod(event.target.value); setBackfillTransactionReference(""); setBackfillCashCollector(""); setBackfillCashNote(""); }} data-testid="backfill-method"><option value="WECOM">企业微信</option><option value="BANK_TRANSFER">银行转账</option><option value="CASH">现金</option></select></label>
-                        {backfillMethod === "WECOM" || backfillMethod === "BANK_TRANSFER" ? <label>交易单号<input value={backfillTransactionReference} onChange={(event) => setBackfillTransactionReference(event.target.value)} required data-testid="backfill-transaction-reference" /></label> : null}
+                        {backfillMethod === "WECOM" ? <ExternalPaymentPicker propertyId={propertyId} value={backfillTransactionReference} amountMinor={backfillCollectionAmountMinor} testId="backfill-transaction-reference" onChange={(reference, item) => { setBackfillTransactionReference(reference); if (item?.amountMinor) setBackfillAmountYuan(String(item.amountMinor / 100)); }} /> : backfillMethod === "BANK_TRANSFER" ? <label>交易单号<input value={backfillTransactionReference} onChange={(event) => setBackfillTransactionReference(event.target.value)} required data-testid="backfill-transaction-reference" /></label> : null}
                         {backfillMethod === "CASH" ? <>
                           <label>收款人<input value={backfillCashCollector} onChange={(event) => setBackfillCashCollector(event.target.value)} required maxLength={200} data-testid="backfill-cash-collector" /></label>
                           <label className="span-two">现金收款备注<textarea rows={2} value={backfillCashNote} onChange={(event) => setBackfillCashNote(event.target.value)} required maxLength={1000} data-testid="backfill-cash-note" /></label>
@@ -6485,3 +6485,4 @@ export function InventoryPage() {
     </ModalNoticeProvider>
   );
 }
+import { ExternalPaymentPicker } from "../components/ExternalPaymentPicker";

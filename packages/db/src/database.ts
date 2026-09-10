@@ -9,6 +9,9 @@ import type { Database } from "./schema.ts";
 import { resolveStaffProfileManifest } from "./staff-profile-manifest.ts";
 import { accountManagementReady } from "./account-management-readiness.ts";
 import { checkoutReversalReady } from "./checkout-reversal-readiness.ts";
+import { integrationReady } from "./integration-readiness.ts";
+import { wecomRefundReady } from "./wecom-refund-readiness.ts";
+import { externalPaymentsReady } from "./external-payments-readiness.ts";
 import { companionReady } from "./companion-readiness.ts";
 
 pg.types.setTypeParser(1082, (value) => value);
@@ -70,7 +73,10 @@ export const currentMigrationNames = [
   "054_unused_member_deletion.sql",
   "055_checkout_reversal.sql",
   "056_whole_room_companions.sql",
-  "057_order_directory_read_indexes.sql"
+  "057_order_directory_read_indexes.sql",
+  "058_integration_events.sql",
+  "059_wecom_refund_reference.sql",
+  "060_external_payments.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -85,10 +91,10 @@ export function databaseUrl(): string {
   return url.toString();
 }
 
-export function createDatabase(url = databaseUrl()): Kysely<Database> {
+export function createDatabase(url = databaseUrl(), options: Pick<pg.PoolConfig, "max" | "connectionTimeoutMillis" | "statement_timeout"> = {}): Kysely<Database> {
   return new Kysely<Database>({
     dialect: new PostgresDialect({
-      pool: new pg.Pool({ connectionString: url, max: 20 })
+      pool: new pg.Pool({ connectionString: url, max: 20, ...options })
     })
   });
 }
@@ -230,6 +236,7 @@ export async function databaseReady(
           ('stay_segments', 'created_at'),
           ('pricing_revisions', 'created_at'),
           ('collection_facts', 'created_at'),
+          ('external_payment_bills', 'id'),
           ('entitlement_ledger', 'created_at'),
           ('membership_orders', 'status'),
           ('membership_orders', 'activated_at'),
@@ -3169,7 +3176,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db);
+    return finalReady && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db);
   } catch {
     return false;
   }

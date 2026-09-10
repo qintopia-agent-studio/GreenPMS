@@ -178,7 +178,8 @@ async function createCompletedStay(options: {
     stayType: "TRANSIENT",
     arrivalDate: options.arrivalDate,
     departureDate: options.departureDate,
-    pricingPolicyVersionId: demo.transientPolicyId
+    // Relative historical dates can cross a month boundary; use the approved policy.
+    pricingPolicyVersionId: demo.publicPricingPolicyId
   });
   const createPreview = await createCommandPreview(db, administratorPrincipal, {
     commandType: "CREATE_ORDER",

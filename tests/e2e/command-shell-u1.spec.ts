@@ -155,6 +155,8 @@ test("U1 returns to the maintenance draft, confirms once, auto closes and refres
     await expect(page.getByTestId("command-review-heading")).toBeFocused();
     await expect(dialog).not.toContainText(/Preview|Confirm|Receipt|Command|effectHash|Claim/);
     await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "关闭", exact: true }).click();
     await expect(page.locator("dialog.room-status-write-drawer").getByLabel("维修原因")).toHaveValue(reason);
 
     const escapeReturnPreview = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/command-previews" && response.status() === 200);

@@ -556,6 +556,7 @@ export interface CollectionFactDto {
   cash_collector: string | null;
   note: string;
   transaction_reference: string | null;
+  refund_reference?: string | null;
   pricing_revision_id: string | null;
   command_id: string;
   created_at: string;

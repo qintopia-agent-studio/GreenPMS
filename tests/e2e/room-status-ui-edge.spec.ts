@@ -703,6 +703,8 @@ test("a maintenance draft survives stale query conditions at 320px and resumes a
     await expectFullyHitTestable(confirmButton, "320px business confirmation action");
     await page.screenshot({ path: testInfo.outputPath("server-preview-at-320px.png") });
     await page.keyboard.press("Escape");
+    await expect(commandDialog).toBeVisible();
+    await commandDialog.getByRole("button", { name: "关闭", exact: true }).click();
     await expect(commandDialog).toBeHidden();
   } finally {
     await page.context().setOffline(false);

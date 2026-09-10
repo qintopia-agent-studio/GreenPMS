@@ -665,7 +665,7 @@ test("fixed 30-night timeline keeps stable columns while desktop context opens a
   expect(await trigger.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(widthBeforeOrder, 1);
 });
 
-test("desktop drawer geometry, Escape focus, and full-order return preserve room-status context", async ({ page }, testInfo) => {
+test("desktop drawer geometry, explicit-close focus, and full-order return preserve room-status context", async ({ page }, testInfo) => {
   test.skip(!isDesktopProject(testInfo), "desktop-only Stage 7 responsive context coverage");
   test.setTimeout(120_000);
   const viewports = [
@@ -736,6 +736,8 @@ test("desktop drawer geometry, Escape focus, and full-order return preserve room
         expect(await drawerBody.evaluate((element) => element.scrollTop)).toBe(scrollBeforeRefresh);
       }
       await page.keyboard.press("Escape");
+      await expect(drawer).toBeVisible();
+      await drawer.getByRole("button", { name: "关闭", exact: true }).click();
       await expect(drawer).toBeHidden();
       await expect(trigger).toBeFocused();
     } else {
@@ -851,6 +853,8 @@ test("375px mobile occupancy opens and closes the order context, then returns fr
   await expect(context).toContainText("阿宁");
 
   await page.keyboard.press("Escape");
+  await expect(context).toBeVisible();
+  await closeOrderContext(context);
   await expect(context).toBeHidden();
   await expect(trigger).toBeFocused();
 

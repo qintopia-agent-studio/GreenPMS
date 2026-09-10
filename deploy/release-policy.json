@@ -1,8 +1,8 @@
 {
   "application": "greenpms",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "rollbackCompatibility": {
-    "mode": "same-migrations-only",
-    "reason": "本版本不包含数据库迁移；旧镜像只允许在相同迁移基线上直接回退，不回退数据库或业务数据。"
+    "mode": "forward-only",
+    "reason": "本版本包含企业微信收退款与匹配相关数据库迁移；上线前必须备份数据库，旧镜像不得直接跨迁移回退。"
   }
 }

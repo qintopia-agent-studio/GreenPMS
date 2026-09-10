@@ -3470,7 +3470,8 @@ describe("Receipt transaction reference labels", () => {
     expect(receiptTransactionReferenceLabel({ factType: "REVERSAL", transactionReference: null })).toBe("不适用");
     expect(receiptTransactionReferenceLabel({ factType: "COLLECTION", transactionReference: null })).toBe("历史未记录");
     expect(receiptTransactionReferenceLabel({ factType: "REFUND", transactionReference: "TXN-REFUND-001" })).toBe("TXN-REFUND-001");
-    expect(receiptTransactionReferenceLabel({ factType: "REFUND", method: "WECOM", transactionReference: null })).toBe("沿用原收款交易单号");
+    expect(receiptTransactionReferenceLabel({ factType: "REFUND", method: "WECOM", transactionReference: null })).toBe("历史未记录退款单号");
+    expect(receiptTransactionReferenceLabel({ factType: "REFUND", method: "WECOM", transactionReference: null, refundReference: "RF-001" })).toBe("RF-001");
   });
 });
 

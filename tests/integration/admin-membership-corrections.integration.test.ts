@@ -4938,6 +4938,7 @@ describe("step 9 administrator membership corrections", () => {
             referencesFactId: setup.sourceStay.collectionFactId,
             amountMinor: 1,
             method: "WECOM",
+            refundReference: "REFUND-admin-membership-corrections-0",
             note: "真实退款不能伪装为会员重分类"
           }
         }, `void-reject-${kind}-refund`, ordinaryStaff);
@@ -4989,6 +4990,7 @@ describe("step 9 administrator membership corrections", () => {
         referencesFactId: setup.sourceStay.collectionFactId,
         amountMinor: 1,
         method: "WECOM",
+        refundReference: "REFUND-admin-membership-corrections-1",
         note: "真实退款历史必须永久阻断作废重建"
       }
     }, "void-historical-refund-record", ordinaryStaff);
