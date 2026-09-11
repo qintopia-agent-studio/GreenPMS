@@ -100,6 +100,7 @@ class PackageScannerTests(unittest.TestCase):
         current = manifest()
         details = inspect_archive(self.write_archive(docker_archive(current)), current)
         self.assertEqual(details["imageTag"], IMAGE_TAG)
+        self.assertEqual(len(details["rootfsDiffIds"]), 1)
 
     def test_rejects_tag_mismatch(self):
         current = manifest()
