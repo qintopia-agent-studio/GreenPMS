@@ -24,9 +24,9 @@
 
 | 原则 | Agent OS | GreenPMS 实现 |
 | --- | --- | --- |
-| 不可变版本 | 精确提交的 release 目录 | COS 版本/commit 路径、Docker config image ID、不可变本地 tag |
+| 不可变版本 | 精确提交的 release 目录 | COS 版本/commit 路径、Docker archive config digest、rootfs diff IDs、不可变本地 tag |
 | 临时 staging | 下载与准备目录 | mktemp 下载目录，退出清理 |
-| current / previous / rollback-from | release 指针与实际进程引用 | 原子 state.json、容器 image ID、rollbackFrom |
+| current / previous / rollback-from | release 指针与实际进程引用 | 原子 state.json、目标 daemon 的 runtime image ID、rollbackFrom |
 | 切换与恢复 | 服务切换、健康门禁、恢复原指针/进程 | 固定 Compose 项目和容器、健康门禁、恢复原镜像 |
 | 防止并发 | runner 部署锁 | Actions concurrency + 服务器 flock |
 | 清理保护 | 检查进程对 release 的引用 | 检查所有容器对 image ID 的引用，保护 current/previous/rollbackFrom |

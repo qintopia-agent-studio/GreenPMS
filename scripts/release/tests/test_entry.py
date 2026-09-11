@@ -83,9 +83,15 @@ class EntryTests(unittest.TestCase):
     def test_docker_adapter_uses_fixed_project_no_build_no_pull_and_clean_env(self):
         config = {"composeFile": "/etc/greenpms/compose.server.yaml", "envFile": "/etc/greenpms/app.env"}
         docker = Docker(config)
-        manifest = {"imageId": "sha256:" + "a" * 64, "imageTag": "greenpms:v1.2.4-" + "b" * 40}
-        with patch.object(docker, "inspect_image", return_value={"Id": manifest["imageId"]}), patch("server.command") as run:
-            docker.switch({"manifest": manifest})
+        runtime_image_id = "sha256:" + "c" * 64
+        manifest = {"imageId": "sha256:" + "a" * 64, "imageTag": "greenpms:v1.2.4-" + "b" * 40,
+                    "version": "v1.2.4", "gitRevision": "b" * 40, "source": SOURCE,
+                    "createdAt": "2026-09-09T00:00:00Z"}
+        image = {"Id": runtime_image_id, "RepoTags": [manifest["imageTag"]], "Os": "linux", "Architecture": "amd64",
+                 "Labels": {f"org.opencontainers.image.{field}": manifest[value] for field, value in
+                            (("version", "version"), ("revision", "gitRevision"), ("source", "source"), ("created", "createdAt"))}}
+        with patch.object(docker, "inspect_image", return_value=image), patch("server.command") as run:
+            docker.switch({"manifest": manifest, "runtimeImageId": runtime_image_id})
             args = run.call_args.args[0]
             self.assertEqual(args[:4], ["docker", "compose", "--project-name", "green-pms"])
             self.assertIn("--no-build", args)

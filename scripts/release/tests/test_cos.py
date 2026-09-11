@@ -404,7 +404,8 @@ class OrchestrationTests(unittest.TestCase):
         marker_store = CosStore("bucket", "region", role="MARKER", client=client)
         prefix, manifest, manifest_sha = add_release(client, "v2.0.0", "a" * 40, "2026-09-09T10:00:00Z", marker=False, migration_count=57)
         receipt = {"application": "greenpms", "status": "healthy", "deployedAt": "2026-09-09T10:00:00Z",
-                   "current": {"prefix": prefix, "manifestSha256": manifest_sha, "manifest": manifest},
+                   "current": {"prefix": prefix, "manifestSha256": manifest_sha, "manifest": manifest,
+                               "runtimeImageId": "sha256:" + "f" * 64},
                    "previous": None, "rollbackFrom": None}
         processes = []
         with tempfile.TemporaryDirectory() as temporary, self.ssh_environment(temporary):
@@ -461,7 +462,8 @@ class OrchestrationTests(unittest.TestCase):
     def test_receipt_schema_rejects_unexpected_fields(self):
         prefix = f"{ROOT}v2.1.0/{'b' * 40}/"
         manifest = make_manifest("v2.1.0", "b" * 40)
-        current = {"prefix": prefix, "manifestSha256": "c" * 64, "manifest": manifest}
+        current = {"prefix": prefix, "manifestSha256": "c" * 64, "manifest": manifest,
+                   "runtimeImageId": "sha256:" + "f" * 64}
         receipt = {"application": "greenpms", "status": "healthy", "deployedAt": "2026-09-09T10:00:00Z",
                    "current": current, "previous": None, "rollbackFrom": None}
         validate_receipt(receipt)
@@ -469,6 +471,8 @@ class OrchestrationTests(unittest.TestCase):
             validate_receipt({**receipt, "untrusted": "value"})
         with self.assertRaisesRegex(ReleaseError, "unexpected schema"):
             validate_receipt({**receipt, "current": {**current, "untrusted": "value"}})
+        with self.assertRaisesRegex(ReleaseError, "runtime image identity"):
+            validate_receipt({**receipt, "current": {**current, "runtimeImageId": "sha256:bad"}})
 
     def test_restricted_server_error_is_reported_without_arbitrary_stderr(self):
         with tempfile.TemporaryDirectory() as temporary, self.ssh_environment(temporary):

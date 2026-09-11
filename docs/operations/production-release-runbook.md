@@ -110,7 +110,7 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 3. 先校验对象 SHA-256、manifest 身份、平台、OCI identity 和 SBOM，再执行 `docker load`。
 4. 用不可变的版本/revision 镜像 tag 设置 `GREENPMS_IMAGE`，启动固定的 `green-pms` Compose 项目和 `qintopia-pms-app` 容器。
 5. 等待 Docker healthcheck，并检查本地 `/health/ready`、`/api/v1/version` 以及两个公网健康地址。公网 version 必须与 manifest 版本一致。
-6. 将新版本写入 `current`，部署前版本写入 `previous`；回退操作额外记录 `rollbackFrom`。state 写入采用临时文件加原子替换，配置 hash 绑定 Compose 和外部 app.env。
+6. 将新版本写入 `current`，部署前版本写入 `previous`；回退操作额外记录 `rollbackFrom`。manifest 的 `imageId` 是 Docker archive config digest；state 中的 `runtimeImageId` 是目标 Docker daemon 导入后实际引用的本地 ID。不同 image store 可能使用不同的本地 ID，因此容器切换和清理使用 `runtimeImageId`，归档完整性使用 `imageId`、archive SHA、OCI labels 和 rootfs diff IDs 共同校验。state 写入采用临时文件加原子替换，配置 hash 绑定 Compose 和外部 app.env。
 7. 在锁仍保持期间返回健康 receipt。Actions 校验 receipt 后写入 `deployed.json`，运行 retention，最后让服务器根据 receipt 清理旧 image ID。
 8. 所有成功和失败路径通过 trap 删除 archive、解压内容和下载临时目录。异常中断留下 transaction journal，由 recovery timer 在下一次持锁恢复。
 

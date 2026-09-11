@@ -355,6 +355,7 @@ def inspect_archive(path: str | Path, manifest: dict[str, object]) -> dict[str, 
                     "imageTag": manifest["imageTag"],
                     "platform": "linux/amd64",
                     "layerCount": len(layers),
+                    "rootfsDiffIds": list(diff_ids),
                 }
         except tarfile.TarError:
             raise ReleaseError("Docker archive is invalid") from None

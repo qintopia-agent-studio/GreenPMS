@@ -137,6 +137,7 @@ class FakeDocker:
         revision: str | None = None,
         source: str = SOURCE,
         created: str = "2026-09-09T00:00:00Z",
+        rootfs_diff_ids: list[str] | None = None,
     ) -> None:
         labels = {
             "org.opencontainers.image.version": version,
@@ -150,6 +151,7 @@ class FakeDocker:
             "Os": "linux",
             "Architecture": "amd64",
             "Labels": labels,
+            "RootfsDiffIds": rootfs_diff_ids or ["sha256:" + "d" * 64],
         }
         self.image_records[image_id] = record
         for tag in tags:
@@ -224,7 +226,7 @@ class DockerAdapterTests(unittest.TestCase):
 
         def fake_command(args: list[str], **_kwargs: object) -> str:
             calls.append(args)
-            return '{"Id":"sha256:db","RepoTags":["postgres:18"],"Os":"linux","Architecture":"amd64","Labels":null}'
+            return '{"Id":"sha256:db","RepoTags":["postgres:18"],"Os":"linux","Architecture":"amd64","Labels":null,"RootfsDiffIds":[]}'
 
         original = server.command
         server.command = fake_command
@@ -237,6 +239,7 @@ class DockerAdapterTests(unittest.TestCase):
         template = calls[0][calls[0].index("--format") + 1]
         self.assertIn('index .Config "Labels"', template)
         self.assertNotIn(".Config.Labels", template)
+        self.assertIn(".RootFS.Layers", template)
 
 
 class FakeHealth:
@@ -246,7 +249,7 @@ class FakeHealth:
         self.calls: list[str] = []
 
     def __call__(self, release: dict[str, object]) -> None:
-        image_id = str(release["manifest"]["imageId"])
+        image_id = str(release.get("runtimeImageId", release["manifest"]["imageId"]))
         self.calls.append(image_id)
         if image_id in self.interruptions:
             raise KeyboardInterrupt
@@ -261,6 +264,7 @@ class DeployerFixture:
     new_version = "v1.2.4"
     new_revision = "a" * 40
     new_image_id = "sha256:" + "a" * 64
+    new_runtime_image_id = "sha256:" + "c" * 64
 
     def __init__(self, *, health: FakeHealth | None = None) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="greenpms-server-test-")
@@ -311,8 +315,10 @@ class DeployerFixture:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def scan(self, archive: Path, manifest: dict[str, object]) -> None:
+    def scan(self, archive: Path, manifest: dict[str, object]) -> dict[str, object]:
         self.scanner_calls.append((archive, manifest))
+        image = self.docker.inspect_image(str(manifest["imageTag"]))
+        return {"rootfsDiffIds": image["RootfsDiffIds"]}
 
     def decompress(self, source: Path, target: Path) -> None:
         self.decompress_calls.append((source, target))
@@ -331,6 +337,7 @@ class DeployerFixture:
             "prefix": release_key(version, revision),
             "manifestSha256": digest(json_bytes(manifest)),
             "manifest": manifest,
+            "runtimeImageId": image_id,
         }
         state = {
             "schemaVersion": 1,
@@ -350,6 +357,7 @@ class DeployerFixture:
         migrations: list[dict[str, str]] | None = None,
         compatibility_mode: str = "same-migrations-only",
         labels: dict[str, str | None] | None = None,
+        runtime_image_id: str | None = None,
     ) -> tuple[dict[str, object], str]:
         manifest, objects = make_manifest(
             self.new_version,
@@ -369,7 +377,7 @@ class DeployerFixture:
         if labels:
             image_labels.update(labels)
         self.docker.add_image(
-            self.new_image_id,
+            runtime_image_id or self.new_image_id,
             [str(manifest["imageTag"])],
             version=image_labels["version"],
             revision=image_labels["revision"],
@@ -419,6 +427,29 @@ class CompressionTests(unittest.TestCase):
 
 @unittest.skipIf(server is None, "server.py import contract must be fixed first")
 class DeploymentTests(unittest.TestCase):
+    def test_load_accepts_a_different_daemon_runtime_id_and_records_it(self) -> None:
+        with DeployerFixture() as fixture:
+            manifest, key = fixture.add_new_release(runtime_image_id=fixture.new_runtime_image_id)
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+
+            result = fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+
+            self.assertEqual(result["current"]["manifest"]["imageId"], manifest["imageId"])
+            self.assertEqual(result["current"]["runtimeImageId"], fixture.new_runtime_image_id)
+            self.assertEqual(fixture.docker.current_image_id, fixture.new_runtime_image_id)
+
+    def test_load_rejects_runtime_rootfs_that_differs_from_archive(self) -> None:
+        with DeployerFixture() as fixture:
+            _, key = fixture.add_new_release()
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+            fixture.deployer.scanner = lambda *_: {"rootfsDiffIds": ["sha256:" + "e" * 64]}
+
+            with self.assertRaisesRegex(ReleaseError, "rootfs differs"):
+                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+
+            self.assertEqual(fixture.docker.switches, [])
+            self.assertEqual(fixture.docker.current_image_id, fixture.old_image_id)
+
     def test_bundle_validation_rejects_before_docker_load(self) -> None:
         with DeployerFixture() as fixture:
             _, key = fixture.add_new_release()
@@ -584,6 +615,7 @@ class DeploymentTests(unittest.TestCase):
                 "prefix": key,
                 "manifestSha256": target_manifest_sha,
                 "manifest": target_manifest,
+                "runtimeImageId": fixture.new_image_id,
             }
             before["previous"] = previous
             server.atomic_json(fixture.deployer.state_file, before)  # type: ignore[union-attr]
