@@ -2,6 +2,42 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.3.3](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.3.2...v1.3.3) (2026-09-11)
+
+
+### Bug Fixes
+
+* accept COS never-versioned response ([3a35904](https://github.com/qintopia-agent-studio/GreenPMS/commit/3a359049b79ce57890ee596e4a07f12f11c8d8f7))
+* accept COS never-versioned response ([c94b882](https://github.com/qintopia-agent-studio/GreenPMS/commit/c94b882939364d5c61704656e7d584df0f6578e8))
+* inspect Docker images without labels ([a5de9fa](https://github.com/qintopia-agent-studio/GreenPMS/commit/a5de9fab1df8eee1113b154b0f6b31fd28234465))
+* **integrations:** pass PMS and Agent OS synthetic joint acceptance ([4d71a1a](https://github.com/qintopia-agent-studio/GreenPMS/commit/4d71a1ac119b4c3fad0cd5b2570d81ec56809114))
+* **integrations:** 修复事件补偿响应与新安装就绪检查 ([14f1700](https://github.com/qintopia-agent-studio/GreenPMS/commit/14f17006093e81f8f2bddee39298057307a4ebea))
+* **release:** allow forward-only versions to deploy ([4470417](https://github.com/qintopia-agent-studio/GreenPMS/commit/4470417f0d313457cf302606b790b24c0bcfaf3b))
+* **release:** allow forward-only versions to deploy ([0180c29](https://github.com/qintopia-agent-studio/GreenPMS/commit/0180c29c16ec466a25b12f635ca0c48526e960fb))
+* **release:** deploy WeCom worker with app ([7c755a7](https://github.com/qintopia-agent-studio/GreenPMS/commit/7c755a7cfdd7fb38299711ef18d96f0189c7012c))
+* **release:** deploy WeCom worker with app ([7e63fbc](https://github.com/qintopia-agent-studio/GreenPMS/commit/7e63fbcd21be5240b22213c666bc7989715b292b))
+* **release:** restore rollback policy after migrations ([501e7da](https://github.com/qintopia-agent-studio/GreenPMS/commit/501e7dafaf642a1f63932faf039bfe9103d2f58f))
+* **release:** restore rollback policy after migrations ([8ac3d86](https://github.com/qintopia-agent-studio/GreenPMS/commit/8ac3d861ef406bd80e1506a1fd639860a63221aa))
+* **release:** return archive scanner identity ([d60bd5a](https://github.com/qintopia-agent-studio/GreenPMS/commit/d60bd5a5ef132ca6bbf47933e958148c69d3de2f))
+* **release:** return archive scanner identity ([21d8a0f](https://github.com/qintopia-agent-studio/GreenPMS/commit/21d8a0fa75878f7098191054e8f375035e238516))
+* **release:** separate archive and runtime image identity ([b144ee1](https://github.com/qintopia-agent-studio/GreenPMS/commit/b144ee153de5f77e75480a47faa24066f31dd016))
+* **release:** separate archive and runtime image identity ([a87ead3](https://github.com/qintopia-agent-studio/GreenPMS/commit/a87ead301350928bb7586dba253c47f56a59e303))
+* run release tests from harness checkout ([7c69474](https://github.com/qintopia-agent-studio/GreenPMS/commit/7c69474d197c04747e702f0513a294f8ac49254b))
+* run release tests from harness checkout ([101f4d1](https://github.com/qintopia-agent-studio/GreenPMS/commit/101f4d1630f0b3c50af8d6924b884f68073e2c26))
+* **wecom:** unblock production readiness fingerprint ([34f7725](https://github.com/qintopia-agent-studio/GreenPMS/commit/34f7725216338328d434e850aca1b70910252a34))
+
+
+### Build System
+
+* exclude repository-only files from Docker context ([c2e4e79](https://github.com/qintopia-agent-studio/GreenPMS/commit/c2e4e79f03818065441c59a32c1eb4845fca94ca))
+* exclude repository-only files from Docker context ([8ca80a3](https://github.com/qintopia-agent-studio/GreenPMS/commit/8ca80a30acb15dfed6c8b9784c6750aef8399d6a))
+
+
+### Documentation
+
+* **integrations:** archive acceptance baselines and prepare PR ([a9bbbd9](https://github.com/qintopia-agent-studio/GreenPMS/commit/a9bbbd90b1e2c6fe786a2202d27a583c63546a8e))
+* record final acceptance handoff approval block ([43ece6d](https://github.com/qintopia-agent-studio/GreenPMS/commit/43ece6dc0e0cdd26202c27b43fa5758daab16e36))
+
 ## [1.3.2](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.3.1...v1.3.2) (2026-09-10)
 
 - 修正企业微信收退款 readiness 的生产 PostgreSQL 18 schema fingerprint，使迁移后的运行账号可以正常通过启动门禁。
