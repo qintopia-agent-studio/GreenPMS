@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.3.4](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.3.3...v1.3.4) (2026-09-11)
+
+
+### Bug Fixes
+
+* **ui:** restore Q in collapsed sidebar ([a3b427d](https://github.com/qintopia-agent-studio/GreenPMS/commit/a3b427d6e96b4264e09355f5e8d48aacad8f1540))
+* **ui:** 折叠侧栏恢复 Q 标识并隐藏版本号 ([cfcb080](https://github.com/qintopia-agent-studio/GreenPMS/commit/cfcb080a2020e9056dc7deea1198c3311ac97c3f))
+
 ## [1.3.3](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.3.2...v1.3.3) (2026-09-11)
 
 
