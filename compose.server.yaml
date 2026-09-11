@@ -1,4 +1,4 @@
-# Production deployment: app service only.
+# Production deployment: API and WeCom worker use the same immutable image.
 # Database is TencentDB for PostgreSQL (private network), provided via DATABASE_URL in .env.
 services:
   app:
@@ -24,3 +24,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  wecom-worker:
+    image: ${GREENPMS_IMAGE:?GREENPMS_IMAGE must name an immutable prebuilt release}
+    pull_policy: never
+    container_name: qintopia-pms-wecom-worker
+    restart: unless-stopped
+    command: ["node", "packages/db/src/wecom-worker-main.js"]
+    environment:
+      PMS_WECOM_SYNC_ENABLED: "true"
+      PMS_WECOM_SOURCE_ID: ${PMS_WECOM_SOURCE_ID:?PMS_WECOM_SOURCE_ID is required}
+      PMS_WECOM_CORP_ID: ${PMS_WECOM_CORP_ID:?PMS_WECOM_CORP_ID is required}
+      PMS_WECOM_APP_SECRET: ${PMS_WECOM_APP_SECRET:?PMS_WECOM_APP_SECRET is required}
+      PMS_WECOM_WORKER_DATABASE_URL: ${PMS_WECOM_WORKER_DATABASE_URL:?PMS_WECOM_WORKER_DATABASE_URL is required}

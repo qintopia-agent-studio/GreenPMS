@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 
 RELEASE_DIR = Path(__file__).resolve().parents[1]
@@ -240,6 +241,34 @@ class DockerAdapterTests(unittest.TestCase):
         self.assertIn('index .Config "Labels"', template)
         self.assertNotIn(".Config.Labels", template)
         self.assertIn(".RootFS.Layers", template)
+
+    def test_health_rejects_worker_on_a_different_image(self) -> None:
+        docker = Mock()
+        docker.current.return_value = {
+            "imageId": "sha256:" + "a" * 64,
+            "running": True,
+            "health": "healthy",
+        }
+        docker.worker.return_value = {
+            "imageId": "sha256:" + "b" * 64,
+            "running": True,
+            "health": "none",
+        }
+        health = server.Health(docker, {
+            "healthTimeoutSeconds": 1,
+            "localBaseUrl": "http://127.0.0.1:4100",
+            "publicReadyUrl": "https://example.test/health/ready",
+            "publicVersionUrl": "https://example.test/api/v1/version",
+        })
+        release = {
+            "runtimeImageId": "sha256:" + "a" * 64,
+            "manifest": {"version": "v1.2.4", "imageId": "sha256:" + "c" * 64},
+        }
+        with patch("server.time.monotonic", side_effect=[0, 0, 2]), \
+                patch("server.time.sleep") as sleep, \
+                self.assertRaisesRegex(ReleaseError, "readiness or version gate failed"):
+            health(release)
+        sleep.assert_called_once_with(2)
 
 
 class FakeHealth:

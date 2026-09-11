@@ -83,14 +83,20 @@ class Docker:
         template = '{"id":{{json .Id}},"imageId":{{json .Image}},"name":{{json .Name}},"running":{{json .State.Running}},"health":{{if index .State "Health"}}{{json (index .State "Health").Status}}{{else}}"none"{{end}},"labels":{{json .Config.Labels}}}'
         return [json.loads(line) for line in command(["docker", "inspect", "--format", template, *ids]).splitlines()]
 
-    def current(self):
-        items = [c for c in self.containers() if c["name"] == "/qintopia-pms-app"]
-        require(len(items) == 1, "expected production container missing")
-        current = items[0]
-        labels = current.get("labels") or {}
+    def service(self, service, container_name):
+        items = [c for c in self.containers() if c["name"] == "/" + container_name]
+        require(len(items) == 1, f"expected production {service} container missing")
+        container = items[0]
+        labels = container.get("labels") or {}
         require(labels.get("com.docker.compose.project") == "green-pms"
-                and labels.get("com.docker.compose.service") == "app", "container ownership mismatch")
-        return current
+                and labels.get("com.docker.compose.service") == service, "container ownership mismatch")
+        return container
+
+    def current(self):
+        return self.service("app", "qintopia-pms-app")
+
+    def worker(self):
+        return self.service("wecom-worker", "qintopia-pms-wecom-worker")
 
     def inspect_image(self, identity):
         template = '{"Id":{{json .Id}},"RepoTags":{{json .RepoTags}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Labels":{{if index .Config "Labels"}}{{json (index .Config "Labels")}}{{else}}null{{end}},"RootfsDiffIds":{{json .RootFS.Layers}}}'
@@ -109,7 +115,8 @@ class Docker:
             verify_image(image, manifest)
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GREENPMS_IMAGE": identity}
         command(["docker", "compose", "--project-name", "green-pms", "--file", self.config["composeFile"],
-                 "--env-file", self.config["envFile"], "up", "--detach", "--no-build", "--pull", "never", "--force-recreate", "app"],
+                 "--env-file", self.config["envFile"], "up", "--detach", "--no-build", "--pull", "never", "--force-recreate",
+                 "app", "wecom-worker"],
                 env=environment, timeout=180)
 
     def images(self):
@@ -190,7 +197,9 @@ class Health:
         deadline = time.monotonic() + self.config.get("healthTimeoutSeconds", 150)
         while time.monotonic() < deadline:
             current = self.docker.current()
-            if current["imageId"] == runtime_image_id(release) and current["running"] and current["health"] == "healthy":
+            worker = self.docker.worker()
+            if (current["imageId"] == runtime_image_id(release) and current["running"] and current["health"] == "healthy"
+                    and worker["imageId"] == runtime_image_id(release) and worker["running"]):
                 try:
                     version = release["manifest"]["version"].removeprefix("v")
                     base = self.config["localBaseUrl"].rstrip("/")
