@@ -260,6 +260,21 @@ describe.sequential("minimal projections, feed and recovery", () => {
         });
         await sql `SELECT qintopia_integration_prune(${demo.propertyId},30)`.execute(owner);
         await expect(readPmsEventFeed(runtime, demo.propertyId, original.next_cursor)).rejects.toMatchObject({ statusCode: 410, code: "CURSOR_EXPIRED" });
+        const previousLogLevel = process.env.LOG_LEVEL;
+        process.env.LOG_LEVEL = "silent";
+        const app = await buildServer(createDatabase(runtimeDatabaseUrlForTesting(testDatabaseUrl)));
+        try {
+            const expired = await app.inject({
+                url: `/api/v1/integration-events?propertyId=${demo.propertyId}&cursor=${encodeURIComponent(original.next_cursor)}`,
+                headers: { authorization: `Bearer ${demo.readToken}` }
+            });
+            expect(expired.statusCode).toBe(410);
+            expect(expired.json()).toMatchObject({ code: "CURSOR_EXPIRED", retryable: false, details: { rebuild_required: true } });
+        } finally {
+            await app.close();
+            if (previousLogLevel === undefined) delete process.env.LOG_LEVEL;
+            else process.env.LOG_LEVEL = previousLogLevel;
+        }
         const now = JSON.parse(await readPmsEventFeed(runtime, demo.propertyId));
         expect(now.events).toEqual([]);
         expect(JSON.parse(await readPmsEventFeed(runtime, demo.propertyId, now.retention_floor_cursor)).events).toEqual([]);
