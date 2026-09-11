@@ -459,11 +459,6 @@ textarea:focus-visible {
   padding: 0;
 }
 
-.sidebar-is-collapsed .sidebar-brand .brand-word,
-.sidebar-is-collapsed .sidebar-brand-product {
-  display: none;
-}
-
 .sidebar-is-collapsed .sidebar-brand-full,
 .sidebar-is-collapsed .sidebar-brand-product,
 .sidebar-is-collapsed .nav-link span,
@@ -513,8 +508,7 @@ textarea:focus-visible {
 }
 
 .sidebar-is-collapsed .application-version {
-  margin-left: 0;
-  align-self: center;
+  display: none;
 }
 
 .nav-link {
@@ -4147,6 +4141,7 @@ pre {
 
   .application-version,
   .sidebar-is-collapsed .application-version {
+    display: block;
     align-self: flex-start;
     margin-left: 0;
     line-height: 12px;
