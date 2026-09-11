@@ -486,6 +486,12 @@ class LockedSSH:
         # lifetime; the 600-second wait below starts only after ACK.
         line = self.process.stdout.readline(MAX_RECEIPT_BYTES + 1)
         if not line or len(line) > MAX_RECEIPT_BYTES or not line.endswith("\n"):
+            if self.process.stderr is not None:
+                remote_error = self.process.stderr.readline(513)
+                if (remote_error.endswith("\n") and len(remote_error) <= 512
+                        and remote_error.startswith("GreenPMS: ")
+                        and all(character.isprintable() for character in remote_error.rstrip("\n"))):
+                    raise ReleaseError(remote_error.rstrip("\n"))
             raise ReleaseError("server did not return one JSON receipt line")
         try:
             receipt = json.loads(line)

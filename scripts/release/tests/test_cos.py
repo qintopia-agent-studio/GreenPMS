@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from scripts.release.common import FILES, ReleaseError, json_bytes, sha256_file
 from scripts.release.cos import CosStore, upload_bundle
-from scripts.release.orchestrate import (MAX_RECEIPT_BYTES, deploy, maintenance,
+from scripts.release.orchestrate import (MAX_RECEIPT_BYTES, LockedSSH, deploy, maintenance,
                                           retention_plan, validate_receipt)
 
 
@@ -92,8 +92,9 @@ class FakeCos:
 
 
 class FakeSSH:
-    def __init__(self, receipt, returncode=0):
-        self.stdout = io.StringIO(json.dumps(receipt, separators=(",", ":")) + "\n")
+    def __init__(self, receipt, returncode=0, stderr=""):
+        self.stdout = io.StringIO("" if receipt is None else json.dumps(receipt, separators=(",", ":")) + "\n")
+        self.stderr = io.StringIO(stderr)
         self.stdin = RecordingStdin()
         self.returncode = returncode
         self.wait_calls = []
@@ -468,6 +469,21 @@ class OrchestrationTests(unittest.TestCase):
             validate_receipt({**receipt, "untrusted": "value"})
         with self.assertRaisesRegex(ReleaseError, "unexpected schema"):
             validate_receipt({**receipt, "current": {**current, "untrusted": "value"}})
+
+    def test_restricted_server_error_is_reported_without_arbitrary_stderr(self):
+        with tempfile.TemporaryDirectory() as temporary, self.ssh_environment(temporary):
+            session = LockedSSH("maintenance", ssh_factory=lambda argv: FakeSSH(
+                None, returncode=1, stderr="GreenPMS: running container differs from recorded current; recover first\n"
+            ))
+            with self.assertRaisesRegex(ReleaseError, "running container differs"):
+                session.receipt()
+
+            session = LockedSSH("maintenance", ssh_factory=lambda argv: FakeSSH(
+                None, returncode=1, stderr="SENTINEL_DATABASE_PASSWORD\n"
+            ))
+            with self.assertRaisesRegex(ReleaseError, "did not return one JSON receipt") as error:
+                session.receipt()
+            self.assertNotIn("SENTINEL", str(error.exception))
 
 
 if __name__ == "__main__":

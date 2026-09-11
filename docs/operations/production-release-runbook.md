@@ -132,7 +132,7 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 
 本流程不会自动执行数据库迁移。外部数据库是 TencentDB，不是部署清理对象。服务 readiness 要求完整迁移文件集合和哈希与当前基线匹配；manifest 的 `requiredMigrations` 和 `rollbackCompatibility` 也会参与门禁。
 
-只允许 `same-migrations-only` 的镜像直接互相切换。`forward-only`、缺失 baseline、文件名/哈希不一致或外部配置 hash 变化，都必须在切换前拒绝。保留旧镜像不等于数据库可以回退；需要前向修复、停写、备份恢复或数据库 owner 操作时，另开经过授权的迁移/恢复方案，不能把 owner credentials 给 GitHub Actions。
+向前部署只允许在已核对的运行迁移基线与目标 manifest 完全相同时切换镜像。直接回退还要求当前和目标镜像都是 `same-migrations-only`；任一侧是 `forward-only` 就拒绝回退。缺失 baseline、文件名/哈希不一致或外部配置 hash 变化，都必须在切换前拒绝。保留旧镜像不等于数据库可以回退；需要前向修复、停写、备份恢复或数据库 owner 操作时，另开经过授权的迁移/恢复方案，不能把 owner credentials 给 GitHub Actions。
 
 首次接管时必须先核对旧容器的精确 image ID、tag/revision、API 版本和容器内迁移文件哈希，使用附录 B 的 `migration-baseline.mjs` 只读生成 baseline。不能用 `latest`、缺失 labels 或仓库当前版本猜测旧镜像身份。
 

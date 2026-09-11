@@ -128,13 +128,14 @@ def verify_image(image, manifest):
         require(labels.get("org.opencontainers.image." + field) == expected, "loaded OCI labels mismatch")
 
 
-def compatible(source, target):
+def compatible(source, target, *, rollback):
     a, b = source["manifest"], target["manifest"]
     require(a["requiredMigrations"] == b["requiredMigrations"],
             "migration baseline changed: direct image switch refused; use an approved forward fix or database recovery plan")
-    require(a["rollbackCompatibility"]["mode"] == "same-migrations-only"
-            and b["rollbackCompatibility"]["mode"] == "same-migrations-only",
-            "forward-only release: direct switch refused; forward fix or database recovery required")
+    if rollback:
+        require(a["rollbackCompatibility"]["mode"] == "same-migrations-only"
+                and b["rollbackCompatibility"]["mode"] == "same-migrations-only",
+                "forward-only release: direct rollback refused; forward fix or database recovery required")
 
 
 def cleanup_images(docker, state, dry_run=False):
@@ -286,7 +287,7 @@ class Deployer:
         self.audit("started", version=version, revision=revision, rollback=rollback)
         previous = before.get("previous")
         if rollback and previous and previous.get("manifestSha256") == manifest_sha and previous.get("prefix") == key:
-            compatible(before["current"], previous)
+            compatible(before["current"], previous, rollback=True)
             verify_image(self.docker.inspect_image(previous["manifest"]["imageTag"]), previous["manifest"])
             return self.promote(before, previous, rollback=True)
         with tempfile.TemporaryDirectory(prefix="download-", dir=self.directory / "tmp") as temporary:
@@ -295,7 +296,7 @@ class Deployer:
                 self.store.download(key + name, path / name)
             m = validate_bundle(path, manifest_sha, version, revision)
             target = {"prefix": key, "manifestSha256": manifest_sha, "manifest": m}
-            compatible(before["current"], target)
+            compatible(before["current"], target, rollback=rollback)
             if before["current"]["manifest"]["imageId"] == m["imageId"]:
                 require(before["current"].get("manifestSha256") == manifest_sha, "same image has conflicting release identity")
                 verify_image(self.docker.inspect_image(m["imageTag"]), m)
@@ -411,7 +412,7 @@ def serve(argv=None):
             state = deployer.state()
             previous = state.get("previous")
             require(previous is not None, "no local rollback image")
-            compatible(state["current"], previous)
+            compatible(state["current"], previous, rollback=True)
             result = deployer.promote(state, previous, rollback=True)
         elif operation == "maintenance":
             require(not deployer.journal.exists(), "recovery required before maintenance")
