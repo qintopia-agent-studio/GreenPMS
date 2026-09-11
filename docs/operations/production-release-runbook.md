@@ -33,7 +33,7 @@ Release job 使用两个独立 checkout：`validate` 从受保护 `main` 解析�
 
 ## 2. 发布身份和产物
 
-Release Please 创建的 tag 必须严格匹配 `vX.Y.Z`，并指向 `main` 历史中的提交。Actions 同时核对 tag、package/lock、Release Please 生成的 `CHANGELOG` 条目和 `deploy/release-policy.json`。服务器不从 Git checkout 构建，生产 Compose 只接受明确的预构建 `GREENPMS_IMAGE`，固定容器名是 `qintopia-pms-app`，Compose 项目名是 `green-pms`。
+Release Please 创建的 tag 必须严格匹配 `vX.Y.Z`，并指向 `main` 历史中的提交。Actions 同时核对 tag、package/lock、Release Please 生成的 `CHANGELOG` 条目和 `deploy/release-policy.json`。服务器不从 Git checkout 构建，生产 Compose 只接受明确的预构建 `GREENPMS_IMAGE`，固定容器名是 `qintopia-pms-app` 和 `qintopia-pms-wecom-worker`，Compose 项目名是 `green-pms`。
 
 镜像使用不可变本地 tag：
 
@@ -108,13 +108,13 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 1. 读取并记录当前容器 image ID、state 和部署审计信息。
 2. 在专用临时目录下载 archive、manifest、checksum 和 SBOM。
 3. 先校验对象 SHA-256、manifest 身份、平台、OCI identity 和 SBOM，再执行 `docker load`。
-4. 用不可变的版本/revision 镜像 tag 设置 `GREENPMS_IMAGE`，启动固定的 `green-pms` Compose 项目和 `qintopia-pms-app` 容器。
-5. 等待 Docker healthcheck，并检查本地 `/health/ready`、`/api/v1/version` 以及两个公网健康地址。公网 version 必须与 manifest 版本一致。
+4. 用不可变的版本/revision 镜像 tag 设置 `GREENPMS_IMAGE`，启动固定的 `green-pms` Compose 项目，同时切换 `qintopia-pms-app` 和 `qintopia-pms-wecom-worker`。
+5. 等待 app Docker healthcheck，确认 worker 正在运行且使用同一个目标 image ID，并检查本地 `/health/ready`、`/api/v1/version` 以及两个公网健康地址。公网 version 必须与 manifest 版本一致。
 6. 将新版本写入 `current`，部署前版本写入 `previous`；回退操作额外记录 `rollbackFrom`。manifest 的 `imageId` 是 Docker archive config digest；state 中的 `runtimeImageId` 是目标 Docker daemon 导入后实际引用的本地 ID。不同 image store 可能使用不同的本地 ID，因此容器切换和清理使用 `runtimeImageId`，归档完整性使用 `imageId`、archive SHA、OCI labels 和 rootfs diff IDs 共同校验。state 写入采用临时文件加原子替换，配置 hash 绑定 Compose 和外部 app.env。
 7. 在锁仍保持期间返回健康 receipt。Actions 校验 receipt 后写入 `deployed.json`，运行 retention，最后让服务器根据 receipt 清理旧 image ID。
 8. 所有成功和失败路径通过 trap 删除 archive、解压内容和下载临时目录。异常中断留下 transaction journal，由 recovery timer 在下一次持锁恢复。
 
-服务器只保留当前运行 image 和一个快速回退 image，具体按唯一 image ID 判断。生产 `.env`、COS reader credentials、state、audit 和数据库仍在 release 外部；生产服务器不保存源码构建目录、镜像 archive 或 BuildKit cache。
+服务器只保留当前运行 image 和一个快速回退 image，具体按唯一 image ID 判断。app 与 worker 必须引用同一个 current image；任一容器仍引用旧 image 时清理会拒绝删除。生产 `.env`、COS reader credentials、state、audit 和数据库仍在 release 外部；生产服务器不保存源码构建目录、镜像 archive 或 BuildKit cache。
 
 ## 6. 回退
 
@@ -255,6 +255,8 @@ rtk proxy ssh -t "$ADMIN_ALIAS" 'sudoedit /etc/greenpms/cos-readonly.json'
 ```
 
 `app.env` 继续使用现有生产配置；先确认来源是当前配置，再执行复制命令。不要在终端、日志或聊天中输出配置内容。确认 `SEED_DEMO_DATA=false`、`IMPORT_2026_REFERENCE_CATALOG=false`，数据库仍指向外部 TencentDB。
+
+同一个 root-owned `app.env` 还必须保存 `PMS_WECOM_SOURCE_ID`、`PMS_WECOM_CORP_ID`、`PMS_WECOM_APP_SECRET` 和 `PMS_WECOM_WORKER_DATABASE_URL`。生产 Compose 固定启用同步 worker，并且只把这四项注入 worker；Web app 不接收企业微信 secret 或 worker 数据库账号。缺少任一项时 Compose 必须在切换容器前失败。
 
 ### A.4 核对当前状态并启用恢复
 

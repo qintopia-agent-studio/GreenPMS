@@ -96,8 +96,16 @@ class EntryTests(unittest.TestCase):
             self.assertEqual(args[:4], ["docker", "compose", "--project-name", "green-pms"])
             self.assertIn("--no-build", args)
             self.assertEqual(args[args.index("--pull") + 1], "never")
-            self.assertEqual(args[-1], "app")
+            self.assertEqual(args[-2:], ["app", "wecom-worker"])
             self.assertEqual(set(run.call_args.kwargs["env"]), {"PATH", "GREENPMS_IMAGE"})
+
+    def test_production_compose_uses_one_immutable_image_for_app_and_worker(self):
+        compose = (ROOT / "compose.server.yaml").read_text(encoding="utf-8")
+        self.assertEqual(compose.count("image: ${GREENPMS_IMAGE:"), 2)
+        self.assertIn("container_name: qintopia-pms-app", compose)
+        self.assertIn("container_name: qintopia-pms-wecom-worker", compose)
+        self.assertIn('command: ["node", "packages/db/src/wecom-worker-main.js"]', compose)
+        self.assertNotIn("build:", compose)
 
     def test_subprocess_failure_does_not_include_secret_output(self):
         with patch("server.subprocess.run") as run:
