@@ -219,7 +219,7 @@ class Deployer:
     @staticmethod
     def scan(path, manifest):
         from package import inspect_archive
-        inspect_archive(path, manifest)
+        return inspect_archive(path, manifest)
 
     @staticmethod
     def uncompress(source, target):

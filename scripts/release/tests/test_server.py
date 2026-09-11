@@ -405,6 +405,17 @@ class ServerImportTests(unittest.TestCase):
     def test_server_import_contract(self) -> None:
         self.assertIsNone(SERVER_IMPORT_ERROR, f"server.py import failed: {SERVER_IMPORT_ERROR!r}")
 
+    def test_default_scanner_returns_verified_archive_identity(self) -> None:
+        import package as release_package
+
+        expected = {"rootfsDiffIds": ["sha256:" + "d" * 64]}
+        original = release_package.inspect_archive
+        release_package.inspect_archive = lambda _path, _manifest: expected
+        try:
+            self.assertIs(server.Deployer.scan(Path("image.tar"), {}), expected)
+        finally:
+            release_package.inspect_archive = original
+
 
 @unittest.skipIf(server is None, "server.py import contract must be fixed first")
 @unittest.skipUnless(shutil.which("zstd"), "zstd is required for archive decompression")
