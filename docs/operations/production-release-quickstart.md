@@ -26,7 +26,7 @@
 2. `version` 填要回退到的版本，例如 `v1.2.4`；只有同一版本存在多个成功 revision 时才填写完整 40 位 `revision`。
 3. 运行 workflow。它只接受 COS 中同时具备完整产物、有效 manifest、匹配 checksum 和有效 `deployed.json` 的成功版本，再执行已有迁移兼容性、镜像身份和健康检查。
 
-这个 workflow 使用同一个 `production` Environment 和同一把部署 SSH key，没有第二次审批。`forward-only` 或迁移集合不兼容的版本会在切换前拒绝。服务器上已有 `previous` 时可直接复用本地镜像，更早版本会从 COS 下载并校验。
+这个 workflow 使用同一个 `production` Environment 和同一把部署 SSH key，没有第二次审批。向前部署要求服务器已核对的迁移基线与目标 manifest 完全相同；`forward-only` 会禁止从该版本直接回退，不会阻止基线相同的向前镜像切换。服务器上已有 `previous` 时可直接复用本地镜像，更早版本会从 COS 下载并校验。
 
 ## 一次性配置
 

@@ -506,16 +506,26 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(fixture.docker.switches, [])
             self.assertEqual(fixture.store.markers, {})
 
-    def test_forward_only_release_refuses_direct_switch(self) -> None:
+    def test_forward_only_release_allows_forward_switch_but_refuses_rollback(self) -> None:
         with DeployerFixture() as fixture:
             _, key = fixture.add_new_release(compatibility_mode="forward-only")
             manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
 
-            with self.assertRaisesRegex(ReleaseError, "forward-only release"):
-                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            result = fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            self.assertEqual(result["status"], "healthy")
+            self.assertEqual(fixture.docker.current_image_id, fixture.new_image_id)
 
-            self.assertEqual(fixture.docker.load_calls, [])
-            self.assertEqual(fixture.docker.switches, [])
+            with self.assertRaisesRegex(ReleaseError, "forward-only release"):
+                fixture.deployer.deploy(
+                    fixture.old_version,
+                    fixture.old_revision,
+                    release_key(fixture.old_version, fixture.old_revision),
+                    digest(json_bytes(fixture.old_manifest)),
+                    rollback=True,
+                )
+
+            self.assertEqual(len(fixture.docker.load_calls), 1)
+            self.assertEqual(fixture.docker.switches, [fixture.new_image_id])
             self.assertEqual(fixture.store.markers, {})
 
     def test_success_cleans_download_directory_and_does_not_write_marker(self) -> None:
