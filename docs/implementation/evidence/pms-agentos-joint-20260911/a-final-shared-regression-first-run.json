@@ -1,0 +1,11 @@
+{
+  "manifest_sha256": "ea995750d41e039f2af0cd0661d65700fb7ecf2e0058cdbf9d5f274e19cde35d",
+  "binary_sha256": "03635dfc8fb8f89bdf231939eacdb3f4eb5b9e3fb02724db43053b3a5bb0c3ea",
+  "node": "v22.23.2",
+  "started_at": "2026-09-11T07:30:57.151Z",
+  "cases": [],
+  "failure": "42P01",
+  "location": "shared-baseline-regression.mjs:29:30",
+  "status": "failed",
+  "finished_at": "2026-09-11T07:30:57.192Z"
+}

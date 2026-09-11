@@ -98,7 +98,7 @@ const commandInputContract: Record<PublicCommandEnvelopeType, { required: string
   RELEASE_MAINTENANCE: { required: ["propertyId", "maintenanceLockId"], properties: ["propertyId", "maintenanceLockId"] },
   COMPLETE_CLEANING: { required: ["propertyId", "cleaningTaskId"], properties: ["propertyId", "cleaningTaskId"] },
   RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method"], properties: ["propertyId", "orderId", "amountMinor", "method", "transactionReference", "note"] },
-  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference", "note"] },
+  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference", "refundReference", "note"] },
   CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: {
     required: ["propertyId", "orderId", "memberId", "membershipProductId", "collectionFactIds", "agreedPriceMinor"],
     properties: [

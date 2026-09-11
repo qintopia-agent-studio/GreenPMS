@@ -7,6 +7,11 @@ import { readPmsOrder, readPmsMember, readPmsInventory, scanPmsOrders, readPmsEv
 import { requirePrincipal, requirePropertyAccess } from "./auth.ts";
 import { ErrorResponse, Id, IdParams } from "./schemas.ts";
 const failures = { 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 410: ErrorResponse, 429: ErrorResponse, 500: ErrorResponse, 503: ErrorResponse };
+const cursorExpiredResponse = Type.Object({
+    ...ErrorResponse.properties,
+    code: Type.Literal("CURSOR_EXPIRED"),
+    details: Type.Object({ rebuild_required: Type.Literal(true) }, { additionalProperties: false })
+}, { additionalProperties: false });
 const scope = { propertyId: Id };
 const limit = Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 100 }));
 export function registerPmsIntegration(app: FastifyInstance, db: Kysely<Database>) {
@@ -35,7 +40,7 @@ export function registerPmsIntegration(app: FastifyInstance, db: Kysely<Database
         requirePropertyAccess(await requirePrincipal(db, request), q.propertyId, "READ");
         return scanPmsOrders(db, q.propertyId, q.afterId, q.limit);
     });
-    app.get("/api/v1/integration-events", { schema: { tags: ["queries"], description: "Stored event JSON objects retain exactly the webhook bytes. Extract raw event slices before hashing.", querystring: Type.Object({ ...scope, cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })), limit }, { additionalProperties: false }), response: { 200: PmsEventFeedSchema, ...failures } } }, async (request, reply) => {
+    app.get("/api/v1/integration-events", { schema: { tags: ["queries"], description: "Stored event JSON objects retain exactly the webhook bytes. Extract raw event slices before hashing.", querystring: Type.Object({ ...scope, cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })), limit }, { additionalProperties: false }), response: { 200: PmsEventFeedSchema, ...failures, 410: cursorExpiredResponse } } }, async (request, reply) => {
         const q = request.query as {
             propertyId: string;
             cursor?: string;

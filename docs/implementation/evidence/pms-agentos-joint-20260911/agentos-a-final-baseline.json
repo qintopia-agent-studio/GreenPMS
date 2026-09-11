@@ -1,0 +1,818 @@
+{
+  "baseline": "agentos-a-baseline-20260911-v1",
+  "head": "2815ab46f2cc0efb3e34cda56f6242bb9af5abf0",
+  "branch": "codex/org-person-workbench-a",
+  "kind": "scoped-uncommitted-source-snapshot",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "af168ca36e53712c34a44a12e481338abb8cdab084689716f485ca62660ddc3a",
+      "bytes": 7540
+    },
+    {
+      "path": "README.md",
+      "sha256": "07baacdffcbec3bfd8088993dc82875a745b583c4ab6c3935c789f6fd2d29a8e",
+      "bytes": 10228
+    },
+    {
+      "path": "docs/plans/active/green-pms-event-integration-handoff.md",
+      "sha256": "d6bb7015df954950888906e0ba562bbe3fbe6ef775ff7be1db76b3117c7036ab",
+      "bytes": 12487
+    },
+    {
+      "path": "docs/plans/active/organization-workbench-a-increment.md",
+      "sha256": "51d60a324e8f2fcf0901c245a2c454f3e7eadf94ed6815a8dd29f67ca2dd651b",
+      "bytes": 1168
+    },
+    {
+      "path": "docs/plans/active/person-agent-foundation-execution-plan.md",
+      "sha256": "322419f50c7f8865c3b18312556499bf62a6e7d78209c76ee69f02ca813a9534",
+      "bytes": 12490
+    },
+    {
+      "path": "docs/plans/active/person-agent-foundation-parallel-handoff.md",
+      "sha256": "96c2b9566634589429632386b5c18304384ff019f72368ee9206000abd3b539b",
+      "bytes": 18882
+    },
+    {
+      "path": "docs/plans/active/unified-person-welcome-v1-contract.md",
+      "sha256": "77a055c7e252884dc4e61fcadd4da49e968c194587fce75cd43e6c6eb4b91512",
+      "bytes": 67638
+    },
+    {
+      "path": "docs/reports/2026-09-09-resident-welcome-v1-local-acceptance.md",
+      "sha256": "69032b037fe755a0f5494f2f5686f8d6a47686113779b03f0590d9951aa94f56",
+      "bytes": 11381
+    },
+    {
+      "path": "docs/reports/2026-09-10-collaboration-duties-permissions-local-acceptance.md",
+      "sha256": "e639055d7d8add3bbbb6f8988526d0dc3dd588de18cf936aa610205d0f9e4c13",
+      "bytes": 10946
+    },
+    {
+      "path": "docs/reports/2026-09-11-organization-person-workbench-a-local-acceptance.md",
+      "sha256": "5a5c4636f7d4931c078fbf7c3834ecfb8800d184674c059d996be5301c44ec47",
+      "bytes": 5671
+    },
+    {
+      "path": "fixtures/feishu/xiaoman-message-ingress-envelope-v3.json",
+      "sha256": "6141f23a6e2ec2e0916875dc76bd5d2cd412ddf242a38b412425fc1ba03521d0",
+      "bytes": 907
+    },
+    {
+      "path": "mcp/feishu/config/huabaosi-generated-image-v1.json",
+      "sha256": "dba2b4dd2f67719e46b6b75312b87adfa47960202967d5e876c481fa584bbbd4",
+      "bytes": 1697
+    },
+    {
+      "path": "registry/agents.yaml",
+      "sha256": "88a94e5c51669acbc703285ba30ab34fb3c9a8dae3e03547f465f99711e8ba10",
+      "bytes": 1338
+    },
+    {
+      "path": "runtime/postgres/docs/data-design/2026-09-09-resident-welcome-v1.md",
+      "sha256": "48a2575294256e4e06a514f097a3e2f08dac4aecfacc76a749d1ae6d955c6e80",
+      "bytes": 4323
+    },
+    {
+      "path": "runtime/postgres/docs/data-design/2026-09-10-person-agent-collaboration-v1.md",
+      "sha256": "99134a7972b356775cc9518170b508db62a9def01faeeb7f46277f967b010b6f",
+      "bytes": 34604
+    },
+    {
+      "path": "runtime/postgres/docs/data-design/2026-09-11-organization-person-workbench.md",
+      "sha256": "488fc683a1db0f130d34c3c8e2eafad9db6ae3a6d90256922073367dd44d5f61",
+      "bytes": 4193
+    },
+    {
+      "path": "runtime/postgres/docs/data-design/CHANGELOG.md",
+      "sha256": "bc081e6a25a179be437a28a18fba9615c6a6bdbc39fb4bcdc5912a864d737e9b",
+      "bytes": 9743
+    },
+    {
+      "path": "runtime/postgres/docs/data-design/README.md",
+      "sha256": "cfac628b1256ad3e74c1c3286b68f1b0e98d9a730ffd01575427b92a874340d0",
+      "bytes": 1897
+    },
+    {
+      "path": "runtime/postgres/migrations/202606180001_init.sql",
+      "sha256": "b40e4309a4c19ab8de321c25cf302992ace2388cabfed033894fb8aab9a6aabf",
+      "bytes": 5463
+    },
+    {
+      "path": "runtime/postgres/migrations/202606240002_agent_os_data_layer.sql",
+      "sha256": "89f52dc83a181634572c29569e48ef6cea81ae80242f416f7497192997f46532",
+      "bytes": 26951
+    },
+    {
+      "path": "runtime/postgres/migrations/202606260003_identity_observations.sql",
+      "sha256": "c7eb977d7df8f0d397598d4f21fb19aed08d316286441178f1733919ca24234e",
+      "bytes": 2303
+    },
+    {
+      "path": "runtime/postgres/migrations/202606260004_profile_digest_archive_v1.sql",
+      "sha256": "1528d6725a65aac5032c077e4dc6e90c28d1672feed62a30347ea04f9caef00c",
+      "bytes": 4123
+    },
+    {
+      "path": "runtime/postgres/migrations/202606270005_event_signals_v2.sql",
+      "sha256": "1a6c1c943493f5794e4c1fd834a508fb227be90f484d005c63506cb8ae7549fc",
+      "bytes": 4332
+    },
+    {
+      "path": "runtime/postgres/migrations/202606290006_erhua_training_memory.sql",
+      "sha256": "f0d24650463fdff8ac37d0f1d715b25c754e4d9ac6233094f0bb3cd25dff97a8",
+      "bytes": 4669
+    },
+    {
+      "path": "runtime/postgres/migrations/202606300007_operations_control_plane.sql",
+      "sha256": "ef03f7996fc1db5598b7cc79e276f6d6a15998b9527423ca3c3c21b6de95d119",
+      "bytes": 11749
+    },
+    {
+      "path": "runtime/postgres/migrations/202607020001_operations_human_actor_guards.sql",
+      "sha256": "1359eaf12d957bdd916b627a344da38aa97a9246d6c8fa81439f77f402935026",
+      "bytes": 2846
+    },
+    {
+      "path": "runtime/postgres/migrations/202607130002_huabaosi_image_generation.sql",
+      "sha256": "74b9b762ef179e5e54ff1fe5214933da0ec56d1ef880353bcc1f7ab0ab52a21d",
+      "bytes": 1898
+    },
+    {
+      "path": "runtime/postgres/migrations/202607140001_xiaoman_event_signal_mutations.sql",
+      "sha256": "319db40e159eb18bfe5d7529ebf675aa3a570be8d742d92f870dda835926f15b",
+      "bytes": 2858
+    },
+    {
+      "path": "runtime/postgres/migrations/202607140002_qiwe_image_send_state.sql",
+      "sha256": "4599393b0b1766b741c78f36599f0a3a28efa9ba2239ac4f9b7b117a51798a94",
+      "bytes": 4460
+    },
+    {
+      "path": "runtime/postgres/migrations/202607140003_qiwe_upload_attempt_lifecycle.sql",
+      "sha256": "1556c95c27179dac5146861d14f94548ceb8d4cec9283a468b4012b409a65ce8",
+      "bytes": 2890
+    },
+    {
+      "path": "runtime/postgres/migrations/202607150001_xiaoman_activity_phases.sql",
+      "sha256": "5757a01f13a93ece3964106f7e3a71348b21ecbdfe8cf85012dad4fe1ada9c54",
+      "bytes": 3200
+    },
+    {
+      "path": "runtime/postgres/migrations/202607150002_xiaoman_promotion_details.sql",
+      "sha256": "54bc60139cecb7c678d3fc5a85bbac7686c8d7e5511756180da1a79acb2ed030",
+      "bytes": 1244
+    },
+    {
+      "path": "runtime/postgres/migrations/202607310001_xiaoman_poster_async_return.sql",
+      "sha256": "5efc27837c5c029f331290cd45dcacbef5230a29dcc5671edc7ca8198e48692b",
+      "bytes": 8298
+    },
+    {
+      "path": "runtime/postgres/migrations/202608010001_xiaoman_conversation_ingress_v3.sql",
+      "sha256": "5465e4c3c29aa235b4edcb1ed6ee0db475424be35694ed8f8b8285851e56e959",
+      "bytes": 13378
+    },
+    {
+      "path": "runtime/postgres/migrations/202608010002_xiaoman_conversation_poster_participants_v3.sql",
+      "sha256": "eaa35e6e1c8f181f57013d0b889dc66ca1ef6628a9eaab7b9659f4bc5bbc52c7",
+      "bytes": 3656
+    },
+    {
+      "path": "runtime/postgres/migrations/202608020001_xiaoman_material_followup_capability.sql",
+      "sha256": "7b8200a8f6889eabc28cf65e6c729a148e6865cb472a3711cbc1aea89c78237a",
+      "bytes": 3094
+    },
+    {
+      "path": "runtime/postgres/migrations/202608080001_xiaoman_daily_case_report_auto_publish.sql",
+      "sha256": "8bbe6addcb7734d199a3fb5b6a61ac1e847804fcf3e38b56ecd824f6388021a8",
+      "bytes": 1960
+    },
+    {
+      "path": "runtime/postgres/migrations/202608190001_erhua_morning_brief_card_publish_capability.sql",
+      "sha256": "f36cdd1d8c3e487a12e3405abefc85bdac354714a8e4366c9bc3279016c7234b",
+      "bytes": 3969
+    },
+    {
+      "path": "runtime/postgres/migrations/202609090001_resident_welcome_v1.sql",
+      "sha256": "ed2c57a0c70186bd0c855fdaad25042b993f56d894a1f87635e0ade0f81fe9a2",
+      "bytes": 10767
+    },
+    {
+      "path": "runtime/postgres/migrations/202609090002_resident_welcome_recovery.sql",
+      "sha256": "fcbd59d99e5fc90750c893d46ec2d7bb96dfa04e59bc44305a079c924d622223",
+      "bytes": 1050
+    },
+    {
+      "path": "runtime/postgres/migrations/202609090003_resident_welcome_conflict_quarantine.sql",
+      "sha256": "11dfbb152b663c893521004ed96d2714fc0f39882706fb79c1d20f8bd7ccacc7",
+      "bytes": 347
+    },
+    {
+      "path": "runtime/postgres/migrations/202609100001_person_agent_collaboration.sql",
+      "sha256": "b68422202f1f9bb9d63c70ee81460acd6ecd2c12ef6520674af5427eeb6a67ac",
+      "bytes": 6974
+    },
+    {
+      "path": "runtime/postgres/migrations/202609100002_collaboration_role_actions.sql",
+      "sha256": "58cc9c51f073a9f4f66472a49110cb7f908c429935f81ac48f4355e701ba2b71",
+      "bytes": 1444
+    },
+    {
+      "path": "runtime/postgres/migrations/202609100003_collaboration_duties_permissions.sql",
+      "sha256": "282d145b0bf7d9e7d2071c2b7974dd635a8f970e0db0ebae9c6faaf884f59092",
+      "bytes": 5546
+    },
+    {
+      "path": "runtime/postgres/migrations/202609110001_organization_person_workbench.sql",
+      "sha256": "8d7494cc3b19c134a854d433d26bc70aff49c0292ea8ec0108b84d61722d6109",
+      "bytes": 2485
+    },
+    {
+      "path": "runtime/sidecar/AGENTS.md",
+      "sha256": "b19b653df834cf08ff503e8c049ae607e41fda7a32a762b193c492161222ae44",
+      "bytes": 18427
+    },
+    {
+      "path": "runtime/sidecar/Cargo.lock",
+      "sha256": "638b9d7010b1a081844597498e384b8ff6c85509517a758bc32e6c903ee880ca",
+      "bytes": 74791
+    },
+    {
+      "path": "runtime/sidecar/Cargo.toml",
+      "sha256": "cdcaf14479cf6b290f21721be58a72c0a99b60b4e6618811f119be706bba1868",
+      "bytes": 1854
+    },
+    {
+      "path": "runtime/sidecar/README.md",
+      "sha256": "3949bf9789601d13b08528db8ca8347331b616d82008297f347e13e87dd7eccc",
+      "bytes": 9109
+    },
+    {
+      "path": "runtime/sidecar/config/agentos/daily-digest-dispatch-rules.json",
+      "sha256": "f9cee3a76e5715bfd3d9da019ed6819edc800318b416a83846b1c3a62e8127f7",
+      "bytes": 1303
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_analyze_preview_expected.json",
+      "sha256": "d1d639a408934a014fb8b22d5164918a1c5c60265e269427469f3ad0e63c2ae6",
+      "bytes": 7367
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_analyze_preview_input.json",
+      "sha256": "95464ac7c3f3e00d312fcdddfb1b7f89fd9a0e10ee5a6fd35fe5b2b13be004c3",
+      "bytes": 1995
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_collect_preview.json",
+      "sha256": "57b8977f651cda052e2528869ffc6ed43961b3974d476a5bd865dd8cc6c0b559",
+      "bytes": 2670
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_jieba_dict.txt",
+      "sha256": "d5a9672fcafef3ca518f271a38431c1c788e8b74f856e12ffd43135b3c325eb0",
+      "bytes": 5072082
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_narrative_normal_prompt.json",
+      "sha256": "d2b09e24bf3a1256b167da892cff7963a1e174f76ef4241c417c0b66bd9789ef",
+      "bytes": 1189
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_narrative_preview_input.json",
+      "sha256": "ab5d77696f17adb8e2a792fb78fed32bc2cf30da67f3844aa5e23041ae4cc61c",
+      "bytes": 1126
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_narrative_roast_prompt.json",
+      "sha256": "9093be58be75cbdf1be690a78e8371435a605808d0507cc7c0e35bdb446affc8",
+      "bytes": 2774
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_render_preview_input.json",
+      "sha256": "2d7046b078eabc10fa03d76e4929aef1e1bab3dc0991ddc4144d565d1153e2ed",
+      "bytes": 43453
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_render_preview_newspaper_elegant_expected.html",
+      "sha256": "e0cc6d12a714cd806f7866004d188c6e59c72b6b035034b9f1a6e5b1d31a62ac",
+      "bytes": 16127
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_render_preview_newspaper_expected.html",
+      "sha256": "b5ddd67d1fdfac0adc752e63f395c550303288ce1dad208d38cb994bf7961421",
+      "bytes": 11948
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_render_preview_roast_long_image_expected.html",
+      "sha256": "c08d5173528b536a971dd706d8e29bd246dcfe60b14cc0d5b3194d22df6f79fc",
+      "bytes": 5454
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_render_preview_roast_narrative.md",
+      "sha256": "169b042d3129dc5e6e471b3ac2cbcdbc0fa2ecc8640d8f82e9bc3576d59622c6",
+      "bytes": 1309
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_render_preview_v3_expected.html",
+      "sha256": "f1dad1df3848dfb3af8ae28e6181e75c1b69b0d03d4c733c6ec92639b683d3fc",
+      "bytes": 23556
+    },
+    {
+      "path": "runtime/sidecar/fixtures/daily_case_report_segmentation_parity.json",
+      "sha256": "2ec1f633cc63eba3a90d0c04f80f68a610af5aaa32dfb5cfee1fe16be9a1da97",
+      "bytes": 2259
+    },
+    {
+      "path": "runtime/sidecar/fixtures/huabaosi_wecom_canary_payload.json",
+      "sha256": "63748787fabea19c962717a8badbec88e071a7b9fb1cef38c22a76ae8b448e4e",
+      "bytes": 212
+    },
+    {
+      "path": "runtime/sidecar/fixtures/huabaosi_wecom_policy_events.json",
+      "sha256": "79365b75eb1cdea60d88004605bf429ff036e134b4674bfad2948cff5eb6129f",
+      "bytes": 5894
+    },
+    {
+      "path": "runtime/sidecar/fixtures/huabaosi_wecom_shadow_events.json",
+      "sha256": "968285ee87b71a29830e742635c3a1cc3fbe64ef1081cac79afc287e99a8944b",
+      "bytes": 2081
+    },
+    {
+      "path": "runtime/sidecar/fixtures/xiaoman_activity_records.json",
+      "sha256": "a18616ebb83ff8aa4cd0bd801c9eca3d5980755875a7bb279a959c4aa5f86f48",
+      "bytes": 1388
+    },
+    {
+      "path": "runtime/sidecar/manifest.yaml",
+      "sha256": "b7c1602c75f9cecae5210abf2f5ec4616d64263cc1d9cd1788a93b2e6f4216f9",
+      "bytes": 885
+    },
+    {
+      "path": "runtime/sidecar/src/activity_lifecycle.rs",
+      "sha256": "7207f9daa8de3728bd2c2c4d87a32c10f0302a324b069453de73afbaa47b7caf",
+      "bytes": 3445
+    },
+    {
+      "path": "runtime/sidecar/src/bounded_http.rs",
+      "sha256": "a993eff4860ff891e55dbe01800a61c6cccd42f209b246146f5af3b44d6d112d",
+      "bytes": 16702
+    },
+    {
+      "path": "runtime/sidecar/src/collaboration.rs",
+      "sha256": "17f5faf95c6ee5a1bb56e9b03136736492c8f757a5f0cc674a181ded2db2ba30",
+      "bytes": 68775
+    },
+    {
+      "path": "runtime/sidecar/src/config.rs",
+      "sha256": "47940ad2930b9e2311fc7d55e1f79c556cdc8951663bf5d1b86494bd6574af76",
+      "bytes": 58265
+    },
+    {
+      "path": "runtime/sidecar/src/consumer.rs",
+      "sha256": "7c803cfe0f2a23f06eb97c9f4b2ccf49a8ebd8d812a7fcb679b9585226208883",
+      "bytes": 6587
+    },
+    {
+      "path": "runtime/sidecar/src/context_mcp_server.rs",
+      "sha256": "e68eeec3e1e3f23c2dc84ef33dd0d0f86f35439ce804e03bb5e725601d1295a2",
+      "bytes": 5917
+    },
+    {
+      "path": "runtime/sidecar/src/context_tools.rs",
+      "sha256": "aadacbd3f953bf2b7288c36534618b567c17e1a3a08c307ce740db9d003e2a26",
+      "bytes": 155973
+    },
+    {
+      "path": "runtime/sidecar/src/conversation_ingress.rs",
+      "sha256": "83fb46b9975b1871eca4e84d974a1baa7dcccc856fa10a7b661b917959692267",
+      "bytes": 40870
+    },
+    {
+      "path": "runtime/sidecar/src/conversation_policy.rs",
+      "sha256": "bc63febcc504f6ac22b3b8e0192b6ed1be0a18d16b878db089944c333c394b5a",
+      "bytes": 23534
+    },
+    {
+      "path": "runtime/sidecar/src/daily_case_report.rs",
+      "sha256": "0f801b854490570cf2d081b438c53d8dfc0a9f17c9e3074a2f658526a26e0b5d",
+      "bytes": 34503
+    },
+    {
+      "path": "runtime/sidecar/src/daily_case_report_analyze.rs",
+      "sha256": "f687ca329d2bae83164870043027b1fb52144049f1ff8faaed8db522422b13cf",
+      "bytes": 67106
+    },
+    {
+      "path": "runtime/sidecar/src/daily_case_report_cutover.rs",
+      "sha256": "78b0beef325970b7cefc2530ea80d306ea2fac4e05d73ce8c9374a55dad153ea",
+      "bytes": 53866
+    },
+    {
+      "path": "runtime/sidecar/src/daily_case_report_mcp.rs",
+      "sha256": "c53a492efbc44e09c694f91eb671831ba3ddcd43673e00298d14780f5523c71f",
+      "bytes": 38586
+    },
+    {
+      "path": "runtime/sidecar/src/daily_case_report_narrative.rs",
+      "sha256": "6edded10af9995441dd767a896e26c17f1e58fbb0debf89e396030429f1f416c",
+      "bytes": 41425
+    },
+    {
+      "path": "runtime/sidecar/src/daily_case_report_render.rs",
+      "sha256": "6af45a3c7a9734dfc9e2f1828622864701472547ecbe925cb4bfd24622e7a88b",
+      "bytes": 204523
+    },
+    {
+      "path": "runtime/sidecar/src/daily_digest_publisher.rs",
+      "sha256": "8de1f9cf59964382b97b08e5f545a820c0406c72a51bb3560771a7193039682c",
+      "bytes": 39371
+    },
+    {
+      "path": "runtime/sidecar/src/db.rs",
+      "sha256": "a02cf35071b620119aa400ead2eec4d31e8e32a674280a454a412a9067b4116a",
+      "bytes": 17067
+    },
+    {
+      "path": "runtime/sidecar/src/embedding_worker.rs",
+      "sha256": "5aeb360bb9ba3a0b100babe3585b6ab93db96d185c2a5ce216237c624e1a3a2f",
+      "bytes": 22983
+    },
+    {
+      "path": "runtime/sidecar/src/erhua_morning_brief_news.rs",
+      "sha256": "c8b6612dd8e38714250878a6e4fb13141eaa54d6961655dbc2a0b829654b4d85",
+      "bytes": 26784
+    },
+    {
+      "path": "runtime/sidecar/src/event.rs",
+      "sha256": "32140c3757b105d918d2987c05925a58626a4d1ce9823ae930eac1fc8d9a6ce4",
+      "bytes": 42899
+    },
+    {
+      "path": "runtime/sidecar/src/event_signal.rs",
+      "sha256": "282d63f5984d6b89da4fbccc9553c0c325d31ef3d1b3f914f10383482629f567",
+      "bytes": 38473
+    },
+    {
+      "path": "runtime/sidecar/src/evidence.rs",
+      "sha256": "3e14c12acbfd99a63530a2dddacbe83178f7701748e8b78a810f745798b0eb42",
+      "bytes": 46089
+    },
+    {
+      "path": "runtime/sidecar/src/graph_projection.rs",
+      "sha256": "a0f2c355ca96347dac89e3edf1c7739dccb3dc14cc511ada7269f237190b3333",
+      "bytes": 11670
+    },
+    {
+      "path": "runtime/sidecar/src/group_message_send.rs",
+      "sha256": "052271e9bdcd1cd6983bdaa9db743d3d33a44fe2d5e4f304640693aacef5b042",
+      "bytes": 46817
+    },
+    {
+      "path": "runtime/sidecar/src/health.rs",
+      "sha256": "0056bde2ebafc74184ed101806a8acca38d095bf531bdc82b80dd0c837d37f9c",
+      "bytes": 1738
+    },
+    {
+      "path": "runtime/sidecar/src/huabaosi_feishu_artifact_mirror.rs",
+      "sha256": "6582f38a274f7dcd88ad7f6ad11e7df923833b5e2b731eb5a1b8b03b0b0a059f",
+      "bytes": 199269
+    },
+    {
+      "path": "runtime/sidecar/src/huabaosi_wecom_canary.rs",
+      "sha256": "a33880a387b5b1e4df37385932e6a16f0dea7f02baedf99c2fbd56dfc7c525ee",
+      "bytes": 34934
+    },
+    {
+      "path": "runtime/sidecar/src/huabaosi_wecom_policy.rs",
+      "sha256": "2e1d6259d68e0fb35f85485de0aa8471caf2489f7578c77914e326ecbcc84b9a",
+      "bytes": 20215
+    },
+    {
+      "path": "runtime/sidecar/src/huabaosi_wecom_shadow.rs",
+      "sha256": "f57d9b90145f142ef27fba00aac151db2b9b0dfb7b1857c898cd989a1e0ddaff",
+      "bytes": 14761
+    },
+    {
+      "path": "runtime/sidecar/src/identity_alias.rs",
+      "sha256": "5f7ac9274d3e23241d48cf63d926b11ba56af8b59934f2b4b5be5759ba290cf0",
+      "bytes": 43607
+    },
+    {
+      "path": "runtime/sidecar/src/identity_backfill.rs",
+      "sha256": "2838630a9facd58b094d3e8ca84d75a73f01517cb5120713a4f3b242e5a902cf",
+      "bytes": 44992
+    },
+    {
+      "path": "runtime/sidecar/src/identity_bootstrap.rs",
+      "sha256": "5812389fd2e91974b6a8702a89d54b405c874d36cb250aaf43f2e1d1dd373823",
+      "bytes": 89761
+    },
+    {
+      "path": "runtime/sidecar/src/image_generation.rs",
+      "sha256": "b99ca4caf94d21c9ca330643f496da5b269fce232815c4fa51854b973b54c51b",
+      "bytes": 148397
+    },
+    {
+      "path": "runtime/sidecar/src/knowledge.rs",
+      "sha256": "a0b2981885d92dae568e9bc22026f0f74b04cb8ee55b41e9e58e3a71efaf8820",
+      "bytes": 17400
+    },
+    {
+      "path": "runtime/sidecar/src/local_http.rs",
+      "sha256": "76549c31f7be18aa8c7fca9053a3a0592b5b999d9e523fdce195ea225ac3d99a",
+      "bytes": 2925
+    },
+    {
+      "path": "runtime/sidecar/src/main.rs",
+      "sha256": "22fe3ffb17c265c6a52af9bbedc7673a9c3353fe5ba7549aef8bc121f95fd04a",
+      "bytes": 28241
+    },
+    {
+      "path": "runtime/sidecar/src/mcp_server.rs",
+      "sha256": "b148b56f3533d49855a2eaff5d4330b3e3588ed430105dd673c26779d4197724",
+      "bytes": 5829
+    },
+    {
+      "path": "runtime/sidecar/src/media_identity.rs",
+      "sha256": "5dc277e88c4a3286294d1d8c8f7ea9964537c99a1ad0f3603e0f90d681275d7a",
+      "bytes": 3293
+    },
+    {
+      "path": "runtime/sidecar/src/media_upload.rs",
+      "sha256": "92d498e5d743abe994285032c61e0bedcfba18a6ac83002ef97e023833f9cdd8",
+      "bytes": 4563
+    },
+    {
+      "path": "runtime/sidecar/src/member_profile.rs",
+      "sha256": "56b34b9465a6d26caf4c3b293d1bb1b4bb423367b15ff787fee1bbe569a0cd44",
+      "bytes": 84767
+    },
+    {
+      "path": "runtime/sidecar/src/message_search.rs",
+      "sha256": "74a6981da97bbd610ad137209e610d9b721327bcb2debb3c369b66384b8a3c08",
+      "bytes": 25673
+    },
+    {
+      "path": "runtime/sidecar/src/operations.rs",
+      "sha256": "05382e6ccafa208e30d645d5b3bf65381ed33e7a012605a3fcb82b51b2e2f534",
+      "bytes": 566146
+    },
+    {
+      "path": "runtime/sidecar/src/operations_intake.rs",
+      "sha256": "75d6adeb237fa59082e4ccf928009b7fa52bcba1a998d1f7185019dcb427a3c2",
+      "bytes": 151112
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/README.md",
+      "sha256": "5a95eea03ca6527e86d57fbe83bb8df444676f1ddd226c78ac7ec7957e554fa2",
+      "bytes": 8372
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/duty_store_tests.rs",
+      "sha256": "4bea7289c5506e450f5808bdc4e6b7ce3cc46acf8d9581aa8ae6c319f53d6c73",
+      "bytes": 30520
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/local_server.rs",
+      "sha256": "7ef4fe7c1fc1253505894956d2a0a14cc6cc02cd4e4890fedbcc98405f74c20f",
+      "bytes": 9584
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/mod.rs",
+      "sha256": "3ffcafa6070f05d8707c6243fdce088160edb4c102c6d40062a1da315d9b374a",
+      "bytes": 1201
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/model.rs",
+      "sha256": "9af4fcd464de4ad1518bd4412b895d242abf943baf7401915471e90cd1da0eb8",
+      "bytes": 16752
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/store.rs",
+      "sha256": "da76e9bc1f0387a1b1e516ef0583030fb218e64e510cb251bf76079dcd0ac579",
+      "bytes": 45801
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/store/catalog.rs",
+      "sha256": "b456299c83efc5a36c48bfc7cc2ab23674e2f3c2b59414b3aded9b8991a9ece4",
+      "bytes": 18789
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/store/organization.rs",
+      "sha256": "dcae3c412de3598e6c5b5719e48be4f1423587761d9f2901ee74c3cbcb3ac5d8",
+      "bytes": 35847
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/tests.rs",
+      "sha256": "3afd5efdddb428334b2f33b3fa2a03a00ed4648431af02ce48d3690c277dba63",
+      "bytes": 34636
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/workbench-catalog.js",
+      "sha256": "b977237d0a6d5438c790b18b5eff7d5b267864c56ee4d831500cc1a0760018a0",
+      "bytes": 12129
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/workbench-organization.js",
+      "sha256": "9a04fc7054042135e33924d2da1a03b965de1dbbfffecb3ed51313d9c1776d43",
+      "bytes": 21863
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/workbench-view.js",
+      "sha256": "efd01aff4dee0dd7b97958b402d441a34b71a4b749591c94becf26e1ffdf91a4",
+      "bytes": 24569
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/workbench.css",
+      "sha256": "3cc6a2d839bd3bd6f1c3e08452672d77b17dcb21a65d707a93926d4a74ff4af5",
+      "bytes": 13009
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/workbench.html",
+      "sha256": "b3d3736178a7bddfdd87543bc3669b65051585d674aeed49009e496fc4ebe220",
+      "bytes": 18128
+    },
+    {
+      "path": "runtime/sidecar/src/person_collaboration/workbench.js",
+      "sha256": "9c467a28af1f3bcb82174957fdabf833cd8c48c91bf75e228ac98f2f686e836b",
+      "bytes": 18954
+    },
+    {
+      "path": "runtime/sidecar/src/poster_delivery.rs",
+      "sha256": "fc336406ecb0da1963e55c4cd1d605d920b6f2bc9ccd9c73d79e3ed9711549ba",
+      "bytes": 96450
+    },
+    {
+      "path": "runtime/sidecar/src/poster_notification.rs",
+      "sha256": "9d6815fb774b89b9e95b1608518f4de69dcae9afd846d07dafe2afb2e87946a9",
+      "bytes": 50075
+    },
+    {
+      "path": "runtime/sidecar/src/qiwe_claimable_image_sources.rs",
+      "sha256": "aa1a2ecc0e1477bbf93c809d4852336e7d2eb4bd461444dfcefb1ab76505de41",
+      "bytes": 12290
+    },
+    {
+      "path": "runtime/sidecar/src/qiwe_image_send.rs",
+      "sha256": "71dc145841e636c5036105e5463ab85ef4628deea204b2d6885c789698a85f94",
+      "bytes": 183243
+    },
+    {
+      "path": "runtime/sidecar/src/qiwe_image_send_state.rs",
+      "sha256": "d95791b0b29c70bdad28ddde4a0c91be29f4bcda8fe8c5fd75f9abea42122f98",
+      "bytes": 157457
+    },
+    {
+      "path": "runtime/sidecar/src/qiwe_text_send.rs",
+      "sha256": "4fd301606a518e746819368ef874486d399084228ebc255a1aa1964b7a8c54f0",
+      "bytes": 42602
+    },
+    {
+      "path": "runtime/sidecar/src/raw_archive.rs",
+      "sha256": "abefc4ca4230bdfb4326440c56faaab29516ea42c2c91a052b2e6476290f3ded",
+      "bytes": 12631
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/artifact.rs",
+      "sha256": "2be603ac6dc2693d29182f3c4e8a3990b80c75d2337974f5d1ceac9510391e33",
+      "bytes": 9563
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/channels.rs",
+      "sha256": "28b1ca606415e14a863cac18185e8aeb996e0b561e0ed8eafe223e4f3d0df412",
+      "bytes": 7472
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/client.rs",
+      "sha256": "3292e38312d93bdb71702575f3f59c7cd15baf9a2b2c3dcaf7a9038a350ef12c",
+      "bytes": 9197
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/delivery.rs",
+      "sha256": "480d5b3b0e649a274e91c8f619e4522de5c162a9159e7f0615cce78a4ba646ca",
+      "bytes": 22574
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/ingress.rs",
+      "sha256": "06ef0468e3e89840a47b64f59239867f7fd655e95eab081d2b5b754c3810fe69",
+      "bytes": 1588
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/local_driver.rs",
+      "sha256": "e49bdd93f87f6700e40f222f3d77ef3fe2c51017d39b9b7a51f80cdad08da098",
+      "bytes": 7378
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/local_server.rs",
+      "sha256": "c029132920ecb62732cfb81e167c1d20982e4e62b0aadd6e1ce9b37a073086fd",
+      "bytes": 7431
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/mod.rs",
+      "sha256": "654f1fd87e19edf237abc69a53349c990d89f8e5e10c836a00323047b4bc08ee",
+      "bytes": 1874
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/projection.rs",
+      "sha256": "8bee75daea96834bd437c7c1be6a7eae187cc344a7702f9e36c4a9050a591d7d",
+      "bytes": 19091
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/protocol.rs",
+      "sha256": "29775e4b73228499309f7cc48651432b5d8b74d8b913f3224729c60c6cfa5a18",
+      "bytes": 9584
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/recovery.rs",
+      "sha256": "d19627be80ef1f248fa3a55246cb5c2baf65011cd65506140a164e761d8488cf",
+      "bytes": 16000
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/review.rs",
+      "sha256": "eb164fedd82dbad08a77ba5c8b6dfcd44a26fe7d8f24d61e808cbe9d720fca2c",
+      "bytes": 10521
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/state.rs",
+      "sha256": "f5b00262c8f1e00ca82ea388ae8c871176d0234bd388921bcf04a1c02542af31",
+      "bytes": 26354
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/store.rs",
+      "sha256": "42d4bd28eb1718f198aa797e1b9aa2d822aca077ef53e37e223080f983c3b8bb",
+      "bytes": 17367
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/tests.rs",
+      "sha256": "9f2e98c596e3bef3b55e91a7317ef7146a0c35ca9cfeb6df29a5b89ea2e9352d",
+      "bytes": 41024
+    },
+    {
+      "path": "runtime/sidecar/src/resident_welcome/workbench.rs",
+      "sha256": "bd9d64902ba65b6bf33676412c3b92fbdd555cafc85a59d8ab7190f55070ddca",
+      "bytes": 11007
+    },
+    {
+      "path": "runtime/sidecar/src/smoke.rs",
+      "sha256": "6b49e961b4c889bb2663913f761ea18607f57c49723da5fa5cff823b0c4f383a",
+      "bytes": 7667
+    },
+    {
+      "path": "runtime/sidecar/src/url_policy.rs",
+      "sha256": "e6fb78700543895758ada3d652055b9082f58888b6c7f041db93c5c0207561b5",
+      "bytes": 1072
+    },
+    {
+      "path": "runtime/sidecar/src/workbench.rs",
+      "sha256": "e1e96035c7de687ed46395fabf2b197c57cb7f65486b2f4419735d748ab2d572",
+      "bytes": 36667
+    },
+    {
+      "path": "runtime/sidecar/src/xiaoman_activity.rs",
+      "sha256": "4806729888034f98151471c0e1be84d143e3ee1760415fc91b830fd6b472b257",
+      "bytes": 180669
+    },
+    {
+      "path": "runtime/sidecar/src/xiaoman_real_activity_evidence.rs",
+      "sha256": "aff6a5fded84987456db5dfe9d22caadf92db35e003348773103c04609a1d7fd",
+      "bytes": 35842
+    },
+    {
+      "path": "skills/qintopia-tools/variants/xiaoman/tests/fixtures/poster-review-callback-envelope.json",
+      "sha256": "437e0ea143c6171d5ba1301e21a75edc9ff33908cb39670cfa33f828f9a758a8",
+      "bytes": 1045
+    },
+    {
+      "path": "workflows/resident-welcome/README.md",
+      "sha256": "be013588d54fe41440065462cbe611bca9338d5168ca18762a04495b7cc49f0f",
+      "bytes": 4660
+    },
+    {
+      "path": "workflows/resident-welcome/SYNTHETIC-JOINT.md",
+      "sha256": "2d6dd6bc1f3f3dc2aa2cdce98b62f312b5ae30f40fb18c66c62a84494a3d4428",
+      "bytes": 3569
+    },
+    {
+      "path": "workflows/resident-welcome/fixtures/local-workbench.sql",
+      "sha256": "3687bd46d975856a383e3a3e7c0009d644a45a1365ff909bdd8a36dcd2a22fd8",
+      "bytes": 1569
+    },
+    {
+      "path": "workflows/resident-welcome/fixtures/order-projection.json",
+      "sha256": "ac700940422e133d0a9f004bfd057462d4f6f487a29f2c45214ccd831fe6be49",
+      "bytes": 1662
+    },
+    {
+      "path": "workflows/resident-welcome/workbench.html",
+      "sha256": "2c356fbe8a0f01da046e42227eb08729c3e0712a68946cfff5f8ef67b2b77394",
+      "bytes": 9181
+    },
+    {
+      "path": "workflows/resident-welcome/workflow.yaml",
+      "sha256": "f466ef177cc4ea08e97c34aa1945946d752361e07d62b773bdda9640c7c4dc6c",
+      "bytes": 1048
+    }
+  ]
+}

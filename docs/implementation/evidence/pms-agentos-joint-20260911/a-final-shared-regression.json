@@ -1,0 +1,28 @@
+{
+  "manifest_sha256": "ea995750d41e039f2af0cd0661d65700fb7ecf2e0058cdbf9d5f274e19cde35d",
+  "binary_sha256": "03635dfc8fb8f89bdf231939eacdb3f4eb5b9e3fb02724db43053b3a5bb0c3ea",
+  "node": "v22.23.2",
+  "started_at": "2026-09-11T07:33:57.730Z",
+  "cases": [
+    {
+      "name": "existing_v2_database_upgrade_preserves_history",
+      "status": "passed"
+    },
+    {
+      "name": "fresh_install_and_both_real_processes_start",
+      "status": "passed"
+    },
+    {
+      "name": "signed_delivery_pull_dedup_and_real_projection_consumption",
+      "status": "passed"
+    },
+    {
+      "name": "rebuild_entry_preserves_disabled_admission_and_zero_effects",
+      "status": "passed"
+    }
+  ],
+  "preserved_welcome_tables": 16,
+  "old_migration_count": 26,
+  "status": "passed",
+  "finished_at": "2026-09-11T07:34:25.345Z"
+}

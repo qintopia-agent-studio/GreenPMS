@@ -21,8 +21,13 @@ export async function externalPaymentsSchemaFingerprint(db: Kysely<Database>): P
 }
 
 export async function externalPaymentsReady(db: Kysely<Database>): Promise<boolean> {
-  // Frozen from migrations 059/060 on PostgreSQL 18, matching the event module.
-  if (await externalPaymentsSchemaFingerprint(db) !== "0e14e25d9c534fe01032a239e60eec03ccf0385f616e0a4ebd529fafe8edc799") return false;
+  // Preserve both already frozen schemas: a fresh 059/060 installation on PG18
+  // and the deployed schema accepted by 4b598c6. Unknown drift still fails closed.
+  const acceptedFingerprints = [
+    "705eeaf432a39efbb9611b4bab5be004b1dfeb7924ad52a3841280a41e403063",
+    "0e14e25d9c534fe01032a239e60eec03ccf0385f616e0a4ebd529fafe8edc799"
+  ];
+  if (!acceptedFingerprints.includes(await externalPaymentsSchemaFingerprint(db))) return false;
   const row = (await sql<{ ready: boolean }>`SELECT
     NOT EXISTS(SELECT 1 FROM (VALUES ('external_payment_sources'),('external_payment_accounts'),
       ('external_payment_bills'),('external_payment_contacts'),('external_payment_matches'),
