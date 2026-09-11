@@ -1,6 +1,6 @@
 # PMS 与 Agent OS 事件联合验收
 
-状态：本地固定版本双程序合成联合验收 **19/19 通过**；未部署、未启用真实投递或欢迎。用户于 2026-09-11 授权执行交接文件 §1—2、§4 B。
+状态：v2 固定版本双程序合成联合验收 **19/19 通过**；A 最终冻结版共享构建/迁移限定回归 **4/4 通过**；未部署、未启用真实投递或欢迎。用户于 2026-09-11 授权执行交接文件 §1—2、§4 B。
 
 ## 范围与固定基线
 
@@ -118,3 +118,26 @@ Agent OS 责任任务已明确确认：v2 可以作为本轮 B 收口基线；A 
 生产网络与凭证轮换、规模吞吐/24小时积压、生产切换/灾备恢复、真实账号及完整欢迎业务仍需各自后续验收。本轮B没有新增业务判断要求，也未启动C/D或生产试点。接收端无待修复的本轮缺陷；A最终版本的共享构建/迁移差异回归单独交接。
 
 收尾已确认两端应用/测试进程退出，专用库活动连接数均为0，PMS Worker恢复NOLOGIN，Agent OS来源全部synthetic且禁用，欢迎动作数为0。两个本任务容器已停止并保留合成数据，其他容器未改动。独立Git工作区、Agent OS冻结副本/构建及证据保留供复查；临时目录不替代长期版本归档，后续A应把其最终基线纳入自身版本管理。
+
+
+## A 最终冻结版的限定兼容回归
+
+A 责任方随后交付最终固定清单，B 于 2026-09-11 15:33:57—15:34:25（Asia/Shanghai）完成受影响范围回归。本节补充此前“A 最终版本待交付”的状态；不把 v2 的19项证据改标为 A 最终版完整19项验收，也不代替 A 的组织工作台/真实登录验收。
+
+- PMS 使用本地提交 `4d71a1ac119b4c3fad0cd5b2570d81ec56809114` 的事件代码，追加工具 `tests/joint/shared-baseline-regression.mjs`。本轮没有新增业务代码修订。
+- A 源基线为责任方的 `codex/org-person-workbench-a`、HEAD `2815ab46f2cc0efb3e34cda56f6242bb9af5abf0` 加明确文件清单；162文件由 B 校验后复制到 `/private/tmp/green-pms-joint-agentos-a-20260911-v1`，运行后再次逐文件核验未变。
+- A 清单 SHA256：`ea995750d41e039f2af0cd0661d65700fb7ecf2e0058cdbf9d5f274e19cde35d`。独立离线构建的程序 SHA256：`03635dfc8fb8f89bdf231939eacdb3f4eb5b9e3fb02724db43053b3a5bb0c3ea`；使用 `welcome-synthetic-driver`，Node 22.23.2。
+- 唯一共同协议、旧迁移及共享样例未变。接收器相关4个文件经 rustfmt 规范化比较一致；其他变动属于组织工作台。新增迁移 `202609110001_organization_person_workbench.sql` 创建三张组织工作台表并登记 schema_change_log，没有修改欢迎表。
+
+| 限定检查 | 实测结果 |
+| --- | --- |
+| 保留 v2 合成库上运行 A 的真实迁移器 | 26条旧迁移 checksum 不变，仅新增一条；16张 welcome 表逐表数量与完整内容 hash 不变；三张新工作台表为空 |
+| 全新合成库安装与启动 | 原迁移正常应用，真实 PMS API 与 A 的真实 ingress 均启动 |
+| 实际预订/入住、HTTPS签名投递、pull去重与消费 | 两个新事件由真实 Worker 获 ACK，Inbox 各一条且原字节 hash 一致，订单消费到 revision 2 |
+| 重建、扫描与恢复入口 | 来源保持禁用；欢迎动作、上传意图、产物绑定均为0 |
+
+升级检查先运行真实 `welcome-synthetic init`：迁移成功后重复来源注册按预期拒绝，退出码1；结合迁移记录与全表 hash 证明升级未改变旧来源或欢迎历史。随后才重建干净专用库做新安装和双程序检查。
+
+首次追加脚本误把 SQLx 迁移表写成 `public._sqlx_migrations`，报 `42P01`，发生在迁移执行前；按真实 `db.rs` 的 search_path 修正为 `qintopia_messages._sqlx_migrations` 后4项通过。此为 PMS 验收工具错误，没有修改 Agent OS。失败证据保留为 [a-final-shared-regression-first-run.json](../docs/implementation/evidence/pms-agentos-joint-20260911/a-final-shared-regression-first-run.json)，最终证据为 [a-final-shared-regression.json](../docs/implementation/evidence/pms-agentos-joint-20260911/a-final-shared-regression.json)。
+
+收尾再次只读确认：两专用实例无其他客户端连接，PMS Worker 为 NOLOGIN，欢迎三类效果记录均为0。两个本任务容器再次停止，合成数据保留。A 最终版共享构建/迁移兼容性无本轮未关闭缺陷；生产网络、账号、完整欢迎与真实发送仍不在本次结论内。

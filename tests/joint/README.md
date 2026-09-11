@@ -65,3 +65,22 @@ node --import tsx tests/joint/run.mjs
 自动清理保留合成数据库，便于诊断。确认测试进程已退出后，可以停止本任务两个容器；不要清理或重置 55432/55433/55439/55440/55441 的既有实例。
 
 PMS 相关回归使用相同测试锁及 55442 实例，库名与联合验收分开：事件专项为 `qintopia_events_joint_regression`；支付 readiness 专项须使用 `qintopia_wecom_` 前缀（如 `qintopia_wecom_joint_regression`）。测试完成前不能同时重置共享 PostgreSQL 角色。
+
+
+## A 最终版共享构建/迁移限定回归
+
+`shared-baseline-regression.mjs` 固定使用 A 的162文件清单，核验旧迁移/共同协议未变，再覆盖保留旧库升级、新安装、真实投递/消费和重建禁发4项。版本与结果见验收记录末节；它不替代 v2 的完整19项验收。
+
+准备责任方冻结副本 `/private/tmp/green-pms-joint-agentos-a-20260911-v1`，按上文离线构建方式使用其 Cargo.toml，输出目录改为 `/private/tmp/green-pms-joint-agentos-a-target`。清单 SHA256 固定为 `ea995750d41e039f2af0cd0661d65700fb7ecf2e0058cdbf9d5f274e19cde35d`。
+
+**升级检查必须从保留的 v2 合成库开始。** 如果已运行过本脚本，先用未覆写 Agent 基线变量的 `run.mjs` 成功重建 v2 测试状态，再运行下列命令；不能在已升级 A 的库上跳过旧库升级证明。两步都会按已有隔离门禁重建本任务专用合成库。
+
+```sh
+PMS_AGENTOS_JOINT_ENABLE=1 \
+TEST_DATABASE_URL=postgres://qintopia@127.0.0.1:55442/qintopia_joint_test \
+TEST_SUITE_LOCK_DATABASE_URL=postgres://qintopia@127.0.0.1:55442/postgres \
+node --import tsx tests/helpers/run-database-test-suite.ts -- \
+node --import tsx tests/joint/shared-baseline-regression.mjs
+```
+
+输出为证据目录下的 `a-final-shared-regression.json`，复跑前先保留已有报告。首次脚本使用错误迁移表 schema 的失败已单独归档，成功记录不覆盖该历史。
