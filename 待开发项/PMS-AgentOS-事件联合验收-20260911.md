@@ -141,3 +141,5 @@ A 责任方随后交付最终固定清单，B 于 2026-09-11 15:33:57—15:34:25
 首次追加脚本误把 SQLx 迁移表写成 `public._sqlx_migrations`，报 `42P01`，发生在迁移执行前；按真实 `db.rs` 的 search_path 修正为 `qintopia_messages._sqlx_migrations` 后4项通过。此为 PMS 验收工具错误，没有修改 Agent OS。失败证据保留为 [a-final-shared-regression-first-run.json](../docs/implementation/evidence/pms-agentos-joint-20260911/a-final-shared-regression-first-run.json)，最终证据为 [a-final-shared-regression.json](../docs/implementation/evidence/pms-agentos-joint-20260911/a-final-shared-regression.json)。
 
 收尾再次只读确认：两专用实例无其他客户端连接，PMS Worker 为 NOLOGIN，欢迎三类效果记录均为0。两个本任务容器再次停止，合成数据保留。A 最终版共享构建/迁移兼容性无本轮未关闭缺陷；生产网络、账号、完整欢迎与真实发送仍不在本次结论内。
+
+追加回传状态：PMS 限定回归已保存为本地提交 `d1d13ae36c58e1e2b3fc58e4950ca3d1a3541cbf`。尝试将结果与版本信息回传给既有 Agent OS 任务“实现统一人员与欢迎 V1”时，自动审批认为该批内部信息向此目标的发送授权不足而拒绝；本次消息未送达。结果和完整技术交接保留在本文件，待用户明确授权该次跨任务回传，不通过其他渠道绕过。此阻塞不影响已完成的4项测试结果，但对方最终版兼容状态尚未由本次回传同步。
