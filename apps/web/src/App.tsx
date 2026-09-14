@@ -12,6 +12,7 @@ const OrdersPage = lazy(() => import("./pages/OrdersPage").then((module) => ({ d
 const TodayPage = lazy(() => import("./pages/TodayPage").then((module) => ({ default: module.TodayPage })));
 const TokensPage = lazy(() => import("./pages/TokensPage").then((module) => ({ default: module.TokensPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
+const RoomCatalogPage = lazy(() => import("./pages/RoomCatalogPage").then((module) => ({ default: module.RoomCatalogPage })));
 
 function SettingsRedirect({ section }: { section: string }) {
   const location = useLocation();
@@ -79,6 +80,7 @@ export default function App() {
               <Route path="orders/:orderId" element={<OrderDetailPage />} />
               <Route path="today" element={<TodayPage />} />
               <Route path="settings" element={<SettingsPage />}>
+                <Route path="rooms" element={<RoomCatalogPage />} />
                 <Route path="tokens" element={<TokensPage />} />
                 <Route path="accounts" element={<AccountsPage />} />
               </Route>
