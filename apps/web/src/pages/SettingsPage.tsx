@@ -1,18 +1,21 @@
-import { BedDouble, KeyRound, Users } from "lucide-react";
+import { Suspense } from "react";
+import { BedDouble, KeyRound, Settings, Users } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { canManageTokens, principalCan, useWorkspace } from "../session";
+import { LoadingBlock } from "../uiBasic";
 
 export function SettingsPage() {
   const { principal, propertyId } = useWorkspace();
   const { pathname } = useLocation();
   const index = pathname === "/settings" || pathname === "/settings/";
   return <div className="settings-page">
-    {index ? <header className="page-heading settings-page-heading"><div><p className="eyebrow">系统管理</p><h1>设置</h1></div></header> : null}
-    <nav className={index ? "settings-cards" : "settings-tabs"} aria-label="设置导航">
-      {principalCan(principal, propertyId, "MANAGE_ROOM_CATALOG") ? <NavLink to="/settings/rooms" className="settings-link"><BedDouble aria-hidden="true" size={20} /><span><strong>房型与价格</strong>{index ? <small>房型、房间床位与住宿价格</small> : null}</span></NavLink> : null}
-      <NavLink to="/settings/accounts" className="settings-link"><Users aria-hidden="true" size={20} /><span><strong>账号</strong>{index ? <small>工作人员、门店授权与操作权限</small> : null}</span></NavLink>
-      {canManageTokens(principal, propertyId) ? <NavLink to="/settings/tokens" className="settings-link"><KeyRound aria-hidden="true" size={20} /><span><strong>外部访问</strong>{index ? <small>访问密钥、权限范围与有效期</small> : null}</span></NavLink> : null}
+    <nav className="settings-tabs" aria-label="设置导航">
+      <NavLink to="/settings" end className="settings-link"><Settings aria-hidden="true" size={18} /><span>设置总览</span></NavLink>
+      <NavLink to="/settings/accounts" className="settings-link"><Users aria-hidden="true" size={18} /><span>账号</span></NavLink>
+      {canManageTokens(principal, propertyId) ? <NavLink to="/settings/tokens" className="settings-link"><KeyRound aria-hidden="true" size={18} /><span>外部访问</span></NavLink> : null}
+      {principalCan(principal, propertyId, "MANAGE_ROOM_CATALOG") ? <NavLink to="/settings/rooms" className="settings-link"><BedDouble aria-hidden="true" size={18} /><span>房型与价格</span></NavLink> : null}
     </nav>
-    <Outlet />
+    {index ? <header className="page-heading settings-page-heading"><div><p className="eyebrow">系统管理</p><h1>设置</h1><p className="muted">通过上方导航管理账号及当前门店可用的设置。</p></div></header> : null}
+    <Suspense fallback={<LoadingBlock label="正在载入设置内容" />}><Outlet /></Suspense>
   </div>;
 }
