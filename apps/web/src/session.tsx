@@ -1,3 +1,4 @@
+import { AssistantProvider, AssistantTrigger } from "./assistant/Assistant";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from "react";
 import { AlertCircle, BadgeCheck, BedDouble, Building2, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, Settings, UserRound } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
@@ -362,7 +363,7 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
   }
 
   return (
-    <div className={`app-shell${sidebarCollapsed ? " sidebar-is-collapsed" : ""}`}>
+    <AssistantProvider key={`${principal.subjectId}:${propertyId}`}><div className={`app-shell${sidebarCollapsed ? " sidebar-is-collapsed" : ""}`}>
       <a className="skip-link" href="#main-content">跳至主要内容</a>
       <aside className="sidebar">
           <div className="sidebar-brand-row">
@@ -386,9 +387,11 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
           >
             {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" size={18} /> : <PanelLeftClose aria-hidden="true" size={18} />}
           </button>
+          <AssistantTrigger mobile />
           <button className="mobile-logout icon-button" type="button" onClick={() => void logout()} disabled={loggingOut} aria-label="退出登录" title="退出登录"><LogOut aria-hidden="true" size={19} /></button>
         </div>
         <Navigation principal={principal} propertyId={propertyId} collapsed={sidebarCollapsed} />
+        <div className="assistant-sidebar-slot"><AssistantTrigger /></div>
         <div className="sidebar-property" title={propertyLabel}>
           <Building2 aria-hidden="true" size={15} />
           <label className="sr-only" htmlFor="property-select">门店</label>
@@ -418,6 +421,6 @@ export function AppShell({ onLogout }: { onLogout: () => void }) {
         <main id="main-content" className="main-content" tabIndex={-1}><Outlet /></main>
       </div>
       <Navigation principal={principal} propertyId={propertyId} mobile />
-    </div>
+    </div></AssistantProvider>
   );
 }

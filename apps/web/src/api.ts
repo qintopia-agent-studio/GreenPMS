@@ -1,3 +1,4 @@
+import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply } from "../../../packages/contracts/src/assistant.ts";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
 import type {
   AvailabilityDto,
@@ -132,6 +133,10 @@ function normalizeCommandResult(
 }
 
 export const api = {
+  assistantSettings: (propertyId: string) => request<AssistantSettings>(`/api/v1/assistant/settings?propertyId=${encodeURIComponent(propertyId)}`),
+  assistantSave: (body: AssistantSettingsInput) => request<AssistantSettings>("/api/v1/assistant/settings", { method: "PUT", body: JSON.stringify(body) }),
+  assistantTest: (body: AssistantSettingsInput) => request<{ message: string }>("/api/v1/assistant/test", { method: "POST", body: JSON.stringify(body) }),
+  assistantChat: (body: AssistantChatRequest, signal: AbortSignal) => request<AssistantChatReply>("/api/v1/assistant/chat", { method: "POST", body: JSON.stringify(body), signal }),
   externalPayments: (query: Record<string, string>, signal?: AbortSignal) => request<ExternalPaymentList>(
     `/api/v1/external-payments?${new URLSearchParams(query)}`, signal ? { signal } : {}),
   commandMetadata: (scope: string): ClientCommandMetadata => {
