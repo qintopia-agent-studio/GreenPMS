@@ -43,6 +43,7 @@ test("assistant overlay preserves calendar geometry and scroll; settings fit the
   expect(after?.width).toBe(before?.width); expect(after?.x).toBe(before?.x);
   if (hasCalendar) expect(await scroller.evaluate(el => [el.scrollLeft, el.scrollTop])).toEqual(position);
   await page.getByRole("button", { name: "关闭 AI 助手", exact: true }).click();
+  await expect(page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true })).toBeFocused();
   if (hasCalendar) expect(await scroller.evaluate(el => [el.scrollLeft, el.scrollTop])).toEqual(position);
   await page.goto("/settings/ai"); await expect(page.getByLabel("Base URL", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

@@ -72,10 +72,13 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     document.addEventListener("keydown", trap);
     return () => { shell.inert = previous; document.removeEventListener("keydown", trap); };
   }, [mobile, open, dialogOpen]);
-  useEffect(() => { if (open && !dialogOpen) inputRef.current?.focus({ preventScroll: true }); }, [open, dialogOpen]);
+  useEffect(() => {
+    if (open && !dialogOpen) inputRef.current?.focus({ preventScroll: true });
+    else if (!open) returnFocus.current?.focus({ preventScroll: true });
+  }, [open, dialogOpen]);
   useEffect(() => { const el = messagesRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages, busy, error]);
   useEffect(() => { if (guide && guide.orderId && location.pathname !== `/orders/${encodeURIComponent(guide.orderId)}`) { setGuide(undefined); setPending(undefined); } }, [location.pathname, guide]);
-  const close = () => { setOpen(false); returnFocus.current?.focus({ preventScroll: true }); };
+  const close = () => { setOpen(false); };
   const toggle = () => { if (open) close(); else { returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setOpen(true); } };
   const openEntry = (entry: AssistantEntry) => {
     const path = entryPath(entry);
