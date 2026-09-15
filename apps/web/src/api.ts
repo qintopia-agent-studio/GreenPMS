@@ -137,6 +137,9 @@ export const api = {
   assistantSave: (body: AssistantSettingsInput) => request<AssistantSettings>("/api/v1/assistant/settings", { method: "PUT", body: JSON.stringify(body) }),
   assistantTest: (body: AssistantSettingsInput) => request<{ message: string }>("/api/v1/assistant/test", { method: "POST", body: JSON.stringify(body) }),
   assistantChat: (body: AssistantChatRequest, signal: AbortSignal) => request<AssistantChatReply>("/api/v1/assistant/chat", { method: "POST", body: JSON.stringify(body), signal }),
+  roomCatalog: (propertyId: string) => request<RoomCatalogView>(`/api/v1/properties/${encodeURIComponent(propertyId)}/room-catalog`),
+  roomRateTrial: (propertyId: string, body: { anchors: RoomRateAnchors; arrivalDate: string; departureDate: string; multiplier: number }) =>
+    request<{ nights: number; anchorNights: number; amountMinor: number }>(`/api/v1/properties/${encodeURIComponent(propertyId)}/room-rate-trial`, { method: "POST", body: JSON.stringify(body) }),
   externalPayments: (query: Record<string, string>, signal?: AbortSignal) => request<ExternalPaymentList>(
     `/api/v1/external-payments?${new URLSearchParams(query)}`, signal ? { signal } : {}),
   commandMetadata: (scope: string): ClientCommandMetadata => {
@@ -295,3 +298,4 @@ export const api = {
 };
 
 export type { ClientCommandMetadata } from "./types";
+import type { RoomCatalogView, RoomRateAnchors } from "@qintopia/contracts";

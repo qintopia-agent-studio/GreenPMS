@@ -10,6 +10,10 @@ type Json = ColumnType<unknown, unknown, unknown>;
 
 export interface Database {
   ai_model_settings: { scope_id: string; management_property_id: string; version: number; enabled: boolean; base_url: string; model: string; encrypted_key: string; updated_by: string; updated_at: GeneratedTimestamp };
+  room_catalog_state: { property_id: string; version: number; snapshot: Json };
+  room_catalog_links: { unit_id: string; asset_id: string; version: number };
+  room_catalog_heads: { property_id: string; effective_from: string; policy_id: string };
+  room_catalog_changes: { id: string; property_id: string; command_id: string; effect: Json; reason: string; created_at: GeneratedTimestamp };
   active_order_occupants: Database["order_occupants"];
   order_occupant_removals: { id: string; order_id: string; occupant_id: string; amendment_id: string; created_by_command_id: string; created_at: GeneratedTimestamp };
   schema_migrations: { name: string; applied_at: GeneratedTimestamp };

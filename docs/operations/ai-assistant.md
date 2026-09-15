@@ -5,7 +5,7 @@
 ## 首次配置
 
 1. 部署人员生成独立的 32 字节 base64 随机值，例如 `openssl rand -base64 32`，作为服务端 `AI_SETTINGS_ENCRYPTION_KEY`。此值为加密主密钥，不是供应商 API Key。生产 Compose 已支持传入该变量。
-2. 通过项目正式发布入口部署含本功能的镜像，应用迁移 `061_ai_assistant.sql`。不要在生产目录构建。
+2. 通过项目正式发布入口部署含本功能的镜像，应用迁移 `062_ai_assistant.sql`（在主线 `061_room_catalog_management.sql` 之后）。不要在生产目录构建。
 3. 管理员登录，在“设置 → AI 助手”填写 HTTPS Base URL、API Key 或 Bearer 访问 Token、模型名称。Base URL 为 API 根地址，如供应商的 `/v1`；系统追加 `/chat/completions`。
 4. 点击“测试连接”。使用非流式 Chat Completions、`max_tokens`、function tools，并要求模型返回一次工具调用。此测试产生一次供应商请求，不含业务资料，不保存配置。
 5. 勾选启用并保存。服务地址改变时必须提供新地址对应的 Key；同地址更换模型可以留空保留 Key。失败后先重新载入核对版本，不自动重复保存或测试。

@@ -30,9 +30,19 @@
 
 ## 实现与验证记录
 
-- 独立分支 `codex/ai-assistant`、工作目录 `/private/tmp/green-pms-ai-assistant`，不修改房型设置任务目录。
+- 独立分支 `codex/ai-assistant`、固定工作目录为项目内 `.worktrees/ai-assistant`；旧路径 `/private/tmp/green-pms-ai-assistant` 为兼容链接。继续开发使用现有分支和草稿 PR #26。
 - 右侧固定400px覆盖面板、左导航底部入口；小屏全屏并限制背景焦点。现有弹窗打开时助手隐藏，直接引导说明进入原生表单。已接入续住、换房、记录收款、调整金额、取消订单的表单入口；其他入口为页面导航。
 - 2026-09-15：Node 22.23.2 下 TypeScript 与1,164项单元测试通过；13项独立库 AI 契约通过；生产前端构建及 runtime 构建通过。界面1440/768/375px检查无溢出和pageerror，日历展开前后宽度1212px、左边距202px，打开续住表单无业务提交请求。截图目录 [evidence/ai-assistant](./evidence/ai-assistant/)。浏览器的模型响应为合成，业务数据、权限、正式表单为真实本地测试流程。
 - 可复跑：`npm exec vitest run apps/api/src/assistant-model.test.ts`；通过数据库测试锁运行 `tests/contract/assistant.contract.test.ts`，独立库由 `ASSISTANT_TEST_DATABASE_URL` 指定；标准 E2E 环境运行 `npm exec playwright test -- tests/e2e/assistant.spec.ts`。
 
 - 正式浏览器回归：桌面2项、真实手机设备模式2项通过。另完成101项发布离线测试及8项PR格式测试；系统默认Python过旧导致的2项初次环境失败，切换到带venv的配套Python后全部通过。
+
+## 2026-09-15 主线同步
+
+已接入主线 `ee244c8`，包括房型与价格、统一设置导航、worktree 规则和 iPad 吸顶修复。保留主线三个设置入口的名称与顺序，AI 助手作为第四个入口，并沿用页面加载与错误隔离。
+
+AI 迁移由未发布的 `061_ai_assistant.sql` 顺延为 `062_ai_assistant.sql`，SQL 内容不变，正式安装顺序为房型目录 061 → AI 062。已有旧 AI 开发预览不能直接重跑迁移或重置：本次已先备份，在隔离恢复库演练后，对原合成预览库补入房型迁移并转换 AI 迁移登记；74 张原有数据表内容校验不变，原 3 笔订单及本地密钥文件保留。此转换仅针对本地旧预览，未操作生产。
+
+同步后的 TypeScript、1,171 项单元测试、生产前端构建和独立测试库的 13 项 AI 契约 + 17 项房型集成测试通过。AI 草稿 PR 保持未合并；真实模型与业务人工验收仍待进行。
+
+原预览 API 与前端已从固定目录重启，地址仍为 http://127.0.0.1:4235 。真实页面验证 820/1280/1440px 筛选展开/收起时吸顶间隙均为 0；AI 开关前后日历宽度保持 1212px；1440/768/375px 四个设置入口、返回导航及无页面溢出检查通过；用合成模型回答打开原有订单续住表单，业务提交请求为 0，无页面异常。
