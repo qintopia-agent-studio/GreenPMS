@@ -10,5 +10,6 @@ export const assistantGuides: Record<AssistantOrderAction, { label: string; step
 export type AssistantEntry = { page: "inventory" | "orders" | "members" | "today" | "settings" | "order"; label: string; steps: string[]; orderId?: string; memberId?: string; action?: AssistantOrderAction };
 export interface AssistantSettings { version: number; enabled: boolean; baseUrl: string; model: string; hasKey: boolean; keyReady: boolean; canManage: boolean; managementPropertyId: string | null; updatedAt: string | null }
 export interface AssistantSettingsInput { propertyId: string; expectedVersion: number; enabled: boolean; baseUrl: string; model: string; apiKey?: string }
-export interface AssistantChatRequest { propertyId: string; message: string; conversationId?: string; page: string; orderId?: string }
-export interface AssistantChatReply { conversationId: string; text: string; entries: AssistantEntry[] }
+export type AssistantQuestionFeedback = "RESOLVED" | "UNRESOLVED";
+export interface AssistantChatRequest { propertyId: string; message: string; conversationId?: string; page: string; orderId?: string; source?: "USER" | "SUGGESTION" | "UNKNOWN" }
+export interface AssistantChatReply { conversationId: string; text: string; entries: AssistantEntry[]; questionId?: string }

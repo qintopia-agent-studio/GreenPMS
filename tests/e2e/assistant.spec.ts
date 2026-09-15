@@ -90,6 +90,39 @@ test("assistant composer separates sending, line breaks and IME confirmation", a
   release();
   await expect(page.locator(".assistant-markdown")).toHaveText("已收到完整问题。");
 });
+test("assistant distinguishes suggested questions and saves explicit feedback with retry", async ({ page }) => {
+  await enabledUi(page);
+  const sources: string[] = [], feedbacks: string[] = [];
+  await page.route("**/api/v1/assistant/chat", route => {
+    sources.push(route.request().postDataJSON().source);
+    return route.fulfill({ json: { conversationId: "synthetic-feedback", questionId: `synthetic-question-${sources.length}`, text: "请先核对房态，再进入正式操作页面。", entries: [] } });
+  });
+  await page.route("**/api/v1/assistant/questions/*/feedback", route => {
+    feedbacks.push(route.request().postDataJSON().feedback);
+    return feedbacks.length === 1
+      ? route.fulfill({ status: 500, json: { error: { code: "INTERNAL_ERROR", message: "反馈未能保存，请稍后重试。", retryable: true } } })
+      : route.fulfill({ json: { saved: true } });
+  });
+  await login(page);
+  await page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true }).click();
+  await page.locator(".assistant-suggestions button").first().click();
+  await expect(page.locator(".assistant-feedback")).toBeVisible(); expect(sources).toEqual(["SUGGESTION"]);
+  const unresolved = page.getByRole("button", { name: "未解决", exact: true });
+  await unresolved.click(); await expect(page.locator(".assistant-feedback [role=alert]")).toBeVisible();
+  await expect(unresolved).toHaveAttribute("aria-pressed", "false");
+  await unresolved.click(); await expect(unresolved).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".assistant-feedback-status")).toHaveText("反馈已记录");
+  await unresolved.click(); expect(feedbacks).toEqual(["UNRESOLVED", "UNRESOLVED"]);
+  await page.getByRole("button", { name: "已解决", exact: true }).click();
+  await expect(page.getByRole("button", { name: "已解决", exact: true })).toHaveAttribute("aria-pressed", "true");
+  expect(feedbacks).toEqual(["UNRESOLVED", "UNRESOLVED", "RESOLVED"]);
+  await page.getByRole("button", { name: "关闭 AI 助手", exact: true }).click();
+  await page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true }).click();
+  await expect(page.getByRole("button", { name: "已解决", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByLabel("向 AI 助手提问").fill("帮我打开会员页面");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.locator(".assistant-feedback")).toHaveCount(2); expect(sources).toEqual(["SUGGESTION", "USER"]);
+});
 test("assistant opens the real stay-date form with durable guidance and no business submission", async ({ page }) => {
   await login(page); const orderId = await order(page.request);
   await enabledUi(page);

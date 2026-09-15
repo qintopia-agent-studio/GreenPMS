@@ -10,6 +10,7 @@ import { assistantGuides, assistantOrderActions, type AssistantChatReply, type A
 import { authenticateRequest, requirePropertyAccess } from "./auth.ts";
 import { ErrorResponse, Id } from "./schemas.ts";
 import { aiError, callModel, decryptKey, encryptKey, keyReady, normalizeBaseUrl, resolvePublicEndpoint, type ModelMessage, type ModelTool, type ModelTransport } from "./assistant-model.ts";
+import { beginAssistantQuestion, finishAssistantQuestion, maintainAssistantQuestions } from "./assistant-question-records.ts";
 
 function guestName(value: unknown): string {
   if (!value || typeof value !== "object") return "未记录";
@@ -19,7 +20,7 @@ function guestName(value: unknown): string {
 const text = (maxLength = 120) => Type.String({ maxLength });
 const querySchema = Type.Object({ propertyId: Id }, { additionalProperties: false });
 const settingsSchema = Type.Object({ propertyId: Id, expectedVersion: Type.Integer({ minimum: 0 }), enabled: Type.Boolean(), baseUrl: Type.String({ minLength: 1, maxLength: 2048 }), model: Type.String({ minLength: 1, maxLength: 120, pattern: "\\S" }), apiKey: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^[^\\s]+$" })) }, { additionalProperties: false });
-const chatSchema = Type.Object({ propertyId: Id, message: Type.String({ minLength: 1, maxLength: 4000, pattern: "\\S" }), conversationId: Type.Optional(Id), page: text(200), orderId: Type.Optional(Id) }, { additionalProperties: false });
+const chatSchema = Type.Object({ propertyId: Id, message: Type.String({ minLength: 1, maxLength: 4000, pattern: "\\S" }), conversationId: Type.Optional(Id), page: text(200), orderId: Type.Optional(Id), source: Type.Optional(Type.Union([Type.Literal("USER"), Type.Literal("SUGGESTION"), Type.Literal("UNKNOWN")])) }, { additionalProperties: false });
 const failures = { 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 429: ErrorResponse, 500: ErrorResponse };
 const settingsResponse = Type.Object({ version: Type.Integer(), enabled: Type.Boolean(), baseUrl: Type.String(), model: Type.String(), hasKey: Type.Boolean(), keyReady: Type.Boolean(), canManage: Type.Boolean(), managementPropertyId: Type.Union([Id, Type.Null()]), updatedAt: Type.Union([Type.String(), Type.Null()]) });
 const entrySchema = Type.Object({ page: Type.Union(["inventory", "orders", "members", "today", "settings", "order"].map(v => Type.Literal(v))), label: Type.String(), steps: Type.Array(Type.String()), orderId: Type.Optional(Id), memberId: Type.Optional(Id), action: Type.Optional(Type.Union(assistantOrderActions.map(v => Type.Literal(v)))) }, { additionalProperties: false });
@@ -112,14 +113,36 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     await adminSettings(db, request, (request.body as AssistantSettingsInput).propertyId);
     return { message: "连接与工具调用测试通过。测试不会保存配置。" };
   });
-  app.post("/api/v1/assistant/chat", { validatorCompiler: guard(chatSchema), config: { rateLimit: { max: 20, timeWindow: "1 minute" } }, schema: { tags: ["queries"], body: chatSchema, response: { 200: Type.Object({ conversationId: Id, text: Type.String(), entries: Type.Array(entrySchema) }), ...failures } } }, async (request): Promise<AssistantChatReply> => {
+  app.post("/api/v1/assistant/questions/:questionId/feedback", {
+    config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    schema: { tags: ["queries"], params: Type.Object({ questionId: Id }, { additionalProperties: false }),
+      body: Type.Object({ propertyId: Id, feedback: Type.Union([Type.Literal("RESOLVED"), Type.Literal("UNRESOLVED")]) }, { additionalProperties: false }),
+      response: { 200: Type.Object({ saved: Type.Literal(true) }), ...failures } }
+  }, async request => {
+    const body = request.body as { propertyId: string; feedback: string };
+    const principal = await currentUser(db, request, body.propertyId);
+    try {
+      await sql`SELECT qintopia_feedback_ai_question(${(request.params as { questionId: string }).questionId}, ${principal.subjectId}, ${principal.credentialId}, ${body.propertyId}, ${body.feedback})`.execute(db);
+    } catch (error) {
+      if ((error as Error).message === "AI_QUESTION_NOT_FOUND") throw new DomainError("NOT_FOUND", "未找到可反馈的问题，或记录已过保留期。", 404);
+      if ((error as Error).message === "AI_QUESTION_FORBIDDEN") throw new DomainError("INSUFFICIENT_ACCESS", "当前会话不能提交此反馈。", 403);
+      throw new DomainError("INTERNAL_ERROR", "反馈未能保存，请稍后重试。", 500);
+    }
+    return { saved: true as const };
+  });
+  app.post("/api/v1/assistant/chat", { validatorCompiler: guard(chatSchema), config: { rateLimit: { max: 20, timeWindow: "1 minute" } }, schema: { tags: ["queries"], body: chatSchema, response: { 200: Type.Object({ conversationId: Id, text: Type.String(), entries: Type.Array(entrySchema), questionId: Type.Optional(Id) }), ...failures } } }, async (request): Promise<AssistantChatReply> => {
     const body = request.body as AssistantChatRequest, principal = await currentUser(db, request, body.propertyId);
+    const startedAt = Date.now(), id = body.conversationId ?? randomUUID(), toolsUsed = new Set<string>();
+    const knownConversation = conversations.get(id);
+    const recordConversation = !body.conversationId || knownConversation?.subjectId === principal.subjectId && knownConversation.propertyId === body.propertyId && knownConversation.credentialId === principal.credentialId ? id : randomUUID();
+    const questionId = await beginAssistantQuestion(db, app.log, principal, body, recordConversation);
+    let recordedOutcome: "ANSWERED" | "FAILED" = "FAILED", recordedError: string | null = null;
+    try {
     const settings = await readSettings(db);
-    if (!settings?.enabled) throw aiError("AI 助手尚未启用，请管理员在“设置 → AI 助手”配置连接。");
+    if (!settings?.enabled) { recordedError = "ASSISTANT_DISABLED"; throw aiError("AI 助手尚未启用，请管理员在“设置 → AI 助手”配置连接。"); }
     const apiKey = decryptKey(settings.encrypted_key);
     const now = Date.now();
     for (const [id, conversation] of conversations) if (conversation.expiresAt < now && !conversation.busy) conversations.delete(id);
-    const id = body.conversationId ?? randomUUID();
     let conversation = conversations.get(id);
     if (body.conversationId && (!conversation || conversation.subjectId !== principal.subjectId || conversation.credentialId !== principal.credentialId || conversation.propertyId !== body.propertyId || conversation.version !== settings.version)) throw aiError("对话已过期或工作区已变化，请新建对话。");
     if (activeSubjects.has(principal.subjectId) || conversation?.busy) throw new DomainError("RATE_LIMITED", "上一条消息仍在处理，请稍候。", 429);
@@ -200,12 +223,14 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
           const answer = response.content?.trim(); if (!answer) throw aiError("模型未返回回答，请重试。");
           conversation.messages = [...conversation.messages, { role: "user", content: body.message }, { role: "assistant", content: answer }].slice(-12) as ModelMessage[];
           conversation.expiresAt = Date.now() + 900_000;
-          return { conversationId: id, text: answer, entries: entries.slice(-1) };
+          recordedOutcome = "ANSWERED";
+          return { conversationId: id, text: answer, entries: entries.slice(-1), ...(questionId ? { questionId } : {}) };
         }
         messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
         for (const tool of response.tool_calls) {
           if (++calls > 6) throw aiError("本轮查询步骤过多，请把需求拆成更具体的问题。");
           const args = toolArgs(tool.function.name, tool.function.arguments);
+          toolsUsed.add(tool.function.name);
           const result = await runTool(tool.function.name, args);
           messages.push({ role: "tool", tool_call_id: tool.id, content: JSON.stringify(result) });
         }
@@ -215,6 +240,18 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       if (error instanceof DomainError) throw error;
       throw aiError("助手暂时无法完成查询，请稍后重试。本次没有提交业务操作。");
     } finally { conversation.busy = false; activeSubjects.delete(principal.subjectId); }
+    } catch (error) {
+      const code = error instanceof DomainError ? error.code : "REQUEST_FAILED";
+      recordedError ??= ["VALIDATION_ERROR", "INSUFFICIENT_ACCESS", "NOT_FOUND", "RATE_LIMITED", "AUTHENTICATION_REQUIRED", "SESSION_EXPIRED", "INVALID_CREDENTIALS"].includes(code) ? code : "REQUEST_FAILED";
+      throw error;
+    } finally { await finishAssistantQuestion(db, app.log, questionId, principal, recordedOutcome, recordedError, toolsUsed, startedAt); }
   });
-  app.addHook("onClose", async () => conversations.clear());
+  let maintenance: ReturnType<typeof setInterval> | undefined;
+  let maintenanceRun: Promise<void> | undefined;
+  const maintain = () => {
+    if (!maintenanceRun) maintenanceRun = maintainAssistantQuestions(db, app.log).finally(() => { maintenanceRun = undefined; });
+    return maintenanceRun;
+  };
+  app.addHook("onReady", async () => { await maintain(); maintenance = setInterval(() => void maintain(), 60 * 60 * 1000); maintenance.unref(); });
+  app.addHook("onClose", async () => { if (maintenance) clearInterval(maintenance); await maintenanceRun; conversations.clear(); });
 }

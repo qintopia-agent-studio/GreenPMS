@@ -50,6 +50,12 @@
 .assistant-markdown :is(th, td) { min-width: 80px; padding: 8px 10px; border: 1px solid var(--border); text-align: left; white-space: normal; }
 .assistant-markdown th { background: var(--surface-muted); font-weight: 650; }
 .assistant-message-user .assistant-message-text { background: var(--brand-soft); border-radius: 7px; padding: 10px 12px; }
+.assistant-feedback { margin-top: 14px; font-size: 12px; color: var(--muted); }
+.assistant-feedback > div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.assistant-feedback button { border: 1px solid var(--border); border-radius: 5px; background: transparent; padding: 6px 9px; color: var(--muted); font-size: 12px; }
+.assistant-feedback button:hover, .assistant-feedback button[aria-pressed="true"] { color: var(--brand); background: var(--brand-soft); border-color: var(--border-strong); }
+.assistant-feedback-status:not(:empty) { display: block; margin-top: 6px; }
+.assistant-feedback > p { color: var(--danger); margin: 6px 0 0; }
 .assistant-entry { margin-top: 14px; border: 1px solid var(--border); border-radius: 5px; padding: 12px; }
 .assistant-entry ol, .assistant-operation-guide ol { margin: 10px 0 0; padding-left: 20px; }
 .assistant-entry li, .assistant-operation-guide li { margin: 7px 0; line-height: 1.6; }

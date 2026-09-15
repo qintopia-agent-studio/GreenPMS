@@ -4,9 +4,10 @@ import { ChevronRight, MessageSquare, Plus, Send, Settings, Sparkles, X } from "
 import { api } from "../api";
 import { useWorkspace } from "../session";
 import { errorMessage } from "../uiBasic";
-import { assistantOrderActions, type AssistantChatReply, type AssistantEntry, type AssistantSettings } from "../../../../packages/contracts/src/assistant.ts";
+import { assistantOrderActions, type AssistantChatReply, type AssistantEntry, type AssistantSettings, type AssistantQuestionFeedback } from "../../../../packages/contracts/src/assistant.ts";
 import { AssistantContext, useAssistant } from "./context";
 import { AssistantMessageContent } from "./AssistantMessageContent";
+import { AssistantFeedback } from "./AssistantFeedback";
 import "./assistant.css";
 
 export function entryPath(entry: AssistantEntry): string | undefined {
@@ -22,7 +23,7 @@ export function AssistantTrigger({ mobile = false }: { mobile?: boolean }) {
   if (!assistant) return null;
   return <button type="button" className={`assistant-trigger${mobile ? " assistant-trigger-mobile" : ""}`} onClick={assistant.toggle} aria-expanded={assistant.open} aria-controls="ai-assistant-panel" aria-label="AI 助手" title="AI 助手"><Sparkles size={18} aria-hidden="true" /><span>AI 助手</span></button>;
 }
-interface Message { role: "user" | "assistant"; text: string; entries?: AssistantEntry[] }
+interface Message { role: "user" | "assistant"; text: string; entries?: AssistantEntry[]; questionId?: string; feedback?: AssistantQuestionFeedback }
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const { propertyId } = useWorkspace(), location = useLocation(), navigate = useNavigate();
   const [open, setOpen] = useState(false), [settings, setSettings] = useState<AssistantSettings>();
@@ -121,10 +122,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     controller.current = new AbortController(); setBusy(true); setError(undefined); setDraft("");
     setMessages(current => [...current, { role: "user", text: message }]);
     try {
-      const result: AssistantChatReply = await api.assistantChat({ propertyId, message, page: pageName, ...(orderId ? { orderId: decodeURIComponent(orderId) } : {}), ...(conversationId ? { conversationId } : {}) }, controller.current.signal);
+      const result: AssistantChatReply = await api.assistantChat({ propertyId, message, source: prompt === undefined ? "USER" : "SUGGESTION", page: pageName, ...(orderId ? { orderId: decodeURIComponent(orderId) } : {}), ...(conversationId ? { conversationId } : {}) }, controller.current.signal);
       if (ticket !== generation.current) return;
       setConversationId(result.conversationId);
-      setMessages(current => [...current, { role: "assistant", text: result.text, entries: result.entries }]);
+      setMessages(current => [...current, { role: "assistant", text: result.text, entries: result.entries, ...(result.questionId ? { questionId: result.questionId } : {}) }]);
       const entry = result.entries[0];
       if (entry && currentPath.current === path) openEntry(entry);
       else if (entry) setError("你已切换页面，助手没有自动跳转。可点击回答中的入口继续。");
@@ -136,7 +137,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     {open && !dialogOpen ? <aside id="ai-assistant-panel" className="assistant-panel" role={mobile ? "dialog" : "complementary"} aria-modal={mobile ? true : undefined} aria-label="AI 助手" data-testid="ai-assistant-panel">
       <header className="assistant-header"><div><Sparkles size={18} aria-hidden="true" /><strong>AI 助手</strong></div><div><button type="button" className="icon-button" aria-label="新建对话" title="新建对话" onClick={newConversation}><Plus size={18} /></button>{settings?.canManage ? <button type="button" className="icon-button" aria-label="模型设置" title="模型设置" onClick={() => { close(); navigate("/settings/ai"); }}><Settings size={18} /></button> : null}<button type="button" className="icon-button" aria-label="关闭 AI 助手" onClick={close}><X size={19} /></button></div></header>
       <div className="assistant-messages" ref={messagesRef} aria-live="polite" aria-busy={busy}>
-        {!messages.length ? <div className="assistant-welcome"><MessageSquare size={27} aria-hidden="true" /><h2>需要帮你做什么？</h2><p>问我怎么操作，或让我查找房态、订单与会员资料。</p>{settings && !settings.enabled ? <p className="assistant-notice">助手尚未启用，请管理员在设置中配置模型连接。</p> : null}<div className="assistant-suggestions">{suggestions.map(({ title, prompt }) => <button type="button" key={title} onClick={() => void send(undefined, prompt)} disabled={busy || !settings?.enabled}><span><strong>{title}</strong><small>{prompt}</small></span><ChevronRight size={16} aria-hidden="true" /></button>)}</div></div> : messages.map((m, i) => <article className={`assistant-message assistant-message-${m.role}`} key={i}><span className="assistant-message-author">{m.role === "user" ? "你" : "AI 助手"}</span>{m.role === "assistant" ? <AssistantMessageContent text={m.text} /> : <div className="assistant-message-text">{m.text}</div>}{m.entries?.map((entry, index) => <div className="assistant-entry" key={index}><button type="button" className="button button-secondary" onClick={() => openEntry(entry)}>打开{entry.label}</button><ol>{entry.steps.map(step => <li key={step}>{step}</li>)}</ol></div>)}</article>)}
+        {!messages.length ? <div className="assistant-welcome"><MessageSquare size={27} aria-hidden="true" /><h2>需要帮你做什么？</h2><p>问我怎么操作，或让我查找房态、订单与会员资料。</p>{settings && !settings.enabled ? <p className="assistant-notice">助手尚未启用，请管理员在设置中配置模型连接。</p> : null}<div className="assistant-suggestions">{suggestions.map(({ title, prompt }) => <button type="button" key={title} onClick={() => void send(undefined, prompt)} disabled={busy || !settings?.enabled}><span><strong>{title}</strong><small>{prompt}</small></span><ChevronRight size={16} aria-hidden="true" /></button>)}</div></div> : messages.map((m, i) => <article className={`assistant-message assistant-message-${m.role}`} key={i}><span className="assistant-message-author">{m.role === "user" ? "你" : "AI 助手"}</span>{m.role === "assistant" ? <AssistantMessageContent text={m.text} /> : <div className="assistant-message-text">{m.text}</div>}{m.entries?.map((entry, index) => <div className="assistant-entry" key={index}><button type="button" className="button button-secondary" onClick={() => openEntry(entry)}>打开{entry.label}</button><ol>{entry.steps.map(step => <li key={step}>{step}</li>)}</ol></div>)}{m.questionId ? <AssistantFeedback questionId={m.questionId} propertyId={propertyId} selected={m.feedback} onSaved={feedback => setMessages(current => current.map(message => message.questionId === m.questionId ? { ...message, feedback } : message))} /> : null}</article>)}
         {busy ? <p className="assistant-wait">正在查询和整理…</p> : null}
         {error ? <div className="assistant-error" role="alert">{error}</div> : null}
       </div>
