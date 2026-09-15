@@ -1,0 +1,126 @@
+{
+  "started_at": "2026-09-11T06:52:34.043Z",
+  "pms_head": "4b598c61fc5af04ee9c5951f4f09d6ab409bf55f",
+  "node": "v24.14.0",
+  "cases": [
+    {
+      "id": "J01",
+      "title": "真实预订入住及原字节签名ACK",
+      "status": "passed",
+      "duration_ms": 20716
+    },
+    {
+      "id": "J02",
+      "title": "签名错误与跨来源跨物业拒绝",
+      "status": "passed",
+      "duration_ms": 48
+    },
+    {
+      "id": "J03",
+      "title": "ACK丢失后同事件重试并保持单Inbox",
+      "status": "passed",
+      "duration_ms": 2818
+    },
+    {
+      "id": "J04",
+      "title": "push与pull同时到达及乱序去重",
+      "status": "passed",
+      "duration_ms": 994
+    },
+    {
+      "id": "J05",
+      "title": "同event_id异原字节冲突保留原记录",
+      "status": "passed",
+      "duration_ms": 10
+    },
+    {
+      "id": "J06",
+      "title": "断网重启后事件与投递状态恢复",
+      "status": "passed",
+      "duration_ms": 5516
+    },
+    {
+      "id": "J07",
+      "title": "分页失败检查点不前进且新进程继续",
+      "status": "passed",
+      "duration_ms": 13056
+    },
+    {
+      "id": "J08",
+      "title": "并发拉取CAS只允许一次推进",
+      "status": "passed",
+      "duration_ms": 501
+    },
+    {
+      "id": "J09",
+      "title": "同版本投影冲突持久隔离",
+      "status": "passed",
+      "duration_ms": 803
+    },
+    {
+      "id": "J10",
+      "title": "库存墓碑恢复与关联修订",
+      "status": "passed",
+      "duration_ms": 449
+    },
+    {
+      "id": "J11",
+      "title": "真实会员删除得到200墓碑且不可见不作删除",
+      "status": "passed",
+      "duration_ms": 341
+    },
+    {
+      "id": "J12",
+      "title": "未来换房跨营业日无新事件仍收敛",
+      "status": "passed",
+      "duration_ms": 5591
+    },
+    {
+      "id": "J13",
+      "title": "历史补录复合事件只同步不准入欢迎",
+      "status": "passed",
+      "duration_ms": 12314
+    },
+    {
+      "id": "J14",
+      "title": "晚提交位于已消费水位之后且回滚不留事件",
+      "status": "passed",
+      "duration_ms": 533
+    },
+    {
+      "id": "J15",
+      "title": "分scope领取互不干扰",
+      "status": "passed",
+      "duration_ms": 78
+    },
+    {
+      "id": "J16",
+      "title": "410过期重建及分页重启始终禁发",
+      "status": "failed",
+      "code": "ASSERTION_FAILED",
+      "duration_ms": 113984
+    },
+    {
+      "id": "J17",
+      "title": "旧重建代次不能提交覆盖新代次",
+      "status": "passed",
+      "duration_ms": 722
+    },
+    {
+      "id": "J18",
+      "title": "所有补偿重建无制卡上传发送效果",
+      "status": "passed",
+      "duration_ms": 94
+    }
+  ],
+  "agent_manifest": "56cc9ee18f93eabd6be177f73be7ca523cd5f91f5105e4f63069e59ca05da291",
+  "agent_binary": "31079d9f0890653cf26c5e33e1593f013e96591357ad53a4bcb29e8a562f136f",
+  "agent_source_head": "2815ab46f2cc0efb3e34cda56f6242bb9af5abf0",
+  "contract_sha256": "77a055c7e252884dc4e61fcadd4da49e968c194587fce75cd43e6c6eb4b91512",
+  "fixture_sha256": "7c9001ea62a3b3850b96356c23437f6d7884e9da5ba7696dcee1951f8e9fad56",
+  "https_requests": 116,
+  "https_accepted": 12,
+  "https_duplicates": 103,
+  "finished_at": "2026-09-11T06:55:38.825Z",
+  "status": "failed"
+}

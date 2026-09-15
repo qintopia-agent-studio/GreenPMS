@@ -1,0 +1,145 @@
+{
+  "started_at": "2026-09-11T06:57:09.744Z",
+  "pms_head": "4b598c61fc5af04ee9c5951f4f09d6ab409bf55f",
+  "node": "v24.14.0",
+  "cases": [
+    {
+      "id": "J01",
+      "title": "真实预订入住及原字节签名ACK",
+      "status": "passed",
+      "duration_ms": 19167
+    },
+    {
+      "id": "J02",
+      "title": "签名错误与跨来源跨物业拒绝",
+      "status": "passed",
+      "duration_ms": 49
+    },
+    {
+      "id": "J03",
+      "title": "ACK丢失后同事件重试并保持单Inbox",
+      "status": "passed",
+      "duration_ms": 2991
+    },
+    {
+      "id": "J04",
+      "title": "push与pull同时到达及乱序去重",
+      "status": "passed",
+      "duration_ms": 579
+    },
+    {
+      "id": "J05",
+      "title": "同event_id异原字节冲突保留原记录",
+      "status": "passed",
+      "duration_ms": 8
+    },
+    {
+      "id": "J06",
+      "title": "断网重启后事件与投递状态恢复",
+      "status": "passed",
+      "duration_ms": 4936
+    },
+    {
+      "id": "J07",
+      "title": "分页失败检查点不前进且新进程继续",
+      "status": "passed",
+      "duration_ms": 11256
+    },
+    {
+      "id": "J08",
+      "title": "并发拉取CAS只允许一次推进",
+      "status": "passed",
+      "duration_ms": 289
+    },
+    {
+      "id": "J09",
+      "title": "同版本投影冲突持久隔离",
+      "status": "passed",
+      "duration_ms": 910
+    },
+    {
+      "id": "J10",
+      "title": "库存墓碑恢复与关联修订",
+      "status": "passed",
+      "duration_ms": 349
+    },
+    {
+      "id": "J11",
+      "title": "真实会员删除得到200墓碑且不可见不作删除",
+      "status": "passed",
+      "duration_ms": 347
+    },
+    {
+      "id": "J12",
+      "title": "未来换房跨营业日无新事件仍收敛",
+      "status": "passed",
+      "duration_ms": 5064
+    },
+    {
+      "id": "J13",
+      "title": "历史补录复合事件只同步不准入欢迎",
+      "status": "passed",
+      "duration_ms": 12041
+    },
+    {
+      "id": "J14",
+      "title": "晚提交位于已消费水位之后且回滚不留事件",
+      "status": "passed",
+      "duration_ms": 474
+    },
+    {
+      "id": "J15",
+      "title": "分scope领取互不干扰",
+      "status": "passed",
+      "duration_ms": 538
+    },
+    {
+      "id": "J16",
+      "title": "410过期重建及分页重启始终禁发",
+      "status": "failed",
+      "code": "ASSERTION_FAILED",
+      "location": "tests/joint/run.mjs:262:5",
+      "duration_ms": 117275
+    },
+    {
+      "id": "J17",
+      "title": "旧重建代次不能提交覆盖新代次",
+      "status": "passed",
+      "duration_ms": 913
+    },
+    {
+      "id": "J18",
+      "title": "所有补偿重建无制卡上传发送效果",
+      "status": "passed",
+      "duration_ms": 102
+    },
+    {
+      "id": "J19",
+      "title": "真实签名失败暂停Worker并受控恢复",
+      "status": "passed",
+      "duration_ms": 3779
+    }
+  ],
+  "agent_manifest": "56cc9ee18f93eabd6be177f73be7ca523cd5f91f5105e4f63069e59ca05da291",
+  "agent_binary": "31079d9f0890653cf26c5e33e1593f013e96591357ad53a4bcb29e8a562f136f",
+  "agent_source_head": "2815ab46f2cc0efb3e34cda56f6242bb9af5abf0",
+  "contract_sha256": "77a055c7e252884dc4e61fcadd4da49e968c194587fce75cd43e6c6eb4b91512",
+  "fixture_sha256": "7c9001ea62a3b3850b96356c23437f6d7884e9da5ba7696dcee1951f8e9fad56",
+  "https_requests": 119,
+  "https_accepted": 13,
+  "https_duplicates": 104,
+  "finished_at": "2026-09-11T07:00:14.701Z",
+  "pms_runtime_files": {
+    "packages/db/src/external-payments-readiness.ts": "6c1ce742b7fb5ed685616d0daf717cee289c2813b0661b1cf4304967d5cac35a",
+    "packages/db/src/integration-worker-main.ts": "fbf7dec03e9da532837a4072a183c61d3b9552837b1f4fa16e8e9909bb46d0ee",
+    "packages/db/src/integration-worker.ts": "5c6ad0c2825a5105073e5cdd9af6375ecd6e54e1f304238ea2a07bc30c766f1b",
+    "packages/db/src/integration-queries.ts": "3bedbe20afc0c9757e7015aa2756272dd6116c92a6a5225b13267e03f9c3244e",
+    "apps/api/src/integration.ts": "ba5e806b5666ccd6731c5bae009b9e797b4051b4130532c92b27a82d3b11a62c",
+    "tests/joint/run.mjs": "7cf9e6457c5c806db8a477ba16961298ba1c76d0193b8175086e54c4c86e5906",
+    "tests/joint/support.mjs": "9cef3814aa016bad224c2a5aa3be1ad4ebb5abadf8b58e9fe4c070b34c85207a",
+    "tests/joint/pms-fixture.mjs": "41279679ba0d6020af0921150245da1e3ff288f4e74f829d81c6bfbce9d685fb",
+    "tests/joint/agent-fixture.mjs": "09dabbe29ee9fa2ffdce1c9d500aa30b3d3f05e6b0185f359bfdee3a01621c0e",
+    "tests/joint/pms-api.mjs": "0e0f43dac4d770f671f44d05ba9a944e9e2d2a2a14d19c60cef4ccd76fc2c0eb"
+  },
+  "status": "failed"
+}

@@ -100,7 +100,8 @@ def _validate_ref(reference: Any, *, allow_legacy: bool = True) -> None:
     prefix = reference.get("prefix")
     manifest_sha = reference.get("manifestSha256")
     manifest = reference.get("manifest")
-    if set(reference) != {"prefix", "manifestSha256", "manifest"}:
+    if set(reference) not in ({"prefix", "manifestSha256", "manifest"},
+                              {"prefix", "manifestSha256", "manifest", "runtimeImageId"}):
         raise ReleaseError("receipt release reference has an unexpected schema")
     if not isinstance(prefix, str) or not prefix.endswith("/"):
         raise ReleaseError("receipt release prefix is invalid")
@@ -112,6 +113,10 @@ def _validate_ref(reference: Any, *, allow_legacy: bool = True) -> None:
     validate_identity(parts[0], parts[1])
     if not isinstance(manifest_sha, str) or HEX.fullmatch(manifest_sha) is None:
         raise ReleaseError("receipt manifest checksum is invalid")
+    runtime_image_id = reference.get("runtimeImageId")
+    if runtime_image_id is not None and (not isinstance(runtime_image_id, str)
+                                         or re.fullmatch(r"sha256:[0-9a-f]{64}", runtime_image_id) is None):
+        raise ReleaseError("receipt runtime image identity is invalid")
     validate_manifest(manifest, parts[0], parts[1])
 
 
@@ -486,6 +491,12 @@ class LockedSSH:
         # lifetime; the 600-second wait below starts only after ACK.
         line = self.process.stdout.readline(MAX_RECEIPT_BYTES + 1)
         if not line or len(line) > MAX_RECEIPT_BYTES or not line.endswith("\n"):
+            if self.process.stderr is not None:
+                remote_error = self.process.stderr.readline(513)
+                if (remote_error.endswith("\n") and len(remote_error) <= 512
+                        and remote_error.startswith("GreenPMS: ")
+                        and all(character.isprintable() for character in remote_error.rstrip("\n"))):
+                    raise ReleaseError(remote_error.rstrip("\n"))
             raise ReleaseError("server did not return one JSON receipt line")
         try:
             receipt = json.loads(line)

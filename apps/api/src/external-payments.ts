@@ -31,7 +31,7 @@ export function registerExternalPayments(app: FastifyInstance, db: Kysely<Databa
   });
   app.get("/api/v1/external-payment-events", { schema: { tags: ["queries"], querystring: Type.Object({
     propertyId: Id, cursor: Type.Optional(Type.String({ pattern: "^(0|[1-9][0-9]{0,18})$" })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 }))
-  }, { additionalProperties: false }) } }, async request => {
+  }, { additionalProperties: false }), response: { 500: ErrorResponse } } }, async request => {
     const q = request.query as { propertyId: string; cursor?: string; limit?: number };
     requirePropertyAccess(await requirePrincipal(db, request), q.propertyId, "READ");
     return readExternalPaymentEvents(db, q.propertyId, q.cursor ?? "0", q.limit);

@@ -7,6 +7,13 @@
 node_modules
 **/node_modules
 apps/web/dist
+# Repository-only design, audit, and planning material. Release notes remain
+# available because the image build validates the tagged version against them.
+diagrams
+docs/**
+!docs/releases
+!docs/releases/**
+待开发项
 **/*.test.ts
 **/*.test.tsx
 **/*.spec.ts

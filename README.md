@@ -14,7 +14,7 @@ Production release setup and daily operations are described in the [quickstart](
 
 - Docker Engine with Compose v2 for the one-command path; this path does not require host Node.js
 - Node.js 22.x LTS and npm 10 or newer for local development and test commands
-- PostgreSQL 16 is always used for runtime and integration tests; there is no SQLite or in-memory fallback
+- Runtime and integration tests use real PostgreSQL; there is no SQLite or in-memory fallback. The local Compose default remains PostgreSQL 16, but the event integration acceptance ran on PostgreSQL 18 and the v1.3.2 release record identifies production PostgreSQL 18.4. PostgreSQL 16 is not verified for the current event readiness fingerprint. See [database target and release prerequisites](待开发项/PMS-AgentOS-版本收口与PR准备-20260911.md#数据库目标与发布前缺项) before using the current event module or choosing a deployment target.
 - Playwright Chromium for browser acceptance: `npx playwright install chromium`
 
 ## Start with Docker Compose

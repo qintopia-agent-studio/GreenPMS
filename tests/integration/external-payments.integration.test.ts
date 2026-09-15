@@ -64,6 +64,7 @@ describe("external payment synchronization and atomic matching", () => {
   it("passes readiness and limits the worker to synchronized data", async () => {
     expect(await externalPaymentsReady(db)).toBe(true);
     expect(await databaseReady(db, { identity: "maintenance-owner", staffProfileManifestName: "demo" })).toBe(true);
+    expect(await databaseReady(runtime, { staffProfileManifestName: "demo" })).toBe(true);
     await configure();
     await db.connection().execute(async c => {
       await sql`SET ROLE qintopia_payment_worker`.execute(c);
@@ -75,6 +76,9 @@ describe("external payment synchronization and atomic matching", () => {
     });
     await sql`ALTER TABLE external_payment_matches DISABLE TRIGGER external_payment_match_guard`.execute(db);
     expect(await externalPaymentsReady(db)).toBe(false);
+    expect(await databaseReady(runtime, { staffProfileManifestName: "demo" })).toBe(false);
+    await sql`ALTER TABLE external_payment_matches ENABLE TRIGGER external_payment_match_guard`.execute(db);
+    expect(await databaseReady(runtime, { staffProfileManifestName: "demo" })).toBe(true);
   });
   it("imports the baseline without alerts and keeps older money out of candidates", async () => {
     await configure(false);

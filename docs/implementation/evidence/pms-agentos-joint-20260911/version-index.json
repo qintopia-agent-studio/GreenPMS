@@ -1,0 +1,52 @@
+{
+  "recorded_on": "2026-09-11",
+  "scope": "PMS joint acceptance local PR preparation; no publication",
+  "pms_base": "4b598c61fc5af04ee9c5951f4f09d6ab409bf55f",
+  "pms_commits": [
+    "4d71a1ac119b4c3fad0cd5b2570d81ec56809114",
+    "d1d13ae36c58e1e2b3fc58e4950ca3d1a3541cbf",
+    "43ece6dc0e0cdd26202c27b43fa5758daab16e36"
+  ],
+  "reviewed_remote_main": "7c755a7cfdd7fb38299711ef18d96f0189c7012c",
+  "remote_observation": {
+    "matching_branch": false,
+    "matching_pr": false,
+    "three_commit_lookups": "GitHub API 422: commit not found",
+    "open_release_pr": 6
+  },
+  "agent_baselines": [
+    {
+      "name": "v2",
+      "source_head": "2815ab46f2cc0efb3e34cda56f6242bb9af5abf0",
+      "source_kind": "scoped-uncommitted-source-snapshot",
+      "manifest_file": "agentos-v2-baseline.json",
+      "manifest_sha256": "56cc9ee18f93eabd6be177f73be7ca523cd5f91f5105e4f63069e59ca05da291",
+      "file_count": 152,
+      "binary_sha256": "31079d9f0890653cf26c5e33e1593f013e96591357ad53a4bcb29e8a562f136f",
+      "source_archive_status": "Agent OS owner must retain exact snapshot or map to a committed revision; this manifest does not contain source or binary"
+    },
+    {
+      "name": "a-final",
+      "source_head": "2815ab46f2cc0efb3e34cda56f6242bb9af5abf0",
+      "source_kind": "scoped-uncommitted-source-snapshot",
+      "manifest_file": "agentos-a-final-baseline.json",
+      "manifest_sha256": "ea995750d41e039f2af0cd0661d65700fb7ecf2e0058cdbf9d5f274e19cde35d",
+      "file_count": 162,
+      "binary_sha256": "03635dfc8fb8f89bdf231939eacdb3f4eb5b9e3fb02724db43053b3a5bb0c3ea",
+      "source_archive_status": "Agent OS owner must retain exact snapshot or map to a committed revision; this manifest does not contain source or binary"
+    }
+  ],
+  "pms_runtime_files": {
+    "packages/db/src/external-payments-readiness.ts": "6c1ce742b7fb5ed685616d0daf717cee289c2813b0661b1cf4304967d5cac35a",
+    "packages/db/src/integration-worker-main.ts": "fbf7dec03e9da532837a4072a183c61d3b9552837b1f4fa16e8e9909bb46d0ee",
+    "packages/db/src/integration-worker.ts": "5c6ad0c2825a5105073e5cdd9af6375ecd6e54e1f304238ea2a07bc30c766f1b",
+    "packages/db/src/integration-queries.ts": "3bedbe20afc0c9757e7015aa2756272dd6116c92a6a5225b13267e03f9c3244e",
+    "apps/api/src/integration.ts": "b34bceb4eb531cab9588e5c1b309d055ccf89aa6cf95c71d851d41f371871c4d",
+    "tests/joint/run.mjs": "7cf9e6457c5c806db8a477ba16961298ba1c76d0193b8175086e54c4c86e5906",
+    "tests/joint/support.mjs": "9cef3814aa016bad224c2a5aa3be1ad4ebb5abadf8b58e9fe4c070b34c85207a",
+    "tests/joint/pms-fixture.mjs": "41279679ba0d6020af0921150245da1e3ff288f4e74f829d81c6bfbce9d685fb",
+    "tests/joint/agent-fixture.mjs": "09dabbe29ee9fa2ffdce1c9d500aa30b3d3f05e6b0185f359bfdee3a01621c0e",
+    "tests/joint/pms-api.mjs": "0e0f43dac4d770f671f44d05ba9a944e9e2d2a2a14d19c60cef4ccd76fc2c0eb"
+  },
+  "common_contract_sha256": "77a055c7e252884dc4e61fcadd4da49e968c194587fce75cd43e6c6eb4b91512"
+}

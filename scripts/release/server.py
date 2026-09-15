@@ -80,20 +80,26 @@ class Docker:
         if not ids:
             return []
         # Do not inspect Env or healthcheck output (either can contain secrets).
-        template = '{"id":{{json .Id}},"imageId":{{json .Image}},"name":{{json .Name}},"running":{{json .State.Running}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"labels":{{json .Config.Labels}}}'
+        template = '{"id":{{json .Id}},"imageId":{{json .Image}},"name":{{json .Name}},"running":{{json .State.Running}},"health":{{if index .State "Health"}}{{json (index .State "Health").Status}}{{else}}"none"{{end}},"labels":{{json .Config.Labels}}}'
         return [json.loads(line) for line in command(["docker", "inspect", "--format", template, *ids]).splitlines()]
 
-    def current(self):
-        items = [c for c in self.containers() if c["name"] == "/qintopia-pms-app"]
-        require(len(items) == 1, "expected production container missing")
-        current = items[0]
-        labels = current.get("labels") or {}
+    def service(self, service, container_name):
+        items = [c for c in self.containers() if c["name"] == "/" + container_name]
+        require(len(items) == 1, f"expected production {service} container missing")
+        container = items[0]
+        labels = container.get("labels") or {}
         require(labels.get("com.docker.compose.project") == "green-pms"
-                and labels.get("com.docker.compose.service") == "app", "container ownership mismatch")
-        return current
+                and labels.get("com.docker.compose.service") == service, "container ownership mismatch")
+        return container
+
+    def current(self):
+        return self.service("app", "qintopia-pms-app")
+
+    def worker(self):
+        return self.service("wecom-worker", "qintopia-pms-wecom-worker")
 
     def inspect_image(self, identity):
-        template = '{"Id":{{json .Id}},"RepoTags":{{json .RepoTags}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Labels":{{json .Config.Labels}}}'
+        template = '{"Id":{{json .Id}},"RepoTags":{{json .RepoTags}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Labels":{{if index .Config "Labels"}}{{json (index .Config "Labels")}}{{else}}null{{end}},"RootfsDiffIds":{{json .RootFS.Layers}}}'
         return json.loads(command(["docker", "image", "inspect", "--format", template, identity]))
 
     def load(self, archive):
@@ -103,10 +109,14 @@ class Docker:
         manifest = release["manifest"]
         # Legacy adoption restores by exact ID; latest is never a recovery input.
         identity = manifest["imageId"] if release.get("legacy") else manifest["imageTag"]
-        require(self.inspect_image(identity)["Id"] == manifest["imageId"], "image identity changed before switch")
+        image = self.inspect_image(identity)
+        require(image["Id"] == runtime_image_id(release), "image identity changed before switch")
+        if not release.get("legacy"):
+            verify_image(image, manifest)
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GREENPMS_IMAGE": identity}
         command(["docker", "compose", "--project-name", "green-pms", "--file", self.config["composeFile"],
-                 "--env-file", self.config["envFile"], "up", "--detach", "--no-build", "--pull", "never", "--force-recreate", "app"],
+                 "--env-file", self.config["envFile"], "up", "--detach", "--no-build", "--pull", "never", "--force-recreate",
+                 "app", "wecom-worker"],
                 env=environment, timeout=180)
 
     def images(self):
@@ -119,7 +129,9 @@ class Docker:
 
 
 def verify_image(image, manifest):
-    require(image["Id"] == manifest["imageId"], "loaded image ID mismatch")
+    image_id = image.get("Id")
+    require(isinstance(image_id, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id),
+            "invalid local image ID")
     require(image["Os"] == "linux" and image["Architecture"] == "amd64", "loaded platform mismatch")
     require(manifest["imageTag"] in (image.get("RepoTags") or []), "immutable image tag missing")
     labels = image.get("Labels") or {}
@@ -128,17 +140,42 @@ def verify_image(image, manifest):
         require(labels.get("org.opencontainers.image." + field) == expected, "loaded OCI labels mismatch")
 
 
-def compatible(source, target):
+def verify_loaded_image(image, manifest, archive_details):
+    verify_image(image, manifest)
+    require(isinstance(archive_details, dict), "Docker archive inspection result is invalid")
+    expected_layers = archive_details.get("rootfsDiffIds")
+    require(isinstance(expected_layers, list) and expected_layers, "Docker archive rootfs identity is missing")
+    require(image.get("RootfsDiffIds") == expected_layers, "loaded image rootfs differs from archive")
+
+
+def runtime_image_id(release):
+    identity = release.get("runtimeImageId", release.get("manifest", {}).get("imageId"))
+    require(isinstance(identity, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", identity),
+            "invalid runtime image ID")
+    return identity
+
+
+def compatible(source, target, *, rollback):
     a, b = source["manifest"], target["manifest"]
-    require(a["requiredMigrations"] == b["requiredMigrations"],
-            "migration baseline changed: direct image switch refused; use an approved forward fix or database recovery plan")
-    require(a["rollbackCompatibility"]["mode"] == "same-migrations-only"
-            and b["rollbackCompatibility"]["mode"] == "same-migrations-only",
-            "forward-only release: direct switch refused; forward fix or database recovery required")
+    if rollback:
+        require(a["requiredMigrations"] == b["requiredMigrations"],
+                "migration baseline changed: direct image switch refused; use an approved forward fix or database recovery plan")
+        require(a["rollbackCompatibility"]["mode"] == "same-migrations-only"
+                and b["rollbackCompatibility"]["mode"] == "same-migrations-only",
+                "forward-only release: direct rollback refused; forward fix or database recovery required")
+        return
+
+    source_migrations = a["requiredMigrations"]
+    target_migrations = b["requiredMigrations"]
+    if source_migrations != target_migrations:
+        require(b["rollbackCompatibility"]["mode"] == "forward-only"
+                and len(target_migrations) > len(source_migrations)
+                and target_migrations[:len(source_migrations)] == source_migrations,
+                "migration baseline changed: direct image switch refused; use an approved forward fix or database recovery plan")
 
 
 def cleanup_images(docker, state, dry_run=False):
-    protected = {state[k]["manifest"]["imageId"] for k in ("current", "previous") if state.get(k)}
+    protected = {runtime_image_id(state[k]) for k in ("current", "previous") if state.get(k)}
     decisions = []
     for image in docker.images():
         tags = image.get("RepoTags") or []
@@ -169,7 +206,9 @@ class Health:
         deadline = time.monotonic() + self.config.get("healthTimeoutSeconds", 150)
         while time.monotonic() < deadline:
             current = self.docker.current()
-            if current["imageId"] == release["manifest"]["imageId"] and current["running"] and current["health"] == "healthy":
+            worker = self.docker.worker()
+            if (current["imageId"] == runtime_image_id(release) and current["running"] and current["health"] == "healthy"
+                    and worker["imageId"] == runtime_image_id(release) and worker["running"]):
                 try:
                     version = release["manifest"]["version"].removeprefix("v")
                     base = self.config["localBaseUrl"].rstrip("/")
@@ -198,7 +237,7 @@ class Deployer:
     @staticmethod
     def scan(path, manifest):
         from package import inspect_archive
-        inspect_archive(path, manifest)
+        return inspect_archive(path, manifest)
 
     @staticmethod
     def uncompress(source, target):
@@ -228,7 +267,7 @@ class Deployer:
         return state
 
     def observe(self, state):
-        require(self.docker.current()["imageId"] == state["current"]["manifest"]["imageId"], "running container differs from recorded current; recover first")
+        require(self.docker.current()["imageId"] == runtime_image_id(state["current"]), "running container differs from recorded current; recover first")
 
     def receipt(self, state):
         return {"application": "greenpms", "status": "healthy", "deployedAt": state["deployedAt"],
@@ -245,7 +284,7 @@ class Deployer:
         self.docker.switch(target["current"])
         self.health(target["current"])
         self.journal.unlink()
-        self.audit("recovered", imageId=target["current"]["manifest"]["imageId"])
+        self.audit("recovered", imageId=runtime_image_id(target["current"]))
 
     def clear_stale_downloads(self):
         # Only our root-owned dedicated temp subtree, always under the deployment lock.
@@ -286,8 +325,10 @@ class Deployer:
         self.audit("started", version=version, revision=revision, rollback=rollback)
         previous = before.get("previous")
         if rollback and previous and previous.get("manifestSha256") == manifest_sha and previous.get("prefix") == key:
-            compatible(before["current"], previous)
-            verify_image(self.docker.inspect_image(previous["manifest"]["imageTag"]), previous["manifest"])
+            compatible(before["current"], previous, rollback=True)
+            image = self.docker.inspect_image(previous["manifest"]["imageTag"])
+            verify_image(image, previous["manifest"])
+            require(image["Id"] == runtime_image_id(previous), "rollback image identity changed")
             return self.promote(before, previous, rollback=True)
         with tempfile.TemporaryDirectory(prefix="download-", dir=self.directory / "tmp") as temporary:
             path = Path(temporary)
@@ -295,17 +336,21 @@ class Deployer:
                 self.store.download(key + name, path / name)
             m = validate_bundle(path, manifest_sha, version, revision)
             target = {"prefix": key, "manifestSha256": manifest_sha, "manifest": m}
-            compatible(before["current"], target)
+            compatible(before["current"], target, rollback=rollback)
             if before["current"]["manifest"]["imageId"] == m["imageId"]:
                 require(before["current"].get("manifestSha256") == manifest_sha, "same image has conflicting release identity")
-                verify_image(self.docker.inspect_image(m["imageTag"]), m)
+                image = self.docker.inspect_image(m["imageTag"])
+                verify_image(image, m)
+                require(image["Id"] == runtime_image_id(before["current"]), "image identity changed before retry")
                 self.health(before["current"])
                 self.audit("idempotent", version=version)
                 return self.receipt(before)
             self.decompress(path / ARCHIVE, path / "image.tar")
-            self.scanner(path / "image.tar", m)
+            archive_details = self.scanner(path / "image.tar", m)
             self.docker.load(path / "image.tar")
-            verify_image(self.docker.inspect_image(m["imageTag"]), m)
+            loaded = self.docker.inspect_image(m["imageTag"])
+            verify_loaded_image(loaded, m, archive_details)
+            target["runtimeImageId"] = loaded["Id"]
             return self.promote(before, target, rollback=rollback)
 
     def promote(self, before, target, *, rollback=False):
@@ -325,12 +370,13 @@ class Deployer:
                 atomic_json(self.state_file, before)
                 self.journal.unlink()
             except BaseException:
-                self.failure_evidence("recovery-required", imageId=before["current"]["manifest"]["imageId"])
+                self.failure_evidence("recovery-required", imageId=runtime_image_id(before["current"]))
                 raise ReleaseError("deployment failed and recovery is incomplete; journal retained; no retention allowed") from None
-            self.failure_evidence("restored", imageId=before["current"]["manifest"]["imageId"])
+            self.failure_evidence("restored", imageId=runtime_image_id(before["current"]))
             raise ReleaseError("deployment failed; previous container restored; no success marker or retention") from None
         self.journal.unlink()
-        self.audit("healthy", version=target["manifest"]["version"], imageId=target["manifest"]["imageId"])
+        self.audit("healthy", version=target["manifest"]["version"], imageId=target["manifest"]["imageId"],
+                   runtimeImageId=runtime_image_id(target))
         return self.receipt(after)
 
 
@@ -411,7 +457,7 @@ def serve(argv=None):
             state = deployer.state()
             previous = state.get("previous")
             require(previous is not None, "no local rollback image")
-            compatible(state["current"], previous)
+            compatible(state["current"], previous, rollback=True)
             result = deployer.promote(state, previous, rollback=True)
         elif operation == "maintenance":
             require(not deployer.journal.exists(), "recovery required before maintenance")

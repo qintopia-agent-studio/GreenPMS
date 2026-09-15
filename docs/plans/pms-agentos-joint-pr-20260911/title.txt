@@ -1,0 +1,1 @@
+fix(integrations): 修复事件补偿响应与新安装就绪检查

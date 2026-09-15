@@ -196,6 +196,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("steps.metadata", self.release)
         self.assertNotIn("python3 scripts/release/orchestrate.py maintenance", self.release)
 
+        harness_test = self.release.split("      - name: Test release harness", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("working-directory: harness", harness_test)
+        self.assertIn("run: python3 -m unittest discover -s scripts/release/tests -v", harness_test)
+
     def test_release_checks_all_external_configuration_before_packaging(self) -> None:
         package_upload = self.release.split("  package-upload:", 1)[1].split("  deploy:", 1)[0]
         preflight = package_upload.split("      - name: Verify release infrastructure configuration", 1)[1].split(

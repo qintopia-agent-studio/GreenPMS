@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 
 RELEASE_DIR = Path(__file__).resolve().parents[1]
@@ -137,6 +138,7 @@ class FakeDocker:
         revision: str | None = None,
         source: str = SOURCE,
         created: str = "2026-09-09T00:00:00Z",
+        rootfs_diff_ids: list[str] | None = None,
     ) -> None:
         labels = {
             "org.opencontainers.image.version": version,
@@ -150,6 +152,7 @@ class FakeDocker:
             "Os": "linux",
             "Architecture": "amd64",
             "Labels": labels,
+            "RootfsDiffIds": rootfs_diff_ids or ["sha256:" + "d" * 64],
         }
         self.image_records[image_id] = record
         for tag in tags:
@@ -194,6 +197,80 @@ class FakeDocker:
         self.image_records[image_id]["RepoTags"] = [value for value in tags if value != tag]
 
 
+class DockerAdapterTests(unittest.TestCase):
+    def test_container_inspection_handles_containers_without_healthchecks(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_command(args: list[str], **_kwargs: object) -> str:
+            calls.append(args)
+            if args[:3] == ["docker", "ps", "-aq"]:
+                return "healthy-id\nplain-id\n"
+            return "\n".join((
+                '{"id":"healthy-id","imageId":"sha256:a","name":"/qintopia-pms-app","running":true,"health":"healthy","labels":{}}',
+                '{"id":"plain-id","imageId":"sha256:b","name":"/other","running":true,"health":"none","labels":{}}',
+            ))
+
+        original = server.command
+        server.command = fake_command
+        try:
+            containers = server.Docker({}).containers()
+        finally:
+            server.command = original
+
+        self.assertEqual([item["health"] for item in containers], ["healthy", "none"])
+        template = calls[1][calls[1].index("--format") + 1]
+        self.assertIn('index .State "Health"', template)
+        self.assertNotIn(".State.Health", template)
+
+    def test_image_inspection_handles_images_without_labels(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_command(args: list[str], **_kwargs: object) -> str:
+            calls.append(args)
+            return '{"Id":"sha256:db","RepoTags":["postgres:18"],"Os":"linux","Architecture":"amd64","Labels":null,"RootfsDiffIds":[]}'
+
+        original = server.command
+        server.command = fake_command
+        try:
+            image = server.Docker({}).inspect_image("sha256:db")
+        finally:
+            server.command = original
+
+        self.assertIsNone(image["Labels"])
+        template = calls[0][calls[0].index("--format") + 1]
+        self.assertIn('index .Config "Labels"', template)
+        self.assertNotIn(".Config.Labels", template)
+        self.assertIn(".RootFS.Layers", template)
+
+    def test_health_rejects_worker_on_a_different_image(self) -> None:
+        docker = Mock()
+        docker.current.return_value = {
+            "imageId": "sha256:" + "a" * 64,
+            "running": True,
+            "health": "healthy",
+        }
+        docker.worker.return_value = {
+            "imageId": "sha256:" + "b" * 64,
+            "running": True,
+            "health": "none",
+        }
+        health = server.Health(docker, {
+            "healthTimeoutSeconds": 1,
+            "localBaseUrl": "http://127.0.0.1:4100",
+            "publicReadyUrl": "https://example.test/health/ready",
+            "publicVersionUrl": "https://example.test/api/v1/version",
+        })
+        release = {
+            "runtimeImageId": "sha256:" + "a" * 64,
+            "manifest": {"version": "v1.2.4", "imageId": "sha256:" + "c" * 64},
+        }
+        with patch("server.time.monotonic", side_effect=[0, 0, 2]), \
+                patch("server.time.sleep") as sleep, \
+                self.assertRaisesRegex(ReleaseError, "readiness or version gate failed"):
+            health(release)
+        sleep.assert_called_once_with(2)
+
+
 class FakeHealth:
     def __init__(self, *, failures: set[str] | None = None, interruptions: set[str] | None = None) -> None:
         self.failures = failures or set()
@@ -201,7 +278,7 @@ class FakeHealth:
         self.calls: list[str] = []
 
     def __call__(self, release: dict[str, object]) -> None:
-        image_id = str(release["manifest"]["imageId"])
+        image_id = str(release.get("runtimeImageId", release["manifest"]["imageId"]))
         self.calls.append(image_id)
         if image_id in self.interruptions:
             raise KeyboardInterrupt
@@ -216,6 +293,7 @@ class DeployerFixture:
     new_version = "v1.2.4"
     new_revision = "a" * 40
     new_image_id = "sha256:" + "a" * 64
+    new_runtime_image_id = "sha256:" + "c" * 64
 
     def __init__(self, *, health: FakeHealth | None = None) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="greenpms-server-test-")
@@ -266,8 +344,10 @@ class DeployerFixture:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def scan(self, archive: Path, manifest: dict[str, object]) -> None:
+    def scan(self, archive: Path, manifest: dict[str, object]) -> dict[str, object]:
         self.scanner_calls.append((archive, manifest))
+        image = self.docker.inspect_image(str(manifest["imageTag"]))
+        return {"rootfsDiffIds": image["RootfsDiffIds"]}
 
     def decompress(self, source: Path, target: Path) -> None:
         self.decompress_calls.append((source, target))
@@ -286,6 +366,7 @@ class DeployerFixture:
             "prefix": release_key(version, revision),
             "manifestSha256": digest(json_bytes(manifest)),
             "manifest": manifest,
+            "runtimeImageId": image_id,
         }
         state = {
             "schemaVersion": 1,
@@ -305,6 +386,7 @@ class DeployerFixture:
         migrations: list[dict[str, str]] | None = None,
         compatibility_mode: str = "same-migrations-only",
         labels: dict[str, str | None] | None = None,
+        runtime_image_id: str | None = None,
     ) -> tuple[dict[str, object], str]:
         manifest, objects = make_manifest(
             self.new_version,
@@ -324,7 +406,7 @@ class DeployerFixture:
         if labels:
             image_labels.update(labels)
         self.docker.add_image(
-            self.new_image_id,
+            runtime_image_id or self.new_image_id,
             [str(manifest["imageTag"])],
             version=image_labels["version"],
             revision=image_labels["revision"],
@@ -352,6 +434,17 @@ class ServerImportTests(unittest.TestCase):
     def test_server_import_contract(self) -> None:
         self.assertIsNone(SERVER_IMPORT_ERROR, f"server.py import failed: {SERVER_IMPORT_ERROR!r}")
 
+    def test_default_scanner_returns_verified_archive_identity(self) -> None:
+        import package as release_package
+
+        expected = {"rootfsDiffIds": ["sha256:" + "d" * 64]}
+        original = release_package.inspect_archive
+        release_package.inspect_archive = lambda _path, _manifest: expected
+        try:
+            self.assertIs(server.Deployer.scan(Path("image.tar"), {}), expected)
+        finally:
+            release_package.inspect_archive = original
+
 
 @unittest.skipIf(server is None, "server.py import contract must be fixed first")
 @unittest.skipUnless(shutil.which("zstd"), "zstd is required for archive decompression")
@@ -374,6 +467,29 @@ class CompressionTests(unittest.TestCase):
 
 @unittest.skipIf(server is None, "server.py import contract must be fixed first")
 class DeploymentTests(unittest.TestCase):
+    def test_load_accepts_a_different_daemon_runtime_id_and_records_it(self) -> None:
+        with DeployerFixture() as fixture:
+            manifest, key = fixture.add_new_release(runtime_image_id=fixture.new_runtime_image_id)
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+
+            result = fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+
+            self.assertEqual(result["current"]["manifest"]["imageId"], manifest["imageId"])
+            self.assertEqual(result["current"]["runtimeImageId"], fixture.new_runtime_image_id)
+            self.assertEqual(fixture.docker.current_image_id, fixture.new_runtime_image_id)
+
+    def test_load_rejects_runtime_rootfs_that_differs_from_archive(self) -> None:
+        with DeployerFixture() as fixture:
+            _, key = fixture.add_new_release()
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+            fixture.deployer.scanner = lambda *_: {"rootfsDiffIds": ["sha256:" + "e" * 64]}
+
+            with self.assertRaisesRegex(ReleaseError, "rootfs differs"):
+                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+
+            self.assertEqual(fixture.docker.switches, [])
+            self.assertEqual(fixture.docker.current_image_id, fixture.old_image_id)
+
     def test_bundle_validation_rejects_before_docker_load(self) -> None:
         with DeployerFixture() as fixture:
             _, key = fixture.add_new_release()
@@ -461,16 +577,41 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(fixture.docker.switches, [])
             self.assertEqual(fixture.store.markers, {})
 
-    def test_forward_only_release_refuses_direct_switch(self) -> None:
+    def test_forward_migration_extension_allows_switch(self) -> None:
+        with DeployerFixture() as fixture:
+            current_migrations = list(fixture.old_manifest["requiredMigrations"])
+            target_migrations = current_migrations + [migration("061_room_catalog_management.sql")]
+            _, key = fixture.add_new_release(
+                migrations=target_migrations,
+                compatibility_mode="forward-only",
+            )
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+
+            result = fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+
+            self.assertEqual(result["status"], "healthy")
+            self.assertEqual(fixture.docker.current_image_id, fixture.new_image_id)
+
+    def test_forward_only_release_allows_forward_switch_but_refuses_rollback(self) -> None:
         with DeployerFixture() as fixture:
             _, key = fixture.add_new_release(compatibility_mode="forward-only")
             manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
 
-            with self.assertRaisesRegex(ReleaseError, "forward-only release"):
-                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            result = fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            self.assertEqual(result["status"], "healthy")
+            self.assertEqual(fixture.docker.current_image_id, fixture.new_image_id)
 
-            self.assertEqual(fixture.docker.load_calls, [])
-            self.assertEqual(fixture.docker.switches, [])
+            with self.assertRaisesRegex(ReleaseError, "forward-only release"):
+                fixture.deployer.deploy(
+                    fixture.old_version,
+                    fixture.old_revision,
+                    release_key(fixture.old_version, fixture.old_revision),
+                    digest(json_bytes(fixture.old_manifest)),
+                    rollback=True,
+                )
+
+            self.assertEqual(len(fixture.docker.load_calls), 1)
+            self.assertEqual(fixture.docker.switches, [fixture.new_image_id])
             self.assertEqual(fixture.store.markers, {})
 
     def test_success_cleans_download_directory_and_does_not_write_marker(self) -> None:
@@ -529,6 +670,7 @@ class DeploymentTests(unittest.TestCase):
                 "prefix": key,
                 "manifestSha256": target_manifest_sha,
                 "manifest": target_manifest,
+                "runtimeImageId": fixture.new_image_id,
             }
             before["previous"] = previous
             server.atomic_json(fixture.deployer.state_file, before)  # type: ignore[union-attr]

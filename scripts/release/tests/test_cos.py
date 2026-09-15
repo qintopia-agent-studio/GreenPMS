@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from scripts.release.common import FILES, ReleaseError, json_bytes, sha256_file
 from scripts.release.cos import CosStore, upload_bundle
-from scripts.release.orchestrate import (MAX_RECEIPT_BYTES, deploy, maintenance,
+from scripts.release.orchestrate import (MAX_RECEIPT_BYTES, LockedSSH, deploy, maintenance,
                                           retention_plan, validate_receipt)
 
 
@@ -92,8 +92,9 @@ class FakeCos:
 
 
 class FakeSSH:
-    def __init__(self, receipt, returncode=0):
-        self.stdout = io.StringIO(json.dumps(receipt, separators=(",", ":")) + "\n")
+    def __init__(self, receipt, returncode=0, stderr=""):
+        self.stdout = io.StringIO("" if receipt is None else json.dumps(receipt, separators=(",", ":")) + "\n")
+        self.stderr = io.StringIO(stderr)
         self.stdin = RecordingStdin()
         self.returncode = returncode
         self.wait_calls = []
@@ -263,6 +264,19 @@ class CosStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ReleaseError, "unknown"):
                 complete_store(UnknownVersioning(), role="UPLOAD").put_immutable(key, source.name)
 
+    def test_sdk_empty_versioning_configuration_allows_upload(self):
+        class NeverVersioned(FakeCos):
+            def get_bucket_versioning(self, Bucket):
+                self.versioning_calls += 1
+                return {"VersioningConfiguration": None}
+
+        client = NeverVersioned()
+        key = ROOT + "v1.2.3/" + "a" * 40 + "/greenpms-linux-amd64.docker.tar.zst"
+        complete_store(client, role="UPLOAD").put_immutable(key, b"archive")
+
+        self.assertEqual(client.versioning_calls, 1)
+        self.assertEqual(client.objects[key], b"archive")
+
     def test_upload_failure_does_not_create_marker(self):
         client = FakeCos()
         client.fail_put = 500
@@ -390,7 +404,8 @@ class OrchestrationTests(unittest.TestCase):
         marker_store = CosStore("bucket", "region", role="MARKER", client=client)
         prefix, manifest, manifest_sha = add_release(client, "v2.0.0", "a" * 40, "2026-09-09T10:00:00Z", marker=False, migration_count=57)
         receipt = {"application": "greenpms", "status": "healthy", "deployedAt": "2026-09-09T10:00:00Z",
-                   "current": {"prefix": prefix, "manifestSha256": manifest_sha, "manifest": manifest},
+                   "current": {"prefix": prefix, "manifestSha256": manifest_sha, "manifest": manifest,
+                               "runtimeImageId": "sha256:" + "f" * 64},
                    "previous": None, "rollbackFrom": None}
         processes = []
         with tempfile.TemporaryDirectory() as temporary, self.ssh_environment(temporary):
@@ -447,7 +462,8 @@ class OrchestrationTests(unittest.TestCase):
     def test_receipt_schema_rejects_unexpected_fields(self):
         prefix = f"{ROOT}v2.1.0/{'b' * 40}/"
         manifest = make_manifest("v2.1.0", "b" * 40)
-        current = {"prefix": prefix, "manifestSha256": "c" * 64, "manifest": manifest}
+        current = {"prefix": prefix, "manifestSha256": "c" * 64, "manifest": manifest,
+                   "runtimeImageId": "sha256:" + "f" * 64}
         receipt = {"application": "greenpms", "status": "healthy", "deployedAt": "2026-09-09T10:00:00Z",
                    "current": current, "previous": None, "rollbackFrom": None}
         validate_receipt(receipt)
@@ -455,6 +471,23 @@ class OrchestrationTests(unittest.TestCase):
             validate_receipt({**receipt, "untrusted": "value"})
         with self.assertRaisesRegex(ReleaseError, "unexpected schema"):
             validate_receipt({**receipt, "current": {**current, "untrusted": "value"}})
+        with self.assertRaisesRegex(ReleaseError, "runtime image identity"):
+            validate_receipt({**receipt, "current": {**current, "runtimeImageId": "sha256:bad"}})
+
+    def test_restricted_server_error_is_reported_without_arbitrary_stderr(self):
+        with tempfile.TemporaryDirectory() as temporary, self.ssh_environment(temporary):
+            session = LockedSSH("maintenance", ssh_factory=lambda argv: FakeSSH(
+                None, returncode=1, stderr="GreenPMS: running container differs from recorded current; recover first\n"
+            ))
+            with self.assertRaisesRegex(ReleaseError, "running container differs"):
+                session.receipt()
+
+            session = LockedSSH("maintenance", ssh_factory=lambda argv: FakeSSH(
+                None, returncode=1, stderr="SENTINEL_DATABASE_PASSWORD\n"
+            ))
+            with self.assertRaisesRegex(ReleaseError, "did not return one JSON receipt") as error:
+                session.receipt()
+            self.assertNotIn("SENTINEL", str(error.exception))
 
 
 if __name__ == "__main__":

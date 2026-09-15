@@ -83,15 +83,29 @@ class EntryTests(unittest.TestCase):
     def test_docker_adapter_uses_fixed_project_no_build_no_pull_and_clean_env(self):
         config = {"composeFile": "/etc/greenpms/compose.server.yaml", "envFile": "/etc/greenpms/app.env"}
         docker = Docker(config)
-        manifest = {"imageId": "sha256:" + "a" * 64, "imageTag": "greenpms:v1.2.4-" + "b" * 40}
-        with patch.object(docker, "inspect_image", return_value={"Id": manifest["imageId"]}), patch("server.command") as run:
-            docker.switch({"manifest": manifest})
+        runtime_image_id = "sha256:" + "c" * 64
+        manifest = {"imageId": "sha256:" + "a" * 64, "imageTag": "greenpms:v1.2.4-" + "b" * 40,
+                    "version": "v1.2.4", "gitRevision": "b" * 40, "source": SOURCE,
+                    "createdAt": "2026-09-09T00:00:00Z"}
+        image = {"Id": runtime_image_id, "RepoTags": [manifest["imageTag"]], "Os": "linux", "Architecture": "amd64",
+                 "Labels": {f"org.opencontainers.image.{field}": manifest[value] for field, value in
+                            (("version", "version"), ("revision", "gitRevision"), ("source", "source"), ("created", "createdAt"))}}
+        with patch.object(docker, "inspect_image", return_value=image), patch("server.command") as run:
+            docker.switch({"manifest": manifest, "runtimeImageId": runtime_image_id})
             args = run.call_args.args[0]
             self.assertEqual(args[:4], ["docker", "compose", "--project-name", "green-pms"])
             self.assertIn("--no-build", args)
             self.assertEqual(args[args.index("--pull") + 1], "never")
-            self.assertEqual(args[-1], "app")
+            self.assertEqual(args[-2:], ["app", "wecom-worker"])
             self.assertEqual(set(run.call_args.kwargs["env"]), {"PATH", "GREENPMS_IMAGE"})
+
+    def test_production_compose_uses_one_immutable_image_for_app_and_worker(self):
+        compose = (ROOT / "compose.server.yaml").read_text(encoding="utf-8")
+        self.assertEqual(compose.count("image: ${GREENPMS_IMAGE:"), 2)
+        self.assertIn("container_name: qintopia-pms-app", compose)
+        self.assertIn("container_name: qintopia-pms-wecom-worker", compose)
+        self.assertIn('command: ["node", "packages/db/src/wecom-worker-main.js"]', compose)
+        self.assertNotIn("build:", compose)
 
     def test_subprocess_failure_does_not_include_secret_output(self):
         with patch("server.subprocess.run") as run:

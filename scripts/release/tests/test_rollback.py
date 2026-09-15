@@ -21,7 +21,7 @@ class RollbackFormTests(unittest.TestCase):
         receipt = {"application": "greenpms", "status": "healthy",
                    "deployedAt": "2026-09-10T10:00:00Z",
                    "current": {"prefix": self.prefix, "manifestSha256": self.digest,
-                               "manifest": self.manifest},
+                               "manifest": self.manifest, "runtimeImageId": "sha256:" + "f" * 64},
                    "previous": None, "rollbackFrom": None}
         calls = []
         with tempfile.TemporaryDirectory() as temporary, fixtures.OrchestrationTests().ssh_environment(temporary):
