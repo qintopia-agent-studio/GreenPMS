@@ -48,6 +48,48 @@ test("assistant overlay preserves calendar geometry and scroll; settings fit the
   await page.goto("/settings/ai"); await expect(page.getByLabel("Base URL", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+test("assistant composer separates sending, line breaks and IME confirmation", async ({ page }) => {
+  await enabledUi(page);
+  const received: string[] = [];
+  let release!: () => void;
+  const responseReady = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/v1/assistant/chat", async route => {
+    received.push(route.request().postDataJSON().message);
+    await responseReady;
+    await route.fulfill({ json: { conversationId: "synthetic-keyboard", text: "已收到完整问题。", entries: [] } });
+  });
+  await login(page);
+  await page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true }).click();
+  await expect(page.locator(".assistant-suggestions button")).toHaveCount(5);
+  const input = page.getByLabel("向 AI 助手提问");
+  await input.fill("核对房态");
+  await input.press("Shift+Enter");
+  await expect(input).toHaveValue("核对房态\n");
+  await input.fill("核对房态\n再办理续住");
+  await input.dispatchEvent("compositionstart");
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter" });
+  await input.dispatchEvent("compositionend");
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", keyCode: 229 });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", repeat: true });
+  expect(received).toEqual([]);
+  await expect(input).toHaveValue("核对房态\n再办理续住");
+  const mobile = await page.evaluate(() => matchMedia("(max-width: 720px)").matches);
+  await input.press("Enter");
+  if (mobile) {
+    await expect(input).toHaveValue("核对房态\n再办理续住\n");
+    expect(received).toEqual([]);
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+  }
+  await expect.poll(() => received.length).toBe(1);
+  expect(received[0]).toBe("核对房态\n再办理续住");
+  await input.fill("上一条仍在处理中");
+  await input.press("Enter");
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  expect(received).toHaveLength(1);
+  release();
+  await expect(page.locator(".assistant-markdown")).toHaveText("已收到完整问题。");
+});
 test("assistant opens the real stay-date form with durable guidance and no business submission", async ({ page }) => {
   await login(page); const orderId = await order(page.request);
   await enabledUi(page);
