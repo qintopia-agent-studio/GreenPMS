@@ -2887,6 +2887,21 @@ describe("stay collection upgrade membership evidence", () => {
     committedAt: "2026-08-02T10:00:00.000Z"
   };
 
+  it("requires explicit input and coherent cross-room evidence before enabling confirmation", () => {
+    const crossRoomUpgrade = { kind: "TEMPORARY_OTHER_ROOM_UPGRADE", reason: "客户继续住原整房",
+      originalRoomTypeCode: previewEffect.product.allowedRoomTypeCode, actualInventoryUnitId: "unit_a02",
+      actualRoomTypeCode: "PRIVATE_BATH_STANDARD", arrivalDate: "2026-07-26", departureDate: "2026-08-02" };
+    const reviewedInput = { ...input, temporaryOtherRoomReason: crossRoomUpgrade.reason };
+    const reviewedEffect = { ...previewEffect, crossRoomUpgrade };
+    expect(conversionPreviewHasEvidence(reviewedEffect, reviewedInput)).toBe(true);
+    expect(conversionPreviewHasEvidence(reviewedEffect, input)).toBe(false);
+    expect(conversionPreviewHasEvidence(previewEffect, reviewedInput)).toBe(false);
+    for (const change of [{ reason: "" }, { reason: "另一个原因" }, { departureDate: "2026-08-03" },
+      { actualRoomTypeCode: crossRoomUpgrade.originalRoomTypeCode }, { actualInventoryUnitId: "" }, { extra: true }]) {
+      expect(conversionPreviewHasEvidence({ ...reviewedEffect, crossRoomUpgrade: { ...crossRoomUpgrade, ...change } }, reviewedInput)).toBe(false);
+    }
+  });
+
   it("accepts only coherent Preview and committed Receipt evidence through both command-shell entry points", () => {
     expect(conversionPreviewHasEvidence(previewEffect, input)).toBe(true);
     expect(u1PreviewHasBusinessEvidence("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", previewEffect, input)).toBe(true);

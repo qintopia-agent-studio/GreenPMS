@@ -103,7 +103,7 @@ const commandInputContract: Record<Exclude<PublicCommandEnvelopeType, "MANAGE_RO
     required: ["propertyId", "orderId", "memberId", "membershipProductId", "collectionFactIds", "agreedPriceMinor"],
     properties: [
       "propertyId", "orderId", "memberId", "membershipProductId", "collectionFactIds", "agreedPriceMinor",
-      "priceAdjustmentReason", "remainingPaymentTransactionReference", "remainingPaymentNote"
+      "priceAdjustmentReason", "remainingPaymentTransactionReference", "remainingPaymentNote", "temporaryOtherRoomReason"
     ]
   },
   REVERSE_FACT: { required: ["propertyId", "orderId", "reversesFactId", "note"], properties: ["propertyId", "orderId", "reversesFactId", "note"] },
@@ -292,6 +292,7 @@ describe("OpenAPI 3.1 command contract", () => {
       expect(variant.required, commandType).toEqual(["commandType", "input"]);
       if (commandType === "MANAGE_ROOM_CATALOG") {
         const shapes: Record<string, { required: string[]; optional?: string[] }> = {
+          SET_BUILDING_ORDER: { required: ["buildingOrder"] },
           SAVE_TYPE: { required: ["name", "bathroom", "saleMode", "bedCount", "capacity"], optional: ["typeCode"] },
           DELETE_TYPE: { required: ["typeCode"] }, SET_TYPE_ACTIVE: { required: ["typeCode", "active"] },
           SAVE_ROOM: { required: ["typeCode", "code", "buildingCode", "bedCount", "capacity"], optional: ["roomId"] },
@@ -299,7 +300,7 @@ describe("OpenAPI 3.1 command contract", () => {
         };
         expect(input.discriminator).toEqual({ propertyName: "action" });
         const actions = input.oneOf as JsonSchema[];
-        expect(actions).toHaveLength(6);
+        expect(actions).toHaveLength(Object.keys(shapes).length);
         for (const shape of actions) {
           const properties = shape.properties as Record<string, JsonSchema>;
           const actionName = (properties.action!.const ?? (properties.action!.enum as string[])[0]) as string;

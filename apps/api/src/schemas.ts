@@ -556,7 +556,8 @@ export const CommandEnvelopeSchema = Type.Union([
     agreedPriceMinor: MembershipAgreedPriceAmount,
     priceAdjustmentReason: Type.Optional(Note),
     remainingPaymentTransactionReference: Type.Optional(ShortText),
-    remainingPaymentNote: Type.Optional(OptionalNote)
+    remainingPaymentNote: Type.Optional(OptionalNote),
+    temporaryOtherRoomReason: Type.Optional(Type.String({ minLength: 1, maxLength: 200 }))
   })),
   commandEnvelope("CHECK_IN", strictObject(OrderInput)),
   commandEnvelope("CHECK_OUT", strictObject(OrderInput)),
@@ -1385,6 +1386,15 @@ export const CommandEffectSchema = Type.Union([
   strictObject({ orderId: Id, reversesFactId: Id, amountMinor: PositiveAmount, netEffectMinor: SafeInteger, currency: Type.String({ minLength: 3, maxLength: 3 }), note: Note }),
   strictObject({
     operation: Type.Literal("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"),
+    crossRoomUpgrade: Type.Optional(strictObject({
+      kind: Type.Literal("TEMPORARY_OTHER_ROOM_UPGRADE"),
+      reason: Type.String({ minLength: 1, maxLength: 200 }),
+      originalRoomTypeCode: ShortText,
+      actualInventoryUnitId: Id,
+      actualRoomTypeCode: ShortText,
+      arrivalDate: LocalDate,
+      departureDate: LocalDate
+    })),
     orderId: Id,
     stayId: Id,
     primaryOccupant: strictObject({

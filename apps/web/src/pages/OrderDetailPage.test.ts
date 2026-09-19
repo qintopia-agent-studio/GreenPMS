@@ -1315,6 +1315,16 @@ describe("in-house stay membership upgrade entry", () => {
     room_type_code: "SHARED_BATH_QUAD"
   }]]);
 
+  it("offers cross-room whole-room upgrades while rejecting bed entitlements and completed mismatches", () => {
+    const rooms = new Map([["unit_upgrade_eligible", { id: "unit_upgrade_eligible", kind: "ROOM", room_type_code: "private_bath_standard" }]]);
+    const product = { ...matchingProduct, allowed_inventory_kind: "ROOM", entitlement_unit_kind: "ROOM_NIGHT", allowed_room_type_code: "private_bath_single" };
+    expect(stayMembershipUpgradeEntry(inHouseView(), [matchingMember] as never, [product] as never, rooms as never).state).toBe("READY");
+    expect(stayMembershipUpgradeEntry(inHouseView({ occupants: [{ ...primaryOccupant, phone: null }] }), [], [product] as never, rooms as never).state).toBe("CORRECT_PRIMARY_OCCUPANT");
+    expect(stayMembershipUpgradeEntry(inHouseView(), [matchingMember] as never, [matchingProduct] as never, rooms as never).state).toBe("UNAVAILABLE");
+    expect(stayMembershipUpgradeEntry(inHouseView({ order: { ...inHouseView().order, status: "CHECKED_OUT" } }), [matchingMember] as never, [product] as never, rooms as never).state).toBe("UNAVAILABLE");
+    expect(stayMembershipUpgradeEntry(inHouseView({ effectiveArrangement: { intervals: [{ inventoryUnitId: "unit_upgrade_eligible" }, { inventoryUnitId: "other" }] } }), [matchingMember] as never, [product] as never, rooms as never).state).toBe("UNAVAILABLE");
+  });
+
   it("keeps the upgrade entry ready for an in-house zero-collection stay without inventing a lodging receipt", () => {
     expect(stayMembershipUpgradeEntry(inHouseView(), [matchingMember] as never, [matchingProduct] as never, unitMap as never)).toEqual({
       state: "READY",

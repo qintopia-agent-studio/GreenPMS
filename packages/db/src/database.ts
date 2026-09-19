@@ -1,3 +1,4 @@
+import { crossRoomUpgradeReady } from "./cross-room-upgrade-readiness.ts";
 import { roomCatalogReady } from "./room-catalog-readiness.ts";
 import { Kysely, PostgresDialect, sql, type Transaction } from "kysely";
 import pg from "pg";
@@ -81,7 +82,8 @@ export const currentMigrationNames = [
   "061_room_catalog_management.sql",
   "062_ai_assistant.sql",
   "063_ai_question_records.sql",
-  "064_building_order.sql"
+  "064_building_order.sql",
+  "065_cross_room_membership_upgrade.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -1909,12 +1911,12 @@ export async function databaseReady(
             FROM (
               VALUES
                 ('qintopia_assert_stage13_stay_conversion_command(text)', '9f9d7311054a9c99b68999dcd799cd662996d0496573cdd783fc747ca1466459'),
-                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '09f38934bca14e5b4e1f2f902b63b5db8d5aa82e409fc86f41365b81bb53ddfe'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', 'b4270521bdc3cb0eda81d6cb6e65ba353239a6a01e712534cf99d954b293bb63'),
                 ('qintopia_reject_lodging_funds_after_membership_transfer()', 'db65662dcfcffcde84fb0abc91d54a7a1b2b720b4cd42a8b34375f9499943d5e'),
                 ('qintopia_reject_membership_funds_after_stay_transfer()', '94efb540ae902ad6edf664b72ec170e1ea54fc3459a5e70af01783b0e484ebb6'),
                 ('qintopia_require_stage13_conversion_reversal_bridge()', '5f73c20a3019cdc3810ae4484eec1a898e700e954c20d6c6a65fe8493b8f5c2e'),
                 ('qintopia_require_transfer_membership_payment_bridge()', '1993430b9a865fa9ab62a4c88dab76e30dc0defc753016726bb1e21ed4920af2'),
-                ('qintopia_validate_conversion_consume_entitlement_fact()', '10918d3fca13eb15e2b05cf3c661ad8289808589f1698ef04589099194e19b52'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', 'af89b532e6a6ab2c9a276610b5f4b72dffbdb858862bdf646ffaced92eaddb93'),
                 ('qintopia_validate_membership_payment_fact()', 'cce1edb6109475403047b936d164c8cb18b6577b9078c6c398c25ce0f22a41c1'),
                 ('qintopia_validate_stage13_stay_conversion_child()', '4d0ef7b2821a7286c2e6bb87fa936b1e6c6fc194e759acf09afe0645d36095b0'),
                 ('qintopia_validate_stage13_stay_conversion_execution()', '2b83d1f0c739a4bdc65e3114d0f6ddbcca1ac80a02ede73d687705da946d3f56'),
@@ -2842,17 +2844,17 @@ export async function databaseReady(
             FROM (
               VALUES
                 ('qintopia_assert_stage10_shorten_combination(text)', 'a9ea4fc40b6f4e204db8b9c9ec05869b493f5220c389bbd6443ee355cc30db4b'),
-                ('qintopia_validate_coverage_ownership()', 'eceea85cdea1d5a9e591684a9f94dc66f492477cc8e303da8e28d0194a1e0669'),
+                ('qintopia_validate_coverage_ownership()', '7b304edb2fd2783436bc77b568370d2f2aab78820771c71fbea53f35d0d75a55'),
                 ('qintopia_protect_coverage_identity()', 'b8eb365fa29712bfe2c26b9c8dfe17a87bdcd0091b012af88a5bb328b5af0750'),
                 ('qintopia_reject_stage10_entitlement_write()', 'd3450f298724fa9df85d09cc89175acf4d4cccb837963839b61dddbaac22756f'),
                 ('qintopia_validate_entitlement_lifecycle_fact()', 'c03dac8f3f8571b9908fb95929f91fa7ea6386b78af1e19aa7127c54ca65ab35'),
                 ('qintopia_validate_coverage_lifecycle_state()', '5442a3840f8204eefb8a465ed5297634add72877de279ff371a8800bbd421596'),
                 ('qintopia_assert_stage11_move_combination(text)', 'a20dda3b5c1103f9daa577dd09edcf4a8544a7f66c9f292d9d72d4eb172b12cf'),
                 ('qintopia_preserve_stage11_consumed_coverage()', '7152466eed2e839a9be9e38464e0fef91d5e615246f21dd372c7d487295dde58'),
-                ('qintopia_validate_conversion_consume_entitlement_fact()', '10918d3fca13eb15e2b05cf3c661ad8289808589f1698ef04589099194e19b52'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', 'af89b532e6a6ab2c9a276610b5f4b72dffbdb858862bdf646ffaced92eaddb93'),
                 ('qintopia_reject_lodging_funds_after_membership_transfer()', 'db65662dcfcffcde84fb0abc91d54a7a1b2b720b4cd42a8b34375f9499943d5e'),
                 ('qintopia_reject_membership_funds_after_stay_transfer()', '94efb540ae902ad6edf664b72ec170e1ea54fc3459a5e70af01783b0e484ebb6'),
-                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '09f38934bca14e5b4e1f2f902b63b5db8d5aa82e409fc86f41365b81bb53ddfe'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', 'b4270521bdc3cb0eda81d6cb6e65ba353239a6a01e712534cf99d954b293bb63'),
                 ('qintopia_assert_converted_stay_fulfillment_command(text)', '7b22fe62a3610462c82a4a54f95d62e478996454dfc312ff8e90c189dfa222a0'),
                 ('qintopia_validate_converted_stay_fulfillment_execution()', 'ed58ceb0d44795151d23b34912bf90809ca7f2e370b41d9f07b564a71c8404ce'),
                 ('qintopia_validate_converted_stay_fulfillment_child()', 'a4a789b5bbb5ad99fd7b6fd8aa38528f6bcc6f4851ea0e7f550f7d28d965733c')
@@ -3059,7 +3061,7 @@ export async function databaseReady(
             SELECT 1
             FROM (
               VALUES
-                ('qintopia_validate_coverage_ownership()', 'eceea85cdea1d5a9e591684a9f94dc66f492477cc8e303da8e28d0194a1e0669'),
+                ('qintopia_validate_coverage_ownership()', '7b304edb2fd2783436bc77b568370d2f2aab78820771c71fbea53f35d0d75a55'),
                 ('qintopia_validate_temporary_other_room_create_order()', '7591e6b8e9d6cac8f3625807ab56ec2f743b3d4f96accd8c7d759a9c435c72b8'),
                 ('qintopia_reject_temporary_other_room_lifecycle_amendment()', 'f48371f00b8377485122ef26f988ace3a1cf6a54711e94937f9c74d45c1f6a54'),
                 ('qintopia_protect_temporary_other_room_member_chain()', 'b26f75a93c4f5e0580847d61c267c72db734f1a4dc2ed7fe3590c43ff0798004'),
@@ -3181,7 +3183,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db);
+    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db);
   } catch {
     return false;
   }

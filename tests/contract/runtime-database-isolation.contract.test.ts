@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 describe("runtime database credential isolation", () => {
   it("keeps migration execution out of the application image command", async () => {
     const dockerfile = await readFile("Dockerfile", "utf8");
-    const command = dockerfile.split("\n").find((line) => line.startsWith("CMD ")) ?? "";
-    expect(command).toContain("npm start");
+    const command = dockerfile.split("\n").filter((line) => line.startsWith("CMD ")).at(-1) ?? "";
+    expect(JSON.parse(command.slice(4))).toEqual(["node", "apps/api/src/main.js"]);
     expect(command).not.toContain("db:migrate");
     expect(command).not.toContain("MIGRATION_DATABASE_URL");
     expect(command).not.toContain("RUNTIME_DATABASE_PASSWORD");

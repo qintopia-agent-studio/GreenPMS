@@ -1,9 +1,11 @@
+import { hasTemporaryOtherRoomMemberChainEvidence } from "../../packages/db/src/orders.ts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthPrincipal, CommandEnvelope, ReceiptDto } from "@qintopia/contracts";
 import {
   confirmCommandPreview,
   createCommandPreview,
   getOrderView,
+  databaseReady,
   propertyLocalToday,
   withPropertyClockForTesting,
   type Database
@@ -432,6 +434,8 @@ async function conversionArtifactCounts(orderId?: string) {
 async function createInHouseConversion(options: {
   prefix: string;
   businessDate?: string;
+  membershipProductId?: string;
+  temporaryOtherRoomReason?: string;
   collectionAmountMinor?: number;
   skipCollection?: boolean;
   unitId?: string;
@@ -466,13 +470,15 @@ async function createInHouseConversion(options: {
       ? { remainingPaymentTransactionReference: `WX-STAGE86-${options.prefix.toUpperCase()}-REMAINING` }
       : {})
   });
+  if (options.membershipProductId) envelope.input.membershipProductId = options.membershipProductId;
+  if (options.temporaryOtherRoomReason !== undefined) envelope.input.temporaryOtherRoomReason = options.temporaryOtherRoomReason;
   const prepared = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () =>
     preview(envelope, `${options.prefix}-conversion`)
   );
   const receipt = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () =>
     confirmPrepared(envelope, prepared, `${options.prefix}-conversion`)
   );
-  expect(receipt.businessCommitted).toBe(true);
+  expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
   return {
     memberId,
     stay,
@@ -3097,5 +3103,120 @@ describe("4.7 stay collection conversion to membership", () => {
         .where("id", "=", prepared.preview.previewId)
         .executeTakeFirstOrThrow()).toEqual({ status: "OPEN", used_at: null });
     });
+  });
+});
+
+
+describe("cross-room membership upgrade", () => {
+  it("retains the actual room and real funds, atomically consumes seven nights, and supports shortening and checkout", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftDate(businessDate, -6);
+    const departureDate = shiftDate(businessDate, 1);
+    const unit = await db.selectFrom("inventory_units").select("id").where("code", "=", "A02").executeTakeFirstOrThrow();
+    const converted = await createInHouseConversion({ prefix: "cross-room", unitId: unit.id,
+      businessDate, arrivalDate, departureDate, collectionAmountMinor: 72_000,
+      agreedPriceMinor: 216_000, membershipProductId: products.privateSingle,
+      temporaryOtherRoomReason: "客户体验良好升级会员，本次继续住 A02" });
+    expect(converted.prepared.preview.effect.crossRoomUpgrade).toMatchObject({
+      actualInventoryUnitId: unit.id, originalRoomTypeCode: "private_bath_single", actualRoomTypeCode: "private_bath_standard"
+    });
+    expect(converted.receipt.result).toMatchObject({ transferredAmount: { minorUnits: 72_000 },
+      remainingPaymentAmount: { minorUnits: 144_000 }, convertedUnits: 7, remainingUnits: 23 });
+    expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(23);
+    const before = await writableOrderView(converted.stay.orderId);
+    expect(before.order.status).toBe("CHECKED_IN");
+    expect(before.amounts.currentContractAmount.minorUnits).toBe(0);
+    expect(before.amounts.netRecordedCollection.minorUnits).toBe(0);
+    expect(before.allowedActions.some(a => a.code === "EXTEND_STAY" && a.enabled)).toBe(false);
+    expect(before.allowedActions.some(a => a.code === "MOVE_UNIT" && a.enabled)).toBe(false);
+    const claims = await db.selectFrom("inventory_claims as c").innerJoin("stay_segments as s", "s.id", "c.source_id")
+      .select(["c.inventory_unit_id", "c.service_date"]).where("s.stay_id", "=", converted.stay.stayId).where("c.active", "=", true).execute();
+    expect(claims).toHaveLength(7);
+    expect(claims.every(c => c.inventory_unit_id === unit.id)).toBe(true);
+    const counts = await conversionArtifactCounts(converted.stay.orderId);
+    const replay = await confirmCommandPreview(db, principal, converted.prepared.preview.previewId, {
+      propertyId: demo.propertyId, commandType: converted.envelope.commandType, confirmation: true,
+      expectedEffectHash: converted.prepared.preview.effectHash,
+      reason: { code: "STAGE47_ACCEPTANCE", note: "Stage 47 CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP acceptance" }
+    }, { idempotencyKey: `cross-room-conversion-confirm-${sequence}`, correlationId: "cross-room-replay" });
+    expect(replay.commandId).toBe(converted.receipt.commandId);
+    expect(await conversionArtifactCounts(converted.stay.orderId)).toEqual(counts);
+    for (const commandType of ["EXTEND_STAY", "MOVE_UNIT"] as const) {
+      await expect(preview({ commandType, input: { propertyId: demo.propertyId, orderId: converted.stay.orderId } }, commandType))
+        .rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    }
+    const checkout = await execute({ commandType: "SHORTEN_STAY", input: {
+      propertyId: demo.propertyId, orderId: converted.stay.orderId, newDepartureDate: businessDate
+    } }, "cross-room-shorten");
+    expect(checkout.businessCommitted).toBe(true);
+    expect(await conversionEntitlementBalance(converted.entitlementLotId)).toBe(24);
+    expect((await writableOrderView(converted.stay.orderId)).order.status).toBe("CHECKED_OUT");
+    await assertConversionCommandStillValid(converted.receipt.commandId);
+  });
+
+  it("rejects missing consent, blank or excessive reasons, bed products, and fake exceptions on matching rooms", async () => {
+    const memberId = await createMember("CROSS-REJECT", "cross-reject");
+    const unit = await db.selectFrom("inventory_units").select("id").where("code", "=", "A02").executeTakeFirstOrThrow();
+    const stay = await createCheckedOutStay({ prefix: "cross-reject", documentNumber: "CROSS-REJECT", unitId: unit.id, skipCheckOut: true });
+    const base = conversionEnvelope({ orderId: stay.orderId, memberId, collectionFactId: stay.collectionFactId,
+      membershipProductId: products.privateSingle, agreedPriceMinor: 216_000, remainingPaymentTransactionReference: "WX-CROSS-REJECT-NEW" });
+    const counts = await conversionArtifactCounts(stay.orderId);
+    for (const reason of [undefined, " ", "x".repeat(201)]) {
+      await expect(preview({ ...base, input: { ...base.input, ...(reason !== undefined ? { temporaryOtherRoomReason: reason } : {}) } }, "cross-invalid"))
+        .rejects.toMatchObject({ code: reason === undefined ? "ENTITLEMENT_CONFLICT" : "VALIDATION_ERROR" });
+    }
+    await expect(preview({ ...base, input: { ...base.input, membershipProductId: "membership_product_shared_bath_quad_v1", agreedPriceMinor: 93_600, temporaryOtherRoomReason: "床位不允许" } }, "cross-bed"))
+      .rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT" });
+    expect(await conversionArtifactCounts(stay.orderId)).toEqual(counts);
+    await expect(createInHouseConversion({ prefix: "cross-matching", temporaryOtherRoomReason: "不应标记例外" }))
+      .rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+});
+
+
+describe("cross-room upgrade database evidence", () => {
+  it("requires intact reviewed evidence and detects guard drift without weakening other constraints", async () => {
+    const unit = await db.selectFrom("inventory_units").select("id").where("code", "=", "A02").executeTakeFirstOrThrow();
+    const converted = await createInHouseConversion({ prefix: "cross-guards", unitId: unit.id,
+      membershipProductId: products.privateSingle, agreedPriceMinor: 216_000, temporaryOtherRoomReason: "继续原房间" });
+    const options = { staffProfileManifestName: "demo", identity: "maintenance-owner" } as const;
+    expect(await databaseReady(db, options)).toBe(true);
+    const amendment = await db.selectFrom("amendments").select(["id", "payload"]).where("command_id", "=", converted.receipt.commandId).executeTakeFirstOrThrow();
+    for (const change of [{ reason: "" }, { actualInventoryUnitId: "unit_room_d_gen_01" }, { departureDate: "2099-01-01" }]) {
+      await expect(db.transaction().execute(async trx => {
+        await sql`ALTER TABLE amendments DISABLE TRIGGER amendments_append_only`.execute(trx);
+        const payload = amendment.payload as Record<string, unknown>;
+        await trx.updateTable("amendments").set({ payload: { ...payload,
+          crossRoomUpgrade: { ...(payload.crossRoomUpgrade as Record<string, unknown>), ...change } } }).where("id", "=", amendment.id).execute();
+        await sql`SELECT qintopia_assert_stage13_stay_conversion_command(${converted.receipt.commandId})`.execute(trx);
+        throw new Error("corrupt cross-room evidence was accepted");
+      })).rejects.toMatchObject({ code: "23514" });
+    }
+    const rollback = new Error("rollback readiness probe");
+    await expect(db.transaction().execute(async trx => {
+      await sql`ALTER TABLE amendments DISABLE TRIGGER cross_room_upgrade_evidence_guard`.execute(trx);
+      expect(await databaseReady(trx, options)).toBe(false);
+      throw rollback;
+    })).rejects.toBe(rollback);
+    expect(await databaseReady(db, options)).toBe(true);
+    expect(await hasTemporaryOtherRoomMemberChainEvidence(db, demo.propertyId, { membershipOrderId: converted.membershipOrderId })).toBe(true);
+    expect(await hasTemporaryOtherRoomMemberChainEvidence(db, demo.propertyId, { memberContractId: converted.contractId })).toBe(true);
+  });
+
+  it("allows exactly one of two concurrent cross-room upgrades", async () => {
+    const prefix = "cross-concurrent";
+    const memberId = await createMember("CROSS-CONCURRENT", prefix);
+    const unit = await db.selectFrom("inventory_units").select("id").where("code", "=", "A02").executeTakeFirstOrThrow();
+    const stay = await createCheckedOutStay({ prefix, documentNumber: "CROSS-CONCURRENT", unitId: unit.id, skipCheckOut: true });
+    const envelope = conversionEnvelope({ orderId: stay.orderId, memberId, collectionFactId: stay.collectionFactId,
+      membershipProductId: products.privateSingle, agreedPriceMinor: 216_000, remainingPaymentTransactionReference: "WX-CROSS-CONCURRENT-NEW" });
+    envelope.input.temporaryOtherRoomReason = "客人保留原房间";
+    const first = await preview(envelope, "cross-first");
+    const second = await preview(envelope, "cross-second");
+    const results = await Promise.all([confirmPrepared(envelope, first, "cross-first"), confirmPrepared(envelope, second, "cross-second")]);
+    expect(results.filter(r => r.businessCommitted)).toHaveLength(1);
+    expect(results.find(r => !r.businessCommitted)?.error?.code).toBe("PREVIEW_STALE");
+    expect(await db.selectFrom("membership_orders").select("id").where("member_id", "=", memberId).execute()).toHaveLength(1);
+    expect(await conversionEntitlementBalance(results.find(r => r.businessCommitted)!.result!.entitlementLotId as string)).toBe(23);
   });
 });

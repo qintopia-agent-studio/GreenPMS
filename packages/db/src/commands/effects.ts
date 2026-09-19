@@ -1838,6 +1838,12 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
   const context = await loadOrderContextForProperty(db, propertyId, orderId);
   if (commandType === "REVOKE_CHECK_OUT") return buildCheckoutReversalEffect(db, context);
   if (commandType === "MANAGE_ORDER_OCCUPANTS") return buildCompanionEffect(db, context, input);
+  const crossRoomUpgrade = await db.selectFrom("amendments").select("id")
+    .where("order_id", "=", orderId).where("amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP")
+    .where(sql<boolean>`payload ? 'crossRoomUpgrade'`).executeTakeFirst();
+  if (crossRoomUpgrade && ["EXTEND_STAY", "MOVE_UNIT"].includes(commandType)) {
+    throw new DomainError("VALIDATION_ERROR", "本次跨房型升级仅适用于已确认的房间与日期；续住或换房请另建符合安排的订单", 409);
+  }
   const temporaryOtherRoomEvidence = await loadTemporaryOtherRoomCreateEvidence(db, orderId);
   if (temporaryOtherRoomEvidence && temporaryOtherRoomBlockedOrderCommands.has(commandType)) {
     rejectTemporaryOtherRoomLifecycleChange();
@@ -1962,9 +1968,31 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       || unit.roomTypeCode !== product.allowed_room_type_code
       || entitlementKindFor(unit.kind) !== product.entitlement_unit_kind
     ));
-    if (unitMismatch) {
-      throw new DomainError("ENTITLEMENT_CONFLICT", "所选会员产品不适用于本次住宿房型", 409);
+    const crossRoomReason = optionalString(input, "temporaryOtherRoomReason");
+    if (input.temporaryOtherRoomReason !== undefined && (!crossRoomReason || crossRoomReason.length > 200)) {
+      throw new DomainError("VALIDATION_ERROR", "本次临时安排原因须为 1–200 字");
     }
+    if (!unitMismatch && crossRoomReason) {
+      throw new DomainError("VALIDATION_ERROR", "当前房型已匹配会员产品，不需要临时安排");
+    }
+    const actualUnit = timelineUnits[0]!;
+    const crossRoomEligible = context.order.status === "CHECKED_IN" && context.stay.status === "IN_HOUSE"
+      && timelineUnits.length === 1 && actualUnit.kind === "ROOM"
+      && product.allowed_inventory_kind === "ROOM" && product.entitlement_unit_kind === "ROOM_NIGHT";
+    if (unitMismatch && (!crossRoomEligible || !crossRoomReason)) {
+      throw new DomainError("ENTITLEMENT_CONFLICT", crossRoomEligible
+        ? "所选会员产品不适用于本次住宿房型；请确认本次临时安排其他整房并填写原因"
+        : "所选会员产品不适用于本次住宿房型；仅同一整房的在住订单可临时跨房型升级整房会员", 409);
+    }
+    const crossRoomUpgrade = unitMismatch ? {
+      kind: "TEMPORARY_OTHER_ROOM_UPGRADE",
+      reason: crossRoomReason!,
+      originalRoomTypeCode: product.allowed_room_type_code,
+      actualInventoryUnitId: actualUnit.id,
+      actualRoomTypeCode: actualUnit.roomTypeCode,
+      arrivalDate: context.order.arrival_date,
+      departureDate: context.order.departure_date
+    } : undefined;
 
     const [allOrderFunds, existingTransfers] = await Promise.all([
       db.selectFrom("collection_facts")
@@ -2063,6 +2091,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     const remainingUnits = entitlementUnits - serviceDates.length;
     return finalize(propertyId, {
       operation: "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
+      ...(crossRoomUpgrade ? { crossRoomUpgrade } : {}),
       orderId,
       stayId: context.stay.id,
       primaryOccupant: {
