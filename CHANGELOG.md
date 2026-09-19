@@ -2,6 +2,18 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.5.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.4.3...v1.5.0) (2026-09-19)
+
+
+### Features
+
+* **membership:** 支持在住订单保留原房跨房型升级会员 ([#40](https://github.com/qintopia-agent-studio/GreenPMS/issues/40)) ([fecbd61](https://github.com/qintopia-agent-studio/GreenPMS/commit/fecbd614e7644791360fa0bc028f7c3076d8a0dc))
+
+
+### Bug Fixes
+
+* **orders:** 修复经营目录维护后的换房快照与名称展示 ([#38](https://github.com/qintopia-agent-studio/GreenPMS/issues/38)) ([418ffdf](https://github.com/qintopia-agent-studio/GreenPMS/commit/418ffdf0c29be6542754175a400ad0ecfc4ea3db))
+
 ## [1.4.3](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.4.2...v1.4.3) (2026-09-17)
 
 
