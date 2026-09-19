@@ -26,6 +26,7 @@
     "test:integration": "npm run test:integration:lock-runner && node --import tsx tests/helpers/run-database-test-suite.ts -- npm run test:integration:run --",
     "test:integration:lock-runner": "vitest run tests/integration/test-suite-runner.integration.test.ts",
     "test:integration:run": "node --import tsx tests/helpers/assert-database-test-lock.ts && vitest run tests/integration --exclude tests/integration/test-suite-runner.integration.test.ts",
+    "test:catalog-management": "node --import tsx tests/helpers/run-database-test-suite.ts -- vitest run --config vitest.catalog-management.config.ts",
     "test:catalog-regression": "node --import tsx tests/helpers/run-database-test-suite.ts -- vitest run --config vitest.catalog.config.ts",
     "test:contract": "node --import tsx tests/helpers/run-database-test-suite.ts -- npm run test:contract:run --",
     "test:contract:run": "node --import tsx tests/helpers/assert-database-test-lock.ts && npm run build && vitest run tests/contract",

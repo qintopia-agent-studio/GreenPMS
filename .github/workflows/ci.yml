@@ -88,4 +88,6 @@ jobs:
       - name: Maintained catalog lifecycle matrix
         run: npm run test:catalog-regression
       - name: First catalog write, display, failure diagnostics and catalog management
-        run: npm run test:integration -- tests/integration/catalog-snapshot-regression.integration.test.ts tests/integration/room-catalog.integration.test.ts
+        run: |
+          npm run test:integration:lock-runner
+          npm run test:catalog-management
