@@ -4227,3 +4227,13 @@ describe("U1 confirmation evidence", () => {
     expect(receiptHasCommandEvidence("SHORTEN_STAY", malformedReceipt, { orderId: "order_1" })).toBe(false);
   });
 });
+
+ it.each(["RECORD_COLLECTION", "RECORD_REFUND", "ISSUE_TOKEN"] as const)("preserves non-retryable failure guidance for %s", (businessCommand) => {
+  const receipt: ReceiptDto = { receiptId: "receipt_constraint", commandId: "command_constraint", correlationId: "correlation_constraint",
+    executionStatus: "NOT_EXECUTED", businessCommitted: false,
+    error: { code: "COMMAND_INTERRUPTED", message: "操作未完成，请联系管理员核查；请勿反复提交", retryable: false, correlationId: "correlation_constraint" },
+    resourceRefs: [], factRefs: [], committedAt: "2026-09-19T00:00:00.000Z" };
+  const html = renderToStaticMarkup(createElement(ReceiptPanel, { receipt, businessCommand }));
+  expect(html).toContain("请联系管理员核查");
+  expect(html).not.toMatch(/重新登记|结果暂时不确定/);
+});

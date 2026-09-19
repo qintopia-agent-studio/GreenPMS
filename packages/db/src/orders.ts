@@ -1,3 +1,4 @@
+import { projectCatalogUnitNames } from "./room-catalog-labels.ts";
 import { currentPrimaryGuest, projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import {
@@ -1977,7 +1978,16 @@ export async function getOrderView(
   commandGrants: ReadonlySet<CommandCapability | string> = new Set()
 ) {
   return db.transaction().setIsolationLevel("repeatable read")
-    .execute((trx) => getOrderViewSnapshot(trx, orderId, accessLevel, commandGrants));
+    .execute(async (trx) => {
+      const view = await getOrderViewSnapshot(trx, orderId, accessLevel, commandGrants);
+      const current = view.order.status === "RESERVED" || view.order.status === "CHECKED_IN";
+      const displayed = current ? await projectCatalogUnitNames(trx, view.referencedInventoryUnits) : view.referencedInventoryUnits;
+      return { ...view, referencedInventoryUnits: view.referencedInventoryUnits.map((unit, index) => ({
+        ...unit,
+        // Never overwrite canonical names consumed by historical views or commands.
+        ...(current && unit.active ? { display_name: displayed[index]!.name } : {})
+      })) };
+    });
 }
 
 export async function activeCoverageCandidates(db: DbExecutor, orderId: string, dates?: string[]): Promise<CoverageCandidate[]> {

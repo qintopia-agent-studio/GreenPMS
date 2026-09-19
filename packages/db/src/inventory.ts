@@ -143,13 +143,14 @@ async function loadInventoryUnitRecord(db: DbExecutor, propertyId: string, unitI
     .where("id", "=", unitId)
     .where("property_id", "=", propertyId);
   if (requireActive) query = query.where("active", "=", true);
-  let row = await query.executeTakeFirst();
+  const row = await query.executeTakeFirst();
   if (!row) throw new DomainError("NOT_FOUND", "Inventory unit not found", 404);
   if (requireActive && row.kind === "BED") {
     const parent = await db.selectFrom("inventory_units").select("id").where("id", "=", row.parent_room_id!).where("property_id", "=", propertyId).where("active", "=", true).executeTakeFirst();
     if (!parent) throw new DomainError("NOT_FOUND", "父房间已停用，床位不可售", 404);
   }
-  if (requireActive) row = (await projectCatalogUnitNames(db, [row]))[0]!;
+  // Command snapshots must match canonical database inventory facts.
+  // Catalog labels are projected only by read/presentation endpoints.
   return {
     id: row.id,
     propertyId: row.property_id,

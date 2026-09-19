@@ -173,11 +173,11 @@ function money(value: unknown, path: string): { currency: string; minorUnits: nu
 
 function referencedInventoryUnit(value: unknown, path: string): { id: string; propertyId: string } {
   const unit = record(value, path);
-  exactKeys(unit, path, [
+  exactKeysWithOptional(unit, path, [
     "id", "property_id", "kind", "parent_room_id", "code", "name", "active", "catalog_version",
     "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance",
     "physical_bed_count", "occupancy_capacity", "created_at"
-  ]);
+  ], ["display_name"]);
   const id = stringValue(unit.id, `${path}.id`);
   const propertyId = stringValue(unit.property_id, `${path}.property_id`);
   const kind = stringValue(unit.kind, `${path}.kind`);
@@ -185,6 +185,7 @@ function referencedInventoryUnit(value: unknown, path: string): { id: string; pr
   nullableNonEmptyString(unit.parent_room_id, `${path}.parent_room_id`);
   stringValue(unit.code, `${path}.code`);
   stringValue(unit.name, `${path}.name`);
+  if (unit.display_name !== undefined) stringValue(unit.display_name, `${path}.display_name`);
   if (typeof unit.active !== "boolean") fail(`${path}.active`, "必须是布尔值");
   nullableNonEmptyString(unit.catalog_version, `${path}.catalog_version`);
   nullableNonEmptyString(unit.building_code, `${path}.building_code`);

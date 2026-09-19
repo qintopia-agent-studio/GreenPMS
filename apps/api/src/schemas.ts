@@ -2706,7 +2706,7 @@ const PropertyRowSchema = strictObject({
 });
 const InventoryUnitRowSchema = strictObject({
   id: Id, property_id: Id, kind: InventoryUnitKindSchema, parent_room_id: nullable(Id), code: ShortText,
-  name: ShortText, active: Type.Boolean(), catalog_version: nullable(ShortText), building_code: nullable(ShortText),
+  name: ShortText, display_name: Type.Optional(ShortText), active: Type.Boolean(), catalog_version: nullable(ShortText), building_code: nullable(ShortText),
   room_type_code: nullable(ShortText), pricing_product_code: nullable(ShortText),
   inventory_basis: nullable(Type.Union([Type.Literal("INDEPENDENT"), Type.Literal("WHOLE_ROOM_COMBINATION")])),
   code_provenance: nullable(Type.Union([Type.Literal("SOURCE_EXPLICIT"), Type.Literal("USER_CONFIRMED_RENAMED"), Type.Literal("PMS_GENERATED")])),

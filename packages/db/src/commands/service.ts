@@ -1,3 +1,4 @@
+import { reportTransactionFailure } from "./transaction-failure.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import {
   currentReleaseFeatures,
@@ -2042,12 +2043,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           && error.code === "VALIDATION_ERROR") throw error;
         const rejectionError = error instanceof DomainError
           ? error
-          : new DomainError(
-            "COMMAND_INTERRUPTED",
-            "The command transaction failed before any business facts committed; retry with a new idempotency key",
-            409,
-            true
-          );
+          : reportTransactionFailure(error, { commandType, previewId, correlationId: headers.correlationId });
         try {
           return await persistRejected(lockedDb, principal, {
             propertyId,

@@ -26,6 +26,16 @@ export async function listOrders(db: Kysely<Database>, query: OrderListQuery) {
   }
   return db.transaction().setIsolationLevel("repeatable read").execute(async (trx) => {
     const businessDate = await propertyLocalToday(trx, query.propertyId);
+    // Use exactly the same label for selection and filtering, before pagination.
+    // Closed orders and retired units retain their historical inventory label.
+    const currentUnitName = sql<string | null>`case
+      when current_unit.active and orders.status in ('RESERVED', 'CHECKED_IN') then
+        coalesce((select current_unit.code || ' ' || nullif(type->>'name', '')
+          from room_catalog_state as catalog,
+            jsonb_array_elements(catalog.snapshot->'types') as type
+          where catalog.property_id = orders.property_id
+            and type->>'code' = current_unit.room_type_code limit 1), current_unit.name)
+      else current_unit.name end`;
     let selection = trx.selectFrom("orders")
       .leftJoin("pricing_revisions as current_revision", "current_revision.id", "orders.current_revision_id")
       .leftJoin("stays", "stays.order_id", "orders.id")
@@ -52,7 +62,7 @@ export async function listOrders(db: Kysely<Database>, query: OrderListQuery) {
         "stays.status as stay_status",
         "current_revision.current_contract_amount_minor as current_contract_amount_minor",
         "current_revision.currency as currency",
-        "current_unit.name as current_unit_name",
+        currentUnitName.as("current_unit_name"),
         "current_unit.code as current_unit_code",
         "current_unit.room_type_code as current_unit_room_type_code"
       ])
@@ -89,7 +99,7 @@ export async function listOrders(db: Kysely<Database>, query: OrderListQuery) {
       selection = selection.where(sql<boolean>`(
         orders.id ILIKE ${pattern} ESCAPE '\\'
         OR current_unit.code ILIKE ${pattern} ESCAPE '\\'
-        OR current_unit.name ILIKE ${pattern} ESCAPE '\\'
+        OR ${currentUnitName} ILIKE ${pattern} ESCAPE '\\'
         OR orders.channel_order_reference ILIKE ${pattern} ESCAPE '\\'
         OR (CASE WHEN orders.member_id IS NOT NULL OR orders.member_contract_id IS NOT NULL THEN '会员权益'
           WHEN orders.stay_type = 'FREE' THEN '免费住宿'

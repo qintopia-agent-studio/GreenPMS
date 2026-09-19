@@ -3882,7 +3882,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
   if (businessCommand && tokenBusinessCommands.has(businessCommand)) {
     const label = tokenCommandLabel(businessCommand);
     const tokenReceiptErrorMessage = receipt.error
-      ? receipt.error.code === "COMMAND_INTERRUPTED" || receipt.error.code === "COMMAND_STATUS_UNKNOWN"
+      ? (receipt.error.code === "COMMAND_INTERRUPTED" && receipt.error.retryable) || receipt.error.code === "COMMAND_STATUS_UNKNOWN"
         ? `${label} 结果暂时不确定，请查询刚才的结果。`
         : /[\u3400-\u9fff]/.test(receipt.error.message)
           ? receipt.error.message
@@ -3910,7 +3910,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
     const transactionReference = result && typeof result.transactionReference === "string" ? result.transactionReference : undefined;
     const refundReference = result && typeof result.refundReference === "string" ? result.refundReference : undefined;
     const receiptErrorMessage = receipt.error
-      ? receipt.error.code === "COMMAND_INTERRUPTED" || receipt.error.code === "COMMAND_STATUS_UNKNOWN"
+      ? (receipt.error.code === "COMMAND_INTERRUPTED" && receipt.error.retryable) || receipt.error.code === "COMMAND_STATUS_UNKNOWN"
         ? `本次${label}没有登记。请返回订单后重新登记，系统不会重复写入。`
         : /[\u3400-\u9fff]/.test(receipt.error.message)
           ? receipt.error.message

@@ -678,18 +678,19 @@ function HistoricalStayCorrectionGroup({ item, units }: {
 
 export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds = true, channelPriceDifferenceReason }: {
   view: Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
-  inventoryUnits: Array<Pick<InventoryUnitDto, "id" | "code" | "name" | "building_code">>;
+  inventoryUnits: Array<Pick<InventoryUnitDto, "id" | "code" | "name" | "building_code" | "display_name">>;
   showPerOrderFunds?: boolean;
   channelPriceDifferenceReason?: string | undefined;
 }) {
   const units = new Map(inventoryUnits.map((unit) => [unit.id, unit]));
+  const currentUnits = new Map(inventoryUnits.map((unit) => [unit.id, { ...unit, name: unit.display_name ?? unit.name }]));
   return <>
     <div className="detail-grid" data-testid="order-arrangements">
       <section className="detail-section" aria-labelledby="effective-arrangement-heading">
         <div className="section-title-row"><h2 id="effective-arrangement-heading">{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</h2></div>
         <ArrangementDetails
           arrangement={view.effectiveArrangement}
-          units={units}
+          units={currentUnits}
           omitIntervals={view.effectiveArrangement.intervals.length === 1 && accommodationPositionItems(view).length > 0}
           positionItems={accommodationPositionItems(view)}
         />
@@ -1924,7 +1925,7 @@ function ScopedOrderDetailPage() {
 
   const orderInventoryUnits = useMemo(() => {
     const units = new Map(meta.inventoryUnits.map((unit) => [unit.id, unit]));
-    for (const unit of view?.referencedInventoryUnits ?? []) units.set(unit.id, unit);
+    for (const unit of view?.referencedInventoryUnits ?? []) units.set(unit.id, { ...unit, name: unit.display_name ?? unit.name });
     return [...units.values()];
   }, [meta.inventoryUnits, view?.referencedInventoryUnits]);
   const unitMap = useMemo(() => new Map(orderInventoryUnits.map((unit) => [unit.id, unit])), [orderInventoryUnits]);
@@ -2262,7 +2263,7 @@ function ScopedOrderDetailPage() {
 
       <OrderLifecycleSections
         view={view}
-        inventoryUnits={orderInventoryUnits}
+        inventoryUnits={view.referencedInventoryUnits}
         showPerOrderFunds={showPerOrderFunds}
         channelPriceDifferenceReason={currentPricingRevision?.reason.note}
       />
@@ -2278,7 +2279,7 @@ function ScopedOrderDetailPage() {
         })}</div>
       </section></details> : null}
 
-      <TemporaryOtherRoomArrangementHistory view={view} inventoryUnits={orderInventoryUnits} />
+      <TemporaryOtherRoomArrangementHistory view={view} inventoryUnits={view.referencedInventoryUnits} />
 
       <CompleteStayCorrectionHistory view={view} />
 
