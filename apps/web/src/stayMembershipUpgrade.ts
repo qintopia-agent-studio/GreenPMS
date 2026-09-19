@@ -89,6 +89,16 @@ export function membershipProductMatchesCurrentStay(
   });
 }
 
+export function membershipProductAllowsTemporaryUpgrade(
+  product: MembershipProductDto, view: OrderViewDto, unitMap: ReadonlyMap<string, InventoryUnitDto>
+): boolean {
+  const unitIds = [...new Set(view.effectiveArrangement.intervals.map((interval) => interval.inventoryUnitId))];
+  return view.order.status === "CHECKED_IN" && unitIds.length === 1
+    && unitMap.get(unitIds[0]!)?.kind === "ROOM"
+    && product.allowed_inventory_kind === "ROOM" && product.entitlement_unit_kind === "ROOM_NIGHT"
+    && !membershipProductMatchesCurrentStay(product, view, unitMap);
+}
+
 function transferableCollectionFactIds(view: OrderViewDto): string[] {
   const reversed = new Set(view.collectionFacts
     .filter((fact) => fact.fact_type === "REVERSAL" && fact.reverses_fact_id)
@@ -115,7 +125,8 @@ export function stayMembershipUpgradeEntry(
 ): StayMembershipUpgradeEntry {
   const action = view.allowedActions.find((candidate) => candidate.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
   if (!action?.enabled) return { state: "UNAVAILABLE", reason: "ACTION_NOT_AVAILABLE" };
-  if (!membershipProducts.some((product) => membershipProductMatchesCurrentStay(product, view, unitMap))) {
+  if (!membershipProducts.some((product) => membershipProductMatchesCurrentStay(product, view, unitMap)
+    || membershipProductAllowsTemporaryUpgrade(product, view, unitMap))) {
     return { state: "UNAVAILABLE", reason: "MEMBERSHIP_PRODUCT_NOT_APPLICABLE" };
   }
   const primary = view.occupants.find((occupant) => occupant.role === "PRIMARY");

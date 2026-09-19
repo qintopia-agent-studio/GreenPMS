@@ -54,6 +54,7 @@ import { commandRecoveryAvailable, propertyAllowedActions, useWorkspace } from "
 import { assertOrderViewAllowedActions } from "../orderViewValidation";
 import {
   membershipProductMatchesCurrentStay,
+  membershipProductAllowsTemporaryUpgrade,
   normalizeStayUpgradePhone as normalizePhoneNumber,
   stayMembershipUpgradeActionVisible,
   stayMembershipUpgradeEntry,
@@ -177,6 +178,22 @@ function validRecordedAt(value: string): boolean {
 }
 
 export function temporaryOtherRoomOrderRecord(amendments: readonly AmendmentDto[]): TemporaryOtherRoomOrderRecord | undefined {
+  const upgrade = amendments.find((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+    && amendment.payload && typeof amendment.payload === "object" && "crossRoomUpgrade" in amendment.payload);
+  const upgradeArrangement = upgrade && (upgrade.payload as Record<string, unknown>).crossRoomUpgrade;
+  if (upgrade?.actor && upgradeArrangement && typeof upgradeArrangement === "object" && !Array.isArray(upgradeArrangement)) {
+    const value = upgradeArrangement as Record<string, unknown>;
+    if (value.kind === "TEMPORARY_OTHER_ROOM_UPGRADE"
+      && ["originalRoomTypeCode", "actualInventoryUnitId", "actualRoomTypeCode", "arrivalDate", "departureDate", "reason"].every(key => typeof value[key] === "string" && String(value[key]).trim())
+      && String(value.reason).length <= 200 && value.originalRoomTypeCode !== value.actualRoomTypeCode
+      && validRecordedAt(upgrade.created_at)) {
+      return {
+        originalRoomTypeCode: String(value.originalRoomTypeCode), actualInventoryUnitId: String(value.actualInventoryUnitId),
+        actualRoomTypeCode: String(value.actualRoomTypeCode), arrivalDate: String(value.arrivalDate), departureDate: String(value.departureDate),
+        reasonNote: String(value.reason), actor: upgrade.actor, recordedAt: upgrade.created_at
+      };
+    }
+  }
   const creation = amendments
     .filter((amendment) => amendment.amendment_type === "CREATE_ORDER")
     .sort((left, right) => left.sequence - right.sequence)[0];
@@ -1104,7 +1121,8 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
   const matchedMembers = primaryPhone
     ? members.filter((member) => normalizePhoneNumber(member.phone) === primaryPhone)
     : [];
-  const eligibleProducts = membershipProducts.filter((product) => membershipProductMatchesCurrentStay(product, view, unitMap));
+  const eligibleProducts = membershipProducts.filter((product) => membershipProductMatchesCurrentStay(product, view, unitMap)
+    || membershipProductAllowsTemporaryUpgrade(product, view, unitMap));
   const fundsState = stayConversionFundsState(
     view.collectionFacts,
     view.amounts.netRecordedCollection.minorUnits,
@@ -1114,10 +1132,13 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
   const draftInput = draft?.input ?? {};
   const draftMemberId = typeof draftInput.memberId === "string" ? draftInput.memberId : undefined;
   const draftProductId = typeof draftInput.membershipProductId === "string" ? draftInput.membershipProductId : undefined;
-  const initialProduct = eligibleProducts.find((product) => product.id === draftProductId) ?? eligibleProducts[0];
+  const initialProduct = eligibleProducts.find((product) => product.id === draftProductId) ?? eligibleProducts.find((product) => membershipProductMatchesCurrentStay(product, view, unitMap)) ?? eligibleProducts[0];
   const [memberId, setMemberId] = useState(draftMemberId && matchedMembers.some((member) => member.id === draftMemberId) ? draftMemberId : matchedMembers[0]?.id ?? "");
   const [productId, setProductId] = useState(initialProduct?.id ?? "");
   const selectedProduct = eligibleProducts.find((product) => product.id === productId);
+  const needsTemporaryRoom = Boolean(selectedProduct && membershipProductAllowsTemporaryUpgrade(selectedProduct, view, unitMap));
+  const [temporaryRoomConfirmed, setTemporaryRoomConfirmed] = useState(typeof draftInput.temporaryOtherRoomReason === "string");
+  const [temporaryRoomReason, setTemporaryRoomReason] = useState(typeof draftInput.temporaryOtherRoomReason === "string" ? draftInput.temporaryOtherRoomReason : "");
   const [agreedPriceYuan, setAgreedPriceYuan] = useState(() => {
     const draftPrice = typeof draftInput.agreedPriceMinor === "number" ? draftInput.agreedPriceMinor : undefined;
     return String((draftPrice ?? initialProduct?.list_price_minor ?? 0) / 100);
@@ -1162,6 +1183,10 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
       setValidationError(new Error("请选择匹配的会员产品"));
       return;
     }
+    if (needsTemporaryRoom && (!temporaryRoomConfirmed || !temporaryRoomReason.trim() || temporaryRoomReason.trim().length > 200)) {
+      setValidationError(new Error("请确认本次临时安排其他整房，并填写 1–200 字原因"));
+      return;
+    }
     if (agreedPriceMinor === undefined || agreedPriceMinor <= 0) {
       setValidationError(new Error("正式会员成交价必须是大于零的整元金额"));
       return;
@@ -1200,6 +1225,7 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
         orderId: view.order.id,
         memberId,
         membershipProductId: selectedProduct.id,
+        ...(needsTemporaryRoom ? { temporaryOtherRoomReason: temporaryRoomReason.trim() } : {}),
         collectionFactIds: transferableCollections.map((fact) => fact.fact_id),
         agreedPriceMinor,
         ...(priceAdjustmentReason.trim() ? { priceAdjustmentReason: priceAdjustmentReason.trim() } : {}),
@@ -1221,10 +1247,15 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
           </select>
         </label>
         <label className="span-two">会员产品
-          <select value={productId} onChange={(event) => { setProductId(event.target.value); setValidationError(undefined); }} disabled={Boolean(disabledReason) || eligibleProducts.length === 0} required>
-            {eligibleProducts.map((product) => <option key={product.id} value={product.id}>{membershipProductOptionLabel(product)}</option>)}
+          <select value={productId} onChange={(event) => { setProductId(event.target.value); setTemporaryRoomConfirmed(false); setTemporaryRoomReason(""); setValidationError(undefined); }} disabled={Boolean(disabledReason) || eligibleProducts.length === 0} required>
+            {eligibleProducts.map((product) => <option key={product.id} value={product.id}>{membershipProductOptionLabel(product)}{membershipProductAllowsTemporaryUpgrade(product, view, unitMap) ? " · 需确认本次临时安排" : ""}</option>)}
           </select>
         </label>
+        {needsTemporaryRoom ? <div className="span-two form-field-note">
+          <label className="check-row"><input type="checkbox" checked={temporaryRoomConfirmed} onChange={(event) => { setTemporaryRoomConfirmed(event.target.checked); setValidationError(undefined); }} /><span>本次临时安排其他整房</span></label>
+          <span>保留当前房间，本次全部住宿夜数计入会员权益；以后仍按会员产品适用房型使用。本单续住或换房需另建订单。</span>
+          <label>临时安排原因<input value={temporaryRoomReason} onChange={(event) => { setTemporaryRoomReason(event.target.value); setValidationError(undefined); }} maxLength={200} required /></label>
+        </div> : null}
         <div className="span-two conversion-transfer-card">
           <div className="conversion-transfer-heading">
             <div>

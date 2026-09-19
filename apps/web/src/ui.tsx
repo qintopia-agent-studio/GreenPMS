@@ -1634,8 +1634,24 @@ export function conversionPreviewHasEvidence(
   const before = isRecord(effect.before) ? effect.before : undefined;
   const decision = isRecord(effect.pricingDecision) ? effect.pricingDecision : undefined;
   const pricing = isRecord(effect.pricing) ? effect.pricing : undefined;
+  const crossRoom = isRecord(effect.crossRoomUpgrade) ? effect.crossRoomUpgrade : undefined;
+  const crossRoomRequested = typeof input.temporaryOtherRoomReason === "string";
+  if (crossRoomRequested !== Boolean(crossRoom)
+    || (crossRoom && (!hasExactKeys(crossRoom, ["kind", "reason", "originalRoomTypeCode", "actualInventoryUnitId", "actualRoomTypeCode", "arrivalDate", "departureDate"])
+      || crossRoom.kind !== "TEMPORARY_OTHER_ROOM_UPGRADE"
+      || !nonblankString(crossRoom.reason) || String(crossRoom.reason).length > 200
+      || crossRoom.reason !== input.temporaryOtherRoomReason
+      || product?.allowedInventoryKind !== "ROOM" || product.entitlementUnitKind !== "ROOM_NIGHT"
+      || crossRoom.originalRoomTypeCode !== product.allowedRoomTypeCode
+      || !nonblankString(crossRoom.actualInventoryUnitId) || !nonblankString(crossRoom.actualRoomTypeCode)
+      || crossRoom.actualRoomTypeCode === crossRoom.originalRoomTypeCode
+      || localDateNightCount(crossRoom.arrivalDate, crossRoom.departureDate) === undefined
+      || !Array.isArray(entitlement?.serviceDates) || entitlement.serviceDates.length === 0
+      || crossRoom.arrivalDate !== entitlement.serviceDates[0]
+      || localDateEpoch(entitlement.serviceDates.at(-1)) === undefined
+      || crossRoom.departureDate !== nextLocalDate(String(entitlement.serviceDates.at(-1)))))) return false;
   if (effect.operation !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
-    || !hasExactKeys(effect, ["operation", "orderId", "stayId", "primaryOccupant", "member", "product", "transfer", "membershipPricing", "remainingPayment", "entitlement", "before", "pricingDecision", "pricing"])
+    || !hasExactKeys(effect, ["operation", "orderId", "stayId", "primaryOccupant", "member", "product", "transfer", "membershipPricing", "remainingPayment", "entitlement", "before", "pricingDecision", "pricing", ...(crossRoom ? ["crossRoomUpgrade"] : [])])
     || !nonblankString(effect.orderId) || effect.orderId !== input.orderId
     || !nonblankString(effect.stayId)
     || !expectedCollectionIds
@@ -2689,6 +2705,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           {primaryOccupant ? <><dt>主要居住人</dt><dd><strong>{primaryOccupantName ?? "未填写姓名"}</strong></dd></> : null}
           {conversionMember ? <><dt>目标会员</dt><dd><strong>{scalar(conversionMember.fullName)}</strong></dd></> : null}
           {product ? <><dt>会员产品</dt><dd>{scalar(product.name)}</dd></> : null}
+          {isRecord(effect.crossRoomUpgrade) ? <><dt>本次临时安排其他整房</dt><dd>保留{inventoryUnitLabels?.[String(effect.crossRoomUpgrade.actualInventoryUnitId)] ?? "当前房间"}，全部住宿夜数计入会员权益；以后适用房型不变。原因：{scalar(effect.crossRoomUpgrade.reason)}</dd></> : null}
           {transferTotal ? <><dt>用于升级的住宿收款</dt><dd><strong>{formatMoney(transferTotal)}</strong></dd></> : null}
           {transferCollections.length ? <><dt>住宿收款明细</dt><dd><ol className="effect-inline-list">{transferCollections.map((collection, index) => {
             const amount = moneyFrom(collection.amount);

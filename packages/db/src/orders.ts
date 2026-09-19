@@ -188,13 +188,23 @@ export async function hasTemporaryOtherRoomMemberChainEvidence(
 ): Promise<boolean> {
   const rows = await db.selectFrom("amendments")
     .innerJoin("orders", "orders.id", "amendments.order_id")
-    .select(["amendments.id", "amendments.order_id", "amendments.payload"])
+    .leftJoin("membership_orders as cross_membership", "cross_membership.activated_by_command_id", "amendments.command_id")
+    .select(["amendments.id", "amendments.order_id", "amendments.payload",
+      "cross_membership.id as crossMembershipId", "cross_membership.contract_id as crossContractId",
+      "cross_membership.entitlement_lot_id as crossLotId"])
     .where("orders.property_id", "=", propertyId)
-    .where("amendments.amendment_type", "=", "CREATE_ORDER")
-    .where("amendments.reason_code", "=", "TEMPORARY_OTHER_ROOM")
+    .where((eb) => eb.or([
+      eb.and([eb("amendments.amendment_type", "=", "CREATE_ORDER"), eb("amendments.reason_code", "=", "TEMPORARY_OTHER_ROOM")]),
+      eb.and([eb("amendments.amendment_type", "=", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"), sql<boolean>`amendments.payload ? 'crossRoomUpgrade'`])
+    ]))
     .execute();
   return rows.some((row) => {
     if (target.sourceStayOrderId && row.order_id === target.sourceStayOrderId) return true;
+    if (recordValue(row.payload)?.crossRoomUpgrade) {
+      return Boolean((target.membershipOrderId && target.membershipOrderId === row.crossMembershipId)
+        || (target.memberContractId && target.memberContractId === row.crossContractId)
+        || (target.entitlementLotId && target.entitlementLotId === row.crossLotId));
+    }
     const arrangement = temporaryOtherRoomArrangementFromCreatePayload(row.payload, row.id);
     return Boolean(arrangement
       && ((target.membershipOrderId && arrangement.membershipOrderId === target.membershipOrderId)
@@ -1886,7 +1896,10 @@ export async function getOrderViewSnapshot(
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
-   }, commandGrants).filter((action) => !temporaryOtherRoomEvidence
+   }, commandGrants).filter((action) => !amendments.some((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+     && recordValue(amendment.payload)?.crossRoomUpgrade)
+     || !["EXTEND_STAY", "MOVE_UNIT", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"].includes(action.code))
+     .filter((action) => !temporaryOtherRoomEvidence
      || !temporaryOtherRoomHiddenActionCodes.has(action.code))
      .filter((action) => action.code !== "MANAGE_ORDER_OCCUPANTS"
        || (activeTimeline.length > 0 && activeTimeline.every((day) => referencedInventoryUnits.some((unit) => unit.id === day.inventoryUnitId && unit.kind === "ROOM")))),
