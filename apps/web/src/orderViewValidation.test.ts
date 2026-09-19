@@ -1399,3 +1399,14 @@ describe("parseOrderView", () => {
     expect(() => parseOrderView(input)).toThrow(expected);
   });
 });
+
+ it("accepts optional current display labels without replacing historical inventory names", () => {
+  const input = orderView();
+  const canonical = input.referencedInventoryUnits[0]!.name;
+  Object.assign(input.referencedInventoryUnits[0]!, { display_name: "101 经营新名称" });
+  const parsed = parseOrderView(input);
+  expect(parsed.referencedInventoryUnits[0]!.name).toBe(canonical);
+  expect(parsed.referencedInventoryUnits[0]!.display_name).toBe("101 经营新名称");
+  Object.assign(input.referencedInventoryUnits[0]!, { display_name: 123 });
+  expect(() => parseOrderView(input)).toThrow("display_name");
+});

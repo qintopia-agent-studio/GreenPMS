@@ -2,7 +2,8 @@ import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import pg from "pg";
 import { createDatabase, type Database } from "@qintopia/db";
-import { seedDemo } from "../../packages/db/src/seed.ts";
+import { readRoomCatalog } from "../../packages/db/src/room-catalog.ts";
+import { demo, seedDemo } from "../../packages/db/src/seed.ts";
 import type { Kysely } from "kysely";
 import { runtimeDatabaseTestPassword } from "./runtime-database.ts";
 
@@ -28,6 +29,13 @@ async function migrateAndSeedDatabase(databaseUrl: string): Promise<Kysely<Datab
   }
   const db = createDatabase(databaseUrl);
   await seedDemo(db, { includeProtocolFixturePolicy: true });
+  // Dedicated maintained-catalog suite exercises lifecycle commands after the
+  // first operational catalog write, while ordinary fixtures retain version 0.
+  if (process.env.PMS_TEST_MAINTAINED_CATALOG === "true") {
+    const catalog = await readRoomCatalog(db, demo.propertyId);
+    await db.insertInto("room_catalog_state").values({ property_id: demo.propertyId, version: 1,
+      snapshot: { version: 1, types: catalog.types, rates: catalog.rates, buildingOrder: catalog.buildingOrder } }).execute();
+  }
   if (process.env.PMS_TEST_CAPTURE_BASELINE === "true") {
     await db.transaction().execute(async trx => {
       const { sql } = await import("kysely");

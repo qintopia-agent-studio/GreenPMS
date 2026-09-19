@@ -100,6 +100,7 @@ export interface PropertyDto {
 }
 
 export interface InventoryUnitDto {
+  display_name?: string;
   id: string;
   property_id: string;
   kind: "ROOM" | "BED";

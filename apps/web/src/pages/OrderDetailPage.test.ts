@@ -685,6 +685,20 @@ describe("operator-facing order lifecycle presentation", () => {
     }]
   } satisfies Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
 
+  it("shows operational names only in current arrangement, leaving history canonical", () => {
+    const html = renderToStaticMarkup(createElement(OrderLifecycleSections, {
+      view: lifecycle,
+      inventoryUnits: [
+        { id: "unit_d01", code: "D01", name: "D01 原始名称", display_name: "D01 经营新名称", building_code: "1" },
+        { id: "unit_d02", code: "D02", name: "D02 原始名称", display_name: "D02 经营新名称", building_code: "1" }
+      ]
+    }));
+    const history = html.slice(html.indexOf('data-testid="arrangement-history"'));
+    expect(html.slice(0, html.indexOf('data-testid="arrangement-history"'))).toContain("经营新名称");
+    expect(history).toContain("原始名称");
+    expect(history).not.toContain("经营新名称");
+  });
+
   it("renders the four server-projected business layers with terminal wording", () => {
     const html = renderToStaticMarkup(createElement(OrderLifecycleSections, {
       view: lifecycle,
