@@ -4092,7 +4092,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
 
 interface CommandDialogProps {
   request: CommandRequest;
-  onClose: (context?: CommandDialogCloseContext) => void;
+  onClose: (context?: CommandDialogCloseContext) => void | Promise<void>;
   onCommitted?: (receipt: ReceiptDto) => void | Promise<void>;
   onBusinessSuccess?: (message: string, receipt: ReceiptDto) => void;
   onBusinessNotExecuted?: (message: string) => void;
@@ -4107,6 +4107,29 @@ interface CommandDialogProps {
 
 export interface CommandDialogCloseContext {
   receipt: ReceiptDto;
+}
+
+export function fundsCommandCanReturnToEdit(input: {
+  commandType: CommandRequest["commandType"];
+  hasEditor: boolean;
+  busy: boolean;
+  recoveryOnly: boolean;
+  networkUncertain: boolean;
+  hasConfirmationKey: boolean;
+  hasReceipt: boolean;
+}): boolean {
+  return (input.commandType === "RECORD_COLLECTION" || input.commandType === "RECORD_REFUND")
+    && input.hasEditor && !input.busy && !input.recoveryOnly && !input.networkUncertain
+    && !input.hasConfirmationKey && !input.hasReceipt;
+}
+
+export async function returnCommandDraftAfterClose(
+  request: CommandRequest,
+  onClose: () => void | Promise<void>,
+  onReturnToEdit: (request: CommandRequest) => void
+): Promise<void> {
+  await onClose();
+  onReturnToEdit(request);
 }
 
 export function knownCommittedCommandMessage(
@@ -6392,6 +6415,7 @@ export function CommandDialog({
   }));
   const requestLeaseRef = useRef<{ id: number; controller?: AbortController }>({ id: 0 });
   const successFinalizedRef = useRef(false);
+  const returningFundsToEditRef = useRef(false);
   const reviewHeadingRef = useRef<HTMLHeadingElement>(null);
   const expiryErrorRef = useRef<HTMLDivElement>(null);
   const notExecutedMessage = u1CommandType
@@ -6446,6 +6470,15 @@ export function CommandDialog({
     && (!backfillStay || completedStayBackfillPreviewHasEvidence(preview.effect, request.input))
     && (!fulfillment || fulfillmentTransitionIsExpected(preview.commandType, preview.effect)));
   const dialogCloseDisabled = busy && (!u1CommandType || Boolean(confirmationKey) || shellState.phase === "CONFIRMING");
+  const canReturnFundsToEdit = fundsCommandCanReturnToEdit({
+    commandType: request.commandType,
+    hasEditor: Boolean(onReturnToEdit),
+    busy,
+    recoveryOnly: recoveryOnlyRequest,
+    networkUncertain,
+    hasConfirmationKey: Boolean(confirmationKey),
+    hasReceipt: Boolean(receipt)
+  });
   const currentKey = useMemo(() => confirmationKey ?? api.recoveryKey(request.commandType), [confirmationKey, request.commandType]);
 
   useEffect(() => {
@@ -6553,8 +6586,9 @@ export function CommandDialog({
     void loadPreview(metadata);
   }
 
-  function returnToEdit() {
+  async function returnToEdit() {
     if (dialogCloseDisabled) return;
+    if (fundBusiness && (!canReturnFundsToEdit || returningFundsToEditRef.current)) return;
     requestLeaseRef.current.controller?.abort();
     if (u1CommandType && fulfillment) {
       const nextAttemptId = shellAttemptIdRef.current + 1;
@@ -6573,11 +6607,27 @@ export function CommandDialog({
       ...request,
       initialReason: { code: reasonCode.trim(), note: reasonNote }
     };
+    if (fundBusiness && onReturnToEdit) {
+      returningFundsToEditRef.current = true;
+      setBusy(true);
+      try {
+        await returnCommandDraftAfterClose(draftRequest, onClose, onReturnToEdit);
+      } catch (closeError) {
+        returningFundsToEditRef.current = false;
+        setBusy(false);
+        setError(closeError);
+      }
+      return;
+    }
     onClose();
     onReturnToEdit?.(draftRequest);
   }
 
   function closeCommandDialog() {
+    if (canReturnFundsToEdit) {
+      void returnToEdit();
+      return;
+    }
     if (u1CommandType
       && !lodgingFulfillment
       && !networkUncertain
@@ -6834,11 +6884,11 @@ export function CommandDialog({
           <button
             className="button button-secondary"
             type="button"
-            onClick={u1CommandType && !lodgingFulfillment && !networkUncertain && !recoveryOnlyRequest ? returnToEdit : () => onClose()}
+            onClick={canReturnFundsToEdit || (u1CommandType && !lodgingFulfillment && !networkUncertain && !recoveryOnlyRequest) ? returnToEdit : () => onClose()}
             disabled={dialogCloseDisabled}
-            data-testid={u1CommandType ? (lodgingFulfillment || networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
+            data-testid={canReturnFundsToEdit ? "command-return-to-edit" : u1CommandType ? (lodgingFulfillment || networkUncertain || recoveryOnlyRequest ? "command-close" : "command-return-to-edit") : undefined}
           >
-            {u1CommandType
+            {canReturnFundsToEdit ? "返回修改" : u1CommandType
               ? networkUncertain || recoveryOnlyRequest
                 ? "关闭"
                 : lodgingFulfillment

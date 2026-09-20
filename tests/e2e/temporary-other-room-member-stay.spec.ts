@@ -152,7 +152,7 @@ async function openOrderForm(
     await page.keyboard.press("Enter");
     const popover = page.getByTestId("room-status-quick-popover");
     await expect(popover).toBeVisible();
-    await popover.getByRole("button", { name: "创建订单", exact: true }).click();
+    await popover.getByRole("button", { name: "预订", exact: true }).click();
     drawer = page.locator("dialog.room-status-write-drawer");
   }
   await expect(drawer).toBeVisible();

@@ -1,3 +1,4 @@
+import { openQuickPopoverOrderDrawer } from "./quick-popover-helpers";
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import type { AuthPrincipal, RoomStatusBoardDto } from "@qintopia/contracts";
 import { confirmCommandPreview, createCommandPreview } from "../../packages/db/src/commands/service.ts";
@@ -164,9 +165,7 @@ async function selectOccupiedCell(
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", unitId);
   await expect(popover).toHaveAttribute("data-selection-kind", "day");
-  const orderOptions = popover.locator(".room-status-quick-orders button");
-  await expect(orderOptions).toHaveCount(1);
-  await orderOptions.click();
+  await openQuickPopoverOrderDrawer(popover);
   const context = orderContext(page, orderId);
   await expect(context).toBeVisible();
   await expect(context.getByRole("heading", { name: "完整住宿", exact: true }))

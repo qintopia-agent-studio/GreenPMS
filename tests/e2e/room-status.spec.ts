@@ -549,7 +549,7 @@ async function openRoomStatusWriteDrawer(
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", unitId);
   await expect(popover).toHaveAttribute("data-selection-kind", "day");
-  await popover.getByRole("button", { name: action, exact: true }).click();
+  await popover.getByRole("button", { name: action === "创建订单" ? "预订" : action, exact: true }).click();
   const drawer = page.locator("dialog.room-status-write-drawer");
   await expect(drawer).toBeVisible();
   return drawer;
@@ -909,7 +909,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await bedAStart.focus();
   await page.keyboard.press("Shift+ArrowRight");
   await page.keyboard.press("Enter");
-  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   const relatedSources = page.locator("section.room-status-context-section").filter({
     has: page.getByRole("heading", { name: "选区内住宿或锁房" })
   });
@@ -921,7 +922,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedAInterval.click();
-  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   const sourceSection = page.locator("section.room-status-context-section").filter({
     has: page.getByRole("heading", { name: "住宿或锁房记录" })
   });
@@ -959,7 +961,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(page.getByRole("dialog", { name: "选中对象上下文" })).toBeHidden();
   const parentStart = roomCell(page, roomId, arrivalDate);
   const parentPopover = await openDayPopover(page, parentStart);
-  await parentPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await parentPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   await expect(conflictSection.locator(".room-status-conflict-list > li")).toHaveCount(2);
   await expect(conflictSection).toContainText("已有住宿，不能重复安排");
   await expect(conflictSection).not.toContainText(/unit_room_|Block|Claim|conflict/i);
@@ -972,7 +975,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedBInterval.click();
-  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
   const siblingReleaseReceipt = await previewAndConfirm(page, [
     "完整释放这条维修锁房"
@@ -983,7 +987,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedAInterval.click();
-  await rangePopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
   const releaseReceipt = await previewAndConfirm(page, [
     "完整释放这条维修锁房"
@@ -1333,14 +1338,11 @@ test("split-bed parent shows debt, status slots, ratio, and nicknames without ov
   await expect(historicalArrearsPopover.locator(".room-status-mark")).toContainText("已结单");
   await expect(historicalArrearsPopover.locator(".room-status-mobile-attention")).toHaveText("欠款");
   await expect(historicalArrearsPopover.getByText("欠款", { exact: true })).toHaveCount(1);
-  await historicalArrearsPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
-  const historicalArrearsContext = page.getByRole("dialog", { name: "选中对象上下文" });
-  await expect(historicalArrearsContext.locator(".room-status-context-header-actions .room-status-mark"))
-    .toContainText("已结单");
-  await expect(historicalArrearsContext.locator(".room-status-context-header-actions .room-status-mobile-attention"))
-    .toHaveText("欠款");
-  await expect(historicalArrearsContext.locator(".room-status-context-header-actions").getByText("欠款", { exact: true }))
-    .toHaveCount(1);
+  await historicalArrearsPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开订单详情", exact: true }).click();
+  const historicalArrearsContext = page.getByRole("dialog", { name: "订单详情", exact: true });
+  await expect(historicalArrearsContext.locator(".room-status-context-header")).toContainText("已退房");
+  await expect(historicalArrearsContext.getByRole("region", { name: "完整住宿", exact: true })).toContainText("差额");
   await historicalArrearsContext.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
 });
 
@@ -1633,7 +1635,7 @@ test("desktop range selection, fixed 30-night start-date navigation, filtered-em
   const rangePopover = page.getByTestId("room-status-quick-popover");
   await expect(rangePopover).toBeVisible();
   await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
-  await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "预订", exact: true }).click();
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(candidate!.arrivalDate);
   await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(candidate!.departureDate);
 
@@ -1747,7 +1749,8 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   });
 
   const quickPopover = await openDayPopover(page, roomCell(page, candidate!.id, longArrival));
-  await quickPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await quickPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   const selectionDrawer = page.locator("dialog.room-status-view-drawer");
   await expect(selectionDrawer).toBeVisible();
   const departure117 = addDays(longArrival, 117);
@@ -1951,7 +1954,7 @@ test("desktop keeps room status writable when the client clock is ahead of the s
   await expectDesktopGrid(page);
   const cell = firstAvailableRoomStatusCell(page, board);
   const popover = await openDayPopover(page, cell);
-  await expect(popover.getByRole("button", { name: "创建订单", exact: true })).toBeEnabled();
+  await expect(popover.getByRole("button", { name: "预订", exact: true })).toBeEnabled();
   await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeEnabled();
   const responsesBeforeRenewal = roomStatusResponses;
 
@@ -1959,7 +1962,7 @@ test("desktop keeps room status writable when the client clock is ahead of the s
 
   expect(roomStatusResponses).toBeGreaterThan(responsesBeforeRenewal);
   await expect(popover).toBeVisible();
-  await expect(popover.getByRole("button", { name: "创建订单", exact: true })).toBeEnabled();
+  await expect(popover.getByRole("button", { name: "预订", exact: true })).toBeEnabled();
   await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeEnabled();
   await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
 });
@@ -2299,7 +2302,7 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await expect(preservedCell).toHaveAttribute("aria-label", preservedAccessibleName!);
     const refreshingPopover = await openDayPopover(page, preservedCell);
     await expect(refreshingPopover).toContainText("可售");
-    await expect(refreshingPopover.getByRole("button", { name: "创建订单", exact: true })).toBeDisabled();
+    await expect(refreshingPopover.getByRole("button", { name: "预订", exact: true })).toBeDisabled();
     await expect(refreshingPopover.getByRole("button", { name: "维修锁房", exact: true })).toBeDisabled();
     await expect(refreshingPopover.locator(".room-status-quick-gate")).toHaveCount(0);
     await page.keyboard.press("Escape");
@@ -2311,7 +2314,7 @@ test("desktop stale and unknown states fail closed without mocked room-status da
   await expect(page.getByRole("button", { name: "刷新房态", exact: true })).toBeVisible();
 
   const quickPopover = await openDayPopover(page, preservedCell);
-  await quickPopover.getByRole("button", { name: "创建订单", exact: true }).click();
+  await quickPopover.getByRole("button", { name: "预订", exact: true }).click();
   await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeVisible();
 
   try {
@@ -2493,7 +2496,8 @@ test("READ Web principal receives the real projection without business write act
     && unit.intervals.every((interval) => interval.allowedActions.every((action) => action.code === "OPEN_ORDER")))).toBe(true);
 
   const quickPopover = await openDayPopover(page, firstAvailableRoomStatusCell(page, board));
-  await quickPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await quickPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   const actionRegion = page.locator(".room-status-context-actions");
   await expect(actionRegion).toContainText("当前账号只有查看权限，不能补录住宿或执行其他写入");
   for (const action of ["创建正常住宿订单", "创建免费入住", "放置维修锁房"]) {
@@ -2508,7 +2512,8 @@ test("room-status responsive layouts keep the matrix bounded through tablet and 
   const { board } = await login(page);
 
   const quickPopover = await openDayPopover(page, firstAvailableRoomStatusCell(page, board));
-  await quickPopover.getByRole("button", { name: "查看房态记录", exact: true }).click();
+  await quickPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
 
   for (const viewport of [
     { width: 1440, height: 900, name: "1440" },
@@ -2644,7 +2649,7 @@ test("room-status reload LCP and a real fixed 30-night grid stay within the inte
   const rangePopover = page.getByTestId("room-status-quick-popover");
   await expect(rangePopover).toBeVisible();
   await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
-  const createButton = rangePopover.getByRole("button", { name: "创建订单", exact: true });
+  const createButton = rangePopover.getByRole("button", { name: "预订", exact: true });
   await expect(createButton).toBeVisible();
   await createButton.click();
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(selectionArrival);
@@ -2717,7 +2722,7 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
   const touchPopover = page.getByTestId("room-status-quick-popover");
   await expect(touchPopover).toBeVisible();
   await expect(touchPopover).toHaveAttribute("data-selection-kind", "range");
-  await touchPopover.getByRole("button", { name: "创建订单", exact: true }).click();
+  await touchPopover.getByRole("button", { name: "预订", exact: true }).click();
   const touchDrawer = page.locator("dialog.room-status-write-drawer");
   await expect(touchDrawer.getByLabel("入住日期", { exact: true })).toHaveValue(touchCandidate!.startDate);
   await expect(touchDrawer.getByLabel("退房日期", { exact: true })).toHaveValue(addDays(touchCandidate!.endDate, 1));

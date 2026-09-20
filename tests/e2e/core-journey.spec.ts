@@ -156,7 +156,7 @@ async function selectRoomStatusRange(
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", unitId);
-  await popover.getByRole("button", { name: "创建订单", exact: true }).click();
+  await popover.getByRole("button", { name: "预订", exact: true }).click();
   const writeDrawer = page.locator("dialog.room-status-write-drawer");
   await expect(writeDrawer).toBeVisible();
   await writeDrawer.getByLabel("入住日期", { exact: true }).fill(arrivalDate);

@@ -4,7 +4,87 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
+import type { CommandRequest } from "./types";
+import { CommandDialog, fundsCommandCanReturnToEdit, returnCommandDraftAfterClose } from "./ui.tsx";
 import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, temporaryOtherRoomArrangementPresentation, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+
+describe("funds confirmation return to edit", () => {
+  const request: CommandRequest = {
+    commandType: "RECORD_COLLECTION",
+    title: "登记收款",
+    description: "",
+    input: { propertyId: "property_1", orderId: "order_1", amountMinor: 2850, method: "CASH", note: "收款人甲" },
+    initialReason: { code: "RECORD_COLLECTION", note: "收款人甲" }
+  };
+  const editable = {
+    commandType: request.commandType,
+    hasEditor: true,
+    busy: false,
+    recoveryOnly: false,
+    networkUncertain: false,
+    hasConfirmationKey: false,
+    hasReceipt: false
+  };
+
+  it("allows only funds with a supplied editor before a pending or completed confirmation", () => {
+    expect(fundsCommandCanReturnToEdit(editable)).toBe(true);
+    expect(fundsCommandCanReturnToEdit({ ...editable, commandType: "RECORD_REFUND" })).toBe(true);
+    expect(fundsCommandCanReturnToEdit({ ...editable, commandType: "REPRICE_ORDER" })).toBe(false);
+    expect(fundsCommandCanReturnToEdit({ ...editable, hasEditor: false })).toBe(false);
+    for (const flag of ["busy", "recoveryOnly", "networkUncertain", "hasConfirmationKey", "hasReceipt"] as const) {
+      expect(fundsCommandCanReturnToEdit({ ...editable, [flag]: true }), flag).toBe(false);
+    }
+  });
+
+  it("renders the funds return button only for an editable request, keeping recovery and receipts on the existing path", () => {
+    const withEditor = renderToStaticMarkup(createElement(CommandDialog, {
+      request, onClose: () => {}, onReturnToEdit: () => {}
+    }));
+    const withoutEditor = renderToStaticMarkup(createElement(CommandDialog, { request, onClose: () => {} }));
+    const recovery = renderToStaticMarkup(createElement(CommandDialog, {
+      request, initialConfirmationKey: "confirm_existing", onClose: () => {}, onReturnToEdit: () => {}
+    }));
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_funds", commandId: "command_funds", executionStatus: "EXECUTED",
+      businessCommitted: true, correlationId: "correlation_funds", resourceRefs: [], factRefs: [],
+      result: { orderId: "order_1", factType: "COLLECTION", method: "CASH", amount: { minorUnits: 2850, currency: "CNY" } }
+    };
+    const completed = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(CommandDialog, {
+      request, initialReceipt: receipt, onClose: () => {}, onReturnToEdit: () => {}
+    })));
+    expect(withEditor).toContain('data-testid="command-return-to-edit"');
+    expect(withEditor).toContain("返回修改");
+    expect(withoutEditor).not.toContain('data-testid="command-return-to-edit"');
+    expect(recovery).not.toContain('data-testid="command-return-to-edit"');
+    expect(completed).not.toContain('data-testid="command-return-to-edit"');
+  });
+
+  it("waits for asynchronous command cleanup before restoring the exact draft", async () => {
+    let finishClose: () => void = () => {};
+    const closeGate = new Promise<void>((resolve) => { finishClose = resolve; });
+    const events: string[] = [];
+    let restored: CommandRequest | undefined;
+    const returning = returnCommandDraftAfterClose(request, async () => {
+      events.push("close-started");
+      await closeGate;
+      events.push("close-finished");
+    }, (draft) => { restored = draft; events.push("draft-restored"); });
+    expect(events).toEqual(["close-started"]);
+    expect(restored).toBeUndefined();
+    finishClose();
+    await returning;
+    expect(events).toEqual(["close-started", "close-finished", "draft-restored"]);
+    expect(restored).toBe(request);
+  });
+
+  it("does not reopen an editor if cleanup fails", async () => {
+    let restored = false;
+    await expect(returnCommandDraftAfterClose(request, async () => {
+      throw new Error("恢复清理失败");
+    }, () => { restored = true; })).rejects.toThrow("恢复清理失败");
+    expect(restored).toBe(false);
+  });
+});
 
 class MemoryStorage {
   readonly values = new Map<string, string>();

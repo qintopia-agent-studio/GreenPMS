@@ -72,7 +72,7 @@ test("history candidates load only on demand and recover without losing prior pa
     await expect(cell).toBeVisible();
     await cell.focus();
     await page.keyboard.press("Enter");
-    await page.getByTestId("room-status-quick-popover").getByRole("button", { name: "创建订单", exact: true }).click();
+    await page.getByTestId("room-status-quick-popover").getByRole("button", { name: "预订", exact: true }).click();
     drawer = page.locator("dialog.room-status-write-drawer");
   }
   await drawer.getByLabel("入住日期", { exact: true }).fill(arrival);

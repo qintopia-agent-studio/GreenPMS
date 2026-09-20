@@ -1,6 +1,9 @@
+import { openQuickPopoverOrderDrawer } from "./quick-popover-helpers";
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import type { RoomStatusBoardDto } from "@qintopia/contracts";
-import { prepareU2Acceptance, type U2AcceptanceFixture } from "./setup-u2-acceptance.ts";
+import type { U2AcceptanceFixture } from "./setup-u2-acceptance.ts";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
@@ -155,9 +158,7 @@ async function expectDayPopover(popover: Locator, unitId: string): Promise<void>
 }
 
 async function selectQuickPopoverOrder(popover: Locator, nickname: string): Promise<void> {
-  const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: nickname });
-  await expect(orderOption).toHaveCount(1);
-  await orderOption.click();
+  await openQuickPopoverOrderDrawer(popover, nickname);
 }
 
 async function dragRoomStatusRange(page: Page, unitId: string, startDate: string, endDate: string): Promise<void> {
@@ -180,12 +181,22 @@ async function dragRoomStatusRange(page: Page, unitId: string, startDate: string
 }
 
 test.beforeAll(async ({}, workerInfo) => {
-  fixture = await prepareU2Acceptance(e2eDatabaseUrl, {
-    reset: false,
-    dayOffset: fixtureDayOffset
-      + (workerInfo.project.name === "mobile" ? 10 : 0)
-      + workerInfo.workerIndex * 20
+  const dayOffset = fixtureDayOffset
+    + (workerInfo.project.name === "mobile" ? 10 : 0)
+    + workerInfo.workerIndex * 20;
+  // Keep the ESM database fixture out of Playwright's CommonJS transform.
+  const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { prepareU2Acceptance } from "./tests/e2e/setup-u2-acceptance.ts";
+    const fixture = await prepareU2Acceptance(process.env.E2E_DATABASE_URL, {
+      reset: false, dayOffset: Number(process.env.U2_FIXTURE_DAY_OFFSET)
+    });
+    process.stdout.write(JSON.stringify(fixture));
+  `], {
+    cwd: process.cwd(),
+    env: { ...process.env, E2E_DATABASE_URL: e2eDatabaseUrl, U2_FIXTURE_DAY_OFFSET: String(dayOffset) },
+    timeout: 120_000, maxBuffer: 10 * 1024 * 1024
   });
+  fixture = JSON.parse(stdout) as U2AcceptanceFixture;
 });
 
 test("U2 desktop empty cell popover stays in view and Escape restores the exact cell and both scroll axes", async ({ page }, testInfo) => {
@@ -224,9 +235,9 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
   await expect(popover.locator("header strong")).toHaveText(targetUnitLabel);
   await expect(viewDrawer).toBeHidden();
   await expect(writeDrawer).toBeHidden();
-  await expect(popover.getByRole("button", { name: "创建订单", exact: true })).toBeVisible();
+  await expect(popover.getByRole("button", { name: "预订", exact: true })).toBeVisible();
   await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeVisible();
-  await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
+  await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toHaveCount(0);
   await expect(popover).not.toContainText(/清洁|房务/);
 
   const geometry = await popover.evaluate((element) => {
@@ -256,7 +267,7 @@ test("U2 desktop empty cell popover stays in view and Escape restores the exact 
   expect(geometry.top).toBeGreaterThanOrEqual(7);
   expect(geometry.right).toBeLessThanOrEqual(geometry.width - 7);
   expect(geometry.bottom).toBeLessThanOrEqual(geometry.height - 7);
-  expect(geometry.popoverWidth).toBeLessThanOrEqual(280);
+  expect(geometry.popoverWidth).toBeLessThanOrEqual(300);
   expect(geometry.top).toBeGreaterThanOrEqual(geometry.rowBottom + 7);
   expect(geometry.titleFits).toBe(true);
   expect(geometry.titleEndsBeforeClose).toBe(true);
@@ -316,13 +327,14 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
     }
     const boardWidth = await page.locator(".room-status-grid-section").evaluate((element) => element.getBoundingClientRect().width);
     const { trigger, popover } = await openWholeRoomPopover(page);
-    await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(1);
-    await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
+    await expect(popover.getByRole("region", { name: "订单快捷操作", exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(popover.getByRole("button", { name: "查看房态记录", exact: true })).toHaveCount(0);
     await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
 
     const drawer = page.locator("dialog.modal-drawer");
     await expect(drawer).toBeVisible();
-    await expect(drawer.locator(".modal-header button")).toBeFocused();
+    // The shared drawer focuses its first control, including the optional AI entry.
+    await expect(drawer.locator(".modal-header button").first()).toBeFocused();
     const context = drawer.locator(".room-status-order-context");
     await expect(context.getByRole("heading", { name: "小川的住宿订单", exact: true })).toBeVisible();
     await expect(context.getByRole("heading", { name: "原始预订安排", exact: true })).toBeVisible();
@@ -344,11 +356,13 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
 
     const correctionAction = context.getByRole("button", { name: "更正资料", exact: true }).first();
     await expect(correctionAction).toBeEnabled();
-    await expect(correctionAction).toBeEnabled();
 
     await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.getByRole("button", { name: "打开订单详情", exact: true }).click();
     await expect(drawer).toBeVisible();
-    await drawer.getByRole("button", { name: "关闭", exact: true }).click();
+    await drawer.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
     await expect(drawer).toBeHidden();
     await expect(trigger).toBeFocused();
   }
@@ -418,13 +432,14 @@ test("U2 quick popover contains a legal 200-character unbroken occupant label", 
 
   const { popover } = await openWholeRoomPopover(page);
   const longLabel = "U".repeat(200);
-  await popover.locator(".room-status-quick-orders strong").evaluate((element, value) => {
+  await expect(popover.locator(".room-status-quick-order-heading > strong")).toBeVisible();
+  await popover.locator(".room-status-quick-order-heading > strong").evaluate((element, value) => {
     element.textContent = value;
   }, longLabel);
-  await expect(popover.locator(".room-status-quick-orders strong")).toHaveText(longLabel);
+  await expect(popover.locator(".room-status-quick-order-heading > strong")).toHaveText(longLabel);
   const geometry = await popover.evaluate((element) => {
-    const button = element.querySelector<HTMLElement>(".room-status-quick-orders button");
-    const label = element.querySelector<HTMLElement>(".room-status-quick-orders strong");
+    const button = element.querySelector<HTMLElement>(".room-status-quick-order-heading");
+    const label = element.querySelector<HTMLElement>(".room-status-quick-order-heading > strong");
     if (!button || !label) throw new Error("快捷操作框缺少订单按钮或住客名称");
     return {
       popoverWidth: element.getBoundingClientRect().width,
@@ -433,7 +448,7 @@ test("U2 quick popover contains a legal 200-character unbroken occupant label", 
       labelFits: label.scrollWidth <= label.clientWidth
     };
   });
-  expect(geometry).toEqual({ popoverWidth: 280, popoverFits: true, buttonFits: true, labelFits: true });
+  expect(geometry).toEqual({ popoverWidth: 300, popoverFits: true, buttonFits: true, labelFits: true });
 });
 
 test("U2 selecting a new room-status cell invalidates the old order drawer before opening the quick popover", async ({ page }, testInfo) => {
@@ -605,16 +620,14 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   await uniqueCell.focus();
   await page.keyboard.press("Enter");
   await expectDayPopover(popover, fixture.wholeRoom.roomId);
-  await expect(popover.locator(".room-status-quick-orders button")).toHaveCount(1);
+  await expect(popover.getByRole("region", { name: "订单快捷操作", exact: true })).toBeVisible();
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
   for (let dayOffset = 0; dayOffset < 3; dayOffset += 1) {
     await expect(roomCell(page, fixture.wholeRoom.roomId, addDays(fixture.dates.arrivalDate, dayOffset)))
       .toHaveClass(/is-stay-selected/);
   }
-  const wholeRoomOrder = orderResponse(page, fixture.wholeRoom.orderId);
   await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
-  await wholeRoomOrder;
   const uniqueOrderDrawer = page.locator("dialog.room-status-view-drawer");
   await expect(uniqueOrderDrawer).toBeVisible();
   await expect(staleStart).not.toHaveClass(/is-selected/);
@@ -733,14 +746,14 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
       metaEndsBeforeClose: metaBox.right <= closeBox.left
     };
   });
-  expect(placement.width).toBeLessThanOrEqual(280);
+  expect(placement.width).toBeLessThanOrEqual(300);
   expect(
     placement.top >= placement.rowBottom + 7 || placement.bottom <= placement.rowTop - 7,
     `快捷操作框不得覆盖触发房源行：${JSON.stringify(placement)}`
   ).toBe(true);
   expect(placement.metaFits).toBe(true);
   expect(placement.metaEndsBeforeClose).toBe(true);
-  await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
+  await rangePopover.getByRole("button", { name: "预订", exact: true }).click();
   await expect(drawer).toBeVisible();
   await expect(drawer).toHaveClass(/room-status-write-drawer/);
   await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(targetDate);

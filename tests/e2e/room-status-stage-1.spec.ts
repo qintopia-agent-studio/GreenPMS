@@ -102,7 +102,7 @@ async function selectDraft(page: Page, unitId: string, arrivalDate: string, depa
       await expect(popover).toBeVisible({ timeout: 5_000 });
       await expect(popover).toHaveAttribute("data-unit-id", unitId);
       await expect(popover).toHaveAttribute("data-selection-kind", "day");
-      await popover.getByRole("button", { name: "创建订单", exact: true }).click({ timeout: 5_000 });
+      await popover.getByRole("button", { name: "预订", exact: true }).click({ timeout: 5_000 });
       await expect(drawer).toBeVisible({ timeout: 5_000 });
       break;
     } catch (error) {
@@ -211,7 +211,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await expect(rangePopover).toHaveAttribute("data-unit-id", "unit_room_102_bed_b");
     await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
     await expect(rangePopover).toContainText("4晚");
-    await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
+    await rangePopover.getByRole("button", { name: "预订", exact: true }).click();
     await expect(drawer).toBeVisible();
     await expect(drawer.getByLabel("入住日期", { exact: true })).toHaveValue(draftArrivalDate);
     await expect(drawer.getByLabel("退房日期", { exact: true })).toHaveValue(draftDepartureDate);
@@ -485,7 +485,7 @@ test.describe("第 1 步 / 阶段 1 自动报价", () => {
     await expect(rangePopover).toHaveAttribute("data-selection-kind", "range");
     await expect(rangePopover).toContainText("4晚");
     expect(quotePayloads).toHaveLength(0);
-    await rangePopover.getByRole("button", { name: "创建订单", exact: true }).click();
+    await rangePopover.getByRole("button", { name: "预订", exact: true }).click();
     await expect(page.getByLabel("入住日期", { exact: true })).toHaveValue(draftArrivalDate);
     await expect(page.getByLabel("退房日期", { exact: true })).toHaveValue(draftDepartureDate);
     await expect(page.getByTestId("quote-result")).toContainText("4 晚", { timeout: 15_000 });

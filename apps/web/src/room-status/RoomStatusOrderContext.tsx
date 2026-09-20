@@ -252,7 +252,7 @@ export function RoomStatusOrderContext({
     action.code !== "CORRECT_ORDER_OCCUPANT" && action.code !== "CHECK_IN" && action.code !== "CHECK_OUT"
       && action.code !== "RESCHEDULE_STAY" && action.code !== "EXTEND_STAY" && action.code !== "SHORTEN_STAY"
       && action.code !== "MOVE_UNIT" && action.code !== "CANCEL_ORDER" && action.code !== "MARK_NO_SHOW"
-      && action.code !== "REVOKE_CHECK_IN" && action.code !== "REVOKE_CHECK_OUT" && action.code !== "REVERSE_FACT"
+      && action.code !== "REVOKE_CHECK_IN" && action.code !== "REVOKE_CHECK_OUT"
       && action.code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
   ));
   const dateActionBlockedReasons = [...new Set(dateActionStates
@@ -335,6 +335,11 @@ export function RoomStatusOrderContext({
           ? <button type="button" className="room-status-text-button" onClick={() => onOpenMember(memberProfileTarget)}>查看会员档案<ArrowRight aria-hidden="true" size={15} /></button>
           : <Link className="room-status-text-button" to={`/members?memberId=${encodeURIComponent(memberProfileTarget.memberId)}&contractId=${encodeURIComponent(memberProfileTarget.contractId)}`}>查看会员档案<ArrowRight aria-hidden="true" size={15} /></Link>}
       </section> : null}
+
+      {!(matchingMemberView && matchingMembershipOrder && memberProfileTarget) && (view.order.member_id || view.membershipConversion?.memberId) ? <Link
+        className="room-status-text-button"
+        to={`/members?memberId=${encodeURIComponent(view.order.member_id ?? view.membershipConversion!.memberId)}`}
+      >查看会员档案<ArrowRight aria-hidden="true" size={15} /></Link> : null}
 
       {currentReleaseFeatures.cleaningWorkflow && view.cleaningTasks.length ? <section className="room-status-context-section" aria-labelledby="room-status-order-cleaning-heading">
         <div className="room-status-context-section-heading"><Sparkles aria-hidden="true" size={17} /><h3 id="room-status-order-cleaning-heading">清洁任务</h3></div>

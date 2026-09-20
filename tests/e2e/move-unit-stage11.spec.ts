@@ -1,3 +1,4 @@
+import { openQuickPopoverOrderDrawer } from "./quick-popover-helpers";
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import {
   prepareStage11Acceptance,
@@ -136,9 +137,7 @@ async function openMoveFromRoomStatus(page: Page, stay: Stage11MoveFixture): Pro
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", stay.source.id);
-  const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: stay.nickname });
-  await expect(orderOption).toHaveCount(1);
-  await orderOption.click();
+  await openQuickPopoverOrderDrawer(popover, stay.nickname);
   const context = page.locator(".room-status-order-context").filter({ hasText: stay.nickname });
   await expect(context).toBeVisible({ timeout: 30_000 });
   await context.getByRole("button", { name: "换房", exact: true }).click();
