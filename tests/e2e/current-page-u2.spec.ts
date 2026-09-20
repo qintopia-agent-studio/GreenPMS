@@ -333,7 +333,8 @@ test("U2 desktop order popover opens an overlay drawer without shrinking the boa
 
     const drawer = page.locator("dialog.modal-drawer");
     await expect(drawer).toBeVisible();
-    await expect(drawer.locator(".modal-header button")).toBeFocused();
+    // The shared drawer focuses its first control, including the optional AI entry.
+    await expect(drawer.locator(".modal-header button").first()).toBeFocused();
     const context = drawer.locator(".room-status-order-context");
     await expect(context.getByRole("heading", { name: "小川的住宿订单", exact: true })).toBeVisible();
     await expect(context.getByRole("heading", { name: "原始预订安排", exact: true })).toBeVisible();

@@ -76,3 +76,7 @@
 - 52 项快捷框／订单摘要／原抽屉单测、TypeScript、Web 构建及 diff --check 通过。5 项快捷操作端到端复验通过；多订单所选状态显示补充后，该场景再次通过。另有 3 项 U2 回归通过：空房弹出框定位与焦点、200 字长名称、三个桌面尺寸的原抽屉覆盖布局和关闭焦点恢复。
 - 精简版证据保留在 `.local-workspace/quick-actions/test-results-compact/`、`test-results-compact-u2-final/`、`test-results-compact-final-pass/` 和 `test-results-compact-drawer-network/`。旧 U2 测试已改为等待异步订单摘要，并从原页面入口打开抽屉；未改变产品读取时限或业务门禁。途中遇到读取延迟及本机进程快照超时，保留失败证据，最终定向复验通过。
 - 人工合成验收仍为 `http://127.0.0.1:4252/`，C01 普通预订与 D01 会员卡片已进行真实页面目视检查；右侧抽屉只补冲销和会员档案入口。用户随后明确要求提交代码及 PR；业务逐项人工操作结果未另行补报，不将自动检查代记为人工通过。
+
+## 提交前同步验证
+
+同步至 main `bd5d111`（v1.6.0）后，类型检查、构建（含 release:check）及 381 项相关单测通过，8 项 PR 格式自测通过。针对 main 新增的抽屉 AI 按钮，仅调整 U2 的首个控件焦点定位；快捷收款填写／返回修改／确认／刷新与三个桌面尺寸抽屉焦点定向复验均通过。证据保留在 `.local-workspace/quick-actions/test-results-pr-main-sync/` 和 `test-results-pr-main-drawer/`。
