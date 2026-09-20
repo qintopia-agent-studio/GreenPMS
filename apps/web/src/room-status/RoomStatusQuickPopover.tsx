@@ -225,6 +225,75 @@ function QuickOrderActionIcon({ code }: { code: RoomStatusQuickOrderAction }) {
   return <Icon aria-hidden="true" size={14} />;
 }
 
+function QuickOrderActionButton({ item, disabledReason, onAction }: {
+  item: RoomStatusQuickOrderActionItem;
+  disabledReason: string | undefined;
+  onAction: ((action: RoomStatusQuickOrderAction) => void) | undefined;
+}) {
+  const reasonId = useId();
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 0, top: 0 });
+  const disabled = !item.enabled || !onAction;
+  const reason = disabled ? disabledReason : undefined;
+  const showReason = Boolean(reason && open);
+
+  useLayoutEffect(() => {
+    if (!showReason) return;
+    const reposition = () => {
+      const trigger = triggerRef.current?.getBoundingClientRect();
+      const tooltip = tooltipRef.current?.getBoundingClientRect();
+      if (!trigger || !tooltip) return;
+      const above = trigger.top - tooltip.height - 6;
+      setPosition({
+        left: Math.max(VIEWPORT_MARGIN, Math.min(trigger.left + (trigger.width - tooltip.width) / 2,
+          window.innerWidth - tooltip.width - VIEWPORT_MARGIN)),
+        top: above >= VIEWPORT_MARGIN ? above
+          : Math.max(VIEWPORT_MARGIN, Math.min(trigger.bottom + 6, window.innerHeight - tooltip.height - VIEWPORT_MARGIN))
+      });
+    };
+    reposition();
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+  }, [showReason, reason]);
+
+  return <div
+    ref={triggerRef}
+    className="room-status-action-with-reason"
+    tabIndex={reason ? 0 : undefined}
+    role={reason ? "group" : undefined}
+    aria-label={reason ? `${item.label}（不可用）` : undefined}
+    aria-describedby={reason ? reasonId : undefined}
+    onMouseEnter={() => setOpen(true)}
+    onMouseLeave={() => setOpen(false)}
+    onFocus={() => setOpen(true)}
+    onBlur={() => setOpen(false)}
+    onClick={() => { if (reason) setOpen(true); }}
+    onKeyDown={(event) => {
+      if (event.key !== "Escape" || !showReason) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    }}
+  >
+    <button
+      type="button"
+      className={`button ${item.primary ? "button-primary" : "button-secondary"}`}
+      disabled={disabled}
+      data-room-status-quick-action={item.code}
+      aria-describedby={reason ? reasonId : undefined}
+      onClick={() => { if (item.enabled && onAction) onAction(item.code); }}
+    ><QuickOrderActionIcon code={item.code} />{item.label}</button>
+    {reason ? <span ref={tooltipRef} id={reasonId} role="tooltip" hidden={!showReason}
+      className="room-status-quick-action-tooltip" style={position}>{reason}</span> : null}
+  </div>;
+}
+
 export function RoomStatusQuickOrderContent({ view, memberView, option, loading = false, showStatus = false, writeBlock, onAction }: {
   view: OrderViewDto;
   memberView?: MemberViewDto | undefined;
@@ -234,7 +303,6 @@ export function RoomStatusQuickOrderContent({ view, memberView, option, loading 
   writeBlock?: { reason: string } | undefined;
   onAction?: ((action: RoomStatusQuickOrderAction) => void) | undefined;
 }) {
-  const id = useId();
   const actions = roomStatusQuickOrderActions(view, writeBlock, loading);
   const funds = roomStatusQuickOrderFundsFacts(view).filter((fact) => fact.label !== "退款参考");
   const channel = roomStatusQuickOrderChannelFacts(view).filter((fact) => fact.label !== "渠道订单号");
@@ -246,25 +314,11 @@ export function RoomStatusQuickOrderContent({ view, memberView, option, loading 
   const occupant = view.occupants.find((candidate) => candidate.role === "PRIMARY");
   const guest = occupant?.nickname?.trim() || occupant?.fullName?.trim() || option.label;
   function actionButton(item: RoomStatusQuickOrderActionItem) {
-    const reasonId = `${id}-${item.code}`;
-    const disabled = !item.enabled || !onAction;
     const reason = item.disabledReason === writeBlock?.reason || (loading && item.disabledReason === "正在更新订单，请稍候。") ? undefined : item.disabledReason;
-    return <div key={item.code} className="room-status-action-with-reason">
-      <button
-        type="button"
-        className={`button ${item.primary ? "button-primary" : "button-secondary"}`}
-        disabled={disabled}
-        data-room-status-quick-action={item.code}
-        aria-describedby={disabled && reason ? reasonId : undefined}
-        onClick={() => { if (item.enabled && onAction) onAction(item.code); }}
-      ><QuickOrderActionIcon code={item.code} />{item.label}</button>
-    </div>;
+    return <QuickOrderActionButton key={item.code} item={item} disabledReason={reason} onAction={onAction} />;
   }
   return <section className="room-status-quick-order-content" aria-label="订单快捷操作" aria-busy={loading}>
     {actions.primary.length ? <div className="room-status-quick-order-actions">{actions.primary.map(actionButton)}</div> : null}
-    {actions.primary.filter((item) => !item.enabled && item.disabledReason && item.disabledReason !== writeBlock?.reason && !loading).map((item) => <p
-      key={item.code} id={`${id}-${item.code}`} className="room-status-quick-action-reason"
-    >{item.disabledReason}</p>)}
     <div className="room-status-quick-order-heading">
       <strong>{guest}</strong>
       <span>{showStatus ? `${businessStatusLabel(view.order.status)} · ` : ""}{sourceLabel}</span>
@@ -304,6 +358,9 @@ export function RoomStatusQuickPopover({
   onReleaseMaintenance,
   onRefresh,
   onOpenRecovery,
+  autoFocus = true,
+  onHoverEnter,
+  onHoverLeave,
   onClose
 }: {
   anchor: HTMLElement;
@@ -328,6 +385,9 @@ export function RoomStatusQuickPopover({
   onReleaseMaintenance: (action: RoomStatusActionDto) => void;
   onRefresh?: () => void;
   onOpenRecovery?: () => void;
+  autoFocus?: boolean;
+  onHoverEnter?: () => void;
+  onHoverLeave?: () => void;
   onClose: (reason: RoomStatusQuickPopoverCloseReason) => void;
 }) {
   const titleId = useId();
@@ -454,12 +514,12 @@ export function RoomStatusQuickPopover({
       frame = requestAnimationFrame(trackGeometry);
     };
     frame = requestAnimationFrame(trackGeometry);
-    node.focus({ preventScroll: true });
+    if (autoFocus) node.focus({ preventScroll: true });
     return () => {
       cancelAnimationFrame(frame);
       resizeObserver.disconnect();
     };
-  }, [anchor, reposition, rowAnchor]);
+  }, [anchor, autoFocus, reposition, rowAnchor]);
 
   useEffect(() => {
     anchor.setAttribute("aria-expanded", "true");
@@ -491,13 +551,25 @@ export function RoomStatusQuickPopover({
       }
       close(false);
     };
+    const onWheel = (event: WheelEvent) => {
+      if (!autoFocus && !(event.target instanceof Node && popoverRef.current?.contains(event.target))) close(false);
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (autoFocus || event.defaultPrevented || event.key !== "Escape") return;
+      event.preventDefault();
+      close(Boolean(popoverRef.current?.contains(document.activeElement)));
+    };
     document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onEscape);
     window.addEventListener("resize", onViewportChange);
     window.addEventListener("scroll", onViewportChange, true);
+    window.addEventListener("wheel", onWheel, { capture: true, passive: true });
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onEscape);
       window.removeEventListener("resize", onViewportChange);
       window.removeEventListener("scroll", onViewportChange, true);
+      window.removeEventListener("wheel", onWheel, true);
     };
   });
 
@@ -514,6 +586,10 @@ export function RoomStatusQuickPopover({
       data-testid="room-status-quick-popover"
       data-unit-id={anchor.dataset.unitId}
       data-selection-kind={selection ? "range" : "day"}
+      data-trigger={autoFocus ? "explicit" : "hover"}
+      onPointerEnter={onHoverEnter}
+      onPointerLeave={onHoverLeave}
+      onFocus={onHoverEnter}
       onKeyDown={(event) => {
         if (event.key !== "Escape") return;
         event.preventDefault();

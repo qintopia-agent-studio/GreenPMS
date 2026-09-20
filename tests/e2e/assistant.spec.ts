@@ -1,4 +1,5 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
+import { openQuickPopoverOrderDrawer } from "./quick-popover-helpers";
 import { assistantGuides } from "../../packages/contracts/src/assistant.ts";
 import type { OrderViewDto } from "../../apps/web/src/types.ts";
 const propertyId = "prop_qintopia_demo";
@@ -260,7 +261,7 @@ test("streamed text appears before completion; stop and failure discard the draf
 });
 
 for (const openOrder of ["order-first", "assistant-first"] as const) test(`order read drawers stay independent: ${openOrder}`, async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "covers the non-modal desktop drawer and responsive transition in one journey");
+  test.skip(testInfo.project.name !== "desktop", "covers the modal desktop drawer and responsive transition in one journey");
   await enabledUi(page);
   await page.route("**/api/v1/assistant/chat", route => route.fulfill({ json: {
     conversationId: "independent-drawers", text: Array.from({ length: 30 }, (_, i) => `第 ${i + 1} 项：请在订单页面核对操作。`).join("\n\n"), entries: []
@@ -282,11 +283,11 @@ for (const openOrder of ["order-first", "assistant-first"] as const) test(`order
   const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${details.currentSegment.inventoryUnitId}"][data-service-date="${details.currentSegment.arrivalDate}"]`);
   await cell.focus(); await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
-  await popover.locator(".room-status-quick-orders button").filter({ hasText: "助手回归" }).click();
+  await openQuickPopoverOrderDrawer(popover, "助手回归");
   const drawer = page.locator("dialog[open]").last();
   await expect(drawer).toBeVisible();
-  expect(await drawer.evaluate(el => el.matches(":modal"))).toBe(false);
-  if (openOrder === "order-first") await trigger.click();
+  expect(await drawer.evaluate(el => el.matches(":modal"))).toBe(true);
+  if (openOrder === "order-first") await drawer.locator(":scope > .modal-shell").getByRole("button", { name: "AI 助手", exact: true }).click();
   await expect(drawer).toBeVisible();
   if (openOrder === "order-first") await prepareConversation();
   await expect.poll(() => messages.evaluate(el => el.scrollTop)).toBe(100);
@@ -302,9 +303,9 @@ for (const openOrder of ["order-first", "assistant-first"] as const) test(`order
     await body.evaluate(el => { el.scrollTop = 100; });
     const scrollTop = await body.evaluate(el => el.scrollTop);
     await page.getByLabel("向 AI 助手提问").fill("保留助手草稿");
-    // In the stacked layout the order covers the page header, so use its local switch.
-    const layoutTrigger = width > 860 ? trigger : drawer.locator(":scope > .modal-shell").getByRole("button", { name: "AI 助手", exact: true });
-    // Cover both the panel close button and the page-level toggle, including its icon.
+    // The calendar is inert while the drawer is open; use its local switch.
+    const layoutTrigger = drawer.locator(":scope > .modal-shell").getByRole("button", { name: "AI 助手", exact: true });
+    // Cover both the panel close button and the drawer toggle, including its icon.
     for (const closeButton of [panel.getByRole("button", { name: "关闭 AI 助手" }), layoutTrigger.locator("svg")]) {
       await closeButton.click();
       await expect(panel).toBeHidden();
@@ -334,18 +335,22 @@ for (const openOrder of ["order-first", "assistant-first"] as const) test(`order
   await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("仅编辑助手草稿");
   await expect.poll(() => messages.evaluate(el => el.scrollTop)).toBe(100);
   await expect(panel.locator(".assistant-message-assistant")).toContainText("第 30 项");
+  const reopenBounds = (await page.getByRole("button", { name: "打开订单详情", exact: true }).boundingBox())!;
+  const panelBounds = (await panel.boundingBox())!;
+  expect(reopenBounds.y + reopenBounds.height).toBeLessThanOrEqual(panelBounds.y);
   // Genuine outside clicks still dismiss only the read drawer.
   await page.setViewportSize({ width: 1440, height: 900 });
   await cell.press("Enter");
-  await popover.locator(".room-status-quick-orders button").filter({ hasText: "助手回归" }).click();
+  await openQuickPopoverOrderDrawer(popover, "助手回归");
   await expect(drawer).toBeVisible();
-  await page.locator(".main-content").click({ position: { x: 20, y: 20 } });
+  const background = (await page.locator(".main-content").boundingBox())!;
+  await page.mouse.click(background.x + 20, background.y + 20);
   await expect(drawer).toHaveCount(0);
   await expect(panel).toBeVisible();
   // Moving a hidden assistant between the page and a drawer must also preserve reading position.
   await panel.getByRole("button", { name: "关闭 AI 助手" }).click();
   await cell.press("Enter");
-  await popover.locator(".room-status-quick-orders button").filter({ hasText: "助手回归" }).click();
+  await openQuickPopoverOrderDrawer(popover, "助手回归");
   await expect(drawer).toBeVisible();
   await drawer.locator(":scope > .modal-shell").getByRole("button", { name: "关闭", exact: true }).first().click();
   await expect(drawer).toHaveCount(0);

@@ -248,7 +248,7 @@ describe("room-status membership and funds presentation", () => {
     expect(actions.primary.map((item) => item.code)).toEqual(["EARLY_CHECK_OUT", "VIEW_MEMBERSHIP", "ADJUST_DEPARTURE"]);
     expect([...actions.primary, ...actions.more].some((item) => item.code === "RECORD_COLLECTION" || item.code === "RECORD_REFUND")).toBe(false);
     expect(roomStatusQuickOrderNotices(current)).toEqual([
-      "本次临时安排其他整房；增加日期或再次换房需另建符合现场安排的订单。",
+      "临时跨房型：续住或再次换房需另建订单。",
       "已升级会员；后续会员收款在会员订单办理，原住宿不再追加收退款。"
     ]);
   });

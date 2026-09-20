@@ -93,7 +93,8 @@ async function openQuoteWorkbench(page: Page, candidate: ReturnType<typeof avail
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
-  await cell.click();
+  await cell.focus();
+  await cell.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", candidate.unitId);
@@ -564,7 +565,8 @@ test("U1 damaged local recovery stays blocked until the operator completes contr
 
   const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${candidate.unitId}"][data-service-date="${candidate.arrivalDate}"]`);
   await cell.scrollIntoViewIfNeeded();
-  await cell.click();
+  await cell.focus();
+  await cell.press("Enter");
   await expect(page.getByTestId("room-status-quick-popover").getByRole("button", { name: "维修锁房", exact: true })).toBeEnabled();
 });
 

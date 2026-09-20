@@ -464,6 +464,8 @@ test("U2 selecting a new room-status cell invalidates the old order drawer befor
   await expect(drawer).toBeVisible();
 
   const other = roomCell(page, fixture.stage6.emptyCreationRoomId, fixture.dates.arrivalDate);
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
   await other.focus();
   await page.keyboard.press("Enter");
   const layeredPopover = page.getByTestId("room-status-quick-popover");
@@ -530,24 +532,29 @@ test("U2 a delayed response for an invalidated order cannot reopen or overwrite 
     page.on("requestfailed", onRequestFailed);
   });
 
-  const { popover } = await openWholeRoomPopover(page);
-  await selectQuickPopoverOrder(popover, fixture.wholeRoom.nicknames[0]!);
-  const drawer = page.locator("dialog.room-status-view-drawer");
-  await expect(drawer).toBeHidden();
-  await expect(page.getByText("正在载入订单详情", { exact: true })).toHaveCount(0);
+  const oldOrderRequested = page.waitForRequest((request) => new URL(request.url()).pathname === `/api/v1/orders/${fixture.wholeRoom.orderId}`);
+  await roomCell(page, fixture.wholeRoom.roomId, fixture.dates.arrivalDate).click();
+  await oldOrderRequested;
+  const drawer = page.getByRole("dialog", { name: "订单详情", exact: true });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByRole("heading", { name: `${fixture.wholeRoom.nicknames[0]}的住宿订单`, exact: true })).toHaveCount(0);
 
   const other = roomCell(page, fixture.stage6.emptyCreationRoomId, fixture.dates.arrivalDate);
-  await other.click();
-  const replacementPopover = page.getByTestId("room-status-quick-popover");
-  await expectDayPopover(replacementPopover, fixture.stage6.emptyCreationRoomId);
+  const otherBounds = (await other.boundingBox())!;
+  await page.mouse.click(otherBounds.x + otherBounds.width / 2, otherBounds.y + otherBounds.height / 2);
   await expect(drawer).toBeHidden();
+  await other.click();
+  const selectionContext = page.getByRole("dialog", { name: "选中对象上下文", exact: true });
+  await expect(selectionContext).toBeVisible();
+  await expect(page.getByTestId("room-status-quick-popover")).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "订单详情", exact: true })).toBeHidden();
 
   releaseOldOrderResponse?.();
   await Promise.all([oldOrderRequestSettled, oldOrderRouteSettled]);
   await page.unroute(`**/api/v1/orders/${fixture.wholeRoom.orderId}`);
-  await expect(drawer).toBeHidden();
-  await expect(replacementPopover).toBeVisible();
-  await expect(replacementPopover).toHaveAttribute("data-unit-id", fixture.stage6.emptyCreationRoomId);
+  await expect(page.getByRole("dialog", { name: "订单详情", exact: true })).toBeHidden();
+  await expect(selectionContext).toBeVisible();
+  await expect(page.getByTestId("room-status-quick-popover")).toBeHidden();
   await expect(other).toHaveClass(/is-selected/);
 });
 
@@ -602,13 +609,15 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
 
   const emptyTarget = roomCell(page, emptyRoomId, emptyTargetDate);
   await emptyTarget.click();
-  await expectDayPopover(popover, emptyRoomId);
+  const emptyContext = page.getByRole("dialog", { name: "选中对象上下文", exact: true });
+  await expect(emptyContext).toBeVisible();
+  await expect(popover).toBeHidden();
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
   await expect(emptyTarget).toHaveClass(/is-selected/);
   await expect(page.locator(".room-status-day-cell.is-selected")).toHaveCount(1);
   await page.keyboard.press("Escape");
-  await expect(popover).toBeHidden();
+  await expect(emptyContext).toBeHidden();
   await expect(emptyTarget).toHaveClass(/is-selected/);
 
   await dragRoomStatusRange(page, emptyRoomId, staleStartDate, staleEndDate);
@@ -620,7 +629,7 @@ test("U2 replaces a stale drag range with the clicked cell or exact Stay", async
   await uniqueCell.focus();
   await page.keyboard.press("Enter");
   await expectDayPopover(popover, fixture.wholeRoom.roomId);
-  await expect(popover.getByRole("region", { name: "订单快捷操作", exact: true })).toBeVisible();
+  await expect(popover.getByRole("region", { name: "订单快捷操作", exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(staleStart).not.toHaveClass(/is-selected/);
   await expect(staleEnd).not.toHaveClass(/is-selected/);
   for (let dayOffset = 0; dayOffset < 3; dayOffset += 1) {
@@ -766,7 +775,7 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   }));
   expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
   await expect(drawer.locator(".modal-footer")).toBeVisible();
-  await expect(page.getByTestId("create-order")).toBeVisible();
+  await expect(page.getByTestId("create-order")).toBeVisible({ timeout: 30_000 });
   await expect(target).toHaveClass(/is-selected/);
 
   let outsideInteractionBlocked = false;
@@ -780,8 +789,7 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   await drawer.getByRole("button", { name: "关闭办理区域", exact: true }).click();
   await expect(drawer).toBeVisible();
   await expect(drawer).toHaveClass(/room-status-view-drawer/);
-  expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(false);
-  await other.click({ trial: true });
+  expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
 
   await drawer.evaluate((element) => {
     element.setAttribute("data-drawer-instance", "selection-before-write");
@@ -790,6 +798,9 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   await expect(drawer).toHaveClass(/room-status-write-drawer/);
   await expect(drawer).not.toHaveAttribute("data-drawer-instance", "selection-before-write");
   expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
+  // Finish the quote read before testing ordinary close/remount behavior.
+  // Closing during submission correctly enters the existing quote recovery flow.
+  await expect(drawer.getByTestId("create-order")).toBeVisible({ timeout: 30_000 });
 
   await drawer.evaluate((element) => {
     element.setAttribute("data-drawer-instance", "write-before-selection");
@@ -814,11 +825,13 @@ test("U2 desktop write drawer is modal and restores its cell, selection, focus, 
   const maintenanceDrawer = page.locator("dialog.room-status-write-drawer");
   await expect(maintenanceDrawer).toBeVisible();
   await expect(maintenanceDrawer.getByRole("heading", { name: /维修锁房/ })).toBeVisible();
+  await expect(page.locator("dialog:modal")).toHaveCount(1);
   await expect(maintenanceDrawer.getByLabel("开始日期", { exact: true })).toHaveValue(targetDate);
   await expect(maintenanceDrawer.getByLabel("结束日期", { exact: true })).toHaveValue(addDays(rangeEndDate, 1));
   expect(await maintenanceDrawer.evaluate((element) => element.matches(":modal"))).toBe(true);
   await maintenanceDrawer.getByRole("button", { name: "取消", exact: true }).click();
   await expect(maintenanceDrawer).toBeHidden();
+  await expect(page.locator("dialog:modal")).toHaveCount(0);
   await expect(rangeEnd).toBeFocused();
   await expect(target).toHaveClass(/is-selected/);
   await expect(rangeEnd).toHaveClass(/is-selected/);

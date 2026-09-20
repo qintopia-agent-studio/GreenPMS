@@ -156,7 +156,7 @@ export function roomStatusQuickOrderNotices(view: OrderViewDto): string[] {
     && amendment.reason_code === "TEMPORARY_OTHER_ROOM"
     && temporaryOtherRoomArrangementPresentation(record(amendment.payload)?.temporaryOtherRoomArrangement));
   const notices: string[] = [];
-  if (crossRoom || temporaryRoom) notices.push("本次临时安排其他整房；增加日期或再次换房需另建符合现场安排的订单。");
+  if (crossRoom || temporaryRoom) notices.push("临时跨房型：续住或再次换房需另建订单。");
   if (view.membershipConversion) notices.push("已升级会员；后续会员收款在会员订单办理，原住宿不再追加收退款。");
   return notices;
 }

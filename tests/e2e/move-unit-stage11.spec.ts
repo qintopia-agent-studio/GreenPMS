@@ -133,7 +133,8 @@ async function openMoveFromRoomStatus(page: Page, stay: Stage11MoveFixture): Pro
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
-  await cell.click();
+  await cell.focus();
+  await cell.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", stay.source.id);
