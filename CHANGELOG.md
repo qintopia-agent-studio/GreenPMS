@@ -2,6 +2,18 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.6.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.5.0...v1.6.0) (2026-09-20)
+
+
+### Features
+
+* **ai:** 流式响应、超时取消与订单抽屉共存修复 ([#43](https://github.com/qintopia-agent-studio/GreenPMS/issues/43)) ([ca231cd](https://github.com/qintopia-agent-studio/GreenPMS/commit/ca231cd378e7e3e08b4768e5761c749ba5840d35))
+
+
+### Documentation
+
+* 核对已发布功能并关闭过期草稿记录 ([#41](https://github.com/qintopia-agent-studio/GreenPMS/issues/41)) ([9b9c6ee](https://github.com/qintopia-agent-studio/GreenPMS/commit/9b9c6eed97f18f535b295a2910c47b8ab5412af9))
+
 ## [1.5.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.4.3...v1.5.0) (2026-09-19)
 
 
