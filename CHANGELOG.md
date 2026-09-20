@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.7.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.6.0...v1.7.0) (2026-09-20)
+
+
+### Features
+
+* **room-status:** 优化悬浮快捷框与点击抽屉交互 ([#45](https://github.com/qintopia-agent-studio/GreenPMS/issues/45)) ([318088b](https://github.com/qintopia-agent-studio/GreenPMS/commit/318088bf1eb000be8dd5a90901c0a8af639b4df7))
+* **room-status:** 精简快捷框并直达常用订单操作 ([#44](https://github.com/qintopia-agent-studio/GreenPMS/issues/44)) ([7fbd80e](https://github.com/qintopia-agent-studio/GreenPMS/commit/7fbd80e9f1011ae07ccd3005d7d152c6a70cac62))
+
 ## [1.6.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.5.0...v1.6.0) (2026-09-20)
 
 
