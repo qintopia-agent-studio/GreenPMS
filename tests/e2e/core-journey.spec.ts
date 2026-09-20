@@ -152,7 +152,8 @@ async function selectRoomStatusRange(
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
-  await cell.click();
+  await cell.focus();
+  await cell.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", unitId);
@@ -1929,10 +1930,7 @@ test("maintenance lock can be listed and released", async ({ page }, testInfo: T
   const maintenanceInterval = roomRow.getByRole("button", { name: /维修\/锁房，/ }).first();
   await expect(maintenanceInterval).toBeVisible();
   await maintenanceInterval.click();
-  const maintenancePopover = page.getByTestId("room-status-quick-popover");
-  await expect(maintenancePopover).toBeVisible();
-  await maintenancePopover.getByRole("button", { name: "查看房态记录", exact: true })
-    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.getByRole("dialog", { name: "选中对象上下文", exact: true })).toBeVisible();
   const sourceSection = page.locator("section.room-status-context-section").filter({
     has: page.getByRole("heading", { name: "住宿或锁房记录", exact: true })
   });

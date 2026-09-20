@@ -545,9 +545,7 @@ test("mouse drag selection keeps extending while the pointer crosses a continuou
   } finally {
     if (await interval.count() === 1) {
       await interval.click();
-      const actionPopover = page.getByTestId("room-status-quick-popover");
-      await actionPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
-      await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+      await expect(page.getByRole("dialog", { name: "选中对象上下文", exact: true })).toBeVisible();
       await page.locator(".room-status-context-actions").getByRole("button", { name: "释放维修锁房", exact: true }).click();
       const releaseReceipt = await previewAndConfirm(page);
       expect(releaseReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);

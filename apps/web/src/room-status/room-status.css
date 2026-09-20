@@ -1807,6 +1807,18 @@
   box-shadow: var(--shadow-dialog);
 }
 
+@media (min-width: 861px) {
+  .assistant-is-open .room-status-context-reopen {
+    right: 418px;
+  }
+}
+
+@media (max-width: 860px) {
+  .assistant-is-open .room-status-context-reopen {
+    bottom: calc(45dvh + 18px);
+  }
+}
+
 .room-status-quick-popover {
   position: fixed;
   z-index: 80;
@@ -2050,12 +2062,37 @@
   flex-shrink: 0;
 }
 
-.room-status-quick-action-reason {
-  margin: -3px 0 7px;
-  color: var(--muted);
-  font-size: 11px;
+.room-status-quick-order-actions .room-status-action-with-reason:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+
+.room-status-quick-order-actions .room-status-action-with-reason[tabindex] > button {
+  pointer-events: none;
+}
+
+.room-status-quick-action-tooltip {
+  position: fixed;
+  z-index: 81;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 16px));
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 6px 8px;
+  background: var(--text);
+  color: var(--surface);
+  box-shadow: var(--shadow-dialog);
+  font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.room-status-quick-action-tooltip::before {
+  content: "";
+  position: absolute;
+  inset: -6px 0;
+  z-index: -1;
 }
 
 .room-status-quick-order-error {

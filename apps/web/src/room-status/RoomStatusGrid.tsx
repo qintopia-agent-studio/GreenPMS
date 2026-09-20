@@ -141,6 +141,7 @@ export interface RoomStatusGridProps {
   filters: RoomStatusFilters;
   expandedRoomIds: readonly string[];
   focusedCell: RoomStatusCellFocus | null;
+  hoveredCell?: RoomStatusCellFocus | null;
   selection: RoomStatusSelection | null;
   selectedStayId?: string | null;
   dateWindowStart: number;
@@ -161,8 +162,12 @@ export interface RoomStatusGridProps {
   onPageChange: (pageIndex: number) => void;
   onDateWindowChange: (start: number) => void;
   onInspectUnit: (unit: RoomStatusUnitDto) => void;
-  onInspectDay: (unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement) => void;
-  onInspectInterval: (unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) => void;
+  onInspectDay: (unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement, intent?: "POINTER" | "TOUCH") => void;
+  onInspectInterval: (unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string, intent?: "POINTER" | "TOUCH") => void;
+  onHoverDay?: (unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement) => void;
+  onHoverInterval?: (unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) => void;
+  onHoverLeave?: () => void;
+  onQuickPointerDown?: () => void;
   onClearFilters: () => void;
   onScrollAnchorChange?: (anchor: RoomStatusScrollAnchor) => void;
 }
@@ -733,6 +738,7 @@ export function RoomStatusGrid({
   filters,
   expandedRoomIds,
   focusedCell,
+  hoveredCell = null,
   selection,
   selectedStayId = null,
   dateWindowStart,
@@ -755,6 +761,10 @@ export function RoomStatusGrid({
   onInspectUnit,
   onInspectDay,
   onInspectInterval,
+  onHoverDay,
+  onHoverInterval,
+  onHoverLeave,
+  onQuickPointerDown,
   onClearFilters,
   onScrollAnchorChange
 }: RoomStatusGridProps) {
@@ -765,6 +775,7 @@ export function RoomStatusGrid({
   const headerScrollRef = useRef<HTMLDivElement>(null);
   const cellRefs = useRef(new Map<string, HTMLDivElement>());
   const pointerSelection = useRef<PointerSelectionState | null>(null);
+  const intervalPointerType = useRef("");
   const scrollFrame = useRef<number | null>(null);
   const dragAutoScrollFrame = useRef<number | null>(null);
   const scrollRestored = useRef(false);
@@ -894,7 +905,7 @@ export function RoomStatusGrid({
     setDraggingUnitId(null);
     setPointerPreviewSelection(null);
     if (active.touch) setTouchSelectionMode(false);
-    if (commit && active.lastServiceDate === active.anchorDate) onInspectDay(active.unit, active.day, active.sourceCell);
+    if (commit && active.lastServiceDate === active.anchorDate) onInspectDay(active.unit, active.day, active.sourceCell, active.touch ? "TOUCH" : "POINTER");
     else if (commit) {
       const anchor = cellRefs.current.get(`${active.unitId}:${active.lastServiceDate}`) ?? active.sourceCell;
       onInspectSelection(active.unit, active.selection, anchor);
@@ -920,9 +931,10 @@ export function RoomStatusGrid({
   );
   const availabilitySummaryByDate = useMemo(() => new Map(board.availabilitySummary
     .map((item) => [item.serviceDate, item] as const)), [board.availabilitySummary]);
-  const singleCellSelection = useMemo(() => {
-    return roomStatusSingleCellMappingSelection(pointerPreviewSelection, selection, selectedStayId);
-  }, [pointerPreviewSelection, selectedStayId, selection]);
+  const axisHighlight = useMemo(() => {
+    // Hover only guides the eye; it must not change selection or keyboard focus.
+    return hoveredCell ?? roomStatusSingleCellMappingSelection(pointerPreviewSelection, selection, selectedStayId);
+  }, [hoveredCell, pointerPreviewSelection, selectedStayId, selection]);
   const showBuildingTodayOccupancy = Boolean(todayDate && dates.includes(todayDate));
   const buildingTodayOccupancySummaries = useMemo(() => (
     showBuildingTodayOccupancy && todayDate
@@ -1167,11 +1179,12 @@ export function RoomStatusGrid({
     day: RoomStatusDayDto | null
   ) => {
     if (event.button !== 0) return;
+    onQuickPointerDown?.();
     const touch = event.pointerType === "touch";
     if (touch && !touchSelectionMode) {
       event.preventDefault();
       onFocusedCellChange({ unitId: unit.id, serviceDate });
-      onInspectDay(unit, day, event.currentTarget);
+      onInspectDay(unit, day, event.currentTarget, "TOUCH");
       event.currentTarget.focus();
       closeBedOccupancyTooltip();
       return;
@@ -1375,7 +1388,7 @@ export function RoomStatusGrid({
                 return (
                   <div
                     key={date}
-                    className={`room-status-date-header${date === todayDate ? " is-today" : ""}${singleCellSelection?.serviceDate === date ? " is-cell-selection-column" : ""}`}
+                    className={`room-status-date-header${date === todayDate ? " is-today" : ""}${axisHighlight?.serviceDate === date ? " is-cell-selection-column" : ""}`}
                     role="columnheader"
                     aria-label={`${formatRoomStatusDate(date)} ${weekDay} ${summaryLabel}`}
                   >
@@ -1449,7 +1462,7 @@ export function RoomStatusGrid({
                 aria-rowindex={rowIndex + 2}
                 style={{ "--room-status-interval-lanes": rowLanes } as CSSProperties}
               >
-                <div className={`room-status-resource-cell${singleCellSelection?.unitId === unit.id ? " is-cell-selection-row" : ""}`} role="rowheader">
+                <div className={`room-status-resource-cell${axisHighlight?.unitId === unit.id ? " is-cell-selection-row" : ""}`} role="rowheader">
                   {canExpand ? (
                     <button
                       type="button"
@@ -1553,7 +1566,12 @@ export function RoomStatusGrid({
                           if (node) cellRefs.current.set(key, node);
                           else cellRefs.current.delete(key);
                         }}
-                        onMouseEnter={bedOccupancyTooltipText
+                        onPointerEnter={(event) => {
+                          if (event.pointerType !== "mouse" || event.buttons || pointerSelection.current || isMobile) return;
+                          onHoverDay?.(unit, day, event.currentTarget);
+                        }}
+                        onPointerLeave={() => onHoverLeave?.()}
+                        onMouseEnter={bedOccupancyTooltipText && !onHoverDay
                           ? (event) => showBedOccupancyTooltip(event.currentTarget, bedOccupancyTooltipText)
                           : undefined}
                         onMouseLeave={bedOccupancyTooltipText
@@ -1581,7 +1599,7 @@ export function RoomStatusGrid({
                             }
                           : undefined}
                         onPointerDown={(event) => handlePointerDown(event, unit, date, day)}
-                        onDoubleClick={(event) => onInspectDay(unit, day, event.currentTarget)}
+                        onDoubleClick={(event) => { event.preventDefault(); }}
                         onKeyDown={(event) => handleCellKeyDown(event, unit, day)}
                       >
                         {date === todayDate ? <span className="room-status-today-overlay" aria-hidden="true" /> : null}
@@ -1596,7 +1614,7 @@ export function RoomStatusGrid({
                               <span
                                 key={`${bedOccupancy.occupants[index]!.inventoryUnitId}:${index}`}
                                 tabIndex={0}
-                                onMouseEnter={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
+                                onMouseEnter={onHoverDay ? undefined : (event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
                                 onMouseLeave={scheduleBedOccupancyTooltipDismiss}
                                 onFocus={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
                                 onBlur={scheduleBedOccupancyTooltipDismiss}
@@ -1615,7 +1633,7 @@ export function RoomStatusGrid({
                               <span
                                 key={directLodging.occupants[index]!.occupantId}
                                 tabIndex={0}
-                                onMouseEnter={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
+                                onMouseEnter={onHoverDay ? undefined : (event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
                                 onMouseLeave={scheduleBedOccupancyTooltipDismiss}
                                 onFocus={(event) => showBedOccupantTooltipIfTruncated(event.currentTarget, nickname)}
                                 onBlur={scheduleBedOccupancyTooltipDismiss}
@@ -1702,14 +1720,28 @@ export function RoomStatusGrid({
                             <button
                               key={interval.id}
                               type="button"
+                              data-unit-id={unit.id}
                               className={`room-status-interval room-status-interval-${interval.status.toLowerCase().replaceAll("_", "-")}${interval.blocking ? " is-blocking" : ""}${interval.conflicts.length ? " has-blocking-conflict" : ""}${roomStatusIntervalNeedsProcessing(interval, board.businessDate) ? " has-attention-interval" : ""}`}
                               style={{ left: 0, width: `${(endColumn - startColumn) * 100}%`, top: `calc(5px + ${lane + attentionLaneOffset} * 25px)` }}
                               aria-label={intervalAriaLabel}
                               title={maintenance ? gridLabel : `${roomStatusSourceLabels[interval.sourceKind]} · ${gridLabel}`}
-                              onPointerDown={(event) => event.stopPropagation()}
+                              onPointerEnter={(event) => {
+                                if (event.pointerType !== "mouse" || event.buttons || pointerSelection.current || isMobile) return;
+                                onHoverInterval?.(unit, interval, event.currentTarget, roomStatusIntervalServiceDateAtPointer(
+                                  dates, startColumn, endColumn, event.currentTarget.getBoundingClientRect(), event.clientX
+                                ));
+                              }}
+                              onPointerLeave={() => onHoverLeave?.()}
+                              onPointerDown={(event) => {
+                                event.stopPropagation();
+                                intervalPointerType.current = event.pointerType;
+                                onQuickPointerDown?.();
+                              }}
                               onDoubleClick={(event) => event.stopPropagation()}
                               onKeyDown={(event) => event.stopPropagation()}
-                              onClick={(event) => onInspectInterval(
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onInspectInterval(
                                 unit,
                                 interval,
                                 event.currentTarget,
@@ -1719,8 +1751,10 @@ export function RoomStatusGrid({
                                   endColumn,
                                   event.currentTarget.getBoundingClientRect(),
                                   event.clientX
-                                )
-                              )}
+                                ),
+                                event.detail === 0 ? undefined : intervalPointerType.current === "touch" ? "TOUCH" : "POINTER"
+                                );
+                              }}
                             >
                               <span>{gridLabel}</span>
                               {maintenance ? null : <small>{roomStatusSourceLabels[interval.sourceKind]} · {intervalStatusLabel}</small>}

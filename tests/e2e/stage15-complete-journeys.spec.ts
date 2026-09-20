@@ -70,7 +70,8 @@ async function createWecomInHouseBackfill(
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
-  await cell.click();
+  await cell.focus();
+  await cell.press("Enter");
 
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();

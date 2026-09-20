@@ -50,7 +50,8 @@ async function clickRoomStatusCell(page: Page, cell: Locator, unitId: string): P
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
-  await cell.click();
+  await cell.focus();
+  await cell.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAttribute("data-unit-id", unitId);

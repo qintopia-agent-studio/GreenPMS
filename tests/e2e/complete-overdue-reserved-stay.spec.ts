@@ -230,7 +230,8 @@ async function openOrderFromRoomStatus(page: Page, target: CompleteStayFixture):
     `[data-room-status-cell="true"][data-unit-id="${target.unitId}"][data-service-date="${target.arrivalDate}"]`
   );
   await expect(cell).toBeVisible({ timeout: 30_000 });
-  await cell.click();
+  await cell.focus();
+  await cell.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await openQuickPopoverOrderDrawer(popover, target.nickname);

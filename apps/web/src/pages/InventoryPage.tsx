@@ -19,6 +19,8 @@ import { addLocalDateDays, localDateInTimeZone } from "../dates";
 import { memberStayIntent } from "../memberStayIntent";
 import { commandRecoveryAvailable, principalCan, propertyAllowedActions, useWorkspace } from "../session";
 import { assertOrderViewAllowedActions } from "../orderViewValidation";
+import { useRoomStatusHover } from "../room-status/useRoomStatusHover";
+import { roomStatusOrderPreviewKey, useRoomStatusOrderPreview, type RoomStatusOrderPreview } from "../room-status/useRoomStatusOrderPreview";
 import type {
   BookingChannelCode,
   CommandCapability,
@@ -144,6 +146,15 @@ const bookingChannelLabels: Record<BookingChannelCode, string> = {
 };
 
 const MAX_STAY_SELECTION_NIGHTS = 366;
+
+interface RoomStatusQuickTarget {
+  unitId: string;
+  serviceDate: string;
+  anchor: HTMLElement;
+  intervalId?: string;
+  selection?: RoomStatusSelection;
+  hover?: boolean;
+}
 
 export function roomStatusOrderContextMode(workspaceWidth: number, isMobile: boolean): "INLINE" | "DRAWER" {
   void workspaceWidth;
@@ -3402,12 +3413,12 @@ export function InventoryPage() {
       setDesktopContextCollapsed(false);
     }
   }, [currentBrowserQuoteRecoveryOwnerId, currentQuoteRecoveryIdentity, currentQuoteRecoveryOwnerId, effectiveAutoOpenedQuoteRecoveryIdentity, effectiveDismissedQuoteRecoveryIdentity, isMobile, orderContextOpen, queryPhase, quoteRecoveryContextOpen, selectedOrderIdentity]);
-  const [quickPopoverTarget, setQuickPopoverTarget] = useState<{
-    unitId: string;
-    serviceDate: string;
-    anchor: HTMLElement;
-    intervalId?: string;
-    selection?: RoomStatusSelection;
+  const [quickPopoverTarget, setQuickPopoverTarget] = useState<RoomStatusQuickTarget>();
+  const [hoverOrderIdentity, setHoverOrderIdentity] = useState<RoomStatusOrderIdentity>();
+  const hoverPreviewCache = useRef<RoomStatusOrderPreview | undefined>(undefined);
+  const promotedOrderPreview = useRef<RoomStatusOrderPreview | undefined>(undefined);
+  const [pendingQuickAction, setPendingQuickAction] = useState<{
+    action: RoomStatusQuickOrderAction; target: RoomStatusQuickTarget; identity: RoomStatusOrderIdentity; key: string;
   }>();
   const [orderRefreshToken, setOrderRefreshToken] = useState(0);
   const [selectedOrderCommandScope, setSelectedOrderCommandScope] = useState<string>();
@@ -3562,6 +3573,17 @@ export function InventoryPage() {
     if (!selectedOrderIdentity) {
       setSelectedOrderView(undefined);
       setSelectedOrderLoadedScope(undefined);
+      setSelectedOrderError(undefined);
+      setSelectedOrderLoading(false);
+      return;
+    }
+    const promoted = promotedOrderPreview.current;
+    promotedOrderPreview.current = undefined;
+    if (promoted?.view && promoted.key === roomStatusOrderPreviewKey(
+      `${orderPrincipalScope}:${board?.businessDate}`, board?.revision, selectedOrderIdentity
+    )) {
+      setSelectedOrderView(promoted.view);
+      setSelectedOrderLoadedScope(orderPrincipalScope);
       setSelectedOrderError(undefined);
       setSelectedOrderLoading(false);
       return;
@@ -4269,6 +4291,16 @@ export function InventoryPage() {
       ? roomStatusOrderOptionsForSelection(quickPopoverUnit, quickPopoverSelection)
       : roomStatusOrderOptionsForDate(quickPopoverUnit, quickPopoverTarget.serviceDate)
     : { kind: "READY" as const, orders: [] };
+  const hoverIdentity = quickPopoverTarget?.hover && quickPopoverOrders.kind === "READY"
+    ? quickPopoverOrders.orders.find((option) => option.identity.orderId === hoverOrderIdentity?.orderId
+      && option.identity.stayId === hoverOrderIdentity.stayId)?.identity
+      ?? (quickPopoverOrders.orders.length === 1 ? quickPopoverOrders.orders[0]!.identity : undefined)
+    : undefined;
+  const hoverPreview = useRoomStatusOrderPreview({
+    identity: hoverIdentity, propertyId, scope: `${orderPrincipalScope}:${board?.businessDate}`,
+    revision: board?.revision, allowedActions: currentPropertyAllowedActions
+  });
+  if (hoverPreview.view) hoverPreviewCache.current = hoverPreview;
   // A split-bed parent cell is an occupancy summary, even when it happens to
   // contain one child order. Concrete bed and non-aggregate room rows may still
   // use their unique order as the Stay preview.
@@ -4351,6 +4383,7 @@ export function InventoryPage() {
   useEffect(() => {
     if (!quickPopoverTarget) return;
     if (quickPopoverTarget.anchor.isConnected && quickPopoverUnit && (quickPopoverDay || quickPopoverInterval)) return;
+    if (quickPopoverTarget.hover) { setQuickPopoverTarget(undefined); return; }
     if (quickPopoverUnit && (quickPopoverDay || quickPopoverInterval)) {
       const detachedAnchor = quickPopoverTarget.anchor;
       const targetUnitId = quickPopoverTarget.unitId;
@@ -4838,9 +4871,9 @@ export function InventoryPage() {
     : undefined;
   const quoteRecoveryDrawerOpen = quoteRecoveryUiOpen;
   const desktopContextKind = roomStatusDesktopContextKind(quoteRecoveryDrawerOpen, Boolean(selectedOrderIdentity));
-  const desktopDrawerModal = desktopContextKind === "QUOTE_RECOVERY"
+  const desktopWriteDrawer = desktopContextKind === "QUOTE_RECOVERY"
     || (desktopContextKind === "SELECTION" && showQuoteWorkbench);
-  const desktopDrawerInstanceKey = desktopDrawerModal ? "room-status-write" : "room-status-view";
+  const desktopDrawerInstanceKey = desktopWriteDrawer ? "room-status-write" : "room-status-view";
   const desktopQuoteDrawerTitle = quoteRecoveryDrawerOpen
     ? "报价恢复"
     : activeQuoteTarget?.actionCode === "BACKFILL_ORDER"
@@ -5053,14 +5086,19 @@ export function InventoryPage() {
   function selectOrderContextIdentity(
     identity: RoomStatusOrderIdentity,
     serviceDate?: string,
-    openContext = true
+    openContext = true,
+    openImmediately = false
   ) {
     setQuickPopoverTarget(undefined);
     const sameOrder = selectedOrderIdentity?.orderId === identity.orderId
       && selectedOrderIdentity.stayId === identity.stayId;
     const identityKey = roomStatusOrderIdentityKey(identity);
     const canOpenFromLoadedView = sameOrder && Boolean(authorizedSelectedOrderView);
-    const deferDrawerOpen = openContext && !isMobile && !useInlineOrderContext && !canOpenFromLoadedView;
+    const deferDrawerOpen = openContext && !openImmediately && !isMobile && !useInlineOrderContext && !canOpenFromLoadedView;
+    const cached = hoverPreviewCache.current;
+    if (cached?.key === roomStatusOrderPreviewKey(`${orderPrincipalScope}:${board?.businessDate}`, board?.revision, identity)) {
+      promotedOrderPreview.current = cached;
+    }
     setActionError(undefined);
     setSelectedUnitId(identity.unitId);
     setSelectedDayDate(serviceDate);
@@ -5103,7 +5141,35 @@ export function InventoryPage() {
     });
   }
 
-  function inspectDay(unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement) {
+  function openClickedRoomStatus(unit: RoomStatusUnitDto, serviceDate: string, anchor: HTMLElement, interval?: RoomStatusIntervalDto) {
+    const selection = selectionFromCells(unit.id, serviceDate, serviceDate);
+    captureRoomStatusInteraction(anchor, selection);
+    const options = roomStatusOrderOptionsForDate(unit, serviceDate);
+    const identity = interval ? roomStatusOrderIdentityForInterval(interval)
+      : options.kind === "READY" && options.orders.length === 1 ? options.orders[0]!.identity : undefined;
+    invalidateSelectedOrderForRoomStatusInspection();
+    setQuickPopoverTarget(undefined);
+    setActionError(undefined);
+    setReturnNotice(undefined);
+    if (identity) {
+      selectOrderContextIdentity(identity, serviceDate, true, true);
+      return;
+    }
+    dispatchView({ type: "SET_SELECTION", selection });
+    setSelectedUnitId(unit.id);
+    setSelectedDayDate(serviceDate);
+    setSelectedIntervalId(interval?.id);
+    setSelectedGridStayId(undefined);
+    setQuoteTarget(undefined);
+    setDesktopContextCollapsed(false);
+  }
+
+  function inspectDay(unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement, intent?: "POINTER" | "TOUCH") {
+    const date = day?.serviceDate ?? anchor.dataset.serviceDate;
+    if (intent === "POINTER" && !isMobile && date) {
+      openClickedRoomStatus(unit, date, anchor);
+      return;
+    }
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
     setReturnNotice(undefined);
@@ -5127,7 +5193,11 @@ export function InventoryPage() {
     if (options.kind === "READY" && options.orders.length === 1) setSelectedOrderIdentity(options.orders[0]!.identity);
   }
 
-  function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) {
+  function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string, intent?: "POINTER" | "TOUCH") {
+    if (intent === "POINTER" && !isMobile) {
+      openClickedRoomStatus(unit, serviceDate, anchor, interval);
+      return;
+    }
     setQuoteRecoveryOutcome(undefined);
     setActionError(undefined);
     setReturnNotice(undefined);
@@ -5256,10 +5326,15 @@ export function InventoryPage() {
     });
   }
 
-  function runQuickOrderAction(action: RoomStatusQuickOrderAction) {
+  function runQuickOrderAction(action: RoomStatusQuickOrderAction, target = quickPopoverTarget) {
     const view = authorizedSelectedOrderView;
     const identity = selectedOrderIdentity;
-    const targetMatches = quickPopoverOrders.kind === "READY" && quickPopoverOrders.orders.some((option) => (
+    const targetUnit = findRoomStatusUnit(renderedBoard, target?.unitId);
+    const targetOrders = targetUnit && target
+      ? target.selection ? roomStatusOrderOptionsForSelection(targetUnit, target.selection)
+        : roomStatusOrderOptionsForDate(targetUnit, target.serviceDate)
+      : undefined;
+    const targetMatches = targetOrders?.kind === "READY" && targetOrders.orders.some((option) => (
       option.identity.orderId === identity?.orderId && option.identity.stayId === identity?.stayId
     ));
     if (!view || !identity || !targetMatches || selectedOrderLoading) {
@@ -5276,7 +5351,7 @@ export function InventoryPage() {
       return;
     }
     if (action === "VIEW_FUNDS") {
-      selectOrderContextIdentity(identity, quickPopoverTarget?.serviceDate);
+      selectOrderContextIdentity(identity, target?.serviceDate);
       return;
     }
     if (commandsBlocked || view.accessLevel !== "WRITE") return;
@@ -5293,6 +5368,38 @@ export function InventoryPage() {
     else if (action === "RECORD_COLLECTION" || action === "RECORD_REFUND") startSelectedOrderFunds(action);
     else openSelectedOrder(action);
   }
+
+  function runHoverOrderAction(action: RoomStatusQuickOrderAction) {
+    if (!quickPopoverTarget?.hover || !hoverIdentity || !hoverPreview.view || hoverPreview.loading) return;
+    const target = quickPopoverTarget;
+    const identity = hoverIdentity;
+    captureRoomStatusInteraction(target.anchor, selectionFromCells(target.unitId, target.serviceDate, target.serviceDate));
+    invalidateSelectedOrderForRoomStatusInspection();
+    promotedOrderPreview.current = hoverPreview;
+    setSelectedOrderIdentity(identity);
+    setSelectedUnitId(target.unitId);
+    setSelectedDayDate(target.serviceDate);
+    setSelectedIntervalId(target.intervalId);
+    setSelectedGridStayId(identity.stayId);
+    dispatchView({ type: "SET_SELECTION", selection: selectionFromCells(target.unitId, target.serviceDate, target.serviceDate) });
+    setPendingQuickAction({ action, target, identity, key: hoverPreview.key });
+  }
+
+  useEffect(() => {
+    if (!pendingQuickAction) return;
+    if (pendingQuickAction.key !== roomStatusOrderPreviewKey(
+      `${orderPrincipalScope}:${board?.businessDate}`, board?.revision, selectedOrderIdentity
+    )) {
+      setPendingQuickAction(undefined);
+      setActionError(new Error("当前订单或房态已变化，请重新选择后办理。"));
+      return;
+    }
+    if (selectedOrderLoading) return;
+    if (!authorizedSelectedOrderView && !selectedOrderError) return;
+    setPendingQuickAction(undefined);
+    runQuickOrderAction(pendingQuickAction.action, pendingQuickAction.target);
+  }, [pendingQuickAction, selectedOrderIdentity, authorizedSelectedOrderView, selectedOrderError, selectedOrderLoading,
+    orderPrincipalScope, board?.businessDate, board?.revision]);
 
   function startSelectedOrderFunds(action: OrderFundsAction) {
     const view = authorizedSelectedOrderView;
@@ -5437,11 +5544,13 @@ export function InventoryPage() {
       openQuoteRecoveryContext();
       return;
     }
-    setDesktopContextCollapsed(false);
     if (selectedOrderIdentity) {
-      dispatchView({ type: "SET_SELECTION", selection: null });
-      setOrderContextOpen(true);
-    }
+      const focus = viewState.focusedCell;
+      const anchor = [...(boardColumnRef.current?.querySelectorAll<HTMLElement>("[data-room-status-cell='true']") ?? [])]
+        .find((cell) => cell.dataset.unitId === focus?.unitId && cell.dataset.serviceDate === focus?.serviceDate);
+      if (anchor) captureRoomStatusInteraction(anchor);
+      selectOrderContextIdentity(selectedOrderIdentity, selectedDayDate, true, true);
+    } else setDesktopContextCollapsed(false);
   }
 
   function openQuoteRecoveryContext() {
@@ -6015,7 +6124,18 @@ export function InventoryPage() {
     </div>
   ) : null;
 
-  const desktopSelectionContext = renderedBoard ? (
+  const contextOrderOptions = selectedUnit && selectedDayDate
+    ? roomStatusOrderOptionsForDate(selectedUnit, selectedDayDate) : undefined;
+  const contextOrderChoices = contextOrderOptions?.kind === "READY" && contextOrderOptions.orders.length > 1
+    ? contextOrderOptions.orders : [];
+  const desktopSelectionContext = renderedBoard ? (<>
+    {contextOrderChoices.length ? <section className="room-status-context-section" aria-label="选择订单">
+      <h3>选择订单</h3>
+      <div className="room-status-quick-orders">{contextOrderChoices.map((option) => <button
+        type="button" key={option.identity.orderId}
+        onClick={() => selectOrderContextIdentity(option.identity, selectedDayDate, true, true)}
+      ><strong>{option.label}</strong></button>)}</div>
+    </section> : null}
     <RoomStatusContext
       key="room-status-context"
       board={renderedBoard}
@@ -6025,7 +6145,7 @@ export function InventoryPage() {
       relatedIntervals={relatedIntervals}
       selection={viewState.selection}
       conflicts={contextConflicts}
-      allowedActions={contextActions}
+      allowedActions={contextOrderChoices.length ? contextActions.filter((action) => action.code !== "OPEN_ORDER") : contextActions}
       {...(controlWriteBlock ? { writeBlock: controlWriteBlock } : {})}
       onSelectedUnitChange={inspectUnit}
       onSelectionChange={selectRange}
@@ -6037,6 +6157,7 @@ export function InventoryPage() {
       onOpenRecovery={openRoomStatusRecoveryEntry}
       {...(useInlineOrderContext ? { onClose: closeDesktopContext } : {})}
     />
+    </>
   ) : null;
 
   const desktopContextDrawerOpen = Boolean(renderedBoard
@@ -6061,7 +6182,7 @@ export function InventoryPage() {
   }, [location.key, location.search, propertyId, renderedBoard, commandsBlocked, navigate]);
 
   const roomStatusBlockingModalOpen = Boolean(
-    (desktopContextDrawerOpen && desktopDrawerModal)
+    desktopContextDrawerOpen
     || (isMobile && selectedOrderIdentity && orderContextOpen)
     || createSelectionOpen
     || detachedQuoteRecoveryWorkbenchOpen
@@ -6073,6 +6194,28 @@ export function InventoryPage() {
     || (authorizedSelectedOrderView && selectedFundsAction)
     || (command && commandTargetScopeCurrent)
   );
+  const hoverEnabled = !isMobile && !roomStatusBlockingModalOpen && !desktopContextDrawerOpen
+    && !pendingOrderContextIdentity && !pendingQuickAction
+    && (!quickPopoverTarget || quickPopoverTarget.hover === true);
+  const hoverIntent = useRoomStatusHover<RoomStatusQuickTarget>({
+    enabled: hoverEnabled,
+    contextKey: `${orderPrincipalScope}:${currentBoardQueryKey}:${board?.businessDate}`,
+    isStillHovered: (target) => target.anchor.isConnected && target.anchor.matches(":hover"),
+    onOpen: (target) => {
+      if (!target.anchor.isConnected || !findRoomStatusUnit(renderedBoard, target.unitId)) return;
+      if (document.querySelector("[data-testid='room-status-quick-popover']")?.contains(document.activeElement)) return;
+      setHoverOrderIdentity(undefined);
+      setQuickPopoverTarget({ ...target, hover: true });
+    },
+    onClose: () => {
+      if (hoverEnabled && document.querySelector("[data-testid='room-status-quick-popover']")?.contains(document.activeElement)) return;
+      setQuickPopoverTarget((current) => current?.hover ? undefined : current);
+    }
+  });
+  const cancelQuickHover = () => {
+    hoverIntent.cancel();
+    setQuickPopoverTarget((current) => current?.hover ? undefined : current);
+  };
   const roomStatusRefreshNotice = renderedBoard && (actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted || boardExpired) ? (
     <div className={`room-status-stale-notice${boardRefreshFailed ? " is-failed" : ""}`} role="status" aria-live="polite" data-testid="room-status-stale-notice">
       <AlertTriangle className="room-status-stale-icon" aria-hidden="true" size={16} />
@@ -6153,10 +6296,13 @@ export function InventoryPage() {
                 filters={viewState.filters}
                 expandedRoomIds={viewState.expandedRoomIds}
                 focusedCell={viewState.focusedCell}
+                hoveredCell={quickPopoverTarget?.hover
+                  ? { unitId: quickPopoverTarget.unitId, serviceDate: quickPopoverTarget.serviceDate }
+                  : null}
                 selection={viewState.selection}
                 selectedStayId={roomStatusGridSelectedStayId(
-                  Boolean(quickPopoverTarget),
-                  quickPopoverPreviewStayId,
+                  Boolean(quickPopoverTarget && !quickPopoverTarget.hover),
+                  quickPopoverTarget?.hover ? null : quickPopoverPreviewStayId,
                   selectedOrderIdentity,
                   selectedGridStayId
                 )}
@@ -6183,6 +6329,15 @@ export function InventoryPage() {
                 onInspectUnit={inspectUnit}
                 onInspectDay={inspectDay}
                 onInspectInterval={inspectInterval}
+                onHoverDay={(unit, day, anchor) => {
+                  const serviceDate = day?.serviceDate ?? anchor.dataset.serviceDate;
+                  if (serviceDate) hoverIntent.enter({ unitId: unit.id, serviceDate, anchor });
+                }}
+                onHoverInterval={(unit, interval, anchor, serviceDate) => {
+                  hoverIntent.enter({ unitId: unit.id, intervalId: interval.id, serviceDate, anchor });
+                }}
+                onHoverLeave={() => hoverIntent.leave()}
+                onQuickPointerDown={cancelQuickHover}
                 onClearFilters={clearFilters}
                 onScrollAnchorChange={(anchor) => dispatchView({ type: "SET_SCROLL_ANCHOR", anchor })}
               />
@@ -6237,6 +6392,9 @@ export function InventoryPage() {
 
           {quickPopoverTarget && quickPopoverUnit ? (
             <RoomStatusQuickPopover
+              autoFocus={!quickPopoverTarget.hover}
+              onHoverEnter={() => hoverIntent.keepOpen()}
+              onHoverLeave={() => hoverIntent.leave()}
               anchor={quickPopoverTarget.anchor}
               unit={quickPopoverUnit}
               serviceDate={quickPopoverTarget.serviceDate}
@@ -6250,7 +6408,9 @@ export function InventoryPage() {
               orderOptions={quickPopoverOrders}
               {...(quickPopoverSelection ? { selection: quickPopoverSelection } : {})}
               onClose={(reason) => {
+                hoverIntent.cancel();
                 setQuickPopoverTarget(undefined);
+                if (quickPopoverTarget.hover) return;
                 if (reason === "DISMISS") {
                   roomStatusInteractionSnapshotRef.current = undefined;
                   if (selectedOrderIdentity && orderContextOpen) {
@@ -6259,6 +6419,7 @@ export function InventoryPage() {
                 }
               }}
               onCreate={(action) => {
+                if (quickPopoverTarget.hover) captureRoomStatusInteraction(quickPopoverTarget.anchor, selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate));
                 const selection = quickPopoverSelection
                   ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
                 setSelectedUnitId(quickPopoverUnit.id);
@@ -6268,16 +6429,20 @@ export function InventoryPage() {
                 handleAction(action, quickPopoverUnit, selection);
               }}
               onLockMaintenance={(action) => {
+                if (quickPopoverTarget.hover) captureRoomStatusInteraction(quickPopoverTarget.anchor, selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate));
                 const selection = quickPopoverSelection
                   ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate);
                 setSelectedUnitId(quickPopoverUnit.id);
                 setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
                 setSelectedIntervalId(undefined);
                 selectRange(selection);
-                handleAction(action, quickPopoverUnit, selection);
+                // The quick action opens its own drawer; do not leave a second
+                // modal context underneath it and block focus restoration.
+                if (handleAction(action, quickPopoverUnit, selection)) setDesktopContextCollapsed(true);
                 setQuoteTarget(undefined);
               }}
               onReleaseMaintenance={(action) => {
+                if (quickPopoverTarget.hover) captureRoomStatusInteraction(quickPopoverTarget.anchor, selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate));
                 setSelectedUnitId(quickPopoverUnit.id);
                 setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
                 setSelectedIntervalId(quickPopoverTarget.intervalId);
@@ -6289,20 +6454,22 @@ export function InventoryPage() {
                 setQuickPopoverTarget(undefined);
                 openRoomStatusRecoveryEntry();
               }}
-              {...(authorizedSelectedOrderView ? { orderView: authorizedSelectedOrderView } : {})}
-              {...(selectedMemberView ? { memberView: selectedMemberView } : {})}
-              orderLoading={selectedOrderLoading || Boolean(selectedOrderIdentity && !authorizedSelectedOrderView && !selectedOrderError)}
-              orderError={selectedOrderError}
-              onRetryOrder={() => setOrderRefreshToken((value) => value + 1)}
+              orderView={quickPopoverTarget.hover ? hoverPreview.view : authorizedSelectedOrderView}
+              memberView={quickPopoverTarget.hover ? hoverPreview.memberView : selectedMemberView}
+              orderLoading={quickPopoverTarget.hover ? hoverPreview.loading
+                : selectedOrderLoading || Boolean(selectedOrderIdentity && !authorizedSelectedOrderView && !selectedOrderError)}
+              orderError={quickPopoverTarget.hover ? hoverPreview.error : selectedOrderError}
+              onRetryOrder={quickPopoverTarget.hover ? hoverPreview.retry : () => setOrderRefreshToken((value) => value + 1)}
               onSelectOrder={(option) => {
                 if (quickPopoverOrders.kind !== "READY" || !quickPopoverOrders.orders.some((candidate) => (
                   candidate.identity.orderId === option.identity.orderId && candidate.identity.stayId === option.identity.stayId
                 ))) return;
+                if (quickPopoverTarget.hover) { setHoverOrderIdentity(option.identity); return; }
                 invalidateSelectedOrderForRoomStatusInspection();
                 setSelectedOrderIdentity(option.identity);
                 setSelectedGridStayId(option.identity.stayId);
               }}
-              onOrderAction={runQuickOrderAction}
+              onOrderAction={quickPopoverTarget.hover ? runHoverOrderAction : runQuickOrderAction}
             />
           ) : null}
 
@@ -6311,8 +6478,8 @@ export function InventoryPage() {
               key={desktopDrawerInstanceKey}
               title={desktopDrawerTitle}
               size="drawer"
-              modal={desktopDrawerModal}
-              className={desktopDrawerModal ? "room-status-write-drawer" : "room-status-view-drawer"}
+              modal
+              className={desktopWriteDrawer ? "room-status-write-drawer" : "room-status-view-drawer"}
               onClose={closeDesktopContext}
               footer={<>
                 <button type="button" className="button button-secondary" onClick={closeDesktopContext}>关闭</button>
@@ -6340,7 +6507,7 @@ export function InventoryPage() {
             </Modal>
           ) : null}
 
-          {!isMobile && desktopContextCollapsed && !pendingOrderContextIdentity && !quickPopoverTarget && (selectedUnit || selectedOrderIdentity || viewState.selection || showQuoteWorkbench) ? (
+          {!isMobile && desktopContextCollapsed && !pendingOrderContextIdentity && (!quickPopoverTarget || quickPopoverTarget.hover) && (selectedUnit || selectedOrderIdentity || viewState.selection || showQuoteWorkbench) ? (
             <button type="button" className="button button-primary room-status-context-reopen" onClick={reopenDesktopContext}>
               <PanelRightOpen aria-hidden="true" size={17} />打开{pageQuoteRecovery.kind !== "ABSENT" ? "报价恢复" : selectedOrderIdentity ? "订单详情" : "选中对象上下文"}
             </button>

@@ -10,10 +10,14 @@ let fixture: QuickActionsAcceptanceFixture;
 const orderReadRetried = new WeakSet<Page>();
 const networkDiagnostics = new WeakMap<Page, object[]>();
 
+function fixtureCell(page: Page, stay: QuickActionStayFixture) {
+  return page.locator(`[data-room-status-cell="true"][data-unit-id="${stay.unitId}"][data-service-date="${stay.arrivalDate}"]`);
+}
+
 // Each journey has an independent page; only the first writes its own C01 order.
 // Keep failures local so the remaining scenarios still provide evidence.
 test.describe.configure({ mode: "default" });
-test.skip(({ isMobile }) => isMobile, "Desktop click popover; mobile keeps its existing order panel interaction.");
+test.skip(({ isMobile }) => isMobile, "Desktop hover and click; mobile keeps its existing order panel interaction.");
 
 test.beforeAll(async ({}, testInfo) => {
   test.setTimeout(180_000);
@@ -93,7 +97,7 @@ async function openCell(page: Page, unitCode: string, unitId: string, date: stri
   const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${unitId}"][data-service-date="${date}"]`);
   await expect(cell).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("room-status-range-loading")).toBeHidden({ timeout: 30_000 });
-  await cell.click();
+  await cell.hover();
   await expect(currentPopover).toBeVisible();
 }
 
@@ -163,7 +167,9 @@ test("快捷日期与换房直达既有表单，今日应退直达退房核对",
   await reschedule.getByRole("button", { name: "取消", exact: true }).click();
   quick = await openQuickOrder(page, fixture.cases.earlyCheckout);
   await expect(quick.getByRole("button", { name: "提前退房", exact: true })).toBeDisabled();
-  await expect(quick).toContainText("入住当天暂不办理缩短或提前退房");
+  await expect(quick.getByRole("tooltip")).toHaveCount(0);
+  await quick.getByRole("group", { name: "提前退房（不可用）", exact: true }).hover();
+  await expect(quick.getByRole("tooltip")).toHaveText("入住当天暂不办理缩短或提前退房。");
   await quick.getByRole("button", { name: "调整退房日期", exact: true }).click();
   const departure = page.getByRole("dialog", { name: "调整退房日期", exact: true });
   await expect(departure.getByTestId("stay-date-order-context")).toContainText(fixture.cases.earlyCheckout.nickname);
@@ -189,7 +195,7 @@ test("快捷日期与换房直达既有表单，今日应退直达退房核对",
   await expect(page).toHaveURL(/\/$/);
 });
 
-test("会员全覆盖、部分现金、升级和临时跨房型显示对应摘要与门禁", async ({ page }) => {
+test("会员全覆盖、部分现金、升级和临时跨房型显示对应摘要与门禁", async ({ page }, testInfo) => {
   await login(page);
   let quick = await openQuickOrder(page, fixture.cases.memberCovered);
   await expect(quick).toContainText("本次已核销");
@@ -207,9 +213,30 @@ test("会员全覆盖、部分现金、升级和临时跨房型显示对应摘�
   await expect(quick.locator('[aria-label="住宿资金摘要"]')).toHaveCount(0);
   await expect(quick.getByRole("button", { name: "登记收款", exact: true })).toHaveCount(0);
   quick = await openQuickOrder(page, fixture.cases.temporaryOtherRoom);
-  await expect(quick).toContainText("本次临时安排其他整房");
+  await expect(quick).toContainText("临时跨房型：续住或再次换房需另建订单。");
   await expect(quick.getByRole("button", { name: "换房", exact: true })).toHaveCount(0);
   await expect(quick.getByRole("button", { name: "调整退房日期", exact: true })).toBeDisabled();
+  await expect(quick.getByRole("tooltip")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("b01-compact.png") });
+  for (const label of ["提前退房", "调整退房日期"]) {
+    const disabledAction = quick.getByRole("group", { name: `${label}（不可用）`, exact: true });
+    await disabledAction.hover();
+    await expect(quick.getByRole("tooltip")).toHaveCount(1);
+    await expect(quick.getByRole("tooltip")).toHaveText("入住当天暂不办理缩短或提前退房。");
+    if (label === "提前退房") await page.screenshot({ path: testInfo.outputPath("b01-disabled-tooltip.png") });
+    await disabledAction.click();
+    await expect(page.getByRole("dialog", { name: label, exact: true })).toHaveCount(0);
+    await disabledAction.press("Escape");
+    await expect(quick.getByRole("tooltip")).toHaveCount(0);
+    await expect(quick).toBeVisible();
+  }
+  await page.getByRole("button", { name: "关闭快捷操作", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(quick.getByRole("group", { name: "提前退房（不可用）", exact: true })).toBeFocused();
+  await expect(quick.getByRole("tooltip")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(quick.getByRole("tooltip")).toHaveCount(0);
+  await expect(quick).toBeVisible();
   for (const stay of [fixture.cases.externalChannel, fixture.cases.freeStay]) {
     quick = await openQuickOrder(page, stay);
     await expect(quick.locator('[aria-label="住宿资金摘要"]')).toHaveCount(0);
@@ -277,4 +304,162 @@ test("同房多订单先选目标，迟到的甲订单响应不能覆盖乙订�
   await expect(page.getByTestId("command-effect")).toBeVisible({ timeout: 30_000 });
   await page.getByRole("dialog", { name: "办理入住", exact: true }).getByRole("button", { name: "取消", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
+});
+
+
+test("悬浮联动房间日期高亮，抽屉遮罩点击只收起并恢复原焦点", async ({ page }, testInfo) => {
+  await login(page);
+  const search = page.getByLabel("搜索房间或床位", { exact: true });
+  await search.fill("C");
+  await search.focus();
+  const first = fixtureCell(page, fixture.cases.todayUnpaid);
+  const second = fixtureCell(page, fixture.cases.todayPaid);
+  await expect(first).toBeVisible();
+  const selectedBefore = await page.locator('[data-room-status-cell="true"][aria-selected="true"]').count();
+  await second.hover();
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toHaveAttribute("data-trigger", "hover");
+  await expect(popover.locator(".room-status-quick-order-heading")).toContainText(fixture.cases.todayPaid.nickname, { timeout: 30_000 });
+  await expect(search).toBeFocused();
+  await expect(page.locator('[data-room-status-cell="true"][aria-selected="true"]')).toHaveCount(selectedBefore);
+  await expect(page.locator(`[data-room-status-row="${fixture.cases.todayPaid.unitId}"] .room-status-resource-cell`)).toHaveClass(/is-cell-selection-row/);
+  await expect(page.locator(".room-status-date-header.is-cell-selection-column strong")).toHaveText(fixture.cases.todayPaid.arrivalDate.slice(5));
+  await popover.hover();
+  await page.waitForTimeout(350); // Cross the dismiss grace period while inside the portal.
+  await expect(popover).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("hover-card.png") });
+  await page.mouse.move(10, 10);
+  await expect(popover).toBeHidden();
+  await expect(search).toBeFocused();
+  await expect(page.locator(".is-cell-selection-row, .is-cell-selection-column")).toHaveCount(0);
+
+  await first.click();
+  const drawer = page.getByRole("dialog", { name: "订单详情", exact: true });
+  await expect(drawer).toBeVisible();
+  expect(await drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
+  await expect(drawer.getByRole("heading", { name: `${fixture.cases.todayUnpaid.nickname}的住宿订单`, exact: true })).toBeVisible({ timeout: 30_000 });
+  const secondBounds = (await second.boundingBox())!;
+  await page.mouse.move(secondBounds.x + secondBounds.width / 2, secondBounds.y + secondBounds.height / 2);
+  await page.waitForTimeout(350);
+  await expect(popover).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath("drawer-backdrop.png") });
+  await page.mouse.click(secondBounds.x + secondBounds.width / 2, secondBounds.y + secondBounds.height / 2);
+  await expect(drawer).toBeHidden();
+  await expect(first).toBeFocused();
+  await expect(second).not.toHaveClass(/is-selected/);
+  await second.click();
+  await expect(drawer.getByRole("heading", { name: `${fixture.cases.todayPaid.nickname}的住宿订单`, exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(popover).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath("click-drawer.png") });
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await expect(second).toBeFocused();
+
+  // A passive preview must not hide or retarget the existing selected-order entry.
+  await first.press("Enter");
+  await expect(popover.locator(".room-status-quick-order-heading")).toContainText(fixture.cases.todayUnpaid.nickname, { timeout: 30_000 });
+  await popover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+  await second.hover();
+  await expect(popover).toHaveAttribute("data-trigger", "hover");
+  const reopen = page.getByRole("button", { name: "打开订单详情", exact: true });
+  await expect(reopen).toBeVisible();
+  await reopen.click();
+  await expect(drawer.getByRole("heading", { name: `${fixture.cases.todayUnpaid.nickname}的住宿订单`, exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(popover).toBeHidden();
+});
+
+test("未预加载的订单单击即开抽屉，读取完成后展示同一目标", async ({ page }) => {
+  await login(page);
+  const stay = fixture.cases.todayPaid;
+  await page.getByLabel("搜索房间或床位", { exact: true }).fill(stay.unitCode);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`**/api/v1/orders/${stay.orderId}`, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  const drawer = page.getByRole("dialog", { name: "订单详情", exact: true });
+  try {
+    await fixtureCell(page, stay).click();
+    await expect(drawer).toBeVisible();
+    await expect(page.getByTestId("room-status-quick-popover")).toBeHidden();
+    await expect(drawer.getByRole("heading", { name: `${stay.nickname}的住宿订单`, exact: true })).toHaveCount(0);
+  } finally { release(); }
+  await expect(drawer.getByRole("heading", { name: `${stay.nickname}的住宿订单`, exact: true })).toBeVisible({ timeout: 30_000 });
+});
+
+test("空房抽屉遮罩与悬浮定位保留拖选、键盘入口", async ({ page }) => {
+  await login(page);
+  await page.getByLabel("搜索房间或床位", { exact: true }).fill(fixture.emptyUnitCode);
+  const from = page.locator(`[data-room-status-cell="true"][data-service-date="${fixture.businessDate}"]`);
+  await expect(from).toBeVisible();
+  const targetDate = new Date(`${fixture.businessDate}T00:00:00Z`);
+  targetDate.setUTCDate(targetDate.getUTCDate() + 2);
+  const end = page.locator(`[data-room-status-cell="true"][data-service-date="${targetDate.toISOString().slice(0, 10)}"]`);
+  await from.hover();
+  const popover = page.getByTestId("room-status-quick-popover");
+  await expect(popover).toBeVisible();
+  const a = (await from.boundingBox())!, b = (await end.boundingBox())!;
+  await expect(page.locator(".room-status-resource-cell.is-cell-selection-row")).toContainText(fixture.emptyUnitCode);
+  await expect(page.locator(".room-status-date-header.is-cell-selection-column strong")).toHaveText(fixture.businessDate.slice(5));
+  await from.click();
+  const context = page.getByRole("dialog", { name: "选中对象上下文", exact: true });
+  await expect(context).toBeVisible();
+  expect(await context.evaluate((element) => element.matches(":modal"))).toBe(true);
+  await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+  await expect(context).toBeHidden();
+  await expect(from).toBeFocused();
+  await expect(from).toHaveClass(/is-selected/);
+  await expect(end).not.toHaveClass(/is-selected/);
+  await end.hover();
+  await expect(popover).toBeVisible();
+  await expect(page.locator(".room-status-date-header.is-cell-selection-column strong")).toHaveText(targetDate.toISOString().slice(5, 10));
+  await page.mouse.move(10, 10);
+  await expect(popover).toBeHidden();
+  await expect(page.locator(".room-status-date-header.is-cell-selection-column strong")).toHaveText(fixture.businessDate.slice(5));
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await page.mouse.down();
+  await expect(popover).toBeHidden();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(popover).toHaveAttribute("data-trigger", "explicit");
+  await expect(popover).toHaveAttribute("data-selection-kind", "range");
+  await expect(page.locator("dialog.modal-drawer")).toBeHidden();
+  await page.keyboard.press("Escape");
+  await expect(end).toBeFocused();
+  await from.focus();
+  await from.press("Enter");
+  await expect(popover).toBeVisible();
+  await expect(popover).toHaveAttribute("data-trigger", "explicit");
+  await popover.getByRole("button", { name: "预订", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "创建订单", exact: true })).toBeVisible();
+});
+
+test("同房多订单点击先在抽屉选目标，触屏点击保留快捷框", async ({ page, browser }) => {
+  await login(page);
+  await page.getByLabel("搜索房间或床位", { exact: true }).fill("101");
+  const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${fixture.multiOrderRoomUnitId}"][data-service-date="${fixture.businessDate}"]`);
+  await cell.click();
+  const chooser = page.getByRole("region", { name: "选择订单", exact: true });
+  await expect(chooser).toBeVisible();
+  await chooser.getByRole("button").filter({ hasText: fixture.cases.multiOrderB.nickname }).click();
+  await expect(page.getByRole("dialog", { name: "订单详情", exact: true })).toContainText(fixture.cases.multiOrderB.nickname, { timeout: 30_000 });
+
+  const touchContext = await browser.newContext({ hasTouch: true, baseURL: String(test.info().project.use.baseURL) });
+  try {
+    const touchPage = await touchContext.newPage();
+    await login(touchPage);
+    await touchPage.getByLabel("搜索房间或床位", { exact: true }).fill(fixture.cases.todayPaid.unitCode);
+    await fixtureCell(touchPage, fixture.cases.todayPaid).tap();
+    await expect(touchPage.getByTestId("room-status-quick-popover")).toHaveAttribute("data-trigger", "explicit");
+    await expect(touchPage.getByRole("dialog", { name: "订单详情", exact: true })).toBeHidden();
+    await touchPage.getByRole("button", { name: "关闭快捷操作", exact: true }).tap();
+    await touchPage.getByLabel("搜索房间或床位", { exact: true }).fill(fixture.cases.temporaryOtherRoom.unitCode);
+    await fixtureCell(touchPage, fixture.cases.temporaryOtherRoom).tap();
+    const quick = touchPage.getByRole("region", { name: "订单快捷操作", exact: true });
+    await expect(quick.locator(".room-status-quick-order-heading")).toContainText(fixture.cases.temporaryOtherRoom.nickname);
+    await quick.getByRole("group", { name: "提前退房（不可用）", exact: true }).tap();
+    await expect(quick.getByRole("tooltip")).toHaveText("入住当天暂不办理缩短或提前退房。");
+    await expect(touchPage.getByRole("dialog", { name: "提前退房", exact: true })).toHaveCount(0);
+  } finally { await touchContext.close(); }
 });
