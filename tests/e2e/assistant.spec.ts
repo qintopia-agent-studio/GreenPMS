@@ -187,7 +187,7 @@ test("all five suggestions keep the assistant open while their buttons unmount",
     await route.fulfill({ json: { conversationId: "suggestion-dismiss-regression", text: "已收到默认问题。", entries: [] } });
   });
   await login(page);
-  const trigger = page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true });
+  const trigger = page.locator(".assistant-trigger:not(.assistant-trigger-compact)").filter({ visible: true });
   const panel = page.getByTestId("ai-assistant-panel");
   await trigger.click();
   try {
@@ -259,19 +259,37 @@ test("streamed text appears before completion; stop and failure discard the draf
   await expect(page).toHaveURL(/\/$/);
 });
 
-test("order read drawers and assistant never overlap across desktop and narrow widths", async ({ page }, testInfo) => {
+for (const openOrder of ["order-first", "assistant-first"] as const) test(`order read drawers stay independent: ${openOrder}`, async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "covers the non-modal desktop drawer and responsive transition in one journey");
-  await login(page); const id = await order(page.request);
+  await enabledUi(page);
+  await page.route("**/api/v1/assistant/chat", route => route.fulfill({ json: {
+    conversationId: "independent-drawers", text: Array.from({ length: 30 }, (_, i) => `第 ${i + 1} 项：请在订单页面核对操作。`).join("\n\n"), entries: []
+  } }));
+  await login(page); const id = process.env.ASSISTANT_TEST_ORDER_ID ?? await order(page.request);
   const details = await (await page.request.get(`/api/v1/orders/${id}`)).json() as OrderViewDto;
   await page.reload();
-  await page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true }).click();
+  const trigger = page.locator(".assistant-trigger:not(.assistant-trigger-compact)").filter({ visible: true });
+  const panel = page.getByTestId("ai-assistant-panel"), messages = panel.locator(".assistant-messages");
+  async function prepareConversation() {
+    await page.getByLabel("向 AI 助手提问").fill("合成滚动测试");
+    await panel.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(panel.locator(".assistant-message-assistant")).toContainText("第 30 项");
+    await messages.evaluate(el => { el.scrollTop = 100; });
+    await expect.poll(() => messages.evaluate(el => el.scrollTop)).toBe(100);
+  }
+  if (openOrder === "assistant-first") await trigger.click();
+  if (openOrder === "assistant-first") await prepareConversation();
   const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${details.currentSegment.inventoryUnitId}"][data-service-date="${details.currentSegment.arrivalDate}"]`);
   await cell.focus(); await page.keyboard.press("Enter");
   const popover = page.getByTestId("room-status-quick-popover");
   await popover.locator(".room-status-quick-orders button").filter({ hasText: "助手回归" }).click();
-  const drawer = page.locator("dialog[open]").last(), panel = page.getByTestId("ai-assistant-panel");
+  const drawer = page.locator("dialog[open]").last();
   await expect(drawer).toBeVisible();
   expect(await drawer.evaluate(el => el.matches(":modal"))).toBe(false);
+  if (openOrder === "order-first") await trigger.click();
+  await expect(drawer).toBeVisible();
+  if (openOrder === "order-first") await prepareConversation();
+  await expect.poll(() => messages.evaluate(el => el.scrollTop)).toBe(100);
   for (const width of [1440, 1024, 900, 820]) {
     await page.setViewportSize({ width, height: 900 });
     await expect(panel).toBeVisible();
@@ -280,6 +298,28 @@ test("order read drawers and assistant never overlap across desktop and narrow w
       expect(form && assistant && (form.x + form.width <= assistant.x + 1 || form.y + form.height <= assistant.y + 1)).toBe(true);
     }).toPass();
     await expect(drawer.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
+    const body = drawer.locator(":scope > .modal-shell > .modal-body");
+    await body.evaluate(el => { el.scrollTop = 100; });
+    const scrollTop = await body.evaluate(el => el.scrollTop);
+    await page.getByLabel("向 AI 助手提问").fill("保留助手草稿");
+    // In the stacked layout the order covers the page header, so use its local switch.
+    const layoutTrigger = width > 860 ? trigger : drawer.locator(":scope > .modal-shell").getByRole("button", { name: "AI 助手", exact: true });
+    // Cover both the panel close button and the page-level toggle, including its icon.
+    for (const closeButton of [panel.getByRole("button", { name: "关闭 AI 助手" }), layoutTrigger.locator("svg")]) {
+      await closeButton.click();
+      await expect(panel).toBeHidden();
+      await expect(drawer).toBeVisible();
+      await expect.poll(() => body.evaluate(el => el.scrollTop)).toBe(scrollTop);
+      await expect(async () => {
+        const bounds = await drawer.boundingBox();
+        expect(bounds!.x + bounds!.width).toBeCloseTo(width, 0);
+      }).toPass();
+      await layoutTrigger.click();
+      await expect(drawer).toBeVisible();
+      await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("保留助手草稿");
+      await expect.poll(() => body.evaluate(el => el.scrollTop)).toBe(scrollTop);
+      await expect.poll(() => messages.evaluate(el => el.scrollTop)).toBe(100);
+    }
     await page.screenshot({ path: testInfo.outputPath(`assistant-order-drawer-${width}.png`) });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
   }
@@ -292,4 +332,56 @@ test("order read drawers and assistant never overlap across desktop and narrow w
   expect(confirmation).toBe(false);
   await expect(panel).toBeVisible();
   await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("仅编辑助手草稿");
+  await expect.poll(() => messages.evaluate(el => el.scrollTop)).toBe(100);
+  await expect(panel.locator(".assistant-message-assistant")).toContainText("第 30 项");
+  // Genuine outside clicks still dismiss only the read drawer.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await cell.press("Enter");
+  await popover.locator(".room-status-quick-orders button").filter({ hasText: "助手回归" }).click();
+  await expect(drawer).toBeVisible();
+  await page.locator(".main-content").click({ position: { x: 20, y: 20 } });
+  await expect(drawer).toHaveCount(0);
+  await expect(panel).toBeVisible();
+  // Moving a hidden assistant between the page and a drawer must also preserve reading position.
+  await panel.getByRole("button", { name: "关闭 AI 助手" }).click();
+  await cell.press("Enter");
+  await popover.locator(".room-status-quick-orders button").filter({ hasText: "助手回归" }).click();
+  await expect(drawer).toBeVisible();
+  await drawer.locator(":scope > .modal-shell").getByRole("button", { name: "关闭", exact: true }).first().click();
+  await expect(drawer).toHaveCount(0);
+  await trigger.click();
+  await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("仅编辑助手草稿");
+  await expect.poll(() => messages.evaluate(el => el.scrollTop)).toBe(100);
+});
+
+test("assistant can open after a modal form and each pane preserves the other's draft", async ({ page }, testInfo) => {
+  await enabledUi(page);
+  await login(page); const id = process.env.ASSISTANT_TEST_ORDER_ID ?? await order(page.request);
+  await page.goto(`/orders/${id}`);
+  await page.locator('[data-order-action="ADJUST_DEPARTURE"]').click();
+  const dialog = page.locator("dialog[open]"), panel = page.getByTestId("ai-assistant-panel");
+  const shell = dialog.locator(":scope > .modal-shell"), note = shell.locator("textarea").last();
+  await note.fill("关闭助手也必须保留的订单备注");
+  let writes = 0;
+  page.on("request", request => { if (request.method() === "POST" && /command-previews|\/quotes/.test(request.url())) writes++; });
+  await shell.getByRole("button", { name: "AI 助手", exact: true }).click();
+  await expect(panel).toBeVisible();
+  await expect(note).toHaveValue("关闭助手也必须保留的订单备注");
+  await expect(async () => {
+    const form = await shell.boundingBox(), assistant = await panel.boundingBox();
+    expect(form && assistant && (form.x + form.width <= assistant.x + 1 || form.y + form.height <= assistant.y + 1)).toBe(true);
+  }).toPass();
+  await page.getByLabel("向 AI 助手提问").fill("未发送的助手问题");
+  await panel.getByRole("button", { name: "关闭 AI 助手" }).click();
+  await expect(panel).toBeHidden();
+  await expect(dialog).toBeVisible();
+  await expect(note).toHaveValue("关闭助手也必须保留的订单备注");
+  await shell.getByRole("button", { name: "AI 助手", exact: true }).click();
+  await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("未发送的助手问题");
+  await page.screenshot({ path: testInfo.outputPath("assistant-form-independent.png") });
+  await shell.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(panel).toBeVisible();
+  await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("未发送的助手问题");
+  expect(writes).toBe(0);
 });

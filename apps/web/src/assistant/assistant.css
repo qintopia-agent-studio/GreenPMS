@@ -8,6 +8,9 @@
 .sidebar-is-collapsed .assistant-sidebar-slot .assistant-trigger { justify-content: center; padding: 10px 0; }
 .sidebar-is-collapsed .assistant-sidebar-slot .assistant-trigger span { display: none; }
 .assistant-trigger-mobile { display: none; }
+.assistant-trigger-compact { width: auto; margin-left: auto; flex-shrink: 0; padding: 7px 10px; }
+.assistant-portal { display: contents; }
+.assistant-panel[hidden] { display: none; }
 .assistant-panel { position: fixed; z-index: 80; inset: 0 0 0 auto; width: min(400px, 100vw); display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border); box-shadow: -8px 0 30px rgba(23,32,27,.14); }
 .assistant-header { flex-shrink: 0; padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .assistant-header > div { display: flex; gap: 8px; align-items: center; }
