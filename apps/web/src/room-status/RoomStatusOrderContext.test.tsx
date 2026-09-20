@@ -1,4 +1,10 @@
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToStaticMarkup as renderMarkup } from "react-dom/server";
+import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
+
+function renderToStaticMarkup(node: ReactNode) {
+  return renderMarkup(<MemoryRouter>{node}</MemoryRouter>);
+}
 import { describe, expect, it } from "vitest";
 import type { OrderViewDto } from "../types";
 import { RoomStatusOrderContext } from "./RoomStatusOrderContext";
@@ -386,12 +392,12 @@ describe("RoomStatusOrderContext", () => {
       onLocateRange={() => undefined}
     />);
     expect(html.match(/data-room-status-action-mode="inline"/g)).toHaveLength(3);
-    expect(html.match(/data-room-status-action-mode="order-detail"/g)).toHaveLength(1);
+    expect(html.match(/data-room-status-action-mode="order-detail"/g)).toHaveLength(2);
     expect(html).toContain("办理入住");
     expect(html).toContain("办理退房");
     expect(html).toContain("换房");
     expect(html).toContain("调整订单金额");
-    expect(html).not.toContain("登记冲销");
+    expect(html).toContain("登记冲销");
   });
 
   it("keeps cancel, no-show and revoke check-in inside the current room-status context", () => {
@@ -814,7 +820,8 @@ describe("RoomStatusOrderContext", () => {
     expect(html).not.toContain("未生效会员产品");
     expect(html).not.toContain("错误合同会员产品");
     expect(html).not.toContain("其他合同会员产品");
-    expect(html).not.toContain("查看会员档案");
+    expect(html).toContain('href="/members?memberId=member_1"');
+    expect(html).not.toContain("contractId=");
   });
 
   it("hides historical cleaning tasks while the current release keeps the workflow disabled", () => {

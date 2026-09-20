@@ -1,3 +1,4 @@
+import { openQuickPopoverOrderDrawer } from "./quick-popover-helpers";
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import type { RoomStatusBoardDto, RoomStatusUnitDto } from "@qintopia/contracts";
 import { prepareStage8Acceptance, type Stage8AcceptanceFixture, type Stage8StayFixture } from "./setup-stage8-acceptance.ts";
@@ -134,9 +135,7 @@ async function selectQuickPopoverOrder(page: Page, stay: Stage8StayFixture): Pro
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAccessibleName(new RegExp(stay.unitCode));
-  const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: stay.nickname });
-  await expect(orderOption).toHaveCount(1);
-  await orderOption.click();
+  await openQuickPopoverOrderDrawer(popover, stay.nickname);
 }
 
 async function verifyMemberProfile(page: Page, stay: Stage8StayFixture, coverageCount: number) {

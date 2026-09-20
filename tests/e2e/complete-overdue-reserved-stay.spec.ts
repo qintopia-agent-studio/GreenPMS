@@ -1,3 +1,4 @@
+import { openQuickPopoverOrderDrawer } from "./quick-popover-helpers";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import type { AuthPrincipal, CommandEnvelope, CommandType, ReceiptDto, RoomStatusBoardDto } from "@qintopia/contracts";
 import { todayInTimeZone } from "@qintopia/domain";
@@ -232,9 +233,7 @@ async function openOrderFromRoomStatus(page: Page, target: CompleteStayFixture):
   await cell.click();
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
-  const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: target.nickname });
-  await expect(orderOption).toHaveCount(1);
-  await orderOption.click();
+  await openQuickPopoverOrderDrawer(popover, target.nickname);
   const context = page.locator(".room-status-order-context").filter({ hasText: target.nickname });
   await expect(context).toBeVisible({ timeout: 30_000 });
   await page.getByRole("dialog", { name: "订单详情" }).locator(".modal-footer")

@@ -1,3 +1,4 @@
+import { openQuickPopoverOrderDrawer } from "./quick-popover-helpers";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { prepareStage10MemberTraceAcceptance, type Stage10MemberTraceFixture } from "./setup-stage10-acceptance.ts";
 
@@ -38,9 +39,7 @@ test("4.3 member lodging and entitlement records link to each other without expo
   const popover = page.getByTestId("room-status-quick-popover");
   await expect(popover).toBeVisible();
   await expect(popover).toHaveAccessibleName(new RegExp(stay.unitCode));
-  const orderOption = popover.locator(".room-status-quick-orders button").filter({ hasText: stay.nickname });
-  await expect(orderOption).toHaveCount(1);
-  await orderOption.click();
+  await openQuickPopoverOrderDrawer(popover, stay.nickname);
 
   const drawer = page.locator("dialog.room-status-view-drawer");
   await expect(drawer).toBeVisible();

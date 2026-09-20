@@ -34,6 +34,14 @@ import {
 } from "@qintopia/contracts";
 import { api, ApiError } from "../api";
 import { ExternalPaymentPicker } from "../components/ExternalPaymentPicker";
+import { OrderFundsFormDialog } from "../components/OrderFundsFormDialog";
+import {
+  collectionAmountMinorToYuanInput,
+  collectionAmountYuanInputToMinor,
+  collectionFactTransactionReferenceLabel,
+  collectionMethodLabel,
+  remainingRefundableMinor
+} from "../orderFunds";
 import { accommodationPositionItems, type AccommodationPositionItem } from "../components/AccommodationPositionSummary";
 import { roomStatusRoomTypeLabel } from "../room-status/roomStatusPresentation";
 import { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
@@ -91,6 +99,14 @@ import {
   usePersistentCommandRecovery,
   StatusBadge
 } from "../ui";
+
+export {
+  collectionAmountMinorToYuanInput,
+  collectionAmountYuanInputToMinor,
+  collectionFactTransactionReferenceLabel,
+  collectionMethodLabel,
+  remainingRefundableMinor
+} from "../orderFunds";
 
 export { OverdueInHouseAlert, overdueInHouseNotice } from "../components/OverdueInHouseAlert";
 
@@ -275,8 +291,6 @@ const formTitles: Record<FormAction, string> = {
   REPRICE_ORDER: "调整订单金额"
 };
 
-const MAX_AMOUNT_MINOR = 2_147_483_647;
-
 const bookingChannelLabels = {
   YOUMUDAO: "游牧岛",
   CTRIP: "携程",
@@ -453,15 +467,6 @@ export function requestedOrderAction(search: string, actions: readonly OrderAllo
   return actions.find((action) => action.enabled && action.code === requested)?.code;
 }
 
-export function remainingRefundableMinor(facts: readonly CollectionFactDto[], collection: CollectionFactDto): number {
-  if (collection.fact_type !== "COLLECTION" || facts.some((fact) => fact.reverses_fact_id === collection.fact_id)) return 0;
-  const activeRefunded = facts
-    .filter((fact) => fact.fact_type === "REFUND" && fact.references_fact_id === collection.fact_id)
-    .filter((refund) => !facts.some((fact) => fact.reverses_fact_id === refund.fact_id))
-    .reduce((sum, refund) => sum + refund.amount_minor, 0);
-  return Math.max(0, collection.amount_minor - activeRefunded);
-}
-
 export function collectionFactCanReverse(
   facts: readonly CollectionFactDto[],
   fact: CollectionFactDto,
@@ -496,16 +501,6 @@ export function buildReverseFactRequest(
     },
     initialReason: { code: "REVERSE_FACT", note: trimmedNote }
   };
-}
-
-export function collectionFactTransactionReferenceLabel(facts: readonly CollectionFactDto[], fact: CollectionFactDto): string {
-  if (fact.fact_type === "REVERSAL") return "不适用";
-  if (fact.transaction_reference) return fact.transaction_reference;
-  if (fact.fact_type === "REFUND" && fact.method === "WECOM") {
-    const original = facts.find((item) => item.fact_id === fact.references_fact_id);
-    return `${fact.refund_reference ? `退款 ${fact.refund_reference}` : "历史未记录退款单号"}${original?.transaction_reference ? ` · 原收款 ${original.transaction_reference}` : ""}`;
-  }
-  return fact.method === "CASH" || fact.method === "OTHER" ? "不适用" : "历史未记录";
 }
 
 export function orderViewMatchesPrincipalScope(loadedScope: string | undefined, currentScope: string): boolean {
@@ -567,19 +562,6 @@ export function collectionFactTypeLabel(type: CollectionFactDto["fact_type"]): s
   return "冲销";
 }
 
-export function collectionMethodLabel(method: string): string {
-  const labels: Record<string, string> = {
-    CASH: "现金",
-    BANK_TRANSFER: "银行转账",
-    CARD: "银行卡",
-    WECOM: "企业微信",
-    WECHAT: "微信",
-    ALIPAY: "支付宝",
-    OTHER: "其他方式"
-  };
-  return labels[method] ?? "其他方式";
-}
-
 export function pricingBasisLabel(basis: PricingRevisionDto["pricing_basis"]): string {
   switch (basis) {
     case "CHANNEL_CONTRACT": return "本单渠道应结金额";
@@ -598,22 +580,6 @@ export function collectionDifferencePresentation(amount: MoneyDto): {
     label: "收款差额",
     amount
   };
-}
-
-export function collectionAmountYuanInputToMinor(value: string): number | undefined {
-  const normalized = value.trim();
-  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return undefined;
-  const [yuanPart, fractionPart = ""] = normalized.split(".");
-  const minor = BigInt(yuanPart!) * 100n + BigInt(fractionPart.padEnd(2, "0") || "0");
-  if (minor <= 0n || minor > BigInt(MAX_AMOUNT_MINOR)) return undefined;
-  return Number(minor);
-}
-
-export function collectionAmountMinorToYuanInput(minorUnits: number): string {
-  if (!Number.isSafeInteger(minorUnits) || minorUnits <= 0) return "";
-  const yuan = Math.trunc(minorUnits / 100);
-  const cents = minorUnits % 100;
-  return cents === 0 ? String(yuan) : `${yuan}.${String(cents).padStart(2, "0")}`;
 }
 
 export function arrangementUnitLabel(units: ReadonlyMap<string, Pick<InventoryUnitDto, "code" | "name" | "building_code">>, inventoryUnitId: string): string {
@@ -1441,7 +1407,7 @@ function CompleteStayDialog({ view, draft, onClose, onSubmit }: {
   </Modal>;
 }
 
-function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = false, onClose, onSubmit }: {
+function ActionFormDialog({ action, ...props }: {
   action: FormAction;
   view: OrderViewDto;
   initialFactId?: string;
@@ -1450,9 +1416,20 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
 }) {
-  const collections = view.collectionFacts.filter((fact) => fact.fact_type === "COLLECTION");
-  const refundableCollections = collections.filter((fact) => remainingRefundableMinor(view.collectionFacts, fact) > 0);
-  const initialSelectedFactId = initialFactId ?? refundableCollections[0]?.fact_id ?? "";
+  return action === "RECORD_COLLECTION" || action === "RECORD_REFUND"
+    ? <OrderFundsFormDialog action={action} {...props} />
+    : <OtherActionFormDialog action={action} {...props} />;
+}
+
+function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocked = false, onClose, onSubmit }: {
+  action: Exclude<FormAction, "RECORD_COLLECTION" | "RECORD_REFUND">;
+  view: OrderViewDto;
+  initialFactId?: string;
+  draft?: CommandRequest;
+  writeBlocked?: boolean;
+  onClose: () => void;
+  onSubmit: (request: CommandRequest) => void;
+}) {
   const reversibleFacts = view.collectionFacts.filter((fact) => collectionFactCanReverse(view.collectionFacts, fact, true));
   const draftReverseFactId = typeof draft?.input.reversesFactId === "string" ? draft.input.reversesFactId : undefined;
   const initialReverseFactId = action === "REVERSE_FACT"
@@ -1462,35 +1439,14 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
         ? draftReverseFactId
         : reversibleFacts[0]?.fact_id ?? "")
     : "";
-  const recordedExcessMinor = view.amounts.refundReferenceAmount.minorUnits;
-  function selectedRefundCollectionFor(collectionFactId: string): CollectionFactDto | undefined {
-    return collections.find((fact) => fact.fact_id === collectionFactId);
-  }
-  function suggestedRefundFor(collectionFactId: string): number {
-    const collection = selectedRefundCollectionFor(collectionFactId);
-    if (!collection) return 0;
-    return Math.min(recordedExcessMinor, remainingRefundableMinor(view.collectionFacts, collection));
-  }
-  const initialSuggestedRefund = action === "RECORD_REFUND" ? suggestedRefundFor(initialSelectedFactId) : 0;
-  const initialRefundMethod = action === "RECORD_REFUND" ? selectedRefundCollectionFor(initialSelectedFactId)?.method ?? "WECOM" : "WECOM";
   const initialReverseNote = typeof draft?.input.note === "string"
     ? draft.input.note
     : draft?.initialReason?.note ?? "";
-  const [amountYuan, setAmountYuan] = useState(initialSuggestedRefund > 0 ? collectionAmountMinorToYuanInput(initialSuggestedRefund) : "");
-  const [method, setMethod] = useState(initialRefundMethod);
-  const [note, setNote] = useState(action === "REVERSE_FACT" ? initialReverseNote : "");
-  const [transactionReference, setTransactionReference] = useState("");
-  const [refundReference, setRefundReference] = useState("");
-  const [factId, setFactId] = useState(initialSelectedFactId);
+  const [note, setNote] = useState(initialReverseNote);
   const [reverseFactId, setReverseFactId] = useState(initialReverseFactId);
-  const selectedRefundCollection = action === "RECORD_REFUND" ? selectedRefundCollectionFor(factId) : undefined;
   const selectedReverseFact = action === "REVERSE_FACT"
     ? reversibleFacts.find((fact) => fact.fact_id === reverseFactId)
     : undefined;
-  const selectedRefundRemainingMinor = selectedRefundCollection ? remainingRefundableMinor(view.collectionFacts, selectedRefundCollection) : 0;
-  const transactionReferenceRequired = action === "RECORD_COLLECTION"
-    ? method === "WECOM" || method === "BANK_TRANSFER"
-    : method === "BANK_TRANSFER";
   const [newDepartureDate, setNewDepartureDate] = useState(action === "SHORTEN_STAY" ? shiftDate(view.order.departure_date, -1) : shiftDate(view.order.departure_date, 1));
   const [targetContractYuan, setTargetContractYuan] = useState(() => initialRepriceTargetYuan(
     view.amounts.currentContractAmount.minorUnits,
@@ -1498,12 +1454,6 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
   ));
   const [repriceReason, setRepriceReason] = useState(draft?.initialReason?.note ?? "");
   const [validationError, setValidationError] = useState<unknown>();
-
-  useEffect(() => {
-    if (action !== "RECORD_REFUND") return;
-    const suggested = suggestedRefundFor(factId);
-    setAmountYuan(suggested > 0 ? collectionAmountMinorToYuanInput(suggested) : "");
-  }, [action, factId, recordedExcessMinor]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1528,49 +1478,6 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
       onSubmit(buildReverseFactRequest(view, selectedReverseFact, trimmedNote));
       return;
     }
-    if (action === "RECORD_COLLECTION" || action === "RECORD_REFUND") {
-      if (action === "RECORD_REFUND" && refundableCollections.length === 0) {
-        setValidationError(new Error("该订单当前没有可退款的收款记录，不能登记退款"));
-        return;
-      }
-      if (action === "RECORD_REFUND" && !factId) {
-        setValidationError(new Error("请选择要退款的原收款"));
-        return;
-      }
-      const trimmedNote = note.trim();
-      if (action === "RECORD_REFUND" && !trimmedNote) {
-        setValidationError(new Error("必须填写退款原因"));
-        return;
-      }
-      if (action === "RECORD_COLLECTION" && !trimmedNote && (method === "CASH" || method === "OTHER")) {
-        setValidationError(new Error(method === "CASH" ? "必须填写收款人" : "必须填写其他收款说明"));
-        return;
-      }
-      const parsedAmount = collectionAmountYuanInputToMinor(amountYuan);
-      if (parsedAmount === undefined) {
-        setValidationError(new Error("金额必须按人民币元填写，大于 0 且最多保留两位小数"));
-        return;
-      }
-      if (action === "RECORD_REFUND" && parsedAmount > selectedRefundRemainingMinor) {
-        setValidationError(new Error(`退款金额不能超过所选原收款的剩余可退金额（最多可退 ${formatMinor(selectedRefundRemainingMinor, selectedRefundCollection?.currency ?? "CNY")}）。如需退多笔原收款，请分多次办理。`));
-        return;
-      }
-      if (transactionReferenceRequired && !transactionReference.trim()) {
-        setValidationError(new Error(method === "WECOM" ? "必须填写企业微信交易单号" : "必须填写交易单号或流水号"));
-        return;
-      }
-      if (action === "RECORD_REFUND" && method === "WECOM" && !refundReference.trim()) {
-        setValidationError(new Error("必须填写本次企业微信退款单号"));
-        return;
-      }
-      Object.assign(base, { amountMinor: parsedAmount, method, note: trimmedNote });
-      if (transactionReference.trim()) Object.assign(base, { transactionReference: transactionReference.trim() });
-      if (action === "RECORD_REFUND") {
-        Object.assign(base, { referencesFactId: factId });
-        if (method === "WECOM") Object.assign(base, { refundReference: refundReference.trim() });
-      }
-      description = "";
-    }
     if (action === "SHORTEN_STAY" || action === "EXTEND_STAY") {
       Object.assign(base, { newDepartureDate });
       description = "订单金额将按原房价标准重新计算，并保留调整记录。";
@@ -1593,13 +1500,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
       title: formTitles[action],
       description,
       input: base,
-      ...(action === "REPRICE_ORDER" ? { initialReason: { code: "REPRICE_ORDER", note: repriceReason.trim() } } : {}),
-      ...((action === "RECORD_COLLECTION" || action === "RECORD_REFUND") ? {
-        initialReason: {
-          code: action,
-          note: action === "RECORD_REFUND" ? note.trim() : note.trim() || "登记收款"
-        }
-      } : {})
+      ...(action === "REPRICE_ORDER" ? { initialReason: { code: "REPRICE_ORDER", note: repriceReason.trim() } } : {})
     });
   }
 
@@ -1607,34 +1508,6 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
     <Modal title={formTitles[action]} onClose={onClose} footer={null}>
       <form className="modal-form" onSubmit={submit} noValidate>
         <InlineError error={validationError} title="无法继续" />
-        {(action === "RECORD_COLLECTION" || action === "RECORD_REFUND") ? (
-          <div className="form-grid form-grid-two">
-            {action === "RECORD_REFUND" && refundableCollections.length === 0 ? (
-              <div className="span-two form-field-note" role="status">
-                <strong>该订单当前没有可退款的收款记录</strong>
-                <span>需要先有未被冲销、且仍有可退余额的原收款，才能登记退款。</span>
-              </div>
-            ) : null}
-            {action === "RECORD_REFUND" && refundableCollections.length > 0 ? <label className="span-two">选择原收款<select value={factId} onChange={(event) => {
-              const nextFactId = event.target.value;
-              const nextFact = selectedRefundCollectionFor(nextFactId);
-              setFactId(nextFactId);
-              if (nextFact?.method) setMethod(nextFact.method);
-              setTransactionReference("");
-              setRefundReference("");
-              setValidationError(undefined);
-            }} required>{refundableCollections.map((fact) => <option key={fact.fact_id} value={fact.fact_id}>{formatDateTime(fact.created_at)} · {collectionFactTransactionReferenceLabel(view.collectionFacts, fact)} · 可退 {formatMinor(remainingRefundableMinor(view.collectionFacts, fact), fact.currency)} · {collectionMethodLabel(fact.method)}</option>)}</select></label> : null}
-            <label>金额（元）<input type="text" value={amountYuan} onChange={(event) => { setAmountYuan(event.target.value); setValidationError(undefined); }} required inputMode="decimal" placeholder="例如 1280.50" data-testid="fact-amount-yuan" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0} /></label>
-            <label>{action === "RECORD_REFUND" ? "退款方式" : "收款方式"}<select value={method} onChange={(event) => { setMethod(event.target.value); setTransactionReference(""); setValidationError(undefined); }} disabled={(action === "RECORD_REFUND" && refundableCollections.length === 0) || selectedRefundCollection?.method === "WECOM"}><option value="WECOM">企业微信</option><option value="BANK_TRANSFER">银行转账</option><option value="CASH">现金</option><option value="OTHER">其他</option></select></label>
-            {action === "RECORD_REFUND" && method === "WECOM" ? <div className="span-two form-field-note" role="status">
-              <strong>企业微信原路退回</strong>
-              <span>对应所选原收款；本次退款需记录独立退款单号。</span>
-            </div> : null}
-            {action === "RECORD_REFUND" && method === "WECOM" ? <ExternalPaymentPicker key={factId} propertyId={view.order.property_id} kind="REFUND" originalCollectionFactId={factId} value={refundReference} amountMinor={Math.round(Number(amountYuan) * 100)} testId="refund-reference" disabled={refundableCollections.length === 0} onChange={(reference, item) => { setRefundReference(reference); if (item?.amountMinor) setAmountYuan(collectionAmountMinorToYuanInput(item.amountMinor)); setValidationError(undefined); }} /> : null}
-            {transactionReferenceRequired ? method === "WECOM" ? <ExternalPaymentPicker propertyId={view.order.property_id} value={transactionReference} amountMinor={Math.round(Number(amountYuan) * 100) || Math.max(0, view.amounts.collectionDifference.minorUnits)} testId="transaction-reference" onChange={(reference, item) => { setTransactionReference(reference); if (item?.amountMinor) setAmountYuan(collectionAmountMinorToYuanInput(item.amountMinor)); setValidationError(undefined); }} /> : <label className="span-two">交易单号 / 流水号<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="transaction-reference" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0} /></label> : null}
-            <label className="span-two">{action === "RECORD_REFUND" ? "退款原因" : method === "CASH" ? "收款人" : method === "OTHER" ? "其他收款说明" : "备注（选填）"}<textarea rows={3} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} required={action === "RECORD_REFUND" || method === "CASH" || method === "OTHER"} maxLength={1000} data-testid={action === "RECORD_REFUND" ? "refund-reason" : "collection-note"} /></label>
-          </div>
-        ) : null}
         {action === "REVERSE_FACT" ? (
           <div className="form-grid form-grid-two">
             {reversibleFacts.length === 0 ? (
@@ -1663,7 +1536,7 @@ function ActionFormDialog({ action, view, initialFactId, draft, writeBlocked = f
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}
-        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked || (action === "RECORD_REFUND" && refundableCollections.length === 0) || (action === "REVERSE_FACT" && reversibleFacts.length === 0)}>{action === "RECORD_COLLECTION" || action === "RECORD_REFUND" ? "下一步" : "继续核对"}</button></div>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked || (action === "REVERSE_FACT" && reversibleFacts.length === 0)}>继续核对</button></div>
       </form>
     </Modal>
   );
@@ -2061,6 +1934,13 @@ function ScopedOrderDetailPage() {
   }
 
   function returnCommandToEdit(request: CommandRequest) {
+    if (request.commandType === "RECORD_COLLECTION" || request.commandType === "RECORD_REFUND") {
+      if (request.input.orderId !== viewRef.current?.order.id || request.input.propertyId !== viewRef.current?.order.property_id) return;
+      setCommandDraft(request);
+      setInitialFactId(typeof request.input.referencesFactId === "string" ? request.input.referencesFactId : undefined);
+      setFormAction(request.commandType);
+      return;
+    }
     setCommandDraft(request);
     if (request.commandType === "MANAGE_ORDER_OCCUPANTS") {
       setCompanionAction(typeof request.input.occupantId === "string" ? { occupantId: request.input.occupantId } : {});

@@ -34,6 +34,8 @@ import type {
 } from "../types";
 import { correctionDraftMatchesOccupant, OrderOccupantCorrectionDialog } from "../components/OrderOccupantCorrectionDialog";
 import { MoveUnitDrawer } from "../components/MoveUnitDrawer";
+import { OrderFundsFormDialog, type OrderFundsAction } from "../components/OrderFundsFormDialog";
+import type { RoomStatusQuickOrderAction } from "../room-status/RoomStatusQuickPopover";
 import {
   OrderLifecycleActionDrawer,
   type OrderLifecycleAction
@@ -3363,6 +3365,8 @@ export function InventoryPage() {
   const [selectedMoveUnitRevision, setSelectedMoveUnitRevision] = useState<string>();
   const [selectedLifecycleAction, setSelectedLifecycleAction] = useState<OrderLifecycleAction>();
   const [selectedLifecycleRevision, setSelectedLifecycleRevision] = useState<string>();
+  const [selectedFundsAction, setSelectedFundsAction] = useState<OrderFundsAction>();
+  const [selectedFundsRevision, setSelectedFundsRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [pendingOrderContextIdentity, setPendingOrderContextIdentity] = useState<string>();
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
@@ -3566,10 +3570,20 @@ export function InventoryPage() {
     const controller = new AbortController();
     setSelectedOrderLoading(true);
     setSelectedOrderError(undefined);
+    const timeout = window.setTimeout(() => {
+      if (!current) return;
+      current = false;
+      controller.abort();
+      setSelectedOrderView(undefined);
+      setSelectedOrderLoadedScope(undefined);
+      setSelectedOrderError(new Error("订单信息载入超时，请重新载入后办理。"));
+      setSelectedOrderLoading(false);
+    }, ROOM_STATUS_QUERY_TIMEOUT_MS);
     api.order(selectedOrderIdentity.orderId, controller.signal)
       .then((response) => {
         if (!current) return;
-        if (response.order.property_id !== propertyId || response.stay.id !== selectedOrderIdentity.stayId) {
+        if (response.order.property_id !== propertyId || response.order.id !== selectedOrderIdentity.orderId
+          || response.stay.id !== selectedOrderIdentity.stayId) {
           throw new Error("订单详情与当前房态的住宿记录不一致，已停止显示");
         }
         assertOrderViewAllowedActions(response, currentPropertyAllowedActions);
@@ -3582,9 +3596,13 @@ export function InventoryPage() {
         setSelectedOrderView(undefined);
         setSelectedOrderError(nextError);
       })
-      .finally(() => current && setSelectedOrderLoading(false));
+      .finally(() => {
+        window.clearTimeout(timeout);
+        if (current) setSelectedOrderLoading(false);
+      });
     return () => {
       current = false;
+      window.clearTimeout(timeout);
       controller.abort();
     };
   }, [board?.businessDate, board?.revision, orderPrincipalScope, orderRefreshToken, propertyId, selectedOrderIdentity]);
@@ -3627,9 +3645,12 @@ export function InventoryPage() {
     setSelectedMoveUnitRevision(undefined);
     setSelectedLifecycleAction(undefined);
     setSelectedLifecycleRevision(undefined);
+    setSelectedFundsAction(undefined);
+    setSelectedFundsRevision(undefined);
     setCommandDraft((current) => current?.presentation === "STAY_DATES"
       || current?.presentation === "MOVE_UNIT"
-      || current?.presentation === "ORDER_LIFECYCLE" ? undefined : current);
+      || current?.presentation === "ORDER_LIFECYCLE"
+      || current?.commandType === "RECORD_COLLECTION" || current?.commandType === "RECORD_REFUND" ? undefined : current);
   }, [selectedOrderIdentity?.orderId, selectedOrderIdentity?.stayId]);
 
   useEffect(() => {
@@ -4309,7 +4330,10 @@ export function InventoryPage() {
     setRefreshToken((value) => value + 1);
   }, [boardExpired, historicalSelectionOpen, querySettledToken, renderedBoard?.freshUntil, renderedBoard?.revision]);
   const useInlineOrderContext = roomStatusOrderContextMode(workspaceWidth, isMobile) === "INLINE";
-  const authorizedSelectedOrderView = selectedOrderLoadedScope === orderPrincipalScope ? selectedOrderView : undefined;
+  const authorizedSelectedOrderView = selectedOrderLoadedScope === orderPrincipalScope
+    && selectedOrderView?.order.id === selectedOrderIdentity?.orderId
+    && selectedOrderView?.stay.id === selectedOrderIdentity?.stayId
+    ? selectedOrderView : undefined;
   const selectedCorrectionOccupant = authorizedSelectedOrderView?.occupants.find((occupant) => occupant.id === selectedCorrectionOccupantId);
 
   useEffect(() => {
@@ -5006,6 +5030,8 @@ export function InventoryPage() {
     setSelectedStayDateAction(undefined);
     setSelectedStayDateMode("DATE_CHANGE");
     setSelectedStayDateRevision(undefined);
+    setSelectedFundsAction(undefined);
+    setSelectedFundsRevision(undefined);
     setSelectedOrderCommandScope(undefined);
     setCommandDraft(undefined);
     setPendingOrderContextIdentity(undefined);
@@ -5097,6 +5123,8 @@ export function InventoryPage() {
     setSelectedGridStayId(identity?.stayId);
     setQuoteTarget(undefined);
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor });
+    const options = roomStatusOrderOptionsForDate(unit, serviceDate);
+    if (options.kind === "READY" && options.orders.length === 1) setSelectedOrderIdentity(options.orders[0]!.identity);
   }
 
   function inspectInterval(unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string) {
@@ -5113,6 +5141,8 @@ export function InventoryPage() {
     setSelectedGridStayId(roomStatusOrderIdentityForInterval(interval)?.stayId);
     setQuoteTarget(undefined);
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, intervalId: interval.id });
+    const options = roomStatusOrderOptionsForDate(unit, serviceDate);
+    if (options.kind === "READY" && options.orders.length === 1) setSelectedOrderIdentity(options.orders[0]!.identity);
   }
 
   function inspectSelection(unit: RoomStatusUnitDto, selection: RoomStatusSelection, anchor: HTMLElement) {
@@ -5137,6 +5167,8 @@ export function InventoryPage() {
     setSelectedGridStayId(undefined);
     setQuoteTarget(undefined);
     setQuickPopoverTarget({ unitId: unit.id, serviceDate, anchor, selection });
+    const options = roomStatusOrderOptionsForSelection(unit, selection);
+    if (options.kind === "READY" && options.orders.length === 1) setSelectedOrderIdentity(options.orders[0]!.identity);
   }
 
   function previewSelection(selection: RoomStatusSelection | null) {
@@ -5222,6 +5254,60 @@ export function InventoryPage() {
         selectedDayDate ?? viewState.selection?.anchorDate
       )
     });
+  }
+
+  function runQuickOrderAction(action: RoomStatusQuickOrderAction) {
+    const view = authorizedSelectedOrderView;
+    const identity = selectedOrderIdentity;
+    const targetMatches = quickPopoverOrders.kind === "READY" && quickPopoverOrders.orders.some((option) => (
+      option.identity.orderId === identity?.orderId && option.identity.stayId === identity?.stayId
+    ));
+    if (!view || !identity || !targetMatches || selectedOrderLoading) {
+      setActionError(new Error("当前订单信息仍在载入或已变化，请重新选择后办理。"));
+      return;
+    }
+    if (action === "VIEW_MEMBERSHIP") {
+      const memberId = view.order.member_id ?? view.membershipConversion?.memberId;
+      const contractId = view.order.member_contract_id ?? view.membershipConversion?.contractId;
+      if (!memberId) return;
+      setQuickPopoverTarget(undefined);
+      persistViewNow();
+      navigate(`/members?memberId=${encodeURIComponent(memberId)}${contractId ? `&contractId=${encodeURIComponent(contractId)}` : ""}`);
+      return;
+    }
+    if (action === "VIEW_FUNDS") {
+      selectOrderContextIdentity(identity, quickPopoverTarget?.serviceDate);
+      return;
+    }
+    if (commandsBlocked || view.accessLevel !== "WRITE") return;
+    setQuickPopoverTarget(undefined);
+    if (action === "CHECK_IN" || action === "CHECK_OUT") startSelectedOrderFulfillment(action);
+    else if (action === "EARLY_CHECK_OUT") startSelectedOrderDateAction("SHORTEN_STAY", "EARLY_CHECK_OUT");
+    else if (action === "ADJUST_DEPARTURE") {
+      const commandType = view.allowedActions.find((candidate) => candidate.code === "EXTEND_STAY" && candidate.enabled)
+        ? "EXTEND_STAY" : "SHORTEN_STAY";
+      startSelectedOrderDateAction(commandType, "ADJUST_DEPARTURE");
+    } else if (action === "RESCHEDULE_STAY" || action === "EXTEND_STAY" || action === "SHORTEN_STAY") startSelectedOrderDateAction(action);
+    else if (action === "MOVE_UNIT") startSelectedOrderMoveUnit();
+    else if (action === "CANCEL_ORDER" || action === "MARK_NO_SHOW" || action === "REVOKE_CHECK_IN" || action === "REVOKE_CHECK_OUT") startSelectedOrderLifecycleAction(action);
+    else if (action === "RECORD_COLLECTION" || action === "RECORD_REFUND") startSelectedOrderFunds(action);
+    else openSelectedOrder(action);
+  }
+
+  function startSelectedOrderFunds(action: OrderFundsAction) {
+    const view = authorizedSelectedOrderView;
+    const identity = selectedOrderIdentity;
+    if (!view || !identity || selectedOrderLoading || commandsBlocked || view.accessLevel !== "WRITE"
+      || view.order.id !== identity.orderId || view.stay.id !== identity.stayId
+      || !view.allowedActions.some((candidate) => candidate.code === action && candidate.enabled)) {
+      setActionError(new Error("当前订单或权限已变化，未打开资金表单。请刷新后重新核对。"));
+      return;
+    }
+    setActionError(undefined);
+    setCommandDraft(undefined);
+    setSelectedFundsAction(action);
+    setSelectedFundsRevision(boardRef.current?.revision);
+    setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
   }
 
   function startSelectedOrderFulfillment(commandType: "CHECK_IN" | "CHECK_OUT") {
@@ -5671,6 +5757,19 @@ export function InventoryPage() {
   }
 
   function returnCommandToEdit(request: CommandRequest) {
+    if (request.commandType === "RECORD_COLLECTION" || request.commandType === "RECORD_REFUND") {
+      const currentIdentity = currentSelectedOrderIdentityRef.current;
+      if (!authorizedSelectedOrderView || !currentIdentity
+        || currentOrderPrincipalScopeRef.current !== orderPrincipalScope
+        || currentPropertyIdRef.current !== propertyId
+        || request.input.propertyId !== propertyId || request.input.orderId !== currentIdentity.orderId
+        || authorizedSelectedOrderView.order.id !== currentIdentity.orderId
+        || authorizedSelectedOrderView.stay.id !== currentIdentity.stayId) return;
+      setCommandDraft(request);
+      setSelectedFundsAction(request.commandType);
+      setSelectedFundsRevision(boardRef.current?.revision);
+      return;
+    }
     setCommandDraft(request);
     if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN" || request.commandType === "REVOKE_CHECK_OUT") {
       if (authorizedSelectedOrderView) {
@@ -5971,6 +6070,7 @@ export function InventoryPage() {
     || (authorizedSelectedOrderView && selectedStayDateAction)
     || (authorizedSelectedOrderView && selectedMoveUnitOpen)
     || (authorizedSelectedOrderView && selectedLifecycleAction)
+    || (authorizedSelectedOrderView && selectedFundsAction)
     || (command && commandTargetScopeCurrent)
   );
   const roomStatusRefreshNotice = renderedBoard && (actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted || boardExpired) ? (
@@ -6144,7 +6244,9 @@ export function InventoryPage() {
               status={quickPopoverStatus}
               attentionLabels={quickPopoverAttentionLabels}
               actions={quickPopoverActions}
-              {...(controlWriteBlock ? { writeBlock: controlWriteBlock } : {})}
+              {...(actionPresentationBlock ? { writeBlock: actionPresentationBlock } : commandsBlocked ? {
+                writeBlock: { kind: "REFRESH" as const, reason: "当前房态或操作上下文已变化，请刷新后重新选择订单。" }
+              } : {})}
               orderOptions={quickPopoverOrders}
               {...(quickPopoverSelection ? { selection: quickPopoverSelection } : {})}
               onClose={(reason) => {
@@ -6182,28 +6284,25 @@ export function InventoryPage() {
                 setQuoteTarget(undefined);
                 handleAction(action, quickPopoverUnit);
               }}
-              onViewStatus={() => {
-                setSelectedOrderIdentity(undefined);
-                setSelectedOrderView(undefined);
-                setSelectedCorrectionOccupantId(undefined);
-                setOrderContextOpen(false);
-                setSelectedUnitId(quickPopoverUnit.id);
-                setSelectedDayDate(quickPopoverSelection ? undefined : quickPopoverTarget.serviceDate);
-                setSelectedIntervalId(quickPopoverTarget.intervalId);
-                setQuoteTarget(undefined);
-                dispatchView({
-                  type: "SET_SELECTION",
-                  selection: quickPopoverSelection
-                    ?? selectionFromCells(quickPopoverUnit.id, quickPopoverTarget.serviceDate, quickPopoverTarget.serviceDate)
-                });
-                setDesktopContextCollapsed(false);
-              }}
               onRefresh={requestRoomStatusRefresh}
               onOpenRecovery={() => {
                 setQuickPopoverTarget(undefined);
                 openRoomStatusRecoveryEntry();
               }}
-              onOpenOrder={(option) => selectOrderContextIdentity(option.identity, quickPopoverTarget.serviceDate)}
+              {...(authorizedSelectedOrderView ? { orderView: authorizedSelectedOrderView } : {})}
+              {...(selectedMemberView ? { memberView: selectedMemberView } : {})}
+              orderLoading={selectedOrderLoading || Boolean(selectedOrderIdentity && !authorizedSelectedOrderView && !selectedOrderError)}
+              orderError={selectedOrderError}
+              onRetryOrder={() => setOrderRefreshToken((value) => value + 1)}
+              onSelectOrder={(option) => {
+                if (quickPopoverOrders.kind !== "READY" || !quickPopoverOrders.orders.some((candidate) => (
+                  candidate.identity.orderId === option.identity.orderId && candidate.identity.stayId === option.identity.stayId
+                ))) return;
+                invalidateSelectedOrderForRoomStatusInspection();
+                setSelectedOrderIdentity(option.identity);
+                setSelectedGridStayId(option.identity.stayId);
+              }}
+              onOrderAction={runQuickOrderAction}
             />
           ) : null}
 
@@ -6349,6 +6448,39 @@ export function InventoryPage() {
       ) : null}
 
       {maintenanceTarget && viewState.selection && !command ? <MaintenanceDialog unit={maintenanceTarget} arrivalDate={viewState.selection.arrivalDate} departureDate={viewState.selection.departureDate} writeBlocked={commandsBlocked} {...(commandDraft?.commandType === "LOCK_MAINTENANCE" ? { draft: commandDraft } : {})} onClose={() => { setMaintenanceTarget(undefined); setCommandDraft(undefined); restoreRoomStatusInteraction(); }} onSubmit={startCommand} /> : null}
+      {authorizedSelectedOrderView && selectedFundsAction && !command ? <OrderFundsFormDialog
+        key={`${authorizedSelectedOrderView.order.id}:${selectedFundsAction}`}
+        action={selectedFundsAction}
+        view={authorizedSelectedOrderView}
+        writeBlocked={commandsBlocked || selectedOrderLoading || selectedFundsRevision !== board?.revision
+          || authorizedSelectedOrderView.accessLevel !== "WRITE"
+          || !authorizedSelectedOrderView.allowedActions.some((candidate) => candidate.code === selectedFundsAction && candidate.enabled)}
+        writeBlockedReason={selectedFundsRevision !== board?.revision
+          ? "订单或房态已更新，本次填写已保留。请取消后重新打开资金表单，核对最新记录。"
+          : selectedOrderLoading ? "正在更新订单信息，请稍候。"
+            : "当前订单、操作权限或房态暂不支持资金登记。请取消后重新核对。"}
+        {...(commandDraft?.commandType === selectedFundsAction ? { draft: commandDraft } : {})}
+        onClose={() => {
+          setSelectedFundsAction(undefined);
+          setSelectedFundsRevision(undefined);
+          setSelectedOrderCommandScope(undefined);
+          setCommandDraft(undefined);
+          restoreRoomStatusInteraction();
+        }}
+        onSubmit={(request) => {
+          const identity = selectedOrderIdentity;
+          const view = authorizedSelectedOrderView;
+          if (!identity || commandsBlocked || selectedOrderLoading || selectedFundsRevision !== board?.revision
+            || view.accessLevel !== "WRITE" || request.commandType !== selectedFundsAction
+            || request.input.propertyId !== propertyId || request.input.orderId !== identity.orderId
+            || view.order.id !== identity.orderId || view.stay.id !== identity.stayId
+            || !view.allowedActions.some((candidate) => candidate.code === selectedFundsAction && candidate.enabled)) return;
+          if (startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity))) {
+            setSelectedFundsAction(undefined);
+            setSelectedFundsRevision(undefined);
+          }
+        }}
+      /> : null}
       {authorizedSelectedOrderView && selectedCorrectionOccupant ? <OrderOccupantCorrectionDialog
         view={authorizedSelectedOrderView}
         occupant={selectedCorrectionOccupant}
@@ -6471,6 +6603,8 @@ export function InventoryPage() {
           setSelectedMoveUnitRevision(undefined);
           setSelectedLifecycleAction(undefined);
           setSelectedLifecycleRevision(undefined);
+          setSelectedFundsAction(undefined);
+          setSelectedFundsRevision(undefined);
           if (command.commandType === "CREATE_ORDER") {
             setQuoteTarget(undefined);
             setDesktopContextCollapsed(true);

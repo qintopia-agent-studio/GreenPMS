@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, CalendarPlus2, ClipboardList, FileClock, Gift, HandHeart, LockKeyhole, LockKeyholeOpen, RefreshCw, Search, X } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, CalendarDays, CalendarPlus2, ClipboardList, Gift, HandHeart, LockKeyhole, LockKeyholeOpen, LogIn, LogOut, ReceiptText, RefreshCw, Search, Users, X } from "lucide-react";
 import type { RoomStatusActionDto, RoomStatusStatus } from "@qintopia/contracts";
+import type { MemberViewDto, OrderViewDto } from "../types";
+import { businessStatusLabel } from "../ui";
 import {
   formatRoomStatusDate,
   roomStatusFreeStayCategoryLabel,
@@ -11,6 +13,19 @@ import {
   type RoomStatusAttentionLabel
 } from "./roomStatusPresentation";
 import type { RoomStatusOrderOption, RoomStatusOrderOptionsResult, RoomStatusSelection } from "./roomStatusState";
+import {
+  roomStatusMatchingQuickOrder,
+  roomStatusQuickOrderActions,
+  roomStatusQuickOrderChannelFacts,
+  roomStatusQuickOrderFundsFacts,
+  roomStatusQuickOrderMemberId,
+  roomStatusQuickOrderMembershipFacts,
+  roomStatusQuickOrderNotices,
+  type RoomStatusQuickOrderAction,
+  type RoomStatusQuickOrderActionItem
+} from "./roomStatusQuickOrderActions";
+
+export type { RoomStatusQuickOrderAction } from "./roomStatusQuickOrderActions";
 
 const VIEWPORT_MARGIN = 8;
 const ANCHOR_GAP = 8;
@@ -201,6 +216,71 @@ function QuickActionButton({
   </div>;
 }
 
+function QuickOrderActionIcon({ code }: { code: RoomStatusQuickOrderAction }) {
+  const Icon = code === "CHECK_IN" ? LogIn
+    : code === "CHECK_OUT" || code === "EARLY_CHECK_OUT" ? LogOut
+      : code === "VIEW_MEMBERSHIP" ? Users
+        : code === "VIEW_FUNDS" || code === "RECORD_COLLECTION" || code === "RECORD_REFUND" ? ReceiptText
+          : code === "MOVE_UNIT" ? ArrowLeftRight : CalendarDays;
+  return <Icon aria-hidden="true" size={14} />;
+}
+
+export function RoomStatusQuickOrderContent({ view, memberView, option, loading = false, showStatus = false, writeBlock, onAction }: {
+  view: OrderViewDto;
+  memberView?: MemberViewDto | undefined;
+  option: RoomStatusOrderOption;
+  showStatus?: boolean;
+  loading?: boolean;
+  writeBlock?: { reason: string } | undefined;
+  onAction?: ((action: RoomStatusQuickOrderAction) => void) | undefined;
+}) {
+  const id = useId();
+  const actions = roomStatusQuickOrderActions(view, writeBlock, loading);
+  const funds = roomStatusQuickOrderFundsFacts(view).filter((fact) => fact.label !== "退款参考");
+  const channel = roomStatusQuickOrderChannelFacts(view).filter((fact) => fact.label !== "渠道订单号");
+  const membership = roomStatusQuickOrderMembershipFacts(view, memberView).filter((fact) => !fact.label.endsWith("有效至"));
+  const member = Boolean(roomStatusQuickOrderMemberId(view));
+  const sourceLabel = option.source.sourceCategory === "MEMBER" && !member && view.order.member_id
+    ? "会员住客" : roomStatusQuickOrderSourceSummary(option);
+  const notices = roomStatusQuickOrderNotices(view);
+  const occupant = view.occupants.find((candidate) => candidate.role === "PRIMARY");
+  const guest = occupant?.nickname?.trim() || occupant?.fullName?.trim() || option.label;
+  function actionButton(item: RoomStatusQuickOrderActionItem) {
+    const reasonId = `${id}-${item.code}`;
+    const disabled = !item.enabled || !onAction;
+    const reason = item.disabledReason === writeBlock?.reason || (loading && item.disabledReason === "正在更新订单，请稍候。") ? undefined : item.disabledReason;
+    return <div key={item.code} className="room-status-action-with-reason">
+      <button
+        type="button"
+        className={`button ${item.primary ? "button-primary" : "button-secondary"}`}
+        disabled={disabled}
+        data-room-status-quick-action={item.code}
+        aria-describedby={disabled && reason ? reasonId : undefined}
+        onClick={() => { if (item.enabled && onAction) onAction(item.code); }}
+      ><QuickOrderActionIcon code={item.code} />{item.label}</button>
+    </div>;
+  }
+  return <section className="room-status-quick-order-content" aria-label="订单快捷操作" aria-busy={loading}>
+    {actions.primary.length ? <div className="room-status-quick-order-actions">{actions.primary.map(actionButton)}</div> : null}
+    {actions.primary.filter((item) => !item.enabled && item.disabledReason && item.disabledReason !== writeBlock?.reason && !loading).map((item) => <p
+      key={item.code} id={`${id}-${item.code}`} className="room-status-quick-action-reason"
+    >{item.disabledReason}</p>)}
+    <div className="room-status-quick-order-heading">
+      <strong>{guest}</strong>
+      <span>{showStatus ? `${businessStatusLabel(view.order.status)} · ` : ""}{sourceLabel}</span>
+    </div>
+    <p className="room-status-quick-order-dates">{formatRoomStatusDate(view.effectiveArrangement.arrivalDate)} 至 {formatRoomStatusDate(view.effectiveArrangement.departureDate)}</p>
+    {funds.length ? <dl className="room-status-quick-order-facts room-status-quick-funds" aria-label="住宿资金摘要">{funds.map((fact) => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl> : null}
+    {channel.length ? <dl className="room-status-quick-order-facts" aria-label="渠道订单摘要">{channel.map((fact) => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl> : null}
+    {member ? <div className="room-status-quick-membership">
+      {membership.length ? <dl className="room-status-quick-order-facts">{membership.map((fact, index) => <div key={`${fact.label}-${index}`}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl> : <p>会员权益</p>}
+    </div> : null}
+    {view.order.stay_type === "FREE" && view.order.free_stay_reason ? <p className="room-status-quick-order-note">免费原因：{view.order.free_stay_reason}</p> : null}
+    {notices.map((notice) => <p className="room-status-quick-order-note" key={notice}>{notice}</p>)}
+    {loading ? <p className="room-status-quick-order-note" role="status">正在更新订单…</p> : null}
+  </section>;
+}
+
 export function RoomStatusQuickPopover({
   anchor,
   unit,
@@ -211,14 +291,19 @@ export function RoomStatusQuickPopover({
   actions,
   writeBlock,
   orderOptions,
+  orderView,
+  memberView,
+  orderLoading = false,
+  orderError,
+  onRetryOrder,
+  onSelectOrder,
+  onOrderAction,
   selection,
   onCreate,
   onLockMaintenance,
   onReleaseMaintenance,
-  onViewStatus,
   onRefresh,
   onOpenRecovery,
-  onOpenOrder,
   onClose
 }: {
   anchor: HTMLElement;
@@ -230,14 +315,19 @@ export function RoomStatusQuickPopover({
   actions: readonly RoomStatusActionDto[];
   writeBlock?: { kind: "REFRESH" | "RECOVERY" | "PERMISSION"; reason: string; actionLabel?: string };
   orderOptions: RoomStatusOrderOptionsResult;
+  orderView?: OrderViewDto | undefined;
+  memberView?: MemberViewDto | undefined;
+  orderLoading?: boolean;
+  orderError?: unknown;
+  onRetryOrder?: (() => void) | undefined;
+  onSelectOrder?: ((option: RoomStatusOrderOption) => void) | undefined;
+  onOrderAction?: ((action: RoomStatusQuickOrderAction) => void) | undefined;
   selection?: RoomStatusSelection;
   onCreate: (action: RoomStatusActionDto) => void;
   onLockMaintenance: (action: RoomStatusActionDto) => void;
   onReleaseMaintenance: (action: RoomStatusActionDto) => void;
-  onViewStatus: () => void;
   onRefresh?: () => void;
   onOpenRecovery?: () => void;
-  onOpenOrder: (option: Extract<RoomStatusOrderOptionsResult, { kind: "READY" }>["orders"][number]) => void;
   onClose: (reason: RoomStatusQuickPopoverCloseReason) => void;
 }) {
   const titleId = useId();
@@ -247,7 +337,7 @@ export function RoomStatusQuickPopover({
   const [position, setPosition] = useState<RoomStatusPopoverPosition>(() => roomStatusPopoverPosition(
     anchor.getBoundingClientRect(),
     { width: window.innerWidth, height: window.innerHeight },
-    { width: 280, height: 220 },
+    { width: 300, height: 220 },
     rowAnchor?.getBoundingClientRect()
   ));
   const restoreSnapshot = useRef({
@@ -270,6 +360,7 @@ export function RoomStatusQuickPopover({
     : formatRoomStatusDate(serviceDate);
   const historicalBlank = !selection && businessDate !== undefined && serviceDate < businessDate && status === "AVAILABLE";
   const selectedOrderCount = orderOptions.kind === "READY" ? orderOptions.orders.length : 0;
+  const matchingOrder = orderError ? undefined : roomStatusMatchingQuickOrder(orderView, orderOptions);
   const quickOrderHeaderMarks = orderOptions.kind === "READY"
     ? roomStatusQuickOrderHeaderMarks(orderOptions.orders)
     : [];
@@ -439,7 +530,7 @@ export function RoomStatusQuickPopover({
         <div>
           <strong id={titleId}>{roomStatusUnitLabel(unit)}</strong>
           <span className="room-status-quick-meta">
-            <span>{dateLabel}</span>
+            {selectedOrderCount === 0 ? <span>{dateLabel}</span> : null}
             {selection ? <span>{rangeLabel}</span> : historicalBlank ? <span>历史空白</span> : <RoomStatusMark status={status} compact />}
             {quickOrderHeaderMarks.map((mark, index) => <RoomStatusQuickOrderHeaderMark key={mark.label} mark={mark} category={index === 1} />)}
             <RoomStatusAttentionBadges labels={attentionLabels} />
@@ -451,18 +542,33 @@ export function RoomStatusQuickPopover({
         <p className="room-status-quick-error" role="alert">当前住宿缺少唯一、稳定的订单引用。请刷新房态后重试。</p>
       ) : (
         <>
-          {orderOptions.orders.length ? (
+          {orderOptions.orders.length > 1 ? (
             <div className="room-status-quick-orders" aria-label="当前订单列表">
               {orderOptions.orders.map((option) => (
-                <button key={`${option.identity.orderId}:${option.identity.stayId}`} type="button" onClick={() => { onClose("ACTION"); onOpenOrder(option); }}>
+                <button key={`${option.identity.orderId}:${option.identity.stayId}`} type="button"
+                  {...(onSelectOrder && orderOptions.orders.length > 1 ? { "aria-pressed": matchingOrder === option } : {})}
+                  onClick={() => {
+                    onSelectOrder?.(option);
+                  }}>
                   <ClipboardList aria-hidden="true" size={17} /><span><strong>{option.label}</strong><small>{formatRoomStatusDate(option.identity.arrivalDate)} 至 {formatRoomStatusDate(option.identity.departureDate)} · {roomStatusQuickOrderSourceSummary(option)}</small></span>
                 </button>
               ))}
             </div>
           ) : null}
+          {matchingOrder && orderView ? <RoomStatusQuickOrderContent
+            key={`${orderView.order.id}:${orderView.stay.id}`}
+            view={orderView}
+            memberView={memberView}
+            option={matchingOrder}
+            showStatus={orderOptions.orders.length > 1}
+            loading={orderLoading}
+            writeBlock={writeBlock}
+            onAction={onOrderAction ? (action) => { onClose("ACTION"); onOrderAction(action); } : undefined}
+          /> : selectedOrderCount > 0 && orderLoading ? <p className="room-status-quick-order-note" role="status">正在载入订单操作…</p> : null}
+          {selectedOrderCount > 0 && orderError ? <div className="room-status-quick-order-error" role="alert"><p>订单操作暂不可用，请重新载入。</p>{onRetryOrder ? <button type="button" className="room-status-text-button" onClick={onRetryOrder}><RefreshCw aria-hidden="true" size={15} />重新载入</button> : null}</div> : null}
           {hasQuickAction ? (
             <div className="room-status-quick-actions">
-              {createAction ? <QuickActionButton action={createAction} label="创建订单" icon={<CalendarPlus2 aria-hidden="true" size={17} />} primary reasonId={actionReasonId(createAction)} disabledReason={disabledReason(createAction)} onRun={runCreate} /> : null}
+              {createAction ? <QuickActionButton action={createAction} label="预订" icon={<CalendarPlus2 aria-hidden="true" size={17} />} primary reasonId={actionReasonId(createAction)} disabledReason={disabledReason(createAction)} onRun={runCreate} /> : null}
               {backfillAction ? <QuickActionButton action={backfillAction} label="补录住宿" icon={<CalendarPlus2 aria-hidden="true" size={17} />} primary reasonId={actionReasonId(backfillAction)} disabledReason={disabledReason(backfillAction)} onRun={runCreate} /> : null}
               {maintenanceAction ? <QuickActionButton action={maintenanceAction} label="维修锁房" icon={<LockKeyhole aria-hidden="true" size={17} />} reasonId={actionReasonId(maintenanceAction)} disabledReason={disabledReason(maintenanceAction)} onRun={(action) => runMaintenanceAction(action, onLockMaintenance)} /> : null}
               {releaseAction ? <QuickActionButton action={releaseAction} label="释放维修锁房" icon={<LockKeyholeOpen aria-hidden="true" size={17} />} reasonId={actionReasonId(releaseAction)} disabledReason={disabledReason(releaseAction)} onRun={(action) => runMaintenanceAction(action, onReleaseMaintenance)} /> : null}
@@ -479,7 +585,6 @@ export function RoomStatusQuickPopover({
             ? <button type="button" className="button button-secondary" onClick={() => { runRoomStatusWriteBlockAction(writeBlock, { onRefresh, onOpenRecovery }); }}><Search aria-hidden="true" size={16} />{writeBlock.actionLabel}</button>
             : null}
       </div> : null}
-      <button type="button" className="room-status-quick-history" onClick={() => { onClose("ACTION"); onViewStatus(); }}><FileClock aria-hidden="true" size={17} />查看房态记录</button>
     </div>,
     document.body
   );
