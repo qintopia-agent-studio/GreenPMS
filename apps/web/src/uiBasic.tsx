@@ -1,4 +1,5 @@
-import { AssistantGuide } from "./assistant/context";
+import { AssistantGuide, useAssistant } from "./assistant/context";
+import { AssistantTrigger } from "./assistant/AssistantTrigger";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, Check, CircleHelp, LoaderCircle, X } from "lucide-react";
 import type { MoneyDto } from "@qintopia/contracts";
@@ -245,6 +246,14 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
   const edited = useRef(false);
   const outsidePress = useRef(false);
   const modalNotice = useContext(ModalNoticeContext);
+  const assistant = useAssistant();
+
+  function isAssistantInteraction(event: Event) {
+    // Inspect the original path: closing/toggling a portal can detach the target
+    // before the document's click listener runs.
+    return event.composedPath().some(target => target instanceof Element
+      && target.matches("#ai-assistant-panel, [aria-controls='ai-assistant-panel']"));
+  }
 
   function dismissDrawer() {
     if (size !== "drawer" || closeDisabled) return;
@@ -255,14 +264,15 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
   useEffect(() => {
     if (size !== "drawer" || modal) return;
     const pointerDown = (event: PointerEvent) => {
-      outsidePress.current = event.target instanceof Node && !dialogRef.current?.contains(event.target);
+      outsidePress.current = !isAssistantInteraction(event)
+        && event.target instanceof Node && !dialogRef.current?.contains(event.target);
     };
     const outside = (event: MouseEvent) => {
       const dialog = dialogRef.current;
       if (!outsidePress.current) return;
       outsidePress.current = false;
       if (!dialog || !(event.target instanceof Element) || dialog.contains(event.target)) return;
-      if (document.querySelector("dialog:modal") || event.target.closest("dialog, #ai-assistant-panel")) return;
+      if (document.querySelector("dialog:modal") || event.target.closest("dialog") || isAssistantInteraction(event)) return;
       dismissDrawer();
     };
     document.addEventListener("pointerdown", pointerDown, true);
@@ -347,10 +357,10 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
       tabIndex={-1}
       aria-labelledby={titleId}
       onKeyDown={trapFocus}
-      onChangeCapture={() => { edited.current = true; }}
+      onChangeCapture={event => { if (!(event.target instanceof Element) || !event.target.closest("#ai-assistant-panel")) edited.current = true; }}
       onClickCapture={(event) => {
         // Some form choices (for example a room picker) are buttons, not inputs.
-        if (event.target instanceof Element && event.target.closest("form button")) edited.current = true;
+        if (event.target instanceof Element && !event.target.closest("#ai-assistant-panel") && event.target.closest("form button")) edited.current = true;
       }}
       onPointerDown={(event) => {
         const bounds = event.currentTarget.getBoundingClientRect();
@@ -370,6 +380,7 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
       <div className="modal-shell">
         <header className="modal-header">
           <h2 id={titleId}>{title}</h2>
+          {assistant ? <AssistantTrigger compact /> : null}
           <button className="icon-button" type="button" onClick={onClose} disabled={closeDisabled} aria-label="关闭" title="关闭">
             <X aria-hidden="true" size={20} />
           </button>

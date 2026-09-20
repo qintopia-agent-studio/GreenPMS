@@ -3939,6 +3939,8 @@ pre {
 }
 
 .info-hint-bubble {
+  /* Hidden absolute hints must not enlarge the mobile layout viewport. */
+  display: none;
   position: absolute;
   left: calc(100% + 8px);
   top: 50%;
@@ -3964,6 +3966,7 @@ pre {
 .info-hint:hover .info-hint-bubble,
 .info-hint:focus .info-hint-bubble,
 .info-hint:focus-within .info-hint-bubble {
+  display: block;
   opacity: 1;
   visibility: visible;
 }
