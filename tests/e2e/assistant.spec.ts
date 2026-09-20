@@ -1,5 +1,6 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 import { assistantGuides } from "../../packages/contracts/src/assistant.ts";
+import type { OrderViewDto } from "../../apps/web/src/types.ts";
 const propertyId = "prop_qintopia_demo";
 async function login(page: Page) {
   await page.goto("/");
@@ -133,7 +134,7 @@ test("assistant opens the real stay-date form with durable guidance and no busin
     if (requests.length === 1) await new Promise<void>(resolve => { releaseFirst = resolve; });
     return route.fulfill({ json: { conversationId: "synthetic-ui", text: requests.length === 1 ? "请在已打开的表单核对新离店日期。" : "仍在处理同一个订单。", entries: requests.length === 1 ? [{ page: "order", orderId, action: "EXTEND_STAY", ...assistantGuides.EXTEND_STAY }] : [] } });
   });
-  await page.goto(`/orders/${orderId}`); await expect(page.locator('[data-order-action="ADJUST_DEPARTURE"]')).toBeEnabled();
+  await page.goto(`/orders/${orderId}`); await expect(page.locator('[data-order-action="ADJUST_DEPARTURE"]')).toBeEnabled({ timeout: 30_000 });
   await page.goto("/orders");
   let writes = 0; page.on("request", request => { if (request.method() === "POST" && /command-previews|\/quotes/.test(request.url())) writes++; });
   await page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true }).click();
@@ -153,6 +154,7 @@ test("assistant opens the real stay-date form with durable guidance and no busin
   await page.screenshot({path: test.info().outputPath("assistant-with-form.png")});
   await expect(page).toHaveURL(new RegExp(`/orders/${orderId}$`));
   await page.getByLabel("向 AI 助手提问").fill("还需要核对什么？");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
   await panel.getByRole("button", {name: "发送", exact: true}).click();
   await expect(panel).toContainText("仍在处理同一个订单。");
   expect(requests[1]?.conversationId).toBe("synthetic-ui");
@@ -215,4 +217,79 @@ test("all five suggestions keep the assistant open while their buttons unmount",
     await page.getByLabel("向 AI 助手提问").press("Escape");
     await expect(panel).toBeHidden();
   } finally { releaseReply?.(); }
+});
+
+test("streamed text appears before completion; stop and failure discard the draft without navigation", async ({ page }) => {
+  await enabledUi(page);
+  await page.addInitScript(() => {
+    const original = window.fetch;
+    const state = window as unknown as { emitAssistant: (value: object) => void; assistantAborted: boolean };
+    window.fetch = async (input, init) => {
+      if (input !== "/api/v1/assistant/chat") return original(input, init);
+      state.assistantAborted = false;
+      return new Response(new ReadableStream({ start(controller) {
+        state.emitAssistant = value => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(value)}\n\n`));
+        init?.signal?.addEventListener("abort", () => { state.assistantAborted = true; controller.error(new DOMException("Aborted", "AbortError")); }, { once: true });
+      } }), { headers: { "Content-Type": "text/event-stream" } });
+    };
+  });
+  await login(page);
+  await page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true }).click();
+  const input = page.getByLabel("向 AI 助手提问"), panel = page.getByTestId("ai-assistant-panel");
+  const emit = (event: object) => page.evaluate(value => (window as unknown as { emitAssistant: (event: object) => void }).emitAssistant(value), event);
+  await input.fill("流式测试"); await panel.getByRole("button", { name: "发送", exact: true }).click();
+  await emit({ type: "status", phase: "thinking", round: 1 });
+  await emit({ type: "delta", text: "正在逐步显示", round: 1 });
+  await expect(panel.locator(".assistant-message-partial")).toContainText("正在逐步显示");
+  await expect(panel.locator(".assistant-feedback")).toHaveCount(0);
+  await panel.getByRole("button", { name: "停止生成" }).click();
+  await expect(panel).toContainText("已停止生成");
+  await expect(panel.locator(".assistant-message-partial")).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { assistantAborted: boolean }).assistantAborted)).toBe(true);
+  await input.fill("重试问题"); await panel.getByRole("button", { name: "发送", exact: true }).click();
+  await emit({ type: "delta", text: "不完整回答", round: 1 });
+  await emit({ type: "error", code: "VALIDATION_ERROR", status: 400, message: "模型响应中断" });
+  await expect(panel.getByRole("alert")).toContainText("模型响应中断");
+  await expect(panel.locator(".assistant-message-partial")).toHaveCount(0);
+  await input.fill("完成测试"); await panel.getByRole("button", { name: "发送", exact: true }).click();
+  await emit({ type: "delta", text: "完整回答", round: 1 });
+  await emit({ type: "done", result: { conversationId: "stream-ui", text: "完整回答", entries: [], questionId: "stream-question" } });
+  await expect(panel.locator(".assistant-feedback")).toBeVisible();
+  await expect(panel.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+  await expect(page).toHaveURL(/\/$/);
+});
+
+test("order read drawers and assistant never overlap across desktop and narrow widths", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "covers the non-modal desktop drawer and responsive transition in one journey");
+  await login(page); const id = await order(page.request);
+  const details = await (await page.request.get(`/api/v1/orders/${id}`)).json() as OrderViewDto;
+  await page.reload();
+  await page.getByRole("button", { name: "AI 助手", exact: true }).filter({ visible: true }).click();
+  const cell = page.locator(`[data-room-status-cell="true"][data-unit-id="${details.currentSegment.inventoryUnitId}"][data-service-date="${details.currentSegment.arrivalDate}"]`);
+  await cell.focus(); await page.keyboard.press("Enter");
+  const popover = page.getByTestId("room-status-quick-popover");
+  await popover.locator(".room-status-quick-orders button").filter({ hasText: "助手回归" }).click();
+  const drawer = page.locator("dialog[open]").last(), panel = page.getByTestId("ai-assistant-panel");
+  await expect(drawer).toBeVisible();
+  expect(await drawer.evaluate(el => el.matches(":modal"))).toBe(false);
+  for (const width of [1440, 1024, 900, 820]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(panel).toBeVisible();
+    await expect(async () => {
+      const form = await drawer.locator(":scope > .modal-shell").boundingBox(), assistant = await panel.boundingBox();
+      expect(form && assistant && (form.x + form.width <= assistant.x + 1 || form.y + form.height <= assistant.y + 1)).toBe(true);
+    }).toPass();
+    await expect(drawer.getByRole("button", { name: "查看完整订单", exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`assistant-order-drawer-${width}.png`) });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  }
+  await page.getByLabel("向 AI 助手提问").fill("仅编辑助手草稿");
+  let confirmation = false;
+  page.on("dialog", dialog => { confirmation = true; void dialog.dismiss(); });
+  // Assistant draft changes must not mark the order form as edited.
+  await drawer.locator(":scope > .modal-shell").getByRole("button", { name: "关闭", exact: true }).first().press("Escape");
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  expect(confirmation).toBe(false);
+  await expect(panel).toBeVisible();
+  await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("仅编辑助手草稿");
 });

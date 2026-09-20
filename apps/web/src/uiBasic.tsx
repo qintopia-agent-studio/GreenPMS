@@ -347,10 +347,10 @@ export function Modal({ title, onClose, children, footer, size = "default", clos
       tabIndex={-1}
       aria-labelledby={titleId}
       onKeyDown={trapFocus}
-      onChangeCapture={() => { edited.current = true; }}
+      onChangeCapture={event => { if (!(event.target instanceof Element) || !event.target.closest("#ai-assistant-panel")) edited.current = true; }}
       onClickCapture={(event) => {
         // Some form choices (for example a room picker) are buttons, not inputs.
-        if (event.target instanceof Element && event.target.closest("form button")) edited.current = true;
+        if (event.target instanceof Element && !event.target.closest("#ai-assistant-panel") && event.target.closest("form button")) edited.current = true;
       }}
       onPointerDown={(event) => {
         const bounds = event.currentTarget.getBoundingClientRect();

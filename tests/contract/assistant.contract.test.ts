@@ -24,10 +24,16 @@ const transport: ModelTransport = async input => {
   calls.push(input);
   if (duringModel) { const action = duringModel; duringModel = undefined; await action(); }
   if (mode === "fail") throw new Error("DO-NOT-LEAK synthetic-provider-key");
+  if (mode === "waiting") return new Promise((_, reject) => {
+    const cancel = () => reject(input.signal!.reason);
+    input.signal!.addEventListener("abort", cancel, { once: true });
+    if (input.signal!.aborted) cancel();
+  });
+  if (mode === "stream-text") { await input.onDelta?.("合成回答"); return { content: "合成回答" }; }
   if (input.toolChoice) return { content: null, tool_calls: [{ id: "ping", type: "function", function: { name: "connection_check", arguments: '{"ok":true}' } }] };
   if (mode === "unknown") return { content: null, tool_calls: [{ id: "evil", type: "function", function: { name: "execute_sql", arguments: '{"sql":"DELETE FROM orders"}' } }] };
   const last = input.messages.at(-1);
-  if (last?.role === "tool") return { content: "已找到操作入口，请在正式页面核对并操作。" };
+  if (last?.role === "tool") { await input.onDelta?.("已找到操作入口，"); await input.onDelta?.("请在正式页面核对并操作。"); return { content: "已找到操作入口，请在正式页面核对并操作。" }; }
   const name = mode === "members" ? "search_members" : mode === "cross" ? "order_details" : "open_entry";
   const args = mode === "members" ? { query: "Demo" } : mode === "cross" ? { orderId: "foreign-order-id" } : { page: "members" };
   return { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: JSON.stringify(args) } }] };
@@ -112,6 +118,47 @@ describe.sequential("AI assistant authenticated contract", () => {
     mode = "guide";
     duringModel = async () => { const concurrent = await chat(); expect(concurrent.statusCode).toBe(429); };
     const response = await chat(); expect(response.statusCode, response.body).toBe(200);
+  });
+  it("streams safe stages and text, with navigation and feedback only in the final result", async () => {
+    mode = "guide"; calls.length = 0;
+    const response = await app.inject({ method: "POST", url: "/api/v1/assistant/chat", cookies: cookies(staff), headers: { accept: "text/event-stream" }, payload: { propertyId: demo.propertyId, message: "打开会员", page: "房态" } });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.headers["x-accel-buffering"]).toBe("no");
+    expect(response.headers["content-encoding"]).toBeUndefined();
+    const events = response.body.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
+    expect(events.filter(e => e.type === "delta").map(e => e.text).join("")).toBe("已找到操作入口，请在正式页面核对并操作。");
+    expect(events.filter(e => e.type === "done")).toHaveLength(1);
+    expect(events.at(-1).result.entries[0].page).toBe("members");
+    expect(JSON.stringify(events.slice(0, -1))).not.toMatch(/entries|arguments|synthetic-provider-key/);
+    expect(calls).toHaveLength(2);
+    await vi.waitFor(async () => expect((await rows()).find(r => r.id === events.at(-1).result.questionId)?.outcome).toBe("ANSWERED"));
+  });
+  it("rejects a revoked session before sending a text delta or committing history", async () => {
+    mode = "stream-text";
+    const login = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "operator", password: "demo-pass-2026" } });
+    const temporary = login.cookies.find(c => c.name === "qintopia_session")!.value;
+    duringModel = async () => { await app.inject({ method: "POST", url: "/api/v1/auth/logout", cookies: cookies(temporary) }); };
+    const response = await app.inject({ method: "POST", url: "/api/v1/assistant/chat", cookies: cookies(temporary), headers: { accept: "text/event-stream" }, payload: { propertyId: demo.propertyId, message: "测试撤权", page: "房态" } });
+    expect(response.body).toContain('"type":"error"');
+    expect(response.body).not.toContain('"type":"delta"'); expect(response.body).not.toContain('"type":"done"');
+    expect(response.body).not.toContain("合成回答"); mode = "guide";
+  });
+  it("cancels provider work on a real client disconnect and releases the subject lock", async () => {
+    mode = "waiting"; calls.length = 0;
+    const address = await app.listen({ port: 0, host: "127.0.0.1" });
+    const controller = new AbortController();
+    const response = await fetch(`${address}/api/v1/assistant/chat`, { method: "POST", signal: controller.signal,
+      headers: { Cookie: `qintopia_session=${staff}`, Accept: "text/event-stream", "Content-Type": "application/json" },
+      body: JSON.stringify({ propertyId: demo.propertyId, message: "取消测试", page: "房态" }) });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect((await chat()).statusCode).toBe(429);
+    controller.abort();
+    await vi.waitFor(() => expect(calls[0]!.signal?.aborted).toBe(true));
+    await vi.waitFor(async () => expect((await rows()).some(r => r.error_code === "AI_CANCELLED" && r.outcome === "FAILED")).toBe(true));
+    mode = "guide";
+    expect((await chat()).statusCode).toBe(200);
   });
   it("persists redacted questions, controlled context, source and outcomes without business writes", async () => {
     mode = "guide";

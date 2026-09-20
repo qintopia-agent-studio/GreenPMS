@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
-import { ChevronRight, MessageSquare, Plus, Send, Settings, Sparkles, X } from "lucide-react";
+import { ChevronRight, MessageSquare, Plus, Send, Settings, Sparkles, Square, X } from "lucide-react";
 import { api } from "../api";
 import { useWorkspace } from "../session";
 import { errorMessage } from "../uiBasic";
@@ -30,6 +30,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false), [settings, setSettings] = useState<AssistantSettings>();
   const [messages, setMessages] = useState<Message[]>([]), [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string>();
+  const [partial, setPartial] = useState(""), [progress, setProgress] = useState("正在思考…"), [stopped, setStopped] = useState(false);
   const [conversationId, setConversationId] = useState<string>();
   const [guide, setGuide] = useState<AssistantEntry>(), [pending, setPending] = useState<AssistantEntry>();
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -59,7 +60,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       const next = Boolean(document.querySelector("dialog[open]"));
       if (previouslyOpen && !next) setGuide(undefined);
       previouslyOpen = next; setDialogOpen(next);
-      setDialogHost([...document.querySelectorAll<HTMLDialogElement>("dialog:modal")].at(-1) ?? null);
+      setDialogHost([...document.querySelectorAll<HTMLDialogElement>("dialog:modal")].at(-1)
+        ?? [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")].at(-1) ?? null);
     };
     const observer = new MutationObserver(inspect); observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["open"] }); inspect();
     return () => observer.disconnect();
@@ -69,7 +71,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     const change = () => setMobile(query.matches); query.addEventListener("change", change);
     return () => query.removeEventListener("change", change);
   }, []);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     document.body.classList.add("assistant-is-open");
     if (dialogHost) dialogHost.dataset.assistantOpen = "true";
@@ -83,7 +85,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       target?.focus({ preventScroll: true });
     }
   }, [open]);
-  useEffect(() => { const el = messagesRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages, busy, error]);
+  const followResponse = useRef(true);
+  useEffect(() => { const el = messagesRef.current; if (el && followResponse.current) el.scrollTop = el.scrollHeight; }, [messages, partial, busy, error]);
   useEffect(() => {
     if (!open) return;
     const escape = (event: KeyboardEvent) => {
@@ -119,7 +122,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     const timer = window.setTimeout(() => finishEntry("操作页面未能及时载入，请检查连接后重新打开。"), 15_000);
     return () => window.clearTimeout(timer);
   }, [pending]);
-  const newConversation = () => { generation.current++; controller.current?.abort(); sending.current = false; setBusy(false); setConversationId(undefined); setMessages([]); setError(undefined); setGuide(undefined); setPending(undefined); refreshSettings(); };
+  const stop = () => { controller.current?.abort(); };
+  const newConversation = () => { generation.current++; controller.current?.abort(); sending.current = false; setBusy(false); setPartial(""); setStopped(false); setConversationId(undefined); setMessages([]); setError(undefined); setGuide(undefined); setPending(undefined); refreshSettings(); };
   function questionKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (mobile || event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
     // IME confirmation is not a send command; keyCode 229 covers Safari's composition boundary.
@@ -132,31 +136,50 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     if (!message || busy || sending.current || !settings?.enabled) return;
     sending.current = true;
     const ticket = generation.current, path = location.pathname;
-    controller.current = new AbortController(); setBusy(true); setError(undefined); setDraft("");
+    const active = new AbortController(); controller.current = active;
+    followResponse.current = true;
+    setBusy(true); setError(undefined); setDraft(""); setPartial(""); setStopped(false); setProgress("正在思考…");
+    let streamedText = "";
     setMessages(current => [...current, { role: "user", text: message }]);
     try {
-      const result: AssistantChatReply = await api.assistantChat({ propertyId, message, source: prompt === undefined ? "USER" : "SUGGESTION", page: pageName, ...(orderId ? { orderId: decodeURIComponent(orderId) } : {}), ...(conversationId ? { conversationId } : {}) }, controller.current.signal);
+      const result: AssistantChatReply = await api.assistantChat({ propertyId, message, source: prompt === undefined ? "USER" : "SUGGESTION", page: pageName, ...(orderId ? { orderId: decodeURIComponent(orderId) } : {}), ...(conversationId ? { conversationId } : {}) }, active.signal, event => {
+        if (ticket !== generation.current || active.signal.aborted) return;
+        if (event.type === "status") {
+          streamedText = ""; setPartial(""); setProgress(event.phase === "tool" ? "正在查询资料…" : "正在思考…");
+        } else if (event.type === "delta") {
+          streamedText += event.text;
+          if (streamedText.length > 12000) throw new Error("回答过长，请缩小问题范围后重试。");
+          setPartial(streamedText); setProgress("正在回答…");
+        }
+      });
       if (ticket !== generation.current) return;
       setConversationId(result.conversationId);
       setMessages(current => [...current, { role: "assistant", text: result.text, entries: result.entries, ...(result.questionId ? { questionId: result.questionId } : {}) }]);
       const entry = result.entries[0];
       if (entry && currentPath.current === path) openEntry(entry);
       else if (entry) setError("你已切换页面，助手没有自动跳转。可点击回答中的入口继续。");
-    } catch (e) { if (ticket === generation.current) { setError(errorMessage(e)); setDraft(message); } }
-    finally { if (ticket === generation.current) { sending.current = false; setBusy(false); } }
+    } catch (e) { if (ticket === generation.current) {
+      if (active.signal.aborted) setStopped(true); else setError(errorMessage(e));
+      setDraft(current => current || message);
+    } }
+    finally { if (ticket === generation.current) { sending.current = false; setBusy(false); setPartial(""); } }
   }
   const panel = open ? <aside id="ai-assistant-panel" className="assistant-panel" role="complementary" aria-label="AI 助手" data-testid="ai-assistant-panel" onKeyDown={event => {
       if (event.key === "Escape" && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); close(); }
-      if (event.key === "Tab" && dialogHost) {
+      if (event.key === "Tab" && dialogHost?.matches(":modal")) {
         const controls = [...dialogHost.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])")].filter(el => el.getClientRects().length > 0);
         if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus(); }
         if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus(); }
       }
     }}>
       <header className="assistant-header"><div><Sparkles size={18} aria-hidden="true" /><strong>AI 助手</strong></div><div><button type="button" className="icon-button" aria-label="新建对话" title="新建对话" onClick={newConversation}><Plus size={18} /></button>{settings?.canManage ? <button type="button" className="icon-button" aria-label="模型设置" title="模型设置" onClick={() => { if (dialogOpen) { setError("请先完成或取消当前表单，再打开模型设置。"); return; } navigate("/settings/ai"); }}><Settings size={18} /></button> : null}<button type="button" className="icon-button" aria-label="关闭 AI 助手" onClick={close}><X size={19} /></button></div></header>
-      <div className="assistant-messages" ref={messagesRef} aria-live="polite" aria-busy={busy}>
+      <div className="assistant-messages" ref={messagesRef} aria-live="polite" aria-busy={busy} onScroll={event => {
+        const el = event.currentTarget; followResponse.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      }}>
         {!messages.length ? <div className="assistant-welcome"><MessageSquare size={27} aria-hidden="true" /><h2>需要帮你做什么？</h2><p>问我怎么操作，或让我查找房态、订单与会员资料。</p>{settings && !settings.enabled ? <p className="assistant-notice">助手尚未启用，请管理员在设置中配置模型连接。</p> : null}<div className="assistant-suggestions">{suggestions.map(({ title, prompt }) => <button type="button" key={title} onClick={() => void send(undefined, prompt)} disabled={busy || !settings?.enabled}><span><strong>{title}</strong><small>{prompt}</small></span><ChevronRight size={16} aria-hidden="true" /></button>)}</div></div> : messages.map((m, i) => <article className={`assistant-message assistant-message-${m.role}`} key={i}><span className="assistant-message-author">{m.role === "user" ? "你" : "AI 助手"}</span>{m.role === "assistant" ? <AssistantMessageContent text={m.text} /> : <div className="assistant-message-text">{m.text}</div>}{m.entries?.map((entry, index) => <div className="assistant-entry" key={index}><button type="button" className="button button-secondary" onClick={() => openEntry(entry)}>打开{entry.label}</button><ol>{entry.steps.map(step => <li key={step}>{step}</li>)}</ol></div>)}{m.questionId ? <AssistantFeedback questionId={m.questionId} propertyId={propertyId} selected={m.feedback} onSaved={feedback => setMessages(current => current.map(message => message.questionId === m.questionId ? { ...message, feedback } : message))} /> : null}</article>)}
-        {busy ? <p className="assistant-wait">正在查询和整理…</p> : null}
+        {busy && partial ? <article className="assistant-message assistant-message-assistant assistant-message-partial"><span className="assistant-message-author">AI 助手 · 回答中</span><AssistantMessageContent text={partial} /></article> : null}
+        {busy ? <p className="assistant-wait" role="status">{progress}</p> : null}
+        {stopped ? <p className="assistant-wait" role="status">已停止生成，可以修改问题后重新发送。</p> : null}
         {error ? <div className="assistant-error" role="alert">{error}</div> : null}
       </div>
       <form className="assistant-composer" onSubmit={event => void send(event)}>
@@ -165,6 +188,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
           aria-describedby="assistant-input-hint" maxLength={4000} placeholder="描述你想完成的事情…" rows={3} />
         <div><div className="assistant-composer-help"><small>业务操作由你确认</small><small id="assistant-input-hint">{mobile ? "回车换行，点击发送" : "回车发送 · Shift + 回车换行"}</small></div>
+          {busy ? <button className="button button-secondary" type="button" onClick={stop}><Square size={14} aria-hidden="true" />停止生成</button> : null}
           <button className="button button-primary" type="submit" disabled={busy || !draft.trim() || !settings?.enabled}><Send size={16} aria-hidden="true" />发送</button>
         </div>
       </form>

@@ -13,3 +13,8 @@ export interface AssistantSettingsInput { propertyId: string; expectedVersion: n
 export type AssistantQuestionFeedback = "RESOLVED" | "UNRESOLVED";
 export interface AssistantChatRequest { propertyId: string; message: string; conversationId?: string; page: string; orderId?: string; source?: "USER" | "SUGGESTION" | "UNKNOWN" }
 export interface AssistantChatReply { conversationId: string; text: string; entries: AssistantEntry[]; questionId?: string }
+export type AssistantStreamEvent =
+  | { type: "status"; phase: "thinking" | "tool"; round: number }
+  | { type: "delta"; text: string; round: number }
+  | { type: "done"; result: AssistantChatReply }
+  | { type: "error"; code: string; message: string; status: number };

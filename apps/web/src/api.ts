@@ -1,4 +1,5 @@
-import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback } from "../../../packages/contracts/src/assistant.ts";
+import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
+import { readAssistantStream } from "./assistant/stream";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
 import type {
   AvailabilityDto,
@@ -108,6 +109,40 @@ function commandHeaders(scope: string) {
   };
 }
 
+async function assistantChat(body: AssistantChatRequest, signal: AbortSignal, onEvent: (event: AssistantStreamEvent) => void): Promise<AssistantChatReply> {
+  const generation = sessionGeneration;
+  const check = () => {
+    signal.throwIfAborted();
+    if (sessionExpired || generation !== sessionGeneration) throw new ApiError(401, { code: "SESSION_EXPIRED", message: "登录已过期，请重新登录" });
+  };
+  check();
+  const deadline = AbortSignal.timeout(150_000);
+  try {
+    const response = await fetch("/api/v1/assistant/chat", { method: "POST", credentials: "include", body: JSON.stringify(body),
+      signal: AbortSignal.any([signal, deadline]), headers: { Accept: "text/event-stream", "Content-Type": "application/json" } });
+    check();
+    if (!response.ok) {
+      if (response.status === 401) expireSession(generation);
+      const payload = await parseBody(response);
+      throw new ApiError(response.status, (payload ?? {}) as ErrorPayload);
+    }
+    const result = response.headers.get("content-type")?.includes("text/event-stream")
+      ? await readAssistantStream(response, event => {
+        check();
+        if (event.type === "error") {
+          if (event.status === 401) expireSession(generation);
+          throw new ApiError(event.status, { code: event.code, message: event.message });
+        }
+        onEvent(event);
+      })
+      : await response.json() as AssistantChatReply; // one request, compatible with an older server
+    check(); return result;
+  } catch (error) {
+    if (deadline.aborted && !signal.aborted) throw new Error("回答等待超时，已断开连接，请重试。");
+    throw error;
+  }
+}
+
 function metadataHeaders(metadata: ClientCommandMetadata) {
   return {
     "Idempotency-Key": metadata.idempotencyKey,
@@ -136,7 +171,7 @@ export const api = {
   assistantSettings: (propertyId: string) => request<AssistantSettings>(`/api/v1/assistant/settings?propertyId=${encodeURIComponent(propertyId)}`),
   assistantSave: (body: AssistantSettingsInput) => request<AssistantSettings>("/api/v1/assistant/settings", { method: "PUT", body: JSON.stringify(body) }),
   assistantTest: (body: AssistantSettingsInput) => request<{ message: string }>("/api/v1/assistant/test", { method: "POST", body: JSON.stringify(body) }),
-  assistantChat: (body: AssistantChatRequest, signal: AbortSignal) => request<AssistantChatReply>("/api/v1/assistant/chat", { method: "POST", body: JSON.stringify(body), signal }),
+  assistantChat,
   assistantFeedback: (questionId: string, propertyId: string, feedback: AssistantQuestionFeedback) => request<{ saved: true }>(`/api/v1/assistant/questions/${encodeURIComponent(questionId)}/feedback`, { method: "POST", body: JSON.stringify({ propertyId, feedback }) }),
   roomCatalog: (propertyId: string) => request<RoomCatalogView>(`/api/v1/properties/${encodeURIComponent(propertyId)}/room-catalog`),
   roomRateTrial: (propertyId: string, body: { anchors: RoomRateAnchors; arrivalDate: string; departureDate: string; multiplier: number }) =>
