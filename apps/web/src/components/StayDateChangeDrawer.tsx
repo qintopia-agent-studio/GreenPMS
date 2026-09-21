@@ -1,7 +1,7 @@
 import { CalendarMinus2, CalendarPlus2, CalendarRange, LoaderCircle, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
-import { channelPriceDifferenceReasonRequired } from "../uiBasic";
+import { channelPriceDifferenceReasonRequired, manualPriceAdjustmentNotNeeded } from "../uiBasic";
 import type { CommandRequest, InventoryUnitDto, OrderViewDto } from "../types";
 import {
   InlineError,
@@ -191,6 +191,9 @@ export function buildStayDateChangeRequest(
   if (draft.newDepartureDate <= draft.newArrivalDate) {
     throw new Error("退房日期必须晚于入住日期");
   }
+  if ((Date.parse(draft.newDepartureDate) - Date.parse(draft.newArrivalDate)) / 86_400_000 > 366) {
+    throw new Error("单次住宿最多 366 夜，请调整入住或退房日期后重新核对。");
+  }
   if (resolvedAction === "RESCHEDULE_STAY") {
     if (draft.newArrivalDate < view.effectiveArrangement.businessDate) {
       throw new Error("新入住日期不能早于当前营业日");
@@ -330,14 +333,14 @@ export function StayDateChangeDrawer({
     inventoryUnits.map((unit) => [unit.id, `${unit.code} · ${unit.name}`])
   ), [inventoryUnits]);
 
-  const previewRequest = useMemo(() => {
+  const previewDraft = useMemo(() => {
     try {
-      return buildStayDateChangeRequest(action, view, {
+      return { request: buildStayDateChangeRequest(action, view, {
         ...draft,
         reason: draft.reason.trim() || "住宿日期调整金额核对"
-      }, mode);
-    } catch {
-      return undefined;
+      }, mode), error: undefined };
+    } catch (error) {
+      return { request: undefined, error };
     }
   }, [
     action,
@@ -350,6 +353,7 @@ export function StayDateChangeDrawer({
     draft.manuallyAdjustWecomPrice,
     draft.manualPriceAdjustmentReason
   ]);
+  const previewRequest = previewDraft.request;
   const previewSignature = previewRequest
     ? JSON.stringify({ commandType: previewRequest.commandType, input: previewRequest.input })
     : "";
@@ -499,11 +503,13 @@ export function StayDateChangeDrawer({
 
       <section className="stay-date-pricing-section" aria-labelledby="stay-date-price-result-heading" aria-live="polite">
         <h3 id="stay-date-price-result-heading">金额核对</h3>
-        {pricePreview.status === "EMPTY" ? <p data-testid="stay-date-price-empty">填写有效的新日期和所需金额后，系统会在这里显示调整结果。</p> : null}
+        <InlineError error={!dateConstraintError && actionState?.enabled ? previewDraft.error : undefined} title="请检查填写内容" />
+        {pricePreview.status === "EMPTY" && !previewDraft.error ? <p data-testid="stay-date-price-empty">填写有效的新日期和所需金额后，系统会在这里显示调整结果。</p> : null}
         {pricePreview.status === "LOADING" || staleReadyPreview ? <div className="stay-date-price-loading" role="status" data-testid="stay-date-price-loading"><LoaderCircle className="spin" aria-hidden="true" size={17} /><span>正在计算调整后订单金额</span></div> : null}
         {pricePreview.status === "ERROR" ? <>
           <InlineError error={pricePreview.error} title={missingChannelReason ? "缺少渠道价格差异说明" : "暂时无法核对新金额"} hideTechnicalDetails />
           {missingChannelReason ? <button type="button" className="button button-secondary" onClick={() => channelReasonRef.current?.focus()}>去填写差异说明</button> : null}
+          {manualPriceAdjustmentNotNeeded(pricePreview.error) ? <button type="button" className="button button-secondary" onClick={() => update({ manuallyAdjustWecomPrice: false, targetContractYuan: "", manualPriceAdjustmentReason: "" })}>使用系统计算金额</button> : null}
         </> : null}
         {pricePreview.status === "READY" && currentPricePreviewReady ? (() => {
           const { summary } = pricePreview;

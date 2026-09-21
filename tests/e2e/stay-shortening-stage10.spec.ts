@@ -398,6 +398,81 @@ test("4.3 CTRIP shortening requires a new channel amount and enforces the 15 per
   await expectNoInternalProtocol(page);
 });
 
+test("error feedback distinguishes missing fields, unchanged move price, and failed refresh", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop error feedback");
+  const stay = fixture.wecomManualPrice;
+  await login(page);
+  const before = await getOrderView(page, stay);
+  await openOrder(page, stay);
+  await page.getByRole("button", { name: "换房", exact: true }).click();
+  const form = page.getByRole("dialog", { name: "换房", exact: true });
+  const target = form.getByTestId("move-unit-id");
+  await expect(target).toContainText("· 可用", { timeout: 30_000 });
+  const targetId = await target.locator("option").evaluateAll((options, currentId) => options
+    .find((option) => option.getAttribute("value") !== currentId && option.textContent?.endsWith("· 可用"))?.getAttribute("value"), stay.unitId);
+  expect(targetId).toBeTruthy();
+  await target.selectOption(targetId!);
+  await form.getByTestId("move-unit-reason").fill("核对换房提示");
+  await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeEnabled({ timeout: 30_000 });
+  const policyText = await form.getByTestId("move-unit-preview").getByText("政策基础金额", { exact: true }).locator("xpath=following-sibling::strong[1]").innerText();
+  const policyYuan = policyText.replace(/[^\d.]/g, "").replace(/\.00$/, "");
+  await form.getByRole("switch").check();
+  await form.getByTestId("move-wecom-amount").fill(policyYuan);
+  await expect(form.getByRole("alert")).toContainText("必须填写人工调价原因");
+  await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeDisabled();
+  await form.getByTestId("move-wecom-reason").fill("本次约定金额");
+  await expect(form.getByRole("alert")).toContainText("请关闭“另行调整金额”后继续核对");
+
+  let refreshRequests = 0;
+  await page.route("**/api/v1/command-previews", async (route) => {
+    if (route.request().postDataJSON().commandType !== "MOVE_UNIT") return route.continue();
+    refreshRequests += 1;
+    if (refreshRequests > 1) return route.fulfill({ status: 409, json: {
+      code: "INVENTORY_CONFLICT", message: "目标房源在所选换房日期内已有占用，请选择其他房源。", retryable: false
+    } });
+    const response = await route.fetch();
+    expect(response.ok()).toBe(true);
+    const body = await response.json();
+    body.preview.expiresAt = new Date(Date.now() + 2500).toISOString();
+    return route.fulfill({ response, json: body });
+  });
+  await form.getByRole("button", { name: "使用系统计算金额", exact: true }).click();
+  await expect(form.getByRole("switch")).not.toBeChecked();
+  await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeEnabled({ timeout: 30_000 });
+  await expect(form.getByRole("alert")).toContainText("目标房源在所选换房日期内已有占用", { timeout: 30_000 });
+  await expect(form).toContainText("原结果仅供查看");
+  await expect(form.getByTestId("move-unit-target-status")).toContainText("本次换房核对已失效");
+  await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeDisabled();
+  await page.screenshot({ path: testInfo.outputPath("move-refresh-reason.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await form.getByRole("alert").scrollIntoViewIfNeeded();
+  await expect(form.getByRole("alert")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("move-refresh-reason-narrow.png") });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.unroute("**/api/v1/command-previews");
+  await form.getByRole("button", { name: "重新核对", exact: true }).click();
+  await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeEnabled({ timeout: 30_000 });
+  await expect(form.getByRole("alert")).toHaveCount(0);
+  await form.getByRole("button", { name: "取消", exact: true }).click();
+  const after = await getOrderView(page, stay);
+  expect(after.order).toEqual(before.order);
+  expect(after.amendments).toEqual(before.amendments);
+  expect(after.pricingRevisions).toEqual(before.pricingRevisions);
+  expect(after.collectionFacts).toEqual(before.collectionFacts);
+});
+
+test("error feedback describes missing orders and network read failures without asking to edit", async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo), "desktop read error feedback");
+  await login(page);
+  await page.goto("/orders/order_missing_error_feedback");
+  await expect(page.getByRole("alert")).toContainText("未找到所需信息");
+  await expect(page.getByRole("alert")).not.toContainText(/返回修改|这次提交/);
+  await page.route("**/api/v1/orders/*", (route) => route.abort("failed"));
+  await page.goto(`/orders/${fixture.wecomManualPrice.orderId}`);
+  await expect(page.getByRole("alert")).toContainText("请检查网络连接后重试读取");
+  await expect(page.getByRole("alert")).not.toContainText(/返回修改|这次提交/);
+});
+
 test("4.3 WECOM shortening supports an explicit manual price without channel fields", async ({ page }, testInfo) => {
   test.skip(!isDesktop(testInfo), "desktop Stage 10 WECOM manual pricing");
   const stay = fixture.wecomManualPrice;
@@ -405,10 +480,28 @@ test("4.3 WECOM shortening supports an explicit manual price without channel fie
   await openOrder(page, stay);
   await page.getByRole("button", { name: "调整退房日期", exact: true }).click();
   const form = await fillShortenDraft(page, stay, "企微住客缩短并重新协商金额");
+  await form.getByTestId("stay-date-departure").fill(addDays(stay.arrivalDate, 367));
+  await expect(form.getByRole("alert")).toContainText("单次住宿最多 366 夜");
+  await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeDisabled();
+  await form.getByTestId("stay-date-departure").fill(stay.newDepartureDate);
+  await waitForPrice(form);
+  const policyYuan = (await form.getByTestId("stay-date-new-amount").innerText()).replace(/[^\d.]/g, "").replace(/\.00$/, "");
   await expect(form.getByTestId("stay-date-channel-amount")).toHaveCount(0);
   await expect(form.getByTestId("stay-date-wecom-adjust-toggle")).not.toBeChecked();
   await form.getByTestId("stay-date-wecom-adjust-toggle").check();
   await expect(form.getByTestId("stay-date-wecom-amount")).toBeVisible();
+  await form.getByTestId("stay-date-wecom-amount").fill(policyYuan);
+  await expect(form.getByRole("alert")).toContainText("必须填写人工调价原因");
+  await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeDisabled();
+  await form.getByTestId("stay-date-wecom-reason").fill("本次约定金额");
+  await expect(form.getByRole("alert")).toContainText("请关闭“另行调整金额”后继续核对");
+  await form.getByRole("alert").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("unchanged-manual-price.png") });
+  await form.getByRole("button", { name: "使用系统计算金额", exact: true }).click();
+  await expect(form.getByTestId("stay-date-wecom-adjust-toggle")).not.toBeChecked();
+  await waitForPrice(form);
+  await expect(form.getByRole("alert")).toHaveCount(0);
+  await form.getByTestId("stay-date-wecom-adjust-toggle").check();
   await form.getByTestId("stay-date-wecom-amount").fill(stay.targetContractYuan);
   const previewRequest = page.waitForRequest((request) => request.method() === "POST"
     && new URL(request.url()).pathname === "/api/v1/command-previews"

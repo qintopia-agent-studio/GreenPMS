@@ -243,7 +243,7 @@ function HistoricalStayCorrectionsDialog({ propertyId, orders, inventoryUnits, d
         </label>
         <button type="button" className="button button-secondary" onClick={addOrder} disabled={!selectedOrderId || page.loading}><Plus aria-hidden="true" size={16} />加入修改清单</button>
       </div>
-      <InlineError error={page.error || draftLoadError} title="住宿列表未能完整载入" />
+      <InlineError context="read" error={page.error || draftLoadError} title="住宿列表未能完整载入" />
       {page.error || draftLoadError ? <button type="button" className="button button-secondary" onClick={() => setCandidateRefresh((value) => value + 1)}>重试读取住宿</button> : null}
       <div className="list-pagination" aria-label="历史住宿翻页">
         <button type="button" className="button button-secondary" disabled={!candidateBefore || page.loading} onClick={() => { setCandidateBefore(undefined); setSelectedOrderId(""); }}>回到第一页住宿</button>
@@ -395,7 +395,7 @@ export function OrdersPage() {
         <span className="result-count">{loading ? "正在查询" : `本页 ${orders.length} 条` }</span>
       </section>
       {funds ? <div className="orders-funds-notice" role="status"><AlertCircle aria-hidden="true" size={16} /><p>仅按本单金额与已登记净收款筛选，不含外部渠道及免费住宿。多收金额需打开订单核对可退原收款，并不代表已批准退款；会员办卡登记差额请在会员档案核对。</p></div> : null}
-      <InlineError error={error} title="无法载入订单" />
+      <InlineError context="read" error={error} title="无法载入订单" />
       {loading ? <LoadingBlock label="正在载入订单" /> : error ? null : visibleOrders.length === 0 ? <EmptyState title="没有匹配订单" detail="调整筛选条件或从房态页创建新订单。" /> : (
         <div className="table-region orders-table-region" role="region" aria-label="订单列表" tabIndex={0}>
           <table className="data-table" data-testid="orders-table">

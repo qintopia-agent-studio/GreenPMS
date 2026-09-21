@@ -75,6 +75,31 @@ function view(overrides: Partial<OrderViewDto> = {}): OrderViewDto {
 }
 
 describe("stay date change drawer rules", () => {
+  it.each([
+    { input: { newArrivalDate: "2026-08-06", newDepartureDate: "2026-08-05" }, message: "退房日期必须晚于入住日期" },
+    { input: { newArrivalDate: "2026-08-02", newDepartureDate: "2027-08-04" }, message: "单次住宿最多 366 夜" },
+    { input: { newArrivalDate: "2026-08-02", newDepartureDate: "2026-08-05", targetCurrentContractAmountMinor: 10000 }, message: "必须填写人工调价原因" }
+  ])("shows the actual draft validation and keeps confirmation blocked: $message", ({ input, message }) => {
+    const current = view({ order: { ...view().order, booking_channel_code: "WECOM" } });
+    const html = renderToStaticMarkup(createElement(StayDateChangeDrawer, {
+      action: "RESCHEDULE_STAY", view: current, inventoryUnitLabel: "101",
+      draft: { commandType: "RESCHEDULE_STAY", title: "调整住宿日期", description: "",
+        initialReason: { code: "RESCHEDULE_STAY", note: "调整行程" },
+        input: { propertyId: current.order.property_id, orderId: current.order.id, ...input } },
+      runPreview: (execute) => execute(), onClose: () => {}, onSubmit: () => {}
+    }));
+    expect(html).toContain('role="alert"');
+    expect(html).toContain(message);
+    expect(html).toMatch(/disabled="">继续核对/);
+    expect(html).not.toContain("填写有效的新日期和所需金额后");
+  });
+
+  it("accepts exactly 366 nights and rejects 367 without sending a preview", () => {
+    const current = view({ order: { ...view().order, booking_channel_code: "WECOM" } });
+    const draft = { ...stayDateChangeInitialDraft("RESCHEDULE_STAY", current), reason: "调整行程", newDepartureDate: "2027-08-03" };
+    expect(buildStayDateChangeRequest("RESCHEDULE_STAY", current, draft).input.newDepartureDate).toBe("2027-08-03");
+    expect(() => buildStayDateChangeRequest("RESCHEDULE_STAY", current, { ...draft, newDepartureDate: "2027-08-04" })).toThrow("最多 366 夜");
+  });
   it("names the reserved-stay drawer as an accommodation date adjustment", () => {
     const html = renderToStaticMarkup(createElement(StayDateChangeDrawer, {
       action: "RESCHEDULE_STAY",

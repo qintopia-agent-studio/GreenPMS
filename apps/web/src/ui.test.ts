@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
-import { createOrderPricingDecision } from "@qintopia/domain";
+import { createOrderPricingDecision, enumerateServiceDates } from "@qintopia/domain";
 import { channelPriceDifferenceReasonRequired, InlineError } from "./uiBasic";
 import type { CommandRequest } from "./types";
 import { CommandDialog, fundsCommandCanReturnToEdit, returnCommandDraftAfterClose } from "./ui.tsx";
@@ -586,6 +586,43 @@ describe("temporary other-room member stay presentation", () => {
 });
 
 describe("operator-facing business errors", () => {
+  it("explains the actual unchanged manual price rejection without changing the pricing rule", () => {
+    let rejected: Error & { code?: string } | undefined;
+    try {
+      createOrderPricingDecision({ bookingChannelCode: "WECOM", stayType: "TRANSIENT", memberStay: false,
+        policyBaseAmountMinor: 10000, targetCurrentContractAmountMinor: 10000, manualPriceAdjustmentReason: "约定金额" });
+    } catch (error) { rejected = error as Error & { code?: string }; }
+    expect(rejected).toBeDefined();
+    const html = renderToStaticMarkup(createElement(InlineError, { error: new ApiError(400, { code: rejected!.code, message: rejected!.message }) }));
+    expect(html).toContain("请关闭“另行调整金额”后继续核对");
+    expect(html).not.toContain("manualPriceAdjustmentReason");
+  });
+
+  it("explains the domain stay length rejection", () => {
+    let rejected: Error & { code?: string } | undefined;
+    try { enumerateServiceDates("2026-08-02", "2027-08-04"); }
+    catch (error) { rejected = error as Error & { code?: string }; }
+    expect(rejected).toBeDefined();
+    expect(businessErrorMessage(new ApiError(400, { code: rejected!.code, message: rejected!.message }))).toContain("最多 366 夜");
+  });
+
+  it.each([
+    { error: new ApiError(404, { code: "NOT_FOUND", message: "Order not found" }), message: "未找到所需信息" },
+    { error: new TypeError("Failed to fetch"), message: "请检查网络连接后重试读取" },
+    { error: new ApiError(500, { code: "INTERNAL_ERROR", message: "Internal server error" }), message: "暂时无法读取数据" },
+    { error: new ApiError(403, { code: "INSUFFICIENT_ACCESS", message: "Permission denied" }), message: "没有查看权限" },
+    { error: new ApiError(401, { code: "AUTHENTICATION_REQUIRED", message: "Unauthorized" }), message: "重新登录后读取" }
+  ])("distinguishes read failures from submissions: $message", ({ error, message }) => {
+    const html = renderToStaticMarkup(createElement(InlineError, { context: "read", title: "无法载入订单", error }));
+    expect(html).toContain(message);
+    expect(html).not.toMatch(/没有接受这次提交|返回修改|查询原操作结果|本次没有写入/);
+  });
+
+  it("keeps uncertain writes on the result-recovery path", () => {
+    const html = renderToStaticMarkup(createElement(InlineError, { error: new ApiError(503, { code: "SERVICE_NOT_READY", message: "Unavailable", retryable: true }) }));
+    expect(html).toContain("当前结果尚未确认");
+    expect(html).toContain("查询原操作结果");
+  });
   it.each([8400, 11600])("explains the actual channel threshold rejection for amount %s", (amount) => {
     let rejected: Error & { code?: string } | undefined;
     try {

@@ -91,8 +91,37 @@ export function channelPriceDifferenceReasonRequired(error: unknown): boolean {
     && error.message === "channelPriceDifferenceReason is required when the channel price difference exceeds 15%";
 }
 
+export function manualPriceAdjustmentNotNeeded(error: unknown): boolean {
+  return error instanceof ApiError
+    && error.status === 400
+    && error.code === "VALIDATION_ERROR"
+    && error.message === "manualPriceAdjustmentReason is only allowed when a WECOM order differs from policy price";
+}
+
+export function readErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 401) return "登录已过期，请重新登录后读取。";
+    if (error.status === 403) return "当前账号没有查看权限，请联系管理员核对权限。";
+    if (error.status === 404) return "未找到所需信息，可能已不存在或当前不可访问。请返回列表刷新后重试。";
+    if (error.status >= 500 || error.retryable) return "暂时无法读取数据，请稍后刷新重试。";
+  }
+  if (error instanceof TypeError && /fetch|network|load failed/i.test(error.message)) {
+    return "无法连接服务器，请检查网络连接后重试读取。";
+  }
+  if (error instanceof Error && /[\u3400-\u9fff]/.test(error.message)
+    && !/Preview|Confirm|Receipt|Command|effectHash|idempoten/i.test(error.message)) return error.message;
+  return "未能读取所需信息，请刷新重试；如持续失败，请联系支持人员。";
+}
+
 export function businessErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    if (manualPriceAdjustmentNotNeeded(error)) {
+      return "填写的金额与系统计算的政策金额相同，无需人工调价。请关闭“另行调整金额”后继续核对。";
+    }
+    if (error.status === 400 && error.code === "VALIDATION_ERROR"
+      && error.message === "Stay cannot exceed 366 service nights") {
+      return "单次住宿最多 366 夜，请调整入住或退房日期后重新核对。";
+    }
     if (channelPriceDifferenceReasonRequired(error)) {
       return "本单渠道应结金额与政策基础金额的差异超过 15%，请填写“渠道价格差异说明”后继续核对。";
     }
@@ -172,15 +201,17 @@ export function businessStatusLabel(value: string): string {
   return businessStatusLabels[value] ?? value;
 }
 
-export function InlineError({ error, title = "操作未完成", hideTechnicalDetails = true }: {
+export function InlineError({ error, title = "操作未完成", hideTechnicalDetails = true, context = "write" }: {
   error: unknown;
   title?: string;
   hideTechnicalDetails?: boolean;
+  context?: "read" | "write";
 }) {
   if (!error) return null;
   const apiError = error instanceof ApiError ? error : undefined;
   const originMismatch = apiError?.code === "RESOURCE_SCOPE_DENIED" && /Cross-origin session write/i.test(apiError.message);
-  const message = !hideTechnicalDetails || apiError && (apiError.status === 401 || apiError.status === 403) && !originMismatch
+  const message = context === "read" ? readErrorMessage(error)
+    : !hideTechnicalDetails || apiError && (apiError.status === 401 || apiError.status === 403) && !originMismatch
     ? errorMessage(error)
     : businessErrorMessage(error);
   return (

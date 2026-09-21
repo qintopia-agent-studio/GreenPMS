@@ -173,7 +173,7 @@ export function RoomCatalogPage() {
     {recovery.canDiscardCorrupt ? <DamagedCommandRecoveryNotice error={recovery.error} onDiscard={recovery.discardCorruptAfterReview} /> : <InlineError error={recovery.error} />}
     <QuoteRecoveryConflictNotice conflict={recovery.conflict} />
     {recovery.pending ? <CommandRecoveryBar recovery={recovery.pending} businessFacing onOpen={() => { if (recovery.pending) { setRecovering(true); setCommand(recoveryCommandRequest(recovery.pending)); } }} /> : null}
-    <InlineError error={error} title="无法载入房型与价格" />
+    <InlineError context="read" error={error} title="无法载入房型与价格" />
     <div className="catalog-toolbar"><nav className="catalog-tabs" aria-label="房源设置内容">{([
       ["TYPES", "房型与价格", Tag], ["ROOMS", "房间与床位", Building2], ["HISTORY", "修改记录", History]
     ] as const).map(([value, label, Icon]) => <button key={value} className={tab === value ? "is-selected" : ""} aria-pressed={tab === value} onClick={() => setTab(value)}><Icon size={16} aria-hidden="true" />{label}</button>)}</nav>
