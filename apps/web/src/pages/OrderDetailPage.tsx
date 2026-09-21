@@ -661,12 +661,12 @@ function HistoricalStayCorrectionGroup({ item, units }: {
 
 export function OrderLifecycleSections({ view, inventoryUnits, showPerOrderFunds = true, channelPriceDifferenceReason }: {
   view: Pick<OrderViewDto, "originalArrangement" | "effectiveArrangement" | "fulfillment" | "arrangementHistory">;
-  inventoryUnits: Array<Pick<InventoryUnitDto, "id" | "code" | "name" | "building_code" | "display_name">>;
+  inventoryUnits: Array<Pick<InventoryUnitDto, "id" | "code" | "name" | "building_code" | "display_name" | "display_code">>;
   showPerOrderFunds?: boolean;
   channelPriceDifferenceReason?: string | undefined;
 }) {
   const units = new Map(inventoryUnits.map((unit) => [unit.id, unit]));
-  const currentUnits = new Map(inventoryUnits.map((unit) => [unit.id, { ...unit, name: unit.display_name ?? unit.name }]));
+  const currentUnits = new Map(inventoryUnits.map((unit) => [unit.id, { ...unit, code: unit.display_code ?? unit.code, name: unit.display_name ?? unit.name }]));
   return <>
     <div className="detail-grid" data-testid="order-arrangements">
       <section className="detail-section" aria-labelledby="effective-arrangement-heading">
@@ -1829,7 +1829,7 @@ function ScopedOrderDetailPage() {
 
   const orderInventoryUnits = useMemo(() => {
     const units = new Map(meta.inventoryUnits.map((unit) => [unit.id, unit]));
-    for (const unit of view?.referencedInventoryUnits ?? []) units.set(unit.id, { ...unit, name: unit.display_name ?? unit.name });
+    for (const unit of view?.referencedInventoryUnits ?? []) units.set(unit.id, { ...unit, code: unit.display_code ?? unit.code, name: unit.display_name ?? unit.name });
     return [...units.values()];
   }, [meta.inventoryUnits, view?.referencedInventoryUnits]);
   const unitMap = useMemo(() => new Map(orderInventoryUnits.map((unit) => [unit.id, unit])), [orderInventoryUnits]);
@@ -2351,6 +2351,7 @@ function ScopedOrderDetailPage() {
       {command ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${pendingRecovery?.confirmationKey ?? "missing"}` : "new-order-command"}
         request={command}
+        inventoryUnitLabels={Object.fromEntries(orderInventoryUnits.map((unit) => [unit.id, unit.name]))}
         onClose={closeCommandDialog}
         onCommitted={async () => {
           if (!orderId) throw new Error("当前订单引用缺失，无法刷新订单详情");

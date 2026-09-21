@@ -10,6 +10,30 @@ import type { CommandRequest } from "./types";
 import { CommandDialog, fundsCommandCanReturnToEdit, returnCommandDraftAfterClose } from "./ui.tsx";
 import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, temporaryOtherRoomArrangementPresentation, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
 
+describe("room rename confirmation evidence", () => {
+  const input = { propertyId: "property_1", action: "RENAME_ROOM", expectedVersion: 3, roomId: "room_1", code: "F01" };
+  const effect = {
+    operation: "MANAGE_ROOM_CATALOG", propertyId: "property_1", action: "RENAME_ROOM", beforeVersion: 3,
+    after: { version: 4, unitCodes: { room_1: "F01" } }, title: "修改房号：F01", description: ["01 → F01"],
+    roomRename: { roomId: "room_1", beforeCode: "01", afterCode: "F01" },
+    retireUnitIds: [], insertUnits: [], policies: [], roomLink: null
+  };
+  it("allows the current and compatible legacy rename requests to reach confirmation", () => {
+    expect(u1PreviewHasBusinessEvidence("MANAGE_ROOM_CATALOG", effect, input)).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("MANAGE_ROOM_CATALOG", { ...effect, action: "SAVE_ROOM" }, { ...input, action: "SAVE_ROOM" })).toBe(true);
+  });
+  it("blocks mismatched actions, missing rename evidence and hidden structural writes", () => {
+    for (const change of [
+      { action: "SAVE_ROOM" }, { roomRename: undefined },
+      { roomRename: { ...effect.roomRename, roomId: "another_room" } },
+      { roomRename: { ...effect.roomRename, afterCode: "F02" } },
+      { after: { version: 4, unitCodes: { room_1: "F02" } } },
+      { retireUnitIds: ["room_1"] }, { insertUnits: [{ id: "replacement" }] },
+      { policies: [{ id: "new_rate" }] }, { roomLink: { roomId: "replacement" } }
+    ]) expect(u1PreviewHasBusinessEvidence("MANAGE_ROOM_CATALOG", { ...effect, ...change }, input), JSON.stringify(change)).toBe(false);
+  });
+});
+
 describe("funds confirmation return to edit", () => {
   const request: CommandRequest = {
     commandType: "RECORD_COLLECTION",
@@ -4398,4 +4422,17 @@ describe("U1 confirmation evidence", () => {
   const html = renderToStaticMarkup(createElement(ReceiptPanel, { receipt, businessCommand }));
   expect(html).toContain("请联系管理员核查");
   expect(html).not.toMatch(/重新登记|结果暂时不确定/);
+});
+
+
+it("uses current room labels in confirmation without mutating canonical effect evidence", () => {
+  const unit = Object.freeze({ id: "unit_room_original", code: "01", name: "01 原房间" });
+  const effect = Object.freeze({ inventoryUnit: unit });
+  const html = renderToStaticMarkup(createElement(EffectSummary, {
+    preview: { previewId: "preview_rename", commandType: "LOCK_MAINTENANCE", effectHash: "synthetic", effect, expiresAt: "2030-01-01T00:00:00Z" },
+    inventoryUnitLabels: { unit_room_original: "F01 当前房间" }
+  }));
+  expect(html).toContain("F01 当前房间");
+  expect(html).not.toContain("01 原房间");
+  expect(unit.code).toBe("01");
 });

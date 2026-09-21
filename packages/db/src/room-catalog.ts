@@ -54,12 +54,13 @@ async function catalogBasis(db: DbExecutor, propertyId: string) {
     if ((latestByAsset.get(link.asset_id)?.version ?? -1) < link.version) latestByAsset.set(link.asset_id, link);
   }
   const linkByUnit = new Map(links.map((link) => [link.unit_id, link]));
+  const unitCodes = stateRow ? object<RoomCatalogSnapshot>(stateRow.snapshot).unitCodes ?? {} : {};
   const rooms: ManagedRoom[] = units.filter((unit) => unit.kind === "ROOM" && (!linkByUnit.has(unit.id)
     || latestByAsset.get(linkByUnit.get(unit.id)!.asset_id)?.unit_id === unit.id)).map((room) => ({
-    assetId: linkByUnit.get(room.id)?.asset_id ?? room.id, unitId: room.id, code: room.code,
+    assetId: linkByUnit.get(room.id)?.asset_id ?? room.id, unitId: room.id, code: unitCodes[room.id] ?? room.code,
     buildingCode: room.building_code ?? "", typeCode: room.room_type_code ?? "", bedCount: room.physical_bed_count ?? 1,
     capacity: room.occupancy_capacity, active: room.active,
-    beds: units.filter((unit) => unit.parent_room_id === room.id).map((bed) => ({ id: bed.id, code: bed.code, active: bed.active }))
+    beds: units.filter((unit) => unit.parent_room_id === room.id).map((bed) => ({ id: bed.id, code: unitCodes[bed.id] ?? bed.code, active: bed.active }))
   }));
   let snapshot: RoomCatalogSnapshot;
   if (stateRow) snapshot = object<RoomCatalogSnapshot>(stateRow.snapshot);
@@ -84,7 +85,7 @@ async function catalogBasis(db: DbExecutor, propertyId: string) {
     snapshot = { version: 0, types: types.sort((a, b) => a.code.localeCompare(b.code)), rates: [] };
   }
   snapshot = { ...snapshot, buildingOrder: resolveBuildingOrder(units.filter((unit) => unit.kind === "ROOM"), snapshot.buildingOrder) };
-  return { property, units, rooms: sortRoomsByBuilding(rooms, snapshot.buildingOrder!), snapshot, baselines };
+  return { property, units, rooms: sortRoomsByBuilding(rooms, snapshot.buildingOrder!), snapshot, storedSnapshot: stateRow ? object<RoomCatalogSnapshot>(stateRow.snapshot) : undefined, baselines };
 }
 
 function baselineAt(baselines: Awaited<ReturnType<typeof catalogBasis>>["baselines"], date: string) {
@@ -184,7 +185,37 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
     effect.retireUnitIds = rooms.flatMap((room) => [room.unitId, ...room.beds.map((bed) => bed.id)]).sort();
   };
 
-  if (input.action === "SET_BUILDING_ORDER") {
+  // Legacy SAVE_ROOM clients also take the identity-preserving path for code-only changes.
+  const codeOnly = input.action === "SAVE_ROOM" && selectedRoom?.active
+    && input.typeCode === selectedRoom.typeCode && input.buildingCode?.trim() === selectedRoom.buildingCode
+    && input.bedCount === selectedRoom.bedCount && input.capacity === selectedRoom.capacity;
+  if (input.action === "RENAME_ROOM" || codeOnly) {
+    const room = requireRoom();
+    if (!room.active) throw new DomainError("VALIDATION_ERROR", "请先启用房间，再修改房号");
+    const code = text(input.code, "房号", 60);
+    if (code === room.code) throw new DomainError("VALIDATION_ERROR", "房号和房间配置没有变化");
+    const canonical = basis.units.find((unit) => unit.id === room.unitId)!;
+    const children = basis.units.filter((unit) => unit.parent_room_id === room.unitId);
+    if (children.some((unit) => !unit.code.startsWith(`${canonical.code}-`))) {
+      throw new DomainError("VALIDATION_ERROR", "床位编号与房号不一致，请先核查房源配置");
+    }
+    const changes = { [room.unitId]: code, ...Object.fromEntries(children.map((unit) =>
+      [unit.id, code + unit.code.slice(canonical.code.length)])) };
+    const codes = Object.values(changes);
+    if (basis.rooms.some((other) => other.unitId !== room.unitId && other.code === code)
+      || basis.units.some((unit) => !(unit.id in changes) && (unit.active || unit.kind === "ROOM")
+        && (codes.includes(basis.snapshot.unitCodes?.[unit.id] ?? unit.code) || codes.includes(unit.code)))) {
+      throw new DomainError("VALIDATION_ERROR", "房号或床位编号已存在（包括保留的历史编号），请使用其他房号");
+    }
+    next.unitCodes = { ...next.unitCodes, ...changes };
+    effect.after = { ...(basis.storedSnapshot ?? basis.snapshot), version: next.version, unitCodes: next.unitCodes };
+    effect.action = input.action;
+    effect.roomRename = { roomId: room.unitId, beforeCode: room.code, afterCode: code };
+    effect.title = `修改房号：${code}`;
+    effect.description = [`${room.buildingCode}栋 · 原房号 ${room.code} → 新房号 ${code}`,
+      "仅修改当前展示房号，保留原房间、床位、订单、占用和价格；历史操作记录不变",
+      ...(children.length ? [`关联床位同步显示：${children.map((unit) => changes[unit.id]).join("、")}`] : [])];
+  } else if (input.action === "SET_BUILDING_ORDER") {
     const current = basis.snapshot.buildingOrder!;
     const order = input.buildingOrder;
     if (!Array.isArray(order) || order.length !== current.length || new Set(order).size !== order.length
@@ -266,7 +297,7 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
           inventory_basis: "INDEPENDENT", physical_bed_count: null, occupancy_capacity: 1 });
       }
       const newCodes = effect.insertUnits.map((unit) => unit.code);
-      if (basis.units.some((unit) => unit.active && !effect.retireUnitIds.includes(unit.id) && newCodes.includes(unit.code))) throw new DomainError("VALIDATION_ERROR", "房号或床位编号与其他有效库存重复");
+      if (basis.units.some((unit) => unit.active && !effect.retireUnitIds.includes(unit.id) && (newCodes.includes(basis.snapshot.unitCodes?.[unit.id] ?? unit.code) || newCodes.includes(unit.code)))) throw new DomainError("VALIDATION_ERROR", "房号或床位编号与其他有效库存重复");
       effect.roomLink = { assetId: old?.assetId ?? roomId, oldUnitId: old?.unitId ?? null, newUnitId: roomId };
       effect.title = `${old ? "调整" : "新增"}房间：${code}`;
       effect.description = [`${building}栋 · ${type.name} · ${bedCount} 床 / ${capacity} 人`,
@@ -289,7 +320,7 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
     effect.description = [`${effectiveFrom} 起按新订单入住日生效，已建订单继续使用原价格版本`,
       ...(["1", "7", "14", "30"] as const).map((night) => `${night} 晚：${before ? `¥${(before[night] / 100).toFixed(2)}` : "未设置"} → ¥${(anchors[night] / 100).toFixed(2)}`)];
   }
-  if (["PUBLISH_RATES", "SAVE_ROOM"].includes(input.action) || (input.action === "SET_ROOM_ACTIVE" && input.active)) effect.policies = preparePolicies(basis, next);
+  if (!effect.roomRename && (["PUBLISH_RATES", "SAVE_ROOM"].includes(input.action) || (input.action === "SET_ROOM_ACTIVE" && input.active))) effect.policies = preparePolicies(basis, next);
   const basisVersions = { version: basis.snapshot.version, inventory: basis.units, baselinePolicies: basis.baselines };
   return { propertyId, effect: effect as unknown as Record<string, unknown>, effectHash: stableHash({ effect, basisVersions }), basisVersions };
 }

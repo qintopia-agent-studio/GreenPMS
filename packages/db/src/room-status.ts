@@ -1431,7 +1431,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           ...(!departureDayInHouse && claimId ? [reference("CLAIM", claimId, `Claim ${claimId}`)] : []),
           orderRef,
           reference("STAY", order.stay_id, `Stay ${order.stay_id}`),
-          reference("INVENTORY_UNIT", segment.inventory_unit_id, `${segment.unit_code} · ${segment.unit_name}`)
+          reference("INVENTORY_UNIT", segment.inventory_unit_id, inventoryRows.find((unit) => unit.id === segment.inventory_unit_id)?.name ?? `${segment.unit_code} · ${segment.unit_name}`)
         ],
         histories: [{
           action: "ORDER_TASK_SOURCE",

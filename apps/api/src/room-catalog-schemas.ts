@@ -13,7 +13,7 @@ const roomType = obj({ code: id, name, bathroom, saleMode: mode, bedCount: count
   products: Type.Array(obj({ code: id, kind: mode, multiplier: count })) });
 const rate = obj({ id, typeCode: id, effectiveFrom: date, anchors: RoomRateAnchorsSchema, version: Type.Integer({ minimum: 1 }) });
 const buildingOrder = Type.Array(name, { uniqueItems: true });
-const snapshot = obj({ buildingOrder: Type.Optional(buildingOrder), version: Type.Integer({ minimum: 0 }), types: Type.Array(roomType), rates: Type.Array(rate) });
+const snapshot = obj({ buildingOrder: Type.Optional(buildingOrder), unitCodes: Type.Optional(Type.Record(id, name)), version: Type.Integer({ minimum: 0 }), types: Type.Array(roomType), rates: Type.Array(rate) });
 const action = Type.Union(roomCatalogActions.map((value) => Type.Literal(value)));
 const unit = obj({ id, property_id: id, kind: mode, parent_room_id: nullable(id), code: name, name: Type.String(), active: Type.Boolean(),
   catalog_version: id, building_code: name, room_type_code: id, pricing_product_code: id,
@@ -23,6 +23,7 @@ export const RoomCatalogEffectSchema = obj({ operation: Type.Literal("MANAGE_ROO
   description: Type.Array(Type.String()), beforeVersion: Type.Integer({ minimum: 0 }), after: snapshot,
   retireUnitIds: Type.Array(id), insertUnits: Type.Array(unit),
   roomLink: Type.Union([obj({ assetId: id, oldUnitId: nullable(id), newUnitId: id }), Type.Null()]),
+  roomRename: Type.Optional(obj({ roomId: id, beforeCode: name, afterCode: name })),
   policies: Type.Array(obj({ id, effectiveFrom: date, anchors: Type.Record(Type.String(), RoomRateAnchorsSchema) })) });
 export const RoomCatalogInputSchema = Type.Unsafe({ type: "object", discriminator: { propertyName: "action" }, oneOf: [
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_BUILDING_ORDER"), buildingOrder }),
@@ -32,6 +33,7 @@ export const RoomCatalogInputSchema = Type.Unsafe({ type: "object", discriminato
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_TYPE_ACTIVE"), typeCode: id, active: Type.Boolean() }),
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SAVE_ROOM"), roomId: Type.Optional(id), typeCode: id,
     code: name, buildingCode: name, bedCount: count, capacity: count }),
+  obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("RENAME_ROOM"), roomId: id, code: name }),
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_ROOM_ACTIVE"), roomId: id, active: Type.Boolean() }),
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("PUBLISH_RATES"), typeCode: id,
     effectiveFrom: date, anchors: RoomRateAnchorsSchema })

@@ -68,8 +68,12 @@ function CatalogEditor({ editor, data, draft, onClose, onSubmit }: { editor: Edi
     try {
       if (!reason.trim()) throw new Error("请填写修改原因");
       const common = { propertyId: data.propertyId, expectedVersion: data.version };
+      const codeOnly = editor.kind === "ROOM" && oldRoom?.active && typeCode === oldRoom.typeCode
+        && building.trim() === oldRoom.buildingCode && Number(beds) === oldRoom.bedCount
+        && Number(mode === "BED" ? beds : capacity) === oldRoom.capacity;
       const input: RoomCatalogInput = editor.kind === "TYPE" ? { ...common, action: "SAVE_TYPE", ...(editor.type ? { typeCode: editor.type.code } : {}),
         name: name.trim(), bathroom, saleMode, bedCount: Number(beds), capacity: Number(mode === "BED" ? beds : capacity) }
+        : codeOnly ? { ...common, action: "RENAME_ROOM", roomId: oldRoom!.unitId, code: code.trim() }
         : editor.kind === "ROOM" ? { ...common, action: "SAVE_ROOM", ...(oldRoom ? { roomId: oldRoom.unitId } : {}), typeCode,
           code: code.trim(), buildingCode: building.trim(), bedCount: Number(beds), capacity: Number(mode === "BED" ? beds : capacity) }
         : { ...common, action: "PUBLISH_RATES", typeCode: editor.type.code, effectiveFrom, anchors: readAnchors() };
@@ -88,7 +92,7 @@ function CatalogEditor({ editor, data, draft, onClose, onSubmit }: { editor: Edi
           <label className="field"><span>房号</span><input value={code} maxLength={40} onChange={(e) => setCode(e.target.value)} required /></label></div>
         <label className="field"><span>房型</span><select value={typeCode} required onChange={(e) => { setTypeCode(e.target.value); const next = data.types.find((item) => item.code === e.target.value); if (next) { setBeds(String(next.bedCount)); setCapacity(String(next.capacity)); } }}>
           <option value="" disabled>请选择房型</option>{data.types.filter((item) => item.active).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-        {oldRoom ? <p className="catalog-hint">调整前需要处理关联预订、在住与维修占用。历史订单保留原房型和床位记录。</p> : null}
+        {oldRoom ? <p className="catalog-hint">仅修改房号不影响现有订单，可在入住期间操作。调整楼栋、房型或床位结构前，须先处理关联预订、在住与维修占用。</p> : null}
       </> : <>
         <p className="catalog-hint">填写每个档位的基准总价，销售单位为{editor.type.saleMode === "BED" ? "床位" : "整房"}。系统按连续住宿晚数选择档位。</p>
         <div className="catalog-price-inputs">{nights.map((night) => <label className="field" key={night}><span>{night} 晚总价 / 元</span><input value={amounts[night] ?? ""} inputMode="decimal" required
@@ -146,7 +150,7 @@ export function RoomCatalogPage() {
   const price = data?.prices.find((item) => item.typeCode === activeType?.code);
   function submit(input: RoomCatalogInput, reason: string) {
     setRecovering(false); setNotice("");
-    setCommand({ commandType: "MANAGE_ROOM_CATALOG", input: { ...input }, title: input.action === "SET_BUILDING_ORDER" ? "核对楼栋顺序" : "核对房型与价格修改",
+    setCommand({ commandType: "MANAGE_ROOM_CATALOG", input: { ...input }, title: input.action === "SET_BUILDING_ORDER" ? "核对楼栋顺序" : input.action === "RENAME_ROOM" ? "核对房号修改" : "核对房型与价格修改",
       description: "请核对修改内容，确认后保存并保留操作记录。", initialReason: { code: "ROOM_CATALOG_CHANGE", note: reason } });
   }
   function simple(input: Omit<RoomCatalogInput, "propertyId" | "expectedVersion">, title: string) {
