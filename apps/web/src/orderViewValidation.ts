@@ -177,7 +177,7 @@ function referencedInventoryUnit(value: unknown, path: string): { id: string; pr
     "id", "property_id", "kind", "parent_room_id", "code", "name", "active", "catalog_version",
     "building_code", "room_type_code", "pricing_product_code", "inventory_basis", "code_provenance",
     "physical_bed_count", "occupancy_capacity", "created_at"
-  ], ["display_name"]);
+  ], ["display_name", "display_code"]);
   const id = stringValue(unit.id, `${path}.id`);
   const propertyId = stringValue(unit.property_id, `${path}.property_id`);
   const kind = stringValue(unit.kind, `${path}.kind`);
@@ -186,6 +186,7 @@ function referencedInventoryUnit(value: unknown, path: string): { id: string; pr
   stringValue(unit.code, `${path}.code`);
   stringValue(unit.name, `${path}.name`);
   if (unit.display_name !== undefined) stringValue(unit.display_name, `${path}.display_name`);
+  if (unit.display_code !== undefined) stringValue(unit.display_code, `${path}.display_code`);
   if (typeof unit.active !== "boolean") fail(`${path}.active`, "必须是布尔值");
   nullableNonEmptyString(unit.catalog_version, `${path}.catalog_version`);
   nullableNonEmptyString(unit.building_code, `${path}.building_code`);

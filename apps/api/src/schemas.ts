@@ -265,7 +265,10 @@ const BackfillCompletedStayCollectionEffectSchema = Type.Union([
   })
 ]);
 
-const ErrorDetailsSchema = Type.Union([
+// The runtime union remains strict; the DTO intentionally exposes diagnostics as a record.
+// Avoid expanding this large diagnostic union through every nested receipt TypeScript type.
+export const ErrorDetailsSchema = Type.Unsafe<Record<string, unknown>>(Type.Union([
+  strictObject({ roomCodes: Type.Array(ShortText), orderIds: Type.Array(Id) }),
   strictObject({ serviceDate: LocalDate, claimId: Id }),
   strictObject({ serviceDate: LocalDate, inventoryUnitId: Id }),
   strictObject({
@@ -298,7 +301,7 @@ const ErrorDetailsSchema = Type.Union([
     originalRoomTypeAvailable: Type.Boolean()
   }),
   strictObject({ cleaningTaskId: Id, status: Type.Union([Type.Literal("PENDING"), Type.Literal("COMPLETED")]) })
-]);
+]));
 
 export const ErrorResponse = strictObject({
   code: Type.Union(errorCodes.map((code) => Type.Literal(code))),
@@ -2716,7 +2719,7 @@ const PropertyRowSchema = strictObject({
 });
 const InventoryUnitRowSchema = strictObject({
   id: Id, property_id: Id, kind: InventoryUnitKindSchema, parent_room_id: nullable(Id), code: ShortText,
-  name: ShortText, display_name: Type.Optional(ShortText), active: Type.Boolean(), catalog_version: nullable(ShortText), building_code: nullable(ShortText),
+  name: ShortText, display_code: Type.Optional(ShortText), display_name: Type.Optional(ShortText), active: Type.Boolean(), catalog_version: nullable(ShortText), building_code: nullable(ShortText),
   room_type_code: nullable(ShortText), pricing_product_code: nullable(ShortText),
   inventory_basis: nullable(Type.Union([Type.Literal("INDEPENDENT"), Type.Literal("WHOLE_ROOM_COMBINATION")])),
   code_provenance: nullable(Type.Union([Type.Literal("SOURCE_EXPLICIT"), Type.Literal("USER_CONFIRMED_RENAMED"), Type.Literal("PMS_GENERATED")])),

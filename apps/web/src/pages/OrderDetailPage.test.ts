@@ -689,14 +689,17 @@ describe("operator-facing order lifecycle presentation", () => {
     const html = renderToStaticMarkup(createElement(OrderLifecycleSections, {
       view: lifecycle,
       inventoryUnits: [
-        { id: "unit_d01", code: "D01", name: "D01 原始名称", display_name: "D01 经营新名称", building_code: "1" },
-        { id: "unit_d02", code: "D02", name: "D02 原始名称", display_name: "D02 经营新名称", building_code: "1" }
+        { id: "unit_d01", code: "D01", name: "D01 原始名称", display_name: "F01 经营新名称", display_code: "F01", building_code: "1" },
+        { id: "unit_d02", code: "D02", name: "D02 原始名称", display_name: "F02 经营新名称", display_code: "F02", building_code: "1" }
       ]
     }));
     const history = html.slice(html.indexOf('data-testid="arrangement-history"'));
     expect(html.slice(0, html.indexOf('data-testid="arrangement-history"'))).toContain("经营新名称");
     expect(history).toContain("原始名称");
     expect(history).not.toContain("经营新名称");
+    expect(history).not.toContain("F01");
+    expect(history).not.toContain("F02");
+    expect(html.slice(0, html.indexOf('data-testid="arrangement-history"'))).toContain("F02");
   });
 
   it("renders the four server-projected business layers with terminal wording", () => {

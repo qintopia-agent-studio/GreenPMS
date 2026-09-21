@@ -1,4 +1,4 @@
-export const roomCatalogActions = ["SAVE_TYPE", "DELETE_TYPE", "SET_TYPE_ACTIVE", "SAVE_ROOM", "SET_ROOM_ACTIVE", "PUBLISH_RATES", "SET_BUILDING_ORDER"] as const;
+export const roomCatalogActions = ["SAVE_TYPE", "DELETE_TYPE", "SET_TYPE_ACTIVE", "SAVE_ROOM", "RENAME_ROOM", "SET_ROOM_ACTIVE", "PUBLISH_RATES", "SET_BUILDING_ORDER"] as const;
 export type RoomCatalogAction = (typeof roomCatalogActions)[number];
 export type RoomRateAnchors = Record<"1" | "7" | "14" | "30", number>;
 export interface ManagedRoomType {
@@ -32,6 +32,8 @@ export interface RoomRateChange {
 export interface RoomCatalogSnapshot {
   /** Optional for receipts written before building ordering was introduced. */
   buildingOrder?: string[];
+  /** Operational codes only; canonical inventory and historical facts are immutable. */
+  unitCodes?: Record<string, string>;
   version: number;
   types: ManagedRoomType[];
   rates: RoomRateChange[];
@@ -82,4 +84,5 @@ export interface RoomCatalogEffect {
   insertUnits: CatalogInventoryInsert[];
   roomLink: { assetId: string; oldUnitId: string | null; newUnitId: string } | null;
   policies: CatalogPolicyInsert[];
+  roomRename?: { roomId: string; beforeCode: string; afterCode: string };
 }

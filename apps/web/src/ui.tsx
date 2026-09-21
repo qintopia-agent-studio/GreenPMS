@@ -2018,7 +2018,14 @@ export function u1PreviewHasBusinessEvidence(
       return effect.operation === "MANAGE_ROOM_CATALOG" && effect.propertyId === input.propertyId && effect.action === input.action
         && effect.beforeVersion === input.expectedVersion && isRecord(effect.after) && effect.after.version === Number(input.expectedVersion) + 1
         && nonblankString(effect.title) && Array.isArray(effect.description) && effect.description.length > 0
-        && effect.description.every((item) => typeof item === "string");
+        && effect.description.every((item) => typeof item === "string")
+        && (!(input.action === "RENAME_ROOM" || effect.roomRename !== undefined) || (
+          isRecord(effect.roomRename) && effect.roomRename.roomId === input.roomId
+          && effect.roomRename.afterCode === input.code && nonblankString(effect.roomRename.beforeCode)
+          && isRecord(effect.after.unitCodes) && effect.after.unitCodes[String(input.roomId)] === input.code
+          && Array.isArray(effect.retireUnitIds) && effect.retireUnitIds.length === 0
+          && Array.isArray(effect.insertUnits) && effect.insertUnits.length === 0
+          && Array.isArray(effect.policies) && effect.policies.length === 0 && effect.roomLink === null));
     case "CREATE_ORDER":
       return Boolean(inventoryUnit
         && nonblankString(inventoryUnit.code)
@@ -2493,6 +2500,8 @@ function historicalCorrectionOccupantLabel(value: unknown): string {
 
 export function EffectSummary({ preview, fulfillment = false, businessCommand, reasonNote, commandTitle, bookingChannelCode: stableBookingChannelCode, inventoryUnitLabels, orderLifecycleContext, historicalStayCorrectionContexts, commandInput }: { preview: PreviewDto; fulfillment?: boolean; businessCommand?: CommandType; reasonNote?: string; commandTitle?: string; bookingChannelCode?: string | null; inventoryUnitLabels?: Record<string, string>; orderLifecycleContext?: { guestName: string; arrivalDate: string; departureDate: string }; historicalStayCorrectionContexts?: Record<string, { guestName: string }>; commandInput?: Record<string, unknown> }) {
   const effect = preview.effect;
+  const unitLabel = (unit: Record<string, unknown>) => inventoryUnitLabels?.[String(unit.id)]
+    ?? `${scalar(unit.code)} · ${scalar(unit.name)}`;
   if (preview.commandType === "MANAGE_ROOM_CATALOG") return <div className="effect-summary" data-testid="command-effect">
     <section className="effect-section"><h3>{String(effect.title)}</h3><ul>{Array.isArray(effect.description) ? effect.description.map((line, index) => <li key={index}>{String(line)}</li>) : null}</ul></section>
   </div>;
@@ -2851,10 +2860,10 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           <div className="move-unit-preview-side"><h4>换房后完整安排</h4><StayTimelineDisplay timeline={summary.afterTimeline} {...(inventoryUnitLabels ? { labels: inventoryUnitLabels } : {})} testId="move-unit-review-after-timeline" /></div>
         </div>
         <dl className="difference-grid">
-          {actualUnit ? <><dt>当前所在位置</dt><dd>{scalar(actualUnit.code)} · {scalar(actualUnit.name)}</dd></> : null}
-          {effectiveDateUnit ? <><dt>生效日原计划位置</dt><dd>{scalar(effectiveDateUnit.code)} · {scalar(effectiveDateUnit.name)}</dd></> : null}
+          {actualUnit ? <><dt>当前所在位置</dt><dd>{unitLabel(actualUnit)}</dd></> : null}
+          {effectiveDateUnit ? <><dt>生效日原计划位置</dt><dd>{unitLabel(effectiveDateUnit)}</dd></> : null}
           <dt>换房生效日期</dt><dd>{formatDate(summary.effectiveDate)}</dd>
-          <dt>目标房源</dt><dd><strong>{scalar(toUnit.code)} · {scalar(toUnit.name)}</strong></dd>
+          <dt>目标房源</dt><dd><strong>{unitLabel(toUnit)}</strong></dd>
           <dt>完整住宿周期</dt><dd>{formatDate(String(before.arrivalDate))} 至 {formatDate(String(before.departureDate))}</dd>
           <dt>原安排晚数</dt><dd>{summary.beforeTimeline.length} 晚</dd>
           <dt>换房后安排晚数</dt><dd>{summary.afterTimeline.length} 晚</dd>
@@ -2905,7 +2914,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
         <h3 id="completed-backfill-summary-heading">{inHouseBackfill ? "请核对在住住宿补录" : "请核对已完成住宿补录"}</h3>
         <dl className="difference-grid">
           {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>住客昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要住客姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
-          {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {inventoryUnit ? <><dt>住宿位置</dt><dd>{unitLabel(inventoryUnit)}</dd></> : null}
           <dt>实际住宿日期</dt><dd>{formatDate(String(effect.arrivalDate))} 至 {formatDate(String(effect.departureDate))}</dd>
           {isFreeStay ? <>
             <dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd>
@@ -3252,7 +3261,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
         <h3 id="member-stay-summary-heading">请核对会员住宿</h3>
         <dl className="difference-grid">
           {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
-          {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {inventoryUnit ? <><dt>住宿位置</dt><dd>{unitLabel(inventoryUnit)}</dd></> : null}
           {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
           {totalNights !== undefined ? <><dt>总住宿晚数</dt><dd>{totalNights} 晚</dd></> : null}
           <dt>会员权益覆盖</dt><dd>{coveredNights} 晚</dd>
@@ -3279,7 +3288,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
         <h3 id="paid-stay-summary-heading">请核对住宿订单</h3>
         <dl className="difference-grid">
           {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>居住人昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要居住人姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
-          {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {inventoryUnit ? <><dt>住宿位置</dt><dd>{unitLabel(inventoryUnit)}</dd></> : null}
           {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
           <dt>订单来源渠道</dt><dd>{bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode}</dd>
           <dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? "未填写"}</dd>
@@ -3311,7 +3320,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
         <h3 id="create-order-summary-heading">请核对{isFreeStay ? "免费住宿" : "住宿订单"}</h3>
         <dl className="difference-grid">
           {occupants.length ? <><dt>住宿人</dt><dd><OccupantSummary value={effect.occupants} /></dd><dt>住宿人数</dt><dd>{occupants.length} 人</dd></> : guest ? <><dt>住客昵称</dt><dd>{guestNicknameLabel(guest)}</dd><dt>主要住客姓名</dt><dd>{scalar(guest.fullName)}</dd></> : null}
-          {inventoryUnit ? <><dt>住宿位置</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {inventoryUnit ? <><dt>住宿位置</dt><dd>{unitLabel(inventoryUnit)}</dd></> : null}
           {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
           {isFreeStay ? <>
             <dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd>
@@ -3335,7 +3344,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
       <section className="effect-section" aria-labelledby="maintenance-command-summary-heading">
         <h3 id="maintenance-command-summary-heading">请核对{commandShellLabel(businessCommand)}</h3>
         <dl className="difference-grid">
-          {inventoryUnit ? <><dt>房源</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {inventoryUnit ? <><dt>房源</dt><dd>{unitLabel(inventoryUnit)}</dd></> : null}
           {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
           {businessCommand === "LOCK_MAINTENANCE" ? <>
             <dt>维修原因</dt><dd>{scalar(effect.reason)}</dd>
@@ -3413,7 +3422,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           {hasBookingChannel && !isFreeStay ? <><dt>订单来源渠道</dt><dd>{bookingChannelCode ? bookingChannelLabels[bookingChannelCode] ?? bookingChannelCode : "历史未记录"}</dd></> : null}
           {hasBookingChannel && !isFreeStay ? <><dt>渠道订单号</dt><dd>{bookingChannelCode === "WECOM" ? "不适用" : channelOrderReference ?? (bookingChannelCode ? "未填写" : "历史未记录")}</dd></> : null}
           {isFreeStay ? <><dt>免费入住类型</dt><dd>{freeStayCategoryLabel(freeStayCategoryCode)}</dd><dt>免费入住原因</dt><dd>{freeStayReason ?? "历史未记录"}</dd></> : null}
-          {inventoryUnit ? <><dt>库存单元</dt><dd>{scalar(inventoryUnit.code)} · {scalar(inventoryUnit.name)}</dd></> : null}
+          {inventoryUnit ? <><dt>库存单元</dt><dd>{unitLabel(inventoryUnit)}</dd></> : null}
           {typeof effect.arrivalDate === "string" && typeof effect.departureDate === "string" ? <><dt>住宿日期</dt><dd>{formatDate(effect.arrivalDate)} 至 {formatDate(effect.departureDate)}</dd></> : null}
           {typeof effect.serviceDate === "string" ? <><dt>营业日期</dt><dd>{formatDate(effect.serviceDate)}</dd></> : null}
           {typeof effect.reason === "string" ? <><dt>业务原因</dt><dd>{effect.reason}</dd></> : null}
@@ -4092,6 +4101,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
 
 interface CommandDialogProps {
   request: CommandRequest;
+  inventoryUnitLabels?: Record<string, string>;
   onClose: (context?: CommandDialogCloseContext) => void | Promise<void>;
   onCommitted?: (receipt: ReceiptDto) => void | Promise<void>;
   onBusinessSuccess?: (message: string, receipt: ReceiptDto) => void;
@@ -6352,6 +6362,7 @@ function displayCommandInput(input: Record<string, unknown>): Record<string, unk
 
 export function CommandDialog({
   request,
+  inventoryUnitLabels,
   onClose,
   onCommitted,
   onBusinessSuccess,
@@ -6364,6 +6375,7 @@ export function CommandDialog({
   writeBlockedReason = "当前事实不再满足安全写入条件。请关闭后刷新并重新生成 Preview。",
   onProgress
 }: CommandDialogProps) {
+  const [displayUnitLabels] = useState(() => ({ ...inventoryUnitLabels, ...request.inventoryUnitLabels }));
   const backfillStay = request.commandType === "CREATE_ORDER" && request.presentation === "BACKFILL_STAY";
   const completeStay = request.commandType === "COMPLETE_STAY" && request.presentation === "COMPLETE_STAY";
   const strictAdministratorCorrection = isStrictAdministratorCorrection(request.commandType);
@@ -6971,7 +6983,7 @@ export function CommandDialog({
             fulfillment={fulfillment}
             commandTitle={request.title}
             commandInput={request.input}
-            {...(request.inventoryUnitLabels ? { inventoryUnitLabels: request.inventoryUnitLabels } : {})}
+            inventoryUnitLabels={displayUnitLabels}
             {...(request.orderLifecycleContext ? { orderLifecycleContext: request.orderLifecycleContext } : {})}
             {...(request.historicalStayCorrectionContexts ? { historicalStayCorrectionContexts: request.historicalStayCorrectionContexts } : {})}
             {...(requestBookingChannelCode !== undefined ? { bookingChannelCode: requestBookingChannelCode } : {})}

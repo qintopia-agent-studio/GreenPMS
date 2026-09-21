@@ -1400,13 +1400,19 @@ describe("parseOrderView", () => {
   });
 });
 
- it("accepts optional current display labels without replacing historical inventory names", () => {
+it("accepts optional current display labels without replacing historical inventory codes and names", () => {
   const input = orderView();
   const canonical = input.referencedInventoryUnits[0]!.name;
-  Object.assign(input.referencedInventoryUnits[0]!, { display_name: "101 经营新名称" });
+  const canonicalCode = input.referencedInventoryUnits[0]!.code;
+  Object.assign(input.referencedInventoryUnits[0]!, { display_name: "F01 经营新名称", display_code: "F01" });
   const parsed = parseOrderView(input);
   expect(parsed.referencedInventoryUnits[0]!.name).toBe(canonical);
-  expect(parsed.referencedInventoryUnits[0]!.display_name).toBe("101 经营新名称");
+  expect(parsed.referencedInventoryUnits[0]!.code).toBe(canonicalCode);
+  expect(parsed.referencedInventoryUnits[0]!.display_name).toBe("F01 经营新名称");
+  expect(parsed.referencedInventoryUnits[0]!.display_code).toBe("F01");
+  for (const display_code of [123, null, ""]) {
+    expect(() => parseOrderView({ ...input, referencedInventoryUnits: [{ ...input.referencedInventoryUnits[0], display_code }] })).toThrow("display_code");
+  }
   Object.assign(input.referencedInventoryUnits[0]!, { display_name: 123 });
   expect(() => parseOrderView(input)).toThrow("display_name");
 });

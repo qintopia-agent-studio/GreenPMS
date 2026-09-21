@@ -1998,7 +1998,7 @@ export async function getOrderView(
       return { ...view, referencedInventoryUnits: view.referencedInventoryUnits.map((unit, index) => ({
         ...unit,
         // Never overwrite canonical names consumed by historical views or commands.
-        ...(current && unit.active ? { display_name: displayed[index]!.name } : {})
+        ...(current && unit.active ? { display_name: displayed[index]!.name, display_code: displayed[index]!.code } : {})
       })) };
     });
 }

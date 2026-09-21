@@ -5,7 +5,7 @@ import type { Database } from "./schema.ts";
 export async function roomCatalogReady(db: Kysely<Database>): Promise<boolean> {
   const result = await sql<{ ready: boolean }>`
     WITH expected(signature, body_hash, definer) AS (VALUES
-      ('qintopia_apply_room_catalog(text,jsonb,text)', '23bd6ef1430e90c04407cdcda5be5a65d2f22c41ef19a490ec410bf9f96b77e8', true),
+      ('qintopia_apply_room_catalog(text,jsonb,text)', 'accc9f55576e4252b823b4341138224b6757bbc2372f6379e85b8e24685a75eb', true),
       ('qintopia_catalog_claim_guard()', '1033b51a86b2c9b4e0993d4beff320b52673fb0024586e31e6884117d37abc4c', false),
       ('qintopia_catalog_commit_guard()', 'e6c37d102859981effd43d6fde238fe864c9826f50982fc34f3c6320bdb7af46', false)
     ) SELECT NOT EXISTS (

@@ -28,9 +28,14 @@ export async function listOrders(db: Kysely<Database>, query: OrderListQuery) {
     const businessDate = await propertyLocalToday(trx, query.propertyId);
     // Use exactly the same label for selection and filtering, before pagination.
     // Closed orders and retired units retain their historical inventory label.
+    const currentUnitCode = sql<string | null>`case
+      when current_unit.active and orders.status in ('RESERVED', 'CHECKED_IN') then
+        coalesce((select catalog.snapshot->'unitCodes'->>current_unit.id from room_catalog_state as catalog
+          where catalog.property_id = orders.property_id), current_unit.code)
+      else current_unit.code end`;
     const currentUnitName = sql<string | null>`case
       when current_unit.active and orders.status in ('RESERVED', 'CHECKED_IN') then
-        coalesce((select current_unit.code || ' ' || nullif(type->>'name', '')
+        coalesce((select ${currentUnitCode} || ' ' || nullif(type->>'name', '')
           from room_catalog_state as catalog,
             jsonb_array_elements(catalog.snapshot->'types') as type
           where catalog.property_id = orders.property_id
@@ -63,7 +68,7 @@ export async function listOrders(db: Kysely<Database>, query: OrderListQuery) {
         "current_revision.current_contract_amount_minor as current_contract_amount_minor",
         "current_revision.currency as currency",
         currentUnitName.as("current_unit_name"),
-        "current_unit.code as current_unit_code",
+        currentUnitCode.as("current_unit_code"),
         "current_unit.room_type_code as current_unit_room_type_code"
       ])
       .where("orders.property_id", "=", query.propertyId);
@@ -98,7 +103,7 @@ export async function listOrders(db: Kysely<Database>, query: OrderListQuery) {
       const pattern = `%${query.query.trim().replace(/[\\%_]/g, "\\$&")}%`;
       selection = selection.where(sql<boolean>`(
         orders.id ILIKE ${pattern} ESCAPE '\\'
-        OR current_unit.code ILIKE ${pattern} ESCAPE '\\'
+        OR ${currentUnitCode} ILIKE ${pattern} ESCAPE '\\'
         OR ${currentUnitName} ILIKE ${pattern} ESCAPE '\\'
         OR orders.channel_order_reference ILIKE ${pattern} ESCAPE '\\'
         OR (CASE WHEN orders.member_id IS NOT NULL OR orders.member_contract_id IS NOT NULL THEN '会员权益'

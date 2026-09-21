@@ -2,16 +2,19 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sql, type Kysely } from "kysely";
 import { databaseReady, createDatabase, createCommandPreview, confirmCommandPreview, getOrderView, type Database } from "@qintopia/db";
 import { sha256 } from "@qintopia/domain";
-import type { AuthPrincipal, RoomCatalogInput, RoomCatalogEffect } from "@qintopia/contracts";
+import type { AuthPrincipal, RoomCatalogInput, RoomCatalogEffect, CommandType } from "@qintopia/contracts";
 import { resetDatabase } from "../helpers/database.ts";
 import { runtimeDatabaseUrlForTesting } from "../helpers/runtime-database.ts";
 import { authScope } from "../helpers/auth-principals.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { readRoomCatalog, resolveCatalogPolicyId } from "../../packages/db/src/room-catalog.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
-import { loadInventoryUnit } from "../../packages/db/src/inventory.ts";
+import { listOrders } from "../../packages/db/src/order-list.ts";
+import { propertyLocalToday, withPropertyClockForTesting } from "../../packages/db/src/members.ts";
+import { loadInventoryUnit, listAvailability } from "../../packages/db/src/inventory.ts";
 import { getRoomStatusBoard } from "../../packages/db/src/room-status.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
+import { parseOrderView } from "../../apps/web/src/orderViewValidation.ts";
 
 const url = process.env.ROOM_CATALOG_TEST_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_room_catalog_test";
 let owner: Kysely<Database>, db: Kysely<Database>;
@@ -20,6 +23,7 @@ let lockedOrderId: string;
 const metadata = () => ({ idempotencyKey: `catalog-${++sequence}`, correlationId: `catalog-${sequence}` });
 const admin: AuthPrincipal = { subjectId: demo.administratorSubjectId, credentialId: "session_catalog_admin", credentialType: "SESSION",
   displayName: "房型管理员", ...authScope({ credentialType: "SESSION", profile: "administrator" }) };
+const addDays = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 const anchors = { "1": 8000, "7": 40000, "14": 60000, "30": 100000 };
 async function preview(input: Omit<RoomCatalogInput, "propertyId" | "expectedVersion"> & { expectedVersion?: number }) {
   const current = await readRoomCatalog(db, demo.propertyId);
@@ -60,7 +64,15 @@ describe.sequential("administrator room catalog with the restricted runtime role
     expect(catalog.prices).toHaveLength(8);
     expect(catalog.version).toBe(0);
   });
+  it("renames before the first catalog write without changing canonical inventory", async () => {
+    const before = await loadInventoryUnit(db, demo.propertyId, "unit_room_d_gen_01");
+    await change({ action: "RENAME_ROOM", roomId: before.id, code: "D001" });
+    expect((await readRoomCatalog(db, demo.propertyId)).rooms.find((room) => room.unitId === before.id)?.code).toBe("D001");
+    expect(await loadInventoryUnit(db, demo.propertyId, before.id)).toEqual(before);
+    await change({ action: "RENAME_ROOM", roomId: before.id, code: "D01" });
+  });
   it("creates and deletes an unused room type with receipt, audit and replay", async () => {
+    const historyCount = (await readRoomCatalog(db, demo.propertyId)).history.length;
     const prepared = await preview({ action: "SAVE_TYPE", name: "误建测试房型", bathroom: "PRIVATE", saleMode: "ROOM", bedCount: 1, capacity: 2 });
     const key = metadata();
     const first = await commit(prepared, key);
@@ -68,7 +80,7 @@ describe.sequential("administrator room catalog with the restricted runtime role
     const type = (await readRoomCatalog(db, demo.propertyId)).types.find((item) => item.name === "误建测试房型")!;
     await change({ action: "DELETE_TYPE", typeCode: type.code });
     expect((await readRoomCatalog(db, demo.propertyId)).types.some((item) => item.code === type.code)).toBe(false);
-    expect((await readRoomCatalog(db, demo.propertyId)).history).toHaveLength(2);
+    expect((await readRoomCatalog(db, demo.propertyId)).history).toHaveLength(historyCount + 2);
   });
   it("reclassifies a room by retaining the old inventory identity and retiring its entire bed set", async () => {
     const catalog = await readRoomCatalog(db, demo.propertyId);
@@ -359,6 +371,145 @@ describe.sequential("administrator room catalog with the restricted runtime role
           idempotency_key: id, request_hash: sha256(id), correlation_id: id, state: "EXECUTING", completed_at: null }).execute();
         await sql`select qintopia_apply_room_catalog(${id}, ${JSON.stringify(effect)}::jsonb, 'database boundary probe')`.execute(trx);
       })).rejects.toThrow(message);
+    }
+    expect(await readRoomCatalog(db, demo.propertyId)).toEqual(current);
+  });
+
+  let renamedRoomId: string, renamedOrderId: string, renameToday: string;
+  async function executeBusiness(commandType: CommandType, input: Record<string, unknown>) {
+    const draft = await createCommandPreview(db, admin, { commandType, input: { propertyId: demo.propertyId, ...input } }, metadata());
+    const receipt = await confirmCommandPreview(db, admin, draft.preview.previewId, { propertyId: demo.propertyId,
+      commandType, expectedEffectHash: draft.preview.effectHash, confirmation: true,
+      reason: { code: commandType === "CREATE_ORDER" ? "CREATE_STANDARD_ORDER" : commandType, note: commandType === "CREATE_ORDER" ? "" : "改号回归" } }, metadata());
+    expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+    return receipt;
+  }
+  it("renames an occupied room without changing its order, inventory, claims, coverage or prices", async () => {
+    const room = (await readRoomCatalog(db, demo.propertyId)).rooms.find((item) => item.code === "A01")!;
+    renamedRoomId = room.unitId;
+    renameToday = await propertyLocalToday(db, demo.propertyId);
+    const quote = await createQuoteForTesting(db, { propertyId: demo.propertyId, inventoryUnitId: room.unitId,
+      arrivalDate: renameToday, departureDate: addDays(renameToday, 2),
+      pricingPolicyVersionId: (await resolveCatalogPolicyId(db, demo.propertyId, renameToday))! });
+    renamedOrderId = String((await executeBusiness("CREATE_ORDER", { quoteId: quote.quoteId,
+      primaryGuest: { fullName: "改号合成住客", nickname: "改号验收" }, bookingChannelCode: "WECOM" })).result!.orderId);
+    await executeBusiness("CHECK_IN", { orderId: renamedOrderId });
+    const before = await getOrderView(db, renamedOrderId);
+    const units = await owner.selectFrom("inventory_units").selectAll().orderBy("id").execute();
+    const policies = await owner.selectFrom("pricing_policy_versions").selectAll().orderBy("id").execute();
+    const claims = await owner.selectFrom("inventory_claims").selectAll().orderBy("id").execute();
+    const coverage = await owner.selectFrom("coverage_items").selectAll().orderBy("id").execute();
+    const draft = await preview({ action: "SAVE_ROOM", roomId: room.unitId, code: "F01", typeCode: room.typeCode,
+      buildingCode: room.buildingCode, bedCount: room.bedCount, capacity: room.capacity });
+    expect(draft.preview.effect).toMatchObject({ action: "SAVE_ROOM", roomRename: { afterCode: "F01" }, retireUnitIds: [], insertUnits: [], policies: [], roomLink: null });
+    const key = metadata(), receipt = await commit(draft, key);
+    expect((await commit(draft, key)).receiptId).toBe(receipt.receiptId);
+    const after = await getOrderView(db, renamedOrderId);
+    expect(after.order).toEqual(before.order);
+    expect(after.amendments).toEqual(before.amendments);
+    expect(after.currentSegment).toEqual(before.currentSegment);
+    expect(after.referencedInventoryUnits.find((unit) => unit.id === room.unitId)).toMatchObject({ code: "A01", display_code: "F01" });
+    expect(await owner.selectFrom("inventory_units").selectAll().orderBy("id").execute()).toEqual(units);
+    expect(await owner.selectFrom("pricing_policy_versions").selectAll().orderBy("id").execute()).toEqual(policies);
+    expect(await owner.selectFrom("inventory_claims").selectAll().orderBy("id").execute()).toEqual(claims);
+    expect(await owner.selectFrom("coverage_items").selectAll().orderBy("id").execute()).toEqual(coverage);
+    const catalog = await readRoomCatalog(db, demo.propertyId);
+    expect(catalog.rooms.find((item) => item.unitId === room.unitId)).toMatchObject({ code: "F01", active: true });
+    expect(catalog.history[0]).toMatchObject({ title: "修改房号：F01", reason: "本地合成验收" });
+    expect((await listOrders(db, { propertyId: demo.propertyId, query: "F01", pageSize: 1 })).orders[0]).toMatchObject({ id: renamedOrderId, current_unit_code: "F01" });
+    const available = await listAvailability(db, demo.propertyId, renameToday, addDays(renameToday, 1));
+    expect(available.find((unit) => unit.id === room.unitId)).toMatchObject({ code: "F01", available: false });
+    const board = await getRoomStatusBoard(db, { propertyId: demo.propertyId, arrivalDate: renameToday,
+      departureDate: addDays(renameToday, 1), accessLevel: "READ", commandGrants: new Set(), requestingSubjectId: admin.subjectId, pageSize: 200 });
+    expect(board.rooms.find((item) => item.id === room.unitId)?.code).toBe("F01");
+  });
+  it("returns HTTP 409 for occupied room/type retirement and structure edits instead of serialization 500", async () => {
+    const app = await buildServer(createDatabase(runtimeDatabaseUrlForTesting(url)));
+    try {
+      const catalog = await readRoomCatalog(db, demo.propertyId), room = catalog.rooms.find((item) => item.unitId === renamedRoomId)!;
+      const drafts = [
+        { action: "SET_ROOM_ACTIVE", roomId: room.unitId, active: false },
+        { action: "SET_TYPE_ACTIVE", typeCode: room.typeCode, active: false },
+        { action: "SAVE_ROOM", roomId: room.unitId, code: room.code, typeCode: room.typeCode,
+          buildingCode: room.buildingCode, bedCount: room.bedCount + 1, capacity: room.capacity }
+      ];
+      for (const input of drafts) {
+        const response = await app.inject({ method: "POST", url: "/api/v1/command-previews", cookies: { qintopia_session: "synthetic-catalog-session" },
+          headers: { "idempotency-key": `conflict-${++sequence}`, "x-correlation-id": `conflict-${sequence}` },
+          payload: { commandType: "MANAGE_ROOM_CATALOG", input: { propertyId: demo.propertyId, expectedVersion: catalog.version, ...input } } });
+        expect(response.statusCode, response.body).toBe(409);
+        expect(response.json()).toMatchObject({ code: "INVENTORY_CONFLICT", details: { roomCodes: expect.arrayContaining(["F01"]) } });
+        expect(response.json().message).toContain("有关联预订");
+      }
+      const details = await app.inject({ method: "GET", url: `/api/v1/orders/${renamedOrderId}`, cookies: { qintopia_session: "synthetic-catalog-session" } });
+      expect(details.statusCode, details.body).toBe(200);
+      expect(() => parseOrderView(details.json())).not.toThrow();
+      expect(details.json().referencedInventoryUnits.find((unit: { id: string }) => unit.id === renamedRoomId)).toMatchObject({ code: "A01", display_code: "F01" });
+    } finally { await app.close(); }
+  });
+  it("rejects duplicate, unchanged, unauthorized and stale renames and never republishes prices", async () => {
+    const catalog = await readRoomCatalog(db, demo.propertyId), room = catalog.rooms.find((item) => item.unitId === renamedRoomId)!;
+    for (const code of ["F01", "A02"]) await expect(preview({ action: "RENAME_ROOM", roomId: room.unitId, code })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(preview({ action: "SAVE_ROOM", code: "F01", buildingCode: "F", typeCode: room.typeCode, bedCount: 2, capacity: 2 })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    const staff = { ...admin, subjectId: demo.agentSubjectId, ...authScope({ credentialType: "SESSION" }) };
+    await expect(createCommandPreview(db, staff, { commandType: "MANAGE_ROOM_CATALOG", input: { propertyId: demo.propertyId,
+      expectedVersion: catalog.version, action: "RENAME_ROOM", roomId: room.unitId, code: "F001" } }, metadata())).rejects.toMatchObject({ code: "INSUFFICIENT_ACCESS" });
+    const [first, stale] = await Promise.all(["F001", "F0001"].map((code) => preview({ action: "RENAME_ROOM", roomId: room.unitId, code })));
+    await commit(first!);
+    const rejected = await confirmCommandPreview(db, admin, stale!.preview.previewId, { propertyId: demo.propertyId,
+      commandType: "MANAGE_ROOM_CATALOG", expectedEffectHash: stale!.preview.effectHash, confirmation: true,
+      reason: { code: "ROOM_CATALOG_CHANGE", note: "过期改名" } }, metadata());
+    expect(rejected.businessCommitted).toBe(false);
+    expect(rejected.error?.code).toBe("PREVIEW_STALE");
+    await change({ action: "RENAME_ROOM", roomId: room.unitId, code: "F01" });
+  });
+  it("renames child beds without changing their IDs or suffixes and retains canonical move snapshots", async () => {
+    const room = (await readRoomCatalog(db, demo.propertyId)).rooms.find((item) => item.code === "103")!;
+    const before = await loadInventoryUnit(db, demo.propertyId, room.beds[0]!.id);
+    await change({ action: "RENAME_ROOM", roomId: room.unitId, code: "F02" });
+    const renamed = (await readRoomCatalog(db, demo.propertyId)).rooms.find((item) => item.unitId === room.unitId)!;
+    expect(renamed.beds.map((bed) => bed.id)).toEqual(room.beds.map((bed) => bed.id));
+    expect(renamed.beds.map((bed) => bed.code)).toEqual(room.beds.map((bed) => `F02${bed.code.slice(room.code.length)}`));
+    expect(await loadInventoryUnit(db, demo.propertyId, room.beds[0]!.id)).toEqual(before);
+    await expect(preview({ action: "RENAME_ROOM", roomId: renamedRoomId, code: renamed.beds[0]!.code })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    // A real move into the renamed whole room still uses canonical business snapshots.
+    await executeBusiness("MOVE_UNIT", { orderId: renamedOrderId, newInventoryUnitId: room.unitId, effectiveDate: renameToday });
+    expect((await getOrderView(db, renamedOrderId)).currentSegment.inventoryUnitId).toBe(room.unitId);
+  });
+  it("checks out a renamed room and keeps completed order snapshots and prior audit records unchanged", async () => {
+    const before = await getOrderView(db, renamedOrderId);
+    const canonicalCodes = before.referencedInventoryUnits.map((unit) => unit.code);
+    const history = (await readRoomCatalog(db, demo.propertyId)).history;
+    await withPropertyClockForTesting(new Date(`${addDays(renameToday, 2)}T04:00:00Z`), () => executeBusiness("CHECK_OUT", { orderId: renamedOrderId }));
+    const after = await getOrderView(db, renamedOrderId);
+    expect(after.order.status).toBe("CHECKED_OUT");
+    expect(after.referencedInventoryUnits.map((unit) => unit.code)).toEqual(canonicalCodes);
+    expect(after.referencedInventoryUnits.every((unit) => !("display_code" in unit))).toBe(true);
+    expect((await readRoomCatalog(db, demo.propertyId)).history).toEqual(history);
+  });
+  it("rejects forged rename scope, structural effects and aliases injected through other actions at the database boundary", async () => {
+    const current = await readRoomCatalog(db, demo.propertyId);
+    const draft = await preview({ action: "RENAME_ROOM", roomId: renamedRoomId, code: "F001" });
+    for (const corrupt of [
+      (effect: RoomCatalogEffect) => { effect.after.unitCodes!["unit_room_b01"] = "injected"; },
+      (effect: RoomCatalogEffect) => { effect.after.types[0]!.capacity += 1; },
+      (effect: RoomCatalogEffect) => { effect.retireUnitIds = [renamedRoomId]; },
+      (effect: RoomCatalogEffect) => { effect.action = "SAVE_ROOM"; delete effect.roomRename; },
+      (effect: RoomCatalogEffect) => { effect.roomRename!.beforeCode = "wrong"; },
+      (effect: RoomCatalogEffect) => { effect.roomRename!.afterCode = "A02"; effect.after.unitCodes![renamedRoomId] = "A02"; }
+    ]) {
+      const effect = structuredClone(draft.preview.effect) as unknown as RoomCatalogEffect;
+      corrupt(effect);
+      await expect(owner.transaction().execute(async (trx) => {
+        const source = await trx.selectFrom("command_previews").selectAll().where("id", "=", draft.preview.previewId).executeTakeFirstOrThrow();
+        await trx.insertInto("command_previews").values({ ...source, id: `forged_rename_${++sequence}`, effect: effect as unknown as Record<string, unknown> }).execute();
+        await sql`set local role qintopia_runtime`.execute(trx);
+        const id = `bad_rename_${++sequence}`;
+        await trx.insertInto("command_executions").values({ id, subject_id: admin.subjectId, credential_id: admin.credentialId,
+          property_id: demo.propertyId, command_type: "MANAGE_ROOM_CATALOG", idempotency_key: id, request_hash: sha256(id), correlation_id: id,
+          state: "EXECUTING", completed_at: null }).execute();
+        await sql`select qintopia_apply_room_catalog(${id}, ${JSON.stringify(effect)}::jsonb, 'synthetic boundary test')`.execute(trx);
+      })).rejects.toMatchObject({ code: "23514" });
     }
     expect(await readRoomCatalog(db, demo.propertyId)).toEqual(current);
   });

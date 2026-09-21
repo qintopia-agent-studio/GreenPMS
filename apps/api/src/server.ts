@@ -1,3 +1,4 @@
+import { publicCommandErrorPayload } from "./public-error.ts";
 import { registerAssistant } from "./assistant.ts";
 import type { ModelTransport } from "./assistant-model.ts";
 import { projectCatalogUnitNames } from "../../../packages/db/src/room-catalog-labels.ts";
@@ -541,6 +542,7 @@ async function replayHistoricalCreateOrderPreview(
 export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport } = {}) {
   const allowedWebOrigins = webOriginAllowlist();
   const app = Fastify({ ajv: { customOptions: { discriminator: true } }, logger: { level: process.env.LOG_LEVEL ?? "info" }, genReqId: () => crypto.randomUUID() });
+  app.addHook("preSerialization", async (_request, _reply, payload) => publicCommandErrorPayload(payload));
   await app.register(compress, { global: true, threshold: 1_024 });
   await app.register(cookie);
   await app.register(cors, { origin: [...allowedWebOrigins], credentials: true });

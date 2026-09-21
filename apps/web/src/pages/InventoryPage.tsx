@@ -6766,6 +6766,7 @@ export function InventoryPage() {
       {command && commandTargetScopeCurrent ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}-${commandAttemptId}` : `new-room-status-command-${commandAttemptId}`}
         request={command}
+        inventoryUnitLabels={Object.fromEntries(meta.inventoryUnits.map((unit) => [unit.id, unit.name]))}
         onClose={closeCommandDialog}
         writeBlocked={!recoveryDialogOpen && activeCommandWriteBlocked}
         writeBlockedReason="当前命令绑定的门店、账号、订单、住宿、查询范围或业务版本已经变化，或者操作恢复状态异常。请关闭后重新核对。"
