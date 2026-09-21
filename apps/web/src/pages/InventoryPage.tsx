@@ -4246,7 +4246,7 @@ export function InventoryPage() {
       ? "查询原操作结果"
       : "处理恢复记录"
   });
-  const controlWriteBlock = actionPresentationBlock?.kind === "REFRESH" ? undefined : actionPresentationBlock;
+  const controlWriteBlock = actionPresentationBlock;
   useEffect(() => {
     if (!command || commandPhaseRef.current === "IDLE" || !commandQueryKeyRef.current) return;
     if (commandQueryKeyRef.current !== currentBoardQueryKey) setCommandContextInvalidated(true);
@@ -5267,6 +5267,7 @@ export function InventoryPage() {
     cancelQuoteSectionScroll();
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
+    setActionError(undefined);
     invalidateSelectedOrderForRoomStatusInspection();
     setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
@@ -5280,6 +5281,13 @@ export function InventoryPage() {
       setSelectionDraftValid(true);
       setDesktopContextCollapsed(false);
       setSelectedUnitId(selection.unitId);
+      // Actions are authorized by the dates in the server's board projection.
+      // Load the selected arrival before offering historical backfill; never
+      // manufacture a BACKFILL_ORDER action from a future CREATE_ORDER grant.
+      if (selection.arrivalDate < range.arrivalDate || selection.arrivalDate >= range.departureDate) {
+        setRange(roomStatusTimelineRangeFromStart(selection.arrivalDate));
+        dispatchView({ type: "SET_DATE_WINDOW", start: 0, totalDates: ROOM_STATUS_TIMELINE_DAYS });
+      }
       const nextQuoteTarget = updateRoomStatusQuoteTargetSelection(
         quoteTarget,
         findRoomStatusUnit(renderedBoard, selection.unitId),
@@ -5287,7 +5295,9 @@ export function InventoryPage() {
         renderedBoard?.businessDate ?? todayDate
       );
       setQuoteTarget(nextQuoteTarget);
-      if (quoteTarget && !nextQuoteTarget) {
+      const modeChanged = quoteTarget && (quoteTarget.actionCode === "BACKFILL_ORDER")
+        !== roomStatusQuoteRequiresBackfill(selection.arrivalDate, renderedBoard?.businessDate ?? todayDate);
+      if (quoteTarget && !nextQuoteTarget && !modeChanged) {
         setActionError(new Error("修改后的房源或日期不再有服务端授权的住宿办理动作，原住宿表单已关闭。"));
       }
     } else if (quoteTarget) {

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { RoomStatusActionDto, RoomStatusBoardDto, RoomStatusIntervalDto, RoomStatusUnitDto } from "@qintopia/contracts";
-import { RoomStatusContext, roomStatusDraftSelection } from "./RoomStatusContext";
+import { RoomStatusContext, roomStatusDraftSelection, type RoomStatusContextProps } from "./RoomStatusContext";
 
 const unit = {
   id: "unit_room_104_bed_c",
@@ -19,6 +19,7 @@ const unit = {
 
 const board = {
   rooms: [unit],
+  businessDate: "2026-08-14",
   range: { arrivalDate: "2026-08-01", departureDate: "2026-08-31" }
 } as unknown as RoomStatusBoardDto;
 
@@ -33,7 +34,8 @@ const backfillAction = {
 function renderContext(
   allowedActions: readonly RoomStatusActionDto[],
   writeBlock?: { kind: "REFRESH" | "RECOVERY" | "PERMISSION"; reason: string; actionLabel?: string },
-  selectedInterval: RoomStatusIntervalDto | null = null
+  selectedInterval: RoomStatusIntervalDto | null = null,
+  overrides: Partial<RoomStatusContextProps> = {}
 ): string {
   return renderToStaticMarkup(<RoomStatusContext
     board={board}
@@ -53,6 +55,7 @@ function renderContext(
     onAction={() => undefined}
     onRefresh={() => undefined}
     onOpenRecovery={() => undefined}
+    {...overrides}
   />);
 }
 
@@ -156,7 +159,7 @@ describe("RoomStatusContext write action presentation", () => {
     expect(readOnlyHtml).not.toContain("服务端未为当前对象下发可执行动作");
   });
 
-  it("shows both a global pause and the lack of server authorization", () => {
+  it("explains a global pause without exposing implementation jargon", () => {
     const html = renderContext([], {
       kind: "RECOVERY",
       reason: "上一笔操作结果尚未收口。请先查询原操作结果；处理完成前不能发起新的补录。",
@@ -164,11 +167,45 @@ describe("RoomStatusContext write action presentation", () => {
     });
     expect(html).toContain("上一笔操作结果尚未收口");
     expect(html).toContain("查询原操作结果");
-    expect(html).toContain("服务端未授权当前操作。");
+    expect(html).not.toContain("服务端未授权当前操作。");
   });
 
-  it("reserves the no-server-action message for a genuinely unblocked empty action set", () => {
-    expect(renderContext([])).toContain("服务端未为当前对象下发可执行动作");
+  it("asks for valid dates instead of claiming an empty selection is available", () => {
+    const html = renderContext([]);
+    expect(html).toContain("请先选择房源并填写有效的入住、退房日期");
+    expect(html).not.toContain("当前所选日期可以安排住宿");
+    expect(html).not.toContain("服务端");
+  });
+
+  it.each([
+    ["2026-08-14", "已完成住宿补录"],
+    ["2026-08-15", "在住住宿补录"]
+  ])("explains historical intent with departure %s as %s", (departureDate, label) => {
+    const selection = roomStatusDraftSelection({ unitId: unit.id, arrivalDate: "2026-08-13", departureDate }).selection;
+    const html = renderContext([{ ...backfillAction, enabled: true, disabledReason: null }], undefined, null, { selection });
+    expect(html).toContain(label);
+    expect(html).toContain("入住日期早于今天，请通过“补录住宿”登记");
+    expect(html).toMatch(/<button[^>]*>补录住宿/);
+  });
+
+  it("labels off-board dates as unverified and gives the actual calendar window", () => {
+    const selection = roomStatusDraftSelection({ unitId: unit.id, arrivalDate: "2026-07-31", departureDate: "2026-09-02" }).selection;
+    const html = renderContext([], undefined, null, { selection });
+    expect(html).toContain("2026-08-01");
+    expect(html).toContain("2026-08-30");
+    expect(html).toContain("所选住宿日期已保留，超出部分将在办理时核对");
+    expect(html).toContain("其余日期将在办理时核对");
+    expect(html).not.toContain("当前所选日期可以安排住宿");
+  });
+
+  it("explains existing historical records even without an active blocking conflict", () => {
+    const selection = roomStatusDraftSelection({ unitId: unit.id, arrivalDate: "2026-08-13", departureDate: "2026-08-14" }).selection;
+    const html = renderContext([], undefined, null, {
+      selection,
+      selectedUnit: { ...unit, days: [{ serviceDate: "2026-08-13", status: "SETTLED", available: false, intervalIds: ["historical"], conflicts: [] }] }
+    });
+    expect(html).toContain("所选日期已有住宿或锁房记录，请先核对已有记录");
+    expect(html).toContain("暂不能新建或补录住宿");
   });
 });
 
