@@ -1,10 +1,10 @@
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
-import {
-  prepareStage10Acceptance,
-  prepareStage10MobileAcceptance,
-  type Stage10AcceptanceFixture,
-  type Stage10MobileAcceptanceFixture,
-  type Stage10StayFixture
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type {
+  Stage10AcceptanceFixture,
+  Stage10MobileAcceptanceFixture,
+  Stage10StayFixture
 } from "./setup-stage10-acceptance.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
@@ -176,17 +176,23 @@ async function confirmReview(page: Page, title: "缩短住宿" | "提前退房")
 }
 
 test.beforeAll(async ({}, workerInfo) => {
-  if (workerInfo.project.name === "mobile") {
-    mobileFixture = await prepareStage10MobileAcceptance(e2eDatabaseUrl, {
-      suffix: `stage10-${workerInfo.project.name}-${workerInfo.workerIndex}`,
-      unitCode: "109"
-    });
-    return;
-  }
-  fixture = await prepareStage10Acceptance(e2eDatabaseUrl, {
-    reset: false,
-    suffix: `stage10-${workerInfo.project.name}-${workerInfo.workerIndex}`
+  // Keep the domain fixture in the same Node/tsx runtime as database setup;
+  // Playwright's CommonJS transform cannot load its dynamic ESM DB imports.
+  const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { prepareStage10Acceptance, prepareStage10MobileAcceptance } from "./tests/e2e/setup-stage10-acceptance.ts";
+    const options = { suffix: process.env.STAGE10_SUFFIX };
+    const fixture = process.env.STAGE10_PROJECT === "mobile"
+      ? await prepareStage10MobileAcceptance(process.env.E2E_DATABASE_URL, { ...options, unitCode: "109" })
+      : await prepareStage10Acceptance(process.env.E2E_DATABASE_URL, { ...options, reset: false });
+    process.stdout.write(JSON.stringify(fixture));
+  `], {
+    cwd: process.cwd(),
+    env: { ...process.env, E2E_DATABASE_URL: e2eDatabaseUrl, STAGE10_PROJECT: workerInfo.project.name,
+      STAGE10_SUFFIX: `stage10-${workerInfo.project.name}-${workerInfo.workerIndex}` },
+    timeout: 120_000, maxBuffer: 10 * 1024 * 1024
   });
+  if (workerInfo.project.name === "mobile") mobileFixture = JSON.parse(stdout) as Stage10MobileAcceptanceFixture;
+  else fixture = JSON.parse(stdout) as Stage10AcceptanceFixture;
 });
 
 test("4.3 desktop shortening reprices the full stay and remains in house", async ({ page }, testInfo) => {
@@ -335,8 +341,14 @@ test("4.3 CTRIP shortening requires a new channel amount and enforces the 15 per
   const rejectedBody = await rejected.json() as { code: string; message: string };
   expect(rejectedBody).toMatchObject({ code: "VALIDATION_ERROR" });
   expect(rejectedBody.message).toContain("15%");
-  const blocked = form.getByRole("alert").filter({ hasText: "暂时无法核对新金额" });
+  const blocked = form.getByRole("alert").filter({ hasText: "缺少渠道价格差异说明" });
   await expect(blocked).toBeVisible();
+  await expect(blocked).toContainText("差异超过 15%，请填写“渠道价格差异说明”后继续核对");
+  await expect(blocked).not.toContainText("请返回修改后重新核对");
+  await expect(form.getByTestId("stay-date-channel-reason")).toHaveAttribute("aria-invalid", "true");
+  await form.getByRole("button", { name: "去填写差异说明", exact: true }).click();
+  await expect(form.getByTestId("stay-date-channel-reason")).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath("channel-reason-required.png") });
   await expect(form.locator("#channel-difference-hint")).toContainText(/超过 15% 时必须填写/);
   await expect(form.getByRole("button", { name: "继续核对", exact: true })).toBeDisabled();
 
@@ -345,6 +357,8 @@ test("4.3 CTRIP shortening requires a new channel amount and enforces the 15 per
     && (request.postDataJSON() as { commandType?: string }).commandType === "SHORTEN_STAY");
   await form.getByTestId("stay-date-channel-reason").fill(stay.channelPriceDifferenceReason);
   await waitForPrice(form);
+  await expect(blocked).toHaveCount(0);
+  await expect(form.getByTestId("stay-date-channel-reason")).not.toHaveAttribute("aria-invalid", "true");
   expect((await previewRequest).postDataJSON()).toMatchObject({
     commandType: "SHORTEN_STAY",
     input: {

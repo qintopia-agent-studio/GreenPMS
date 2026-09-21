@@ -3222,6 +3222,14 @@ pre {
   font-size: 0.96rem;
 }
 
+.stay-date-pricing-section .stay-date-channel-error {
+  color: var(--danger);
+}
+
+.stay-date-pricing-section textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
 .stay-date-price-preview {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

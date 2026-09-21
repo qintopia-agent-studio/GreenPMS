@@ -84,8 +84,18 @@ export function errorMessage(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 
+export function channelPriceDifferenceReasonRequired(error: unknown): boolean {
+  return error instanceof ApiError
+    && error.status === 400
+    && error.code === "VALIDATION_ERROR"
+    && error.message === "channelPriceDifferenceReason is required when the channel price difference exceeds 15%";
+}
+
 export function businessErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    if (channelPriceDifferenceReasonRequired(error)) {
+      return "本单渠道应结金额与政策基础金额的差异超过 15%，请填写“渠道价格差异说明”后继续核对。";
+    }
     if (error.code === "RESOURCE_SCOPE_DENIED" && /Cross-origin session write/i.test(error.message)) {
       return "当前页面地址与系统登录地址不一致，本次没有写入。请从系统提供的地址重新打开并登录。";
     }

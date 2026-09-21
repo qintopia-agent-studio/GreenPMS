@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
+import { createOrderPricingDecision } from "@qintopia/domain";
+import { channelPriceDifferenceReasonRequired, InlineError } from "./uiBasic";
 import type { CommandRequest } from "./types";
 import { CommandDialog, fundsCommandCanReturnToEdit, returnCommandDraftAfterClose } from "./ui.tsx";
 import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, temporaryOtherRoomArrangementPresentation, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
@@ -584,6 +586,34 @@ describe("temporary other-room member stay presentation", () => {
 });
 
 describe("operator-facing business errors", () => {
+  it.each([8400, 11600])("explains the actual channel threshold rejection for amount %s", (amount) => {
+    let rejected: Error & { code?: string } | undefined;
+    try {
+      createOrderPricingDecision({
+        bookingChannelCode: "CTRIP", stayType: "TRANSIENT", memberStay: false,
+        policyBaseAmountMinor: 10000, targetCurrentContractAmountMinor: amount
+      });
+    } catch (error) { rejected = error as Error & { code?: string }; }
+    expect(rejected).toBeDefined();
+    const error = new ApiError(400, { code: rejected!.code, message: rejected!.message });
+    expect(channelPriceDifferenceReasonRequired(error)).toBe(true);
+    const html = renderToStaticMarkup(createElement(InlineError, { error }));
+    expect(html).toContain("差异超过 15%，请填写“渠道价格差异说明”后继续核对");
+    expect(html).not.toContain("请返回修改后重新核对");
+    expect(html).not.toContain("channelPriceDifferenceReason");
+  });
+
+  it("does not label unrelated failures as a missing channel explanation", () => {
+    for (const error of [
+      new ApiError(400, { code: "VALIDATION_ERROR", message: "targetCurrentContractAmountMinor is required for paid orders" }),
+      new ApiError(403, { code: "INSUFFICIENT_ACCESS", message: "WRITE access is required" }),
+      new ApiError(500, { code: "INTERNAL_ERROR", message: "Internal server error" })
+    ]) {
+      expect(channelPriceDifferenceReasonRequired(error)).toBe(false);
+      expect(businessErrorMessage(error)).not.toContain("请填写“渠道价格差异说明”");
+    }
+  });
+
   it("distinguishes a mismatched page origin from a read-only account", () => {
     expect(businessErrorMessage(new ApiError(403, {
       code: "RESOURCE_SCOPE_DENIED",

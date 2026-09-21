@@ -1,6 +1,7 @@
 import { CalendarMinus2, CalendarPlus2, CalendarRange, LoaderCircle, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
+import { channelPriceDifferenceReasonRequired } from "../uiBasic";
 import type { CommandRequest, InventoryUnitDto, OrderViewDto } from "../types";
 import {
   InlineError,
@@ -300,6 +301,7 @@ export function StayDateChangeDrawer({
   const initial = stayDateChangeInitialDraft(action, view, recovered, mode);
   const [draft, setDraft] = useState(initial);
   const [error, setError] = useState<unknown>();
+  const channelReasonRef = useRef<HTMLTextAreaElement>(null);
   const memberStay = Boolean(view.order.member_id || view.order.member_contract_id);
   const freeStay = view.order.stay_type === "FREE";
   const externalChannel = Boolean(view.order.booking_channel_code && externalChannels.has(view.order.booking_channel_code));
@@ -440,6 +442,9 @@ export function StayDateChangeDrawer({
     : undefined;
   const currentPricePreviewReady = stayDatePreviewIdentityMatches(pricePreview, previewSignature, previewSemanticSignature);
   const staleReadyPreview = pricePreview.status === "READY" && !currentPricePreviewReady;
+  const missingChannelReason = externalChannel && !memberStay && !freeStay
+    && !draft.channelPriceDifferenceReason.trim()
+    && pricePreview.status === "ERROR" && channelPriceDifferenceReasonRequired(pricePreview.error);
   const title = mode === "ADJUST_DEPARTURE" ? "调整退房日期" : action === "RESCHEDULE_STAY" ? "调整住宿日期" : action === "EXTEND_STAY" ? "延长住宿" : earlyCheckout ? "提前退房" : "缩短住宿";
   return <Modal
     title={title}
@@ -476,7 +481,8 @@ export function StayDateChangeDrawer({
         <p>旧金额不会自动继承。请按本次渠道合同重新填写，系统将在核对时与政策基础金额比较。</p>
         <div className="form-grid">
           <label>本单渠道应结金额（元）<input type="number" min="0" max={maxWholeYuan} step="1" inputMode="numeric" value={draft.targetContractYuan} onChange={(event) => update({ targetContractYuan: event.target.value })} required data-testid="stay-date-channel-amount" /></label>
-          <label>渠道价格差异说明<textarea value={draft.channelPriceDifferenceReason} onChange={(event) => update({ channelPriceDifferenceReason: event.target.value })} maxLength={1000} rows={2} aria-describedby="channel-difference-hint" data-testid="stay-date-channel-reason" /></label>
+          <label>渠道价格差异说明<textarea ref={channelReasonRef} value={draft.channelPriceDifferenceReason} onChange={(event) => update({ channelPriceDifferenceReason: event.target.value })} maxLength={1000} rows={2} aria-invalid={missingChannelReason || undefined} aria-describedby={missingChannelReason ? "channel-difference-hint channel-difference-error" : "channel-difference-hint"} data-testid="stay-date-channel-reason" /></label>
+          {missingChannelReason ? <small id="channel-difference-error" className="stay-date-channel-error">本次金额差异超过 15%，请补填渠道价格差异说明。</small> : null}
           <small id="channel-difference-hint">与政策基础金额差异超过 15% 时必须填写；核对页会显示比较结果。</small>
         </div>
       </section> : null}
@@ -495,7 +501,10 @@ export function StayDateChangeDrawer({
         <h3 id="stay-date-price-result-heading">金额核对</h3>
         {pricePreview.status === "EMPTY" ? <p data-testid="stay-date-price-empty">填写有效的新日期和所需金额后，系统会在这里显示调整结果。</p> : null}
         {pricePreview.status === "LOADING" || staleReadyPreview ? <div className="stay-date-price-loading" role="status" data-testid="stay-date-price-loading"><LoaderCircle className="spin" aria-hidden="true" size={17} /><span>正在计算调整后订单金额</span></div> : null}
-        {pricePreview.status === "ERROR" ? <InlineError error={pricePreview.error} title="暂时无法核对新金额" hideTechnicalDetails /> : null}
+        {pricePreview.status === "ERROR" ? <>
+          <InlineError error={pricePreview.error} title={missingChannelReason ? "缺少渠道价格差异说明" : "暂时无法核对新金额"} hideTechnicalDetails />
+          {missingChannelReason ? <button type="button" className="button button-secondary" onClick={() => channelReasonRef.current?.focus()}>去填写差异说明</button> : null}
+        </> : null}
         {pricePreview.status === "READY" && currentPricePreviewReady ? (() => {
           const { summary } = pricePreview;
           const showPerOrderFunds = stayDateFundsAreOperatorFacing(view.order.booking_channel_code, summary.pricingBasis);
