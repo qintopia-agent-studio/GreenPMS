@@ -2020,7 +2020,7 @@ function ScopedOrderDetailPage() {
 
   if (loading) return <LoadingBlock label="正在载入订单详情" />;
   if (view && !orderViewMatchesPrincipalScope(loadedPrincipalOrderScope, principalOrderScope)) return <LoadingBlock label="正在切换订单访问权限" />;
-  if (!view) return <div><Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link><InlineError error={error ?? new Error("Order not found")} title="无法载入订单" /></div>;
+  if (!view) return <div><Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link><InlineError context="read" error={error ?? new Error("Order not found")} title="无法载入订单" /></div>;
 
   const occupants = orderedOrderOccupants(view.occupants);
   const primaryOccupant = primaryOrderOccupant(occupants);
@@ -2080,7 +2080,7 @@ function ScopedOrderDetailPage() {
   const showOrderActionHelp = orderActionHelpRequired(view.allowedActions, visibleActionCodes);
   const overdueNotice = overdueInHouseNotice(view);
 
-  const readFailureNotice = error ? <InlineError error={error} title="订单刷新失败，草稿已保留；读取恢复前暂不能提交" /> : null;
+  const readFailureNotice = error ? <InlineError context="read" error={error} title="订单刷新失败，草稿已保留；读取恢复前暂不能提交" /> : null;
   return (
     <ModalNoticeProvider notice={readFailureNotice}>
     <div className="order-detail-page">

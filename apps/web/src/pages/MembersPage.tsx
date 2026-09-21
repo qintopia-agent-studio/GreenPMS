@@ -849,7 +849,7 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
             {!eligibleStays.length && stayOrdersLoading ? <option value="">正在载入已完成住宿</option> : !eligibleStays.length ? <option value="">{stayOrdersError ? "住宿尚未载入，请重试" : "没有身份一致的已完成企微住宿"}</option> : eligibleStays.map((candidate) => <option key={candidate.order.id} value={candidate.order.id}>{stayOrderOptionLabel(candidate)}</option>)}
           </select></label>
           <div className="span-two" aria-live="polite">
-            {stayOrdersError ? <><InlineError error={stayOrdersError} title="历史住宿未能完整载入" /><button type="button" className="button button-secondary" disabled={stayOrdersLoading} onClick={onRetryStayOrders}>重试载入住宿</button></> : null}
+            {stayOrdersError ? <><InlineError context="read" error={stayOrdersError} title="历史住宿未能完整载入" /><button type="button" className="button button-secondary" disabled={stayOrdersLoading} onClick={onRetryStayOrders}>重试载入住宿</button></> : null}
             {hasMoreStayOrders && !stayOrdersError ? <button type="button" className="button button-secondary" disabled={stayOrdersLoading} onClick={onLoadMoreStayOrders}>{stayOrdersLoading ? "正在载入" : "载入更多历史住宿"}</button> : null}
             {eligibleStays.length ? <p className="muted compact">已载入 {eligibleStays.length} 条身份一致的住宿；最终可用性将在核对时重新检查。</p> : null}
           </div>
@@ -1474,7 +1474,7 @@ export function MembersPage() {
       {searchQuery ? <button className="button button-secondary" type="button" onClick={() => { setSearchInput(""); setSearchQuery(""); setSelectedMemberId(""); setTargetContractId(undefined); setTargetMembershipOrderId(undefined); }}>清除</button> : null}
     </form>
 
-    <InlineError error={error} title="无法载入会员档案" />
+    <InlineError context="read" error={error} title="无法载入会员档案" />
     {error ? <button type="button" className="button button-secondary" onClick={refresh}>重新载入</button> : null}
     <div className={`member-directory${currentMemberId ? " member-directory-detail-open" : ""}`}>
       <div className="member-directory-list">

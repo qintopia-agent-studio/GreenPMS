@@ -1,6 +1,7 @@
 import { ArrowRightLeft, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
+import { manualPriceAdjustmentNotNeeded } from "../uiBasic";
 import type { CommandRequest, InventoryUnitDto, OrderViewDto, UnitAvailabilityDto } from "../types";
 import {
   InlineError,
@@ -322,14 +323,14 @@ export function MoveUnitDrawer({
     ? `${selectedTarget.code} 最多登记 ${selectedTarget.occupancy_capacity} 位住宿人，当前订单有 ${occupantCount} 位。`
     : "目标房源在所选换房日期内已有占用，请选择其他房源。";
 
-  const previewRequest = useMemo(() => {
-    if (candidateAvailability.status !== "READY" || !selectedTargetAvailable) return undefined;
+  const previewDraft = useMemo(() => {
     try {
-      return buildMoveUnitRequest(view, { ...draft, reason: draft.reason.trim() || "换房安排核对" });
-    } catch {
-      return undefined;
+      return { request: buildMoveUnitRequest(view, { ...draft, reason: draft.reason.trim() || "换房安排核对" }), error: undefined };
+    } catch (error) {
+      return { request: undefined, error };
     }
-  }, [candidateAvailability.status, selectedTargetAvailable, view, draft.newInventoryUnitId, draft.effectiveDate, draft.targetContractYuan, draft.channelPriceDifferenceReason, draft.manuallyAdjustWecomPrice, draft.manualPriceAdjustmentReason]);
+  }, [view, draft.newInventoryUnitId, draft.effectiveDate, draft.targetContractYuan, draft.channelPriceDifferenceReason, draft.manuallyAdjustWecomPrice, draft.manualPriceAdjustmentReason]);
+  const previewRequest = candidateAvailability.status === "READY" && selectedTargetAvailable ? previewDraft.request : undefined;
   const previewSignature = previewRequest ? JSON.stringify(previewRequest.input) : "";
   const previewSemanticSignature = JSON.stringify({
     orderId: view.order.id,
@@ -495,11 +496,11 @@ export function MoveUnitDrawer({
             <option value="">{visibleCandidates.length ? "请选择目标房源" : "没有符合条件的房源"}</option>
             {visibleCandidates.map((unit) => <option key={unit.id} value={unit.id}>{moveUnitCandidateLabel(
               unit,
-              moveUnitCandidateOptionStatusLabel(candidateStatus(unit.id)),
+              preview.status === "STALE" && unit.id === draft.newInventoryUnitId ? "待重新核对" : moveUnitCandidateOptionStatusLabel(candidateStatus(unit.id)),
               unit.parent_room_id ? unitMap.get(unit.parent_room_id) : undefined
             )}</option>)}
           </select>
-          <small data-testid="move-unit-target-status">目标区间状态：{draft.newInventoryUnitId ? moveUnitCandidateStatusLabel(candidateStatus(draft.newInventoryUnitId)) : "请选择目标房源"}{selectedTargetBlocked ? "，请选择其他房源。" : "。正式确认时会再次核对。"}</small>
+          <small data-testid="move-unit-target-status">{preview.status === "STALE" ? "本次换房核对已失效，请查看下方原因并重新核对。" : <>目标区间状态：{draft.newInventoryUnitId ? moveUnitCandidateStatusLabel(candidateStatus(draft.newInventoryUnitId)) : "请选择目标房源"}{selectedTargetBlocked ? "，请选择其他房源。" : "。正式确认时会再次核对。"}</>}</small>
           {selectedTargetBlocked ? <InlineError error={new Error(selectedTargetBlockedMessage)} title={selectedTargetCapacityBlocked ? "目标房源容量不足" : "目标房源不可用"} hideTechnicalDetails /> : null}
         </div>
         <label>换房原因<textarea value={draft.reason} onChange={(event) => update({ reason: event.target.value })} required maxLength={1000} rows={3} data-testid="move-unit-reason" /></label>
@@ -527,11 +528,12 @@ export function MoveUnitDrawer({
 
       <section className="stay-date-pricing-section" aria-labelledby="move-preview-heading" aria-live="polite">
         <h3 id="move-preview-heading">换房结果核对</h3>
-        {preview.status === "EMPTY" && !selectedTargetBlocked ? <p>选择有效日期、可用房源并填写所需金额后，系统会显示完整结果。</p> : null}
+        <InlineError error={previewDraft.error} title="请检查填写内容" />
+        {preview.status === "EMPTY" && !selectedTargetBlocked && !previewDraft.error ? <p>选择有效日期、可用房源并填写所需金额后，系统会显示完整结果。</p> : null}
         {preview.status === "LOADING" ? <div className="stay-date-price-loading" role="status"><LoaderCircle className="spin" aria-hidden="true" size={17} /><span>正在核对库存、住宿安排和金额</span></div> : null}
-        {preview.status === "ERROR" ? <InlineError error={preview.error} title="暂时无法核对换房结果" hideTechnicalDetails /> : null}
+        {preview.status === "ERROR" ? <><InlineError error={preview.error} title="暂时无法核对换房结果" hideTechnicalDetails />{manualPriceAdjustmentNotNeeded(preview.error) ? <button type="button" className="button button-secondary" onClick={() => update({ manuallyAdjustWecomPrice: false, targetContractYuan: "", manualPriceAdjustmentReason: "" })}>使用系统计算金额</button> : null}</> : null}
         {preview.status === "REFRESHING" ? <div className="stay-date-price-loading" role="status"><LoaderCircle className="spin" aria-hidden="true" size={17} /><span>正在重新核对，原结果暂时保留</span></div> : null}
-        {preview.status === "STALE" ? <div className="move-unit-preview-retry"><InlineError error={new Error("本次核对已失效，原结果仅供查看；重新核对完成前不能继续。")} title="需要重新核对" hideTechnicalDetails /><button type="button" className="button button-secondary" onClick={() => { setPreview((current) => "summary" in current ? { ...current, status: "REFRESHING" } : current); setPreviewRefresh((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重新核对</button></div> : null}
+        {preview.status === "STALE" ? <div className="move-unit-preview-retry"><p>本次核对已失效，原结果仅供查看；重新核对完成前不能继续。</p><InlineError error={preview.error} title="重新核对未通过" hideTechnicalDetails /><button type="button" className="button button-secondary" onClick={() => { setPreview((current) => "summary" in current ? { ...current, status: "REFRESHING" } : current); setPreviewRefresh((value) => value + 1); }}><RefreshCw aria-hidden="true" size={16} />重新核对</button></div> : null}
         {"summary" in preview ? <div className="move-unit-preview" data-testid="move-unit-preview">
           <div className="move-unit-preview-side"><h4>换房前完整安排</h4><Timeline summary={preview.summary} units={unitMap} side="before" /></div>
           <div className="move-unit-preview-side"><h4>换房后完整安排</h4><Timeline summary={preview.summary} units={unitMap} side="after" /></div>

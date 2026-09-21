@@ -235,7 +235,7 @@ export function TodayPage() {
       <div className="today-tabs" role="tablist" aria-label="工作台分类">
           {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong>{loading || error ? "—" : buckets[item.id].length}</strong></button>)}
       </div>
-      <InlineError error={error} title="无法载入工作台" />
+      <InlineError context="read" error={error} title="无法载入工作台" />
       {error ? <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)}>重新载入工作台</button> : null}
       <section id="today-tabpanel" className="today-queue" role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>
         {loading ? <LoadingBlock label="正在载入待办事项" /> : error ? null : visible.length === 0 ? <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" /> : visible.map((order) => (

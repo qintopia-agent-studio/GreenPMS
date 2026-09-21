@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
+import { createOrderPricingDecision, enumerateServiceDates } from "@qintopia/domain";
+import { channelPriceDifferenceReasonRequired, InlineError } from "./uiBasic";
 import type { CommandRequest } from "./types";
 import { CommandDialog, fundsCommandCanReturnToEdit, returnCommandDraftAfterClose } from "./ui.tsx";
 import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, temporaryOtherRoomArrangementPresentation, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
@@ -584,6 +586,71 @@ describe("temporary other-room member stay presentation", () => {
 });
 
 describe("operator-facing business errors", () => {
+  it("explains the actual unchanged manual price rejection without changing the pricing rule", () => {
+    let rejected: Error & { code?: string } | undefined;
+    try {
+      createOrderPricingDecision({ bookingChannelCode: "WECOM", stayType: "TRANSIENT", memberStay: false,
+        policyBaseAmountMinor: 10000, targetCurrentContractAmountMinor: 10000, manualPriceAdjustmentReason: "约定金额" });
+    } catch (error) { rejected = error as Error & { code?: string }; }
+    expect(rejected).toBeDefined();
+    const html = renderToStaticMarkup(createElement(InlineError, { error: new ApiError(400, { code: rejected!.code, message: rejected!.message }) }));
+    expect(html).toContain("请关闭“另行调整金额”后继续核对");
+    expect(html).not.toContain("manualPriceAdjustmentReason");
+  });
+
+  it("explains the domain stay length rejection", () => {
+    let rejected: Error & { code?: string } | undefined;
+    try { enumerateServiceDates("2026-08-02", "2027-08-04"); }
+    catch (error) { rejected = error as Error & { code?: string }; }
+    expect(rejected).toBeDefined();
+    expect(businessErrorMessage(new ApiError(400, { code: rejected!.code, message: rejected!.message }))).toContain("最多 366 夜");
+  });
+
+  it.each([
+    { error: new ApiError(404, { code: "NOT_FOUND", message: "Order not found" }), message: "未找到所需信息" },
+    { error: new TypeError("Failed to fetch"), message: "请检查网络连接后重试读取" },
+    { error: new ApiError(500, { code: "INTERNAL_ERROR", message: "Internal server error" }), message: "暂时无法读取数据" },
+    { error: new ApiError(403, { code: "INSUFFICIENT_ACCESS", message: "Permission denied" }), message: "没有查看权限" },
+    { error: new ApiError(401, { code: "AUTHENTICATION_REQUIRED", message: "Unauthorized" }), message: "重新登录后读取" }
+  ])("distinguishes read failures from submissions: $message", ({ error, message }) => {
+    const html = renderToStaticMarkup(createElement(InlineError, { context: "read", title: "无法载入订单", error }));
+    expect(html).toContain(message);
+    expect(html).not.toMatch(/没有接受这次提交|返回修改|查询原操作结果|本次没有写入/);
+  });
+
+  it("keeps uncertain writes on the result-recovery path", () => {
+    const html = renderToStaticMarkup(createElement(InlineError, { error: new ApiError(503, { code: "SERVICE_NOT_READY", message: "Unavailable", retryable: true }) }));
+    expect(html).toContain("当前结果尚未确认");
+    expect(html).toContain("查询原操作结果");
+  });
+  it.each([8400, 11600])("explains the actual channel threshold rejection for amount %s", (amount) => {
+    let rejected: Error & { code?: string } | undefined;
+    try {
+      createOrderPricingDecision({
+        bookingChannelCode: "CTRIP", stayType: "TRANSIENT", memberStay: false,
+        policyBaseAmountMinor: 10000, targetCurrentContractAmountMinor: amount
+      });
+    } catch (error) { rejected = error as Error & { code?: string }; }
+    expect(rejected).toBeDefined();
+    const error = new ApiError(400, { code: rejected!.code, message: rejected!.message });
+    expect(channelPriceDifferenceReasonRequired(error)).toBe(true);
+    const html = renderToStaticMarkup(createElement(InlineError, { error }));
+    expect(html).toContain("差异超过 15%，请填写“渠道价格差异说明”后继续核对");
+    expect(html).not.toContain("请返回修改后重新核对");
+    expect(html).not.toContain("channelPriceDifferenceReason");
+  });
+
+  it("does not label unrelated failures as a missing channel explanation", () => {
+    for (const error of [
+      new ApiError(400, { code: "VALIDATION_ERROR", message: "targetCurrentContractAmountMinor is required for paid orders" }),
+      new ApiError(403, { code: "INSUFFICIENT_ACCESS", message: "WRITE access is required" }),
+      new ApiError(500, { code: "INTERNAL_ERROR", message: "Internal server error" })
+    ]) {
+      expect(channelPriceDifferenceReasonRequired(error)).toBe(false);
+      expect(businessErrorMessage(error)).not.toContain("请填写“渠道价格差异说明”");
+    }
+  });
+
   it("distinguishes a mismatched page origin from a read-only account", () => {
     expect(businessErrorMessage(new ApiError(403, {
       code: "RESOURCE_SCOPE_DENIED",

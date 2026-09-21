@@ -2297,7 +2297,7 @@ function QuoteWorkbench({
                 </select>
               </label>
               {memberChoices.loading ? <p role="status">正在查找会员…</p> : null}
-              <InlineError error={memberChoices.error} title="无法查找会员" />
+              <InlineError context="read" error={memberChoices.error} title="无法查找会员" />
               {memberChoices.error ? <button type="button" className="button button-secondary" onClick={memberChoices.retry}>重试查找</button> : null}
               {memberChoices.nextCursor ? <button type="button" className="button button-secondary" disabled={memberChoices.loading} onClick={memberChoices.loadMore}>加载更多会员</button> : null}
               {!memberChoices.loading && !memberChoices.error && !memberProfiles.length ? <p role="status">未找到有本店住宿合同的会员，请更换关键词或先办理会员订单。</p> : null}
@@ -4246,7 +4246,7 @@ export function InventoryPage() {
       ? "查询原操作结果"
       : "处理恢复记录"
   });
-  const controlWriteBlock = actionPresentationBlock?.kind === "REFRESH" ? undefined : actionPresentationBlock;
+  const controlWriteBlock = actionPresentationBlock;
   useEffect(() => {
     if (!command || commandPhaseRef.current === "IDLE" || !commandQueryKeyRef.current) return;
     if (commandQueryKeyRef.current !== currentBoardQueryKey) setCommandContextInvalidated(true);
@@ -5267,6 +5267,7 @@ export function InventoryPage() {
     cancelQuoteSectionScroll();
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
+    setActionError(undefined);
     invalidateSelectedOrderForRoomStatusInspection();
     setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
@@ -5280,6 +5281,13 @@ export function InventoryPage() {
       setSelectionDraftValid(true);
       setDesktopContextCollapsed(false);
       setSelectedUnitId(selection.unitId);
+      // Actions are authorized by the dates in the server's board projection.
+      // Load the selected arrival before offering historical backfill; never
+      // manufacture a BACKFILL_ORDER action from a future CREATE_ORDER grant.
+      if (selection.arrivalDate < range.arrivalDate || selection.arrivalDate >= range.departureDate) {
+        setRange(roomStatusTimelineRangeFromStart(selection.arrivalDate));
+        dispatchView({ type: "SET_DATE_WINDOW", start: 0, totalDates: ROOM_STATUS_TIMELINE_DAYS });
+      }
       const nextQuoteTarget = updateRoomStatusQuoteTargetSelection(
         quoteTarget,
         findRoomStatusUnit(renderedBoard, selection.unitId),
@@ -5287,7 +5295,9 @@ export function InventoryPage() {
         renderedBoard?.businessDate ?? todayDate
       );
       setQuoteTarget(nextQuoteTarget);
-      if (quoteTarget && !nextQuoteTarget) {
+      const modeChanged = quoteTarget && (quoteTarget.actionCode === "BACKFILL_ORDER")
+        !== roomStatusQuoteRequiresBackfill(selection.arrivalDate, renderedBoard?.businessDate ?? todayDate);
+      if (quoteTarget && !nextQuoteTarget && !modeChanged) {
         setActionError(new Error("修改后的房源或日期不再有服务端授权的住宿办理动作，原住宿表单已关闭。"));
       }
     } else if (quoteTarget) {
@@ -6088,7 +6098,7 @@ export function InventoryPage() {
     ) : (
       <aside className="room-status-context room-status-order-context" aria-label="订单详情">
         <header className="room-status-context-header"><div><span>订单概览</span><h2>订单详情</h2></div><button type="button" className="room-status-icon-button" onClick={closeSelectedOrderContext} aria-label="关闭订单详情" title="关闭订单详情"><X aria-hidden="true" size={17} /></button></header>
-        {selectedOrderLoading || !selectedOrderError ? <LoadingBlock label="正在载入订单详情" /> : <InlineError error={selectedOrderError} title="订单详情不可用" />}
+        {selectedOrderLoading || !selectedOrderError ? <LoadingBlock label="正在载入订单详情" /> : <InlineError context="read" error={selectedOrderError} title="订单详情不可用" />}
       </aside>
     )
   ) : null;

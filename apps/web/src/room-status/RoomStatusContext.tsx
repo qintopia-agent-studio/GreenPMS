@@ -79,8 +79,8 @@ function unitOptionLabel(unit: RoomStatusUnitDto): string {
   return `${roomStatusUnitLabel(unit)}（${kind}）`;
 }
 
-function ConflictList({ conflicts }: { conflicts: readonly RoomStatusConflictDto[] }) {
-  if (!conflicts.length) return <p className="room-status-context-empty">当前所选日期可以安排住宿。</p>;
+function ConflictList({ conflicts, emptyMessage }: { conflicts: readonly RoomStatusConflictDto[]; emptyMessage: string }) {
+  if (!conflicts.length) return <p className="room-status-context-empty">{emptyMessage}</p>;
   return (
     <ul className="room-status-conflict-list">
       {conflicts.map((conflict) => (
@@ -186,6 +186,34 @@ export function RoomStatusContext({
   const draftOutsideBoard = Boolean(draftSelection
     && (draftSelection.arrivalDate < board.range.arrivalDate
       || draftSelection.departureDate > board.range.departureDate));
+  const historicalDraft = Boolean(draftSelection && draftSelection.arrivalDate < board.businessDate && !selectedInterval);
+  const backfillLabel = historicalDraft
+    ? draftSelection!.departureDate <= board.businessDate ? "已完成住宿补录" : "在住住宿补录"
+    : undefined;
+  const draftDays = selectedUnit?.id === draftSelection?.unitId
+    ? selectedUnit?.days.filter((day) => day.serviceDate >= draftSelection!.arrivalDate
+      && day.serviceDate < draftSelection!.departureDate) ?? []
+    : [];
+  const hasExistingStay = draftDays.some((day) => day.intervalIds.length > 0);
+  const unavailableDraft = draftDays.some((day) => day.serviceDate < board.businessDate
+    ? day.status !== "AVAILABLE"
+    : !day.available);
+  const occupancyMessage = !draftSelection
+    ? "请先选择房源并填写有效的入住、退房日期。"
+    : writeBlock?.kind === "REFRESH"
+      ? "房态尚未核对完成，暂时无法确认所选日期的占用情况。"
+      : hasExistingStay
+        ? "所选日期已有住宿或锁房记录，请先核对已有记录。"
+        : unavailableDraft
+          ? "所选日期包含不可安排住宿的日期，请核对房态。"
+          : draftOutsideBoard || draftDays.length !== draftNightCount
+            ? "当前已显示的日期未发现占用；其余日期将在办理时核对。"
+            : "所选日期未发现占用，办理时将再次核对。";
+  const noActionMessage = !draftSelection
+    ? "请先选择房源并填写有效的入住、退房日期。"
+    : hasExistingStay || unavailableDraft || conflicts.length
+      ? "所选日期存在住宿、锁房或不可用状态，暂不能新建或补录住宿。"
+      : "当前房源暂无可办理的住宿操作，请刷新房态；仍不可操作时请联系管理员核对权限。";
   const contextIntervals = useMemo(() => {
     const intervals = selectedInterval ? [selectedInterval, ...relatedIntervals] : [...relatedIntervals];
     return [...new Map(intervals.map((interval) => [interval.id, interval])).values()];
@@ -229,7 +257,7 @@ export function RoomStatusContext({
     <aside className="room-status-context" aria-labelledby="room-status-context-heading">
       <header className="room-status-context-header">
         <div>
-          <span>选中对象上下文</span>
+          <span>{backfillLabel ?? "选中对象上下文"}</span>
           <h2 id="room-status-context-heading">{contextTitle}</h2>
         </div>
         <div className="room-status-context-header-actions">
@@ -244,7 +272,7 @@ export function RoomStatusContext({
           <CalendarRange aria-hidden="true" size={17} />
           <h3 id="room-status-selection-heading">日期选区</h3>
         </div>
-        <p>修改房源或日期后自动更新住宿草稿，不会创建订单。</p>
+        <p className="room-status-selection-intro">选择房源和住宿日期，再选择下方操作；修改日期不会创建订单。</p>
         <label>房间或床位
           <select data-testid="room-status-unit-select" value={draft.unitId} onChange={(event) => changeUnit(event.target.value)}>
             <option value="">请选择房源</option>
@@ -284,9 +312,11 @@ export function RoomStatusContext({
           >
             <RoomStatusWarning>{draftDateError}</RoomStatusWarning>
           </div>
-        ) : draftOutsideBoard ? (
-          <p className="room-status-selection-note">房态当前只显示其中 30 夜，住宿日期仍按完整区间核对。</p>
         ) : null}
+        {backfillLabel || draftOutsideBoard ? <div className="room-status-selection-notes" role="status">
+          {backfillLabel ? <p><strong>{backfillLabel}</strong><span>入住日期早于今天，请通过“补录住宿”登记。{draftSelection!.departureDate <= board.businessDate ? "确认补录后将记录已完成的住宿。" : "确认补录后将记为在住。"}</span></p> : null}
+          {draftOutsideBoard ? <p className="room-status-selection-note">日历当前显示 {board.range.arrivalDate} 至 {addLocalDateDays(board.range.departureDate, -1)} 的每晚房态。所选住宿日期已保留，超出部分将在办理时核对。</p> : null}
+        </div> : null}
       </section>
 
       {selectedUnit ? (
@@ -354,7 +384,7 @@ export function RoomStatusContext({
           <AlertTriangle aria-hidden="true" size={17} />
           <h3 id="room-status-conflicts-heading">日期占用</h3>
         </div>
-        <ConflictList conflicts={conflicts} />
+        <ConflictList conflicts={conflicts} emptyMessage={occupancyMessage} />
       </section>
 
       <section className="room-status-context-actions" aria-labelledby="room-status-actions-heading">
@@ -387,7 +417,7 @@ export function RoomStatusContext({
               </li>;
             })}
           </ul>
-        ) : <p className="room-status-context-empty">{writeBlock ? "服务端未授权当前操作。" : "服务端未为当前对象下发可执行动作。"}</p>}
+        ) : !writeBlock ? <p className="room-status-context-empty">{noActionMessage}</p> : null}
       </section>
 
     </aside>

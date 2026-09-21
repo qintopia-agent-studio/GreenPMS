@@ -180,15 +180,37 @@ async function createCompletedBackfillFixture(options: {
   }
 }
 
-async function createRemoteLongStayConflict(unitId: string, arrivalDate: string, departureDate: string): Promise<void> {
-  await createReservedOrderFixture({
-    unitId,
-    arrivalDate,
-    departureDate,
-    guest: "长住窗口外冲突住客",
-    nickname: "窗口外冲突",
-    keyPrefix: "e2e-long-stay-remote-conflict"
+async function createRemoteLongStayConflict(page: Page, unitId: string, arrivalDate: string, departureDate: string): Promise<void> {
+  // Use the running API so the fixture exercises the normal command contract
+  // and avoids Playwright's CommonJS transform of dynamic database imports.
+  const post = async (path: string, data: unknown) => {
+    const key = `e2e-long-stay-remote-conflict-${crypto.randomUUID()}`;
+    const response = await page.request.post(`/api/v1/${path}`, {
+      headers: { "Idempotency-Key": key, "X-Correlation-ID": key },
+      data
+    });
+    expect(response.ok(), await response.text()).toBe(true);
+    return response.json();
+  };
+  const quoted = await post("quotes", {
+    propertyId, inventoryUnitId: unitId, arrivalDate, departureDate,
+    pricingPolicyVersionId: publicPricingPolicyId
   });
+  const prepared = await post("command-previews", {
+    commandType: "CREATE_ORDER",
+    input: {
+      propertyId, quoteId: quoted.quote.quoteId,
+      primaryGuest: { fullName: "长住窗口外冲突住客", nickname: "窗口外冲突" },
+      bookingChannelCode: "WECOM", channelOrderReference: null,
+      targetCurrentContractAmountMinor: quoted.quote.currentContractAmount.minorUnits
+    }
+  });
+  const receipt = await post(`command-previews/${prepared.preview.previewId}/confirm`, {
+    propertyId, commandType: "CREATE_ORDER", confirmation: true,
+    expectedEffectHash: prepared.preview.effectHash,
+    reason: { code: "CREATE_STANDARD_ORDER", note: "" }
+  });
+  expect(receipt).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
 }
 
 async function checkInOrderFixture(orderId: string): Promise<void> {
@@ -1601,6 +1623,75 @@ test("desktop delays the range-loading notice without delaying write blocking", 
   }
 });
 
+test("sidebar dates load historical actions and open the existing backfill flow", async ({ page }, testInfo) => {
+  const { board } = await login(page);
+  const today = board.businessDate;
+  const arrivalDate = addDays(today, -2);
+  const departureDate = addDays(today, 2);
+  const unit = board.rooms.find((room) => room.code === "105")!.children.find((bed) => bed.code.endsWith("A"))!;
+  expect(unit).toBeTruthy();
+
+  if (isProject(testInfo, "desktop")) {
+    const quick = await openDayPopover(page, firstAvailableRoomStatusCell(page, board));
+    await quick.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
+    await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  } else {
+    await page.getByRole("button", { name: "新建住宿或锁房", exact: true }).click();
+  }
+  let context = page.locator("dialog:visible .room-status-context");
+  await context.getByTestId("room-status-unit-select").selectOption(unit.id);
+  await context.getByLabel("退房日期", { exact: true }).fill(departureDate);
+  await context.getByLabel("入住日期", { exact: true }).fill(today);
+  await expect(context.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeEnabled();
+  let quoteCount = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/quotes") quoteCount += 1;
+  });
+
+  const historicalBoard = roomStatusResponse(page, { arrivalDate, departureDate: addDays(arrivalDate, 30) });
+  await context.getByLabel("入住日期", { exact: true }).fill(arrivalDate);
+  const loaded = await (await historicalBoard).json() as RoomStatusBoardDto;
+  expect(loaded.rooms.find((room) => room.code === "105")!.children.find((bed) => bed.id === unit.id)!.allowedActions)
+    .toContainEqual(expect.objectContaining({ code: "BACKFILL_ORDER", enabled: true }));
+  await expect(context.getByRole("button", { name: "补录住宿", exact: true })).toBeEnabled();
+  await expect(context.locator(".room-status-selection-notes")).toContainText("在住住宿补录");
+  await expect(context.getByLabel("退房日期", { exact: true })).toHaveValue(departureDate);
+  await expect(context).not.toContainText("服务端未为当前对象下发可执行动作");
+  expect(quoteCount).toBe(0);
+  const datesBox = await context.locator(".room-status-date-inputs").boundingBox();
+  const notesBox = await context.locator(".room-status-selection-notes").boundingBox();
+  expect(notesBox!.y - (datesBox!.y + datesBox!.height)).toBeGreaterThanOrEqual(10);
+  await page.screenshot({ path: testInfo.outputPath("sidebar-in-house-backfill.png") });
+
+  const quote = quoteResponse(page, { inventoryUnitId: unit.id, arrivalDate, departureDate });
+  await context.getByRole("button", { name: "补录住宿", exact: true }).click();
+  expect((await quote).ok()).toBe(true);
+  await expect(page.getByTestId("backfill-reason")).toBeVisible();
+  await expect(page.getByTestId("backfill-submit")).toBeVisible();
+  await expect(page.getByTestId("create-order")).toHaveCount(0);
+  if (isProject(testInfo, "mobile")) return;
+
+  context = page.locator("dialog:visible .room-status-context");
+  const completedQuote = quoteResponse(page, { inventoryUnitId: unit.id, arrivalDate, departureDate: today });
+  await context.getByLabel("退房日期", { exact: true }).fill(today);
+  expect((await completedQuote).ok()).toBe(true);
+  await expect(context.locator(".room-status-selection-notes")).toContainText("已完成住宿补录");
+
+  const longDeparture = addDays(today, 40);
+  const longQuote = quoteResponse(page, { inventoryUnitId: unit.id, arrivalDate, departureDate: longDeparture });
+  await context.getByLabel("退房日期", { exact: true }).fill(longDeparture);
+  expect((await longQuote).ok()).toBe(true);
+  await expect(context.locator(".room-status-selection-note")).toContainText("所选住宿日期已保留");
+  await expect(context).toContainText("其余日期将在办理时核对");
+  await page.screenshot({ path: testInfo.outputPath("sidebar-long-backfill.png") });
+
+  await context.getByLabel("入住日期", { exact: true }).fill(today);
+  context = page.locator("dialog:visible .room-status-context");
+  await expect(context.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeEnabled();
+  await expect(context.getByRole("button", { name: "补录住宿", exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("backfill-reason")).toHaveCount(0);
+});
+
 test("desktop range selection, fixed 30-night start-date navigation, filtered-empty and range-loading fail closed", async ({ page }, testInfo: TestInfo) => {
   test.skip(!isProject(testInfo, "desktop"), "desktop room-status interaction-state coverage");
   test.setTimeout(120_000);
@@ -1778,7 +1869,7 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
     return response;
   };
 
-  await expect(drawer.getByText("房态当前只显示其中 30 夜，住宿日期仍按完整区间核对。", { exact: true })).toBeVisible();
+  await expect(drawer.locator(".room-status-selection-note")).toContainText("所选住宿日期已保留，超出部分将在办理时核对。");
   await expect(drawer.getByTestId("quote-result")).toContainText("117 晚");
   await drawer.getByTestId("primary-guest-nickname").fill("长住浏览器验证");
   await drawer.getByTestId("primary-guest-name").fill("长住浏览器验证住客");
@@ -1814,7 +1905,7 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   const remoteConflictArrival = addDays(longArrival, 45);
   const remoteConflictDeparture = addDays(remoteConflictArrival, 1);
   expect(remoteConflictArrival > displayedDeparture).toBe(true);
-  await createRemoteLongStayConflict(candidate!.id, remoteConflictArrival, remoteConflictDeparture);
+  await createRemoteLongStayConflict(page, candidate!.id, remoteConflictArrival, remoteConflictDeparture);
   const ordersBeforeFailedTargetQuote = await propertyOrderCount();
 
   const failedQuote = await quoteFor(addDays(longArrival, 116));

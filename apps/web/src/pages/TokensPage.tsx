@@ -549,7 +549,7 @@ export function TokensPage() {
         <div className="token-counts"><span>有效 {counts.ACTIVE}</span><span>已过期 {counts.EXPIRED}</span><span>已撤销 {counts.REVOKED}</span><span>已轮换 {counts.ROTATED}</span></div>
       </section>
 
-      <InlineError error={error} title="无法载入 Token" />
+      <InlineError context="read" error={error} title="无法载入 Token" />
       {loading ? <LoadingBlock label="正在载入 Token" /> : error ? null : tokens.length ? (
         <div className="table-region token-table-region" role="region" aria-label="本物业主体 Token" tabIndex={0}>
           <table className="data-table token-table">
