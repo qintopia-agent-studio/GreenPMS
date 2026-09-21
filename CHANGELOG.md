@@ -2,6 +2,13 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.7.2](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.7.1...v1.7.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* **catalog:** 保留房源身份支持在住房间改号并修复业务错误返回 ([#49](https://github.com/qintopia-agent-studio/GreenPMS/issues/49)) ([a410cda](https://github.com/qintopia-agent-studio/GreenPMS/commit/a410cdaf1f48376bead751d064503f09e557854f))
+
 ## [1.7.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.7.0...v1.7.1) (2026-09-21)
 
 
