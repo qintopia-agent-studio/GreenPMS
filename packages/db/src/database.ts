@@ -13,6 +13,7 @@ import { accountManagementReady } from "./account-management-readiness.ts";
 import { checkoutReversalReady } from "./checkout-reversal-readiness.ts";
 import { integrationReady } from "./integration-readiness.ts";
 import { wecomRefundReady } from "./wecom-refund-readiness.ts";
+import { paymentDeliveryReady } from "./payment-delivery-readiness.ts";
 import { externalPaymentsReady } from "./external-payments-readiness.ts";
 import { companionReady } from "./companion-readiness.ts";
 
@@ -84,7 +85,8 @@ export const currentMigrationNames = [
   "063_ai_question_records.sql",
   "064_building_order.sql",
   "065_cross_room_membership_upgrade.sql",
-  "066_room_operational_codes.sql"
+  "066_room_operational_codes.sql",
+  "067_payment_event_delivery.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -3184,7 +3186,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db);
+    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db);
   } catch {
     return false;
   }

@@ -134,3 +134,29 @@ PMS 仅对已提交事件投递，不在资金事务内发网络。复用既有�
 共同契约补充（总指挥与接收方 2026-09-24 回传）：身份键为可信 sourceInstance + propertyId + schemaVersion + eventId；deliveryId 仅标识一次投递。推送信封与补拉 page 抽取相同事件字段比较内容，不比较两种外层 JSON 的原始哈希；原始字节哈希仅用于传输签名。occurredAt 是事件 created_at 的 UTC ISO 表示，不是付款业务时间。退款事件不得当作新收款唤起登记。400/409/413/422 直接死信，401/403 持久暂停，网络/超时/429/5xx 和回执不匹配有限退避。联合验证覆盖推送先/补拉先、同事件不同 deliveryId、同身份异内容、跨来源/物业隔离、MATCHED 先到而 DISCOVERED 后到。
 
 阶段验证：2026-09-24，Node 22.23.2、独立 PostgreSQL 18.6（127.0.0.1:55448，`qintopia_wecom_events_20260924`），沿用原数据库测试锁运行收退款专项 16/16 通过，含新增 head 三项及既有资金/权限/回滚/并发回归；类型检查通过。head 已实现并自动验证，主动投递及双端联合验证尚在实施，不代表生产或人工验收通过。
+
+### 发送持久状态与本地运行
+
+追加迁移 `067_payment_event_delivery.sql`，不改历史迁移。新增独立 `qintopia_payment_delivery_worker`（默认 NOLOGIN）、不可变发布正文、发送租约/回执/审计及默认暂停的来源配置。旧住宿发送角色、企微同步角色权限不变。发布函数在独立事务扫描已提交支付事件，按 eventId 幂等物化队列，不以最大序号跳过未发布事件；资金事务提交后、发布前崩溃可恢复。正文 UTC 毫秒时间与 feed 一致，并在重试间保持原字节。
+
+网络层与完成处理复用 `integration-worker.ts`；独立入口 `npm run payments:worker`，默认关闭且不连库。生产配置名（此处仅接线方案，未执行）：`PMS_PAYMENT_DELIVERY_ENABLED`、`PMS_PAYMENT_DELIVERY_DATABASE_URL`、`PMS_PAYMENT_DELIVERY_ENDPOINT`、`PMS_PAYMENT_SOURCE_INSTANCE`、`PMS_PAYMENT_PROPERTY_IDS`、`PMS_PAYMENT_KEY_ID`、`PMS_PAYMENT_SIGNING_KEY`。专用角色运行，不能使用 runtime 或 owner。维护者先插入唯一 sourceInstance（以后不可更换），再以 `qintopia_payment_delivery_control('RESUME',reason)` 激活；PAUSE/RESUME/REPLAY 均需原因码并审计，REPLAY 只允许 retained dead letter。环境值与可信来源不一致停止，不能自动覆盖。
+
+每次一条在途请求，10 秒请求时限、30 秒租约，过期后重领并递增代次，旧回执不能完成新租约。指数退避和 Retry-After 上限 15 分钟，24 小时重试后死信；持久暂停只影响支付发送。未确认、已确认和死信均保留，本轮无删除/清理。运行汇总只输出状态数量和错误码，不记录正文/密钥。暂停或关闭进程即可停止新领取；恢复保留原事件/回执身份。回滚应用需保留新增 schema 对应版本兼容性，不通过删除队列或改来源解除冲突。
+
+相关旧链回归发现并修复：原 main 的通用错误脱敏白名单未包含已有 CURSOR_EXPIRED 的 `rebuild_required:true`，会删掉旧事件 feed 410 响应的必需字段，实际返回500。将该既有公开字段纳入严格白名单，保留其他私有诊断过滤；不改变旧事件正文、游标或权限协议。旧集成回归与错误契约测试验证此恢复行为。
+
+发送阶段自动验证（2026-09-24）：Node 22.23.2 / PostgreSQL 18.6，专用测试库沿用原锁。支付投递 8/8、旧住宿事件 23/23、收退款 16/16、错误响应契约 25/25、恢复脚本契约 12/12 通过；全单元 1297/1297、类型检查、release:check/build、PR格式校验8/8通过。末次增加上游结构校验后，发送进程启动/退出专项再次通过。旧事件首轮410失败与修复后23/23分开保留，没有降低检查。迁移编号核对时，本机其他分支均无067；仅在本任务独立测试库应用，无生产已应用记录读取。
+
+可复跑命令（先将 Node 22 加入 PATH）：
+
+```sh
+npm run typecheck
+npm test
+npm run build
+node --test scripts/check-pr-tests.mjs
+TEST_DATABASE_URL=postgres://qintopia@127.0.0.1:55448/qintopia_wecom_events_20260924 node --import tsx tests/helpers/run-database-test-suite.ts -- ./node_modules/.bin/vitest run tests/integration/payment-event-delivery.integration.test.ts tests/integration/integration-events.integration.test.ts tests/integration/external-payments.integration.test.ts
+./node_modules/.bin/vitest run apps/api/src/public-error.test.ts
+TEST_DATABASE_URL=postgres://qintopia@127.0.0.1:55448/qintopia_wecom_events_20260924 node --import tsx tests/helpers/run-database-test-suite.ts -- ./node_modules/.bin/vitest run tests/contract/restore-script.contract.test.ts
+```
+
+联合验证夹具为 `tests/joint/payment-events-local.mjs`，固定本机 PG55448 与独立 `qintopia_wecom_payment_joint`，HTTP入口18448；fixture只含模拟身份、演示凭证与订单，保存于忽略目录 `.local-workspace/payment-events/joint/fixture.json`。来源 `synthetic-pms-joint-20260924`，key ID `local-payment-joint`；签名值从本机受限文件读取，不进入版本库。接收HTTP计划18449，本机TLS代理计划18450；尚未完成双端联通。先setup生成未收款订单与head=0，岸岸持久初始化后再discover；`deliver`使用原HTTPS transport，`status`回读事件、发送回执与实际收款事实。人确认和登记链由岸岸真实宿主/授权链验证，PMS夹具不伪造确认。

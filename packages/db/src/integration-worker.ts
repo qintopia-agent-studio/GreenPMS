@@ -121,17 +121,20 @@ export async function claimDelivery(db: Kysely<Database>, config: IntegrationDel
       RETURNING d.event_id,c.body,d.generation::text,d.attempts,d.first_attempt_at,${deliveryId}::text AS delivery_id`.execute(trx)).rows[0];
     });
 }
-export async function finishDelivery(db: Kysely<Database>, claim: ClaimedDelivery, outcome: DeliveryOutcome, random = Math.random): Promise<boolean> {
+export async function finishDelivery(db: Kysely<Database>, claim: ClaimedDelivery, outcome: DeliveryOutcome, random = Math.random, stream: "integration" | "payment" = "integration"): Promise<boolean> {
+    const subscription = sql.table(stream === "integration" ? "integration_subscription_state" : "payment_delivery_source");
+    const deliveries = sql.table(stream === "integration" ? "integration_deliveries" : "payment_deliveries");
+    const audit = sql.table(stream === "integration" ? "integration_delivery_audit" : "payment_delivery_audit");
     return db.transaction().execute(async (trx) => {
         // Claim and completion lock subscription before delivery rows: same order as pause.
-        await sql `SELECT singleton FROM integration_subscription_state WHERE singleton FOR UPDATE`.execute(trx);
+        await sql `SELECT singleton FROM ${subscription} WHERE singleton FOR UPDATE`.execute(trx);
         const expired = Date.now() - claim.first_attempt_at.getTime() >= 86400000;
         const state = outcome.kind === "accepted" ? "accepted" : outcome.kind === "dead_letter" || (outcome.kind === "retry" && expired) ? "dead_letter" : "pending";
         const code = outcome.kind === "accepted" ? "ACK_ACCEPTED" : expired && outcome.kind === "retry" ? "RETRY_EXHAUSTED" : outcome.code;
         const delay = Math.min(900000, Math.max(outcome.kind === "retry" ? outcome.retryAfterMs ?? 0 : 0, 1000 * 2 ** Math.min(claim.attempts - 1, 20) * (0.5 + random() / 2)));
         const updated = (await sql<{
             event_id: string;
-        }> `UPDATE integration_deliveries SET state=${state},lease_until=NULL,next_attempt_at=clock_timestamp()+${delay}*interval '1 millisecond',
+        }> `UPDATE ${deliveries} SET state=${state},lease_until=NULL,next_attempt_at=clock_timestamp()+${delay}*interval '1 millisecond',
       receipt_id=${outcome.kind === "accepted" ? outcome.receipt : null},last_error_code=${outcome.kind === "accepted" ? null : code},
       completed_at=CASE WHEN ${state} IN ('accepted','dead_letter') THEN clock_timestamp() ELSE NULL END
       WHERE event_id=${claim.event_id} AND generation=${claim.generation}::bigint AND state='sending'
@@ -139,8 +142,8 @@ export async function finishDelivery(db: Kysely<Database>, claim: ClaimedDeliver
         if (!updated)
             return false;
         if (outcome.kind === "pause")
-            await sql `UPDATE integration_subscription_state SET paused=true,reason_code=${code} WHERE singleton`.execute(trx);
-        await sql `INSERT INTO integration_delivery_audit(event_id,action,result_code,delivery_id,generation) VALUES(${claim.event_id},'ATTEMPT',${code},${claim.delivery_id},${claim.generation}::bigint)`.execute(trx);
+            await sql `UPDATE ${subscription} SET paused=true,reason_code=${code} WHERE singleton`.execute(trx);
+        await sql `INSERT INTO ${audit}(event_id,action,result_code,delivery_id,generation) VALUES(${claim.event_id},'ATTEMPT',${code},${claim.delivery_id},${claim.generation}::bigint)`.execute(trx);
         return true;
     });
 }
@@ -148,6 +151,18 @@ export async function deliverOne(db: Kysely<Database>, config: IntegrationDelive
     const claim = await claimDelivery(db, config);
     if (!claim)
         return false;
+    const outcome = await sendClaim(config, claim, transport);
+    await finishDelivery(db, claim, outcome);
+    return true;
+}
+export async function publishPmsEvents(db: Kysely<Database>, property: string) {
+    return (await sql<{
+        count: number;
+    }> `SELECT qintopia_integration_publish(${property},100) AS count`.execute(db)).rows[0]!.count;
+}
+
+/** Shared wire protocol; stream persistence and business decoders remain independent. */
+export async function sendClaim(config: IntegrationDeliveryConfig, claim: ClaimedDelivery, transport: DeliveryTransport = httpsDeliveryTransport): Promise<DeliveryOutcome> {
     const sentAt = String(Math.floor(Date.now() / 1000));
     let outcome: DeliveryOutcome;
     try {
@@ -159,11 +174,5 @@ export async function deliverOne(db: Kysely<Database>, config: IntegrationDelive
     catch {
         outcome = { kind: "retry", code: "TRANSPORT_UNCONFIRMED" };
     }
-    await finishDelivery(db, claim, outcome);
-    return true;
-}
-export async function publishPmsEvents(db: Kysely<Database>, property: string) {
-    return (await sql<{
-        count: number;
-    }> `SELECT qintopia_integration_publish(${property},100) AS count`.execute(db)).rows[0]!.count;
+    return outcome;
 }
