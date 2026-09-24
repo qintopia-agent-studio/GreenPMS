@@ -27,11 +27,14 @@ if (mode === 'proxy') {
   await mkdir(directory, {recursive: true});
   await writeFile(`${directory}/proxy-mode`, 'normal');
   await writeFile(`${directory}/tls.json`, JSON.stringify({ca: proxy.ca, endpoint: 'https://127.0.0.1:18450/api/v1/ingress/pms/events'}));
+  let recorded = "";
   const tick = setInterval(async () => {
     const mode = (await readFile(`${directory}/proxy-mode`, 'utf8')).trim();
-    assert.ok(['normal','drop-ack','bad-signature','offline'].includes(mode));
-    proxy.state.mode = mode;
-    await writeFile(`${directory}/tls-records.json`, JSON.stringify(proxy.state.records, null, 2));
+    if (['normal','drop-ack','bad-signature','offline'].includes(mode)) proxy.state.mode = mode;
+    const snapshot = JSON.stringify(proxy.state.records, null, 2);
+    if (snapshot !== recorded) {
+      await writeFile(`${directory}/tls-records.json`, snapshot); recorded = snapshot;
+    }
   }, 250);
   const stop = async () => { clearInterval(tick); await proxy.close(); process.exit(0); };
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
@@ -84,6 +87,10 @@ if (mode === 'proxy') {
       externalUserId: null, collectorId: null, amountMinor: 12000, occurredAt, state: 'SUCCESS'}] : [], nextCursor: null}), nickname: async () => null}, now);
     console.log(JSON.stringify(await readExternalPaymentEvents(owner, demo.propertyId, '0')));
   } finally { await owner.destroy(); }
+} else if (mode === 'resume' || mode === 'pause') {
+  const owner = createDatabase(ownerUrl);
+  try { await sql`SELECT qintopia_payment_delivery_control(${mode.toUpperCase()},'JOINT_TEST')`.execute(owner); }
+  finally { await owner.destroy(); }
 } else if (mode === 'deliver') {
   const endpoint = process.env.PMS_PAYMENT_JOINT_ENDPOINT;
   const parsed = new URL(endpoint); assert.equal(parsed.hostname, '127.0.0.1'); assert.equal(parsed.protocol, 'https:');
@@ -91,7 +98,6 @@ if (mode === 'proxy') {
   const owner = createDatabase(ownerUrl);
   try {
     await publishPaymentEvents(worker, demo.propertyId, sourceInstance);
-    await sql`SELECT qintopia_payment_delivery_control('RESUME','JOINT_TEST')`.execute(owner);
     const attempted = await deliverOnePayment(worker, {endpoint, sourceInstance, propertyIds: [demo.propertyId],
       keyId: process.env.PMS_PAYMENT_JOINT_KEY_ID ?? 'local-payment-joint', signingKey: (await readFile(process.env.PMS_PAYMENT_JOINT_KEY_FILE, 'utf8')).trim(), timeoutMs: 10000, leaseMs: 30000});
     console.log(JSON.stringify({attempted, deliveries: (await sql`SELECT event_id,state,receipt_id,last_error_code FROM payment_deliveries ORDER BY event_id`.execute(owner)).rows}));
@@ -104,4 +110,4 @@ if (mode === 'proxy') {
       collections: await owner.selectFrom('collection_facts').select(['fact_id','amount_minor','transaction_reference']).where('order_id','=',fixture.orderId).execute(),
       deliveries: (await sql`SELECT event_id,state,receipt_id,last_error_code FROM payment_deliveries ORDER BY event_id`.execute(owner)).rows}));
   } finally { await owner.destroy(); }
-} else throw Error('expected setup, api, proxy, discover, deliver or status');
+} else throw Error('expected setup, api, proxy, discover, resume, pause, deliver or status');
