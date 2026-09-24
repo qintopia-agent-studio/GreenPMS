@@ -18,7 +18,7 @@
 
 ## 环境、边界与证据来源
 
-仅本机合成环境：PMS API 18448、接收服务 18449、HTTPS 代理 18450、PG18.6 55448 / `qintopia_wecom_payment_joint`。source=`synthetic-pms-joint-20260924`，property=`prop_qintopia_demo`，key ID=`local-payment-joint`。接收方真实读取 head 后原子保存并独立 SQL 回读 baseline=cursor=0、bindingVersion=1；无历史付款时才生成第一笔。
+仅本机模拟环境：PMS API 18448、接收服务 18449、HTTPS 代理 18450、PG18.6 55448 / `qintopia_wecom_payment_joint`。source=`synthetic-pms-joint-20260924`，property=`prop_qintopia_demo`，key ID=`local-payment-joint`。接收方真实读取 head 后原子保存并独立 SQL 回读 baseline=cursor=0、bindingVersion=1；无历史付款时才生成第一笔。
 
 PMS 独立 SQL、原 sender 响应、TLS 实录为本方证据；Inbox、WorkItem、action、接收游标及业务链执行结果由岸岸任务 `01a0d2c3-4d3e-7f72-9206-fce386254bef` 独立回读并回报。总指挥任务 `01a0c6ee-1de7-7302-8be1-3f7966f51bea` 另行核对接收快照。报告不把协作方证据描述为本方直接运行。
 
