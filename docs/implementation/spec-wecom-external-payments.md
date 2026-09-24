@@ -106,3 +106,31 @@ UI 每 15 秒自动读取 PMS，时间戳用于识别同步延迟，无手动刷
 - 专用库 `qintopia_wecom_live_preview_20260910` 位于本次 PostgreSQL 18 容器的 55441 端口。页面 [http://127.0.0.1:4220/](http://127.0.0.1:4220/)，API 仅监听 `127.0.0.1:4131`；账号沿用本地 `operator` / `demo-pass-2026`。4219 原合成体验保留。
 - 流水与昵称为真实快照；两个订单均明确命名为本地模拟，退款演示原收款关联也仅用于本地体验，不代表线上订单归属。用户可模拟收款选择、取消和匹配；历史退款从退款选择器的完整清单切换“全部”查看独立退款号与原收款。基线不产生群提醒，不修改线上收退款。
 - 初始化脚本 `scripts/setup-wecom-live-preview.ts` 只允许指定本地端口和专用库，新建且不重置已有数据库。真实明细只保存于本地数据库，含明细的浏览器证据放在 Git 忽略的 `test-results` 下。
+
+## 2026-09-24 Agent OS 首次基线与主动投递
+
+来源：总指挥任务 `01a0c6ee-1de7-7302-8be1-3f7966f51bea` 的已授权开发交接；冻结材料位于 Agent OS 的 `.local-workspace/green-pms-events-dispatch-20260924/`，包括 `green-pms-payment-events-handoff.md`（SHA256 `a7610d7db4b9f63d86b569b8891ed232de6c2859dd961f2c9bf141e5ca14c03f`）、`anan-payment-feed-baseline-proposal.md`（`04f8b11a70f36419d42ed10db28ee9f237fd6998896477b79266510d72a37e02`）及 `agent-os-dual-track-coordination.md`（`34f7708ac860bac419b68b3fb08dd01bd19c207907e208926b25328b5f7235f5`）。PMS 基线为 `c75c5470f0202fadcd2a497ec6ce7e87483943fd`。接收任务 `01a0d2c3-4d3e-7f72-9206-fce386254bef` 已确认以下传输契约可承接；双方源码各自维护。
+
+### 首次基线
+
+`GET /api/v1/external-payment-events/head?propertyId=...` 复用当前主体认证与物业 READ 权限，返回 `{schemaVersion:"pms.payments.v1",propertyId,headCursor:"42"}`，并设置 `Cache-Control: no-store`。单条 SELECT 读取已提交事件头；无记录为字符串 `"0"`，bigint 不转为 JavaScript Number。无新迁移，无财务写入。
+
+接收方以可信来源实例和物业为流身份，首次取得 H 后原子保存 baseline 与 checkpoint；重启不覆盖。采样前开始、采样后提交的事务序号仍大于 H，即使 occurredAt 较早也需处理。分页 nextCursor 不是全流 head，不能用时间替代边界。来源变化或 head 回退显式报缺口。
+
+### 支付投递共同契约
+
+独立 `pms.payments.v1` 信封：`{schemaVersion,sourceInstance,propertyId,eventId,sequence,billId,kind,eventType,occurredAt}`。除 sourceInstance 外与支付补拉逐事件字段一致；eventId 为 `payment:{billId}:{eventType}`，sequence 为规范非负 bigint 十进制字符串，kind 为 COLLECTION/REFUND，eventType 为 DISCOVERED/MATCHED。不得经过旧住宿 decoder 或改变旧 `pms.events.v1` 字节。
+
+固定 HTTPS `POST /api/v1/ingress/pms/events`，Content-Type 恰为 `application/json`，无 Content-Encoding，body 不超过 65536 字节。使用 `X-QT-Key-Id`、`X-QT-Sent-At`（规范 Unix 秒）、`X-QT-Delivery-Id`、`X-QT-Signature`。签名为小写 hex HMAC-SHA256，原文依次为 POST、固定路径、sentAt、deliveryId、原始 body 的 SHA256 hex，以换行连接。接收端拒绝重复 JSON key，时间窗口为 ±300 秒，key 绑定来源和物业白名单。
+
+仅持久提交后返回 `202 {event_id,status:"accepted",receipt_id}`；重复返回 `200 {event_id,status:"duplicate",receipt_id}`，沿用同一持久 receipt_id；同 ID 不同内容是冲突。回执只证明接收，不证明登记或住客业务完成。回执丢失重发同事件身份；推送不直接推进补拉连续 checkpoint，防止越过缺口。
+
+PMS 仅对已提交事件投递，不在资金事务内发网络。复用既有签名、固定目标、租约代次、回执校验、退避、401/403 暂停和死信策略，支付持久状态独立。恢复依赖数据库，不依赖进程内唯一队列。历史/已有 MATCHED 不制造新催办，接收方使用前回读当前 PMS 状态。
+
+每笔登记收款仍需有权人对具体流水、金额、订单明确确认；完整明确交办可作为当笔确认，长期授权、到账事件和模型推断不能替代。Agent OS 保存、去重并派发事项，Hermes 运行岸岸；PMS 不运行岸岸，不管理 Agent OS 人员与协作。收款不自动入住，不改变现有预订、实际入住、续住、换房、改期及库存协议。
+
+本轮仅本地实现、模拟验证及 PR；不启用生产投递、不改 CI、不部署、不发送群消息。工程验证、双端联合验证和人工验收分别记录，生产接线另行执行。
+
+共同契约补充（总指挥与接收方 2026-09-24 回传）：身份键为可信 sourceInstance + propertyId + schemaVersion + eventId；deliveryId 仅标识一次投递。推送信封与补拉 page 抽取相同事件字段比较内容，不比较两种外层 JSON 的原始哈希；原始字节哈希仅用于传输签名。occurredAt 是事件 created_at 的 UTC ISO 表示，不是付款业务时间。退款事件不得当作新收款唤起登记。400/409/413/422 直接死信，401/403 持久暂停，网络/超时/429/5xx 和回执不匹配有限退避。联合验证覆盖推送先/补拉先、同事件不同 deliveryId、同身份异内容、跨来源/物业隔离、MATCHED 先到而 DISCOVERED 后到。
+
+阶段验证：2026-09-24，Node 22.23.2、独立 PostgreSQL 18.6（127.0.0.1:55448，`qintopia_wecom_events_20260924`），沿用原数据库测试锁运行收退款专项 16/16 通过，含新增 head 三项及既有资金/权限/回滚/并发回归；类型检查通过。head 已实现并自动验证，主动投递及双端联合验证尚在实施，不代表生产或人工验收通过。

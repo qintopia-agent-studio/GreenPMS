@@ -3,7 +3,7 @@ import { DomainError, type CommandType } from "@qintopia/contracts";
 import { randomUUID } from "node:crypto";
 import type { Database } from "./schema.ts";
 import type { ExternalBillKind } from "./wecom-client.ts";
-import type { ExternalPaymentItem, ExternalPaymentList } from "../../contracts/src/external-payments.ts";
+import type { ExternalPaymentEventHead, ExternalPaymentItem, ExternalPaymentList } from "../../contracts/src/external-payments.ts";
 export type { ExternalPaymentItem, ExternalPaymentList } from "../../contracts/src/external-payments.ts";
 
 type Db = Kysely<Database> | Transaction<Database>;
@@ -170,6 +170,12 @@ export async function bindExternalPayments(trx: Transaction<Database>, commandId
     await sql`INSERT INTO external_payment_matches(bill_id,collection_fact_id,membership_payment_fact_id,origin)
       VALUES(${payment.billId},${fact.kind === "LODGING" ? fact.fact_id : null},${fact.kind === "MEMBERSHIP" ? fact.fact_id : null},'CONFIRMED')`.execute(trx);
   }
+}
+
+export async function readExternalPaymentEventHead(db: Db, propertyId: string): Promise<ExternalPaymentEventHead> {
+  const row = (await sql<{ cursor: string }>`SELECT last_sequence::text AS cursor
+    FROM external_payment_event_heads WHERE property_id=${propertyId}`.execute(db)).rows[0];
+  return { schemaVersion: "pms.payments.v1", propertyId, headCursor: row?.cursor ?? "0" };
 }
 
 export async function readExternalPaymentEvents(db: Db, propertyId: string, after: string, limit = 100) {

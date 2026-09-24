@@ -8,3 +8,8 @@ export interface ExternalPaymentList {
   enabled: boolean; lastSyncedAt: string | null; synchronizationError: boolean;
   items: ExternalPaymentItem[]; hasMore: boolean; nextBeforeId: string | null;
 }
+export interface ExternalPaymentEventHead {
+  schemaVersion: "pms.payments.v1";
+  propertyId: string;
+  headCursor: string;
+}
