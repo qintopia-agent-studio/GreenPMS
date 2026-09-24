@@ -21,7 +21,22 @@ const sourceInstance = 'synthetic-pms-joint-20260924';
 const directory = '.local-workspace/payment-events/joint';
 const mode = process.argv[2];
 process.env.STAFF_PROFILE_MANIFEST_NAME = 'demo';
-if (mode === 'api') {
+if (mode === 'proxy') {
+  const {tlsProxy} = await import('./support.mjs');
+  const proxy = await tlsProxy({listenPort: 18450, receiverPort: 18449});
+  await mkdir(directory, {recursive: true});
+  await writeFile(`${directory}/proxy-mode`, 'normal');
+  await writeFile(`${directory}/tls.json`, JSON.stringify({ca: proxy.ca, endpoint: 'https://127.0.0.1:18450/api/v1/ingress/pms/events'}));
+  const tick = setInterval(async () => {
+    const mode = (await readFile(`${directory}/proxy-mode`, 'utf8')).trim();
+    assert.ok(['normal','drop-ack','bad-signature','offline'].includes(mode));
+    proxy.state.mode = mode;
+    await writeFile(`${directory}/tls-records.json`, JSON.stringify(proxy.state.records, null, 2));
+  }, 250);
+  const stop = async () => { clearInterval(tick); await proxy.close(); process.exit(0); };
+  process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  console.log(JSON.stringify({code: 'PAYMENT_JOINT_TLS_READY', ca: proxy.ca}));
+} else if (mode === 'api') {
   const {app} = await listenRuntimeApi({databaseUrl: runtimeUrl, host: '127.0.0.1', port: 18448});
   const stop = async () => { await app.close(); process.exit(0); };
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
@@ -89,4 +104,4 @@ if (mode === 'api') {
       collections: await owner.selectFrom('collection_facts').select(['fact_id','amount_minor','transaction_reference']).where('order_id','=',fixture.orderId).execute(),
       deliveries: (await sql`SELECT event_id,state,receipt_id,last_error_code FROM payment_deliveries ORDER BY event_id`.execute(owner)).rows}));
   } finally { await owner.destroy(); }
-} else throw Error('expected setup, api, discover, deliver or status');
+} else throw Error('expected setup, api, proxy, discover, deliver or status');
