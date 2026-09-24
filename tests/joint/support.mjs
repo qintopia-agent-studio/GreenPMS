@@ -51,7 +51,9 @@ export async function until(fn, message, ms = 15000) {
 
 // Fresh private key is held only in process memory. Only the public test CA is
 // written temporarily for NODE_EXTRA_CA_CERTS; no system trust store is changed.
-export async function tlsProxy() {
+export async function tlsProxy({ listenPort = 18444, receiverPort = 18872 } = {}) {
+  assert.ok([18444, 18450].includes(listenPort));
+  assert.ok([18872, 18449].includes(receiverPort));
   const dir = await mkdtemp(join(tmpdir(), 'pms-joint-ca-'));
   const config = join(dir, 'openssl.cnf');
   await writeFile(config, '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=PMS joint synthetic loopback\n[ext]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\n');
@@ -67,14 +69,14 @@ export async function tlsProxy() {
     for await (const b of req) chunks.push(b);
     const body = Buffer.concat(chunks);
     if (body.length > 65536) { res.writeHead(413).end(); return; }
-    const record = { hash: hash(body), eventId: JSON.parse(body).event_id, deliveryId: req.headers['x-qt-delivery-id'], status: null, dropped: false };
+    const record = { hash: hash(body), eventId: JSON.parse(body).event_id ?? JSON.parse(body).eventId, deliveryId: req.headers['x-qt-delivery-id'], status: null, dropped: false };
     state.records.push(record);
     const mode = state.mode;
     if (mode === 'offline') { record.dropped = true; req.socket.destroy(); return; }
     if (mode === 'hold' && state.hold) await state.hold;
-    const headers = { ...req.headers, host: '127.0.0.1:18872', 'content-length': String(body.length), connection: 'close' };
+    const headers = { ...req.headers, host: `127.0.0.1:${receiverPort}`, 'content-length': String(body.length), connection: 'close' };
     if (mode === 'bad-signature') headers['x-qt-signature'] = '0'.repeat(64);
-    const upstream = httpRequest({ host: '127.0.0.1', port: 18872, path: req.url, method: 'POST', headers }, response => {
+    const upstream = httpRequest({ host: '127.0.0.1', port: receiverPort, path: req.url, method: 'POST', headers }, response => {
       const received = [];
       response.on('data', b => received.push(b));
       response.on('end', () => {
@@ -87,7 +89,7 @@ export async function tlsProxy() {
     upstream.on('error', () => { record.dropped = true; req.socket.destroy(); });
     upstream.end(body);
   });
-  server.listen(18444, '127.0.0.1');
+  server.listen(listenPort, '127.0.0.1');
   await once(server, 'listening');
   return { ...state, state, ca, async close() { server.closeAllConnections(); await new Promise(r => server.close(r)); await rm(dir, { recursive: true, force: true }); } };
 }

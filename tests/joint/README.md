@@ -84,3 +84,27 @@ node --import tsx tests/joint/shared-baseline-regression.mjs
 ```
 
 输出为证据目录下的 `a-final-shared-regression.json`，复跑前先保留已有报告。首次脚本使用错误迁移表 schema 的失败已单独归档，成功记录不覆盖该历史。
+
+## 支付事件专项（2026-09-24）
+
+`payment-events-local.mjs` 只允许显式 `PMS_PAYMENT_JOINT_ENABLE=1`，固定本机 PG18 55448 / `qintopia_wecom_payment_joint` 与 HTTP18448。先启动独立PG实例并创建管理库qintopia；以下命令在Node22下执行：
+
+```sh
+PMS_PAYMENT_JOINT_ENABLE=1 TEST_DATABASE_URL=postgres://qintopia@127.0.0.1:55448/qintopia_wecom_payment_joint node --import tsx tests/helpers/run-database-test-suite.ts -- node --import tsx tests/joint/payment-events-local.mjs setup
+PMS_PAYMENT_JOINT_ENABLE=1 node --import tsx tests/joint/payment-events-local.mjs api
+```
+
+setup会重建这个专用模拟库，必须在原测试锁下运行；运行API后不再setup。订单、物业、来源、演示读写Token在忽略目录 `.local-workspace/payment-events/joint/fixture.json`。接收方先持久保存head=0基线，再执行：
+
+```sh
+PMS_PAYMENT_JOINT_ENABLE=1 node --import tsx tests/joint/payment-events-local.mjs discover simulation-payment-one
+PMS_PAYMENT_JOINT_ENABLE=1 node --import tsx tests/joint/payment-events-local.mjs resume
+PMS_PAYMENT_JOINT_ENABLE=1 PMS_PAYMENT_JOINT_ENDPOINT=https://127.0.0.1:18450/api/v1/ingress/pms/events PMS_PAYMENT_JOINT_KEY_FILE=/absolute/path/to/local-only-key NODE_EXTRA_CA_CERTS=/absolute/path/to/local-only-ca.pem node --import tsx tests/joint/payment-events-local.mjs deliver
+PMS_PAYMENT_JOINT_ENABLE=1 node --import tsx tests/joint/payment-events-local.mjs status
+```
+
+key文件为UTF-8原始模拟签名值（32字节以上），默认key ID为`local-payment-joint`，source为`synthetic-pms-joint-20260924`。TLS仅本机代理，不导入系统CA、不关闭生产TLS校验。deliver回执表示接收持久化，实际收款结果需由岸岸取得当笔人确认并经真实PMS命令链完成后status回读；本工具不自动登记收款。
+
+本机TLS代理入口：`PMS_PAYMENT_JOINT_ENABLE=1 node --import tsx tests/joint/payment-events-local.mjs proxy`，固定18450→18449。公开CA路径与endpoint写入忽略目录的`joint/tls.json`，私钥仅在代理内存。故障注入仅修改`joint/proxy-mode`为`normal`、`drop-ack`、`bad-signature`或`offline`，250ms内生效；`joint/tls-records.json`记录事件/投递ID、正文哈希、HTTP状态和丢回执标志，不保存正文或签名值。
+
+发送默认暂停。`resume`/`pause`是显式本机维护控制，`deliver`不会自动解除401/403形成的持久暂停。

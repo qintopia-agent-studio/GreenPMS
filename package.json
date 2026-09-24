@@ -15,6 +15,7 @@
     "dev": "concurrently -k -n api,web -c green,blue \"npm run dev -w @qintopia/api\" \"npm run dev -w @qintopia/web\"",
     "start": "npm run start -w @qintopia/api",
     "integration:worker": "node --import tsx packages/db/src/integration-worker-main.ts",
+    "payments:worker": "node --import tsx packages/db/src/payment-event-worker-main.ts",
     "wecom:worker": "node --import tsx packages/db/src/wecom-worker-main.ts",
     "db:migrate": "npm run migrate -w @qintopia/db",
     "db:ready": "npm run ready -w @qintopia/db",

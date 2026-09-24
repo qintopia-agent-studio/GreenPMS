@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
 import type { Database } from "@qintopia/db";
-import { listExternalPayments, readExternalPaymentEvents } from "../../../packages/db/src/external-payments.ts";
+import { listExternalPayments, readExternalPaymentEventHead, readExternalPaymentEvents } from "../../../packages/db/src/external-payments.ts";
 import { requirePrincipal, requirePropertyAccess } from "./auth.ts";
 import { ErrorResponse, Id } from "./schemas.ts";
 const nullable = <T extends ReturnType<typeof Type.String> | ReturnType<typeof Type.Integer>>(s: T) => Type.Union([s, Type.Null()]);
@@ -12,6 +12,17 @@ const item = Type.Object({ id: Id, kind: Type.Union([Type.Literal("COLLECTION"),
   occurredAt: Type.String({ format: "date-time" }), nickname: nullable(Type.String()), status,
   orderId: nullable(Id), membershipOrderId: nullable(Id), recommendationReasons: Type.Array(Type.String()) }, { additionalProperties: false });
 export function registerExternalPayments(app: FastifyInstance, db: Kysely<Database>) {
+  app.get("/api/v1/external-payment-events/head", { schema: { tags: ["queries"],
+    querystring: Type.Object({ propertyId: Id }, { additionalProperties: false }),
+    response: { 200: Type.Object({ schemaVersion: Type.Literal("pms.payments.v1"), propertyId: Id,
+      headCursor: Type.String({ pattern: "^(0|[1-9][0-9]{0,18})$" }) }, { additionalProperties: false }),
+      400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 500: ErrorResponse }
+  } }, async (request, reply) => {
+    const { propertyId } = request.query as { propertyId: string };
+    requirePropertyAccess(await requirePrincipal(db, request), propertyId, "READ");
+    reply.header("Cache-Control", "no-store");
+    return readExternalPaymentEventHead(db, propertyId);
+  });
   app.get("/api/v1/external-payments", { schema: { tags: ["queries"], querystring: Type.Object({
     propertyId: Id, kind: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND")]),
     recommended: Type.Optional(Type.Boolean()), amountMinor: Type.Optional(Type.Integer({ minimum: 1, maximum: 2147483647 })),

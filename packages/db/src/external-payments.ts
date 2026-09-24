@@ -3,7 +3,7 @@ import { DomainError, type CommandType } from "@qintopia/contracts";
 import { randomUUID } from "node:crypto";
 import type { Database } from "./schema.ts";
 import type { ExternalBillKind } from "./wecom-client.ts";
-import type { ExternalPaymentItem, ExternalPaymentList } from "../../contracts/src/external-payments.ts";
+import type { ExternalPaymentEventHead, ExternalPaymentEventPage, ExternalPaymentItem, ExternalPaymentList } from "../../contracts/src/external-payments.ts";
 export type { ExternalPaymentItem, ExternalPaymentList } from "../../contracts/src/external-payments.ts";
 
 type Db = Kysely<Database> | Transaction<Database>;
@@ -172,9 +172,15 @@ export async function bindExternalPayments(trx: Transaction<Database>, commandId
   }
 }
 
-export async function readExternalPaymentEvents(db: Db, propertyId: string, after: string, limit = 100) {
+export async function readExternalPaymentEventHead(db: Db, propertyId: string): Promise<ExternalPaymentEventHead> {
+  const row = (await sql<{ cursor: string }>`SELECT last_sequence::text AS cursor
+    FROM external_payment_event_heads WHERE property_id=${propertyId}`.execute(db)).rows[0];
+  return { schemaVersion: "pms.payments.v1", propertyId, headCursor: row?.cursor ?? "0" };
+}
+
+export async function readExternalPaymentEvents(db: Db, propertyId: string, after: string, limit = 100): Promise<ExternalPaymentEventPage> {
   if (!/^(0|[1-9][0-9]{0,18})$/.test(after) || BigInt(after) > 9223372036854775807n) throw new DomainError("VALIDATION_ERROR", "流水事件游标无效");
-  const rows = (await sql<{ sequence: string; event_id: string; bill_id: string; event_type: string; created_at: Date; kind: ExternalBillKind }>`
+  const rows = (await sql<{ sequence: string; event_id: string; bill_id: string; event_type: "DISCOVERED" | "MATCHED"; created_at: Date; kind: ExternalBillKind }>`
     SELECT e.sequence::text,e.event_id,e.bill_id,e.event_type,e.created_at,b.kind FROM external_payment_events e
     JOIN external_payment_bills b ON b.id=e.bill_id
     WHERE e.property_id=${propertyId} AND e.sequence>${after}::bigint ORDER BY e.sequence LIMIT ${Math.max(1, Math.min(100,limit))}`.execute(db)).rows;

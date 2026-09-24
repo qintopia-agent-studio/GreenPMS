@@ -106,3 +106,59 @@ UI 每 15 秒自动读取 PMS，时间戳用于识别同步延迟，无手动刷
 - 专用库 `qintopia_wecom_live_preview_20260910` 位于本次 PostgreSQL 18 容器的 55441 端口。页面 [http://127.0.0.1:4220/](http://127.0.0.1:4220/)，API 仅监听 `127.0.0.1:4131`；账号沿用本地 `operator` / `demo-pass-2026`。4219 原合成体验保留。
 - 流水与昵称为真实快照；两个订单均明确命名为本地模拟，退款演示原收款关联也仅用于本地体验，不代表线上订单归属。用户可模拟收款选择、取消和匹配；历史退款从退款选择器的完整清单切换“全部”查看独立退款号与原收款。基线不产生群提醒，不修改线上收退款。
 - 初始化脚本 `scripts/setup-wecom-live-preview.ts` 只允许指定本地端口和专用库，新建且不重置已有数据库。真实明细只保存于本地数据库，含明细的浏览器证据放在 Git 忽略的 `test-results` 下。
+
+## 2026-09-24 Agent OS 首次基线与主动投递
+
+来源：总指挥任务 `01a0c6ee-1de7-7302-8be1-3f7966f51bea` 的已授权开发交接；冻结材料位于 Agent OS 的 `.local-workspace/green-pms-events-dispatch-20260924/`，包括 `green-pms-payment-events-handoff.md`（SHA256 `a7610d7db4b9f63d86b569b8891ed232de6c2859dd961f2c9bf141e5ca14c03f`）、`anan-payment-feed-baseline-proposal.md`（`04f8b11a70f36419d42ed10db28ee9f237fd6998896477b79266510d72a37e02`）及 `agent-os-dual-track-coordination.md`（`34f7708ac860bac419b68b3fb08dd01bd19c207907e208926b25328b5f7235f5`）。PMS 基线为 `c75c5470f0202fadcd2a497ec6ce7e87483943fd`。接收任务 `01a0d2c3-4d3e-7f72-9206-fce386254bef` 已确认以下传输契约可承接；双方源码各自维护。
+
+### 首次基线
+
+`GET /api/v1/external-payment-events/head?propertyId=...` 复用当前主体认证与物业 READ 权限，返回 `{schemaVersion:"pms.payments.v1",propertyId,headCursor:"42"}`，并设置 `Cache-Control: no-store`。单条 SELECT 读取已提交事件头；无记录为字符串 `"0"`，bigint 不转为 JavaScript Number。无新迁移，无财务写入。
+
+接收方以可信来源实例和物业为流身份，首次取得 H 后原子保存 baseline 与 checkpoint；重启不覆盖。采样前开始、采样后提交的事务序号仍大于 H，即使 occurredAt 较早也需处理。分页 nextCursor 不是全流 head，不能用时间替代边界。来源变化或 head 回退显式报缺口。
+
+### 支付投递共同契约
+
+独立 `pms.payments.v1` 信封：`{schemaVersion,sourceInstance,propertyId,eventId,sequence,billId,kind,eventType,occurredAt}`。除 sourceInstance 外与支付补拉逐事件字段一致；eventId 为 `payment:{billId}:{eventType}`，sequence 为规范非负 bigint 十进制字符串，kind 为 COLLECTION/REFUND，eventType 为 DISCOVERED/MATCHED。不得经过旧住宿 decoder 或改变旧 `pms.events.v1` 字节。
+
+固定 HTTPS `POST /api/v1/ingress/pms/events`，Content-Type 恰为 `application/json`，无 Content-Encoding，body 不超过 65536 字节。使用 `X-QT-Key-Id`、`X-QT-Sent-At`（规范 Unix 秒）、`X-QT-Delivery-Id`、`X-QT-Signature`。签名为小写 hex HMAC-SHA256，原文依次为 POST、固定路径、sentAt、deliveryId、原始 body 的 SHA256 hex，以换行连接。接收端拒绝重复 JSON key，时间窗口为 ±300 秒，key 绑定来源和物业白名单。
+
+仅持久提交后返回 `202 {event_id,status:"accepted",receipt_id}`；重复返回 `200 {event_id,status:"duplicate",receipt_id}`，沿用同一持久 receipt_id；同 ID 不同内容是冲突。回执只证明接收，不证明登记或住客业务完成。回执丢失重发同事件身份；推送不直接推进补拉连续 checkpoint，防止越过缺口。
+
+PMS 仅对已提交事件投递，不在资金事务内发网络。复用既有签名、固定目标、租约代次、回执校验、退避、401/403 暂停和死信策略，支付持久状态独立。恢复依赖数据库，不依赖进程内唯一队列。历史/已有 MATCHED 不制造新催办，接收方使用前回读当前 PMS 状态。
+
+每笔登记收款仍需有权人对具体流水、金额、订单明确确认；完整明确交办可作为当笔确认，长期授权、到账事件和模型推断不能替代。Agent OS 保存、去重并派发事项，Hermes 运行岸岸；PMS 不运行岸岸，不管理 Agent OS 人员与协作。收款不自动入住，不改变现有预订、实际入住、续住、换房、改期及库存协议。
+
+本轮仅本地实现、模拟验证及 PR；不启用生产投递、不改 CI、不部署、不发送群消息。工程验证、双端联合验证和人工验收分别记录，生产接线另行执行。
+
+共同契约补充（总指挥与接收方 2026-09-24 回传）：身份键为可信 sourceInstance + propertyId + schemaVersion + eventId；deliveryId 仅标识一次投递。推送信封与补拉 page 抽取相同事件字段比较内容，不比较两种外层 JSON 的原始哈希；原始字节哈希仅用于传输签名。occurredAt 是事件 created_at 的 UTC ISO 表示，不是付款业务时间。退款事件不得当作新收款唤起登记。400/409/413/422 直接死信，401/403 持久暂停，网络/超时/429/5xx 和回执不匹配有限退避。联合验证覆盖推送先/补拉先、同事件不同 deliveryId、同身份异内容、跨来源/物业隔离、MATCHED 先到而 DISCOVERED 后到。
+
+阶段验证：2026-09-24，Node 22.23.2、独立 PostgreSQL 18.6（127.0.0.1:55448，`qintopia_wecom_events_20260924`），沿用原数据库测试锁运行收退款专项 16/16 通过，含新增 head 三项及既有资金/权限/回滚/并发回归；类型检查通过。head 已实现并自动验证，主动投递及双端联合验证尚在实施，不代表生产或人工验收通过。
+
+### 发送持久状态与本地运行
+
+追加迁移 `067_payment_event_delivery.sql`，不改历史迁移。新增独立 `qintopia_payment_delivery_worker`（默认 NOLOGIN）、不可变发布正文、发送租约/回执/审计及默认暂停的来源配置。旧住宿发送角色、企微同步角色权限不变。发布函数在独立事务扫描已提交支付事件，按 eventId 幂等物化队列，不以最大序号跳过未发布事件；资金事务提交后、发布前崩溃可恢复。正文 UTC 毫秒时间与 feed 一致，并在重试间保持原字节。
+
+网络层与完成处理复用 `integration-worker.ts`；独立入口 `npm run payments:worker`，默认关闭且不连库。生产配置名（此处仅接线方案，未执行）：`PMS_PAYMENT_DELIVERY_ENABLED`、`PMS_PAYMENT_DELIVERY_DATABASE_URL`、`PMS_PAYMENT_DELIVERY_ENDPOINT`、`PMS_PAYMENT_SOURCE_INSTANCE`、`PMS_PAYMENT_PROPERTY_IDS`、`PMS_PAYMENT_KEY_ID`、`PMS_PAYMENT_SIGNING_KEY`。专用角色运行，不能使用 runtime 或 owner。维护者先插入唯一 sourceInstance（以后不可更换），再以 `qintopia_payment_delivery_control('RESUME',reason)` 激活；PAUSE/RESUME/REPLAY 均需原因码并审计，REPLAY 只允许 retained dead letter。环境值与可信来源不一致停止，不能自动覆盖。
+
+每次一条在途请求，10 秒请求时限、30 秒租约，过期后重领并递增代次，旧回执不能完成新租约。指数退避和 Retry-After 上限 15 分钟，24 小时重试后死信；持久暂停只影响支付发送。未确认、已确认和死信均保留，本轮无删除/清理。运行汇总只输出状态数量和错误码，不记录正文/密钥。暂停或关闭进程即可停止新领取；恢复保留原事件/回执身份。回滚应用需保留新增 schema 对应版本兼容性，不通过删除队列或改来源解除冲突。
+
+相关旧链回归发现并修复：原 main 的通用错误脱敏白名单未包含已有 CURSOR_EXPIRED 的 `rebuild_required:true`，会删掉旧事件 feed 410 响应的必需字段，实际返回500。将该既有公开字段纳入严格白名单，保留其他私有诊断过滤；不改变旧事件正文、游标或权限协议。旧集成回归与错误契约测试验证此恢复行为。
+
+发送阶段自动验证（2026-09-24）：Node 22.23.2 / PostgreSQL 18.6，专用测试库沿用原锁。支付投递 8/8、旧住宿事件 23/23、收退款 16/16、错误响应契约 25/25、恢复脚本契约 12/12 通过；全单元 1297/1297、类型检查、release:check/build、PR格式校验8/8通过。末次增加上游结构校验后，发送进程启动/退出专项再次通过。旧事件首轮410失败与修复后23/23分开保留，没有降低检查。迁移编号核对时，本机其他分支均无067；仅在本任务独立测试库应用，无生产已应用记录读取。
+
+可复跑命令（先将 Node 22 加入 PATH）：
+
+```sh
+npm run typecheck
+npm test
+npm run build
+node --test scripts/check-pr-tests.mjs
+TEST_DATABASE_URL=postgres://qintopia@127.0.0.1:55448/qintopia_wecom_events_20260924 node --import tsx tests/helpers/run-database-test-suite.ts -- ./node_modules/.bin/vitest run tests/integration/payment-event-delivery.integration.test.ts tests/integration/integration-events.integration.test.ts tests/integration/external-payments.integration.test.ts
+./node_modules/.bin/vitest run apps/api/src/public-error.test.ts
+TEST_DATABASE_URL=postgres://qintopia@127.0.0.1:55448/qintopia_wecom_events_20260924 node --import tsx tests/helpers/run-database-test-suite.ts -- ./node_modules/.bin/vitest run tests/contract/restore-script.contract.test.ts
+```
+
+联合验证夹具为 `tests/joint/payment-events-local.mjs`，固定本机 PG55448 与独立 `qintopia_wecom_payment_joint`，HTTP入口18448；fixture只含模拟身份、演示凭证与订单，保存于忽略目录 `.local-workspace/payment-events/joint/fixture.json`。来源 `synthetic-pms-joint-20260924`，key ID `local-payment-joint`；签名值从本机受限文件读取，不进入版本库。接收HTTP计划18449，本机TLS代理计划18450；尚未完成双端联通。先setup生成未收款订单与head=0，岸岸持久初始化后再discover；`deliver`使用原HTTPS transport，`status`回读事件、发送回执与实际收款事实。人确认和登记链由岸岸真实宿主/授权链验证，PMS夹具不伪造确认。
+
+补充验证：首笔事件尚未提交时 head 为0且不等待写者；同物业两个并发事务提交后序号为1/2；早于采样时间开始的事务提交后仍可从采样H之后读出。两项定向PG18测试通过（收退款套件现17项，此前16项整套通过，新增/增强2项定向通过）。本机TLS代理已实际启动并验证临时CA握手，接收方尚未就绪，未产生模拟付款。联测工具显式 `resume/pause`，`deliver`不会解除持久暂停；保留head=0和已建模拟订单等待接收方基线。

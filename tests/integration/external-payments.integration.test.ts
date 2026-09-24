@@ -7,7 +7,7 @@ import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts"
 import { resetTestDatabase, testDatabaseUrl } from "../helpers/database.ts";
 import { runtimeDatabaseUrlForTesting } from "../helpers/runtime-database.ts";
 import { authScope } from "../helpers/auth-principals.ts";
-import { externalPaymentBasis, listExternalPayments, readExternalPaymentEvents } from "../../packages/db/src/external-payments.ts";
+import { externalPaymentBasis, listExternalPayments, readExternalPaymentEventHead, readExternalPaymentEvents } from "../../packages/db/src/external-payments.ts";
 import { syncWecomSource, type PaymentClient } from "../../packages/db/src/wecom-sync.ts";
 import { type WecomBill } from "../../packages/db/src/wecom-client.ts";
 import { externalPaymentsReady } from "../../packages/db/src/external-payments-readiness.ts";
@@ -61,6 +61,99 @@ beforeEach(async () => {
 afterEach(async () => { await runtime?.destroy(); await db?.destroy(); });
 
 describe("external payment synchronization and atomic matching", () => {
+  it("reads a committed head independent of pagination and preserves bigint precision", async () => {
+    expect(await readExternalPaymentEventHead(runtime, demo.propertyId)).toEqual({
+      schemaVersion: "pms.payments.v1", propertyId: demo.propertyId, headCursor: "0"
+    });
+    await configure();
+    await syncWecomSource(db, "source", fakeClient(Array.from({length: 105}, (_, i) => bill(`head-${i}`))), now);
+    expect((await readExternalPaymentEvents(runtime, demo.propertyId, "0")).nextCursor).toBe("100");
+    expect((await readExternalPaymentEventHead(runtime, demo.propertyId)).headCursor).toBe("105");
+    expect((await readExternalPaymentEventHead(runtime, "foreign")).headCursor).toBe("0");
+    await sql`UPDATE external_payment_event_heads SET last_sequence=9007199254740993 WHERE property_id=${demo.propertyId}`.execute(db);
+    const app = await buildServer(runtime);
+    try {
+      const response = await app.inject({method: "GET", url: `/api/v1/external-payment-events/head?propertyId=${demo.propertyId}`,
+        headers: {authorization: `Bearer ${demo.readToken}`}});
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.headers["cache-control"]).toBe("no-store");
+      expect(response.json().headCursor).toBe("9007199254740993");
+    } finally { await app.close(); }
+  });
+  it("keeps late commits after the sampled head and excludes rolled back events", async () => {
+    await configure();
+    await syncWecomSource(db, "source", fakeClient([bill("late"), bill("rollback")]), now);
+    const items = (await listExternalPayments(runtime, demo.propertyId, {kind: "COLLECTION"})).items;
+    const late = items.find(i => i.reference === "late")!.id;
+    const rollback = items.find(i => i.reference === "rollback")!.id;
+    let release!: () => void;
+    let ready!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const inserted = new Promise<void>(resolve => { ready = resolve; });
+    const pending = db.transaction().execute(async trx => {
+      await sql`SELECT qintopia_external_payment_event(${late}, 'MATCHED')`.execute(trx);
+      ready();
+      await gate;
+    });
+    await inserted;
+    let head;
+    let sampledAt: Date;
+    try {
+      head = await readExternalPaymentEventHead(runtime, demo.propertyId);
+      sampledAt = (await sql<{started: Date}>`SELECT transaction_timestamp() AS started`.execute(db)).rows[0]!.started;
+      expect(head.headCursor).toBe("2");
+      expect((await readExternalPaymentEvents(runtime, demo.propertyId, "2")).events).toHaveLength(0);
+    } finally { release(); await pending; }
+    const events = await readExternalPaymentEvents(runtime, demo.propertyId, head!.headCursor);
+    expect(events.events).toHaveLength(1);
+    expect(events.events[0]?.sequence).toBe("3");
+    expect(new Date(events.events[0]!.occurredAt).getTime()).toBeLessThanOrEqual(sampledAt!.getTime());
+    await expect(db.transaction().execute(async trx => {
+      await sql`SELECT qintopia_external_payment_event(${rollback}, 'MATCHED')`.execute(trx);
+      throw Error("rollback");
+    })).rejects.toThrow("rollback");
+    expect((await readExternalPaymentEventHead(runtime, demo.propertyId)).headCursor).toBe("3");
+    expect((await readExternalPaymentEvents(runtime, demo.propertyId, "3")).events).toHaveLength(0);
+  });
+  it("samples zero without waiting for the first transaction and serializes same-property writers", async () => {
+    await configure();
+    for (const id of ["first", "second"]) await sql`INSERT INTO external_payment_bills
+      (id,source_id,merchant_id,property_id,kind,reference,original_trade_no,amount_minor,occurred_at,state)
+      VALUES(${id},'source','m1',${demo.propertyId},'COLLECTION',${id},${id},12000,${now},'SUCCESS')`.execute(db);
+    let release!: () => void, inserted!: () => void, secondStarted!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { inserted = resolve; });
+    const started = new Promise<void>(resolve => { secondStarted = resolve; });
+    const first = db.transaction().execute(async trx => {
+      await sql`SELECT qintopia_external_payment_event('first','DISCOVERED')`.execute(trx);
+      inserted(); await gate;
+    });
+    await ready;
+    let second: Promise<void> | undefined;
+    try {
+      second = db.transaction().execute(async trx => {
+        secondStarted();
+        await sql`SELECT qintopia_external_payment_event('second','DISCOVERED')`.execute(trx);
+      });
+      await started;
+      expect((await readExternalPaymentEventHead(runtime, demo.propertyId)).headCursor).toBe("0");
+    } finally { release(); await first; await second; }
+    const events = (await readExternalPaymentEvents(runtime, demo.propertyId, "0")).events;
+    expect(events.map(e => [e.billId,e.sequence])).toEqual([["first","1"],["second","2"]]);
+    expect((await readExternalPaymentEventHead(runtime, demo.propertyId)).headCursor).toBe("2");
+  });
+  it("protects head with current authentication and property READ grants", async () => {
+    const app = await buildServer(runtime);
+    try {
+      const url = `/api/v1/external-payment-events/head?propertyId=${demo.propertyId}`;
+      const headers = {authorization: `Bearer ${demo.readToken}`};
+      expect((await app.inject({method: "GET", url})).statusCode).toBe(401);
+      expect((await app.inject({method: "GET", url, headers})).statusCode).toBe(200);
+      expect((await app.inject({method: "GET", url: "/api/v1/external-payment-events/head?propertyId=foreign", headers})).statusCode).toBe(403);
+      await db.deleteFrom("subject_property_grants").where("subject_id", "=", demo.agentSubjectId).execute();
+      expect((await app.inject({method: "GET", url, headers})).statusCode).toBe(403);
+    } finally { await app.close(); }
+  });
   it("passes readiness and limits the worker to synchronized data", async () => {
     expect(await externalPaymentsReady(db)).toBe(true);
     expect(await databaseReady(db, { identity: "maintenance-owner", staffProfileManifestName: "demo" })).toBe(true);

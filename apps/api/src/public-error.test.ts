@@ -58,7 +58,7 @@ describe("business error HTTP contracts", () => {
     const receipt = await app.inject({ url: `/receipt-regression/${index}` });
     expect(receipt.statusCode, receipt.body).toBe(200);
     expect(receipt.json().error).toMatchObject({ code, message: "已拒绝，未写入" });
-    if (index === 0) {
+    if (index === 0 || code === "CURSOR_EXPIRED") {
       expect(response.json().details).toEqual(details);
       expect(receipt.json().error.details).toEqual(details);
     } else {
