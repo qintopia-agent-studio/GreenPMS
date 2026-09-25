@@ -2,6 +2,18 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.8.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.7.2...v1.8.0) (2026-09-25)
+
+
+### Features
+
+* **payments:** 可靠投递收款事件并提供首次基线 ([#51](https://github.com/qintopia-agent-studio/GreenPMS/issues/51)) ([e7f7716](https://github.com/qintopia-agent-studio/GreenPMS/commit/e7f77163eb6d4cbc0142b356f96087b0a399458c))
+
+
+### Documentation
+
+* **payments:** 补充支付事件联合验收报告 ([#53](https://github.com/qintopia-agent-studio/GreenPMS/issues/53)) ([0dbb320](https://github.com/qintopia-agent-studio/GreenPMS/commit/0dbb3208430ade6b663c6acf587f8ec47d752533))
+
 ## [1.7.2](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.7.1...v1.7.2) (2026-09-21)
 
 
