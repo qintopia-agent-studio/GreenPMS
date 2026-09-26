@@ -4,6 +4,15 @@
 - source_spec: `待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md`
   summary: 侧边栏历史日期接入既有补录流程，并修正范围提示、占用文案及输入框间距（2026-09-21 已实现，待人工验收与反馈）。
   evidence: Node 22 下 TypeScript、1254 项单元、5 项相关浏览器、生产构建和 8 项 PR 格式检查通过；验收步骤见主验收计划“2026-09-21 侧边栏历史日期补录与提示修复”。
+
+- source_spec: 用户 2026-09-26 反馈：签发 Token 弹窗的勾选框尺寸、排布和权限选择。
+  summary: B 级界面调整已实现，待反馈；命令按业务分类显示，提供全选 Operator 权限，Operator 与 Administrator 目标主体共用，checkbox 尺寸收紧。签发和轮换仍按目标主体、当前操作者及原 Token 上限限制可选命令。
+  evidence: `apps/web/src/pages/TokensPage.tsx` 与 `apps/web/src/styles.css`；定向测试覆盖命令分组完整性、Operator 权限清单对照及全选不覆盖管理员专属权限。自动检查和浏览器预览结果以本次 PR 为准，人工满意度待反馈。
+
+- source_spec: 用户 2026-09-26 反馈：正式环境为 Operator 签发可写 Token 时，Preview 返回 400，弹窗仅提示“填写内容需要修改”。
+  summary: 已改进 Token 请求 400 的字段提示和错误编号，并纠正失败后无法返回表单的引导；正式 400 的具体字段原因尚未由响应正文证实，不能将提示改进视为签发故障已修复。待取得当次响应的 code、message、correlationId 后继续定位并补回归验证。
+  evidence: 生产约 2026-09-26 15:03:46 CST 的请求返回 400，服务端日志未保留响应正文；目标主体及管理员权限覆盖 25 项 Operator 命令。本地完整请求通过领域 Preview、TypeBox 及 Fastify 同等 Ajv 配置的联合 schema 校验，尚不能复现正式环境的 400。
+
 - source_spec: 2026-09-20 仓库遗留事项核对
   summary: AI 原草稿 PR #26 已由 #32 完整整合并关闭；当前生产 v1.5.0 已包含房型管理、AI 助手与楼栋排序、订单交互、换房修复和跨房型会员升级。
   evidence: 合并及首次发布映射、仍待人工检查的项目统一见主验收计划“2026-09-20 合并、发布与待验收核对”。下文按日期保留的“未发布”是历史阶段记录；旧预览已停止，真实模型超时由独立任务处理，不自动标记人工通过。分支历史与 AI 工作目录本地资料保存在受限、已忽略的 .local-workspace/repository-cleanup-20260920/。

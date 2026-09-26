@@ -3,6 +3,7 @@ import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import { ordinaryStaffCommandGrants } from "@qintopia/domain";
 import {
   CommandEnvelopeSchema,
   CommandEffectSchema,
@@ -617,6 +618,30 @@ describe("public command envelope schema", () => {
 
 describe("Token command ceiling schema", () => {
   const tokenSecret = `qtp_${"A".repeat(43)}`;
+
+  it("accepts the complete Operator command ceiling for a writable Token", () => {
+    const request = {
+      commandType: "ISSUE_TOKEN",
+      input: {
+        propertyId: "prop_qintopia",
+        subjectId: "subject_qintopia_operator",
+        label: "AI 助手",
+        accessCeiling: "WRITE",
+        commandCeiling: [...ordinaryStaffCommandGrants],
+        expiresAt: "2028-01-01T00:00:00.000Z",
+        tokenSecret
+      }
+    };
+    const issueSchema = CommandEnvelopeSchema.anyOf.find((branch) => branch.properties?.commandType.const === "ISSUE_TOKEN");
+    expect(issueSchema).toBeDefined();
+    const ajv = new Ajv2020({ strict: true });
+    addFormats(ajv);
+    expect(Value.Check(CommandEnvelopeSchema, request)).toBe(true);
+    expect(ajv.compile(issueSchema!)(request)).toBe(true);
+    const routeAjv = new Ajv2020({ strict: false, removeAdditional: true, useDefaults: true, coerceTypes: "array" });
+    addFormats(routeAjv);
+    expect(routeAjv.compile(CommandEnvelopeSchema)(structuredClone(request))).toBe(true);
+  });
 
   it("requires issue and rotate commands to carry an exact command ceiling", () => {
     const issue = {

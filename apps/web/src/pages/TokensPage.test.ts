@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { administratorCommandGrants, ordinaryStaffCommandGrants } from "@qintopia/domain";
 import type { RetainedTokenSecret, TokenDto } from "../types";
 import {
   coordinateTokenPreviewProgress,
   generateTokenSecret,
+  operatorTokenCommands,
   retainedTokenCommandUnresolved,
+  selectOperatorTokenCommands,
   TOKEN_SECRET_BYTES,
   tokenCommandCeilingForSubmit,
   tokenCommandCeilingOptions,
+  tokenCommandGroups,
   tokenHistoricalReadCeilingHint,
   tokenLifecycleStatus,
   tokenLifecycleStatusLabel,
@@ -80,6 +84,18 @@ describe("Token lifecycle status", () => {
 });
 
 describe("Token command ceiling", () => {
+  it("groups every command once and keeps the Operator shortcut aligned with the authorization policy", () => {
+    expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual([...administratorCommandGrants].sort());
+    expect([...operatorTokenCommands].sort()).toEqual([...ordinaryStaffCommandGrants].sort());
+  });
+
+  it("selects only currently available Operator commands and preserves Administrator choices", () => {
+    const options = ["CREATE_ORDER", "CHECK_IN", "ISSUE_TOKEN"] as const;
+    expect(selectOperatorTokenCommands(["ISSUE_TOKEN"], options, true)).toEqual(["ISSUE_TOKEN", "CREATE_ORDER", "CHECK_IN"]);
+    expect(selectOperatorTokenCommands(["ISSUE_TOKEN", "CREATE_ORDER", "CHECK_IN"], options, false)).toEqual(["ISSUE_TOKEN"]);
+    expect(selectOperatorTokenCommands([], ["ISSUE_TOKEN"], true)).toEqual([]);
+  });
+
   it("uses the exact intersection of target grants, caller actions, and optional current ceiling", () => {
     const options = tokenCommandCeilingOptions(
       ["CREATE_ORDER", "REPRICE_ORDER", "ISSUE_TOKEN", "REPRICE_ORDER"],
