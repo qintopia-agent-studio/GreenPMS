@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { administratorCommandGrants, ordinaryStaffCommandGrants } from "@qintopia/domain";
+import { administratorCommandGrants, enabledAdministratorTokenCommandGrants, ordinaryStaffCommandGrants } from "@qintopia/domain";
 import type { RetainedTokenSecret, TokenDto } from "../types";
 import {
   coordinateTokenPreviewProgress,
@@ -85,7 +85,7 @@ describe("Token lifecycle status", () => {
 
 describe("Token command ceiling", () => {
   it("groups every command once and keeps the Operator shortcut aligned with the authorization policy", () => {
-    expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual([...administratorCommandGrants].sort());
+    expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual(administratorCommandGrants.filter((command) => command !== "MANAGE_ROOM_CATALOG").sort());
     expect([...operatorTokenCommands].sort()).toEqual([...ordinaryStaffCommandGrants].sort());
   });
 
@@ -94,6 +94,14 @@ describe("Token command ceiling", () => {
     expect(selectOperatorTokenCommands(["ISSUE_TOKEN"], options, true)).toEqual(["ISSUE_TOKEN", "CREATE_ORDER", "CHECK_IN"]);
     expect(selectOperatorTokenCommands(["ISSUE_TOKEN", "CREATE_ORDER", "CHECK_IN"], options, false)).toEqual(["ISSUE_TOKEN"]);
     expect(selectOperatorTokenCommands([], ["ISSUE_TOKEN"], true)).toEqual([]);
+  });
+
+  it("offers only Token-grantable Administrator permissions even when the caller can manage the room catalog", () => {
+    const callerActions = new Set([...enabledAdministratorTokenCommandGrants, "MANAGE_ROOM_CATALOG"] as const);
+    const options = tokenCommandCeilingOptions(administratorCommandGrants, callerActions);
+    expect([...options].sort()).toEqual([...enabledAdministratorTokenCommandGrants].sort());
+    expect(tokenCommandCeilingOptions(administratorCommandGrants, callerActions, administratorCommandGrants)).toEqual(options);
+    expect(selectOperatorTokenCommands([], options, true).sort()).toEqual([...ordinaryStaffCommandGrants].sort());
   });
 
   it("uses the exact intersection of target grants, caller actions, and optional current ceiling", () => {

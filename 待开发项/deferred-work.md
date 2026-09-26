@@ -10,8 +10,8 @@
   evidence: `apps/web/src/pages/TokensPage.tsx` 与 `apps/web/src/styles.css`；定向测试覆盖命令分组完整性、Operator 权限清单对照及全选不覆盖管理员专属权限。自动检查和浏览器预览结果以本次 PR 为准，人工满意度待反馈。
 
 - source_spec: 用户 2026-09-26 反馈：正式环境为 Operator 签发可写 Token 时，Preview 返回 400，弹窗仅提示“填写内容需要修改”。
-  summary: 已改进 Token 请求 400 的字段提示和错误编号，并纠正失败后无法返回表单的引导；正式 400 的具体字段原因尚未由响应正文证实，不能将提示改进视为签发故障已修复。待取得当次响应的 code、message、correlationId 后继续定位并补回归验证。
-  evidence: 生产约 2026-09-26 15:03:46 CST 的请求返回 400，服务端日志未保留响应正文；目标主体及管理员权限覆盖 25 项 Operator 命令。本地完整请求通过领域 Preview、TypeBox 及 Fastify 同等 Ajv 配置的联合 schema 校验，尚不能复现正式环境的 400。
+  summary: 已改进 Token 请求 400 的字段提示和错误编号，并纠正失败后无法返回表单的引导。复查确认 Administrator 列表曾提供仅允许网页登录会话使用的 MANAGE_ROOM_CATALOG，选中后会触发 400；签发及轮换现已排除此选项，沿用原服务端权限边界。用户报告的那次 Operator 400 仍缺响应正文，尚不能认定为同一原因或标为修复完成；待正式环境复测与人工反馈。
+  evidence: 生产 2026-09-26 15:03:46 CST 的 Preview 返回 400（164 字节），未留下 Token 签发、Preview 或权限拒绝记录。生产 v1.8.0 的只读命令校验及效果构建接受完整 25 项 Operator 命令；本地真实 API 与受限数据库身份下，25 项 Operator 签发 Preview、Confirm、新 Token 访问均成功，测试 Token 已撤销。Administrator 选择 MANAGE_ROOM_CATALOG 可复现 VALIDATION_ERROR / commandCeiling contains a non-grantable command（400、164 字节），生产现有校验代码也拒绝该选项；响应大小一致仅是线索，不能替代当次响应正文。补充前端选项与既定可授予 Token 权限清单对照回归。
 
 - source_spec: 2026-09-20 仓库遗留事项核对
   summary: AI 原草稿 PR #26 已由 #32 完整整合并关闭；当前生产 v1.5.0 已包含房型管理、AI 助手与楼栋排序、订单交互、换房修复和跨房型会员升级。

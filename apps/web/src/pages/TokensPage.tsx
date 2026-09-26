@@ -47,6 +47,8 @@ export function tokenCommandCeilingOptions(
 ): CommandCapability[] {
   const current = currentCommandCeiling ? new Set(currentCommandCeiling) : undefined;
   return targetCommandGrants.filter((commandType, index) => targetCommandGrants.indexOf(commandType) === index
+    // Room catalog management requires an administrator browser session.
+    && commandType !== "MANAGE_ROOM_CATALOG"
     && callerAllowedActions.has(commandType)
     && (!current || current.has(commandType)));
 }
@@ -72,7 +74,7 @@ export const tokenCommandGroups = [
   { title: "会员与会籍", commands: ["CREATE_MEMBER", "CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", "CORRECT_MEMBER_ENTITLEMENT_BALANCE"] },
   { title: "住宿订单", commands: ["CREATE_ORDER", "MANAGE_ORDER_OCCUPANTS", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT", "REPRICE_ORDER", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"] },
   { title: "住宿收退款", commands: ["RECORD_COLLECTION", "RECORD_REFUND", "REVERSE_FACT"] },
-  { title: "房务", commands: ["LOCK_MAINTENANCE", "RELEASE_MAINTENANCE", "MANAGE_ROOM_CATALOG", "COMPLETE_CLEANING"] },
+  { title: "房务", commands: ["LOCK_MAINTENANCE", "RELEASE_MAINTENANCE", "COMPLETE_CLEANING"] },
   { title: "管理员纠错", commands: ["CORRECT_ORDER_OCCUPANT", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS", "CORRECT_MEMBER_PROFILE", "CORRECT_MEMBERSHIP_EFFECTIVE_DATE", "BACKFILL_HISTORICAL_MEMBERSHIP", "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", "REVOKE_CHECK_OUT"] },
   { title: "Token 管理", commands: ["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"] }
 ] as const satisfies readonly { title: string; commands: readonly CommandCapability[] }[];
