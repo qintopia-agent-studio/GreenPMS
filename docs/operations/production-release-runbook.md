@@ -1,6 +1,6 @@
 # GreenPMS 生产发布与恢复 Runbook
 
-本文描述仓库内已经实现的发布 harness。真实 COS、服务器安装和 GitHub Secrets 尚未配置，生产首发和生产验收尚未执行。首次实施范围需明确授权，可以在一个初始化窗口统一确认；下文命令是操作指南，不是已执行记录。
+本文描述仓库内已经实现的发布 harness。生产环境已执行发布；每次实际状态以服务器受限审计和 GitHub Actions 运行结果为准。下文命令是操作指南，不能替代具体发布的验收记录。
 
 快速操作入口见 [生产发布快速开始](production-release-quickstart.md)。
 
@@ -148,6 +148,10 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 | Actions 在健康 receipt 后失败 | 新容器保持健康；marker/retention 可通过重跑或 maintenance 幂等恢复 |
 | COS 删除部分失败 | 新容器保持运行，报告删除失败，不强制回退 |
 | 进程被 SIGKILL 或主机断电 | trap 可能无法执行；下一次 recovery timer 清理专用临时目录并按 journal 恢复 |
+
+Compose 启动或健康门禁失败时，服务器在恢复前向受限 `audit.jsonl` 写入 `failed` 记录。`stage` 区分 `compose-start` 与 `health-gate`；`diagnosticCode` 使用固定代码。健康门禁另记最后一次检查的 `codes`，以及 app 的运行/健康状态、worker 的运行状态和二者是否匹配目标镜像。四个探针分别使用 `LOCAL_READY`、`LOCAL_VERSION`、`PUBLIC_READY`、`PUBLIC_VERSION` 前缀，并以 `HTTP_STATUS`、`UNREACHABLE`、`MISMATCH`、`INVALID_RESPONSE` 或截止时间内 `NOT_CHECKED` 区分结果。该记录不包含命令 stderr、容器日志、HTTP 正文、镜像 ID、URL 或环境值；GitHub 仍只收到恢复结果。若审计盘不可写，恢复照常尝试，并报告本地审计不可用。
+
+2026-09-26 的 v1.8.0（revision `537558701896c5bb2d7e65bb968817ff226faf43`）发布运行 [36206227155](https://github.com/qintopia-agent-studio/GreenPMS/actions/runs/36206227155) 已通过校验、打包和 COS 上传，服务器审计记录 `00:53:05Z started`、`00:55:47Z failed(stage=switch-or-health)`、`00:56:01Z restored`。恢复后服务器仍运行 v1.7.2，previous 为 v1.7.1；旧 app healthy、worker running，无未完成 transaction。旧审计未区分 Compose、容器及四个探针，约 162 秒不能证明健康超时是根因。本次诊断修改只为下一次失败保留固定代码，不追认该次失败子项。
 
 日志只输出版本、revision、前缀和状态等必要证据，不输出 COS credentials、SSH private key、数据库 URL、应用 env、STS token 或任何密码。若排障发现凭据疑似暴露，在明确授权的窗口内轮换，并从干净 checkout 重新构建和核验镜像；旧镜像的应急使用也需包含在授权范围内。
 
