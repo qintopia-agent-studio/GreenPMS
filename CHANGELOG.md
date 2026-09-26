@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.8.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.8.0...v1.8.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **release:** record restricted switch failure diagnostics ([#54](https://github.com/qintopia-agent-studio/GreenPMS/issues/54)) ([3116f52](https://github.com/qintopia-agent-studio/GreenPMS/commit/3116f52608866b0ff8bba81acc6c74a63d86fc5c))
+* **tokens:** 优化权限选择与签发校验提示 ([#56](https://github.com/qintopia-agent-studio/GreenPMS/issues/56)) ([f10e40a](https://github.com/qintopia-agent-studio/GreenPMS/commit/f10e40a8f4dc27b3871e93bc78c02e2b95fba69d))
+
 ## [1.8.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.7.2...v1.8.0) (2026-09-25)
 
 
