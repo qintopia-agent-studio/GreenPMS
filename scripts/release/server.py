@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 from common import (ARCHIVE, FILES, HEX, ReleaseError, image_tag, json_bytes,
@@ -60,14 +61,26 @@ def deployment_lock(directory):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def command(args, *, env=None, timeout=180):
+class DeploymentDiagnosticError(ReleaseError):
+    def __init__(self, code, message, *, details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
+
+def command(args, *, env=None, timeout=180, failure_code=None):
     """Never put untrusted command output, database URLs or environment in logs."""
     try:
         result = subprocess.run(args, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired):
+        if failure_code:
+            raise DeploymentDiagnosticError(failure_code + "_UNAVAILABLE", "external command unavailable or timed out") from None
         raise ReleaseError("external command unavailable or timed out") from None
-    require(result.returncode == 0, "external command failed; consult restricted local diagnostics")
+    if result.returncode != 0:
+        if failure_code:
+            raise DeploymentDiagnosticError(failure_code, "external command failed; consult restricted local diagnostics")
+        raise ReleaseError("external command failed; consult restricted local diagnostics")
     return result.stdout.decode()
 
 
@@ -85,11 +98,14 @@ class Docker:
 
     def service(self, service, container_name):
         items = [c for c in self.containers() if c["name"] == "/" + container_name]
-        require(len(items) == 1, f"expected production {service} container missing")
+        if len(items) != 1:
+            raise DeploymentDiagnosticError("APP_CONTAINER_MISSING" if service == "app" else "WORKER_CONTAINER_MISSING",
+                                            "expected production container missing")
         container = items[0]
         labels = container.get("labels") or {}
-        require(labels.get("com.docker.compose.project") == "green-pms"
-                and labels.get("com.docker.compose.service") == service, "container ownership mismatch")
+        if labels.get("com.docker.compose.project") != "green-pms" or labels.get("com.docker.compose.service") != service:
+            raise DeploymentDiagnosticError("APP_OWNERSHIP_MISMATCH" if service == "app" else "WORKER_OWNERSHIP_MISMATCH",
+                                            "container ownership mismatch")
         return container
 
     def current(self):
@@ -117,7 +133,7 @@ class Docker:
         command(["docker", "compose", "--project-name", "green-pms", "--file", self.config["composeFile"],
                  "--env-file", self.config["envFile"], "up", "--detach", "--no-build", "--pull", "never", "--force-recreate",
                  "app", "wecom-worker"],
-                env=environment, timeout=180)
+                env=environment, timeout=180, failure_code="COMPOSE_START_FAILED")
 
     def images(self):
         ids = sorted(set(command(["docker", "image", "ls", "-aq", "--no-trunc"]).split()))
@@ -204,25 +220,67 @@ class Health:
 
     def __call__(self, release):
         deadline = time.monotonic() + self.config.get("healthTimeoutSeconds", 150)
+        last = {"codes": ["HEALTH_NOT_OBSERVED"]}
         while time.monotonic() < deadline:
-            current = self.docker.current()
-            worker = self.docker.worker()
-            if (current["imageId"] == runtime_image_id(release) and current["running"] and current["health"] == "healthy"
-                    and worker["imageId"] == runtime_image_id(release) and worker["running"]):
-                try:
-                    version = release["manifest"]["version"].removeprefix("v")
-                    base = self.config["localBaseUrl"].rstrip("/")
-                    for url, expected_version in ((base + "/health/ready", None), (base + "/api/v1/version", version),
-                                                  (self.config["publicReadyUrl"], None), (self.config["publicVersionUrl"], version)):
-                        with urllib.request.urlopen(url, timeout=10) as response:
-                            require(response.status == 200, "health HTTP status failed")
-                            if expected_version:
-                                require(json.loads(response.read(65536)).get("version") == expected_version, "health version mismatch")
-                    return
-                except Exception:
-                    pass  # Only a fixed failure reason is exposed, never response data.
+            last = self.check_once(release, deadline=deadline)
+            if not last["codes"]:
+                return
             time.sleep(2)
-        raise ReleaseError("Docker/local/public readiness or version gate failed")
+        raise DeploymentDiagnosticError("HEALTH_GATE_FAILED", "Docker/local/public readiness or version gate failed", details=last)
+
+    def check_once(self, release, *, deadline=None):
+        codes, states = [], {}
+        identity = runtime_image_id(release)
+        for name, lookup in (("app", self.docker.current), ("worker", self.docker.worker)):
+            try:
+                container = lookup()
+                running = container.get("running") is True
+                image_matches = container.get("imageId") == identity
+                state = {"running": running, "imageMatches": image_matches}
+                if name == "app":
+                    health = container.get("health")
+                    state["health"] = health if health in ("healthy", "unhealthy", "starting", "none") else "unknown"
+                states[name] = state
+                if not running:
+                    codes.append(name.upper() + "_NOT_RUNNING")
+                if not image_matches:
+                    codes.append(name.upper() + "_IMAGE_MISMATCH")
+                if name == "app" and state["health"] != "healthy":
+                    codes.append("APP_NOT_HEALTHY")
+            except ReleaseError as error:
+                codes.append(error.code if isinstance(error, DeploymentDiagnosticError)
+                             else name.upper() + "_INSPECT_FAILED")
+            except Exception:
+                codes.append(name.upper() + "_INSPECT_FAILED")
+        if codes:
+            return {"codes": sorted(set(codes)), "containers": states}
+
+        version = release["manifest"]["version"].removeprefix("v")
+        base = self.config["localBaseUrl"].rstrip("/")
+        probes = (("LOCAL_READY", base + "/health/ready", None),
+                  ("LOCAL_VERSION", base + "/api/v1/version", version),
+                  ("PUBLIC_READY", self.config["publicReadyUrl"], None),
+                  ("PUBLIC_VERSION", self.config["publicVersionUrl"], version))
+        for name, url, expected_version in probes:
+            remaining = deadline - time.monotonic() if deadline is not None else 10
+            if remaining <= 0:
+                codes.append(name + "_NOT_CHECKED")
+                continue
+            try:
+                with urllib.request.urlopen(url, timeout=min(10, remaining)) as response:
+                    if response.status != 200:
+                        codes.append(name + "_HTTP_STATUS")
+                    elif expected_version:
+                        try:
+                            actual = json.loads(response.read(65536))
+                            codes.append(name + "_MISMATCH" if actual.get("version") != expected_version else "")
+                        except (ValueError, AttributeError, TypeError):
+                            codes.append(name + "_INVALID_RESPONSE")
+            except urllib.error.HTTPError:
+                codes.append(name + "_HTTP_STATUS")
+            except Exception:
+                codes.append(name + "_UNREACHABLE")
+        return {"codes": sorted(code for code in codes if code), "containers": states}
 
 
 class Deployer:
@@ -360,14 +418,19 @@ class Deployer:
     def promote(self, before, target, *, rollback=False):
         self.observe(before)
         atomic_json(self.journal, {"before": before, "target": target, "startedAt": utcnow()})
+        stage = "compose-start"
         try:
             self.docker.switch(target)
+            stage = "health-gate"
             self.health(target)
             after = {**before, "current": target, "previous": before["current"],
                      "rollbackFrom": before["current"] if rollback else None, "deployedAt": utcnow()}
             atomic_json(self.state_file, after)
-        except BaseException:
-            self.failure_evidence("failed", version=target["manifest"]["version"], stage="switch-or-health")
+        except BaseException as error:
+            code = error.code if isinstance(error, DeploymentDiagnosticError) else "UNEXPECTED_" + stage.upper().replace("-", "_")
+            details = error.details if isinstance(error, DeploymentDiagnosticError) else {}
+            self.failure_evidence("failed", version=target["manifest"]["version"], stage=stage,
+                                  diagnosticCode=code, **details)
             try:
                 self.docker.switch(before["current"])
                 self.health(before["current"])

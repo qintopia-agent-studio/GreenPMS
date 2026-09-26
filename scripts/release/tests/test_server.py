@@ -18,7 +18,8 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+import urllib.error
+from unittest.mock import MagicMock, Mock, patch
 
 
 RELEASE_DIR = Path(__file__).resolve().parents[1]
@@ -198,6 +199,76 @@ class FakeDocker:
 
 
 class DockerAdapterTests(unittest.TestCase):
+    def test_compose_failure_has_fixed_code_without_command_output(self) -> None:
+        secret = "postgres://secret@database/private"
+        result = subprocess.CompletedProcess([], 1, stdout=b"", stderr=secret.encode())
+        with patch("server.subprocess.run", return_value=result):
+            with self.assertRaises(server.DeploymentDiagnosticError) as raised:
+                server.command(["docker", "compose", "up"], failure_code="COMPOSE_START_FAILED")
+        self.assertEqual(raised.exception.code, "COMPOSE_START_FAILED")
+        self.assertNotIn(secret, str(raised.exception))
+
+    def test_health_probe_codes_do_not_include_response_data(self) -> None:
+        docker = Mock()
+        image = "sha256:" + "a" * 64
+        docker.current.return_value = {"imageId": image, "running": True, "health": "healthy"}
+        docker.worker.return_value = {"imageId": image, "running": True}
+        health = server.Health(docker, {"localBaseUrl": "http://127.0.0.1:4100",
+                                        "publicReadyUrl": "https://example.test/health/ready",
+                                        "publicVersionUrl": "https://example.test/api/v1/version"})
+        responses = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        for response in responses:
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=False)
+            response.status = 200
+        responses[0].status = 503
+        responses[1].read.return_value = b'{"version":"wrong","secret":"private"}'
+        responses[2].__enter__.side_effect = OSError("secret url")
+        responses[3].read.return_value = b'{"version":"1.2.4"}'
+        with patch("server.urllib.request.urlopen", side_effect=responses):
+            # The third probe fails while entering its context manager.
+            result = health.check_once({"runtimeImageId": image, "manifest": {"version": "v1.2.4"}})
+        self.assertEqual(result["codes"], ["LOCAL_READY_HTTP_STATUS", "LOCAL_VERSION_MISMATCH", "PUBLIC_READY_UNREACHABLE"])
+        self.assertNotIn("secret", json.dumps(result))
+
+    def test_http_error_is_status_failure_not_connection_failure(self) -> None:
+        docker = Mock()
+        image = "sha256:" + "a" * 64
+        docker.current.return_value = {"imageId": image, "running": True, "health": "healthy"}
+        docker.worker.return_value = {"imageId": image, "running": True}
+        health = server.Health(docker, {"localBaseUrl": "http://127.0.0.1:4100",
+                                        "publicReadyUrl": "https://example.test/health/ready",
+                                        "publicVersionUrl": "https://example.test/api/v1/version"})
+        with patch("server.urllib.request.urlopen", side_effect=urllib.error.HTTPError(
+                "https://secret.example.test", 503, "secret", {}, None)):
+            result = health.check_once({"runtimeImageId": image, "manifest": {"version": "v1.2.4"}})
+        self.assertEqual(result["codes"], ["LOCAL_READY_HTTP_STATUS", "LOCAL_VERSION_HTTP_STATUS",
+                                            "PUBLIC_READY_HTTP_STATUS", "PUBLIC_VERSION_HTTP_STATUS"])
+        self.assertNotIn("secret", json.dumps(result))
+
+    def test_probe_budget_does_not_extend_the_health_deadline(self) -> None:
+        docker = Mock()
+        image = "sha256:" + "a" * 64
+        docker.current.return_value = {"imageId": image, "running": True, "health": "healthy"}
+        docker.worker.return_value = {"imageId": image, "running": True}
+        health = server.Health(docker, {"localBaseUrl": "http://127.0.0.1:4100",
+                                        "publicReadyUrl": "https://example.test/health/ready",
+                                        "publicVersionUrl": "https://example.test/api/v1/version"})
+        with patch("server.urllib.request.urlopen") as urlopen:
+            result = health.check_once({"runtimeImageId": image, "manifest": {"version": "v1.2.4"}}, deadline=0)
+        urlopen.assert_not_called()
+        self.assertEqual(result["codes"], ["LOCAL_READY_NOT_CHECKED", "LOCAL_VERSION_NOT_CHECKED",
+                                            "PUBLIC_READY_NOT_CHECKED", "PUBLIC_VERSION_NOT_CHECKED"])
+
+    def test_health_reports_container_state_without_image_id(self) -> None:
+        docker = Mock()
+        docker.current.return_value = {"imageId": "sha256:" + "b" * 64, "running": False, "health": "unhealthy"}
+        docker.worker.return_value = {"imageId": "sha256:" + "a" * 64, "running": False}
+        health = server.Health(docker, {"localBaseUrl": "http://127.0.0.1:4100"})
+        result = health.check_once({"runtimeImageId": "sha256:" + "a" * 64, "manifest": {"version": "v1.2.4"}})
+        self.assertEqual(result["codes"], ["APP_IMAGE_MISMATCH", "APP_NOT_HEALTHY", "APP_NOT_RUNNING", "WORKER_NOT_RUNNING"])
+        self.assertEqual(result["containers"]["app"], {"running": False, "imageMatches": False, "health": "unhealthy"})
+
     def test_container_inspection_handles_containers_without_healthchecks(self) -> None:
         calls: list[list[str]] = []
 
@@ -467,6 +538,72 @@ class CompressionTests(unittest.TestCase):
 
 @unittest.skipIf(server is None, "server.py import contract must be fixed first")
 class DeploymentTests(unittest.TestCase):
+    def test_health_diagnostic_is_recorded_before_recovery_changes_container(self) -> None:
+        class DiagnosticHealth(FakeHealth):
+            def __call__(self, release: dict[str, object]) -> None:
+                if release["manifest"]["version"] == DeployerFixture.new_version:
+                    raise server.DeploymentDiagnosticError(
+                        "HEALTH_GATE_FAILED", "fixed health failure",
+                        details={"codes": ["PUBLIC_VERSION_MISMATCH"],
+                                 "containers": {"app": {"running": True, "imageMatches": True, "health": "healthy"},
+                                                "worker": {"running": True, "imageMatches": True}}})
+
+        with DeployerFixture(health=DiagnosticHealth()) as fixture:
+            _, key = fixture.add_new_release()
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+            observed: list[str] = []
+            original_audit = fixture.deployer.audit
+
+            def audit(event: str, **fields: object) -> None:
+                if event == "failed":
+                    observed.append(fixture.docker.current_image_id)
+                original_audit(event, **fields)
+
+            fixture.deployer.audit = audit
+            with self.assertRaisesRegex(ReleaseError, "previous container restored"):
+                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            records = [json.loads(line) for line in (fixture.state_dir / "audit.jsonl").read_text().splitlines()]
+            self.assertEqual(observed, [fixture.new_image_id])
+            self.assertEqual(records[-2]["diagnosticCode"], "HEALTH_GATE_FAILED")
+            self.assertEqual(records[-2]["codes"], ["PUBLIC_VERSION_MISMATCH"])
+            self.assertEqual(records[-1]["event"], "restored")
+            self.assertEqual(fixture.docker.current_image_id, fixture.old_image_id)
+            self.assertEqual(fixture.store.markers, {})
+
+    def test_compose_failure_audits_fixed_code_before_restore(self) -> None:
+        with DeployerFixture() as fixture:
+            _, key = fixture.add_new_release()
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+            original_switch = fixture.docker.switch
+
+            def fail_target(release: dict[str, object]) -> None:
+                if release["manifest"]["version"] == fixture.new_version:
+                    raise server.DeploymentDiagnosticError("COMPOSE_START_FAILED", "hidden stderr")
+                original_switch(release)
+
+            fixture.docker.switch = fail_target
+            with self.assertRaisesRegex(ReleaseError, "previous container restored"):
+                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            audit = [json.loads(line) for line in (fixture.state_dir / "audit.jsonl").read_text().splitlines()]
+            self.assertEqual([(entry["event"], entry.get("diagnosticCode")) for entry in audit[-2:]],
+                             [("failed", "COMPOSE_START_FAILED"), ("restored", None)])
+            self.assertEqual(audit[-2]["stage"], "compose-start")
+            self.assertNotIn("hidden stderr", json.dumps(audit))
+            self.assertFalse(fixture.deployer.journal.exists())
+            self.assertEqual(fixture.store.markers, {})
+
+    def test_health_failure_audits_probe_codes_before_restore(self) -> None:
+        health = FakeHealth(failures={DeployerFixture.new_image_id})
+        with DeployerFixture(health=health) as fixture:
+            _, key = fixture.add_new_release()
+            manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
+            with self.assertRaisesRegex(ReleaseError, "previous container restored"):
+                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            audit = [json.loads(line) for line in (fixture.state_dir / "audit.jsonl").read_text().splitlines()]
+            self.assertEqual(audit[-2]["stage"], "health-gate")
+            self.assertEqual(audit[-2]["diagnosticCode"], "UNEXPECTED_HEALTH_GATE")
+            self.assertEqual(audit[-1]["event"], "restored")
+
     def test_load_accepts_a_different_daemon_runtime_id_and_records_it(self) -> None:
         with DeployerFixture() as fixture:
             manifest, key = fixture.add_new_release(runtime_image_id=fixture.new_runtime_image_id)
