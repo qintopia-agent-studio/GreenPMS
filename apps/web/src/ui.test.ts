@@ -737,6 +737,19 @@ describe("operator-facing business errors", () => {
     }))).toBe(true);
   });
 
+  it("shows the Token validation field and trace reference without exposing the submitted secret", () => {
+    const error = new ApiError(400, {
+      code: "VALIDATION_ERROR",
+      message: "body/input/commandCeiling contains qtp_private_secret",
+      correlationId: "token-correlation-123"
+    });
+    const message = commandDialogBusinessErrorMessage("ISSUE_TOKEN", error);
+    expect(message).toContain("命令权限与当前可授予范围不一致");
+    expect(message).toContain("token-correlation-123");
+    expect(message).not.toContain("qtp_private_secret");
+    expect(commandPreviewFailureCanReload(error)).toBe(false);
+  });
+
   it("explains an existing membership in operator language when historical backfill is no longer eligible", () => {
     const conflict = new ApiError(409, {
       code: "ENTITLEMENT_CONFLICT",

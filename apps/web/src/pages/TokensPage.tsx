@@ -47,6 +47,8 @@ export function tokenCommandCeilingOptions(
 ): CommandCapability[] {
   const current = currentCommandCeiling ? new Set(currentCommandCeiling) : undefined;
   return targetCommandGrants.filter((commandType, index) => targetCommandGrants.indexOf(commandType) === index
+    // Room catalog management requires an administrator browser session.
+    && commandType !== "MANAGE_ROOM_CATALOG"
     && callerAllowedActions.has(commandType)
     && (!current || current.has(commandType)));
 }
@@ -57,6 +59,31 @@ export function tokenCommandCeilingForSubmit(
 ): CommandCapability[] {
   if (accessCeiling === "READ") return [];
   return [...new Set(selectedCommands)];
+}
+
+export const operatorTokenCommands = [
+  "CREATE_MEMBER", "CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT",
+  "ACTIVATE_MEMBERSHIP_ORDER", "CREATE_ORDER", "MANAGE_ORDER_OCCUPANTS", "RESCHEDULE_STAY", "EXTEND_STAY",
+  "SHORTEN_STAY", "MOVE_UNIT", "REPRICE_ORDER", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN",
+  "LOCK_MAINTENANCE", "RELEASE_MAINTENANCE", "RECORD_COLLECTION", "RECORD_REFUND", "REVERSE_FACT",
+  "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", "CHECK_IN", "CHECK_OUT", "COMPLETE_STAY",
+  "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
+] as const satisfies readonly CommandCapability[];
+
+export const tokenCommandGroups = [
+  { title: "会员与会籍", commands: ["CREATE_MEMBER", "CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", "CORRECT_MEMBER_ENTITLEMENT_BALANCE"] },
+  { title: "住宿订单", commands: ["CREATE_ORDER", "MANAGE_ORDER_OCCUPANTS", "RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT", "REPRICE_ORDER", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"] },
+  { title: "住宿收退款", commands: ["RECORD_COLLECTION", "RECORD_REFUND", "REVERSE_FACT"] },
+  { title: "房务", commands: ["LOCK_MAINTENANCE", "RELEASE_MAINTENANCE", "COMPLETE_CLEANING"] },
+  { title: "管理员纠错", commands: ["CORRECT_ORDER_OCCUPANT", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS", "CORRECT_MEMBER_PROFILE", "CORRECT_MEMBERSHIP_EFFECTIVE_DATE", "BACKFILL_HISTORICAL_MEMBERSHIP", "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", "REVOKE_CHECK_OUT"] },
+  { title: "Token 管理", commands: ["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"] }
+] as const satisfies readonly { title: string; commands: readonly CommandCapability[] }[];
+
+export function selectOperatorTokenCommands(current: readonly CommandCapability[], options: readonly CommandCapability[], checked: boolean): CommandCapability[] {
+  const eligible = new Set(options.filter((command) => (operatorTokenCommands as readonly CommandCapability[]).includes(command)));
+  return checked
+    ? [...new Set([...current, ...options.filter((command) => eligible.has(command))])]
+    : current.filter((command) => !eligible.has(command));
 }
 
 export function tokenHistoricalReadCeilingHint(token: Pick<TokenDto, "historicalReadCeilingPreserved">): string | null {
@@ -216,6 +243,8 @@ function TokenSecretDialog({ operation, token, accessGrant, targets, callerAllow
     token?.commandCeiling
   );
   const commandOptionKey = commandOptions.join("|");
+  const availableOperatorCommands = commandOptions.filter((command) => (operatorTokenCommands as readonly CommandCapability[]).includes(command));
+  const allOperatorSelected = availableOperatorCommands.length > 0 && availableOperatorCommands.every((command) => selectedCommandCeiling.includes(command));
 
   useEffect(() => {
     if (accessCeiling === "WRITE" && !canGrantWriteAccess) setAccessCeiling("READ");
@@ -310,18 +339,26 @@ function TokenSecretDialog({ operation, token, accessGrant, targets, callerAllow
           {(isIssue ? accessCeiling : token?.access_ceiling) === "WRITE" ? (
             <fieldset className="span-two token-command-ceiling">
               <legend>命令上限</legend>
-              {!commandOptions.length ? <p>当前没有可授予的写命令；Token 将不能执行写命令。</p> : commandOptions.map((commandType) => (
-                <label key={commandType}>
-                  <input
-                    type="checkbox"
-                    checked={selectedCommandCeiling.includes(commandType)}
-                    onChange={(event) => setSelectedCommandCeiling((current) => event.target.checked
-                      ? [...current, commandType]
-                      : current.filter((candidate) => candidate !== commandType))}
-                  />
-                  <span>{commandCapabilityBusinessLabel(commandType)}</span>
-                </label>
-              ))}
+              {!commandOptions.length ? <p>当前没有可授予的写命令；Token 将不能执行写命令。</p> : <>
+                {availableOperatorCommands.length > 0 ? <label className="check-row token-command-select-all">
+                  <input type="checkbox" checked={allOperatorSelected} onChange={(event) => setSelectedCommandCeiling((current) => selectOperatorTokenCommands(current, commandOptions, event.target.checked))} />
+                  <span>全选 Operator 权限 <small>{availableOperatorCommands.length} 项</small></span>
+                </label> : null}
+                <div className="token-command-groups">
+                  {tokenCommandGroups.map((group) => {
+                    const commands = group.commands.filter((command) => commandOptions.includes(command));
+                    return commands.length ? <section className="token-command-group" key={group.title} aria-label={group.title}>
+                      <h3>{group.title}</h3>
+                      <div className="token-command-items">{commands.map((commandType) => <label className="check-row" key={commandType}>
+                        <input type="checkbox" checked={selectedCommandCeiling.includes(commandType)} onChange={(event) => setSelectedCommandCeiling((current) => event.target.checked
+                          ? [...current, commandType]
+                          : current.filter((candidate) => candidate !== commandType))} />
+                        <span>{commandCapabilityBusinessLabel(commandType)}</span>
+                      </label>)}</div>
+                    </section> : null;
+                  })}
+                </div>
+              </>}
             </fieldset>
           ) : null}
           <label htmlFor="token-expires-at">过期时间<input id="token-expires-at" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} required /></label>

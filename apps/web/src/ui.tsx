@@ -42,6 +42,21 @@ export { formatMoney, formatMinor, stayDateFundsAreOperatorFacing, formatDate, n
 import { formatMoney, formatMinor, stayDateFundsAreOperatorFacing, formatDate, nextLocalDate, formatDateTime, guestName, guestSearchText, errorMessage, businessErrorMessage, InfoHint, membershipStartDateHelp, membershipPaymentDateHelp, StatusBadge, businessStatusLabel, InlineError, EmptyState, LoadingBlock, CommandResultNotice, ModalNoticeProvider, Modal } from "./uiBasic";
 
 export function commandDialogBusinessErrorMessage(commandType: HistoricalCommandType, error: unknown): string {
+  if ((commandType === "ISSUE_TOKEN" || commandType === "ROTATE_TOKEN" || commandType === "REVOKE_TOKEN")
+    && error instanceof ApiError && error.status === 400) {
+    const detail = /commandCeiling/i.test(error.message)
+      ? "命令权限与当前可授予范围不一致，请刷新页面后重新选择。"
+      : /expiresAt/i.test(error.message)
+        ? "过期时间无效，请重新设置。"
+        : /tokenSecret/i.test(error.message)
+          ? "一次性密钥无效，请重新生成。"
+          : /subjectId/i.test(error.message)
+            ? "目标主体无效，请重新选择。"
+            : /label/i.test(error.message)
+              ? "Token 标签无效，请重新填写。"
+              : "Token 操作信息未通过校验，请刷新页面后重新填写。";
+    return `${detail}${error.correlationId ? ` 错误编号：${error.correlationId}` : ""}`;
+  }
   if (isExistingMembershipBackfillConflict(commandType, error)) {
     return "系统发现这位会员已有未作废的办卡订单、仍在生效的合同或可用权益。为避免重复生成合同和权益，本次补录没有写入。";
   }
@@ -6956,7 +6971,10 @@ export function CommandDialog({
           {businessFacing ? <p>{deterministicPreviewFailure
             ? existingMembershipBackfillConflict
               ? "请关闭本窗口，先核对这位会员现有的办卡记录；如原记录有误，请使用对应的会员修改功能。"
-              : request.commandType === "CORRECT_ORDER_OCCUPANT" ? "请返回修改住宿人资料后重新核对。" : "请返回修改填写内容后重新核对。"
+              : request.commandType === "CORRECT_ORDER_OCCUPANT" ? "请返回修改住宿人资料后重新核对。"
+                : request.commandType === "ISSUE_TOKEN" || request.commandType === "ROTATE_TOKEN"
+                  ? "本次密钥没有生效。请关闭窗口，清除未提交的密钥显示后重新填写。"
+                  : "请返回修改填写内容后重新核对。"
             : busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : administratorMembershipCorrection ? `正在载入${membershipCommandLabel(request.commandType as CommandType)}核对信息。` : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : administratorMembershipCorrection ? `系统将重新载入${membershipCommandLabel(request.commandType as CommandType)}的只读核对信息。` : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>

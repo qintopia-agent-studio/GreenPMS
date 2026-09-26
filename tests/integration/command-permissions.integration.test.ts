@@ -314,6 +314,23 @@ afterAll(async () => {
 });
 
 describe("exact command permissions on PostgreSQL", () => {
+  it("previews a writable Operator Token with every current staff command", async () => {
+    const preview = await createCommandPreview(db, administratorPrincipal, {
+      commandType: "ISSUE_TOKEN",
+      input: {
+        propertyId: demo.propertyId,
+        subjectId: demo.operatorSubjectId,
+        label: "Operator full-scope agent",
+        accessCeiling: "WRITE",
+        commandCeiling: [...ordinaryStaffCommandGrants],
+        expiresAt: "2029-01-01T00:00:00.000Z",
+        tokenSecret: newOpaqueSecret("qtp")
+      }
+    }, metadata("operator-full-scope-token"));
+
+    expect(preview.preview.commandType).toBe("ISSUE_TOKEN");
+  });
+
   it("covers every catalog command in the operator/admin authorization stage matrix", async () => {
     expect(commandTypes).toHaveLength(40);
     expect(commandCatalogTypes).toHaveLength(44);

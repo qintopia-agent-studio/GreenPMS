@@ -4,6 +4,15 @@
 - source_spec: `待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md`
   summary: 侧边栏历史日期接入既有补录流程，并修正范围提示、占用文案及输入框间距（2026-09-21 已实现，待人工验收与反馈）。
   evidence: Node 22 下 TypeScript、1254 项单元、5 项相关浏览器、生产构建和 8 项 PR 格式检查通过；验收步骤见主验收计划“2026-09-21 侧边栏历史日期补录与提示修复”。
+
+- source_spec: 用户 2026-09-26 反馈：签发 Token 弹窗的勾选框尺寸、排布和权限选择。
+  summary: B 级界面调整已实现，待反馈；命令按业务分类显示，提供全选 Operator 权限，Operator 与 Administrator 目标主体共用，checkbox 尺寸收紧。签发和轮换仍按目标主体、当前操作者及原 Token 上限限制可选命令。
+  evidence: `apps/web/src/pages/TokensPage.tsx` 与 `apps/web/src/styles.css`；定向测试覆盖命令分组完整性、Operator 权限清单对照及全选不覆盖管理员专属权限。自动检查和浏览器预览结果以本次 PR 为准，人工满意度待反馈。
+
+- source_spec: 用户 2026-09-26 反馈：正式环境为 Operator 签发可写 Token 时，Preview 返回 400，弹窗仅提示“填写内容需要修改”。
+  summary: 已改进 Token 请求 400 的字段提示和错误编号，并纠正失败后无法返回表单的引导。复查确认 Administrator 列表曾提供仅允许网页登录会话使用的 MANAGE_ROOM_CATALOG，选中后会触发 400；签发及轮换现已排除此选项，沿用原服务端权限边界。用户报告的那次 Operator 400 仍缺响应正文，尚不能认定为同一原因或标为修复完成；待正式环境复测与人工反馈。
+  evidence: 生产 2026-09-26 15:03:46 CST 的 Preview 返回 400（164 字节），未留下 Token 签发、Preview 或权限拒绝记录。生产 v1.8.0 的只读命令校验及效果构建接受完整 25 项 Operator 命令；本地真实 API 与受限数据库身份下，25 项 Operator 签发 Preview、Confirm、新 Token 访问均成功，测试 Token 已撤销。Administrator 选择 MANAGE_ROOM_CATALOG 可复现 VALIDATION_ERROR / commandCeiling contains a non-grantable command（400、164 字节），生产现有校验代码也拒绝该选项；响应大小一致仅是线索，不能替代当次响应正文。补充前端选项与既定可授予 Token 权限清单对照回归。
+
 - source_spec: 2026-09-20 仓库遗留事项核对
   summary: AI 原草稿 PR #26 已由 #32 完整整合并关闭；当前生产 v1.5.0 已包含房型管理、AI 助手与楼栋排序、订单交互、换房修复和跨房型会员升级。
   evidence: 合并及首次发布映射、仍待人工检查的项目统一见主验收计划“2026-09-20 合并、发布与待验收核对”。下文按日期保留的“未发布”是历史阶段记录；旧预览已停止，真实模型超时由独立任务处理，不自动标记人工通过。分支历史与 AI 工作目录本地资料保存在受限、已忽略的 .local-workspace/repository-cleanup-20260920/。

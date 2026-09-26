@@ -1623,9 +1623,69 @@ textarea:focus-visible {
 }
 
 .token-saved-confirmation input {
-  width: 18px;
-  min-height: 18px;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
   margin: 1px 0 0;
+  padding: 0;
+}
+
+.token-command-ceiling {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.token-command-ceiling legend {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.token-command-select-all {
+  width: fit-content;
+  margin-bottom: 10px;
+  font-weight: 650 !important;
+}
+
+.token-command-select-all small {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.token-command-groups {
+  display: grid;
+  gap: 0 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.token-command-group {
+  min-width: 0;
+  padding: 11px 0 13px;
+  border-top: 1px solid var(--border);
+}
+
+.token-command-group h3 {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.token-command-items {
+  display: grid;
+  gap: 2px;
+}
+
+.form-grid .token-command-ceiling label.check-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  flex-basis: 16px;
 }
 
 .token-operation-context {
@@ -4442,6 +4502,10 @@ pre {
 
   .span-two {
     grid-column: 1;
+  }
+
+  .token-command-groups {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .modal,
