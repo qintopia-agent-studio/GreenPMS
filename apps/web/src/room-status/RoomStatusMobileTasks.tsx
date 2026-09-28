@@ -11,6 +11,7 @@ import {
   LogIn,
   LogOut,
   Plus,
+  RefreshCw,
   CircleHelp,
   ShieldAlert
 } from "lucide-react";
@@ -66,6 +67,7 @@ export interface RoomStatusMobileTasksProps {
   groups: RoomStatusMobileGroups;
   activeTab: RoomStatusMobileTab;
   canCreate: boolean;
+  syncing?: boolean;
   focusRequest?: RoomStatusMobileFocusRequest | undefined;
   onTabChange: (tab: RoomStatusMobileTab) => void;
   onPageChange: (pageIndex: number) => void;
@@ -304,6 +306,7 @@ export function RoomStatusMobileTasks({
   groups,
   activeTab,
   canCreate,
+  syncing = false,
   focusRequest,
   onTabChange,
   onPageChange,
@@ -410,7 +413,9 @@ export function RoomStatusMobileTasks({
           <h1 id={`${tabsId}-heading`}>房态任务</h1>
         </div>
         <div className="room-status-mobile-header-actions">
-          <small>更新于 {formatRoomStatusDateTime(board.asOf)}</small>
+          {syncing
+            ? <small className="room-status-mobile-sync" role="status" aria-live="polite" data-testid="room-status-mobile-sync"><RefreshCw aria-hidden="true" size={13} className="room-status-spin" />同步中…</small>
+            : <small>更新于 {formatRoomStatusDateTime(board.asOf)}</small>}
           {canCreate ? (
             <button type="button" className="room-status-button" aria-label="新建住宿或锁房" onClick={onCreate}>
               <Plus aria-hidden="true" size={17} />新建
