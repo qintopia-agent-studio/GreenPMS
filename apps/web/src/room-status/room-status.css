@@ -171,6 +171,22 @@
   white-space: nowrap;
 }
 
+.room-status-sync-indicator,
+.room-status-mobile-sync {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.room-status-sync-indicator {
+  flex: 0 0 68px;
+  min-height: 40px;
+}
+
 .room-status-search-field > span {
   position: relative;
   display: block;
@@ -2320,6 +2336,15 @@
     min-height: 44px;
     flex: 0 0 auto;
     padding: 7px 10px;
+  }
+
+  .room-status-mobile-header-actions .room-status-mobile-sync {
+    max-width: none;
+    font-size: 11px;
+  }
+
+  .room-status-mobile-sync svg {
+    flex: none;
   }
 
   .room-status-mobile-range {

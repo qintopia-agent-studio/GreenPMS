@@ -2388,14 +2388,17 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await page.waitForTimeout(Math.max(0, Date.parse(board.freshUntil) - Date.now() + 200));
 
     await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
-    await expect(page.locator(".room-status-stale-notice")).toHaveCount(1);
-    await expect(page.locator(".room-status-stale-notice")).toContainText("正在更新房态");
+    await expect(page.getByTestId("room-status-sync-indicator")).toContainText("同步中");
+    await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+    await expect(page.locator(".room-status-stale-notice")).toHaveCount(1, { timeout: 5_000 });
+    await expect(page.locator(".room-status-stale-notice")).toContainText("房态正在更新");
     await expect(preservedCell).toHaveAttribute("aria-label", preservedAccessibleName!);
     const refreshingPopover = await openDayPopover(page, preservedCell);
     await expect(refreshingPopover).toContainText("可售");
     await expect(refreshingPopover.getByRole("button", { name: "预订", exact: true })).toBeDisabled();
     await expect(refreshingPopover.getByRole("button", { name: "维修锁房", exact: true })).toBeDisabled();
-    await expect(refreshingPopover.locator(".room-status-quick-gate")).toHaveCount(0);
+    await expect(refreshingPopover.locator(".room-status-quick-gate"))
+      .toContainText("正在更新房态，更新完成前暂不能写入");
     await page.keyboard.press("Escape");
   } finally {
     releaseRefresh();
@@ -2412,7 +2415,9 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await page.context().setOffline(true);
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
-    await expect(page.getByRole("alert").filter({ hasText: "房态刷新失败" })).toBeVisible();
+    const failedNotice = page.getByRole("dialog", { name: "创建订单", exact: true })
+      .getByRole("status").filter({ hasText: "房态暂时未更新" });
+    await expect(failedNotice).toContainText("正在自动重试，恢复前不能发起写入");
     await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "创建订单", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeDisabled();
@@ -2422,7 +2427,7 @@ test("desktop stale and unknown states fail closed without mocked room-status da
     await page.getByRole("button", { name: "刷新房态", exact: true })
       .evaluate((element: HTMLButtonElement) => element.click());
     await refreshed;
-    await expect(page.getByRole("alert").filter({ hasText: "房态刷新失败" })).toBeHidden();
+    await expect(failedNotice).toBeHidden();
     const restoredContext = page.getByRole("dialog", { name: "创建订单", exact: true });
     await restoredContext.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
     await expect(restoredContext).toBeHidden();
@@ -2443,6 +2448,50 @@ test("desktop stale and unknown states fail closed without mocked room-status da
   } finally {
     await page.context().setOffline(false);
   }
+});
+
+test("mobile keeps brief room-status renewal in the header before showing a delayed warning", async ({ page }, testInfo: TestInfo) => {
+  test.skip(!isProject(testInfo, "mobile"), "mobile room-status sync feedback coverage");
+  const { board } = await login(page);
+  await expect(page.locator(".room-status-mobile")).toBeVisible();
+
+  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  let releaseRefresh!: () => void;
+  let markRefreshIntercepted!: () => void;
+  let markRefreshFulfilled!: () => void;
+  const heldRefresh = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  const refreshIntercepted = new Promise<void>((resolve) => { markRefreshIntercepted = resolve; });
+  const refreshFulfilled = new Promise<void>((resolve) => { markRefreshFulfilled = resolve; });
+  let holdNextRefresh = true;
+  await page.route(roomStatusRoutePattern, async (route) => {
+    if (!holdNextRefresh) {
+      await route.continue();
+      return;
+    }
+    holdNextRefresh = false;
+    const response = await route.fetch();
+    markRefreshIntercepted();
+    await heldRefresh;
+    await route.fulfill({ response });
+    markRefreshFulfilled();
+  });
+  try {
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refreshIntercepted;
+    await page.waitForTimeout(Math.max(0, Date.parse(board.freshUntil) - Date.now() + 200));
+
+    await expect(page.getByTestId("room-status-mobile-sync")).toHaveText("同步中…");
+    await expect(page.getByTestId("room-status-stale-notice")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "新建住宿或锁房" })).toHaveCount(0);
+    await expect(page.getByTestId("room-status-stale-notice")).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByTestId("room-status-stale-notice")).toContainText("更新完成前不能发起写入");
+  } finally {
+    releaseRefresh();
+    await refreshFulfilled;
+    await page.unroute(roomStatusRoutePattern);
+  }
+  await expect(page.getByTestId("room-status-stale-notice")).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.getByTestId("room-status-mobile-sync")).toHaveCount(0);
 });
 
 test("a real delayed 403 clears the board, command draft, restoration and stable references", async ({ page }, testInfo: TestInfo) => {

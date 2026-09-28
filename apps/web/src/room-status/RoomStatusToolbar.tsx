@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Eraser, Search } from "lucide-react";
+import { Eraser, RefreshCw, Search } from "lucide-react";
 import {
   hasActiveRoomStatusFilters,
   type RoomStatusFilterOptions,
@@ -35,6 +35,7 @@ export interface RoomStatusToolbarProps {
   filters: RoomStatusFilters;
   filterOptions: RoomStatusFilterOptions;
   focusSearchRequestToken?: number;
+  syncing?: boolean;
   actions?: ReactNode;
   onFiltersChange: (filters: RoomStatusFilters) => void;
   onClearFilters: () => void;
@@ -53,6 +54,7 @@ export function RoomStatusToolbar({
   filters,
   filterOptions,
   focusSearchRequestToken = 0,
+  syncing = false,
   actions,
   onFiltersChange,
   onClearFilters
@@ -116,6 +118,9 @@ export function RoomStatusToolbar({
           </select>
         </label>
         <div className="room-status-toolbar-quick-actions">
+          <span className="room-status-sync-indicator" role="status" aria-live="polite" data-testid="room-status-sync-indicator">
+            {syncing ? <><RefreshCw aria-hidden="true" size={14} className="room-status-spin" />同步中…</> : null}
+          </span>
           <button type="button" className="room-status-button room-status-button-secondary advanced-filter-toggle" aria-expanded={advancedOpen} aria-controls="room-status-advanced-filters" onClick={() => setAdvancedOpen((value) => !value)}>{advancedOpen ? "收起筛选" : "更多筛选"}{advancedCount ? `（${advancedCount}）` : ""}</button>
           {actions ? <div className="room-status-toolbar-actions">{actions}</div> : null}
         </div>

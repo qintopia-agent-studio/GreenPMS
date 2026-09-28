@@ -2477,6 +2477,7 @@ const ROOM_STATUS_QUERY_FAILURE_RETRY_MAX_MS = 8_000;
 const ROOM_STATUS_LOW_FRESHNESS_RESPONSE_LIMIT = 3;
 const ROOM_STATUS_QUERY_TIMEOUT_MS = 15_000;
 const ROOM_STATUS_RANGE_LOADING_NOTICE_DELAY_MS = 250;
+const ROOM_STATUS_SLOW_SYNC_NOTICE_DELAY_MS = 2_500;
 const ROOM_STATUS_RESTORATION_PREFIX = "qintopia.room-status-view.v1";
 const selectionActionCodes = new Set(["CREATE_ORDER", "CREATE_FREE_STAY", "BACKFILL_ORDER", "LOCK_MAINTENANCE"]);
 
@@ -3322,6 +3323,7 @@ export function InventoryPage() {
   const [initializedPropertyId, setInitializedPropertyId] = useState(propertyId);
   const [queryPhase, setQueryPhase] = useState<"LOADING" | "RANGE_LOADING" | "READY" | "REFRESHING" | "ERROR" | "PERMISSION_DENIED">("LOADING");
   const [rangeLoadingNoticeReady, setRangeLoadingNoticeReady] = useState(false);
+  const [slowSyncNoticeReady, setSlowSyncNoticeReady] = useState(false);
   const [queryError, setQueryError] = useState<unknown>();
   const [rangeError, setRangeError] = useState<unknown>();
   const [restorationError, setRestorationError] = useState<unknown>();
@@ -4257,6 +4259,18 @@ export function InventoryPage() {
       : undefined,
     [boardForCurrentProperty, command, commandsBlocked]
   );
+  const refreshNoticeNeeded = Boolean(renderedBoard
+    && (actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted || boardExpired));
+  const ordinarySync = refreshNoticeNeeded && !boardRefreshFailed && !rangeLoading;
+  useEffect(() => {
+    if (!ordinarySync) {
+      setSlowSyncNoticeReady(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSlowSyncNoticeReady(true), ROOM_STATUS_SLOW_SYNC_NOTICE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [ordinarySync]);
+  const compactSyncVisible = ordinarySync && !slowSyncNoticeReady;
   const filteredViewHasNoRooms = Boolean(renderedBoard
     && hasActiveRoomStatusFilters(viewState.filters)
     && filterRoomStatusRooms(renderedBoard.rooms, viewState.filters).length === 0);
@@ -6063,6 +6077,7 @@ export function InventoryPage() {
           .map((unit) => [unit.roomTypeCode!, roomStatusUnitDescription(unit)])
       ]) }}
       focusSearchRequestToken={filterFocusRequestToken}
+      syncing={compactSyncVisible}
       actions={!isMobile && currentPropertyAllowedActions.has("CREATE_ORDER") ? <>
         <button type="button" className="button button-primary" onClick={() => setCreateSelectionOpen(true)} disabled={!renderedBoard || commandsBlocked}>新建住宿</button>
         <button type="button" className="button button-secondary" onClick={requestRoomStatusRefresh} disabled={queryBusy}><RefreshCw aria-hidden="true" className={queryBusy ? "spin" : undefined} size={16} />{queryBusy ? "正在刷新" : "刷新房态"}</button>
@@ -6226,7 +6241,7 @@ export function InventoryPage() {
     hoverIntent.cancel();
     setQuickPopoverTarget((current) => current?.hover ? undefined : current);
   };
-  const roomStatusRefreshNotice = renderedBoard && (actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted || boardExpired) ? (
+  const roomStatusRefreshNotice = renderedBoard && refreshNoticeNeeded ? (
     <div className={`room-status-stale-notice${boardRefreshFailed ? " is-failed" : ""}`} role="status" aria-live="polite" data-testid="room-status-stale-notice">
       <AlertTriangle className="room-status-stale-icon" aria-hidden="true" size={16} />
       <span className="room-status-stale-copy">
@@ -6274,7 +6289,7 @@ export function InventoryPage() {
       {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="inventory-command-recovery" businessFacing={inventoryRecoveryIsBusinessFacing(commandRecovery.pending.presentation)} /> : null}
       {queryPhase !== "PERMISSION_DENIED" && commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="inventory-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；房态只按当前权限开放服务端动作。</p></div></section> : null}
       {returnNotice ? <div className="room-status-return-notice" role="status">{returnNotice}</div> : null}
-      {!roomStatusBlockingModalOpen ? roomStatusRefreshNotice : null}
+      {!roomStatusBlockingModalOpen && (!ordinarySync || slowSyncNoticeReady) ? roomStatusRefreshNotice : null}
 
       {!renderedBoard ? (
         queryPhase === "LOADING" || (board !== undefined && !boardMatchesCurrentProperty)
@@ -6357,6 +6372,7 @@ export function InventoryPage() {
                 groups={mobileGroups}
                 activeTab={mobileTab}
                 canCreate={!commandsBlocked && roomStatusBoardHasSelectionAction(renderedBoard)}
+                syncing={compactSyncVisible}
                 focusRequest={mobileFocusRequest}
                 onTabChange={setMobileTab}
                 onPageChange={(index) => changeRoomPage(index, renderedBoard.page.totalPages)}
