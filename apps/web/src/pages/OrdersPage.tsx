@@ -1,3 +1,4 @@
+import { RetainedFundsList } from "../components/RetainedFunds";
 import { useEffect, useState, type FormEvent } from "react";
 import { AlertCircle, ChevronRight, PencilLine, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
@@ -287,6 +288,9 @@ export function OrdersPage() {
   const fundsValue = inProperty ? searchParams.get("funds") : null;
   const funds = fundsValue === "BALANCE_DUE" || fundsValue === "OVERPAID" ? fundsValue : undefined;
   const beforeId = inProperty ? searchParams.get("before") || undefined : undefined;
+  const [retainedView, setRetainedView] = useState(false);
+  const [retainedEnabled, setRetainedEnabled] = useState(false);
+  useEffect(() => {const c = new AbortController(); setRetainedEnabled(false); void api.retainedFunds({propertyId, status:"ALL", limit:"1"}, c.signal).then(data => {if (!c.signal.aborted) setRetainedEnabled(data.enabled || data.items.length > 0);}).catch(() => {}); return () => c.abort();}, [propertyId]);
   const [draftQuery, setDraftQuery] = useState(query);
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [refreshToken, setRefreshToken] = useState(0);
@@ -384,6 +388,8 @@ export function OrdersPage() {
       <QuoteRecoveryConflictNotice conflict={commandRecovery.conflict} testId="orders-quote-recovery-conflict" />
       <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="orders-command-recovery" businessFacing /> : null}
+      {retainedEnabled ? <label>资金视图<select value={retainedView ? "RETAINED" : "ORDERS"} onChange={e => setRetainedView(e.target.value === "RETAINED")}><option value="ORDERS">订单列表</option><option value="RETAINED">客户留存待用</option></select></label> : null}
+      {retainedEnabled && retainedView ? <RetainedFundsList propertyId={propertyId} refreshKey={refreshToken}/> : <>
       <section className="list-toolbar orders-filter-toolbar" aria-label="订单筛选">
         <label className="search-control"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索订单</span><input type="search" value={draftQuery} maxLength={200} onChange={(event) => setDraftQuery(event.target.value)} placeholder="姓名、房号、渠道或渠道订单号" /></label>
         <label className="filter-select-control"><span className="sr-only">按订单状态筛选</span><select aria-label="按订单状态筛选" value={status} onChange={(event) => changeStatus(event.target.value)}><option value="ALL">全部状态</option>{orderListStatuses.map((option) => <option key={option} value={option}>{businessStatusLabel(option)}</option>)}</select></label>
@@ -422,6 +428,7 @@ export function OrdersPage() {
         <span className="muted">每页最多 50 条，按创建时间由近到远</span>
         <button type="button" className="button button-secondary" disabled={loading || !nextCursor} onClick={() => changePage(nextCursor ?? undefined, [...previousPages, beforeId ?? ""])}>下一页</button>
       </nav>
+      </>}
       {correctionDialogOpen && canCorrectHistoricalStays ? <HistoricalStayCorrectionsDialog
         propertyId={propertyId}
         orders={orders}

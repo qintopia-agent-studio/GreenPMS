@@ -1,3 +1,4 @@
+import { RetainedFundsPanel } from "../components/RetainedFunds";
 import { useAssistantOrderEntry } from "../assistant/context";
 import { createReadPoller } from "../readPoller";
 import { orderListBackHref } from "../orderListNavigation";
@@ -58,7 +59,7 @@ import {
   type StayDateChangeAction,
   type StayDateChangeMode
 } from "../components/StayDateChangeDrawer";
-import { commandRecoveryAvailable, propertyAllowedActions, useWorkspace } from "../session";
+import { principalCan, commandRecoveryAvailable, propertyAllowedActions, useWorkspace } from "../session";
 import { assertOrderViewAllowedActions } from "../orderViewValidation";
 import {
   membershipProductMatchesCurrentStay,
@@ -472,7 +473,7 @@ export function collectionFactCanReverse(
   fact: CollectionFactDto,
   reverseActionEnabled: boolean
 ): boolean {
-  if (!reverseActionEnabled || fact.fact_type === "REVERSAL") return false;
+  if (!reverseActionEnabled || ["REVERSAL", "REALLOCATION_IN", "REALLOCATION_OUT"].includes(fact.fact_type)) return false;
   const reversedFactIds = new Set(facts
     .filter((candidate) => candidate.fact_type === "REVERSAL" && candidate.reverses_fact_id)
     .map((candidate) => candidate.reverses_fact_id));
@@ -557,6 +558,8 @@ export function arrangementChangeLabel(type: OrderArrangementHistoryItemDto["typ
 }
 
 export function collectionFactTypeLabel(type: CollectionFactDto["fact_type"]): string {
+  if (type === "REALLOCATION_IN") return "留存款转入（非现金）";
+  if (type === "REALLOCATION_OUT") return "留存款转出（非退款）";
   if (type === "COLLECTION") return "收款";
   if (type === "REFUND") return "退款";
   return "冲销";
@@ -1444,6 +1447,9 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
     : draft?.initialReason?.note ?? "";
   const [note, setNote] = useState(initialReverseNote);
   const [reverseFactId, setReverseFactId] = useState(initialReverseFactId);
+  const [releaseAllocation, setReleaseAllocation] = useState(false);
+  const [allocationEnabled, setAllocationEnabled] = useState(false);
+  useEffect(() => {const c = new AbortController(); void api.paymentAllocations({propertyId: view.order.property_id, kind: "COLLECTION", limit: "1"}, c.signal).then(data => {if(!c.signal.aborted) setAllocationEnabled(data.enabled);}).catch(() => {});return () => c.abort();}, [view.order.property_id]);
   const selectedReverseFact = action === "REVERSE_FACT"
     ? reversibleFacts.find((fact) => fact.fact_id === reverseFactId)
     : undefined;
@@ -1475,7 +1481,9 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
         setValidationError(new Error("必须填写冲销原因"));
         return;
       }
-      onSubmit(buildReverseFactRequest(view, selectedReverseFact, trimmedNote));
+      const request = buildReverseFactRequest(view, selectedReverseFact, trimmedNote);
+      if (allocationEnabled && releaseAllocation && ["COLLECTION", "REFUND"].includes(selectedReverseFact.fact_type)) request.input.releaseExternalPaymentAllocation = true;
+      onSubmit(request);
       return;
     }
     if (action === "SHORTEN_STAY" || action === "EXTEND_STAY") {
@@ -1516,7 +1524,7 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
                 <span>只能冲销尚未被冲销、且没有有效退款占用的收款或退款记录。</span>
               </div>
             ) : <>
-              <label className="span-two">选择要冲销的记录<select value={reverseFactId} onChange={(event) => { setReverseFactId(event.target.value); setValidationError(undefined); }} required data-testid="reverse-fact-id">{reversibleFacts.map((fact) => <option key={fact.fact_id} value={fact.fact_id}>{collectionFactTypeLabel(fact.fact_type)} · {formatDateTime(fact.created_at)} · 净影响 {formatMinor(fact.net_effect_minor, fact.currency)} · {collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</option>)}</select></label>
+              <label className="span-two">选择要冲销的记录<select value={reverseFactId} onChange={(event) => { setReverseFactId(event.target.value); setReleaseAllocation(false); setValidationError(undefined); }} required data-testid="reverse-fact-id">{reversibleFacts.map((fact) => <option key={fact.fact_id} value={fact.fact_id}>{collectionFactTypeLabel(fact.fact_type)} · {formatDateTime(fact.created_at)} · 净影响 {formatMinor(fact.net_effect_minor, fact.currency)} · {collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</option>)}</select></label>
               {selectedReverseFact ? <div className="span-two form-field-note" role="status" data-testid="reverse-fact-summary">
                 <strong>追加反向冲销记录</strong>
                 <span>原{collectionFactTypeLabel(selectedReverseFact.fact_type)}记录不会被删除；冲销后抵销净影响 {formatMinor(selectedReverseFact.net_effect_minor, selectedReverseFact.currency)}。</span>
@@ -1536,6 +1544,7 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}
+        {action === "REVERSE_FACT" && allocationEnabled && selectedReverseFact && ["COLLECTION", "REFUND"].includes(selectedReverseFact.fact_type) ? <label><input type="checkbox" checked={releaseAllocation} onChange={e => setReleaseAllocation(e.target.checked)}/>同时撤销流水归属以便重新分配（不改变实际收退款；撤销退款归属不会恢复原收款可用额度）</label> : null}
         <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked || (action === "REVERSE_FACT" && reversibleFacts.length === 0)}>继续核对</button></div>
       </form>
     </Modal>
@@ -2179,6 +2188,7 @@ function ScopedOrderDetailPage() {
         channelPriceDifferenceReason={currentPricingRevision?.reason.note}
       />
 
+      <RetainedFundsPanel view={view} blocked={orderActionsBlocked} can={code => principalCan(principal, propertyId, code)} onSubmit={request => { if (orderActionsBlocked) return; setRecoveryDialogOpen(false); setCommand(request); }} />
       <section id="order-funds" className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{itemCountLabel(view.collectionFacts.length)}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
 
       {view.amendments.some((amendment) => amendment.amendment_type === "MANAGE_ORDER_OCCUPANTS") ? <details className="detail-disclosure"><summary>同住人登记记录</summary><section className="detail-section full-detail" aria-labelledby="companion-history-heading">

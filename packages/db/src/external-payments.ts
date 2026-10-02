@@ -1,3 +1,4 @@
+import { allocationPaymentBasis } from "./payment-allocation.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import { DomainError, type CommandType } from "@qintopia/contracts";
 import { randomUUID } from "node:crypto";
@@ -43,7 +44,7 @@ export async function listExternalPayments(db: Db, propertyId: string, query: Pa
     order_id: string | null; membership_order_id: string | null;
   }>`WITH candidates AS (
     SELECT b.*,c.nickname,f.order_id,mf.membership_order_id,
-      CASE WHEN m.bill_id IS NOT NULL THEN 'MATCHED'
+      CASE WHEN m.bill_id IS NOT NULL OR EXISTS(SELECT 1 FROM external_payment_allocations a WHERE a.bill_id=b.id) THEN 'MATCHED'
         WHEN b.needs_review OR EXISTS(SELECT 1 FROM external_payment_bills duplicate
           WHERE duplicate.property_id=b.property_id AND duplicate.kind=b.kind AND duplicate.reference=b.reference AND duplicate.id<>b.id) THEN 'REVIEW'
         WHEN b.occurred_at<s.matching_since THEN 'HISTORICAL'
@@ -96,9 +97,12 @@ function descriptors(command: CommandType, effect: RecordValue): PaymentDescript
   return [{ kind: "COLLECTION", reference: String(payment.transactionReference), amountMinor: Number(payment.amountMinor ?? money(payment.amount)) }];
 }
 
-export interface ExternalPaymentBasis { billId: string; kind: ExternalBillKind; reference: string; amountMinor: number; alreadyMatched: boolean }
+export interface ExternalPaymentBasis { billId: string; kind: ExternalBillKind; reference: string; amountMinor: number; alreadyMatched: boolean; allocation?: boolean; allocatedMinor?: number }
 export async function externalPaymentBasis(db: Db, propertyId: string, command: CommandType, effect: RecordValue,
   lock = false): Promise<ExternalPaymentBasis[]> {
+  if (effect.externalPaymentBillId && ["RECORD_COLLECTION", "RECORD_REFUND", "REFUND_RETAINED_FUNDS"].includes(command)) {
+    return allocationPaymentBasis(db, propertyId, effect, command === "RECORD_COLLECTION" ? "COLLECTION" : "REFUND", lock);
+  }
   const payments = descriptors(command, effect);
   if (!payments.length) return [];
   const configured = (await sql<{ enabled: boolean }>`SELECT EXISTS(SELECT 1 FROM external_payment_accounts a
@@ -115,16 +119,16 @@ export async function externalPaymentBasis(db: Db, propertyId: string, command: 
     }
     const rows = (await sql<{
       id: string; amount_minor: number | null; state: string; needs_review: boolean; occurred_at: Date;
-      matching_since: Date; transaction_id: string | null; collection_fact_id: string | null; membership_payment_fact_id: string | null;
+      matching_since: Date; transaction_id: string | null; allocation_exists: boolean; collection_fact_id: string | null; membership_payment_fact_id: string | null;
     }>`SELECT b.id,b.amount_minor,b.state,b.needs_review,b.occurred_at,s.matching_since,b.transaction_id,
-      m.collection_fact_id,m.membership_payment_fact_id
+      m.collection_fact_id,m.membership_payment_fact_id,EXISTS(SELECT 1 FROM external_payment_allocations a WHERE a.bill_id=b.id) allocation_exists
       FROM external_payment_bills b JOIN external_payment_sources s ON s.id=b.source_id
       LEFT JOIN external_payment_matches m ON m.bill_id=b.id
       WHERE b.property_id=${propertyId} AND s.enabled AND b.kind=${payment.kind} AND b.reference=${payment.reference}
       `.execute(db)).rows;
     if (rows.length !== 1) throw new DomainError("VALIDATION_ERROR", rows.length ? "同号流水不唯一，请先核对商户" : "请选择已同步的企业微信收退款流水");
     const bill = rows[0]!;
-    const alreadyMatched = Boolean(bill.collection_fact_id || bill.membership_payment_fact_id);
+    const alreadyMatched = Boolean(bill.collection_fact_id || bill.membership_payment_fact_id || bill.allocation_exists);
     let sameCorrection = command === "CORRECT_MEMBERSHIP_PAYMENT" && bill.membership_payment_fact_id === effect.originalPaymentFactId;
     if (!sameCorrection && command === "CORRECT_MEMBERSHIP_PAYMENT" && bill.membership_payment_fact_id) {
       // Note-only corrections append a replacement fact. Keep the original
@@ -167,6 +171,12 @@ export async function bindExternalPayments(trx: Transaction<Database>, commandId
           AND ${payment.kind}='COLLECTION' AND transaction_reference=${payment.reference} AND amount_minor=${payment.amountMinor}`.execute(trx)).rows;
     if (rows.length !== 1) throw new DomainError("INTERNAL_ERROR", "收退款事实与选定流水未形成唯一对应", 500);
     const fact = rows[0]!;
+    if (payment.allocation) {
+      if (fact.kind !== "LODGING") throw new DomainError("VALIDATION_ERROR", "会员收款不支持分配");
+      await sql`INSERT INTO external_payment_allocations(id,bill_id,collection_fact_id,amount_minor,command_id,origin)
+        VALUES(${`allocation_${randomUUID()}`},${payment.billId},${fact.fact_id},${payment.amountMinor},${commandId},'CONFIRMED')`.execute(trx);
+      continue;
+    }
     await sql`INSERT INTO external_payment_matches(bill_id,collection_fact_id,membership_payment_fact_id,origin)
       VALUES(${payment.billId},${fact.kind === "LODGING" ? fact.fact_id : null},${fact.kind === "MEMBERSHIP" ? fact.fact_id : null},'CONFIRMED')`.execute(trx);
   }

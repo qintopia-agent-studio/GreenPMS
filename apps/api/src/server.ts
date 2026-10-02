@@ -1,3 +1,5 @@
+import { registerPaymentAllocationEvents } from "./payment-allocation-events.ts";
+import { registerPaymentAllocation } from "./payment-allocation.ts";
 import { publicCommandErrorPayload } from "./public-error.ts";
 import { registerAssistant } from "./assistant.ts";
 import type { ModelTransport } from "./assistant-model.ts";
@@ -669,6 +671,8 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   registerRoomCatalog(app, db);
   registerPmsIntegration(app, db);
   registerExternalPayments(app, db);
+  registerPaymentAllocation(app, db);
+  registerPaymentAllocationEvents(app, db);
 
   app.get("/api/v1/meta", { schema: { tags: ["queries"], response: { 200: MetaResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);

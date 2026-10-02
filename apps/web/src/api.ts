@@ -1,3 +1,4 @@
+import type { PaymentAllocationList, RetainedFundList } from "@qintopia/contracts";
 import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
 import { readAssistantStream } from "./assistant/stream";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
@@ -178,6 +179,8 @@ export const api = {
     request<{ nights: number; anchorNights: number; amountMinor: number }>(`/api/v1/properties/${encodeURIComponent(propertyId)}/room-rate-trial`, { method: "POST", body: JSON.stringify(body) }),
   externalPayments: (query: Record<string, string>, signal?: AbortSignal) => request<ExternalPaymentList>(
     `/api/v1/external-payments?${new URLSearchParams(query)}`, signal ? { signal } : {}),
+  paymentAllocations: (query: Record<string, string>, signal?: AbortSignal) => request<PaymentAllocationList>(`/api/v2/external-payments?${new URLSearchParams(query)}`, signal ? { signal } : {}),
+  retainedFunds: (query: Record<string, string>, signal?: AbortSignal) => request<RetainedFundList>(`/api/v2/retained-funds?${new URLSearchParams(query)}`, signal ? { signal } : {}),
   commandMetadata: (scope: string): ClientCommandMetadata => {
     const headers = commandHeaders(scope);
     return { idempotencyKey: headers["Idempotency-Key"], correlationId: headers["X-Correlation-ID"] };

@@ -17,6 +17,7 @@ export interface OrderFundsFormValues {
   transactionReference: string;
   refundReference: string;
   factId: string;
+  externalPaymentBillId?: string;
 }
 
 export function orderFundsTransactionReferenceRequired(action: OrderFundsAction, method: string): boolean {
@@ -67,6 +68,7 @@ export function buildOrderFundsRequest(
       propertyId: view.order.property_id,
       orderId: view.order.id,
       amountMinor,
+      ...(values.externalPaymentBillId ? { externalPaymentBillId: values.externalPaymentBillId } : {}),
       method,
       note: trimmedNote,
       ...(transactionReference.trim() ? { transactionReference: transactionReference.trim() } : {}),
@@ -80,9 +82,9 @@ export function buildOrderFundsRequest(
 }
 
 export function remainingRefundableMinor(facts: readonly CollectionFactDto[], collection: CollectionFactDto): number {
-  if (collection.fact_type !== "COLLECTION" || facts.some((fact) => fact.reverses_fact_id === collection.fact_id)) return 0;
+  if (!(["COLLECTION", "REALLOCATION_IN"].includes(collection.fact_type)) || facts.some((fact) => fact.reverses_fact_id === collection.fact_id)) return 0;
   const activeRefunded = facts
-    .filter((fact) => fact.fact_type === "REFUND" && fact.references_fact_id === collection.fact_id)
+    .filter((fact) => (fact.fact_type === "REFUND" || fact.fact_type === "REALLOCATION_OUT") && fact.references_fact_id === collection.fact_id)
     .filter((refund) => !facts.some((fact) => fact.reverses_fact_id === refund.fact_id))
     .reduce((sum, refund) => sum + refund.amount_minor, 0);
   return Math.max(0, collection.amount_minor - activeRefunded);

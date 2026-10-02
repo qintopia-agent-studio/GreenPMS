@@ -89,6 +89,12 @@ export async function syncWecomSource(db: Kysely<Database>, sourceId: string, cl
             DO UPDATE SET nickname=COALESCE(EXCLUDED.nickname,external_payment_contacts.nickname),checked_at=EXCLUDED.checked_at`.execute(connection);
         }
         await connection.transaction().execute(async trx => {
+          // Share the money writer gate before any bill/event-head lock. A refund
+          // that commits first must be visible when Confirm rechecks its source.
+          const propertyIds = [...new Set(bills.map(bill => mappings.get(bill.merchantId)).filter((id): id is string => Boolean(id)))].sort();
+          for (const propertyId of propertyIds) {
+            await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`payment-allocation:${propertyId}`},0))`.execute(trx);
+          }
           const discoveries: string[] = [];
           for (const bill of bills) {
             const propertyId = mappings.get(bill.merchantId);

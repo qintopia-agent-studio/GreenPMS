@@ -1,7 +1,7 @@
 import { sql } from "kysely";
 import { createDatabase } from "./database.ts";
 import { validateDeliveryConfig, type IntegrationDeliveryConfig } from "./integration-worker.ts";
-import { deliverOnePayment, publishPaymentEvents } from "./payment-event-worker.ts";
+import { deliverOnePayment, publishPaymentEvents, deliverOnePaymentAllocation, publishPaymentAllocationEvents, allocationDeliveryReady } from "./payment-event-worker.ts";
 import { externalPaymentsReady } from "./external-payments-readiness.ts";
 import { paymentDeliveryReady } from "./payment-delivery-readiness.ts";
 
@@ -11,6 +11,14 @@ async function main() {
     console.log(JSON.stringify({ code: "PAYMENT_DELIVERY_DISABLED" }));
     return;
   }
+  const version = process.env.PMS_PAYMENT_DELIVERY_SCHEMA_VERSION ?? "pms.payments.v1";
+  if (version !== "pms.payments.v1" && version !== "pms.payments.v2") throw Error("PAYMENT_DELIVERY_SCHEMA_VERSION");
+  const v2 = version === "pms.payments.v2";
+  const publish = v2 ? publishPaymentAllocationEvents : publishPaymentEvents;
+  const deliver = v2 ? deliverOnePaymentAllocation : deliverOnePayment;
+  const deliveries = sql.table(v2 ? "allocation_deliveries" : "payment_deliveries");
+  const events = sql.table(v2 ? "allocation_delivery_events" : "payment_delivery_events");
+  const sources = sql.table(v2 ? "allocation_delivery_source" : "payment_delivery_source");
   const databaseUrl = process.env.PMS_PAYMENT_DELIVERY_DATABASE_URL;
   const config: IntegrationDeliveryConfig = {
     endpoint: process.env.PMS_PAYMENT_DELIVERY_ENDPOINT ?? "",
@@ -26,22 +34,22 @@ async function main() {
   const stop = () => { stopping = true; };
   process.once("SIGTERM", stop); process.once("SIGINT", stop);
   try {
-    const identity = (await sql<{valid: boolean}>`SELECT current_user='qintopia_payment_delivery_worker'
-      AND session_user='qintopia_payment_delivery_worker' AS valid`.execute(db)).rows[0]?.valid;
-    if (!identity || !await paymentDeliveryReady(db) || !await externalPaymentsReady(db)) throw Error("READINESS");
+    const identity = (await sql<{valid: boolean}>`SELECT current_user=${v2 ? 'qintopia_allocation_delivery_worker' : 'qintopia_payment_delivery_worker'}
+      AND session_user=${v2 ? 'qintopia_allocation_delivery_worker' : 'qintopia_payment_delivery_worker'} AS valid`.execute(db)).rows[0]?.valid;
+    if (!identity || (v2 ? !await allocationDeliveryReady(db) : (!await paymentDeliveryReady(db) || !await externalPaymentsReady(db)))) throw Error("READINESS");
     let lastStatus = 0;
     while (!stopping) {
       let published = 0;
       for (const property of config.propertyIds) {
         if (stopping) break;
-        published += await publishPaymentEvents(db, property, config.sourceInstance);
+        published += await publish(db, property, config.sourceInstance);
       }
-      const attempted = !stopping && await deliverOnePayment(db, config);
+      const attempted = !stopping && await deliver(db, config);
       if (Date.now() - lastStatus >= 60000) {
         const states = (await sql<{state: string; count: string}>`SELECT d.state,count(*)::text AS count
-          FROM payment_deliveries d JOIN payment_delivery_events e USING(event_id)
+          FROM ${deliveries} d JOIN ${events} e USING(event_id)
           WHERE e.property_id=ANY(${[...config.propertyIds]}::text[]) GROUP BY d.state`.execute(db)).rows;
-        const source = (await sql<{paused: boolean; reason_code: string}>`SELECT paused,reason_code FROM payment_delivery_source`.execute(db)).rows[0];
+        const source = (await sql<{paused: boolean; reason_code: string}>`SELECT paused,reason_code FROM ${sources}`.execute(db)).rows[0];
         console.log(JSON.stringify({code: "PAYMENT_DELIVERY_STATUS", states, ...source}));
         lastStatus = Date.now();
       }

@@ -548,7 +548,8 @@ export interface CoverageRowDto {
 export interface CollectionFactDto {
   fact_id: string;
   order_id: string;
-  fact_type: "COLLECTION" | "REFUND" | "REVERSAL";
+  fact_type: "COLLECTION" | "REFUND" | "REVERSAL" | "REALLOCATION_IN" | "REALLOCATION_OUT";
+  external_payment_bill_id?: string | null;
   amount_minor: number;
   net_effect_minor: number;
   currency: string;

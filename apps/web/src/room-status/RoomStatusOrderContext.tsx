@@ -76,6 +76,7 @@ const fulfillmentStateLabels: Record<OrderViewDto["fulfillment"]["state"], strin
 };
 
 const collectionFactLabels = {
+  REALLOCATION_IN: "留存款转入（非现金）", REALLOCATION_OUT: "留存款转出（非退款）",
   COLLECTION: "收款",
   REFUND: "退款",
   REVERSAL: "冲销"

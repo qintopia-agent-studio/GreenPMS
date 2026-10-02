@@ -11,7 +11,10 @@ import {
   withPropertyClockForTesting,
   type Database
 } from "@qintopia/db";
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
+import { syncWecomSource, type PaymentClient } from "../../packages/db/src/wecom-sync.ts";
+import type { WecomBill } from "../../packages/db/src/wecom-client.ts";
+import { listPaymentAllocations } from "../../packages/db/src/payment-allocation.ts";
 import { CommandEffectSchema, ErrorResponse, ReceiptSchema } from "../../apps/api/src/schemas.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -50,6 +53,10 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   LOCK_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnit", "reason"],
   RELEASE_MAINTENANCE: ["arrivalDate", "departureDate", "inventoryUnitId", "maintenanceLockId"],
   COMPLETE_CLEANING: ["cleaningTaskId", "fromStatus", "inventoryUnitId", "orderId", "roomId", "serviceDate", "stayId", "toStatus"],
+  RETAIN_ORDER_FUNDS: ["amountMinor", "billId", "confirmationNote", "currency", "operation", "orderId", "ownerContact", "ownerName", "remainingBefore", "sourceFactId", "sourceOrderId"],
+  APPLY_RETAINED_FUNDS: ["amountMinor", "authorizationNote", "billId", "currency", "operation", "orderId", "ownerContact", "ownerName", "remainingBefore", "retainedFundId", "sourceFactId", "sourceOrderId"],
+  RELEASE_RETAINED_FUNDS: ["amountMinor", "billId", "currency", "note", "operation", "orderId", "ownerContact", "ownerName", "remainingBefore", "retainedFundId", "sourceFactId", "sourceOrderId"],
+  REFUND_RETAINED_FUNDS: ["amountMinor", "billId", "currency", "externalPaymentBillId", "method", "note", "operation", "orderId", "ownerContact", "ownerName", "referencesFactId", "refundReference", "remainingBefore", "retainedFundId", "sourceFactId", "sourceOrderId", "transactionReference"],
   RECORD_COLLECTION: ["amountMinor", "currency", "method", "note", "orderId", "transactionReference"],
   RECORD_REFUND: ["amountMinor", "currency", "method", "note", "orderId", "referencesFactId", "transactionReference"],
   CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: ["before", "entitlement", "member", "membershipPricing", "operation", "orderId", "pricing", "pricingDecision", "primaryOccupant", "product", "remainingPayment", "stayId", "transfer"],
@@ -1445,6 +1452,93 @@ describe("Command effect HTTP contract", () => {
     expect(Object.keys(catalogEffect).sort()).toEqual(expectedEffectKeys.MANAGE_ROOM_CATALOG);
     expect(Value.Check(CommandEffectSchema, catalogEffect)).toBe(true);
     covered.add("MANAGE_ROOM_CATALOG");
+    // New commands are session-authorized; do not silently extend existing token grants.
+    const previousAllocationFlag = process.env.PMS_PAYMENT_ALLOCATION_ENABLED;
+    process.env.PMS_PAYMENT_ALLOCATION_ENABLED = "true";
+    try {
+      const allocationPrincipal: AuthPrincipal = {
+        subjectId: demo.administratorSubjectId, credentialId: "effect-retained-session", credentialType: "SESSION",
+        displayName: "留存契约验收", ...authScope({ credentialType: "SESSION", profile: "administrator" })
+      };
+      // Confirmation revalidates the credential against persisted session state.
+      await db.insertInto("web_sessions").values({
+        id: allocationPrincipal.credentialId, subject_id: allocationPrincipal.subjectId,
+        secret_hash: "a".repeat(64), expires_at: new Date(Date.now() + 3_600_000), revoked_at: null
+      }).execute();
+      const executeAllocation = async (commandType: CommandType, input: Record<string, unknown>) => {
+        const { preview } = await createCommandPreviewDirect(db, allocationPrincipal, { commandType, input }, metadata("retained-effect-preview"));
+        const receipt = await confirmCommandPreviewDirect(db, allocationPrincipal, preview.previewId, {
+          propertyId: demo.propertyId, commandType, confirmation: true, expectedEffectHash: preview.effectHash,
+          reason: commandType === "CREATE_ORDER" ? { code: "CREATE_STANDARD_ORDER", note: "" }
+            : { code: "EFFECT_CONTRACT", note: "核对来源并确认留存" }
+        }, metadata("retained-effect-confirm"));
+        expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+        return receipt;
+      };
+      const createRetentionOrder = async (offset: number) => {
+        const priced = await quote({ arrivalDate: shiftLocalDate(propertyToday, offset), departureDate: shiftLocalDate(propertyToday, offset + 1) });
+        const receipt = await executeAllocation("CREATE_ORDER", {
+          propertyId: demo.propertyId, quoteId: priced.quoteId, primaryGuest: { fullName: "留存契约客户", nickname: "留存契约", phone: "13800001122" },
+          bookingChannelCode: "WECOM", targetCurrentContractAmountMinor: priced.currentContractAmount.minorUnits
+        });
+        return receipt.result!.orderId as string;
+      };
+      const sourceOrderId = await createRetentionOrder(400);
+      const targetOrderId = await createRetentionOrder(402);
+      const synchronizedAt = new Date();
+      await sql`INSERT INTO external_payment_sources(id,corp_id,enabled,matching_since,import_since,synced_until,baseline_complete)
+        VALUES('effect-retained-source','effect-corp',true,${new Date(synchronizedAt.getTime()-86400000)},${new Date(synchronizedAt.getTime()-86400000)},${new Date(synchronizedAt.getTime()-120000)},true)`.execute(db);
+      await sql`INSERT INTO external_payment_accounts VALUES('effect-retained-source','effect-merchant',${demo.propertyId})`.execute(db);
+      const original: WecomBill = { kind: "COLLECTION", merchantId: "effect-merchant", reference: "effect-retained-payment",
+        transactionId: "effect-retained-payment", originalTradeNo: "effect-retained-trade", externalUserId: "effect-customer", collectorId: "staff",
+        amountMinor: 60000, occurredAt: new Date(synchronizedAt.getTime()-60000), state: "SUCCESS" };
+      const sync = async (rows: WecomBill[]) => {
+        const client: PaymentClient = { bills: async (begin,end) => ({ bills: rows.filter(row => row.occurredAt >= begin && row.occurredAt <= end), nextCursor: null }), nickname: async () => "留存客户" };
+        await syncWecomSource(db, "effect-retained-source", client, synchronizedAt);
+      };
+      await sync([original]);
+      const sourceBill = (await listPaymentAllocations(db, demo.propertyId, { kind: "COLLECTION", status: "ALL" })).items.find(item => item.reference === original.reference)!;
+      expect(sourceBill).toBeDefined();
+      const collectionReceipt = await executeAllocation("RECORD_COLLECTION", { propertyId: demo.propertyId, orderId: sourceOrderId,
+        externalPaymentBillId: sourceBill.id, amountMinor: 60000, method: "WECOM", transactionReference: original.reference, note: "真实来源留存契约" });
+      await executeAllocation("CANCEL_ORDER", { propertyId: demo.propertyId, orderId: sourceOrderId });
+      const retainInput = { propertyId: demo.propertyId, orderId: sourceOrderId, sourceFactId: collectionReceipt.factRefs[0]!,
+        amountMinor: 60000, ownerName: "付款归属客户", ownerContact: "13800001122", confirmationNote: "客户确认留存下次使用" };
+      const sourceEvidence = { sourceOrderId, sourceFactId: retainInput.sourceFactId, billId: sourceBill.id,
+        currency: "CNY", remainingBefore: 60000, ownerName: retainInput.ownerName, ownerContact: retainInput.ownerContact };
+      expect(await captureInternalEffect("RETAIN_ORDER_FUNDS", retainInput)).toEqual({
+        ...sourceEvidence, operation: "RETAIN_ORDER_FUNDS", orderId: sourceOrderId,
+        amountMinor: 60000, confirmationNote: retainInput.confirmationNote
+      });
+      const retained = await executeAllocation("RETAIN_ORDER_FUNDS", retainInput);
+      const retainedFundId = retained.result!.retainedFundId as string;
+      expect(retained.result).toEqual({ operation: "RETAIN_ORDER_FUNDS", orderId: sourceOrderId,
+        retainedFundId, amountMinor: 60000, remainingMinor: 60000 });
+      expect(Value.Check(ReceiptSchema, retained)).toBe(true);
+      expect(await captureInternalEffect("APPLY_RETAINED_FUNDS", { propertyId: demo.propertyId, orderId: targetOrderId, retainedFundId,
+        amountMinor: 40000, authorizationNote: "原付款人确认授权代订" })).toEqual({
+        ...sourceEvidence, operation: "APPLY_RETAINED_FUNDS", orderId: targetOrderId, retainedFundId,
+        amountMinor: 40000, authorizationNote: "原付款人确认授权代订"
+      });
+      // These previews are alternatives: none consumes the retained balance.
+      expect(await captureInternalEffect("RELEASE_RETAINED_FUNDS", { propertyId: demo.propertyId, orderId: sourceOrderId, retainedFundId,
+        amountMinor: 20000, note: "客户解除剩余留存" })).toEqual({
+        ...sourceEvidence, operation: "RELEASE_RETAINED_FUNDS", orderId: sourceOrderId, retainedFundId,
+        amountMinor: 20000, note: "客户解除剩余留存"
+      });
+      await sync([{ ...original, kind: "REFUND", reference: "effect-retained-refund", amountMinor: 20000 }]);
+      const refundBill = (await listPaymentAllocations(db, demo.propertyId, { kind: "REFUND", status: "ALL" })).items.find(item => item.reference === "effect-retained-refund")!;
+      expect(refundBill).toBeDefined();
+      expect(await captureInternalEffect("REFUND_RETAINED_FUNDS", { propertyId: demo.propertyId, orderId: sourceOrderId, retainedFundId,
+        amountMinor: 20000, externalPaymentBillId: refundBill.id, refundReference: "effect-retained-refund", note: "登记实际退款" })).toEqual({
+        ...sourceEvidence, operation: "REFUND_RETAINED_FUNDS", orderId: sourceOrderId, retainedFundId,
+        amountMinor: 20000, externalPaymentBillId: refundBill.id, refundReference: "effect-retained-refund", note: "登记实际退款",
+        method: "WECOM", referencesFactId: retainInput.sourceFactId, transactionReference: null
+      });
+    } finally {
+      if (previousAllocationFlag === undefined) delete process.env.PMS_PAYMENT_ALLOCATION_ENABLED;
+      else process.env.PMS_PAYMENT_ALLOCATION_ENABLED = previousAllocationFlag;
+    }
     expect([...covered].sort()).toEqual([...commandTypes].sort());
   }, 120_000);
 });

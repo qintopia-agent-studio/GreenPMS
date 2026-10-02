@@ -1,3 +1,5 @@
+import { buildRetainedFundsEffect, isRetainedFundsCommand } from "../retained-funds.ts";
+import { fundingSource, assertNoUnassignedRefund, requirePaymentAllocationEnabled } from "../payment-allocation.ts";
 import { sql } from "kysely";
 import { buildCheckoutReversalEffect } from "./checkout-reversal.ts";
 import { buildCompanionEffect } from "./companions.ts";
@@ -269,7 +271,7 @@ const temporaryOtherRoomBlockedOrderCommands = new Set<CommandType>([
   "REFRESH_MEMBER_COVERAGE",
   "RECORD_COLLECTION",
   "RECORD_REFUND",
-  "REVERSE_FACT"
+  "REVERSE_FACT", "RETAIN_ORDER_FUNDS", "APPLY_RETAINED_FUNDS", "RELEASE_RETAINED_FUNDS", "REFUND_RETAINED_FUNDS"
 ]);
 
 function temporaryOtherRoomEffectEvidence(evidence: TemporaryOtherRoomCreateEvidence | null): Record<string, unknown> {
@@ -1859,7 +1861,20 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     } : {})
   };
 
+  if (isRetainedFundsCommand(commandType)) {
+    const retained = await buildRetainedFundsEffect(db, commandType, input);
+    return finalize(propertyId, retained.effect, { ...baseBasis, ...retained.basis });
+  }
+
   if (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP") {
+    const restricted = (await sql<{blocked: boolean}>`SELECT EXISTS(
+      SELECT 1 FROM collection_facts f LEFT JOIN external_payment_allocations a ON a.collection_fact_id=f.fact_id
+      LEFT JOIN external_payment_bills b ON b.id=COALESCE(f.external_payment_bill_id,a.bill_id)
+      WHERE f.order_id=${orderId} AND (f.fact_type IN ('REALLOCATION_IN','REALLOCATION_OUT')
+        OR EXISTS(SELECT 1 FROM retained_funds l WHERE l.source_fact_id=f.fact_id)
+        OR (a.id IS NOT NULL AND (a.amount_minor<>b.amount_minor OR
+          (SELECT count(*) FROM external_payment_allocations x WHERE x.bill_id=a.bill_id)>1)))) blocked`.execute(db)).rows[0]?.blocked;
+    if (restricted) throw new DomainError("VALIDATION_ERROR", "拆分分配或客户留存款暂不支持转会员");
     const existingOrderConversion = await db.selectFrom("amendments")
       .select("id")
       .where("order_id", "=", orderId)
@@ -3005,7 +3020,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     const method = requireCollectionMethod(input);
     const { transactionReference, note } = fundsTransactionAndNote(input, method, false);
     if (!["RESERVED", "CHECKED_IN", "CHECKED_OUT"].includes(context.order.status)) throw new DomainError("INVALID_ORDER_STATE", "Cannot record a collection for this order", 409);
-    return finalize(propertyId, { orderId, amountMinor, currency: context.revision.currency, method, transactionReference, note }, baseBasis);
+    return finalize(propertyId, { orderId, amountMinor, currency: context.revision.currency, method, transactionReference, note, ...(input.externalPaymentBillId ? { externalPaymentBillId: requireString(input, "externalPaymentBillId") } : {}) }, baseBasis);
   }
 
   if (commandType === "RECORD_REFUND") {
@@ -3015,7 +3030,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     const referencesFactId = requireString(input, "referencesFactId");
     const method = requireCollectionMethod(input);
     const refundFunds = fundsTransactionAndNote(input, method, true);
-    if (refundFunds.refundReference) {
+    if (refundFunds.refundReference && !input.externalPaymentBillId) {
       const recorded = await db.selectFrom("collection_facts").innerJoin("orders", "orders.id", "collection_facts.order_id")
         .select("collection_facts.fact_id").where("orders.property_id", "=", propertyId)
         .where("collection_facts.refund_reference", "=", refundFunds.refundReference).executeTakeFirst();
@@ -3029,17 +3044,18 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       .executeTakeFirst();
     if (!original) throw new DomainError("NOT_FOUND", "Referenced collection fact not found", 404);
     if (original.order_id !== orderId) throw new DomainError("CROSS_ORDER_FACT_REFERENCE", "Refund must reference a collection in the same order", 409);
-    if (original.fact_type !== "COLLECTION") throw new DomainError("VALIDATION_ERROR", "Refund must reference a collection fact");
+    if (!["COLLECTION", "REALLOCATION_IN"].includes(original.fact_type)) throw new DomainError("VALIDATION_ERROR", "Refund must reference a collection fact");
     if ((original.method === "WECOM") !== (method === "WECOM")) {
       throw new DomainError("VALIDATION_ERROR", "企业微信收款必须通过企业微信原路退款");
     }
     const originalReversal = await db.selectFrom("collection_facts").select("fact_id").where("reverses_fact_id", "=", referencesFactId).executeTakeFirst();
     if (originalReversal) throw new DomainError("FACT_ALREADY_REVERSED", "Cannot refund a reversed collection", 409, false, { reversalFactId: originalReversal.fact_id });
     const activeRefunded = await activeRefundedAmount(db, referencesFactId);
-    if (activeRefunded + amountMinor > original.amount_minor) {
+    const funding = await fundingSource(db, propertyId, referencesFactId);
+    if (amountMinor > funding.remainingMinor - funding.reservedMinor) {
       throw new DomainError("REFUND_LIMIT_EXCEEDED", "退款金额不能超过所选原收款的剩余可退金额", 409);
     }
-    return finalize(propertyId, { orderId, amountMinor, currency: original.currency, referencesFactId, method, ...refundFunds }, { ...baseBasis, originalFact: original, activeRefunded });
+    return finalize(propertyId, { orderId, amountMinor, currency: original.currency, referencesFactId, method, ...refundFunds, ...(input.externalPaymentBillId ? { externalPaymentBillId: requireString(input, "externalPaymentBillId") } : {}) }, { ...baseBasis, originalFact: original, activeRefunded, funding });
   }
 
   if (commandType === "REVERSE_FACT") {
@@ -3054,13 +3070,35 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     if (!original) throw new DomainError("NOT_FOUND", "Fact not found", 404);
     if (original.order_id !== orderId) throw new DomainError("CROSS_ORDER_FACT_REFERENCE", "Reversal must remain within the order", 409);
     if (original.fact_type === "REVERSAL") throw new DomainError("VALIDATION_ERROR", "A reversal fact cannot itself be reversed");
+    if (["REALLOCATION_IN", "REALLOCATION_OUT"].includes(original.fact_type)) throw new DomainError("VALIDATION_ERROR", "内部划转不能直接冲销，请从目标订单核对资金");
+    if (original.fact_type === "COLLECTION") {
+      const funding = await fundingSource(db, propertyId, reversesFactId);
+      if (funding.reservedMinor > 0 || funding.transferredMinor > 0) throw new DomainError("VALIDATION_ERROR", "收款有留存或划转占用，不能冲销");
+    }
+    if ((await sql<{used:boolean}>`SELECT EXISTS(SELECT 1 FROM retained_fund_entries e WHERE e.refund_fact_id=${reversesFactId}) used`.execute(db)).rows[0]?.used)
+      throw new DomainError("VALIDATION_ERROR", "留存退款记录需专项核对，不能直接冲销");
+    if (original.fact_type === "REFUND" && input.releaseExternalPaymentAllocation !== true
+      && (await sql<{ present: boolean }>`SELECT EXISTS(SELECT 1 FROM external_payment_allocations WHERE collection_fact_id=${reversesFactId}) present`.execute(db)).rows[0]?.present) {
+      throw new DomainError("VALIDATION_ERROR", "真实退款只能受控撤销归属；请勾选同时撤销流水归属，不能恢复已经退走的资金");
+    }
+    let releaseAllocationId: string | undefined;
+    if (input.releaseExternalPaymentAllocation === true) {
+      requirePaymentAllocationEnabled();
+      if (original.fact_type !== "COLLECTION" && original.fact_type !== "REFUND") throw new DomainError("VALIDATION_ERROR", "这里只能释放收款或退款分配");
+      const allocation = (await sql<{id:string;bill_id:string}>`SELECT a.id,a.bill_id FROM external_payment_allocations a
+        WHERE a.collection_fact_id=${reversesFactId} AND NOT EXISTS(SELECT 1 FROM external_payment_allocation_releases x WHERE x.allocation_id=a.id)`.execute(db)).rows[0];
+      if (!allocation) throw new DomainError("VALIDATION_ERROR", "没有可撤销的收退款分配");
+      if (original.fact_type === "COLLECTION") await assertNoUnassignedRefund(db, propertyId, allocation.bill_id);
+      releaseAllocationId = allocation.id;
+    }
+
     const reversal = await db.selectFrom("collection_facts").select("fact_id").where("reverses_fact_id", "=", reversesFactId).executeTakeFirst();
     if (reversal) throw new DomainError("FACT_ALREADY_REVERSED", "Fact is already reversed", 409);
     const activeRefunded = original.fact_type === "COLLECTION" ? await activeRefundedAmount(db, reversesFactId) : 0;
     if (activeRefunded > 0) {
       throw new DomainError("REFUND_LIMIT_EXCEEDED", "Reverse active refunds before reversing their collection", 409, false, { activeRefunded });
     }
-    return finalize(propertyId, { orderId, reversesFactId, amountMinor: original.amount_minor, netEffectMinor: -original.net_effect_minor, currency: original.currency, note: requireString(input, "note") }, { ...baseBasis, originalFact: original, activeRefunded });
+    return finalize(propertyId, { orderId, reversesFactId, amountMinor: original.amount_minor, netEffectMinor: -original.net_effect_minor, currency: original.currency, note: requireString(input, "note"), ...(releaseAllocationId ? { releaseExternalPaymentAllocation: true, releaseAllocationId } : {}) }, { ...baseBasis, originalFact: original, activeRefunded });
   }
 
   if (commandType === "CHECK_IN") {

@@ -1,3 +1,4 @@
+import { paymentAllocationReady } from "./payment-allocation-readiness.ts";
 import { crossRoomUpgradeReady } from "./cross-room-upgrade-readiness.ts";
 import { roomCatalogReady } from "./room-catalog-readiness.ts";
 import { Kysely, PostgresDialect, sql, type Transaction } from "kysely";
@@ -86,7 +87,9 @@ export const currentMigrationNames = [
   "064_building_order.sql",
   "065_cross_room_membership_upgrade.sql",
   "066_room_operational_codes.sql",
-  "067_payment_event_delivery.sql"
+  "067_payment_event_delivery.sql",
+  "069_payment_allocations_retained_funds.sql",
+  "070_payment_allocation_events.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -746,7 +749,7 @@ export async function databaseReady(
           ), false)
           AND COALESCE((
             SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
-                '6e1b524d8743b8a109add35436be2347a337b08c3821b715c59c56a273bd9639'
+                '7a69c01590ed1f69291cc99becebb7508305e050a91cdcc15195a0ac3d92dc45'
               AND procedure_row.proowner = database_owner.datdba
               AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
               AND NOT procedure_row.prosecdef
@@ -1315,7 +1318,7 @@ export async function databaseReady(
             SELECT 1
             FROM (
               VALUES
-                ('qintopia_validate_new_collection_fact_transaction_reference()', '424dd22174300cf686be9422dd8b9b42ef4e7f48fa0266f504bf6f4316dabbe3')
+                ('qintopia_validate_new_collection_fact_transaction_reference()', '22be0cf8db3f59056bbbeaa05633eca12f2631f45087cf633d938861dd6f97b8')
             ) AS expected(signature, body_hash)
             WHERE NOT COALESCE((
               SELECT encode(
@@ -1925,7 +1928,7 @@ export async function databaseReady(
                 ('qintopia_validate_stage13_stay_conversion_execution()', '2b83d1f0c739a4bdc65e3114d0f6ddbcca1ac80a02ede73d687705da946d3f56'),
                 ('qintopia_validate_stage13_stay_conversion_membership_order()', '1baf9a5240b34e396eed0aca2da6165adec38227ee672e63623d33a3ad1ecae2'),
                 ('qintopia_validate_stay_collection_membership_transfer()', 'c9787c3223d8e3a41fe6c9111be52c6711fae94a212c5fcf4d10fd3f791f6c43'),
-                ('qintopia_validate_new_collection_fact_shape()', '0922bb880a362c3fa315ef44c9cb20f8edc855263bcc03d4fb537bad3e2d8977')
+                ('qintopia_validate_new_collection_fact_shape()', '44f93f4f11a66dff2b7382772060a81428db135bfe31afb150d95840b6519e32')
             ) AS expected(signature, body_hash)
             WHERE NOT COALESCE((
               SELECT encode(
@@ -2610,7 +2613,7 @@ export async function databaseReady(
           ('command_catalog', 'command_catalog_feature_key_check', 'c',
             'CHECK (((feature_key IS NULL) OR (command_type = ANY (ARRAY[''COMPLETE_CLEANING''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text]))))'),
           ('subject_command_grants', 'subject_command_grants_human_exact_check', 'c',
-            'CHECK ((command_type = ANY (ARRAY[''CREATE_MEMBER''::text, ''CREATE_MEMBERSHIP_ORDER''::text, ''RECORD_MEMBERSHIP_PAYMENT''::text, ''CORRECT_MEMBERSHIP_PAYMENT''::text, ''ACTIVATE_MEMBERSHIP_ORDER''::text, ''CREATE_ORDER''::text, ''CORRECT_ORDER_OCCUPANT''::text, ''MANAGE_ROOM_CATALOG''::text, ''MANAGE_ORDER_OCCUPANTS''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''CORRECT_MEMBER_PROFILE''::text, ''CORRECT_MEMBERSHIP_EFFECTIVE_DATE''::text, ''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text, ''RESCHEDULE_STAY''::text, ''EXTEND_STAY''::text, ''SHORTEN_STAY''::text, ''MOVE_UNIT''::text, ''REPRICE_ORDER''::text, ''CANCEL_ORDER''::text, ''MARK_NO_SHOW''::text, ''REVOKE_CHECK_IN''::text, ''LOCK_MAINTENANCE''::text, ''RELEASE_MAINTENANCE''::text, ''COMPLETE_CLEANING''::text, ''RECORD_COLLECTION''::text, ''RECORD_REFUND''::text, ''REVERSE_FACT''::text, ''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text, ''CHECK_IN''::text, ''CHECK_OUT''::text, ''REVOKE_CHECK_OUT''::text, ''COMPLETE_STAY''::text, ''CORRECT_MEMBER_ENTITLEMENT_BALANCE''::text, ''ISSUE_TOKEN''::text, ''ROTATE_TOKEN''::text, ''REVOKE_TOKEN''::text, ''PLACE_INTERNAL_USE''::text, ''RELEASE_INTERNAL_USE''::text, ''BACKFILL_COMPLETED_STAY''::text])))'),
+            'CHECK ((command_type = ANY (ARRAY[''CREATE_MEMBER''::text, ''CREATE_MEMBERSHIP_ORDER''::text, ''RECORD_MEMBERSHIP_PAYMENT''::text, ''CORRECT_MEMBERSHIP_PAYMENT''::text, ''ACTIVATE_MEMBERSHIP_ORDER''::text, ''CREATE_ORDER''::text, ''CORRECT_ORDER_OCCUPANT''::text, ''MANAGE_ROOM_CATALOG''::text, ''MANAGE_ORDER_OCCUPANTS''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''CORRECT_MEMBER_PROFILE''::text, ''CORRECT_MEMBERSHIP_EFFECTIVE_DATE''::text, ''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text, ''RESCHEDULE_STAY''::text, ''EXTEND_STAY''::text, ''SHORTEN_STAY''::text, ''MOVE_UNIT''::text, ''REPRICE_ORDER''::text, ''CANCEL_ORDER''::text, ''MARK_NO_SHOW''::text, ''REVOKE_CHECK_IN''::text, ''LOCK_MAINTENANCE''::text, ''RELEASE_MAINTENANCE''::text, ''COMPLETE_CLEANING''::text, ''RECORD_COLLECTION''::text, ''RETAIN_ORDER_FUNDS''::text, ''APPLY_RETAINED_FUNDS''::text, ''RELEASE_RETAINED_FUNDS''::text, ''REFUND_RETAINED_FUNDS''::text, ''RECORD_REFUND''::text, ''REVERSE_FACT''::text, ''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text, ''CHECK_IN''::text, ''CHECK_OUT''::text, ''REVOKE_CHECK_OUT''::text, ''COMPLETE_STAY''::text, ''CORRECT_MEMBER_ENTITLEMENT_BALANCE''::text, ''ISSUE_TOKEN''::text, ''ROTATE_TOKEN''::text, ''REVOKE_TOKEN''::text, ''PLACE_INTERNAL_USE''::text, ''RELEASE_INTERNAL_USE''::text, ''BACKFILL_COMPLETED_STAY''::text])))'),
           ('membership_orders', 'membership_orders_status_check', 'c',
             'CHECK ((status = ANY (ARRAY[''DRAFT''::text, ''ACTIVE''::text, ''VOIDED''::text])))'),
           ('membership_orders', 'membership_orders_lifecycle_state_check', 'c',
@@ -3186,7 +3189,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db);
+    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db);
   } catch {
     return false;
   }

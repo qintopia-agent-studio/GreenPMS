@@ -96,8 +96,13 @@ async function seedTokenCommandCeiling(
   commandTypes: readonly CommandCatalogType[]
 ): Promise<void> {
   if (commandTypes.length === 0) return;
+  // Historical fixture databases may intentionally stop before newer commands exist.
+  // A seed may grant only capabilities present in that database's command catalog.
+  const catalog = new Set((await db.selectFrom("command_catalog").select("command_type").execute()).map(row => row.command_type));
+  const supportedCommands = commandTypes.filter(command => catalog.has(command));
+  if (supportedCommands.length === 0) return;
   await db.insertInto("token_command_ceilings")
-    .values(commandTypes.map((commandType) => ({ token_id: tokenId, subject_id: subjectId, property_id: propertyId, command_type: commandType })))
+    .values(supportedCommands.map((commandType) => ({ token_id: tokenId, subject_id: subjectId, property_id: propertyId, command_type: commandType })))
     .onConflict((oc) => oc.columns(["token_id", "command_type"]).doNothing())
     .execute();
 }

@@ -549,9 +549,13 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("LOCK_MAINTENANCE", strictObject({ ...PropertyInput, inventoryUnitId: Id, arrivalDate: LocalDate, departureDate: LocalDate, reason: Note })),
   commandEnvelope("RELEASE_MAINTENANCE", strictObject({ ...PropertyInput, maintenanceLockId: Id })),
   commandEnvelope("COMPLETE_CLEANING", strictObject({ ...PropertyInput, cleaningTaskId: Id })),
-  commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, amountMinor: PositiveAmount, method: ShortText, transactionReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
-  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), refundReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
-  commandEnvelope("REVERSE_FACT", strictObject({ ...OrderInput, reversesFactId: Id, note: Note })),
+  commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, method: ShortText, transactionReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
+  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), refundReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
+  commandEnvelope("REVERSE_FACT", strictObject({ ...OrderInput, reversesFactId: Id, note: Note, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()) })),
+  commandEnvelope("RETAIN_ORDER_FUNDS", strictObject({ ...OrderInput, sourceFactId: Id, amountMinor: PositiveAmount, ownerName: ShortText, ownerContact: ShortText, confirmationNote: Note })),
+  commandEnvelope("APPLY_RETAINED_FUNDS", strictObject({ ...OrderInput, retainedFundId: Id, amountMinor: PositiveAmount, authorizationNote: Note })),
+  commandEnvelope("RELEASE_RETAINED_FUNDS", strictObject({ ...OrderInput, retainedFundId: Id, amountMinor: PositiveAmount, note: Note })),
+  commandEnvelope("REFUND_RETAINED_FUNDS", strictObject({ ...OrderInput, retainedFundId: Id, amountMinor: PositiveAmount, externalPaymentBillId: Id, refundReference: ShortText, note: Note })),
   commandEnvelope("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", strictObject({
     ...OrderInput,
     memberId: Id,
@@ -976,7 +980,21 @@ const RevokeCheckOutEffectSchema = strictObject({
   fundsSummary: strictObject({ netRecordedCollection: Money, collectionDifference: Money, refundReferenceAmount: Money })
 });
 
+const RetainedFundsOperationSchema = Type.Union(["RETAIN_ORDER_FUNDS", "APPLY_RETAINED_FUNDS", "RELEASE_RETAINED_FUNDS", "REFUND_RETAINED_FUNDS"].map(value => Type.Literal(value)));
+const RetainedFundsEffectBase = {
+  orderId: Id, sourceOrderId: Id, sourceFactId: Id, billId: Id,
+  amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }),
+  remainingBefore: Type.Integer({ minimum: 0, maximum: 2147483647 }), ownerName: ShortText, ownerContact: ShortText
+};
+const RetainedFundsEffectSchema = Type.Union([
+  strictObject({ ...RetainedFundsEffectBase, operation: Type.Literal("RETAIN_ORDER_FUNDS"), confirmationNote: Note }),
+  strictObject({ ...RetainedFundsEffectBase, operation: Type.Literal("APPLY_RETAINED_FUNDS"), retainedFundId: Id, authorizationNote: Note }),
+  strictObject({ ...RetainedFundsEffectBase, operation: Type.Literal("RELEASE_RETAINED_FUNDS"), retainedFundId: Id, note: Note }),
+  strictObject({ ...RetainedFundsEffectBase, operation: Type.Literal("REFUND_RETAINED_FUNDS"), retainedFundId: Id, note: Note,
+    method: Type.Literal("WECOM"), referencesFactId: Id, transactionReference: Type.Null(), externalPaymentBillId: Id, refundReference: ShortText })
+]);
 export const CommandEffectSchema = Type.Union([
+  RetainedFundsEffectSchema,
   RoomCatalogEffectSchema,
   RevokeCheckOutEffectSchema,
   strictObject({
@@ -1385,9 +1403,9 @@ export const CommandEffectSchema = Type.Union([
     before: strictObject({ currentContractAmount: Money }),
     pricing: PricingResultSchema
   }),
-  strictObject({ orderId: Id, amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), method: ShortText, transactionReference: nullable(ShortText), note: OptionalNote }),
-  strictObject({ orderId: Id, amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), referencesFactId: Id, method: ShortText, transactionReference: nullable(ShortText), refundReference: Type.Optional(ShortText), note: OptionalNote }),
-  strictObject({ orderId: Id, reversesFactId: Id, amountMinor: PositiveAmount, netEffectMinor: SafeInteger, currency: Type.String({ minLength: 3, maxLength: 3 }), note: Note }),
+  strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), method: ShortText, transactionReference: nullable(ShortText), note: OptionalNote }),
+  strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), referencesFactId: Id, method: ShortText, transactionReference: nullable(ShortText), refundReference: Type.Optional(ShortText), note: OptionalNote }),
+  strictObject({ orderId: Id, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()), releaseAllocationId: Type.Optional(Id), reversesFactId: Id, amountMinor: PositiveAmount, netEffectMinor: SafeInteger, currency: Type.String({ minLength: 3, maxLength: 3 }), note: Note }),
   strictObject({
     operation: Type.Literal("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"),
     crossRoomUpgrade: Type.Optional(strictObject({
@@ -1891,7 +1909,7 @@ const CoverageRefreshResultSchema = strictObject({ orderId: Id, amendmentId: Id,
 const CollectionFactResultSchema = strictObject({
   orderId: Id,
   factId: Id,
-  factType: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
+  factType: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL"), Type.Literal("REALLOCATION_IN"), Type.Literal("REALLOCATION_OUT")]),
   netEffectMinor: SafeInteger,
   transactionReference: nullable(ShortText),
   refundReference: Type.Optional(ShortText)
@@ -2224,6 +2242,8 @@ export const ExecutedCommandResultSchema = Type.Union([
   RepriceResultSchema,
   CoverageRefreshResultSchema,
   CollectionFactResultSchema,
+  strictObject({ operation: RetainedFundsOperationSchema, orderId: Id, retainedFundId: Id, amountMinor: PositiveAmount,
+    remainingMinor: Type.Integer({ minimum: 0, maximum: 2147483647 }), factId: Type.Optional(Id) }),
   OrderStatusResultSchema,
   BackfillCompletedStayResultSchema,
   CompleteStayResultSchema,
@@ -3190,8 +3210,8 @@ const OrderArrangementHistoryItemSchema = strictObject({
   correctionGroup: Type.Optional(OrderHistoricalStayCorrectionGroupSchema)
 });
 export const CollectionFactRowSchema = strictObject({
-  fact_id: Id, order_id: Id,
-  fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
+  fact_id: Id, order_id: Id, external_payment_bill_id: Type.Optional(nullable(Id)),
+  fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL"), Type.Literal("REALLOCATION_IN"), Type.Literal("REALLOCATION_OUT")]),
   amount_minor: PositiveAmount, net_effect_minor: SafeInteger,
   currency: Type.String({ minLength: 3, maxLength: 3 }), references_fact_id: nullable(Id), reverses_fact_id: nullable(Id),
   method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), refund_reference: Type.Optional(nullable(ShortText)), cash_collector: nullable(ShortText), pricing_revision_id: nullable(Id), command_id: Id, created_at: DateTime,
@@ -3497,7 +3517,7 @@ export const MemberResponseSchema = strictObject({
 
 const CollectionFactResponseSchema = strictObject({
   fact_id: Id, order_id: Id,
-  fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL")]),
+  fact_type: Type.Union([Type.Literal("COLLECTION"), Type.Literal("REFUND"), Type.Literal("REVERSAL"), Type.Literal("REALLOCATION_IN"), Type.Literal("REALLOCATION_OUT")]),
   amount_minor: PositiveAmount, net_effect_minor: SafeInteger,
   currency: Type.String({ minLength: 3, maxLength: 3 }), references_fact_id: nullable(Id), reverses_fact_id: nullable(Id),
   method: ShortText, note: OptionalNote, transaction_reference: nullable(ShortText), refund_reference: Type.Optional(nullable(ShortText)), cash_collector: nullable(ShortText), pricing_revision_id: nullable(Id), created_at: DateTime, property_id: Id

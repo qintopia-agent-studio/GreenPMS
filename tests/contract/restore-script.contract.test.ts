@@ -161,9 +161,11 @@ describe("restore script contract", () => {
     }
   });
 
-  it("creates a new target, upgrades a stage 9 backup, and validates the current schema including integration capture", async () => {
-    expect(currentMigrationNames).toHaveLength(67);
-    expect(currentMigrationNames.at(-1)).toBe("067_payment_event_delivery.sql");
+  it("creates a new target, upgrades a stage 9 backup, and validates the current schema including retained funds and allocation events", async () => {
+    expect(currentMigrationNames).toHaveLength(69);
+    expect(currentMigrationNames.slice(-3)).toEqual([
+      "067_payment_event_delivery.sql", "069_payment_allocations_retained_funds.sql", "070_payment_allocation_events.sql"
+    ]);
     expect(currentMigrationNames).toContain("046_command_authorization.sql");
     expect(currentMigrationNames).toContain("047_runtime_database_role.sql");
     expect(currentMigrationNames).toContain("048_runtime_isolation_guards.sql");
@@ -212,6 +214,8 @@ describe("restore script contract", () => {
       expect(calls).toContain("046_command_authorization.sql");
       expect(calls).toContain("047_runtime_database_role.sql");
       expect(calls).toContain("048_runtime_isolation_guards.sql");
+      expect(calls).toContain("069_payment_allocations_retained_funds.sql");
+      expect(calls).toContain("070_payment_allocation_events.sql");
       expect(calls).toContain("npm run db:ready");
       expect(calls.match(/staff profile manifest=demo/g)).toHaveLength(2);
       expect(calls).toContain("pricing_revisions_stage10_validate");
@@ -273,6 +277,25 @@ describe("restore script contract", () => {
       } finally {
         await rm(fixture.workdir, { recursive: true, force: true });
       }
+    }
+  });
+
+  it.each([
+    ["069_payment_allocations_retained_funds.sql", 67],
+    ["070_payment_allocation_events.sql", 68]
+  ] as const)("rejects an upgrade that stops before %s and retains the target", async (missingMigration, finalCount) => {
+    expect(currentMigrationNames[finalCount]).toBe(missingMigration);
+    const fixture = await fakeDockerEnvironment(false, false, undefined, { finalMigrationCount: String(finalCount) });
+    try {
+      await expect(execFileAsync("bash", [restoreScript, fixture.backup, `incomplete_allocation_${finalCount}`], { env: fixture.env }))
+        .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining(`migrations ${finalCount}/69`) });
+      const calls = await readFile(fixture.log, "utf8");
+      expect(calls).toContain("npm run db:migrate");
+      expect(calls).toContain(missingMigration);
+      expect(calls).not.toContain("npm run db:ready");
+      expect(calls).not.toContain("dropdb");
+    } finally {
+      await rm(fixture.workdir, { recursive: true, force: true });
     }
   });
 

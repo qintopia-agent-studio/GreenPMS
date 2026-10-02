@@ -26,10 +26,26 @@ export const preservedBaseTables = [
   "api_tokens",
   "web_sessions",
   "membership_products",
-  "room_status_revisions"
+  "room_status_revisions",
+  "room_catalog_state",
+  "room_catalog_links",
+  "room_catalog_heads"
 ] as const satisfies readonly (keyof Database)[];
 
+// external_payment_matches is maintained via SQL and is not in the typed DB schema.
+type AcceptanceBusinessTable = keyof Database | "external_payment_matches";
+
 export const acceptanceBusinessTables = [
+  // Explicit inbound FK closure; never cascade into source bills or durable events.
+  "external_payment_allocation_releases",
+  "external_payment_allocations",
+  "external_payment_matches",
+  "retained_fund_entries",
+  "retained_funds",
+  "member_deletions",
+  "order_occupant_removals",
+  // Maintenance command/audit history is purged; operational catalog state/links/heads stay.
+  "room_catalog_changes",
   "member_profile_corrections",
   "membership_effective_date_corrections",
   "historical_membership_backfills",
@@ -66,7 +82,7 @@ export const acceptanceBusinessTables = [
   "command_previews",
   "command_executions",
   "audit_entries"
-] as const satisfies readonly (keyof Database)[];
+] as const satisfies readonly AcceptanceBusinessTable[];
 
 export interface PurgeArguments {
   execute: boolean;
@@ -153,16 +169,16 @@ export function assertPurgeExecutionAuthorized(arguments_: PurgeArguments): void
   }
 }
 
-async function countTable(db: Kysely<Database>, table: keyof Database): Promise<number> {
-  const row = await db.selectFrom(table)
-    .select(({ fn }) => fn.countAll<number>().as("count"))
-    .executeTakeFirstOrThrow();
-  return Number(row.count);
+async function countTable(db: Kysely<Database>, table: AcceptanceBusinessTable): Promise<number> {
+  const result = await sql<{ count: string }>`
+    select count(*)::text as count from ${sql.table(table)}
+  `.execute(db);
+  return Number(result.rows[0]!.count);
 }
 
 async function snapshotCounts(
   db: Kysely<Database>,
-  tables: readonly (keyof Database)[]
+  tables: readonly AcceptanceBusinessTable[]
 ): Promise<Record<string, number>> {
   const counts: Record<string, number> = {};
   for (const table of tables) counts[table] = await countTable(db, table);

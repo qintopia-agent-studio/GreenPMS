@@ -64,7 +64,7 @@ interface LoadedHistoricalCorrectionItem extends NormalizedHistoricalCorrectionI
   occupants: HistoricalCorrectionOccupant[];
   collectionFacts: Array<{
     fact_id: string;
-    fact_type: "COLLECTION" | "REFUND" | "REVERSAL";
+    fact_type: "COLLECTION" | "REFUND" | "REVERSAL" | "REALLOCATION_IN" | "REALLOCATION_OUT";
     amount_minor: number;
     net_effect_minor: number;
     currency: string;
