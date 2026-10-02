@@ -1,3 +1,4 @@
+import { applyRetainedFundsCommand, isRetainedFundsCommand, lockPaymentAllocationResources } from "../retained-funds.ts";
 import { sql, type Transaction } from "kysely";
 import { applyCheckoutReversal, lockCheckoutReversalInventory } from "./checkout-reversal.ts";
 import { applyCompanionEffect } from "./companions.ts";
@@ -305,6 +306,8 @@ async function resolveQuoteMemberEntitlementOwner(
 
 export async function lockCommandResources(trx: Transaction<Database>, commandType: CommandType, rawInput: unknown): Promise<void> {
   const input = requireObject(rawInput);
+  await lockPaymentAllocationResources(trx, commandType, input);
+  if (isRetainedFundsCommand(commandType)) return;
   const propertyId = requireString(input, "propertyId");
   if (commandType === "MANAGE_ROOM_CATALOG") return;
 
@@ -617,6 +620,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
   const input = requireObject(options.input);
   const propertyId = requireString(input, "propertyId");
   const effect = options.effect;
+  if (isRetainedFundsCommand(options.commandType)) return applyRetainedFundsCommand(trx, options.commandType, effect, options.commandId);
   if (options.commandType === "MANAGE_ROOM_CATALOG") return applyRoomCatalogEffect(trx, options.commandId, effect, options.reason.note);
 
   if (isMemberCorrectionCommandType(options.commandType)) {
@@ -2322,9 +2326,14 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       note: typeof effect.note === "string" ? effect.note : options.reason.note,
       transaction_reference: transactionReference,
       refund_reference: refundReference ?? null,
+      ...(typeof effect.externalPaymentBillId === "string" ? { external_payment_bill_id: effect.externalPaymentBillId } : {}),
       pricing_revision_id: context.revision.id,
       command_id: options.commandId
     }).execute();
+    if (effect.releaseExternalPaymentAllocation === true) {
+      await sql`INSERT INTO external_payment_allocation_releases(id,allocation_id,reversal_fact_id,command_id)
+        VALUES(${newId("allocation_release")},${String(effect.releaseAllocationId)},${factId},${options.commandId})`.execute(trx);
+    }
     return { persistedResult: { orderId, factId, factType, netEffectMinor, transactionReference, ...(refundReference ? { refundReference } : {}) }, resourceRefs: [orderId], factRefs: [factId] };
   }
 

@@ -406,7 +406,18 @@ function scalar(value: unknown): string {
   return JSON.stringify(value);
 }
 
+const retainedFundsBusinessCommands = new Set<string>([
+  "RETAIN_ORDER_FUNDS", "APPLY_RETAINED_FUNDS", "RELEASE_RETAINED_FUNDS", "REFUND_RETAINED_FUNDS"
+]);
+
+function retainedFundsCommandLabel(commandType: string): string | undefined {
+  return retainedFundsBusinessCommands.has(commandType)
+    ? commandCapabilityBusinessLabels[commandType as CommandCapability]
+    : undefined;
+}
+
 export const commandCapabilityBusinessLabels: Record<CommandCapability, string> = {
+  RETAIN_ORDER_FUNDS: "登记客户留存", APPLY_RETAINED_FUNDS: "使用客户留存款", RELEASE_RETAINED_FUNDS: "解除留存", REFUND_RETAINED_FUNDS: "登记留存款退款",
   MANAGE_ROOM_CATALOG: "管理房型与价格",
   CREATE_MEMBER: "创建会员档案",
   CREATE_MEMBERSHIP_ORDER: "创建会员订单",
@@ -2666,6 +2677,20 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     </div>;
   }
 
+  if (businessCommand && retainedFundsBusinessCommands.has(businessCommand)) {
+    const details = { ...commandInput, ...effect };
+    return <section className="effect-summary" data-testid="command-effect"><h3>请核对{commandCapabilityBusinessLabels[businessCommand]}</h3>
+      <dl className="difference-grid"><dt>订单</dt><dd>{String(details.orderId ?? "—")}</dd>
+      <dt>本次金额</dt><dd>{typeof details.amountMinor === "number" ? formatMinor(details.amountMinor, "CNY") : "请核对预览金额"}</dd>
+      {details.ownerName ? <><dt>款项归属客户</dt><dd>{String(details.ownerName)} · {String(details.ownerContact ?? "")}</dd></> : null}
+      {details.retainedFundId ? <><dt>留存记录</dt><dd>{String(details.retainedFundId)}</dd></> : null}
+      {details.sourceFactId ? <><dt>来源资金记录</dt><dd>{String(details.sourceFactId)}</dd></> : null}
+      {details.refundReference ? <><dt>真实退款单号</dt><dd>{String(details.refundReference)}</dd></> : null}
+      <dt>确认 / 授权说明</dt><dd>{String(details.authorizationNote ?? details.confirmationNote ?? details.note ?? reasonNote ?? "—")}</dd></dl>
+      <p>{businessCommand === "REFUND_RETAINED_FUNDS" ? "仅登记已经发生的实际退款，不调用支付渠道退钱。" : "只改变已有款项的留存或订单归属，不新增现金收款，也不自动退款。"}</p>
+    </section>;
+  }
+
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const amountMinor = typeof effect.amountMinor === "number" ? effect.amountMinor : undefined;
     const currency = typeof effect.currency === "string" ? effect.currency : "CNY";
@@ -3946,6 +3971,29 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
       {tokenReceiptErrorMessage ? <div className="receipt-error"><p>{tokenReceiptErrorMessage}</p></div> : null}
     </section>;
   }
+  const retainedFundsLabel = businessCommand ? retainedFundsCommandLabel(businessCommand) : undefined;
+  if (retainedFundsLabel) {
+    const successDescription = businessCommand === "RETAIN_ORDER_FUNDS"
+      ? "客户留存已登记，预留的是已有款项，没有新增收款。"
+      : businessCommand === "APPLY_RETAINED_FUNDS"
+        ? "留存款已用于本订单，来源订单和目标订单的资金归属已更新，没有新增现金收款。"
+        : businessCommand === "RELEASE_RETAINED_FUNDS"
+          ? "留存已解除，款项仍归来源订单，没有发起退款。"
+          : "已登记实际发生的留存款退款，没有调用支付渠道退钱。";
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <div className="receipt-title-row">
+        <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
+        <div><h3 id="receipt-heading">{retainedFundsLabel}{committed ? "已完成" : "未执行"}</h3>
+          <p>{committed ? successDescription : "本次操作没有写入留存或订单资金记录。"}</p></div>
+      </div>
+      {committed ? <dl className="receipt-grid">
+        {typeof result?.amountMinor === "number" ? <><dt>本次金额</dt><dd>{formatMinor(result.amountMinor, "CNY")}</dd></> : null}
+        {typeof result?.remainingMinor === "number" ? <><dt>留存余额</dt><dd>{formatMinor(result.remainingMinor, "CNY")}</dd></> : null}
+      </dl> : null}
+      {!committed && receipt.error ? <div className="receipt-error"><p>{/[\u3400-\u9fff]/.test(receipt.error.message) ? receipt.error.message : `${retainedFundsLabel}未执行，请返回订单刷新后重新核对。`}</p></div> : null}
+      {committed && orderId ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
+    </section>;
+  }
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const label = businessCommand === "RECORD_REFUND" ? "退款" : "收款";
     const transactionReference = result && typeof result.transactionReference === "string" ? result.transactionReference : undefined;
@@ -4143,7 +4191,7 @@ export function fundsCommandCanReturnToEdit(input: {
   hasConfirmationKey: boolean;
   hasReceipt: boolean;
 }): boolean {
-  return (input.commandType === "RECORD_COLLECTION" || input.commandType === "RECORD_REFUND")
+  return (input.commandType === "RECORD_COLLECTION" || input.commandType === "RECORD_REFUND" || retainedFundsBusinessCommands.has(input.commandType))
     && input.hasEditor && !input.busy && !input.recoveryOnly && !input.networkUncertain
     && !input.hasConfirmationKey && !input.hasReceipt;
 }
@@ -5815,6 +5863,8 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
           ? "查询历史住宿安排修改结果"
         : u1CommandType
           ? `查询${commandShellLabel(u1CommandType)}结果`
+        : retainedFundsCommandLabel(recovery.commandType)
+          ? `查询${retainedFundsCommandLabel(recovery.commandType)}结果`
         : `${recovery.commandType} · 原命令恢复`,
     description: memberStay
       ? "系统只查询原住宿办理结果，不会重复创建订单或冻结会员权益。"
@@ -6276,11 +6326,11 @@ export function CommandRecoveryBar({ recovery, onOpen, testId = "command-recover
     ? membershipCommandLabel(recovery.commandType)
     : undefined;
   const historicalStayCorrectionLabel = recovery.commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" ? "历史住宿安排修改" : undefined;
-  const businessMode = businessFacing || memberStay || backfillStay || completeStay || fulfillment || fundBusiness || tokenBusiness || Boolean(u1CommandType) || Boolean(administratorMembershipLabel) || Boolean(historicalStayCorrectionLabel);
+  const businessMode = businessFacing || memberStay || backfillStay || completeStay || fulfillment || fundBusiness || retainedFundsBusinessCommands.has(recovery.commandType) || tokenBusiness || Boolean(u1CommandType) || Boolean(administratorMembershipLabel) || Boolean(historicalStayCorrectionLabel);
   const memberRegistration = businessMode && recovery.commandType === "CREATE_MEMBER";
   const fulfillmentLabel = isExecutableCommandType(recovery.commandType) ? fulfillmentCommandLabel(recovery.commandType) : "履约操作";
   const u1Label = u1CommandType ? commandShellLabel(u1CommandType) : undefined;
-  const fundLabel = fundBusiness ? (recovery.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款") : undefined;
+  const fundLabel = fundBusiness ? (recovery.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款") : retainedFundsCommandLabel(recovery.commandType);
   const tokenLabel = tokenBusiness ? tokenCommandLabel(recovery.commandType) : undefined;
   return (
     <section className="recovery-bar" role="status" aria-live="polite" aria-label={memberRegistration ? "待恢复会员建档" : memberStay ? "待恢复会员住宿" : backfillStay ? "待恢复补录住宿" : completeStay ? "待恢复完成住宿" : fulfillment ? `待恢复${fulfillmentLabel}` : u1Label ? `待恢复${u1Label}` : fundLabel ? `待恢复${fundLabel}` : tokenLabel ? `待恢复${tokenLabel}` : administratorMembershipLabel ? `待恢复${administratorMembershipLabel}` : historicalStayCorrectionLabel ? `待恢复${historicalStayCorrectionLabel}` : businessMode ? "待恢复业务操作" : "待恢复命令"} data-testid={testId}>
@@ -6410,6 +6460,7 @@ export function CommandDialog({
   const createOrderBusiness = request.commandType === "CREATE_ORDER";
   const memberLodging = request.commandType === "CREATE_ORDER" && request.presentation === "MEMBER_STAY";
   const fundBusiness = request.commandType === "RECORD_COLLECTION" || request.commandType === "RECORD_REFUND";
+  const retainedFundsLabel = retainedFundsCommandLabel(request.commandType);
   const tokenBusiness = Boolean(executableCommandType && tokenBusinessCommands.has(executableCommandType));
   const stayDates = request.presentation === "STAY_DATES"
     && (request.commandType === "RESCHEDULE_STAY" || request.commandType === "EXTEND_STAY" || request.commandType === "SHORTEN_STAY");
@@ -6422,9 +6473,9 @@ export function CommandDialog({
     : undefined;
   const fulfillment = Boolean(executableCommandType && fulfillmentBusinessCommands.has(executableCommandType) && request.presentation === "FULFILLMENT");
   const lodgingFulfillment = fulfillment && (request.commandType === "CHECK_IN" || request.commandType === "CHECK_OUT");
-  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || historicalStayCorrection || createOrderBusiness || completeStay || fulfillment || fundBusiness || tokenBusiness;
-  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : completeStay ? "COMPLETE_STAY" : fulfillment && executableCommandType ? executableCommandType : fundBusiness ? request.commandType : tokenBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
-  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment || completeStay ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : tokenBusiness ? tokenCommandLabel(request.commandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
+  const businessFacing = Boolean(u1CommandType) || memberProfile || membershipBusiness || historicalStayCorrection || createOrderBusiness || completeStay || fulfillment || fundBusiness || Boolean(retainedFundsLabel) || tokenBusiness;
+  const [reasonCode, setReasonCode] = useState(request.initialReason?.code ?? (createOrderBusiness ? "CREATE_STANDARD_ORDER" : memberProfile ? "CREATE_MEMBER_PROFILE" : membershipBusiness ? request.commandType : completeStay ? "COMPLETE_STAY" : fulfillment && executableCommandType ? executableCommandType : fundBusiness || retainedFundsLabel ? request.commandType : tokenBusiness ? request.commandType : "OPERATOR_CONFIRMED"));
+  const [reasonNote, setReasonNote] = useState(request.initialReason?.note ?? (createOrderBusiness || lodgingFulfillment || completeStay ? "" : memberProfile ? "创建会员档案" : membershipBusiness && executableCommandType ? membershipCommandLabel(executableCommandType) : fulfillment && executableCommandType ? fulfillmentCommandLabel(executableCommandType) : fundBusiness ? (request.commandType === "RECORD_REFUND" ? "" : "登记收款") : retainedFundsLabel ? String(request.input.authorizationNote ?? request.input.confirmationNote ?? request.input.note ?? retainedFundsLabel) : tokenBusiness ? tokenCommandLabel(request.commandType) : u1CommandType ? commandShellLabel(u1CommandType) : ""));
   const [confirmationKey, setConfirmationKey] = useState(initialConfirmationKey);
   const recoveryOnlyRequest = Boolean(initialConfirmationKey);
   const [networkUncertain, setNetworkUncertain] = useState(Boolean(initialConfirmationKey && (!initialReceipt || !initialReceiptHasEvidence)));
@@ -6450,7 +6501,7 @@ export function CommandDialog({
       ? `${commandShellLabel(u1CommandType)}未写入；原操作已安全收口，可以关闭后重新发起。`
       : commandShellNotExecutedMessage(u1CommandType)
     : "本次操作未执行。";
-  const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || tokenBusiness || historicalStayCorrection) && executableCommandType ? executableCommandType : undefined);
+  const summaryBusinessCommand = u1CommandType ?? ((fundBusiness || retainedFundsLabel || tokenBusiness || historicalStayCorrection) && executableCommandType ? executableCommandType : undefined);
   const deterministicPreviewFailure = Boolean(error && !preview && !receipt && !commandPreviewFailureCanReload(error));
   const existingMembershipBackfillConflict = isExistingMembershipBackfillConflict(request.commandType, error);
 
@@ -6615,7 +6666,7 @@ export function CommandDialog({
 
   async function returnToEdit() {
     if (dialogCloseDisabled) return;
-    if (fundBusiness && (!canReturnFundsToEdit || returningFundsToEditRef.current)) return;
+    if ((fundBusiness || retainedFundsLabel) && (!canReturnFundsToEdit || returningFundsToEditRef.current)) return;
     requestLeaseRef.current.controller?.abort();
     if (u1CommandType && fulfillment) {
       const nextAttemptId = shellAttemptIdRef.current + 1;
@@ -6634,7 +6685,7 @@ export function CommandDialog({
       ...request,
       initialReason: { code: reasonCode.trim(), note: reasonNote }
     };
-    if (fundBusiness && onReturnToEdit) {
+    if ((fundBusiness || retainedFundsLabel) && onReturnToEdit) {
       returningFundsToEditRef.current = true;
       setBusy(true);
       try {
@@ -6932,7 +6983,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : backfillStay ? "确认补录住宿" : completeStay ? "确认完成住宿" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : backfillStay ? "确认补录住宿" : completeStay ? "确认完成住宿" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : retainedFundsLabel ? `确认${retainedFundsLabel}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }
@@ -6975,7 +7026,7 @@ export function CommandDialog({
                 : request.commandType === "ISSUE_TOKEN" || request.commandType === "ROTATE_TOKEN"
                   ? "本次密钥没有生效。请关闭窗口，清除未提交的密钥显示后重新填写。"
                   : "请返回修改填写内容后重新核对。"
-            : busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : administratorMembershipCorrection ? `正在载入${membershipCommandLabel(request.commandType as CommandType)}核对信息。` : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : administratorMembershipCorrection ? `系统将重新载入${membershipCommandLabel(request.commandType as CommandType)}的只读核对信息。` : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
+            : busy ? (memberProfile ? "正在检查手机号并载入会员资料。" : memberLodging ? "正在载入会员住宿核对信息。" : backfillStay ? "正在载入已完成住宿补录核对信息。" : completeStay ? "正在载入完成住宿核对信息。" : createOrderBusiness ? "正在载入住宿订单核对信息。" : fulfillment ? "正在载入本次履约核对信息。" : fundBusiness ? `正在载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : retainedFundsLabel ? `正在载入${retainedFundsLabel}核对信息。` : tokenBusiness ? "正在核对 Token 操作。" : administratorMembershipCorrection ? `正在载入${membershipCommandLabel(request.commandType as CommandType)}核对信息。` : u1CommandType ? `正在载入${commandShellLabel(u1CommandType)}核对信息。` : "正在载入本次会员操作的核对信息。") : (memberProfile ? "系统会先检查手机号是否已登记，再显示本次要创建的会员资料。" : memberLodging ? "系统将重新载入会员住宿核对信息。" : backfillStay ? "系统将重新载入原补录住宿核对信息。" : completeStay ? "系统将重新载入完成住宿核对信息。" : createOrderBusiness ? "系统将重新载入住宿订单核对信息。" : fulfillment ? "系统将重新载入本次履约核对信息。" : fundBusiness ? `系统将重新载入${request.commandType === "RECORD_REFUND" ? "退款" : "收款"}核对信息。` : retainedFundsLabel ? `系统将重新载入${retainedFundsLabel}核对信息。` : tokenBusiness ? "系统将核对本次 Token 操作。" : administratorMembershipCorrection ? `系统将重新载入${membershipCommandLabel(request.commandType as CommandType)}的只读核对信息。` : u1CommandType ? `系统将重新载入${commandShellLabel(u1CommandType)}核对信息。` : "系统将重新载入本次会员操作的核对信息。")}</p> : <>
             <p>命令类型</p>
             <code>{request.commandType}</code>
             <details className="raw-details">
@@ -7039,7 +7090,7 @@ export function CommandDialog({
           data-command-state="duplicate-returned-original-receipt"
         >
           <strong>{businessFacing ? "已找到原操作结果" : "已返回原 Receipt"}</strong>
-          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : administratorMembershipCorrection ? "系统返回了原来的会员修改结果，没有重复修改资料、合同、资金或权益。" : historicalStayCorrection ? "系统返回了原来的历史住宿安排修改结果，没有重复修改订单、房态或历史记录。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : backfillStay ? "系统返回了原补录住宿结果，没有重复创建订单、退房记录或收款事实。" : completeStay ? "系统返回了刚才的办理结果，没有重复完成订单或重复登记收款。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : tokenBusiness ? "系统返回了原来的 Token 操作结果，没有重复提交。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "系统找到了原来的操作结果，没有重复执行。"}</p>
+          <p>{memberProfile ? "系统返回了原来的建档结果，没有重复创建会员。" : administratorMembershipCorrection ? "系统返回了原来的会员修改结果，没有重复修改资料、合同、资金或权益。" : historicalStayCorrection ? "系统返回了原来的历史住宿安排修改结果，没有重复修改订单、房态或历史记录。" : membershipBusiness ? "系统返回了原来的操作结果，没有重复写入会员订单或收款。" : memberLodging ? "系统返回了原来的住宿结果，没有重复创建订单或冻结会员权益。" : backfillStay ? "系统返回了原补录住宿结果，没有重复创建订单、退房记录或收款事实。" : completeStay ? "系统返回了刚才的办理结果，没有重复完成订单或重复登记收款。" : createOrderBusiness ? "系统返回了原来的住宿订单结果，没有重复创建订单。" : fulfillment ? "系统返回了刚才的操作结果，没有重复办理。" : retainedFundsLabel ? `系统返回了原来的${retainedFundsLabel}结果，没有重复写入留存或订单资金记录。` : tokenBusiness ? "系统返回了原来的 Token 操作结果，没有重复提交。" : u1CommandType ? `系统返回了原来的${commandShellLabel(u1CommandType)}结果，没有重复提交。` : "系统找到了原来的操作结果，没有重复执行。"}</p>
         </div>
       ) : null}
       {receipt && !u1CommandType ? <ReceiptPanel
@@ -7054,9 +7105,9 @@ export function CommandDialog({
       /> : null}
       {networkUncertain && confirmationKey ? (
         <div className="recovery-bar">
-          <div><strong>{memberProfile ? "建档结果需要恢复查询" : administratorMembershipCorrection ? `${membershipCommandLabel(request.commandType as CommandType)}结果需要恢复查询` : historicalStayCorrection ? "历史住宿安排修改结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : backfillStay ? "补录住宿结果需要恢复查询" : completeStay ? "完成住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : tokenBusiness ? "Token 操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : administratorMembershipCorrection ? "系统只查询原修改结果，不会重新修改或重复写入记录。" : historicalStayCorrection ? "系统只查询原来的修改结果，不会重新修改订单、房态或历史记录。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : backfillStay ? "系统会查询原补录结果，不会重复创建订单、退房记录或收款事实。" : completeStay ? "系统只查询刚才的办理结果，不会重复完成订单或重复登记收款。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : tokenBusiness ? "系统会查询刚才的 Token 操作结果，不会重复提交。" : u1CommandType ? "系统只查询原操作结果，不会重复提交。" : "系统只查询原操作结果，不会发起新的操作。"}</p></div>
+          <div><strong>{memberProfile ? "建档结果需要恢复查询" : administratorMembershipCorrection ? `${membershipCommandLabel(request.commandType as CommandType)}结果需要恢复查询` : historicalStayCorrection ? "历史住宿安排修改结果需要恢复查询" : membershipBusiness ? "会员操作结果需要恢复查询" : memberLodging ? "会员住宿结果需要恢复查询" : backfillStay ? "补录住宿结果需要恢复查询" : completeStay ? "完成住宿结果需要恢复查询" : createOrderBusiness ? "住宿订单结果需要恢复查询" : fulfillment ? "刚才的操作结果需要查询" : retainedFundsLabel ? `${retainedFundsLabel}结果需要查询` : tokenBusiness ? "Token 操作结果需要查询" : u1CommandType ? `${commandShellLabel(u1CommandType)}结果需要查询` : "执行状态需要恢复查询"}</strong><p>{memberProfile ? "系统会查询原建档结果，不会重复创建会员。" : administratorMembershipCorrection ? "系统只查询原修改结果，不会重新修改或重复写入记录。" : historicalStayCorrection ? "系统只查询原来的修改结果，不会重新修改订单、房态或历史记录。" : membershipBusiness ? "系统会查询原操作结果，不会重复写入会员订单或收款。" : memberLodging ? "系统会查询原住宿结果，不会重复创建订单或冻结会员权益。" : backfillStay ? "系统会查询原补录结果，不会重复创建订单、退房记录或收款事实。" : completeStay ? "系统只查询刚才的办理结果，不会重复完成订单或重复登记收款。" : createOrderBusiness ? "系统会查询原住宿订单结果，不会重复创建订单。" : fulfillment ? "系统会查询刚才的操作结果，不会重复办理。" : retainedFundsLabel ? "系统只查询原操作结果，不会重复写入留存或订单资金记录。" : tokenBusiness ? "系统会查询刚才的 Token 操作结果，不会重复提交。" : u1CommandType ? "系统只查询原操作结果，不会重复提交。" : "系统只查询原操作结果，不会发起新的操作。"}</p></div>
           <button className="button button-secondary" type="button" onClick={() => void recover()} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : administratorMembershipCorrection ? "查询会员修改结果" : historicalStayCorrection ? "查询历史住宿修改结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : backfillStay ? "查询补录结果" : completeStay ? "查询完成住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : tokenBusiness ? "查询 Token 结果" : u1CommandType ? "查询原操作结果" : "查询操作结果"}
+            <RefreshCw aria-hidden="true" size={17} />{memberProfile ? "查询建档结果" : administratorMembershipCorrection ? "查询会员修改结果" : historicalStayCorrection ? "查询历史住宿修改结果" : membershipBusiness ? "查询会员操作结果" : memberLodging ? "查询住宿结果" : backfillStay ? "查询补录结果" : completeStay ? "查询完成住宿结果" : createOrderBusiness ? "查询订单结果" : fulfillment ? "查询操作结果" : retainedFundsLabel ? `查询${retainedFundsLabel}结果` : tokenBusiness ? "查询 Token 结果" : u1CommandType ? "查询原操作结果" : "查询操作结果"}
           </button>
         </div>
       ) : null}

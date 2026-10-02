@@ -1,3 +1,4 @@
+import { retainedFundsCommandTypes } from "@qintopia/contracts";
 import { describe, expect, it } from "vitest";
 import { administratorCommandGrants, enabledAdministratorTokenCommandGrants, ordinaryStaffCommandGrants } from "@qintopia/domain";
 import type { RetainedTokenSecret, TokenDto } from "../types";
@@ -86,7 +87,7 @@ describe("Token lifecycle status", () => {
 describe("Token command ceiling", () => {
   it("groups every command once and keeps the Operator shortcut aligned with the authorization policy", () => {
     expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual(administratorCommandGrants.filter((command) => command !== "MANAGE_ROOM_CATALOG").sort());
-    expect([...operatorTokenCommands].sort()).toEqual([...ordinaryStaffCommandGrants].sort());
+    expect([...operatorTokenCommands].sort()).toEqual([...ordinaryStaffCommandGrants].filter(command => !(retainedFundsCommandTypes as readonly string[]).includes(command)).sort());
   });
 
   it("selects only currently available Operator commands and preserves Administrator choices", () => {
@@ -96,12 +97,21 @@ describe("Token command ceiling", () => {
     expect(selectOperatorTokenCommands([], ["ISSUE_TOKEN"], true)).toEqual([]);
   });
 
+  it("does not silently grant retained-funds capabilities through the existing Operator shortcut or rotation", () => {
+    const options = tokenCommandCeilingOptions(administratorCommandGrants, new Set(administratorCommandGrants));
+    const selected = selectOperatorTokenCommands([], options, true);
+    for (const command of retainedFundsCommandTypes) {
+      expect(options).toContain(command);
+      expect(selected).not.toContain(command);
+      expect(tokenCommandCeilingOptions(administratorCommandGrants, new Set(administratorCommandGrants), ["RECORD_COLLECTION"])).not.toContain(command);
+    }
+  });
   it("offers only Token-grantable Administrator permissions even when the caller can manage the room catalog", () => {
     const callerActions = new Set([...enabledAdministratorTokenCommandGrants, "MANAGE_ROOM_CATALOG"] as const);
     const options = tokenCommandCeilingOptions(administratorCommandGrants, callerActions);
     expect([...options].sort()).toEqual([...enabledAdministratorTokenCommandGrants].sort());
     expect(tokenCommandCeilingOptions(administratorCommandGrants, callerActions, administratorCommandGrants)).toEqual(options);
-    expect(selectOperatorTokenCommands([], options, true).sort()).toEqual([...ordinaryStaffCommandGrants].sort());
+    expect(selectOperatorTokenCommands([], options, true).sort()).toEqual([...ordinaryStaffCommandGrants].filter(command => !(retainedFundsCommandTypes as readonly string[]).includes(command)).sort());
   });
 
   it("uses the exact intersection of target grants, caller actions, and optional current ceiling", () => {

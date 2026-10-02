@@ -1,18 +1,21 @@
+import type { PaymentAllocationItem, PaymentAllocationList } from "@qintopia/contracts";
 import { useEffect, useId, useState } from "react";
 import { api } from "../api";
 import { Modal, formatDateTime, formatMinor } from "../uiBasic";
 import type { ExternalPaymentItem, ExternalPaymentList } from "../../../../packages/contracts/src/external-payments.ts";
 import "./ExternalPaymentPicker.css";
 
-const labels: Record<ExternalPaymentItem["status"], string> = {
-  AVAILABLE: "待匹配", MATCHED: "已匹配", HISTORICAL: "历史不纳入", REVIEW: "待核对", PENDING: "退款处理中", UNVERIFIED: "尚未核实成功"
+type PaymentItem = ExternalPaymentItem | PaymentAllocationItem;
+const labels: Record<string, string> = {
+  PARTIALLY_MATCHED: "部分分配", AVAILABLE: "待匹配", MATCHED: "已匹配", HISTORICAL: "历史不纳入", REVIEW: "待核对", PENDING: "退款处理中", UNVERIFIED: "尚未核实成功"
 };
-export function paymentOptionText(item: ExternalPaymentItem): string {
+export function paymentOptionText(item: PaymentItem): string {
   return `${item.nickname || "昵称未取得"} · ${item.amountMinor === null ? "金额待核实" : formatMinor(item.amountMinor, "CNY")} · ${formatDateTime(item.occurredAt)}`;
 }
 interface Props {
+  allocationMode?: boolean;
   propertyId: string; kind?: "COLLECTION" | "REFUND"; value: string;
-  onChange: (reference: string, item?: ExternalPaymentItem) => void;
+  onChange: (reference: string, item?: PaymentItem) => void;
   amountMinor?: number | undefined; originalCollectionFactId?: string | undefined;
   disabled?: boolean; testId?: string; label?: string;
 }
@@ -20,13 +23,14 @@ export function ExternalPaymentPicker(props: Props) {
   return <PaymentPicker key={`${props.propertyId}:${props.kind ?? "COLLECTION"}:${props.originalCollectionFactId ?? ""}`} {...props} />;
 }
 function PaymentPicker({ propertyId, kind = "COLLECTION", value, onChange, amountMinor,
-  originalCollectionFactId, disabled = false, testId, label }: Props) {
+  originalCollectionFactId, disabled = false, testId, label, allocationMode = false }: Props) {
+  const loadPayments = allocationMode ? api.paymentAllocations : api.externalPayments;
   const listId = useId();
-  const [data, setData] = useState<ExternalPaymentList>();
+  const [data, setData] = useState<ExternalPaymentList | PaymentAllocationList>();
   const [failure, setFailure] = useState(false);
   const [open, setOpen] = useState(false);
   const [full, setFull] = useState(false);
-  const [selected, setSelected] = useState<ExternalPaymentItem>();
+  const [selected, setSelected] = useState<PaymentItem>();
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("AVAILABLE");
   const [start, setStart] = useState("");
@@ -37,12 +41,12 @@ function PaymentPicker({ propertyId, kind = "COLLECTION", value, onChange, amoun
   useEffect(() => {
     if (!value || selected?.reference === value || !data?.enabled) return;
     const controller = new AbortController();
-    void api.externalPayments({ propertyId, kind, query: value, status: "ALL" }, controller.signal).then(result => {
+    void loadPayments({ propertyId, kind, query: value, status: "ALL" }, controller.signal).then(result => {
       const matches = result.items.filter(item => item.reference === value);
       if (!controller.signal.aborted && matches.length === 1) setSelected(matches[0]);
     }).catch(() => {});
     return () => controller.abort();
-  }, [propertyId, kind, value, selected?.reference, data?.enabled]);
+  }, [propertyId, kind, value, selected?.reference, data?.enabled, allocationMode]);
   useEffect(() => { setBeforeId(""); }, [query, status, start, end, filterAmount, full]);
   useEffect(() => {
     let disposed = false;
@@ -63,28 +67,30 @@ function PaymentPicker({ propertyId, kind = "COLLECTION", value, onChange, amoun
         if (beforeId) parameters.beforeId = beforeId;
       }
       try {
-        const result = await api.externalPayments(parameters, active.signal);
+        const result = await loadPayments(parameters, active.signal);
         if (!disposed) { setData(result); setFailure(false); }
       } catch { if (!disposed) setFailure(true); }
       finally { if (!disposed) timer = setTimeout(load, 15_000); }
     };
     void load();
     return () => { disposed = true; active?.abort(); clearTimeout(timer); };
-  }, [propertyId, kind, originalCollectionFactId, amountMinor, full, query, status, start, end, filterAmount, beforeId]);
-  function choose(item: ExternalPaymentItem) {
-    if (item.status !== "AVAILABLE" || item.amountMinor === null) return;
+  }, [propertyId, kind, originalCollectionFactId, amountMinor, full, query, status, start, end, filterAmount, beforeId, allocationMode]);
+  function choose(item: PaymentItem) {
+    if (!paymentSelectable(item, allocationMode)) return;
     setSelected(item); onChange(item.reference, item); setOpen(false); setFull(false);
   }
   const options = (data?.items ?? []).map(item => <li key={item.id}>
-    <button type="button" className="external-payment-option" disabled={item.status !== "AVAILABLE" || disabled}
+    <button type="button" className="external-payment-option" disabled={!paymentSelectable(item, allocationMode) || disabled}
       onClick={() => choose(item)}>
       <span className="external-payment-primary"><strong>{item.nickname || "昵称未取得"}</strong>
         <strong>{item.amountMinor === null ? "金额待核实" : formatMinor(item.amountMinor, "CNY")}</strong></span>
+      {"remainingMinor" in item ? <small>已分配 {formatMinor(item.allocatedMinor, "CNY")} · 剩余可分配 {formatMinor(item.remainingMinor, "CNY")}</small> : null}
       <span>{formatDateTime(item.occurredAt)} · {labels[item.status]}</span>
       {full && item.recommendationReasons.length ? <small>{item.recommendationReasons.join(" · ")}</small> : null}
       {full ? <small>编号：{item.reference}{item.originalTransactionReference ? ` · 原收款：${item.originalTransactionReference}` : ""}
         {item.orderId ? ` · 订单：${item.orderId}` : item.membershipOrderId ? ` · 会员订单：${item.membershipOrderId}` : ""}</small> : null}
     </button>
+    {allocationMode && "allocations" in item && item.allocations.length ? <details><summary>查看分配明细</summary><ul>{item.allocations.map(part => <li key={part.id}>订单 {part.orderId} · {formatMinor(part.amountMinor, "CNY")} · {part.released ? "已撤销分配" : "有效分配"}</li>)}</ul></details> : null}
     {!full ? <details><summary>查看编号</summary><code>{item.reference}</code></details> : null}
   </li>);
   return <div className="external-payment-picker span-two" data-testid={testId ? `${testId}-picker` : undefined}>
@@ -115,7 +121,7 @@ function PaymentPicker({ propertyId, kind = "COLLECTION", value, onChange, amoun
         <label>从<input type="date" value={start} onChange={e => setStart(e.target.value)} /></label>
         <label>至<input type="date" value={end} onChange={e => setEnd(e.target.value)} /></label>
         <label>处理状态<select value={status} onChange={e => setStatus(e.target.value)}>
-          <option value="AVAILABLE">待匹配</option><option value="ALL">全部</option><option value="MATCHED">已匹配</option>
+          <option value="AVAILABLE">待匹配</option>{allocationMode ? <option value="PARTIALLY_MATCHED">部分分配</option> : null}<option value="ALL">全部</option><option value="MATCHED">已匹配</option>
         </select></label>
       </div>
       <ul className="external-payment-full-list" aria-label="完整收退款清单">{options}</ul>
@@ -124,4 +130,8 @@ function PaymentPicker({ propertyId, kind = "COLLECTION", value, onChange, amoun
       {data?.hasMore && data.nextBeforeId ? <button type="button" className="button button-secondary" onClick={() => setBeforeId(data.nextBeforeId!)}>下一页</button> : null}
     </Modal> : null}
   </div>;
+}
+
+export function paymentSelectable(item: PaymentItem, allocationMode = false): boolean {
+  return item.amountMinor !== null && (item.status === "AVAILABLE" || (allocationMode && item.status === "PARTIALLY_MATCHED")) && (!("remainingMinor" in item) || item.remainingMinor > 0);
 }

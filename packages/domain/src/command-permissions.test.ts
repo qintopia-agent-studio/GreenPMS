@@ -39,6 +39,10 @@ const expectedMatrix: Record<CommandType, ExpectedAuthority> = {
   LOCK_MAINTENANCE: { ordinaryStaff: true, administrator: true, systemDerived: false },
   RELEASE_MAINTENANCE: { ordinaryStaff: true, administrator: true, systemDerived: false },
   COMPLETE_CLEANING: { ordinaryStaff: false, administrator: true, systemDerived: false },
+  RETAIN_ORDER_FUNDS: { ordinaryStaff: true, administrator: true, systemDerived: false },
+  APPLY_RETAINED_FUNDS: { ordinaryStaff: true, administrator: true, systemDerived: false },
+  RELEASE_RETAINED_FUNDS: { ordinaryStaff: true, administrator: true, systemDerived: false },
+  REFUND_RETAINED_FUNDS: { ordinaryStaff: true, administrator: true, systemDerived: false },
   RECORD_COLLECTION: { ordinaryStaff: true, administrator: true, systemDerived: false },
   RECORD_REFUND: { ordinaryStaff: true, administrator: true, systemDerived: false },
   REVERSE_FACT: { ordinaryStaff: true, administrator: true, systemDerived: false },
@@ -71,8 +75,8 @@ function authorized(overrides: Partial<Parameters<typeof evaluateCommandAuthoriz
 }
 
 describe("exact command permission profiles", () => {
-  it("freezes the complete 41-command ordinary staff, administrator, and system-derived matrix", () => {
-    expect(commandTypes).toHaveLength(41);
+  it("freezes the complete 45-command ordinary staff, administrator, and system-derived matrix", () => {
+    expect(commandTypes).toHaveLength(45);
     expect(Object.keys(expectedMatrix).sort()).toEqual([...commandTypes].sort());
 
     const ordinary = new Set<string>(ordinaryStaffCommandGrants);

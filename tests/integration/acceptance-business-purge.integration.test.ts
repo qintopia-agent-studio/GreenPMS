@@ -1,14 +1,19 @@
 import pg from "pg";
 import { sql, type Kysely } from "kysely";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AuthPrincipal } from "@qintopia/contracts";
-import { executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
+import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
+import { confirmCommandPreview, createCommandPreview, executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
 import { createDatabase, currentMigrationNames } from "../../packages/db/src/database.ts";
 import type { Database } from "../../packages/db/src/schema.ts";
+import { readRoomCatalog, resolveCatalogPolicyId } from "../../packages/db/src/room-catalog.ts";
+import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import {
   AcceptanceBusinessPurgeCommittedVerificationError,
+  acceptanceBusinessTables,
+  preservedBaseTables,
   assertBusinessTablesEmpty,
+  assertQintopiaLocalTarget,
   assertExpectedLocalDatabaseIdentity,
   truncateAcceptanceBusinessDataWithinExclusiveGate,
   withPurgedIsolatedAcceptanceDatabase,
@@ -23,6 +28,15 @@ const adminUrl = process.env.ACCEPTANCE_PURGE_ADMIN_DATABASE_URL
 const databaseName = `qintopia_purge_acceptance_${process.pid}`;
 const databaseUrl = new URL(adminUrl);
 databaseUrl.pathname = `/${databaseName}`;
+
+// Source transactions and durable v1/v2 event/delivery history are not booking facts.
+const preservedPaymentHistoryTables = [
+  "external_payment_sources", "external_payment_accounts", "external_payment_bills",
+  "external_payment_contacts", "external_payment_event_heads", "external_payment_events",
+  "payment_delivery_source", "payment_delivery_events", "payment_deliveries", "payment_delivery_audit",
+  "payment_allocation_heads", "payment_allocation_events", "allocation_delivery_source",
+  "allocation_delivery_events", "allocation_deliveries", "allocation_delivery_audit"
+] as const;
 
 let db: Kysely<Database> | undefined;
 
@@ -114,6 +128,231 @@ afterEach(async () => {
 afterAll(dropDatabase);
 
 describe("acceptance business-data purge isolation", () => {
+  it("keeps the CLI target fixed to 55432 even when synthetic tests run on another port", () => {
+    expect(assertQintopiaLocalTarget("postgres://qintopia:qintopia@127.0.0.1:55432/qintopia").port).toBe("55432");
+    for (const target of [
+      "postgres://qintopia:qintopia@127.0.0.1:55439/qintopia",
+      "postgres://qintopia:qintopia@localhost:55432/qintopia",
+      "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_purge_acceptance_123"
+    ]) {
+      expect(() => assertQintopiaLocalTarget(target)).toThrow("Refusing purge: target must be");
+    }
+  });
+
+  it("explicitly includes the complete inbound FK closure without external payment history", async () => {
+    const closure = await sql<{ table_name: string }>`
+      with recursive purge_closure(table_oid) as (
+        select to_regclass(table_name)::oid
+        from unnest(${[...acceptanceBusinessTables]}::text[]) as tables(table_name)
+        union
+        select constraint_.conrelid
+        from pg_constraint as constraint_
+        join purge_closure on constraint_.confrelid = purge_closure.table_oid
+        where constraint_.contype = 'f'
+      )
+      select relation.relname as table_name
+      from purge_closure
+      join pg_class as relation on relation.oid = purge_closure.table_oid
+      order by relation.relname
+    `.execute(db!);
+    const missing = closure.rows.map((row) => row.table_name)
+      .filter((table) => !(acceptanceBusinessTables as readonly string[]).includes(table));
+    expect(missing).toEqual([]);
+    for (const table of preservedPaymentHistoryTables) {
+      expect(closure.rows.map((row) => row.table_name)).not.toContain(table);
+    }
+  });
+
+  it("purges populated payment attribution and retained funds while preserving source and event bytes", async () => {
+    const currentDb = db!;
+    const principal: AuthPrincipal = {
+      subjectId: demo.administratorSubjectId,
+      credentialId: "purge-funds-session",
+      credentialType: "SESSION",
+      displayName: "Synthetic purge regression",
+      ...authScope({ credentialType: "SESSION", profile: "administrator" })
+    };
+    await currentDb.insertInto("web_sessions").values({
+      id: principal.credentialId, subject_id: principal.subjectId,
+      secret_hash: "a".repeat(64), expires_at: new Date(Date.now() + 3_600_000), revoked_at: null
+    }).execute();
+    let sequence = 0;
+    async function command(envelope: CommandEnvelope) {
+      const metadata = { idempotencyKey: `purge-funds-${++sequence}`, correlationId: `purge-funds-${sequence}` };
+      const prepared = await createCommandPreview(currentDb, principal, envelope, metadata);
+      const receipt = await confirmCommandPreview(currentDb, principal, prepared.preview.previewId, {
+        propertyId: demo.propertyId, commandType: envelope.commandType, confirmation: true,
+        expectedEffectHash: prepared.preview.effectHash,
+        reason: envelope.commandType === "CREATE_ORDER"
+          ? { code: "CREATE_STANDARD_ORDER", note: "" }
+          : { code: "PURGE_REGRESSION", note: "合成数据清理回归" }
+      }, metadata);
+      expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+      return receipt;
+    }
+    const quote = await createQuoteForTesting(currentDb, {
+      propertyId: demo.propertyId, inventoryUnitId: demo.roomId, stayType: "TRANSIENT",
+      arrivalDate: "2028-12-10", departureDate: "2028-12-11",
+      pricingPolicyVersionId: demo.transientPolicyId
+    });
+    const created = await command({ commandType: "CREATE_ORDER", input: {
+      propertyId: demo.propertyId, quoteId: quote.quoteId,
+      primaryGuest: { fullName: "清理合成客户", nickname: "合成", phone: "13800000000" },
+      bookingChannelCode: "WECOM", targetCurrentContractAmountMinor: 100_000,
+      manualPriceAdjustmentReason: "合成资金清理测试"
+    } });
+    const orderId = created.result!.orderId as string;
+    const execution = await currentDb.selectFrom("command_executions").select("id")
+      .where("idempotency_key", "=", "purge-funds-1").executeTakeFirstOrThrow();
+    await sql`insert into external_payment_sources(id,corp_id,enabled,import_since,baseline_complete)
+      values('purge-source','purge-corp',true,'2026-09-01',true)`.execute(currentDb);
+    await sql`insert into external_payment_accounts values('purge-source','purge-merchant',${demo.propertyId})`.execute(currentDb);
+    await sql`insert into external_payment_contacts values('purge-source','purge-contact','合成客户',now())`.execute(currentDb);
+    await sql`insert into external_payment_bills(
+      id,source_id,merchant_id,property_id,kind,reference,original_trade_no,transaction_id,amount_minor,occurred_at,state
+    ) values('purge-bill','purge-source','purge-merchant',${demo.propertyId},'COLLECTION',
+      'purge-reference','purge-trade','purge-reference',100000,now(),'SUCCESS')`.execute(currentDb);
+    // v1 discovery is emitted by the sync worker, not the bill INSERT trigger.
+    await sql`select qintopia_external_payment_event('purge-bill','DISCOVERED')`.execute(currentDb);
+    // Real guards stay enabled. A legacy match mirrors an allocation in the same transaction.
+    await currentDb.transaction().execute(async (trx) => {
+      await sql`insert into collection_facts(
+        fact_id,order_id,fact_type,amount_minor,net_effect_minor,currency,method,note,command_id,pricing_revision_id,transaction_reference
+      ) select 'purge-fact',id,'COLLECTION',100000,100000,'CNY','WECOM','合成历史关联',
+        ${execution.id},current_revision_id,'purge-reference' from orders where id=${orderId}`.execute(trx);
+      await sql`insert into external_payment_matches(bill_id,collection_fact_id,origin)
+        values('purge-bill','purge-fact','HISTORICAL_LINK')`.execute(trx);
+    });
+    await command({ commandType: "CANCEL_ORDER", input: { propertyId: demo.propertyId, orderId } });
+    await sql`insert into retained_funds(
+      id,property_id,source_order_id,source_fact_id,bill_id,owner_name,owner_contact,confirmation_note,amount_minor,command_id
+    ) values('purge-retained',${demo.propertyId},${orderId},'purge-fact','purge-bill',
+      '合成客户','13800000000','客户确认留存',60000,${execution.id})`.execute(currentDb);
+    await sql`insert into retained_fund_entries(id,retained_fund_id,kind,amount_minor,authorization_note,command_id)
+      values('purge-retained-release','purge-retained','RELEASE',60000,'客户撤回留存',${execution.id})`.execute(currentDb);
+    await sql`insert into command_executions(
+      id,subject_id,credential_id,property_id,command_type,idempotency_key,request_hash,correlation_id,state
+    ) select 'purge-reverse',subject_id,credential_id,property_id,'REVERSE_FACT','purge-reverse',
+      request_hash,'purge-reverse','EXECUTING' from command_executions where id=${execution.id}`.execute(currentDb);
+    await currentDb.transaction().execute(async (trx) => {
+      await sql`insert into collection_facts(
+        fact_id,order_id,fact_type,amount_minor,net_effect_minor,currency,method,note,command_id,pricing_revision_id,reverses_fact_id
+      ) select 'purge-reversal',id,'REVERSAL',100000,-100000,'CNY','WECOM','误录冲销',
+        'purge-reverse',current_revision_id,'purge-fact' from orders where id=${orderId}`.execute(trx);
+      await sql`insert into external_payment_allocation_releases(id,allocation_id,reversal_fact_id,command_id)
+        values('purge-allocation-release','legacy:purge-bill','purge-reversal','purge-reverse')`.execute(trx);
+    });
+    for (const prefix of ["payment", "allocation"] as const) {
+      await sql`insert into ${sql.table(`${prefix}_delivery_source`)}(source_instance)
+        values('purge-synthetic')`.execute(currentDb);
+      await sql`select ${sql.ref(`qintopia_${prefix}_delivery_publish`)}(${demo.propertyId},'purge-synthetic')`.execute(currentDb);
+      await sql`select ${sql.ref(`qintopia_${prefix}_delivery_control`)}('PAUSE','PURGE_REGRESSION')`.execute(currentDb);
+    }
+    const preservedTables = [
+      ...preservedBaseTables.filter((table) => table !== "room_status_revisions"),
+      ...preservedPaymentHistoryTables
+    ];
+    async function snapshot() {
+      const rows: Record<string, unknown> = {};
+      for (const table of preservedTables) {
+        const result = await sql<{ rows: unknown }>`select coalesce(
+          jsonb_agg(to_jsonb(row_) order by to_jsonb(row_)::text), '[]'::jsonb
+        ) as rows from ${sql.table(table)} as row_`.execute(currentDb);
+        rows[table] = result.rows[0]!.rows;
+      }
+      return rows;
+    }
+    const before = await snapshot();
+    for (const table of preservedPaymentHistoryTables) {
+      expect(before[table], table).not.toEqual([]);
+    }
+    const result = await withExclusiveAcceptanceWriterGate(currentDb, (connection) => (
+      truncateAcceptanceBusinessDataWithinExclusiveGate(connection, demo.propertyId)
+    ));
+    for (const table of ["external_payment_matches", "external_payment_allocations",
+      "external_payment_allocation_releases", "retained_funds", "retained_fund_entries"]) {
+      expect(result.businessCountsBefore[table], table).toBe(1);
+    }
+    await expect(assertBusinessTablesEmpty(currentDb)).resolves.toBeUndefined();
+    expect(await snapshot()).toEqual(before);
+    expect(BigInt(result.roomStatusRevisionAfter)).toBe(BigInt(result.roomStatusRevisionBefore) + 1n);
+  });
+
+  it("preserves maintained room configuration and prices while resetting only its command history", async () => {
+    const currentDb = db!;
+    const principal: AuthPrincipal = {
+      subjectId: demo.administratorSubjectId, credentialId: "purge-catalog-session",
+      credentialType: "SESSION", displayName: "Synthetic catalog purge regression",
+      ...authScope({ credentialType: "SESSION", profile: "administrator" })
+    };
+    await currentDb.insertInto("web_sessions").values({
+      id: principal.credentialId, subject_id: principal.subjectId,
+      secret_hash: "b".repeat(64), expires_at: new Date(Date.now() + 3_600_000), revoked_at: null
+    }).execute();
+    let sequence = 0;
+    async function change(input: Record<string, unknown>) {
+      const catalog = await readRoomCatalog(currentDb, demo.propertyId);
+      const metadata = { idempotencyKey: `purge-catalog-${++sequence}`, correlationId: `purge-catalog-${sequence}` };
+      const prepared = await createCommandPreview(currentDb, principal, {
+        commandType: "MANAGE_ROOM_CATALOG",
+        input: { propertyId: demo.propertyId, expectedVersion: catalog.version, ...input }
+      }, metadata);
+      const receipt = await confirmCommandPreview(currentDb, principal, prepared.preview.previewId, {
+        propertyId: demo.propertyId, commandType: "MANAGE_ROOM_CATALOG", confirmation: true,
+        expectedEffectHash: prepared.preview.effectHash,
+        reason: { code: "ROOM_CATALOG_CHANGE", note: "经营配置保留合成回归" }
+      }, metadata);
+      expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+    }
+    await change({ action: "SAVE_TYPE", name: "清理后保留经营房型", bathroom: "PRIVATE", saleMode: "ROOM", bedCount: 2, capacity: 2 });
+    const type = (await readRoomCatalog(currentDb, demo.propertyId)).types.find((item) => item.name === "清理后保留经营房型")!;
+    await change({ action: "PUBLISH_RATES", typeCode: type.code, effectiveFrom: (await readRoomCatalog(currentDb, demo.propertyId)).businessDate,
+      anchors: { "1": 8800, "7": 44000, "14": 66000, "30": 110000 } });
+    await change({ action: "SAVE_ROOM", typeCode: type.code, code: "PURGE-CATALOG-ROOM",
+      buildingCode: "合成楼", bedCount: 2, capacity: 2 });
+    const before = await readRoomCatalog(currentDb, demo.propertyId);
+    expect(before.history).toHaveLength(3);
+    const room = before.rooms.find((item) => item.code === "PURGE-CATALOG-ROOM")!;
+    const policyId = (await resolveCatalogPolicyId(currentDb, demo.propertyId, "2028-12-10"))!;
+    const quoteRequest = {
+      propertyId: demo.propertyId, inventoryUnitId: room.unitId,
+      arrivalDate: "2028-12-10", departureDate: "2028-12-11", pricingPolicyVersionId: policyId
+    };
+    expect((await createQuoteForTesting(currentDb, quoteRequest)).currentContractAmount.minorUnits).toBe(8800);
+    const configurationTables = ["inventory_units", "pricing_policy_versions", "room_catalog_state",
+      "room_catalog_links", "room_catalog_heads"] as const;
+    async function configurationRows() {
+      const rows: Record<string, unknown> = {};
+      for (const table of configurationTables) {
+        const result = await sql<{ rows: unknown }>`select coalesce(
+          jsonb_agg(to_jsonb(row_) order by to_jsonb(row_)::text), '[]'::jsonb
+        ) as rows from ${sql.table(table)} as row_`.execute(currentDb);
+        rows[table] = result.rows[0]!.rows;
+        expect(rows[table], table).not.toEqual([]);
+      }
+      return rows;
+    }
+    const persistedBefore = await configurationRows();
+    const result = await withExclusiveAcceptanceWriterGate(currentDb, (connection) => (
+      truncateAcceptanceBusinessDataWithinExclusiveGate(connection, demo.propertyId)
+    ));
+    expect(result.businessCountsBefore.room_catalog_changes).toBe(3);
+    await expect(assertBusinessTablesEmpty(currentDb)).resolves.toBeUndefined();
+    expect(await configurationRows()).toEqual(persistedBefore);
+    expect(await readRoomCatalog(currentDb, demo.propertyId)).toEqual({ ...before, history: [] });
+    expect(await resolveCatalogPolicyId(currentDb, demo.propertyId, "2028-12-10")).toBe(policyId);
+    expect((await createQuoteForTesting(currentDb, quoteRequest)).currentContractAmount.minorUnits).toBe(8800);
+    // The preserved version remains the next write's basis; no old change row is required.
+    await change({ action: "SAVE_TYPE", typeCode: type.code, name: "清理后继续维护经营房型",
+      bathroom: "PRIVATE", saleMode: "ROOM", bedCount: 2, capacity: 2 });
+    const after = await readRoomCatalog(currentDb, demo.propertyId);
+    expect(after.version).toBe(before.version + 1);
+    expect(after.history).toHaveLength(1);
+    expect(after.rates).toEqual(before.rates);
+    expect(after.rooms).toEqual(before.rooms);
+    expect(after.types.find((item) => item.code === type.code)?.name).toBe("清理后继续维护经营房型");
+  });
+
   it("holds the protocol writer lock for the entire guarded operation", async () => {
     await db!.destroy();
     db = undefined;

@@ -1336,6 +1336,14 @@ describe("parseOrderView", () => {
     collectionFact.cash_collector = null;
     expect(parseOrderView(input)).toBe(input);
 
+    collectionFact.external_payment_bill_id = "payment_shared";
+    expect(parseOrderView(input)).toBe(input);
+    collectionFact.external_payment_bill_id = null;
+    expect(parseOrderView(input)).toBe(input);
+    collectionFact.external_payment_bill_id = 123 as never;
+    expect(() => parseOrderView(input)).toThrow("external_payment_bill_id");
+    collectionFact.external_payment_bill_id = null;
+
     collectionFact.cash_collector = 123 as never;
     expect(() => parseOrderView(input)).toThrow("collectionFacts[0].cash_collector必须是非空文字");
   });
