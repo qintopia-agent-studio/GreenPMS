@@ -343,6 +343,9 @@ export interface OrderFulfillmentNotice {
 
 export function orderFulfillmentNotice(actions: readonly OrderAllowedActionDto[]): OrderFulfillmentNotice | undefined {
   const checkIn = actions.find((action) => action.code === "CHECK_IN");
+  if (checkIn?.disabledReason === "PREVIOUS_STAY_NOT_CHECKED_OUT") {
+    return { action: "CHECK_IN", title: "待前客退房", body: "本单库存已保留；前客尚未退房，请先办理前单退房。" };
+  }
   if (checkIn?.disabledReason === "ARRIVAL_DATE_NOT_REACHED") {
     return {
       action: "CHECK_IN",
@@ -395,6 +398,7 @@ export function orderActionDisabledReasonText(action: OrderAllowedActionDto | un
   if (reason === "ORDER_STATE_NOT_ALLOWED") return "当前订单状态不允许执行此操作。";
   if (reason === "NO_REFUNDABLE_COLLECTION") return orderRefundUnavailableReason([action]);
   if (reason === "NO_TRANSFERABLE_COLLECTION") return "当前订单资金记录包含非企微、冲销或无法核对的收退款事实，不能升级会员。";
+  if (reason === "PREVIOUS_STAY_NOT_CHECKED_OUT") return "前客尚未退房，请先办理前单退房。";
   if (reason === "ARRIVAL_DATE_NOT_REACHED") return "尚未到计划到店日，请在计划到店日办理。";
   if (reason === "ARRIVAL_DATE_PASSED") return "已超过计划到店日，可办理改期或标记未到。";
   if (reason === "DEPARTURE_DATE_NOT_REACHED") return "尚未到计划退房日，暂不能办理退房。";
@@ -2145,7 +2149,7 @@ function ScopedOrderDetailPage() {
             {showDepartureAdjustmentButton ? <OrderActionButton action={visibleDepartureAdjustmentAction} blocked={orderActionsBlocked} showWhenDisabled={Boolean(departureAdjustmentDisabledAction)} dataOrderAction="ADJUST_DEPARTURE" onClick={() => { if (!departureAdjustmentAction) return; setCommandDraft(undefined); setStayDateMode("ADJUST_DEPARTURE"); setStayDateAction(departureAdjustmentAction); }}><CalendarRange aria-hidden="true" size={17} />调整退房日期</OrderActionButton> : null}
             <OrderActionButton action={actionByCode.get("MOVE_UNIT")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("MOVE_UNIT")} onClick={() => { setCommandDraft(undefined); setMovingUnit(true); }}><ArrowRightLeft aria-hidden="true" size={17} />换房</OrderActionButton>
             <OrderActionButton action={repriceAction} blocked={orderActionsBlocked} showWhenDisabled={repriceClosedByUpgrade || terminalActionVisible("REPRICE_ORDER")} onClick={() => openForm("REPRICE_ORDER")} testId="reprice-order"><CircleDollarSign aria-hidden="true" size={17} />调整金额</OrderActionButton>
-            <OrderActionButton action={actionByCode.get("CHECK_IN")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CHECK_IN")} className="button button-primary" onClick={() => directCommand("CHECK_IN", "办理入住", "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。")} testId="check-in"><LogIn aria-hidden="true" size={17} />入住</OrderActionButton>
+            <OrderActionButton action={actionByCode.get("CHECK_IN")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CHECK_IN") || actionByCode.get("CHECK_IN")?.disabledReason === "PREVIOUS_STAY_NOT_CHECKED_OUT"} className="button button-primary" onClick={() => directCommand("CHECK_IN", "办理入住", "核对后将住宿状态更新为在住；会员住宿会同时核销本次仍冻结的权益。")} testId="check-in"><LogIn aria-hidden="true" size={17} />入住</OrderActionButton>
             <OrderActionButton action={actionByCode.get("CHECK_OUT")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("CHECK_OUT")} className="button button-primary" onClick={() => directCommand("CHECK_OUT", "办理退房", "核对后将住宿状态更新为已退房并释放后续住宿库存；退房不会重复核销会员权益。")} testId="check-out"><LogOut aria-hidden="true" size={17} />退房</OrderActionButton>
             <OrderActionButton action={actionByCode.get("COMPLETE_STAY")} blocked={orderActionsBlocked} showWhenDisabled={terminalActionVisible("COMPLETE_STAY")} className="button button-primary" onClick={() => { setCommandDraft(undefined); setCompleteStayAction(true); }} testId="complete-stay"><ClipboardCheck aria-hidden="true" size={17} />完成住宿</OrderActionButton>
             {showLifecycleSeparator ? <div className="action-separator" aria-hidden="true" /> : null}

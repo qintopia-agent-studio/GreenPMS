@@ -65,6 +65,7 @@ export function roomStatusQuickOrderFundsVisible(view: OrderViewDto): boolean {
 function actionDisabledReason(reason: string | null): string {
   if (reason?.includes("入住当天暂不办理缩短或提前退房")) return "入住当天暂不办理缩短或提前退房。";
   const descriptions: Record<string, string> = {
+    PREVIOUS_STAY_NOT_CHECKED_OUT: "前客尚未退房，请先办理前单退房。",
     ARRIVAL_DATE_NOT_REACHED: "尚未到计划入住日。",
     ARRIVAL_DATE_PASSED: "已超过计划入住日，请先核对住宿日期。",
     DEPARTURE_DATE_NOT_REACHED: "尚未到计划退房日。",

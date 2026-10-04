@@ -40,6 +40,7 @@ import {
   roomStatusIntervalBusinessPeriod,
   ROOM_STATUS_TIMELINE_DAYS,
   selectionFromCells,
+  roomStatusDepartureTasks,
   visibleDateWindow,
   type RoomStatusCellFocus,
   type RoomStatusFilters,
@@ -161,6 +162,7 @@ export interface RoomStatusGridProps {
   onInspectSelection: (unit: RoomStatusUnitDto, selection: RoomStatusSelection, anchor: HTMLElement) => void;
   onPageChange: (pageIndex: number) => void;
   onDateWindowChange: (start: number) => void;
+  onOpenDeparture?: (task: import("@qintopia/contracts").RoomStatusOperationalTaskDto) => void;
   onInspectUnit: (unit: RoomStatusUnitDto) => void;
   onInspectDay: (unit: RoomStatusUnitDto, day: RoomStatusDayDto | null, anchor: HTMLElement, intent?: "POINTER" | "TOUCH") => void;
   onInspectInterval: (unit: RoomStatusUnitDto, interval: RoomStatusIntervalDto, anchor: HTMLElement, serviceDate: string, intent?: "POINTER" | "TOUCH") => void;
@@ -759,6 +761,7 @@ export function RoomStatusGrid({
   onPageChange,
   onDateWindowChange,
   onInspectUnit,
+  onOpenDeparture,
   onInspectDay,
   onInspectInterval,
   onHoverDay,
@@ -1540,6 +1543,7 @@ export function RoomStatusGrid({
                     const bedOccupancyRatio = !directLodging && hasBedSlots
                       ? roomStatusOccupancyDisplayRatio(bedOccupancy?.occupants.length ?? 0, unit)
                       : null;
+                    const departureTasks = roomStatusDepartureTasks(board, unit, date);
                     const selected = isCellSelected(pointerPreviewSelection ?? selection, unit.id, date)
                       || (!pointerPreviewSelection && selectedStayId ? roomStatusCellBelongsToStay(unit, date, selectedStayId) : false);
                     const focusable = effectiveFocus?.unitId === unit.id && effectiveFocus.serviceDate === date;
@@ -1560,7 +1564,7 @@ export function RoomStatusGrid({
                         data-whole-room-occupied={wholeRoomLodgingOnBed || undefined}
                         data-room-status-source-count={cellSourceBadges.length || undefined}
                         data-room-status-attention-count={cellAttentionLabels.length || undefined}
-                        className={`room-status-day-cell room-status-day-${status.toLowerCase().replaceAll("_", "-")}${selected ? " is-selected" : ""}${selectedStayId && roomStatusCellBelongsToStay(unit, date, selectedStayId) ? " is-stay-selected" : ""}${date === todayDate ? " is-today" : ""}${!day?.available ? " is-authoritatively-unavailable" : ""}${historicalBlank ? " is-historical-blank" : ""}${wholeRoomLodgingOnBed ? " is-whole-room-occupied-bed" : ""}${day?.conflicts.length ? " has-blocking-conflict" : ""}${startingIntervals.length ? " has-source-interval" : ""}${bedOccupancy ? " has-bed-occupancy" : ""}${hasBedSlots ? " has-bed-slot-states" : ""}${unit.salesMode === "BED_SPLIT" && (bedOccupancy || hasBedSlots || directLodging) ? " is-bed-split-parent" : ""}${directLodging ? " has-direct-lodging" : ""}${bedOccupancyNeedsProcessing || directLodgingNeedsProcessing ? " has-attention-occupancy" : ""}`}
+                        className={`room-status-day-cell room-status-day-${status.toLowerCase().replaceAll("_", "-")}${departureTasks.length ? " has-handoff" : ""}${selected ? " is-selected" : ""}${selectedStayId && roomStatusCellBelongsToStay(unit, date, selectedStayId) ? " is-stay-selected" : ""}${date === todayDate ? " is-today" : ""}${!day?.available ? " is-authoritatively-unavailable" : ""}${historicalBlank ? " is-historical-blank" : ""}${wholeRoomLodgingOnBed ? " is-whole-room-occupied-bed" : ""}${day?.conflicts.length ? " has-blocking-conflict" : ""}${startingIntervals.length ? " has-source-interval" : ""}${bedOccupancy ? " has-bed-occupancy" : ""}${hasBedSlots ? " has-bed-slot-states" : ""}${unit.salesMode === "BED_SPLIT" && (bedOccupancy || hasBedSlots || directLodging) ? " is-bed-split-parent" : ""}${directLodging ? " has-direct-lodging" : ""}${bedOccupancyNeedsProcessing || directLodgingNeedsProcessing ? " has-attention-occupancy" : ""}`}
                         ref={(node) => {
                           const key = `${unit.id}:${date}`;
                           if (node) cellRefs.current.set(key, node);
@@ -1602,6 +1606,22 @@ export function RoomStatusGrid({
                         onDoubleClick={(event) => { event.preventDefault(); }}
                         onKeyDown={(event) => handleCellKeyDown(event, unit, day)}
                       >
+                        {departureTasks.length > 0 ? <div className="room-status-handoffs">
+                          {departureTasks.map((task) => {
+                            const sourceUnit = board.rooms.flatMap((room) => [room, ...room.children])
+                              .find((candidate) => candidate.id === task.actualInventoryUnitId);
+                            const code = sourceUnit?.code ?? task.references.find((ref) => ref.type === "INVENTORY_UNIT")?.label ?? "房源";
+                            const vacant = sourceUnit?.days.find((item) => item.serviceDate === date)?.available ?? day?.available;
+                            const description = `${code} · ${task.primaryOccupantLabel ?? task.label} · ${task.orderArrivalDate} 至 ${task.orderDepartureDate} · ${vacant ? "可预订，待前客退房" : "前客待退房"}`;
+                            return <button key={task.id} type="button" className="room-status-handoff"
+                              title={description} aria-label={`打开前单：${description}`}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => event.stopPropagation()}
+                              onClick={(event) => { event.stopPropagation(); onOpenDeparture?.(task); }}>
+                              {code} 待退{vacant ? " · 可预订" : ""}
+                            </button>;
+                          })}
+                        </div> : null}
                         {date === todayDate ? <span className="room-status-today-overlay" aria-hidden="true" /> : null}
                         <RoomStatusSourceBadges
                           badges={sourceBadgeSummary.visible}

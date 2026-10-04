@@ -3,6 +3,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { hashPassword, todayInTimeZone } from "@qintopia/domain";
 import type { AuthPrincipal, CommandEnvelope, RoomStatusBoardDto } from "@qintopia/contracts";
 import { confirmCommandPreview, createCommandPreview, executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createDatabase } from "../../packages/db/src/database.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { authScope, commandGrantsForProfile } from "../helpers/auth-principals.ts";
@@ -3076,4 +3078,66 @@ test("mobile room status uses task tabs and a full-screen fact detail instead of
     const activeTab = active.getAttribute("role") === "tab" && active.getAttribute("aria-selected") === "true";
     return activeTab || active.classList.contains("room-status-mobile-task-open");
   }), { message: "a completed mobile task returns focus to the active tab or the next task" }).toBe(true);
+});
+
+
+test("same-day turnover keeps nightly inventory writable and exposes the departure separately", async ({ page }, testInfo) => {
+  const { board: initial } = await login(page);
+  const today = initial.businessDate;
+  const tomorrow = addDays(today, 1);
+  const room = initial.rooms.find((candidate) => candidate.children.length > 0
+    && candidate.children.every((bed) => bed.days.find((day) => day.serviceDate === today)?.available));
+  expect(room).toBeTruthy();
+  const bed = room!.children[0]!;
+  // Use the normal Node/tsx runtime for command-backed fixtures, matching the
+  // quick-actions suite (Playwright rewrites dynamic DB imports to CommonJS).
+  const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { createDatabase } from "./packages/db/src/database.ts";
+    import { createQuoteForTesting } from "./packages/db/src/pricing-service.ts";
+    import { createCommandPreview, confirmCommandPreview } from "./packages/db/src/commands/service.ts";
+    import { withPropertyClockForTesting } from "./packages/db/src/members.ts";
+    import { authScope } from "./tests/helpers/auth-principals.ts";
+    const db = createDatabase(process.env.E2E_DATABASE_URL);
+    const propertyId = "prop_qintopia_demo";
+    const principal = { subjectId: "subject_demo_agent", credentialId: "token_demo_write", credentialType: "TOKEN", displayName: "Turnover fixture", ...authScope() };
+    const today = ${JSON.stringify(today)}, tomorrow = ${JSON.stringify(tomorrow)}, yesterday = ${JSON.stringify(addDays(today, -1))}, unitId = ${JSON.stringify(bed.id)};
+    const execute = async (commandType, input) => {
+      const key = crypto.randomUUID();
+      const prepared = await createCommandPreview(db, principal, { commandType, input: { propertyId, ...input } }, { idempotencyKey: key + "-p", correlationId: key });
+      const receipt = await confirmCommandPreview(db, principal, prepared.preview.previewId, { propertyId, commandType, confirmation: true, expectedEffectHash: prepared.preview.effectHash,
+        reason: { code: commandType === "CREATE_ORDER" ? "CREATE_STANDARD_ORDER" : "CHECKED_IN", note: commandType === "CREATE_ORDER" ? "" : "同日交接测试" } }, { idempotencyKey: key + "-c", correlationId: key });
+      if (!receipt.businessCommitted) throw new Error(JSON.stringify(receipt.error));
+      return receipt;
+    };
+    const create = async (arrivalDate, departureDate, nickname) => {
+      const quote = await createQuoteForTesting(db, { propertyId, inventoryUnitId: unitId, arrivalDate, departureDate, stayType: "TRANSIENT", pricingPolicyVersionId: "policy_qintopia_public_2026_rev561_v1" });
+      return (await execute("CREATE_ORDER", { quoteId: quote.quoteId, primaryGuest: { fullName: nickname, nickname }, bookingChannelCode: "WECOM", channelOrderReference: null, targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits })).result.orderId;
+    };
+    try {
+      await withPropertyClockForTesting(new Date(yesterday + "T12:00:00Z"), async () => {
+        const outgoingId = await create(yesterday, today, "交接前客");
+        await execute("CHECK_IN", { orderId: outgoingId });
+      });
+      process.stdout.write(JSON.stringify(await create(today, tomorrow, "交接后客")));
+    } finally { await db.destroy(); }
+  `], { cwd: process.cwd(), env: { ...process.env, E2E_DATABASE_URL: e2eDatabaseUrl }, timeout: 60_000 });
+  const incomingId = JSON.parse(stdout) as string;
+  const refreshed = roomStatusResponse(page);
+  await page.reload();
+  const snapshot = await (await refreshed).json() as RoomStatusBoardDto;
+  expect(snapshot.projectionState).toBe("READY");
+  expect(snapshot.operationalTasks.some((task) => task.actualInventoryUnitId === bed.id && task.operationalAttention === "DUE_OUT")).toBe(true);
+  if (isProject(testInfo, "desktop")) {
+    const cell = page.locator(`[data-room-status-cell][data-unit-id="${room!.id}"][data-service-date="${today}"]`);
+    const handoff = cell.getByRole("button", { name: new RegExp(`打开前单：${bed.code}`) });
+    await expect(handoff).toBeVisible();
+    await expect(handoff).toContainText(bed.code);
+    await handoff.click();
+    await expect(page.getByText("交接前客", { exact: true }).first()).toBeVisible();
+  } else {
+    await expect(page.getByText("待前客退房 · 本单库存已保留，暂不能办理入住").first()).toBeVisible();
+  }
+  await page.goto(`/orders/${incomingId}`);
+  await expect(page.getByText("待前客退房", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("check-in")).toBeDisabled();
 });

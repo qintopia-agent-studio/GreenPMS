@@ -1938,7 +1938,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         }
         if (preview.effect_hash !== confirmation.expectedEffectHash) throw new DomainError("CONFIRMATION_MISMATCH", "Confirmed effect hash does not match the preview", 409);
         await lockCommandResources(trx, commandType, preview.normalized_input);
-        const authoritativeWallInstant = commandType === "CREATE_ORDER"
+        const authoritativeWallInstant = ["CREATE_ORDER", "CHECK_IN", "CHECK_OUT"].includes(commandType)
           ? await sampleAuthoritativePropertyWallClock(trx)
           : null;
         const rebuildAndApply = async () => {
