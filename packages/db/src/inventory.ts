@@ -2,8 +2,13 @@ import { projectCatalogUnitNames } from "./room-catalog-labels.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import { DomainError, type InventoryUnitKind } from "@qintopia/contracts";
 import { enumerateServiceDates, newId } from "@qintopia/domain";
-import { propertyLocalClockAt } from "./members.ts";
+import { loadDepartureDayStayBlockers, departureDayBlockerAffectsUnit, type DepartureDayStayBlocker } from "./departure-day-stays.ts";
+export { previousStayAwaitingCheckout } from "./departure-day-stays.ts";
+import { getOrderViewSnapshot } from "./orders.ts";
+import { roomStatusSourceMetadataDamageReason, ordinaryStayMoneyAttention } from "./lodging-integrity.ts";
 import type { Database } from "./schema.ts";
+
+export type InventoryPurpose = "LODGING_NIGHTS" | "PHYSICAL_USE";
 
 export type DbExecutor = Kysely<Database> | Transaction<Database>;
 
@@ -33,15 +38,6 @@ export interface AvailabilityNight {
 export interface UnitAvailability extends InventoryUnitRecord {
   nights: AvailabilityNight[];
   available: boolean;
-}
-
-interface DepartureDayStayBlocker {
-  orderId: string;
-  stayId: string;
-  segmentId: string;
-  inventoryUnitId: string;
-  roomId: string;
-  serviceDate: string;
 }
 
 interface DeferredUnavailableBlocker {
@@ -75,58 +71,6 @@ async function loadDeferredUnavailableBlockers(
     arrivalDate: row.arrival_date,
     departureDate: row.departure_date
   }));
-}
-
-async function loadDepartureDayStayBlockers(
-  db: DbExecutor,
-  propertyId: string,
-  dates: readonly string[]
-): Promise<DepartureDayStayBlocker[]> {
-  if (dates.length === 0) return [];
-  const property = await db.selectFrom("properties").select("timezone").where("id", "=", propertyId).executeTakeFirst();
-  if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
-  const clock = await sql<{ as_of: Date }>`select transaction_timestamp() as as_of`.execute(db);
-  const businessDate = propertyLocalClockAt(property.timezone, clock.rows[0]!.as_of).date;
-  if (!dates.includes(businessDate)) return [];
-
-  const orderRows = await db.selectFrom("orders")
-    .select(["id", "status"])
-    .where("property_id", "=", propertyId)
-    .where("departure_date", "=", businessDate)
-    .where("status", "=", "CHECKED_IN")
-    .orderBy("id")
-    .execute();
-  const orderIds = orderRows.map((row) => row.id);
-  if (orderIds.length === 0) return [];
-
-  const segmentRows = await db.selectFrom("stays as stay")
-    .innerJoin("stay_segments as segment", "segment.stay_id", "stay.id")
-    .innerJoin("inventory_units as unit", "unit.id", "segment.inventory_unit_id")
-    .select([
-      "stay.order_id", "stay.id as stay_id", "segment.id as segment_id", "segment.inventory_unit_id",
-      "segment.sequence", "unit.kind", "unit.parent_room_id"
-    ])
-    .where("stay.order_id", "in", orderIds)
-    .orderBy("stay.order_id")
-    .orderBy("segment.sequence", "desc")
-    .execute();
-  const latestByOrder = new Map<string, typeof segmentRows[number]>();
-  for (const row of segmentRows) {
-    if (!latestByOrder.has(row.order_id)) latestByOrder.set(row.order_id, row);
-  }
-  return [...latestByOrder.values()].map((row) => ({
-    orderId: row.order_id,
-    stayId: row.stay_id,
-    segmentId: row.segment_id,
-    inventoryUnitId: row.inventory_unit_id,
-    roomId: row.kind === "ROOM" ? row.inventory_unit_id : row.parent_room_id!,
-    serviceDate: businessDate
-  }));
-}
-
-function departureDayBlockerAffectsUnit(blocker: DepartureDayStayBlocker, unit: Pick<InventoryUnitRecord, "id" | "kind" | "roomId">): boolean {
-  return blocker.roomId === unit.roomId
-    && (unit.kind === "ROOM" || blocker.inventoryUnitId === blocker.roomId || blocker.inventoryUnitId === unit.id);
 }
 
 function deferredUnavailableBlockerAffectsUnit(
@@ -183,17 +127,19 @@ export async function listAvailability(
   arrivalDate: string,
   departureDate: string,
   kind?: InventoryUnitKind,
-  excludeOrderId?: string
+  excludeOrderId?: string,
+  purpose: InventoryPurpose = "LODGING_NIGHTS"
 ): Promise<UnitAvailability[]> {
   const dates = enumerateServiceDates(arrivalDate, departureDate);
   let excludedSegmentIds = new Set<string>();
   if (excludeOrderId) {
     const order = await db.selectFrom("orders")
-      .select("id")
+      .select(["id", "status"])
       .where("id", "=", excludeOrderId)
       .where("property_id", "=", propertyId)
       .executeTakeFirst();
     if (!order) throw new DomainError("NOT_FOUND", "Order not found", 404);
+    if (order.status === "CHECKED_IN") purpose = "PHYSICAL_USE";
     const rows = await db.selectFrom("stays as stay")
       .innerJoin("stay_segments as segment", "segment.stay_id", "stay.id")
       .select("segment.id")
@@ -216,7 +162,7 @@ export async function listAvailability(
     .where("service_date", ">=", arrivalDate)
     .where("service_date", "<", departureDate)
     .execute();
-  const departureDayStayBlockers = await loadDepartureDayStayBlockers(db, propertyId, dates);
+  const departureDayStayBlockers = await loadInventoryDepartureBlockers(db, propertyId, dates, purpose, { excludeSourceIds: [...excludedSegmentIds] });
   const deferredUnavailableBlockers = await loadDeferredUnavailableBlockers(db, propertyId, dates);
 
   return units.map((unit) => {
@@ -264,7 +210,7 @@ export async function listAvailability(
   });
 }
 
-export async function inventoryFingerprint(db: DbExecutor, propertyId: string, unitId: string, arrivalDate: string, departureDate: string, excludeSourceIds: string[] = []): Promise<string[]> {
+export async function inventoryFingerprint(db: DbExecutor, propertyId: string, unitId: string, arrivalDate: string, departureDate: string, excludeSourceIds: string[] = [], purpose: InventoryPurpose = "PHYSICAL_USE"): Promise<string[]> {
   const unit = await loadInventoryUnit(db, propertyId, unitId);
   const dates = enumerateServiceDates(arrivalDate, departureDate);
   let query = db.selectFrom("inventory_claims")
@@ -279,8 +225,7 @@ export async function inventoryFingerprint(db: DbExecutor, propertyId: string, u
   const claimFingerprint = claims
     .filter((claim) => unit.kind === "ROOM" || claim.inventory_unit_id === unit.roomId || claim.inventory_unit_id === unit.id)
     .map((claim) => `${claim.service_date}:${claim.inventory_unit_id}:${claim.id}`);
-  const stayFingerprint = (await loadDepartureDayStayBlockers(db, propertyId, dates))
-    .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && departureDayBlockerAffectsUnit(blocker, unit))
+  const stayFingerprint = (await loadInventoryDepartureBlockers(db, propertyId, dates, purpose, { unit, excludeSourceIds }))
     .map((blocker) => `${blocker.serviceDate}:DEPARTURE_DAY_STAY:${blocker.inventoryUnitId}:${blocker.stayId}`);
   const deferredUnavailableFingerprint = (await loadDeferredUnavailableBlockers(db, propertyId, dates))
     .filter((blocker) => deferredUnavailableBlockerAffectsUnit(blocker, unit))
@@ -315,9 +260,8 @@ export async function lockUnitDates(trx: Transaction<Database>, propertyId: stri
   return unit;
 }
 
-export async function assertUnitAvailable(trx: Transaction<Database>, unit: InventoryUnitRecord, dates: string[], excludeSourceIds: string[] = []): Promise<void> {
-  const departureDayStayBlockers = (await loadDepartureDayStayBlockers(trx, unit.propertyId, dates))
-    .filter((blocker) => !excludeSourceIds.includes(blocker.segmentId) && departureDayBlockerAffectsUnit(blocker, unit));
+export async function assertUnitAvailable(trx: Transaction<Database>, unit: InventoryUnitRecord, dates: string[], excludeSourceIds: string[] = [], purpose: InventoryPurpose = "PHYSICAL_USE"): Promise<void> {
+  const departureDayStayBlockers = await loadInventoryDepartureBlockers(trx, unit.propertyId, dates, purpose, { unit, excludeSourceIds });
   const deferredUnavailableBlockers = (await loadDeferredUnavailableBlockers(trx, unit.propertyId, dates))
     .filter((blocker) => !excludeSourceIds.includes(blocker.id) && deferredUnavailableBlockerAffectsUnit(blocker, unit));
   for (const serviceDate of dates) {
@@ -373,8 +317,9 @@ export async function createInventoryClaims(trx: Transaction<Database>, options:
   sourceType: "ORDER_SEGMENT" | "MAINTENANCE" | "INTERNAL_USE";
   sourceId: string;
   excludeSourceIds?: string[];
+  purpose?: InventoryPurpose;
 }): Promise<string[]> {
-  await assertUnitAvailable(trx, options.unit, options.dates, options.excludeSourceIds);
+  await assertUnitAvailable(trx, options.unit, options.dates, options.excludeSourceIds, options.purpose);
   const claimIds: string[] = [];
   for (const serviceDate of options.dates) {
     const claimId = newId("claim");
@@ -509,4 +454,40 @@ export async function releaseInventoryClaimsOnDates(
     }
   }
   return claims.map((claim) => claim.id);
+}
+
+async function loadInventoryDepartureBlockers(
+  db: DbExecutor, propertyId: string, dates: readonly string[], purpose: InventoryPurpose,
+  scope: { unit?: Pick<InventoryUnitRecord, "id" | "kind" | "roomId">; excludeSourceIds?: readonly string[] } = {}
+): Promise<DepartureDayStayBlocker[]> {
+  // Filter before reading order integrity: an unrelated bed must not trigger a
+  // full order read, and the caller's own excluded segments need no validation.
+  const blockers = (await loadDepartureDayStayBlockers(db, propertyId, dates)).filter((blocker) =>
+    !scope.excludeSourceIds?.includes(blocker.segmentId)
+    && (!scope.unit || departureDayBlockerAffectsUnit(blocker, scope.unit)));
+  if (purpose !== "LODGING_NIGHTS") return blockers;
+  const damaged: DepartureDayStayBlocker[] = [];
+  for (const blocker of blockers) {
+    try {
+      // Reuse the authoritative order reader's lifecycle, immutable amendment,
+      // revision and active-Claim timeline checks; never lock another order here.
+      const view = await getOrderViewSnapshot(db, blocker.orderId, "READ");
+      if (view.order.status !== "CHECKED_IN" || view.stay.status !== "IN_HOUSE"
+        || roomStatusSourceMetadataDamageReason(view.order.stay_type === "FREE" ? "FREE_STAY" : "ORDER", view.order)) {
+        damaged.push(blocker);
+        continue;
+      }
+      if (view.order.stay_type !== "FREE" && !view.order.member_id && !view.order.member_contract_id
+        && (view.order.booking_channel_code === null || view.order.booking_channel_code === "WECOM")) {
+        if (view.coverageSet.length > 0) throw new DomainError("INTERNAL_ERROR", "当前住宿的会员覆盖关系无法核对", 500);
+        ordinaryStayMoneyAttention({ order: view.order, revisions: view.pricingRevisions, facts: view.collectionFacts,
+          currentTimeline: view.effectiveArrangement.intervals.flatMap((interval) =>
+            enumerateServiceDates(interval.arrivalDate, interval.departureDate).map((serviceDate) => ({ serviceDate, inventoryUnitId: interval.inventoryUnitId }))) });
+      }
+    } catch (error) {
+      if (!(error instanceof DomainError)) throw error;
+      damaged.push(blocker);
+    }
+  }
+  return damaged;
 }

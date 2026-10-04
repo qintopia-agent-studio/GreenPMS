@@ -2,7 +2,7 @@ import { performance } from "node:perf_hooks";
 import { gzipSync } from "node:zlib";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ROOM_STATUS_MAX_QUERY_NIGHTS,
   ROOM_STATUS_OPERATIONAL_TASK_LIMIT,
@@ -13,6 +13,7 @@ import {
   type RoomStatusUnitDto
 } from "@qintopia/contracts";
 import {
+  createDatabase,
   confirmCommandPreview,
   createCommandPreview,
   getOrderView,
@@ -28,6 +29,9 @@ import { sql, type Kysely, type Updateable } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { assertRoomStatusBoard } from "../../apps/web/src/room-status/roomStatusValidation.ts";
+import * as orderReader from "../../packages/db/src/orders.ts";
+import { buildServer } from "../../apps/api/src/server.ts";
+import { assertUnitAvailable, inventoryFingerprint, loadInventoryUnit, lockRoomDays } from "../../packages/db/src/inventory.ts";
 import { RoomStatusBoardSchema } from "../../apps/api/src/schemas.ts";
 import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
@@ -1338,50 +1342,15 @@ describe("PostgreSQL room-status projection", () => {
     expect(overdueHistoricalInterval.endDate < businessDate).toBe(true);
 
     const departureUnit = unitIn(todayBoard, rooms[2]!.id);
-    expect(departureUnit.days[0]).toMatchObject({
-      serviceDate: businessDate,
-      status: "IN_HOUSE",
-      available: false
-    });
-    expect(departureUnit.intervals).toEqual(expect.arrayContaining([expect.objectContaining({
-      startDate: businessDate,
-      endDate: tomorrow,
-      sourceStartDate: businessDate,
-      sourceEndDate: tomorrow,
-      orderArrivalDate: yesterday,
-      orderDepartureDate: businessDate,
-      status: "IN_HOUSE",
-      attention: "ARREARS",
-      operationalAttention: "DUE_OUT",
-      blocking: true,
-      conflicts: [expect.objectContaining({
-        blockingFactKind: "DUE_OUT",
-        claimId: null,
-        claimIds: [],
-        sourceReference: expect.objectContaining({ type: "ORDER", id: departureOrderId })
-      })]
-    })]));
-    expect(departureUnit.conflicts.some((conflict) => conflict.blockingFactKind === "OVERDUE_IN_HOUSE")).toBe(false);
-
+    expect(departureUnit.days[0]).toMatchObject({ serviceDate: businessDate, status: "AVAILABLE", available: true });
+    expect(departureUnit.intervals).toEqual([]);
     const departureAcrossBoundary = await board({ arrivalDate: yesterday, departureDate: tomorrow, pageSize: 200 });
     const departureIntervals = unitIn(departureAcrossBoundary, rooms[2]!.id).intervals.filter((interval) => interval.references
       .some((reference) => reference.type === "ORDER" && reference.id === departureOrderId));
-    expect(departureIntervals).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        startDate: yesterday,
-        endDate: businessDate,
-        attention: null,
-        operationalAttention: null,
-        conflicts: [expect.objectContaining({ blockingFactKind: "CLAIM", claimId: expect.any(String) })]
-      }),
-      expect.objectContaining({
-        startDate: businessDate,
-        endDate: tomorrow,
-        attention: "ARREARS",
-        operationalAttention: "DUE_OUT",
-        conflicts: [expect.objectContaining({ blockingFactKind: "DUE_OUT", claimId: null })]
-      })
-    ]));
+    expect(departureIntervals).toEqual([expect.objectContaining({
+      startDate: yesterday, endDate: businessDate,
+      conflicts: [expect.objectContaining({ blockingFactKind: "CLAIM", claimId: expect.any(String) })]
+    })]);
     expect(() => assertRoomStatusBoard(departureAcrossBoundary, {
       propertyId: demo.propertyId,
       range: { arrivalDate: yesterday, departureDate: tomorrow },
@@ -1396,7 +1365,7 @@ describe("PostgreSQL room-status projection", () => {
     });
     expect(availability.find((unit) => unit.id === rooms[2]!.id)?.nights[0]).toMatchObject({
       serviceDate: businessDate,
-      available: false,
+      available: true,
       blockingClaimIds: []
     });
     expect(availability.find((unit) => unit.id === rooms[6]!.id)?.nights[0]).not.toHaveProperty("blockingStayIds");
@@ -1408,7 +1377,7 @@ describe("PostgreSQL room-status projection", () => {
       arrivalDate: businessDate,
       departureDate: tomorrow,
       pricingPolicyVersionId: testPricingPolicyForDates(businessDate, tomorrow)
-    })).rejects.toMatchObject({ code: "INVENTORY_CONFLICT" });
+    })).resolves.toMatchObject({ inventoryUnitId: rooms[2]!.id });
     await expect(createQuote(db, {
       propertyId: demo.propertyId,
       inventoryUnitId: rooms[6]!.id,
@@ -1438,6 +1407,218 @@ describe("PostgreSQL room-status projection", () => {
       range: { arrivalDate: "2030-02-01", departureDate: "2030-02-02" },
       pageIndex: 0
     })).not.toThrow();
+  });
+
+  it("serializes checkout and a waiting check-in on their shared departure-day room lock", async () => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const outgoing = await createOrder({ unitId: demo.secondRoomId, arrivalDate: shiftLocalDate(today, -1), departureDate: today, prefix: "handoff-lock-out" });
+    const incoming = await createOrder({ unitId: demo.secondRoomId, arrivalDate: today, departureDate: tomorrow, prefix: "handoff-lock-in" });
+    const incomingId = incoming.result!.orderId as string;
+    const checkIn = await prepare({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: incomingId } }, "handoff-lock-in");
+    await markOrderInHouseFixture(outgoing.result!.orderId as string);
+    const checkOut = await prepare({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId: outgoing.result!.orderId as string } }, "handoff-lock-out");
+    let release!: () => void;
+    let ready!: () => void;
+    const readySignal = new Promise<void>((resolve) => { ready = resolve; });
+    const releaseSignal = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = db.transaction().execute(async (trx) => {
+      await trx.selectFrom("inventory_room_days").select("room_id").where("room_id", "=", demo.secondRoomId).where("service_date", "=", today).forUpdate().executeTakeFirstOrThrow();
+      ready();
+      await releaseSignal;
+    });
+    await readySignal;
+    const checkoutPending = confirmPrepared(checkOut, "handoff-lock-out");
+    let checkinPending: ReturnType<typeof confirmPrepared> | undefined;
+    try {
+      await expect.poll(async () => Number((await sql<{ count: string }>`select count(*)::text as count from pg_stat_activity where pid <> pg_backend_pid() and wait_event_type = 'Lock' and query like '%inventory_room_days%'`.execute(db)).rows[0]!.count)).toBeGreaterThan(0);
+      checkinPending = confirmPrepared(checkIn, "handoff-lock-in");
+    } finally { release(); await blocker; }
+    const results = await Promise.all([checkoutPending, checkinPending!]);
+    expect(results.map((item) => item.receipt.businessCommitted)).toEqual([true, true]);
+    expect((await writableOrderView(incomingId)).order.status).toBe("CHECKED_IN");
+  });
+
+  it("rejects check-in when the authoritative clock passes departure while waiting for its room lock", async () => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const incoming = await createOrder({ unitId: demo.secondRoomId, arrivalDate: today, departureDate: tomorrow, prefix: "checkin-midnight" });
+    const orderId = incoming.result!.orderId as string;
+    const prepared = await prepare({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "checkin-midnight");
+    let release!: () => void;
+    let ready!: () => void;
+    const readySignal = new Promise<void>((resolve) => { ready = resolve; });
+    const releaseSignal = new Promise<void>((resolve) => { release = resolve; });
+    const blocker = db.transaction().execute(async (trx) => {
+      await trx.selectFrom("inventory_room_days").select("room_id").where("room_id", "=", demo.secondRoomId).where("service_date", "=", today).forUpdate().executeTakeFirstOrThrow();
+      ready(); await releaseSignal;
+    });
+    await readySignal;
+    const result = await withMutablePropertyWallClockForTesting(new Date(`${today}T12:00:00Z`), async (clock) => {
+      const pending = confirmPrepared(prepared, "checkin-midnight");
+      try {
+        await expect.poll(async () => Number((await sql<{ count: string }>`select count(*)::text as count from pg_stat_activity where pid <> pg_backend_pid() and wait_event_type = 'Lock' and query like '%inventory_room_days%'`.execute(db)).rows[0]!.count)).toBeGreaterThan(0);
+        clock.set(new Date(`${tomorrow}T12:00:00Z`));
+      } finally { release(); await blocker; }
+      return pending;
+    });
+    expect(result.receipt).toMatchObject({ businessCommitted: false, executionStatus: "NOT_EXECUTED", error: { code: "PREVIEW_STALE", details: { causeCode: "INVALID_ORDER_STATE" } } });
+    expect((await writableOrderView(orderId)).order.status).toBe("RESERVED");
+  });
+
+  it("rechecks a prepared CHECK_IN against a newly in-house previous stay and preserves the reservation", async () => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const outgoing = await createOrder({ unitId: demo.secondRoomId, arrivalDate: shiftLocalDate(today, -1), departureDate: today, prefix: "stale-checkin-out" });
+    const incoming = await createOrder({ unitId: demo.secondRoomId, arrivalDate: today, departureDate: tomorrow, prefix: "stale-checkin-in" });
+    const incomingId = incoming.result!.orderId as string;
+    const prepared = await prepare({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: incomingId } }, "stale-checkin");
+    await markOrderInHouseFixture(outgoing.result!.orderId as string);
+    const before = await lodgingBusinessFactCounts();
+    expect((await confirmPrepared(prepared, "stale-checkin")).receipt).toMatchObject({
+      businessCommitted: false, executionStatus: "NOT_EXECUTED", factRefs: [],
+      error: { code: "PREVIEW_STALE", details: { causeCode: "INVENTORY_CONFLICT" } }
+    });
+    expect(await lodgingBusinessFactCounts()).toEqual(before);
+    expect((await writableOrderView(incomingId)).order.status).toBe("RESERVED");
+  });
+
+  it.each(["BOOKING_FIRST", "EXTENSION_FIRST", "CONCURRENT"])("awards contested nights only once: %s", async (mode) => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const outgoing = await createOrder({ unitId: demo.secondRoomId, arrivalDate: shiftLocalDate(today, -1), departureDate: today, prefix: "race-out" });
+    const outgoingId = outgoing.result!.orderId as string;
+    await markOrderInHouseFixture(outgoingId);
+    const extension = await prepare({ commandType: "EXTEND_STAY", input: { propertyId: demo.propertyId, orderId: outgoingId, newDepartureDate: tomorrow } }, "race-extension");
+    const incoming = await prepareStandardOrder({ unitId: demo.secondRoomId, arrivalDate: today, departureDate: tomorrow, prefix: "race-booking", nickname: "接续预订" });
+    const receipts = mode === "CONCURRENT"
+      ? await Promise.all([confirmPrepared(incoming, "race-booking"), confirmPrepared(extension, "race-extension")])
+      : mode === "BOOKING_FIRST"
+        ? [await confirmPrepared(incoming, "race-booking"), await confirmPrepared(extension, "race-extension")]
+        : [await confirmPrepared(extension, "race-extension"), await confirmPrepared(incoming, "race-booking")];
+    expect(receipts.filter((result) => result.receipt.businessCommitted)).toHaveLength(1);
+    const failed = receipts.find((result) => !result.receipt.businessCommitted)!.receipt;
+    expect(failed).toMatchObject({ executionStatus: "NOT_EXECUTED", error: { code: "PREVIEW_STALE" }, factRefs: [] });
+    const claims = await db.selectFrom("inventory_claims").select("id").where("inventory_unit_id", "=", demo.secondRoomId).where("service_date", "=", today).where("active", "=", true).execute();
+    expect(claims).toHaveLength(1);
+    if (mode === "BOOKING_FIRST") expect((await writableOrderView(outgoingId)).order.departure_date).toBe(today);
+  });
+
+  it.each([[demo.roomId, demo.bedAId], [demo.bedAId, demo.roomId]])("requires physical handoff between whole room and child bed: %s -> %s", async (outgoingUnit, incomingUnit) => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const outgoing = await createOrder({ unitId: outgoingUnit, arrivalDate: shiftLocalDate(today, -1), departureDate: today, prefix: "physical-out" });
+    await markOrderInHouseFixture(outgoing.result!.orderId as string);
+    const incoming = await createOrder({ unitId: incomingUnit, arrivalDate: today, departureDate: tomorrow, prefix: "physical-in" });
+    const orderId = incoming.result!.orderId as string;
+    await expect(prepare({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "physical-in-denied"))
+      .rejects.toMatchObject({ code: "INVENTORY_CONFLICT", details: { reason: "PREVIOUS_STAY_NOT_CHECKED_OUT" } });
+    expect((await writableOrderView(orderId)).allowedActions.find((action) => action.code === "CHECK_IN"))
+      .toMatchObject({ enabled: false, disabledReason: "PREVIOUS_STAY_NOT_CHECKED_OUT" });
+  });
+
+  it("keeps same-day bed turnover READY and gates check-in until checkout without blocking sibling beds", async () => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const outgoing = await createOrder({ unitId: demo.bedAId, arrivalDate: shiftLocalDate(today, -1), departureDate: today, prefix: "turnover-out" });
+    const outgoingId = outgoing.result!.orderId as string;
+    await markOrderInHouseFixture(outgoingId);
+    const incoming = await createOrder({ unitId: demo.bedAId, arrivalDate: today, departureDate: tomorrow, prefix: "turnover-in" });
+    const incomingId = incoming.result!.orderId as string;
+    const snapshot = await board({ arrivalDate: today, departureDate: tomorrow });
+    expect(snapshot.projectionState).toBe("READY");
+    expect(unitIn(snapshot, demo.bedAId).days[0]).toMatchObject({ status: "RESERVED" });
+    expect(taskForOrder(snapshot, outgoingId)).toMatchObject({ operationalAttention: "DUE_OUT", claimIds: [] });
+    expect(() => assertRoomStatusBoard(snapshot, { propertyId: demo.propertyId, range: { arrivalDate: today, departureDate: tomorrow }, pageIndex: 0 })).not.toThrow();
+    expect((await writableOrderView(incomingId)).allowedActions.find((action) => action.code === "CHECK_IN"))
+      .toMatchObject({ enabled: false, disabledReason: "PREVIOUS_STAY_NOT_CHECKED_OUT" });
+    const input = { propertyId: demo.propertyId, orderId: incomingId };
+    await expect(prepare({ commandType: "CHECK_IN", input }, "turnover-denied"))
+      .rejects.toMatchObject({ code: "INVENTORY_CONFLICT", details: { reason: "PREVIOUS_STAY_NOT_CHECKED_OUT" } });
+    const sibling = await createOrder({ unitId: demo.bedBId, arrivalDate: today, departureDate: tomorrow, prefix: "turnover-sibling" });
+    expect((await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: sibling.result!.orderId as string } }, "turnover-sibling-in")).businessCommitted).toBe(true);
+    expect((await execute({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId: outgoingId } }, "turnover-out-done")).businessCommitted).toBe(true);
+    expect((await execute({ commandType: "CHECK_IN", input }, "turnover-in-done")).businessCommitted).toBe(true);
+  });
+
+  it("separates healthy lodging-night availability from actual in-house move availability by physical resource", async () => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const outgoing = await createOrder({ unitId: demo.bedAId, arrivalDate: shiftLocalDate(today, -1), departureDate: today, prefix: "move-purpose-out" });
+    await markOrderInHouseFixture(outgoing.result!.orderId as string);
+    const moving = await createOrder({ unitId: demo.secondRoomId, arrivalDate: today, departureDate: tomorrow, prefix: "move-purpose-in" });
+    await markOrderInHouseFixture(moving.result!.orderId as string);
+    const lodging = await listAvailability(db, demo.propertyId, today, tomorrow);
+    const physical = await listAvailability(db, demo.propertyId, today, tomorrow, undefined, moving.result!.orderId as string);
+    for (const id of [demo.bedAId, demo.roomId]) {
+      expect(lodging.find((unit) => unit.id === id)).toMatchObject({ available: true, nights: [{ serviceDate: today, available: true }] });
+      expect(physical.find((unit) => unit.id === id)).toMatchObject({ available: false, nights: [{ serviceDate: today, available: false }] });
+    }
+    for (const result of [lodging, physical]) {
+      expect(result.find((unit) => unit.id === demo.bedBId)).toMatchObject({ available: true, nights: [{ serviceDate: today, available: true }] });
+    }
+    const segmentIds = (await writableOrderView(outgoing.result!.orderId as string)).segments.map((segment) => segment.id);
+    const read = vi.spyOn(orderReader, "getOrderViewSnapshot");
+    try {
+      await inventoryFingerprint(db, demo.propertyId, demo.bedBId, today, tomorrow, [], "LODGING_NIGHTS");
+      await db.transaction().execute(async (trx) => {
+        const unit = await loadInventoryUnit(trx, demo.propertyId, demo.bedBId);
+        await lockRoomDays(trx, [{ roomId: unit.roomId, serviceDate: today }]);
+        await assertUnitAvailable(trx, unit, [today], [], "LODGING_NIGHTS");
+      });
+      expect(read).not.toHaveBeenCalled();
+      await inventoryFingerprint(db, demo.propertyId, demo.bedAId, today, tomorrow, segmentIds, "LODGING_NIGHTS");
+      expect(read).not.toHaveBeenCalled();
+      await inventoryFingerprint(db, demo.propertyId, demo.bedAId, today, tomorrow, [], "LODGING_NIGHTS");
+      expect(read.mock.calls.map((call) => call[1])).toEqual([outgoing.result!.orderId]);
+    } finally { read.mockRestore(); }
+  });
+
+  it.each(["LIFECYCLE", "SOURCE", "REVISION", "MONEY_CHAIN"])("fails damaged departure %s closed through direct API, preview, locked confirm and Claim guard", async (damage) => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const tomorrow = shiftLocalDate(today, 1);
+    const outgoing = await createOrder({ unitId: demo.bedAId, arrivalDate: shiftLocalDate(today, -1), departureDate: today, prefix: "damaged-handoff-out" });
+    const outgoingId = outgoing.result!.orderId as string;
+    await markOrderInHouseFixture(outgoingId);
+    const collection = damage === "MONEY_CHAIN" ? await recordFullCollectionForProjectionTest(outgoingId, "damaged-handoff-funds") : null;
+    const quoted = await createQuote(db, { propertyId: demo.propertyId, inventoryUnitId: demo.bedAId, stayType: "TRANSIENT", arrivalDate: today, departureDate: tomorrow, pricingPolicyVersionId: testPricingPolicyForDates(today, tomorrow) });
+    const input = { propertyId: demo.propertyId, quoteId: quoted.quoteId, primaryGuest: { fullName: "后客", nickname: "后客" }, bookingChannelCode: "WECOM", channelOrderReference: null, targetCurrentContractAmountMinor: quoted.currentContractAmount.minorUnits };
+    const prepared = await prepare({ commandType: "CREATE_ORDER", input }, "damaged-handoff-before");
+    if (damage === "LIFECYCLE") await db.updateTable("stays").set({ status: "PLANNED" }).where("order_id", "=", outgoingId).execute();
+    else if (damage === "SOURCE") await updateOrderIdentityForProjectionTest(outgoingId, { member_id: demo.memberId, booking_channel_code: "CTRIP", channel_order_reference: "BROKEN-HANDOFF" });
+    else if (damage === "REVISION") await db.updateTable("orders").set({ current_revision_id: null }).where("id", "=", outgoingId).execute();
+    else {
+      await sql`alter table collection_facts disable trigger collection_facts_append_only`.execute(db);
+      try { await db.updateTable("collection_facts").set({ net_effect_minor: -1_000 }).where("fact_id", "=", collection!.factRefs[0]!).execute(); }
+      finally { await sql`alter table collection_facts enable trigger collection_facts_append_only`.execute(db); }
+    }
+    const before = await lodgingBusinessFactCounts();
+    const priorState = await orderFulfillmentState(outgoingId);
+    const claimsBefore = await db.selectFrom("inventory_claims").selectAll().orderBy("id").execute();
+    const app = await buildServer(createDatabase(databaseUrl));
+    try {
+      const availability = await app.inject({ method: "GET", url: `/api/v1/properties/${demo.propertyId}/availability?arrivalDate=${today}&departureDate=${tomorrow}`, headers: { authorization: `Bearer ${demo.writeToken}` } });
+      expect(availability.statusCode).toBe(200);
+      const units = availability.json().units as Array<{ id: string; available: boolean; nights: unknown[] }>;
+      for (const id of [demo.bedAId, demo.roomId]) expect(units.find((unit) => unit.id === id)).toMatchObject({ available: false, nights: [{ serviceDate: today, available: false }] });
+      expect(units.find((unit) => unit.id === demo.bedBId)).toMatchObject({ available: true, nights: [{ serviceDate: today, available: true }] });
+      const key = metadata("damaged-handoff-api");
+      const quoteResult = await app.inject({ method: "POST", url: "/api/v1/quotes", headers: { authorization: `Bearer ${demo.writeToken}`, "idempotency-key": key.idempotencyKey, "x-correlation-id": key.correlationId }, payload: { propertyId: demo.propertyId, inventoryUnitId: demo.bedAId, arrivalDate: today, departureDate: tomorrow, pricingPolicyVersionId: testPricingPolicyForDates(today, tomorrow) } });
+      expect(quoteResult.statusCode).toBe(409);
+      expect(quoteResult.json().code).toBe("INVENTORY_CONFLICT");
+    } finally { await app.close(); }
+    await expect(prepare({ commandType: "CREATE_ORDER", input }, "damaged-handoff-after")).rejects.toMatchObject({ code: "INVENTORY_CONFLICT" });
+    expect((await confirmPrepared(prepared, "damaged-handoff-confirm")).receipt).toMatchObject({ businessCommitted: false, executionStatus: "NOT_EXECUTED", factRefs: [], error: { code: "PREVIEW_STALE", details: { causeCode: "INVENTORY_CONFLICT" } } });
+    expect(await inventoryFingerprint(db, demo.propertyId, demo.bedAId, today, tomorrow, [], "LODGING_NIGHTS")).not.toEqual([]);
+    expect(await inventoryFingerprint(db, demo.propertyId, demo.bedBId, today, tomorrow, [], "LODGING_NIGHTS")).toEqual([]);
+    await expect(db.transaction().execute(async (trx) => {
+      const unit = await loadInventoryUnit(trx, demo.propertyId, demo.bedAId);
+      await lockRoomDays(trx, [{ roomId: unit.roomId, serviceDate: today }]);
+      await assertUnitAvailable(trx, unit, [today], [], "LODGING_NIGHTS");
+    })).rejects.toMatchObject({ code: "INVENTORY_CONFLICT" });
+    expect(await lodgingBusinessFactCounts()).toEqual(before);
+    expect(await orderFulfillmentState(outgoingId)).toEqual(priorState);
+    expect(await db.selectFrom("inventory_claims").selectAll().orderBy("id").execute()).toEqual(claimsBefore);
   });
 
   it("keeps inconsistent or source-damaged departure-day Stays fail-closed without claiming they are due out", async () => {
@@ -1518,7 +1699,7 @@ describe("PostgreSQL room-status projection", () => {
     })).not.toThrow();
   });
 
-  it("fails a concurrent arrival with zero business writes while checkout is still uncommitted", async () => {
+  it("reserves vacant nights while checkout is still uncommitted", async () => {
     const businessDate = (await board({ arrivalDate: "2030-02-01", departureDate: "2030-02-02" })).businessDate;
     const yesterday = shiftLocalDate(businessDate, -1);
     const tomorrow = shiftLocalDate(businessDate, 1);
@@ -1564,15 +1745,10 @@ describe("PostgreSQL room-status projection", () => {
     }
     const checkedOut = await checkoutConfirmation;
 
-    expect(incomingConfirmation.receipt).toMatchObject({
-      businessCommitted: false,
-      executionStatus: "NOT_EXECUTED",
-      error: { code: "PREVIEW_STALE", details: { causeCode: "INVENTORY_CONFLICT" } }
-    });
-    expect(incomingConfirmation.receipt.factRefs).toEqual([]);
+    expect(incomingConfirmation.receipt).toMatchObject({ businessCommitted: true, executionStatus: "EXECUTED" });
     expect(checkedOut.receipt).toMatchObject({ businessCommitted: true, executionStatus: "EXECUTED" });
-    expect(await db.selectFrom("orders").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow())
-      .toEqual(ordersBefore);
+    expect(Number((await db.selectFrom("orders").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow()).count)).toBe(Number(ordersBefore.count) + 1);
+
   });
 
   it("allows a waiting prepared arrival when checkout linearizes first", async () => {
@@ -1629,6 +1805,8 @@ describe("PostgreSQL room-status projection", () => {
           and query like '%inventory_room_days%'
       `.execute(db)).rows[0]?.count ?? "0"), { timeout: 3_000, interval: 20 }).toBeGreaterThan(0);
 
+      releaseRoomDayLock();
+      await blocker;
       expect((await confirmPrepared(checkout, "due-out-checkout-first")).receipt)
         .toMatchObject({ businessCommitted: true, executionStatus: "EXECUTED" });
     } finally {
@@ -1707,7 +1885,7 @@ describe("PostgreSQL room-status projection", () => {
     expect(confirmed.receipt).toMatchObject({
       businessCommitted: false,
       executionStatus: "NOT_EXECUTED",
-      error: { code: "PREVIEW_STALE", details: { causeCode: "INVENTORY_CONFLICT" } }
+      error: { code: "PREVIEW_STALE" }
     });
     expect(confirmed.receipt.factRefs).toEqual([]);
     expect(await db.selectFrom("orders").select(({ fn }) => fn.countAll<string>().as("count")).executeTakeFirstOrThrow())
@@ -3711,7 +3889,7 @@ describe("PostgreSQL room-status projection", () => {
     await markOrderInHouseFixture(overdueOrderId);
 
     const initial = await board({ arrivalDate: businessDate, departureDate: tomorrow });
-    expect(intervalForOrder(initial, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+    expect(taskForOrder(initial, dueOutOrderId)).toMatchObject({
       status: "IN_HOUSE",
       attention: "ARREARS",
       operationalAttention: "DUE_OUT",
@@ -3737,7 +3915,7 @@ describe("PostgreSQL room-status projection", () => {
     const dueOutCollection = await recordFullCollectionForProjectionTest(dueOutOrderId, "due-out-arrears-funds");
     const overdueCollection = await recordFullCollectionForProjectionTest(overdueOrderId, "overdue-in-house-arrears-funds");
     const afterFullCollection = await board({ arrivalDate: businessDate, departureDate: tomorrow });
-    expect(intervalForOrder(afterFullCollection, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+    expect(taskForOrder(afterFullCollection, dueOutOrderId)).toMatchObject({
       status: "IN_HOUSE",
       attention: null,
       operationalAttention: "DUE_OUT"
@@ -3773,7 +3951,7 @@ describe("PostgreSQL room-status projection", () => {
       }
     }, "overdue-in-house-arrears-funds-refund");
     const afterRefund = await board({ arrivalDate: businessDate, departureDate: tomorrow });
-    expect(intervalForOrder(afterRefund, demo.secondRoomId, dueOutOrderId)).toMatchObject({
+    expect(taskForOrder(afterRefund, dueOutOrderId)).toMatchObject({
       status: "IN_HOUSE",
       attention: "ARREARS",
       operationalAttention: "DUE_OUT"

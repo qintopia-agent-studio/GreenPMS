@@ -1107,3 +1107,11 @@ export function parseRoomStatusRestoration(serialized: string, expectedPropertyI
       || restored.state.selection.focusDate !== restored.state.focusedCell.serviceDate)) return undefined;
   return restored;
 }
+
+/** Handoff tasks are server facts, not accommodation-night occupancy. */
+export function roomStatusDepartureTasks(board: import("@qintopia/contracts").RoomStatusBoardDto, unit: RoomStatusUnitDto, serviceDate: string) {
+  return board.operationalTasks.filter((task) => task.businessDate === serviceDate
+    && task.operationalAttention === "DUE_OUT" && task.status === "IN_HOUSE"
+    && (task.actualInventoryUnitId === unit.id || task.actualInventoryUnitId === unit.parentRoomId
+      || (unit.kind === "ROOM" && task.roomId === unit.id)));
+}

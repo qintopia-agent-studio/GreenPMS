@@ -35,7 +35,7 @@ import {
   type TemporaryOtherRoomCreateEvidence
 } from "../orders.ts";
 import { allocateCoverageCandidates, loadPricingPolicy, loadStoredQuote, resolveMemberCoverage, resolveTemporaryOtherRoomCoverage, sameTemporaryOtherRoomArrangement } from "../pricing-service.ts";
-import { inventoryFingerprint, loadInventoryUnit, type DbExecutor } from "../inventory.ts";
+import { previousStayAwaitingCheckout, inventoryFingerprint, loadInventoryUnit, type DbExecutor } from "../inventory.ts";
 import { propertyLocalClock, propertyLocalToday } from "../members.ts";
 import { planStayDateChangeTimeline, timelinePairDiff } from "../stay-timeline-plan.ts";
 import {
@@ -1392,7 +1392,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       role: index === 0 ? "PRIMARY" as const : "ADDITIONAL" as const,
       ...snapshot
     }));
-    const fingerprint = await inventoryFingerprint(db, propertyId, unit.id, quote.arrivalDate, quote.departureDate);
+    const fingerprint = await inventoryFingerprint(db, propertyId, unit.id, quote.arrivalDate, quote.departureDate, [], "LODGING_NIGHTS");
     if (fingerprint.length > 0) throw new DomainError("INVENTORY_CONFLICT", "Quoted inventory is no longer available", 409);
     const policyPricing = temporaryOtherRoomArrangement
       ? await priceTemporaryOtherRoomQuote(db, quote, temporaryOtherRoomArrangement)
@@ -2580,7 +2580,8 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
         item.inventoryUnitId,
         item.serviceDate,
         nextServiceDate(item.serviceDate),
-        context.segmentIds
+        context.segmentIds,
+        "LODGING_NIGHTS"
       )
     })));
     const fingerprint = fingerprintParts.flatMap(({ item, fingerprint: entries }) =>
@@ -3077,6 +3078,11 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
         businessDate,
         departureDate: context.order.departure_date
       });
+    }
+    const checkInTimeline = await loadActiveStayTimeline(db, context);
+    const checkInUnitId = checkInTimeline.find((day) => day.serviceDate === businessDate)!.inventoryUnitId;
+    if (await previousStayAwaitingCheckout(db, propertyId, checkInUnitId, businessDate, orderId)) {
+      throw new DomainError("INVENTORY_CONFLICT", "前客尚未退房，请先办理前单退房", 409, false, { reason: "PREVIOUS_STAY_NOT_CHECKED_OUT" });
     }
     const heldCoverage = await db.selectFrom("coverage_items").select("id")
       .where("order_id", "=", orderId).where("status", "=", "HELD").orderBy("id").execute();

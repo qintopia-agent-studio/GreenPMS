@@ -509,7 +509,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
       .orderBy("id").forShare().execute();
     return;
   }
-  if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"].includes(commandType)) {
+  if (["RESCHEDULE_STAY", "SHORTEN_STAY", "EXTEND_STAY", "MOVE_UNIT", "CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN", "CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"].includes(commandType)) {
     const timeline = await loadActiveStayTimeline(trx, context);
     const roomDates = await roomDatesForTimeline(trx, propertyId, timeline);
     if (commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY") {
@@ -544,6 +544,11 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
       parseLocalDate(effectiveDate);
       roomDates.push(...enumerateServiceDates(effectiveDate, context.order.departure_date)
         .map((serviceDate) => ({ roomId: newUnit.roomId, serviceDate })));
+    }
+    if (commandType === "CHECK_IN" || commandType === "CHECK_OUT") {
+      const unit = await loadInventoryUnitIncludingInactive(trx, propertyId, context.currentSegment.inventoryUnitId);
+      roomDates.push({ roomId: unit.roomId, serviceDate: context.order.arrival_date });
+      roomDates.push({ roomId: unit.roomId, serviceDate: context.order.departure_date });
     }
     await lockRoomDays(trx, roomDates);
   }
@@ -1049,7 +1054,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     const revisionId = await insertRevision(trx, { orderId, revisionNo: 1, amendmentId, policyVersionId, arrivalDate, departureDate, pricing });
     await trx.updateTable("orders").set({ current_revision_id: revisionId }).where("id", "=", orderId).execute();
     const unit = await loadInventoryUnit(trx, propertyId, unitId);
-    await createInventoryClaims(trx, { propertyId, unit, dates: enumerateServiceDates(arrivalDate, departureDate), sourceType: "ORDER_SEGMENT", sourceId: segmentId });
+    await createInventoryClaims(trx, { propertyId, unit, dates: enumerateServiceDates(arrivalDate, departureDate), sourceType: "ORDER_SEGMENT", sourceId: segmentId, purpose: "LODGING_NIGHTS" });
     const coverageRefs = memberContractId
       ? await holdCoverage(trx, { orderId, contractId: memberContractId, ...(memberId ? { memberId } : {}), inventoryUnitId: unitId, revisionId, coverageSet: pricing.coverageSet, commandId: options.commandId })
       : { coverageIds: [], factIds: [] };
@@ -1865,7 +1870,8 @@ export async function applyCommand(trx: Transaction<Database>, options: {
         dates,
         sourceType: "ORDER_SEGMENT",
         sourceId: segmentId,
-        excludeSourceIds: [...context.segmentIds, segmentId]
+        excludeSourceIds: [...context.segmentIds, segmentId],
+        purpose: "LODGING_NIGHTS"
       }));
     }
     if (addedClaimIds.length !== pairDiff.added.length) {

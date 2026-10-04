@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RoomStatusBoardDto, RoomStatusConflictDto, RoomStatusIntervalDto, RoomStatusOperationalTaskDto } from "@qintopia/contracts";
+import { roomStatusDepartureTasks } from "./roomStatusState";
 import { assertRoomStatusBoard } from "./roomStatusValidation";
 
 const expected = {
@@ -1247,4 +1248,21 @@ describe("assertRoomStatusBoard", () => {
     wrongPage.page.totalPages = 2;
     expect(() => assertRoomStatusBoard(wrongPage, expected)).toThrow(/page.totalPages/);
   });
+});
+
+
+it("matches server handoff tasks by physical unit without borrowing sibling-bed tasks or changing free inventory", () => {
+  const board = validBoard();
+  const room = board.rooms[0]!;
+  const task = { ...normalLodgingTask("DEPARTURE"), actualInventoryUnitId: "bed_a", roomId: room.id };
+  board.operationalTasks = [task];
+  const a = { ...room, id: "bed_a", parentRoomId: room.id, kind: "BED" as const };
+  const b = { ...a, id: "bed_b" };
+  expect(roomStatusDepartureTasks(board, room, board.businessDate)).toEqual([task]);
+  expect(roomStatusDepartureTasks(board, a, board.businessDate)).toEqual([task]);
+  expect(roomStatusDepartureTasks(board, b, board.businessDate)).toEqual([]);
+  expect(roomStatusDepartureTasks(board, a, "2028-01-02")).toEqual([]);
+  board.operationalTasks = [{ ...task, actualInventoryUnitId: room.id }];
+  expect(roomStatusDepartureTasks(board, b, board.businessDate)).toHaveLength(1);
+  expect(room.days[0]!.available).toBe(true);
 });
