@@ -6316,6 +6316,10 @@ export function InventoryPage() {
           >
             <div className="room-status-board-column" ref={boardColumnRef}>
               <RoomStatusGrid
+                onOpenDeparture={(task) => {
+                  const identity = roomStatusOrderIdentityForInterval(task);
+                  if (identity) selectOrderContextIdentity(identity, task.businessDate);
+                }}
                 board={renderedBoard}
                 range={range}
                 filters={viewState.filters}

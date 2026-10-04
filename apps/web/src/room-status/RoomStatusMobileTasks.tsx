@@ -40,6 +40,7 @@ import {
   isIsoLocalDate,
   ROOM_STATUS_TIMELINE_DAYS,
   roomStatusIntervalBusinessPeriod,
+  roomStatusDepartureTasks,
   roomStatusOrderIdentityForInterval,
   type RoomStatusOrderIdentity
 } from "./roomStatusState";
@@ -578,6 +579,9 @@ export function RoomStatusMobileTasks({
           <ul className="room-status-mobile-task-list">
             {tasks.map((interval) => {
               const unit = unitMap.get(interval.displayInventoryUnitId) ?? unitMap.get(interval.actualInventoryUnitId) ?? null;
+              const actualUnit = unitMap.get(interval.actualInventoryUnitId);
+              const awaitingDeparture = interval.status === "RESERVED" && actualUnit
+                ? roomStatusDepartureTasks(board, actualUnit, interval.businessDate).length > 0 : false;
               const primaryAction = executableTaskAction(interval, unit);
               const lodging = interval.sourceKind === "ORDER" || interval.sourceKind === "FREE_STAY";
               const identity = roomStatusOrderIdentityForInterval(interval);
@@ -601,6 +605,7 @@ export function RoomStatusMobileTasks({
                       <RoomStatusAttentionBadges labels={roomStatusIntervalAttentionLabels(interval)} />
                     </span>
                     {lodging ? <span>住宿人 · {businessLabel}</span> : null}
+                    {awaitingDeparture ? <small className="room-status-mobile-task-warning">待前客退房 · 本单库存已保留，暂不能办理入住</small> : null}
                     {!lodging ? <span>{interval.label}</span> : null}
                     <small>完整业务周期 {formatRoomStatusDate(businessPeriod.arrivalDate)}至{formatRoomStatusDate(businessPeriod.departureDate)} · {roomStatusSourceLabels[interval.sourceKind]}</small>
                     {!unit ? <small className="room-status-mobile-task-warning">当前查询页未包含该房源名称，请刷新或调整房源页。</small> : null}
@@ -697,7 +702,7 @@ export function RoomStatusMobileTasks({
                   {detailInterval.attention === "ARREARS" || detailInterval.status === "ARREARS" ? <><dt>收款状态</dt><dd><span className="room-status-mobile-attention">欠款</span></dd></> : null}
                   {detailInterval.operationalAttention ? <><dt>运营提醒</dt><dd><RoomStatusAttentionBadges labels={roomStatusIntervalAttentionLabels(detailInterval).filter((label) => label !== "欠款")} /></dd></> : null}
                   <dt>住宿来源</dt><dd>{roomStatusSourceLabels[detailInterval.sourceKind]}</dd>
-                  <dt>说明</dt><dd>{detailInterval.reason ?? "无额外说明"}</dd>
+                  <dt>说明</dt><dd>{detailInterval.operationalAttention === "DUE_OUT" ? "当晚库存空闲时可预订，后客须等前客退房后入住。" : detailInterval.reason ?? "无额外说明"}</dd>
                 </dl>
               </section>
             )}

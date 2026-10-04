@@ -28,6 +28,7 @@ import {
   type HistoricalProtocolVersion
 } from "./historical-command-protocol.ts";
 import type { DbExecutor } from "./inventory.ts";
+import { previousStayAwaitingCheckout } from "./departure-day-stays.ts";
 import { propertyLocalClock, propertyLocalToday } from "./members.ts";
 import type { Database } from "./schema.ts";
 
@@ -1884,6 +1885,7 @@ export async function getOrderViewSnapshot(
     activeTimeline,
     historicalCorrectionGroupsByCommandId
   });
+ const awaitingPreviousCheckout = context.order.status === "RESERVED" && await previousStayAwaitingCheckout(db, context.order.property_id, activeTimeline.find((day) => day.serviceDate === businessDate)?.inventoryUnitId ?? context.currentSegment.inventoryUnitId, businessDate, context.order.id);
  return {
    accessLevel,
    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
@@ -1896,7 +1898,8 @@ export async function getOrderViewSnapshot(
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
-   }, commandGrants).filter((action) => !amendments.some((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
+   }, commandGrants).map((action) => action.code === "CHECK_IN" && action.enabled && awaitingPreviousCheckout
+     ? { ...action, enabled: false, disabledReason: "PREVIOUS_STAY_NOT_CHECKED_OUT" } : action).filter((action) => !amendments.some((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
      && recordValue(amendment.payload)?.crossRoomUpgrade)
      || !["EXTEND_STAY", "MOVE_UNIT", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"].includes(action.code))
      .filter((action) => !temporaryOtherRoomEvidence
