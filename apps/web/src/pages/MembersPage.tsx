@@ -1451,8 +1451,10 @@ export function MembersPage() {
   return <div className={`members-page${currentMemberId ? " member-detail-visible" : ""}`}>
     <header className="page-heading page-heading-actions">
       <div><p className="eyebrow">会员管理</p><h1>会员档案</h1><p>查询和维护当前门店的会员资料</p></div>
-      <button className="button button-secondary" type="button" onClick={refresh} disabled={loadingList || loadingMember}><RefreshCw className={loadingList || loadingMember ? "spin" : ""} aria-hidden="true" size={17} />刷新</button>
-      {canCreateMember ? <button className="button button-primary" type="button" onClick={() => setCreatingMember(true)} disabled={commandsBlocked} data-testid="create-member"><UserPlus aria-hidden="true" size={17} />新建会员</button> : null}
+      <div className="page-heading-buttons" role="group" aria-label="会员档案操作">
+        {canCreateMember ? <button className="button button-primary" type="button" onClick={() => setCreatingMember(true)} disabled={commandsBlocked} data-testid="create-member"><UserPlus aria-hidden="true" size={17} />新建会员</button> : null}
+        <button className="button button-secondary" type="button" onClick={refresh} disabled={loadingList || loadingMember}><RefreshCw className={loadingList || loadingMember ? "spin" : ""} aria-hidden="true" size={17} />刷新</button>
+      </div>
     </header>
 
     <InlineError error={recoveryError} title="恢复记录未完成" />

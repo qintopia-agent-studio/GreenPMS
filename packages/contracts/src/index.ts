@@ -1,3 +1,5 @@
+export * from "./workbench-funds.ts";
+export * from "./payment-allocation.ts";
 export * from "./account-management.ts";
 export * from "./room-catalog.ts";
 
@@ -72,6 +74,10 @@ export const commandTypes = [
   "RECORD_COLLECTION",
   "RECORD_REFUND",
   "REVERSE_FACT",
+  "RETAIN_ORDER_FUNDS",
+  "APPLY_RETAINED_FUNDS",
+  "RELEASE_RETAINED_FUNDS",
+  "REFUND_RETAINED_FUNDS",
   "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
   "CHECK_IN",
   "CHECK_OUT",

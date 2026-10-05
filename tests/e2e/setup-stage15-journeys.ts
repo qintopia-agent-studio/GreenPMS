@@ -48,7 +48,7 @@ export interface Stage15JourneyEvidence {
   }>;
   collectionFacts: Array<{
     factId: string;
-    factType: "COLLECTION" | "REFUND" | "REVERSAL";
+    factType: "COLLECTION" | "REFUND" | "REVERSAL" | "REALLOCATION_IN" | "REALLOCATION_OUT";
     amountMinor: number;
     netEffectMinor: number;
     method: string;

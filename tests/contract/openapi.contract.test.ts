@@ -97,8 +97,12 @@ const commandInputContract: Record<Exclude<PublicCommandEnvelopeType, "MANAGE_RO
   LOCK_MAINTENANCE: { required: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"], properties: ["propertyId", "inventoryUnitId", "arrivalDate", "departureDate", "reason"] },
   RELEASE_MAINTENANCE: { required: ["propertyId", "maintenanceLockId"], properties: ["propertyId", "maintenanceLockId"] },
   COMPLETE_CLEANING: { required: ["propertyId", "cleaningTaskId"], properties: ["propertyId", "cleaningTaskId"] },
-  RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method"], properties: ["propertyId", "orderId", "amountMinor", "method", "transactionReference", "note"] },
-  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "transactionReference", "refundReference", "note"] },
+  RETAIN_ORDER_FUNDS: { required: ["propertyId", "orderId", "sourceFactId", "amountMinor", "ownerName", "ownerContact", "confirmationNote"], properties: ["propertyId", "orderId", "sourceFactId", "amountMinor", "ownerName", "ownerContact", "confirmationNote"] },
+  APPLY_RETAINED_FUNDS: { required: ["propertyId", "orderId", "retainedFundId", "amountMinor", "authorizationNote"], properties: ["propertyId", "orderId", "retainedFundId", "amountMinor", "authorizationNote"] },
+  RELEASE_RETAINED_FUNDS: { required: ["propertyId", "orderId", "retainedFundId", "amountMinor", "note"], properties: ["propertyId", "orderId", "retainedFundId", "amountMinor", "note"] },
+  REFUND_RETAINED_FUNDS: { required: ["propertyId", "orderId", "retainedFundId", "amountMinor", "externalPaymentBillId", "refundReference", "note"], properties: ["propertyId", "orderId", "retainedFundId", "amountMinor", "externalPaymentBillId", "refundReference", "note"] },
+  RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method"], properties: ["propertyId", "orderId", "amountMinor", "method", "externalPaymentBillId", "transactionReference", "note"] },
+  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "externalPaymentBillId", "transactionReference", "refundReference", "note"] },
   CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: {
     required: ["propertyId", "orderId", "memberId", "membershipProductId", "collectionFactIds", "agreedPriceMinor"],
     properties: [
@@ -106,7 +110,7 @@ const commandInputContract: Record<Exclude<PublicCommandEnvelopeType, "MANAGE_RO
       "priceAdjustmentReason", "remainingPaymentTransactionReference", "remainingPaymentNote", "temporaryOtherRoomReason"
     ]
   },
-  REVERSE_FACT: { required: ["propertyId", "orderId", "reversesFactId", "note"], properties: ["propertyId", "orderId", "reversesFactId", "note"] },
+  REVERSE_FACT: { required: ["propertyId", "orderId", "reversesFactId", "note"], properties: ["propertyId", "orderId", "reversesFactId", "note", "releaseExternalPaymentAllocation"] },
   CHECK_IN: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   CHECK_OUT: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
   REVOKE_CHECK_OUT: { required: ["propertyId", "orderId"], properties: ["propertyId", "orderId"] },
@@ -296,11 +300,16 @@ describe("OpenAPI 3.1 command contract", () => {
           SAVE_TYPE: { required: ["name", "bathroom", "saleMode", "bedCount", "capacity"], optional: ["typeCode"] },
           DELETE_TYPE: { required: ["typeCode"] }, SET_TYPE_ACTIVE: { required: ["typeCode", "active"] },
           SAVE_ROOM: { required: ["typeCode", "code", "buildingCode", "bedCount", "capacity"], optional: ["roomId"] },
+          RENAME_ROOM: { required: ["roomId", "code"] },
           SET_ROOM_ACTIVE: { required: ["roomId", "active"] }, PUBLISH_RATES: { required: ["typeCode", "effectiveFrom", "anchors"] }
         };
         expect(input.discriminator).toEqual({ propertyName: "action" });
         const actions = input.oneOf as JsonSchema[];
         expect(actions).toHaveLength(Object.keys(shapes).length);
+        expect(actions.map((shape) => {
+          const action = (shape.properties as Record<string, JsonSchema>).action!;
+          return action.const ?? (action.enum as string[])[0];
+        }).sort()).toEqual(Object.keys(shapes).sort());
         for (const shape of actions) {
           const properties = shape.properties as Record<string, JsonSchema>;
           const actionName = (properties.action!.const ?? (properties.action!.enum as string[])[0]) as string;
@@ -1240,8 +1249,28 @@ describe("OpenAPI 3.1 command contract", () => {
 
     const errorSchema = document.paths["/api/v1/quotes"].post.responses["400"].content["application/json"].schema;
     expect(errorSchema.additionalProperties).toBe(false);
-    const detailVariants = errorSchema.properties.details.anyOf as Array<{ required?: string[] }>;
-    expect(detailVariants).toHaveLength(18);
+    const detailVariants = errorSchema.properties.details.anyOf as Array<{ required?: string[]; properties: Record<string, JsonSchema>; additionalProperties?: boolean }>;
+    expect(detailVariants).toHaveLength(20);
+    const temporaryRoomDetails = detailVariants.filter((variant) => variant.properties.temporaryOtherRoomAvailable);
+    expect(temporaryRoomDetails).toHaveLength(1);
+    expect(temporaryRoomDetails[0]!.additionalProperties).toBe(false);
+    const temporaryRoomKeys = ["temporaryOtherRoomAvailable", "originalRoomTypeCode", "actualRoomTypeCode", "originalRoomTypeAvailable"];
+    expect([...temporaryRoomDetails[0]!.required!].sort()).toEqual([...temporaryRoomKeys].sort());
+    expect(Object.keys(temporaryRoomDetails[0]!.properties).sort()).toEqual([...temporaryRoomKeys].sort());
+    expect(temporaryRoomDetails[0]!.properties).toMatchObject({
+      temporaryOtherRoomAvailable: { enum: [true], type: "boolean" },
+      originalRoomTypeCode: { type: "string", minLength: 1, maxLength: 200 },
+      actualRoomTypeCode: { type: "string", minLength: 1, maxLength: 200 },
+      originalRoomTypeAvailable: { type: "boolean" }
+    });
+    const cleaningDetails = detailVariants.filter((variant) => variant.properties.cleaningTaskId);
+    expect(cleaningDetails).toHaveLength(1);
+    expect(cleaningDetails[0]!.additionalProperties).toBe(false);
+    expect([...cleaningDetails[0]!.required!].sort()).toEqual(["cleaningTaskId", "status"]);
+    expect(Object.keys(cleaningDetails[0]!.properties).sort()).toEqual(["cleaningTaskId", "status"]);
+    expect(cleaningDetails[0]!.properties.cleaningTaskId).toEqual({ type: "string", minLength: 3, maxLength: 160 });
+    const cleaningStatuses = cleaningDetails[0]!.properties.status!.anyOf as Array<{ enum: string[] }>;
+    expect(cleaningStatuses.map((variant) => variant.enum[0]).sort()).toEqual(["COMPLETED", "PENDING"]);
     expect(detailVariants.some((variant) => variant.required?.includes("serviceDate")
       && variant.required.includes("inventoryUnitId"))).toBe(true);
     expect(detailVariants.some((variant) => variant.required?.includes("businessDate")

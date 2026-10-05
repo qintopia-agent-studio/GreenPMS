@@ -24,6 +24,8 @@ export async function externalPaymentsReady(db: Kysely<Database>): Promise<boole
   // Preserve both already frozen schemas: a fresh 059/060 installation on PG18
   // and the deployed schema accepted by 4b598c6. Unknown drift still fails closed.
   const acceptedFingerprints = [
+    // Verified 069/070 allocation fixture, PostgreSQL 18.
+    "8b914dd27b9f543815bf3890263d2342d2d7c619bd202877f9ce48325e5d015d",
     "705eeaf432a39efbb9611b4bab5be004b1dfeb7924ad52a3841280a41e403063",
     "0e14e25d9c534fe01032a239e60eec03ccf0385f616e0a4ebd529fafe8edc799"
   ];
@@ -39,9 +41,9 @@ export async function externalPaymentsReady(db: Kysely<Database>): Promise<boole
       CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('TRIGGER'),('REFERENCES')) privilege(name)
       WHERE n.nspname='public' AND c.relkind='r' AND c.relname LIKE 'external_payment_%' AND (
         (has_table_privilege('qintopia_runtime',c.oid,privilege.name) OR CASE WHEN privilege.name IN ('SELECT','INSERT','UPDATE','REFERENCES') THEN has_any_column_privilege('qintopia_runtime',c.oid,privilege.name) ELSE false END)
-          IS DISTINCT FROM (privilege.name='SELECT' OR (privilege.name='INSERT' AND c.relname='external_payment_matches') OR (privilege.name='UPDATE' AND c.relname='external_payment_bills'))
+          IS DISTINCT FROM (privilege.name='SELECT' OR (privilege.name='INSERT' AND c.relname IN ('external_payment_matches','external_payment_allocations','external_payment_allocation_releases')) OR (privilege.name='UPDATE' AND c.relname='external_payment_bills'))
         OR (has_table_privilege('qintopia_payment_worker',c.oid,privilege.name) OR CASE WHEN privilege.name IN ('SELECT','INSERT','UPDATE','REFERENCES') THEN has_any_column_privilege('qintopia_payment_worker',c.oid,privilege.name) ELSE false END)
-          IS DISTINCT FROM ((privilege.name='SELECT' AND c.relname<>'external_payment_event_heads')
+          IS DISTINCT FROM ((privilege.name='SELECT' AND c.relname NOT IN ('external_payment_event_heads','external_payment_allocations','external_payment_allocation_releases'))
             OR (privilege.name IN ('INSERT','UPDATE') AND c.relname IN ('external_payment_bills','external_payment_contacts'))
             OR (privilege.name='UPDATE' AND c.relname='external_payment_sources'))))
     AND NOT EXISTS(SELECT 1 FROM (VALUES

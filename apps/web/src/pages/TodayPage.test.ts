@@ -4,6 +4,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { OrderRowDto } from "../types";
 import {
+  TodayQueueEmpty,
+  TodayTabLabel,
+  todayLocationView,
   buildTodayBuckets,
   TodayExceptionAction,
   TodayExceptionReason,
@@ -125,5 +128,42 @@ describe("today fulfillment buckets", () => {
     const arrival = order("arrival", "RESERVED", "2026-09-08", "2026-09-10");
     expect(todayArrivalActionAllowed(arrival, "2026-09-08", "2026-09-08")).toBe(true);
     expect(todayArrivalActionAllowed(arrival, "2026-09-09", "2026-09-08")).toBe(false);
+  });
+});
+
+
+describe("workbench URL view restoration", () => {
+  it("reads the date and tab on every location change, including same-page history navigation", () => {
+    const original = new URLSearchParams("propertyId=p&date=2026-01-01&tab=EXCEPTIONS&fundsCursor=opaque");
+    expect(todayLocationView(original, "p", "2026-10-05")).toEqual({ date: "2026-01-01", tab: "EXCEPTIONS" });
+    original.set("date", "2026-02-02"); original.set("tab", "DEPARTURES");
+    expect(todayLocationView(original, "p", "2026-10-05")).toEqual({ date: "2026-02-02", tab: "DEPARTURES" });
+    original.delete("date");
+    expect(todayLocationView(original, "p", "2026-10-05").date).toBe("2026-10-05");
+  });
+  it("does not restore a previous property's date or selected tab", () => {
+    expect(todayLocationView(new URLSearchParams("propertyId=old&date=2026-01-01&tab=EXCEPTIONS"), "new", "2026-10-05"))
+      .toEqual({ date: "2026-10-05", tab: "ARRIVALS" });
+  });
+});
+
+
+describe("compact exceptions entry on mobile", () => {
+  it("uses a short lodging-only hint instead of the large empty-state container", () => {
+    const markup = renderToStaticMarkup(createElement(TodayQueueEmpty, { tab: "EXCEPTIONS" }));
+    expect(markup).toContain("暂无住宿异常，资金待办见下方。");
+    expect(markup).toContain("workbench-lodging-empty");
+    expect(markup).not.toContain('class="empty-state"');
+    expect(markup).not.toContain("当前队列为空");
+  });
+  it.each(["ARRIVALS", "IN_HOUSE", "DEPARTURES"] as const)("keeps the original empty presentation for %s", tab => {
+    const markup = renderToStaticMarkup(createElement(TodayQueueEmpty, { tab }));
+    expect(markup).toContain('class="empty-state"');
+    expect(markup).toContain("当前队列为空");
+    expect(markup).not.toContain("资金待办见下方");
+  });
+  it("explicitly names funds in the exceptions tab without claiming a funds count", () => {
+    expect(renderToStaticMarkup(createElement(TodayTabLabel, { tab: "EXCEPTIONS" }))).toBe("<span>异常·含资金</span>");
+    expect(renderToStaticMarkup(createElement(TodayTabLabel, { tab: "ARRIVALS" }))).toBe("<span>今日到店</span>");
   });
 });

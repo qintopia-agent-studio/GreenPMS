@@ -4928,9 +4928,32 @@ pre {
   .member-entitlement-lot dl, .membership-order-pricing, .member-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-.orders-filter-toolbar { align-items: center; }
-.orders-filter-toolbar .filter-select-control { min-width: 148px; }
-.orders-filter-toolbar .filter-select-control select { width: 100%; }
+.orders-filter-toolbar { align-items: center; flex-wrap: nowrap; }
+.orders-filter-toolbar .search-control {
+  flex: 0 1 300px;
+  width: 300px;
+  min-width: 0 !important;
+}
+.orders-filter-toolbar .filter-select-control {
+  flex: 0 0 148px;
+  min-width: 148px;
+  width: 148px;
+}
+.orders-filter-toolbar select,
+.orders-filter-toolbar input {
+  width: 100%;
+  height: 40px;
+  min-height: 40px;
+  font-size: 13px;
+}
+.retained-funds-toolbar .search-control input { padding-left: 12px; }
+@media (max-width: 767px) {
+  .orders-filter-toolbar { flex-direction: row; flex-wrap: wrap; }
+  .orders-filter-toolbar .search-control { flex: 1 0 100%; width: 100%; }
+  .orders-filter-toolbar .filter-select-control { flex: 1 1 148px; }
+  .orders-filter-toolbar select,
+  .orders-filter-toolbar input { height: 44px; min-height: 44px; }
+}
 .orders-funds-notice {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -4968,3 +4991,145 @@ pre {
 .account-history > summary h2 { margin-bottom: 0; }
 .account-history > summary { justify-content: flex-start; }
 .account-history > summary .muted { margin-left: auto; font-size: 12px; }
+
+
+/* Retained funds only: do not change shared order tables or text inputs. */
+.retained-funds-list {
+  min-width: 0;
+}
+
+.retained-funds-search {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.retained-funds-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 44px;
+  padding: 10px 0;
+  cursor: pointer;
+}
+
+.retained-funds-check input[type="checkbox"] {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 2px 0 0;
+  padding: 0;
+}
+
+.retained-funds-table {
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.retained-funds-table th,
+.retained-funds-table td {
+  max-width: none;
+  overflow-wrap: anywhere;
+}
+
+.retained-funds-table th:nth-child(1) { width: 20%; }
+.retained-funds-table th:nth-child(2) { width: 18%; }
+.retained-funds-table th:nth-child(3) { width: 24%; }
+.retained-funds-table th:nth-child(4) { width: 22%; }
+.retained-funds-table th:nth-child(5) { width: 16%; }
+
+.retained-funds-owner > span,
+.retained-funds-note > span {
+  display: block;
+  margin-top: 4px;
+}
+
+.retained-funds-source a {
+  font-size: 12px;
+}
+
+.retained-funds-amount > strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.retained-funds-table .retained-funds-breakdown {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.retained-funds-actions .button {
+  max-width: 100%;
+  white-space: normal;
+}
+
+@media (max-width: 760px) {
+  .retained-funds-list .retained-funds-table-region {
+    overflow: visible;
+  }
+
+  .retained-funds-table,
+  .retained-funds-table tbody {
+    display: block;
+  }
+
+  /* Keep column headers in the accessibility tree when rows become cards. */
+  .retained-funds-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .retained-funds-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 14px 12px;
+    margin-bottom: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+  }
+
+  .retained-funds-table tbody td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+
+  .retained-funds-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .retained-funds-owner { grid-column: 1; grid-row: 1; }
+  .retained-funds-amount { grid-column: 2; grid-row: 1; }
+  .retained-funds-source,
+  .retained-funds-note,
+  .retained-funds-actions { grid-column: 1 / -1; }
+}
+
+/* Financial follow-up is independent of the lodging date and queue. */
+.workbench-funds { margin-top: 20px; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.workbench-section-heading { padding: 12px 14px; margin: 0; font-size: 16px; }
+.funds-exception-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+.funds-reference { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .funds-exception-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .funds-exception-row .queue-primary { grid-column: 1 / -1; }
+}
+
+.workbench-lodging-empty { margin: 0; padding: 8px 14px 12px; color: var(--text-muted); font-size: 13px; }
