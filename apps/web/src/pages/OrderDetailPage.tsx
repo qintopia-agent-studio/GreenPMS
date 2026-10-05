@@ -1,3 +1,5 @@
+import { workbenchBackHref, workbenchFundsHint } from "../workbenchFundsNavigation";
+import { WorkbenchFundsContext } from "../components/WorkbenchFundsExceptions";
 import { RetainedFundsPanel } from "../components/RetainedFunds";
 import { useAssistantOrderEntry } from "../assistant/context";
 import { createReadPoller } from "../readPoller";
@@ -460,6 +462,7 @@ export function OrderActionNotice({ title, body, testId, action }: {
 export function orderDetailBackTarget(state: unknown): string {
   if (!state || typeof state !== "object") return "/orders";
   const source = state as Record<string, unknown>;
+  if (workbenchBackHref(state) && !source.orderListSearch) return workbenchBackHref(state)!;
   return source.fromRoomStatus === true
     || source.source === "room-status"
     || source.returnTo === "/"
@@ -2033,7 +2036,7 @@ function ScopedOrderDetailPage() {
 
   if (loading) return <LoadingBlock label="正在载入订单详情" />;
   if (view && !orderViewMatchesPrincipalScope(loadedPrincipalOrderScope, principalOrderScope)) return <LoadingBlock label="正在切换订单访问权限" />;
-  if (!view) return <div><Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link><InlineError context="read" error={error ?? new Error("Order not found")} title="无法载入订单" /></div>;
+  if (!view) return <div><Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : backTarget.startsWith("/today") ? "返回工作台异常" : "返回订单"}</Link><InlineError context="read" error={error ?? new Error("Order not found")} title="无法载入订单" /></div>;
 
   const occupants = orderedOrderOccupants(view.occupants);
   const primaryOccupant = primaryOrderOccupant(occupants);
@@ -2097,7 +2100,8 @@ function ScopedOrderDetailPage() {
   return (
     <ModalNoticeProvider notice={readFailureNotice}>
     <div className="order-detail-page">
-      <Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : "返回订单"}</Link>
+      {workbenchFundsHint(location.state, propertyId) ? <WorkbenchFundsContext item={workbenchFundsHint(location.state, propertyId)!} /> : null}
+      <Link className="back-link" to={backTarget} state={location.state}><ArrowLeft aria-hidden="true" size={17} />{backTarget === "/" ? "返回房态" : backTarget.startsWith("/today") ? "返回工作台异常" : "返回订单"}</Link>
       <header className="order-heading">
         <div><div className="order-title-row"><h1>{guestName(view.order.current_primary_guest ?? (primaryOccupant ? { nickname: primaryOccupant.nickname, fullName: primaryOccupant.fullName } : view.order.primary_guest_snapshot))}</h1><StatusBadge value={view.order.status} label={businessStatusLabel(view.order.status)} /></div></div>
         <div className="order-unit"><span>{effectiveArrangementTitle(view.effectiveArrangement.presentation)}</span><strong>{visibleArrangementUnits.join("、")}</strong><small>{formatDate(view.effectiveArrangement.arrivalDate)} 至 {formatDate(view.effectiveArrangement.departureDate)}</small></div>

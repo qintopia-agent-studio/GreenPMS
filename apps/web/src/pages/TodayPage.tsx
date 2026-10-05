@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CalendarDays, ChevronRight, DoorOpen, LogIn, LogOut, RefreshCw } from "lucide-react";
-import { Link } from "react-router-dom";
+import { WorkbenchFundsExceptions } from "../components/WorkbenchFundsExceptions";
+import { Link, useSearchParams } from "react-router-dom";
 import type { CommandType } from "@qintopia/contracts";
 import { api } from "../api";
 import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
@@ -31,8 +32,18 @@ const tabs: Array<{ id: TodayTab; label: string }> = [
   { id: "ARRIVALS", label: "今日到店" },
   { id: "IN_HOUSE", label: "在住" },
   { id: "DEPARTURES", label: "今日离店" },
-  { id: "EXCEPTIONS", label: "异常" }
+  { id: "EXCEPTIONS", label: "异常·含资金" }
 ];
+
+export function TodayTabLabel({ tab }: { tab: TodayTab }) {
+  return <span>{tabs.find(item => item.id === tab)!.label}</span>;
+}
+
+export function TodayQueueEmpty({ tab }: { tab: TodayTab }) {
+  return tab === "EXCEPTIONS"
+    ? <p className="workbench-lodging-empty">暂无住宿异常，资金待办见下方。</p>
+    : <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" />;
+}
 
 export interface TodayExceptionPresentation {
   title: "逾期在住，需确认实际状态";
@@ -116,19 +127,46 @@ export function todayArrivalActionAllowed(
     && browsingDate === businessDate;
 }
 
+export function todayLocationView(search: URLSearchParams, propertyId: string, fallbackDate: string): { date: string; tab: TodayTab } {
+  const inProperty = !search.get("propertyId") || search.get("propertyId") === propertyId;
+  const date = inProperty ? search.get("date") : null;
+  const selectedTab = inProperty ? search.get("tab") : null;
+  return {
+    date: date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : fallbackDate,
+    tab: tabs.find(item => item.id === selectedTab)?.id ?? "ARRIVALS"
+  };
+}
+
 export function TodayPage() {
   const { meta, principal, propertyId } = useWorkspace();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const inProperty = !searchParams.get("propertyId") || searchParams.get("propertyId") === propertyId;
+  const fundsQuery = inProperty ? searchParams.get("fundsQuery")?.slice(0, 200) ?? "" : "";
+  const fundsCursor = inProperty ? searchParams.get("fundsCursor")?.slice(0, 1000) ?? "" : "";
+  function updateFundsQuery(query: string, cursor = "") {
+    const next = new URLSearchParams(searchParams);
+    next.set("propertyId", propertyId); next.set("tab", "EXCEPTIONS"); next.set("date", browsingDate);
+    if (query) next.set("fundsQuery", query); else next.delete("fundsQuery");
+    if (cursor) next.set("fundsCursor", cursor); else next.delete("fundsCursor");
+    setSearchParams(next);
+  }
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
   const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
   const canCheckIn = principalCan(principal, propertyId, "CHECK_IN");
   const canCheckOut = principalCan(principal, propertyId, "CHECK_OUT");
   const propertyTimezone = meta.properties.find((property) => property.id === propertyId)?.timezone ?? "UTC";
   const [orders, setOrders] = useState<OrderRowDto[]>([]);
-  const [browsingDate, setBrowsingDate] = useState(() => localDateInTimeZone(propertyTimezone));
+  const [defaultDate, setDefaultDate] = useState(() => localDateInTimeZone(propertyTimezone));
+  const { date: browsingDate, tab } = todayLocationView(searchParams, propertyId, defaultDate);
+  const hasExplicitDate = inProperty && /^\d{4}-\d{2}-\d{2}$/.test(searchParams.get("date") ?? "");
+  function updateDateOrTab(date: string | null | undefined, nextTab = tab) {
+    const next = inProperty ? new URLSearchParams(searchParams) : new URLSearchParams();
+    next.set("propertyId", propertyId); next.set("tab", nextTab);
+    if (date === null) next.delete("date"); else if (date !== undefined) next.set("date", date);
+    setSearchParams(next);
+  }
   const [currentBusinessDate, setCurrentBusinessDate] = useState(() => localDateInTimeZone(propertyTimezone));
-  const dateEdited = useRef(false);
   const previousPropertyId = useRef(propertyId);
-  const [tab, setTab] = useState<TodayTab>("ARRIVALS");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>();
   const [recoveryError, setRecoveryError] = useState<unknown>();
@@ -147,7 +185,7 @@ export function TodayPage() {
     setCommandNotice(undefined);
     const localDate = localDateInTimeZone(propertyTimezone);
     setCurrentBusinessDate(localDate);
-    if (!dateEdited.current) setBrowsingDate(localDate);
+    setDefaultDate(localDate);
   }, [propertyId, propertyTimezone]);
 
   useEffect(() => {
@@ -171,12 +209,12 @@ export function TodayPage() {
         if (!current) return;
         setOrders(response.orders);
         setCurrentBusinessDate(response.businessDate);
-        if (!dateEdited.current) setBrowsingDate(response.businessDate);
+        if (!hasExplicitDate) setDefaultDate(response.businessDate);
       })
       .catch((nextError) => current && setError(controller.signal.aborted ? controller.signal.reason : nextError))
       .finally(() => { window.clearTimeout(timeout); if (current) setLoading(false); });
     return () => { current = false; controller.abort(); window.clearTimeout(timeout); };
-  }, [propertyId, browsingDate, refreshToken]);
+  }, [propertyId, browsingDate, hasExplicitDate, refreshToken]);
 
   const buckets = useMemo<Record<TodayTab, OrderRowDto[]>>(
     () => buildTodayBuckets(orders, browsingDate, currentBusinessDate),
@@ -217,12 +255,15 @@ export function TodayPage() {
   }
 
   const visible = buckets[tab];
+  const returnParams = new URLSearchParams({ propertyId, tab: "EXCEPTIONS", date: browsingDate });
+  if (fundsQuery) returnParams.set("fundsQuery", fundsQuery);
+  if (fundsCursor) returnParams.set("fundsCursor", fundsCursor);
 
   return (
     <div className="today-page">
       <header className="page-heading page-heading-actions">
         <div><p className="eyebrow">前台日常</p><h1>工作台</h1></div>
-        <div className="today-date"><CalendarDays aria-hidden="true" size={17} /><label><span className="sr-only">营业日期</span><input type="date" value={browsingDate} onChange={(event) => { if (event.target.value) { dateEdited.current = true; setBrowsingDate(event.target.value); } }} /></label><button className="button button-secondary button-small" type="button" onClick={() => { dateEdited.current = false; setBrowsingDate(currentBusinessDate); }}>今天</button><button className="icon-button" type="button" onClick={() => setRefreshToken((value) => value + 1)} aria-label="刷新工作台" title="刷新"><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={18} /></button></div>
+        <div className="today-date"><CalendarDays aria-hidden="true" size={17} /><label><span className="sr-only">营业日期</span><input type="date" value={browsingDate} onChange={(event) => { if (event.target.value) { updateDateOrTab(event.target.value); } }} /></label><button className="button button-secondary button-small" type="button" onClick={() => { setDefaultDate(currentBusinessDate); updateDateOrTab(null); }}>今天</button><button className="icon-button" type="button" onClick={() => setRefreshToken((value) => value + 1)} aria-label="刷新工作台" title="刷新"><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={18} /></button></div>
       </header>
       <InlineError error={recoveryError} title="恢复记录未收口" />
       {commandRecovery.canDiscardCorrupt
@@ -233,12 +274,13 @@ export function TodayPage() {
       {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
       {commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="today-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；只读查看不受影响。</p></div></section> : null}
       <div className="today-tabs" role="tablist" aria-label="工作台分类">
-          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong>{loading || error ? "—" : buckets[item.id].length}</strong></button>)}
+          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => updateDateOrTab(undefined, item.id)}><TodayTabLabel tab={item.id} /><strong>{loading || error ? "—" : buckets[item.id].length}{item.id === "EXCEPTIONS" ? " 住宿" : ""}</strong></button>)}
       </div>
       <InlineError context="read" error={error} title="无法载入工作台" />
       {error ? <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)}>重新载入工作台</button> : null}
       <section id="today-tabpanel" className="today-queue" role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>
-        {loading ? <LoadingBlock label="正在载入待办事项" /> : error ? null : visible.length === 0 ? <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" /> : visible.map((order) => (
+        {tab === "EXCEPTIONS" ? <h2 className="workbench-section-heading">住宿异常</h2> : null}
+        {loading ? <LoadingBlock label="正在载入待办事项" /> : error ? null : visible.length === 0 ? <TodayQueueEmpty tab={tab} /> : visible.map((order) => (
           <article className="queue-row" key={order.id}>
             <div className="queue-icon" aria-hidden="true">{tab === "EXCEPTIONS" ? <AlertTriangle size={19} /> : tab === "DEPARTURES" ? <LogOut size={19} /> : tab === "ARRIVALS" ? <LogIn size={19} /> : <DoorOpen size={19} />}</div>
             <div className="queue-primary">
@@ -261,6 +303,9 @@ export function TodayPage() {
           </article>
         ))}
       </section>
+      {tab === "EXCEPTIONS" ? <WorkbenchFundsExceptions key={JSON.stringify([propertyId, fundsQuery, fundsCursor])}
+        propertyId={propertyId} query={fundsQuery} cursor={fundsCursor} returnSearch={returnParams.toString()} refreshKey={refreshToken}
+        onSearch={query => updateFundsQuery(query)} onNext={cursor => updateFundsQuery(fundsQuery, cursor)} onFirst={() => updateFundsQuery(fundsQuery)} /> : null}
       {command ? <CommandDialog
         key={recoveryDialogOpen ? `recovery-${commandRecovery.pending?.confirmationKey ?? "missing"}` : "new-today-command"}
         request={command}

@@ -5121,3 +5121,15 @@ pre {
   .retained-funds-note,
   .retained-funds-actions { grid-column: 1 / -1; }
 }
+
+/* Financial follow-up is independent of the lodging date and queue. */
+.workbench-funds { margin-top: 20px; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.workbench-section-heading { padding: 12px 14px; margin: 0; font-size: 16px; }
+.funds-exception-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+.funds-reference { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .funds-exception-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .funds-exception-row .queue-primary { grid-column: 1 / -1; }
+}
+
+.workbench-lodging-empty { margin: 0; padding: 8px 14px 12px; color: var(--text-muted); font-size: 13px; }
