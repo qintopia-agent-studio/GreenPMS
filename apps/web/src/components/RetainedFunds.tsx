@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { RetainedFundItem, RetainedFundList, RetainedFundsCommandType } from '@qintopia/contracts';
 import { api } from '../api';
@@ -11,7 +11,7 @@ import { ExternalPaymentPicker } from './ExternalPaymentPicker';
 const titles: Record<RetainedFundsCommandType, string> = {
   RETAIN_ORDER_FUNDS: '登记客户留存', APPLY_RETAINED_FUNDS: '使用客户留存款', RELEASE_RETAINED_FUNDS: '解除留存', REFUND_RETAINED_FUNDS: '登记留存款实际退款'
 };
-export function RetainedFundsList({propertyId, onChoose, orderId, refreshKey}: {propertyId: string; onChoose?: (item: RetainedFundItem) => void; orderId?: string; refreshKey?: unknown}) {
+export function RetainedFundsList({propertyId, onChoose, orderId, refreshKey, toolbarEnd}: {propertyId: string; onChoose?: (item: RetainedFundItem) => void; orderId?: string; refreshKey?: unknown; toolbarEnd?: ReactNode}) {
   const [query, setQuery] = useState('');
   const [all, setAll] = useState(false);
   const [cursor, setCursor] = useState('');
@@ -32,9 +32,15 @@ export function RetainedFundsList({propertyId, onChoose, orderId, refreshKey}: {
       }).catch(reason => {if (!controller.signal.aborted) setError(reason);});
     return () => controller.abort();
   }, [propertyId, query, all, cursor, orderId, refreshKey]);
-  if (data && !data.enabled && !data.items.length && !query && !cursor && !all) return null;
+  if (data && !data.enabled && !data.items.length && !query && !cursor && !all && !toolbarEnd) return null;
   return <section className="retained-funds-list" aria-label="客户留存待用"><h3>客户留存待用</h3>
-    <label className="retained-funds-search">搜索客户 / 联系方式 / 来源订单<input value={query} onChange={e => {setQuery(e.target.value); setCursor('');}} maxLength={200}/></label>
+    <div className={toolbarEnd ? "list-toolbar orders-filter-toolbar retained-funds-toolbar" : undefined}>
+      <label className={toolbarEnd ? "search-control" : "retained-funds-search"}>
+        {toolbarEnd ? <span className="sr-only">搜索客户 / 联系方式 / 来源订单</span> : '搜索客户 / 联系方式 / 来源订单'}
+        <input type="search" value={query} onChange={e => {setQuery(e.target.value); setCursor('');}} maxLength={200} placeholder={toolbarEnd ? "客户、联系方式或来源订单" : undefined}/>
+      </label>
+      {toolbarEnd}
+    </div>
     <label className="retained-funds-check"><input type="checkbox" checked={all} onChange={e => {setAll(e.target.checked); setCursor('');}}/>包含已处理历史</label>
     <InlineError error={error}/>
     {!data && !error ? <p role="status">正在读取留存款…</p> : null}

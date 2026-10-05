@@ -373,6 +373,16 @@ export function OrdersPage() {
     if (refreshAfterClose) setRefreshToken((value) => value + 1);
   }
 
+  const fundsViewControl = retainedEnabled ? (
+    <label className="filter-select-control">
+      <span className="sr-only">资金视图</span>
+      <select aria-label="资金视图" value={retainedView ? "RETAINED" : "ORDERS"} onChange={(event) => setRetainedView(event.target.value === "RETAINED")}>
+        <option value="ORDERS">资金视图</option>
+        <option value="RETAINED">客户留存待用</option>
+      </select>
+    </label>
+  ) : null;
+
   return (
     <div className="orders-page">
       <header className="page-heading page-heading-actions">
@@ -388,16 +398,16 @@ export function OrdersPage() {
       <QuoteRecoveryConflictNotice conflict={commandRecovery.conflict} testId="orders-quote-recovery-conflict" />
       <CommandResultNotice message={commandNotice} onDismiss={() => setCommandNotice(undefined)} />
       {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="orders-command-recovery" businessFacing /> : null}
-      {retainedEnabled ? <label>资金视图<select value={retainedView ? "RETAINED" : "ORDERS"} onChange={e => setRetainedView(e.target.value === "RETAINED")}><option value="ORDERS">订单列表</option><option value="RETAINED">客户留存待用</option></select></label> : null}
-      {retainedEnabled && retainedView ? <RetainedFundsList propertyId={propertyId} refreshKey={refreshToken}/> : <>
+      {retainedEnabled && retainedView ? <RetainedFundsList propertyId={propertyId} refreshKey={refreshToken} toolbarEnd={fundsViewControl}/> : <>
       <section className="list-toolbar orders-filter-toolbar" aria-label="订单筛选">
         <label className="search-control"><Search aria-hidden="true" size={17} /><span className="sr-only">搜索订单</span><input type="search" value={draftQuery} maxLength={200} onChange={(event) => setDraftQuery(event.target.value)} placeholder="姓名、房号、渠道或渠道订单号" /></label>
-        <label className="filter-select-control"><span className="sr-only">按订单状态筛选</span><select aria-label="按订单状态筛选" value={status} onChange={(event) => changeStatus(event.target.value)}><option value="ALL">全部状态</option>{orderListStatuses.map((option) => <option key={option} value={option}>{businessStatusLabel(option)}</option>)}</select></label>
+        <label className="filter-select-control"><span className="sr-only">按订单状态筛选</span><select aria-label="按订单状态筛选" value={status} onChange={(event) => changeStatus(event.target.value)}><option value="ALL">预订及入住状态</option>{orderListStatuses.map((option) => <option key={option} value={option}>{businessStatusLabel(option)}</option>)}</select></label>
         <label className="filter-select-control"><span className="sr-only">按收退款核对筛选</span><select aria-label="按收退款核对筛选" value={funds ?? "ALL"} onChange={(event) => {
           const next = new URLSearchParams(searchParams);
           if (event.target.value === "ALL") next.delete("funds"); else next.set("funds", event.target.value);
           next.delete("before"); setSearchParams(next, { state: null });
         }}><option value="ALL">收退款核对</option><option value="BALANCE_DUE">待补收</option><option value="OVERPAID">多收待核对</option></select></label>
+        {fundsViewControl}
         <span className="result-count">{loading ? "正在查询" : `本页 ${orders.length} 条` }</span>
       </section>
       {funds ? <div className="orders-funds-notice" role="status"><AlertCircle aria-hidden="true" size={16} /><p>仅按本单金额与已登记净收款筛选，不含外部渠道及免费住宿。多收金额需打开订单核对可退原收款，并不代表已批准退款；会员办卡登记差额请在会员档案核对。</p></div> : null}

@@ -4928,9 +4928,32 @@ pre {
   .member-entitlement-lot dl, .membership-order-pricing, .member-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-.orders-filter-toolbar { align-items: center; }
-.orders-filter-toolbar .filter-select-control { min-width: 148px; }
-.orders-filter-toolbar .filter-select-control select { width: 100%; }
+.orders-filter-toolbar { align-items: center; flex-wrap: nowrap; }
+.orders-filter-toolbar .search-control {
+  flex: 0 1 300px;
+  width: 300px;
+  min-width: 0 !important;
+}
+.orders-filter-toolbar .filter-select-control {
+  flex: 0 0 148px;
+  min-width: 148px;
+  width: 148px;
+}
+.orders-filter-toolbar select,
+.orders-filter-toolbar input {
+  width: 100%;
+  height: 40px;
+  min-height: 40px;
+  font-size: 13px;
+}
+.retained-funds-toolbar .search-control input { padding-left: 12px; }
+@media (max-width: 767px) {
+  .orders-filter-toolbar { flex-direction: row; flex-wrap: wrap; }
+  .orders-filter-toolbar .search-control { flex: 1 0 100%; width: 100%; }
+  .orders-filter-toolbar .filter-select-control { flex: 1 1 148px; }
+  .orders-filter-toolbar select,
+  .orders-filter-toolbar input { height: 44px; min-height: 44px; }
+}
 .orders-funds-notice {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);

@@ -96,3 +96,27 @@ describe('retained funds responsive list content and semantics', () => {
     expect(readOnly).toContain(sourceOrderId);
   });
 });
+
+describe('retained funds inline view switch', () => {
+  const toolbarEnd = <label className="filter-select-control"><span className="sr-only">资金视图</span><select aria-label="资金视图" defaultValue="RETAINED"><option value="ORDERS">资金视图</option><option value="RETAINED">客户留存待用</option></select></label>;
+
+  it('places customer search and the view switch in one toolbar without order filters', () => {
+    state.values = ['',false,'',data,undefined];
+    const html = renderToStaticMarkup(<MemoryRouter><RetainedFundsList propertyId="p" toolbarEnd={toolbarEnd}/></MemoryRouter>);
+    const toolbar = html.slice(html.indexOf('class="list-toolbar'), html.indexOf('</div>', html.indexOf('class="list-toolbar')));
+    expect(toolbar).toContain('搜索客户 / 联系方式 / 来源订单');
+    expect(toolbar).toContain('aria-label="资金视图"');
+    expect(toolbar).toContain('type="search"');
+    expect(html).not.toContain('按订单状态筛选');
+    expect(html).not.toContain('按收退款核对筛选');
+    expect(html).toContain('已有记录仅供查询');
+  });
+
+  it('keeps the return switch visible when the feature closes with an empty list', () => {
+    state.values = ['',false,'',{...data,items:[]},undefined];
+    const html = renderToStaticMarkup(<RetainedFundsList propertyId="p" toolbarEnd={toolbarEnd}/>);
+    expect(html).toContain('aria-label="资金视图"');
+    expect(html).toContain('没有符合条件的留存记录');
+    expect(html).not.toContain('选择并核对归属');
+  });
+});
