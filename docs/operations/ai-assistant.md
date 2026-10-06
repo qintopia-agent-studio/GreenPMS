@@ -4,6 +4,12 @@
 
 提问记录保存在同一数据库的 `ai_question_records`；Codex 应使用 `ai_question_export` 视图和 `ai_question_daily` 汇总。表字段、90 天明细保留和只读同步方式见 [AI 提问记录与 Codex 同步指南](./ai-question-records.md)，无需数据查看界面。
 
+## 员工操作知识
+
+助手每轮问答读取随应用打包的 `packages/contracts/src/assistant-knowledge.ts`，包括资金分配、客户留存、退款、退房交接、会员、房态及管理功能。不是从员工对话自动学习，也不读取任意仓库文档。维护、版本边界和问答验收见 [知识与功能同版本交付](assistant-knowledge.md)。
+
+知识只说明操作，不赋予权限或查询能力。资金分配/留存是否启用取本实例真实写开关，仍须核对门店来源、订单条件和页面状态；模型不能凭示例回答实时留存余额。新增知识未增加任何写工具、原始流水或个人资料外传。
+
 ## 首次配置
 
 1. 部署人员生成独立的 32 字节 base64 随机值，例如 `openssl rand -base64 32`，作为服务端 `AI_SETTINGS_ENCRYPTION_KEY`。此值为加密主密钥，不是供应商 API Key。生产 Compose 已支持传入该变量。
