@@ -1,4 +1,3 @@
-import { registerWorkbenchFunds } from "./workbench-funds.ts";
 import { registerPaymentAllocationEvents } from "./payment-allocation-events.ts";
 import { registerPaymentAllocation } from "./payment-allocation.ts";
 import { publicCommandErrorPayload } from "./public-error.ts";
@@ -673,7 +672,6 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   registerPmsIntegration(app, db);
   registerExternalPayments(app, db);
   registerPaymentAllocation(app, db);
-  registerWorkbenchFunds(app, db);
   registerPaymentAllocationEvents(app, db);
 
   app.get("/api/v1/meta", { schema: { tags: ["queries"], response: { 200: MetaResponseSchema, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {

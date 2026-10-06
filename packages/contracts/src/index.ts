@@ -1,4 +1,3 @@
-export * from "./workbench-funds.ts";
 export * from "./payment-allocation.ts";
 export * from "./account-management.ts";
 export * from "./room-catalog.ts";

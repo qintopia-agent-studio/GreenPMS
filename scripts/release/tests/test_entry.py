@@ -107,6 +107,13 @@ class EntryTests(unittest.TestCase):
         self.assertIn('command: ["node", "packages/db/src/wecom-worker-main.js"]', compose)
         self.assertNotIn("build:", compose)
 
+    def test_payment_allocation_flag_is_app_only_and_defaults_to_disabled(self):
+        compose = (ROOT / "compose.server.yaml").read_text(encoding="utf-8")
+        app, worker = compose.split("  wecom-worker:", 1)
+        self.assertIn("      PMS_PAYMENT_ALLOCATION_ENABLED: ${PMS_PAYMENT_ALLOCATION_ENABLED:-false}", app)
+        self.assertEqual(compose.count("\n      PMS_PAYMENT_ALLOCATION_ENABLED:"), 1)
+        self.assertNotIn("PMS_PAYMENT_ALLOCATION_ENABLED", worker)
+
     def test_subprocess_failure_does_not_include_secret_output(self):
         with patch("server.subprocess.run") as run:
             run.return_value.returncode = 1
