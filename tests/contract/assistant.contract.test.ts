@@ -134,6 +134,32 @@ describe.sequential("AI assistant authenticated contract", () => {
     expect(calls).toHaveLength(2);
     await vi.waitFor(async () => expect((await rows()).find(r => r.id === events.at(-1).result.questionId)?.outcome).toBe("ANSWERED"));
   });
+  it("sends versioned knowledge on every turn with the live allocation flag and does not submit business", async () => {
+    mode = "stream-text"; calls.length = 0;
+    const before = await sql<{ count: string }>`SELECT count(*)::text AS count FROM command_executions`.execute(owner);
+    const previous = process.env.PMS_PAYMENT_ALLOCATION_ENABLED;
+    try {
+      process.env.PMS_PAYMENT_ALLOCATION_ENABLED = "false";
+      const first = await chat(staff, { message: "一笔1000元怎么覆盖两个预订，取消后怎么留存？" });
+      expect(first.statusCode).toBe(200);
+      expect(calls[0]!.messages[0]!.content).toContain("B订单选择同一流水分600元");
+      expect(calls[0]!.messages[0]!.content).toContain("未开启；不能指导当前用户执行拆分分配或留存写入");
+      expect(first.json().entries).toEqual([]);
+      process.env.PMS_PAYMENT_ALLOCATION_ENABLED = "true";
+      const next = await chat(staff, { message: "那留存给朋友用400呢？", conversationId: first.json().conversationId });
+      expect(next.statusCode).toBe(200);
+      expect(calls[1]!.messages[0]!.content).toContain("已开启，但仍需核对当前门店流水来源、权限、订单资格");
+      expect(calls[1]!.messages[0]!.content).toContain("剩余200元");
+      expect(calls[1]!.messages[0]!.content).toContain("同日退房交接");
+      const after = await sql<{ count: string }>`SELECT count(*)::text AS count FROM command_executions`.execute(owner);
+      expect(after.rows).toEqual(before.rows);
+    } finally {
+      if (previous === undefined) delete process.env.PMS_PAYMENT_ALLOCATION_ENABLED;
+      else process.env.PMS_PAYMENT_ALLOCATION_ENABLED = previous;
+      mode = "guide";
+    }
+  });
+
   it("rejects a revoked session before sending a text delta or committing history", async () => {
     mode = "stream-text";
     const login = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "operator", password: "demo-pass-2026" } });
