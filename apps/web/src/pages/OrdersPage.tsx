@@ -1,5 +1,3 @@
-import { workbenchBackHref, workbenchFundsHint } from "../workbenchFundsNavigation";
-import { WorkbenchFundsContext } from "../components/WorkbenchFundsExceptions";
 import { RetainedFundsList } from "../components/RetainedFunds";
 import { useEffect, useState, type FormEvent } from "react";
 import { AlertCircle, ChevronRight, PencilLine, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
@@ -280,8 +278,6 @@ export function OrdersPage() {
   const { principal, propertyId, meta } = useWorkspace();
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
-  const fundsHint = workbenchFundsHint(location.state, propertyId);
-  const workbenchState = fundsHint ? { workbenchSearch: (location.state as Record<string, unknown>).workbenchSearch, workbenchFundsHint: fundsHint } : null;
   const commandRecovery = usePersistentCommandRecovery({ subjectId: principal.subjectId, scopeId: `property:${propertyId}` });
   const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
   const commandsBlocked = commandRecovery.blocked && recoveryPendingAllowed;
@@ -314,7 +310,7 @@ export function OrdersPage() {
     if (searchParams.get("propertyId") === propertyId) return;
     const next = inProperty ? new URLSearchParams(searchParams) : new URLSearchParams();
     next.set("propertyId", propertyId);
-    setSearchParams(next, { replace: true, state: inProperty ? workbenchState : null });
+    setSearchParams(next, { replace: true, state: null });
     setCorrectionDialogOpen(false);
     setCommandDraft(undefined);
     setCommand(undefined);
@@ -330,7 +326,7 @@ export function OrdersPage() {
       next.set("propertyId", propertyId);
       if (draftQuery.trim()) next.set("q", draftQuery.trim()); else next.delete("q");
       next.delete("before");
-      setSearchParams(next, { replace: true, state: workbenchState });
+      setSearchParams(next, { replace: true, state: null });
     }, 300);
     return () => window.clearTimeout(timer);
   }, [draftQuery, query, propertyId, searchParams, setSearchParams]);
@@ -339,16 +335,16 @@ export function OrdersPage() {
     const next = new URLSearchParams(searchParams);
     if (value === "ALL") next.delete("status"); else next.set("status", value);
     next.delete("before");
-    setSearchParams(next, { state: workbenchState });
+    setSearchParams(next, { state: null });
   }
 
   function changePage(cursor: string | undefined, trail: string[]) {
     const next = new URLSearchParams(searchParams);
     if (cursor) next.set("before", cursor); else next.delete("before");
-    setSearchParams(next, { state: { ...workbenchState, orderPreviousPages: trail } });
+    setSearchParams(next, { state: { orderPreviousPages: trail } });
   }
 
-  const detailReturnState = { ...workbenchState, orderListSearch: searchParams.toString(), orderPreviousPages: previousPages };
+  const detailReturnState = { orderListSearch: searchParams.toString(), orderPreviousPages: previousPages };
   const visibleOrders = orders;
 
   function startHistoricalCorrection(request: CommandRequest) {
@@ -389,7 +385,6 @@ export function OrdersPage() {
 
   return (
     <div className="orders-page">
-      {fundsHint ? <><Link className="back-link" to={workbenchBackHref(location.state)!}>返回工作台异常</Link><WorkbenchFundsContext item={fundsHint} /></> : null}
       <header className="page-heading page-heading-actions">
         <div><p className="eyebrow">订单管理</p><h1>订单</h1></div>
         <div className="page-heading-buttons">
@@ -410,7 +405,7 @@ export function OrdersPage() {
         <label className="filter-select-control"><span className="sr-only">按收退款核对筛选</span><select aria-label="按收退款核对筛选" value={funds ?? "ALL"} onChange={(event) => {
           const next = new URLSearchParams(searchParams);
           if (event.target.value === "ALL") next.delete("funds"); else next.set("funds", event.target.value);
-          next.delete("before"); setSearchParams(next, { state: workbenchState });
+          next.delete("before"); setSearchParams(next, { state: null });
         }}><option value="ALL">收退款核对</option><option value="BALANCE_DUE">待补收</option><option value="OVERPAID">多收待核对</option></select></label>
         {fundsViewControl}
         <span className="result-count">{loading ? "正在查询" : `本页 ${orders.length} 条` }</span>
