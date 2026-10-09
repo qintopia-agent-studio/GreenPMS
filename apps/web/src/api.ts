@@ -1,4 +1,4 @@
-import type { PaymentAllocationList, RetainedFundList } from "@qintopia/contracts";
+import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList } from "@qintopia/contracts";
 import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
 import { readAssistantStream } from "./assistant/stream";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
@@ -169,6 +169,8 @@ function normalizeCommandResult(
 }
 
 export const api = {
+  dashboard: (propertyId: string, query: string, signal: AbortSignal) => request<DashboardResponse>(`/api/v1/properties/${encodeURIComponent(propertyId)}/dashboard?${query}`, { signal }),
+  dashboardDetails: (propertyId: string, query: string, signal: AbortSignal) => request<DashboardDetailsResponse>(`/api/v1/properties/${encodeURIComponent(propertyId)}/dashboard/details?${query}`, { signal }),
   assistantSettings: (propertyId: string) => request<AssistantSettings>(`/api/v1/assistant/settings?propertyId=${encodeURIComponent(propertyId)}`),
   assistantSave: (body: AssistantSettingsInput) => request<AssistantSettings>("/api/v1/assistant/settings", { method: "PUT", body: JSON.stringify(body) }),
   assistantTest: (body: AssistantSettingsInput) => request<{ message: string }>("/api/v1/assistant/test", { method: "POST", body: JSON.stringify(body) }),

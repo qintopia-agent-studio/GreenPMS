@@ -1,6 +1,6 @@
 import { AssistantProvider, AssistantTrigger } from "./assistant/Assistant";
 import { Suspense, createContext, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from "react";
-import { AlertCircle, BadgeCheck, BedDouble, Building2, ChevronDown, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, Settings, UserRound } from "lucide-react";
+import { AlertCircle, ChartNoAxesCombined, BadgeCheck, BedDouble, Building2, ChevronDown, ClipboardList, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, Smartphone, Settings, UserRound } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { version as applicationVersion } from "../../../package.json";
 import { api, ApiError } from "./api";
@@ -202,6 +202,7 @@ const navigation = [
   { to: "/orders", label: "订单", icon: ClipboardList, end: false },
   { to: "/members", label: "会员", icon: BadgeCheck, end: false },
   { to: "/today", label: "工作台", icon: Smartphone, end: false },
+  { to: "/dashboard", label: "经营概览", icon: ChartNoAxesCombined, end: false },
   { to: "/settings", label: "设置", icon: Settings, end: false }
 ] as const;
 
