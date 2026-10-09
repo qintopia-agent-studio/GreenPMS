@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import type { DashboardMetric, DashboardSource } from "@qintopia/contracts";
 
@@ -15,14 +15,33 @@ export function shiftDate(value: string, days: number) {
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
+export function createDashboardRequestScope() {
+  const active = new Set<string>();
+  const controllers = new Map<string, AbortController>();
+  return {
+    activate(key: string) {
+      active.add(key);
+      return () => {
+        active.delete(key);
+        // StrictMode remounts effects immediately; an old key must never abort the next key's request.
+        queueMicrotask(() => {
+          if (!active.has(key)) { controllers.get(key)?.abort(); controllers.delete(key); }
+        });
+      };
+    },
+    begin(key: string) {
+      controllers.get(key)?.abort();
+      const controller = new AbortController();
+      controllers.set(key, controller);
+      return controller.signal;
+    }
+  };
+}
 export function useDashboardRead<T>(key: string, read: (signal: AbortSignal) => Promise<T>, refreshInterval = 0) {
-  const controller = useRef<AbortController | null>(null);
-  useEffect(() => () => controller.current?.abort(), [key]);
+  const [requests] = useState(createDashboardRequestScope);
+  useEffect(() => requests.activate(key), [key, requests]);
   return useSWR<T>(key, async () => {
-    controller.current?.abort();
-    const next = new AbortController();
-    controller.current = next;
-    return read(AbortSignal.any([next.signal, AbortSignal.timeout(30_000)]));
+    return read(AbortSignal.any([requests.begin(key), AbortSignal.timeout(30_000)]));
   }, { refreshInterval, refreshWhenHidden: false, refreshWhenOffline: false, revalidateOnFocus: true,
     keepPreviousData: false, shouldRetryOnError: false, dedupingInterval: 5_000 });
 }

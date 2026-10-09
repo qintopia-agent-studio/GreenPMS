@@ -4,6 +4,9 @@ import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
 import { createCommandPreview, confirmCommandPreview, createDatabase, type Database } from "@qintopia/db";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
+import { aggregateDashboardMoney } from "@qintopia/domain";
+import { loadDashboardMoney } from "../../packages/db/src/dashboard-money.ts";
+import { getDashboard } from "../../packages/db/src/dashboard.ts";
 import { listRetainedFunds } from "../../packages/db/src/retained-funds.ts";
 import { listPaymentAllocations } from "../../packages/db/src/payment-allocation.ts";
 import { syncWecomSource, type PaymentClient } from "../../packages/db/src/wecom-sync.ts";
@@ -107,6 +110,10 @@ async function assertUsed(retainedId: string, b: string, c: string, sourceFactId
   expect(rows.reduce((sum, row) => sum + row.net_effect_minor, 0)).toBe(100000);
   expect(rows.filter(row => row.order_id === b).reduce((sum, row) => sum + row.net_effect_minor, 0)).toBe(20000);
   expect(await payment("parent")).toMatchObject({ remainingMinor: 0 });
+  const dashboard = await getDashboard(runtime, demo.propertyId, {});
+  const currentMoney = await runtime.transaction().execute(trx => loadDashboardMoney(trx, demo.propertyId, dashboard.timezone, dashboard.businessDate, "2035-01-01"));
+  expect(aggregateDashboardMoney(currentMoney.filter(row => row.family === "STAY"), "CNY")[0]).toMatchObject({ collectedMinor: "100000", netMinor: "100000", reviewCount: 0 });
+  expect(dashboard.current.retained[0]).toMatchObject({ amountMinor: "20000", count: 1 });
 }
 
 describe("retained funds through real Preview/Confirm", () => {
@@ -129,6 +136,10 @@ describe("retained funds through real Preview/Confirm", () => {
     expect(rows.filter(row => row.order_id === c).reduce((sum, row) => sum + row.net_effect_minor, 0)).toBe(40000);
     expect(rows.filter(row => row.order_id === b).reduce((sum, row) => sum + row.net_effect_minor, 0)).toBe(0);
     expect(rows.reduce((sum, row) => sum + row.net_effect_minor, 0)).toBe(80000);
+    const dashboard = await getDashboard(runtime, demo.propertyId, {});
+    const money = await runtime.transaction().execute(trx => loadDashboardMoney(trx, demo.propertyId, dashboard.timezone, dashboard.businessDate, "2035-01-01"));
+    expect(aggregateDashboardMoney(money.filter(row => row.family === "STAY"), "CNY")[0]).toMatchObject({ collectedMinor: "100000", refundedMinor: "20000", netMinor: "80000", reviewCount: 0 });
+    expect(dashboard.current.retained[0]?.amountMinor).toBe("0");
     expect(await payment("parent")).toMatchObject({ remainingMinor: 0 });
   });
   it("releases unused retention back to B's pending funds, not to public allocation capacity", async () => {
