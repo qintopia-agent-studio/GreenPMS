@@ -36,7 +36,8 @@ describe("external payment read-only diagnostic", () => {
     expect(sql).toContain("SET LOCAL statement_timeout = '15s'");
     expect(sql).toContain("SET LOCAL lock_timeout = '2s'");
     expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|COPY|DO|CALL|COMMIT)\b/i);
-    expect(sql).not.toMatch(/SET\s+(?:LOCAL\s+)?(?:ROLE|search_path)/i);
+    expect(sql).not.toMatch(/SET\s+(?:LOCAL\s+)?(?:ROLE|search_path|TimeZone|TIME\s+ZONE|DateStyle)/i);
+    expect(sql).not.toMatch(/\bset_config\s*\(/i);
   });
 
   it("never queries business rows, credentials or filesystem functions", () => {
@@ -52,6 +53,8 @@ describe("external payment read-only diagnostic", () => {
     expect(sql).not.toMatch(/current_setting\('lc_(?:collate|ctype)'\)/);
     expect(sql).toContain("'database_collate', d.datcollate");
     expect(sql).toContain("'database_ctype', d.datctype");
+    expect(sql).toContain("'timezone', current_setting('TimeZone')");
+    expect(sql).toContain("'datestyle', current_setting('DateStyle')");
     expect(sql).toContain("AS greenpms_diagnostic");
     expect(sql).toContain("'matches_v1_10_0_fingerprint_only'");
     expect(sql).toContain("'definition_sha256', encode(sha256(convert_to(pg_get_functiondef(p.oid),'UTF8')),'hex')");

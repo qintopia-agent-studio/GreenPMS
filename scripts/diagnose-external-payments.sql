@@ -56,6 +56,8 @@ SELECT jsonb_pretty(jsonb_build_object(
       'locale', coalesce(to_jsonb(d)->>'datlocale', to_jsonb(d)->>'daticulocale'),
       'collation_version', to_jsonb(d)->>'datcollversion',
       'search_path', current_setting('search_path'),
+      'timezone', current_setting('TimeZone'),
+      'datestyle', current_setting('DateStyle'),
       'public_schema_visible', 'public'::name = ANY(current_schemas(false)),
       'standard_conforming_strings', current_setting('standard_conforming_strings'),
       'transaction_read_only', current_setting('transaction_read_only'),
