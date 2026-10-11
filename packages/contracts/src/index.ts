@@ -1,3 +1,4 @@
+export * from "./dashboard.ts";
 export * from "./payment-allocation.ts";
 export * from "./account-management.ts";
 export * from "./room-catalog.ts";

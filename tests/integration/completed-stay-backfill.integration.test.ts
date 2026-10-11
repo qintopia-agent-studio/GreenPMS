@@ -11,6 +11,7 @@ import {
   type Database
 } from "@qintopia/db";
 import { newId } from "@qintopia/domain";
+import { getDashboard, getDashboardDetails } from "../../packages/db/src/dashboard.ts";
 import { sql, type Kysely } from "kysely";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -179,6 +180,29 @@ afterEach(async () => {
 });
 
 describe("8.3 completed-stay backfill", () => {
+  it("aggregates released historical bed nights beyond the detail page and separates free stays", async () => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const from = addDays(today, -65), until = addDays(today, -5);
+    let paidAmount = 0;
+    for (let i = 0; i < 10; i++) {
+      const arrivalDate = addDays(from, i * 6), departureDate = addDays(arrivalDate, 6);
+      const paid = await backfillEnvelope({ unitId: demo.bedAId, arrivalDate, departureDate, prefix: `dashboard-paid-${i}` });
+      expect((await previewAndConfirm(paid.envelope, `dashboard-paid-${i}`)).businessCommitted).toBe(true);
+      paidAmount += paid.contractAmountMinor;
+    }
+    const free = await backfillEnvelope({ unitId: demo.bedBId, arrivalDate: addDays(today, -8), departureDate: until, prefix: "dashboard-free", free: true });
+    expect((await previewAndConfirm(free.envelope, "dashboard-free")).businessCommitted).toBe(true);
+    const query = { from, to: addDays(until, -1) };
+    const dashboard = await getDashboard(db, demo.propertyId, query);
+    expect(dashboard.history).toMatchObject({ paidUnitNights: 60, freeUnitNights: 3, reviewCount: 0, occupancyRate: null });
+    expect(dashboard.current.debts[0]?.amountMinor).toBe(String(paidAmount));
+    const first = await getDashboardDetails(db, demo.propertyId, { ...query, metric: "PAID" });
+    const next = await getDashboardDetails(db, demo.propertyId, { ...query, metric: "PAID", page: 1 });
+    expect(first.total).toBe(60); expect(first.items).toHaveLength(50); expect(next.items).toHaveLength(10);
+    expect([...first.items, ...next.items].reduce((n, row) => n + row.units!, 0)).toBe(dashboard.history.paidUnitNights);
+    expect(dashboard.stayTrend.reduce((n, row) => n + row.paid, 0)).toBe(60);
+    expect((await getDashboard(db, demo.propertyId, { ...query, source: "FREE" })).history).toMatchObject({ paidUnitNights: 0, freeUnitNights: 3 });
+  });
   it("atomically records a fully paid completed stay and closes inventory", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);
     const arrivalDate = addDays(businessDate, -5);
@@ -234,6 +258,12 @@ describe("8.3 completed-stay backfill", () => {
     const serializedDetail = JSON.parse(fastJsonStringify(OrderDetailResponseSchema)(detail)) as typeof detail;
     expect(serializedDetail.amendments[0]?.payload).not.toHaveProperty("confirmedEffect");
     expect(await projectedStatus(orderId, demo.secondRoomId, arrivalDate, departureDate)).toBe("SETTLED");
+    const query = { from: arrivalDate, to: addDays(departureDate, -1) };
+    const dashboard = await getDashboard(db, demo.propertyId, query);
+    expect(dashboard.history).toMatchObject({ paidUnitNights: 0, reviewCount: 1, occupancyRate: null });
+    expect(dashboard.money[0]?.netMinor).toBe("0");
+    const details = await getDashboardDetails(db, demo.propertyId, { ...query, metric: "REVIEW" });
+    expect(details.total).toBe(1); expect(details.items[0]?.orderId).toBe(orderId);
 
     const overlapping = await backfillEnvelope({
       unitId: demo.secondRoomId,
@@ -328,6 +358,9 @@ describe("8.3 completed-stay backfill", () => {
     const externalRevision = await db.selectFrom("pricing_revisions").selectAll().where("order_id", "=", externalOrder.id).executeTakeFirstOrThrow();
     expect(externalOrder).toMatchObject({ booking_channel_code: "CTRIP", channel_order_reference: "CHANNEL-channel" });
     expect(externalRevision).toMatchObject({ pricing_basis: "CHANNEL_CONTRACT", current_contract_amount_minor: 32_400 });
+    const dashboard = await getDashboard(db, demo.propertyId, { from: arrivalDate, to: addDays(departureDate, -1) });
+    expect(dashboard.history).toMatchObject({ paidUnitNights: 0, freeUnitNights: 0, reviewCount: 2, occupancyRate: null });
+    expect(dashboard.current.debts[0]?.amountMinor).toBe("0");
   });
 
   it("persists cash collector and note as separate order-detail evidence", async () => {

@@ -1,3 +1,4 @@
+export * from "./dashboard-metrics.ts";
 export * from "./dates.ts";
 export * from "./command-permissions.ts";
 export * from "./ids.ts";
