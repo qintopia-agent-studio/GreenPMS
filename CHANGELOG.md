@@ -2,6 +2,13 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.11.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.11.0...v1.11.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **dashboard:** 中文展示与未来库存异常追溯 ([#71](https://github.com/qintopia-agent-studio/GreenPMS/issues/71)) ([385d3b1](https://github.com/qintopia-agent-studio/GreenPMS/commit/385d3b19bcde69305b9801e8a291b8b0a8698a28))
+
 ## [1.11.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.10.0...v1.11.0) (2026-10-11)
 
 
