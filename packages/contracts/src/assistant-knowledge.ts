@@ -13,14 +13,22 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-10-06.1";
+export const assistantKnowledgeRevision = "2026-10-09.1";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   {
+    id: "dashboard", title: "经营概览与统计口径", commands: [],
+    sources: ["apps/web/src/pages/DashboardPage.tsx", "packages/domain/src/dashboard-metrics.ts", "packages/db/src/dashboard.ts", "docs/implementation/spec-payment-allocation-retained-funds.md", "待开发项/QinTopia-PMS-运营主管受控纠错与房态异常修复-实施规格.md"],
+    content: `在当前门店主导航打开“经营概览”（/dashboard），门店READ权限可查看；只读展示和下钻，不办理收退款或入住退房。当前现场固定为现在，历史默认近30个完整营业日到昨日，可选近7天、本月至昨日或自定义最多366天；未来库存固定从今天起14或30天。楼栋、房型、来源仅筛选住宿分析，不筛门店资金和当前余额。
+经营入住率只含已履约付费住宿及会员权益，免费占用单列，尚未入住预订、取消、未到不算实际履约。住宿含入住日、不含离店日，换房按最终有效时间线分段归属；整间计1、单床计1，可拆床整间按该期可核对的床数折算。单元夜不是人数，来源结构不是收入贡献。容量只能按当前目录核对且未发现影响比较的变更时注明“按当前目录口径”；历史容量、零分母或时间线无法核对时显示—，不能猜增长率。
+收退款登记净额按PMS登记时间，非银行到账、财务收入或利润；内部留存划转与住宿转会员不新增现金。普通冲销计更正，不当作退款。管理员重建时旧错误会员收款冲销计更正，新链只计有独立证据的真实差额，不把旧错误金额转入新链。未知来源进入待核对并隐藏该币种净额；不同币种不相加，补录不证明当前真实收钱。
+住宿欠款沿用逐单正差额，不用另一单多收抵销；留存待用是客户已有资金余额，开关关闭也不清零。今日待退不等于今晚不可预订，能订不代表现在能入住。点击指标查看组成明细，再进入原订单或会员核对；明细重新读取后可能与旧概览不同，应刷新核对。助手当前没有经营概览实时统计查询工具，不能凭订单搜索前20条或示例数字推断全店汇总。`
+  },
+  {
     id: "workspace", title: "工作区、权限与安全提交", commands: [],
     sources: ["apps/web/src/session.tsx", "packages/domain/src/command-permissions.ts"],
-    content: `先确认当前门店。房态、订单、会员、工作台和设置的数据与权限以当前工作区为准，换店后重新查询；只读账号不能提交业务。按钮隐藏或禁用可能由权限、订单状态、功能开关或未完成的核对流程导致，应查看页面具体原因，不教员工绕过限制。
+    content: `先确认当前门店。房态、订单、会员、工作台、经营概览和设置的数据与权限以当前工作区为准，换店后重新查询；只读账号不能提交业务。按钮隐藏或禁用可能由权限、订单状态、功能开关或未完成的核对流程导致，应查看页面具体原因，不教员工绕过限制。
 所有业务变更都在正式页面填写、查看预览并由员工确认；预览不是提交成功。结果不明先查订单或恢复提示，不重复登记收款、退款或预订。不要求员工提供登录密码、API Key、完整证件号。`
   },
   {
@@ -121,7 +129,7 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
     id: "member-profile", title: "会员档案、查重与误建删除", commands: ["CREATE_MEMBER", "CORRECT_MEMBER_PROFILE"], accountActions: ["DELETE_MEMBER"],
     sources: ["docs/implementation/spec-step-2a-member-directory.md", "待开发项/QinTopia-PMS-会员资料字段调整-实施规格.md", "待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md", "apps/web/src/pages/MembersPage.tsx"],
     content: `在会员页按姓名、昵称或手机号搜索，确认不是已有会员再新建。手机号需要查重，证件号可选；相同姓名不代表同一人。新建档案本身不产生可住宿权益。
-打开会员档案查看合同、余额、收款及关联住宿。资料错误通过有权限的“修改会员记录”办理，填写原因并核对；不要为改资料另建重复会员。管理员可删除无业务记录或已办卡但从未核销的误建会员；先取消关联预订，存在误录收款时必须额外确认其为误录，系统追加冲销并作废未用权益，保留历史而不是实际退款。有历史核销、住宿转会员或其他禁止关联时不能删除；真正收过的钱需要退回时，不用误建删除冒充退款。`
+打开会员档案查看合同、余额���收款及关联住宿。资料错误通过有权限的“修改会员记录”办理，填写原因并核对；不要为改资料另建重复会员。管理员可删除无业务记录或已办卡但从未核销的误建会员；先取消关联预订，存在误录收款时必须额外确认其为误录，系统追加冲销并作废未用权益，保留历史而不是实际退款。有历史核销、住宿转会员或其他禁止关联时不能删除；真正收过的钱需要退回时，不用误建删除冒充退款。`
   },
   {
     id: "membership-sale", title: "会员订单、收款、生效与更正", commands: ["CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER"],

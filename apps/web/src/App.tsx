@@ -7,6 +7,7 @@ import type { PrincipalDto } from "./types";
 import { LoadingBlock } from "./uiBasic";
 import { SettingsPage } from "./pages/SettingsPage";
 
+const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const InventoryPage = lazy(() => import("./pages/InventoryPage").then((module) => ({ default: module.InventoryPage })));
 const MembersPage = lazy(() => import("./pages/MembersPage").then((module) => ({ default: module.MembersPage })));
 const OrderDetailPage = lazy(() => import("./pages/OrderDetailPage").then((module) => ({ default: module.OrderDetailPage })));
@@ -79,6 +80,7 @@ export default function App() {
             <Route path="orders" element={<OrdersPage />} />
             <Route path="orders/:orderId" element={<OrderDetailPage />} />
             <Route path="today" element={<TodayPage />} />
+            <Route path="dashboard" element={<DashboardPage />} />
             <Route path="settings" element={<SettingsPage />}>
               <Route path="rooms" element={<RoomCatalogPage />} />
               <Route path="ai" element={<AssistantSettingsPage />} />

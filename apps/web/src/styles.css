@@ -1,7 +1,7 @@
 :root {
   color: #17201b;
   background: #f4f6f3;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "Noto Sans SC Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --canvas: #f4f6f3;
@@ -4287,7 +4287,9 @@ pre {
     min-height: 64px;
     display: grid;
     grid-auto-flow: column;
-    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-columns: minmax(64px, 1fr);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
     padding: 5px max(8px, env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
     background: var(--surface);
     border-top: 1px solid var(--border);
