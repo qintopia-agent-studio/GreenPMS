@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { SWRConfig } from "swr";
 import { ArrowRight, ChartNoAxesCombined, Info, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -25,6 +25,7 @@ function DashboardWorkspace({ propertyId }: { propertyId: string }) {
   const [roomType, setRoomType] = useState("");
   const [source, setSource] = useState("");
   const [detail, setDetail] = useState<DashboardMetric | null>(null);
+  const detailTrigger = useRef<HTMLElement | null>(null);
   const [custom, setCustom] = useState({ from: "", to: "" });
   const query = new URLSearchParams({ ...(range ?? {}), futureDays: String(futureDays), ...(building ? { building } : {}), ...(roomType ? { roomType } : {}), ...(source ? { source } : {}) }).toString();
   const { data, error, isLoading, isValidating, mutate } = useDashboardRead(`dashboard:${propertyId}:${query}`, signal => api.dashboard(propertyId, query, signal), 60_000);
@@ -37,7 +38,15 @@ function DashboardWorkspace({ propertyId }: { propertyId: string }) {
   const mainMoney = data?.money.find(item => item.currency === data.currency);
   const confirmedQuery = new URLSearchParams(query);
   if (data) { confirmedQuery.set("from", data.range.from); confirmedQuery.set("to", data.range.to); }
-  const openDetail = (metric: DashboardMetric) => setDetail(metric);
+  const openDetail = (metric: DashboardMetric) => {
+    detailTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setDetail(metric);
+  };
+  const closeDetail = () => {
+    setDetail(null);
+    const trigger = detailTrigger.current;
+    requestAnimationFrame(() => { if (trigger?.isConnected) trigger.focus(); });
+  };
   return <div className="dashboard" data-testid="dashboard-page">
     <header className="dashboard-heading"><div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>经营概览</h1><p className="dashboard-muted">从住宿到资金，看清每一笔经营事实。</p></div><button type="button" className="button button-secondary" disabled={isValidating} onClick={() => void mutate()}><RefreshCw size={16} aria-hidden="true" />{isValidating ? "更新中" : "刷新数据"}</button></header>
     <div className="dashboard-context"><span><ChartNoAxesCombined size={15} aria-hidden="true" />当前门店 · 只读概览</span><span>{data ? `${data.timezone} · 更新于 ${new Date(data.asOf).toLocaleTimeString("zh-CN", { timeZone: data.timezone })}` : "等待服务器数据"}</span></div>
@@ -66,7 +75,7 @@ function DashboardWorkspace({ propertyId }: { propertyId: string }) {
       </section>
       <section className="dashboard-panel" aria-labelledby="future-title"><div className="dashboard-section-heading"><div><h2 id="future-title">未来可售库存</h2><p>固定从 {data.businessDate} 起 · 已订占用，不是入住预测</p></div><label className="dashboard-future-select"><span className="sr-only">未来天数</span><select value={futureDays} onChange={event => setFutureDays(Number(event.target.value))}><option value={14}>未来14天</option><option value={30}>未来30天</option></select></label></div><div className="dashboard-future-grid">{data.future.map(day => <div className={`dashboard-future-day ${day.quality !== "COMPLETE" ? "dashboard-future-review" : ""}`} key={day.date}><span>{day.date.slice(5)}</span><strong>{day.availableRooms === null || day.availableBeds === null ? "—" : day.availableRooms + day.availableBeds}<small> 可售</small></strong><div className="dashboard-inventory-bar" aria-hidden="true"><i style={{ width: `${day.paid / Math.max(day.capacity, 1) * 100}%` }} /><i style={{ width: `${day.free / Math.max(day.capacity, 1) * 100}%` }} /><i style={{ width: `${day.maintenance / Math.max(day.capacity, 1) * 100}%` }} /></div><small>{day.availableRooms ?? "—"}间 / {day.availableBeds ?? "—"}床</small><small>已订 {day.paid} · 免费 {day.free}</small><small>维修 {day.maintenance} · 待核对 {day.review}</small></div>)}</div><p className="dashboard-footnote">当天前客待退不等于今晚不可售；能预订不代表此刻能办理后客入住。<Link to="/">去房态核对 <ArrowRight size={14} aria-hidden="true" /></Link></p></section>
       <section className="dashboard-panel" aria-labelledby="attention-title"><div className="dashboard-section-heading"><div><h2 id="attention-title">需关注事项</h2><p>在原业务页面核对和处理，概览不办理业务</p></div><Link to="/today">前往工作台 <ArrowRight size={14} aria-hidden="true" /></Link></div><div className="dashboard-attention">{(["OVERDUE", "DEBT", "RETAINED", "REVIEW"] as const).map(metric => <button type="button" key={metric} onClick={() => openDetail(metric)}><span>{metricLabels[metric]}</span><strong>{metric === "OVERDUE" ? data.current.overdue : metric === "DEBT" ? data.current.debts.reduce((n, row) => n + row.count, 0) : metric === "RETAINED" ? data.current.retained.reduce((n, row) => n + row.count, 0) : data.history.reviewCount + data.money.reduce((n, row) => n + row.reviewCount, 0)}</strong><ArrowRight size={16} aria-hidden="true" /></button>)}</div></section>
-      {detail ? <DashboardDetails key={`${detail}:${confirmedQuery}`} propertyId={propertyId} query={confirmedQuery.toString()} metric={detail} asOf={data.asOf} onClose={() => setDetail(null)} /> : null}
+      {detail ? <DashboardDetails key={`${detail}:${confirmedQuery}`} propertyId={propertyId} query={confirmedQuery.toString()} metric={detail} asOf={data.asOf} onClose={closeDetail} /> : null}
       <footer className="dashboard-footer">数据来自 PMS 原始业务事实 · 摘要使用同一只读快照 · 点击指标可核对组成明细</footer>
     </> : null}
   </div>;
