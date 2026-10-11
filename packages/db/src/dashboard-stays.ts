@@ -19,6 +19,12 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
   const changes = await trx.selectFrom("room_catalog_changes").select(["created_at", "effect"]).where("property_id", "=", propertyId).execute();
   const capacityChanges = changes.filter(change => {
     const effect = change.effect as Record<string, unknown> | null;
+    const rename = effect?.roomRename as Record<string, unknown> | undefined;
+    const pureRename = effect?.action === "SAVE_ROOM" && rename
+      && typeof rename.roomId === "string" && typeof rename.beforeCode === "string" && typeof rename.afterCode === "string"
+      && Array.isArray(effect.insertUnits) && effect.insertUnits.length === 0
+      && Array.isArray(effect.retireUnitIds) && effect.retireUnitIds.length === 0;
+    if (pureRename) return false;
     return !effect || (Array.isArray(effect.insertUnits) && effect.insertUnits.length > 0) || (Array.isArray(effect.retireUnitIds) && effect.retireUnitIds.length > 0) || ["SET_ROOM_ACTIVE", "SAVE_ROOM"].includes(String(effect.action));
   });
   const orders = await trx.selectFrom("orders as o").innerJoin("stays as s", "s.order_id", "o.id")
@@ -38,8 +44,10 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
   const nights: DashboardStayNight[] = [];
   const reviews: DashboardDetail[] = [];
   const invalidFutureDates = new Set<string>();
+  const futureReviews: DashboardDetail[] = [];
   const validOrderIds = new Set<string>();
   for (const order of orders) {
+    let reviewReason = "订单住宿时间线或履约证据不完整";
     try {
       const normalized = (byOrderAmendment.get(order.id) ?? []).map(amendment => {
         const protocolVersion = legacyEffectProtocol(amendment.amendment_type, amendment.payload);
@@ -53,6 +61,7 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
         activeTimeline: (byOrderActive.get(order.id) ?? []).map(row => ({ serviceDate: row.service_date, inventoryUnitId: row.inventory_unit_id })) });
       validOrderIds.add(order.id);
       if (order.status === "RESERVED") continue;
+      reviewReason = "历史房源或拆床容量证据不完整";
       const orderNights: DashboardStayNight[] = [];
       for (const interval of lifecycle.effectiveArrangement.intervals) {
         const unit = unitsById.get(interval.inventoryUnitId);
@@ -72,7 +81,11 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
       if (order.status !== "RESERVED" && order.arrival_date <= range.to) reviews.push({ id: `stay-review:${order.id}`, date: order.arrival_date > range.from ? order.arrival_date : range.from, metric: "REVIEW", label: "住宿时间线待核对", orderId: order.id, memberId: null, unitId: null, units: null, amountMinor: null, currency: null, registeredAt: null, businessDate: null, reason: "有效住宿、履约或历史拆床容量证据不完整，未纳入已知单元夜" });
       const from = order.arrival_date > businessDate ? order.arrival_date : businessDate;
       const until = order.departure_date < futureUntil ? order.departure_date : futureUntil;
-      if (order.status !== "CHECKED_OUT" && from < until) for (const date of enumerateServiceDates(from, until)) invalidFutureDates.add(date);
+      if (order.status !== "CHECKED_OUT" && from < until) {
+        for (const date of enumerateServiceDates(from, until)) invalidFutureDates.add(date);
+        futureReviews.push({ id: `future-review:${order.id}`, date: from, metric: "REVIEW", label: "未来库存待核对", orderId: order.id, memberId: null, unitId: null, units: null, amountMinor: null, currency: null, registeredAt: null, businessDate: null,
+          reason: `${reviewReason}；影响 ${from} 至 ${dashboardDate(until, -1)}（含首尾日期）。请核对原订单，未将未知占用视为空房。` });
+      }
     }
   }
   const atomicUnits = units.filter(unit => unit.active && (unit.kind === "BED" ? unitsById.get(unit.parent_room_id!)?.active : !(children.get(unit.id) ?? []).some(bed => bed.active)));
@@ -86,5 +99,5 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
     if (hasChanges || incomplete) return { value: null, reason: "目录增减、停用或拆床的历史容量尚不可完整还原，暂不展示比率" };
     return { value: atomicUnits.filter(unit => matchingUnit(unit, query)).length * days, reason: "按当前目录口径；查询期间至今未发现容量变更，不等同于完整历史容量模型" };
   }
-  return { units, atomicUnits, matchingUnit, capacityFor, nights, reviews, orders, validOrderIds, invalidFutureDates };
+  return { units, atomicUnits, matchingUnit, capacityFor, nights, reviews, orders, validOrderIds, invalidFutureDates, futureReviews };
 }

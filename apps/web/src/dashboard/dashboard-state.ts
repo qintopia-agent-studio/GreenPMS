@@ -45,3 +45,8 @@ export function useDashboardRead<T>(key: string, read: (signal: AbortSignal) => 
   }, { refreshInterval, refreshWhenHidden: false, refreshWhenOffline: false, revalidateOnFocus: true,
     keepPreviousData: false, shouldRetryOnError: false, dedupingInterval: 5_000 });
 }
+
+export function dashboardPresetRange(value: "7" | "30" | "month", businessDate: string) {
+  if (value === "month" && businessDate.endsWith("-01")) return null;
+  return { from: value === "month" ? `${businessDate.slice(0, 7)}-01` : shiftDate(businessDate, -Number(value)), to: shiftDate(businessDate, -1) };
+}

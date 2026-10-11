@@ -52,7 +52,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
     sources: dashboardSources.map(source => ({ source, unitNights: currentNights.filter(night => night.source === source).reduce((n, row) => n + row.units, 0) })),
     money, previousMoney: aggregateDashboardMoney(moneyFacts.filter(fact => inDashboardRange(fact.date, previousRange)), property.currency),
     moneyTrend: enumerateServiceDates(range.from, dashboardDate(range.to, 1)).map(date => ({ date, money: aggregateDashboardMoney(moneyFacts.filter(fact => fact.date === date), property.currency) })),
-    current, future, filters: { buildings: [...new Set(lodging.units.map(unit => unit.building_code ?? "未分配"))].sort(), roomTypes: [...new Set(lodging.units.map(unit => unit.room_type_code ?? "未分配"))].sort() },
+    current, future, futureReviewCount: lodging.futureReviews.length, filters: { buildings: [...new Set(lodging.units.map(unit => unit.building_code ?? "未分配"))].sort(), roomTypes: [...new Set(lodging.units.map(unit => unit.room_type_code ?? "未分配"))].sort() },
     warnings: [
       ...(history.reviewCount ? [`${history.reviewCount} 单历史住宿缺少完整证据；图表只含可核对部分，待核对单不因楼栋或房型筛选被隐藏。`] : []),
       ...(history.occupancyRate !== null && history.occupancyRate > 100 ? ["经营入住率超过100%，请核对重叠住宿与目录容量；未截断该异常。"] : []),
@@ -63,7 +63,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const stayDetails: DashboardDetail[] = currentNights.map(night => ({ ...newDashboardDetail(`night:${night.orderId}:${night.date}`, night.date),
     metric: night.source === "FREE" ? "FREE" : "PAID", label: `${night.building} / ${night.roomType}`, orderId: night.orderId, unitId: night.unitId, units: night.units,
     reason: `${night.source === "FREE" ? "免费占用" : "已履约付费住宿"}；按有效住宿安排逐日归属` }));
-  const details = [...stayDetails, ...relevantReviews(range).map(review => ({ ...review, date: review.date < range.from ? range.from : review.date })), ...moneyFacts.filter(fact => inDashboardRange(fact.date, range)).map(dashboardMoneyDetail), ...currentDetails];
+  const details = [...lodging.futureReviews, ...stayDetails, ...relevantReviews(range).map(review => ({ ...review, date: review.date < range.from ? range.from : review.date })), ...moneyFacts.filter(fact => inDashboardRange(fact.date, range)).map(dashboardMoneyDetail), ...currentDetails];
   return { response, details };
 }
 export async function getDashboard(db: Kysely<Database>, propertyId: string, query: DashboardQuery): Promise<DashboardResponse> {
