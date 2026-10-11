@@ -87,6 +87,7 @@ export interface DashboardResponse {
     retained: DashboardBalance[];
   };
   future: DashboardFutureDay[];
+  futureReviewCount: number;
   filters: { buildings: string[]; roomTypes: string[] };
   warnings: string[];
 }
