@@ -11,11 +11,11 @@ const durationBands = [
 ] as const;
 
 export function dashboardDurationBands(duration: DashboardResponse["community"]["duration"]) {
-  const bands = durationBands.map(band => ({ ...band, current: 0, completed: 0 }));
+  const bands = durationBands.map(band => ({ ...band, current: 0, all: 0 }));
   for (const row of duration) {
     const band = bands.find(item => row.nights <= item.maxNights)!;
     band.current += row.current;
-    band.completed += row.completed;
+    band.all += row.all;
   }
   return bands;
 }

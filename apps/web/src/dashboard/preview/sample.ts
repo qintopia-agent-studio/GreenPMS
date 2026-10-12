@@ -51,7 +51,7 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     return { ...row, ...history, paidUnitNights: paid, freeUnitNights: free, capacityUnitNights: row.weight * days, occupancyRate: paid / (row.weight * days) * 100 };
   });
   const result: DashboardResponse = {
-    propertyId, businessDate: today, asOf: `${today}T01:42:00Z`, timezone: "Asia/Shanghai", currency, definitionVersion: "2026-10-12.1",
+    propertyId, businessDate: today, asOf: `${today}T01:42:00Z`, timezone: "Asia/Shanghai", currency, definitionVersion: "2026-10-12.2",
     range, previousRange, history, previous: history, occupancyChangePoints: zero ? 0 : 4.2,
     community, current: { paidGuests: community.current.paid, freeGuests: community.current.volunteer + community.current.reception, guestReviewOrders: scenario === "partial" ? 1 : 0, arrivals: zero ? 0 : 4, departures: zero ? 0 : 2, overdue: zero ? 0 : 1, debts: [{ currency, amountMinor: zero ? "0" : "368000", count: zero ? 0 : 3 }], retained: [{ currency, amountMinor: zero ? "0" : "120000", count: zero ? 0 : 2 }] },
     stayTrend,

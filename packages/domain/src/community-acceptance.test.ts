@@ -18,7 +18,7 @@ describe("community confirmed acceptance boundaries", () => {
     expect(result.records.find(row => row.kind === "DUE")).toMatchObject({ date: "2026-01-08", orderId: "reserved", nights: 2 });
   });
   it("uses completed nights for an overdue current stay rather than freezing on the planned departure", () => {
-    expect(communityMetrics([stay({ current: true, departure: "2026-01-05" })], [], range, "2026-01-08").duration).toEqual([{ nights: 7, current: 1, completed: 0 }]);
+    expect(communityMetrics([stay({ current: true, departure: "2026-01-05" })], [], range, "2026-01-08").duration).toEqual([{ nights: 7, current: 1, all: 1 }]);
   });
   it("does not spread unknown identities to dates outside their stay", () => {
     const result = communityMetrics([stay(), stay({ personKey: null, orderId: "missing", arrival: "2026-01-05", departure: "2026-01-07" })], [], range, "2026-02-11");

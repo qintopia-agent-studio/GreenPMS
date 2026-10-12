@@ -64,7 +64,13 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     for (const person of people) { if (person) entry.people.add(person); else entry.unknown = true; }
     records.set(key, entry);
   }
-  const distribution = new Map<number, { nights: number; current: number; completed: number }>();
+  const cutoff = range.to < today ? range.to : today;
+  const distribution = new Map<number, { nights: number; current: number; all: number }>();
+  function countDuration(duration: number, perspective: "current" | "all") {
+    const row = distribution.get(duration) ?? { nights: duration, current: 0, all: 0 };
+    row[perspective]++;
+    distribution.set(duration, row);
+  }
   for (const [personKey, list] of byPerson) {
     list.sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
     let chain: CommunityStay[] = [], until = "", previous = false;
@@ -74,10 +80,10 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
       const live = chain.some(stay => stay.current && stay.arrival <= today);
       const observedEnd = live || until > today ? today : until;
       const duration = nights(start, observedEnd);
-      if (live || (until <= today && inRange(until))) {
-        const row = distribution.get(duration) ?? { nights: duration, current: 0, completed: 0 };
-        if (live) row.current++; else row.completed++;
-        distribution.set(duration, row);
+      if (live) countDuration(duration, "current");
+      const occupiedUntil = live ? dashboardDate(today, 1) : until;
+      if (range.from <= cutoff && start <= cutoff && occupiedUntil > range.from) {
+        countDuration(nights(start, observedEnd < cutoff ? observedEnd : cutoff), "all");
       }
       if (inRange(start)) add({ orderId: chain[0]!.orderId, date: start, nights: duration, reason: previous ? "同一住客间隔后再次入住" : "首次可核实的入住记录", kind: previous ? "RETURN" : "NEW" }, [personKey]);
       let confirmedEnd = until;

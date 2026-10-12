@@ -1,4 +1,4 @@
-export const dashboardDefinitionVersion = "2026-10-12.1";
+export const dashboardDefinitionVersion = "2026-10-12.2";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
@@ -117,7 +117,7 @@ export interface DashboardCommunity {
   trend: CommunityDay[];
   visitors: number | null;
   dailyAverage: number | null;
-  duration: Array<{ nights: number; current: number; completed: number }>;
+  duration: Array<{ nights: number; current: number; all: number }>;
   records: CommunityRecord[];
   counts: Record<CommunityRecord["kind"], number>;
   reasons: string[];

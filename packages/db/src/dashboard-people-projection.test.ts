@@ -23,7 +23,7 @@ describe("historical occupant projection, read-only SQL fixtures", () => {
     const result = await load({ order_occupants: [primary, { ...companion, created_by_command_id: "append", created_at: new Date("2026-10-08") }] });
     expect(result.current.total).toBe(2);
     expect(result.trend[0]).toMatchObject({ total: null, paid: 1 });
-    expect(result.duration).toEqual([{ nights: 11, current: 1, completed: 0 }]);
+    expect(result.duration).toEqual([{ nights: 10, current: 0, all: 1 }, { nights: 11, current: 1, all: 0 }]);
     expect(result.reasons.join(" ")).toContain("追加登记");
   });
   it("never substitutes the payer membership for an unidentified actual guest", async () => {

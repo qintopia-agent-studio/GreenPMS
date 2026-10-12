@@ -3,24 +3,24 @@ import { dashboardAvailability, dashboardDetailLabel, dashboardDurationBands, da
 
 describe("经营概览展示", () => {
   it.each([[0, 0], [6, 0], [7, 1], [13, 1], [14, 2], [20, 2], [21, 3], [30, 3], [31, 4], [60, 4], [61, 5], [366, 5]])("实际 %i 晚只归入第 %i 档", (nights, index) => {
-    const bands = dashboardDurationBands([{ nights, current: 2, completed: 3 }]);
+    const bands = dashboardDurationBands([{ nights, current: 2, all: 3 }]);
     expect(bands).toHaveLength(6);
-    expect(bands[index]).toMatchObject({ current: 2, completed: 3 });
+    expect(bands[index]).toMatchObject({ current: 2, all: 3 });
     expect(bands.reduce((sum, row) => sum + row.current, 0)).toBe(2);
-    expect(bands.reduce((sum, row) => sum + row.completed, 0)).toBe(3);
+    expect(bands.reduce((sum, row) => sum + row.all, 0)).toBe(3);
   });
-  it("合并同档数量且不混淆当前人数与已结束次数，不修改原始夜数", () => {
-    const duration = [{ nights: 3, current: 1, completed: 2 }, { nights: 4, current: 3, completed: 4 }, { nights: 6, current: 5, completed: 6 }, { nights: 40, current: 0, completed: 1 }];
+  it("合并同档数量且不混淆当前人数与期间全部住宿次数，不修改原始夜数", () => {
+    const duration = [{ nights: 3, current: 1, all: 2 }, { nights: 4, current: 3, all: 4 }, { nights: 6, current: 5, all: 6 }, { nights: 40, current: 0, all: 1 }];
     const before = structuredClone(duration);
     const bands = dashboardDurationBands(duration);
-    expect(bands[0]).toMatchObject({ label: "不足 1 周", range: "≤6 晚", current: 9, completed: 12 });
-    expect(bands[4]).toMatchObject({ label: "1–2 个月", range: "31–60 晚", current: 0, completed: 1 });
+    expect(bands[0]).toMatchObject({ label: "不足 1 周", range: "≤6 晚", current: 9, all: 12 });
+    expect(bands[4]).toMatchObject({ label: "1–2 个月", range: "31–60 晚", current: 0, all: 1 });
     expect(duration).toEqual(before);
   });
   it("空资料保留统一的六档定义而不制造人数", () => {
     const bands = dashboardDurationBands([]);
     expect(bands.map(row => row.label)).toEqual(["不足 1 周", "1–2 周", "2–3 周", "3 周至 1 个月", "1–2 个月", "超过 2 个月"]);
-    expect(bands.every(row => row.current === 0 && row.completed === 0)).toBe(true);
+    expect(bands.every(row => row.current === 0 && row.all === 0)).toBe(true);
   });
   it("房型编码和住宿组成明细使用与房态相同的中文名称", () => {
     expect(dashboardRoomTypeLabel("shared_bath_double")).toBe("两人间（公卫）");
