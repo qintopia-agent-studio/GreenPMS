@@ -12,6 +12,12 @@ try {
   await page.goto(url);
   await expect(page.getByRole("heading", { name: "共居经营看板" })).toBeVisible();
   await expect(page.locator(".community-total-value")).toContainText("42");
+  const dailyPeople = page.getByRole("region", { name: "逐日人数与统计依据", exact: true });
+  await expect(dailyPeople.getByRole("heading", { name: "逐日人数与统计依据" })).toBeVisible();
+  await expect(dailyPeople.getByRole("table")).toBeVisible();
+  await expect(dailyPeople.locator("tbody tr")).toHaveCount(30);
+  await expect(dailyPeople.getByRole("link", { name: "到订单核对实际住宿人" })).toBeVisible();
+  await expect(page.locator(".community-trend details, .community-trend summary")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "当前现场", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /住宿欠款余额/ })).toHaveCount(1);
   await expect(page.getByRole("button", { name: /客户留存待用/ })).toHaveCount(1);
