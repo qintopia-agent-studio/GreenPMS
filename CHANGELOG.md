@@ -2,6 +2,13 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.12.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.11.1...v1.12.0) (2026-10-12)
+
+
+### Features
+
+* **dashboard:** 重设计共居经营看板并修正统计边界 ([#73](https://github.com/qintopia-agent-studio/GreenPMS/issues/73)) ([71784bb](https://github.com/qintopia-agent-studio/GreenPMS/commit/71784bb35a24d95f991cedd3caecf38c8d0a28e5))
+
 ## [1.11.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.11.0...v1.11.1) (2026-10-11)
 
 
