@@ -36,8 +36,13 @@ try {
   await expect(page.locator(".residence-records")).toContainText("提前 7 晚");
   await page.getByRole("button", { name: "返回", exact: true }).click();
   await page.getByRole("button", { name: /实际住宿天数分布/ }).click();
+  const durationLabels = ["不足 1 周≤6 晚", "1–2 周7–13 晚", "2–3 周14–20 晚", "3 周至 1 个月21–30 晚", "1–2 个月31–60 晚", "超过 2 个月≥61 晚"];
+  await expect(page.locator(".duration-bars > div > span")).toHaveText(durationLabels);
+  await expect(page.locator(".duration-bars b")).toHaveText(["3人", "6人", "7人", "9人", "17人", "0人"]);
   await page.getByRole("button", { name: "本期已结束", exact: true }).click();
-  await expect(page.locator(".duration-bars")).toContainText("40 晚");
+  await expect(page.locator(".duration-bars > div > span")).toHaveText(durationLabels);
+  await expect(page.locator(".duration-bars b")).toHaveText(["1次", "4次", "3次", "6次", "3次", "0次"]);
+  await expect(page.locator(".residence-drilldown .dashboard-pagination")).toHaveCount(0);
   await page.getByRole("button", { name: "返回", exact: true }).click();
   await page.getByRole("button", { name: /即将到期 从今天起7天/ }).click();
   await page.getByRole("button", { name: "下一页", exact: true }).click();

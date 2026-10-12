@@ -170,7 +170,8 @@
 .residence-records a { color: var(--brand); }
 .duration-bars { display: flex; flex-direction: column; gap: 15px; margin-top: 20px; }
 .duration-bars > div { display: flex; align-items: center; gap: 12px; font-size: 11px; }
-.duration-bars span { width: 50px; flex-shrink: 0; }
+.duration-bars span { width: 104px; flex-shrink: 0; }
+.duration-bars span small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
 .duration-bars > div > div { flex: 1; height: 8px; background: var(--surface-muted); border-radius: 2px; overflow: hidden; }
 .duration-bars i { display: block; height: 100%; background: var(--brand); }
 .duration-bars b { min-width: 30px; text-align: right; font-weight: 500; }
