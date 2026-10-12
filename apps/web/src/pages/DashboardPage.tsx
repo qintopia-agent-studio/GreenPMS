@@ -5,7 +5,7 @@ import type { DashboardMetric } from "@qintopia/contracts";
 import { api } from "../api";
 import { useWorkspace } from "../session";
 import { errorMessage, LoadingBlock } from "../uiBasic";
-import { CommunitySnapshot, CommunityPanels } from "../dashboard/CommunityPanels";
+import { CurrentScene, CommunityPanels } from "../dashboard/CommunityPanels";
 import { ResidenceChanges } from "../dashboard/ResidenceChanges";
 import { ResourcePanels } from "../dashboard/ResourcePanels";
 import { DashboardDetails } from "../dashboard/DashboardDetails";
@@ -24,7 +24,7 @@ export function DashboardWorkspace({ propertyId, read = api.dashboard, readDetai
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
   const [preset, setPreset] = useState("30");
   const [futureDays, setFutureDays] = useState(14);
-  const [resourceView, setResourceView] = useState("future");
+  const [resourceView, setResourceView] = useState("money");
   const [filters, setFilters] = useState({ building: "", roomType: "", source: "" });
   const [detail, setDetail] = useState<DashboardMetric | null>(null);
   const detailTrigger = useRef<HTMLElement | null>(null);
@@ -56,7 +56,7 @@ export function DashboardWorkspace({ propertyId, read = api.dashboard, readDetai
     {error ? <div className="dashboard-notice" role="alert"><strong>{data ? "刷新失败，以下为上次读取的数据" : "经营数据暂不可用"}</strong><p>{errorMessage(error)}。请求失败不是零，也不是没有记录。</p><button className="button button-secondary" onClick={() => void mutate()}>重新读取</button><button className="button button-secondary" onClick={() => { setRange(null); setPreset("30"); setFilters({ building: "", roomType: "", source: "" }); setDetail(null); }}>恢复近30天</button></div> : null}
     {isLoading ? <LoadingBlock label="正在读取所选范围，不显示上一范围的数据" /> : null}
     {data ? <>
-      <CommunitySnapshot data={data} onDetail={openDetail} />
+      <CurrentScene data={data} onDetail={openDetail} />
       <section className="dashboard-period" aria-label="历史统计区间">
         <div className="dashboard-period-label"><CalendarDays size={17} aria-hidden="true" /><div><strong>历史统计区间</strong><p>{data.range.from} — {data.range.to}</p></div></div>
         <div className="dashboard-range-tabs" role="group" aria-label="历史日期范围">{[["7", "近7天"], ["30", "近30天"], ["month", "本月至昨日"], ["custom", "自定义"]].map(([value, label]) => <button type="button" key={value} disabled={value === "month" && data.businessDate.endsWith("-01")} aria-pressed={preset === value} onClick={() => changePreset(value!)}>{label}</button>)}</div>

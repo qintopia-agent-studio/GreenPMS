@@ -4,6 +4,7 @@ import { ArrowRight, Users, LogIn, LogOut } from "lucide-react";
 import { Area, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { CommunityDay, DashboardMetric, DashboardResponse } from "@qintopia/contracts";
 import { DashboardHint } from "./DashboardHint";
+import { money } from "./dashboard-state";
 
 export const chartAxis = { tick: { fill: "var(--muted)", fontSize: 11 }, tickLine: false, axisLine: false };
 export const chartTooltip = { contentStyle: { border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", background: "var(--surface)", fontSize: 12 } };
@@ -11,6 +12,17 @@ const freeCount = (day: CommunityDay) => day.volunteer + day.reception + day.oth
 export function Count({ value, reason, unit = "人" }: { value: number | null; reason: string; unit?: string }) {
   return <>{value === null ? <>— <DashboardHint label="查看缺项原因" text={reason} /></> : value.toLocaleString("zh-CN", { maximumFractionDigits: 1 })}<small>{unit}</small></>;
 }
+export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void }) {
+  return <section className="dashboard-current-scene" aria-labelledby="current-scene-title">
+    <div className="dashboard-section-heading"><h2 id="current-scene-title">当前现场</h2><span className="dashboard-muted">{data.businessDate} · 不随历史日期变化</span></div>
+    <CommunitySnapshot data={data} onDetail={onDetail} />
+    <div className="dashboard-current-balances">
+      <button type="button" className="dashboard-current-card" onClick={() => onDetail("DEBT")}><span>住宿欠款余额 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.debts.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 单</small></strong>)}<small>逐单正差额 · 不以多收抵欠款</small></button>
+      <button type="button" className="dashboard-current-card" onClick={() => onDetail("RETAINED")}><span>客户留存待用 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.retained.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 笔</small></strong>)}<small>客户资金归属 · 不计新增收款</small></button>
+    </div>
+  </section>;
+}
+
 export function CommunitySnapshot({ data, onDetail }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void }) {
   const day = data.community.current;
   return <section className="community-snapshot" aria-labelledby="community-title">

@@ -175,7 +175,10 @@
 .duration-bars i { display: block; height: 100%; background: var(--brand); }
 .duration-bars b { min-width: 30px; text-align: right; font-weight: 500; }
 .resource-section { padding-top: 6px; }
-.resource-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 9px; background: var(--surface); padding: 21px 0; margin-bottom: 18px; }
+.dashboard-current-balances { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+.dashboard-current-balances .dashboard-current-card > span { display: flex; align-items: center; gap: 8px; }
+.dashboard-source-panel { margin-top: 24px; }
+.resource-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 9px; background: var(--surface); padding: 21px 0; margin-bottom: 18px; }
 .resource-summary > div, .resource-summary > button { padding: 0 22px; border: 0; border-right: 1px solid var(--border); background: none; display: flex; flex-direction: column; gap: 10px; text-align: left; color: var(--text); min-width: 0; }
 .resource-summary > :last-child { border-right: 0; }
 .resource-summary > button:hover { color: var(--brand); }
@@ -232,12 +235,14 @@
   .residence-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; }
   .resource-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 24px; }
   .resource-summary > :nth-child(2) { border: 0; }
+  .resource-summary > :last-child { grid-column: 1 / -1; padding-top: 18px; border-top: 1px solid var(--border); }
   .resource-summary strong { font-size: 23px; }
   .dashboard-refresh > span { display: none; }
 }
 @media (max-width: 600px) {
   .dashboard { gap: 20px; }
   .dashboard-heading { gap: 12px; }
+  .dashboard-current-balances { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .dashboard-heading h1 { font-size: 23px; }
   .dashboard-heading .dashboard-muted { font-size: 11px; }
   .dashboard-refresh .button { min-height: 36px; padding: 6px 10px; font-size: 11px; }

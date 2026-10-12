@@ -12,6 +12,13 @@ try {
   await page.goto(url);
   await expect(page.getByRole("heading", { name: "共居经营看板" })).toBeVisible();
   await expect(page.locator(".community-total-value")).toContainText("42");
+  await expect(page.getByRole("heading", { name: "当前现场", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /住宿欠款余额/ })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: /客户留存待用/ })).toHaveCount(1);
+  await expect(page.locator(".resource-tabs button")).toHaveText(["资金与欠款", "未来已订", "楼栋与房型"]);
+  await expect(page.locator(".resource-tabs button").first()).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator('[aria-labelledby="money-chart-title"] tbody tr')).toHaveCount(30);
+  const currentBalances = await page.locator(".dashboard-current-balances").innerText();
   await page.evaluate(() => document.fonts.ready);
   expect(await page.evaluate(() => document.fonts.check('14px "Noto Sans SC Variable"', "社区经营看板"))).toBe(true);
   for (const width of [1440, 1153, 949, 390, 320]) {
@@ -42,6 +49,9 @@ try {
   await expect(page.locator(".resource-panel table")).toHaveCount(2);
   await page.getByRole("button", { name: "楼栋与房型", exact: true }).click();
   await expect(page.getByRole("heading", { name: "住宿来源结构", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "住宿来源结构", exact: true })).toHaveCount(1);
+  await expect(page.locator(".dashboard-source-list")).not.toContainText("历史未记录");
+  await expect(page.getByRole("button", { name: "查看免费占用明细", exact: true })).toHaveCount(1);
   await expect(page.locator(".resource-panel details")).toHaveCount(0);
   await expect(page.locator(".dashboard-breakdown")).toContainText("公卫双人间");
   await expect(page.locator(".dashboard-breakdown")).not.toContainText("shared_bath_double");
@@ -68,6 +78,9 @@ try {
   await expect(page.locator(".resource-panel tbody tr")).toHaveCount(30);
   await page.getByRole("button", { name: "近7天", exact: true }).click();
   await expect(page.locator(".dashboard-period-label")).toContainText("2026-10-05");
+  expect(await page.locator(".dashboard-current-balances").innerText()).toBe(currentBalances);
+  await page.getByRole("button", { name: "资金与欠款", exact: true }).click();
+  await expect(page.locator('[aria-labelledby="money-chart-title"] tbody tr')).toHaveCount(7);
   await expect(page.locator(".community-total-value")).toContainText("42");
   await page.getByRole("combobox", { name: "合成门店" }).selectOption("sample-b");
   await expect(page.locator(".community-total-value")).toContainText("23");
