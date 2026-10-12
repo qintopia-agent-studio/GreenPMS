@@ -2656,6 +2656,8 @@ export const RoomStatusAvailabilitySummarySchema = strictObject({
   availableBeds: Type.Integer({ minimum: 0 }),
   paidOccupiedUnits: Type.Integer({ minimum: 0 }),
   totalSellableUnits: Type.Integer({ minimum: 0 }),
+  capacityKnown: Type.Optional(Type.Boolean()),
+  capacityReason: Type.Optional(Type.String()),
   occupantCount: Type.Integer({ minimum: 0 })
 });
 const RoomStatusUnitBase = {

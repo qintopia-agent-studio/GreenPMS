@@ -589,6 +589,8 @@ export interface RoomStatusAvailabilitySummaryDto {
   availableBeds: number;
   paidOccupiedUnits: number;
   totalSellableUnits: number;
+  capacityKnown?: boolean;
+  capacityReason?: string;
   occupantCount: number;
 }
 

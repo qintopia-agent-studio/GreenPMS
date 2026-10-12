@@ -1,3 +1,4 @@
+import { InfoHint } from "../uiBasic";
 import {
   useCallback,
   useEffect,
@@ -691,6 +692,7 @@ export function roomStatusDateHeaderSummaryLabel(
   businessDate: string
 ): string {
   if (serviceDate < businessDate) {
+    if (summary?.capacityKnown === false || (summary?.capacityKnown === true && summary.totalSellableUnits === 0)) return `入住率 — · ${summary.occupantCount}人`;
     const denominator = summary && summary.totalSellableUnits > 0
       ? summary.totalSellableUnits
       : QINTOPIA_TOTAL_SELLABLE_UNITS;
@@ -1397,7 +1399,7 @@ export function RoomStatusGrid({
                   >
                     <strong>{date.slice(5)}</strong>
                     <span>{date === todayDate ? "今天" : weekDay}</span>
-                    <small>{summaryLabel}</small>
+                    <small>{summaryLabel}{date < board.businessDate && availabilitySummaryByDate.get(date)?.capacityKnown === false ? <InfoHint text={availabilitySummaryByDate.get(date)?.capacityReason ?? "缺少该日期销售单元依据"}/> : null}</small>
                   </div>
                 );
               })}

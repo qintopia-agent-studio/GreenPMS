@@ -1016,6 +1016,8 @@ function assertAvailabilitySummary(
     integer(item.availableBeds, `${path}[${index}].availableBeds`);
     integer(item.paidOccupiedUnits, `${path}[${index}].paidOccupiedUnits`);
     integer(item.totalSellableUnits, `${path}[${index}].totalSellableUnits`);
+    if (item.capacityKnown !== undefined && typeof item.capacityKnown !== "boolean") fail(`${path}[${index}].capacityKnown`, "必须为布尔值");
+    if (item.capacityReason !== undefined && typeof item.capacityReason !== "string") fail(`${path}[${index}].capacityReason`, "必须为说明文字");
     integer(item.occupantCount, `${path}[${index}].occupantCount`);
   });
 }

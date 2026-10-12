@@ -58,15 +58,14 @@ export async function loadDashboardFuture(trx: Transaction<Database>, propertyId
     const day: DashboardFutureDay = { date, paid: 0, free: 0, maintenance: 0, review: 0, availableRooms: 0, availableBeds: 0, capacity: lodging.atomicUnits.length, quality: "COMPLETE" };
     for (const unit of lodging.atomicUnits) {
       const night = available.get(unit.id)?.nights.find(item => item.serviceDate === date);
-      if (!night) { day.review++; continue; }
-      if (night.available) { if (unit.kind === "ROOM") day.availableRooms!++; else day.availableBeds!++; continue; }
+      if (!night) { day.review++; if (unit.kind === "ROOM") day.availableRooms = null; else day.availableBeds = null; continue; }
+      if (night.available) { if (unit.kind === "ROOM" && day.availableRooms !== null) day.availableRooms++; else if (unit.kind === "BED" && day.availableBeds !== null) day.availableBeds++; continue; }
       const claim = night.blockingClaimIds.length === 1 ? byId.get(night.blockingClaimIds[0]!) : undefined;
       if (claim?.source_type === "MAINTENANCE" && claim.maintenance_status === "ACTIVE") day.maintenance++;
-      else if (claim?.order_id && claim.order_property_id === propertyId && lodging.validOrderIds.has(claim.order_id) && ((claim.status === "RESERVED" && claim.stay_status === "PLANNED") || (claim.status === "CHECKED_IN" && claim.stay_status === "IN_HOUSE"))) { if (claim.stay_type === "FREE") day.free++; else day.paid++; }
+      else if (claim?.order_id && claim.order_property_id === propertyId && ((claim.status === "RESERVED" && claim.stay_status === "PLANNED") || (claim.status === "CHECKED_IN" && claim.stay_status === "IN_HOUSE"))) { if (claim.stay_type === "FREE") day.free++; else day.paid++; }
       else day.review++;
     }
-    if (lodging.invalidFutureDates.has(date)) { day.quality = "PARTIAL"; day.availableRooms = null; day.availableBeds = null; day.review = Math.max(day.review, 1); }
-    else if (day.review) day.quality = "PARTIAL";
+    if (day.review || lodging.invalidFutureDates.has(date)) day.quality = "PARTIAL";
     return day;
   });
 }

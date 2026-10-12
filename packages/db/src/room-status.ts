@@ -1,3 +1,4 @@
+import { dailySalesCapacity } from "./daily-sales-capacity.ts";
 import { externalChannelCodes, nullLodgingSourceFields, roomStatusOrderSourceFields,
   roomStatusSourceMetadataDamageReason, ordinaryStayMoneyAttention,
   type LodgingSourceProjectionRow, type LodgingSourceFields } from "./lodging-integrity.ts";
@@ -900,7 +901,8 @@ function buildAvailabilitySummary(
   unitsById: Map<string, RoomStatusUnitDto>,
   dates: string[],
   intervalsByUnit: Map<string, RoomStatusIntervalDto[]>,
-  businessDate: string
+  businessDate: string,
+  capacity: ReturnType<typeof dailySalesCapacity>
 ): RoomStatusAvailabilitySummaryDto[] {
   let totalSellableUnits = 0;
   for (const room of rooms) {
@@ -913,6 +915,7 @@ function buildAvailabilitySummary(
     totalSellableUnits += room.childUnitIds.filter((childId) => unitsById.get(childId)?.active).length;
   }
   return dates.map((serviceDate) => {
+    const dailyCapacity = capacity.on(serviceDate);
     let availableRooms = 0;
     let availableBeds = 0;
     const paidOccupiedSources = new Map<string, number>();
@@ -944,7 +947,7 @@ function buildAvailabilitySummary(
           const sellableUnitCount = actualUnit?.kind === "ROOM" && actualUnit.salesMode === "BED_SPLIT"
             ? Math.max(1, actualUnit.childUnitIds.filter((childId) => unitsById.get(childId)?.active).length)
             : 1;
-          paidOccupiedSources.set(paidSourceKey, sellableUnitCount);
+          paidOccupiedSources.set(paidSourceKey, capacity.weight(interval.actualInventoryUnitId, serviceDate) ?? sellableUnitCount);
         }
         for (const occupant of interval.occupants) occupantIds.add(occupant.occupantId);
       }
@@ -954,7 +957,9 @@ function buildAvailabilitySummary(
       availableRooms,
       availableBeds,
       paidOccupiedUnits: [...paidOccupiedSources.values()].reduce((total, count) => total + count, 0),
-      totalSellableUnits,
+      totalSellableUnits: dailyCapacity.value ?? totalSellableUnits,
+      capacityKnown: dailyCapacity.value !== null,
+      capacityReason: dailyCapacity.reason,
       occupantCount: occupantIds.size
     };
   });
@@ -2601,7 +2606,9 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     const baseRooms = roomRows.filter((roomRow) => roomRow.active)
       .map((roomRow) => displayUnitsById.get(roomRow.id)!);
     const statusesByUnit = buildUnitStatuses(displayUnitsById, dates, builtIntervals.byUnit, businessDate);
-    const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit, businessDate);
+    const capacityChanges = await trx.selectFrom("room_catalog_changes").select(["created_at", "effect"]).where("property_id", "=", options.propertyId).execute();
+    const dailyCapacity = dailySalesCapacity(inventoryRows, capacityChanges, date => propertyLocalClockAt(property.timezone, date).date);
+    const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit, businessDate, dailyCapacity);
     const filterOptions = roomStatusFilterOptions(baseRooms, displayUnitsById, statusesByUnit);
     const filteredRooms = filterRoomSelections(baseRooms, displayUnitsById, filters, statusesByUnit);
     const totalRooms = filteredRooms.length;

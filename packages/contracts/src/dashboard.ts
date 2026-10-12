@@ -1,4 +1,4 @@
-export const dashboardDefinitionVersion = "2026-10-09.1";
+export const dashboardDefinitionVersion = "2026-10-12.2";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
@@ -88,7 +88,8 @@ export interface DashboardResponse {
   };
   future: DashboardFutureDay[];
   futureReviewCount: number;
-  filters: { buildings: string[]; roomTypes: string[] };
+  community: DashboardCommunity;
+  filters: { buildings: string[]; roomTypes: string[]; roomTypeLabels?: Record<string, string> };
   warnings: string[];
 }
 export interface DashboardDetailsResponse {
@@ -100,4 +101,24 @@ export interface DashboardDetailsResponse {
   total: number;
   page: number;
   pageSize: number;
+}
+
+export interface CommunityDay {
+  date: string; total: number | null; paid: number; volunteer: number; reception: number; otherFree: number; unlinked: number;
+  unclassified?: number;
+}
+export interface CommunityRecord {
+  orderId: string; date: string; nights: number; reason: string;
+  people?: number | null;
+  kind: "NEW" | "RETURN" | "RENEWAL" | "DUE" | "EARLY";
+}
+export interface DashboardCommunity {
+  current: CommunityDay;
+  trend: CommunityDay[];
+  visitors: number | null;
+  dailyAverage: number | null;
+  duration: Array<{ nights: number; current: number; all: number }>;
+  records: CommunityRecord[];
+  counts: Record<CommunityRecord["kind"], number>;
+  reasons: string[];
 }

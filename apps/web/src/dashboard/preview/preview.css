@@ -1,0 +1,23 @@
+.preview-main { min-width: 0; padding: 24px 32px; }
+.preview-shell .sidebar { padding: 20px 12px; }
+.preview-shell .sidebar-brand { padding: 4px 10px 18px; }
+.preview-shell .sidebar-brand small { font-size: 10px; margin-top: 7px; font-weight: 400; }
+.preview-disabled { opacity: .65; }
+.sample-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px dashed #aac1b3; padding: 10px 12px; border-radius: 6px; margin-bottom: 24px; color: var(--brand); background: #edf3ed; font-size: 11px; }
+.sample-banner > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.sample-banner span { color: var(--muted); font-size: 10px; }
+.sample-banner select { font-size: 11px; min-height: 30px; padding: 4px 8px; background: var(--surface); }
+@media (max-width: 700px) {
+  .preview-shell { display: flex; flex-direction: column; }
+  .preview-shell .sidebar { position: static; height: auto; padding: 12px 16px; flex-direction: row; align-items: center; border-bottom: 1px solid var(--border); }
+  .preview-shell .sidebar-brand-row { margin: 0; min-height: 0; }
+  .preview-shell .sidebar-brand { padding: 0; }
+  .preview-shell .sidebar-brand small, .preview-shell .primary-navigation, .preview-shell .sidebar-utilities > div { display: none; }
+  .preview-shell .sidebar-utilities { display: block; margin: 0 0 0 auto; }
+  .preview-shell .sidebar-property { border: 0; min-height: 0; padding: 0; font-size: 11px; }
+  .preview-shell label.sidebar-property { display: flex; }
+  .preview-main { padding: 18px 16px; }
+  .sample-banner { flex-wrap: wrap; margin-bottom: 20px; }
+  .sample-banner > div > span { flex-basis: 100%; }
+  .sample-banner select { font-size: 11px; }
+}
