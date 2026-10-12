@@ -87,7 +87,7 @@
 
 .dashboard-hint { position: relative; display: inline-flex; vertical-align: middle; color: inherit; font-size: 12px; font-weight: 400; }
 .dashboard-hint > button { border: 0; background: transparent; color: inherit; padding: 3px; display: inline-flex; cursor: pointer; }
-.dashboard-hint-bubble { position: fixed; z-index: 200; display: block; max-height: 75vh; overflow: auto; width: min(260px, 75vw); white-space: normal; text-align: left; padding: 12px; line-height: 1.7; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px #0002; }
+.dashboard-hint-bubble { position: fixed; z-index: 1000; display: block; box-sizing: border-box; max-height: 75vh; overflow: auto; width: max-content; max-width: min(260px, 80vw); white-space: normal; overflow-wrap: anywhere; text-align: left; padding: 8px 10px; font-size: 12px; font-weight: 400; line-height: 1.5; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12); }
 .dashboard-nowrap { white-space: nowrap; }
 .dashboard .dashboard-breakdown td:not(:first-child):not(:nth-child(2)), .dashboard .dashboard-breakdown th:not(:first-child):not(:nth-child(2)) { text-align: right; font-variant-numeric: tabular-nums; }
 .dashboard table td .dashboard-hint { vertical-align: baseline; }
@@ -215,7 +215,6 @@
 .dashboard-data-table p { line-height: 1.8; margin-top: 10px; overflow-wrap: anywhere; }
 .dashboard-data-table summary { padding: 5px 0; }
 .dashboard-hint > button { min-width: 22px; min-height: 22px; align-items: center; justify-content: center; }
-.dashboard-hint-bubble > button { display: block; margin-top: 10px; font-size: 11px; min-height: 30px; }
 @media (max-width: 1100px) {
   .community-history-grid { grid-template-columns: minmax(0, 1.3fr) minmax(265px, 1fr); gap: 16px; }
   .community-total, .community-composition { padding: 22px; }

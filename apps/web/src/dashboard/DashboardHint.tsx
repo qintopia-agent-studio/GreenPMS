@@ -20,6 +20,6 @@ export function DashboardHint({text,label="说明"}:{text:string;label?:string})
   },[open,text]);
   return <span className="dashboard-hint" onMouseEnter={show} onMouseLeave={delayHide}>
     <button ref={trigger} type="button" aria-label={label} aria-expanded={open} aria-describedby={open?id:undefined} onFocus={show} onBlur={e=>{if(!bubble.current?.contains(e.relatedTarget))delayHide()}} onClick={show}><CircleHelp size={14} aria-hidden="true" /></button>
-    {open?createPortal(<span ref={bubble} role="tooltip" id={id} className="dashboard-hint-bubble" style={position} onMouseEnter={cancel} onMouseLeave={delayHide} onFocus={cancel} onBlur={e=>{if(!bubble.current?.contains(e.relatedTarget)&&e.relatedTarget!==trigger.current)delayHide()}}>{text}<button type="button" className="button button-secondary" onClick={()=>{cancel();setOpen(false)}} aria-label="关闭说明">关闭</button></span>,document.body):null}
+    {open?createPortal(<span ref={bubble} role="tooltip" id={id} className="dashboard-hint-bubble" style={position} onMouseEnter={cancel} onMouseLeave={delayHide} onFocus={cancel} onBlur={e=>{if(!bubble.current?.contains(e.relatedTarget)&&e.relatedTarget!==trigger.current)delayHide()}}>{text}</span>,document.body):null}
   </span>;
 }

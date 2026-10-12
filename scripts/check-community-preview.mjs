@@ -43,7 +43,14 @@ try {
   await hint.click();
   await expect(page.getByRole("tooltip")).toBeVisible();
   await expect(page.getByRole("tooltip")).toContainText("每天有效销售单元数");
-  await page.getByRole("button", { name: "关闭说明", exact: true }).click();
+  await expect(page.getByRole("tooltip").getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("tooltip")).toHaveCSS("font-size", "12px");
+  await expect(page.getByRole("tooltip")).toHaveCSS("line-height", "18px");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await hint.click();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  await page.locator("h1").click();
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   await page.getByLabel("楼栋", { exact: true }).selectOption("A栋");
   await expect(page.getByLabel("楼栋", { exact: true })).toHaveValue("A栋");
