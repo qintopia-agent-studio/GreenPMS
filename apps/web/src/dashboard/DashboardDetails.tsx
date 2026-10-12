@@ -7,13 +7,13 @@ import { errorMessage, LoadingBlock } from "../uiBasic";
 import { dashboardDetailLabel } from "./dashboard-presentation";
 import { metricLabels, money, useDashboardRead } from "./dashboard-state";
 
-export function DashboardDetails({ propertyId, query, metric, asOf, onClose }: { propertyId: string; query: string; metric: DashboardMetric; asOf: string; onClose: () => void }) {
+export function DashboardDetails({ propertyId, query, metric, asOf, onClose, read = api.dashboardDetails }: { propertyId: string; query: string; metric: DashboardMetric; asOf: string; onClose: () => void; read?: typeof api.dashboardDetails }) {
   const [page, setPage] = useState(0);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { heading.current?.focus(); }, []);
   const parameters = new URLSearchParams(query);
   parameters.set("metric", metric); parameters.set("page", String(page)); parameters.set("asOf", asOf);
-  const { data, error, isLoading, mutate } = useDashboardRead(`dashboard-details:${propertyId}:${parameters}`, signal => api.dashboardDetails(propertyId, parameters.toString(), signal));
+  const { data, error, isLoading, mutate } = useDashboardRead(`dashboard-details:${propertyId}:${parameters}`, signal => read(propertyId, parameters.toString(), signal));
   return <section className="dashboard-panel dashboard-details" aria-labelledby="dashboard-detail-title">
     <div className="dashboard-section-heading"><div><h2 id="dashboard-detail-title" tabIndex={-1} ref={heading}>{metricLabels[metric]} · 组成明细</h2><p>只读查询 · 明细重新读取，不锁定原快照</p></div><button type="button" className="button button-secondary" onClick={onClose}><X size={16} aria-hidden="true" />关闭</button></div>
     {error ? <div role="alert" className="dashboard-notice">{errorMessage(error)} <button type="button" className="button button-secondary" onClick={() => void mutate()}>重试</button></div> : null}

@@ -7,6 +7,8 @@ describe("经营概览展示", () => {
     expect(dashboardRoomTypeLabel("shared_bath_quad")).toBe("四人间（公卫）");
     expect(dashboardRoomTypeLabel("private_bath_king")).toBe("大床房（独卫）");
     expect(dashboardRoomTypeLabel("未分配")).toBe("房型未分配");
+    expect(dashboardRoomTypeLabel("custom_room", { custom_room: "山景双人间" })).toBe("山景双人间");
+    expect(dashboardRoomTypeLabel("custom_room")).toBe("房型名称待核对");
     expect(dashboardDetailLabel({ metric: "PAID", label: "1 / shared_bath_double" })).toBe("1 / 两人间（公卫）");
     expect(dashboardDetailLabel({ metric: "FREE", label: "2 / shared_bath_quad" })).toBe("2 / 四人间（公卫）");
     expect(dashboardDetailLabel({ metric: "REVIEW", label: "住宿时间线待核对" })).toBe("住宿时间线待核对");

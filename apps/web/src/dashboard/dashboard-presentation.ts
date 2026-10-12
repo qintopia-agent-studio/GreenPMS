@@ -1,8 +1,10 @@
 import type { DashboardDetail, DashboardFutureDay } from "@qintopia/contracts";
 import { roomStatusRoomTypeLabel } from "../room-status/roomStatusPresentation";
 
-export function dashboardRoomTypeLabel(code: string): string {
-  return code === "未分配" ? "房型未分配" : roomStatusRoomTypeLabel(code);
+export function dashboardRoomTypeLabel(code: string, labels?: Record<string, string>): string {
+  if (labels?.[code]?.trim()) return labels[code]!;
+  const label = code === "未分配" ? "房型未分配" : roomStatusRoomTypeLabel(code);
+  return label === "未命名房型" || /^[a-z0-9_-]+$/i.test(label) ? "房型名称待核对" : label;
 }
 
 export function dashboardDetailLabel(item: Pick<DashboardDetail, "metric" | "label">): string {

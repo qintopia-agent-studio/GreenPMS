@@ -19,6 +19,7 @@ export function dashboardFixture(url: URL): DashboardResponse {
   const paid = url.searchParams.has("building") ? 3 : 6;
   const history = { paidUnitNights: paid * days, freeUnitNights: days, capacityUnitNights: 20 * days, occupancyRate: paid * 5, quality: "COMPLETE" as const, reviewCount: 0, reason: "界面回归样例：按当前目录口径" };
   return {
+    community: {current:{date:businessDate,total:0,paid:0,volunteer:0,reception:0,otherFree:0,unlinked:0},trend:[],visitors:0,dailyAverage:0,duration:[],records:[],counts:{NEW:0,RETURN:0,RENEWAL:0,DUE:0,EARLY:0},reasons:[]},
     propertyId, asOf, businessDate, futureReviewCount: 0, timezone: "Asia/Shanghai", currency: "CNY", definitionVersion: "2026-10-09.1",
     range: { from, to }, previousRange: { from: dateAfter(from, -days), to: dateAfter(from, -1) },
     history, previous: history, occupancyChangePoints: 0,

@@ -1,3 +1,4 @@
+import { dailySalesCapacity } from "./daily-sales-capacity.ts";
 import { sql, type Transaction } from "kysely";
 import type { DashboardDetail, DashboardQuery, DashboardRange } from "@qintopia/contracts";
 import { dashboardSource, dashboardDate, enumerateServiceDates, type DashboardStayNight } from "@qintopia/domain";
@@ -17,16 +18,7 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
   const unitsById = new Map(units.map(unit => [unit.id, unit]));
   const children = groupDashboardRows(units.filter(unit => unit.parent_room_id), unit => unit.parent_room_id!);
   const changes = await trx.selectFrom("room_catalog_changes").select(["created_at", "effect"]).where("property_id", "=", propertyId).execute();
-  const capacityChanges = changes.filter(change => {
-    const effect = change.effect as Record<string, unknown> | null;
-    const rename = effect?.roomRename as Record<string, unknown> | undefined;
-    const pureRename = effect?.action === "SAVE_ROOM" && rename
-      && typeof rename.roomId === "string" && typeof rename.beforeCode === "string" && typeof rename.afterCode === "string"
-      && Array.isArray(effect.insertUnits) && effect.insertUnits.length === 0
-      && Array.isArray(effect.retireUnitIds) && effect.retireUnitIds.length === 0;
-    if (pureRename) return false;
-    return !effect || (Array.isArray(effect.insertUnits) && effect.insertUnits.length > 0) || (Array.isArray(effect.retireUnitIds) && effect.retireUnitIds.length > 0) || ["SET_ROOM_ACTIVE", "SAVE_ROOM"].includes(String(effect.action));
-  });
+  const capacity = dailySalesCapacity(units, changes, localDate);
   const orders = await trx.selectFrom("orders as o").innerJoin("stays as s", "s.order_id", "o.id")
     .select(["o.id", "o.status", "o.stay_type", "o.arrival_date", "o.departure_date", "o.current_revision_id", "o.version", "o.member_id", "o.member_contract_id", "o.booking_channel_code", "s.id as stay_id", "s.status as stay_status"])
     .where("o.property_id", "=", propertyId).where("o.status", "in", ["CHECKED_IN", "CHECKED_OUT", "RESERVED"])
@@ -46,6 +38,7 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
   const invalidFutureDates = new Set<string>();
   const futureReviews: DashboardDetail[] = [];
   const validOrderIds = new Set<string>();
+  const arrangements = new Map<string, Array<{ inventoryUnitId: string; arrivalDate: string; departureDate: string }>>();
   for (const order of orders) {
     let reviewReason = "订单住宿时间线或履约证据不完整";
     try {
@@ -60,9 +53,9 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
         segments: byStay.get(order.stay_id) ?? [], amendments: normalized, revisions: byOrderRevision.get(order.id) ?? [], facts: byOrderFact.get(order.id) ?? [],
         activeTimeline: (byOrderActive.get(order.id) ?? []).map(row => ({ serviceDate: row.service_date, inventoryUnitId: row.inventory_unit_id })) });
       validOrderIds.add(order.id);
+      arrangements.set(order.id, lifecycle.effectiveArrangement.intervals);
       if (order.status === "RESERVED") continue;
       reviewReason = "历史房源或拆床容量证据不完整";
-      const orderNights: DashboardStayNight[] = [];
       for (const interval of lifecycle.effectiveArrangement.intervals) {
         const unit = unitsById.get(interval.inventoryUnitId);
         if (!unit) throw new Error("历史房源不可核对");
@@ -71,17 +64,20 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
         const from = interval.arrivalDate > range.from ? interval.arrivalDate : range.from;
         const until = interval.departureDate < businessDate ? interval.departureDate : businessDate;
         if (from >= until) continue;
-        const beds = children.get(unit.id) ?? [];
-        if (unit.kind === "ROOM" && beds.length && (beds.some(bed => !bed.active || localDate(bed.created_at) > from) || capacityChanges.some(change => localDate(change.created_at) >= from))) throw new Error("拆床容量的历史有效期不可核对");
-        const weight = unit.kind === "ROOM" && beds.length ? beds.length : 1;
-        for (const date of enumerateServiceDates(from, until)) orderNights.push({ orderId: order.id, date, unitId: unit.id, building: room.building_code ?? "未分配", roomType: unit.room_type_code ?? room.room_type_code ?? "未分配", source: dashboardSource(order), units: weight });
+        for (const date of enumerateServiceDates(from, until)) {
+          const weight = capacity.weight(unit.id, date);
+          if (weight === null) {
+            reviews.push({ id: `stay-review:${order.id}:${unit.id}:${date}`, date, metric: "REVIEW", label: "当日住宿量待核对", orderId: order.id, memberId: null, unitId: unit.id, units: null, amountMinor: null, currency: null, registeredAt: null, businessDate: date, reason: `${date} 的 ${room.building_code ?? "未分配楼栋"} / ${unit.code} 缺少有效销售结构依据；只排除这一天的住宿量，同单其他已知日期保留。` });
+            continue;
+          }
+          nights.push({ orderId: order.id, date, unitId: unit.id, building: room.building_code ?? "未分配", roomType: unit.room_type_code ?? room.room_type_code ?? "未分配", source: dashboardSource(order), units: weight });
+        }
       }
-      nights.push(...orderNights);
     } catch {
       if (order.status !== "RESERVED" && order.arrival_date <= range.to) reviews.push({ id: `stay-review:${order.id}`, date: order.arrival_date > range.from ? order.arrival_date : range.from, metric: "REVIEW", label: "住宿时间线待核对", orderId: order.id, memberId: null, unitId: null, units: null, amountMinor: null, currency: null, registeredAt: null, businessDate: null, reason: "有效住宿、履约或历史拆床容量证据不完整，未纳入已知单元夜" });
       const from = order.arrival_date > businessDate ? order.arrival_date : businessDate;
       const until = order.departure_date < futureUntil ? order.departure_date : futureUntil;
-      if (order.status !== "CHECKED_OUT" && from < until) {
+      if (!validOrderIds.has(order.id) && order.status !== "CHECKED_OUT" && from < until) {
         for (const date of enumerateServiceDates(from, until)) invalidFutureDates.add(date);
         futureReviews.push({ id: `future-review:${order.id}`, date: from, metric: "REVIEW", label: "未来库存待核对", orderId: order.id, memberId: null, unitId: null, units: null, amountMinor: null, currency: null, registeredAt: null, businessDate: null,
           reason: `${reviewReason}；影响 ${from} 至 ${dashboardDate(until, -1)}（含首尾日期）。请核对原订单，未将未知占用视为空房。` });
@@ -94,10 +90,7 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
     return (!query.building || (room?.building_code ?? "未分配") === query.building) && (!query.roomType || (unit.room_type_code ?? room?.room_type_code ?? "未分配") === query.roomType);
   }
   function capacityFor(from: string, days: number, query: DashboardQuery): { value: number | null; reason: string } {
-    const hasChanges = capacityChanges.some(change => localDate(change.created_at) >= from);
-    const incomplete = units.some(unit => !unit.active || localDate(unit.created_at) > from);
-    if (hasChanges || incomplete) return { value: null, reason: "目录增减、停用或拆床的历史容量尚不可完整还原，暂不展示比率" };
-    return { value: atomicUnits.filter(unit => matchingUnit(unit, query)).length * days, reason: "按当前目录口径；查询期间至今未发现容量变更，不等同于完整历史容量模型" };
+    return capacity.period(from, dashboardDate(from, days), query);
   }
-  return { units, atomicUnits, matchingUnit, capacityFor, nights, reviews, orders, validOrderIds, invalidFutureDates, futureReviews };
+  return { units, atomicUnits, matchingUnit, capacityFor, nights, reviews, orders, validOrderIds, invalidFutureDates, futureReviews, arrangements };
 }

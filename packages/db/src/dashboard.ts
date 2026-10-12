@@ -1,3 +1,4 @@
+import { loadDashboardCommunity } from "./dashboard-community.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import { dashboardDefinitionVersion, dashboardSources, DomainError, type DashboardQuery, type DashboardResponse, type DashboardDetailsResponse, type DashboardDetail, type DashboardMetric, type DashboardRange } from "@qintopia/contracts";
 import { aggregateDashboardMoney, aggregateDashboardStays, dashboardDate, dashboardRange, dashboardSource, enumerateServiceDates, inDashboardRange, type DashboardStayNight } from "@qintopia/domain";
@@ -10,6 +11,12 @@ import type { Database } from "./schema.ts";
 async function readDashboard(trx: Transaction<Database>, propertyId: string, query: DashboardQuery) {
   const property = await trx.selectFrom("properties").select(["id", "timezone", "currency", sql<Date>`transaction_timestamp()`.as("as_of")]).where("id", "=", propertyId).executeTakeFirst();
   if (!property) throw new DomainError("NOT_FOUND", "门店不存在", 404);
+  const [catalog, referenceTypes] = await Promise.all([
+    trx.selectFrom("room_catalog_state").select("snapshot").where("property_id", "=", propertyId).executeTakeFirst(),
+    trx.selectFrom("inventory_catalog_entries as entry").innerJoin("catalog_import_batches as batch", "batch.id", "entry.import_batch_id").select(["entry.type_code", "entry.type_name"]).where("batch.property_id", "=", propertyId).orderBy("batch.created_at").execute()
+  ]);
+  const snapshot = catalog?.snapshot as { types?: Array<{ code: string; name: string }> } | undefined;
+  const roomTypeLabels = Object.fromEntries([...referenceTypes.map(row => [row.type_code, row.type_name]), ...(snapshot?.types ?? []).map(row => [row.code, row.name])]);
   const asOf = property.as_of.toISOString();
   const businessDate = propertyLocalClockAt(property.timezone, property.as_of).date;
   const { range, previousRange, nights: periodDays } = dashboardRange(query, businessDate);
@@ -17,17 +24,23 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const lodging = await loadDashboardStays(trx, propertyId, businessDate, { from: previousRange.from, to: range.to }, futureUntil, property.timezone);
   const moneyFacts = await loadDashboardMoney(trx, propertyId, property.timezone, previousRange.from, dashboardDate(range.to, 1));
   const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency);
+  const community = await loadDashboardCommunity(trx, propertyId, range, businessDate, property.timezone);
   const future = await loadDashboardFuture(trx, propertyId, businessDate, futureUntil, lodging);
   const matches = (night: DashboardStayNight) => (!query.building || night.building === query.building) && (!query.roomType || night.roomType === query.roomType) && (!query.source || night.source === query.source);
   const filteredNights = lodging.nights.filter(matches);
   const orderById = new Map(lodging.orders.map(order => [order.id, order]));
-  const relevantReviews = (period: DashboardRange) => lodging.reviews.filter(review => {
+  const relevantReviews = (period: DashboardRange, selection = query) => lodging.reviews.filter(review => {
     const order = orderById.get(review.orderId!);
-    return order && order.arrival_date <= period.to && order.departure_date > period.from && (!query.source || dashboardSource(order) === query.source);
+    if (!order || (selection.source && dashboardSource(order) !== selection.source)) return false;
+    if (review.unitId) {
+      const unit = lodging.units.find(row => row.id === review.unitId);
+      return inDashboardRange(review.date, period) && (!unit || lodging.matchingUnit(unit, selection));
+    }
+    return order.arrival_date <= period.to && order.departure_date > period.from;
   });
   function totals(period: DashboardRange, selection = query, values = filteredNights) {
     const capacity = lodging.capacityFor(period.from, periodDays, selection);
-    return aggregateDashboardStays(values.filter(night => inDashboardRange(night.date, period)), capacity.value, relevantReviews(period).length, capacity.reason);
+    return aggregateDashboardStays(values.filter(night => inDashboardRange(night.date, period)), capacity.value, relevantReviews(period, selection).length, capacity.reason);
   }
   const history = totals(range), previous = totals(previousRange);
   const currentNights = filteredNights.filter(night => inDashboardRange(night.date, range));
@@ -52,12 +65,12 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
     sources: dashboardSources.map(source => ({ source, unitNights: currentNights.filter(night => night.source === source).reduce((n, row) => n + row.units, 0) })),
     money, previousMoney: aggregateDashboardMoney(moneyFacts.filter(fact => inDashboardRange(fact.date, previousRange)), property.currency),
     moneyTrend: enumerateServiceDates(range.from, dashboardDate(range.to, 1)).map(date => ({ date, money: aggregateDashboardMoney(moneyFacts.filter(fact => fact.date === date), property.currency) })),
-    current, future, futureReviewCount: lodging.futureReviews.length, filters: { buildings: [...new Set(lodging.units.map(unit => unit.building_code ?? "未分配"))].sort(), roomTypes: [...new Set(lodging.units.map(unit => unit.room_type_code ?? "未分配"))].sort() },
+    current, community, future, futureReviewCount: lodging.futureReviews.length, filters: { roomTypeLabels, buildings: [...new Set(lodging.units.map(unit => unit.building_code ?? "未分配"))].sort(), roomTypes: [...new Set(lodging.units.map(unit => unit.room_type_code ?? "未分配"))].sort() },
     warnings: [
-      ...(history.reviewCount ? [`${history.reviewCount} 单历史住宿缺少完整证据；图表只含可核对部分，待核对单不因楼栋或房型筛选被隐藏。`] : []),
+      ...(history.reviewCount ? [`${history.reviewCount} 条历史住宿事实缺少完整证据；保留其他已核对日期。能定位的房源缺项按分组筛选，房源不明的记录仍保留供核对。`] : []),
       ...(history.occupancyRate !== null && history.occupancyRate > 100 ? ["经营入住率超过100%，请核对重叠住宿与目录容量；未截断该异常。"] : []),
       ...(money.some(row => row.reviewCount > 0) ? ["资金来源未能全部分类，已隐藏对应币种净额；不能将可核对部分当作完整收退款。"] : []),
-      ...(future.some(day => day.quality !== "COMPLETE") ? ["未来存在待核对库存；未知占用不视为空房，无法确认完整性时隐藏可售数。"] : []),
+      ...(future.some(day => day.quality !== "COMPLETE") ? ["未来部分占用分类待核对；未知占用不视为空房。正式可售查询的已知间/床数仍保留，仅缺少依据的项目显示说明。"] : []),
       ...(current.guestReviewOrders ? ["部分在住订单缺少登记住宿人，人数仅包含可核对部分。"] : [])
     ] };
   const stayDetails: DashboardDetail[] = currentNights.map(night => ({ ...newDashboardDetail(`night:${night.orderId}:${night.date}`, night.date),

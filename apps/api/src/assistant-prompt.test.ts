@@ -28,6 +28,7 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "共居看板怎么查看续住和天数，分类有冲突是不是总人数也未知？", ids: ["dashboard"], facts: ["共居经营看板", "当前已住", "本期已结束", "点击“返回”", "分类冲突不抹掉已知总人数", "撤销登记不等于真实离店", "只排除该天未知住宿量", "记录计数不等同去重人数", "不把提前晚数当损失收入"] },
     { question: "在哪里看经营，收款是不是收入，能直接告诉我实时入住率吗？", ids: ["dashboard"], facts: ["/dashboard", "门店READ权限", "最多366天", "不筛门店资金", "按PMS登记时间", "非银行到账", "旧错误会员收款冲销计更正", "没有经营概览实时统计查询工具", "未知来源进入待核对", "不含离店日"] },
     { question: "客人付1000元，怎么分到两张或更多预订？", ids: ["payment-allocation"], facts: ["A订单分400元", "B订单选择同一流水分600元", "三个或更多订单", "逐单预览确认", "会员订单收款仍整笔独占"] },
     { question: "取消B以后是不是自动退款并能把600给C？", ids: ["cancel-no-show", "refunds"], facts: ["不会自动退款", "不会自动释放", "现金净额400元", "不能再拿600元"] },
