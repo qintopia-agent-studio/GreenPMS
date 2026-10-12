@@ -36,7 +36,13 @@ try {
   await page.getByRole("button", { name: "下一页", exact: true }).click();
   await expect(page.locator(".residence-drilldown .dashboard-pagination")).toContainText("2 /");
   await page.getByRole("button", { name: "返回", exact: true }).click();
+  await page.getByRole("button", { name: "资金与欠款", exact: true }).click();
+  await expect(page.locator("#money-chart-title")).toBeVisible();
+  await expect(page.locator(".resource-panel details")).toHaveCount(0);
+  await expect(page.locator(".resource-panel table")).toHaveCount(2);
   await page.getByRole("button", { name: "楼栋与房型", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "住宿来源结构", exact: true })).toBeVisible();
+  await expect(page.locator(".resource-panel details")).toHaveCount(0);
   await expect(page.locator(".dashboard-breakdown")).toContainText("公卫双人间");
   await expect(page.locator(".dashboard-breakdown")).not.toContainText("shared_bath_double");
   const hint = page.locator(".dashboard-breakdown thead .dashboard-hint button").first();
@@ -58,6 +64,8 @@ try {
   await page.getByRole("button", { name: "未来已订", exact: true }).click();
   await page.getByRole("button", { name: "未来30天", exact: true }).click();
   await expect(page.locator(".future-readout select option")).toHaveCount(30);
+  await expect(page.locator(".resource-panel details")).toHaveCount(0);
+  await expect(page.locator(".resource-panel tbody tr")).toHaveCount(30);
   await page.getByRole("button", { name: "近7天", exact: true }).click();
   await expect(page.locator(".dashboard-period-label")).toContainText("2026-10-05");
   await expect(page.locator(".community-total-value")).toContainText("42");
