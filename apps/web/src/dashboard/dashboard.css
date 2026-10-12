@@ -162,7 +162,14 @@
 .residence-duration-link small { display: block; font-size: 10px; font-weight: 400; color: var(--muted); margin-top: 5px; }
 .residence-note { margin-top: 12px; font-size: 10px; }
 .residence-drilldown { outline-offset: 4px; }
-.residence-drilldown-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; font-size: 12px; }
+.residence-drilldown-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; font-size: 12px; }
+.residence-back-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 14px; border: 1px solid var(--brand); border-radius: 6px; background: var(--brand-soft); color: var(--brand); font-size: 13px; font-weight: 650; cursor: pointer; }
+.residence-back-button:hover { background: var(--surface); box-shadow: 0 0 0 1px var(--brand); }
+.duration-explanation { display: flex; flex-direction: column; gap: 6px; margin: 16px 0 12px; padding: 14px; border-radius: 6px; background: var(--surface-muted); font-size: 12px; line-height: 1.7; }
+.duration-explanation strong { color: var(--text); font-weight: 600; }
+.duration-explanation p { margin: 0; color: var(--text); }
+.duration-explanation small { color: var(--muted); font-size: 11px; }
+.duration-band-note { font-size: 11px; line-height: 1.7; }
 .residence-records article { padding: 13px 0; border-bottom: 1px solid var(--border); }
 .residence-records article > div, .residence-records footer { display: flex; justify-content: space-between; gap: 12px; font-size: 10px; color: var(--muted); }
 .residence-records article > div > span { color: var(--brand); }
