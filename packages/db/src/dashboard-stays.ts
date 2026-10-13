@@ -1,3 +1,4 @@
+import { confirmedInventoryAvailability } from "./confirmed-inventory-availability.ts";
 import { dailySalesCapacity } from "./daily-sales-capacity.ts";
 import { sql, type Transaction } from "kysely";
 import type { DashboardDetail, DashboardQuery, DashboardRange } from "@qintopia/contracts";
@@ -18,7 +19,7 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
   const unitsById = new Map(units.map(unit => [unit.id, unit]));
   const children = groupDashboardRows(units.filter(unit => unit.parent_room_id), unit => unit.parent_room_id!);
   const changes = await trx.selectFrom("room_catalog_changes").select(["created_at", "effect"]).where("property_id", "=", propertyId).execute();
-  const capacity = dailySalesCapacity(units, changes, localDate);
+  const capacity = dailySalesCapacity(units, changes, localDate, confirmedInventoryAvailability(propertyId));
   const orders = await trx.selectFrom("orders as o").innerJoin("stays as s", "s.order_id", "o.id")
     .select(["o.id", "o.status", "o.stay_type", "o.arrival_date", "o.departure_date", "o.current_revision_id", "o.version", "o.member_id", "o.member_contract_id", "o.booking_channel_code", "s.id as stay_id", "s.status as stay_status"])
     .where("o.property_id", "=", propertyId).where("o.status", "in", ["CHECKED_IN", "CHECKED_OUT", "RESERVED"])

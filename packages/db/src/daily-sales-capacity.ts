@@ -1,4 +1,5 @@
-import { enumerateServiceDates } from "@qintopia/domain";
+import type { ConfirmedInventoryAvailability } from "./confirmed-inventory-availability.ts";
+import { parseLocalDate, enumerateServiceDates } from "@qintopia/domain";
 
 export interface CapacityUnit {
   id: string; kind: "ROOM" | "BED"; parent_room_id: string | null; active: boolean;
@@ -7,7 +8,7 @@ export interface CapacityUnit {
 export interface CapacityChange { created_at: Date; effect: unknown }
 type Selection = { building?: string; roomType?: string };
 /** Replay inventory lifecycle, never infer a historical opening date from today's active flag. */
-export function dailySalesCapacity(units: readonly CapacityUnit[], changes: readonly CapacityChange[], localDate: (date: Date) => string) {
+export function dailySalesCapacity(units: readonly CapacityUnit[], changes: readonly CapacityChange[], localDate: (date: Date) => string, confirmations: readonly ConfirmedInventoryAvailability[] = []) {
   const start = new Map<string, string>(), end = new Map<string, string>();
   const unsupported = new Set<string>();
   const knownIds = new Set(units.map(unit => unit.id));
@@ -27,6 +28,20 @@ export function dailySalesCapacity(units: readonly CapacityUnit[], changes: read
     for (const id of effect.retireUnitIds) end.set(id, day);
   }
   const byId = new Map(units.map(unit => [unit.id, unit]));
+  const evidenceStart = new Map<string, string>();
+  for (const evidence of confirmations) {
+    const unit = byId.get(evidence.unitId);
+    if (!unit || unit.kind !== "ROOM" || unit.parent_room_id !== null
+      || units.some(child => child.parent_room_id === unit.id)
+      || unit.created_at.toISOString() !== evidence.recordedAt) continue;
+    parseLocalDate(evidence.availableFrom);
+    parseLocalDate(evidence.confirmedOn);
+    const registeredDay = localDate(unit.created_at);
+    if (!evidence.source || evidence.availableFrom >= registeredDay
+      || (start.has(unit.id) && start.get(unit.id) !== registeredDay)) continue;
+    start.set(unit.id, evidence.availableFrom);
+    evidenceStart.set(unit.id, evidence.availableFrom);
+  }
   const active = (unit: CapacityUnit, date: string) => date >= (start.get(unit.id) ?? localDate(unit.created_at))
     && (end.has(unit.id) ? date < end.get(unit.id)! : unit.active);
   function matches(unit: CapacityUnit, selection: Selection) {
@@ -36,15 +51,17 @@ export function dailySalesCapacity(units: readonly CapacityUnit[], changes: read
   }
   function on(date: string, selection: Selection = {}) {
     const selected = units.filter(unit => matches(unit, selection));
+    const beforeEvidence = selected.filter(unit => evidenceStart.has(unit.id) && date < evidenceStart.get(unit.id)!);
     const issues = selected.filter(unit => !start.has(unit.id) && date < localDate(unit.created_at));
     const missingRetirement = selected.some(unit => !unit.active && !end.has(unit.id));
     const affectedChange = [...unsupported].some(day => day >= date);
-    const reason = issues.length ? `${date}：${issues.length}条房源记录早于系统登记日期，缺少启用日期依据`
+    const reason = beforeEvidence.length ? `${date}：${beforeEvidence.length}间补录房源早于已确认使用日期，尚无更早启用依据`
+      : issues.length ? `${date}：${issues.length}条房源记录早于系统登记日期，缺少启用日期依据`
       : missingRetirement ? `${date}：停用房源缺少有效变更记录` : affectedChange ? `${date}：房源变更记录不完整` : "按每日有效销售单元累计；维修、免费和占用不扣分母";
     const atoms = selected.filter(unit => active(unit, date) && (unit.kind === "BED"
       ? Boolean(byId.get(unit.parent_room_id!) && active(byId.get(unit.parent_room_id!)!, date))
       : !units.some(bed => bed.parent_room_id === unit.id && active(bed, date))));
-    return { value: issues.length || missingRetirement || affectedChange ? null : atoms.length, reason, atoms };
+    return { value: beforeEvidence.length || issues.length || missingRetirement || affectedChange ? null : atoms.length, reason, atoms };
   }
   function weight(id: string, date: string) {
     const unit = byId.get(id);
