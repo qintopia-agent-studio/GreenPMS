@@ -39,6 +39,24 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   function day(date: string): CommunityDay {
     const active = stays.filter(stay => relevant(stay, date));
     const unlinked = new Set(active.filter(stay => !stay.personKey).map((stay, i) => stay.registrationKey ?? `${stay.orderId}:${i}`)).size;
+    const registrations = new Map<string, Set<string>>();
+    let missingRegistration = false;
+    for (const stay of active) {
+      const key = stay.registrationKey ?? (stay.personKey ? `${stay.orderId}:${stay.personKey}` : null);
+      if (!key) { missingRegistration = true; continue; }
+      const categories = registrations.get(key) ?? new Set<string>();
+      categories.add(stay.free ? (stay.category ?? "OTHER") : "PAID");
+      registrations.set(key, categories);
+    }
+    const registered = { total: missingRegistration ? null : registrations.size, paid: 0, volunteer: 0, reception: 0, otherFree: 0 };
+    for (const categories of registrations.values()) {
+      if (categories.size !== 1) { registered.total = null; continue; }
+      const category = [...categories][0];
+      if (category === "PAID") registered.paid++;
+      else if (category === "VOLUNTEER") registered.volunteer++;
+      else if (category === "RECEPTION") registered.reception++;
+      else registered.otherFree++;
+    }
     const grouped = new Map<string, Set<string>>();
     for (const stay of active) if (stay.personKey) {
       const categories = grouped.get(stay.personKey) ?? new Set<string>();
@@ -54,7 +72,7 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
       else if (category === "RECEPTION") reception++;
       else otherFree++;
     }
-    return { date, total: unlinked ? null : grouped.size, paid, volunteer, reception, otherFree, unlinked, unclassified };
+    return { date, total: unlinked ? null : grouped.size, paid, volunteer, reception, otherFree, unlinked, unclassified, registered };
   }
   const inRange = (date: string) => date >= range.from && date <= range.to;
   const records = new Map<string, { record: CommunityRecord; people: Set<string>; unknown: boolean }>();

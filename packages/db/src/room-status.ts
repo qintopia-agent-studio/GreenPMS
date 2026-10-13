@@ -1,3 +1,4 @@
+import { confirmedInventoryAvailability } from "./confirmed-inventory-availability.ts";
 import { dailySalesCapacity } from "./daily-sales-capacity.ts";
 import { externalChannelCodes, nullLodgingSourceFields, roomStatusOrderSourceFields,
   roomStatusSourceMetadataDamageReason, ordinaryStayMoneyAttention,
@@ -2607,7 +2608,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .map((roomRow) => displayUnitsById.get(roomRow.id)!);
     const statusesByUnit = buildUnitStatuses(displayUnitsById, dates, builtIntervals.byUnit, businessDate);
     const capacityChanges = await trx.selectFrom("room_catalog_changes").select(["created_at", "effect"]).where("property_id", "=", options.propertyId).execute();
-    const dailyCapacity = dailySalesCapacity(inventoryRows, capacityChanges, date => propertyLocalClockAt(property.timezone, date).date);
+    const dailyCapacity = dailySalesCapacity(inventoryRows, capacityChanges, date => propertyLocalClockAt(property.timezone, date).date, confirmedInventoryAvailability(options.propertyId));
     const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit, businessDate, dailyCapacity);
     const filterOptions = roomStatusFilterOptions(baseRooms, displayUnitsById, statusesByUnit);
     const filteredRooms = filterRoomSelections(baseRooms, displayUnitsById, filters, statusesByUnit);
