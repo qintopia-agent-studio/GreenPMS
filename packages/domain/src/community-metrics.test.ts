@@ -111,3 +111,29 @@ describe("acceptance evidence edge cases",()=>{
   expect(c.trend[0]!.total).toBe(1);expect(c.trend[0]!.unclassified).toBe(1);expect(c.reasons.some(r=>r.includes("归属冲突"))).toBe(true);expect(c.current.total).toBe(0);
  });
 });
+
+describe("registration counts without identity documents", () => {
+  it("preserves current registration facts while leaving cross-order identity unknown", () => {
+    const a = { ...stay({personKey:null,current:true}), registrationKey:"registration-a" };
+    const b = { ...stay({personKey:null,current:true,free:true,category:"VOLUNTEER"}), registrationKey:"registration-b" };
+    const c = communityMetrics([a,b],[],range,"2026-01-02");
+    expect(c.current.total).toBeNull();
+    expect(c.current.registered).toEqual({total:2,paid:1,volunteer:1,reception:0,otherFree:0});
+    expect(c.visitors).toBeNull();
+  });
+});
+
+describe("registration evidence boundaries",()=>{
+ it("counts the same registration once across room segments and keeps distinct registrations",()=>{
+  const first={...stay({personKey:null,current:true}),registrationKey:"guest-a"};
+  const c=communityMetrics([first,{...first},{...first,registrationKey:"guest-b",free:true,category:"RECEPTION"}],[],range,"2026-01-02");
+  expect(c.current.registered).toMatchObject({total:2,paid:1,reception:1});
+ });
+ it("does not turn an unknown guest roster into one person",()=>{
+  const c=communityMetrics([stay({personKey:null,current:true})],[],range,"2026-01-02");expect(c.current.registered?.total).toBeNull();
+ });
+ it("distinguishes one identity in two orders from two registrations",()=>{
+  const c=communityMetrics([{...stay({current:true}),registrationKey:"a"},{...stay({orderId:"two",current:true}),registrationKey:"b"}],[],range,"2026-01-02");
+  expect(c.current.total).toBe(1);expect(c.current.registered?.total).toBe(2);
+ });
+});

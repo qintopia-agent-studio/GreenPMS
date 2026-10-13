@@ -106,6 +106,7 @@ export interface DashboardDetailsResponse {
 export interface CommunityDay {
   date: string; total: number | null; paid: number; volunteer: number; reception: number; otherFree: number; unlinked: number;
   unclassified?: number;
+  registered?: { total: number | null; paid: number; volunteer: number; reception: number; otherFree: number };
 }
 export interface CommunityRecord {
   orderId: string; date: string; nights: number; reason: string;

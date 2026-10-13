@@ -28,3 +28,11 @@ describe("dashboard future review response contract", () => {
     })).toBe(true);
   });
 });
+
+it("publishes registration counts separately from unresolved identity totals", () => {
+  const summary = dashboardFixture(new URL("http://localhost/api/v1/properties/demo/dashboard"));
+  summary.community.current = {date:summary.businessDate,total:null,paid:0,volunteer:0,reception:0,otherFree:0,unlinked:36,registered:{total:36,paid:31,volunteer:5,reception:0,otherFree:0}};
+  expect(Value.Check(DashboardResponseSchema,summary)).toBe(true);
+  summary.community.current.registered!.total=-1;
+  expect(Value.Check(DashboardResponseSchema,summary)).toBe(false);
+});
