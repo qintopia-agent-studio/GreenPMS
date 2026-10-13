@@ -2,6 +2,13 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.12.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.12.0...v1.12.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **dashboard:** 恢复登记人数与补录房源历史入住率 ([#75](https://github.com/qintopia-agent-studio/GreenPMS/issues/75)) ([3c2c573](https://github.com/qintopia-agent-studio/GreenPMS/commit/3c2c5732c83b55f424bcb9e24a520b523dab7dd9))
+
 ## [1.12.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.11.1...v1.12.0) (2026-10-12)
 
 
