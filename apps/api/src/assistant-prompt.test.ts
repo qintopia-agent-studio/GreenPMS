@@ -86,3 +86,9 @@ describe("versioned employee operating knowledge", () => {
     expect(prompt).not.toContain("docs/implementation/");
   });
 });
+
+
+it("当前人数与今日经营指标提供正确的范围和金额口径", () => {
+ const topic=assistantKnowledgeTopics.find(topic=>topic.id==="dashboard")!;
+ for(const text of ["今日入住", "今日新增订单", "今日登记收款", "含补录", "未扣退款", "不将渠道应结金额当作已收款", "组成明细"]) expect(topic.content).toContain(text);
+});

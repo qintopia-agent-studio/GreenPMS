@@ -25,7 +25,7 @@ export const DashboardResponseSchema = Type.Object({ propertyId: Id, asOf: Type.
   stayTrend: Type.Array(Type.Object({ date: LocalDate, paid: count, free: count, capacity: nullable(count), quality })),
   breakdown: Type.Array(Type.Object({ building: Type.String(), roomType: Type.String(), ...totals })), sources: Type.Array(Type.Object({ source, unitNights: count })),
   money: Type.Array(money), previousMoney: Type.Array(money), moneyTrend: Type.Array(Type.Object({ date: LocalDate, money: Type.Array(money) })),
-  current: Type.Object({ paidGuests: count, freeGuests: count, guestReviewOrders: count, arrivals: count, departures: count, overdue: count, debts: Type.Array(balance), retained: Type.Array(balance) }),
+  current: Type.Object({ todayOrders: count, todayCollections: Type.Array(balance), todayCollectionReviewCount: count, paidGuests: count, freeGuests: count, guestReviewOrders: count, arrivals: count, departures: count, overdue: count, debts: Type.Array(balance), retained: Type.Array(balance) }),
   community,
   futureReviewCount: count,
   future: Type.Array(Type.Object({ date: LocalDate, paid: count, free: count, maintenance: count, review: count, availableRooms: nullable(count), availableBeds: nullable(count), capacity: count, quality })),

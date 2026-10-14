@@ -183,7 +183,7 @@
 .duration-bars i { display: block; height: 100%; background: var(--brand); }
 .duration-bars b { min-width: 30px; text-align: right; font-weight: 500; }
 .resource-section { padding-top: 6px; }
-.dashboard-current-balances { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+.dashboard-current-balances { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
 .dashboard-current-balances .dashboard-current-card > span { display: flex; align-items: center; gap: 8px; }
 .dashboard-source-panel { margin-top: 24px; }
 .resource-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 9px; background: var(--surface); padding: 21px 0; margin-bottom: 18px; }
@@ -228,6 +228,7 @@
 .dashboard-data-table summary { padding: 5px 0; }
 .dashboard-hint > button { min-width: 22px; min-height: 22px; align-items: center; justify-content: center; }
 @media (max-width: 1100px) {
+  .dashboard-current-balances { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .community-history-grid { grid-template-columns: minmax(0, 1.3fr) minmax(265px, 1fr); gap: 16px; }
   .community-total, .community-composition { padding: 22px; }
   .community-today { padding: 0 18px; }

@@ -23,7 +23,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const futureUntil = dashboardDate(businessDate, query.futureDays ?? 14);
   const lodging = await loadDashboardStays(trx, propertyId, businessDate, { from: previousRange.from, to: range.to }, futureUntil, property.timezone);
   const moneyFacts = await loadDashboardMoney(trx, propertyId, property.timezone, previousRange.from, dashboardDate(range.to, 1));
-  const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency);
+  const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency, property.timezone);
   const community = await loadDashboardCommunity(trx, propertyId, range, businessDate, property.timezone);
   const future = await loadDashboardFuture(trx, propertyId, businessDate, futureUntil, lodging);
   const matches = (night: DashboardStayNight) => (!query.building || night.building === query.building) && (!query.roomType || night.roomType === query.roomType) && (!query.source || night.source === query.source);

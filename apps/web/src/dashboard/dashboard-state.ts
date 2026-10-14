@@ -3,7 +3,7 @@ import useSWR from "swr";
 import type { DashboardMetric, DashboardSource } from "@qintopia/contracts";
 
 export const sourceLabels: Record<DashboardSource, string> = { WECOM: "企业微信", YOUMUDAO: "游牧岛", CTRIP: "携程", MEITUAN: "美团", MEMBER: "会员权益", FREE: "免费住宿", UNKNOWN: "历史未记录" };
-export const metricLabels: Record<DashboardMetric, string> = { PAID: "付费住宿单元夜", FREE: "免费占用单元夜", MONEY: "收退款登记", REVIEW: "待核对事实", DEBT: "住宿欠款", RETAINED: "客户留存待用", IN_HOUSE: "当前在住", ARRIVAL: "今日待到", DEPARTURE: "今日待离", OVERDUE: "逾期履约" };
+export const metricLabels: Record<DashboardMetric, string> = { TODAY_ORDERS: "今日新增订单", TODAY_COLLECTIONS: "今日登记收款", PAID: "付费住宿单元夜", FREE: "免费占用单元夜", MONEY: "收退款登记", REVIEW: "待核对事实", DEBT: "住宿欠款", RETAINED: "客户留存待用", IN_HOUSE: "当前在住", ARRIVAL: "今日待到", DEPARTURE: "今日待离", OVERDUE: "逾期履约" };
 export function money(value: string | null | undefined, currency = "CNY") {
   if (value == null) return "—";
   const amount = BigInt(value);

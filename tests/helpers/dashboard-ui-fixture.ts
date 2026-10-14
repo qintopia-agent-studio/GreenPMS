@@ -27,7 +27,7 @@ export function dashboardFixture(url: URL): DashboardResponse {
     breakdown: [{ building: "一号楼", roomType: "标准双人间", ...history }],
     sources: [{ source: "WECOM", unitNights: paid * days }, { source: "FREE", unitNights: days }],
     money: [money], previousMoney: [money], moneyTrend: [{ date: to, money: [money] }],
-    current: { paidGuests: propertyId === "ui-b" ? 2 : 12, freeGuests: 1, guestReviewOrders: 0, arrivals: 3, departures: 2, overdue: 1, debts: [{ currency: "CNY", amountMinor: "40000", count: 2 }], retained: [{ currency: "CNY", amountMinor: "20000", count: 1 }] },
+    current: { todayOrders: 3, todayCollections: [{currency:"CNY",amountMinor:"27720",count:1}], todayCollectionReviewCount: 0, paidGuests: propertyId === "ui-b" ? 2 : 12, freeGuests: 1, guestReviewOrders: 0, arrivals: 3, departures: 2, overdue: 1, debts: [{ currency: "CNY", amountMinor: "40000", count: 2 }], retained: [{ currency: "CNY", amountMinor: "20000", count: 1 }] },
     future: Array.from({ length: Number(url.searchParams.get("futureDays") ?? 14) }, (_, index) => ({ date: dateAfter(businessDate, index), paid: 6, free: 1, maintenance: 1, review: 0, availableRooms: 5, availableBeds: 7, capacity: 20, quality: "COMPLETE" })),
     filters: { buildings: ["一号楼", "二号楼"], roomTypes: ["标准双人间", "六人床位房"] }, warnings: []
   };
