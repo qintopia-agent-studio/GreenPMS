@@ -1,3 +1,4 @@
+import { dashboardDate } from "@qintopia/domain";
 import type { Transaction, Selectable } from "kysely";
 import type { DashboardRange } from "@qintopia/contracts";
 import type { Database } from "./schema.ts";
@@ -28,7 +29,7 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
   const initialCommands = new Map(amendments.filter(row => ["CREATE_ORDER", "BACKFILL_COMPLETED_STAY", "CREATE"].includes(row.amendment_type)).map(row => [row.order_id, row.command_id]));
   const oldest=orders.reduce((d,o)=>o.arrival_date<d?o.arrival_date:d,range.from);
   // Load authoritative final arrangements over the complete observed history, not just the chart window.
-  const lodging=await loadDashboardStays(trx,propertyId,today,{from:oldest,to:range.to},today,timezone);
+  const lodging=await loadDashboardStays(trx,propertyId,today,{from:oldest,to:range.to},dashboardDate(today,1),timezone);
   const stays:CommunityStay[]=[];
   const planned:CommunityStay[]=[];
   for(const order of orders){

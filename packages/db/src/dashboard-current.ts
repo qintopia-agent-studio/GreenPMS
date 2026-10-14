@@ -1,3 +1,4 @@
+import { loadDashboardToday } from "./dashboard-today.ts";
 import { sql, type Transaction } from "kysely";
 import type { DashboardBalance, DashboardDetail, DashboardFutureDay, DashboardResponse } from "@qintopia/contracts";
 import { enumerateServiceDates } from "@qintopia/domain";
@@ -12,7 +13,7 @@ function balances(items: DashboardDetail[], currency: string): DashboardBalance[
   for (const item of items) { const code = item.currency!; const value = grouped.get(code) ?? { amount: 0n, count: 0 }; value.amount += BigInt(item.amountMinor!); value.count++; grouped.set(code, value); }
   return [...grouped].map(([code, value]) => ({ currency: code, amountMinor: String(value.amount), count: value.count }));
 }
-export async function loadDashboardCurrent(trx: Transaction<Database>, propertyId: string, businessDate: string, currency: string) {
+export async function loadDashboardCurrent(trx: Transaction<Database>, propertyId: string, businessDate: string, currency: string, timezone: string) {
   const debtRows = (await sql<{ id: string; currency: string; amount: string }>`SELECT o.id, p.currency,
     (p.current_contract_amount_minor - COALESCE((SELECT SUM(f.net_effect_minor) FROM collection_facts f WHERE f.order_id=o.id),0))::text AS amount
     FROM orders o JOIN pricing_revisions p ON p.id=o.current_revision_id
@@ -29,8 +30,9 @@ export async function loadDashboardCurrent(trx: Transaction<Database>, propertyI
     (SELECT count(DISTINCT guest.id)::text FROM active_order_occupants guest WHERE guest.order_id=o.id) AS guests
     FROM orders o JOIN stays s ON s.order_id=o.id WHERE o.property_id=${propertyId}
       AND ((o.status='CHECKED_IN' AND s.status='IN_HOUSE') OR (o.status='RESERVED' AND s.status='PLANNED' AND o.arrival_date<=${businessDate}::date))`.execute(trx)).rows;
-  const current: DashboardResponse["current"] = { paidGuests: 0, freeGuests: 0, guestReviewOrders: 0, arrivals: 0, departures: 0, overdue: 0, debts: balances(debts, currency), retained: balances(retained, currency) };
-  const details: DashboardDetail[] = [...debts, ...retained];
+  const { details: todayDetails, ...today } = await loadDashboardToday(trx, propertyId, businessDate, timezone, currency);
+  const current: DashboardResponse["current"] = { ...today, paidGuests: 0, freeGuests: 0, guestReviewOrders: 0, arrivals: 0, departures: 0, overdue: 0, debts: balances(debts, currency), retained: balances(retained, currency) };
+  const details: DashboardDetail[] = [...todayDetails, ...debts, ...retained];
   for (const row of rows) {
     const base = { ...newDashboardDetail(`current:${row.id}`, businessDate), orderId: row.id };
     if (row.status === "CHECKED_IN") {

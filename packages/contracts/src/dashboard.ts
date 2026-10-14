@@ -1,8 +1,8 @@
-export const dashboardDefinitionVersion = "2026-10-12.2";
+export const dashboardDefinitionVersion = "2026-10-14.1";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
-export const dashboardMetrics = ["PAID", "FREE", "MONEY", "REVIEW", "DEBT", "RETAINED", "IN_HOUSE", "ARRIVAL", "DEPARTURE", "OVERDUE"] as const;
+export const dashboardMetrics = ["PAID", "FREE", "MONEY", "REVIEW", "DEBT", "RETAINED", "IN_HOUSE", "ARRIVAL", "DEPARTURE", "OVERDUE", "TODAY_ORDERS", "TODAY_COLLECTIONS"] as const;
 export type DashboardMetric = typeof dashboardMetrics[number];
 export interface DashboardQuery {
   from?: string;
@@ -77,6 +77,9 @@ export interface DashboardResponse {
   previousMoney: DashboardMoney[];
   moneyTrend: Array<{ date: string; money: DashboardMoney[] }>;
   current: {
+    todayOrders: number;
+    todayCollections: DashboardBalance[];
+    todayCollectionReviewCount: number;
     paidGuests: number;
     freeGuests: number;
     guestReviewOrders: number;
