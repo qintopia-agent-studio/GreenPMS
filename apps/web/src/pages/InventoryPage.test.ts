@@ -2308,3 +2308,11 @@ describe("Room-status backfill entry routing", () => {
     }, target)).toBe(false);
   });
 });
+
+
+it("渠道新建接受角分但不放开直订人工价", () => {
+  const input = { bookingChannelCode: "YOUMUDAO" as const, channelOrderReference: "channel-27720", targetAmountYuan: "277.20", policyBaseAmountMinor: 30000, channelPriceDifferenceReason: "", manualPriceAdjustmentReason: "" };
+  expect(createOrderPricingDraft(input)).toMatchObject({ complete: true, targetCurrentContractAmountMinor: 27720 });
+  expect(createOrderPricingDraft({ ...input, targetAmountYuan: "277.201" }).complete).toBe(false);
+  expect(createOrderPricingDraft({ ...input, bookingChannelCode: "WECOM", channelOrderReference: "", manualPriceAdjustmentReason: "更正" }).complete).toBe(false);
+});

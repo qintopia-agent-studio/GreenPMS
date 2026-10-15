@@ -1,3 +1,4 @@
+import { parseChannelYuanToMinor } from "../channel-amount";
 import { useMemberChoices } from "../useMemberChoices";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import { AlertTriangle, FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
@@ -428,8 +429,10 @@ export function createOrderPricingDraft(input: {
   channelPriceDifferenceReason: string;
   manualPriceAdjustmentReason: string;
 }) {
-  const targetCurrentContractAmountMinor = parseYuanAmountToMinor(input.targetAmountYuan);
   const externalChannel = input.bookingChannelCode !== "" && input.bookingChannelCode !== "WECOM";
+  const targetCurrentContractAmountMinor = externalChannel
+    ? parseChannelYuanToMinor(input.targetAmountYuan)
+    : parseYuanAmountToMinor(input.targetAmountYuan);
   const differenceFromPolicyMinor = targetCurrentContractAmountMinor === undefined
     ? undefined
     : targetCurrentContractAmountMinor - input.policyBaseAmountMinor;
@@ -2406,10 +2409,10 @@ function QuoteWorkbench({
                       <input
                         value={targetContractAmountYuan}
                         onChange={(event) => setTargetContractAmountYuan(event.target.value)}
-                        inputMode="numeric"
-                        placeholder="0"
-                        min={bookingChannelCode === "WECOM" ? 0 : 1}
-                        pattern={bookingChannelCode === "WECOM" ? "[0-9]+(?:\\.00)?" : "[1-9][0-9]*(?:\\.00)?"}
+                        inputMode={bookingChannelCode === "WECOM" ? "numeric" : "decimal"}
+                        placeholder={bookingChannelCode === "WECOM" ? "0" : "例如 277.20"}
+                        min={bookingChannelCode === "WECOM" ? 0 : 0.01}
+                        pattern={bookingChannelCode === "WECOM" ? "[0-9]+(?:\\.00)?" : "[0-9]+(?:\\.[0-9]{1,2})?"}
                         required
                         data-testid="target-contract-amount"
                       />

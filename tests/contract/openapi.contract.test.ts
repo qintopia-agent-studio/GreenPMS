@@ -362,8 +362,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect((createInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
       type: "integer",
       minimum: 0,
-      maximum: 2_147_483_600,
-      multipleOf: 100
+      maximum: 2_147_483_600
     });
     expect((createInput.properties as Record<string, JsonSchema>).channelPriceDifferenceReason).toMatchObject({
       type: "string",
@@ -380,8 +379,7 @@ describe("OpenAPI 3.1 command contract", () => {
       expect((stayChangeInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
         type: "integer",
         minimum: 0,
-        maximum: 2_147_483_600,
-        multipleOf: 100
+        maximum: 2_147_483_600
       });
       expect((stayChangeInput.properties as Record<string, JsonSchema>).channelPriceDifferenceReason).toMatchObject({
         type: "string", minLength: 1, maxLength: 1000
@@ -444,8 +442,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect((repriceInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
       type: "integer",
       minimum: 0,
-      maximum: Number.MAX_SAFE_INTEGER,
-      multipleOf: 100
+      maximum: 2_147_483_600
     });
   });
 

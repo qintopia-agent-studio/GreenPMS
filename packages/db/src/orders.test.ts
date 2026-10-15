@@ -1290,3 +1290,17 @@ describe("projectOrderLifecycle", () => {
     expect(() => projectOrderLifecycle(cancelled)).toThrow(/终态订单包含不允许/);
   });
 });
+
+
+it("已退房渠道订单可审计更正金额，取消订单和直订退房订单仍关闭", () => {
+  for (const channel of ["YOUMUDAO", "CTRIP", "MEITUAN"] as const) {
+    const actions = orderAllowedActions("WRITE", "CHECKED_OUT", false, undefined, false, channel, false, false, undefined, allOrderActionGrants);
+    expect(actions.find(action => action.code === "REPRICE_ORDER")?.enabled).toBe(true);
+    expect(orderAllowedActions("READ", "CHECKED_OUT", false, undefined, false, channel, false, false, undefined, allOrderActionGrants)).toEqual([]);
+    expect(orderAllowedActions("WRITE", "CHECKED_OUT", false, undefined, false, channel, false, false, undefined, new Set()).some(action=>action.code==="REPRICE_ORDER")).toBe(false);
+    for (const status of ["CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"]) {
+      expect(orderAllowedActions("WRITE",status,false,undefined,false,channel,false,false,undefined,allOrderActionGrants).find(action=>action.code==="REPRICE_ORDER")?.enabled).toBe(false);
+    }
+  }
+  expect(orderAllowedActions("WRITE","CHECKED_OUT",false,undefined,false,"WECOM",false,false,undefined,allOrderActionGrants).find(action=>action.code==="REPRICE_ORDER")?.enabled).toBe(false);
+});

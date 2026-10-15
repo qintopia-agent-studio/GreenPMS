@@ -1,3 +1,4 @@
+import { parseChannelYuanToMinor, isExternalBookingChannel } from "../channel-amount";
 import { CalendarMinus2, CalendarPlus2, CalendarRange, LoaderCircle, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
@@ -70,9 +71,9 @@ function draftString(input: Record<string, unknown> | undefined, key: string): s
   return typeof value === "string" ? value : "";
 }
 
-function draftAmountYuan(input: Record<string, unknown> | undefined): string {
+function draftAmountYuan(input: Record<string, unknown> | undefined, channel: unknown): string {
   const value = input?.targetCurrentContractAmountMinor;
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value % 100 === 0
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 2_147_483_600 && (isExternalBookingChannel(channel) || value % 100 === 0)
     ? String(value / 100)
     : "";
 }
@@ -86,7 +87,7 @@ export function stayDateChangeInitialDraft(
   const recoveredMatches = recovered?.commandType === action
     || (mode === "ADJUST_DEPARTURE" && (recovered?.commandType === "EXTEND_STAY" || recovered?.commandType === "SHORTEN_STAY"));
   const recoveredInput = recoveredMatches ? recovered?.input : undefined;
-  const targetContractYuan = draftAmountYuan(recoveredInput);
+  const targetContractYuan = draftAmountYuan(recoveredInput, view.order.booking_channel_code);
   return {
     newArrivalDate: action === "RESCHEDULE_STAY"
       ? draftString(recoveredInput, "newArrivalDate") || view.effectiveArrangement.arrivalDate
@@ -241,8 +242,8 @@ export function buildStayDateChangeRequest(
   const channel = view.order.booking_channel_code;
   const externalChannelStay = !memberStay && !freeStay && Boolean(channel && externalChannels.has(channel));
   if (externalChannelStay) {
-    const target = wholeYuanMinor(draft.targetContractYuan);
-    if (target === undefined) throw new Error("请重新填写本单渠道应结金额，金额必须是支持范围内的非负整元");
+    const target = parseChannelYuanToMinor(draft.targetContractYuan);
+    if (target === undefined) throw new Error("请重新填写本单渠道应结金额，金额必须在支持范围内且最多两位小数");
     input.targetCurrentContractAmountMinor = target;
     if (draft.channelPriceDifferenceReason.trim()) {
       input.channelPriceDifferenceReason = draft.channelPriceDifferenceReason.trim();
@@ -484,7 +485,7 @@ export function StayDateChangeDrawer({
         <h3 id="channel-repricing-heading">渠道订单金额</h3>
         <p>旧金额不会自动继承。请按本次渠道合同重新填写，系统将在核对时与政策基础金额比较。</p>
         <div className="form-grid">
-          <label>本单渠道应结金额（元）<input type="number" min="0" max={maxWholeYuan} step="1" inputMode="numeric" value={draft.targetContractYuan} onChange={(event) => update({ targetContractYuan: event.target.value })} required data-testid="stay-date-channel-amount" /></label>
+          <label>本单渠道应结金额（元）<input type="number" min="0" max={maxWholeYuan} step="0.01" inputMode="decimal" value={draft.targetContractYuan} onChange={(event) => update({ targetContractYuan: event.target.value })} required data-testid="stay-date-channel-amount" /></label>
           <label>渠道价格差异说明<textarea ref={channelReasonRef} value={draft.channelPriceDifferenceReason} onChange={(event) => update({ channelPriceDifferenceReason: event.target.value })} maxLength={1000} rows={2} aria-invalid={missingChannelReason || undefined} aria-describedby={missingChannelReason ? "channel-difference-hint channel-difference-error" : "channel-difference-hint"} data-testid="stay-date-channel-reason" /></label>
           {missingChannelReason ? <small id="channel-difference-error" className="stay-date-channel-error">本次金额差异超过 15%，请补填渠道价格差异说明。</small> : null}
           <small id="channel-difference-hint">与政策基础金额差异超过 15% 时必须填写；核对页会显示比较结果。</small>

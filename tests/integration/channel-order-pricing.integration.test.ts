@@ -461,4 +461,31 @@ describe.sequential("channel order amount and atomic CREATE_ORDER on PostgreSQL"
     expect(await db.selectFrom("pricing_revisions").select("id").execute()).toHaveLength(1);
     expect(await db.selectFrom("command_executions").select("id").where("command_type", "=", "REPRICE_ORDER").execute()).toHaveLength(0);
   });
+
+  it("persists channel cents through create and audited reprice without recording payment facts", async () => {
+    const quote = await transientQuote(23);
+    const created = await confirm(await preview(createInput(quote.quoteId, {
+      channel: "YOUMUDAO", target: 27720, channelReason: "平台确认应结金额277.20元"
+    }), "channel-cents"), "channel-cents");
+    const orderId = created.receipt.result!.orderId as string;
+    const before = await getOrderView(db, orderId);
+    expect(before.amounts.currentContractAmount.minorUnits).toBe(27720);
+    const prepared = await preview({ commandType:"REPRICE_ORDER", input:{propertyId:demo.propertyId,orderId,targetCurrentContractAmountMinor:161028}},"channel-cents-correction");
+    const confirmation: ConfirmRequest = { propertyId:demo.propertyId,commandType:"REPRICE_ORDER",confirmation:true,
+      expectedEffectHash:prepared.preview.effectHash,reason:{code:"REPRICE_ORDER",note:"核对平台原始应结金额1610.28元"} };
+    const requestMetadata=metadata("channel-cents-correction-confirm");
+    const receipt=await confirmCommandPreview(db,principal,prepared.preview.previewId,confirmation,requestMetadata);
+    const replay=await confirmCommandPreview(db,principal,prepared.preview.previewId,confirmation,requestMetadata);
+    expect(replay.result).toEqual(receipt.result);
+    const after=await getOrderView(db,orderId);
+    expect(after.amounts.currentContractAmount.minorUnits).toBe(161028);
+    expect(after.order.status).toBe(before.order.status);
+    const revisions=await db.selectFrom("pricing_revisions").select(["current_contract_amount_minor","pricing_basis","manual_adjustment_minor"]).where("order_id","=",orderId).orderBy("revision_no").execute();
+    expect(revisions).toEqual([
+      {current_contract_amount_minor:27720,pricing_basis:"CHANNEL_CONTRACT",manual_adjustment_minor:0},
+      {current_contract_amount_minor:161028,pricing_basis:"CHANNEL_CONTRACT",manual_adjustment_minor:0}
+    ]);
+    expect(await db.selectFrom("collection_facts").select("fact_id").where("order_id","=",orderId).execute()).toHaveLength(0);
+  });
+
 });

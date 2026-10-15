@@ -403,3 +403,13 @@ describe("stay date change drawer rules", () => {
     expect(stayDateChangeActionState(checkedIn, "SHORTEN_STAY")?.reason).toContain("尚未生效的换房安排");
   });
 });
+
+
+it("渠道改期命令与恢复草稿保留角分", () => {
+  const current = view();
+  const draft = { ...stayDateChangeInitialDraft("RESCHEDULE_STAY", current), newArrivalDate:"2026-08-03", newDepartureDate:"2026-08-05", reason:"改期", targetContractYuan:"1610.28", channelPriceDifferenceReason:"平台确认" };
+  const request = buildStayDateChangeRequest("RESCHEDULE_STAY",current,draft);
+  expect(request.input.targetCurrentContractAmountMinor).toBe(161028);
+  expect(stayDateChangeInitialDraft("RESCHEDULE_STAY",current,request).targetContractYuan).toBe("1610.28");
+  expect(() => buildStayDateChangeRequest("RESCHEDULE_STAY",current,{...draft,targetContractYuan:"1610.281"})).toThrow();
+});

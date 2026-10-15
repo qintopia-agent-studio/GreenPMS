@@ -89,7 +89,8 @@ export const currentMigrationNames = [
   "066_room_operational_codes.sql",
   "067_payment_event_delivery.sql",
   "069_payment_allocations_retained_funds.sql",
-  "070_payment_allocation_events.sql"
+  "070_payment_allocation_events.sql",
+  "071_channel_amount_precision.sql"
 ] as const;
 
 export function databaseUrl(): string {

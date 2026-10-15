@@ -58,7 +58,8 @@ const NonNegativeAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_IN
 const NonNegativeWholeYuanAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const PositiveWholeYuanAmount = Type.Integer({ minimum: 100, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const MembershipAgreedPriceAmount = Type.Integer({ minimum: 100, maximum: 2_147_483_600, multipleOf: 100 });
-const StayChangeTargetAmount = Type.Integer({ minimum: 0, maximum: 2_147_483_600, multipleOf: 100 });
+// 订单渠道由服务端读取；非渠道整元约束在领域校验中执行。
+const StayChangeTargetAmount = Type.Integer({ minimum: 0, maximum: 2_147_483_600 });
 const NonZeroInteger = Type.Union([
   Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: -1 }),
   Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })
@@ -488,11 +489,7 @@ export const CommandEnvelopeSchema = Type.Union([
     additionalGuests: Type.Optional(Type.Array(PrimaryGuestInputSchema, { maxItems: 999 })),
     bookingChannelCode: Type.Optional(BookingChannelCodeSchema),
     channelOrderReference: Type.Optional(nullable(ShortText)),
-    targetCurrentContractAmountMinor: Type.Optional(Type.Integer({
-      minimum: 0,
-      maximum: 2_147_483_600,
-      multipleOf: 100
-    })),
+    targetCurrentContractAmountMinor: Type.Optional(StayChangeTargetAmount),
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note),
     freeStayReason: Type.Optional(Note),
@@ -542,7 +539,7 @@ export const CommandEnvelopeSchema = Type.Union([
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note)
   })),
-  commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: NonNegativeWholeYuanAmount })),
+  commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: StayChangeTargetAmount })),
   commandEnvelope("CANCEL_ORDER", strictObject(OrderInput)),
   commandEnvelope("MARK_NO_SHOW", strictObject(OrderInput)),
   commandEnvelope("REVOKE_CHECK_IN", strictObject({ ...OrderInput, unusedRoomConfirmed: Type.Literal(true) })),
@@ -1391,6 +1388,7 @@ export const CommandEffectSchema = Type.Union([
     inventoryUnitId: Id,
     stayTimeline: StayTimelineSchema,
     before: strictObject({ currentContractAmount: Money }),
+    bookingChannelCode: Type.Optional(nullable(BookingChannelCodeSchema)),
     policyBaseAmount: Money,
     targetCurrentContractAmount: Money,
     pricing: PricingResultSchema,

@@ -126,6 +126,7 @@ function temporaryOtherRoomReceiptEvidenceFromEffect(effect: Record<string, unkn
 }
 
 function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
+  bookingChannelCode?: string | null;
   stayType: string;
   memberId: string | null;
   memberContractId: string | null;
@@ -143,7 +144,9 @@ function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
     ? "FREE"
     : orderIdentity?.memberId || orderIdentity?.memberContractId
       ? "MEMBER_ENTITLEMENT"
-      : undefined;
+      : orderIdentity?.bookingChannelCode && ["YOUMUDAO", "CTRIP", "MEITUAN"].includes(orderIdentity.bookingChannelCode)
+        ? "CHANNEL_CONTRACT"
+        : undefined;
   const pricingBasis = pricingBasisValue === undefined
     ? categoricalBasis ?? (contract.minorUnits === cashRemainder.minorUnits ? "POLICY" : "MANUAL_ADJUSTMENT")
     : createOrderPricingBasisCodes.includes(pricingBasisValue as CreateOrderPricingBasis)
@@ -168,7 +171,7 @@ function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
     policyBaseAmountMinor: policyBase.minorUnits,
     pricingBasis,
     currentContractAmountMinor: contract.minorUnits,
-    manualAdjustmentMinor: manualAdjustmentMinor as number | undefined ?? contract.minorUnits - cashRemainder.minorUnits,
+    manualAdjustmentMinor: pricingBasis === "CHANNEL_CONTRACT" ? 0 : manualAdjustmentMinor as number | undefined ?? contract.minorUnits - cashRemainder.minorUnits,
     currency: contract.currency,
     ...(reasonCode ? { reason: { code: reasonCode, note: reasonNoteValue as string ?? "" } } : {})
   };
@@ -2275,6 +2278,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       commandId: options.commandId
     });
     const pricing = pricingSnapshot(effect, {
+      bookingChannelCode: context.order.booking_channel_code,
       stayType: context.order.stay_type,
       memberId: context.order.member_id,
       memberContractId: context.order.member_contract_id

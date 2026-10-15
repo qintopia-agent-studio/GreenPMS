@@ -28,6 +28,7 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "游牧岛应结277.20元能录角分吗，已退房录错了怎么办？", ids: ["booking", "pricing"], facts: ["277.20", "最多两位小数", "已退房", "保留原值", "不改变退房与库存", "不等于办理收款或退款"] },
     { question: "逐日人数和统计依据在哪里，需要点开吗？", ids: ["dashboard"], facts: ["逐日人数与统计依据", "始终展开显示", "长表保留滚动查看", "免费分类的展开/收起切换仍保留"] },
     { question: "当前在住和所选期间全部是什么意思，怎么返回？", ids: ["dashboard"], facts: ["当前在住", "所选期间全部", "按人", "按次", "不随顶部历史日期变化", "所选期间实际住过的全部连续住宿", "仍在住或已离店", "完整夜数", "同一人离店后再来分别计次", "返回居住概览"] },
     { question: "所选日期不包含今天怎么办，后来才离店的是否纳入？", ids: ["dashboard"], facts: ["统计截止日取所选结束日与今天中较早的一天", "不把截止日之后的实际住宿倒灌历史", "期间首日已离店的不纳入", "截止日当天入住计0晚", "纯未来区间没有已发生住宿", "不含仅预订未入住", "历史期间全部不一定包含今天才入住的人"] },

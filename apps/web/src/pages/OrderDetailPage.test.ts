@@ -2494,3 +2494,9 @@ describe("shared Web command recovery persistence", () => {
     expect(readPersistedCommandRecovery(storage, context.subjectId, context.scopeId)).toEqual({ kind: "ABSENT" });
   });
 });
+
+
+it("渠道更正草稿恢复到分且不放开非渠道草稿", () => {
+  expect(initialRepriceTargetYuan(27600,27720,"YOUMUDAO")).toBe("277.2");
+  expect(initialRepriceTargetYuan(27600,27720,"WECOM")).toBe("276");
+});

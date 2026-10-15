@@ -1,3 +1,4 @@
+import { parseChannelYuanToMinor, isExternalBookingChannel } from "../channel-amount";
 import { ArrowRightLeft, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
@@ -76,9 +77,9 @@ function recoveredString(request: CommandRequest | undefined, key: string): stri
   return typeof value === "string" ? value : "";
 }
 
-function recoveredAmount(request: CommandRequest | undefined): string {
+function recoveredAmount(request: CommandRequest | undefined, channel: unknown): string {
   const value = request?.commandType === "MOVE_UNIT" ? request.input.targetCurrentContractAmountMinor : undefined;
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value % 100 === 0
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 2_147_483_600 && (isExternalBookingChannel(channel) || value % 100 === 0)
     ? String(value / 100)
     : "";
 }
@@ -102,7 +103,7 @@ export function moveUnitInitialDraft(
   const effectiveDate = recoveredString(recovered, "effectiveDate") || initialEffectiveDate;
   const effectiveDateUnitId = inventoryUnitAtDate(view, effectiveDate);
   const defaultCandidate = candidates.find((unit) => unit.id !== effectiveDateUnitId) ?? candidates[0];
-  const amount = recoveredAmount(recovered);
+  const amount = recoveredAmount(recovered, view.order.booking_channel_code);
   return {
     newInventoryUnitId: candidates.some((unit) => unit.id === recoveredTarget)
       ? recoveredTarget
@@ -201,8 +202,8 @@ export function buildMoveUnitRequest(view: OrderViewDto, draft: MoveUnitDraft): 
     effectiveDate: draft.effectiveDate
   };
   if (!memberStay && !freeStay && channel && externalChannels.has(channel)) {
-    const target = wholeYuanMinor(draft.targetContractYuan);
-    if (target === undefined) throw new Error("请填写本单渠道应结金额，金额必须是支持范围内的非负整元");
+    const target = parseChannelYuanToMinor(draft.targetContractYuan);
+    if (target === undefined) throw new Error("请填写本单渠道应结金额，金额必须在支持范围内且最多两位小数");
     input.targetCurrentContractAmountMinor = target;
     if (draft.channelPriceDifferenceReason.trim()) {
       input.channelPriceDifferenceReason = draft.channelPriceDifferenceReason.trim();
@@ -510,7 +511,7 @@ export function MoveUnitDrawer({
         <h3 id="move-channel-heading">渠道订单金额</h3>
         <p>请按本次渠道约定重新填写，系统会与完整换房安排的政策基础金额比较。</p>
         <div className="form-grid">
-          <label>本单渠道应结金额（元）<input type="number" min="0" max={maxWholeYuan} step="1" inputMode="numeric" value={draft.targetContractYuan} onChange={(event) => update({ targetContractYuan: event.target.value })} required data-testid="move-channel-amount" /></label>
+          <label>本单渠道应结金额（元）<input type="number" min="0" max={maxWholeYuan} step="0.01" inputMode="decimal" value={draft.targetContractYuan} onChange={(event) => update({ targetContractYuan: event.target.value })} required data-testid="move-channel-amount" /></label>
           <label>渠道价格差异说明<textarea value={draft.channelPriceDifferenceReason} onChange={(event) => update({ channelPriceDifferenceReason: event.target.value })} maxLength={1000} rows={2} data-testid="move-channel-reason" /></label>
           <small>与政策基础金额差异超过 15% 时必须填写；由服务端最终核对结果判定。</small>
         </div>

@@ -3853,6 +3853,11 @@ describe("U1 confirmation evidence", () => {
     };
     const input = { orderId: "order_1", targetCurrentContractAmountMinor: 11_000 };
     expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", effect, input)).toBe(true);
+    const channelEffect = { ...effect, bookingChannelCode: "YOUMUDAO", manualAdjustmentMinor: -1972,
+      targetCurrentContractAmount: money(11028), pricing: { ...effect.pricing, currentContractAmount: money(11028) } };
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", channelEffect, { ...input, targetCurrentContractAmountMinor: 11028 })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...channelEffect, bookingChannelCode: "WECOM" }, { ...input, targetCurrentContractAmountMinor: 11028 })).toBe(false);
+
     for (const key of Object.keys(effect)) {
       expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...effect, [key]: undefined }, input), key).toBe(false);
     }

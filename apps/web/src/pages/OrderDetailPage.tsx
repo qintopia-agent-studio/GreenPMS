@@ -1,3 +1,4 @@
+import { parseChannelYuanToMinor, isExternalBookingChannel } from "../channel-amount";
 import { RetainedFundsPanel } from "../components/RetainedFunds";
 import { useAssistantOrderEntry } from "../assistant/context";
 import { createReadPoller } from "../readPoller";
@@ -253,11 +254,12 @@ function shiftDate(value: string, days: number): string {
   return `${year}-${month}-${day}`;
 }
 
-export function initialRepriceTargetYuan(currentContractAmountMinor: number, draftTargetMinor: unknown): string {
+export function initialRepriceTargetYuan(currentContractAmountMinor: number, draftTargetMinor: unknown, channel?: unknown): string {
   const validDraftTarget = typeof draftTargetMinor === "number"
     && Number.isSafeInteger(draftTargetMinor)
     && draftTargetMinor >= 0
-    && draftTargetMinor % 100 === 0;
+    && draftTargetMinor <= 2_147_483_600
+    && (isExternalBookingChannel(channel) || draftTargetMinor % 100 === 0);
   return String((validDraftTarget ? draftTargetMinor : currentContractAmountMinor) / 100);
 }
 
@@ -1460,7 +1462,8 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
   const [newDepartureDate, setNewDepartureDate] = useState(action === "SHORTEN_STAY" ? shiftDate(view.order.departure_date, -1) : shiftDate(view.order.departure_date, 1));
   const [targetContractYuan, setTargetContractYuan] = useState(() => initialRepriceTargetYuan(
     view.amounts.currentContractAmount.minorUnits,
-    draft?.input.targetCurrentContractAmountMinor
+    draft?.input.targetCurrentContractAmountMinor,
+    view.order.booking_channel_code
   ));
   const [repriceReason, setRepriceReason] = useState(draft?.initialReason?.note ?? "");
   const [validationError, setValidationError] = useState<unknown>();
@@ -1495,9 +1498,11 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
       description = "订单金额将按原房价标准重新计算，并保留调整记录。";
     }
     if (action === "REPRICE_ORDER") {
-      const targetCurrentContractAmountMinor = wholeYuanAmountMinor(targetContractYuan);
+      const targetCurrentContractAmountMinor = isExternalBookingChannel(view.order.booking_channel_code)
+        ? parseChannelYuanToMinor(targetContractYuan)
+        : wholeYuanAmountMinor(targetContractYuan);
       if (targetCurrentContractAmountMinor === undefined) {
-        setValidationError(new Error("指定最终总价必须是大于或等于零的整元金额"));
+        setValidationError(new Error(isExternalBookingChannel(view.order.booking_channel_code) ? "渠道应结金额必须在支持范围内且最多两位小数" : "指定最终总价必须是大于或等于零的整元金额"));
         return;
       }
       if (!repriceReason.trim()) {
@@ -1544,7 +1549,7 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
         ) : null}
         {action === "REPRICE_ORDER" ? (
           <div className="form-grid">
-            <label>指定最终总价（元）<input type="number" min="0" step="1" value={targetContractYuan} onChange={(event) => { setTargetContractYuan(event.target.value); setValidationError(undefined); }} required inputMode="numeric" data-testid="reprice-target-yuan" /></label>
+            <label>指定最终总价（元）<input type="number" min="0" step={isExternalBookingChannel(view.order.booking_channel_code) ? "0.01" : "1"} value={targetContractYuan} onChange={(event) => { setTargetContractYuan(event.target.value); setValidationError(undefined); }} required inputMode={isExternalBookingChannel(view.order.booking_channel_code) ? "decimal" : "numeric"} data-testid="reprice-target-yuan" /></label>
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}

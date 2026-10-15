@@ -21,7 +21,7 @@ import {
   type CommandCapability,
   type TemporaryOtherRoomArrangementDto
 } from "@qintopia/contracts";
-import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
+import { canRepriceOrder, amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
 import {
   historicalProtocolEpochMigration,
   legacyEffectProtocol,
@@ -525,7 +525,8 @@ export function orderAllowedActions(
   return orderActionCodes
     .filter((code) => commandGrants.has(code))
     .map((code) => {
-    const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
+    const statusAllows = code === "REPRICE_ORDER" ? canRepriceOrder(status, bookingChannelCode ?? null)
+      : enabledByStatus[code]?.includes(status) ?? false;
     let fulfillmentDisabledReason: string | null = null;
     const externalFundsDisabledReason = code === "RECORD_COLLECTION" || code === "RECORD_REFUND"
       ? externalChannelFundsDisabledReason(bookingChannelCode)

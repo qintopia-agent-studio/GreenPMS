@@ -445,3 +445,26 @@ describe("move unit drawer", () => {
     expect(html).toContain("换房原因");
   });
 });
+
+
+it("渠道换房命令与恢复草稿保留角分", () => {
+  const current = view();
+  const draft = { ...moveUnitInitialDraft(current, units), newInventoryUnitId: "bed_1", reason: "换房", targetContractYuan: "277.20", channelPriceDifferenceReason: "平台确认" };
+  const request = buildMoveUnitRequest(current, draft);
+  expect(request.input.targetCurrentContractAmountMinor).toBe(27720);
+  expect(moveUnitInitialDraft(current, units, request).targetContractYuan).toBe("277.2");
+  expect(() => buildMoveUnitRequest(current, {...draft, targetContractYuan:"277.201"})).toThrow();
+});
+
+
+it("换房核对凭据允许渠道角分", () => {
+  const input = { propertyId: "property_1", orderId: "order_1", newInventoryUnitId: "bed_1", effectiveDate: "2026-08-02", targetCurrentContractAmountMinor: 22028 };
+  const effect = validEffect() as any;
+  effect.pricingDecision.targetCurrentContractAmount.minorUnits = 22028;
+  effect.pricingDecision.differenceFromPolicy.minorUnits = 2028;
+  effect.after.pricing.currentContractAmount.minorUnits = 22028;
+  effect.fundsSummary.collectionDifference.minorUnits = 22028;
+  expect(moveUnitPreviewHasEvidence(effect, input)).toBe(true);
+  effect.pricingDecision.pricingBasis = "MANUAL_ADJUSTMENT";
+  expect(moveUnitPreviewHasEvidence(effect, input)).toBe(false);
+});

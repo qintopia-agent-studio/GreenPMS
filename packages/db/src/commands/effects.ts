@@ -1,3 +1,4 @@
+import { canRepriceOrder, validateOrderTargetAmount } from "@qintopia/domain";
 import { buildRetainedFundsEffect, isRetainedFundsCommand } from "../retained-funds.ts";
 import { fundingSource, assertNoUnassignedRefund, requirePaymentAllocationEnabled } from "../payment-allocation.ts";
 import { sql } from "kysely";
@@ -2970,8 +2971,10 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
 
   if (commandType === "REPRICE_ORDER") {
     await assertOrderNotConvertedToMembership(db, orderId);
-    assertOrderMutable(context.order.status);
-    const targetCurrentContractAmountMinor = requireNonNegativeWholeYuanMinor(input, "targetCurrentContractAmountMinor");
+    if (!canRepriceOrder(context.order.status, context.order.booking_channel_code)) {
+      throw new DomainError("INVALID_ORDER_STATE", `Order cannot be repriced from ${context.order.status}`, 409);
+    }
+    const targetCurrentContractAmountMinor = validateOrderTargetAmount(context.order.booking_channel_code, input.targetCurrentContractAmountMinor);
     if (context.order.stay_type === "FREE" && targetCurrentContractAmountMinor !== 0) {
       throw new DomainError("VALIDATION_ERROR", "Free stays must keep a zero current contract amount");
     }
@@ -2982,6 +2985,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       stayType: context.order.stay_type as StayType, policyVersionId: context.order.pricing_policy_version_id,
       timeline: stayTimeline, manualAdjustmentMinor: 0
     });
+    // 既有核对/回执字段表示与政策价差额；落库时渠道仍为CHANNEL_CONTRACT且人工调价为0。
     const manualAdjustmentMinor = targetCurrentContractAmountMinor - policyPricing.currentContractAmount.minorUnits;
     const pricing: PricingResult = {
       ...policyPricing,
@@ -2989,6 +2993,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     };
     return finalize(propertyId, {
       orderId, inventoryUnitId: stayTimeline.at(-1)!.inventoryUnitId, stayTimeline,
+      bookingChannelCode: context.order.booking_channel_code,
       before: { currentContractAmount: (await orderAmountSummary(db, context)).currentContractAmount },
       policyBaseAmount: policyPricing.currentContractAmount,
       targetCurrentContractAmount: pricing.currentContractAmount,
