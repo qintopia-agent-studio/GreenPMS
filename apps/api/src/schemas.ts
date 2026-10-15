@@ -58,7 +58,7 @@ const NonNegativeAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_IN
 const NonNegativeWholeYuanAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const PositiveWholeYuanAmount = Type.Integer({ minimum: 100, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const MembershipAgreedPriceAmount = Type.Integer({ minimum: 100, maximum: 2_147_483_600, multipleOf: 100 });
-// 订单渠道由服务端读取；非渠道整元约束在领域校验中执行。
+// 普通住宿本单金额支持整数分；会员及免费边界由服务端领域校验执行。
 const StayChangeTargetAmount = Type.Integer({ minimum: 0, maximum: 2_147_483_600 });
 const NonZeroInteger = Type.Union([
   Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: -1 }),

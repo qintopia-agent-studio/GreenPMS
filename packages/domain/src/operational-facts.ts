@@ -55,9 +55,9 @@ function nonNegativeWholeYuanPostgresAmount(value: unknown, field: string): numb
   return amount;
 }
 
-/** 渠道金额精确到分；非渠道仍执行既有整元约束。 */
+/** 普通住宿手工本单金额精确到分；无普通订单渠道的会员金额保留整元约束。 */
 export function validateOrderTargetAmount(channel: BookingChannelCode | null, value: unknown): number {
-  if (channel !== "YOUMUDAO" && channel !== "CTRIP" && channel !== "MEITUAN") {
+  if (channel !== "WECOM" && channel !== "YOUMUDAO" && channel !== "CTRIP" && channel !== "MEITUAN") {
     return nonNegativeWholeYuanPostgresAmount(value, "targetCurrentContractAmountMinor");
   }
   const amount = nonNegativePostgresAmount(value, "targetCurrentContractAmountMinor");

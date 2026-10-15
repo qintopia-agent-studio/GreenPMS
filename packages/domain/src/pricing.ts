@@ -263,7 +263,7 @@ export function calculateDurationTimelinePricing(input: DurationTimelinePricingI
   const roundedMinorBigInt = roundPositiveRationalHalfUp(BigInt(numeratorMinor), BigInt(anchorNights) * 100n) * 100n;
   if (roundedMinorBigInt > BigInt(Number.MAX_SAFE_INTEGER)) throw new DomainError("VALIDATION_ERROR", "Pricing amount exceeds the supported integer range");
   const roundedMinor = Number(roundedMinorBigInt);
-  const currentContractAmountMinor = applyManualAdjustment(roundedMinor, manualAdjustment, true);
+  const currentContractAmountMinor = applyManualAdjustment(roundedMinor, manualAdjustment, false);
   const cashLines: CashLineDto[] = [{
     lineKind: "STAY_TOTAL",
     arrivalDate: input.arrivalDate,

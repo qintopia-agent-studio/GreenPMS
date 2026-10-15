@@ -2985,7 +2985,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     if (!canRepriceOrder(context.order.status, context.order.booking_channel_code)) {
       throw new DomainError("INVALID_ORDER_STATE", `Order cannot be repriced from ${context.order.status}`, 409);
     }
-    const targetCurrentContractAmountMinor = validateOrderTargetAmount(context.order.booking_channel_code, input.targetCurrentContractAmountMinor);
+    const targetCurrentContractAmountMinor = validateOrderTargetAmount(context.order.member_id || context.order.member_contract_id ? null : context.order.booking_channel_code, input.targetCurrentContractAmountMinor);
     if (context.order.stay_type === "FREE" && targetCurrentContractAmountMinor !== 0) {
       throw new DomainError("VALIDATION_ERROR", "Free stays must keep a zero current contract amount");
     }

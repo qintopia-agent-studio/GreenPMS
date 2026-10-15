@@ -140,14 +140,14 @@ describe("operational fact identifiers", () => {
       policyBaseAmountMinor: 0,
       targetCurrentContractAmountMinor: 0
     })).toThrow(/must not be submitted for FREE or member stays/);
-    expect(() => createOrderPricingDecision({
+    expect(createOrderPricingDecision({
       bookingChannelCode: "WECOM",
       stayType: "TRANSIENT",
       memberStay: false,
       policyBaseAmountMinor: 100_000,
-      targetCurrentContractAmountMinor: 84_050,
-      manualPriceAdjustmentReason: "非渠道仍拒绝角分"
-    })).toThrow(/whole-yuan/);
+      targetCurrentContractAmountMinor: 38_750,
+      manualPriceAdjustmentReason: "实际本单金额387.50元"
+    })).toMatchObject({currentContractAmountMinor:38_750,manualAdjustmentMinor:-61_250});
   });
 
   it("rebuilds external-channel stay changes at the exact 15 percent boundary", () => {

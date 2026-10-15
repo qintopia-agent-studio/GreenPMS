@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-10-15.1";
+export const assistantKnowledgeRevision = "2026-10-15.2";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -51,8 +51,8 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "booking", title: "新建预订、渠道、免费住宿与报价", commands: ["CREATE_ORDER"],
-    sources: ["docs/implementation/channel-amount-precision.md", "apps/web/src/pages/InventoryPage.tsx", "apps/web/src/ui.tsx", "待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md"],
-    content: `从房态空闲位置或页面新建入口开始，核对房间/床位、入住与离店日期、住宿人及住宿类型。普通住宿按表单选择渠道并填写所需渠道订单号；渠道是订单来源，不等于收款方式。游牧岛、携程、美团的“本单渠道应结金额”按平台应结给物业的金额填写，支持最多两位小数，例如277.20元；新建、改期、续住、缩短、换房和金额更正均保留角分，不要自行取整。金额更正需填写原因；已退房的外部渠道订单可追加应结金额更正，不改变退房、库存或历史收退款。已取消、未到及撤销入住订单仍不能用金额更正恢复应结金额；不能把更正金额或取消订单当作平台已退款的证明。会员住宿通过选择会员计算覆盖，不把它伪装成渠道订单。
+    sources: ["docs/implementation/direct-stay-amount-precision.md", "docs/implementation/channel-amount-precision.md", "apps/web/src/pages/InventoryPage.tsx", "apps/web/src/ui.tsx", "待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md"],
+    content: `从房态空闲位置或页面新建入口开始，核对房间/床位、入住与离店日期、住宿人及住宿类型。普通住宿的手工本单金额支持最多两位小数，包括企微直订及住宿补录，例如387.50元；本单金额与实际收款是两个字段，都需按真实金额填写，不要取整或改渠道绕过。政策基础价仍按原规则计算，人工调价原因仍必填；会员卡价格及免费零价规则保持不变。普通住宿按表单选择渠道并填写所需渠道订单号；渠道是订单来源，不等于收款方式。游牧岛、携程、美团的“本单渠道应结金额”按平台应结给物业的金额填写，支持最多两位小数，例如277.20元；新建、改期、续住、缩短、换房和金额更正均保留角分，不要自行取整。金额更正需填写原因；已退房的外部渠道订单可追加应结金额更正，不改变退房、库存或历史收退款。已取消、未到及撤销入住订单仍不能用金额更正恢复应结金额；不能把更正金额或取消订单当作平台已退款的证明。会员住宿通过选择会员计算覆盖，不把它伪装成渠道订单。
 报价后核对金额、住宿范围和规则，再提交预订；报价、预订、办理入住是不同步骤。价格以当前表单和服务端报价为准，不能由助手凭记忆计算或承诺。
 免费住宿按正式免费住宿入口填写依据，不伪造一笔现金或企微收款；渠道差额按页面说明处理，不用改订单金额或重复记收款来消除未知差额。`
   },
@@ -90,8 +90,8 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "pricing", title: "调整金额与资金事实区别", commands: ["REPRICE_ORDER"],
-    sources: ["docs/implementation/channel-amount-precision.md", "apps/web/src/pages/OrderDetailPage.tsx", "packages/contracts/src/assistant.ts"],
-    content: `外部渠道应结金额支持精确到分，例如277.20元；已退房的游牧岛、携程、美团订单可追加金额更正，保留原值、原因和历史，不改变退房与库存。已取消、未到及撤销入住订单不能通过调价恢复应结金额。调整金额入口用于更正实际约定的订单金额，填写新金额和原因，核对原金额、新金额与已收款差额后确认。调整金额不等于办理收款或退款，不会替客人付款，也不自动消除已存在的真实资金事实。金额或币种不清楚时先查订单，不猜测。`
+    sources: ["docs/implementation/direct-stay-amount-precision.md", "docs/implementation/channel-amount-precision.md", "apps/web/src/pages/OrderDetailPage.tsx", "packages/contracts/src/assistant.ts"],
+    content: `外部渠道应结金额支持精确到分，例如277.20元；已退房的游牧岛、携程、美团订单可追加金额更正，保留原值、原因和历史，不改变退房与库存。已取消、未到及撤销入住订单不能通过调价恢复应结金额。普通企微住宿的本单金额、更正金额及后续住宿变更支持最多两位小数；不是只有企微实收金额支持角分。调整金额入口用于更正实际约定的订单金额，填写新金额和原因，核对原金额、新金额与已收款差额后确认。调整金额不等于办理收款或退款，不会替客人付款，也不自动消除已存在的真实资金事实。金额或币种不清楚时先查订单，不猜测。`
   },
   {
     id: "payment-allocation", title: "一笔钱覆盖两个或多个预订", commands: ["RECORD_COLLECTION"],

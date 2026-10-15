@@ -28,6 +28,7 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "企微补录本单387.5能填吗，实收能选为什么本单不行？", ids: ["booking", "pricing"], facts: ["包括企微直订及住宿补录", "387.50元", "本单金额与实际收款是两个字段", "不要取整或改渠道绕过", "政策基础价仍按原规则计算"] },
     { question: "企微已收到1000元，只匹配300元，算哪天多少收入？", ids: ["operating-sales"], facts: ["本次实际匹配份额", "匹配完成的PMS日期", "只收到钱不计住宿销售额", "不能重复认定历史已计收入"] },
     { question: "售卡收款后用会员入住，原住宿款转会员还会再算吗？", ids: ["operating-sales"], facts: ["会员真实收款成功登记到会员订单时", "不等待入住核销或权益生效", "权益入住和住宿收款转会员不再加一次", "只新增真实补款"] },
     { question: "渠道订单取消为0元了，平台退款在哪登记？", ids: ["refunds"], facts: ["原订单的退款入口", "本次应结减少金额", "即使订单取消后合同为0", "仍可登记退款", "不发起平台退款", "已封账月份不能重复补登记"] },

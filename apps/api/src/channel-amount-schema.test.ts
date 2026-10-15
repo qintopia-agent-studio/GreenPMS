@@ -20,7 +20,7 @@ describe("渠道金额接口和权威订单校验", () => {
   });
   it("不信任请求传入的渠道，按已加载订单渠道验证", () => {
     expect(validateOrderTargetAmount("YOUMUDAO",27720)).toBe(27720);
-    expect(()=>validateOrderTargetAmount("WECOM",27720)).toThrow(/whole-yuan/);
+    expect(validateOrderTargetAmount("WECOM",38750)).toBe(38750);
     expect(()=>validateOrderTargetAmount(null,27720)).toThrow(/whole-yuan/);
   });
 });
