@@ -18,31 +18,35 @@ export async function loadOperatingSales(trx:Transaction<Database>,propertyId:st
  LEFT JOIN LATERAL(SELECT min(b.id) AS bill_id,min(b.amount_minor)::text AS bill_amount,count(*)::integer AS bill_count,
  bool_and(b.state='SUCCESS' AND NOT b.needs_review) AS verified FROM external_payment_bills b
  WHERE b.property_id=o.property_id AND b.kind=CASE WHEN f.fact_type='REFUND' THEN 'REFUND' ELSE 'COLLECTION' END
- AND (b.id=f.external_payment_bill_id OR EXISTS(SELECT 1 FROM external_payment_allocations a WHERE a.bill_id=b.id AND a.collection_fact_id=f.fact_id AND NOT EXISTS(SELECT 1 FROM external_payment_allocation_releases r WHERE r.allocation_id=a.id))
- OR b.reference=CASE WHEN f.fact_type='REFUND' THEN f.refund_reference ELSE f.transaction_reference END))proof ON true
+ AND CASE WHEN f.external_payment_bill_id IS NOT NULL THEN b.id=f.external_payment_bill_id
+ WHEN EXISTS(SELECT 1 FROM external_payment_allocations a WHERE a.collection_fact_id=f.fact_id AND NOT EXISTS(SELECT 1 FROM external_payment_allocation_releases r WHERE r.allocation_id=a.id))
+ THEN EXISTS(SELECT 1 FROM external_payment_allocations a WHERE a.bill_id=b.id AND a.collection_fact_id=f.fact_id AND NOT EXISTS(SELECT 1 FROM external_payment_allocation_releases r WHERE r.allocation_id=a.id))
+ ELSE b.reference=CASE WHEN f.fact_type='REFUND' THEN f.refund_reference ELSE f.transaction_reference END END)proof ON true
  WHERE o.property_id=${propertyId}`.execute(trx)).rows;
  const memberProof=(await sql<Proof>`SELECT f.fact_id AS id,'WECOM'::text AS method,
  EXISTS(SELECT 1 FROM membership_payment_facts rev WHERE rev.reverses_fact_id=f.fact_id AND rev.fact_type='REVERSAL') AS reversed,
  proof.bill_id,proof.bill_amount,proof.bill_count,proof.verified,
  (SELECT to_char(original.created_at AT TIME ZONE ${timezone},'YYYY-MM-DD') FROM membership_payment_facts original WHERE original.fact_id=f.corrects_fact_id AND original.transaction_reference=f.transaction_reference
-  AND EXISTS(SELECT 1 FROM external_payment_matches matched WHERE matched.membership_payment_fact_id=original.fact_id)) AS original_date
+  AND EXISTS(SELECT 1 FROM external_payment_matches matched WHERE matched.membership_payment_fact_id=original.fact_id AND matched.bill_id=proof.bill_id)) AS original_date
  FROM membership_payment_facts f JOIN membership_orders o ON o.id=f.membership_order_id
  LEFT JOIN LATERAL(SELECT min(b.id) AS bill_id,min(b.amount_minor)::text AS bill_amount,count(*)::integer AS bill_count,
  bool_and(b.state='SUCCESS' AND NOT b.needs_review) AS verified FROM external_payment_bills b
- WHERE b.property_id=o.property_id AND b.kind='COLLECTION' AND b.reference=f.transaction_reference)proof ON true
+ WHERE b.property_id=o.property_id AND b.kind='COLLECTION' AND CASE WHEN EXISTS(SELECT 1 FROM external_payment_matches m WHERE m.membership_payment_fact_id=f.fact_id) THEN EXISTS(SELECT 1 FROM external_payment_matches m WHERE m.membership_payment_fact_id=f.fact_id AND m.bill_id=b.id) ELSE b.reference=f.transaction_reference END)proof ON true
  WHERE o.property_id=${propertyId}`.execute(trx)).rows;
  const proofs=new Map([...stayProof.map(p=>[`STAY:${p.id}`,p] as const),...memberProof.map(p=>[`MEMBER:${p.id}`,p] as const)]);
  const facts:MatchedSaleFact[]=[];
  const uncertain:Array<{date:string}>=[];
  for(const f of money){
+  const p=proofs.get(`${f.family}:${f.id}`);
+  if(p?.reversed)continue;
   const classification=classifyDashboardMoney(f);
   const correctedCollection=f.family==='MEMBER'&&f.kind==='COLLECTION'&&f.correctsFact&&f.commandType==='CORRECT_MEMBERSHIP_PAYMENT';
   if(classification==='REVIEW'){uncertain.push({date:f.date});continue;}
   if(!['COLLECTION','REFUND'].includes(classification)&&!correctedCollection)continue;
-  const p=proofs.get(`${f.family}:${f.id}`);const refund=classification==='REFUND';
+  const refund=classification==='REFUND';
   facts.push({id:`${f.family}:${f.id}`,source:f.family==='STAY'?'DIRECT':'MEMBERSHIP',date:p?.original_date??f.date,currency:f.currency,amountMinor:String(BigInt(f.netMinor)<0n?-BigInt(f.netMinor):BigInt(f.netMinor)),registeredAt:f.registeredAt,
     orderId:f.orderId,memberId:f.memberId,billId:p?.bill_id??null,billAmountMinor:p?.bill_amount??null,
-    verified:Boolean(p&&(p.method!=='WECOM'||(p.bill_count===1&&p.verified))),reversed:p?.reversed??false,refund,sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`});
+    verified:Boolean(p&&(p.method!=='WECOM'||(f.currency==='CNY'&&p.bill_count===1&&p.verified))),reversed:p?.reversed??false,refund,sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`});
  }
  const matched=recognizedMatchedSales(facts,opening,baselines[0]!.recognitionFrom);
  const channel=(await sql<{id:string;order_id:string;kind:string;amount:string;currency:string;business_date:string;created_at:Date;note:string}>`SELECT id,order_id,kind,amount_minor::text AS amount,currency,business_date::text,created_at,note FROM channel_operating_facts WHERE property_id=${propertyId} ORDER BY created_at,id`.execute(trx)).rows;

@@ -1058,6 +1058,20 @@ describe("projectOrderLifecycle", () => {
     expect(() => projectOrderLifecycle(input)).toThrow(/订单不可变变更记录链损坏/);
   });
 
+  it("projects an audited channel refund pricing revision without changing lodging", () => {
+    const original=base();
+    const input={...structuredClone(original),order:{...original.order,booking_channel_code:"CTRIP",version:2,current_revision_id:"revision_2"}};
+    input.businessDate="2026-08-02";
+    input.amendments.push(amendment({id:"amend_2",sequence:2,type:"RECORD_REFUND",payload:{channelOperating:true,orderId:"order_1",method:"CHANNEL",amountMinor:2000,currency:"CNY",businessDate:"2026-08-02",contractBeforeMinor:10000,contractTargetMinor:8000}}));
+    input.revisions.push({...revision("amend_2","2026-08-01","2026-08-03",10000,2),current_contract_amount_minor:8000});
+    expect(projectOrderLifecycle(input).effectiveArrangement.intervals).toEqual(projectOrderLifecycle(original).effectiveArrangement.intervals);
+    expect(()=>projectOrderLifecycle({...input,order:{...input.order,booking_channel_code:"WECOM"}})).toThrow(/渠道资金变更/);
+    const damaged=structuredClone(input);damaged.revisions[1]!.policy_base_amount_minor=9999;
+    expect(()=>projectOrderLifecycle(damaged)).toThrow(/渠道退款计价修订/);
+    const missing=structuredClone(input);missing.revisions.pop();missing.order.current_revision_id="revision_1";
+    expect(()=>projectOrderLifecycle(missing)).toThrow(/唯一计价版本/);
+  });
+
   it("requires a continuous pricing revision chain whose latest ID is the order current pointer", () => {
     const missingPointer = base();
     missingPointer.order.current_revision_id = null;

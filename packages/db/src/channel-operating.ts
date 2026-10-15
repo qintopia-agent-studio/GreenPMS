@@ -44,14 +44,20 @@ export async function buildChannelFundsEffect(db:Db,propertyId:string,orderId:st
  if(!summary)throw new DomainError('VALIDATION_ERROR','只有外部渠道订单支持渠道退款登记');
  if(!summary.initialized)throw new DomainError('VALIDATION_ERROR','历史已计收入尚未承接，渠道退款登记暂未开放');
  const today=await propertyLocalToday(db,propertyId);
+ const contract=(await sql<{amount:number}>`SELECT p.current_contract_amount_minor AS amount FROM orders o JOIN pricing_revisions p ON p.id=o.current_revision_id WHERE o.id=${orderId} AND o.property_id=${propertyId}`.execute(db)).rows[0]!.amount;
  const note=text(input,'note');
  if(command==='REVERSE_FACT') {
    const original=summary.facts.find(f=>f.id===input.reversesFactId&&f.kind==='REFUND');
    if(!original)throw new DomainError('NOT_FOUND','渠道退款记录不存在',404);
    if(summary.facts.some(f=>f.kind==='REVERSAL'&&f.referencesFactId===original.id))throw new DomainError('FACT_ALREADY_REVERSED','此渠道退款已经撤销误录',409);
    if(summary.facts.some(f=>['SALE','CORRECTION'].includes(f.kind)&&f.createdAt>original.createdAt))throw new DomainError('AGGREGATE_VERSION_CONFLICT','此退款之后已有渠道成交或金额更正，请先核对后续记录再处理误录',409);
+   const originalContract=(await sql<{delta:number;command_id:string}>`SELECT contract_effect_minor AS delta,command_id FROM channel_operating_facts WHERE id=${original.id}`.execute(db)).rows[0]!;
+   const laterPricing=(await sql`SELECT p.id FROM pricing_revisions p JOIN amendments a ON a.id=p.amendment_id WHERE p.order_id=${orderId} AND p.created_at>${original.createdAt}::timestamptz AND a.amendment_type NOT IN ('RECORD_REFUND','REVERSE_FACT') LIMIT 1`.execute(db)).rows[0];
+   if(laterPricing)throw new DomainError('AGGREGATE_VERSION_CONFLICT','此退款之后已有新的渠道定价，请先核对后续金额记录',409);
+   const contractTarget=contract-originalContract.delta;
+   if(contractTarget>2147483600)throw new DomainError('VALIDATION_ERROR','恢复后的渠道应结金额超出范围');
    if(input.releaseExternalPaymentAllocation)throw new DomainError('VALIDATION_ERROR','渠道退款不释放企业微信流水');
-   return {effect:{orderId,channelOperating:true,reversesFactId:original.id,amountMinor:-original.amountMinor,netEffectMinor:-original.amountMinor,currency:summary.currency,note,businessDate:original.businessDate},basis:{channelFactsHash:stableHash(summary)}};
+   return {effect:{orderId,channelOperating:true,reversesFactId:original.id,amountMinor:-original.amountMinor,netEffectMinor:-original.amountMinor,currency:summary.currency,note,businessDate:original.businessDate,contractBeforeMinor:contract,contractTargetMinor:contractTarget},basis:{channelFactsHash:stableHash(summary)}};
  }
  if(input.method!=='CHANNEL'||input.externalPaymentBillId||input.transactionReference)throw new DomainError('VALIDATION_ERROR','渠道退款必须使用平台退款凭据，不能套用企微流水');
  const amount=input.amountMinor;
@@ -67,13 +73,13 @@ export async function buildChannelFundsEffect(db:Db,propertyId:string,orderId:st
  if(date>today||!saleDate||date<saleDate)throw new DomainError('VALIDATION_ERROR','退款业务日期不得晚于今天或早于原成交');
  const closed=(await sql`SELECT month FROM operating_sales_baselines WHERE property_id=${propertyId} AND month=date_trunc('month',${date}::date)::date`.execute(db)).rows[0];
  if(closed)throw new DomainError('VALIDATION_ERROR','该月已经按确认基准封账；历史退款应通过期初承接处理，不能重复登记');
- return {effect:{orderId,channelOperating:true,amountMinor:amount as number,currency:summary.currency,referencesFactId:summary.originalSaleFactId!,method:'CHANNEL',transactionReference:null,refundReference,note,businessDate:date},basis:{channelFactsHash:stableHash(summary),businessDate:today}};
+ return {effect:{orderId,channelOperating:true,amountMinor:amount as number,currency:summary.currency,referencesFactId:summary.originalSaleFactId!,method:'CHANNEL',transactionReference:null,refundReference,note,businessDate:date,contractBeforeMinor:contract,contractTargetMinor:Math.min(contract,Number(summary.netMinor)-(amount as number))},basis:{channelFactsHash:stableHash(summary),businessDate:today}};
 }
 
 export async function applyChannelFunds(trx:Transaction<Database>,command:'RECORD_REFUND'|'REVERSE_FACT',commandId:string,propertyId:string,effect:Record<string,unknown>) {
  const id=newId('channel_fact');const amount=Number(effect.amountMinor);const reversal=command==='REVERSE_FACT';
- await sql`INSERT INTO channel_operating_facts(id,property_id,order_id,kind,amount_minor,currency,business_date,references_fact_id,refund_reference,command_id,note)
+ await sql`INSERT INTO channel_operating_facts(id,property_id,order_id,kind,amount_minor,currency,business_date,references_fact_id,refund_reference,command_id,note,contract_effect_minor)
  VALUES(${id},${propertyId},${String(effect.orderId)},${reversal?'REVERSAL':'REFUND'},${reversal?amount:-amount},${String(effect.currency)},${String(effect.businessDate)}::date,
- ${String(reversal?effect.reversesFactId:effect.referencesFactId)},${reversal?null:String(effect.refundReference)},${commandId},${String(effect.note)})`.execute(trx);
+ ${String(reversal?effect.reversesFactId:effect.referencesFactId)},${reversal?null:String(effect.refundReference)},${commandId},${String(effect.note)},${Number(effect.contractTargetMinor)-Number(effect.contractBeforeMinor)})`.execute(trx);
  return {persistedResult:{orderId:String(effect.orderId),factId:id,factType:reversal?'REVERSAL':'REFUND',netEffectMinor:reversal?amount:-amount,transactionReference:null,...(!reversal?{refundReference:String(effect.refundReference)}:{})},resourceRefs:[String(effect.orderId),id],factRefs:[id]};
 }

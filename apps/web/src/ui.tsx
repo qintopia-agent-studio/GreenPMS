@@ -2693,7 +2693,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
   }
 
   if (businessCommand === "REVERSE_FACT" && effect.channelOperating === true) {
-    return <div className="effect-summary"><h3>核对渠道退款误录撤销</h3><dl className="difference-grid"><dt>恢复经营金额</dt><dd>{formatMinor(Number(effect.amountMinor),String(effect.currency))}</dd><dt>原退款业务日期</dt><dd>{String(effect.businessDate)}</dd><dt>误录原因</dt><dd>{String(effect.note)}</dd></dl><p>保留原退款记录并追加纠错，不发起平台收退款，不改变住宿安排。</p></div>;
+    return <div className="effect-summary"><h3>核对渠道退款误录撤销</h3><dl className="difference-grid"><dt>恢复经营金额</dt><dd>{formatMinor(Number(effect.amountMinor),String(effect.currency))}</dd><dt>原退款业务日期</dt><dd>{String(effect.businessDate)}</dd><dt>当前渠道应结</dt><dd>{formatMinor(Number(effect.contractBeforeMinor),String(effect.currency))} → {formatMinor(Number(effect.contractTargetMinor),String(effect.currency))}</dd><dt>误录原因</dt><dd>{String(effect.note)}</dd></dl><p>保留原退款记录并追加纠错，不发起平台收退款，不改变住宿安排。</p></div>;
   }
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const amountMinor = typeof effect.amountMinor === "number" ? effect.amountMinor : undefined;
@@ -2712,7 +2712,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
           {transactionReference ? <><dt>{effect.method === "WECOM" ? "企业微信交易单号" : "交易单号 / 流水号"}</dt><dd>{transactionReference}</dd></> : null}
           {businessCommand === "RECORD_REFUND" && effect.method === "WECOM" ? <><dt>企业微信退款单号</dt><dd>{typeof effect.refundReference === "string" ? effect.refundReference : "历史未记录退款单号"}</dd></> : null}
           {businessCommand === "RECORD_REFUND" ? <><dt>{effect.channelOperating === true ? "对应渠道成交" : "对应原收款"}</dt><dd>{referencesFactId ? "已关联本订单原始记录" : "未选择"}</dd></> : null}
-          {effect.channelOperating === true ? <><dt>退款业务日期</dt><dd>{String(effect.businessDate)}</dd><dt>平台退款单号</dt><dd>{String(effect.refundReference)}</dd></> : null}
+          {effect.channelOperating === true ? <><dt>退款业务日期</dt><dd>{String(effect.businessDate)}</dd><dt>平台退款单号</dt><dd>{String(effect.refundReference)}</dd><dt>当前渠道应结</dt><dd>{formatMinor(Number(effect.contractBeforeMinor),currency)} → {formatMinor(Number(effect.contractTargetMinor),currency)}</dd></> : null}
           <dt>{noteLabel}</dt><dd>{reasonNote?.trim() || (businessCommand === "RECORD_REFUND" ? "未填写" : "未填写备注")}</dd>
         </dl>
       </section>

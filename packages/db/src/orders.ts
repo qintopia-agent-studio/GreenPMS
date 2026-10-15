@@ -763,6 +763,7 @@ export function projectOrderFulfillment(
 }
 
 interface LifecycleOrderRow {
+  booking_channel_code?: string | null;
   id: string;
   status: string;
   stay_type: string;
@@ -818,6 +819,7 @@ interface LifecycleCollectionFactRow {
 }
 
 const orderLifecycleAmendmentTypes = new Set<string>([
+  "RECORD_REFUND", "REVERSE_FACT",
   "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
@@ -839,6 +841,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
 ] as const);
 
 const pricingRevisionAmendmentTypes = new Set<string>([
+  "RECORD_REFUND", "REVERSE_FACT",
   "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "RESCHEDULE_STAY",
@@ -854,6 +857,17 @@ const pricingRevisionAmendmentTypes = new Set<string>([
   "MARK_NO_SHOW",
   "REVOKE_CHECK_IN"
 ] as const);
+
+function channelFundsAmendment(amendment: LifecycleAmendmentRow): boolean {
+  if (!["RECORD_REFUND","REVERSE_FACT"].includes(amendment.amendment_type)) return false;
+  const p=recordValue(amendment.payload);
+  if (!p || p.channelOperating!==true || p.orderId!==amendment.order_id || !Number.isSafeInteger(p.contractBeforeMinor) || !Number.isSafeInteger(p.contractTargetMinor)
+    || !Number.isSafeInteger(p.amountMinor) || Number(p.amountMinor)<=0 || Number(p.contractBeforeMinor)<0 || Number(p.contractTargetMinor)<0
+    || Number(p.contractBeforeMinor)>2147483600 || Number(p.contractTargetMinor)>2147483600 || typeof p.businessDate!=="string" || typeof p.currency!=="string") return false;
+  return amendment.amendment_type==="RECORD_REFUND"
+    ? p.method==="CHANNEL" && Number(p.contractTargetMinor)<=Number(p.contractBeforeMinor) && Number(p.contractBeforeMinor)-Number(p.contractTargetMinor)<=Number(p.amountMinor)
+    : Number(p.contractTargetMinor)>=Number(p.contractBeforeMinor) && Number(p.contractTargetMinor)-Number(p.contractBeforeMinor)<=Number(p.amountMinor);
+}
 
 const requiredPricingRevisionAmendmentTypes = new Set<string>([
   "REVOKE_CHECK_OUT",
@@ -1384,6 +1398,10 @@ export function projectOrderLifecycle(input: {
       || !orderLifecycleAmendmentTypes.has(amendment.amendment_type)) {
       lifecycleFailure("订单不可变变更记录链损坏", { amendmentId: amendment.id, expectedSequence });
     }
+    if (["RECORD_REFUND","REVERSE_FACT"].includes(amendment.amendment_type)
+      && (!externalChannelCodes.has(input.order.booking_channel_code??"") || !channelFundsAmendment(amendment))) {
+      lifecycleFailure("渠道资金变更缺少有效应结金额证据", {amendmentId:amendment.id});
+    }
     lifecycleActor(amendment);
     const createdAt = lifecycleDateTime(amendment.created_at, "变更记录时间");
     if (priorAmendmentCreatedAt && createdAt < priorAmendmentCreatedAt) {
@@ -1416,6 +1434,13 @@ export function projectOrderLifecycle(input: {
         amendmentId: revision.amendment_id
       });
     }
+    if (channelFundsAmendment(amendment)) {
+      const payload=recordValue(amendment.payload)!;const prior=input.revisions[index-1];
+      if(!prior || prior.current_contract_amount_minor!==payload.contractBeforeMinor || revision.current_contract_amount_minor!==payload.contractTargetMinor
+        || revision.policy_base_amount_minor!==prior.policy_base_amount_minor || revision.arrival_date!==prior.arrival_date || revision.departure_date!==prior.departure_date || revision.currency!==payload.currency) {
+        lifecycleFailure("渠道退款计价修订与原金额或住宿范围不一致",{revisionId:revision.id});
+      }
+    }
     if (!Number.isSafeInteger(revision.policy_base_amount_minor)
       || !Number.isSafeInteger(revision.current_contract_amount_minor)
       || ((amendment.amendment_type === "CANCEL_ORDER"
@@ -1439,7 +1464,9 @@ export function projectOrderLifecycle(input: {
   }
   for (const amendment of input.amendments) {
     const matches = input.revisions.filter((revision) => revision.amendment_id === amendment.id);
-    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type);
+    const channelPayload=channelFundsAmendment(amendment)?recordValue(amendment.payload):null;
+    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type)
+      || Boolean(channelPayload && channelPayload.contractBeforeMinor!==channelPayload.contractTargetMinor);
     if (requiresRevision && matches.length !== 1) {
       lifecycleFailure("订单计价变更没有唯一计价版本", {
         amendmentId: amendment.id,

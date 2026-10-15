@@ -5,6 +5,7 @@ CREATE TABLE channel_operating_facts (
  order_id text NOT NULL REFERENCES orders(id),
  kind text NOT NULL CHECK(kind IN ('SALE','CORRECTION','REFUND','REVERSAL')),
  amount_minor integer NOT NULL CHECK(amount_minor<>0),
+ contract_effect_minor integer NOT NULL DEFAULT 0,
  currency text NOT NULL,
  business_date date NOT NULL,
  pricing_revision_id text REFERENCES pricing_revisions(id),
@@ -15,7 +16,8 @@ CREATE TABLE channel_operating_facts (
  created_at timestamptz NOT NULL DEFAULT now(),
  CHECK((kind='SALE' AND amount_minor>0) OR kind='CORRECTION' OR (kind='REFUND' AND amount_minor<0) OR (kind='REVERSAL' AND amount_minor>0)),
  CHECK(kind NOT IN ('REFUND','REVERSAL') OR (command_id IS NOT NULL AND references_fact_id IS NOT NULL)),
- CHECK(kind<>'REFUND' OR nullif(btrim(refund_reference),'') IS NOT NULL)
+ CHECK(kind<>'REFUND' OR nullif(btrim(refund_reference),'') IS NOT NULL),
+ CHECK((kind IN ('SALE','CORRECTION') AND contract_effect_minor=0) OR (kind='REFUND' AND contract_effect_minor<=0) OR (kind='REVERSAL' AND contract_effect_minor>=0))
 );
 CREATE INDEX channel_operating_order_idx ON channel_operating_facts(order_id,created_at,id);
 CREATE INDEX channel_operating_date_idx ON channel_operating_facts(property_id,business_date);
@@ -46,6 +48,15 @@ CREATE TABLE operating_sales_baselines (
  PRIMARY KEY(property_id,month,currency)
 );
 
+-- 仅保存当前有效退款号的占用；历史事实始终追加，误录撤销后才释放退款号。
+CREATE TABLE channel_refund_claims (
+ property_id text NOT NULL REFERENCES properties(id),
+ channel_code text NOT NULL CHECK(channel_code IN ('YOUMUDAO','CTRIP','MEITUAN')),
+ refund_reference text NOT NULL CHECK(btrim(refund_reference)<>''),
+ fact_id text NOT NULL UNIQUE REFERENCES channel_operating_facts(id) DEFERRABLE INITIALLY DEFERRED,
+ PRIMARY KEY(property_id,channel_code,refund_reference)
+);
+
 -- 将既有渠道计价证据转为可追溯成交事实，不将取消清零当退款。
 DO $$
 DECLARE r record; net bigint; delta bigint; prior integer; first_day date;
@@ -70,17 +81,17 @@ BEGIN
  END LOOP;
 END $$;
 
-CREATE FUNCTION qintopia_guard_channel_operating_fact() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE o orders%ROWTYPE; original channel_operating_facts%ROWTYPE; available bigint; c command_executions%ROWTYPE; revision pricing_revisions%ROWTYPE; amendment amendments%ROWTYPE; expected bigint; prior integer; expected_day date; local_today date;
+CREATE FUNCTION qintopia_guard_channel_operating_fact() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE o orders%ROWTYPE; original channel_operating_facts%ROWTYPE; available bigint; c command_executions%ROWTYPE; revision pricing_revisions%ROWTYPE; amendment amendments%ROWTYPE; expected bigint; prior integer; expected_day date; local_today date; current_contract integer;
 BEGIN
  SELECT * INTO STRICT o FROM orders WHERE id=NEW.order_id FOR UPDATE;
- IF o.property_id<>NEW.property_id OR o.booking_channel_code NOT IN ('YOUMUDAO','CTRIP','MEITUAN')
+ IF o.property_id<>NEW.property_id OR COALESCE(o.booking_channel_code,'') NOT IN ('YOUMUDAO','CTRIP','MEITUAN')
     OR o.stay_type='FREE' OR o.member_id IS NOT NULL OR o.member_contract_id IS NOT NULL THEN
    RAISE EXCEPTION 'channel operating fact requires an external-channel lodging order' USING ERRCODE='23514';
  END IF;
  IF NEW.command_id IS NOT NULL THEN
    SELECT * INTO STRICT c FROM command_executions WHERE id=NEW.command_id;
-   IF c.property_id<>NEW.property_id OR (NEW.kind='REFUND' AND c.command_type<>'RECORD_REFUND') OR (NEW.kind='REVERSAL' AND c.command_type<>'REVERSE_FACT') THEN
+   IF c.state<>'EXECUTING' OR c.property_id<>NEW.property_id OR (NEW.kind='REFUND' AND c.command_type<>'RECORD_REFUND') OR (NEW.kind='REVERSAL' AND c.command_type<>'REVERSE_FACT') THEN
      RAISE EXCEPTION 'channel operating fact command mismatch' USING ERRCODE='23514';
    END IF;
  END IF;
@@ -132,9 +143,22 @@ BEGIN
      AND NOT EXISTS(SELECT 1 FROM channel_operating_facts v WHERE v.references_fact_id=f.id AND v.kind='REVERSAL')) THEN
    RAISE EXCEPTION 'channel refund reference already recorded' USING ERRCODE='23505';
  END IF;
+ IF NEW.kind='REFUND' THEN
+   INSERT INTO channel_refund_claims(property_id,channel_code,refund_reference,fact_id) VALUES(NEW.property_id,o.booking_channel_code,NEW.refund_reference,NEW.id);
+ ELSIF NEW.kind='REVERSAL' THEN
+   DELETE FROM channel_refund_claims WHERE fact_id=original.id;
+ END IF;
  SELECT COALESCE(sum(amount_minor),0) INTO available FROM channel_operating_facts WHERE order_id=NEW.order_id;
  available:=available-COALESCE((SELECT amount_minor FROM operating_sales_opening WHERE property_id=NEW.property_id AND source_kind='CHANNEL_REFUND' AND source_id=NEW.order_id),0);
  IF available+NEW.amount_minor<0 THEN RAISE EXCEPTION 'channel refund/correction exceeds recognized balance' USING ERRCODE='23514'; END IF;
+ SELECT current_contract_amount_minor INTO current_contract FROM pricing_revisions WHERE id=o.current_revision_id;
+ IF NEW.kind='REFUND' AND NEW.contract_effect_minor IS DISTINCT FROM least(current_contract,available+NEW.amount_minor)-current_contract THEN
+   RAISE EXCEPTION 'channel refund contract adjustment mismatch' USING ERRCODE='23514';
+ END IF;
+ IF NEW.kind='REVERSAL' AND NEW.contract_effect_minor IS DISTINCT FROM -original.contract_effect_minor THEN
+   RAISE EXCEPTION 'channel reversal contract adjustment mismatch' USING ERRCODE='23514';
+ END IF;
+
  RETURN NEW;
 END $$;
 CREATE TRIGGER channel_operating_guard BEFORE INSERT ON channel_operating_facts FOR EACH ROW EXECUTE FUNCTION qintopia_guard_channel_operating_fact();
@@ -143,3 +167,27 @@ CREATE TRIGGER opening_sales_immutable BEFORE UPDATE OR DELETE ON operating_sale
 CREATE TRIGGER baseline_sales_immutable BEFORE UPDATE OR DELETE ON operating_sales_baselines FOR EACH ROW EXECUTE FUNCTION qintopia_allocation_immutable();
 GRANT SELECT,INSERT ON channel_operating_facts TO qintopia_runtime;
 GRANT SELECT ON operating_sales_opening,operating_sales_baselines TO qintopia_runtime;
+
+CREATE FUNCTION qintopia_assert_channel_operating_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE c command_executions%ROWTYPE; receipt command_receipts%ROWTYPE; amendment amendments%ROWTYPE; final_amount integer;
+BEGIN
+ SELECT * INTO STRICT c FROM command_executions WHERE id=NEW.command_id;
+ SELECT * INTO STRICT receipt FROM command_receipts WHERE command_id=NEW.command_id;
+ IF c.state<>'APPLIED' OR NOT receipt.business_committed OR receipt.execution_status<>'EXECUTED'
+  OR (NEW.kind IN ('REFUND','REVERSAL') AND receipt.result->>'factId' IS DISTINCT FROM NEW.id) THEN
+  RAISE EXCEPTION 'channel fact requires its committed command receipt' USING ERRCODE='23514';
+ END IF;
+ IF NEW.kind IN ('REFUND','REVERSAL') THEN
+   SELECT * INTO STRICT amendment FROM amendments WHERE command_id=NEW.command_id AND order_id=NEW.order_id AND amendment_type=c.command_type;
+   SELECT p.current_contract_amount_minor INTO final_amount FROM orders o JOIN pricing_revisions p ON p.id=o.current_revision_id WHERE o.id=NEW.order_id;
+   IF amendment.payload->>'channelOperating' IS DISTINCT FROM 'true'
+     OR (amendment.payload->>'contractTargetMinor')::bigint IS DISTINCT FROM final_amount
+     OR (amendment.payload->>'contractTargetMinor')::bigint-(amendment.payload->>'contractBeforeMinor')::bigint IS DISTINCT FROM NEW.contract_effect_minor THEN
+     RAISE EXCEPTION 'channel refund must atomically update its current settlement amount' USING ERRCODE='23514';
+   END IF;
+ END IF;
+ RETURN NULL;
+END $$;
+CREATE CONSTRAINT TRIGGER channel_operating_commit AFTER INSERT ON channel_operating_facts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qintopia_assert_channel_operating_commit();
+REVOKE ALL ON channel_refund_claims FROM PUBLIC,qintopia_runtime;
+REVOKE ALL ON FUNCTION qintopia_guard_channel_operating_fact(),qintopia_assert_channel_operating_commit() FROM PUBLIC;

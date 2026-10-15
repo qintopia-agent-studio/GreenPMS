@@ -23,7 +23,7 @@ async function main(){
    ensure(['PAYMENT_BILL','STAY_FACT','MEMBER_FACT','CHANNEL_REFUND'].includes(row.sourceKind)&&typeof row.sourceId==='string'&&/^\d+$/.test(row.amountMinor)&&row.evidenceNote?.trim(),'期初来源必须有有效金额及依据');
    const key=`${row.sourceKind}:${row.sourceId}`;ensure(!keys.has(key),`来源重复：${key}`);keys.add(key);
    let source:{amount:string;currency:string}|undefined;
-   if(row.sourceKind==='PAYMENT_BILL')source=(await client.query(`SELECT amount_minor::text AS amount,currency FROM external_payment_bills WHERE property_id=$1 AND id=$2 AND kind='COLLECTION' AND state='SUCCESS' AND NOT needs_review`,[plan.propertyId,row.sourceId])).rows[0];
+   if(row.sourceKind==='PAYMENT_BILL')source=(await client.query(`SELECT amount_minor::text AS amount,'CNY'::text AS currency FROM external_payment_bills WHERE property_id=$1 AND id=$2 AND kind='COLLECTION' AND state='SUCCESS' AND NOT needs_review`,[plan.propertyId,row.sourceId])).rows[0];
    if(row.sourceKind==='STAY_FACT')source=(await client.query(`SELECT f.amount_minor::text AS amount,f.currency FROM collection_facts f JOIN orders o ON o.id=f.order_id WHERE o.property_id=$1 AND f.fact_id=$2 AND f.fact_type='COLLECTION' AND NOT EXISTS(SELECT 1 FROM collection_facts rev WHERE rev.reverses_fact_id=f.fact_id)`,[plan.propertyId,row.sourceId])).rows[0];
    if(row.sourceKind==='MEMBER_FACT')source=(await client.query(`SELECT f.amount_minor::text AS amount,f.currency FROM membership_payment_facts f JOIN membership_orders o ON o.id=f.membership_order_id WHERE o.property_id=$1 AND f.fact_id=$2 AND f.fact_type='COLLECTION' AND f.source_type<>'STAY_COLLECTION_TRANSFER' AND NOT EXISTS(SELECT 1 FROM membership_payment_facts rev WHERE rev.reverses_fact_id=f.fact_id)`,[plan.propertyId,row.sourceId])).rows[0];
    if(row.sourceKind==='CHANNEL_REFUND')source=(await client.query(`SELECT sum(amount_minor)::text AS amount,min(currency) AS currency FROM channel_operating_facts WHERE property_id=$1 AND order_id=$2 HAVING count(*)>0`,[plan.propertyId,row.sourceId])).rows[0];
@@ -39,7 +39,7 @@ async function main(){
    }
    for(const b of plan.baselines){
     const existing=(await client.query('SELECT amount_minor::text AS amount,recognition_from::text AS start,evidence_sha256 AS hash FROM operating_sales_baselines WHERE property_id=$1 AND month=$2 AND currency=$3',[plan.propertyId,b.month,plan.currency])).rows[0];
-    if(existing){ensure(existing.amount===b.amountMinor&&existing.start===plan.recognitionFrom&&(existing.hash===sha||at('--existing-baseline-sha')===existing.hash),'已有封账基准不同，禁止覆盖或无依据重开');continue;}
+    if(existing){ensure(existing.amount===b.amountMinor&&existing.start===plan.recognitionFrom&&existing.hash===sha,'已有封账基准不同，禁止覆盖或无依据重开');continue;}
     await client.query('INSERT INTO operating_sales_baselines(property_id,month,amount_minor,currency,recognition_from,evidence_note,evidence_sha256) VALUES($1,$2,$3,$4,$5,$6,$7)',[plan.propertyId,b.month,b.amountMinor,plan.currency,plan.recognitionFrom,b.evidenceNote,sha]);
    }
    await client.query('COMMIT');
