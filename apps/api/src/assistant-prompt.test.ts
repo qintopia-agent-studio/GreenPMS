@@ -28,6 +28,9 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "企微已收到1000元，只匹配300元，算哪天多少收入？", ids: ["operating-sales"], facts: ["本次实际匹配份额", "匹配完成的PMS日期", "只收到钱不计住宿销售额", "不能重复认定历史已计收入"] },
+    { question: "售卡收款后用会员入住，原住宿款转会员还会再算吗？", ids: ["operating-sales"], facts: ["会员真实收款成功登记到会员订单时", "不等待入住核销或权益生效", "权益入住和住宿收款转会员不再加一次", "只新增真实补款"] },
+    { question: "渠道订单取消为0元了，平台退款在哪登记？", ids: ["refunds"], facts: ["原订单的退款入口", "本次应结减少金额", "即使订单取消后合同为0", "仍可登记退款", "不发起平台退款", "已封账月份不能重复补登记"] },
     { question: "游牧岛应结277.20元能录角分吗，已退房录错了怎么办？", ids: ["booking", "pricing"], facts: ["277.20", "最多两位小数", "已退房", "保留原值", "不改变退房与库存", "不等于办理收款或退款"] },
     { question: "逐日人数和统计依据在哪里，需要点开吗？", ids: ["dashboard"], facts: ["逐日人数与统计依据", "始终展开显示", "长表保留滚动查看", "免费分类的展开/收起切换仍保留"] },
     { question: "当前在住和所选期间全部是什么意思，怎么返回？", ids: ["dashboard"], facts: ["当前在住", "所选期间全部", "按人", "按次", "不随顶部历史日期变化", "所选期间实际住过的全部连续住宿", "仍在住或已离店", "完整夜数", "同一人离店后再来分别计次", "返回居住概览"] },
