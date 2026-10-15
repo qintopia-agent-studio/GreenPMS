@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-10-15.5";
+export const assistantKnowledgeRevision = "2026-10-15.6";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -144,10 +144,11 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
 打开会员档案查看合同、余额、收款及关联住宿。资料错误通过有权限的“修改会员记录”办理，填写原因并核对；不要为改资料另建重复会员。管理员可删除无业务记录或已办卡但从未核销的误建会员；先取消关联预订，存在误录收款时必须额外确认其为误录，系统追加冲销并作废未用权益，保留历史而不是实际退款。有历史核销、住宿转会员或其他禁止关联时不能删除；真正收过的钱需要退回时，不用误建删除冒充退款。`
   },
   {
-    id: "membership-sale", title: "会员订单、收款、生效与更正", commands: ["CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER"],
-    sources: ["docs/implementation/spec-step-2b-membership-orders.md", "apps/web/src/pages/MembersPage.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md"],
+    id: "membership-sale", title: "会员订单、收款、生效、更正与空白订单取消", commands: ["CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER", "CANCEL_MEMBERSHIP_ORDER"],
+    sources: ["docs/implementation/spec-cancel-empty-membership-order.md", "docs/implementation/spec-step-2b-membership-orders.md", "apps/web/src/pages/MembersPage.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md"],
     content: `在会员档案创建会员订单，选择页面当前发布的产品，核对权益类型、房型、价格及有效期；成交价偏离默认价时填写原因，不让助手给固定价格承诺。登记真实企微收款并核对流水归属；会员收款仍整笔独占，不使用住宿多订单分配方式。
 收款后仍需明确办理会员订单生效，不能把已建档、已创建会员订单或已收款等同于权益已生效。至少有一笔有效收款才能生效；收款与成交价有差额时按页面核对，不据此自动改价或宣称结清。
+误建的空白会员订单可在会员档案对应订单点击“取消订单”，填写原因，核对后确认。仅待生效、从未有任何收款记录、未关联合同或权益的订单允许取消；收款已冲销为零也不属于空白订单。取消后保留订单及原因、操作人和时间，显示“已取消”，不再提示收款差额或提供收款/生效操作，不影响其他正常订单及核销。不能用删除会员或“撤销错误办卡并重新升级”代替取消草稿。
 错误会员收款使用“更正企微收款”，保留原收款及更正记录，不原地删除。会员退费不是本版已提供的通用功能，不用住宿退款或留存入口冒充会员退费。`
   },
   {

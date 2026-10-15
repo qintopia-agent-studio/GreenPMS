@@ -99,3 +99,10 @@ it("当前人数与今日经营指标提供正确的范围和金额口径", () =
  const topic=assistantKnowledgeTopics.find(topic=>topic.id==="dashboard")!;
  for(const text of ["今日入住", "今日新增订单", "今日登记收款", "含补录", "未扣退款", "不将渠道应结金额当作已收款", "组成明细"]) expect(topic.content).toContain(text);
 });
+
+it("explains cancellation of an empty duplicate membership without deleting the active membership", () => {
+  const topic = assistantKnowledgeTopics.find(topic => topic.id === "membership-sale")!;
+  expect(topic.commands).toContain("CANCEL_MEMBERSHIP_ORDER");
+  for (const rule of ["从未有任何收款记录", "收款已冲销为零也不属于空白订单", "不影响其他正常订单及核销", "不能用删除会员"]) expect(topic.content).toContain(rule);
+  expect(buildAssistantSystemPrompt(context)).toContain("取消订单");
+});

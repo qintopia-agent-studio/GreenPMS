@@ -281,6 +281,11 @@ export async function getMemberView(db: DbExecutor, propertyId: string, memberId
     facts.push(fact);
     factsByOrder.set(fact.membership_order_id, facts);
   }
+  const cancellations = membershipOrderIds.length ? await db.selectFrom("membership_order_cancellations")
+    .innerJoin("command_executions", "command_executions.id", "membership_order_cancellations.command_id")
+    .innerJoin("subjects", "subjects.id", "command_executions.subject_id")
+    .select(["membership_order_cancellations.membership_order_id", "membership_order_cancellations.reason", "membership_order_cancellations.created_at", "membership_order_cancellations.command_id", "subjects.display_name as actor_display_name"])
+    .where("membership_order_cancellations.membership_order_id", "in", membershipOrderIds).execute() : [];
   const membershipOrders = membershipOrderRows.map((order) => {
     const paymentFacts = factsByOrder.get(order.id) ?? [];
     const paymentTotalMinor = paymentFacts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
@@ -288,6 +293,12 @@ export async function getMemberView(db: DbExecutor, propertyId: string, memberId
     const product = membershipProducts.find((item) => item.id === order.product_id);
     if (!product) throw new DomainError("INTERNAL_ERROR", "会员订单缺少产品有效期规则", 500);
     return {
+      cancellation: (() => {
+        const record = cancellations.find((item) => item.membership_order_id === order.id);
+        if (!record) return null;
+        const { membership_order_id: _, ...details } = record;
+        return details;
+      })(),
       order: { ...order, validity_period: product.validity_period },
       paymentFacts,
       paymentTotalMinor,

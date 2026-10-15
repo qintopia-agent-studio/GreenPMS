@@ -297,6 +297,7 @@ const membershipBusinessCommands = new Set<CommandType>([
   "RECORD_MEMBERSHIP_PAYMENT",
   "CORRECT_MEMBERSHIP_PAYMENT",
   "ACTIVATE_MEMBERSHIP_ORDER",
+  "CANCEL_MEMBERSHIP_ORDER",
   "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
   ...administratorMembershipCorrectionCommands
 ]);
@@ -384,6 +385,7 @@ function membershipCommandLabel(commandType: CommandType): string {
   if (commandType === "CREATE_MEMBERSHIP_ORDER") return "创建会员订单";
   if (commandType === "RECORD_MEMBERSHIP_PAYMENT") return "收款";
   if (commandType === "CORRECT_MEMBERSHIP_PAYMENT") return "更正企微收款";
+  if (commandType === "CANCEL_MEMBERSHIP_ORDER") return "取消会员订单";
   if (commandType === "ACTIVATE_MEMBERSHIP_ORDER") return "生效会员订单";
   if (commandType === "CORRECT_MEMBER_ENTITLEMENT_BALANCE") return "更正会员余额";
   if (commandType === "CORRECT_MEMBER_PROFILE") return "修改会员资料";
@@ -425,6 +427,7 @@ export const commandCapabilityBusinessLabels: Record<CommandCapability, string> 
   RECORD_MEMBERSHIP_PAYMENT: "收款",
   CORRECT_MEMBERSHIP_PAYMENT: "更正企微收款",
   ACTIVATE_MEMBERSHIP_ORDER: "生效会员订单",
+  CANCEL_MEMBERSHIP_ORDER: "取消会员订单",
   CREATE_ORDER: "创建住宿订单",
   CORRECT_ORDER_OCCUPANT: "更正住宿人资料",
   MANAGE_ORDER_OCCUPANTS: "管理同住人",
@@ -2113,6 +2116,13 @@ export function u1PreviewHasBusinessEvidence(
     }
     case "CORRECT_MEMBERSHIP_PAYMENT":
       return isRecord(effect.original) && isRecord(effect.replacement) && isRecord(effect.totals);
+    case "CANCEL_MEMBERSHIP_ORDER":
+      return hasExactKeys(effect, ["operation", "membershipOrderId", "memberName", "productName", "reason", "fromStatus", "toStatus"])
+        && effect.operation === "CANCEL_MEMBERSHIP_ORDER"
+        && nonblankString(effect.membershipOrderId) && effect.membershipOrderId === input.membershipOrderId
+        && nonblankString(effect.memberName) && nonblankString(effect.productName)
+        && nonblankString(effect.reason) && typeof input.reason === "string" && effect.reason === input.reason.trim()
+        && effect.fromStatus === "DRAFT" && effect.toStatus === "VOIDED";
     case "ACTIVATE_MEMBERSHIP_ORDER":
       return nonblankString(effect.memberName)
         && nonblankString(effect.productName)
@@ -3255,6 +3265,7 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
             <dt>发放权益</dt><dd>{scalar(product.entitlementUnits)} {product.entitlementUnitKind === "ROOM_NIGHT" ? "间夜" : "床夜"}</dd>
             <dt>适用范围</dt><dd>{product.allowedInventoryKind === "ROOM" ? "指定房型的独立房间" : "指定房型的单床"}</dd>
           </> : null}
+          {preview.commandType === "CANCEL_MEMBERSHIP_ORDER" ? <><dt>订单编号</dt><dd>{scalar(effect.membershipOrderId)}</dd><dt>取消原因</dt><dd>{scalar(effect.reason)}</dd><dt>操作结果</dt><dd>待生效 → 已取消；其他订单、收款及权益保持不变。</dd></> : null}
           {typeof effect.productName === "string" ? <><dt>会员产品</dt><dd>{effect.productName}</dd></> : null}
           {membershipPricing ? <>
             <dt>标价</dt><dd>{formatMoney(moneyFrom(membershipPricing.listedPrice))}</dd>

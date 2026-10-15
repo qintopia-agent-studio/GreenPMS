@@ -30,6 +30,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
   CREATE_MEMBERSHIP_ORDER: ["member", "operation", "pricing", "product", "status"],
   RECORD_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "payment", "productName", "status", "totals"],
   CORRECT_MEMBERSHIP_PAYMENT: ["memberName", "membershipOrderId", "operation", "original", "originalPaymentFactId", "productName", "replacement", "status", "totals"],
+  CANCEL_MEMBERSHIP_ORDER: ["fromStatus", "memberName", "membershipOrderId", "operation", "productName", "reason", "toStatus"],
   ACTIVATE_MEMBERSHIP_ORDER: ["agreedPrice", "entitlementUnitKind", "entitlementUnits", "fromStatus", "memberName", "membershipOrderId", "operation", "paymentDifference", "paymentTotal", "productName", "toStatus", "validFrom", "validUntil"],
   CREATE_ORDER: ["arrivalDate", "bookingChannelCode", "channelOrderReference", "departureDate", "freeStayCategoryCode", "freeStayReason", "inventoryUnit", "memberContractId", "memberId", "occupancyCapacity", "occupants", "pricing", "pricingDecision", "pricingPolicyVersionId", "primaryGuest", "quoteId", "stayType"],
   CORRECT_ORDER_OCCUPANT: ["after", "before", "occupantId", "operation", "orderId", "ordinal", "role"],
@@ -46,7 +47,7 @@ const expectedEffectKeys: Record<CommandType, string[]> = {
     "after", "before", "businessDate", "effectiveDate", "entitlementSummary", "fundsSummary", "inventoryChange",
     "occupancyCapacity", "occupantCount", "operation", "orderId", "pricingDecision", "stayId", "toInventoryUnit"
   ],
-  REPRICE_ORDER: ["before", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
+  REPRICE_ORDER: ["before", "bookingChannelCode", "inventoryUnitId", "manualAdjustmentMinor", "orderId", "policyBaseAmount", "pricing", "stayTimeline", "targetCurrentContractAmount"],
   CANCEL_ORDER: ["amounts", "businessDate", "currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "pricingRevision", "toStatus"],
   MARK_NO_SHOW: ["amounts", "businessDate", "currentContractAmount", "entitlementTransition", "freeStayCategoryCode", "freeStayReason", "fromStatus", "inventoryUnitId", "orderId", "pricingRevision", "toStatus"],
   REVOKE_CHECK_IN: ["amounts", "businessDate", "currentContractAmount", "effectiveDate", "entitlementTransition", "fromStatus", "inventoryUnitId", "orderId", "pricingRevision", "recordingMode", "toStatus", "unusedRoomConfirmed"],
@@ -671,6 +672,15 @@ describe("Command effect HTTP contract", () => {
       evidenceNote: "Effect contract verified historical membership evidence"
     }, demo.administratorWriteToken);
 
+    const emptyMembership = await capture("CREATE_MEMBERSHIP_ORDER", {
+      propertyId: demo.propertyId, memberId: correctionMemberId,
+      membershipProductId: "membership_product_shared_bath_single_v1", agreedPriceMinor: 162000
+    });
+    const emptyMembershipResult = await confirm(emptyMembership);
+    const cancellation = await capture("CANCEL_MEMBERSHIP_ORDER", {
+      propertyId: demo.propertyId, membershipOrderId: emptyMembershipResult.membershipOrderId, reason: "重复办理"
+    });
+    await confirm(cancellation);
     const membershipOrder = await capture("CREATE_MEMBERSHIP_ORDER", {
       propertyId: demo.propertyId,
       memberId: correctionMemberId,

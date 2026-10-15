@@ -1086,6 +1086,32 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     });
   }
 
+  if (commandType === "CANCEL_MEMBERSHIP_ORDER") {
+    const membershipOrderId = requireString(input, "membershipOrderId");
+    const reason = requireString(input, "reason").trim();
+    if (!reason || reason.length > 1000) throw new DomainError("VALIDATION_ERROR", "请填写取消原因（最多 1000 字）");
+    const order = await db.selectFrom("membership_orders")
+      .innerJoin("members", "members.id", "membership_orders.member_id")
+      .selectAll("membership_orders").select("members.full_name as member_name")
+      .where("membership_orders.id", "=", membershipOrderId)
+      .where("membership_orders.property_id", "=", propertyId)
+      .where("members.deleted_at", "is", null).executeTakeFirst();
+    if (!order) throw new DomainError("NOT_FOUND", "会员订单不存在", 404);
+    const [payment, contract] = await Promise.all([
+      db.selectFrom("membership_payment_facts").select("fact_id").where("membership_order_id", "=", order.id).executeTakeFirst(),
+      db.selectFrom("member_contracts").select("id").where("membership_order_id", "=", order.id).executeTakeFirst()
+    ]);
+    if (order.status !== "DRAFT" || payment || contract || order.contract_id || order.entitlement_lot_id
+      || order.activated_at || order.activated_by_command_id || order.valid_from || order.valid_until) {
+      throw new DomainError("AGGREGATE_VERSION_CONFLICT", "只能取消待生效、无任何收款记录且未关联合同或权益的会员订单", 409);
+    }
+    return finalize(propertyId, {
+      operation: "CANCEL_MEMBERSHIP_ORDER", membershipOrderId: order.id,
+      memberName: order.member_name, productName: order.product_name, reason,
+      fromStatus: "DRAFT", toStatus: "VOIDED"
+    }, { membershipOrderVersion: order.version });
+  }
+
   if (commandType === "CREATE_MEMBERSHIP_ORDER") {
     const memberId = requireString(input, "memberId");
     const membershipProductId = requireString(input, "membershipProductId");

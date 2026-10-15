@@ -1,3 +1,4 @@
+import { membershipCancellationReady } from "./membership-cancellation-readiness.ts";
 import { operatingSalesReady } from "./operating-sales-readiness.ts";
 import { paymentAllocationReady } from "./payment-allocation-readiness.ts";
 import { crossRoomUpgradeReady } from "./cross-room-upgrade-readiness.ts";
@@ -93,7 +94,8 @@ export const currentMigrationNames = [
   "070_payment_allocation_events.sql",
   "071_channel_amount_precision.sql",
   "072_channel_operating_facts.sql",
-  "073_direct_stay_amount_precision.sql"
+  "073_direct_stay_amount_precision.sql",
+  "074_cancel_empty_membership_order.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -687,7 +689,7 @@ export async function databaseReady(
           ), false)
           AND COALESCE((
             SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
-                'aec354b10b26d5ad696976098992bea0d6f6e10a8a8f363fa97cc125ff56404f'
+                '226dfeeabfaa1fe8923c327e8cce680d174fba7df84bc90908d69cbdc48b6ff3'
               AND procedure_row.proowner = database_owner.datdba
               AND procedure_row.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
               AND NOT procedure_row.prosecdef
@@ -1016,7 +1018,7 @@ export async function databaseReady(
         ) AS function_bodies_ready,
         COALESCE((
           SELECT encode(sha256(convert_to(procedure_row.prosrc, 'UTF8')), 'hex') =
-              '56ce58874289275ab7c1a3ae05b58109e9e9903caf480520db67e831392e49d5'
+              '3bb869dbdb04acce2e7e29594a965b6ed1cc00484e4d5cc7373eb5065d1a1d12'
             AND procedure_row.proowner = (
               SELECT database_row.datdba
               FROM pg_database AS database_row
@@ -2617,7 +2619,7 @@ export async function databaseReady(
           ('command_catalog', 'command_catalog_feature_key_check', 'c',
             'CHECK (((feature_key IS NULL) OR (command_type = ANY (ARRAY[''COMPLETE_CLEANING''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text]))))'),
           ('subject_command_grants', 'subject_command_grants_human_exact_check', 'c',
-            'CHECK ((command_type = ANY (ARRAY[''CREATE_MEMBER''::text, ''CREATE_MEMBERSHIP_ORDER''::text, ''RECORD_MEMBERSHIP_PAYMENT''::text, ''CORRECT_MEMBERSHIP_PAYMENT''::text, ''ACTIVATE_MEMBERSHIP_ORDER''::text, ''CREATE_ORDER''::text, ''CORRECT_ORDER_OCCUPANT''::text, ''MANAGE_ROOM_CATALOG''::text, ''MANAGE_ORDER_OCCUPANTS''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''CORRECT_MEMBER_PROFILE''::text, ''CORRECT_MEMBERSHIP_EFFECTIVE_DATE''::text, ''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text, ''RESCHEDULE_STAY''::text, ''EXTEND_STAY''::text, ''SHORTEN_STAY''::text, ''MOVE_UNIT''::text, ''REPRICE_ORDER''::text, ''CANCEL_ORDER''::text, ''MARK_NO_SHOW''::text, ''REVOKE_CHECK_IN''::text, ''LOCK_MAINTENANCE''::text, ''RELEASE_MAINTENANCE''::text, ''COMPLETE_CLEANING''::text, ''RECORD_COLLECTION''::text, ''RETAIN_ORDER_FUNDS''::text, ''APPLY_RETAINED_FUNDS''::text, ''RELEASE_RETAINED_FUNDS''::text, ''REFUND_RETAINED_FUNDS''::text, ''RECORD_REFUND''::text, ''REVERSE_FACT''::text, ''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text, ''CHECK_IN''::text, ''CHECK_OUT''::text, ''REVOKE_CHECK_OUT''::text, ''COMPLETE_STAY''::text, ''CORRECT_MEMBER_ENTITLEMENT_BALANCE''::text, ''ISSUE_TOKEN''::text, ''ROTATE_TOKEN''::text, ''REVOKE_TOKEN''::text, ''PLACE_INTERNAL_USE''::text, ''RELEASE_INTERNAL_USE''::text, ''BACKFILL_COMPLETED_STAY''::text])))'),
+            'CHECK ((command_type = ANY (ARRAY[''CREATE_MEMBER''::text, ''CREATE_MEMBERSHIP_ORDER''::text, ''RECORD_MEMBERSHIP_PAYMENT''::text, ''CORRECT_MEMBERSHIP_PAYMENT''::text, ''ACTIVATE_MEMBERSHIP_ORDER''::text, ''CANCEL_MEMBERSHIP_ORDER''::text, ''CREATE_ORDER''::text, ''CORRECT_ORDER_OCCUPANT''::text, ''MANAGE_ROOM_CATALOG''::text, ''MANAGE_ORDER_OCCUPANTS''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''CORRECT_MEMBER_PROFILE''::text, ''CORRECT_MEMBERSHIP_EFFECTIVE_DATE''::text, ''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text, ''RESCHEDULE_STAY''::text, ''EXTEND_STAY''::text, ''SHORTEN_STAY''::text, ''MOVE_UNIT''::text, ''REPRICE_ORDER''::text, ''CANCEL_ORDER''::text, ''MARK_NO_SHOW''::text, ''REVOKE_CHECK_IN''::text, ''LOCK_MAINTENANCE''::text, ''RELEASE_MAINTENANCE''::text, ''COMPLETE_CLEANING''::text, ''RECORD_COLLECTION''::text, ''RETAIN_ORDER_FUNDS''::text, ''APPLY_RETAINED_FUNDS''::text, ''RELEASE_RETAINED_FUNDS''::text, ''REFUND_RETAINED_FUNDS''::text, ''RECORD_REFUND''::text, ''REVERSE_FACT''::text, ''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text, ''CHECK_IN''::text, ''CHECK_OUT''::text, ''REVOKE_CHECK_OUT''::text, ''COMPLETE_STAY''::text, ''CORRECT_MEMBER_ENTITLEMENT_BALANCE''::text, ''ISSUE_TOKEN''::text, ''ROTATE_TOKEN''::text, ''REVOKE_TOKEN''::text, ''PLACE_INTERNAL_USE''::text, ''RELEASE_INTERNAL_USE''::text, ''BACKFILL_COMPLETED_STAY''::text])))'),
           ('membership_orders', 'membership_orders_status_check', 'c',
             'CHECK ((status = ANY (ARRAY[''DRAFT''::text, ''ACTIVE''::text, ''VOIDED''::text])))'),
           ('membership_orders', 'membership_orders_lifecycle_state_check', 'c',
@@ -3193,7 +3195,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
+    return finalReady && await membershipCancellationReady(db) && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
   } catch {
     return false;
   }

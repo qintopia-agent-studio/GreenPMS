@@ -37,6 +37,7 @@ const commandInputContract: Record<Exclude<PublicCommandEnvelopeType, "MANAGE_RO
     required: ["propertyId", "membershipOrderId", "originalPaymentFactId", "correctedAmountMinor", "correctedTransactionReference"],
     properties: ["propertyId", "membershipOrderId", "originalPaymentFactId", "correctedAmountMinor", "correctedTransactionReference", "note"]
   },
+  CANCEL_MEMBERSHIP_ORDER: { required: ["propertyId", "membershipOrderId", "reason"], properties: ["propertyId", "membershipOrderId", "reason"] },
   ACTIVATE_MEMBERSHIP_ORDER: {
     required: ["propertyId", "membershipOrderId"],
     properties: ["propertyId", "membershipOrderId"]

@@ -288,6 +288,7 @@ export interface MembershipPaymentFactDto {
 }
 
 export interface MembershipOrderSummaryDto {
+  cancellation?: { reason: string; created_at: string; command_id: string; actor_display_name: string } | null;
   order: MembershipOrderDto;
   paymentFacts: MembershipPaymentFactDto[];
   paymentTotalMinor: number;
