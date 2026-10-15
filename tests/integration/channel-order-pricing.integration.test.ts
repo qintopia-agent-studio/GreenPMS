@@ -192,14 +192,14 @@ describe.sequential("channel order amount and atomic CREATE_ORDER on PostgreSQL"
     await expect(preview(createInput(rejectedQuote.quoteId, {
       channel: "WECOM",
       reference: null,
-      target: 11_500
+      target: 11_550
     }), "wecom-manual-missing-reason")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
 
     const acceptedQuote = await transientQuote(19);
     const adjustedPreview = await preview(createInput(acceptedQuote.quoteId, {
       channel: "WECOM",
       reference: null,
-      target: 11_500,
+      target: 11_550,
       manualReason: "协议客户优惠"
     }), "wecom-manual");
     const adjustedReceipt = (await confirm(adjustedPreview, "wecom-manual")).receipt;
@@ -207,8 +207,8 @@ describe.sequential("channel order amount and atomic CREATE_ORDER on PostgreSQL"
     expect(adjustedView.pricingRevisions[0]).toMatchObject({
       pricing_basis: "MANUAL_ADJUSTMENT",
       policy_base_amount_minor: 12_000,
-      manual_adjustment_minor: -500,
-      current_contract_amount_minor: 11_500,
+      manual_adjustment_minor: -450,
+      current_contract_amount_minor: 11_550,
       reason: { code: "CREATE_ORDER_MANUAL_PRICE", note: "协议客户优惠" }
     });
   });
