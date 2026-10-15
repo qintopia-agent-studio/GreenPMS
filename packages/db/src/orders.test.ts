@@ -1072,6 +1072,32 @@ describe("projectOrderLifecycle", () => {
     expect(()=>projectOrderLifecycle(missing)).toThrow(/唯一计价版本/);
   });
 
+  it("reads a cancelled channel order after an audited refund without reopening occupancy", () => {
+    const input={...base(),order:{...base().order,booking_channel_code:"CTRIP",status:"CANCELLED",version:2,current_revision_id:"revision_2"}};
+    input.stay.status="CANCELLED";input.activeTimeline=[];
+    input.amendments.push(amendment({id:"amend_2",sequence:2,type:"CANCEL_ORDER",payload:{fromStatus:"RESERVED",toStatus:"CANCELLED"}}));
+    input.revisions.push(revision("amend_2","2026-08-01","2026-08-03",0,2));
+    const before=projectOrderLifecycle(input);
+    input.order.version=3;
+    input.amendments.push(amendment({id:"amend_3",sequence:3,type:"RECORD_REFUND",payload:{channelOperating:true,orderId:"order_1",method:"CHANNEL",amountMinor:5000,currency:"CNY",businessDate:"2026-08-03",contractBeforeMinor:0,contractTargetMinor:0}}));
+    const after=projectOrderLifecycle(input);
+    expect(after.effectiveArrangement).toEqual(before.effectiveArrangement);expect(after.fulfillment).toEqual(before.fulfillment);
+    expect(()=>projectOrderLifecycle({...input,order:{...input.order,booking_channel_code:"WECOM"}})).toThrow();
+  });
+
+  it("reads a completed channel order after a precise financial correction", () => {
+    const input={...base(),order:{...base().order,booking_channel_code:"YOUMUDAO",status:"CHECKED_OUT",version:4,current_revision_id:"revision_2"}};
+    input.stay.status="COMPLETED";input.activeTimeline=[];input.businessDate="2026-08-04";
+    input.amendments.push(
+      amendment({id:"amend_2",sequence:2,type:"CHECK_IN",payload:{fromStatus:"RESERVED",toStatus:"CHECKED_IN",businessDate:"2026-08-01",effectiveDate:"2026-08-01",recordingMode:"ON_SCHEDULE"}}),
+      amendment({id:"amend_3",sequence:3,type:"CHECK_OUT",payload:{fromStatus:"CHECKED_IN",toStatus:"CHECKED_OUT",businessDate:"2026-08-03",effectiveDate:"2026-08-03",recordingMode:"ON_SCHEDULE"}}),
+      amendment({id:"amend_4",sequence:4,type:"REPRICE_ORDER",payload:{bookingChannelCode:"YOUMUDAO",targetCurrentContractAmount:{currency:"CNY",minorUnits:27720}}})
+    );
+    input.revisions.push({...revision("amend_4","2026-08-01","2026-08-03",10000,2),current_contract_amount_minor:27720});
+    expect(projectOrderLifecycle(input).fulfillment.state).toBe("CHECKED_OUT");
+    expect(()=>projectOrderLifecycle({...input,order:{...input.order,booking_channel_code:"WECOM"}})).toThrow(/终态订单/);
+  });
+
   it("requires a continuous pricing revision chain whose latest ID is the order current pointer", () => {
     const missingPointer = base();
     missingPointer.order.current_revision_id = null;

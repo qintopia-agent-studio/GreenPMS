@@ -6,7 +6,7 @@ import { loadDashboardMoney } from "./dashboard-money.ts";
 
 interface Proof { id:string;method:string;reversed:boolean;bill_id:string|null;bill_amount:string|null;bill_count:number;verified:boolean;original_date:string|null }
 export async function loadOperatingSales(trx:Transaction<Database>,propertyId:string,timezone:string,currency:string,range:DashboardRange,today:string) {
- const baselines=(await sql<SalesBaseline>`SELECT month::text,currency,amount_minor::text AS "amountMinor",recognition_from::text AS "recognitionFrom" FROM operating_sales_baselines WHERE property_id=${propertyId} ORDER BY month`.execute(trx)).rows;
+ const baselines=(await sql<SalesBaseline>`SELECT month::text,currency,amount_minor::text AS "amountMinor",recognition_from::text AS "recognitionFrom",evidence_note AS note FROM operating_sales_baselines WHERE property_id=${propertyId} ORDER BY month`.execute(trx)).rows;
  if(!baselines.length){const result=aggregateOperatingSales({from:range.from,to:range.to,currency,events:[],reviews:[],baselines});return {...result,todaySummary:result.summary,details:[] as DashboardDetail[]};}
  const opening=(await sql<SalesOpening>`SELECT source_kind||':'||source_id AS key,amount_minor::text AS "amountMinor" FROM operating_sales_opening WHERE property_id=${propertyId} AND source_kind<>'CHANNEL_REFUND'`.execute(trx)).rows;
  const until=dashboardDate(range.to>today?range.to:today,1);
@@ -49,8 +49,9 @@ export async function loadOperatingSales(trx:Transaction<Database>,propertyId:st
     verified:Boolean(p&&(p.method!=='WECOM'||(f.currency==='CNY'&&p.bill_count===1&&p.verified))),reversed:p?.reversed??false,refund,sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`});
  }
  const matched=recognizedMatchedSales(facts,opening,baselines[0]!.recognitionFrom);
- const channel=(await sql<{id:string;order_id:string;kind:string;amount:string;currency:string;business_date:string;created_at:Date;note:string}>`SELECT id,order_id,kind,amount_minor::text AS amount,currency,business_date::text,created_at,note FROM channel_operating_facts WHERE property_id=${propertyId} ORDER BY created_at,id`.execute(trx)).rows;
- const channelEvents:OperatingSaleEvent[]=channel.map(f=>({id:f.id,source:'CHANNEL',date:f.business_date,currency:f.currency,kind:f.kind==='SALE'?'SALE':f.kind==='REFUND'?'REFUND':'CORRECTION',amountMinor:f.amount,orderId:f.order_id,memberId:null,registeredAt:new Date(f.created_at).toISOString(),reason:f.note}));
+ const channel=(await sql<{id:string;order_id:string;kind:string;amount:string;currency:string;business_date:string;created_at:Date;note:string;references_fact_id:string|null}>`SELECT id,order_id,kind,amount_minor::text AS amount,currency,business_date::text,created_at,note,references_fact_id FROM channel_operating_facts WHERE property_id=${propertyId} ORDER BY created_at,id`.execute(trx)).rows;
+ const reversedChannelRefunds=new Set(channel.filter(f=>f.kind==='REVERSAL').map(f=>f.references_fact_id));
+ const channelEvents:OperatingSaleEvent[]=channel.filter(f=>f.kind!=='REVERSAL'&&!reversedChannelRefunds.has(f.id)).map(f=>({id:f.id,source:'CHANNEL',date:f.business_date,currency:f.currency,kind:f.kind==='SALE'?'SALE':f.kind==='REFUND'?'REFUND':'CORRECTION',amountMinor:f.amount,orderId:f.order_id,memberId:null,registeredAt:new Date(f.created_at).toISOString(),reason:f.note}));
  const result=aggregateOperatingSales({from:range.from,to:range.to,currency,events:[...matched.events,...channelEvents],reviews:[...matched.reviews,...uncertain],baselines});
  const todayResult=aggregateOperatingSales({from:today,to:today,currency,events:[...matched.events,...channelEvents],reviews:[...matched.reviews,...uncertain],baselines});
  const details:DashboardDetail[]=result.events.map(e=>({id:`sales:${e.id}`,date:e.date,metric:'SALES',label:e.source==='BASELINE'?'已确认封账合计':e.source==='CHANNEL'?'渠道应结业务':e.source==='MEMBERSHIP'?'会员售卡收款':'已匹配住宿收款',orderId:e.orderId,memberId:e.memberId,unitId:null,units:null,amountMinor:e.amountMinor,currency:e.currency,registeredAt:e.registeredAt,businessDate:e.date,reason:e.reason}));

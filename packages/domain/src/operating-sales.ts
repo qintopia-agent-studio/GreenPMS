@@ -2,17 +2,17 @@ import type { OperatingSalesAmount, OperatingSalesSource, OperatingSalesSummary 
 export interface OperatingSaleEvent { id:string;source:OperatingSalesSource;date:string;currency:string;kind:"SALE"|"REFUND"|"CORRECTION"|"BASELINE";amountMinor:string;orderId:string|null;memberId:string|null;registeredAt:string|null;reason:string }
 export interface MatchedSaleFact {id:string;source:"DIRECT"|"MEMBERSHIP";date:string;currency:string;amountMinor:string;registeredAt:string;orderId:string|null;memberId:string|null;billId:string|null;billAmountMinor:string|null;verified:boolean;reversed:boolean;refund:boolean;sourceKey:string}
 export interface SalesOpening {key:string;amountMinor:string}
-export interface SalesBaseline {month:string;currency:string;amountMinor:string;recognitionFrom:string}
+export interface SalesBaseline {month:string;currency:string;amountMinor:string;recognitionFrom:string;note?:string}
 
 /** 每笔有效款项按匹配份额及匹配日期计入；期初已计金额优先覆盖历史关联份额。 */
 export function recognizedMatchedSales(facts:MatchedSaleFact[],opening:SalesOpening[],recognitionFrom:string) {
  const available=new Map(opening.map(row=>[row.key,BigInt(row.amountMinor)]));
  const unique=[...new Map(facts.map(f=>[f.id,f])).values()].filter(f=>!f.reversed);
  const billTotals=new Map<string,bigint>();
- for(const f of unique)if(!f.refund&&f.verified&&f.billId)billTotals.set(f.billId,(billTotals.get(f.billId)??0n)+BigInt(f.amountMinor));
+ for(const f of unique)if(f.verified&&f.billId)billTotals.set(f.billId,(billTotals.get(f.billId)??0n)+BigInt(f.amountMinor));
  const events:OperatingSaleEvent[]=[];const reviews:MatchedSaleFact[]=[];
  for(const fact of unique.sort((a,b)=>a.date.localeCompare(b.date)||a.registeredAt.localeCompare(b.registeredAt)||a.id.localeCompare(b.id))) {
-  if(!fact.verified || (!fact.refund&&fact.billId&&fact.billAmountMinor!==null&&(billTotals.get(fact.billId)??0n)>BigInt(fact.billAmountMinor))) {if(fact.date>=recognitionFrom)reviews.push(fact);continue;}
+  if(!fact.verified || (fact.billId&&fact.billAmountMinor!==null&&(billTotals.get(fact.billId)??0n)>BigInt(fact.billAmountMinor))) {if(fact.date>=recognitionFrom)reviews.push(fact);continue;}
   let amount=BigInt(fact.amountMinor);
   if(!fact.refund){
    const billKey=fact.billId?`PAYMENT_BILL:${fact.billId}`:null;
@@ -42,7 +42,7 @@ export function aggregateOperatingSales(input:{from:string;to:string;currency:st
  for(const b of baselines){const last=new Date(Date.UTC(Number(b.month.slice(0,4)),Number(b.month.slice(5,7)),0)).toISOString().slice(0,10);
   if(to<b.month||from>last)continue;
   if(from>b.month||to<last){partialSealed=true;continue;}
-  sealedMonths.push(b.month.slice(0,7));events.push({id:`baseline:${b.month}:${b.currency}`,source:'BASELINE',date:last,currency:b.currency,kind:'BASELINE',amountMinor:b.amountMinor,orderId:null,memberId:null,registeredAt:null,reason:`${b.month.slice(0,7)}已确认封账合计，不代表月末单日发生额`});
+  sealedMonths.push(b.month.slice(0,7));events.push({id:`baseline:${b.month}:${b.currency}`,source:'BASELINE',date:last,currency:b.currency,kind:'BASELINE',amountMinor:b.amountMinor,orderId:null,memberId:null,registeredAt:null,reason:`${b.month.slice(0,7)}已确认封账合计，不代表月末单日发生额。${b.note??""}`});
  }
  const reviews=input.reviews.filter(f=>f.date>=from&&f.date<=to&&f.date>=start);
  let historicalCursor=from;

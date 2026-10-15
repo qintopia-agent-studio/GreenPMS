@@ -1276,7 +1276,8 @@ function validateLifecycleStatus(
   orderStatus: string,
   stayStatus: string,
   amendments: readonly LifecycleAmendmentRow[],
-  fulfillment: Omit<OrderFulfillmentProjectionDto, "state">
+  fulfillment: Omit<OrderFulfillmentProjectionDto, "state">,
+  bookingChannelCode?: string | null
 ): OrderFulfillmentProjectionDto["state"] {
   const expectedStayStatus: Record<LifecycleOrderStatus, string> = {
     RESERVED: "PLANNED",
@@ -1342,9 +1343,12 @@ function validateLifecycleStatus(
     const terminalPricingOnlyAllowed = projectedStatus === "CHECKED_OUT"
       && (amendmentType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
         || amendmentType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
-        || amendmentType === "CORRECT_HISTORICAL_STAY_ARRANGEMENT");
+        || amendmentType === "CORRECT_HISTORICAL_STAY_ARRANGEMENT"
+        || (amendmentType === "REPRICE_ORDER" && externalChannelCodes.has(bookingChannelCode??"")));
+    const terminalChannelFundsAllowed = externalChannelCodes.has(bookingChannelCode??"") && channelFundsAmendment(amendment);
     if (amendmentType !== "CORRECT_ORDER_OCCUPANT"
       && !terminalPricingOnlyAllowed
+      && !terminalChannelFundsAllowed
       && projectedStatus !== "RESERVED"
       && projectedStatus !== "CHECKED_IN") {
       lifecycleFailure("终态订单包含不允许的住宿或计价变更", {
@@ -1669,7 +1673,7 @@ export function projectOrderLifecycle(input: {
     arrivalDate: current.arrivalDate,
     departureDate: current.departureDate
   });
-  const state = validateLifecycleStatus(input.order.status, input.stay.status, input.amendments, fulfillmentEvents);
+  const state = validateLifecycleStatus(input.order.status, input.stay.status, input.amendments, fulfillmentEvents, input.order.booking_channel_code);
   return {
     originalArrangement: original,
     effectiveArrangement: {
