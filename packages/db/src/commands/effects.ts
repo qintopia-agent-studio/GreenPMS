@@ -2978,7 +2978,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     if (context.order.stay_type === "FREE" && targetCurrentContractAmountMinor !== 0) {
       throw new DomainError("VALIDATION_ERROR", "Free stays must keep a zero current contract amount");
     }
-    const stayTimeline = await loadActiveStayTimeline(db, context);
+    const stayTimeline = await loadProjectedStayTimeline(db, context, await propertyLocalToday(db, propertyId));
     const policyPricing = await priceStayTimeline(db, {
       propertyId, orderId, memberId: context.order.member_id, memberContractId: context.order.member_contract_id,
       arrivalDate: context.order.arrival_date, departureDate: context.order.departure_date,
