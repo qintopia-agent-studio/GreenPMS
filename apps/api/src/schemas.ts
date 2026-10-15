@@ -547,7 +547,7 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("RELEASE_MAINTENANCE", strictObject({ ...PropertyInput, maintenanceLockId: Id })),
   commandEnvelope("COMPLETE_CLEANING", strictObject({ ...PropertyInput, cleaningTaskId: Id })),
   commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, method: ShortText, transactionReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
-  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), refundReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
+  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, businessDate: Type.Optional(LocalDate), externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), refundReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
   commandEnvelope("REVERSE_FACT", strictObject({ ...OrderInput, reversesFactId: Id, note: Note, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()) })),
   commandEnvelope("RETAIN_ORDER_FUNDS", strictObject({ ...OrderInput, sourceFactId: Id, amountMinor: PositiveAmount, ownerName: ShortText, ownerContact: ShortText, confirmationNote: Note })),
   commandEnvelope("APPLY_RETAINED_FUNDS", strictObject({ ...OrderInput, retainedFundId: Id, amountMinor: PositiveAmount, authorizationNote: Note })),
@@ -1402,8 +1402,8 @@ export const CommandEffectSchema = Type.Union([
     pricing: PricingResultSchema
   }),
   strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), method: ShortText, transactionReference: nullable(ShortText), note: OptionalNote }),
-  strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), referencesFactId: Id, method: ShortText, transactionReference: nullable(ShortText), refundReference: Type.Optional(ShortText), note: OptionalNote }),
-  strictObject({ orderId: Id, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()), releaseAllocationId: Type.Optional(Id), reversesFactId: Id, amountMinor: PositiveAmount, netEffectMinor: SafeInteger, currency: Type.String({ minLength: 3, maxLength: 3 }), note: Note }),
+  strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), referencesFactId: Id, method: ShortText, transactionReference: nullable(ShortText), refundReference: Type.Optional(ShortText), note: OptionalNote, channelOperating: Type.Optional(Type.Boolean()), businessDate: Type.Optional(LocalDate) }),
+  strictObject({ orderId: Id, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()), releaseAllocationId: Type.Optional(Id), reversesFactId: Id, amountMinor: PositiveAmount, netEffectMinor: SafeInteger, currency: Type.String({ minLength: 3, maxLength: 3 }), note: Note, channelOperating: Type.Optional(Type.Boolean()), businessDate: Type.Optional(LocalDate) }),
   strictObject({
     operation: Type.Literal("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"),
     crossRoomUpgrade: Type.Optional(strictObject({
@@ -3267,6 +3267,7 @@ export const OrderDetailResponseSchema = strictObject({
     commandId: Id
   })),
   coverageSet: Type.Array(CoverageRowSchema),
+  channelOperating: Type.Optional(nullable(strictObject({initialized:Type.Boolean(),businessDate:LocalDate,currency:Type.String(),originalSaleFactId:nullable(Id),netMinor:Type.String(),openingRefundMinor:Type.String(),facts:Type.Array(strictObject({id:Id,kind:Type.Union(["SALE","CORRECTION","REFUND","REVERSAL"].map(v=>Type.Literal(v))),amountMinor:SafeInteger,businessDate:LocalDate,referencesFactId:nullable(Id),refundReference:nullable(Type.String()),note:Type.String(),createdAt:DateTime}))}))),
   collectionFacts: Type.Array(CollectionFactRowSchema),
   cleaningTasks: Type.Array(CleaningTaskSummarySchema),
   amounts: AmountSummarySchema

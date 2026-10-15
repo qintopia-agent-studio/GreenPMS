@@ -1,3 +1,4 @@
+import { applyChannelFunds, externalChannel, recordChannelRevision } from "../channel-operating.ts";
 import { applyRetainedFundsCommand, isRetainedFundsCommand, lockPaymentAllocationResources } from "../retained-funds.ts";
 import { sql, type Transaction } from "kysely";
 import { applyCheckoutReversal, lockCheckoutReversalInventory } from "./checkout-reversal.ts";
@@ -558,6 +559,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     }
     await lockRoomDays(trx, roomDates);
   }
+  if (commandType === "RECORD_REFUND" && externalChannel(context.order.booking_channel_code)) return;
   if (commandType === "RECORD_REFUND") {
     await trx.selectFrom("collection_facts")
       .innerJoin("orders", "orders.id", "collection_facts.order_id")
@@ -604,6 +606,7 @@ async function insertRevision(trx: Transaction<Database>, options: {
     current_contract_amount_minor: options.pricing.currentContractAmountMinor,
     currency: options.pricing.currency
   }).execute();
+  await recordChannelRevision(trx, id);
   return id;
 }
 
@@ -2317,6 +2320,10 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       resourceRefs: [orderId, amendmentId, revisionId, ...coverageRefs.coverageIds],
       factRefs: coverageRefs.factIds
     };
+  }
+
+  if ((options.commandType === "RECORD_REFUND" || options.commandType === "REVERSE_FACT") && effect.channelOperating === true) {
+    return applyChannelFunds(trx, options.commandType, options.commandId, context.order.property_id, effect);
   }
 
   if (options.commandType === "RECORD_COLLECTION" || options.commandType === "RECORD_REFUND" || options.commandType === "REVERSE_FACT") {

@@ -1,3 +1,4 @@
+import { ChannelOperatingHistory } from "../components/ChannelRefundForm";
 import { parseChannelYuanToMinor, isExternalBookingChannel } from "../channel-amount";
 import { RetainedFundsPanel } from "../components/RetainedFunds";
 import { useAssistantOrderEntry } from "../assistant/context";
@@ -2111,6 +2112,7 @@ function ScopedOrderDetailPage() {
       {overdueNotice ? <OverdueInHouseAlert notice={overdueNotice} /> : null}
 
       <OrderAmountStrip amounts={view.amounts} pricingRevision={currentPricingRevision} bookingChannelCode={view.order.booking_channel_code} />
+      <ChannelOperatingHistory view={view} blocked={orderActionsBlocked} onSubmit={request=>{setCommandDraft(undefined);setCommand(request)}} />
 
       {!editorIsOpenRef.current && !command ? readFailureNotice : null}
       <InlineError error={recoveryError} title="恢复记录未收口" />

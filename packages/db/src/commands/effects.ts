@@ -1,3 +1,4 @@
+import { buildChannelFundsEffect, externalChannel } from "../channel-operating.ts";
 import { canRepriceOrder, validateOrderTargetAmount } from "@qintopia/domain";
 import { buildRetainedFundsEffect, isRetainedFundsCommand } from "../retained-funds.ts";
 import { fundingSource, assertNoUnassignedRefund, requirePaymentAllocationEnabled } from "../payment-allocation.ts";
@@ -3030,6 +3031,11 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
   }
 
   if (commandType === "RECORD_REFUND") {
+    if (externalChannel(context.order.booking_channel_code)) {
+      const channel = await buildChannelFundsEffect(db, propertyId, orderId, "RECORD_REFUND", input);
+      return finalize(propertyId, channel.effect, { ...baseBasis, ...channel.basis });
+    }
+    if (input.businessDate !== undefined) throw new DomainError("VALIDATION_ERROR", "业务日期字段仅用于渠道退款；企微退款按正式登记日记录");
     assertOperatorFundsAllowedForOrder(context);
     await assertLodgingFundsOpenForOrder(db, orderId);
     const amountMinor = requireInteger(input, "amountMinor", { min: 1 });
@@ -3065,6 +3071,10 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
   }
 
   if (commandType === "REVERSE_FACT") {
+    if (externalChannel(context.order.booking_channel_code)) {
+      const channel = await buildChannelFundsEffect(db, propertyId, orderId, "REVERSE_FACT", input);
+      return finalize(propertyId, channel.effect, { ...baseBasis, ...channel.basis });
+    }
     await assertLodgingFundsOpenForOrder(db, orderId);
     const reversesFactId = requireString(input, "reversesFactId");
     const original = await db.selectFrom("collection_facts")

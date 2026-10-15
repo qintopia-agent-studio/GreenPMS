@@ -635,6 +635,7 @@ export interface OrderViewDto {
     commandId: string;
   } | null;
   coverageSet: CoverageRowDto[];
+  channelOperating?: {initialized:boolean;businessDate:string;currency:string;originalSaleFactId:string|null;netMinor:string;openingRefundMinor:string;facts:Array<{id:string;kind:"SALE"|"CORRECTION"|"REFUND"|"REVERSAL";amountMinor:number;businessDate:string;referencesFactId:string|null;refundReference:string|null;note:string;createdAt:string}>}|null;
   collectionFacts: CollectionFactDto[];
   cleaningTasks: CleaningTaskSummaryDto[];
   amounts: AmountSummaryDto;

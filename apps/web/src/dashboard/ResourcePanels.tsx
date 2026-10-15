@@ -1,3 +1,4 @@
+import { OperatingSalesPanel } from "./OperatingSalesPanel";
 import { lazy, Suspense } from "react";
 import { ArrowRight } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -18,6 +19,7 @@ export function ResourcePanels({ data, view, onView: setView, futureDays, onFutu
   const partial = data.history.quality !== "COMPLETE";
   return <section className="resource-section" aria-labelledby="resource-title">
     <div className="dashboard-section-heading"><div><p className="section-kicker">03 / 房源与资金</p><h2 id="resource-title">让经营事实，支持下一步安排</h2></div><span className="dashboard-muted">人数之外，再看住宿量与资金</span></div>
+    {data.sales ? <OperatingSalesPanel summary={data.sales} onDetail={()=>onDetail("SALES")}/> : null}
     <div className="resource-summary">
       <div><span>经营入住率 <DashboardHint text={`历史区间 ${data.range.from} 至 ${data.range.to}：每日正常应收费已履约销售单元之和÷每日总销售单元之和。整房1、单床1、拆床包房按当日有效床数；含会员权益，不含免费分子；维修与免费不扣分母。`} /></span><strong>{data.history.occupancyRate == null ? <>— <DashboardHint text={`${data.history.reason}；${data.history.reviewCount} 条住宿记录待核对。打开下方待核对事实。`} /></> : `${data.history.occupancyRate.toFixed(1)}%`}</strong><small>{data.occupancyChangePoints === null ? <>较上期 — <DashboardHint text="本期或上期的住宿事实、逐日销售单元有缺项，无法计算百分点变化。" /></> : `较上期 ${data.occupancyChangePoints >= 0 ? "+" : ""}${data.occupancyChangePoints.toFixed(1)} 个百分点`}</small></div>
       <button onClick={() => onDetail("PAID")}><span>付费住宿量 <ArrowRight size={13} /></span><strong>{data.history.paidUnitNights.toLocaleString("zh-CN")}<small>单元夜</small></strong><small>{partial ? "已核对部分 · 非完整合计" : "历史区间 · 含会员权益"}</small></button>

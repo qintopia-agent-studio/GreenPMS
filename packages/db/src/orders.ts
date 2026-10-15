@@ -1,3 +1,4 @@
+import { channelOperatingSummary } from "./channel-operating.ts";
 import { projectCatalogUnitNames } from "./room-catalog-labels.ts";
 import { currentPrimaryGuest, projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
@@ -1886,9 +1887,11 @@ export async function getOrderViewSnapshot(
     activeTimeline,
     historicalCorrectionGroupsByCommandId
   });
+ const channelOperating = await channelOperatingSummary(db, context.order.property_id, orderId);
  const awaitingPreviousCheckout = context.order.status === "RESERVED" && await previousStayAwaitingCheckout(db, context.order.property_id, activeTimeline.find((day) => day.serviceDate === businessDate)?.inventoryUnitId ?? context.currentSegment.inventoryUnitId, businessDate, context.order.id);
  return {
    accessLevel,
+   channelOperating,
    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
      businessDate,
      arrivalDate: context.order.arrival_date,
@@ -1899,7 +1902,8 @@ export async function getOrderViewSnapshot(
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
-   }, commandGrants).map((action) => action.code === "CHECK_IN" && action.enabled && awaitingPreviousCheckout
+   }, commandGrants).map(action => action.code === "RECORD_REFUND" && channelOperating && accessLevel === "WRITE"
+     ? { ...action, enabled: channelOperating.initialized && channelOperating.originalSaleFactId !== null && BigInt(channelOperating.netMinor)>0n, disabledReason: !channelOperating.initialized ? "历史已计收入尚未承接" : BigInt(channelOperating.netMinor)>0n ? null : "没有可退的渠道成交余额" } : action).map((action) => action.code === "CHECK_IN" && action.enabled && awaitingPreviousCheckout
      ? { ...action, enabled: false, disabledReason: "PREVIOUS_STAY_NOT_CHECKED_OUT" } : action).filter((action) => !amendments.some((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
      && recordValue(amendment.payload)?.crossRoomUpgrade)
      || !["EXTEND_STAY", "MOVE_UNIT", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"].includes(action.code))

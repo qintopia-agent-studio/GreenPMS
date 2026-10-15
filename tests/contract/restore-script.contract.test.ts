@@ -162,9 +162,9 @@ describe("restore script contract", () => {
   });
 
   it("creates a new target, upgrades a stage 9 backup, and validates the current schema including retained funds and allocation events", async () => {
-    expect(currentMigrationNames).toHaveLength(70);
-    expect(currentMigrationNames.slice(-4)).toEqual([
-      "067_payment_event_delivery.sql", "069_payment_allocations_retained_funds.sql", "070_payment_allocation_events.sql", "071_channel_amount_precision.sql"
+    expect(currentMigrationNames).toHaveLength(71);
+    expect(currentMigrationNames.slice(-5)).toEqual([
+      "067_payment_event_delivery.sql", "069_payment_allocations_retained_funds.sql", "070_payment_allocation_events.sql", "071_channel_amount_precision.sql", "072_channel_operating_facts.sql"
     ]);
     expect(currentMigrationNames).toContain("046_command_authorization.sql");
     expect(currentMigrationNames).toContain("047_runtime_database_role.sql");
@@ -283,7 +283,8 @@ describe("restore script contract", () => {
   it.each([
     ["069_payment_allocations_retained_funds.sql", 67],
     ["070_payment_allocation_events.sql", 68],
-    ["071_channel_amount_precision.sql", 69]
+    ["071_channel_amount_precision.sql", 69],
+    ["072_channel_operating_facts.sql", 70]
   ] as const)("rejects an upgrade that stops before %s and retains the target", async (missingMigration, finalCount) => {
     expect(currentMigrationNames[finalCount]).toBe(missingMigration);
     const fixture = await fakeDockerEnvironment(false, false, undefined, { finalMigrationCount: String(finalCount) });

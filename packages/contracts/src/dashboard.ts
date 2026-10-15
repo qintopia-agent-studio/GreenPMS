@@ -1,8 +1,9 @@
+import type { OperatingSalesSummary } from "./operating-sales.ts";
 export const dashboardDefinitionVersion = "2026-10-14.1";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
-export const dashboardMetrics = ["PAID", "FREE", "MONEY", "REVIEW", "DEBT", "RETAINED", "IN_HOUSE", "ARRIVAL", "DEPARTURE", "OVERDUE", "TODAY_ORDERS", "TODAY_COLLECTIONS"] as const;
+export const dashboardMetrics = ["PAID", "FREE", "MONEY", "REVIEW", "DEBT", "RETAINED", "IN_HOUSE", "ARRIVAL", "DEPARTURE", "OVERDUE", "TODAY_ORDERS", "TODAY_COLLECTIONS", "SALES", "TODAY_SALES"] as const;
 export type DashboardMetric = typeof dashboardMetrics[number];
 export interface DashboardQuery {
   from?: string;
@@ -73,10 +74,12 @@ export interface DashboardResponse {
   stayTrend: Array<{ date: string; paid: number; free: number; capacity: number | null; quality: DashboardQuality }>;
   breakdown: Array<{ building: string; roomType: string } & DashboardStayTotals>;
   sources: Array<{ source: DashboardSource; unitNights: number }>;
+  sales?: OperatingSalesSummary;
   money: DashboardMoney[];
   previousMoney: DashboardMoney[];
   moneyTrend: Array<{ date: string; money: DashboardMoney[] }>;
   current: {
+    todaySales?: OperatingSalesSummary;
     todayOrders: number;
     todayCollections: DashboardBalance[];
     todayCollectionReviewCount: number;

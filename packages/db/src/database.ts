@@ -1,3 +1,4 @@
+import { operatingSalesReady } from "./operating-sales-readiness.ts";
 import { paymentAllocationReady } from "./payment-allocation-readiness.ts";
 import { crossRoomUpgradeReady } from "./cross-room-upgrade-readiness.ts";
 import { roomCatalogReady } from "./room-catalog-readiness.ts";
@@ -90,7 +91,8 @@ export const currentMigrationNames = [
   "067_payment_event_delivery.sql",
   "069_payment_allocations_retained_funds.sql",
   "070_payment_allocation_events.sql",
-  "071_channel_amount_precision.sql"
+  "071_channel_amount_precision.sql",
+  "072_channel_operating_facts.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -3190,7 +3192,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db);
+    return finalReady && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
   } catch {
     return false;
   }
