@@ -4,7 +4,7 @@ import type { DashboardDetail, DashboardRange } from "@qintopia/contracts";
 import type { Database } from "./schema.ts";
 import { dashboardMoneyDetail, loadDashboardMoney } from "./dashboard-money.ts";
 
-interface Proof { id:string;channel_order:boolean;method:string;reversed:boolean;bill_id:string|null;bill_amount:string|null;bill_count:number;verified:boolean;original_date:string|null }
+interface Proof { id:string;channel_order:boolean;method:string;reversed:boolean;reversed_at:Date|null;bill_id:string|null;bill_amount:string|null;bill_count:number;verified:boolean;original_date:string|null }
 export async function loadOperatingSales(trx:Transaction<Database>,propertyId:string,timezone:string,currency:string,range:DashboardRange,today:string) {
  const baselines=(await sql<SalesBaseline>`SELECT month::text,currency,amount_minor::text AS "amountMinor",recognition_from::text AS "recognitionFrom",evidence_note AS note FROM operating_sales_baselines WHERE property_id=${propertyId} ORDER BY month`.execute(trx)).rows;
  if(!baselines.length){const result=aggregateOperatingSales({from:range.from,to:range.to,currency,events:[],reviews:[],baselines});return {...result,todaySummary:result.summary,details:[] as DashboardDetail[]};}
@@ -13,6 +13,7 @@ export async function loadOperatingSales(trx:Transaction<Database>,propertyId:st
  const money=await loadDashboardMoney(trx,propertyId,timezone,'1900-01-01',until);
  const stayProof=(await sql<Proof>`SELECT f.fact_id AS id,(o.booking_channel_code IN ('YOUMUDAO','CTRIP','MEITUAN')) AS channel_order,f.method,
  EXISTS(SELECT 1 FROM collection_facts rev WHERE rev.reverses_fact_id=f.fact_id AND rev.fact_type='REVERSAL' AND NOT EXISTS(SELECT 1 FROM stay_collection_membership_transfers t WHERE t.source_reversal_fact_id=rev.fact_id AND t.source_collection_fact_id=f.fact_id AND t.property_id=o.property_id)) AS reversed,
+ (SELECT min(rev.created_at) FROM collection_facts rev WHERE rev.reverses_fact_id=f.fact_id AND rev.fact_type='REVERSAL' AND NOT EXISTS(SELECT 1 FROM stay_collection_membership_transfers t WHERE t.source_reversal_fact_id=rev.fact_id AND t.source_collection_fact_id=f.fact_id AND t.property_id=o.property_id)) AS reversed_at,
  proof.bill_id,proof.bill_amount,proof.bill_count,proof.verified,NULL::text AS original_date
  FROM collection_facts f JOIN orders o ON o.id=f.order_id
  LEFT JOIN LATERAL(SELECT min(b.id) AS bill_id,min(b.amount_minor)::text AS bill_amount,count(*)::integer AS bill_count,
@@ -25,6 +26,7 @@ export async function loadOperatingSales(trx:Transaction<Database>,propertyId:st
  WHERE o.property_id=${propertyId}`.execute(trx)).rows;
  const memberProof=(await sql<Proof>`SELECT f.fact_id AS id,false AS channel_order,'WECOM'::text AS method,
  EXISTS(SELECT 1 FROM membership_payment_facts rev WHERE rev.reverses_fact_id=f.fact_id AND rev.fact_type='REVERSAL') AS reversed,
+ (SELECT min(rev.created_at) FROM membership_payment_facts rev WHERE rev.reverses_fact_id=f.fact_id AND rev.fact_type='REVERSAL') AS reversed_at,
  proof.bill_id,proof.bill_amount,proof.bill_count,proof.verified,
  (WITH RECURSIVE lineage AS (
     SELECT first.fact_id,first.command_id,first.membership_order_id,first.created_at FROM membership_payment_facts first
@@ -57,11 +59,11 @@ export async function loadOperatingSales(trx:Transaction<Database>,propertyId:st
   const refund=classification==='REFUND';
   facts.push({id:`${f.family}:${f.id}`,source:f.family==='STAY'?'DIRECT':'MEMBERSHIP',date:p?.original_date??f.date,currency:f.currency,amountMinor:String(BigInt(f.netMinor)<0n?-BigInt(f.netMinor):BigInt(f.netMinor)),registeredAt:f.registeredAt,
     orderId:f.orderId,memberId:f.memberId,billId:p?.bill_id??null,billAmountMinor:p?.bill_amount??null,
-    verified:Boolean(p&&(p.method!=='WECOM'||(f.currency==='CNY'&&p.bill_count===1&&p.verified))),reversed:p?.reversed??false,refund,sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`});
+    verified:Boolean(p&&(p.method!=='WECOM'||(f.currency==='CNY'&&p.bill_count===1&&p.verified))),reversed:p?.reversed??false,reversedAt:p?.reversed_at?new Date(p.reversed_at).toISOString():null,refund,sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`});
  }
  const sourceLinks=money.filter(f=>f.kind==='COLLECTION'&&f.currency==='CNY').flatMap(f=>{
    const p=proofs.get(`${f.family}:${f.id}`);
-   return p?.bill_id&&p.bill_count===1&&p.verified?[{sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`,billId:p.bill_id}]:[];
+   return p?.bill_id&&p.bill_count===1&&p.verified?[{sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`,billId:p.bill_id,reversedAt:p.reversed_at?new Date(p.reversed_at).toISOString():null}]:[];
  });
  const matched=recognizedMatchedSales(facts,opening,baselines[0]!.recognitionFrom,sourceLinks);
  const channel=(await sql<{id:string;order_id:string;kind:string;amount:string;currency:string;business_date:string;created_at:Date;note:string;references_fact_id:string|null}>`SELECT id,order_id,kind,amount_minor::text AS amount,currency,business_date::text,created_at,note,references_fact_id FROM channel_operating_facts WHERE property_id=${propertyId} ORDER BY created_at,id`.execute(trx)).rows;

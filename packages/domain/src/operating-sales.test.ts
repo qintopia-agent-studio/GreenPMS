@@ -31,10 +31,19 @@ describe('按业务匹配确认收入',()=>{
   expect(r.events.map(e=>[e.date,e.amountMinor])).toEqual([['2026-10-03','30000'],['2026-10-04','-5000']]);
  });
  it('fact级期初额度沿稳定账单承接，释放后新fact不重计',()=>{
-  const old=fact({id:'old',sourceKey:'STAY_FACT:old',date:'2026-09-20',amountMinor:'30000',reversed:true});
+  const old=fact({id:'old',sourceKey:'STAY_FACT:old',date:'2026-09-20',registeredAt:'2026-09-20T01:00:00Z',amountMinor:'30000',reversed:true,reversedAt:'2026-10-01T01:00:00Z'});
   const current=fact({id:'new',sourceKey:'STAY_FACT:new',amountMinor:'30000'});
   expect(recognizedMatchedSales([old,current],[{key:'STAY_FACT:old',amountMinor:'30000'}],'2026-10-01').events).toEqual([]);
-  expect(recognizedMatchedSales([current],[{key:'STAY_FACT:old',amountMinor:'30000'}],'2026-10-01',[{sourceKey:'STAY_FACT:old',billId:'bill1'}]).events).toEqual([]);
+  expect(recognizedMatchedSales([current],[{key:'STAY_FACT:old',amountMinor:'30000'}],'2026-10-01',[{sourceKey:'STAY_FACT:old',billId:'bill1',reversedAt:'2026-10-01T01:00:00Z'}]).events).toEqual([]);
+ });
+ it.each(['STAY_FACT:A0','PAYMENT_BILL:bill1'])('部分期初额度不抢占同账单另一单的收入日期：%s',(key)=>{
+  const old=fact({id:'A0',sourceKey:'STAY_FACT:A0',orderId:'A',date:'2026-09-20',registeredAt:'2026-09-20T01:00:00Z',reversed:true,reversedAt:'2026-10-03T01:00:00Z',billAmountMinor:'60000'});
+  const added=fact({id:'B0',sourceKey:'STAY_FACT:B0',orderId:'B',date:'2026-10-02',registeredAt:'2026-10-02T01:00:00Z',billAmountMinor:'60000'});
+  const rematched=fact({id:'A1',sourceKey:'STAY_FACT:A1',orderId:'A',date:'2026-10-03',registeredAt:'2026-10-03T02:00:00Z',billAmountMinor:'60000'});
+  const result=recognizedMatchedSales([rematched,added,old],[{key,amountMinor:'30000'}],'2026-10-01');
+  expect(result.events.map(e=>[e.orderId,e.date,e.amountMinor])).toEqual([['B','2026-10-02','30000']]);
+  const again=fact({...rematched,id:'A2',sourceKey:'STAY_FACT:A2',date:'2026-10-05',registeredAt:'2026-10-05T02:00:00Z'});
+  expect(recognizedMatchedSales([old,added,{...rematched,reversed:true,reversedAt:'2026-10-05T01:00:00Z'},again],[{key,amountMinor:'30000'}],'2026-10-01').events).toEqual(result.events);
  });
  it('会员售卡在收款关联会员订单时计入，与住宿占用无关',()=>{
   const r=recognizedMatchedSales([fact({source:'MEMBERSHIP',id:'MEMBER:f1',orderId:null,memberId:'m1'})],[],'2026-10-01');

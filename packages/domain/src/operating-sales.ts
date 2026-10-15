@@ -1,31 +1,38 @@
 import type { OperatingSalesAmount, OperatingSalesSource, OperatingSalesSummary } from "@qintopia/contracts";
 export interface OperatingSaleEvent { id:string;source:OperatingSalesSource;date:string;currency:string;kind:"SALE"|"REFUND"|"CORRECTION"|"BASELINE";amountMinor:string;orderId:string|null;memberId:string|null;registeredAt:string|null;reason:string }
-export interface MatchedSaleFact {id:string;source:"DIRECT"|"MEMBERSHIP";date:string;currency:string;amountMinor:string;registeredAt:string;orderId:string|null;memberId:string|null;billId:string|null;billAmountMinor:string|null;verified:boolean;reversed:boolean;refund:boolean;sourceKey:string}
+export interface MatchedSaleFact {id:string;source:"DIRECT"|"MEMBERSHIP";date:string;currency:string;amountMinor:string;registeredAt:string;orderId:string|null;memberId:string|null;billId:string|null;billAmountMinor:string|null;verified:boolean;reversed:boolean;reversedAt?:string|null;refund:boolean;sourceKey:string}
 export interface SalesOpening {key:string;amountMinor:string}
 export interface SalesBaseline {month:string;currency:string;amountMinor:string;recognitionFrom:string;note?:string}
 
 /** 每笔有效款项按匹配份额及匹配日期计入；期初已计金额优先覆盖历史关联份额。 */
-export function recognizedMatchedSales(facts:MatchedSaleFact[],opening:SalesOpening[],recognitionFrom:string,sourceLinks:Array<{sourceKey:string;billId:string}>=[]) {
- // 用稳定账单承接已计额度，不能因冲销/重新匹配换了fact ID就重新认收入。
- const links=new Map([...facts.filter(f=>f.verified&&f.billId).map(f=>[f.sourceKey,f.billId!] as const),...sourceLinks.map(link=>[link.sourceKey,link.billId] as const)]);
- const entries=new Map(opening.map(row=>[row.key,BigInt(row.amountMinor)]));
- const available=new Map<string,bigint>();
- const factsByBill=new Map<string,bigint>();
- for(const [key,amount] of entries){const bill=links.get(key);if(bill){const target=`PAYMENT_BILL:${bill}`;factsByBill.set(target,(factsByBill.get(target)??0n)+amount)}else available.set(key,amount);}
- for(const [key,amount] of factsByBill)if(!available.has(key))available.set(key,amount);
- const unique=[...new Map(facts.map(f=>[f.id,f])).values()].filter(f=>!f.reversed);
+export function recognizedMatchedSales(facts:MatchedSaleFact[],opening:SalesOpening[],recognitionFrom:string,sourceLinks:Array<{sourceKey:string;billId:string;reversedAt?:string|null}>=[]) {
+ const available=new Map(opening.map(row=>[row.key,BigInt(row.amountMinor)]));
+ const unique=[...new Map(facts.map(f=>[f.id,f])).values()];
+ const released=new Map<string,Array<{amount:bigint;at:string}>>();
+ const release=(bill:string,amount:bigint,at:string)=>{const rows=released.get(bill)??[];rows.push({amount,at});released.set(bill,rows);};
+ // 未进入有效收入列表的原事实，仍须有明确冲销时间才能把旧额度交给后续匹配。
+ for(const link of sourceLinks){
+  if(!link.reversedAt||unique.some(f=>f.sourceKey===link.sourceKey)||available.has(`PAYMENT_BILL:${link.billId}`))continue;
+  const amount=available.get(link.sourceKey)??0n;if(amount){release(link.billId,amount,link.reversedAt);available.set(link.sourceKey,0n);}
+ }
  const billTotals=new Map<string,bigint>();
- for(const f of unique)if(f.verified&&f.billId)billTotals.set(f.billId,(billTotals.get(f.billId)??0n)+BigInt(f.amountMinor));
+ for(const f of unique)if(!f.reversed&&f.verified&&f.billId)billTotals.set(f.billId,(billTotals.get(f.billId)??0n)+BigInt(f.amountMinor));
  const events:OperatingSaleEvent[]=[];const reviews:Array<MatchedSaleFact & {reason:string}>=[];
- for(const fact of unique.sort((a,b)=>a.date.localeCompare(b.date)||a.registeredAt.localeCompare(b.registeredAt)||a.id.localeCompare(b.id))) {
-  if(!fact.verified || (fact.billId&&fact.billAmountMinor!==null&&(billTotals.get(fact.billId)??0n)>BigInt(fact.billAmountMinor))) {if(fact.date>=recognitionFrom)reviews.push({...fact,reason:fact.verified?'同一账单的有效关联金额超过流水金额，请核对重复关联；未计入经营销售额':'缺少唯一成功的收款依据，请回原订单核对流水；未计入经营销售额'});continue;}
+ // 包含已冲销原事实：它在冲销前占用自己的期初额度，不能让另一张订单抢走。
+ for(const fact of unique.sort((a,b)=>a.registeredAt.localeCompare(b.registeredAt)||a.date.localeCompare(b.date)||a.id.localeCompare(b.id))) {
+  if(!fact.verified || (!fact.reversed&&fact.billId&&fact.billAmountMinor!==null&&(billTotals.get(fact.billId)??0n)>BigInt(fact.billAmountMinor))) {if(!fact.reversed&&fact.date>=recognitionFrom)reviews.push({...fact,reason:fact.verified?'同一账单的有效关联金额超过流水金额，请核对重复关联；未计入经营销售额':'缺少唯一成功的收款依据，请回原订单核对流水；未计入经营销售额'});continue;}
   let amount=BigInt(fact.amountMinor);
   if(!fact.refund){
    const billKey=fact.billId?`PAYMENT_BILL:${fact.billId}`:null;
-   const keys=billKey&&available.has(billKey)?[billKey]:[fact.sourceKey];
-   for(const key of keys){const carry=available.get(key)??0n;const used=carry<amount?carry:amount;available.set(key,carry-used);amount-=used;}
+   const key=billKey&&available.has(billKey)?billKey:fact.sourceKey;
+   const carry=available.get(key)??0n;const used=carry<amount?carry:amount;available.set(key,carry-used);amount-=used;
+   for(const bucket of fact.billId?released.get(fact.billId)??[]:[]){
+    if(bucket.at>fact.registeredAt)continue;
+    const take=bucket.amount<amount?bucket.amount:amount;bucket.amount-=take;amount-=take;
+   }
+   if(fact.reversed&&fact.billId&&fact.reversedAt){const carried=BigInt(fact.amountMinor)-amount;if(carried>0n)release(fact.billId,carried,fact.reversedAt);}
   }
-  if(fact.date<recognitionFrom||amount===0n)continue;
+  if(fact.reversed||fact.date<recognitionFrom||amount===0n)continue;
   events.push({id:fact.id,source:fact.source,date:fact.date,currency:fact.currency,kind:fact.refund?'REFUND':'SALE',amountMinor:String(fact.refund?-amount:amount),orderId:fact.orderId,memberId:fact.memberId,registeredAt:fact.registeredAt,reason:fact.refund?'已登记实际退款':'真实款项已关联业务；已扣除期初已计份额'});
  }
  return {events,reviews};
