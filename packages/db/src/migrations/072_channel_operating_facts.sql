@@ -70,8 +70,13 @@ BEGIN
  LOOP
    SELECT COALESCE(sum(amount_minor),0),min(business_date) INTO net,first_day FROM channel_operating_facts WHERE order_id=r.order_id;
    SELECT current_contract_amount_minor INTO prior FROM pricing_revisions WHERE order_id=r.order_id AND revision_no<r.revision_no ORDER BY revision_no DESC LIMIT 1;
-   delta:=CASE WHEN r.amendment_type='REPRICE_ORDER' THEN r.current_contract_amount_minor-COALESCE(prior,0)
-     WHEN r.revision_no=1 OR r.amendment_type IN ('RESCHEDULE_STAY','EXTEND_STAY','SHORTEN_STAY','MOVE_UNIT') THEN greatest(0,r.current_contract_amount_minor-net) ELSE 0 END;
+   delta:=CASE WHEN r.amendment_type='REPRICE_ORDER' THEN CASE WHEN net=COALESCE(prior,0) THEN r.current_contract_amount_minor-COALESCE(prior,0) ELSE greatest(0,r.current_contract_amount_minor-net) END
+     WHEN r.revision_no=1 OR r.amendment_type IN ('RESCHEDULE_STAY','EXTEND_STAY','SHORTEN_STAY','MOVE_UNIT') THEN greatest(0,r.current_contract_amount_minor-greatest(COALESCE(prior,0),net)) ELSE 0 END;
+   IF r.amendment_type='REPRICE_ORDER' THEN
+     SELECT (p.created_at AT TIME ZONE r.timezone)::date INTO first_day FROM pricing_revisions p JOIN amendments a ON a.id=p.amendment_id
+       WHERE p.order_id=r.order_id AND p.revision_no<r.revision_no AND (p.revision_no=1 OR (a.amendment_type IN ('RESCHEDULE_STAY','EXTEND_STAY','SHORTEN_STAY','MOVE_UNIT')
+       AND p.current_contract_amount_minor IS DISTINCT FROM (SELECT older.current_contract_amount_minor FROM pricing_revisions older WHERE older.order_id=p.order_id AND older.revision_no<p.revision_no ORDER BY older.revision_no DESC LIMIT 1))) ORDER BY p.revision_no DESC LIMIT 1;
+   END IF;
    IF delta<>0 THEN
      INSERT INTO channel_operating_facts(id,property_id,order_id,kind,amount_minor,currency,business_date,pricing_revision_id,command_id,note,created_at)
        VALUES('channel_'||r.id,r.property_id,r.order_id,CASE WHEN r.amendment_type='REPRICE_ORDER' THEN 'CORRECTION' ELSE 'SALE' END,
@@ -113,11 +118,16 @@ BEGIN
    IF NEW.kind='CORRECTION' THEN
      IF amendment.amendment_type<>'REPRICE_ORDER' THEN RAISE EXCEPTION 'channel correction requires REPRICE_ORDER' USING ERRCODE='23514'; END IF;
      SELECT current_contract_amount_minor INTO STRICT prior FROM pricing_revisions WHERE order_id=NEW.order_id AND revision_no<revision.revision_no ORDER BY revision_no DESC LIMIT 1;
-     expected:=revision.current_contract_amount_minor-prior;
-     SELECT COALESCE(min(business_date),expected_day) INTO expected_day FROM channel_operating_facts WHERE order_id=NEW.order_id AND kind='SALE';
+     IF available<prior THEN RAISE EXCEPTION 'channel correction requires consistent opening evidence' USING ERRCODE='23514'; END IF;
+     expected:=CASE WHEN available=prior THEN revision.current_contract_amount_minor-prior ELSE greatest(0,revision.current_contract_amount_minor-available) END;
+     SELECT (p.created_at AT TIME ZONE prop.timezone)::date INTO expected_day FROM pricing_revisions p JOIN amendments a ON a.id=p.amendment_id JOIN properties prop ON prop.id=NEW.property_id
+       WHERE p.order_id=NEW.order_id AND p.revision_no<revision.revision_no AND (p.revision_no=1 OR (a.amendment_type IN ('RESCHEDULE_STAY','EXTEND_STAY','SHORTEN_STAY','MOVE_UNIT')
+       AND p.current_contract_amount_minor IS DISTINCT FROM (SELECT older.current_contract_amount_minor FROM pricing_revisions older WHERE older.order_id=p.order_id AND older.revision_no<p.revision_no ORDER BY older.revision_no DESC LIMIT 1))) ORDER BY p.revision_no DESC LIMIT 1;
    ELSE
      IF revision.revision_no<>1 AND amendment.amendment_type NOT IN ('RESCHEDULE_STAY','EXTEND_STAY','SHORTEN_STAY','MOVE_UNIT') THEN RAISE EXCEPTION 'invalid channel sale operation' USING ERRCODE='23514'; END IF;
-     expected:=greatest(0,revision.current_contract_amount_minor-available);
+     SELECT COALESCE((SELECT current_contract_amount_minor FROM pricing_revisions WHERE order_id=NEW.order_id AND revision_no<revision.revision_no ORDER BY revision_no DESC LIMIT 1),0) INTO prior;
+     IF revision.revision_no>1 AND revision.current_contract_amount_minor>prior AND available<prior THEN RAISE EXCEPTION 'channel opening balance differs from contract' USING ERRCODE='23514'; END IF;
+     expected:=greatest(0,revision.current_contract_amount_minor-greatest(prior,available));
    END IF;
    IF NEW.amount_minor<>expected OR NEW.business_date<>expected_day THEN RAISE EXCEPTION 'channel sale amount/date differs from pricing evidence' USING ERRCODE='23514'; END IF;
  END IF;
@@ -152,6 +162,7 @@ BEGIN
  available:=available-COALESCE((SELECT amount_minor FROM operating_sales_opening WHERE property_id=NEW.property_id AND source_kind='CHANNEL_REFUND' AND source_id=NEW.order_id),0);
  IF available+NEW.amount_minor<0 THEN RAISE EXCEPTION 'channel refund/correction exceeds recognized balance' USING ERRCODE='23514'; END IF;
  SELECT current_contract_amount_minor INTO current_contract FROM pricing_revisions WHERE id=o.current_revision_id;
+ IF NEW.kind IN ('REFUND','REVERSAL') AND current_contract>available THEN RAISE EXCEPTION 'channel contract exceeds recognized balance; review opening evidence first' USING ERRCODE='23514'; END IF;
  IF NEW.kind='REFUND' AND NEW.contract_effect_minor IS DISTINCT FROM least(current_contract,available+NEW.amount_minor)-current_contract THEN
    RAISE EXCEPTION 'channel refund contract adjustment mismatch' USING ERRCODE='23514';
  END IF;

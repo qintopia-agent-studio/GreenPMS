@@ -1,5 +1,5 @@
-import { buildChannelFundsEffect, externalChannel } from "../channel-operating.ts";
-import { canRepriceOrder, validateOrderTargetAmount } from "@qintopia/domain";
+import { buildChannelFundsEffect, channelOperatingSummary, externalChannel } from "../channel-operating.ts";
+import { canRepriceOrder, channelRecognitionDelta, validateOrderTargetAmount } from "@qintopia/domain";
 import { buildRetainedFundsEffect, isRetainedFundsCommand } from "../retained-funds.ts";
 import { fundingSource, assertNoUnassignedRefund, requirePaymentAllocationEnabled } from "../payment-allocation.ts";
 import { sql } from "kysely";
@@ -1021,7 +1021,17 @@ function pricingDecisionEffect(
 }
 
 export async function buildCommandEffect(db: DbExecutor, commandType: CommandType, rawInput: unknown, lockPayments = false): Promise<BuiltCommandEffect> {
-  const built = await buildRawCommandEffect(db, commandType, rawInput);
+  let built = await buildRawCommandEffect(db, commandType, rawInput);
+  if (["REPRICE_ORDER","RESCHEDULE_STAY","EXTEND_STAY","SHORTEN_STAY","MOVE_UNIT"].includes(commandType) && typeof built.effect.orderId === "string") {
+    const channel = await channelOperatingSummary(db,built.propertyId,built.effect.orderId);
+    if (channel) {
+      const before = requireObject(requireObject(built.effect.before,"before").currentContractAmount,"currentContractAmount");
+      const target = commandType === "REPRICE_ORDER" ? requireObject(built.effect.targetCurrentContractAmount,"targetCurrentContractAmount")
+        : requireObject(requireObject(built.effect.pricingDecision,"pricingDecision").targetCurrentContractAmount,"targetCurrentContractAmount");
+      channelRecognitionDelta(commandType === "REPRICE_ORDER" ? "CORRECTION" : "SALE", Number(before.minorUnits), BigInt(channel.netMinor), Number(target.minorUnits));
+      built=finalize(built.propertyId,built.effect,{...built.basisVersions,channelOperatingFactsHash:stableHash(channel)});
+    }
+  }
   const { externalPaymentBasis } = await import("../external-payments.ts");
   const payments = await externalPaymentBasis(db, built.propertyId, commandType, built.effect, lockPayments);
   return payments.length ? finalize(built.propertyId, built.effect, { ...built.basisVersions, externalPayments: payments }) : built;

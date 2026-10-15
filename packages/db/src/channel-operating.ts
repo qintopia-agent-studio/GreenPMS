@@ -1,6 +1,6 @@
 import { sql, type Kysely, type Transaction } from "kysely";
 import { DomainError } from "@qintopia/contracts";
-import { newId, parseLocalDate, stableHash } from "@qintopia/domain";
+import { channelRecognitionDelta, newId, parseLocalDate, stableHash } from "@qintopia/domain";
 import { propertyLocalToday } from "./members.ts";
 import type { Database } from "./schema.ts";
 
@@ -30,12 +30,23 @@ export async function recordChannelRevision(trx:Transaction<Database>,revisionId
  const summary=await channelOperatingSummary(trx,row.property_id,row.order_id);
  const correction=row.type==='REPRICE_ORDER';
  const sale=row.revision_no===1||['RESCHEDULE_STAY','EXTEND_STAY','SHORTEN_STAY','MOVE_UNIT'].includes(row.type);
- const delta=correction?row.target-row.prior:sale?Math.max(0,row.target-Number(summary!.netMinor)):0;
+ if(sale&&row.revision_no>1&&row.target>row.prior&&BigInt(summary!.netMinor)<BigInt(row.prior))throw new DomainError('VALIDATION_ERROR','当前渠道应结与已计余额不一致，请先核对历史应结及退款资料');
+ const delta=correction?channelRecognitionDelta('CORRECTION',row.prior,BigInt(summary!.netMinor),row.target):sale?channelRecognitionDelta('SALE',row.prior,BigInt(summary!.netMinor),row.target):0;
  if(!delta)return;
  if(BigInt(summary!.netMinor)+BigInt(delta)<0n)throw new DomainError('VALIDATION_ERROR','更正后的渠道成交不能低于已登记退款，请先核对退款记录');
- const date=correction?summary!.facts.find(f=>f.kind==='SALE')?.businessDate??row.date:row.date;
+ const date=correction?await channelCorrectionDate(trx,row.order_id,revisionId):row.date;
  await sql`INSERT INTO channel_operating_facts(id,property_id,order_id,kind,amount_minor,currency,business_date,pricing_revision_id,command_id,note)
  VALUES(${newId('channel_fact')},${row.property_id},${row.order_id},${correction?'CORRECTION':'SALE'},${delta},${row.currency},${date}::date,${revisionId},${row.command_id},${correction?'更正原渠道成交金额，保留原事实':'渠道成交应结金额登记'})`.execute(trx);
+}
+
+export async function channelCorrectionDate(db:Db,orderId:string,excludingRevisionId?:string):Promise<string>{
+ const row=(await sql<{date:string}>`SELECT to_char(p.created_at AT TIME ZONE prop.timezone,'YYYY-MM-DD') AS date
+ FROM pricing_revisions p JOIN amendments a ON a.id=p.amendment_id JOIN orders o ON o.id=p.order_id JOIN properties prop ON prop.id=o.property_id
+ WHERE p.order_id=${orderId} AND (${excludingRevisionId??null}::text IS NULL OR p.id<>${excludingRevisionId??null})
+ AND (p.revision_no=1 OR (a.amendment_type IN ('RESCHEDULE_STAY','EXTEND_STAY','SHORTEN_STAY','MOVE_UNIT')
+ AND p.current_contract_amount_minor IS DISTINCT FROM (SELECT older.current_contract_amount_minor FROM pricing_revisions older WHERE older.order_id=p.order_id AND older.revision_no<p.revision_no ORDER BY older.revision_no DESC LIMIT 1)))
+ ORDER BY p.revision_no DESC LIMIT 1`.execute(db)).rows[0];
+ if(!row)throw new DomainError('VALIDATION_ERROR','缺少可追溯的原渠道成交日期，不能猜测更正归属');return row.date;
 }
 
 function text(input:Record<string,unknown>,key:string):string {const value=input[key];if(typeof value!=='string'||!value.trim()||value.trim().length>1000)throw new DomainError('VALIDATION_ERROR',`${key}必填且不能过长`);return value.trim()}
@@ -45,6 +56,7 @@ export async function buildChannelFundsEffect(db:Db,propertyId:string,orderId:st
  if(!summary.initialized)throw new DomainError('VALIDATION_ERROR','历史已计收入尚未承接，渠道退款登记暂未开放');
  const today=await propertyLocalToday(db,propertyId);
  const contract=(await sql<{amount:number}>`SELECT p.current_contract_amount_minor AS amount FROM orders o JOIN pricing_revisions p ON p.id=o.current_revision_id WHERE o.id=${orderId} AND o.property_id=${propertyId}`.execute(db)).rows[0]!.amount;
+ if(BigInt(contract)>BigInt(summary.netMinor))throw new DomainError('VALIDATION_ERROR','当前渠道应结高于已确认经营余额，请先核对历史应结及退款资料，不自动补改历史差额');
  const note=text(input,'note');
  if(command==='REVERSE_FACT') {
    const original=summary.facts.find(f=>f.id===input.reversesFactId&&f.kind==='REFUND');

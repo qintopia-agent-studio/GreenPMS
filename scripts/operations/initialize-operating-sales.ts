@@ -22,14 +22,23 @@ async function main(){
   for(const row of plan.opening){
    ensure(['PAYMENT_BILL','STAY_FACT','MEMBER_FACT','CHANNEL_REFUND'].includes(row.sourceKind)&&typeof row.sourceId==='string'&&/^\d+$/.test(row.amountMinor)&&row.evidenceNote?.trim(),'期初来源必须有有效金额及依据');
    const key=`${row.sourceKind}:${row.sourceId}`;ensure(!keys.has(key),`来源重复：${key}`);keys.add(key);
-   let source:{amount:string;currency:string}|undefined;
+   ensure(BigInt(row.amountMinor).toString()===row.amountMinor,'期初金额必须使用规范整数分字符串');
+   const applied=(await client.query('SELECT amount_minor::text AS amount,currency FROM operating_sales_opening WHERE property_id=$1 AND source_kind=$2 AND source_id=$3',[plan.propertyId,row.sourceKind,row.sourceId])).rows[0];
+   if(applied){ensure(applied.amount===row.amountMinor&&applied.currency===plan.currency,'已有期初来源与计划不同，禁止覆盖');continue;}
+   let source:{amount:string;currency:string;contract?:number}|undefined;
    if(row.sourceKind==='PAYMENT_BILL')source=(await client.query(`SELECT amount_minor::text AS amount,'CNY'::text AS currency FROM external_payment_bills WHERE property_id=$1 AND id=$2 AND kind='COLLECTION' AND state='SUCCESS' AND NOT needs_review`,[plan.propertyId,row.sourceId])).rows[0];
-   if(row.sourceKind==='STAY_FACT')source=(await client.query(`SELECT f.amount_minor::text AS amount,f.currency FROM collection_facts f JOIN orders o ON o.id=f.order_id WHERE o.property_id=$1 AND f.fact_id=$2 AND f.fact_type='COLLECTION' AND NOT EXISTS(SELECT 1 FROM collection_facts rev WHERE rev.reverses_fact_id=f.fact_id)`,[plan.propertyId,row.sourceId])).rows[0];
+   if(row.sourceKind==='STAY_FACT')source=(await client.query(`SELECT f.amount_minor::text AS amount,f.currency FROM collection_facts f JOIN orders o ON o.id=f.order_id WHERE o.property_id=$1 AND f.fact_id=$2 AND f.fact_type='COLLECTION' AND NOT EXISTS(SELECT 1 FROM collection_facts rev WHERE rev.reverses_fact_id=f.fact_id AND NOT EXISTS(SELECT 1 FROM stay_collection_membership_transfers t WHERE t.source_reversal_fact_id=rev.fact_id AND t.source_collection_fact_id=f.fact_id AND t.property_id=o.property_id))`,[plan.propertyId,row.sourceId])).rows[0];
    if(row.sourceKind==='MEMBER_FACT')source=(await client.query(`SELECT f.amount_minor::text AS amount,f.currency FROM membership_payment_facts f JOIN membership_orders o ON o.id=f.membership_order_id WHERE o.property_id=$1 AND f.fact_id=$2 AND f.fact_type='COLLECTION' AND f.source_type<>'STAY_COLLECTION_TRANSFER' AND NOT EXISTS(SELECT 1 FROM membership_payment_facts rev WHERE rev.reverses_fact_id=f.fact_id)`,[plan.propertyId,row.sourceId])).rows[0];
-   if(row.sourceKind==='CHANNEL_REFUND')source=(await client.query(`SELECT sum(amount_minor)::text AS amount,min(currency) AS currency FROM channel_operating_facts WHERE property_id=$1 AND order_id=$2 HAVING count(*)>0`,[plan.propertyId,row.sourceId])).rows[0];
+   if(row.sourceKind==='CHANNEL_REFUND')source=(await client.query(`SELECT sum(amount_minor)::text AS amount,min(currency) AS currency,(SELECT p.current_contract_amount_minor FROM orders o JOIN pricing_revisions p ON p.id=o.current_revision_id WHERE o.property_id=$1 AND o.id=$2) AS contract FROM channel_operating_facts WHERE property_id=$1 AND order_id=$2 HAVING count(*)>0`,[plan.propertyId,row.sourceId])).rows[0];
    ensure(source&&source.currency===plan.currency&&BigInt(row.amountMinor)<=BigInt(source.amount)&&BigInt(row.amountMinor)>=0n,`期初来源不存在、币种不符或超过可证明金额：${key}`);
+   if(row.sourceKind==='CHANNEL_REFUND')ensure(Number.isSafeInteger(source.contract)&&BigInt(source.contract!)<=BigInt(source.amount)-BigInt(row.amountMinor),`期初退款与当前渠道应结不一致：${key}；须先核对历史应结，不在登记新退款时顺带补改旧金额`);
   }
-  for(const b of plan.baselines)ensure(/^\d{4}-\d{2}-01$/.test(b.month)&&b.month<plan.recognitionFrom&&/^-?\d+$/.test(b.amountMinor)&&b.evidenceNote?.trim(),'封账月份必须在新口径之前，并提供金额及依据');
+  for(const b of plan.baselines){
+   ensure(/^\d{4}-\d{2}-01$/.test(b.month)&&b.month<plan.recognitionFrom&&/^-?\d+$/.test(b.amountMinor)&&b.evidenceNote?.trim(),'封账月份必须在新口径之前，并提供金额及依据');
+   ensure(BigInt(b.amountMinor).toString()===b.amountMinor,'封账金额必须使用规范整数分字符串');
+   const existing=(await client.query('SELECT amount_minor::text AS amount,recognition_from::text AS start,evidence_sha256 AS hash FROM operating_sales_baselines WHERE property_id=$1 AND month=$2 AND currency=$3',[plan.propertyId,b.month,plan.currency])).rows[0];
+   if(existing)ensure(existing.amount===b.amountMinor&&existing.start===plan.recognitionFrom&&existing.hash===sha,'已有封账基准不同，禁止覆盖或无依据重开');
+  }
   if(write){
    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`operating-sales-opening:${plan.propertyId}`]);
    for(const row of plan.opening){
