@@ -1437,3 +1437,43 @@ it("accepts and validates channel operating evidence without accepting arbitrary
   expect(()=>parseOrderView({...view,channelOperating:{...view.channelOperating,facts:[view.channelOperating.facts[0],view.channelOperating.facts[0]]}})).toThrow(/重复/);
   expect(()=>parseOrderView({...view,order:{...view.order,booking_channel_code:"WECOM"}})).toThrow(/外部渠道/);
 });
+
+function channelRepriceView(channel = "YOUMUDAO", target = 161028) {
+  const input = orderView();
+  input.order.booking_channel_code = channel;
+  Object.assign(input.order, { channel_order_reference:"SYNTHETIC-CHANNEL", current_revision_id:"revision_2", version:2 });
+  input.pricingRevisions[0]!.pricing_basis = "CHANNEL_CONTRACT";
+  input.amendments.push(amendment({ id:"amendment_2", sequence:2, amendment_type:"REPRICE_ORDER", reason_code:"REPRICE_ORDER", reason_note:"按平台应结更正角分", prior_version:1, new_version:2, created_at:"2026-07-28T08:59:00.000Z" }));
+  input.pricingRevisions.push({...input.pricingRevisions[0]!, id:"revision_2", revision_no:2, amendment_id:"amendment_2", pricing_basis:"CHANNEL_CONTRACT", current_contract_amount_minor:target, difference_from_policy_minor:target-input.pricingRevisions[0]!.policy_base_amount_minor, manual_adjustment_minor:0, reason:{code:"REPRICE_ORDER",note:"按平台应结更正角分"}, created_at:"2026-07-28T09:00:00.000Z"});
+  input.amounts.currentContractAmount.minorUnits=target;
+  input.amounts.collectionDifference.minorUnits=target;
+  return input;
+}
+describe("渠道独立金额更正读回",()=>{
+ it.each(["YOUMUDAO","CTRIP","MEITUAN"])("%s在不重写住宿安排历史时认可真实调价链",channel=>{
+  for(const target of [161028,27720])expect(parseOrderView(channelRepriceView(channel,target)).amounts.currentContractAmount.minorUnits).toBe(target);
+ });
+ it.each(["CHECKED_IN","CHECKED_OUT"])("%s渠道调价后仍可读回且履约状态不变",status=>{
+  const input=channelRepriceView("YOUMUDAO",status==="CHECKED_IN"?161028:27720);
+  input.order.status=status;
+  input.stay.status=status==="CHECKED_IN"?"IN_HOUSE":"COMPLETED";
+  input.fulfillment.state=status==="CHECKED_IN"?"IN_HOUSE":"CHECKED_OUT";
+  input.fulfillment.checkIn=fulfillmentFact("CHECK_IN","2026-07-28","2026-07-28T08:00:00.000Z");
+  if(status==="CHECKED_OUT"){
+   input.effectiveArrangement.presentation="LAST";
+   input.effectiveArrangement.businessDate="2026-07-30";
+   input.fulfillment.checkOut=fulfillmentFact("CHECK_OUT","2026-07-30","2026-07-30T08:00:00.000Z");
+   input.amendments[1]!.created_at="2026-07-30T08:59:00.000Z";
+   input.pricingRevisions[1]!.created_at="2026-07-30T09:00:00.000Z";
+  }
+  expect(parseOrderView(input).order.status).toBe(status);
+ });
+ it.each([
+  ["非渠道",(v:ReturnType<typeof channelRepriceView>)=>{v.order.booking_channel_code="WECOM";}],
+  ["缺少更正依据",(v:ReturnType<typeof channelRepriceView>)=>{v.amendments.pop();}],
+  ["金额原因不匹配",(v:ReturnType<typeof channelRepriceView>)=>{v.pricingRevisions[1]!.reason.note="其他原因";}],
+  ["跨订单依据",(v:ReturnType<typeof channelRepriceView>)=>{v.amendments[1]!.order_id="other_order";}],
+  ["非零人工调价",(v:ReturnType<typeof channelRepriceView>)=>{v.pricingRevisions[1]!.manual_adjustment_minor=28;}],
+  ["更正早于住宿安排",(v:ReturnType<typeof channelRepriceView>)=>{v.pricingRevisions[1]!.created_at="2026-07-27T08:00:00.000Z";}]
+ ] as const)("拒绝损坏的渠道调价：%s",(_,damage)=>{const input=channelRepriceView();damage(input);expect(()=>parseOrderView(input)).toThrow();});
+});

@@ -1100,6 +1100,10 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
       : memberId === null && memberContractId === null
         && standaloneRepriceRevisionIds.has(latestRevisionId)
         && (latestRevisionBasis === "MANUAL_ADJUSTMENT"
+          || (latestRevisionBasis === "CHANNEL_CONTRACT"
+            && ["YOUMUDAO", "CTRIP", "MEITUAN"].includes(String(order.booking_channel_code))
+            && stayType !== "FREE"
+            && latestRevisionManualAdjustment === 0)
           || (latestRevisionBasis === "POLICY"
             && latestRevisionPolicyBase === currentContractAmount.minorUnits
             && latestRevisionDifference === 0
