@@ -12,6 +12,7 @@ export interface CommunityStay {
   category: string | null;
   registrationKey?: string;
   historical?: boolean;
+  durationReviewReason?: string;
 }
 export interface CommunityEvent { orderId: string; date: string; nights: number; reason: string; kind: "RENEWAL" | "EARLY" }
 const nights = (from: string, until: string) => Math.max(0, Math.round((Date.parse(until) - Date.parse(from)) / 86400000));
@@ -24,7 +25,7 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   for (const stay of stays) {
     const order = byOrder.get(stay.orderId) ?? [];
     order.push(stay); byOrder.set(stay.orderId, order);
-    if (stay.personKey && stay.historical !== false) {
+    if (stay.personKey && stay.historical !== false && !stay.durationReviewReason) {
       const list = byPerson.get(stay.personKey) ?? [];
       list.push(stay); byPerson.set(stay.personKey, list);
     }
@@ -83,6 +84,30 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     records.set(key, entry);
   }
   const cutoff = range.to < today ? range.to : today;
+  // Keep evidence gaps alongside the distribution instead of silently dropping registrations.
+  // These counts are NOT people/trips: identities and actual dates may still be unresolved.
+  function durationCoverage(perspective: "current" | "all") {
+    const registrations = new Set<string>();
+    const orders = new Set<string>();
+    const issues = new Map<string, Set<string>>();
+    for (const stay of stays) {
+      if (stay.personKey && stay.historical !== false && !stay.durationReviewReason) continue;
+      const occupiedUntil = stay.current ? dashboardDate(today, 1) : stay.departure;
+      const included = perspective === "current" ? relevant(stay, today)
+        : range.from <= cutoff && stay.arrival <= cutoff && occupiedUntil > range.from;
+      if (!included) continue;
+      if (stay.registrationKey) registrations.add(stay.registrationKey);
+      else orders.add(stay.orderId);
+      const reasons = issues.get(stay.orderId) ?? new Set<string>();
+      reasons.add(stay.durationReviewReason ?? (stay.historical === false
+        ? "实际入住日期待核对，不能以登记日期或订单日期替代。"
+        : stay.registrationKey ? "缺少跨订单身份依据，无法核对本次连续入住起点。"
+        : "住宿人名单或有效住宿时间线待核对，不能推算人数和时长。"));
+      issues.set(stay.orderId, reasons);
+    }
+    return { pendingRegistrations: registrations.size, pendingOrders: orders.size,
+      issues: [...issues].map(([orderId, reasons]) => ({ orderId, reason: [...reasons].join("；") })) };
+  }
   const distribution = new Map<number, { nights: number; current: number; all: number }>();
   function countDuration(duration: number, perspective: "current" | "all") {
     const row = distribution.get(duration) ?? { nights: duration, current: 0, all: 0 };
@@ -145,7 +170,8 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     current, trend,
     visitors: unknown ? null : [...byPerson.values()].filter(list => list.some(stay => stay.arrival <= range.to && stay.departure > range.from)).length,
     dailyAverage: unknown ? null : trend.reduce((sum, row) => sum + row.total!, 0) / Math.max(trend.length, 1),
-    duration: [...distribution.values()].sort((a, b) => a.nights - b.nights), records: resultRecords,
+    duration: [...distribution.values()].sort((a, b) => a.nights - b.nights),
+    durationCoverage: { current: durationCoverage("current"), all: durationCoverage("all") }, records: resultRecords,
     counts: { NEW: resultRecords.filter(row => row.kind === "NEW").length, RETURN: resultRecords.filter(row => row.kind === "RETURN").length, RENEWAL: resultRecords.filter(row => row.kind === "RENEWAL").length, DUE: resultRecords.filter(row => row.kind === "DUE").length, EARLY: resultRecords.filter(row => row.kind === "EARLY").length },
     reasons
   };

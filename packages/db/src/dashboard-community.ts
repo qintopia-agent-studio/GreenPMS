@@ -38,20 +38,20 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
       continue;
     }
     const intervals=lodging.arrangements.get(order.id);
-    const missingPerson = () => stays.push({orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null});
-    if(!intervals?.length){evidenceIssues.push(`订单 ${order.id} 的有效住宿时间线缺失，未推算人数或居住时长`);missingPerson();continue;}
+    const missingPerson = (durationReviewReason: string) => stays.push({durationReviewReason,orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null});
+    if(!intervals?.length){evidenceIssues.push(`订单 ${order.id} 的有效住宿时间线缺失，未推算人数或居住时长`);missingPerson("有效住宿时间线缺失，连续入住起点与人数待核对。");continue;}
     const people = peopleByOrder.get(order.id) ?? [];
-    if (!people.length) { evidenceIssues.push(`订单 ${order.id} 未登记实际住宿人`); missingPerson(); continue; }
+    if (!people.length) { evidenceIssues.push(`订单 ${order.id} 未登记实际住宿人`); missingPerson("实际住宿人名单缺失，人数与连续时长待核对。"); continue; }
     for (const person of people) {
       const raw = rawById.get(person.id)!;
       const removed = removedByPerson.get(person.id);
       const later = person.role !== "PRIMARY" && raw.created_by_command_id && raw.created_by_command_id !== initialCommands.get(order.id) && local(raw.created_at) > order.arrival_date;
-      const common = { orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null };
+      const common = { ...(later ? { durationReviewReason: "入住后追加住宿登记，缺少该住客实际入住日期，不能沿用订单起点。" } : {}), orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null };
       // Registration withdrawal is not an actual departure event; it cannot supply a guest checkout date.
       if (removed) {
         if (removed > order.arrival_date) {
           evidenceIssues.push(`订单 ${order.id}：第 ${person.ordinal} 位住宿人于 ${removed} 撤销登记，之前的实际住宿日期待核对；未影响同单其他住客或当前名单`);
-          stays.push({ ...common, personKey: null, arrival: order.arrival_date, departure: removed < order.departure_date ? removed : order.departure_date, current: false });
+          stays.push({ ...common, personKey: null, arrival: order.arrival_date, departure: removed < order.departure_date ? removed : order.departure_date, current: false, durationReviewReason: "住宿登记已撤销，撤销时间不是实际离店日期，历史住宿时长待核对。" });
         }
         continue;
       }
@@ -64,7 +64,7 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
         if (order.status === "CHECKED_IN") stays.push({ ...common, personKey, arrival: order.arrival_date, departure: order.departure_date, current: true, historical: false });
         continue;
       }
-      for (const interval of intervals) stays.push({ ...common, personKey, arrival: interval.arrivalDate, departure: interval.departureDate, current: order.status === "CHECKED_IN" && interval === intervals.at(-1) });
+      for (const interval of intervals) stays.push({ ...common, personKey, arrival: interval.arrivalDate, departure: interval.departureDate, current: order.status === "CHECKED_IN" && interval.arrivalDate <= today && (today < interval.departureDate || interval === intervals.at(-1)) });
     }
   }
   const events=communityEvents(orders,amendments,local);

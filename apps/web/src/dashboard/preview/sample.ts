@@ -2,7 +2,7 @@ import type { DashboardDetailsResponse, DashboardResponse } from "@qintopia/cont
 import { communityMetrics, type CommunityStay } from "../../../../../packages/domain/src/community-metrics";
 import { shiftDate } from "../dashboard-state";
 
-export type Scenario = "complete" | "partial" | "zero" | "empty" | "error";
+export type Scenario = "complete" | "partial" | "unlinked" | "zero" | "empty" | "error";
 const today = "2026-10-12";
 const currency = "CNY";
 const base = (i: number, arrival: string, departure: string, current: boolean): CommunityStay => ({ orderId: `sample-order-${i}`, personKey: `sample-person-${i}`, arrival, departure, current, free: false, category: null });
@@ -20,8 +20,13 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     base(81, "2026-08-01", "2026-08-21", false), { ...base(81, "2026-09-01", "2026-10-11", false), orderId: "sample-forty-nights" },
     base(82, "2026-08-01", "2026-08-10", false), { ...base(82, "2026-09-16", "2026-10-08", false), orderId: "sample-return" }
   ];
-  if (scenario === "partial") stays.push({ ...base(99, "2026-10-04", "2026-10-18", true), personKey: null });
-  const community = communityMetrics(stays, zero ? [] : [
+  if (scenario === "partial") stays.push({ ...base(99, "2026-10-04", "2026-10-18", true), registrationKey: "sample-registration-99", personKey: null });
+  if (scenario === "unlinked") stays.splice(0, stays.length, ...Array.from({ length: 31 }, (_, i) => ({
+    ...base(i, i === 30 ? shiftDate(today, -1) : "2026-09-01", "2026-11-01", true),
+    registrationKey: `sample-registration-${i}`, personKey: i === 30 ? "sample-verified-person" : null,
+    free: i < 5, category: i < 5 ? "VOLUNTEER" : null
+  })));
+  const community = communityMetrics(stays, zero || scenario === "unlinked" ? [] : [
     { orderId: "sample-order-60", date: "2026-09-18", nights: 7, kind: "EARLY", reason: "工作行程调整，提前返回常住地。住客表示愿意下次再来，已记录回访意向。" },
     { orderId: "sample-order-62", date: "2026-09-20", nights: 3, kind: "EARLY", reason: "家庭事务，需要提前回家" },
     { orderId: "sample-order-0", date: "2026-10-02", nights: 10, kind: "RENEWAL", reason: "原订单延长10晚，连续居住不打断" },
@@ -59,7 +64,7 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     future: Array.from({ length: Number(params.get("futureDays") ?? 14) }, (_, i) => ({ date: shiftDate(today, i), paid: zero ? 0 : Math.max(15, 53 - Math.floor(i / 3) * 3 + i % 3), free: zero ? 0 : i < 14 ? 8 : 6, maintenance: i < 5 ? 2 : 0, review: scenario === "partial" && i < 3 ? 1 : 0, availableRooms: 4 + Math.floor(i / 3), availableBeds: 8 + Math.floor(i / 2), capacity: 72, quality: scenario === "partial" && i < 3 ? "PARTIAL" : "COMPLETE" })),
     futureReviewCount: scenario === "partial" ? 1 : 0, filters: { buildings: ["A栋", "B栋"], roomTypes: ["shared_bath_double", "ensuite_double"], roomTypeLabels: { shared_bath_double: "公卫双人间", ensuite_double: "独卫双人间" } }, warnings: []
   };
-  if (scenario === "empty") { result.community.trend = []; result.community.duration = []; result.community.records = []; result.community.counts = { NEW: 0, RETURN: 0, RENEWAL: 0, DUE: 0, EARLY: 0 }; result.community.current = { date: today, total: null, paid: 0, volunteer: 0, reception: 0, otherFree: 0, unlinked: 1 }; result.community.dailyAverage = null; result.community.visitors = null; result.community.reasons = ["样本场景：未返回住客名单与逐日资料，不代表实际人数为零。"]; result.future = []; }
+  if (scenario === "empty") { delete result.community.durationCoverage; result.community.trend = []; result.community.duration = []; result.community.records = []; result.community.counts = { NEW: 0, RETURN: 0, RENEWAL: 0, DUE: 0, EARLY: 0 }; result.community.current = { date: today, total: null, paid: 0, volunteer: 0, reception: 0, otherFree: 0, unlinked: 1 }; result.community.dailyAverage = null; result.community.visitors = null; result.community.reasons = ["样本场景：未返回住客名单与逐日资料，不代表实际人数为零。"]; result.future = []; }
   return result;
 }
 function sampleFunds(range: DashboardResponse["range"], zero: boolean) {

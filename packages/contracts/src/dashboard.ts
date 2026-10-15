@@ -119,12 +119,19 @@ export interface CommunityRecord {
   people?: number | null;
   kind: "NEW" | "RETURN" | "RENEWAL" | "DUE" | "EARLY";
 }
+/** Missing identity/date evidence is reported as registrations/orders, never inferred people. */
+export interface CommunityDurationCoverage {
+  pendingRegistrations: number;
+  pendingOrders: number;
+  issues: Array<{ orderId: string; reason: string }>;
+}
 export interface DashboardCommunity {
   current: CommunityDay;
   trend: CommunityDay[];
   visitors: number | null;
   dailyAverage: number | null;
   duration: Array<{ nights: number; current: number; all: number }>;
+  durationCoverage?: { current: CommunityDurationCoverage; all: CommunityDurationCoverage };
   records: CommunityRecord[];
   counts: Record<CommunityRecord["kind"], number>;
   reasons: string[];
