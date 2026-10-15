@@ -24,7 +24,7 @@ function run(bin: string, args: string[], options: { cwd?: string; input?: Buffe
   if (result.error || result.status !== 0) throw new Error(`${bin} ${args.join(" ")}\n${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
   return result.stdout;
 }
-const revision = run("git", ["rev-parse", "--verify", `${process.argv[2] ?? "87d1c78b69b36b0a58a622bf3e37281698ba1cb5"}^{commit}`], { cwd: root }).trim();
+const revision = run("git", ["rev-parse", "--verify", `${process.argv[2] ?? "05d8a4fe1cdd538da082dcf0cffccb43cff3e3c8"}^{commit}`], { cwd: root }).trim();
 run("git", ["check-ignore", ".local-workspace/operating-sales-validation"], { cwd: root });
 const base = join(root, ".local-workspace/operating-sales-validation");
 mkdirSync(base, { recursive: true });
@@ -129,13 +129,13 @@ async function verify(client: pg.Client, db: Kysely<any>) {
     INSERT INTO subject_property_grants(subject_id,property_id,access_level) VALUES('iso-user','iso-property','WRITE');
     INSERT INTO web_sessions(id,subject_id,secret_hash,expires_at) VALUES('iso-session','iso-user',repeat('a',64),now()+interval '1 hour');
     INSERT INTO subject_command_grants(subject_id,property_id,command_type)
-      SELECT 'iso-user','iso-property',unnest(ARRAY['CREATE_ORDER','CHECK_IN','CHECK_OUT','REPRICE_ORDER','CANCEL_ORDER','RECORD_REFUND','REVERSE_FACT','RECORD_COLLECTION','CREATE_MEMBER','CREATE_MEMBERSHIP_ORDER','RECORD_MEMBERSHIP_PAYMENT','ACTIVATE_MEMBERSHIP_ORDER','MOVE_UNIT','EXTEND_STAY']);
+      SELECT 'iso-user','iso-property',unnest(ARRAY['CREATE_ORDER','CHECK_IN','CHECK_OUT','REPRICE_ORDER','CANCEL_ORDER','RECORD_REFUND','REVERSE_FACT','RECORD_COLLECTION','CREATE_MEMBER','CREATE_MEMBERSHIP_ORDER','RECORD_MEMBERSHIP_PAYMENT','ACTIVATE_MEMBERSHIP_ORDER','MOVE_UNIT','EXTEND_STAY','CORRECT_MEMBERSHIP_PAYMENT','CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP']);
   `);
   const moduleAt = (name: string) => import(pathToFileURL(join(snapshot, "packages/db/src", name)).href);
   const { createCommandPreview, confirmCommandPreview } = await moduleAt("commands/service.ts");
   const { createQuoteForTesting } = await moduleAt("pricing-service.ts");
   const { withPropertyClockForTesting } = await moduleAt("members.ts");
-  const grants = new Set(["CREATE_ORDER", "CHECK_IN", "CHECK_OUT", "REPRICE_ORDER", "CANCEL_ORDER", "RECORD_REFUND", "REVERSE_FACT", "RECORD_COLLECTION", "CREATE_MEMBER", "CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER", "MOVE_UNIT", "EXTEND_STAY"]);
+  const grants = new Set(["CREATE_ORDER", "CHECK_IN", "CHECK_OUT", "REPRICE_ORDER", "CANCEL_ORDER", "RECORD_REFUND", "REVERSE_FACT", "RECORD_COLLECTION", "CREATE_MEMBER", "CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER", "MOVE_UNIT", "EXTEND_STAY", "CORRECT_MEMBERSHIP_PAYMENT", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"]);
   const principal = { subjectId: "iso-user", credentialId: "iso-session", credentialType: "SESSION", displayName: "合成验证人员",
     propertyAccess: new Map([["iso-property", "WRITE"]]), propertyCommandGrants: new Map([["iso-property", grants]]), tokenCommandCeiling: null };
   let seq = 0;
@@ -152,12 +152,12 @@ async function verify(client: pg.Client, db: Kysely<any>) {
   const today = (await client.query("SELECT qintopia_stage10_property_today('iso-property')::text AS day")).rows[0].day;
   const day = (offset: number) => new Date(Date.parse(`${today}T00:00:00Z`) + offset * 86400000).toISOString().slice(0, 10);
   const clock = <T>(date: string, fn: () => Promise<T>) => withPropertyClockForTesting(new Date(`${date}T04:00:00Z`), fn);
-  async function create(amount: number, channel = "YOUMUDAO", offset = 0) {
+  async function create(amount: number, channel = "YOUMUDAO", offset = 0, options:{phone?:string;roomType?:string}={}) {
     const unitId = `iso-room-${++seq}`;
-    await db.insertInto("inventory_units").values({ id: unitId, property_id: "iso-property", kind: "ROOM", code: unitId, name: "合成房间" }).execute();
+    await db.insertInto("inventory_units").values({ id: unitId, property_id: "iso-property", kind: "ROOM", code: unitId, name: "合成房间", ...(options.roomType ? {room_type_code:options.roomType} : {}) }).execute();
     const quote = await createQuoteForTesting(db, { propertyId: "iso-property", inventoryUnitId: unitId,
       arrivalDate: day(offset), departureDate: day(offset + 1), pricingPolicyVersionId: "iso-policy" });
-    const result = await command("CREATE_ORDER", { quoteId: quote.quoteId, primaryGuest: { fullName: "合成客人", nickname: "合成客人" },
+    const result = await command("CREATE_ORDER", { quoteId: quote.quoteId, primaryGuest: { fullName: "合成客人", nickname: "合成客人", ...(options.phone ? {phone:options.phone} : {}) },
       bookingChannelCode: channel, channelOrderReference: channel === "WECOM" ? null : `ISO-${seq}`,
       targetCurrentContractAmountMinor: amount, ...(channel === "WECOM" ? (amount===30000 ? {} : {manualPriceAdjustmentReason:reason.note}) : { channelPriceDifferenceReason: reason.note }) });
     return result.receipt.result.orderId as string;
@@ -241,10 +241,17 @@ async function verify(client: pg.Client, db: Kysely<any>) {
   const carriedPayment=await command('RECORD_COLLECTION',{orderId:carriedOrderId,amountMinor:30000,method:'WECOM',transactionReference:'iso-carry-bill',externalPaymentBillId:'iso-carry-bill',note:'合成9月已计来源'});
   const carriedFactId=carriedPayment.receipt.result.factId;
   await bill('iso-opening-bill',40000);
+  await bill('iso-member-opening-bill',30000);
+  const carriedMemberId=(await command('CREATE_MEMBER',{fullName:'合成期初会员',nickname:'合成期初会员',phone:'13900000002',wechat:'iso-opening-member'})).receipt.result.memberId;
+  const carriedMembershipId=(await command('CREATE_MEMBERSHIP_ORDER',{memberId:carriedMemberId,membershipProductId:'membership_product_shared_bath_single_v1',agreedPriceMinor:30000,priceAdjustmentReason:'合成期初会员价'})).receipt.result.membershipOrderId;
+  const carriedMemberFactId=(await command('RECORD_MEMBERSHIP_PAYMENT',{membershipOrderId:carriedMembershipId,amountMinor:30000,transactionReference:'iso-member-opening-bill',note:'已计历史会员款'})).receipt.result.paymentFactId;
+  assert.ok(carriedMemberFactId);
+
   const plan={propertyId:'iso-property',recognitionFrom:'2026-10-01',currency:'CNY',baselines:[{month:'2026-09-01',amountMinor:'99900',evidenceNote:'合成9月封账，非真实业务'}],
     opening:[{sourceKind:'CHANNEL_REFUND',sourceId:id,amountMinor:'10000',evidenceNote:'合成历史已退100元承接'},
       {sourceKind:'STAY_FACT',sourceId:carriedFactId,amountMinor:'30000',evidenceNote:'合成9月已计300元'},
-      {sourceKind:'PAYMENT_BILL',sourceId:'iso-opening-bill',amountMinor:'40000',evidenceNote:'合成9月已计400元'}]};
+      {sourceKind:'PAYMENT_BILL',sourceId:'iso-opening-bill',amountMinor:'40000',evidenceNote:'合成9月已计400元'},
+      {sourceKind:'MEMBER_FACT',sourceId:carriedMemberFactId,amountMinor:'30000',evidenceNote:'合成9月已计会员300元'}]};
   const planPath=join(work,'opening-plan.json');writeFileSync(planPath,JSON.stringify(plan,null,2));
   const sha=createHash('sha256').update(readFileSync(planPath)).digest('hex');
   await client.query('CREATE ROLE isolated_runtime LOGIN INHERIT');await client.query('GRANT qintopia_runtime TO isolated_runtime');
@@ -333,12 +340,12 @@ async function verify(client: pg.Client, db: Kysely<any>) {
 
   await bill('iso-bill-split',100000);
   await check("未匹配企微流水1000元不计经营收入",async()=>{const value=await readSales();assert.equal(value.summary.totals[0].netMinor,'57720');evidence('unmatched-bill',value);});
-  await check("初始化PAYMENT_BILL默认只读校验成功",async()=>{
-    const paymentPlan={...plan,opening:[{sourceKind:'PAYMENT_BILL',sourceId:'iso-bill-split',amountMinor:'100000',evidenceNote:'合成9月已计流水1000元'}]};
-    const path=join(work,'payment-bill-plan.json');writeFileSync(path,JSON.stringify(paymentPlan));
-    const before=await setupState();const r=initialize([], 'isolated_owner',path);assert.deepEqual(await setupState(),before);
-    if(r.status!==0){try{await client.query('SELECT amount_minor::text AS amount,currency FROM external_payment_bills WHERE id=$1',['iso-bill-split']);}catch(error:any){evidence('payment-bill-schema-failure',{code:error.code,message:error.message,position:error.position});}}
-    assert.equal(r.status,0,r.stderr);
+  await check("原计划含PAYMENT_BILL的默认只读校验成功且零写",async()=>{
+    const before=await setupState();const r=initialize();assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).status,'validated_read_only');assert.deepEqual(await setupState(),before);
+  });
+  await check("封账后不同计划即使只读也拒绝且零写",async()=>{
+    const path=join(work,'changed-readonly-plan.json');writeFileSync(path,JSON.stringify({...plan,opening:[{sourceKind:'PAYMENT_BILL',sourceId:'iso-bill-split',amountMinor:'100000',evidenceNote:'改动后的计划'}]}));
+    const before=await setupState();const r=initialize([],'isolated_owner',path);assert.equal(r.status,1);assert.match(r.stderr,/已有封账基准不同/);assert.deepEqual(await setupState(),before);
   });
   let firstFact:string|undefined;
   await check("正式企微匹配1000元流水中的300元仅认300元",async()=>{
@@ -539,8 +546,58 @@ async function verify(client: pg.Client, db: Kysely<any>) {
     await rejectsUnchanged(orderId,{targetCurrentContractAmountMinor:30100},'INVALID_ORDER_STATE',/CHECKED_OUT/,'REPRICE_ORDER');
     const view=await getOrderView(runtimeDb!,orderId,'WRITE',grants);assert.equal(view.order.status,'CHECKED_OUT');assert.equal(view.order.current_contract_amount_minor,30000);
   });
-  await check('活跃渠道历史期初已退时min应结同步后的正式读回',async()=>{
-    // 独立合成门店通过正式初始化入口承接，避免手工写入期初替代入口验证。
+  await check('STAY_FACT opening解除分配后同bill重配不新增收入；initializer原计划仍幂等',async()=>{
+    const before=await readSales();const setupBefore=await setupState();
+    await command('REVERSE_FACT',{orderId:carriedOrderId,reversesFactId:carriedFactId,releaseExternalPaymentAllocation:true,note:'合成期初来源解除归属'},runtimeDb);
+    const rerun=initialize(['--apply','--expected-sha',sha]);assert.equal(rerun.status,0,rerun.stderr);assert.deepEqual(await setupState(),setupBefore);
+    const newOrder=await create(30000,'WECOM');const matched=await command('RECORD_COLLECTION',{orderId:newOrder,amountMinor:30000,method:'WECOM',transactionReference:'iso-carry-bill',externalPaymentBillId:'iso-carry-bill',note:'同流水重配'},runtimeDb);
+    assert.notEqual(matched.receipt.result.factId,carriedFactId);const after=await readSales();assert.equal(after.summary.totals[0].netMinor,before.summary.totals[0].netMinor);
+    assert.ok(!after.events.some((e:any)=>e.id===`STAY:${matched.receipt.result.factId}`));evidence('stay-opening-rematch',{before,after,originalFactId:carriedFactId,newFactId:matched.receipt.result.factId,initializer:JSON.parse(rerun.stdout)});
+  });
+  await check('MEMBER_FACT opening冲销替换同bill两次不新增收入；initializer原计划仍幂等',async()=>{
+    const before=await readSales();const setupBefore=await setupState();let original=carriedMemberFactId;
+    const replacements=[];
+    for(let i=1;i<=2;i++){
+      const r=await command('CORRECT_MEMBERSHIP_PAYMENT',{membershipOrderId:carriedMembershipId,originalPaymentFactId:original,correctedAmountMinor:30000,correctedTransactionReference:'iso-member-opening-bill',note:`期初会员备注更正${i}`},runtimeDb);
+      original=r.receipt.result.replacementFactId;replacements.push(r.receipt.result);
+      const after=await readSales();assert.equal(after.summary.totals[0].netMinor,before.summary.totals[0].netMinor);assert.ok(!after.events.some((e:any)=>e.id===`MEMBER:${original}`));
+    }
+    const rerun=initialize(['--apply','--expected-sha',sha]);assert.equal(rerun.status,0,rerun.stderr);assert.deepEqual(await setupState(),setupBefore);
+    evidence('member-opening-replacements',{before,after:await readSales(),replacements,initializer:JSON.parse(rerun.stdout)});
+  });
+  await check('住宿转会员后原住宿收入保留，内部会员转款不新增',async()=>{
+    const member=(await command('CREATE_MEMBER',{fullName:'合成转会员',nickname:'合成转会员',phone:'13900000003',wechat:'iso-conversion'})).receipt.result.memberId;
+    const stay=await create(30000,'WECOM',0,{phone:'13900000003',roomType:'shared_bath_single'});await bill('iso-convert-bill',30000);
+    const payment=await command('RECORD_COLLECTION',{orderId:stay,amountMinor:30000,method:'WECOM',transactionReference:'iso-convert-bill',externalPaymentBillId:'iso-convert-bill',note:'完整住宿收款转会员'},runtimeDb);
+    await command('CHECK_IN',{orderId:stay},runtimeDb);await clock(day(1),()=>command('CHECK_OUT',{orderId:stay},runtimeDb));
+    const before=await readSales();const sourceEvent=before.events.find((e:any)=>e.id===`STAY:${payment.receipt.result.factId}`);assert.ok(sourceEvent);assert.equal(sourceEvent.amountMinor,'30000');
+    const converted=await clock(day(1),()=>command('CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP',{orderId:stay,memberId:member,membershipProductId:'membership_product_shared_bath_single_v1',collectionFactIds:[payment.receipt.result.factId],agreedPriceMinor:30000,priceAdjustmentReason:'合成全额300元转会员'},runtimeDb));
+    const after=await readSales();assert.equal(after.summary.totals[0].netMinor,before.summary.totals[0].netMinor);assert.deepEqual(after.events.find((e:any)=>e.id===sourceEvent.id),sourceEvent);
+    const transfers=(await client.query('SELECT * FROM stay_collection_membership_transfers WHERE order_id=$1',[stay])).rows;assert.equal(transfers.length,1);
+    assert.ok(!after.events.some((e:any)=>e.id===`MEMBER:${transfers[0].membership_payment_fact_id}`));evidence('stay-to-member-income',{before,after,transfers,receipt:converted.receipt});
+  });
+  await check('会员连续两次note更正保留首次匹配日期（真实SQL跨日期投影）',async()=>{
+    const member=(await command('CREATE_MEMBER',{fullName:'合成日期会员',nickname:'合成日期会员',phone:'13900000004',wechat:'iso-note-dates'})).receipt.result.memberId;
+    const membership=(await command('CREATE_MEMBERSHIP_ORDER',{memberId:member,membershipProductId:'membership_product_shared_bath_single_v1',agreedPriceMinor:31000,priceAdjustmentReason:'合成日期会员价'})).receipt.result.membershipOrderId;
+    await bill('iso-note-bill',31000);const paid=await command('RECORD_MEMBERSHIP_PAYMENT',{membershipOrderId:membership,amountMinor:31000,transactionReference:'iso-note-bill',note:'原备注'},runtimeDb);
+    const firstId=paid.receipt.result.paymentFactId;const first=(await client.query('SELECT created_at FROM membership_payment_facts WHERE fact_id=$1',[firstId])).rows[0];
+    // 不改事实时间。选取合法PostgreSQL固定偏移，将原记录与后续更正分隔到两个投影日期。
+    const boundary=new Date(Math.ceil(new Date(first.created_at).getTime()/1000)*1000);
+    const zone=`UTC+${boundary.toISOString().slice(11,19)}`;
+    await new Promise(resolve=>setTimeout(resolve,1100));
+    let previous=firstId;const replacements=[];
+    for(let i=1;i<=2;i++){
+      const r=await command('CORRECT_MEMBERSHIP_PAYMENT',{membershipOrderId:membership,originalPaymentFactId:previous,correctedAmountMinor:31000,correctedTransactionReference:'iso-note-bill',note:`仅备注更正${i}`},runtimeDb);
+      previous=r.receipt.result.replacementFactId;replacements.push(r.receipt.result);
+    }
+    const dates=(await client.query("SELECT fact_id,to_char(created_at AT TIME ZONE $1,'YYYY-MM-DD') AS date FROM membership_payment_facts WHERE fact_id=ANY($2)",[zone,[firstId,previous]])).rows;
+    const firstDate=dates.find(d=>d.fact_id===firstId)!.date;const lastDate=dates.find(d=>d.fact_id===previous)!.date;assert.notEqual(firstDate,lastDate,'日期探针必须区分首次与后续记录');
+    const result:any=await db.transaction().execute(trx=>loadOperatingSales(trx,'iso-property',zone,'CNY',{from:firstDate,to:lastDate},lastDate));
+    const events=result.events.filter((e:any)=>e.memberId===member);assert.equal(events.length,1);assert.equal(events[0].id,`MEMBER:${previous}`);assert.equal(events[0].date,firstDate);assert.equal(events[0].amountMinor,'31000');
+    evidence('member-two-note-corrections-date',{zone,firstId,latestId:previous,firstDate,lastDate,replacements,events,explanation:'正式命令均用真实记录时间，仅SQL读取使用固定偏移日期边界，未改数据库时钟或事实'});
+  });
+  let gapContext:any;
+  await check('新CHANNEL_REFUND opening使current contract大于net：拒绝且零写',async()=>{
     const propertyId='iso-gap-property';
     await client.query(`INSERT INTO properties(id,code,name,timezone,currency) VALUES('iso-gap-property','ISO-GAP','合成期初读回门店','Asia/Shanghai','CNY');
       INSERT INTO inventory_units(id,property_id,kind,code,name) VALUES('iso-gap-room','iso-gap-property','ROOM','ISO-GAP-ROOM','合成期初客房');
@@ -553,12 +610,24 @@ async function verify(client: pg.Client, db: Kysely<any>) {
     const orderId=created.receipt.result.orderId;const source=(await facts(orderId)).find(f=>f.kind==='SALE')!;
     const gapPlan={propertyId,recognitionFrom:'2026-10-01',currency:'CNY',baselines:[{month:'2026-09-01',amountMinor:'0',evidenceNote:'合成封账'}],opening:[{sourceKind:'CHANNEL_REFUND',sourceId:orderId,amountMinor:'10000',evidenceNote:'合成历史退款已承接，旧合同仍300元'}]};
     const data=JSON.stringify(gapPlan);const path=join(work,'opening-contract-gap-plan.json');writeFileSync(path,data);
+
+    gapContext={propertyId,orderId,path,data,source};const before=await business(orderId);const stateBefore=await setupState();
+    for(const flags of [[],['--apply','--expected-sha',createHash('sha256').update(data).digest('hex')]]){
+      const r=initialize(flags,'isolated_owner',path);assert.equal(r.status,1);assert.match(r.stderr,/期初退款与当前渠道应结不一致/);
+      assert.deepEqual(await business(orderId),before);assert.deepEqual(await setupState(),stateBefore);
+    }
+    evidence('opening-gap-rejected',{before,stateBefore,after:await business(orderId),stateAfter:await setupState()});
+  });
+  await check('current contract200/net200正式退款50只降50且可读',async()=>{
+    assert.ok(gapContext);const {propertyId,orderId,path,data,source}=gapContext;
+    await client.query("INSERT INTO inventory_units(id,property_id,kind,code,name) VALUES('iso-gap-move','iso-gap-property','ROOM','ISO-GAP-MOVE','合成历史应结调整房')");
+    await command('MOVE_UNIT',{propertyId,orderId,newInventoryUnitId:'iso-gap-move',effectiveDate:today,targetCurrentContractAmountMinor:20000,channelPriceDifferenceReason:'合成历史应结已核实为200元'},runtimeDb);
     const initialized=initialize(['--apply','--expected-sha',createHash('sha256').update(data).digest('hex')],'isolated_owner',path);assert.equal(initialized.status,0,initialized.stderr);
-    const before=await business(orderId);const result=await command('RECORD_REFUND',{propertyId,orderId,amountMinor:5000,method:'CHANNEL',referencesFactId:source.id,refundReference:'ISO-OPENING-CONTRACT-GAP',note:'合成期初后退款50元',businessDate:today},runtimeDb);
-    const after=await business(orderId);assertFundsTransition(before.order,after.order,15000,'RECORD_REFUND');const fact=after.facts.find(f=>f.id===result.receipt.result.factId)!;assert.equal(fact.contract_effect_minor,-15000);
-    evidence('opening-contract-gap',{initialization:JSON.parse(initialized.stdout),before,after,receipt:result.receipt});
-    try{const view=await getOrderView(runtimeDb!,orderId,'WRITE',grants);assert.equal(view.order.current_contract_amount_minor,15000);evidence('opening-contract-gap-order-view',view);}
-    catch(error:any){evidence('opening-contract-gap-read-error',{code:error.code,message:error.message,details:error.details,stack:error.stack});throw error;}
+    const before=await business(orderId);assert.equal(before.order.revisions.at(-1).current_contract_amount_minor,20000);assert.equal((await channelOperatingSummary(db,propertyId,orderId)).netMinor,'20000');
+    const result=await command('RECORD_REFUND',{propertyId,orderId,amountMinor:5000,method:'CHANNEL',referencesFactId:source.id,refundReference:'ISO-OPENING-CONSISTENT',note:'一致余额退款50元',businessDate:today},runtimeDb);
+    const after=await business(orderId);assertFundsTransition(before.order,after.order,15000,'RECORD_REFUND');assert.equal(after.facts.find(f=>f.id===result.receipt.result.factId)!.contract_effect_minor,-5000);
+    const view=await getOrderView(runtimeDb!,orderId,'WRITE',grants);assert.equal(view.order.current_contract_amount_minor,15000);assert.equal(view.channelOperating.netMinor,'15000');
+    evidence('opening-consistent-order-view',view);evidence('opening-consistent-refund',{before,after,receipt:result.receipt});
   });
   await check("执行后operatingSalesReady仍返回true",async()=>{assert.equal(await operatingSalesReady(db),true);assert.equal(await operatingSalesReady(runtimeDb!),true);});
   missing.push('未覆盖历史已有订单072迁移回填、同一订单不同退款号并发、住宿转会员完整内部转款/解除重匹配组合、HTTP/UI；未接触生产或既有库');
