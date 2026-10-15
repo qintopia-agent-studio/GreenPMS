@@ -119,8 +119,10 @@ export interface CommunityRecord {
   people?: number | null;
   kind: "NEW" | "RETURN" | "RENEWAL" | "DUE" | "EARLY";
 }
-/** Missing identity/date evidence is reported as registrations/orders, never inferred people. */
+/** Known registration timelines are counted automatically; missing dates/rosters stay explicit. */
 export interface CommunityDurationCoverage {
+  /** Registrations counted without a cross-order identity link; not an unresolved work queue. */
+  registrationBased?: number;
   pendingRegistrations: number;
   pendingOrders: number;
   issues: Array<{ orderId: string; reason: string }>;

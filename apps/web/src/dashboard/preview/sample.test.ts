@@ -41,9 +41,9 @@ describe("合成看板逐日资金", () => {
 });
 
 
-it("身份缺项复现同时保留31条登记、1人已核对和30条待核对", () => {
+it("31条登记无需证件或人工核对即可全部计入住宿时长", () => {
   const data = sampleDashboard("sample-a", "", "unlinked");
   expect(data.community.current.registered).toMatchObject({total:31,paid:26,volunteer:5});
-  expect(data.community.duration.reduce((sum,row)=>sum+row.current,0)).toBe(1);
-  expect(data.community.durationCoverage?.current.pendingRegistrations).toBe(30);
+  expect(data.community.duration.reduce((sum,row)=>sum+row.current,0)).toBe(31);
+  expect(data.community.durationCoverage?.current).toMatchObject({registrationBased:30,pendingRegistrations:0,issues:[]});
 });

@@ -20,7 +20,7 @@ const metric = Type.Union(dashboardMetrics.map(value => Type.Literal(value)));
 const queryProperties = { from: Type.Optional(LocalDate), to: Type.Optional(LocalDate), futureDays: Type.Optional(Type.Union([Type.Literal(14), Type.Literal(30)])), building: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })), roomType: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })), source: Type.Optional(source) };
 const communityDay = Type.Object({ date: LocalDate, total: nullable(count), paid: count, volunteer: count, reception: count, otherFree: count, unlinked: count, unclassified: Type.Optional(count), registered: Type.Optional(Type.Object({total: nullable(count), paid: count, volunteer: count, reception: count, otherFree: count})) });
 const durationCoverage = Type.Object({
-  pendingRegistrations: count, pendingOrders: count,
+  registrationBased: Type.Optional(count), pendingRegistrations: count, pendingOrders: count,
   issues: Type.Array(Type.Object({ orderId: Id, reason: Type.String() }))
 });
 const community = Type.Object({ current: communityDay, trend: Type.Array(communityDay), visitors: nullable(count), dailyAverage: nullable(Type.Number({minimum:0})), duration: Type.Array(Type.Object({nights: count,current:count,all:count})), durationCoverage: Type.Optional(Type.Object({current: durationCoverage, all: durationCoverage})), records: Type.Array(Type.Object({orderId: Id,date:LocalDate,nights:count,reason:Type.String(),people:Type.Optional(nullable(count)),kind:Type.Union(["NEW","RETURN","RENEWAL","DUE","EARLY"].map(v=>Type.Literal(v)))})), counts:Type.Object({NEW:count,RETURN:count,RENEWAL:count,DUE:count,EARLY:count}),reasons:Type.Array(Type.String()) });

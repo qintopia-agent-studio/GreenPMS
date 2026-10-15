@@ -28,12 +28,13 @@ export function ResidenceDuration({ data, perspective, onPerspectiveChange }: {
     </div>
     <p className="dashboard-muted duration-band-note">连续续住或换房不中断累计。以下仅为时长分组，1 个月按固定 30 晚，不改变业务长短住规则。</p>
     <div className="duration-coverage" aria-label="住宿时长统计覆盖情况">
-      <strong>{complete ? `已统计 ${known} ${unit}` : `已核对 ${known} ${unit} · 时长结构尚不完整`}</strong>
+      <strong>{complete ? `已统计 ${known} ${unit}` : `已统计 ${known} ${unit} · 部分住宿资料异常`}</strong>
+      {!!coverage?.registrationBased && <p>已按实际住宿登记自动计算，原单续住和换房连续累计。跨订单已有身份关联的合并计算，未关联的登记分别统计，不按同名猜测。</p>}
       {!complete && <>
         <p>{coverage
-          ? [coverage.pendingRegistrations ? `${coverage.pendingRegistrations} 条住宿登记的连续时长待核对` : "", coverage.pendingOrders ? `${coverage.pendingOrders} 个订单的住宿人或时间线待核对` : ""].filter(Boolean).join("；") + "。"
+          ? [coverage.pendingRegistrations ? `${coverage.pendingRegistrations} 条住宿登记缺少实际住宿日期` : "", coverage.pendingOrders ? `${coverage.pendingOrders} 个订单的住宿人或时间线待核对` : ""].filter(Boolean).join("；") + "。"
           : "当前返回资料未提供时长覆盖情况，暂不能确认是否包含全部住客。"}</p>
-        <p>下方仅展示已核对部分；未覆盖的住宿不能当作 0 人，也不以本单时长替代连续居住时长。待核对登记可能跨单重复，不与已核对人数相加。</p>
+        <p>下方仅展示有实际住宿依据的部分；缺失的日期或名单不能当作 0 人。异常登记不与已统计人数相加。</p>
       </>}
     </div>
     <div className="duration-bars" aria-label={complete ? "住宿时长分布" : "已核对部分的住宿时长分布"}>
@@ -41,10 +42,10 @@ export function ResidenceDuration({ data, perspective, onPerspectiveChange }: {
         <span>{row.label}<small>{row.range}</small></span>
         <div aria-hidden="true"><i style={{ width: `${row[perspective] / max * 100}%` }} /></div>
         <b>{!complete && row[perspective] === 0 ? "待核对" : `${row[perspective]}${unit}`}</b>
-      </div>) : <p className="dashboard-empty">{complete ? perspective === "current" ? "当前没有实际在住人员。" : "所选期间没有实际住宿记录。" : "暂无可核对的完整连续时长，不代表没有人在住。"}</p>}
+      </div>) : <p className="dashboard-empty">{complete ? perspective === "current" ? "当前没有实际在住人员。" : "所选期间没有实际住宿记录。" : "暂无可计算的实际住宿时长，不代表没有人在住。"}</p>}
     </div>
     {!!coverage?.issues.length && <details className="duration-review">
-      <summary>查看待核对依据与关联订单（{coverage.issues.length}）</summary>
+      <summary>查看异常依据与关联订单（{coverage.issues.length}）</summary>
       <ul>{coverage.issues.map(issue => <li key={issue.orderId}>
         <span>{issue.reason}</span>{" "}<Link to={`/orders/${encodeURIComponent(issue.orderId)}`}>查看订单</Link>
       </li>)}</ul>

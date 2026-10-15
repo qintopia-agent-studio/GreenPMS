@@ -21,10 +21,19 @@ const nights = (from: string, until: string) => Math.max(0, Math.round((Date.par
 export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[], range: DashboardRange, today: string, evidenceIssues: string[] = [], planned: CommunityStay[] = []): DashboardCommunity {
   const byPerson = new Map<string, CommunityStay[]>();
   const plannedByPerson = new Map<string, CommunityStay[]>();
+  // A stable occupant registration already identifies the resident within their stay.
+  // Document identity only adds cross-order linking; it is not a duration prerequisite.
+  const residencePeople = new Map<string, CommunityStay[]>();
   const byOrder = new Map<string, CommunityStay[]>();
   for (const stay of stays) {
     const order = byOrder.get(stay.orderId) ?? [];
     order.push(stay); byOrder.set(stay.orderId, order);
+    const residenceKey = stay.personKey ? `identity:${stay.personKey}`
+      : stay.registrationKey ? `registration:${stay.orderId}:${stay.registrationKey}` : null;
+    if (residenceKey && stay.historical !== false && !stay.durationReviewReason) {
+      const list = residencePeople.get(residenceKey) ?? [];
+      list.push(stay); residencePeople.set(residenceKey, list);
+    }
     if (stay.personKey && stay.historical !== false && !stay.durationReviewReason) {
       const list = byPerson.get(stay.personKey) ?? [];
       list.push(stay); byPerson.set(stay.personKey, list);
@@ -85,27 +94,30 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   }
   const cutoff = range.to < today ? range.to : today;
   // Keep evidence gaps alongside the distribution instead of silently dropping registrations.
-  // These counts are NOT people/trips: identities and actual dates may still be unresolved.
+  // Pending counts are NOT people/trips: actual dates or rosters may still be unresolved.
   function durationCoverage(perspective: "current" | "all") {
     const registrations = new Set<string>();
+    const registrationBased = new Set<string>();
     const orders = new Set<string>();
     const issues = new Map<string, Set<string>>();
     for (const stay of stays) {
-      if (stay.personKey && stay.historical !== false && !stay.durationReviewReason) continue;
       const occupiedUntil = stay.current ? dashboardDate(today, 1) : stay.departure;
       const included = perspective === "current" ? relevant(stay, today)
         : range.from <= cutoff && stay.arrival <= cutoff && occupiedUntil > range.from;
       if (!included) continue;
+      if ((stay.personKey || stay.registrationKey) && stay.historical !== false && !stay.durationReviewReason) {
+        if (!stay.personKey && stay.registrationKey) registrationBased.add(stay.registrationKey);
+        continue;
+      }
       if (stay.registrationKey) registrations.add(stay.registrationKey);
       else orders.add(stay.orderId);
       const reasons = issues.get(stay.orderId) ?? new Set<string>();
       reasons.add(stay.durationReviewReason ?? (stay.historical === false
         ? "实际入住日期待核对，不能以登记日期或订单日期替代。"
-        : stay.registrationKey ? "缺少跨订单身份依据，无法核对本次连续入住起点。"
         : "住宿人名单或有效住宿时间线待核对，不能推算人数和时长。"));
       issues.set(stay.orderId, reasons);
     }
-    return { pendingRegistrations: registrations.size, pendingOrders: orders.size,
+    return { registrationBased: registrationBased.size, pendingRegistrations: registrations.size, pendingOrders: orders.size,
       issues: [...issues].map(([orderId, reasons]) => ({ orderId, reason: [...reasons].join("；") })) };
   }
   const distribution = new Map<number, { nights: number; current: number; all: number }>();
@@ -114,7 +126,8 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     row[perspective]++;
     distribution.set(duration, row);
   }
-  for (const [personKey, list] of byPerson) {
+  for (const list of residencePeople.values()) {
+    const personKey = list[0]!.personKey;
     list.sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
     let chain: CommunityStay[] = [], until = "", previous = false;
     function finish() {
@@ -128,6 +141,8 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
       if (range.from <= cutoff && start <= cutoff && occupiedUntil > range.from) {
         countDuration(nights(start, observedEnd < cutoff ? observedEnd : cutoff), "all");
       }
+      // Registration-local durations do not establish NEW/RETURN/RENEWAL identities.
+      if (!personKey) return;
       if (inRange(start)) add({ orderId: chain[0]!.orderId, date: start, nights: duration, reason: previous ? "同一住客间隔后再次入住" : "首次可核实的入住记录", kind: previous ? "RETURN" : "NEW" }, [personKey]);
       let confirmedEnd = until;
       let dueOrder = chain.find(stay => stay.departure === until)!.orderId;
@@ -141,7 +156,7 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     }
     for (const stay of list) {
       if (chain.length && stay.arrival > until) { finish(); chain = []; until = ""; }
-      if (chain.length && chain.at(-1)!.orderId !== stay.orderId && stay.arrival === until && inRange(stay.arrival)) {
+      if (personKey && chain.length && chain.at(-1)!.orderId !== stay.orderId && stay.arrival === until && inRange(stay.arrival)) {
         add({ orderId: stay.orderId, date: stay.arrival, nights: 0, reason: "同一住客无空夜接续订单，换房不打断连续居住", kind: "RENEWAL" }, [personKey]);
       }
       chain.push(stay);

@@ -20,7 +20,7 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     base(81, "2026-08-01", "2026-08-21", false), { ...base(81, "2026-09-01", "2026-10-11", false), orderId: "sample-forty-nights" },
     base(82, "2026-08-01", "2026-08-10", false), { ...base(82, "2026-09-16", "2026-10-08", false), orderId: "sample-return" }
   ];
-  if (scenario === "partial") stays.push({ ...base(99, "2026-10-04", "2026-10-18", true), registrationKey: "sample-registration-99", personKey: null });
+  if (scenario === "partial") stays.push({ ...base(99, "2026-10-04", "2026-10-18", true), registrationKey: "sample-registration-99", personKey: null, historical: false, durationReviewReason: "追加住宿登记缺少实际入住日期。" });
   if (scenario === "unlinked") stays.splice(0, stays.length, ...Array.from({ length: 31 }, (_, i) => ({
     ...base(i, i === 30 ? shiftDate(today, -1) : "2026-09-01", "2026-11-01", true),
     registrationKey: `sample-registration-${i}`, personKey: i === 30 ? "sample-verified-person" : null,
@@ -31,7 +31,7 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     { orderId: "sample-order-62", date: "2026-09-20", nights: 3, kind: "EARLY", reason: "家庭事务，需要提前回家" },
     { orderId: "sample-order-0", date: "2026-10-02", nights: 10, kind: "RENEWAL", reason: "原订单延长10晚，连续居住不打断" },
     { orderId: "sample-order-2", date: "2026-10-05", nights: 20, kind: "RENEWAL", reason: "原订单延长20晚，会员权益付费住宿" }
-  ], range, today, scenario === "partial" ? ["合成样本 sample-order-99：10月4日起的一条住宿人登记缺少跨单身份依据；此前日期不受影响。"] : []);
+  ], range, today, scenario === "partial" ? ["合成样本 sample-order-99：一条追加住宿登记缺少实际入住日期，不能沿用订单起点。"] : []);
   const groups = [
     { building: "A栋", roomType: "shared_bath_double", weight: 18 },
     { building: "A栋", roomType: "ensuite_double", weight: 22 },

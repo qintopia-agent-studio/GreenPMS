@@ -9,17 +9,17 @@ function render(data: ReturnType<typeof sampleDashboard>, perspective: "current"
   return renderToStaticMarkup(<MemoryRouter><ResidenceDuration data={data} perspective={perspective} onPerspectiveChange={() => {}} /></MemoryRouter>);
 }
 describe("residence duration evidence presentation", () => {
-  it("does not present the one-person partial sample as a complete population with five zero bands", () => {
+  it("does not hide genuine missing arrival dates behind zero bands", () => {
     const data = sampleDashboard("sample-a", "", "zero");
     data.community.duration = [{ nights: 1, current: 1, all: 0 }];
-    data.community.durationCoverage = { current: { pendingRegistrations: 30, pendingOrders: 0, issues: [{ orderId: "order-a", reason: "缺少跨订单身份依据" }] }, all: complete() };
+    data.community.durationCoverage = { current: { pendingRegistrations: 30, pendingOrders: 0, issues: [{ orderId: "order-a", reason: "缺少实际入住日期" }] }, all: complete() };
     const html = render(data);
-    expect(html).toContain("已核对 1 人 · 时长结构尚不完整");
+    expect(html).toContain("已统计 1 人 · 部分住宿资料异常");
     expect(html).toContain("30 条住宿登记");
     expect(html.match(/<b>待核对<\/b>/g)).toHaveLength(5);
     expect(html).not.toContain("<b>0人</b>");
     expect(html).toContain('href="/orders/order-a"');
-    expect(html).toContain("不与已核对人数相加");
+    expect(html).toContain("不与已统计人数相加");
   });
   it("shows true zero bands for complete data and clearly states the period cutoff and person-trip unit", () => {
     const data = sampleDashboard("sample-a", "", "zero");
@@ -32,7 +32,7 @@ describe("residence duration evidence presentation", () => {
     expect(html).toContain("使用页面顶部日期筛选");
     expect(html).toContain("不只算期间内的夜数");
     expect(html.match(/<b>0人次<\/b>/g)).toHaveLength(5);
-    expect(html).not.toContain("时长结构尚不完整");
+    expect(html).not.toContain("部分住宿资料异常");
   });
   it("distinguishes all-unresolved, legacy coverage-unknown, and genuine empty populations", () => {
     const data = sampleDashboard("sample-a", "", "zero");
@@ -45,4 +45,16 @@ describe("residence duration evidence presentation", () => {
     expect(render(data)).toContain("暂不能确认是否包含全部住客");
     expect(render(data)).not.toContain("当前没有实际在住人员");
   });
+});
+
+
+it("renders all 31 registered residents automatically without an identity review queue", () => {
+  const data = sampleDashboard("sample-a", "", "unlinked");
+  const html = render(data);
+  expect(html).toContain("已统计 31 人");
+  expect(html).toContain("<b>30人</b>");
+  expect(html).toContain("原单续住和换房连续累计");
+  expect(html).toContain("未关联的登记分别统计");
+  expect(html).not.toContain("待核对");
+  expect(html).not.toContain("查看异常依据");
 });
