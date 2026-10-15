@@ -2,6 +2,18 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.14.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.13.1...v1.14.0) (2026-10-15)
+
+
+### Features
+
+* **members:** 支持取消误建的空白会员订单 ([#84](https://github.com/qintopia-agent-studio/GreenPMS/issues/84)) ([609dc01](https://github.com/qintopia-agent-studio/GreenPMS/commit/609dc011db056df0f1c75ee3dfdd4b6b040b46f1))
+
+
+### Bug Fixes
+
+* **dashboard:** 修复住宿时长漏计并按昵称识别回访 ([#82](https://github.com/qintopia-agent-studio/GreenPMS/issues/82)) ([e599a4b](https://github.com/qintopia-agent-studio/GreenPMS/commit/e599a4be3b75b4039800712b82348817fbe54efd))
+
 ## [1.13.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.13.0...v1.13.1) (2026-10-15)
 
 
