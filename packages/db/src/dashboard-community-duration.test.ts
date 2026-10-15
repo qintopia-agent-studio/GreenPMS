@@ -27,11 +27,12 @@ describe("community duration loader", () => {
     expect(c.duration).toEqual([{ nights: 29, current: 0, all: 1 }, { nights: 43, current: 1, all: 0 }]);
     expect(c.durationCoverage?.current.pendingRegistrations).toBe(0);
   });
-  it("counts the recorded stay without a document and never substitutes payer member, name, or phone as identity", async () => {
+  it("uses the approved name estimate without treating payer member or phone as guest identity", async () => {
     const c = await loadDashboardCommunity(database({ order_occupants: [{ ...occupant, document_number: null }] }), "property", range, today, "Asia/Shanghai");
     expect(c.duration).toEqual([{ nights: 29, current: 0, all: 1 }, { nights: 43, current: 1, all: 0 }]);
-    expect(c.durationCoverage?.current).toMatchObject({ registrationBased: 1, pendingRegistrations: 0, pendingOrders: 0, issues: [] });
-    expect(c.current.total).toBeNull();
+    expect(c.durationCoverage?.current).toMatchObject({ registrationBased: 0, pendingRegistrations: 0, pendingOrders: 0, issues: [] });
+    expect(c.current.total).toBe(1);
+    expect(c.identityApproximate).toBe(true);
     expect(c.current.registered?.total).toBe(1);
     expect(JSON.stringify(c.durationCoverage)).not.toMatch(/shared-phone|合成住客|payer-member/);
   });

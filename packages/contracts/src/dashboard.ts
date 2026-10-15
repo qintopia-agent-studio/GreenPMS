@@ -128,6 +128,8 @@ export interface CommunityDurationCoverage {
   issues: Array<{ orderId: string; reason: string }>;
 }
 export interface DashboardCommunity {
+  /** Nickname/name matching is an operating estimate, not a verified person ID. */
+  identityApproximate?: boolean;
   current: CommunityDay;
   trend: CommunityDay[];
   visitors: number | null;

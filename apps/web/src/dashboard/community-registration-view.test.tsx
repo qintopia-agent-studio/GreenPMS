@@ -28,3 +28,13 @@ it("今日指标与31人登记总数均可见，不将其标成跨单去重人�
  expect(html).toMatch(/31/);expect(html).toContain("登记在住人数");expect(html).toContain("尚未跨单去重");
  expect(data.community.current.total).toBeNull();
 });
+
+it("labels approximate nickname-based headcounts and keeps return records explicitly in条", async () => {
+ const { ResidenceChanges } = await import("./ResidenceChanges");
+ const data=sampleDashboard("sample-a","","complete");
+ data.community.identityApproximate=true;
+ const html=renderToStaticMarkup(<MemoryRouter><CommunitySnapshot data={data} onDetail={()=>{}}/><CommunityPanels data={data}/><ResidenceChanges data={data}/></MemoryRouter>);
+ expect(html).toContain("昵称/姓名近似去重人数");
+ expect(html).toContain("续住与回访为近似统计");
+ expect(html).toContain("再次入住记录 · 按条计");
+});

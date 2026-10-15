@@ -54,7 +54,16 @@ it("renders all 31 registered residents automatically without an identity review
   expect(html).toContain("已统计 31 人");
   expect(html).toContain("<b>30人</b>");
   expect(html).toContain("原单续住和换房连续累计");
-  expect(html).toContain("未关联的登记分别统计");
+  expect(html).toContain("未能关联的登记分别统计");
   expect(html).not.toContain("待核对");
   expect(html).not.toContain("查看异常依据");
+});
+
+it("discloses nickname/name linking as approximate rather than verified identity", () => {
+ const data=sampleDashboard("sample-a","","complete");
+ data.community.identityApproximate=true;
+ const html=render(data);
+ expect(html).toContain("按昵称优先、姓名辅助自动关联住客");
+ expect(html).toContain("跨单连续时长为近似统计");
+ expect(html).toContain("无需补证件或逐条人工核对");
 });

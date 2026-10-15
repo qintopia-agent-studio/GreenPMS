@@ -26,10 +26,11 @@ describe("historical occupant projection, read-only SQL fixtures", () => {
     expect(result.duration).toEqual([{ nights: 10, current: 0, all: 1 }, { nights: 11, current: 1, all: 0 }]);
     expect(result.reasons.join(" ")).toContain("追加登记");
   });
-  it("never substitutes the payer membership for an unidentified actual guest", async () => {
+  it("uses the approved nickname estimate, not the payer membership", async () => {
     const result = await load({ order_occupants: [{ ...primary, document_number: null }] });
-    expect(result.current.total).toBeNull();
-    expect(result.current.unlinked).toBe(1);
+    expect(result.current.total).toBe(1);
+    expect(result.identityApproximate).toBe(true);
+    expect(result.current.unlinked).toBe(0);
   });
   it("does not count reservation-only extensions as actual renewals", () => {
     const event = { id: "extend", order_id: "order", amendment_type: "EXTEND_STAY", payload: {}, command_id: "extend", sequence: 2, reason_note: "延长计划", created_at: new Date("2026-09-30") };

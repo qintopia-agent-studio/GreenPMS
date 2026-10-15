@@ -29,7 +29,8 @@ export function ResidenceDuration({ data, perspective, onPerspectiveChange }: {
     <p className="dashboard-muted duration-band-note">连续续住或换房不中断累计。以下仅为时长分组，1 个月按固定 30 晚，不改变业务长短住规则。</p>
     <div className="duration-coverage" aria-label="住宿时长统计覆盖情况">
       <strong>{complete ? `已统计 ${known} ${unit}` : `已统计 ${known} ${unit} · 部分住宿资料异常`}</strong>
-      {!!coverage?.registrationBased && <p>已按实际住宿登记自动计算，原单续住和换房连续累计。跨订单已有身份关联的合并计算，未关联的登记分别统计，不按同名猜测。</p>}
+      {data.community.identityApproximate && <p>按昵称优先、姓名辅助自动关联住客，跨单连续时长为近似统计；无需补证件或逐条人工核对。</p>}
+      {!!coverage?.registrationBased && <p>已按实际住宿登记自动计算，原单续住和换房连续累计。跨订单已有身份关联的合并计算，未能关联的登记分别统计。</p>}
       {!complete && <>
         <p>{coverage
           ? [coverage.pendingRegistrations ? `${coverage.pendingRegistrations} 条住宿登记缺少实际住宿日期` : "", coverage.pendingOrders ? `${coverage.pendingOrders} 个订单的住宿人或时间线待核对` : ""].filter(Boolean).join("；") + "。"

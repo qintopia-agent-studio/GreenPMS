@@ -13,6 +13,7 @@ export interface CommunityStay {
   registrationKey?: string;
   historical?: boolean;
   durationReviewReason?: string;
+  identityApproximate?: boolean;
 }
 export interface CommunityEvent { orderId: string; date: string; nights: number; reason: string; kind: "RENEWAL" | "EARLY" }
 const nights = (from: string, until: string) => Math.max(0, Math.round((Date.parse(until) - Date.parse(from)) / 86400000));
@@ -180,9 +181,10 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   const current = day(today);
   const reasons = [...evidenceIssues];
   if (trend.some(row => row.unclassified) || current.unclassified) reasons.push("同一住客同日存在付费/免费归属冲突：总人数仍按身份去重保留，冲突住客不猜测分类，请核对关联订单归属。");
-  if (unknown || current.unlinked) reasons.push("部分住宿人缺少跨订单身份或实际日期依据；不按同名、共用手机或下单会员猜测。缺项只影响对应日期，已核对分类保留。");
+  if (unknown || current.unlinked) reasons.push("部分住宿人缺少可识别昵称、姓名或实际日期依据；不以共用手机或下单会员代替住客。缺项只影响对应日期，已核对分类保留。");
   return {
     current, trend,
+    identityApproximate: stays.some(stay => stay.identityApproximate) || planned.some(stay => stay.identityApproximate),
     visitors: unknown ? null : [...byPerson.values()].filter(list => list.some(stay => stay.arrival <= range.to && stay.departure > range.from)).length,
     dailyAverage: unknown ? null : trend.reduce((sum, row) => sum + row.total!, 0) / Math.max(trend.length, 1),
     duration: [...distribution.values()].sort((a, b) => a.nights - b.nights),
