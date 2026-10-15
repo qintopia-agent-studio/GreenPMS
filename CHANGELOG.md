@@ -2,6 +2,18 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.13.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.12.1...v1.13.0) (2026-10-15)
+
+
+### Features
+
+* **sales:** 按匹配事实统计收入并支持住宿金额角分与渠道退款 ([#79](https://github.com/qintopia-agent-studio/GreenPMS/issues/79)) ([7d4117c](https://github.com/qintopia-agent-studio/GreenPMS/commit/7d4117c1afcda5e777aa156e331e9fb0836b5c72))
+
+
+### Bug Fixes
+
+* **dashboard:** 修复当前人数并补齐今日订单与收款 ([#77](https://github.com/qintopia-agent-studio/GreenPMS/issues/77)) ([c937593](https://github.com/qintopia-agent-studio/GreenPMS/commit/c937593823b25a5805a2a3cb10b53612513da7b3))
+
 ## [1.12.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.12.0...v1.12.1) (2026-10-13)
 
 
