@@ -39,3 +39,19 @@ describe("合成看板逐日资金", () => {
     expect(filtered.current).toEqual(original.current);
   });
 });
+
+
+it("31条登记无需证件或人工核对即可全部计入住宿时长", () => {
+  const data = sampleDashboard("sample-a", "", "unlinked");
+  expect(data.community.current.registered).toMatchObject({total:31,paid:26,volunteer:5});
+  expect(data.community.duration.reduce((sum,row)=>sum+row.current,0)).toBe(31);
+  expect(data.community.durationCoverage?.current).toMatchObject({registrationBased:30,pendingRegistrations:0,issues:[]});
+});
+
+it("昵称写法不同的两位回头客归入同一订单记录，显示1条与2人", () => {
+ const data=sampleDashboard("sample-a","","nickname");
+ expect(data.community.identityApproximate).toBe(true);
+ expect(data.community.current.total).toBe(2);
+ expect(data.community.counts.RETURN).toBe(1);
+ expect(data.community.records.find(row=>row.kind==="RETURN")).toMatchObject({orderId:"sample-return",people:2,date:"2026-10-01"});
+});

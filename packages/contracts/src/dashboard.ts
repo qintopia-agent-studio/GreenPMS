@@ -119,12 +119,23 @@ export interface CommunityRecord {
   people?: number | null;
   kind: "NEW" | "RETURN" | "RENEWAL" | "DUE" | "EARLY";
 }
+/** Known registration timelines are counted automatically; missing dates/rosters stay explicit. */
+export interface CommunityDurationCoverage {
+  /** Registrations counted without a cross-order identity link; not an unresolved work queue. */
+  registrationBased?: number;
+  pendingRegistrations: number;
+  pendingOrders: number;
+  issues: Array<{ orderId: string; reason: string }>;
+}
 export interface DashboardCommunity {
+  /** Nickname/name matching is an operating estimate, not a verified person ID. */
+  identityApproximate?: boolean;
   current: CommunityDay;
   trend: CommunityDay[];
   visitors: number | null;
   dailyAverage: number | null;
   duration: Array<{ nights: number; current: number; all: number }>;
+  durationCoverage?: { current: CommunityDurationCoverage; all: CommunityDurationCoverage };
   records: CommunityRecord[];
   counts: Record<CommunityRecord["kind"], number>;
   reasons: string[];

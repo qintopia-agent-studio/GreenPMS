@@ -36,3 +36,15 @@ it("publishes registration counts separately from unresolved identity totals", (
   summary.community.current.registered!.total=-1;
   expect(Value.Check(DashboardResponseSchema,summary)).toBe(false);
 });
+
+it("serializes duration evidence gaps independently of verified people and rejects invalid counts", () => {
+  const summary = dashboardFixture(new URL("http://localhost/api/v1/properties/demo/dashboard"));
+  summary.community.identityApproximate = true;
+  summary.community.durationCoverage = {
+    current: { registrationBased: 30, pendingRegistrations: 0, pendingOrders: 1, issues: [{ orderId: "order_review", reason: "连续入住起点待核对" }] },
+    all: { pendingRegistrations: 0, pendingOrders: 0, issues: [] }
+  };
+  expect(Value.Check(DashboardResponseSchema, summary)).toBe(true);
+  summary.community.durationCoverage.current.registrationBased = -1;
+  expect(Value.Check(DashboardResponseSchema, summary)).toBe(false);
+});

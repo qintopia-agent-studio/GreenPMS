@@ -290,3 +290,11 @@
   .funds-grid { grid-template-columns: minmax(0, 1fr); gap: 24px; }
 }
 @media (prefers-reduced-motion: reduce) { .dashboard * { scroll-behavior: auto; animation: none; transition: none; } }
+
+.duration-coverage { margin: 16px 0; padding: 14px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; line-height: 1.7; }
+.duration-coverage p { margin: 6px 0 0; color: var(--muted); }
+.duration-review { margin-top: 18px; font-size: 12px; line-height: 1.7; }
+.duration-review summary { cursor: pointer; color: var(--brand); }
+.duration-review ul { padding-left: 20px; }
+.duration-review li { margin-top: 10px; }
+.duration-bars b { flex-shrink: 0; }

@@ -1,8 +1,9 @@
 import type { DashboardDetailsResponse, DashboardResponse } from "@qintopia/contracts";
+import { resolveCommunityIdentities } from "../../../../../packages/domain/src/community-identity";
 import { communityMetrics, type CommunityStay } from "../../../../../packages/domain/src/community-metrics";
 import { shiftDate } from "../dashboard-state";
 
-export type Scenario = "complete" | "partial" | "zero" | "empty" | "error";
+export type Scenario = "complete" | "partial" | "unlinked" | "nickname" | "zero" | "empty" | "error";
 const today = "2026-10-12";
 const currency = "CNY";
 const base = (i: number, arrival: string, departure: string, current: boolean): CommunityStay => ({ orderId: `sample-order-${i}`, personKey: `sample-person-${i}`, arrival, departure, current, free: false, category: null });
@@ -20,13 +21,19 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     base(81, "2026-08-01", "2026-08-21", false), { ...base(81, "2026-09-01", "2026-10-11", false), orderId: "sample-forty-nights" },
     base(82, "2026-08-01", "2026-08-10", false), { ...base(82, "2026-09-16", "2026-10-08", false), orderId: "sample-return" }
   ];
-  if (scenario === "partial") stays.push({ ...base(99, "2026-10-04", "2026-10-18", true), personKey: null });
-  const community = communityMetrics(stays, zero ? [] : [
+  if (scenario === "partial") stays.push({ ...base(99, "2026-10-04", "2026-10-18", true), registrationKey: "sample-registration-99", personKey: null, historical: false, durationReviewReason: "追加住宿登记缺少实际入住日期。" });
+  if (scenario === "unlinked") stays.splice(0, stays.length, ...Array.from({ length: 31 }, (_, i) => ({
+    ...base(i, i === 30 ? shiftDate(today, -1) : "2026-09-01", "2026-11-01", true),
+    registrationKey: `sample-registration-${i}`, personKey: i === 30 ? "sample-verified-person" : null,
+    free: i < 5, category: i < 5 ? "VOLUNTEER" : null
+  })));
+  if (scenario === "nickname") stays.splice(0, stays.length, ...nicknameStays());
+  const community = communityMetrics(stays, zero || scenario === "unlinked" || scenario === "nickname" ? [] : [
     { orderId: "sample-order-60", date: "2026-09-18", nights: 7, kind: "EARLY", reason: "工作行程调整，提前返回常住地。住客表示愿意下次再来，已记录回访意向。" },
     { orderId: "sample-order-62", date: "2026-09-20", nights: 3, kind: "EARLY", reason: "家庭事务，需要提前回家" },
     { orderId: "sample-order-0", date: "2026-10-02", nights: 10, kind: "RENEWAL", reason: "原订单延长10晚，连续居住不打断" },
     { orderId: "sample-order-2", date: "2026-10-05", nights: 20, kind: "RENEWAL", reason: "原订单延长20晚，会员权益付费住宿" }
-  ], range, today, scenario === "partial" ? ["合成样本 sample-order-99：10月4日起的一条住宿人登记缺少跨单身份依据；此前日期不受影响。"] : []);
+  ], range, today, scenario === "partial" ? ["合成样本 sample-order-99：一条追加住宿登记缺少实际入住日期，不能沿用订单起点。"] : []);
   const groups = [
     { building: "A栋", roomType: "shared_bath_double", weight: 18 },
     { building: "A栋", roomType: "ensuite_double", weight: 22 },
@@ -59,7 +66,7 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     future: Array.from({ length: Number(params.get("futureDays") ?? 14) }, (_, i) => ({ date: shiftDate(today, i), paid: zero ? 0 : Math.max(15, 53 - Math.floor(i / 3) * 3 + i % 3), free: zero ? 0 : i < 14 ? 8 : 6, maintenance: i < 5 ? 2 : 0, review: scenario === "partial" && i < 3 ? 1 : 0, availableRooms: 4 + Math.floor(i / 3), availableBeds: 8 + Math.floor(i / 2), capacity: 72, quality: scenario === "partial" && i < 3 ? "PARTIAL" : "COMPLETE" })),
     futureReviewCount: scenario === "partial" ? 1 : 0, filters: { buildings: ["A栋", "B栋"], roomTypes: ["shared_bath_double", "ensuite_double"], roomTypeLabels: { shared_bath_double: "公卫双人间", ensuite_double: "独卫双人间" } }, warnings: []
   };
-  if (scenario === "empty") { result.community.trend = []; result.community.duration = []; result.community.records = []; result.community.counts = { NEW: 0, RETURN: 0, RENEWAL: 0, DUE: 0, EARLY: 0 }; result.community.current = { date: today, total: null, paid: 0, volunteer: 0, reception: 0, otherFree: 0, unlinked: 1 }; result.community.dailyAverage = null; result.community.visitors = null; result.community.reasons = ["样本场景：未返回住客名单与逐日资料，不代表实际人数为零。"]; result.future = []; }
+  if (scenario === "empty") { delete result.community.durationCoverage; result.community.trend = []; result.community.duration = []; result.community.records = []; result.community.counts = { NEW: 0, RETURN: 0, RENEWAL: 0, DUE: 0, EARLY: 0 }; result.community.current = { date: today, total: null, paid: 0, volunteer: 0, reception: 0, otherFree: 0, unlinked: 1 }; result.community.dailyAverage = null; result.community.visitors = null; result.community.reasons = ["样本场景：未返回住客名单与逐日资料，不代表实际人数为零。"]; result.future = []; }
   return result;
 }
 function sampleFunds(range: DashboardResponse["range"], zero: boolean) {
@@ -86,4 +93,18 @@ export function sampleDetails(propertyId: string, query: string, scenario: Scena
   const data = sampleDashboard(propertyId, query, scenario);
   const page = Number(params.get("page") ?? 0), total = scenario === "zero" ? 0 : 56;
   return { asOf: data.asOf, definitionVersion: data.definitionVersion, range: data.range, changedSinceSummary: false, page, pageSize: 50, total, items: Array.from({ length: Math.min(50, Math.max(0, total - page * 50)) }, (_, i) => ({ id: `sample-fact-${page * 50 + i}`, date: shiftDate(data.range.from, (page * 50 + i) % 7), metric: "PAID", label: `合成住宿事实 ${page * 50 + i + 1}`, orderId: `sample-order-${page * 50 + i}`, memberId: null, unitId: null, units: 1, amountMinor: null, currency: null, registeredAt: null, businessDate: null, reason: "合成验收样本，仅验证明细分页与返回；不代表真实业务成功。" })) };
+}
+
+
+function nicknameStays(): CommunityStay[] {
+  const rows = [
+    { id: "cathy-first", orderId: "sample-first", nickname: "Cathy", fullName: "陈晓", arrival: "2026-09-01", departure: "2026-09-10", current: false },
+    { id: "cathy-continuation", orderId: "sample-continuation", nickname: "ＣＡＴＨＹ ", fullName: "陈晓", arrival: "2026-09-10", departure: "2026-09-20", current: false },
+    { id: "cathy-return", orderId: "sample-return", nickname: "Caty", fullName: "陈晓", arrival: "2026-10-01", departure: "2026-11-01", current: true },
+    { id: "tomato-first", orderId: "sample-first", nickname: "小番茄", fullName: "李明", arrival: "2026-09-01", departure: "2026-09-10", current: false },
+    { id: "tomato-return", orderId: "sample-return", nickname: "小番茹", fullName: "李明", arrival: "2026-10-01", departure: "2026-11-01", current: true }
+  ].map(row => ({...row,documentNumber:null}));
+  const identities = resolveCommunityIdentities(rows);
+  return rows.map(row => ({orderId:row.orderId,registrationKey:row.id,personKey:identities.get(row.id)!.personKey,
+    identityApproximate:identities.get(row.id)!.approximate,arrival:row.arrival,departure:row.departure,current:row.current,free:false,category:null}));
 }

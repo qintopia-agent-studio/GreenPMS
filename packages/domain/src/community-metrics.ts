@@ -12,6 +12,8 @@ export interface CommunityStay {
   category: string | null;
   registrationKey?: string;
   historical?: boolean;
+  durationReviewReason?: string;
+  identityApproximate?: boolean;
 }
 export interface CommunityEvent { orderId: string; date: string; nights: number; reason: string; kind: "RENEWAL" | "EARLY" }
 const nights = (from: string, until: string) => Math.max(0, Math.round((Date.parse(until) - Date.parse(from)) / 86400000));
@@ -20,11 +22,20 @@ const nights = (from: string, until: string) => Math.max(0, Math.round((Date.par
 export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[], range: DashboardRange, today: string, evidenceIssues: string[] = [], planned: CommunityStay[] = []): DashboardCommunity {
   const byPerson = new Map<string, CommunityStay[]>();
   const plannedByPerson = new Map<string, CommunityStay[]>();
+  // A stable occupant registration already identifies the resident within their stay.
+  // Document identity only adds cross-order linking; it is not a duration prerequisite.
+  const residencePeople = new Map<string, CommunityStay[]>();
   const byOrder = new Map<string, CommunityStay[]>();
   for (const stay of stays) {
     const order = byOrder.get(stay.orderId) ?? [];
     order.push(stay); byOrder.set(stay.orderId, order);
-    if (stay.personKey && stay.historical !== false) {
+    const residenceKey = stay.personKey ? `identity:${stay.personKey}`
+      : stay.registrationKey ? `registration:${stay.orderId}:${stay.registrationKey}` : null;
+    if (residenceKey && stay.historical !== false && !stay.durationReviewReason) {
+      const list = residencePeople.get(residenceKey) ?? [];
+      list.push(stay); residencePeople.set(residenceKey, list);
+    }
+    if (stay.personKey && stay.historical !== false && !stay.durationReviewReason) {
       const list = byPerson.get(stay.personKey) ?? [];
       list.push(stay); byPerson.set(stay.personKey, list);
     }
@@ -83,13 +94,41 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     records.set(key, entry);
   }
   const cutoff = range.to < today ? range.to : today;
+  // Keep evidence gaps alongside the distribution instead of silently dropping registrations.
+  // Pending counts are NOT people/trips: actual dates or rosters may still be unresolved.
+  function durationCoverage(perspective: "current" | "all") {
+    const registrations = new Set<string>();
+    const registrationBased = new Set<string>();
+    const orders = new Set<string>();
+    const issues = new Map<string, Set<string>>();
+    for (const stay of stays) {
+      const occupiedUntil = stay.current ? dashboardDate(today, 1) : stay.departure;
+      const included = perspective === "current" ? relevant(stay, today)
+        : range.from <= cutoff && stay.arrival <= cutoff && occupiedUntil > range.from;
+      if (!included) continue;
+      if ((stay.personKey || stay.registrationKey) && stay.historical !== false && !stay.durationReviewReason) {
+        if (!stay.personKey && stay.registrationKey) registrationBased.add(stay.registrationKey);
+        continue;
+      }
+      if (stay.registrationKey) registrations.add(stay.registrationKey);
+      else orders.add(stay.orderId);
+      const reasons = issues.get(stay.orderId) ?? new Set<string>();
+      reasons.add(stay.durationReviewReason ?? (stay.historical === false
+        ? "实际入住日期待核对，不能以登记日期或订单日期替代。"
+        : "住宿人名单或有效住宿时间线待核对，不能推算人数和时长。"));
+      issues.set(stay.orderId, reasons);
+    }
+    return { registrationBased: registrationBased.size, pendingRegistrations: registrations.size, pendingOrders: orders.size,
+      issues: [...issues].map(([orderId, reasons]) => ({ orderId, reason: [...reasons].join("；") })) };
+  }
   const distribution = new Map<number, { nights: number; current: number; all: number }>();
   function countDuration(duration: number, perspective: "current" | "all") {
     const row = distribution.get(duration) ?? { nights: duration, current: 0, all: 0 };
     row[perspective]++;
     distribution.set(duration, row);
   }
-  for (const [personKey, list] of byPerson) {
+  for (const list of residencePeople.values()) {
+    const personKey = list[0]!.personKey;
     list.sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
     let chain: CommunityStay[] = [], until = "", previous = false;
     function finish() {
@@ -103,6 +142,8 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
       if (range.from <= cutoff && start <= cutoff && occupiedUntil > range.from) {
         countDuration(nights(start, observedEnd < cutoff ? observedEnd : cutoff), "all");
       }
+      // Registration-local durations do not establish NEW/RETURN/RENEWAL identities.
+      if (!personKey) return;
       if (inRange(start)) add({ orderId: chain[0]!.orderId, date: start, nights: duration, reason: previous ? "同一住客间隔后再次入住" : "首次可核实的入住记录", kind: previous ? "RETURN" : "NEW" }, [personKey]);
       let confirmedEnd = until;
       let dueOrder = chain.find(stay => stay.departure === until)!.orderId;
@@ -116,7 +157,7 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     }
     for (const stay of list) {
       if (chain.length && stay.arrival > until) { finish(); chain = []; until = ""; }
-      if (chain.length && chain.at(-1)!.orderId !== stay.orderId && stay.arrival === until && inRange(stay.arrival)) {
+      if (personKey && chain.length && chain.at(-1)!.orderId !== stay.orderId && stay.arrival === until && inRange(stay.arrival)) {
         add({ orderId: stay.orderId, date: stay.arrival, nights: 0, reason: "同一住客无空夜接续订单，换房不打断连续居住", kind: "RENEWAL" }, [personKey]);
       }
       chain.push(stay);
@@ -140,12 +181,14 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   const current = day(today);
   const reasons = [...evidenceIssues];
   if (trend.some(row => row.unclassified) || current.unclassified) reasons.push("同一住客同日存在付费/免费归属冲突：总人数仍按身份去重保留，冲突住客不猜测分类，请核对关联订单归属。");
-  if (unknown || current.unlinked) reasons.push("部分住宿人缺少跨订单身份或实际日期依据；不按同名、共用手机或下单会员猜测。缺项只影响对应日期，已核对分类保留。");
+  if (unknown || current.unlinked) reasons.push("部分住宿人缺少可识别昵称、姓名或实际日期依据；不以共用手机或下单会员代替住客。缺项只影响对应日期，已核对分类保留。");
   return {
     current, trend,
+    identityApproximate: stays.some(stay => stay.identityApproximate) || planned.some(stay => stay.identityApproximate),
     visitors: unknown ? null : [...byPerson.values()].filter(list => list.some(stay => stay.arrival <= range.to && stay.departure > range.from)).length,
     dailyAverage: unknown ? null : trend.reduce((sum, row) => sum + row.total!, 0) / Math.max(trend.length, 1),
-    duration: [...distribution.values()].sort((a, b) => a.nights - b.nights), records: resultRecords,
+    duration: [...distribution.values()].sort((a, b) => a.nights - b.nights),
+    durationCoverage: { current: durationCoverage("current"), all: durationCoverage("all") }, records: resultRecords,
     counts: { NEW: resultRecords.filter(row => row.kind === "NEW").length, RETURN: resultRecords.filter(row => row.kind === "RETURN").length, RENEWAL: resultRecords.filter(row => row.kind === "RENEWAL").length, DUE: resultRecords.filter(row => row.kind === "DUE").length, EARLY: resultRecords.filter(row => row.kind === "EARLY").length },
     reasons
   };

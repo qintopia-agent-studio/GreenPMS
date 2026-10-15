@@ -3,6 +3,7 @@ import type { Transaction, Selectable } from "kysely";
 import type { DashboardRange } from "@qintopia/contracts";
 import type { Database } from "./schema.ts";
 import { communityMetrics, type CommunityStay, type CommunityEvent } from "../../domain/src/community-metrics.ts";
+import { resolveCommunityIdentities } from "../../domain/src/community-identity.ts";
 import { propertyLocalClockAt } from "./members.ts";
 import { projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import { loadDashboardStays } from "./dashboard-stays.ts";
@@ -30,41 +31,53 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
   const oldest=orders.reduce((d,o)=>o.arrival_date<d?o.arrival_date:d,range.from);
   // Load authoritative final arrangements over the complete observed history, not just the chart window.
   const lodging=await loadDashboardStays(trx,propertyId,today,{from:oldest,to:range.to},dashboardDate(today,1),timezone);
+  const orderById = new Map(orders.map(order => [order.id, order]));
+  const identityCandidates = projected.filter(person => !removedByPerson.has(person.id)
+    && (orderById.get(person.orderId)?.status === "RESERVED" || lodging.arrangements.has(person.orderId)));
+  const identities = resolveCommunityIdentities(
+    identityCandidates.filter(person => orderById.get(person.orderId)?.status !== "RESERVED"),
+    identityCandidates.filter(person => orderById.get(person.orderId)?.status === "RESERVED")
+  );
   const stays:CommunityStay[]=[];
   const planned:CommunityStay[]=[];
   for(const order of orders){
     if(order.status==="RESERVED") {
-      for(const person of peopleByOrder.get(order.id) ?? [])if(!removedByPerson.has(person.id) && person.documentNumber?.trim())planned.push({orderId:order.id,personKey:`document:${person.documentNumber.trim().toUpperCase()}`,arrival:order.arrival_date,departure:order.departure_date,current:false,free:order.stay_type==="FREE",category:order.free_stay_category_code??null});
+      for (const person of peopleByOrder.get(order.id) ?? []) {
+        const identity = identities.get(person.id);
+        if (identity?.personKey) planned.push({ orderId: order.id, personKey: identity.personKey,
+          identityApproximate: identity.approximate, arrival: order.arrival_date, departure: order.departure_date,
+          current: false, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null });
+      }
       continue;
     }
     const intervals=lodging.arrangements.get(order.id);
-    const missingPerson = () => stays.push({orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null});
-    if(!intervals?.length){evidenceIssues.push(`订单 ${order.id} 的有效住宿时间线缺失，未推算人数或居住时长`);missingPerson();continue;}
+    const missingPerson = (durationReviewReason: string) => stays.push({durationReviewReason,orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null});
+    if(!intervals?.length){evidenceIssues.push(`订单 ${order.id} 的有效住宿时间线缺失，未推算人数或居住时长`);missingPerson("有效住宿时间线缺失，连续入住起点与人数待核对。");continue;}
     const people = peopleByOrder.get(order.id) ?? [];
-    if (!people.length) { evidenceIssues.push(`订单 ${order.id} 未登记实际住宿人`); missingPerson(); continue; }
+    if (!people.length) { evidenceIssues.push(`订单 ${order.id} 未登记实际住宿人`); missingPerson("实际住宿人名单缺失，人数与连续时长待核对。"); continue; }
     for (const person of people) {
       const raw = rawById.get(person.id)!;
       const removed = removedByPerson.get(person.id);
       const later = person.role !== "PRIMARY" && raw.created_by_command_id && raw.created_by_command_id !== initialCommands.get(order.id) && local(raw.created_at) > order.arrival_date;
-      const common = { orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null };
+      const common = { identityApproximate: identities.get(person.id)?.approximate ?? false, ...(later ? { durationReviewReason: "入住后追加住宿登记，缺少该住客实际入住日期，不能沿用订单起点。" } : {}), orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null };
       // Registration withdrawal is not an actual departure event; it cannot supply a guest checkout date.
       if (removed) {
         if (removed > order.arrival_date) {
           evidenceIssues.push(`订单 ${order.id}：第 ${person.ordinal} 位住宿人于 ${removed} 撤销登记，之前的实际住宿日期待核对；未影响同单其他住客或当前名单`);
-          stays.push({ ...common, personKey: null, arrival: order.arrival_date, departure: removed < order.departure_date ? removed : order.departure_date, current: false });
+          stays.push({ ...common, personKey: null, arrival: order.arrival_date, departure: removed < order.departure_date ? removed : order.departure_date, current: false, durationReviewReason: "住宿登记已撤销，撤销时间不是实际离店日期，历史住宿时长待核对。" });
         }
         continue;
       }
-      // The schema has stable occupant IDs within an order, but no cross-order guest/member relationship.
-      const document = person.documentNumber?.trim().toUpperCase();
-      const personKey = document ? `document:${document}` : null;
+      // User-approved operating estimate: nickname first, name as supporting evidence.
+      // This read-only association is never a member/permission/payment identity.
+      const personKey = identities.get(person.id)?.personKey ?? null;
       if (later) {
         evidenceIssues.push(`订单 ${order.id}：第 ${person.ordinal} 位住宿人于 ${local(raw.created_at)} 追加登记，未记录独立入住日期；历史人数待核对，当前登记仍保留`);
         stays.push({ ...common, personKey: null, arrival: order.arrival_date, departure: order.departure_date < today ? order.departure_date : today, current: false });
         if (order.status === "CHECKED_IN") stays.push({ ...common, personKey, arrival: order.arrival_date, departure: order.departure_date, current: true, historical: false });
         continue;
       }
-      for (const interval of intervals) stays.push({ ...common, personKey, arrival: interval.arrivalDate, departure: interval.departureDate, current: order.status === "CHECKED_IN" && interval === intervals.at(-1) });
+      for (const interval of intervals) stays.push({ ...common, personKey, arrival: interval.arrivalDate, departure: interval.departureDate, current: order.status === "CHECKED_IN" && interval.arrivalDate <= today && (today < interval.departureDate || interval === intervals.at(-1)) });
     }
   }
   const events=communityEvents(orders,amendments,local);
