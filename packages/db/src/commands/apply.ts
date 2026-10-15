@@ -343,7 +343,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     return;
   }
 
-  if (commandType === "ACTIVATE_MEMBERSHIP_ORDER") {
+  if (commandType === "ACTIVATE_MEMBERSHIP_ORDER" || commandType === "CANCEL_MEMBERSHIP_ORDER") {
     const membershipOrderId = requireString(input, "membershipOrderId");
     const identity = await trx.selectFrom("membership_orders").select(["id", "member_id"])
       .where("id", "=", membershipOrderId).where("property_id", "=", propertyId).executeTakeFirst();
@@ -804,6 +804,22 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       resourceRefs: [membershipOrderId],
       factRefs: [reversalFactId, replacementFactId]
     };
+  }
+
+  if (options.commandType === "CANCEL_MEMBERSHIP_ORDER") {
+    const membershipOrderId = requireString(effect, "membershipOrderId");
+    const order = await trx.selectFrom("membership_orders").selectAll()
+      .where("id", "=", membershipOrderId).where("property_id", "=", propertyId)
+      .where("status", "=", "DRAFT").executeTakeFirst();
+    if (!order) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "会员订单已变化，请重新核对", 409);
+    await trx.insertInto("membership_order_cancellations").values({
+      membership_order_id: order.id, command_id: options.commandId,
+      reason: requireString(effect, "reason"), prior_version: order.version
+    }).execute();
+    await trx.updateTable("membership_orders").set({ status: "VOIDED", version: order.version + 1, updated_at: new Date() })
+      .where("id", "=", order.id).where("status", "=", "DRAFT").where("version", "=", order.version)
+      .returning("id").executeTakeFirstOrThrow();
+    return { persistedResult: { membershipOrderId, status: "VOIDED" }, resourceRefs: [membershipOrderId], factRefs: [] };
   }
 
   if (options.commandType === "ACTIVATE_MEMBERSHIP_ORDER") {

@@ -444,6 +444,11 @@ export const CommandEnvelopeSchema = Type.Union([
     correctedTransactionReference: ShortText,
     note: Type.Optional(OptionalNote)
   })),
+  commandEnvelope("CANCEL_MEMBERSHIP_ORDER", strictObject({
+    ...PropertyInput,
+    membershipOrderId: Id,
+    reason: Type.String({ minLength: 1, maxLength: 1000, pattern: "\\S" })
+  })),
   commandEnvelope("ACTIVATE_MEMBERSHIP_ORDER", strictObject({
     ...PropertyInput,
     membershipOrderId: Id
@@ -1051,6 +1056,11 @@ export const CommandEffectSchema = Type.Union([
     replacement: strictObject({ amount: Money, businessDate: LocalDate, transactionReference: ShortText, note: OptionalNote }),
     totals: strictObject({ before: Money, after: Money, agreedPrice: Money, differenceAfter: Money }),
     status: Type.Literal("DRAFT")
+  }),
+  strictObject({
+    operation: Type.Literal("CANCEL_MEMBERSHIP_ORDER"),
+    membershipOrderId: Id, memberName: ShortText, productName: ShortText,
+    reason: Note, fromStatus: Type.Literal("DRAFT"), toStatus: Type.Literal("VOIDED")
   }),
   strictObject({
     operation: Type.Literal("ACTIVATE_MEMBERSHIP_ORDER"),
@@ -2211,6 +2221,7 @@ export const ExecutedCommandResultSchema = Type.Union([
     effectHash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
   QuoteReceiptResultSchema,
   CreateMemberResultSchema,
+  strictObject({ membershipOrderId: Id, status: Type.Literal("VOIDED") }),
   MembershipOrderCreatedResultSchema,
   MembershipPaymentRecordedResultSchema,
   MembershipPaymentCorrectedResultSchema,
@@ -3346,6 +3357,10 @@ const MembershipPaymentFactRowSchema = strictObject({
   created_at: DateTime
 });
 const MembershipOrderSummarySchema = strictObject({
+  cancellation: nullable(strictObject({
+    reason: Note, created_at: DateTime, command_id: Id,
+    actor_display_name: ShortText
+  })),
   order: MembershipOrderRowSchema,
   paymentFacts: Type.Array(MembershipPaymentFactRowSchema),
   paymentTotalMinor: SafeInteger,

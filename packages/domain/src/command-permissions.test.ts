@@ -20,6 +20,7 @@ const expectedMatrix: Record<CommandType, ExpectedAuthority> = {
   CREATE_MEMBERSHIP_ORDER: { ordinaryStaff: true, administrator: true, systemDerived: false },
   RECORD_MEMBERSHIP_PAYMENT: { ordinaryStaff: true, administrator: true, systemDerived: false },
   CORRECT_MEMBERSHIP_PAYMENT: { ordinaryStaff: true, administrator: true, systemDerived: false },
+  CANCEL_MEMBERSHIP_ORDER: { ordinaryStaff: true, administrator: true, systemDerived: false },
   ACTIVATE_MEMBERSHIP_ORDER: { ordinaryStaff: true, administrator: true, systemDerived: false },
   CREATE_ORDER: { ordinaryStaff: true, administrator: true, systemDerived: false },
   CORRECT_ORDER_OCCUPANT: { ordinaryStaff: false, administrator: true, systemDerived: false },
@@ -75,8 +76,8 @@ function authorized(overrides: Partial<Parameters<typeof evaluateCommandAuthoriz
 }
 
 describe("exact command permission profiles", () => {
-  it("freezes the complete 45-command ordinary staff, administrator, and system-derived matrix", () => {
-    expect(commandTypes).toHaveLength(45);
+  it("freezes the complete 46-command ordinary staff, administrator, and system-derived matrix", () => {
+    expect(commandTypes).toHaveLength(46);
     expect(Object.keys(expectedMatrix).sort()).toEqual([...commandTypes].sort());
 
     const ordinary = new Set<string>(ordinaryStaffCommandGrants);

@@ -10,7 +10,7 @@ export async function accountManagementReady(db: Kysely<Database>): Promise<bool
       ('qintopia_delete_member_business(text,text,text,text,text,text,jsonb)', 'd618293280752435bb74ee002bf621b67d8f0aacc918af4d984709714e095d80', false, 'v'),
       ('qintopia_require_live_membership_reference()', '82de0b2e6c1170d92edb07d41276fe7ac012291f7342b54f05beb83e1043c83c', false, 'v'),
       ('qintopia_validate_member_deletion()', 'cafebb7d5e21abbf245a945dbe471eca590b159b24ec49b03e9bcd6bffe0f367', false, 'v'),
-      ('qintopia_protect_membership_order_identity()', '56ce58874289275ab7c1a3ae05b58109e9e9903caf480520db67e831392e49d5', false, 'v'),
+      ('qintopia_protect_membership_order_identity()', '3bb869dbdb04acce2e7e29594a965b6ed1cc00484e4d5cc7373eb5065d1a1d12', false, 'v'),
       ('qintopia_require_active_member()', 'c0ee2080752c4defbb0e3bae97601cca5c5e2d50dfd7f96f97d357c3654473d1', false, 'v'),
       ('qintopia_require_new_active_member()', '35adc08b422a6db2fe3a1cec30f16ae344a257614395e0e4b84ee83903574c7d', false, 'v')
     )

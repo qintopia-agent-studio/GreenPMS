@@ -329,6 +329,28 @@ function CreateMemberDialog({ propertyId, draft, prefill, onCorrectSource, onClo
   </Modal>;
 }
 
+export function CancelMembershipOrderDialog({ propertyId, summary, draft, onClose, onSubmit }: {
+  propertyId: string; summary: MembershipOrderSummaryDto; draft?: CommandRequest;
+  onClose: () => void; onSubmit: (request: CommandRequest) => void;
+}) {
+  const [reason, setReason] = useState(typeof draft?.input.reason === "string" ? draft.input.reason : "");
+  return <Modal title="取消会员订单" onClose={onClose}>
+    <form onSubmit={(event) => {
+      event.preventDefault();
+      if (!reason.trim()) return;
+      onSubmit({ commandType: "CANCEL_MEMBERSHIP_ORDER", title: "取消会员订单",
+        description: "取消这笔未收款、未生效的订单，保留订单和操作记录。",
+        input: { propertyId, membershipOrderId: summary.order.id, reason: reason.trim() },
+        initialReason: { code: "CANCEL_MEMBERSHIP_ORDER", note: reason.trim() } });
+    }}>
+      <p>{summary.order.product_name} · {formatMinor(summary.order.agreed_price_minor, summary.order.currency)}</p>
+      <p className="muted">订单 {summary.order.id}。取消此单不会改变其他会员订单、收款和已使用权益。</p>
+      <label>取消原因<textarea value={reason} onChange={(event) => setReason(event.target.value)} required maxLength={1000} rows={3} placeholder="例如：重复办理" data-testid="membership-cancel-reason" /></label>
+      <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>返回</button><button type="submit" className="button button-primary" disabled={!reason.trim()}>核对取消订单</button></div>
+    </form>
+  </Modal>;
+}
+
 function CreateMembershipOrderDialog({ propertyId, member, products, draft, onClose, onSubmit }: {
   propertyId: string;
   member: MemberViewDto["member"];
@@ -1048,7 +1070,7 @@ function MemberEntitlementsPanel({ view, disabled, targetContractId, canCorrect,
   </section>;
 }
 
-export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId, canCreate, canRecordPayment, canCorrectPayment, canActivate, onCreate, onPayment, onCorrect, onActivate }: {
+export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId, canCreate, canRecordPayment, canCorrectPayment, canActivate, canCancel = false, onCreate, onPayment, onCorrect, onActivate, onCancel }: {
   view: MemberViewDto;
   disabled: boolean;
   targetMembershipOrderId?: string;
@@ -1056,6 +1078,8 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
   canRecordPayment: boolean;
   canCorrectPayment: boolean;
   canActivate: boolean;
+  canCancel?: boolean;
+  onCancel?: (summary: MembershipOrderSummaryDto) => void;
   onCreate: () => void;
   onPayment: (summary: MembershipOrderSummaryDto) => void;
   onCorrect: (summary: MembershipOrderSummaryDto, fact: MembershipPaymentFactDto) => void;
@@ -1075,6 +1099,9 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
     {!view.membershipOrders.length ? <EmptyState title="尚无会员订单" detail="办理会员后，可登记多笔企微收款并由工作人员明确生效。" /> : <div className="membership-order-list">
       {view.membershipOrders.map((summary) => {
         const { order, paymentFacts } = summary;
+        const cancelled = order.status === "VOIDED" && Boolean(summary.cancellation);
+        const cancellable = canCancel && Boolean(onCancel) && order.status === "DRAFT" && paymentFacts.length === 0
+          && !order.contract_id && !order.entitlement_lot_id && !order.activated_at && !order.activated_by_command_id && !order.valid_from && !order.valid_until;
         const canCollect = canRecordPayment && order.status !== "VOIDED" && summary.paymentDifferenceMinor < 0;
         const targeted = order.id === targetMembershipOrderId;
         const reversedIds = new Set(paymentFacts.filter((fact) => fact.reverses_fact_id).map((fact) => fact.reverses_fact_id));
@@ -1082,7 +1109,7 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
         return <article className="membership-order-item" key={order.id} data-testid={targeted ? "membership-order-target" : "membership-order-item"} data-membership-order-id={order.id} {...(targeted ? { ref: targetOrderRef, tabIndex: -1, "aria-current": "true" as const } : {})}>
           <div className="membership-order-heading">
             <div>{targeted ? <span className="section-kicker">当前住宿升级</span> : null}<h3>{order.product_name}</h3><p>{entitlementLabel(order.entitlement_unit_kind, order.entitlement_units)} · {order.allowed_inventory_kind === "ROOM" ? "按房使用" : "按床使用"}</p></div>
-            <span className={`membership-status membership-status-${order.status.toLowerCase()}`}>{order.status === "ACTIVE" ? "已生效" : order.status === "VOIDED" ? "已作废" : "待生效"}</span>
+            <span className={`membership-status membership-status-${order.status.toLowerCase()}`}>{order.status === "ACTIVE" ? "已生效" : order.status === "VOIDED" ? cancelled ? "已取消" : "已作废" : "待生效"}</span>
           </div>
           <dl className="membership-order-pricing">
             <div><dt>标价</dt><dd>{formatMinor(order.listed_price_minor, order.currency)}</dd></div>
@@ -1091,14 +1118,15 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
             <div><dt>有效收款</dt><dd><strong>{formatMinor(summary.paymentTotalMinor, order.currency)}</strong></dd></div>
           </dl>
           {order.price_adjustment_reason ? <p className="membership-adjustment-reason"><span>调价原因</span>{order.price_adjustment_reason}</p> : null}
-          <div className={`membership-payment-difference ${summary.paymentDifferenceMinor === 0 ? "is-balanced" : ""}`} data-testid="membership-payment-difference">
+          {!cancelled ? <div className={`membership-payment-difference ${summary.paymentDifferenceMinor === 0 ? "is-balanced" : ""}`} data-testid="membership-payment-difference">
             {summary.paymentDifferenceMinor === 0
               ? "收款合计与成交价一致"
               : summary.paymentDifferenceMinor < 0
                 ? `收款比成交价少 ${formatMinor(Math.abs(summary.paymentDifferenceMinor), order.currency)}`
                 : `收款比成交价多 ${formatMinor(summary.paymentDifferenceMinor, order.currency)}`}
             <small>仅提示差额，不代表自动到账、结清或改价。</small>
-          </div>
+          </div> : null}
+          {cancelled && summary.cancellation ? <div className="membership-cancellation-summary" data-testid="membership-cancellation-summary"><p><strong>取消原因：</strong>{summary.cancellation.reason}</p><p className="muted">{summary.cancellation.actor_display_name} · {formatDateTime(summary.cancellation.created_at)}</p></div> : null}
           {order.status === "ACTIVE" ? <div className="membership-activation-summary" data-testid="membership-activation-summary"><BadgeCheck aria-hidden="true" size={18} /><div><strong>{formatDate(order.valid_from ?? undefined)} 至 {formatDate(order.valid_until ?? undefined)}</strong><span>已发放 {entitlementLabel(order.entitlement_unit_kind, order.entitlement_units)}</span></div></div> : null}
           <section className="membership-payments" aria-label={`${order.product_name}收款记录`}>
             <div className="membership-subheading"><h4>收款记录</h4><span>{activeCollections.length} 笔有效收款</span></div>
@@ -1119,9 +1147,10 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
               })}
             </ol>}
           </section>
-          {canCollect || (order.status === "DRAFT" && canActivate) ? <div className="membership-order-actions">
+          {canCollect || cancellable || (order.status === "DRAFT" && canActivate) ? <div className="membership-order-actions">
             {canCollect ? <button type="button" className="button button-secondary" onClick={() => onPayment(summary)} disabled={disabled} data-testid="record-membership-payment"><CircleDollarSign aria-hidden="true" size={17} />收款</button> : null}
             {order.status === "DRAFT" && canActivate ? <button type="button" className="button button-primary" onClick={() => onActivate(summary)} disabled={disabled} data-testid="activate-membership-order"><BadgeCheck aria-hidden="true" size={17} />生效会员订单</button> : null}
+            {cancellable ? <button type="button" className="button button-secondary" onClick={() => onCancel?.(summary)} disabled={disabled} data-testid="cancel-membership-order">取消订单</button> : null}
           </div> : null}
         </article>;
       })}
@@ -1152,6 +1181,7 @@ export function MembersPage() {
   const canCreateMembershipOrder = principalCan(principal, propertyId, "CREATE_MEMBERSHIP_ORDER");
   const canRecordMembershipPayment = principalCan(principal, propertyId, "RECORD_MEMBERSHIP_PAYMENT");
   const canCorrectMembershipPayment = principalCan(principal, propertyId, "CORRECT_MEMBERSHIP_PAYMENT");
+  const canCancelMembershipOrder = principalCan(principal, propertyId, "CANCEL_MEMBERSHIP_ORDER");
   const canActivateMembershipOrder = principalCan(principal, propertyId, "ACTIVATE_MEMBERSHIP_ORDER");
   const canCorrectEntitlementBalance = principalCan(principal, propertyId, "CORRECT_MEMBER_ENTITLEMENT_BALANCE");
   const availableMemberCorrections = availableMemberCorrectionCommandTypes((commandType) => principalCan(principal, propertyId, commandType));
@@ -1185,6 +1215,7 @@ export function MembersPage() {
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [refreshToken, setRefreshToken] = useState(0);
   const [creatingMember, setCreatingMember] = useState(stayUpgradeMemberCreationShouldOpen(initialStayUpgradeCreation.current, commandsBlocked));
+  const [cancellingMembershipOrder, setCancellingMembershipOrder] = useState<MembershipOrderSummaryDto>();
   const [creatingMembershipOrder, setCreatingMembershipOrder] = useState(false);
   const [paymentOrder, setPaymentOrder] = useState<MembershipOrderSummaryDto>();
   const [correctingPayment, setCorrectingPayment] = useState<{ summary: MembershipOrderSummaryDto; fact: MembershipPaymentFactDto }>();
@@ -1205,6 +1236,7 @@ export function MembersPage() {
   useEffect(() => {
     setCreatingMember(stayUpgradeMemberCreationShouldOpen(initialStayUpgradeCreation.current, commandsBlocked));
     setCreatingMembershipOrder(false);
+    setCancellingMembershipOrder(undefined);
     setPaymentOrder(undefined);
     setCorrectingPayment(undefined);
     setCorrectingEntitlement(undefined);
@@ -1383,6 +1415,7 @@ export function MembersPage() {
 
   function submitBusinessCommand(request: CommandRequest) {
     setCreatingMembershipOrder(false);
+    setCancellingMembershipOrder(undefined);
     setPaymentOrder(undefined);
     setCorrectingPayment(undefined);
     setCorrectingEntitlement(undefined);
@@ -1434,7 +1467,9 @@ export function MembersPage() {
       ? member.membershipOrders.find((candidate) => candidate.order.id === membershipOrderId)
       : undefined;
     if (!summary) return;
-    if (request.commandType === "RECORD_MEMBERSHIP_PAYMENT") {
+    if (request.commandType === "CANCEL_MEMBERSHIP_ORDER") {
+      setCancellingMembershipOrder(summary);
+    } else if (request.commandType === "RECORD_MEMBERSHIP_PAYMENT") {
       setPaymentOrder(summary);
     } else if (request.commandType === "CORRECT_MEMBERSHIP_PAYMENT") {
       const originalFactId = request.input.originalPaymentFactId;
@@ -1499,6 +1534,8 @@ export function MembersPage() {
           canRecordPayment={canRecordMembershipPayment}
           canCorrectPayment={canCorrectMembershipPayment}
           canActivate={canActivateMembershipOrder}
+          canCancel={canCancelMembershipOrder}
+          onCancel={setCancellingMembershipOrder}
           {...(activeTargetMembershipOrderId ? { targetMembershipOrderId: activeTargetMembershipOrderId } : {})}
           onCreate={() => setCreatingMembershipOrder(true)}
           onPayment={setPaymentOrder}
@@ -1518,6 +1555,7 @@ export function MembersPage() {
       prefill: initialStayUpgradeCreation.current,
       onCorrectSource: () => navigate(stayUpgradeOccupantCorrectionHref(initialStayUpgradeCreation.current!), { replace: true })
     } : {})} onClose={() => { setCreatingMember(false); setCommandDraft(undefined); }} onSubmit={(request) => { if (commandsBlocked) return; setCreatingMember(false); startCommand(request); }} /> : null}
+    {cancellingMembershipOrder && canCancelMembershipOrder ? <CancelMembershipOrderDialog propertyId={propertyId} summary={cancellingMembershipOrder} {...(commandDraft?.commandType === "CANCEL_MEMBERSHIP_ORDER" ? { draft: commandDraft } : {})} onClose={() => { setCancellingMembershipOrder(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
     {creatingMembershipOrder && member && canCreateMembershipOrder ? <CreateMembershipOrderDialog propertyId={propertyId} member={member.member} products={member.membershipProducts} {...(commandDraft?.commandType === "CREATE_MEMBERSHIP_ORDER" ? { draft: commandDraft } : {})} onClose={() => { setCreatingMembershipOrder(false); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
     {paymentOrder && canRecordMembershipPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={paymentOrder} {...(commandDraft?.commandType === "RECORD_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setPaymentOrder(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}
     {correctingPayment && canCorrectMembershipPayment ? <MembershipPaymentDialog propertyId={propertyId} summary={correctingPayment.summary} correction={correctingPayment.fact} {...(commandDraft?.commandType === "CORRECT_MEMBERSHIP_PAYMENT" ? { draft: commandDraft } : {})} onClose={() => { setCorrectingPayment(undefined); setCommandDraft(undefined); }} onSubmit={submitBusinessCommand} /> : null}

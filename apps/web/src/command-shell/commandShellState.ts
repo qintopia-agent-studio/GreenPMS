@@ -8,6 +8,7 @@ export const u1CommandTypes = [
   "RECORD_MEMBERSHIP_PAYMENT",
   "CORRECT_MEMBERSHIP_PAYMENT",
   "ACTIVATE_MEMBERSHIP_ORDER",
+  "CANCEL_MEMBERSHIP_ORDER",
   "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
   "LOCK_MAINTENANCE",
   "RELEASE_MAINTENANCE",
@@ -140,6 +141,7 @@ export function commandShellSuccessMessage(commandType: U1CommandType): string {
     case "CREATE_MEMBERSHIP_ORDER": return "会员订单已创建，会员资料已刷新。";
     case "RECORD_MEMBERSHIP_PAYMENT": return "企微收款已登记，会员订单已刷新。";
     case "CORRECT_MEMBERSHIP_PAYMENT": return "企微收款已更正，会员订单已刷新。";
+    case "CANCEL_MEMBERSHIP_ORDER": return "会员订单已取消，原订单与取消记录已保留。";
     case "ACTIVATE_MEMBERSHIP_ORDER": return "会员订单已生效，权益余额已刷新。";
     case "CORRECT_MEMBER_ENTITLEMENT_BALANCE": return "会员余额已更正，权益记录已刷新。";
     case "LOCK_MAINTENANCE": return "维修锁房已设置，房态已刷新。";
@@ -170,6 +172,7 @@ export function commandShellLabel(commandType: U1CommandType): string {
     case "RECORD_MEMBERSHIP_PAYMENT": return "收款";
     case "CORRECT_MEMBERSHIP_PAYMENT": return "更正企微收款";
     case "ACTIVATE_MEMBERSHIP_ORDER": return "生效会员订单";
+    case "CANCEL_MEMBERSHIP_ORDER": return "取消会员订单";
     case "CORRECT_MEMBER_ENTITLEMENT_BALANCE": return "更正会员余额";
     case "LOCK_MAINTENANCE": return "设置维修锁房";
     case "RELEASE_MAINTENANCE": return "释放维修锁房";
