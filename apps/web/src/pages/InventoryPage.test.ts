@@ -510,11 +510,11 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(bookingChannelRequiredForStay(true, "TRANSIENT")).toBe(false);
   });
 
-  it("parses whole-yuan CNY input exactly without accepting jiao, fen, or oversized values", () => {
+  it("parses ordinary stay final amounts exactly to fen without rounding or exceeding the range", () => {
     expect(parseYuanAmountToMinor("850")).toBe(85_000);
     expect(parseYuanAmountToMinor("850.00")).toBe(85_000);
-    expect(parseYuanAmountToMinor("850.5")).toBeUndefined();
-    expect(parseYuanAmountToMinor("850.05")).toBeUndefined();
+    expect(parseYuanAmountToMinor("850.5")).toBe(85_050);
+    expect(parseYuanAmountToMinor("850.05")).toBe(85_005);
     expect(parseYuanAmountToMinor("850.005")).toBeUndefined();
     expect(parseYuanAmountToMinor("-1")).toBeUndefined();
     expect(parseYuanAmountToMinor("21474836")).toBe(2_147_483_600);
@@ -612,7 +612,7 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(backfillReviewValidationError({ ...paid, bookingChannelCode: "", collectionAmountYuan: "", collectionAmountMinor: undefined }))
       .toBe("请选择订单来源渠道");
     expect(backfillReviewValidationError({ ...paid, targetAmountYuan: "100.5", contractAmountMinor: undefined }))
-      .toBe("本单金额格式不正确，请填写非负整数金额");
+      .toBe("本单金额格式不正确，请填写不超过两位小数的非负金额");
     expect(backfillReviewValidationError({ ...paid, bookingChannelCode: "CTRIP", channelOrderReference: "" }))
       .toBe("请填写渠道订单号");
     expect(backfillReviewValidationError({ ...paid, manualReasonRequired: true, manualPriceAdjustmentReason: "" }))
@@ -2306,5 +2306,28 @@ describe("Room-status backfill entry routing", () => {
       description: "普通创建",
       input: {}
     }, target)).toBe(false);
+  });
+});
+
+
+it("渠道及普通WECOM新建均接受角分", () => {
+  const input = { bookingChannelCode: "YOUMUDAO" as const, channelOrderReference: "channel-27720", targetAmountYuan: "277.20", policyBaseAmountMinor: 30000, channelPriceDifferenceReason: "", manualPriceAdjustmentReason: "" };
+  expect(createOrderPricingDraft(input)).toMatchObject({ complete: true, targetCurrentContractAmountMinor: 27720 });
+  expect(createOrderPricingDraft({ ...input, targetAmountYuan: "277.201" }).complete).toBe(false);
+  expect(createOrderPricingDraft({ ...input, bookingChannelCode: "WECOM", channelOrderReference: "", manualPriceAdjustmentReason: "更正" }).complete).toBe(true);
+});
+
+
+describe("生产补录387.5元普通WECOM本单金额", () => {
+  const pricing = { bookingChannelCode: "WECOM" as const, channelOrderReference: "", targetAmountYuan: "387.5", policyBaseAmountMinor: 40000, channelPriceDifferenceReason: "", manualPriceAdjustmentReason: "历史成交金额核对" };
+  it("与已选实收387.5精确对应并保留人工调价原因", () => {
+    const draft = createOrderPricingDraft(pricing);
+    expect(draft).toMatchObject({complete: true, targetCurrentContractAmountMinor: 38750, differenceFromPolicyMinor: -1250, manualReasonRequired: true});
+    expect(backfillReviewDetailsComplete({stayType:"TRANSIENT",backfillReason:"历史补录",freeStayCategoryCode:"",freeStayReason:"",bookingChannelCode:"WECOM",targetAmountYuan:"387.5",contractAmountMinor:draft.targetCurrentContractAmountMinor,channelOrderReference:"",channelReasonRequired:false,channelPriceDifferenceReason:"",manualReasonRequired:true,manualPriceAdjustmentReason:pricing.manualPriceAdjustmentReason,collectionAmountYuan:"387.5",collectionAmountMinor:parseBackfillCollectionYuanToMinor("387.5"),collectionMethod:"WECOM",transactionReference:"SYNTHETIC-38750",cashCollector:"",cashNote:""})).toBe(true);
+    expect(createOrderPricingDraft({...pricing,manualPriceAdjustmentReason:" "}).complete).toBe(false);
+    expect(createOrderPricingDraft({...pricing,targetAmountYuan:"400.00",manualPriceAdjustmentReason:""})).toMatchObject({complete:true,manualReasonRequired:false,targetCurrentContractAmountMinor:40000});
+  });
+  it.each(["387.501","-0.01","1e2","NaN","Infinity","21474836.01",""])("拒绝非法最终金额 %s", targetAmountYuan => {
+    expect(createOrderPricingDraft({...pricing,targetAmountYuan}).complete).toBe(false);
   });
 });

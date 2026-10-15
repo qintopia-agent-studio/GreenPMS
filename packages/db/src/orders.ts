@@ -1,3 +1,4 @@
+import { channelOperatingSummary } from "./channel-operating.ts";
 import { projectCatalogUnitNames } from "./room-catalog-labels.ts";
 import { currentPrimaryGuest, projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
@@ -21,7 +22,7 @@ import {
   type CommandCapability,
   type TemporaryOtherRoomArrangementDto
 } from "@qintopia/contracts";
-import { amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
+import { canRepriceOrder, amountSummary, enumerateServiceDates, newId, parseLocalDate, type CoverageCandidate } from "@qintopia/domain";
 import {
   historicalProtocolEpochMigration,
   legacyEffectProtocol,
@@ -525,7 +526,8 @@ export function orderAllowedActions(
   return orderActionCodes
     .filter((code) => commandGrants.has(code))
     .map((code) => {
-    const statusAllows = enabledByStatus[code]?.includes(status) ?? false;
+    const statusAllows = code === "REPRICE_ORDER" ? canRepriceOrder(status, bookingChannelCode ?? null)
+      : enabledByStatus[code]?.includes(status) ?? false;
     let fulfillmentDisabledReason: string | null = null;
     const externalFundsDisabledReason = code === "RECORD_COLLECTION" || code === "RECORD_REFUND"
       ? externalChannelFundsDisabledReason(bookingChannelCode)
@@ -761,6 +763,7 @@ export function projectOrderFulfillment(
 }
 
 interface LifecycleOrderRow {
+  booking_channel_code?: string | null;
   id: string;
   status: string;
   stay_type: string;
@@ -816,6 +819,7 @@ interface LifecycleCollectionFactRow {
 }
 
 const orderLifecycleAmendmentTypes = new Set<string>([
+  "RECORD_REFUND", "REVERSE_FACT",
   "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "CORRECT_ORDER_OCCUPANT",
@@ -837,6 +841,7 @@ const orderLifecycleAmendmentTypes = new Set<string>([
 ] as const);
 
 const pricingRevisionAmendmentTypes = new Set<string>([
+  "RECORD_REFUND", "REVERSE_FACT",
   "REVOKE_CHECK_OUT",
   "CREATE_ORDER",
   "RESCHEDULE_STAY",
@@ -852,6 +857,17 @@ const pricingRevisionAmendmentTypes = new Set<string>([
   "MARK_NO_SHOW",
   "REVOKE_CHECK_IN"
 ] as const);
+
+function channelFundsAmendment(amendment: LifecycleAmendmentRow): boolean {
+  if (!["RECORD_REFUND","REVERSE_FACT"].includes(amendment.amendment_type)) return false;
+  const p=recordValue(amendment.payload);
+  if (!p || p.channelOperating!==true || p.orderId!==amendment.order_id || !Number.isSafeInteger(p.contractBeforeMinor) || !Number.isSafeInteger(p.contractTargetMinor)
+    || !Number.isSafeInteger(p.amountMinor) || Number(p.amountMinor)<=0 || Number(p.contractBeforeMinor)<0 || Number(p.contractTargetMinor)<0
+    || Number(p.contractBeforeMinor)>2147483600 || Number(p.contractTargetMinor)>2147483600 || typeof p.businessDate!=="string" || typeof p.currency!=="string") return false;
+  return amendment.amendment_type==="RECORD_REFUND"
+    ? p.method==="CHANNEL" && Number(p.contractTargetMinor)<=Number(p.contractBeforeMinor) && Number(p.contractBeforeMinor)-Number(p.contractTargetMinor)<=Number(p.amountMinor)
+    : Number(p.contractTargetMinor)>=Number(p.contractBeforeMinor) && Number(p.contractTargetMinor)-Number(p.contractBeforeMinor)<=Number(p.amountMinor);
+}
 
 const requiredPricingRevisionAmendmentTypes = new Set<string>([
   "REVOKE_CHECK_OUT",
@@ -1260,7 +1276,8 @@ function validateLifecycleStatus(
   orderStatus: string,
   stayStatus: string,
   amendments: readonly LifecycleAmendmentRow[],
-  fulfillment: Omit<OrderFulfillmentProjectionDto, "state">
+  fulfillment: Omit<OrderFulfillmentProjectionDto, "state">,
+  bookingChannelCode?: string | null
 ): OrderFulfillmentProjectionDto["state"] {
   const expectedStayStatus: Record<LifecycleOrderStatus, string> = {
     RESERVED: "PLANNED",
@@ -1326,9 +1343,12 @@ function validateLifecycleStatus(
     const terminalPricingOnlyAllowed = projectedStatus === "CHECKED_OUT"
       && (amendmentType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
         || amendmentType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
-        || amendmentType === "CORRECT_HISTORICAL_STAY_ARRANGEMENT");
+        || amendmentType === "CORRECT_HISTORICAL_STAY_ARRANGEMENT"
+        || (amendmentType === "REPRICE_ORDER" && externalChannelCodes.has(bookingChannelCode??"")));
+    const terminalChannelFundsAllowed = externalChannelCodes.has(bookingChannelCode??"") && channelFundsAmendment(amendment);
     if (amendmentType !== "CORRECT_ORDER_OCCUPANT"
       && !terminalPricingOnlyAllowed
+      && !terminalChannelFundsAllowed
       && projectedStatus !== "RESERVED"
       && projectedStatus !== "CHECKED_IN") {
       lifecycleFailure("终态订单包含不允许的住宿或计价变更", {
@@ -1382,6 +1402,10 @@ export function projectOrderLifecycle(input: {
       || !orderLifecycleAmendmentTypes.has(amendment.amendment_type)) {
       lifecycleFailure("订单不可变变更记录链损坏", { amendmentId: amendment.id, expectedSequence });
     }
+    if (["RECORD_REFUND","REVERSE_FACT"].includes(amendment.amendment_type)
+      && (!externalChannelCodes.has(input.order.booking_channel_code??"") || !channelFundsAmendment(amendment))) {
+      lifecycleFailure("渠道资金变更缺少有效应结金额证据", {amendmentId:amendment.id});
+    }
     lifecycleActor(amendment);
     const createdAt = lifecycleDateTime(amendment.created_at, "变更记录时间");
     if (priorAmendmentCreatedAt && createdAt < priorAmendmentCreatedAt) {
@@ -1414,6 +1438,13 @@ export function projectOrderLifecycle(input: {
         amendmentId: revision.amendment_id
       });
     }
+    if (channelFundsAmendment(amendment)) {
+      const payload=recordValue(amendment.payload)!;const prior=input.revisions[index-1];
+      if(!prior || prior.current_contract_amount_minor!==payload.contractBeforeMinor || revision.current_contract_amount_minor!==payload.contractTargetMinor
+        || revision.policy_base_amount_minor!==prior.policy_base_amount_minor || revision.arrival_date!==prior.arrival_date || revision.departure_date!==prior.departure_date || revision.currency!==payload.currency) {
+        lifecycleFailure("渠道退款计价修订与原金额或住宿范围不一致",{revisionId:revision.id});
+      }
+    }
     if (!Number.isSafeInteger(revision.policy_base_amount_minor)
       || !Number.isSafeInteger(revision.current_contract_amount_minor)
       || ((amendment.amendment_type === "CANCEL_ORDER"
@@ -1437,7 +1468,9 @@ export function projectOrderLifecycle(input: {
   }
   for (const amendment of input.amendments) {
     const matches = input.revisions.filter((revision) => revision.amendment_id === amendment.id);
-    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type);
+    const channelPayload=channelFundsAmendment(amendment)?recordValue(amendment.payload):null;
+    const requiresRevision = requiredPricingRevisionAmendmentTypes.has(amendment.amendment_type)
+      || Boolean(channelPayload && channelPayload.contractBeforeMinor!==channelPayload.contractTargetMinor);
     if (requiresRevision && matches.length !== 1) {
       lifecycleFailure("订单计价变更没有唯一计价版本", {
         amendmentId: amendment.id,
@@ -1640,7 +1673,7 @@ export function projectOrderLifecycle(input: {
     arrivalDate: current.arrivalDate,
     departureDate: current.departureDate
   });
-  const state = validateLifecycleStatus(input.order.status, input.stay.status, input.amendments, fulfillmentEvents);
+  const state = validateLifecycleStatus(input.order.status, input.stay.status, input.amendments, fulfillmentEvents, input.order.booking_channel_code);
   return {
     originalArrangement: original,
     effectiveArrangement: {
@@ -1885,9 +1918,11 @@ export async function getOrderViewSnapshot(
     activeTimeline,
     historicalCorrectionGroupsByCommandId
   });
+ const channelOperating = await channelOperatingSummary(db, context.order.property_id, orderId);
  const awaitingPreviousCheckout = context.order.status === "RESERVED" && await previousStayAwaitingCheckout(db, context.order.property_id, activeTimeline.find((day) => day.serviceDate === businessDate)?.inventoryUnitId ?? context.currentSegment.inventoryUnitId, businessDate, context.order.id);
  return {
    accessLevel,
+   channelOperating,
    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
      businessDate,
      arrivalDate: context.order.arrival_date,
@@ -1898,7 +1933,8 @@ export async function getOrderViewSnapshot(
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
-   }, commandGrants).map((action) => action.code === "CHECK_IN" && action.enabled && awaitingPreviousCheckout
+   }, commandGrants).map(action => action.code === "RECORD_REFUND" && channelOperating && accessLevel === "WRITE"
+     ? { ...action, enabled: channelOperating.initialized && channelOperating.originalSaleFactId !== null && BigInt(channelOperating.netMinor)>0n, disabledReason: !channelOperating.initialized ? "历史已计收入尚未承接" : BigInt(channelOperating.netMinor)>0n ? null : "没有可退的渠道成交余额" } : action).map((action) => action.code === "CHECK_IN" && action.enabled && awaitingPreviousCheckout
      ? { ...action, enabled: false, disabledReason: "PREVIOUS_STAY_NOT_CHECKED_OUT" } : action).filter((action) => !amendments.some((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
      && recordValue(amendment.payload)?.crossRoomUpgrade)
      || !["EXTEND_STAY", "MOVE_UNIT", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS"].includes(action.code))

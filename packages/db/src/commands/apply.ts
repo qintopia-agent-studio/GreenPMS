@@ -1,3 +1,4 @@
+import { applyChannelFunds, externalChannel, recordChannelRevision } from "../channel-operating.ts";
 import { applyRetainedFundsCommand, isRetainedFundsCommand, lockPaymentAllocationResources } from "../retained-funds.ts";
 import { sql, type Transaction } from "kysely";
 import { applyCheckoutReversal, lockCheckoutReversalInventory } from "./checkout-reversal.ts";
@@ -126,6 +127,7 @@ function temporaryOtherRoomReceiptEvidenceFromEffect(effect: Record<string, unkn
 }
 
 function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
+  bookingChannelCode?: string | null;
   stayType: string;
   memberId: string | null;
   memberContractId: string | null;
@@ -143,7 +145,9 @@ function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
     ? "FREE"
     : orderIdentity?.memberId || orderIdentity?.memberContractId
       ? "MEMBER_ENTITLEMENT"
-      : undefined;
+      : orderIdentity?.bookingChannelCode && ["YOUMUDAO", "CTRIP", "MEITUAN"].includes(orderIdentity.bookingChannelCode)
+        ? "CHANNEL_CONTRACT"
+        : undefined;
   const pricingBasis = pricingBasisValue === undefined
     ? categoricalBasis ?? (contract.minorUnits === cashRemainder.minorUnits ? "POLICY" : "MANUAL_ADJUSTMENT")
     : createOrderPricingBasisCodes.includes(pricingBasisValue as CreateOrderPricingBasis)
@@ -168,7 +172,7 @@ function pricingSnapshot(effect: Record<string, unknown>, orderIdentity?: {
     policyBaseAmountMinor: policyBase.minorUnits,
     pricingBasis,
     currentContractAmountMinor: contract.minorUnits,
-    manualAdjustmentMinor: manualAdjustmentMinor as number | undefined ?? contract.minorUnits - cashRemainder.minorUnits,
+    manualAdjustmentMinor: pricingBasis === "CHANNEL_CONTRACT" ? 0 : manualAdjustmentMinor as number | undefined ?? contract.minorUnits - cashRemainder.minorUnits,
     currency: contract.currency,
     ...(reasonCode ? { reason: { code: reasonCode, note: reasonNoteValue as string ?? "" } } : {})
   };
@@ -555,6 +559,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     }
     await lockRoomDays(trx, roomDates);
   }
+  if (commandType === "RECORD_REFUND" && externalChannel(context.order.booking_channel_code)) return;
   if (commandType === "RECORD_REFUND") {
     await trx.selectFrom("collection_facts")
       .innerJoin("orders", "orders.id", "collection_facts.order_id")
@@ -601,6 +606,7 @@ async function insertRevision(trx: Transaction<Database>, options: {
     current_contract_amount_minor: options.pricing.currentContractAmountMinor,
     currency: options.pricing.currency
   }).execute();
+  await recordChannelRevision(trx, id);
   return id;
 }
 
@@ -2275,6 +2281,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       commandId: options.commandId
     });
     const pricing = pricingSnapshot(effect, {
+      bookingChannelCode: context.order.booking_channel_code,
       stayType: context.order.stay_type,
       memberId: context.order.member_id,
       memberContractId: context.order.member_contract_id
@@ -2313,6 +2320,24 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       resourceRefs: [orderId, amendmentId, revisionId, ...coverageRefs.coverageIds],
       factRefs: coverageRefs.factIds
     };
+  }
+
+  if ((options.commandType === "RECORD_REFUND" || options.commandType === "REVERSE_FACT") && effect.channelOperating === true) {
+    const applied = await applyChannelFunds(trx, options.commandType, options.commandId, context.order.property_id, effect);
+    const amendmentId = await appendAmendment(trx, {orderId,sequence:context.order.version+1,amendmentType:options.commandType,
+      reasonCode:options.reason.code,reasonNote:options.reason.note,priorVersion:context.order.version,payload:effect,commandId:options.commandId});
+    let revisionId=context.revision.id;
+    const target=Number(effect.contractTargetMinor);
+    if(target!==context.revision.currentContractAmountMinor){
+      const original=await trx.selectFrom("pricing_revisions").selectAll().where("id","=",context.revision.id).executeTakeFirstOrThrow();
+      const pricing=pricingSnapshot({pricing:{coverageSet:original.coverage_set,cashLines:original.cash_lines,
+        cashRemainder:{currency:original.currency,minorUnits:original.policy_base_amount_minor},currentContractAmount:{currency:original.currency,minorUnits:target}},
+        pricingDecision:{pricingBasis:"CHANNEL_CONTRACT",policyBaseAmount:{currency:original.currency,minorUnits:original.policy_base_amount_minor},manualAdjustmentMinor:0}});
+      revisionId=await insertRevision(trx,{orderId,revisionNo:context.revision.revisionNo+1,amendmentId,policyVersionId:context.order.pricing_policy_version_id,
+        arrivalDate:context.order.arrival_date,departureDate:context.order.departure_date,pricing});
+    }
+    await trx.updateTable("orders").set({current_revision_id:revisionId,version:context.order.version+1,updated_at:new Date()}).where("id","=",orderId).execute();
+    return {...applied,resourceRefs:[...applied.resourceRefs,amendmentId,revisionId]};
   }
 
   if (options.commandType === "RECORD_COLLECTION" || options.commandType === "RECORD_REFUND" || options.commandType === "REVERSE_FACT") {

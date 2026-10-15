@@ -615,11 +615,11 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
 
 export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const result = record(value, "根节点");
-  exactKeys(result, "根节点", [
+  exactKeysWithOptional(result, "根节点", [
     "accessLevel", "allowedActions", "order", "occupants", "occupantCorrections", "stay", "currentSegment",
     "segments", "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory", "referencedInventoryUnits", "amendments",
     "pricingRevisions", "membershipConversion", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
-  ]);
+  ], ["channelOperating"]);
   const order = record(result.order, "order");
   exactKeysWithOptional(order, "order", [
     "id", "property_id", "status", "stay_type", "arrival_date", "departure_date", "primary_guest_snapshot",
@@ -627,6 +627,34 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     "pricing_policy_version_id", "member_id", "member_contract_id", "current_revision_id",
     "current_contract_amount_minor", "currency", "version", "created_at", "updated_at"
   ], ["current_primary_guest"]);
+  if (result.channelOperating !== undefined && result.channelOperating !== null) {
+    const channel=record(result.channelOperating,"channelOperating");
+    exactKeys(channel,"channelOperating",["initialized","businessDate","currency","originalSaleFactId","netMinor","openingRefundMinor","facts"]);
+    if(!["YOUMUDAO","CTRIP","MEITUAN"].includes(String(order.booking_channel_code)))fail("channelOperating","仅适用于外部渠道订单");
+    if(typeof channel.initialized!=="boolean")fail("channelOperating.initialized","必须是布尔值");
+    localDate(channel.businessDate,"channelOperating.businessDate");
+    const code=stringValue(channel.currency,"channelOperating.currency");if(code!==order.currency)fail("channelOperating.currency","与订单币种不同");
+    const decimal=(value:unknown,path:string)=>{if(typeof value!=="string"||!/^\d+$/.test(value)||value.length>20)fail(path,"必须是非负整数分字符串");return BigInt(value as string)};
+    const net=decimal(channel.netMinor,"channelOperating.netMinor"),opening=decimal(channel.openingRefundMinor,"channelOperating.openingRefundMinor");
+    const original=nullableNonEmptyString(channel.originalSaleFactId,"channelOperating.originalSaleFactId");
+    const rows=arrayValue(channel.facts,"channelOperating.facts").map((value,index)=>{
+      const path=`channelOperating.facts[${index}]`,row=record(value,path);
+      exactKeys(row,path,["id","kind","amountMinor","businessDate","referencesFactId","refundReference","note","createdAt"]);
+      const id=stringValue(row.id,`${path}.id`),kind=stringValue(row.kind,`${path}.kind`),amount=safeInteger(row.amountMinor,`${path}.amountMinor`);
+      if(!["SALE","CORRECTION","REFUND","REVERSAL"].includes(kind)||amount===0||(kind==='REFUND'&&amount>=0)||(['SALE','REVERSAL'].includes(kind)&&amount<=0))fail(path,"事实类型与金额方向不一致");
+      localDate(row.businessDate,`${path}.businessDate`);dateTime(row.createdAt,`${path}.createdAt`);
+      stringValue(row.note,`${path}.note`,true);const reference=nullableNonEmptyString(row.referencesFactId,`${path}.referencesFactId`);
+      const refundReference=nullableNonEmptyString(row.refundReference,`${path}.refundReference`);
+      if(kind==='REFUND'&&!refundReference)fail(path,"退款必须有平台退款单号");
+      return {id,kind,amount,reference};
+    });
+    const byId=new Map(rows.map(row=>[row.id,row]));if(byId.size!==rows.length)fail("channelOperating.facts","事实ID重复");
+    if(original!==null&&byId.get(original)?.kind!=='SALE')fail("channelOperating.originalSaleFactId","没有对应原成交");
+    const reversals=new Set<string>();
+    for(const row of rows){if(row.kind==='REFUND'&&(!row.reference||byId.get(row.reference)?.kind!=='SALE'))fail("channelOperating.facts","退款缺少同单成交来源");
+      if(row.kind==='REVERSAL'){const source=row.reference?byId.get(row.reference):undefined;if(!source||source.kind!=='REFUND'||row.amount!==-source.amount||reversals.has(source.id))fail("channelOperating.facts","误录撤销来源或金额不一致");reversals.add(source.id);}}
+    if(rows.reduce((sum,row)=>sum+BigInt(row.amount),0n)-opening!==net)fail("channelOperating.netMinor","与已登记事实和期初退款不一致");
+  }
   const stay = record(result.stay, "stay");
   exactKeys(stay, "stay", ["id", "status"]);
   const accessLevel = stringValue(result.accessLevel, "accessLevel");

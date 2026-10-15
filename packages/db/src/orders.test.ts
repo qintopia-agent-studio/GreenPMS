@@ -1058,6 +1058,46 @@ describe("projectOrderLifecycle", () => {
     expect(() => projectOrderLifecycle(input)).toThrow(/订单不可变变更记录链损坏/);
   });
 
+  it("projects an audited channel refund pricing revision without changing lodging", () => {
+    const original=base();
+    const input={...structuredClone(original),order:{...original.order,booking_channel_code:"CTRIP",version:2,current_revision_id:"revision_2"}};
+    input.businessDate="2026-08-02";
+    input.amendments.push(amendment({id:"amend_2",sequence:2,type:"RECORD_REFUND",payload:{channelOperating:true,orderId:"order_1",method:"CHANNEL",amountMinor:2000,currency:"CNY",businessDate:"2026-08-02",contractBeforeMinor:10000,contractTargetMinor:8000}}));
+    input.revisions.push({...revision("amend_2","2026-08-01","2026-08-03",10000,2),current_contract_amount_minor:8000});
+    expect(projectOrderLifecycle(input).effectiveArrangement.intervals).toEqual(projectOrderLifecycle(original).effectiveArrangement.intervals);
+    expect(()=>projectOrderLifecycle({...input,order:{...input.order,booking_channel_code:"WECOM"}})).toThrow(/渠道资金变更/);
+    const damaged=structuredClone(input);damaged.revisions[1]!.policy_base_amount_minor=9999;
+    expect(()=>projectOrderLifecycle(damaged)).toThrow(/渠道退款计价修订/);
+    const missing=structuredClone(input);missing.revisions.pop();missing.order.current_revision_id="revision_1";
+    expect(()=>projectOrderLifecycle(missing)).toThrow(/唯一计价版本/);
+  });
+
+  it("reads a cancelled channel order after an audited refund without reopening occupancy", () => {
+    const input={...base(),order:{...base().order,booking_channel_code:"CTRIP",status:"CANCELLED",version:2,current_revision_id:"revision_2"}};
+    input.stay.status="CANCELLED";input.activeTimeline=[];
+    input.amendments.push(amendment({id:"amend_2",sequence:2,type:"CANCEL_ORDER",payload:{fromStatus:"RESERVED",toStatus:"CANCELLED"}}));
+    input.revisions.push(revision("amend_2","2026-08-01","2026-08-03",0,2));
+    const before=projectOrderLifecycle(input);
+    input.order.version=3;
+    input.amendments.push(amendment({id:"amend_3",sequence:3,type:"RECORD_REFUND",payload:{channelOperating:true,orderId:"order_1",method:"CHANNEL",amountMinor:5000,currency:"CNY",businessDate:"2026-08-03",contractBeforeMinor:0,contractTargetMinor:0}}));
+    const after=projectOrderLifecycle(input);
+    expect(after.effectiveArrangement).toEqual(before.effectiveArrangement);expect(after.fulfillment).toEqual(before.fulfillment);
+    expect(()=>projectOrderLifecycle({...input,order:{...input.order,booking_channel_code:"WECOM"}})).toThrow();
+  });
+
+  it("reads a completed channel order after a precise financial correction", () => {
+    const input={...base(),order:{...base().order,booking_channel_code:"YOUMUDAO",status:"CHECKED_OUT",version:4,current_revision_id:"revision_2"}};
+    input.stay.status="COMPLETED";input.activeTimeline=[];input.businessDate="2026-08-04";
+    input.amendments.push(
+      amendment({id:"amend_2",sequence:2,type:"CHECK_IN",payload:{fromStatus:"RESERVED",toStatus:"CHECKED_IN",businessDate:"2026-08-01",effectiveDate:"2026-08-01",recordingMode:"ON_SCHEDULE"}}),
+      amendment({id:"amend_3",sequence:3,type:"CHECK_OUT",payload:{fromStatus:"CHECKED_IN",toStatus:"CHECKED_OUT",businessDate:"2026-08-03",effectiveDate:"2026-08-03",recordingMode:"ON_SCHEDULE"}}),
+      amendment({id:"amend_4",sequence:4,type:"REPRICE_ORDER",payload:{bookingChannelCode:"YOUMUDAO",targetCurrentContractAmount:{currency:"CNY",minorUnits:27720}}})
+    );
+    input.revisions.push({...revision("amend_4","2026-08-01","2026-08-03",10000,2),current_contract_amount_minor:27720});
+    expect(projectOrderLifecycle(input).fulfillment.state).toBe("CHECKED_OUT");
+    expect(()=>projectOrderLifecycle({...input,order:{...input.order,booking_channel_code:"WECOM"}})).toThrow(/终态订单/);
+  });
+
   it("requires a continuous pricing revision chain whose latest ID is the order current pointer", () => {
     const missingPointer = base();
     missingPointer.order.current_revision_id = null;
@@ -1289,4 +1329,18 @@ describe("projectOrderLifecycle", () => {
     cancelled.order.current_revision_id = "revision_3";
     expect(() => projectOrderLifecycle(cancelled)).toThrow(/终态订单包含不允许/);
   });
+});
+
+
+it("已退房渠道订单可审计更正金额，取消订单和直订退房订单仍关闭", () => {
+  for (const channel of ["YOUMUDAO", "CTRIP", "MEITUAN"] as const) {
+    const actions = orderAllowedActions("WRITE", "CHECKED_OUT", false, undefined, false, channel, false, false, undefined, allOrderActionGrants);
+    expect(actions.find(action => action.code === "REPRICE_ORDER")?.enabled).toBe(true);
+    expect(orderAllowedActions("READ", "CHECKED_OUT", false, undefined, false, channel, false, false, undefined, allOrderActionGrants)).toEqual([]);
+    expect(orderAllowedActions("WRITE", "CHECKED_OUT", false, undefined, false, channel, false, false, undefined, new Set()).some(action=>action.code==="REPRICE_ORDER")).toBe(false);
+    for (const status of ["CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"]) {
+      expect(orderAllowedActions("WRITE",status,false,undefined,false,channel,false,false,undefined,allOrderActionGrants).find(action=>action.code==="REPRICE_ORDER")?.enabled).toBe(false);
+    }
+  }
+  expect(orderAllowedActions("WRITE","CHECKED_OUT",false,undefined,false,"WECOM",false,false,undefined,allOrderActionGrants).find(action=>action.code==="REPRICE_ORDER")?.enabled).toBe(false);
 });

@@ -1,3 +1,5 @@
+import { ChannelOperatingHistory } from "../components/ChannelRefundForm";
+import { parseStayFinalYuanToMinor, supportsDecimalStayFinalAmount } from "../channel-amount";
 import { RetainedFundsPanel } from "../components/RetainedFunds";
 import { useAssistantOrderEntry } from "../assistant/context";
 import { createReadPoller } from "../readPoller";
@@ -253,12 +255,17 @@ function shiftDate(value: string, days: number): string {
   return `${year}-${month}-${day}`;
 }
 
-export function initialRepriceTargetYuan(currentContractAmountMinor: number, draftTargetMinor: unknown): string {
+export function initialRepriceTargetYuan(currentContractAmountMinor: number, draftTargetMinor: unknown, channel?: unknown, ordinaryPaidStay = true): string {
   const validDraftTarget = typeof draftTargetMinor === "number"
     && Number.isSafeInteger(draftTargetMinor)
     && draftTargetMinor >= 0
-    && draftTargetMinor % 100 === 0;
+    && draftTargetMinor <= 2_147_483_600
+    && ((ordinaryPaidStay && supportsDecimalStayFinalAmount({ booking_channel_code: channel })) || draftTargetMinor % 100 === 0);
   return String((validDraftTarget ? draftTargetMinor : currentContractAmountMinor) / 100);
+}
+
+export function repriceTargetAmountMinor(order: OrderViewDto["order"], value: string): number | undefined {
+  return supportsDecimalStayFinalAmount(order) ? parseStayFinalYuanToMinor(value) : wholeYuanAmountMinor(value);
 }
 
 export function wholeYuanAmountMinor(value: string): number | undefined {
@@ -1460,7 +1467,9 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
   const [newDepartureDate, setNewDepartureDate] = useState(action === "SHORTEN_STAY" ? shiftDate(view.order.departure_date, -1) : shiftDate(view.order.departure_date, 1));
   const [targetContractYuan, setTargetContractYuan] = useState(() => initialRepriceTargetYuan(
     view.amounts.currentContractAmount.minorUnits,
-    draft?.input.targetCurrentContractAmountMinor
+    draft?.input.targetCurrentContractAmountMinor,
+    view.order.booking_channel_code,
+    supportsDecimalStayFinalAmount(view.order)
   ));
   const [repriceReason, setRepriceReason] = useState(draft?.initialReason?.note ?? "");
   const [validationError, setValidationError] = useState<unknown>();
@@ -1495,9 +1504,9 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
       description = "订单金额将按原房价标准重新计算，并保留调整记录。";
     }
     if (action === "REPRICE_ORDER") {
-      const targetCurrentContractAmountMinor = wholeYuanAmountMinor(targetContractYuan);
+      const targetCurrentContractAmountMinor = repriceTargetAmountMinor(view.order, targetContractYuan);
       if (targetCurrentContractAmountMinor === undefined) {
-        setValidationError(new Error("指定最终总价必须是大于或等于零的整元金额"));
+        setValidationError(new Error(supportsDecimalStayFinalAmount(view.order) ? "指定最终总价必须在支持范围内且为非负金额，最多两位小数" : "指定最终总价必须是大于或等于零的整元金额"));
         return;
       }
       if (!repriceReason.trim()) {
@@ -1544,7 +1553,7 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
         ) : null}
         {action === "REPRICE_ORDER" ? (
           <div className="form-grid">
-            <label>指定最终总价（元）<input type="number" min="0" step="1" value={targetContractYuan} onChange={(event) => { setTargetContractYuan(event.target.value); setValidationError(undefined); }} required inputMode="numeric" data-testid="reprice-target-yuan" /></label>
+            <label>指定最终总价（元）<input type="number" min="0" step={supportsDecimalStayFinalAmount(view.order) ? "0.01" : "1"} value={targetContractYuan} onChange={(event) => { setTargetContractYuan(event.target.value); setValidationError(undefined); }} required inputMode={supportsDecimalStayFinalAmount(view.order) ? "decimal" : "numeric"} data-testid="reprice-target-yuan" /></label>
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}
@@ -2106,6 +2115,7 @@ function ScopedOrderDetailPage() {
       {overdueNotice ? <OverdueInHouseAlert notice={overdueNotice} /> : null}
 
       <OrderAmountStrip amounts={view.amounts} pricingRevision={currentPricingRevision} bookingChannelCode={view.order.booking_channel_code} />
+      <ChannelOperatingHistory view={view} blocked={orderActionsBlocked} onSubmit={request=>{setCommandDraft(undefined);setCommand(request)}} />
 
       {!editorIsOpenRef.current && !command ? readFailureNotice : null}
       <InlineError error={recoveryError} title="恢复记录未收口" />
@@ -2193,7 +2203,7 @@ function ScopedOrderDetailPage() {
       />
 
       <RetainedFundsPanel view={view} blocked={orderActionsBlocked} can={code => principalCan(principal, propertyId, code)} onSubmit={request => { if (orderActionsBlocked) return; setRecoveryDialogOpen(false); setCommand(request); }} />
-      <section id="order-funds" className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{itemCountLabel(view.collectionFacts.length)}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title="尚无收退款记录" detail={externalChannelFunds ? "渠道订单不在 PMS 登记单笔收退款。" : "使用订单操作记录第一笔独立收款。"} />}</section>
+      <section id="order-funds" className="detail-section full-detail" aria-labelledby="facts-heading"><div className="section-title-row"><h2 id="facts-heading">收退款与冲销记录</h2><span>{itemCountLabel(view.collectionFacts.length)}</span></div>{view.collectionFacts.length ? <div className="table-region" role="region" aria-label="收退款与冲销记录表格" tabIndex={0}><table className="data-table compact-table"><thead><tr><th scope="col">序号</th><th scope="col">类型</th><th scope="col">金额</th><th scope="col">净影响</th><th scope="col">外部交易单号</th><th scope="col">收退款方式</th><th scope="col">备注 / 退款原因</th><th scope="col">记录时间</th><th scope="col" className="fact-actions-col">操作</th></tr></thead><tbody>{view.collectionFacts.map((fact, index) => <tr key={fact.fact_id}><td><span className="fact-sequence">{index + 1}</span></td><th scope="row"><StatusBadge value={fact.fact_type} label={collectionFactTypeLabel(fact.fact_type)} /></th><td>{formatMinor(fact.amount_minor, fact.currency)}</td><td>{formatMinor(fact.net_effect_minor, fact.currency)}</td><td>{collectionFactTransactionReferenceLabel(view.collectionFacts, fact)}</td><td>{collectionMethodLabel(fact.method)}</td><td><CollectionFactNote fact={fact} /></td><td>{formatDateTime(fact.created_at)}</td><td><FactActions fact={fact} facts={view.collectionFacts} canRefund={enabledActions.has("RECORD_REFUND") && remainingRefundableMinor(view.collectionFacts, fact) > 0} canReverse={collectionFactCanReverse(view.collectionFacts, fact, enabledActions.has("REVERSE_FACT"))} disabled={orderActionsBlocked} onRefund={() => openForm("RECORD_REFUND", fact.fact_id)} onReverse={() => openForm("REVERSE_FACT", fact.fact_id)} /></td></tr>)}</tbody></table></div> : <EmptyState title={externalChannelFunds ? "渠道资金另有记录" : "尚无收退款记录"} detail={externalChannelFunds ? "渠道退款见上方“渠道成交与退款”；此处保留直接收款与冲销记录。" : "使用订单操作记录第一笔独立收款。"} />}</section>
 
       {view.amendments.some((amendment) => amendment.amendment_type === "MANAGE_ORDER_OCCUPANTS") ? <details className="detail-disclosure"><summary>同住人登记记录</summary><section className="detail-section full-detail" aria-labelledby="companion-history-heading">
         <div className="section-title-row"><h2 id="companion-history-heading">同住人登记记录</h2></div>

@@ -102,7 +102,7 @@ const commandInputContract: Record<Exclude<PublicCommandEnvelopeType, "MANAGE_RO
   RELEASE_RETAINED_FUNDS: { required: ["propertyId", "orderId", "retainedFundId", "amountMinor", "note"], properties: ["propertyId", "orderId", "retainedFundId", "amountMinor", "note"] },
   REFUND_RETAINED_FUNDS: { required: ["propertyId", "orderId", "retainedFundId", "amountMinor", "externalPaymentBillId", "refundReference", "note"], properties: ["propertyId", "orderId", "retainedFundId", "amountMinor", "externalPaymentBillId", "refundReference", "note"] },
   RECORD_COLLECTION: { required: ["propertyId", "orderId", "amountMinor", "method"], properties: ["propertyId", "orderId", "amountMinor", "method", "externalPaymentBillId", "transactionReference", "note"] },
-  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "externalPaymentBillId", "transactionReference", "refundReference", "note"] },
+  RECORD_REFUND: { required: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method"], properties: ["propertyId", "orderId", "amountMinor", "referencesFactId", "method", "externalPaymentBillId", "transactionReference", "refundReference", "note", "businessDate"] },
   CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: {
     required: ["propertyId", "orderId", "memberId", "membershipProductId", "collectionFactIds", "agreedPriceMinor"],
     properties: [
@@ -362,8 +362,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect((createInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
       type: "integer",
       minimum: 0,
-      maximum: 2_147_483_600,
-      multipleOf: 100
+      maximum: 2_147_483_600
     });
     expect((createInput.properties as Record<string, JsonSchema>).channelPriceDifferenceReason).toMatchObject({
       type: "string",
@@ -380,8 +379,7 @@ describe("OpenAPI 3.1 command contract", () => {
       expect((stayChangeInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
         type: "integer",
         minimum: 0,
-        maximum: 2_147_483_600,
-        multipleOf: 100
+        maximum: 2_147_483_600
       });
       expect((stayChangeInput.properties as Record<string, JsonSchema>).channelPriceDifferenceReason).toMatchObject({
         type: "string", minLength: 1, maxLength: 1000
@@ -444,8 +442,7 @@ describe("OpenAPI 3.1 command contract", () => {
     expect((repriceInput.properties as Record<string, JsonSchema>).targetCurrentContractAmountMinor).toMatchObject({
       type: "integer",
       minimum: 0,
-      maximum: Number.MAX_SAFE_INTEGER,
-      multipleOf: 100
+      maximum: 2_147_483_600
     });
   });
 

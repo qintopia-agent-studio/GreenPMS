@@ -410,7 +410,7 @@ describe("membership, free-stay, and recorded-money boundaries", () => {
     expect(quote("private_bath_standard_room", 13).currentContractAmount.minorUnits).toBe(189_400);
   });
 
-  it("rejects manual targets below zero or outside whole-yuan CNY", () => {
+  it("preserves rounded policy base while allowing manual cents and rejecting negative targets", () => {
     const input = {
       propertyId,
       inventoryUnitId: "room-A01",
@@ -423,7 +423,7 @@ describe("membership, free-stay, and recorded-money boundaries", () => {
     };
     expect(() => calculatePricing({ ...input, manualAdjustmentMinor: -189_500 }))
       .toThrow(expect.objectContaining<Partial<DomainError>>({ code: "VALIDATION_ERROR" }));
-    expect(() => calculatePricing({ ...input, manualAdjustmentMinor: 1 }))
-      .toThrow(expect.objectContaining<Partial<DomainError>>({ code: "VALIDATION_ERROR" }));
+    expect(calculatePricing({ ...input, manualAdjustmentMinor: 1 }).currentContractAmount.minorUnits).toBe(189_401);
+    expect(calculatePricing({ ...input, manualAdjustmentMinor: 38_750 - 189_400 }).currentContractAmount.minorUnits).toBe(38_750);
   });
 });

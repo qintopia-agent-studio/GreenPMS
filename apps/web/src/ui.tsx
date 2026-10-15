@@ -1,3 +1,4 @@
+import { isExternalBookingChannel } from "./channel-amount";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, Check, ChevronRight, CircleHelp, Clock3, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -807,7 +808,7 @@ function dateChangePreviewHasEvidence(
       .some((amount) => amount.currency !== targetAmount.currency)
     || targetAmount.minorUnits < 0
     || targetAmount.minorUnits > 2_147_483_600
-    || targetAmount.minorUnits % 100 !== 0
+    || (decision.pricingBasis !== "CHANNEL_CONTRACT" && decision.pricingBasis !== "MANUAL_ADJUSTMENT" && targetAmount.minorUnits % 100 !== 0)
     || difference.minorUnits !== targetAmount.minorUnits - policyAmount.minorUnits
     || !moneyMatches(pricing.currentContractAmount, targetAmount)
     || collectionDifference.minorUnits !== targetAmount.minorUnits - netCollection.minorUnits
@@ -1075,7 +1076,7 @@ export function moveUnitPreviewHasEvidence(effect: Record<string, unknown>, inpu
     || !hasMoney(netCollection) || !hasMoney(collectionDifference)
     || [beforeAmount, policyAmount, difference, pricing.cashRemainder, pricing.currentContractAmount, netCollection, collectionDifference]
       .some((amount) => amount.currency !== targetAmount.currency)
-    || targetAmount.minorUnits < 0 || targetAmount.minorUnits > 2_147_483_600 || targetAmount.minorUnits % 100 !== 0
+    || targetAmount.minorUnits < 0 || targetAmount.minorUnits > 2_147_483_600 || (decision.pricingBasis !== "CHANNEL_CONTRACT" && decision.pricingBasis !== "MANUAL_ADJUSTMENT" && targetAmount.minorUnits % 100 !== 0)
     || difference.minorUnits !== targetAmount.minorUnits - policyAmount.minorUnits
     || !moneyMatches(pricing.currentContractAmount, targetAmount)
     || collectionDifference.minorUnits !== targetAmount.minorUnits - netCollection.minorUnits
@@ -1287,7 +1288,7 @@ export function moveUnitReceiptHasEvidence(
       .some((amount) => amount.currency !== targetAmount.currency)
     || targetAmount.minorUnits < 0
     || targetAmount.minorUnits > 2_147_483_600
-    || targetAmount.minorUnits % 100 !== 0
+    || (decision.pricingBasis !== "CHANNEL_CONTRACT" && decision.pricingBasis !== "MANUAL_ADJUSTMENT" && targetAmount.minorUnits % 100 !== 0)
     || !moneyMatches(pricing.currentContractAmount, targetAmount)
     || difference.minorUnits !== targetAmount.minorUnits - policyAmount.minorUnits
     || collectionDifference.minorUnits !== targetAmount.minorUnits - netCollection.minorUnits
@@ -2162,7 +2163,7 @@ export function u1PreviewHasBusinessEvidence(
           || policyBaseAmount.minorUnits < 0
           || !hasMoney(targetAmount)
           || targetAmount.minorUnits < 0
-          || targetAmount.minorUnits % 100 !== 0
+          || (!isExternalBookingChannel(effect.bookingChannelCode) && effect.bookingChannelCode !== "WECOM" && targetAmount.minorUnits % 100 !== 0)
           || targetAmount.minorUnits !== input.targetCurrentContractAmountMinor
           || !moneyMatches(currentContractAmount, targetAmount)
           || before.currentContractAmount.currency !== targetAmount.currency
@@ -2691,6 +2692,9 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
     </section>;
   }
 
+  if (businessCommand === "REVERSE_FACT" && effect.channelOperating === true) {
+    return <div className="effect-summary"><h3>核对渠道退款误录撤销</h3><dl className="difference-grid"><dt>恢复经营金额</dt><dd>{formatMinor(Number(effect.amountMinor),String(effect.currency))}</dd><dt>原退款业务日期</dt><dd>{String(effect.businessDate)}</dd><dt>当前渠道应结</dt><dd>{formatMinor(Number(effect.contractBeforeMinor),String(effect.currency))} → {formatMinor(Number(effect.contractTargetMinor),String(effect.currency))}</dd><dt>误录原因</dt><dd>{String(effect.note)}</dd></dl><p>保留原退款记录并追加纠错，不发起平台收退款，不改变住宿安排。</p></div>;
+  }
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const amountMinor = typeof effect.amountMinor === "number" ? effect.amountMinor : undefined;
     const currency = typeof effect.currency === "string" ? effect.currency : "CNY";
@@ -2704,10 +2708,11 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
         <h3 id="funds-command-summary-heading">请核对{businessCommand === "RECORD_REFUND" ? "退款" : "收款"}信息</h3>
         <dl className="difference-grid">
           <dt>金额</dt><dd><strong>{amountMinor === undefined ? "-" : formatMinor(amountMinor, currency)}</strong></dd>
-          <dt>{businessCommand === "RECORD_REFUND" ? "退款方式" : "收款方式"}</dt><dd>{fundMethodLabel(effect.method)}</dd>
+          <dt>{businessCommand === "RECORD_REFUND" ? "退款方式" : "收款方式"}</dt><dd>{effect.channelOperating === true ? "渠道平台退款" : fundMethodLabel(effect.method)}</dd>
           {transactionReference ? <><dt>{effect.method === "WECOM" ? "企业微信交易单号" : "交易单号 / 流水号"}</dt><dd>{transactionReference}</dd></> : null}
           {businessCommand === "RECORD_REFUND" && effect.method === "WECOM" ? <><dt>企业微信退款单号</dt><dd>{typeof effect.refundReference === "string" ? effect.refundReference : "历史未记录退款单号"}</dd></> : null}
-          {businessCommand === "RECORD_REFUND" ? <><dt>对应原收款</dt><dd>{referencesFactId ? "已选择同订单原收款" : "未选择"}</dd></> : null}
+          {businessCommand === "RECORD_REFUND" ? <><dt>{effect.channelOperating === true ? "对应渠道成交" : "对应原收款"}</dt><dd>{referencesFactId ? "已关联本订单原始记录" : "未选择"}</dd></> : null}
+          {effect.channelOperating === true ? <><dt>退款业务日期</dt><dd>{String(effect.businessDate)}</dd><dt>平台退款单号</dt><dd>{String(effect.refundReference)}</dd><dt>当前渠道应结</dt><dd>{formatMinor(Number(effect.contractBeforeMinor),currency)} → {formatMinor(Number(effect.contractTargetMinor),currency)}</dd></> : null}
           <dt>{noteLabel}</dt><dd>{reasonNote?.trim() || (businessCommand === "RECORD_REFUND" ? "未填写" : "未填写备注")}</dd>
         </dl>
       </section>
@@ -4010,7 +4015,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
         <span className="receipt-icon" aria-hidden="true">{committed ? <Check size={20} /> : <AlertCircle size={20} />}</span>
         <div>
           <h3 id="receipt-heading">{committed ? `${label}已登记` : `${label}未登记`}</h3>
-          <p>{committed ? "已登记净收款与差额已在订单中更新。" : `本次${label}没有写入。`}</p>
+          <p>{committed ? (typeof result?.factId === "string" && result.factId.startsWith("channel_fact_") ? "渠道退款及经营金额已更新；住宿安排保持原状。" : "已登记净收款与差额已在订单中更新。") : `本次${label}没有写入。`}</p>
         </div>
       </div>
       {committed && transactionReference ? <dl className="receipt-grid">

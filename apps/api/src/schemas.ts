@@ -58,7 +58,8 @@ const NonNegativeAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_IN
 const NonNegativeWholeYuanAmount = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const PositiveWholeYuanAmount = Type.Integer({ minimum: 100, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 100 });
 const MembershipAgreedPriceAmount = Type.Integer({ minimum: 100, maximum: 2_147_483_600, multipleOf: 100 });
-const StayChangeTargetAmount = Type.Integer({ minimum: 0, maximum: 2_147_483_600, multipleOf: 100 });
+// 普通住宿本单金额支持整数分；会员及免费边界由服务端领域校验执行。
+const StayChangeTargetAmount = Type.Integer({ minimum: 0, maximum: 2_147_483_600 });
 const NonZeroInteger = Type.Union([
   Type.Integer({ minimum: Number.MIN_SAFE_INTEGER, maximum: -1 }),
   Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })
@@ -488,11 +489,7 @@ export const CommandEnvelopeSchema = Type.Union([
     additionalGuests: Type.Optional(Type.Array(PrimaryGuestInputSchema, { maxItems: 999 })),
     bookingChannelCode: Type.Optional(BookingChannelCodeSchema),
     channelOrderReference: Type.Optional(nullable(ShortText)),
-    targetCurrentContractAmountMinor: Type.Optional(Type.Integer({
-      minimum: 0,
-      maximum: 2_147_483_600,
-      multipleOf: 100
-    })),
+    targetCurrentContractAmountMinor: Type.Optional(StayChangeTargetAmount),
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note),
     freeStayReason: Type.Optional(Note),
@@ -542,7 +539,7 @@ export const CommandEnvelopeSchema = Type.Union([
     channelPriceDifferenceReason: Type.Optional(Note),
     manualPriceAdjustmentReason: Type.Optional(Note)
   })),
-  commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: NonNegativeWholeYuanAmount })),
+  commandEnvelope("REPRICE_ORDER", strictObject({ ...OrderInput, targetCurrentContractAmountMinor: StayChangeTargetAmount })),
   commandEnvelope("CANCEL_ORDER", strictObject(OrderInput)),
   commandEnvelope("MARK_NO_SHOW", strictObject(OrderInput)),
   commandEnvelope("REVOKE_CHECK_IN", strictObject({ ...OrderInput, unusedRoomConfirmed: Type.Literal(true) })),
@@ -550,7 +547,7 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("RELEASE_MAINTENANCE", strictObject({ ...PropertyInput, maintenanceLockId: Id })),
   commandEnvelope("COMPLETE_CLEANING", strictObject({ ...PropertyInput, cleaningTaskId: Id })),
   commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, method: ShortText, transactionReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
-  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), refundReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
+  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, businessDate: Type.Optional(LocalDate), externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), refundReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
   commandEnvelope("REVERSE_FACT", strictObject({ ...OrderInput, reversesFactId: Id, note: Note, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()) })),
   commandEnvelope("RETAIN_ORDER_FUNDS", strictObject({ ...OrderInput, sourceFactId: Id, amountMinor: PositiveAmount, ownerName: ShortText, ownerContact: ShortText, confirmationNote: Note })),
   commandEnvelope("APPLY_RETAINED_FUNDS", strictObject({ ...OrderInput, retainedFundId: Id, amountMinor: PositiveAmount, authorizationNote: Note })),
@@ -1391,6 +1388,7 @@ export const CommandEffectSchema = Type.Union([
     inventoryUnitId: Id,
     stayTimeline: StayTimelineSchema,
     before: strictObject({ currentContractAmount: Money }),
+    bookingChannelCode: Type.Optional(nullable(BookingChannelCodeSchema)),
     policyBaseAmount: Money,
     targetCurrentContractAmount: Money,
     pricing: PricingResultSchema,
@@ -1404,8 +1402,8 @@ export const CommandEffectSchema = Type.Union([
     pricing: PricingResultSchema
   }),
   strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), method: ShortText, transactionReference: nullable(ShortText), note: OptionalNote }),
-  strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), referencesFactId: Id, method: ShortText, transactionReference: nullable(ShortText), refundReference: Type.Optional(ShortText), note: OptionalNote }),
-  strictObject({ orderId: Id, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()), releaseAllocationId: Type.Optional(Id), reversesFactId: Id, amountMinor: PositiveAmount, netEffectMinor: SafeInteger, currency: Type.String({ minLength: 3, maxLength: 3 }), note: Note }),
+  strictObject({ orderId: Id, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, currency: Type.String({ minLength: 3, maxLength: 3 }), referencesFactId: Id, method: ShortText, transactionReference: nullable(ShortText), refundReference: Type.Optional(ShortText), note: OptionalNote, channelOperating: Type.Optional(Type.Boolean()), businessDate: Type.Optional(LocalDate), contractBeforeMinor:Type.Optional(NonNegativeAmount),contractTargetMinor:Type.Optional(NonNegativeAmount) }),
+  strictObject({ orderId: Id, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()), releaseAllocationId: Type.Optional(Id), reversesFactId: Id, amountMinor: PositiveAmount, netEffectMinor: SafeInteger, currency: Type.String({ minLength: 3, maxLength: 3 }), note: Note, channelOperating: Type.Optional(Type.Boolean()), businessDate: Type.Optional(LocalDate), contractBeforeMinor:Type.Optional(NonNegativeAmount),contractTargetMinor:Type.Optional(NonNegativeAmount) }),
   strictObject({
     operation: Type.Literal("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"),
     crossRoomUpgrade: Type.Optional(strictObject({
@@ -3269,6 +3267,7 @@ export const OrderDetailResponseSchema = strictObject({
     commandId: Id
   })),
   coverageSet: Type.Array(CoverageRowSchema),
+  channelOperating: Type.Optional(nullable(strictObject({initialized:Type.Boolean(),businessDate:LocalDate,currency:Type.String(),originalSaleFactId:nullable(Id),netMinor:Type.String(),openingRefundMinor:Type.String(),facts:Type.Array(strictObject({id:Id,kind:Type.Union(["SALE","CORRECTION","REFUND","REVERSAL"].map(v=>Type.Literal(v))),amountMinor:SafeInteger,businessDate:LocalDate,referencesFactId:nullable(Id),refundReference:nullable(Type.String()),note:Type.String(),createdAt:DateTime}))}))),
   collectionFacts: Type.Array(CollectionFactRowSchema),
   cleaningTasks: Type.Array(CleaningTaskSummarySchema),
   amounts: AmountSummarySchema

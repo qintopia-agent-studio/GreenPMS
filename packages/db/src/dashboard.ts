@@ -1,3 +1,4 @@
+import { loadOperatingSales } from "./operating-sales.ts";
 import { loadDashboardCommunity } from "./dashboard-community.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
 import { dashboardDefinitionVersion, dashboardSources, DomainError, type DashboardQuery, type DashboardResponse, type DashboardDetailsResponse, type DashboardDetail, type DashboardMetric, type DashboardRange } from "@qintopia/contracts";
@@ -25,6 +26,8 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const moneyFacts = await loadDashboardMoney(trx, propertyId, property.timezone, previousRange.from, dashboardDate(range.to, 1));
   const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency, property.timezone);
   const community = await loadDashboardCommunity(trx, propertyId, range, businessDate, property.timezone);
+  const sales = await loadOperatingSales(trx,propertyId,property.timezone,property.currency,range,businessDate);
+  current.todaySales=sales.todaySummary;
   const future = await loadDashboardFuture(trx, propertyId, businessDate, futureUntil, lodging);
   const matches = (night: DashboardStayNight) => (!query.building || night.building === query.building) && (!query.roomType || night.roomType === query.roomType) && (!query.source || night.source === query.source);
   const filteredNights = lodging.nights.filter(matches);
@@ -65,7 +68,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
     sources: dashboardSources.map(source => ({ source, unitNights: currentNights.filter(night => night.source === source).reduce((n, row) => n + row.units, 0) })),
     money, previousMoney: aggregateDashboardMoney(moneyFacts.filter(fact => inDashboardRange(fact.date, previousRange)), property.currency),
     moneyTrend: enumerateServiceDates(range.from, dashboardDate(range.to, 1)).map(date => ({ date, money: aggregateDashboardMoney(moneyFacts.filter(fact => fact.date === date), property.currency) })),
-    current, community, future, futureReviewCount: lodging.futureReviews.length, filters: { roomTypeLabels, buildings: [...new Set(lodging.units.map(unit => unit.building_code ?? "未分配"))].sort(), roomTypes: [...new Set(lodging.units.map(unit => unit.room_type_code ?? "未分配"))].sort() },
+    sales:sales.summary, current, community, future, futureReviewCount: lodging.futureReviews.length, filters: { roomTypeLabels, buildings: [...new Set(lodging.units.map(unit => unit.building_code ?? "未分配"))].sort(), roomTypes: [...new Set(lodging.units.map(unit => unit.room_type_code ?? "未分配"))].sort() },
     warnings: [
       ...(history.reviewCount ? [`${history.reviewCount} 条历史住宿事实缺少完整证据；保留其他已核对日期。能定位的房源缺项按分组筛选，房源不明的记录仍保留供核对。`] : []),
       ...(history.occupancyRate !== null && history.occupancyRate > 100 ? ["经营入住率超过100%，请核对重叠住宿与目录容量；未截断该异常。"] : []),
@@ -77,7 +80,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
     metric: night.source === "FREE" ? "FREE" : "PAID", label: `${night.building} / ${night.roomType}`, orderId: night.orderId, unitId: night.unitId, units: night.units,
     reason: `${night.source === "FREE" ? "免费占用" : "已履约付费住宿"}；按有效住宿安排逐日归属` }));
   const details = [...lodging.futureReviews, ...stayDetails, ...relevantReviews(range).map(review => ({ ...review, date: review.date < range.from ? range.from : review.date })), ...moneyFacts.filter(fact => inDashboardRange(fact.date, range)).map(dashboardMoneyDetail), ...currentDetails];
-  return { response, details };
+  return { response, details: [...details, ...sales.details] };
 }
 export async function getDashboard(db: Kysely<Database>, propertyId: string, query: DashboardQuery): Promise<DashboardResponse> {
   return db.transaction().setIsolationLevel("repeatable read").execute(async trx => {

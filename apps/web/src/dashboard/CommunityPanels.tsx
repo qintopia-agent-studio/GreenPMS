@@ -19,7 +19,10 @@ export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDe
     <CommunitySnapshot data={data} onDetail={onDetail} />
     <div className="dashboard-current-balances">
       <button type="button" className="dashboard-current-card" onClick={() => onDetail("TODAY_ORDERS")}><span>今日新增订单 <ArrowRight size={13} aria-hidden="true" /></span><strong>{data.current.todayOrders}<small> 单</small></strong><small>今天新建的住宿订单 · 含补录</small></button>
+      {data.current.todaySales ? <button type="button" className="dashboard-current-card" onClick={()=>onDetail("TODAY_SALES")}><span>今日经营销售额 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.todaySales.enabled&&data.current.todaySales.complete?data.current.todaySales.totals.map(row=><strong key={row.currency}>{money(row.netMinor,row.currency)}</strong>):<strong>—</strong>}<small>{data.current.todaySales.complete?"已关联业务 · 扣退款后":data.current.todaySales.reason}</small></button>:null}
       <button type="button" className="dashboard-current-card" onClick={() => onDetail("TODAY_COLLECTIONS")}><span>今日登记收款 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.todayCollections.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 笔</small></strong>)}<small>住宿及会员收款 · 未扣退款{data.current.todayCollectionReviewCount ? ` · 另有${data.current.todayCollectionReviewCount}笔待核对` : ""}</small></button>
+    </div>
+    <div className="dashboard-current-balances">
       <button type="button" className="dashboard-current-card" onClick={() => onDetail("DEBT")}><span>住宿欠款余额 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.debts.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 单</small></strong>)}<small>逐单正差额 · 不以多收抵欠款</small></button>
       <button type="button" className="dashboard-current-card" onClick={() => onDetail("RETAINED")}><span>客户留存待用 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.retained.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 笔</small></strong>)}<small>客户资金归属 · 不计新增收款</small></button>
     </div>

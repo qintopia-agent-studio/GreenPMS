@@ -55,6 +55,18 @@ function nonNegativeWholeYuanPostgresAmount(value: unknown, field: string): numb
   return amount;
 }
 
+/** 普通住宿手工本单金额精确到分；无普通订单渠道的会员金额保留整元约束。 */
+export function validateOrderTargetAmount(channel: BookingChannelCode | null, value: unknown): number {
+  if (channel !== "WECOM" && channel !== "YOUMUDAO" && channel !== "CTRIP" && channel !== "MEITUAN") {
+    return nonNegativeWholeYuanPostgresAmount(value, "targetCurrentContractAmountMinor");
+  }
+  const amount = nonNegativePostgresAmount(value, "targetCurrentContractAmountMinor");
+  if (amount > postgresWholeYuanMaximumMinor) {
+    throw new DomainError("VALIDATION_ERROR", "targetCurrentContractAmountMinor exceeds supported amount range");
+  }
+  return amount;
+}
+
 export function channelPriceDifferenceExceedsThreshold(policyBaseAmountMinor: number, targetAmountMinor: number): boolean {
   const policyBase = nonNegativePostgresAmount(policyBaseAmountMinor, "policyBaseAmountMinor");
   const target = nonNegativePostgresAmount(targetAmountMinor, "targetCurrentContractAmountMinor");
@@ -111,7 +123,7 @@ export function createOrderPricingDecision(input: {
   const currentContractAmountMinor = input.targetCurrentContractAmountMinor === undefined
     || input.targetCurrentContractAmountMinor === null
     ? policyBaseAmountMinor
-    : nonNegativeWholeYuanPostgresAmount(input.targetCurrentContractAmountMinor, "targetCurrentContractAmountMinor");
+    : validateOrderTargetAmount(input.bookingChannelCode, input.targetCurrentContractAmountMinor);
   const differenceFromPolicyMinor = currentContractAmountMinor - policyBaseAmountMinor;
   const differenceExceedsThreshold = channelPriceDifferenceExceedsThreshold(
     policyBaseAmountMinor,
@@ -191,4 +203,10 @@ export function requireTransactionReference(value: unknown): string {
     throw new DomainError("VALIDATION_ERROR", "transactionReference is required");
   }
   return value.trim();
+}
+
+/** 已退房渠道订单允许追加金额更正；取消、未到等终态不能恢复应结金额。 */
+export function canRepriceOrder(status: string, channel: string | null): boolean {
+  return status === "RESERVED" || status === "CHECKED_IN"
+    || (status === "CHECKED_OUT" && (channel === "YOUMUDAO" || channel === "CTRIP" || channel === "MEITUAN"));
 }

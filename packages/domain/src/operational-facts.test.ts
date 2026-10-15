@@ -140,14 +140,14 @@ describe("operational fact identifiers", () => {
       policyBaseAmountMinor: 0,
       targetCurrentContractAmountMinor: 0
     })).toThrow(/must not be submitted for FREE or member stays/);
-    expect(() => createOrderPricingDecision({
-      bookingChannelCode: "CTRIP",
+    expect(createOrderPricingDecision({
+      bookingChannelCode: "WECOM",
       stayType: "TRANSIENT",
       memberStay: false,
       policyBaseAmountMinor: 100_000,
-      targetCurrentContractAmountMinor: 84_050,
-      channelPriceDifferenceReason: "非法角分金额"
-    })).toThrow(/whole-yuan/);
+      targetCurrentContractAmountMinor: 38_750,
+      manualPriceAdjustmentReason: "实际本单金额387.50元"
+    })).toMatchObject({currentContractAmountMinor:38_750,manualAdjustmentMinor:-61_250});
   });
 
   it("rebuilds external-channel stay changes at the exact 15 percent boundary", () => {
@@ -314,5 +314,26 @@ describe("operational fact identifiers", () => {
     expect(requireTransactionReference("  txn-123  ")).toBe("txn-123");
     expect(() => requireTransactionReference(undefined)).toThrow(/transactionReference is required/);
     expect(() => requireTransactionReference("   ")).toThrow(/transactionReference is required/);
+  });
+});
+
+
+describe("外部渠道角分金额", () => {
+  it.each(["YOUMUDAO", "CTRIP", "MEITUAN"] as const)("%s 新建和住宿变更保留角分", channel => {
+    const input = { bookingChannelCode: channel, stayType: "TRANSIENT", memberStay: false,
+      policyBaseAmountMinor: 30000, targetCurrentContractAmountMinor: 27720 };
+    expect(createOrderPricingDecision(input)).toMatchObject({ currentContractAmountMinor: 27720, pricingBasis: "CHANNEL_CONTRACT", manualAdjustmentMinor: 0 });
+    for (const commandType of ["RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY", "MOVE_UNIT"] as const) {
+      expect(stayChangePricingDecision({ ...input, commandType }).currentContractAmountMinor).toBe(27720);
+    }
+  });
+  it("角分仍严格执行15%说明门槛", () => {
+    const input = { bookingChannelCode: "CTRIP" as const, stayType: "TRANSIENT", memberStay: false, policyBaseAmountMinor: 10001 };
+    expect(createOrderPricingDecision({ ...input, targetCurrentContractAmountMinor: 8501 }).differenceExceedsThreshold).toBe(false);
+    expect(() => createOrderPricingDecision({ ...input, targetCurrentContractAmountMinor: 8500 })).toThrow(/15%/);
+    expect(createOrderPricingDecision({ ...input, targetCurrentContractAmountMinor: 8500, channelPriceDifferenceReason: "平台确认" }).currentContractAmountMinor).toBe(8500);
+    for (const targetCurrentContractAmountMinor of [-1, 1.1, 2147483601]) {
+      expect(() => createOrderPricingDecision({ ...input, targetCurrentContractAmountMinor })).toThrow();
+    }
   });
 });

@@ -1424,3 +1424,16 @@ it("accepts optional current display labels without replacing historical invento
   Object.assign(input.referencedInventoryUnits[0]!, { display_name: 123 });
   expect(() => parseOrderView(input)).toThrow("display_name");
 });
+
+it("accepts and validates channel operating evidence without accepting arbitrary root fields", () => {
+  const base=orderView();
+  const view={...base,order:{...base.order,booking_channel_code:"CTRIP",channel_order_reference:"channel-test",current_contract_amount_minor:20000},
+    pricingRevisions:base.pricingRevisions.map(r=>({...r,pricing_basis:"CHANNEL_CONTRACT"})),
+    channelOperating:{initialized:true,businessDate:"2026-07-28",currency:"CNY",originalSaleFactId:"channel_sale",netMinor:"20000",openingRefundMinor:"0",facts:[{id:"channel_sale",kind:"SALE",amountMinor:20000,businessDate:"2026-07-28",referencesFactId:null,refundReference:null,note:"合成成交",createdAt:"2026-07-28T08:00:00.000Z"}]}};
+  expect(parseOrderView(view).channelOperating?.netMinor).toBe("20000");
+  expect(()=>parseOrderView({...view,unexpected:true})).toThrow(/不是允许的字段/);
+  expect(()=>parseOrderView({...view,channelOperating:{...view.channelOperating,netMinor:"20001"}})).toThrow(/已登记事实/);
+  expect(()=>parseOrderView({...view,channelOperating:{...view.channelOperating,originalSaleFactId:"missing"}})).toThrow(/原成交/);
+  expect(()=>parseOrderView({...view,channelOperating:{...view.channelOperating,facts:[view.channelOperating.facts[0],view.channelOperating.facts[0]]}})).toThrow(/重复/);
+  expect(()=>parseOrderView({...view,order:{...view.order,booking_channel_code:"WECOM"}})).toThrow(/外部渠道/);
+});

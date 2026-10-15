@@ -1,3 +1,5 @@
+import { buildChannelFundsEffect, channelOperatingSummary, externalChannel } from "../channel-operating.ts";
+import { canRepriceOrder, channelRecognitionDelta, validateOrderTargetAmount } from "@qintopia/domain";
 import { buildRetainedFundsEffect, isRetainedFundsCommand } from "../retained-funds.ts";
 import { fundingSource, assertNoUnassignedRefund, requirePaymentAllocationEnabled } from "../payment-allocation.ts";
 import { sql } from "kysely";
@@ -1019,7 +1021,17 @@ function pricingDecisionEffect(
 }
 
 export async function buildCommandEffect(db: DbExecutor, commandType: CommandType, rawInput: unknown, lockPayments = false): Promise<BuiltCommandEffect> {
-  const built = await buildRawCommandEffect(db, commandType, rawInput);
+  let built = await buildRawCommandEffect(db, commandType, rawInput);
+  if (["REPRICE_ORDER","RESCHEDULE_STAY","EXTEND_STAY","SHORTEN_STAY","MOVE_UNIT"].includes(commandType) && typeof built.effect.orderId === "string") {
+    const channel = await channelOperatingSummary(db,built.propertyId,built.effect.orderId);
+    if (channel) {
+      const before = requireObject(requireObject(built.effect.before,"before").currentContractAmount,"currentContractAmount");
+      const target = commandType === "REPRICE_ORDER" ? requireObject(built.effect.targetCurrentContractAmount,"targetCurrentContractAmount")
+        : requireObject(requireObject(built.effect.pricingDecision,"pricingDecision").targetCurrentContractAmount,"targetCurrentContractAmount");
+      channelRecognitionDelta(commandType === "REPRICE_ORDER" ? "CORRECTION" : "SALE", Number(before.minorUnits), BigInt(channel.netMinor), Number(target.minorUnits));
+      built=finalize(built.propertyId,built.effect,{...built.basisVersions,channelOperatingFactsHash:stableHash(channel)});
+    }
+  }
   const { externalPaymentBasis } = await import("../external-payments.ts");
   const payments = await externalPaymentBasis(db, built.propertyId, commandType, built.effect, lockPayments);
   return payments.length ? finalize(built.propertyId, built.effect, { ...built.basisVersions, externalPayments: payments }) : built;
@@ -2970,18 +2982,21 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
 
   if (commandType === "REPRICE_ORDER") {
     await assertOrderNotConvertedToMembership(db, orderId);
-    assertOrderMutable(context.order.status);
-    const targetCurrentContractAmountMinor = requireNonNegativeWholeYuanMinor(input, "targetCurrentContractAmountMinor");
+    if (!canRepriceOrder(context.order.status, context.order.booking_channel_code)) {
+      throw new DomainError("INVALID_ORDER_STATE", `Order cannot be repriced from ${context.order.status}`, 409);
+    }
+    const targetCurrentContractAmountMinor = validateOrderTargetAmount(context.order.member_id || context.order.member_contract_id ? null : context.order.booking_channel_code, input.targetCurrentContractAmountMinor);
     if (context.order.stay_type === "FREE" && targetCurrentContractAmountMinor !== 0) {
       throw new DomainError("VALIDATION_ERROR", "Free stays must keep a zero current contract amount");
     }
-    const stayTimeline = await loadActiveStayTimeline(db, context);
+    const stayTimeline = await loadProjectedStayTimeline(db, context, await propertyLocalToday(db, propertyId));
     const policyPricing = await priceStayTimeline(db, {
       propertyId, orderId, memberId: context.order.member_id, memberContractId: context.order.member_contract_id,
       arrivalDate: context.order.arrival_date, departureDate: context.order.departure_date,
       stayType: context.order.stay_type as StayType, policyVersionId: context.order.pricing_policy_version_id,
       timeline: stayTimeline, manualAdjustmentMinor: 0
     });
+    // 既有核对/回执字段表示与政策价差额；落库时渠道仍为CHANNEL_CONTRACT且人工调价为0。
     const manualAdjustmentMinor = targetCurrentContractAmountMinor - policyPricing.currentContractAmount.minorUnits;
     const pricing: PricingResult = {
       ...policyPricing,
@@ -2989,6 +3004,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     };
     return finalize(propertyId, {
       orderId, inventoryUnitId: stayTimeline.at(-1)!.inventoryUnitId, stayTimeline,
+      bookingChannelCode: context.order.booking_channel_code,
       before: { currentContractAmount: (await orderAmountSummary(db, context)).currentContractAmount },
       policyBaseAmount: policyPricing.currentContractAmount,
       targetCurrentContractAmount: pricing.currentContractAmount,
@@ -3025,6 +3041,11 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
   }
 
   if (commandType === "RECORD_REFUND") {
+    if (externalChannel(context.order.booking_channel_code)) {
+      const channel = await buildChannelFundsEffect(db, propertyId, orderId, "RECORD_REFUND", input);
+      return finalize(propertyId, channel.effect, { ...baseBasis, ...channel.basis });
+    }
+    if (input.businessDate !== undefined) throw new DomainError("VALIDATION_ERROR", "业务日期字段仅用于渠道退款；企微退款按正式登记日记录");
     assertOperatorFundsAllowedForOrder(context);
     await assertLodgingFundsOpenForOrder(db, orderId);
     const amountMinor = requireInteger(input, "amountMinor", { min: 1 });
@@ -3060,6 +3081,10 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
   }
 
   if (commandType === "REVERSE_FACT") {
+    if (externalChannel(context.order.booking_channel_code)) {
+      const channel = await buildChannelFundsEffect(db, propertyId, orderId, "REVERSE_FACT", input);
+      return finalize(propertyId, channel.effect, { ...baseBasis, ...channel.basis });
+    }
     await assertLodgingFundsOpenForOrder(db, orderId);
     const reversesFactId = requireString(input, "reversesFactId");
     const original = await db.selectFrom("collection_facts")

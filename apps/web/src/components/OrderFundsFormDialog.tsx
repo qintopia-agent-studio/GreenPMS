@@ -1,3 +1,4 @@
+import { ChannelRefundForm } from "./ChannelRefundForm";
 import type { RetainedFundItem } from "@qintopia/contracts";
 import { readOrderRetainedFunds, unreservedSourceMinor } from "../retainedFunds";
 import { api } from "../api";
@@ -17,7 +18,7 @@ import { ExternalPaymentPicker } from "./ExternalPaymentPicker";
 
 export type { OrderFundsAction } from "../orderFunds";
 
-export function OrderFundsFormDialog({ action, view, initialFactId, draft, writeBlocked = false, writeBlockedReason = "当前订单、房态或权限已变化，暂不能继续。请关闭后重新打开并核对。", onClose, onSubmit }: {
+function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeBlocked = false, writeBlockedReason = "当前订单、房态或权限已变化，暂不能继续。请关闭后重新打开并核对。", onClose, onSubmit }: {
   action: OrderFundsAction;
   view: OrderViewDto;
   initialFactId?: string;
@@ -134,4 +135,10 @@ export function OrderFundsFormDialog({ action, view, initialFactId, draft, write
       </form>
     </Modal>
   );
+}
+
+
+export function OrderFundsFormDialog(props: Parameters<typeof NormalOrderFundsFormDialog>[0]) {
+ return props.action === "RECORD_REFUND" && props.view.channelOperating
+   ? <ChannelRefundForm {...props} /> : <NormalOrderFundsFormDialog {...props} />;
 }
