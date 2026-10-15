@@ -1,4 +1,4 @@
-import { parseChannelYuanToMinor } from "../channel-amount";
+import { parseStayFinalYuanToMinor } from "../channel-amount";
 import { useMemberChoices } from "../useMemberChoices";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import { AlertTriangle, FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
@@ -253,11 +253,7 @@ export function bookingChannelRequiredForStay(useMemberEntitlement: boolean, sta
 }
 
 export function parseYuanAmountToMinor(value: string): number | undefined {
-  const normalized = value.trim();
-  const match = /^(\d+)(?:\.00)?$/.exec(normalized);
-  if (!match) return undefined;
-  const minor = BigInt(match[1]!) * 100n;
-  return minor <= 2_147_483_600n ? Number(minor) : undefined;
+  return parseStayFinalYuanToMinor(value);
 }
 
 export function parseBackfillCollectionYuanToMinor(value: string): number | undefined {
@@ -298,7 +294,7 @@ export function backfillReviewValidationError(input: BackfillReviewDetails): str
   }
   if (!input.bookingChannelCode) return "请选择订单来源渠道";
   if (input.contractAmountMinor === undefined) return input.targetAmountYuan.trim()
-    ? "本单金额格式不正确，请填写非负整数金额"
+    ? "本单金额格式不正确，请填写不超过两位小数的非负金额"
     : "请填写本单金额";
   const externalChannel = input.bookingChannelCode !== "WECOM";
   if (externalChannel && input.contractAmountMinor <= 0) return "外部渠道本单应结金额必须大于 0";
@@ -430,9 +426,7 @@ export function createOrderPricingDraft(input: {
   manualPriceAdjustmentReason: string;
 }) {
   const externalChannel = input.bookingChannelCode !== "" && input.bookingChannelCode !== "WECOM";
-  const targetCurrentContractAmountMinor = externalChannel
-    ? parseChannelYuanToMinor(input.targetAmountYuan)
-    : parseYuanAmountToMinor(input.targetAmountYuan);
+  const targetCurrentContractAmountMinor = parseYuanAmountToMinor(input.targetAmountYuan);
   const differenceFromPolicyMinor = targetCurrentContractAmountMinor === undefined
     ? undefined
     : targetCurrentContractAmountMinor - input.policyBaseAmountMinor;
@@ -2409,10 +2403,10 @@ function QuoteWorkbench({
                       <input
                         value={targetContractAmountYuan}
                         onChange={(event) => setTargetContractAmountYuan(event.target.value)}
-                        inputMode={bookingChannelCode === "WECOM" ? "numeric" : "decimal"}
+                        inputMode="decimal"
                         placeholder={bookingChannelCode === "WECOM" ? "0" : "例如 277.20"}
                         min={bookingChannelCode === "WECOM" ? 0 : 0.01}
-                        pattern={bookingChannelCode === "WECOM" ? "[0-9]+(?:\\.00)?" : "[0-9]+(?:\\.[0-9]{1,2})?"}
+                        pattern={"[0-9]+(?:\\.[0-9]{1,2})?"}
                         required
                         data-testid="target-contract-amount"
                       />

@@ -413,3 +413,29 @@ it("渠道改期命令与恢复草稿保留角分", () => {
   expect(stayDateChangeInitialDraft("RESCHEDULE_STAY",current,request).targetContractYuan).toBe("1610.28");
   expect(() => buildStayDateChangeRequest("RESCHEDULE_STAY",current,{...draft,targetContractYuan:"1610.281"})).toThrow();
 });
+
+describe("普通WECOM日期调整保留387.5元最终金额", () => {
+  it.each(["RESCHEDULE_STAY", "EXTEND_STAY", "SHORTEN_STAY"] as const)("%s 命令及恢复草稿精确到分", action => {
+    const current = view();
+    current.order.booking_channel_code = "WECOM";
+    current.allowedActions = [{code:action,enabled:true,disabledReason:null}];
+    if(action !== "RESCHEDULE_STAY") { current.order.status="CHECKED_IN";current.effectiveArrangement.businessDate="2026-08-03"; }
+    const draft = {...stayDateChangeInitialDraft(action,current),newDepartureDate:action === "SHORTEN_STAY" ? "2026-08-03" : "2026-08-05",reason:"调整住宿安排",manuallyAdjustWecomPrice:true,targetContractYuan:"387.5",manualPriceAdjustmentReason:"核对最终成交价"};
+    const request=buildStayDateChangeRequest(action,current,draft);
+    expect(request.input).toMatchObject({targetCurrentContractAmountMinor:38750,manualPriceAdjustmentReason:"核对最终成交价"});
+    expect(stayDateChangeInitialDraft(action,current,request)).toMatchObject({targetContractYuan:"387.5",manuallyAdjustWecomPrice:true,manualPriceAdjustmentReason:"核对最终成交价"});
+    expect(buildStayDateChangeRequest(action,current,{...draft,manuallyAdjustWecomPrice:false}).input).not.toHaveProperty("targetCurrentContractAmountMinor");
+    expect(()=>buildStayDateChangeRequest(action,current,{...draft,manualPriceAdjustmentReason:" "})).toThrow("人工调价原因");
+    for(const targetContractYuan of ["387.501","-0.01","1e2","Infinity","21474836.01",""])expect(()=>buildStayDateChangeRequest(action,current,{...draft,targetContractYuan})).toThrow("最多两位小数");
+  });
+  it("会员/免费即使恢复了WECOM旧渠道也不带入手工金额", () => {
+    for (const extra of [{stay_type:"FREE" as const},{member_id:"member"},{member_contract_id:"contract"}]) {
+      const current=view();current.order={...current.order,booking_channel_code:"WECOM",...extra};
+      const request=buildStayDateChangeRequest("RESCHEDULE_STAY",current,{...stayDateChangeInitialDraft("RESCHEDULE_STAY",current),newDepartureDate:"2026-08-05",reason:"调整安排",manuallyAdjustWecomPrice:true,targetContractYuan:"387.5",manualPriceAdjustmentReason:"不应携带"});
+      expect(request.input).not.toHaveProperty("targetCurrentContractAmountMinor");
+      expect(request.input).not.toHaveProperty("manualPriceAdjustmentReason");
+      const recovered={...request,input:{...request.input,targetCurrentContractAmountMinor:38750,manualPriceAdjustmentReason:"历史草稿"}};
+      expect(stayDateChangeInitialDraft("RESCHEDULE_STAY",current,recovered)).toMatchObject({targetContractYuan:"",manuallyAdjustWecomPrice:false});
+    }
+  });
+});

@@ -468,3 +468,26 @@ it("换房核对凭据允许渠道角分", () => {
   effect.pricingDecision.pricingBasis = "MANUAL_ADJUSTMENT";
   expect(moveUnitPreviewHasEvidence(effect, input)).toBe(false);
 });
+
+describe("普通WECOM换房387.5元精度", () => {
+  it("命令与草稿保留角分，仍校验金额范围和调价原因", () => {
+    const current=view({booking_channel_code:"WECOM",channel_order_reference:null});
+    const draft={...moveUnitInitialDraft(current,units),newInventoryUnitId:"bed_1",reason:"换房核对",manuallyAdjustWecomPrice:true,targetContractYuan:"387.5",manualPriceAdjustmentReason:"核对最终成交价"};
+    const request=buildMoveUnitRequest(current,draft);
+    expect(request.input).toMatchObject({targetCurrentContractAmountMinor:38750,manualPriceAdjustmentReason:"核对最终成交价"});
+    expect(moveUnitInitialDraft(current,units,request)).toMatchObject({targetContractYuan:"387.5",manuallyAdjustWecomPrice:true,manualPriceAdjustmentReason:"核对最终成交价"});
+    expect(()=>buildMoveUnitRequest(current,{...draft,manualPriceAdjustmentReason:" "})).toThrow("人工调价原因");
+    expect(buildMoveUnitRequest(current,{...draft,manuallyAdjustWecomPrice:false}).input).not.toHaveProperty("targetCurrentContractAmountMinor");
+    for(const targetContractYuan of ["387.501","-0.01","1e2","Infinity","21474836.01",""])expect(()=>buildMoveUnitRequest(current,{...draft,targetContractYuan})).toThrow("最多两位小数");
+  });
+  it("会员及免费换房不携带WECOM手工金额", () => {
+    for(const extra of [{stay_type:"FREE" as const},{member_id:"member"},{member_contract_id:"contract"}]) {
+      const current=view({booking_channel_code:"WECOM",...extra});
+      const request=buildMoveUnitRequest(current,{...moveUnitInitialDraft(current,units),newInventoryUnitId:"bed_1",reason:"调整安排",manuallyAdjustWecomPrice:true,targetContractYuan:"387.5",manualPriceAdjustmentReason:"不应携带"});
+      expect(request.input).not.toHaveProperty("targetCurrentContractAmountMinor");
+      expect(request.input).not.toHaveProperty("manualPriceAdjustmentReason");
+      const recovered={...request,input:{...request.input,targetCurrentContractAmountMinor:38750,manualPriceAdjustmentReason:"历史草稿"}};
+      expect(moveUnitInitialDraft(current,units,recovered)).toMatchObject({targetContractYuan:"",manuallyAdjustWecomPrice:false});
+    }
+  });
+});

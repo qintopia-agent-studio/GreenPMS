@@ -808,7 +808,7 @@ function dateChangePreviewHasEvidence(
       .some((amount) => amount.currency !== targetAmount.currency)
     || targetAmount.minorUnits < 0
     || targetAmount.minorUnits > 2_147_483_600
-    || (decision.pricingBasis !== "CHANNEL_CONTRACT" && targetAmount.minorUnits % 100 !== 0)
+    || (decision.pricingBasis !== "CHANNEL_CONTRACT" && decision.pricingBasis !== "MANUAL_ADJUSTMENT" && targetAmount.minorUnits % 100 !== 0)
     || difference.minorUnits !== targetAmount.minorUnits - policyAmount.minorUnits
     || !moneyMatches(pricing.currentContractAmount, targetAmount)
     || collectionDifference.minorUnits !== targetAmount.minorUnits - netCollection.minorUnits
@@ -1076,7 +1076,7 @@ export function moveUnitPreviewHasEvidence(effect: Record<string, unknown>, inpu
     || !hasMoney(netCollection) || !hasMoney(collectionDifference)
     || [beforeAmount, policyAmount, difference, pricing.cashRemainder, pricing.currentContractAmount, netCollection, collectionDifference]
       .some((amount) => amount.currency !== targetAmount.currency)
-    || targetAmount.minorUnits < 0 || targetAmount.minorUnits > 2_147_483_600 || (decision.pricingBasis !== "CHANNEL_CONTRACT" && targetAmount.minorUnits % 100 !== 0)
+    || targetAmount.minorUnits < 0 || targetAmount.minorUnits > 2_147_483_600 || (decision.pricingBasis !== "CHANNEL_CONTRACT" && decision.pricingBasis !== "MANUAL_ADJUSTMENT" && targetAmount.minorUnits % 100 !== 0)
     || difference.minorUnits !== targetAmount.minorUnits - policyAmount.minorUnits
     || !moneyMatches(pricing.currentContractAmount, targetAmount)
     || collectionDifference.minorUnits !== targetAmount.minorUnits - netCollection.minorUnits
@@ -1288,7 +1288,7 @@ export function moveUnitReceiptHasEvidence(
       .some((amount) => amount.currency !== targetAmount.currency)
     || targetAmount.minorUnits < 0
     || targetAmount.minorUnits > 2_147_483_600
-    || (decision.pricingBasis !== "CHANNEL_CONTRACT" && targetAmount.minorUnits % 100 !== 0)
+    || (decision.pricingBasis !== "CHANNEL_CONTRACT" && decision.pricingBasis !== "MANUAL_ADJUSTMENT" && targetAmount.minorUnits % 100 !== 0)
     || !moneyMatches(pricing.currentContractAmount, targetAmount)
     || difference.minorUnits !== targetAmount.minorUnits - policyAmount.minorUnits
     || collectionDifference.minorUnits !== targetAmount.minorUnits - netCollection.minorUnits
@@ -2163,7 +2163,7 @@ export function u1PreviewHasBusinessEvidence(
           || policyBaseAmount.minorUnits < 0
           || !hasMoney(targetAmount)
           || targetAmount.minorUnits < 0
-          || (!isExternalBookingChannel(effect.bookingChannelCode) && targetAmount.minorUnits % 100 !== 0)
+          || (!isExternalBookingChannel(effect.bookingChannelCode) && effect.bookingChannelCode !== "WECOM" && targetAmount.minorUnits % 100 !== 0)
           || targetAmount.minorUnits !== input.targetCurrentContractAmountMinor
           || !moneyMatches(currentContractAmount, targetAmount)
           || before.currentContractAmount.currency !== targetAmount.currency

@@ -1,4 +1,4 @@
-import { parseChannelYuanToMinor, isExternalBookingChannel } from "../channel-amount";
+import { parseChannelYuanToMinor, parseStayFinalYuanToMinor, supportsDecimalStayFinalAmount } from "../channel-amount";
 import { ArrowRightLeft, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
@@ -65,21 +65,14 @@ function shiftDate(value: string, days: number): string {
   return new Date(epoch + days * 86_400_000).toISOString().slice(0, 10);
 }
 
-function wholeYuanMinor(value: string): number | undefined {
-  if (!/^\d+$/.test(value.trim())) return undefined;
-  const yuan = Number(value);
-  if (!Number.isSafeInteger(yuan) || yuan < 0 || yuan > maxWholeYuan) return undefined;
-  return yuan * 100;
-}
-
 function recoveredString(request: CommandRequest | undefined, key: string): string {
   const value = request?.commandType === "MOVE_UNIT" ? request.input[key] : undefined;
   return typeof value === "string" ? value : "";
 }
 
-function recoveredAmount(request: CommandRequest | undefined, channel: unknown): string {
+function recoveredAmount(request: CommandRequest | undefined, order: OrderViewDto["order"]): string {
   const value = request?.commandType === "MOVE_UNIT" ? request.input.targetCurrentContractAmountMinor : undefined;
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 2_147_483_600 && (isExternalBookingChannel(channel) || value % 100 === 0)
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 2_147_483_600 && (supportsDecimalStayFinalAmount(order) || value % 100 === 0)
     ? String(value / 100)
     : "";
 }
@@ -103,7 +96,7 @@ export function moveUnitInitialDraft(
   const effectiveDate = recoveredString(recovered, "effectiveDate") || initialEffectiveDate;
   const effectiveDateUnitId = inventoryUnitAtDate(view, effectiveDate);
   const defaultCandidate = candidates.find((unit) => unit.id !== effectiveDateUnitId) ?? candidates[0];
-  const amount = recoveredAmount(recovered, view.order.booking_channel_code);
+  const amount = recoveredAmount(recovered, view.order);
   return {
     newInventoryUnitId: candidates.some((unit) => unit.id === recoveredTarget)
       ? recoveredTarget
@@ -209,8 +202,8 @@ export function buildMoveUnitRequest(view: OrderViewDto, draft: MoveUnitDraft): 
       input.channelPriceDifferenceReason = draft.channelPriceDifferenceReason.trim();
     }
   } else if (!memberStay && !freeStay && channel === "WECOM" && draft.manuallyAdjustWecomPrice) {
-    const target = wholeYuanMinor(draft.targetContractYuan);
-    if (target === undefined) throw new Error("人工调整后的订单金额必须是支持范围内的非负整元");
+    const target = parseStayFinalYuanToMinor(draft.targetContractYuan);
+    if (target === undefined) throw new Error("人工调整后的订单金额必须是支持范围内的非负金额，最多两位小数");
     if (!draft.manualPriceAdjustmentReason.trim()) throw new Error("主动偏离政策重算金额时必须填写人工调价原因");
     input.targetCurrentContractAmountMinor = target;
     input.manualPriceAdjustmentReason = draft.manualPriceAdjustmentReason.trim();
@@ -522,7 +515,7 @@ export function MoveUnitDrawer({
         <p>默认按换房后的完整住宿安排使用政策价重新计算。</p>
         <label className="stay-date-price-toggle"><input type="checkbox" role="switch" checked={draft.manuallyAdjustWecomPrice} onChange={(event) => update({ manuallyAdjustWecomPrice: event.target.checked, ...(!event.target.checked ? { targetContractYuan: "", manualPriceAdjustmentReason: "" } : {}) })} /><span><strong>另行调整金额</strong><small>只有本次需要使用其他金额时才打开。</small></span></label>
         {draft.manuallyAdjustWecomPrice ? <div className="form-grid">
-          <label>调整后订单金额（元）<input type="number" min="0" max={maxWholeYuan} step="1" inputMode="numeric" value={draft.targetContractYuan} onChange={(event) => update({ targetContractYuan: event.target.value })} required data-testid="move-wecom-amount" /></label>
+          <label>调整后订单金额（元）<input type="number" min="0" max={maxWholeYuan} step="0.01" inputMode="decimal" value={draft.targetContractYuan} onChange={(event) => update({ targetContractYuan: event.target.value })} required data-testid="move-wecom-amount" /></label>
           <label>人工调价原因<textarea value={draft.manualPriceAdjustmentReason} onChange={(event) => update({ manualPriceAdjustmentReason: event.target.value })} required maxLength={1000} rows={2} data-testid="move-wecom-reason" /></label>
         </div> : null}
       </section> : null}

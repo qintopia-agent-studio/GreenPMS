@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { supportsDecimalStayFinalAmount } from "../channel-amount";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
@@ -44,6 +45,7 @@ import {
   orderRefreshMustCloseEditor,
   orderViewPayloadChanged,
   wholeYuanAmountMinor,
+  repriceTargetAmountMinor,
   orderViewMatchesPrincipalScope,
   orderedOrderOccupants,
   overdueInHouseNotice,
@@ -2496,7 +2498,22 @@ describe("shared Web command recovery persistence", () => {
 });
 
 
-it("渠道更正草稿恢复到分且不放开非渠道草稿", () => {
+it("普通WECOM与渠道更正草稿恢复到分", () => {
   expect(initialRepriceTargetYuan(27600,27720,"YOUMUDAO")).toBe("277.2");
-  expect(initialRepriceTargetYuan(27600,27720,"WECOM")).toBe("276");
+  expect(initialRepriceTargetYuan(27600,27720,"WECOM")).toBe("277.2");
+});
+
+
+it("普通WECOM调价387.5及草稿不截断，会员和免费保持原精度", () => {
+  const order={booking_channel_code:"WECOM",stay_type:"TRANSIENT",member_id:null,member_contract_id:null} as OrderViewDto["order"];
+  expect(repriceTargetAmountMinor(order,"387.5")).toBe(38750);
+  expect(initialRepriceTargetYuan(40000,38750,"WECOM")).toBe("387.5");
+  for(const value of ["387.501","-0.01","1e2","Infinity","21474836.01",""])expect(repriceTargetAmountMinor(order,value)).toBeUndefined();
+  for(const restricted of [{...order,stay_type:"FREE" as const},{...order,member_id:"member"},{...order,member_contract_id:"contract"}]) {
+    expect(repriceTargetAmountMinor(restricted,"387.5")).toBeUndefined();
+    expect(initialRepriceTargetYuan(40000,38750,restricted.booking_channel_code,supportsDecimalStayFinalAmount(restricted))).toBe("400");
+    expect(repriceTargetAmountMinor(restricted,"387")).toBe(38700);
+  }
+  expect(initialRepriceTargetYuan(40000,38750,"WECOM",false)).toBe("400");
+  expect(formalMembershipAgreedPriceMinor("387.5")).toBeUndefined();
 });

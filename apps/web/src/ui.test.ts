@@ -3856,7 +3856,8 @@ describe("U1 confirmation evidence", () => {
     const channelEffect = { ...effect, bookingChannelCode: "YOUMUDAO", manualAdjustmentMinor: -1972,
       targetCurrentContractAmount: money(11028), pricing: { ...effect.pricing, currentContractAmount: money(11028) } };
     expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", channelEffect, { ...input, targetCurrentContractAmountMinor: 11028 })).toBe(true);
-    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...channelEffect, bookingChannelCode: "WECOM" }, { ...input, targetCurrentContractAmountMinor: 11028 })).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...channelEffect, bookingChannelCode: "WECOM" }, { ...input, targetCurrentContractAmountMinor: 11028 })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...channelEffect, bookingChannelCode: null }, { ...input, targetCurrentContractAmountMinor: 11028 })).toBe(false);
 
     for (const key of Object.keys(effect)) {
       expect(u1PreviewHasBusinessEvidence("REPRICE_ORDER", { ...effect, [key]: undefined }, input), key).toBe(false);
@@ -3976,6 +3977,11 @@ describe("U1 confirmation evidence", () => {
       newDepartureDate: afterDepartureDate
     };
     expect(u1PreviewHasBusinessEvidence(commandType, effect, input)).toBe(true);
+    const fractional = { ...effect, after: { ...effect.after, pricing: { ...effect.after.pricing, currentContractAmount: money(38750) } },
+      pricingDecision: { ...effect.pricingDecision, pricingBasis: "MANUAL_ADJUSTMENT", targetCurrentContractAmount: money(38750), differenceFromPolicy: money(8750), manualAdjustmentMinor:8750, differenceExceedsThreshold:true, reason:{code:`${commandType}_MANUAL_PRICE`,note:"实际约定387.50元"} },
+      fundsSummary:{...effect.fundsSummary,collectionDifference:money(28750)} };
+    expect(u1PreviewHasBusinessEvidence(commandType, fractional, { ...input, targetCurrentContractAmountMinor:38750 })).toBe(true);
+    expect(u1PreviewHasBusinessEvidence(commandType, {...fractional, pricingDecision:{...fractional.pricingDecision,pricingBasis:"MEMBER_ENTITLEMENT"}}, input)).toBe(false);
     const preview = {
       previewId: "preview_1",
       commandType,
