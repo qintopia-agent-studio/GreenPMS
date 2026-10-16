@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
+import type { MetaDto } from "../../apps/web/src/types";
 import type { CommandType, ReceiptDto, RoomCatalogView, RoomStatusBoardDto } from "@qintopia/contracts";
 
 const propertyId = "prop_qintopia_demo";
@@ -36,12 +37,19 @@ async function openRoomSettings(page: Page) {
   await expect(page.getByRole("heading", { name: "实际房间与床位", exact: true })).toBeVisible();
 }
 
+async function openBatchCategory(page: Page, building: string, included: boolean) {
+  await page.getByRole("button", { name: "批量设置分类", exact: true }).click();
+  await page.getByRole("combobox", { name: "选择楼栋", exact: true }).selectOption(building);
+  await page.getByRole("radio", { name: included ? /^经营单元/ : /^非经营单元/ }).check();
+  await page.getByRole("button", { name: "下一步：核对修改", exact: true }).click();
+}
+
 async function confirmStatistics(page: Page, expectedTitle: string, reason: string) {
   const effect = page.getByTestId("command-effect");
   await expect(effect).toContainText(expectedTitle);
-  await expect(effect).toContainText("历史、当前及未来");
-  await expect(effect).toContainText("房间版本与子床继承设置");
-  await expect(effect).toContainText("房态、真实资金、经营销售额与今日真实新增订单保持完整");
+  await expect(effect).toContainText("过去和今后的经营入住率");
+  await expect(effect).toContainText("房间内的床位一并调整");
+  await expect(effect).toContainText("入住记录、订单、收付款、经营销售额和今日新增订单数照常保留");
   const note = page.getByTestId("reason-note");
   const confirm = page.getByTestId("confirm-command");
   await expect(note).toHaveValue("");
@@ -56,7 +64,7 @@ async function confirmStatistics(page: Page, expectedTitle: string, reason: stri
   const response = await confirmation;
   expect(response.ok(), await response.text()).toBe(true);
   expect((await response.json()).businessCommitted).toBe(true);
-  await expect(page.getByRole("status").filter({ hasText: "经营住宿统计范围已保存" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("status").filter({ hasText: "房间分类已保存" })).toBeVisible({ timeout: 30_000 });
   await expect(confirm).toBeHidden();
   const done = page.getByRole("dialog").getByRole("button", { name: "完成", exact: true });
   if (await done.isVisible()) await done.click();
@@ -95,9 +103,19 @@ test("桌面管理员单房及整栋调整经营统计：原因必填、保存�
   expect(rooms.every(room => room.includedInOperatingStatistics)).toBe(true);
   const arrivalDate = "2034-06-10";
   const departureDate = nextDate(arrivalDate);
+  const metaResponse = await page.request.get("/api/v1/meta");
+  expect(metaResponse.ok()).toBe(true);
+  const meta = await metaResponse.json() as MetaDto;
+  const policy = meta.pricingPolicyVersions.filter(policy => policy.property_id === propertyId
+    && policy.calculation_kind === "DURATION_BAND_TOTAL" && policy.stay_type === null
+    && policy.effective_from !== null && policy.effective_from <= arrivalDate
+    && (policy.effective_until === null || arrivalDate < policy.effective_until))
+    .sort((a, b) => (b.effective_from ?? "").localeCompare(a.effective_from ?? "")
+      || Number(b.code === "MANAGED_ROOM_PRICES") - Number(a.code === "MANAGED_ROOM_PRICES") || b.version - a.version)[0];
+  expect(policy).toBeDefined();
   const quoteResponse = await page.request.post("/api/v1/quotes", { headers: headers(), data: {
     propertyId, inventoryUnitId: occupied.unitId, arrivalDate, departureDate,
-    pricingPolicyVersionId: "policy_qintopia_public_2026_rev561_v1"
+    pricingPolicyVersionId: policy!.id
   } });
   expect(quoteResponse.ok(), await quoteResponse.text()).toBe(true);
   const { quote } = await quoteResponse.json();
@@ -117,31 +135,37 @@ test("桌面管理员单房及整栋调整经营统计：原因必填、保存�
 
   await test.step("单房进入核对，空白原因不能确认，保存后仍可读回", async () => {
     await openRoomSettings(page);
-    await page.getByRole("button", { name: `${occupied.code} 排除经营住宿统计`, exact: true }).click();
+    await page.getByRole("button", { name: `${occupied.code} 分类：经营单元，点击修改`, exact: true }).click();
+    await page.getByRole("radio", { name: "非经营单元", exact: false }).check();
+    await page.getByRole("button", { name: "下一步：核对修改", exact: true }).click();
     await expect(page.getByTestId("command-effect")).toContainText(`${building}栋 ${occupied.code}`);
     // 核对本身不写设置。
     expect((await catalog(page)).rooms.find(room => room.assetId === occupied.assetId)!.includedInOperatingStatistics).toBe(true);
-    await confirmStatistics(page, "排除经营住宿统计：1 间", "宿舍单房不纳入经营住宿统计");
+    await confirmStatistics(page, "设为非经营单元：1 间", "宿舍单房不纳入经营住宿统计");
     await page.reload();
     await page.getByRole("button", { name: "房间与床位", exact: true }).click();
-    await expect(page.getByRole("button", { name: `${occupied.code} 计入经营住宿统计`, exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: `${empty.code} 排除经营住宿统计`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: `${occupied.code} 分类：非经营单元，点击修改`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: `${empty.code} 分类：经营单元，点击修改`, exact: true })).toBeVisible();
     const saved = await catalog(page);
     expect(saved.rooms.find(room => room.assetId === occupied.assetId)!.includedInOperatingStatistics).toBe(false);
     expect(saved.rooms.find(room => room.assetId === empty.assetId)!.includedInOperatingStatistics).toBe(true);
   });
 
   await test.step("混合设置整栋排除，核对展示全部实体房及保留财务的说明", async () => {
-    const controls = page.locator(".catalog-all-rooms .catalog-page-actions > div").filter({ hasText: `${building}栋：` });
-    await expect(controls).toContainText(`${rooms.length - 1}/${rooms.length} 间计入（混合设置）`);
-    await controls.getByRole("button", { name: "整栋排除", exact: true }).click();
+    await page.getByRole("combobox", { name: "楼栋", exact: true }).selectOption(building);
+    await expect(page.getByRole("navigation", { name: "按经营分类筛选" }).getByRole("button", { name: /^经营单元/ })).toHaveText(`经营单元${rooms.length - 1}`);
+    await openBatchCategory(page, building, false);
     for (const code of codes) await expect(page.getByTestId("command-effect")).toContainText(code);
-    await confirmStatistics(page, `排除经营住宿统计：${rooms.length} 间`, "整栋宿舍统一排除，真实资金和订单继续保留");
+    await confirmStatistics(page, `设为非经营单元：${rooms.length} 间`, "整栋宿舍统一排除，真实资金和订单继续保留");
     await page.reload();
     await page.getByRole("button", { name: "房间与床位", exact: true }).click();
     expect((await catalog(page)).rooms.filter(room => room.buildingCode === building).every(room => !room.includedInOperatingStatistics)).toBe(true);
-    await expect(controls).toContainText(`0/${rooms.length} 间计入`);
-    await expect(controls.getByRole("button", { name: "整栋排除", exact: true })).toBeDisabled();
+    await page.getByRole("combobox", { name: "楼栋", exact: true }).selectOption(building);
+    await expect(page.getByRole("navigation", { name: "按经营分类筛选" }).getByRole("button", { name: /^非经营单元/ })).toHaveText(`非经营单元${rooms.length}`);
+    await page.getByRole("button", { name: "批量设置分类", exact: true }).click();
+    await page.getByRole("combobox", { name: "选择楼栋", exact: true }).selectOption(building);
+    await expect(page.getByRole("button", { name: "下一步：核对修改", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "取消", exact: true }).click();
     await page.screenshot({ path: testInfo.outputPath("operating-statistics-building-excluded.png"), fullPage: true });
   });
 
@@ -166,12 +190,12 @@ test("桌面管理员单房及整栋调整经营统计：原因必填、保存�
 
   await test.step("整栋重新计入仍需原因，重载后设置均恢复", async () => {
     await openRoomSettings(page);
-    const controls = page.locator(".catalog-all-rooms .catalog-page-actions > div").filter({ hasText: `${building}栋：` });
-    await controls.getByRole("button", { name: "整栋计入", exact: true }).click();
-    await confirmStatistics(page, `计入经营住宿统计：${rooms.length} 间`, "验收完成，恢复该合成楼栋经营统计");
+    await openBatchCategory(page, building, true);
+    await confirmStatistics(page, `设为经营单元：${rooms.length} 间`, "验收完成，恢复该合成楼栋经营统计");
     await page.reload();
     await page.getByRole("button", { name: "房间与床位", exact: true }).click();
-    await expect(controls).toContainText(`${rooms.length}/${rooms.length} 间计入`);
+    await page.getByRole("combobox", { name: "楼栋", exact: true }).selectOption(building);
+    await expect(page.getByRole("navigation", { name: "按经营分类筛选" }).getByRole("button", { name: /^经营单元/ })).toHaveText(`经营单元${rooms.length}`);
     const saved = await catalog(page);
     expect(saved.rooms.filter(room => room.buildingCode === building).every(room => room.includedInOperatingStatistics)).toBe(true);
     expect(saved.history.some(change => change.reason === "整栋宿舍统一排除，真实资金和订单继续保留")).toBe(true);
@@ -184,5 +208,41 @@ test("桌面管理员单房及整栋调整经营统计：原因必填、保存�
     if (reset.length) await command(page, "MANAGE_ROOM_CATALOG", { expectedVersion: current.version,
       action: "SET_OPERATING_STATISTICS", assetIds: reset, included: true });
     await command(page, "CANCEL_ORDER", { orderId });
+  }
+});
+
+
+test("房源分类筛选与滚动：查看分类不改数据，表格中央可上下滚动", async ({ page, isMobile }) => {
+  await page.goto("/settings/rooms");
+  await page.getByTestId("login-username").fill("admin");
+  await page.getByTestId("login-password").fill("demo-pass-2026");
+  await page.getByTestId("login-submit").click();
+  await page.getByRole("button", { name: "房间与床位", exact: true }).click();
+  const before = await catalog(page);
+  const active = before.rooms.filter(room => room.active);
+  const filters = page.getByRole("navigation", { name: "按经营分类筛选" });
+  await filters.getByRole("button", { name: /^非经营单元/ }).click();
+  await expect(page.locator(".catalog-room-table tbody tr")).toHaveCount(active.filter(room => !room.includedInOperatingStatistics).length);
+  await filters.getByRole("button", { name: /^经营单元/ }).click();
+  await expect(page.locator(".catalog-room-table tbody tr")).toHaveCount(active.filter(room => room.includedInOperatingStatistics).length);
+  await filters.getByRole("button", { name: /^全部/ }).click();
+  await page.getByRole("button", { name: "批量设置分类", exact: true }).click();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  expect((await catalog(page)).version).toBe(before.version);
+  if (!isMobile) {
+    const viewport = page.viewportSize()!;
+    const tableTop = await page.locator(".catalog-room-table").evaluate(element => element.getBoundingClientRect().top + window.scrollY);
+    await page.evaluate(top => window.scrollTo(0, top - 180), tableTop);
+    const start = await page.evaluate(() => window.scrollY);
+    const rect = (await page.locator(".catalog-room-table").boundingBox())!;
+    await page.mouse.move(rect.x + rect.width / 2, Math.min(viewport.height - 100, 400));
+    await page.mouse.wheel(0, 500);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(start + 100);
+    await page.mouse.wheel(0, -500);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeLessThan(start + 100);
+  } else {
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
+    const table = page.locator(".catalog-room-table");
+    expect(await table.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
   }
 });

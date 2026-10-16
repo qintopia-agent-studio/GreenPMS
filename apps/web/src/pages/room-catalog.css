@@ -94,3 +94,40 @@
   .catalog-building-moves button { min-height: 44px; min-width: 44px; padding: 8px; }
   .catalog-building-moves button span { display: none; }
 }
+
+/* Horizontal table scrolling must not trap vertical page scrolling. */
+.catalog-room-table { overscroll-behavior-y: auto; }
+.catalog-all-rooms .catalog-category-guide { margin: 0 0 24px; line-height: 1.8; }
+.catalog-room-filters { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 18px; }
+.catalog-category-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.catalog-category-filters button { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 7px 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 14px; cursor: pointer; }
+.catalog-category-filters button:hover { background: var(--surface-muted); color: var(--text); }
+.catalog-category-filters button.is-selected { background: var(--brand-soft); color: var(--brand); font-weight: 650; }
+.catalog-category-filters button span { font-size: 12px; font-variant-numeric: tabular-nums; }
+.catalog-building-filter { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+.catalog-building-filter select { width: auto; min-width: 112px; min-height: 38px; padding: 6px 28px 6px 12px; font-size: 13px; }
+.catalog-category-button { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; padding: 6px 9px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; }
+.catalog-category-button.is-operating { color: var(--brand); }
+.catalog-category-button.is-other { background: var(--surface-muted); }
+.catalog-category-button svg { color: var(--muted); }
+.catalog-category-button:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-muted); }
+.catalog-category-button:disabled { cursor: default; opacity: .65; }
+.catalog-category-target { margin: 0; font-size: 17px; font-weight: 650; }
+.catalog-category-options { margin: 0; padding: 0; border: 0; display: grid; gap: 10px; min-width: 0; }
+.catalog-category-options legend { margin-bottom: 10px; font-size: 14px; font-weight: 600; }
+.catalog-category-options label { display: flex; align-items: center; gap: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.catalog-category-options label.is-selected { border-color: var(--brand); background: var(--brand-soft); }
+.catalog-category-options input { width: 17px; height: 17px; margin: 0; flex: 0 0 auto; accent-color: var(--brand); }
+.catalog-category-options strong { display: block; font-size: 15px; }
+.catalog-category-options small { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.catalog-category-impact { padding: 14px 16px; border-radius: 8px; background: var(--surface-muted); font-size: 13px; color: var(--muted); line-height: 1.8; }
+.catalog-category-impact p { margin: 0; }
+.catalog-category-impact p + p { margin-top: 5px; }
+.catalog-category-footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+@media (max-width: 760px) {
+  .catalog-all-rooms .catalog-page-actions { flex-wrap: wrap; }
+  .catalog-room-filters { align-items: flex-start; gap: 12px; }
+  .catalog-category-filters { gap: 2px; }
+  .catalog-category-filters button { padding: 8px; gap: 5px; font-size: 13px; }
+  .catalog-all-rooms .catalog-category-guide { margin-bottom: 18px; }
+}

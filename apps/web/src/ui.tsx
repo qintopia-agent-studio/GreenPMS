@@ -6469,6 +6469,8 @@ export function CommandDialog({
   const [busy, setBusy] = useState(false);
   const executableCommandType = isExecutableCommandType(request.commandType) ? request.commandType : undefined;
   const u1CommandType = !backfillStay && isU1CommandType(request.commandType) ? request.commandType : undefined;
+  const u1ActionLabel = u1CommandType === "MANAGE_ROOM_CATALOG" && request.input.action === "SET_OPERATING_STATISTICS"
+    ? "修改房间分类" : u1CommandType ? commandShellLabel(u1CommandType) : "";
   const memberProfile = request.commandType === "CREATE_MEMBER";
   const membershipBusiness = Boolean(executableCommandType && membershipBusinessCommands.has(executableCommandType));
   const administratorMembershipCorrection = Boolean(executableCommandType && isAdministratorMembershipCorrection(executableCommandType));
@@ -6999,7 +7001,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : backfillStay ? "确认补录住宿" : completeStay ? "确认完成住宿" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : retainedFundsLabel ? `确认${retainedFundsLabel}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : backfillStay ? "确认补录住宿" : completeStay ? "确认完成住宿" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : retainedFundsLabel ? `确认${retainedFundsLabel}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${u1ActionLabel}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }
@@ -7062,7 +7064,7 @@ export function CommandDialog({
       </section> : null}
       {preview && !receipt ? (
         <>
-          {u1CommandType && u1CommandType !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" ? <h3 className="command-shell-review-heading" ref={reviewHeadingRef} tabIndex={-1} data-testid="command-review-heading">请核对{commandShellLabel(u1CommandType)}</h3> : null}
+          {u1CommandType && u1CommandType !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" ? <h3 className="command-shell-review-heading" ref={reviewHeadingRef} tabIndex={-1} data-testid="command-review-heading">请核对{u1ActionLabel}</h3> : null}
           <EffectSummary
             preview={preview}
             fulfillment={fulfillment}

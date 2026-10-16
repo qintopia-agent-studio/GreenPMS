@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { BedDouble, Building2, History, Plus, RefreshCw, Settings2, Tag } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { BedDouble, Building2, ChevronDown, History, Plus, RefreshCw, Settings2, Tag } from "lucide-react";
 import type { ManagedRoom, ManagedRoomType, RoomCatalogInput, RoomCatalogView, RoomRateAnchors } from "@qintopia/contracts";
 import { api } from "../api";
 import { principalCan, useWorkspace } from "../session";
@@ -7,6 +8,7 @@ import type { CommandRequest } from "../types";
 import { CommandDialog, CommandRecoveryBar, DamagedCommandRecoveryNotice, EmptyState, InlineError, LoadingBlock, Modal,
   QuoteRecoveryConflictNotice, formatDateTime, formatMinor, isTerminalCommandRecovery, recoveryCommandRequest, usePersistentCommandRecovery } from "../ui";
 import { BuildingOrderEditor } from "./BuildingOrderEditor";
+import { RoomCategoryEditor, type RoomCategoryDraft } from "./RoomCategoryEditor";
 import "./room-catalog.css";
 
 const nights = ["1", "7", "14", "30"] as const;
@@ -122,7 +124,14 @@ export function RoomCatalogPage() {
   const [data, setData] = useState<RoomCatalogView>();
   const [error, setError] = useState<unknown>();
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"TYPES" | "ROOMS" | "HISTORY">("TYPES");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = searchParams.get("tab") === "rooms" ? "ROOMS" : searchParams.get("tab") === "history" ? "HISTORY" : "TYPES";
+  function setTab(value: "TYPES" | "ROOMS" | "HISTORY") {
+    setSearchParams(previous => { const next = new URLSearchParams(previous); next.set("tab", value.toLowerCase()); return next; }, { replace: true });
+  }
+  const [categoryFilter, setCategoryFilter] = useState<"ALL" | "OPERATING" | "OTHER">("ALL");
+  const [buildingFilter, setBuildingFilter] = useState("");
+  const [categoryDraft, setCategoryDraft] = useState<RoomCategoryDraft>();
   const [selected, setSelected] = useState("");
   const [showInactive, setShowInactive] = useState(false);
   const [buildingDraft, setBuildingDraft] = useState<string[]>();
@@ -142,7 +151,7 @@ export function RoomCatalogPage() {
     catch (nextError) { if (loadLease.current === lease) setError(nextError); }
     finally { if (loadLease.current === lease) setLoading(false); }
   }
-  useEffect(() => { setData(undefined); setOrdering(false); setSelected(""); setEditor(undefined); setCommand(undefined); void refresh(); return () => { loadLease.current += 1; }; }, [propertyId]);
+  useEffect(() => { setData(undefined); setOrdering(false); setCategoryDraft(undefined); setCategoryFilter("ALL"); setBuildingFilter(""); setSelected(""); setEditor(undefined); setCommand(undefined); void refresh(); return () => { loadLease.current += 1; }; }, [propertyId]);
   const blocked = loading || Boolean(error) || recovery.blocked || !canManage;
   const visibleTypes = data?.types.filter((type) => showInactive || type.active) ?? [];
   const activeType = visibleTypes.find((type) => type.code === selected) ?? visibleTypes[0];
@@ -159,13 +168,17 @@ export function RoomCatalogPage() {
     setCommand({ commandType: "MANAGE_ROOM_CATALOG", input: { ...input, propertyId, expectedVersion: data.version }, title,
       description: "请核对影响并填写原因，历史订单和操作记录会保留。", initialReason: { code: "ROOM_CATALOG_CHANGE", note: "" } });
   }
+  const listedRooms = data?.rooms.filter(room => (showInactive || room.active)
+    && (!buildingFilter || room.buildingCode === buildingFilter)) ?? [];
+  const filteredRooms = listedRooms.filter(room => categoryFilter === "ALL"
+    || room.includedInOperatingStatistics === (categoryFilter === "OPERATING"));
   function roomRows(rooms: ManagedRoom[]) {
-    return <div className="table-region catalog-room-table" tabIndex={0} role="region" aria-label="房间与床位"><table className="data-table"><thead><tr><th>房间</th><th>房型</th><th>物理床 / 可住人数</th><th>状态</th><th>计入经营住宿统计</th><th>操作</th></tr></thead>
+    return <div className="table-region catalog-room-table" tabIndex={0} role="region" aria-label="房间与床位"><table className="data-table"><thead><tr><th>房间</th><th>房型</th><th>物理床 / 可住人数</th><th>状态</th><th>分类</th><th>操作</th></tr></thead>
       <tbody>{rooms.filter((room) => showInactive || room.active).map((room) => <tr key={room.unitId}><th scope="row">{room.buildingCode}栋 {room.code}</th>
         <td>{data?.types.find((type) => type.code === room.typeCode)?.name ?? room.typeCode}</td><td>{room.bedCount} 床 / {room.capacity} 人{room.beds.length ? <small className="catalog-bed-list">可售床位：{room.beds.filter((bed) => bed.active).map((bed) => bed.code).join("、") || "无"}</small> : null}</td>
-        <td><span className={`catalog-status ${room.active ? "" : "is-inactive"}`}>{room.active ? "启用" : "已停用"}</span></td><td><button className="button button-compact button-secondary" disabled={blocked}
-          aria-label={`${room.code} ${room.includedInOperatingStatistics ? "排除" : "计入"}经营住宿统计`}
-          onClick={() => simple({ action: "SET_OPERATING_STATISTICS", assetIds: [room.assetId], included: !room.includedInOperatingStatistics }, "核对经营住宿统计范围")}>{room.includedInOperatingStatistics ? "计入 · 点击排除" : "排除 · 点击计入"}</button></td><td><div className="row-actions">
+        <td><span className={`catalog-status ${room.active ? "" : "is-inactive"}`}>{room.active ? "启用" : "已停用"}</span></td><td><button className={`catalog-category-button ${room.includedInOperatingStatistics ? "is-operating" : "is-other"}`} disabled={blocked}
+          aria-label={`${room.code} 分类：${room.includedInOperatingStatistics ? "经营单元" : "非经营单元"}，点击修改`}
+          onClick={() => setCategoryDraft({ roomId: room.unitId, buildingCode: room.buildingCode })}>{room.includedInOperatingStatistics ? "经营单元" : "非经营单元"}<ChevronDown size={13} aria-hidden="true" /></button></td><td><div className="row-actions">
           <button className="button button-compact button-secondary" disabled={blocked} onClick={() => setEditor({ kind: "ROOM", room })}>调整</button>
           <button className="button button-compact button-secondary" disabled={blocked} onClick={() => simple({ action: "SET_ROOM_ACTIVE", roomId: room.unitId, active: !room.active }, `${room.active ? "停用" : "启用"}房间 ${room.code}`)}>{room.active ? "停用" : "启用"}</button>
         </div></td></tr>)}</tbody></table></div>;
@@ -207,17 +220,32 @@ export function RoomCatalogPage() {
           <button className="button button-secondary button-compact danger-text-button" disabled={blocked || typeRooms.length > 0 || data.rates.some((rate) => rate.typeCode === activeType.code)}
             title="仅未关联房间、价格或会员的误建房型可删除" onClick={() => simple({ action: "DELETE_TYPE", typeCode: activeType.code }, "删除误建房型")}>删除误建房型</button></div></footer>
       </section> : <EmptyState title="暂无房型" detail="新增房型后可以分配房间并设置价格。" />}</div>
-      : tab === "ROOMS" ? <section className="catalog-all-rooms"><div className="catalog-section-heading"><div><h2>实际房间与床位</h2><p>{data.rooms.filter((room) => room.active).length} 间启用 · 物理床与可单卖床位分别管理</p></div><button className="button button-secondary button-compact" disabled={blocked || (data.buildingOrder?.length ?? 0) < 2} onClick={() => { setBuildingDraft(undefined); setOrdering(true); }}><Settings2 size={15} aria-hidden="true" />调整楼栋顺序</button></div><p className="catalog-hint">统计设置统一影响历史、当前和未来；房态、资金、经营销售额与今日真实新增订单保留。房间版本和子床继承设置；新增房间默认计入；整栋操作修改该楼栋全部实体房间（含停用房间）。</p>
-        <div className="catalog-page-actions">{[...new Set(data.rooms.map(room => room.buildingCode))].map(building => {
-          const rooms = data.rooms.filter(room => room.buildingCode === building);
-          const includedCount = rooms.filter(room => room.includedInOperatingStatistics).length;
-          return <div key={building}><span>{building || "未分配"}栋：{includedCount}/{rooms.length} 间计入{includedCount > 0 && includedCount < rooms.length ? "（混合设置）" : ""}</span>
-            <button className="button button-secondary button-compact" disabled={blocked || includedCount === rooms.length} onClick={() => simple({ action: "SET_OPERATING_STATISTICS", assetIds: rooms.map(room => room.assetId), included: true }, `核对${building}栋全部计入经营住宿统计`)}>整栋计入</button>
-            <button className="button button-secondary button-compact" disabled={blocked || includedCount === 0} onClick={() => simple({ action: "SET_OPERATING_STATISTICS", assetIds: rooms.map(room => room.assetId), included: false }, `核对${building}栋全部排除经营住宿统计`)}>整栋排除</button>
-          </div>;
-        })}</div>{roomRows(data.rooms)}</section>
+      : tab === "ROOMS" ? <section className="catalog-all-rooms">
+        <div className="catalog-section-heading"><div><h2>实际房间与床位</h2><p>{data.rooms.filter(room => room.active).length} 间启用 · 查看房间、床位和经营分类</p></div>
+          <div className="catalog-page-actions"><button className="button button-secondary button-compact" disabled={blocked || (data.buildingOrder?.length ?? 0) < 2} onClick={() => { setBuildingDraft(undefined); setOrdering(true); }}><Settings2 size={15} aria-hidden="true" />调整楼栋顺序</button>
+            <button className="button button-secondary button-compact" disabled={blocked || !data.rooms.length} onClick={() => setCategoryDraft({ buildingCode: buildingFilter || data.rooms[0]!.buildingCode })}>批量设置分类</button></div>
+        </div>
+        <p className="catalog-category-guide">经营单元计入经营入住率、住宿人数等统计。宿舍等非经营单元不计入，入住记录与收付款照常保留。</p>
+        <div className="catalog-room-filters">
+          <nav className="catalog-category-filters" aria-label="按经营分类筛选">{([
+            ["ALL", "全部", listedRooms.length],
+            ["OPERATING", "经营单元", listedRooms.filter(room => room.includedInOperatingStatistics).length],
+            ["OTHER", "非经营单元", listedRooms.filter(room => !room.includedInOperatingStatistics).length]
+          ] as const).map(([value, label, count]) => <button key={value} aria-pressed={categoryFilter === value}
+            className={categoryFilter === value ? "is-selected" : ""} onClick={() => setCategoryFilter(value)}>{label}<span>{count}</span></button>)}</nav>
+          <label className="catalog-building-filter"><span>楼栋</span><select value={buildingFilter} onChange={event => setBuildingFilter(event.target.value)}>
+            <option value="">全部楼栋</option>{[...new Set(data.rooms.map(room => room.buildingCode))].filter(Boolean).map(building => <option key={building} value={building}>{building}栋</option>)}
+          </select></label>
+        </div>
+        {filteredRooms.length ? roomRows(filteredRooms) : <EmptyState title="没有符合条件的房间" detail="试试其他分类或楼栋，也可以勾选“显示停用项”。" />}
+      </section>
       : <section className="catalog-history"><h2>最近修改</h2><p className="muted">保留操作人、时间、原因和前后内容，最多展示最近 100 次操作。</p>{data.history.length ? data.history.map((item) => <article key={item.id}><header><h3>{item.title}</h3><time>{formatDateTime(item.createdAt)}</time></header><p>{item.operator} · {item.reason}</p><ul>{item.description.map((line, index) => <li key={index}>{line}</li>)}</ul></article>) : <EmptyState title="暂无修改记录" detail="首次保存或发布价格后，记录会显示在这里。" />}</section>}
     </> : null}
+    {categoryDraft && data && !command ? <RoomCategoryEditor data={data} draft={categoryDraft} blocked={blocked}
+      onClose={() => setCategoryDraft(undefined)} onSubmit={(rooms, included, draft) => {
+        setCategoryDraft(draft);
+        simple({ action: "SET_OPERATING_STATISTICS", assetIds: rooms.map(room => room.assetId), included }, "核对房间分类修改");
+      }} /> : null}
     {ordering && data && !command ? <BuildingOrderEditor data={data} {...(buildingDraft ? { draft: buildingDraft } : {})} onClose={() => setOrdering(false)} onSubmit={(buildingOrder) => {
       setBuildingDraft(buildingOrder);
       submit({ propertyId, expectedVersion: data.version, action: "SET_BUILDING_ORDER", buildingOrder }, "调整库存日历楼栋显示顺序");
@@ -229,11 +257,15 @@ export function RoomCatalogPage() {
         setCommand(undefined);
         if (draft.input.action === "SET_BUILDING_ORDER") {
           setOrdering(true); setBuildingDraft((draft.input as unknown as RoomCatalogInput).buildingOrder);
-        } else if (draft.input.action === "SET_OPERATING_STATISTICS") { setEditor(undefined); setTab("ROOMS");
+        } else if (draft.input.action === "SET_OPERATING_STATISTICS") {
+          setEditor(undefined); setTab("ROOMS");
+          const input = draft.input as unknown as RoomCatalogInput;
+          const rooms = data?.rooms.filter(room => input.assetIds?.includes(room.assetId)) ?? [];
+          setCategoryDraft({ ...(rooms.length === 1 ? { roomId: rooms[0]!.unitId } : {}), buildingCode: rooms[0]?.buildingCode ?? "", ...(input.included !== undefined ? { included: input.included } : {}) });
         } else { setEditor(editor); setEditorDraft({ input: draft.input as unknown as RoomCatalogInput, reason: draft.initialReason?.note ?? "" }); }
       }}
-      onCommitted={async () => { setOrdering(false); await Promise.all([refresh(), refreshMeta()]); setNotice(command.input.action === "SET_OPERATING_STATISTICS" ? "经营住宿统计范围已保存，历史、当前和未来统计使用相同设置。" : "设置已保存，房态与新订单已使用最新配置。"); }}
-      onClose={async (context) => { setCommand(undefined); setEditor(undefined); setOrdering(false); setRecovering(false);
+      onCommitted={async () => { setOrdering(false); setCategoryDraft(undefined); await Promise.all([refresh(), refreshMeta()]); setNotice(command.input.action === "SET_OPERATING_STATISTICS" ? "房间分类已保存，经营住宿统计已更新。" : "设置已保存，房态与新订单已使用最新配置。"); }}
+      onClose={async (context) => { setCommand(undefined); setEditor(undefined); setCategoryDraft(undefined); setOrdering(false); setRecovering(false);
         if (context || (recovery.pending && isTerminalCommandRecovery(recovery.pending.state))) await recovery.clearResolved(); }} /> : null}
   </div>;
 }

@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-10-16.1";
+export const assistantKnowledgeRevision = "2026-10-16.2";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -183,7 +183,7 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
   {
     id: "catalog", title: "房型、房间床位、楼栋顺序与价格", commands: ["MANAGE_ROOM_CATALOG"],
     sources: ["docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房型房间床位与价格管理-实施规格.md", "docs/implementation/catalog-snapshot-fix/README.md", "apps/web/src/pages/RoomCatalogPage.tsx"],
-    content: `“计入经营住宿统计”支持单个房源或按整栋批量设置，普通经营房源默认计入，子床和房间历史版本沿用同一实体资产设置。关闭只排除经营人数、入住率、住宿量与经营容量等住宿统计，不停用房源、不删除订单、不改变真实收退款和现有收入账本；历史与当期会按同一设置重新统计。管理员需先核对影响范围并填写原因，再确认。
+    content: `房间分为“经营单元”和“非经营单元”：经营单元计入经营住宿统计，宿舍等非经营单元不计入经营人数、入住率、住宿量与经营容量。新增房间默认为经营单元。在设置→房型与价格→房间与床位，点击分类可筛选列表；点击房间行内的分类可修改该房间，“批量设置分类”可选择一栋楼统一修改，包含该楼栋已停用房间。选择分类后点击“下一步：核对修改”，填写原因并确认才会保存。修改分类会重新计算过去和今后的经营住宿统计，房内床位沿用房间分类；不会停用房间或删除订单，入住记录、真实收退款和现有收入账本照常保留。
 有权限的管理员在设置→房型与价格管理房型、房间床位、楼栋显示顺序和住宿价格。修改前核对销售单位、房型关联、启停状态及影响，按页面核对后确认。停用不等于删除历史。
 价格和房型有历史快照，修改经营目录不会简单重算全部旧订单；在住房间改号等变化仍须按系统规则提交，遇到占用或关联阻断不能先删订单绕过。助手不能直接打开此设置子页，需告诉员工从设置手动进入，不能把AI模型设置当作房型设置。`
   },

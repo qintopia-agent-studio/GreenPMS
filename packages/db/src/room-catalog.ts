@@ -228,10 +228,10 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
     effect.after = { ...(basis.storedSnapshot ?? basis.snapshot), version: next.version };
     if (!basis.storedSnapshot) delete effect.after.buildingOrder;
     effect.operatingStatisticsChange = { assetIds: [...input.assetIds].sort(), included };
-    effect.title = `${included ? "计入" : "排除"}经营住宿统计：${selected.length} 间`;
+    effect.title = `设为${included ? "经营单元" : "非经营单元"}：${selected.length} 间`;
     effect.description = [selected.map(room => `${room!.buildingCode}栋 ${room!.code}`).join("、"),
-      "统一影响历史、当前及未来的经营人数、入住率、单元夜和容量；房间版本与子床继承设置。",
-      "房态、真实资金、经营销售额与今日真实新增订单保持完整。"];
+      "过去和今后的经营入住率、住宿人数、住宿晚数和可用房源数量，都会按新分类计算；房间内的床位一并调整。",
+      "入住记录、订单、收付款、经营销售额和今日新增订单数照常保留。"];
   } else if (input.action === "SET_BUILDING_ORDER") {
     const current = basis.snapshot.buildingOrder!;
     const order = input.buildingOrder;
