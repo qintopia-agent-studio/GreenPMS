@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.14.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.14.0...v1.14.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **room-catalog:** 简化房间分类设置并修复表格滚动 ([#87](https://github.com/qintopia-agent-studio/GreenPMS/issues/87)) ([783712e](https://github.com/qintopia-agent-studio/GreenPMS/commit/783712ef99aaa1356e66596a13d3d541f8d930eb))
+* **room-status:** 修复翻月与同步阻断并统一宿舍统计范围 ([#85](https://github.com/qintopia-agent-studio/GreenPMS/issues/85)) ([9ea33bd](https://github.com/qintopia-agent-studio/GreenPMS/commit/9ea33bdbd479e1b08af7183d0e935d225406d84a))
+
 ## [1.14.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.13.1...v1.14.0) (2026-10-15)
 
 
