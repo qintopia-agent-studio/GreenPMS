@@ -49,7 +49,6 @@ import {
   roomStatusActionsForPresentation,
   roomStatusActionPresentationBlock,
   roomStatusAuthorizedQuoteAction,
-  roomStatusHistoricalSelectionNeedsRefresh,
   roomStatusOrderContextVisible,
   roomStatusOrderIdentityKey,
   roomStatusOrderContextMode,
@@ -75,14 +74,7 @@ import {
   roomStatusOrderCommandScope,
   roomStatusProjectionRefreshAllowed,
   roomStatusProjectionRefreshDecision,
-  roomStatusConservativeElapsed,
-  roomStatusProjectionLocalFreshnessDeadline,
-  roomStatusProjectionHasWriteHeadroom,
-  roomStatusProjectionResponseCanEnableWrites,
-  roomStatusLowFreshnessResponseRequiresManualRetry,
   roomStatusQueryFailureRetryDelay,
-  roomStatusRefreshDelay,
-  roomStatusStaleResponseRetryDelay,
   roomStatusCommittedRefreshScopeIsCurrent,
   roomStatusProjectionWritable,
   roomStatusQuoteActionCodeForUnit,
@@ -650,7 +642,7 @@ describe("CREATE_QUOTE request lifecycle", () => {
       quoteIsCurrent: true,
       guestCount: 1,
       occupancyCapacity: 1
-    })).toBe("当前房态已变化、正在刷新、权限受限或有操作尚未收口，请按页面提示处理后重试");
+    })).toBe("当前操作暂不可办理，请查看页面提示");
     expect(backfillSubmitBlockedReason({
       commandsBlocked: false,
       quoteIsCurrent: true,
@@ -1575,103 +1567,12 @@ describe("Room-status query attempt lifecycle", () => {
     expect(roomStatusProjectionRefreshDecision({ ...base, permissionDenied: true, queryInFlight: false })).toBe("STOP");
   });
 
-  it("refreshes before the write headroom closes and never reopens an almost-expired response", () => {
-    const now = Date.parse("2026-08-30T08:00:00.000Z");
-    const freshUntil = "2026-08-30T08:00:05.000Z";
-
-    expect(roomStatusRefreshDelay(freshUntil, now)).toBe(2_000);
-    expect(roomStatusProjectionHasWriteHeadroom(freshUntil, now)).toBe(true);
-    expect(roomStatusProjectionHasWriteHeadroom(freshUntil, now + 4_249)).toBe(true);
-    expect(roomStatusProjectionHasWriteHeadroom(freshUntil, now + 4_250)).toBe(false);
-    expect(roomStatusRefreshDelay(freshUntil, now + 4_900)).toBe(0);
-    expect(roomStatusProjectionHasWriteHeadroom("invalid", now)).toBe(false);
-    expect(roomStatusProjectionResponseCanEnableWrites(freshUntil, now + 1_999)).toBe(true);
-    expect(roomStatusProjectionResponseCanEnableWrites(freshUntil, now + 2_000)).toBe(false);
-    expect(roomStatusProjectionResponseCanEnableWrites("invalid", now)).toBe(false);
-  });
-
-  it("derives a conservative local freshness deadline without comparing client and server clocks", () => {
-    const clientRequestStartedAt = Date.parse("2036-08-30T08:00:00.000Z");
-    const deadline = roomStatusProjectionLocalFreshnessDeadline({
-      asOf: "2026-08-30T08:00:00.000Z",
-      freshUntil: "2026-08-30T08:00:05.000Z"
-    }, clientRequestStartedAt);
-
-    expect(deadline).toBe(clientRequestStartedAt + 5_000);
-    expect(roomStatusProjectionResponseCanEnableWrites(deadline, clientRequestStartedAt + 1_999)).toBe(true);
-    expect(roomStatusProjectionResponseCanEnableWrites(deadline, clientRequestStartedAt + 2_000)).toBe(false);
-    expect(roomStatusProjectionLocalFreshnessDeadline({
-      asOf: "invalid",
-      freshUntil: "2026-08-30T08:00:05.000Z"
-    }, clientRequestStartedAt)).toBeNaN();
-  });
-
-  it("advances freshness by the safer elapsed clock across wall rollback and browser sleep", () => {
-    expect(roomStatusConservativeElapsed(
-      { monotonic: 1_000, wall: 10_000 },
-      { monotonic: 2_500, wall: -50_000 }
-    )).toBe(1_500);
-    expect(roomStatusConservativeElapsed(
-      { monotonic: 2_500, wall: 10_000 },
-      { monotonic: 2_500, wall: 16_000 }
-    )).toBe(6_000);
-  });
-
-  it("keeps the old projection writable through a normal delayed renewal without installing low-headroom data", () => {
-    const initialRequestAt = Date.parse("2026-08-30T08:00:00.000Z");
-    const oldFreshUntil = "2026-08-30T08:00:05.000Z";
-    const refreshStartedAt = initialRequestAt + roomStatusRefreshDelay(oldFreshUntil, initialRequestAt);
-    const responseReceivedAt = refreshStartedAt + 1_500;
-    const renewedFreshUntil = new Date(refreshStartedAt + 5_000).toISOString();
-
-    expect(refreshStartedAt).toBe(initialRequestAt + 2_000);
-    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, responseReceivedAt)).toBe(true);
-    expect(roomStatusProjectionResponseCanEnableWrites(renewedFreshUntil, responseReceivedAt)).toBe(true);
-    expect(roomStatusProjectionResponseCanEnableWrites(
-      new Date(responseReceivedAt + 2_000).toISOString(),
-      responseReceivedAt
-    )).toBe(false);
-
-    const loopingBandResponseReceivedAt = refreshStartedAt + 2_500;
-    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, loopingBandResponseReceivedAt)).toBe(false);
-    expect(roomStatusProjectionResponseCanEnableWrites(
-      new Date(refreshStartedAt + 5_000).toISOString(),
-      loopingBandResponseReceivedAt
-    )).toBe(false);
-
-    const lateTimerStartedAt = initialRequestAt + 2_400;
-    const lateResponseReceivedAt = lateTimerStartedAt + 1_900;
-    const lateResponseDeadline = lateTimerStartedAt + 5_000;
-    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, lateTimerStartedAt)).toBe(true);
-    expect(roomStatusProjectionHasWriteHeadroom(oldFreshUntil, lateResponseReceivedAt)).toBe(false);
-    expect(roomStatusProjectionResponseCanEnableWrites(lateResponseDeadline, lateResponseReceivedAt)).toBe(true);
-    expect(roomStatusProjectionResponseCanEnableWrites(lateResponseDeadline, lateResponseReceivedAt, 4_000)).toBe(false);
-  });
-
-  it("backs off repeated low-freshness responses instead of immediately looping", () => {
-    expect(roomStatusStaleResponseRetryDelay(1)).toBe(500);
-    expect(roomStatusStaleResponseRetryDelay(2)).toBe(1_000);
-    expect(roomStatusStaleResponseRetryDelay(3)).toBe(2_000);
-    expect(roomStatusStaleResponseRetryDelay(4)).toBe(4_000);
-    expect(roomStatusStaleResponseRetryDelay(20)).toBe(4_000);
-    expect(roomStatusLowFreshnessResponseRequiresManualRetry(1)).toBe(false);
-    expect(roomStatusLowFreshnessResponseRequiresManualRetry(2)).toBe(false);
-    expect(roomStatusLowFreshnessResponseRequiresManualRetry(3)).toBe(true);
-    expect(roomStatusLowFreshnessResponseRequiresManualRetry(20)).toBe(true);
-  });
-
   it("backs off transient query failures without requiring a manual browser refresh", () => {
     expect(roomStatusQueryFailureRetryDelay(1)).toBe(1_000);
     expect(roomStatusQueryFailureRetryDelay(2)).toBe(2_000);
     expect(roomStatusQueryFailureRetryDelay(3)).toBe(4_000);
     expect(roomStatusQueryFailureRetryDelay(4)).toBe(8_000);
     expect(roomStatusQueryFailureRetryDelay(20)).toBe(8_000);
-  });
-
-  it("applies the same minimum freshness gate to a committed refresh response", () => {
-    const receivedAt = Date.parse("2026-08-30T08:00:00.000Z");
-    expect(roomStatusProjectionResponseCanEnableWrites("2026-08-30T08:00:03.000Z", receivedAt)).toBe(false);
-    expect(roomStatusProjectionResponseCanEnableWrites("2026-08-30T08:00:03.001Z", receivedAt)).toBe(true);
   });
 
   it("rejects a committed refresh after its property or selected order changes", () => {
@@ -1963,7 +1864,18 @@ describe("Room-status backfill entry routing", () => {
     }, "2026-08-15")).toEqual([]);
   });
 
-  it("prioritizes a failed projection refresh and refreshes an expired historical selection immediately", () => {
+
+
+  it("explains an incomplete projection as a data review rather than an endless network refresh", () => {
+    const block = roomStatusActionPresentationBlock({ refreshFailed: false, accessLevel: "WRITE",
+      projectionWritable: false, projectionExpired: false, projectionReady: false, projectionIncomplete: true,
+      recoveryBlocked: false, recoveryReady: true, recoveryError: undefined, hasRecoveryEntry: false });
+    expect(block).toMatchObject({ kind: "REFRESH", actionLabel: "重试读取" });
+    expect(block?.reason).toContain("资料待核对");
+    expect(block?.reason).not.toContain("正在更新");
+  });
+
+  it("offers an explicit retry when the projection fails before other recovery guidance", () => {
     expect(roomStatusActionPresentationBlock({
       refreshFailed: true,
       accessLevel: "WRITE",
@@ -1979,24 +1891,6 @@ describe("Room-status backfill entry routing", () => {
       actionLabel: "重试刷新",
       reason: expect.stringContaining("房态刷新失败")
     });
-    const guard = new RoomStatusQueryAttemptGuard();
-    const requestId = guard.begin();
-    expect(roomStatusHistoricalSelectionNeedsRefresh({
-      boardExpired: true,
-      historicalSelectionOpen: true,
-      queryInFlight: guard.isInFlight()
-    })).toBe(false);
-    expect(guard.finish(requestId)).toBe(true);
-    expect(roomStatusHistoricalSelectionNeedsRefresh({
-      boardExpired: true,
-      historicalSelectionOpen: true,
-      queryInFlight: guard.isInFlight()
-    })).toBe(true);
-    expect(roomStatusHistoricalSelectionNeedsRefresh({
-      boardExpired: true,
-      historicalSelectionOpen: false,
-      queryInFlight: false
-    })).toBe(false);
   });
 
   it("keeps an ordinary background renewal quiet and offers manual retry only after failure", () => {

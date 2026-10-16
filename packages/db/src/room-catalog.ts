@@ -1,3 +1,4 @@
+import { loadOperatingStatisticsScope } from "./operating-statistics.ts";
 import { sql, type Transaction } from "kysely";
 import { DomainError, roomCatalogActions, type CatalogInventoryInsert, type CatalogPolicyInsert, type ManagedRoom,
   type ManagedRoomType, type RoomCatalogEffect, type RoomCatalogInput, type RoomCatalogSnapshot, type RoomCatalogView,
@@ -49,6 +50,7 @@ async function catalogBasis(db: DbExecutor, propertyId: string) {
       .where("calculation_kind", "=", "DURATION_BAND_TOTAL").where("code", "!=", managedPolicyCode)
       .orderBy("effective_from").orderBy("version").orderBy("id").execute()
   ]);
+  const statistics = await loadOperatingStatisticsScope(db, propertyId, units);
   const latestByAsset = new Map<string, typeof links[number]>();
   for (const link of links) {
     if ((latestByAsset.get(link.asset_id)?.version ?? -1) < link.version) latestByAsset.set(link.asset_id, link);
@@ -57,6 +59,7 @@ async function catalogBasis(db: DbExecutor, propertyId: string) {
   const unitCodes = stateRow ? object<RoomCatalogSnapshot>(stateRow.snapshot).unitCodes ?? {} : {};
   const rooms: ManagedRoom[] = units.filter((unit) => unit.kind === "ROOM" && (!linkByUnit.has(unit.id)
     || latestByAsset.get(linkByUnit.get(unit.id)!.asset_id)?.unit_id === unit.id)).map((room) => ({
+    includedInOperatingStatistics: statistics.includesUnit(room.id),
     assetId: linkByUnit.get(room.id)?.asset_id ?? room.id, unitId: room.id, code: unitCodes[room.id] ?? room.code,
     buildingCode: room.building_code ?? "", typeCode: room.room_type_code ?? "", bedCount: room.physical_bed_count ?? 1,
     capacity: room.occupancy_capacity, active: room.active,
@@ -215,6 +218,20 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
     effect.description = [`${room.buildingCode}栋 · 原房号 ${room.code} → 新房号 ${code}`,
       "仅修改当前展示房号，保留原房间、床位、订单、占用和价格；历史操作记录不变",
       ...(children.length ? [`关联床位同步显示：${children.map((unit) => changes[unit.id]).join("、")}`] : [])];
+  } else if (input.action === "SET_OPERATING_STATISTICS") {
+    if (!Array.isArray(input.assetIds) || !input.assetIds.length || input.assetIds.some(id => typeof id !== "string")
+      || new Set(input.assetIds).size !== input.assetIds.length) throw new DomainError("VALIDATION_ERROR", "请选择不重复的实体房间");
+    const included = flag(input.included);
+    const selected = input.assetIds.map(id => basis.rooms.find(room => room.assetId === id));
+    if (selected.some(room => !room)) throw new DomainError("VALIDATION_ERROR", "统计设置包含不属于本门店的实体房间");
+    if (selected.every(room => room!.includedInOperatingStatistics === included)) throw new DomainError("VALIDATION_ERROR", "所选房间的统计设置没有变化");
+    effect.after = { ...(basis.storedSnapshot ?? basis.snapshot), version: next.version };
+    if (!basis.storedSnapshot) delete effect.after.buildingOrder;
+    effect.operatingStatisticsChange = { assetIds: [...input.assetIds].sort(), included };
+    effect.title = `${included ? "计入" : "排除"}经营住宿统计：${selected.length} 间`;
+    effect.description = [selected.map(room => `${room!.buildingCode}栋 ${room!.code}`).join("、"),
+      "统一影响历史、当前及未来的经营人数、入住率、单元夜和容量；房间版本与子床继承设置。",
+      "房态、真实资金、经营销售额与今日真实新增订单保持完整。"];
   } else if (input.action === "SET_BUILDING_ORDER") {
     const current = basis.snapshot.buildingOrder!;
     const order = input.buildingOrder;

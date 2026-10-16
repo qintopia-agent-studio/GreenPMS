@@ -1,4 +1,4 @@
-export const roomCatalogActions = ["SAVE_TYPE", "DELETE_TYPE", "SET_TYPE_ACTIVE", "SAVE_ROOM", "RENAME_ROOM", "SET_ROOM_ACTIVE", "PUBLISH_RATES", "SET_BUILDING_ORDER"] as const;
+export const roomCatalogActions = ["SAVE_TYPE", "DELETE_TYPE", "SET_TYPE_ACTIVE", "SAVE_ROOM", "RENAME_ROOM", "SET_ROOM_ACTIVE", "PUBLISH_RATES", "SET_BUILDING_ORDER", "SET_OPERATING_STATISTICS"] as const;
 export type RoomCatalogAction = (typeof roomCatalogActions)[number];
 export type RoomRateAnchors = Record<"1" | "7" | "14" | "30", number>;
 export interface ManagedRoomType {
@@ -12,6 +12,7 @@ export interface ManagedRoomType {
   products: { code: string; kind: "ROOM" | "BED"; multiplier: number }[];
 }
 export interface ManagedRoom {
+  includedInOperatingStatistics: boolean;
   assetId: string;
   unitId: string;
   code: string;
@@ -60,6 +61,8 @@ export interface RoomCatalogInput {
   code?: string;
   buildingCode?: string;
   buildingOrder?: string[];
+  assetIds?: string[];
+  included?: boolean;
   effectiveFrom?: string;
   anchors?: RoomRateAnchors;
 }
@@ -84,5 +87,6 @@ export interface RoomCatalogEffect {
   insertUnits: CatalogInventoryInsert[];
   roomLink: { assetId: string; oldUnitId: string | null; newUnitId: string } | null;
   policies: CatalogPolicyInsert[];
+  operatingStatisticsChange?: { assetIds: string[]; included: boolean };
   roomRename?: { roomId: string; beforeCode: string; afterCode: string };
 }

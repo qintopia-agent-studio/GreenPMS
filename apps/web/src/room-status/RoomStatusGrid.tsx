@@ -1,4 +1,3 @@
-import { InfoHint } from "../uiBasic";
 import {
   useCallback,
   useEffect,
@@ -1399,7 +1398,7 @@ export function RoomStatusGrid({
                   >
                     <strong>{date.slice(5)}</strong>
                     <span>{date === todayDate ? "今天" : weekDay}</span>
-                    <small>{summaryLabel}{date < board.businessDate && availabilitySummaryByDate.get(date)?.capacityKnown === false ? <InfoHint text={availabilitySummaryByDate.get(date)?.capacityReason ?? "缺少该日期销售单元依据"}/> : null}</small>
+                    <small title={date < board.businessDate && availabilitySummaryByDate.get(date)?.capacityKnown === false ? "历史经营房源资料待核对，暂无法计算入住率" : "入住率、人数及剩余量按经营住宿统计范围计算"}>{summaryLabel}</small>
                   </div>
                 );
               })}

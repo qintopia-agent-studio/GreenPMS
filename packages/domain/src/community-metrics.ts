@@ -16,10 +16,18 @@ export interface CommunityStay {
   identityApproximate?: boolean;
 }
 export interface CommunityEvent { orderId: string; date: string; nights: number; reason: string; kind: "RENEWAL" | "EARLY" }
+/** Complete evidence defines residence/event boundaries; operating contributions still come from `stays`. */
+export interface CommunityContinuity {
+  stays: CommunityStay[];
+  planned: CommunityStay[];
+  includesEvent: (record: CommunityRecord) => boolean;
+}
+const residenceKey = (stay: CommunityStay) => stay.personKey ? `identity:${stay.personKey}`
+  : stay.registrationKey ? `registration:${stay.orderId}:${stay.registrationKey}` : null;
 const nights = (from: string, until: string) => Math.max(0, Math.round((Date.parse(until) - Date.parse(from)) / 86400000));
 
 /** Identity keys stay inside the server projection; responses contain counts and order links only. */
-export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[], range: DashboardRange, today: string, evidenceIssues: string[] = [], planned: CommunityStay[] = []): DashboardCommunity {
+export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[], range: DashboardRange, today: string, evidenceIssues: string[] = [], planned: CommunityStay[] = [], continuity?: CommunityContinuity): DashboardCommunity {
   const byPerson = new Map<string, CommunityStay[]>();
   const plannedByPerson = new Map<string, CommunityStay[]>();
   // A stable occupant registration already identifies the resident within their stay.
@@ -29,11 +37,10 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   for (const stay of stays) {
     const order = byOrder.get(stay.orderId) ?? [];
     order.push(stay); byOrder.set(stay.orderId, order);
-    const residenceKey = stay.personKey ? `identity:${stay.personKey}`
-      : stay.registrationKey ? `registration:${stay.orderId}:${stay.registrationKey}` : null;
-    if (residenceKey && stay.historical !== false && !stay.durationReviewReason) {
-      const list = residencePeople.get(residenceKey) ?? [];
-      list.push(stay); residencePeople.set(residenceKey, list);
+    const key = residenceKey(stay);
+    if (key && stay.historical !== false && !stay.durationReviewReason) {
+      const list = residencePeople.get(key) ?? [];
+      list.push(stay); residencePeople.set(key, list);
     }
     if (stay.personKey && stay.historical !== false && !stay.durationReviewReason) {
       const list = byPerson.get(stay.personKey) ?? [];
@@ -127,7 +134,14 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     row[perspective]++;
     distribution.set(duration, row);
   }
-  for (const list of residencePeople.values()) {
+  const durationPeople = continuity ? new Map<string, CommunityStay[]>() : residencePeople;
+  if (continuity) for (const stay of continuity.stays) {
+    const key = residenceKey(stay);
+    if (!key || stay.historical === false || stay.durationReviewReason) continue;
+    const list = durationPeople.get(key) ?? [];
+    list.push(stay); durationPeople.set(key, list);
+  }
+  for (const [key, list] of durationPeople) {
     const personKey = list[0]!.personKey;
     list.sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
     let chain: CommunityStay[] = [], until = "", previous = false;
@@ -137,10 +151,35 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
       const live = chain.some(stay => stay.current && stay.arrival <= today);
       const observedEnd = live || until > today ? today : until;
       const duration = nights(start, observedEnd);
-      if (live) countDuration(duration, "current");
-      const occupiedUntil = live ? dashboardDate(today, 1) : until;
-      if (range.from <= cutoff && start <= cutoff && occupiedUntil > range.from) {
-        countDuration(nights(start, observedEnd < cutoff ? observedEnd : cutoff), "all");
+      if (continuity) {
+        const contributions = (residencePeople.get(key) ?? []).filter(stay => stay.arrival < until
+          && (stay.current ? dashboardDate(today, 1) : stay.departure) > start);
+        // Union included service dates inside this complete residence chain. An excluded
+        // room bridges continuity, but contributes no nights and cannot make it current.
+        const operatingNightsThrough = (through: string) => {
+          const intervals = contributions.map(stay => ({
+            from: stay.arrival > start ? stay.arrival : start,
+            to: stay.current || stay.departure > through ? through : stay.departure
+          })).filter(interval => interval.from < interval.to).sort((a, b) => a.from.localeCompare(b.from));
+          let total = 0, countedUntil = start;
+          for (const interval of intervals) {
+            const from = interval.from > countedUntil ? interval.from : countedUntil;
+            if (interval.to > from) total += nights(from, interval.to);
+            if (interval.to > countedUntil) countedUntil = interval.to;
+          }
+          return total;
+        };
+        if (contributions.some(stay => relevant(stay, today))) countDuration(operatingNightsThrough(today), "current");
+        if (range.from <= cutoff && contributions.some(stay => stay.arrival <= cutoff
+          && (stay.current ? dashboardDate(today, 1) : stay.departure) > range.from)) {
+          countDuration(operatingNightsThrough(observedEnd < cutoff ? observedEnd : cutoff), "all");
+        }
+      } else {
+        if (live) countDuration(duration, "current");
+        const occupiedUntil = live ? dashboardDate(today, 1) : until;
+        if (range.from <= cutoff && start <= cutoff && occupiedUntil > range.from) {
+          countDuration(nights(start, observedEnd < cutoff ? observedEnd : cutoff), "all");
+        }
       }
       // Registration-local durations do not establish NEW/RETURN/RENEWAL identities.
       if (!personKey) return;
@@ -175,7 +214,12 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
       add({ ...event, reason: `${event.reason}；按住客核对接续，不推断满意度` }, leaving.length ? leaving.map(person => person.personKey) : [null]);
     } else add(event, people.length ? people.map(person => person.personKey) : [null]);
   }
-  const resultRecords = [...records.values()].map(({ record, people, unknown }) => ({ ...record, people: unknown ? null : people.size })).sort((a, b) => b.date.localeCompare(a.date) || a.orderId.localeCompare(b.orderId));
+  const scopedRecords = [...records.values()].map(({ record, people, unknown }) => ({ ...record, people: unknown ? null : people.size })).sort((a, b) => b.date.localeCompare(a.date) || a.orderId.localeCompare(b.orderId));
+  // Event identity depends on the complete residence chain, including non-operating rooms.
+  // Omitting the optional input preserves the original unscoped behavior and ends recursion.
+  const resultRecords = continuity
+    ? communityMetrics(continuity.stays, events, range, today, [], continuity.planned).records.filter(continuity.includesEvent)
+    : scopedRecords;
   const trend = enumerateServiceDates(range.from, dashboardDate(range.to, 1)).map(day);
   const unknown = trend.some(row => row.unlinked > 0);
   const current = day(today);

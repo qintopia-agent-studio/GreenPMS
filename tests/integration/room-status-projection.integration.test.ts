@@ -405,6 +405,105 @@ afterEach(async () => {
 });
 
 describe("PostgreSQL room-status projection", () => {
+  it("excludes dorm operating summaries while keeping actual rooms, bookings and availability", async () => {
+    const range = { arrivalDate: "2032-11-01", departureDate: "2032-11-03" };
+    const created = await createOrder({ unitId: demo.secondRoomId, arrivalDate: range.arrivalDate,
+      departureDate: "2032-11-02", prefix: "dorm-summary" });
+    const orderId = created.result!.orderId as string;
+    const before = await board(range);
+    expect(unitIn(before, demo.secondRoomId).salesMode).toBe("BED_SPLIT");
+    expect(unitIn(before, demo.secondRoomId).childUnitIds).toHaveLength(4);
+    await db.insertInto("room_operating_statistics").values({ property_id: demo.propertyId,
+      asset_id: demo.secondRoomId, included: false }).execute();
+    const after = await board(range);
+    expect(after.rooms.map(room => room.id)).toEqual(before.rooms.map(room => room.id));
+    expect(intervalForOrder(after, demo.secondRoomId, orderId)).toEqual(intervalForOrder(before, demo.secondRoomId, orderId));
+    expect(unitIn(after, demo.secondRoomId).days[1]!.available).toBe(true);
+    expect(after.availabilitySummary[0]!.paidOccupiedUnits).toBe(before.availabilitySummary[0]!.paidOccupiedUnits - 4);
+    expect(after.availabilitySummary[0]!.occupantCount).toBe(before.availabilitySummary[0]!.occupantCount - 1);
+    expect(after.availabilitySummary[0]!.totalSellableUnits).toBe(before.availabilitySummary[0]!.totalSellableUnits - 4);
+    expect(after.availabilitySummary[1]!.availableBeds).toBe(before.availabilitySummary[1]!.availableBeds - 4);
+    expect(after.availabilitySummary[1]!.availableRooms).toBe(before.availabilitySummary[1]!.availableRooms);
+  });
+
+  it("keeps database inventory safe when a UI session and Agent submit the same displayed room", async () => {
+    const range = { arrivalDate: "2033-02-02", departureDate: "2033-02-03" };
+    const shown = await board(range);
+    expect(unitIn(shown, demo.secondRoomId).days[0]!.available).toBe(true);
+    const principals = [await createAdministratorSessionPrincipal(), writePrincipal];
+    const previews = await Promise.all(principals.map(async (principal, index) => {
+      const quote = await createQuote(db, { propertyId: demo.propertyId, inventoryUnitId: demo.secondRoomId,
+        stayType: "TRANSIENT", ...range, pricingPolicyVersionId: demo.transientPolicyId });
+      return createCommandPreview(db, principal, { commandType: "CREATE_ORDER", input: {
+        propertyId: demo.propertyId, quoteId: quote.quoteId,
+        primaryGuest: { fullName: `UI-Agent race ${index}`, nickname: `并发验证${index}` },
+        bookingChannelCode: "WECOM", channelOrderReference: null,
+        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits
+      } }, metadata(`ui-agent-preview-${index}`));
+    }));
+    const results = await Promise.allSettled(previews.map((prepared, index) => confirmCommandPreview(db,
+      principals[index]!, prepared.preview.previewId, { propertyId: demo.propertyId, commandType: "CREATE_ORDER",
+        confirmation: true, expectedEffectHash: prepared.preview.effectHash,
+        reason: { code: "CREATE_STANDARD_ORDER", note: "" } }, metadata(`ui-agent-confirm-${index}`))));
+    expect(results.filter(result => result.status === "fulfilled" && result.value.businessCommitted)).toHaveLength(1);
+    const actual = await board(range);
+    expect(unitIn(actual, demo.secondRoomId).days[0]!.available).toBe(false);
+    const occupants = new Set(unitIn(actual, demo.secondRoomId).intervals.flatMap(interval => interval.references
+      .filter(reference => reference.type === "ORDER").map(reference => reference.id)));
+    expect(occupants.size).toBe(1);
+  });
+
+  it("keeps completed channel repricing readable in historical room status", async () => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftLocalDate(today, -7);
+    const departureDate = shiftLocalDate(today, -2);
+    const created = await createOrder({ unitId: demo.secondRoomId, arrivalDate, departureDate,
+      prefix: "completed-channel-reprice", bookingChannelCode: "YOUMUDAO", channelOrderReference: "HISTORY-REPRICE" });
+    const orderId = created.result!.orderId as string;
+    await markOrderInHouseFixture(orderId);
+    // Synthetic owner initialization unlocks the existing channel refund protocol;
+    // it does not alter production baselines or the settlement algorithm.
+    await sql`INSERT INTO operating_sales_baselines(property_id,month,amount_minor,currency,recognition_from,evidence_note,evidence_sha256)
+      VALUES(${demo.propertyId},(date_trunc('month',${today}::date)-interval '1 month')::date,0,'CNY',
+        date_trunc('month',${today}::date)::date,'合成房态退款回归',${"0".repeat(64)})`.execute(db);
+    const admin = await createAdministratorSessionPrincipal();
+    const applyFunds = async (envelope: CommandEnvelope, label: string) => {
+      const prepared = await createCommandPreview(db, admin, envelope, metadata(label + "-preview"));
+      const receipt = await confirmCommandPreview(db, admin, prepared.preview.previewId, {
+        propertyId: demo.propertyId, commandType: envelope.commandType, confirmation: true,
+        expectedEffectHash: prepared.preview.effectHash, reason: { code: "ACCEPTANCE", note: "合成渠道退款及撤销回归" }
+      }, metadata(label + "-confirm"));
+      expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+      return receipt;
+    };
+    const refundAndReverse = async (label: string, inspectionRange: { arrivalDate: string; departureDate: string }) => {
+      const view = await writableOrderView(orderId);
+      const refund = await applyFunds({ commandType: "RECORD_REFUND", input: { propertyId: demo.propertyId, orderId,
+        amountMinor: 1_000, method: "CHANNEL", referencesFactId: view.channelOperating!.originalSaleFactId!,
+        refundReference: label, note: "合成平台退款" } }, label);
+      for (const step of ["REFUND", "REVERSAL"] as const) {
+        if (step === "REVERSAL") await applyFunds({ commandType: "REVERSE_FACT", input: {
+          propertyId: demo.propertyId, orderId, reversesFactId: String(refund.result!.factId), note: "撤销合成误录退款"
+        } }, label + "-reverse");
+        const projected = await board(inspectionRange);
+        expect(projected.projectionState).toBe("READY");
+        expect(() => assertRoomStatusBoard(projected, { propertyId: demo.propertyId, range: inspectionRange, pageIndex: 0 })).not.toThrow();
+      }
+    };
+    await refundAndReverse("active-channel-funds", { arrivalDate: today, departureDate: shiftLocalDate(today, 1) });
+    await execute({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, "history-channel-checkout");
+    const changed = await execute({ commandType: "REPRICE_ORDER", input: { propertyId: demo.propertyId, orderId,
+      targetCurrentContractAmountMinor: 27_720 } }, "history-channel-reprice");
+    expect(changed.businessCommitted).toBe(true);
+    const detail = await writableOrderView(orderId);
+    expect(detail.order.status).toBe("CHECKED_OUT");
+    const result = await board({ arrivalDate, departureDate });
+    expect(result.projectionState).toBe("READY");
+    expect(intervalForOrder(result, demo.secondRoomId, orderId)).toMatchObject({ status: "SETTLED", blocking: false, sourceCategory: "YOUMUDAO" });
+    expect(() => assertRoomStatusBoard(result, { propertyId: demo.propertyId, range: { arrivalDate, departureDate }, pageIndex: 0 })).not.toThrow();
+    await refundAndReverse("completed-channel-funds", { arrivalDate, departureDate });
+  });
+
   it("returns whole-property daily availability before filtering without double-counting split beds", async () => {
     const inventoryRows = await db.selectFrom("inventory_units")
       .select(["id", "kind", "parent_room_id", "active"])
@@ -433,7 +532,9 @@ describe("PostgreSQL room-status projection", () => {
         availableBeds: expectedAvailableBeds,
         paidOccupiedUnits: 0,
         totalSellableUnits: expectedTotalSellableUnits,
-        occupantCount: 0
+        occupantCount: 0,
+        capacityKnown: true,
+        capacityReason: "按每日有效销售单元累计；维修、免费和占用不扣分母"
       },
       {
         serviceDate: "2034-01-02",
@@ -441,7 +542,9 @@ describe("PostgreSQL room-status projection", () => {
         availableBeds: expectedAvailableBeds,
         paidOccupiedUnits: 0,
         totalSellableUnits: expectedTotalSellableUnits,
-        occupantCount: 0
+        occupantCount: 0,
+        capacityKnown: true,
+        capacityReason: "按每日有效销售单元累计；维修、免费和占用不扣分母"
       }
     ]);
 
@@ -2349,7 +2452,10 @@ describe("PostgreSQL room-status projection", () => {
     const activeTree = await board({ arrivalDate, departureDate, pageSize: 200 });
     expect(activeTree.projectionState).toBe("READY");
     expect(activeTree.page).toEqual(before.page);
-    expect(activeTree.availabilitySummary).toEqual(before.availabilitySummary);
+    expect(activeTree.availabilitySummary).toEqual(before.availabilitySummary.map(day => ({
+      ...day, capacityKnown: false,
+      capacityReason: `${day.serviceDate}：停用房源缺少有效变更记录`
+    })));
     expect(activeTree.rooms.flatMap((room) => [room, ...room.children])
       .filter((unit) => inactiveBedIds.some((bed) => bed.id === unit.id))).toEqual([]);
     for (const { id, code } of correctedRooms) {
@@ -4348,6 +4454,8 @@ describe("PostgreSQL room-status projection", () => {
       occupants: [],
       allowedActions: []
     });
+    expect(() => assertRoomStatusBoard(result, { propertyId: demo.propertyId,
+      range: { arrivalDate: legacyFreeArrival, departureDate: damagedFreeDeparture }, pageIndex: 0 })).not.toThrow();
   });
 
   it("limits damaged due-out or overdue in-house money state to the current task scope", async () => {

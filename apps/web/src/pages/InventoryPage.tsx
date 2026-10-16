@@ -16,6 +16,10 @@ import type {
 } from "@qintopia/contracts";
 import { currentReleaseFeatures } from "@qintopia/contracts";
 import { api, ApiError, type ClientCommandMetadata } from "../api";
+import {
+  ROOM_STATUS_SYNC_INTERVAL_MS, RoomStatusProjectionError, RoomStatusQueryTimeoutError,
+  roomStatusReadRetryable, roomStatusSyncNeedsBoard, validateRoomStatusResponse, validateRoomStatusSync
+} from "../room-status/roomStatusSync";
 import { addLocalDateDays, localDateInTimeZone } from "../dates";
 import { memberStayIntent } from "../memberStayIntent";
 import { commandRecoveryAvailable, principalCan, propertyAllowedActions, useWorkspace } from "../session";
@@ -73,7 +77,6 @@ import {
   withRecoveryStorageLock
 } from "../ui";
 import {
-  assertRoomStatusBoard,
   createRoomStatusOrderReturnState,
   createRoomStatusViewState,
   DEFAULT_ROOM_STATUS_FILTERS,
@@ -324,11 +327,12 @@ export function backfillReviewDetailsComplete(input: BackfillReviewDetails): boo
 
 export function backfillSubmitBlockedReason(input: {
   commandsBlocked: boolean;
+  blockedReason?: string | undefined;
   quoteIsCurrent: boolean;
   guestCount: number;
   occupancyCapacity: number;
 }): string | undefined {
-  if (input.commandsBlocked) return "当前房态已变化、正在刷新、权限受限或有操作尚未收口，请按页面提示处理后重试";
+  if (input.commandsBlocked) return input.blockedReason ?? "当前操作暂不可办理，请查看页面提示";
   if (!input.quoteIsCurrent) return "房源或住宿日期的最新报价尚未载入，请稍候";
   if (input.guestCount > input.occupancyCapacity) return "住宿人数超过当前房源可入住人数";
   return undefined;
@@ -336,6 +340,7 @@ export function backfillSubmitBlockedReason(input: {
 
 export function createOrderSubmitBlockedReason(input: {
   commandsBlocked: boolean;
+  blockedReason?: string | undefined;
   quoteIsCurrent: boolean;
   guestsComplete: boolean;
   guestCount: number;
@@ -346,7 +351,7 @@ export function createOrderSubmitBlockedReason(input: {
   pricingComplete: boolean;
   freeStayMissing: boolean;
 }): string | undefined {
-  if (input.commandsBlocked) return "当前房态或操作恢复记录尚未收口，请按页面提示处理后重试";
+  if (input.commandsBlocked) return input.blockedReason ?? "当前操作暂不可办理，请查看页面提示";
   if (!input.quoteIsCurrent) return "房源或住宿日期的最新报价尚未载入，请稍候";
   if (!input.guestsComplete) return "请补全每位住宿人的姓名和昵称";
   if (input.guestCount > input.occupancyCapacity) return "住宿人数超过当前房源可入住人数";
@@ -1380,6 +1385,7 @@ function QuoteWorkbench({
   quoteActionCode,
   backfill = false,
   commandsBlocked,
+  commandsBlockedReason,
   selectionDraftValid,
   resetToken,
   autoResolvedRecoveryIdentities,
@@ -1400,6 +1406,7 @@ function QuoteWorkbench({
   quoteActionCode?: RoomStatusQuoteActionCode;
   backfill?: boolean;
   commandsBlocked: boolean;
+  commandsBlockedReason?: string | undefined;
   selectionDraftValid: boolean;
   resetToken: number;
   autoResolvedRecoveryIdentities: { current: Set<string> };
@@ -2044,6 +2051,9 @@ function QuoteWorkbench({
   const backfillSubmitBlockReason = backfill && unit
     ? backfillSubmitBlockedReason({
         commandsBlocked: quoteCommandsBlocked,
+        blockedReason: !quoteRecoveryReady ? "正在读取上一次报价的处理结果，请稍候"
+          : quoteRecoveryRead.kind !== "ABSENT" ? "上一笔报价结果尚未确认，请先查询原报价结果"
+            : commandsBlockedReason,
         quoteIsCurrent,
         guestCount,
         occupancyCapacity: unit.occupancyCapacity
@@ -2052,6 +2062,9 @@ function QuoteWorkbench({
   const createOrderSubmitBlockReason = !backfill && unit && quote
     ? createOrderSubmitBlockedReason({
         commandsBlocked: quoteCommandsBlocked,
+        blockedReason: !quoteRecoveryReady ? "正在读取上一次报价的处理结果，请稍候"
+          : quoteRecoveryRead.kind !== "ABSENT" ? "上一笔报价结果尚未确认，请先查询原报价结果"
+            : commandsBlockedReason,
         quoteIsCurrent,
         guestsComplete,
         guestCount,
@@ -2462,16 +2475,10 @@ function QuoteWorkbench({
 }
 
 const ROOM_STATUS_PAGE_SIZE = 50;
-const ROOM_STATUS_REFRESH_START_LEAD_MS = 3_000;
-const ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS = ROOM_STATUS_REFRESH_START_LEAD_MS;
-const ROOM_STATUS_RECOVERY_INSTALL_HEADROOM_MS = 4_000;
-const ROOM_STATUS_WRITE_HEADROOM_MS = 750;
 const ROOM_STATUS_REFRESH_RETRY_MS = 250;
-const ROOM_STATUS_STALE_RESPONSE_RETRY_BASE_MS = 500;
-const ROOM_STATUS_STALE_RESPONSE_RETRY_MAX_MS = 4_000;
 const ROOM_STATUS_QUERY_FAILURE_RETRY_BASE_MS = 1_000;
 const ROOM_STATUS_QUERY_FAILURE_RETRY_MAX_MS = 8_000;
-const ROOM_STATUS_LOW_FRESHNESS_RESPONSE_LIMIT = 3;
+const ROOM_STATUS_QUERY_FAILURE_RETRY_LIMIT = 3;
 const ROOM_STATUS_QUERY_TIMEOUT_MS = 15_000;
 const ROOM_STATUS_RANGE_LOADING_NOTICE_DELAY_MS = 250;
 const ROOM_STATUS_SLOW_SYNC_NOTICE_DELAY_MS = 2_500;
@@ -2724,100 +2731,12 @@ export function roomStatusProjectionRefreshDecision(input: {
   return "REFRESH";
 }
 
-export function roomStatusProjectionLocalFreshnessDeadline(
-  projection: Pick<RoomStatusBoardDto, "asOf" | "freshUntil">,
-  requestStartedAt: number
-): number {
-  const asOf = Date.parse(projection.asOf);
-  const freshUntil = Date.parse(projection.freshUntil);
-  const ttl = freshUntil - asOf;
-  return Number.isFinite(requestStartedAt) && Number.isFinite(ttl) && ttl > 0
-    ? requestStartedAt + ttl
-    : Number.NaN;
-}
-
-interface RoomStatusFreshnessClockSample {
-  monotonic: number;
-  wall: number;
-}
-
-export function roomStatusConservativeElapsed(
-  previous: RoomStatusFreshnessClockSample,
-  current: RoomStatusFreshnessClockSample
-): number {
-  const monotonicElapsed = Number.isFinite(previous.monotonic) && Number.isFinite(current.monotonic)
-    ? current.monotonic - previous.monotonic
-    : 0;
-  const wallElapsed = Number.isFinite(previous.wall) && Number.isFinite(current.wall)
-    ? current.wall - previous.wall
-    : 0;
-  return Math.max(0, monotonicElapsed, wallElapsed);
-}
-
-let roomStatusFreshnessClockState: (RoomStatusFreshnessClockSample & { logical: number }) | undefined;
-
-function roomStatusFreshnessNow(): number {
-  const wall = Date.now();
-  const monotonic = typeof globalThis.performance?.now === "function"
-    ? globalThis.performance.now()
-    : wall;
-  const previous = roomStatusFreshnessClockState;
-  if (!previous) {
-    roomStatusFreshnessClockState = { monotonic, wall, logical: monotonic };
-    return monotonic;
-  }
-  const logical = previous.logical + roomStatusConservativeElapsed(previous, { monotonic, wall });
-  roomStatusFreshnessClockState = { monotonic, wall, logical };
-  return logical;
-}
-
-function roomStatusFreshnessDeadline(value: string | number): number {
-  return typeof value === "number" ? value : Date.parse(value);
-}
-
-export function roomStatusRefreshDelay(freshUntil: string | number, now = Date.now()): number {
-  const deadline = roomStatusFreshnessDeadline(freshUntil);
-  if (!Number.isFinite(deadline)) return 0;
-  return Math.max(0, deadline - now - ROOM_STATUS_REFRESH_START_LEAD_MS);
-}
-
-export function roomStatusProjectionHasWriteHeadroom(freshUntil: string | number, now = Date.now()): boolean {
-  const deadline = roomStatusFreshnessDeadline(freshUntil);
-  return Number.isFinite(deadline) && deadline - now > ROOM_STATUS_WRITE_HEADROOM_MS;
-}
-
-export function roomStatusProjectionResponseCanEnableWrites(
-  freshUntil: string | number,
-  now = Date.now(),
-  requiredHeadroomMs = ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
-): boolean {
-  const deadline = roomStatusFreshnessDeadline(freshUntil);
-  return Number.isFinite(deadline)
-    && Number.isFinite(requiredHeadroomMs)
-    && requiredHeadroomMs >= ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
-    && deadline - now > requiredHeadroomMs;
-}
-
-export function roomStatusStaleResponseRetryDelay(consecutiveLowFreshnessResponses: number): number {
-  const exponent = Math.min(3, Math.max(0, Math.trunc(consecutiveLowFreshnessResponses) - 1));
-  return Math.min(
-    ROOM_STATUS_STALE_RESPONSE_RETRY_MAX_MS,
-    ROOM_STATUS_STALE_RESPONSE_RETRY_BASE_MS * (2 ** exponent)
-  );
-}
-
 export function roomStatusQueryFailureRetryDelay(consecutiveFailures: number): number {
   const exponent = Math.min(3, Math.max(0, Math.trunc(consecutiveFailures) - 1));
   return Math.min(
     ROOM_STATUS_QUERY_FAILURE_RETRY_MAX_MS,
     ROOM_STATUS_QUERY_FAILURE_RETRY_BASE_MS * (2 ** exponent)
   );
-}
-
-export function roomStatusLowFreshnessResponseRequiresManualRetry(
-  consecutiveLowFreshnessResponses: number
-): boolean {
-  return consecutiveLowFreshnessResponses >= ROOM_STATUS_LOW_FRESHNESS_RESPONSE_LIMIT;
 }
 
 export function roomStatusCommittedRefreshScopeIsCurrent(input: {
@@ -2972,6 +2891,7 @@ export function roomStatusActionPresentationBlock(input: {
   projectionWritable: boolean;
   projectionExpired: boolean;
   projectionReady: boolean;
+  projectionIncomplete?: boolean;
   recoveryBlocked: boolean;
   recoveryReady: boolean;
   recoveryError: unknown;
@@ -2987,6 +2907,13 @@ export function roomStatusActionPresentationBlock(input: {
   }
   if (input.accessLevel !== "WRITE") {
     return { kind: "PERMISSION", reason: "当前账号只有查看权限，不能补录住宿或执行其他写入。" };
+  }
+  if (input.projectionIncomplete) {
+    return {
+      kind: "REFRESH",
+      reason: "部分房态资料待核对，当前仅供查看。可以选择其他日期或联系管理员核对。",
+      actionLabel: "重试读取"
+    };
   }
   if (!input.projectionWritable) {
     return {
@@ -3025,13 +2952,6 @@ export function roomStatusActionsForPresentation(
     : { ...action, enabled: false, disabledReason: null });
 }
 
-export function roomStatusHistoricalSelectionNeedsRefresh(input: {
-  boardExpired: boolean;
-  historicalSelectionOpen: boolean;
-  queryInFlight: boolean;
-}): boolean {
-  return input.boardExpired && input.historicalSelectionOpen && !input.queryInFlight;
-}
 
 function uniqueConflicts(conflicts: readonly RoomStatusConflictDto[]): RoomStatusConflictDto[] {
   return [...new Map(conflicts.map((conflict) => [conflict.id, conflict])).values()];
@@ -3283,7 +3203,6 @@ export function InventoryPage() {
   });
   const recoveryPendingAllowed = commandRecoveryAvailable(principal, propertyId, commandRecovery.pending?.commandType);
   const [board, setBoard] = useState<RoomStatusBoardDto>();
-  const [boardFreshnessDeadline, setBoardFreshnessDeadline] = useState<number>();
   const [boardWriteAdmitted, setBoardWriteAdmitted] = useState(false);
   const boardRef = useRef<RoomStatusBoardDto | undefined>(undefined);
   const [boardQueryKey, setBoardQueryKey] = useState<string>();
@@ -3292,9 +3211,7 @@ export function InventoryPage() {
   if (!queryAttemptGuardRef.current) queryAttemptGuardRef.current = new RoomStatusQueryAttemptGuard();
   const queryAttemptGuard = queryAttemptGuardRef.current;
   useEffect(() => () => queryAttemptGuard.invalidateActive(), [queryAttemptGuard]);
-  const lowFreshnessResponseCountRef = useRef(0);
-  const lowFreshnessQueryKeyRef = useRef<string | undefined>(undefined);
-  const continuityLostQueryKeyRef = useRef<string | undefined>(undefined);
+  const failureQueryKeyRef = useRef<string | undefined>(undefined);
   const refreshReturnFocusRef = useRef<HTMLElement | undefined>(undefined);
   const rememberRefreshReturnFocus = useCallback((candidate: EventTarget | null) => {
     if (!(candidate instanceof HTMLElement)
@@ -3307,6 +3224,9 @@ export function InventoryPage() {
     refreshReturnFocusRef.current = undefined;
     if (!target) return;
     window.requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== document.body && active !== target
+        && !active.closest(".room-status-stale-notice")) return;
       if (target.isConnected && !target.hasAttribute("disabled")) target.focus({ preventScroll: true });
     });
   }, []);
@@ -3328,13 +3248,11 @@ export function InventoryPage() {
   const [returnNotice, setReturnNotice] = useState<string>();
   const [actionError, setActionError] = useState<unknown>();
   const [quoteRecoveryOutcome, setQuoteRecoveryOutcome] = useState<Error>();
-  const [clock, setClock] = useState(roomStatusFreshnessNow);
   const [refreshToken, setRefreshToken] = useState(0);
   const requestRoomStatusRefresh = useCallback(() => {
     if (queryAttemptGuard.isInFlight()) return;
     setRefreshToken((value) => value + 1);
   }, [queryAttemptGuard]);
-  const [querySettledToken, setQuerySettledToken] = useState(0);
   const [quoteResetToken, setQuoteResetToken] = useState(0);
   const [selectionDraftValid, setSelectionDraftValid] = useState(true);
   const [command, setCommand] = useState<CommandRequest>();
@@ -3367,16 +3285,11 @@ export function InventoryPage() {
   const [selectedOrderLoading, setSelectedOrderLoading] = useState(false);
   const [selectedOrderError, setSelectedOrderError] = useState<unknown>();
   const [selectedCorrectionOccupantId, setSelectedCorrectionOccupantId] = useState<string>();
-  const [selectedCorrectionRevision, setSelectedCorrectionRevision] = useState<string>();
   const [selectedStayDateAction, setSelectedStayDateAction] = useState<StayDateChangeAction>();
   const [selectedStayDateMode, setSelectedStayDateMode] = useState<StayDateChangeMode>("DATE_CHANGE");
-  const [selectedStayDateRevision, setSelectedStayDateRevision] = useState<string>();
   const [selectedMoveUnitOpen, setSelectedMoveUnitOpen] = useState(false);
-  const [selectedMoveUnitRevision, setSelectedMoveUnitRevision] = useState<string>();
   const [selectedLifecycleAction, setSelectedLifecycleAction] = useState<OrderLifecycleAction>();
-  const [selectedLifecycleRevision, setSelectedLifecycleRevision] = useState<string>();
   const [selectedFundsAction, setSelectedFundsAction] = useState<OrderFundsAction>();
-  const [selectedFundsRevision, setSelectedFundsRevision] = useState<string>();
   const [orderContextOpen, setOrderContextOpen] = useState(false);
   const [pendingOrderContextIdentity, setPendingOrderContextIdentity] = useState<string>();
   const [desktopContextCollapsed, setDesktopContextCollapsed] = useState(true);
@@ -3437,41 +3350,10 @@ export function InventoryPage() {
   const boardColumnRef = useRef<HTMLDivElement>(null);
   const roomStatusInteractionSnapshotRef = useRef<RoomStatusInteractionSnapshot | undefined>(undefined);
   const commandPhaseRef = useRef<RoomStatusCommandPhase>("IDLE");
-  const [commandPhaseScheduleToken, setCommandPhaseScheduleToken] = useState(0);
   const setCommandPhase = useCallback((nextPhase: RoomStatusCommandPhase) => {
     if (commandPhaseRef.current === nextPhase) return;
     commandPhaseRef.current = nextPhase;
-    setCommandPhaseScheduleToken((value) => value + 1);
   }, []);
-  const lowFreshnessRetryTimerRef = useRef<number | undefined>(undefined);
-  const clearLowFreshnessRetry = useCallback(() => {
-    if (lowFreshnessRetryTimerRef.current === undefined) return;
-    window.clearTimeout(lowFreshnessRetryTimerRef.current);
-    lowFreshnessRetryTimerRef.current = undefined;
-  }, []);
-  const scheduleLowFreshnessRetry = useCallback((delay: number) => {
-    if (lowFreshnessRetryTimerRef.current !== undefined) return;
-    const retryWhenSafe = () => {
-      lowFreshnessRetryTimerRef.current = undefined;
-      if (lowFreshnessResponseCountRef.current === 0) return;
-      const decision = roomStatusProjectionRefreshDecision({
-        visible: document.visibilityState === "visible",
-        permissionDenied: permissionDeniedRef.current,
-        phase: commandPhaseRef.current,
-        queryInFlight: queryAttemptGuard.isInFlight()
-      });
-      if (decision === "STOP") return;
-      if (decision === "WAIT") {
-        lowFreshnessRetryTimerRef.current = window.setTimeout(
-          retryWhenSafe,
-          ROOM_STATUS_REFRESH_RETRY_MS
-        );
-        return;
-      }
-      setRefreshToken((value) => value + 1);
-    };
-    lowFreshnessRetryTimerRef.current = window.setTimeout(retryWhenSafe, delay);
-  }, [queryAttemptGuard]);
   const queryFailureRetryTimerRef = useRef<number | undefined>(undefined);
   const queryFailureRetryAttemptRef = useRef(0);
   const clearQueryFailureRetry = useCallback(() => {
@@ -3484,7 +3366,7 @@ export function InventoryPage() {
     queryFailureRetryAttemptRef.current = 0;
   }, [clearQueryFailureRetry]);
   const scheduleQueryFailureRetry = useCallback((delay: number) => {
-    if (queryFailureRetryTimerRef.current !== undefined) return;
+    if (queryFailureRetryTimerRef.current !== undefined || queryFailureRetryAttemptRef.current > ROOM_STATUS_QUERY_FAILURE_RETRY_LIMIT) return;
     const retryWhenSafe = () => {
       queryFailureRetryTimerRef.current = undefined;
       if (permissionDeniedRef.current) return;
@@ -3509,10 +3391,9 @@ export function InventoryPage() {
   const selectedMemberRequestGuardRef = useRef<SelectedMemberViewRequestGuard | null>(null);
   if (!selectedMemberRequestGuardRef.current) selectedMemberRequestGuardRef.current = new SelectedMemberViewRequestGuard();
   const selectedMemberRequestGuard = selectedMemberRequestGuardRef.current;
-  const commandRevisionRef = useRef<string | undefined>(undefined);
+
   const commandQueryKeyRef = useRef<string | undefined>(undefined);
   const refreshedReceiptIdRef = useRef<string | undefined>(undefined);
-  const historicalRefreshRequestRef = useRef<string | undefined>(undefined);
   const focusAfterNextBoard = useRef(false);
   const returnedOrderCellFocus = useRef<{ unitId: string; serviceDate: string } | undefined>(undefined);
   const pendingMobileTaskFocus = useRef<PendingMobileTaskFocus | undefined>(undefined);
@@ -3543,9 +3424,8 @@ export function InventoryPage() {
 
   useEffect(() => () => cancelQuoteSectionScroll(), []);
   useEffect(() => () => {
-    clearLowFreshnessRetry();
     clearQueryFailureRetry();
-  }, [clearLowFreshnessRetry, clearQueryFailureRetry]);
+  }, [clearQueryFailureRetry]);
 
   useLayoutEffect(() => {
     if (!quoteSectionScrollPendingRef.current) return;
@@ -3661,13 +3541,13 @@ export function InventoryPage() {
   useEffect(() => {
     setSelectedStayDateAction(undefined);
     setSelectedStayDateMode("DATE_CHANGE");
-    setSelectedStayDateRevision(undefined);
+
     setSelectedMoveUnitOpen(false);
-    setSelectedMoveUnitRevision(undefined);
+
     setSelectedLifecycleAction(undefined);
-    setSelectedLifecycleRevision(undefined);
+
     setSelectedFundsAction(undefined);
-    setSelectedFundsRevision(undefined);
+
     setCommandDraft((current) => current?.presentation === "STAY_DATES"
       || current?.presentation === "MOVE_UNIT"
       || current?.presentation === "ORDER_LIFECYCLE"
@@ -3678,7 +3558,7 @@ export function InventoryPage() {
     if (!command || selectedOrderCommandScopeIsCurrent(selectedOrderCommandScope, orderPrincipalScope, selectedOrderIdentity)) return;
     commandAttemptGuard.invalidate();
     setCommandPhase("IDLE");
-    commandRevisionRef.current = undefined;
+
     commandQueryKeyRef.current = undefined;
     setCommand(undefined);
     setCommandDraft(undefined);
@@ -3688,41 +3568,52 @@ export function InventoryPage() {
     setActionError(new Error("当前命令绑定的门店、账号、订单或住宿已经变化，原操作已关闭；请重新选择后办理。"));
   }, [command, currentSelectedOrderCommandScope, selectedOrderCommandScope]);
 
-  useEffect(() => {
-    if (!selectedCorrectionOccupantId || !selectedCorrectionRevision || !board) return;
-    if (board.revision === selectedCorrectionRevision) return;
+  const denyRoomStatusReadAccess = useCallback((error: unknown) => {
+    // A known revocation is final for this cached scope. Abort all older reads so
+    // a late success or a temporary network failure cannot reopen its Preview.
+    queryAttemptGuard.invalidateActive();
+    setBoardWriteAdmitted(false);
+    setQueryError(error);
+    resetQueryFailureRetry();
+    permissionDeniedRef.current = true;
+    latestRestoration.current = undefined;
+    setBoard(undefined);
+    boardRef.current = undefined;
+    setBoardQueryKey(undefined);
+    boardQueryKeyRef.current = undefined;
+    pendingRestoration.current = undefined;
+    try {
+      window.sessionStorage.removeItem(roomStatusRestorationKey(principal.subjectId, propertyId));
+    } catch {
+      // Permission denial still clears all in-memory business state.
+    }
+    dispatchView({ type: "RESTORE", state: createRoomStatusViewState() });
+    setSelectedUnitId(undefined);
+    setSelectedDayDate(undefined);
+    setSelectedIntervalId(undefined);
+    setSelectedOrderIdentity(undefined);
+    setSelectedOrderView(undefined);
+    setSelectedOrderLoadedScope(undefined);
     setSelectedCorrectionOccupantId(undefined);
-    setSelectedCorrectionRevision(undefined);
-    setActionError(new Error("订单资料已被其他操作刷新。为避免覆盖新值，原更正表单已关闭；请重新打开后核对。"));
-  }, [board?.revision, selectedCorrectionOccupantId, selectedCorrectionRevision]);
+    setSelectedOrderCommandScope(undefined);
+    setOrderContextOpen(false);
+    setDesktopContextCollapsed(false);
+    setQuoteTarget(undefined);
+    setMaintenanceTarget(undefined);
+    setCreateSelectionOpen(false);
+    setCommandPhase("IDLE");
+    commandAttemptGuard.invalidate();
 
-  useEffect(() => {
-    if (!selectedStayDateAction || !selectedStayDateRevision || !board) return;
-    if (board.revision === selectedStayDateRevision) return;
-    setSelectedStayDateAction(undefined);
-    setSelectedStayDateMode("DATE_CHANGE");
-    setSelectedStayDateRevision(undefined);
-    setCommandDraft(undefined);
-    setActionError(new Error("订单日期或房态已经变化。为避免使用旧数据，原日期表单已关闭；请重新打开后核对。"));
-  }, [board?.revision, selectedStayDateAction, selectedStayDateRevision]);
-
-  useEffect(() => {
-    if (!selectedMoveUnitOpen || !selectedMoveUnitRevision || !board) return;
-    if (board.revision === selectedMoveUnitRevision) return;
-    setSelectedMoveUnitOpen(false);
-    setSelectedMoveUnitRevision(undefined);
-    setCommandDraft(undefined);
-    setActionError(new Error("订单或房态已经变化。为避免使用旧数据，原换房表单已关闭；请重新打开后核对。"));
-  }, [board?.revision, selectedMoveUnitOpen, selectedMoveUnitRevision]);
-
-  useEffect(() => {
-    if (!selectedLifecycleAction || !selectedLifecycleRevision || !board) return;
-    if (board.revision === selectedLifecycleRevision) return;
-    setSelectedLifecycleAction(undefined);
-    setSelectedLifecycleRevision(undefined);
-    setCommandDraft(undefined);
-    setActionError(new Error("订单或房态已经变化。为避免处理错误订单，原操作表单已关闭；请重新选择后核对。"));
-  }, [board?.revision, selectedLifecycleAction, selectedLifecycleRevision]);
+    commandQueryKeyRef.current = undefined;
+    focusAfterNextBoard.current = false;
+    setCommandContextInvalidated(false);
+    setCommand(undefined);
+    setRecoveryDialogOpen(false);
+    setActionError(undefined);
+    setReturnNotice(undefined);
+    setRestorationError(undefined);
+    setQueryPhase("PERMISSION_DENIED");
+  }, [propertyId, principal.subjectId, queryAttemptGuard, commandAttemptGuard, resetQueryFailureRetry, setCommandPhase]);
 
   const boardMatchesCurrentProperty = Boolean(board && board.propertyId === propertyId);
   const currentBoardQueryKey = roomStatusQueryKey(roomStatusQuery(range, viewState.roomPageIndex, viewState.filters));
@@ -3730,71 +3621,77 @@ export function InventoryPage() {
     && board.propertyId === propertyId
     && boardQueryKey === currentBoardQueryKey);
 
+  const desiredBoardQueryKeyRef = useRef(currentBoardQueryKey);
+  desiredBoardQueryKeyRef.current = currentBoardQueryKey;
+  const queryErrorRef = useRef(queryError);
+  queryErrorRef.current = queryError;
   useEffect(() => {
-    if (!board || !boardMatchesCurrentQuery || boardFreshnessDeadline === undefined) return;
-    const delay = Number.isFinite(boardFreshnessDeadline)
-      ? Math.max(0, boardFreshnessDeadline - roomStatusFreshnessNow() - ROOM_STATUS_WRITE_HEADROOM_MS)
-      : 0;
-    const timer = window.setTimeout(() => setClock(roomStatusFreshnessNow()), delay);
-    return () => window.clearTimeout(timer);
-  }, [board, boardFreshnessDeadline, boardMatchesCurrentQuery]);
-
-  useEffect(() => {
-    if (!board || !boardMatchesCurrentQuery || boardFreshnessDeadline === undefined
-      || !boardWriteAdmitted || queryError || permissionDeniedRef.current) return;
-    let timer = 0;
-    const refreshWhenAllowed = () => {
-      setClock(roomStatusFreshnessNow());
-      const decision = roomStatusProjectionRefreshDecision({
-        visible: document.visibilityState === "visible",
-        permissionDenied: permissionDeniedRef.current,
-        phase: commandPhaseRef.current,
-        queryInFlight: queryAttemptGuard.isInFlight()
-      });
-      if (decision === "STOP") return;
-      if (decision === "WAIT") {
-        timer = window.setTimeout(refreshWhenAllowed, ROOM_STATUS_REFRESH_RETRY_MS);
-        return;
+    let active = true;
+    let controller: AbortController | undefined;
+    const check = async () => {
+      if (!active || document.visibilityState !== "visible" || permissionDeniedRef.current
+        || queryAttemptGuard.isInFlight() || controller || commandPhaseRef.current === "CONFIRMING"
+        || queryErrorRef.current && !roomStatusReadRetryable(queryErrorRef.current)) return;
+      const request = new AbortController();
+      controller = request;
+      const timeout = window.setTimeout(() => request.abort(new RoomStatusQueryTimeoutError()), ROOM_STATUS_QUERY_TIMEOUT_MS);
+      try {
+        const sync = await api.roomStatusSync(propertyId, request.signal);
+        if (!active || request.signal.aborted || queryAttemptGuard.isInFlight()) return;
+        validateRoomStatusSync(sync, propertyId);
+        const current = boardRef.current;
+        const changedAuthorization = Boolean(current && (sync.accessLevel !== current.accessLevel
+          || current.authorizationKey && sync.authorizationKey !== current.authorizationKey));
+        if (changedAuthorization) {
+          setBoardWriteAdmitted(false);
+          setCommandContextInvalidated(true);
+        }
+        if (roomStatusSyncNeedsBoard(sync, current) || boardQueryKeyRef.current !== desiredBoardQueryKeyRef.current) {
+          setRefreshToken((value) => value + 1);
+        } else {
+          resetQueryFailureRetry();
+          setQueryError(undefined);
+          setQueryPhase("READY");
+          // This positive check confirms the exact already-installed post-commit
+          // revision and scope, so a failed redundant read need not lock the UI.
+          if (focusAfterNextBoard.current) {
+            focusAfterNextBoard.current = false;
+            setFocusRequestToken((value) => value + 1);
+          }
+        }
+      } catch (error) {
+        if (!active) return;
+        setQueryError(error);
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+          denyRoomStatusReadAccess(error);
+        } else if (!roomStatusReadRetryable(error)) {
+          setBoardWriteAdmitted(false);
+        }
+      } finally {
+        window.clearTimeout(timeout);
+        if (controller === request) controller = undefined;
       }
-      setRefreshToken((value) => value + 1);
     };
-    timer = window.setTimeout(
-      refreshWhenAllowed,
-      roomStatusRefreshDelay(boardFreshnessDeadline, roomStatusFreshnessNow())
-    );
-    return () => window.clearTimeout(timer);
-  }, [board, boardFreshnessDeadline, boardWriteAdmitted, boardMatchesCurrentQuery, commandPhaseScheduleToken, propertyId, queryError, queryAttemptGuard]);
-
-  useEffect(() => {
-    const refreshVisible = () => {
-      if (document.visibilityState !== "visible") return;
-      setClock(roomStatusFreshnessNow());
-      if (roomStatusProjectionRefreshDecision({
-        visible: true,
-        permissionDenied: permissionDeniedRef.current,
-        phase: commandPhaseRef.current,
-        queryInFlight: queryAttemptGuard.isInFlight()
-      }) === "REFRESH") {
-        setRefreshToken((value) => value + 1);
-      }
-    };
-    document.addEventListener("visibilitychange", refreshVisible);
-    window.addEventListener("focus", refreshVisible);
+    const onVisible = () => { if (document.visibilityState === "visible") void check(); };
+    const timer = window.setInterval(() => void check(), ROOM_STATUS_SYNC_INTERVAL_MS);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
     return () => {
-      document.removeEventListener("visibilitychange", refreshVisible);
-      window.removeEventListener("focus", refreshVisible);
+      active = false;
+      window.clearInterval(timer);
+      controller?.abort();
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
     };
-  }, [propertyId, queryAttemptGuard]);
+  }, [propertyId, orderPrincipalScope, queryAttemptGuard, resetQueryFailureRetry, denyRoomStatusReadAccess]);
 
   useEffect(() => {
     if (previousPropertyId.current === propertyId && previousSubjectId.current === principal.subjectId) return;
     previousPropertyId.current = propertyId;
     previousSubjectId.current = principal.subjectId;
     permissionDeniedRef.current = false;
-    lowFreshnessResponseCountRef.current = 0;
-    lowFreshnessQueryKeyRef.current = undefined;
-    continuityLostQueryKeyRef.current = undefined;
-    clearLowFreshnessRetry();
+    failureQueryKeyRef.current = undefined;
+    resetQueryFailureRetry();
     const restored = readRoomStatusRestoration(principal.subjectId, propertyId);
     initialRestoration.current = restored;
     pendingRestoration.current = restored;
@@ -3809,11 +3706,9 @@ export function InventoryPage() {
     ));
     dispatchView({ type: "RESTORE", state: restored?.state ?? createRoomStatusViewState() });
     setBoard(undefined);
-    setBoardFreshnessDeadline(undefined);
     boardRef.current = undefined;
     setBoardQueryKey(undefined);
     boardQueryKeyRef.current = undefined;
-    historicalRefreshRequestRef.current = undefined;
     setQuickPopoverTarget(undefined);
     roomStatusInteractionSnapshotRef.current = undefined;
     setSelectedUnitId(undefined);
@@ -3838,7 +3733,7 @@ export function InventoryPage() {
     pendingMobileTaskFocus.current = undefined;
     setCommandPhase("IDLE");
     commandAttemptGuard.invalidate();
-    commandRevisionRef.current = undefined;
+
     commandQueryKeyRef.current = undefined;
     focusAfterNextBoard.current = false;
     returnedOrderCellFocus.current = undefined;
@@ -3853,31 +3748,19 @@ export function InventoryPage() {
   }, [principal.subjectId, propertyId, propertyTimezone]);
 
   useEffect(() => {
-    if (initializedPropertyId !== propertyId) return;
+    if (initializedPropertyId !== propertyId || permissionDeniedRef.current) return;
     const query = roomStatusQuery(range, viewState.roomPageIndex, viewState.filters);
     const requestQueryKey = roomStatusQueryKey(query);
     const controller = new AbortController();
     const requestId = queryAttemptGuard.begin(controller);
     const timeout = window.setTimeout(() => {
-      controller.abort(new Error("房态查询超时，未把未知状态解释为可售"));
+      controller.abort(new RoomStatusQueryTimeoutError());
     }, ROOM_STATUS_QUERY_TIMEOUT_MS);
     const existing = boardRef.current;
     const sameQuery = existing?.propertyId === propertyId
       && boardQueryKeyRef.current === requestQueryKey;
-    const requestStartedAt = roomStatusFreshnessNow();
-    const existingFreshnessDeadline = boardFreshnessDeadline;
-    const writeContinuityExpected = Boolean(sameQuery
-      && existing
-      && existingFreshnessDeadline !== undefined
-      && roomStatusProjectionHasWriteHeadroom(existingFreshnessDeadline, requestStartedAt));
-    const recoveryHeadroomRequired = Boolean(sameQuery
-      && existing
-      && (continuityLostQueryKeyRef.current === requestQueryKey || !writeContinuityExpected));
-    if (lowFreshnessQueryKeyRef.current !== requestQueryKey) {
-      lowFreshnessResponseCountRef.current = 0;
-      lowFreshnessQueryKeyRef.current = requestQueryKey;
-      continuityLostQueryKeyRef.current = undefined;
-      clearLowFreshnessRetry();
+    if (failureQueryKeyRef.current !== requestQueryKey) {
+      failureQueryKeyRef.current = requestQueryKey;
       resetQueryFailureRetry();
     }
     const projectionRefreshPaused = !roomStatusProjectionRefreshAllowed(commandPhaseRef.current) && Boolean(existing);
@@ -3891,44 +3774,13 @@ export function InventoryPage() {
       .then((response) => {
         if (!queryAttemptGuard.isActive(requestId)) return;
         permissionDeniedRef.current = false;
-        assertRoomStatusBoard(response, { propertyId, range, pageIndex: viewState.roomPageIndex, allowedActions: currentPropertyAllowedActions });
-        const responseReceivedAt = roomStatusFreshnessNow();
-        const localFreshnessDeadline = roomStatusProjectionLocalFreshnessDeadline(response, requestStartedAt);
-        const writeContinuityPreserved = !writeContinuityExpected
-          || existingFreshnessDeadline !== undefined
-            && roomStatusProjectionHasWriteHeadroom(existingFreshnessDeadline, responseReceivedAt);
-        const admitWrites = writeContinuityPreserved && roomStatusProjectionResponseCanEnableWrites(
-          localFreshnessDeadline,
-          responseReceivedAt,
-          recoveryHeadroomRequired ? ROOM_STATUS_RECOVERY_INSTALL_HEADROOM_MS : ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
-        );
-        setBoardWriteAdmitted(admitWrites);
-        let slowReadError: Error | undefined;
-        if (!admitWrites) {
-          if (sameQuery && existing) continuityLostQueryKeyRef.current = requestQueryKey;
-          lowFreshnessResponseCountRef.current += 1;
-          if (roomStatusLowFreshnessResponseRequiresManualRetry(lowFreshnessResponseCountRef.current)) {
-            clearLowFreshnessRetry();
-            slowReadError = new Error("房态响应持续过慢，无法取得足够安全的写入时间。请在网络恢复后重试刷新。");
-          } else {
-            scheduleLowFreshnessRetry(roomStatusStaleResponseRetryDelay(lowFreshnessResponseCountRef.current));
-          }
-        } else {
-          lowFreshnessResponseCountRef.current = 0;
-          continuityLostQueryKeyRef.current = undefined;
-          clearLowFreshnessRetry();
-        }
+        validateRoomStatusResponse(response, { propertyId, range, pageIndex: viewState.roomPageIndex, allowedActions: currentPropertyAllowedActions });
+        setBoardWriteAdmitted(true);
         if (commandPhaseRef.current === "CONFIRMING" && existing) {
           resetQueryFailureRetry();
           setQueryError(undefined);
           setQueryPhase("READY");
-          setClock(responseReceivedAt);
           return;
-        }
-        if (commandRevisionRef.current
-          && commandPhaseRef.current !== "IDLE"
-          && response.revision !== commandRevisionRef.current) {
-          setCommandContextInvalidated(true);
         }
         const restored = pendingRestoration.current;
         if (restored && response.page.totalPages > 0 && response.page.index >= response.page.totalPages) {
@@ -3938,7 +3790,6 @@ export function InventoryPage() {
             state: { ...restored.state, roomPageIndex: pageIndex }
           };
           setBoard(undefined);
-          setBoardFreshnessDeadline(undefined);
           boardRef.current = undefined;
           setBoardQueryKey(undefined);
           boardQueryKeyRef.current = undefined;
@@ -3957,7 +3808,6 @@ export function InventoryPage() {
               state: { ...restored.state, roomPageIndex: nextPage }
             };
             setBoard(undefined);
-            setBoardFreshnessDeadline(undefined);
             boardRef.current = undefined;
             setBoardQueryKey(undefined);
             boardQueryKeyRef.current = undefined;
@@ -3969,19 +3819,12 @@ export function InventoryPage() {
         restorationPagesVisited.current.clear();
         const reloadOrderContext = roomStatusOrderContextNeedsReload(existing, response);
         setBoard(response);
-        setBoardFreshnessDeadline(localFreshnessDeadline);
         boardRef.current = response;
         setBoardQueryKey(requestQueryKey);
         boardQueryKeyRef.current = requestQueryKey;
-        setQueryError(slowReadError);
-        if (slowReadError) {
-          queryFailureRetryAttemptRef.current += 1;
-          scheduleQueryFailureRetry(roomStatusQueryFailureRetryDelay(queryFailureRetryAttemptRef.current));
-        } else {
-          resetQueryFailureRetry();
-        }
-        setQueryPhase(slowReadError ? "ERROR" : "READY");
-        setClock(responseReceivedAt);
+        setQueryError(undefined);
+        resetQueryFailureRetry();
+        setQueryPhase("READY");
         restoreRefreshReturnFocus();
         if (reloadOrderContext) setOrderRefreshToken((value) => value + 1);
         if (focusAfterNextBoard.current) {
@@ -4011,62 +3854,21 @@ export function InventoryPage() {
       })
       .catch((error) => {
         if (!queryAttemptGuard.isActive(requestId)) return;
-        lowFreshnessResponseCountRef.current = 0;
-        clearLowFreshnessRetry();
-        setQueryError(error);
+            setQueryError(error);
         if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-          resetQueryFailureRetry();
-          permissionDeniedRef.current = true;
-          latestRestoration.current = undefined;
-          setBoard(undefined);
-          setBoardFreshnessDeadline(undefined);
-          boardRef.current = undefined;
-          setBoardQueryKey(undefined);
-          boardQueryKeyRef.current = undefined;
-          pendingRestoration.current = undefined;
-          try {
-            window.sessionStorage.removeItem(roomStatusRestorationKey(principal.subjectId, propertyId));
-          } catch {
-            // Permission denial still clears all in-memory business state.
-          }
-          dispatchView({ type: "RESTORE", state: createRoomStatusViewState() });
-          setSelectedUnitId(undefined);
-          setSelectedDayDate(undefined);
-          setSelectedIntervalId(undefined);
-          setSelectedOrderIdentity(undefined);
-          setSelectedOrderView(undefined);
-          setSelectedOrderLoadedScope(undefined);
-          setSelectedCorrectionOccupantId(undefined);
-          setSelectedOrderCommandScope(undefined);
-          setOrderContextOpen(false);
-          setDesktopContextCollapsed(false);
-          setQuoteTarget(undefined);
-          setMaintenanceTarget(undefined);
-          setCreateSelectionOpen(false);
-          setCommandPhase("IDLE");
-          commandAttemptGuard.invalidate();
-          commandRevisionRef.current = undefined;
-          commandQueryKeyRef.current = undefined;
-          focusAfterNextBoard.current = false;
-          setCommandContextInvalidated(false);
-          setCommand(undefined);
-          setRecoveryDialogOpen(false);
-          setActionError(undefined);
-          setReturnNotice(undefined);
-          setRestorationError(undefined);
-          setQueryPhase("PERMISSION_DENIED");
+          denyRoomStatusReadAccess(error);
         } else {
           rememberRefreshReturnFocus(document.activeElement);
-          queryFailureRetryAttemptRef.current += 1;
-          scheduleQueryFailureRetry(roomStatusQueryFailureRetryDelay(queryFailureRetryAttemptRef.current));
+          if (roomStatusReadRetryable(error)) {
+            queryFailureRetryAttemptRef.current += 1;
+            scheduleQueryFailureRetry(roomStatusQueryFailureRetryDelay(queryFailureRetryAttemptRef.current));
+          } else resetQueryFailureRetry();
           setQueryPhase("ERROR");
         }
       })
       .finally(() => {
         window.clearTimeout(timeout);
-        if (queryAttemptGuard.finish(requestId)) {
-          setQuerySettledToken((value) => value + 1);
-        }
+        queryAttemptGuard.finish(requestId);
       });
     return () => {
       window.clearTimeout(timeout);
@@ -4075,7 +3877,7 @@ export function InventoryPage() {
     };
   }, [
     initializedPropertyId,
-    clearLowFreshnessRetry,
+    denyRoomStatusReadAccess,
     resetQueryFailureRetry,
     orderPrincipalScope,
     propertyId,
@@ -4084,7 +3886,6 @@ export function InventoryPage() {
     rememberRefreshReturnFocus,
     refreshToken,
     restoreRefreshReturnFocus,
-    scheduleLowFreshnessRetry,
     scheduleQueryFailureRetry,
     viewState.roomPageIndex,
     viewState.filters.search,
@@ -4124,14 +3925,11 @@ export function InventoryPage() {
   }, [principal.subjectId, propertyId]);
 
   const boardForCurrentProperty = boardMatchesCurrentProperty ? board : undefined;
-  const boardExpired = Boolean(boardForCurrentProperty
-    && (boardFreshnessDeadline === undefined || clock > boardFreshnessDeadline));
-  const boardWriteWindowClosed = Boolean(boardForCurrentProperty
-    && (boardFreshnessDeadline === undefined
-      || !roomStatusProjectionHasWriteHeadroom(boardFreshnessDeadline, clock)));
   const boardRefreshFailed = Boolean(boardForCurrentProperty && queryError);
-  const rangeLoading = queryPhase === "RANGE_LOADING"
-    || Boolean(boardForCurrentProperty && !boardMatchesCurrentQuery);
+  const boardIncomplete = Boolean(boardMatchesCurrentQuery && boardForCurrentProperty?.projectionState === "PARTIAL");
+  const rangeMismatch = Boolean(boardForCurrentProperty && !boardMatchesCurrentQuery);
+  const rangeLoading = queryPhase === "RANGE_LOADING";
+  const rangeLoadFailed = rangeMismatch && queryPhase === "ERROR";
   useEffect(() => {
     if (!rangeLoading) {
       setRangeLoadingNoticeReady(false);
@@ -4143,16 +3941,14 @@ export function InventoryPage() {
     );
     return () => window.clearTimeout(timer);
   }, [rangeLoading]);
-  const rangeLoadingNoticeVisible = rangeLoading && rangeLoadingNoticeReady;
-  const queryBusy = queryPhase === "LOADING"
-    || queryPhase === "RANGE_LOADING"
-    || Boolean(board && !boardMatchesCurrentQuery);
+  const rangeLoadingNoticeVisible = rangeLoadFailed || rangeLoading && rangeLoadingNoticeReady;
+  const queryBusy = queryPhase === "LOADING" || queryPhase === "RANGE_LOADING" || queryPhase === "REFRESHING";
   const projectionReadyForWrite = Boolean(board
     && boardMatchesCurrentQuery
-    && !queryError
+    && (!queryError || roomStatusReadRetryable(queryError))
     && !focusAfterNextBoard.current
     && board.projectionState === "READY"
-    && (queryPhase === "READY" || queryPhase === "REFRESHING"));
+    && (queryPhase === "READY" || queryPhase === "REFRESHING" || queryPhase === "ERROR" && roomStatusReadRetryable(queryError)));
   const activeProjectionValid = roomStatusProjectionWritable({
     projectionReady: projectionReadyForWrite,
     projectionExpired: false,
@@ -4161,7 +3957,7 @@ export function InventoryPage() {
   });
   const projectionWritable = roomStatusProjectionWritable({
     projectionReady: projectionReadyForWrite,
-    projectionExpired: boardWriteWindowClosed || !boardWriteAdmitted,
+    projectionExpired: !boardWriteAdmitted,
     boardAccess: boardForCurrentProperty?.accessLevel,
     principalAccess: principalPropertyAccess
   });
@@ -4230,13 +4026,14 @@ export function InventoryPage() {
     || pageQuoteRecoveryForPresentation.kind !== "ABSENT"
     || commandRecovery.canDiscardCorrupt);
   const actionPresentationBlock = roomStatusActionPresentationBlock({
-    refreshFailed: boardRefreshFailed,
+    refreshFailed: boardRefreshFailed && !roomStatusReadRetryable(queryError),
     accessLevel: boardForCurrentProperty?.accessLevel === "WRITE" && principalPropertyAccess === "WRITE"
       ? "WRITE"
       : "READ",
     projectionWritable,
-    projectionExpired: boardExpired,
+    projectionExpired: false,
     projectionReady: activeProjectionValid,
+    projectionIncomplete: boardIncomplete,
     recoveryBlocked: roomStatusRecoveryBlocksNewWrites(commandRecoveryBlockedForPresentation, pageQuoteRecoveryForPresentation),
     recoveryReady: commandRecovery.ready,
     recoveryError: commandRecovery.error,
@@ -4256,9 +4053,9 @@ export function InventoryPage() {
       : undefined,
     [boardForCurrentProperty, command, commandsBlocked]
   );
-  const refreshNoticeNeeded = Boolean(renderedBoard
-    && (actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted || boardExpired));
-  const ordinarySync = refreshNoticeNeeded && !boardRefreshFailed && !rangeLoading;
+  const refreshNoticeNeeded = Boolean(renderedBoard && !rangeMismatch
+    && (queryError || boardIncomplete || actionPresentationBlock?.kind === "REFRESH" || !boardWriteAdmitted));
+  const ordinarySync = refreshNoticeNeeded && !boardRefreshFailed && !boardIncomplete && !rangeLoading;
   useEffect(() => {
     if (!ordinarySync) {
       setSlowSyncNoticeReady(false);
@@ -4267,10 +4064,8 @@ export function InventoryPage() {
     const timer = window.setTimeout(() => setSlowSyncNoticeReady(true), ROOM_STATUS_SLOW_SYNC_NOTICE_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [ordinarySync]);
-  const compactSyncVisible = ordinarySync && !slowSyncNoticeReady;
-  const filteredViewHasNoRooms = Boolean(renderedBoard
-    && hasActiveRoomStatusFilters(viewState.filters)
-    && filterRoomStatusRooms(renderedBoard.rooms, viewState.filters).length === 0);
+  const compactSyncVisible = queryPhase === "REFRESHING" || ordinarySync && !slowSyncNoticeReady;
+
   const selectedUnit = findRoomStatusUnit(renderedBoard, selectedUnitId ?? viewState.selection?.unitId);
   const selectedDay = selectedUnit?.days.find((day) => day.serviceDate === selectedDayDate) ?? null;
   const selectedInterval = selectedUnit?.intervals.find((interval) => interval.id === selectedIntervalId) ?? null;
@@ -4350,28 +4145,6 @@ export function InventoryPage() {
       ? action
       : { ...action, enabled: false })
     : roomStatusActionsForPresentation(candidateContextActions, actionPresentationBlock);
-  const historicalSelectionOpen = Boolean(renderedBoard && (
-    (quickPopoverTarget
-      && (quickPopoverSelection?.arrivalDate ?? quickPopoverTarget.serviceDate) < renderedBoard.businessDate)
-    || (!desktopContextCollapsed
-      && viewState.selection
-      && viewState.selection.arrivalDate < renderedBoard.businessDate)
-  ));
-  useEffect(() => {
-    void querySettledToken;
-    if (!renderedBoard || !roomStatusHistoricalSelectionNeedsRefresh({
-      boardExpired,
-      historicalSelectionOpen,
-      queryInFlight: queryAttemptGuard.isInFlight()
-    })) {
-      if (!boardExpired) historicalRefreshRequestRef.current = undefined;
-      return;
-    }
-    const requestKey = `${renderedBoard.revision}:${renderedBoard.freshUntil}`;
-    if (historicalRefreshRequestRef.current === requestKey) return;
-    historicalRefreshRequestRef.current = requestKey;
-    setRefreshToken((value) => value + 1);
-  }, [boardExpired, historicalSelectionOpen, querySettledToken, renderedBoard?.freshUntil, renderedBoard?.revision]);
   const useInlineOrderContext = roomStatusOrderContextMode(workspaceWidth, isMobile) === "INLINE";
   const authorizedSelectedOrderView = selectedOrderLoadedScope === orderPrincipalScope
     && selectedOrderView?.order.id === selectedOrderIdentity?.orderId
@@ -4565,7 +4338,7 @@ export function InventoryPage() {
         if (pageIndex === renderedBoard.page.index) continue;
         const response = await loadReturnPage(pageIndex);
         if (!current) return;
-        assertRoomStatusBoard(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
+        validateRoomStatusResponse(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
         if (response.revision !== renderedBoard.revision
           || response.businessDate !== renderedBoard.businessDate
           || response.accessLevel !== renderedBoard.accessLevel
@@ -4700,7 +4473,7 @@ export function InventoryPage() {
     const loadPage = async (pageIndex: number, filters: RoomStatusViewState["filters"]) => {
       const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, filters));
       if (!current) return undefined;
-      assertRoomStatusBoard(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
+      validateRoomStatusResponse(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
       return response;
     };
     const loadPageSet = async (
@@ -5070,12 +4843,12 @@ export function InventoryPage() {
     setSelectedOrderError(undefined);
     setSelectedOrderLoading(false);
     setSelectedCorrectionOccupantId(undefined);
-    setSelectedCorrectionRevision(undefined);
+
     setSelectedStayDateAction(undefined);
     setSelectedStayDateMode("DATE_CHANGE");
-    setSelectedStayDateRevision(undefined);
+
     setSelectedFundsAction(undefined);
-    setSelectedFundsRevision(undefined);
+
     setSelectedOrderCommandScope(undefined);
     setCommandDraft(undefined);
     setPendingOrderContextIdentity(undefined);
@@ -5274,7 +5047,7 @@ export function InventoryPage() {
     }
   }
 
-  function selectRange(selection: RoomStatusSelection | null) {
+  function selectRange(selection: RoomStatusSelection | null, keepEditorOpen = false) {
     cancelQuoteSectionScroll();
     setQuickPopoverTarget(undefined);
     setQuoteRecoveryOutcome(undefined);
@@ -5282,6 +5055,7 @@ export function InventoryPage() {
     invalidateSelectedOrderForRoomStatusInspection();
     setSelectedGridStayId(undefined);
     dispatchView({ type: "SET_SELECTION", selection });
+    if (keepEditorOpen) setDesktopContextCollapsed(false);
     if (selection) {
       dispatchView({
         type: "SET_FOCUS",
@@ -5434,7 +5208,7 @@ export function InventoryPage() {
     setActionError(undefined);
     setCommandDraft(undefined);
     setSelectedFundsAction(action);
-    setSelectedFundsRevision(boardRef.current?.revision);
+
     setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
   }
 
@@ -5487,7 +5261,7 @@ export function InventoryPage() {
     setCommandDraft(undefined);
     setSelectedStayDateMode(mode);
     setSelectedStayDateAction(commandType);
-    setSelectedStayDateRevision(boardRef.current?.revision);
+
     setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
   }
 
@@ -5506,7 +5280,7 @@ export function InventoryPage() {
     }
     setCommandDraft(undefined);
     setSelectedMoveUnitOpen(true);
-    setSelectedMoveUnitRevision(boardRef.current?.revision);
+
     setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
   }
 
@@ -5525,7 +5299,7 @@ export function InventoryPage() {
     }
     setCommandDraft(undefined);
     setSelectedLifecycleAction(commandType);
-    setSelectedLifecycleRevision(boardRef.current?.revision);
+
     setSelectedOrderCommandScope(roomStatusOrderCommandScope(orderPrincipalScope, identity));
   }
 
@@ -5632,7 +5406,7 @@ export function InventoryPage() {
         for (let pageIndex = 0; pageIndex < renderedBoard.page.totalPages; pageIndex += 1) {
           if (pageIndex === renderedBoard.page.index) continue;
           const response = await api.roomStatus(propertyId, roomStatusQuery(range, pageIndex, viewState.filters));
-          assertRoomStatusBoard(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
+          validateRoomStatusResponse(response, { propertyId, range, pageIndex, allowedActions: currentPropertyAllowedActions });
           if (findRoomStatusUnit(response, target.inventoryUnitId)) {
             targetPage = pageIndex;
             break;
@@ -5706,7 +5480,7 @@ export function InventoryPage() {
     const attemptId = commandAttemptGuard.begin();
     setCommandAttemptId(attemptId);
     setCommandPhase("DRAFT");
-    commandRevisionRef.current = boardRef.current?.revision;
+
     commandQueryKeyRef.current = boardQueryKeyRef.current;
     setCommandContextInvalidated(false);
     setRecoveryDialogOpen(false);
@@ -5825,7 +5599,7 @@ export function InventoryPage() {
     const attemptId = commandAttemptGuard.begin();
     setCommandAttemptId(attemptId);
     setCommandPhase("CONFIRMING");
-    commandRevisionRef.current = boardRef.current?.revision;
+
     commandQueryKeyRef.current = boardQueryKeyRef.current;
     setCommandContextInvalidated(false);
     setRecoveryDialogOpen(true);
@@ -5850,7 +5624,7 @@ export function InventoryPage() {
     }
     commandAttemptGuard.invalidate();
     setCommandPhase("IDLE");
-    commandRevisionRef.current = undefined;
+
     commandQueryKeyRef.current = undefined;
     setCommand(undefined);
     setSelectedOrderCommandScope(undefined);
@@ -5897,14 +5671,14 @@ export function InventoryPage() {
         || authorizedSelectedOrderView.stay.id !== currentIdentity.stayId) return;
       setCommandDraft(request);
       setSelectedFundsAction(request.commandType);
-      setSelectedFundsRevision(boardRef.current?.revision);
+
       return;
     }
     setCommandDraft(request);
     if (request.commandType === "CANCEL_ORDER" || request.commandType === "MARK_NO_SHOW" || request.commandType === "REVOKE_CHECK_IN" || request.commandType === "REVOKE_CHECK_OUT") {
       if (authorizedSelectedOrderView) {
         setSelectedLifecycleAction(request.commandType);
-        setSelectedLifecycleRevision(boardRef.current?.revision);
+
       }
       return;
     }
@@ -5916,14 +5690,14 @@ export function InventoryPage() {
             ? "ADJUST_DEPARTURE"
             : "DATE_CHANGE"
         );
-        setSelectedStayDateRevision(boardRef.current?.revision);
+
       }
       return;
     }
     if (request.commandType === "MOVE_UNIT") {
       if (authorizedSelectedOrderView) {
         setSelectedMoveUnitOpen(true);
-        setSelectedMoveUnitRevision(boardRef.current?.revision);
+
       }
       return;
     }
@@ -5931,7 +5705,7 @@ export function InventoryPage() {
       const occupantId = request.input.occupantId;
       if (typeof occupantId === "string" && authorizedSelectedOrderView?.occupants.some((occupant) => occupant.id === occupantId)) {
         setSelectedCorrectionOccupantId(occupantId);
-        setSelectedCorrectionRevision(boardRef.current?.revision);
+
       }
     }
   }
@@ -5949,26 +5723,8 @@ export function InventoryPage() {
     const controller = new AbortController();
     const requestId = queryAttemptGuard.begin(controller);
     const timeout = window.setTimeout(() => {
-      controller.abort(new Error("提交后的房态刷新超时"));
+      controller.abort(new RoomStatusQueryTimeoutError());
     }, ROOM_STATUS_QUERY_TIMEOUT_MS);
-    const existing = boardRef.current;
-    const sameQuery = existing?.propertyId === propertyId
-      && boardQueryKeyRef.current === queryKey;
-    const requestStartedAt = roomStatusFreshnessNow();
-    const existingFreshnessDeadline = boardFreshnessDeadline;
-    const writeContinuityExpected = Boolean(sameQuery
-      && existing
-      && existingFreshnessDeadline !== undefined
-      && roomStatusProjectionHasWriteHeadroom(existingFreshnessDeadline, requestStartedAt));
-    const recoveryHeadroomRequired = Boolean(sameQuery
-      && existing
-      && (continuityLostQueryKeyRef.current === queryKey || !writeContinuityExpected));
-    if (lowFreshnessQueryKeyRef.current !== queryKey) {
-      lowFreshnessResponseCountRef.current = 0;
-      lowFreshnessQueryKeyRef.current = queryKey;
-      continuityLostQueryKeyRef.current = undefined;
-      clearLowFreshnessRetry();
-    }
     try {
       const response = await api.roomStatus(propertyId, query, controller.signal);
       if (!roomStatusCommittedRefreshScopeIsCurrent({
@@ -5981,41 +5737,15 @@ export function InventoryPage() {
         ...(refreshOrderIdentity ? { capturedOrder: refreshOrderIdentity } : {}),
         ...(currentSelectedOrderIdentityRef.current ? { currentOrder: currentSelectedOrderIdentityRef.current } : {})
       })) throw new Error("提交后的房态刷新已被新的权威查询或操作范围替代");
-      assertRoomStatusBoard(response, { propertyId, range, pageIndex: viewState.roomPageIndex, allowedActions: currentPropertyAllowedActions });
-      const responseReceivedAt = roomStatusFreshnessNow();
-      const localFreshnessDeadline = roomStatusProjectionLocalFreshnessDeadline(response, requestStartedAt);
-      const writeContinuityPreserved = !writeContinuityExpected
-        || existingFreshnessDeadline !== undefined
-          && roomStatusProjectionHasWriteHeadroom(existingFreshnessDeadline, responseReceivedAt);
-      const admitWrites = writeContinuityPreserved && roomStatusProjectionResponseCanEnableWrites(
-        localFreshnessDeadline,
-        responseReceivedAt,
-        recoveryHeadroomRequired ? ROOM_STATUS_RECOVERY_INSTALL_HEADROOM_MS : ROOM_STATUS_RESPONSE_INSTALL_HEADROOM_MS
-      );
-      setBoardWriteAdmitted(admitWrites);
-      let slowReadError: Error | undefined;
-      if (!admitWrites) {
-        if (sameQuery && existing) continuityLostQueryKeyRef.current = queryKey;
-        lowFreshnessResponseCountRef.current += 1;
-        if (roomStatusLowFreshnessResponseRequiresManualRetry(lowFreshnessResponseCountRef.current)) {
-          clearLowFreshnessRetry();
-          slowReadError = new Error("房态响应持续过慢，无法取得足够安全的写入时间。请在网络恢复后重试刷新。");
-        } else {
-          scheduleLowFreshnessRetry(roomStatusStaleResponseRetryDelay(lowFreshnessResponseCountRef.current));
-        }
-      } else {
-        lowFreshnessResponseCountRef.current = 0;
-        continuityLostQueryKeyRef.current = undefined;
-        clearLowFreshnessRetry();
-      }
+      validateRoomStatusResponse(response, { propertyId, range, pageIndex: viewState.roomPageIndex, allowedActions: currentPropertyAllowedActions });
+      setBoardWriteAdmitted(true);
       setBoard(response);
-      setBoardFreshnessDeadline(localFreshnessDeadline);
       boardRef.current = response;
       setBoardQueryKey(queryKey);
       boardQueryKeyRef.current = queryKey;
-      setQueryError(slowReadError);
-      setQueryPhase(slowReadError ? "ERROR" : "READY");
-      setClock(responseReceivedAt);
+      setQueryError(undefined);
+      resetQueryFailureRetry();
+      setQueryPhase("READY");
       restoreRefreshReturnFocus();
       if (refreshOrderIdentity) {
         const orderResponse = await api.order(refreshOrderIdentity.orderId, controller.signal);
@@ -6060,7 +5790,7 @@ export function InventoryPage() {
       refreshedReceiptIdRef.current = receipt.receiptId;
     } finally {
       window.clearTimeout(timeout);
-      if (queryAttemptGuard.finish(requestId)) setQuerySettledToken((value) => value + 1);
+      queryAttemptGuard.finish(requestId);
     }
   }
 
@@ -6103,7 +5833,7 @@ export function InventoryPage() {
         onCorrectOccupant={(occupant) => {
           setCommandDraft(undefined);
           setSelectedCorrectionOccupantId(occupant.id);
-          setSelectedCorrectionRevision(board?.revision);
+
         }}
         onLocateRange={(target) => { void locateOrderRange(target); }}
       />
@@ -6129,6 +5859,7 @@ export function InventoryPage() {
         {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
         backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
         commandsBlocked={quoteWorkbenchBlocked}
+        commandsBlockedReason={actionPresentationBlock?.reason ?? (!activeQuoteAuthorizedAction ? "所选房源或日期目前不能办理，请重新选择后核对。" : undefined)}
         selectionDraftValid={selectionDraftValid}
         resetToken={quoteResetToken}
         autoResolvedRecoveryIdentities={autoResolvedQuoteRecoveryIdentities}
@@ -6170,7 +5901,7 @@ export function InventoryPage() {
       allowedActions={contextOrderChoices.length ? contextActions.filter((action) => action.code !== "OPEN_ORDER") : contextActions}
       {...(controlWriteBlock ? { writeBlock: controlWriteBlock } : {})}
       onSelectedUnitChange={inspectUnit}
-      onSelectionChange={selectRange}
+      onSelectionChange={(selection) => selectRange(selection, true)}
       onDraftValidityChange={setSelectionDraftValid}
       onOpenReference={openReference}
       onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
@@ -6242,10 +5973,12 @@ export function InventoryPage() {
     <div className={`room-status-stale-notice${boardRefreshFailed ? " is-failed" : ""}`} role="status" aria-live="polite" data-testid="room-status-stale-notice">
       <AlertTriangle className="room-status-stale-icon" aria-hidden="true" size={16} />
       <span className="room-status-stale-copy">
-        <strong>{boardRefreshFailed ? "房态暂时未更新" : "房态正在更新"}</strong>
+        <strong>{boardIncomplete ? "部分房态资料待核对" : boardRefreshFailed ? "房态暂时未更新" : "房态正在更新"}</strong>
         <span>
           当前显示 <time dateTime={renderedBoard.asOf}>{new Date(renderedBoard.asOf).toLocaleString("zh-CN", { hour12: false })}</time> 的结果。
-          {boardRefreshFailed ? "正在自动重试，恢复前不能发起写入。" : "更新完成前不能发起写入。"}
+          {boardIncomplete ? "可以查看和切换日期，核清前暂停办理。" : boardRefreshFailed
+            ? roomStatusReadRetryable(queryError) ? "暂时未能同步，可以继续查看和填写；办理时会重新核对。" : "数据校验未通过，请重试或选择其他日期。"
+            : rangeMismatch ? "旧日期仅供查看，日期导航仍可使用。" : "后台同步不影响填写，办理时会重新核对。"}
         </span>
       </span>
       {actionPresentationBlock?.actionLabel
@@ -6300,8 +6033,13 @@ export function InventoryPage() {
 
           {rangeLoadingNoticeVisible ? (
             <div className="room-status-range-loading" role="status" aria-live="polite" data-testid="room-status-range-loading">
-              <strong>正在载入新的日期范围或房间分页</strong>
-              <span>工具栏保留上次获权的数据时点；下方仍是 [{renderedBoard.range.arrivalDate}, {renderedBoard.range.departureDate}) 的旧事实，已暂停全部交互和写入。</span>
+              <strong>{rangeLoadFailed ? "所选日期的房态加载失败" : "正在载入所选日期的房态"}</strong>
+              <span>当前仍显示 {renderedBoard.range.arrivalDate} 至 {addLocalDateDays(renderedBoard.range.departureDate, -1)}，仅供查看。可以选择其他日期或返回今天。</span>
+              {rangeLoadFailed ? <>
+                <span>{queryError instanceof RoomStatusProjectionError ? queryError.message : "请检查网络后重试。"}</span>
+                <button type="button" className="button button-secondary" onClick={requestRoomStatusRefresh} disabled={queryBusy}>重试所选日期</button>
+                <button type="button" className="button button-secondary" onClick={() => applyRange(renderedBoard.range)}>返回已显示日期</button>
+              </> : null}
             </div>
           ) : null}
 
@@ -6309,7 +6047,6 @@ export function InventoryPage() {
             ref={workspaceRef}
             className={`room-status-workspace${!isMobile && (desktopContextCollapsed || !useInlineOrderContext) ? " is-context-overlay" : ""}`}
             aria-busy={rangeLoading}
-            inert={rangeLoading && !filteredViewHasNoRooms}
           >
             <div className="room-status-board-column" ref={boardColumnRef}>
               <RoomStatusGrid
@@ -6555,7 +6292,7 @@ export function InventoryPage() {
                 onSelectedUnitChange={(unit) => {
                   inspectUnit(unit);
                 }}
-                onSelectionChange={selectRange}
+                onSelectionChange={(selection) => selectRange(selection, true)}
                 onDraftValidityChange={setSelectionDraftValid}
                 onOpenReference={openReference}
                 onOpenReceipt={(receiptId) => window.open(`/api/v1/receipts/${encodeURIComponent(receiptId)}`, "_blank", "noopener,noreferrer")}
@@ -6582,6 +6319,7 @@ export function InventoryPage() {
                 {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
                 backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
                 commandsBlocked={quoteWorkbenchBlocked}
+        commandsBlockedReason={actionPresentationBlock?.reason ?? (!activeQuoteAuthorizedAction ? "所选房源或日期目前不能办理，请重新选择后核对。" : undefined)}
                 selectionDraftValid={selectionDraftValid}
                 resetToken={quoteResetToken}
                 autoResolvedRecoveryIdentities={autoResolvedQuoteRecoveryIdentities}
@@ -6623,6 +6361,7 @@ export function InventoryPage() {
               {...(activeQuoteTarget?.actionCode ? { quoteActionCode: activeQuoteTarget.actionCode } : {})}
               backfill={activeQuoteTarget?.actionCode === "BACKFILL_ORDER"}
               commandsBlocked
+              commandsBlockedReason="正在核对上一次操作结果，处理完成后可继续办理。"
               selectionDraftValid={selectionDraftValid}
               resetToken={quoteResetToken}
               autoResolvedRecoveryIdentities={autoResolvedQuoteRecoveryIdentities}
@@ -6646,17 +6385,15 @@ export function InventoryPage() {
         key={`${authorizedSelectedOrderView.order.id}:${selectedFundsAction}`}
         action={selectedFundsAction}
         view={authorizedSelectedOrderView}
-        writeBlocked={commandsBlocked || selectedOrderLoading || selectedFundsRevision !== board?.revision
+        writeBlocked={commandsBlocked || selectedOrderLoading
           || authorizedSelectedOrderView.accessLevel !== "WRITE"
           || !authorizedSelectedOrderView.allowedActions.some((candidate) => candidate.code === selectedFundsAction && candidate.enabled)}
-        writeBlockedReason={selectedFundsRevision !== board?.revision
-          ? "订单或房态已更新，本次填写已保留。请取消后重新打开资金表单，核对最新记录。"
-          : selectedOrderLoading ? "正在更新订单信息，请稍候。"
+        writeBlockedReason={selectedOrderLoading ? "正在更新订单信息，请稍候。"
             : "当前订单、操作权限或房态暂不支持资金登记。请取消后重新核对。"}
         {...(commandDraft?.commandType === selectedFundsAction ? { draft: commandDraft } : {})}
         onClose={() => {
           setSelectedFundsAction(undefined);
-          setSelectedFundsRevision(undefined);
+
           setSelectedOrderCommandScope(undefined);
           setCommandDraft(undefined);
           restoreRoomStatusInteraction();
@@ -6664,14 +6401,14 @@ export function InventoryPage() {
         onSubmit={(request) => {
           const identity = selectedOrderIdentity;
           const view = authorizedSelectedOrderView;
-          if (!identity || commandsBlocked || selectedOrderLoading || selectedFundsRevision !== board?.revision
+          if (!identity || commandsBlocked || selectedOrderLoading
             || view.accessLevel !== "WRITE" || request.commandType !== selectedFundsAction
             || request.input.propertyId !== propertyId || request.input.orderId !== identity.orderId
             || view.order.id !== identity.orderId || view.stay.id !== identity.stayId
             || !view.allowedActions.some((candidate) => candidate.code === selectedFundsAction && candidate.enabled)) return;
           if (startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity))) {
             setSelectedFundsAction(undefined);
-            setSelectedFundsRevision(undefined);
+
           }
         }}
       /> : null}
@@ -6683,13 +6420,13 @@ export function InventoryPage() {
           : {})}
         onClose={() => {
           setSelectedCorrectionOccupantId(undefined);
-          setSelectedCorrectionRevision(undefined);
+
           setCommandDraft(undefined);
         }}
         onSubmit={(request) => {
           if (commandsBlocked) return;
           setSelectedCorrectionOccupantId(undefined);
-          setSelectedCorrectionRevision(undefined);
+
           setRecoveryDialogOpen(false);
           startCommand(request, currentSelectedOrderCommandScope);
         }}
@@ -6703,13 +6440,13 @@ export function InventoryPage() {
           return unit ? `${unit.code} · ${unit.name}` : "房源";
         }))].join(" → ")}
         inventoryUnits={meta.inventoryUnits}
-        writeBlocked={commandsBlocked || selectedStayDateRevision !== board?.revision}
+        writeBlocked={commandsBlocked}
         runPreview={commandRecovery.runPreview}
         {...(commandDraft?.commandType === selectedStayDateAction ? { draft: commandDraft } : {})}
         onClose={() => {
           setSelectedStayDateAction(undefined);
           setSelectedStayDateMode("DATE_CHANGE");
-          setSelectedStayDateRevision(undefined);
+
           setSelectedOrderCommandScope(undefined);
           setCommandDraft(undefined);
           restoreRoomStatusInteraction();
@@ -6723,7 +6460,7 @@ export function InventoryPage() {
           )) return;
           setSelectedStayDateAction(undefined);
           setSelectedStayDateMode("DATE_CHANGE");
-          setSelectedStayDateRevision(undefined);
+
           setCommandDraft(undefined);
           setRecoveryDialogOpen(false);
           startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
@@ -6732,12 +6469,12 @@ export function InventoryPage() {
       {authorizedSelectedOrderView && selectedMoveUnitOpen ? <MoveUnitDrawer
         view={authorizedSelectedOrderView}
         units={meta.inventoryUnits}
-        writeBlocked={commandsBlocked || selectedMoveUnitRevision !== board?.revision}
+        writeBlocked={commandsBlocked}
         runPreview={commandRecovery.runPreview}
         {...(commandDraft?.commandType === "MOVE_UNIT" ? { draft: commandDraft } : {})}
         onClose={() => {
           setSelectedMoveUnitOpen(false);
-          setSelectedMoveUnitRevision(undefined);
+
           setSelectedOrderCommandScope(undefined);
           setCommandDraft(undefined);
           restoreRoomStatusInteraction();
@@ -6746,7 +6483,7 @@ export function InventoryPage() {
           const identity = selectedOrderIdentity;
           if (!identity || commandsBlocked || request.commandType !== "MOVE_UNIT") return;
           setSelectedMoveUnitOpen(false);
-          setSelectedMoveUnitRevision(undefined);
+
           setCommandDraft(undefined);
           setRecoveryDialogOpen(false);
           startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
@@ -6756,11 +6493,11 @@ export function InventoryPage() {
         action={selectedLifecycleAction}
         view={authorizedSelectedOrderView}
         inventoryUnitLabels={Object.fromEntries(meta.inventoryUnits.map((unit) => [unit.id, `${unit.code} · ${unit.name}`]))}
-        writeBlocked={commandsBlocked || selectedLifecycleRevision !== board?.revision}
+        writeBlocked={commandsBlocked}
         {...(commandDraft?.commandType === selectedLifecycleAction ? { draft: commandDraft } : {})}
         onClose={() => {
           setSelectedLifecycleAction(undefined);
-          setSelectedLifecycleRevision(undefined);
+
           setSelectedOrderCommandScope(undefined);
           setCommandDraft(undefined);
           restoreRoomStatusInteraction();
@@ -6769,12 +6506,12 @@ export function InventoryPage() {
           const identity = selectedOrderIdentity;
           const currentView = authorizedSelectedOrderView;
           const action = currentView?.allowedActions.find((candidate) => candidate.code === selectedLifecycleAction);
-          if (!identity || commandsBlocked || selectedLifecycleRevision !== board?.revision
+          if (!identity || commandsBlocked
             || request.commandType !== selectedLifecycleAction
             || currentView.order.id !== identity.orderId || currentView.stay.id !== identity.stayId
             || !action?.enabled) return;
           setSelectedLifecycleAction(undefined);
-          setSelectedLifecycleRevision(undefined);
+
           setCommandDraft(undefined);
           setRecoveryDialogOpen(false);
           startCommand(request, roomStatusOrderCommandScope(orderPrincipalScope, identity));
@@ -6793,13 +6530,13 @@ export function InventoryPage() {
           setCommandDraft(undefined);
           setSelectedStayDateAction(undefined);
           setSelectedStayDateMode("DATE_CHANGE");
-          setSelectedStayDateRevision(undefined);
+
           setSelectedMoveUnitOpen(false);
-          setSelectedMoveUnitRevision(undefined);
+
           setSelectedLifecycleAction(undefined);
-          setSelectedLifecycleRevision(undefined);
+
           setSelectedFundsAction(undefined);
-          setSelectedFundsRevision(undefined);
+
           if (command.commandType === "CREATE_ORDER") {
             setQuoteTarget(undefined);
             setDesktopContextCollapsed(true);

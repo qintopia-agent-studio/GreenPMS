@@ -127,6 +127,29 @@ afterAll(async () => {
 });
 
 describe("RoomStatus Query and Command API contract", () => {
+  it("checks revision and authorization without returning the room projection", async () => {
+    const url = `/api/v1/properties/${demo.propertyId}/room-status/sync`;
+    const noSession = await app.inject({ method: "GET", url });
+    expect(noSession.statusCode).toBe(401);
+    const syncResponse = await app.inject({ method: "GET", url, headers: headers("sync") });
+    expect(syncResponse.statusCode, syncResponse.body).toBe(200);
+    const sync = syncResponse.json();
+    expect(sync).toMatchObject({ propertyId: demo.propertyId, accessLevel: "WRITE" });
+    expect(sync.authorizationKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(sync.rooms).toBeUndefined();
+    const full = await app.inject({ method: "GET",
+      url: `/api/v1/properties/${demo.propertyId}/room-status?arrivalDate=${sync.businessDate}&departureDate=${shiftLocalDate(sync.businessDate, 1)}`,
+      headers: headers("sync-full") });
+    expect(full.statusCode, full.body).toBe(200);
+    expect(full.json()).toMatchObject({ revision: sync.revision, businessDate: sync.businessDate, authorizationKey: sync.authorizationKey });
+    const read = await app.inject({ method: "GET", url, headers: { authorization: `Bearer ${demo.readToken}` } });
+    expect(read.statusCode, read.body).toBe(200);
+    expect(read.json().accessLevel).toBe("READ");
+    expect(read.json().authorizationKey).not.toBe(sync.authorizationKey);
+    const denied = await app.inject({ method: "GET", url: "/api/v1/properties/another_property/room-status/sync", headers: headers("sync-denied") });
+    expect(denied.statusCode).toBe(403);
+  });
+
   it("publishes a finite additive OpenAPI schema and all stable vocabularies", async () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/openapi.json" });
     expect(response.statusCode).toBe(200);
