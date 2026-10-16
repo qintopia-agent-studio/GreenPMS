@@ -219,8 +219,8 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
       "仅修改当前展示房号，保留原房间、床位、订单、占用和价格；历史操作记录不变",
       ...(children.length ? [`关联床位同步显示：${children.map((unit) => changes[unit.id]).join("、")}`] : [])];
   } else if (input.action === "SET_OPERATING_STATISTICS") {
-    if (!Array.isArray(input.assetIds) || !input.assetIds.length || input.assetIds.some(id => typeof id !== "string")
-      || new Set(input.assetIds).size !== input.assetIds.length) throw new DomainError("VALIDATION_ERROR", "请选择不重复的实体房间");
+    if (!Array.isArray(input.assetIds) || input.assetIds.length !== 1 || input.assetIds.some(id => typeof id !== "string")
+      || new Set(input.assetIds).size !== input.assetIds.length) throw new DomainError("VALIDATION_ERROR", "每次请选择一个房间修改分类");
     const included = flag(input.included);
     const selected = input.assetIds.map(id => basis.rooms.find(room => room.assetId === id));
     if (selected.some(room => !room)) throw new DomainError("VALIDATION_ERROR", "统计设置包含不属于本门店的实体房间");
@@ -228,10 +228,10 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
     effect.after = { ...(basis.storedSnapshot ?? basis.snapshot), version: next.version };
     if (!basis.storedSnapshot) delete effect.after.buildingOrder;
     effect.operatingStatisticsChange = { assetIds: [...input.assetIds].sort(), included };
-    effect.title = `${included ? "计入" : "排除"}经营住宿统计：${selected.length} 间`;
+    effect.title = `设为${included ? "经营单元" : "非经营单元"}：${selected.length} 间`;
     effect.description = [selected.map(room => `${room!.buildingCode}栋 ${room!.code}`).join("、"),
-      "统一影响历史、当前及未来的经营人数、入住率、单元夜和容量；房间版本与子床继承设置。",
-      "房态、真实资金、经营销售额与今日真实新增订单保持完整。"];
+      "过去和今后的经营入住率、住宿人数、住宿晚数和可用房源数量，都会按新分类计算；房间内的床位一并调整。",
+      "入住记录、订单、收付款、经营销售额和今日新增订单数照常保留。"];
   } else if (input.action === "SET_BUILDING_ORDER") {
     const current = basis.snapshot.buildingOrder!;
     const order = input.buildingOrder;

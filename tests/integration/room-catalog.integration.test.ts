@@ -600,21 +600,21 @@ describe.sequential("operating lodging statistics with protected asset settings"
     expect([old.unitId, latest.unitId, ...latest.beds.map(bed => bed.id)].every(enabled.includesUnit)).toBe(true);
   });
 
-  it("applies an entire building atomically, rejects duplicate/foreign assets, and invalidates stale previews", async () => {
+  it("accepts one room only, rejects batch/duplicate/foreign assets, and invalidates stale previews", async () => {
     const catalog = await readRoomCatalog(db, demo.propertyId);
     const assets = catalog.rooms.filter(room => room.buildingCode === "A").map(room => room.assetId);
     expect(assets.length).toBeGreaterThan(1);
     const stale = await preview({ action: "SET_OPERATING_STATISTICS", assetIds: [assets[0]!], included: false });
-    await change({ action: "SET_OPERATING_STATISTICS", assetIds: assets, included: false });
+    await change({ action: "SET_OPERATING_STATISTICS", assetIds: [assets[0]!], included: false });
     const receipt = await confirmCommandPreview(db, admin, stale.preview.previewId, { propertyId: demo.propertyId,
       commandType: "MANAGE_ROOM_CATALOG", expectedEffectHash: stale.preview.effectHash, confirmation: true,
-      reason: { code: "ROOM_CATALOG_CHANGE", note: "旧核对不能覆盖批量设置" } }, metadata());
+      reason: { code: "ROOM_CATALOG_CHANGE", note: "旧核对不能覆盖单房新设置" } }, metadata());
     expect(receipt.businessCommitted).toBe(false);
-    expect((await readRoomCatalog(db, demo.propertyId)).rooms.filter(room => assets.includes(room.assetId)).every(room => !room.includedInOperatingStatistics)).toBe(true);
-    for (const assetIds of [[assets[0]!, assets[0]!], [assets[0]!, "foreign"], []]) {
+    expect((await readRoomCatalog(db, demo.propertyId)).rooms.find(room => room.assetId === assets[0])!.includedInOperatingStatistics).toBe(false);
+    for (const assetIds of [assets, [assets[0]!, assets[0]!], ["foreign"], []]) {
       await expect(preview({ action: "SET_OPERATING_STATISTICS", assetIds, included: true })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     }
-    await change({ action: "SET_OPERATING_STATISTICS", assetIds: assets, included: true });
+    await change({ action: "SET_OPERATING_STATISTICS", assetIds: [assets[0]!], included: true });
   });
 
   it("enforces the same narrow mutation at the SQL boundary even with a forged matching preview", async () => {

@@ -94,3 +94,28 @@
   .catalog-building-moves button { min-height: 44px; min-width: 44px; padding: 8px; }
   .catalog-building-moves button span { display: none; }
 }
+
+/* Horizontal table scrolling must not trap vertical page scrolling. */
+.catalog-room-table { overscroll-behavior-y: auto; }
+.catalog-room-filters { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 18px; }
+.catalog-category-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.catalog-category-filters button { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 7px 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 14px; cursor: pointer; }
+.catalog-category-filters button:hover { background: var(--surface-muted); color: var(--text); }
+.catalog-category-filters button.is-selected { background: var(--brand-soft); color: var(--brand); font-weight: 650; }
+.catalog-category-filters button span { font-size: 12px; font-variant-numeric: tabular-nums; }
+.catalog-building-filter { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+.catalog-building-filter select { width: auto; min-width: 112px; min-height: 38px; padding: 6px 28px 6px 12px; font-size: 13px; }
+@media (max-width: 760px) {
+  .catalog-all-rooms .catalog-page-actions { flex-wrap: wrap; }
+  .catalog-room-filters { align-items: flex-start; gap: 12px; }
+  .catalog-category-filters { gap: 2px; }
+  .catalog-category-filters button { padding: 8px; gap: 5px; font-size: 13px; }
+}
+
+.catalog-rooms-title { position: relative; display: flex; align-items: center; gap: 4px; }
+.catalog-rooms-title .info-hint { position: static; }
+.catalog-rooms-title .info-hint-bubble { left: 0; right: auto; top: calc(100% + 10px); transform: none; width: 260px; max-width: min(260px, 75vw); }
+.catalog-room-table th:nth-child(n+4), .catalog-room-table td:nth-child(n+4) { text-align: center; vertical-align: middle; }
+.catalog-room-table .row-actions { justify-content: center; }
+.catalog-category-select { display: inline-block; width: 136px; min-height: 36px; padding: 6px 24px 6px 10px; font-size: 13px; }
+.catalog-saving { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
