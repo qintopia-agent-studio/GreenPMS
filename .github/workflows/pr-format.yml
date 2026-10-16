@@ -1,0 +1,37 @@
+name: GreenPMS PR format
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Metadata changes must not cancel full CI. Serialize these short checks, and
+# read the current PR so an older queued event cannot validate outdated text.
+concurrency:
+  group: greenpms-pr-format-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pr-format:
+    name: PR format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.x
+      - name: Test and validate PR metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          node --test scripts/check-pr-tests.mjs
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '{pull_request: .}' > "$RUNNER_TEMP/pr-metadata.json"
+          GITHUB_EVENT_PATH="$RUNNER_TEMP/pr-metadata.json" node scripts/check-pr.mjs
