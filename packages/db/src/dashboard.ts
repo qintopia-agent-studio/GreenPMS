@@ -24,8 +24,8 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const futureUntil = dashboardDate(businessDate, query.futureDays ?? 14);
   const lodging = await loadDashboardStays(trx, propertyId, businessDate, { from: previousRange.from, to: range.to }, futureUntil, property.timezone);
   const moneyFacts = await loadDashboardMoney(trx, propertyId, property.timezone, previousRange.from, dashboardDate(range.to, 1));
-  const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency, property.timezone);
-  const community = await loadDashboardCommunity(trx, propertyId, range, businessDate, property.timezone);
+  const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency, property.timezone, lodging);
+  const community = await loadDashboardCommunity(trx, propertyId, range, businessDate, property.timezone, lodging.statistics);
   const sales = await loadOperatingSales(trx,propertyId,property.timezone,property.currency,range,businessDate);
   current.todaySales=sales.todaySummary;
   const future = await loadDashboardFuture(trx, propertyId, businessDate, futureUntil, lodging);
@@ -76,7 +76,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
       ...(future.some(day => day.quality !== "COMPLETE") ? ["未来部分占用分类待核对；未知占用不视为空房。正式可售查询的已知间/床数仍保留，仅缺少依据的项目显示说明。"] : []),
       ...(current.guestReviewOrders ? ["部分在住订单缺少登记住宿人，人数仅包含可核对部分。"] : [])
     ] };
-  const stayDetails: DashboardDetail[] = currentNights.map(night => ({ ...newDashboardDetail(`night:${night.orderId}:${night.date}`, night.date),
+  const stayDetails: DashboardDetail[] = currentNights.map(night => ({ ...newDashboardDetail(`night:${night.orderId}:${night.unitId}:${night.date}`, night.date),
     metric: night.source === "FREE" ? "FREE" : "PAID", label: `${night.building} / ${night.roomType}`, orderId: night.orderId, unitId: night.unitId, units: night.units,
     reason: `${night.source === "FREE" ? "免费占用" : "已履约付费住宿"}；按有效住宿安排逐日归属` }));
   const details = [...lodging.futureReviews, ...stayDetails, ...relevantReviews(range).map(review => ({ ...review, date: review.date < range.from ? range.from : review.date })), ...moneyFacts.filter(fact => inDashboardRange(fact.date, range)).map(dashboardMoneyDetail), ...currentDetails];

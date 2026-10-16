@@ -644,6 +644,15 @@ export interface RoomStatusBoardQueryDto {
   unitKind?: InventoryUnitKind;
 }
 
+export interface RoomStatusSyncDto {
+  propertyId: string;
+  businessDate: string;
+  asOf: string;
+  revision: string;
+  accessLevel: AccessLevel;
+  authorizationKey: string;
+}
+
 export interface RoomStatusBoardDto {
   propertyId: string;
   businessDate: string;
@@ -653,7 +662,9 @@ export interface RoomStatusBoardDto {
   };
   dates: string[];
   asOf: string;
+  /** Legacy snapshot freshness hint; submitting still requires authoritative Preview/Confirm. */
   freshUntil: string;
+  authorizationKey?: string;
   revision: string;
   accessLevel: AccessLevel;
   projectionState: "READY" | "PARTIAL";

@@ -247,6 +247,13 @@ describe.sequential("administrator room catalog with the restricted runtime role
       const roomDraft = await postPreview({ action: "SAVE_ROOM", typeCode, code: "HTTP-1", buildingCode: "测试", bedCount: 2, capacity: 2 });
       await postConfirm(roomDraft);
       await postPreview({ action: "SET_ROOM_ACTIVE", roomId: roomDraft.effect.roomLink.newUnitId, active: false });
+      const statistics = await postPreview({ action: "SET_OPERATING_STATISTICS", assetIds: [roomDraft.effect.roomLink.assetId], included: false });
+      expect(statistics.effect.operatingStatisticsChange).toEqual({ assetIds: [roomDraft.effect.roomLink.assetId], included: false });
+      await postConfirm(statistics);
+      const configured = await app.inject({ method: "GET", url: `/api/v1/properties/${demo.propertyId}/room-catalog`, cookies });
+      expect(configured.statusCode, configured.body).toBe(200);
+      expect(configured.json().rooms.find((room: { assetId: string }) => room.assetId === roomDraft.effect.roomLink.assetId).includedInOperatingStatistics).toBe(false);
+      await postConfirm(await postPreview({ action: "SET_OPERATING_STATISTICS", assetIds: [roomDraft.effect.roomLink.assetId], included: true }));
     } finally { await app.close(); }
   });
   it("keeps the last supply for a live membership and rolls back incomplete catalog commands", async () => {
@@ -514,4 +521,210 @@ describe.sequential("administrator room catalog with the restricted runtime role
     expect(await readRoomCatalog(db, demo.propertyId)).toEqual(current);
   });
 
+});
+
+describe.sequential("operating lodging statistics with protected asset settings", () => {
+  beforeAll(async () => {
+    owner = await resetDatabase(url);
+    await owner.insertInto("web_sessions").values({ id: admin.credentialId, subject_id: admin.subjectId,
+      secret_hash: sha256("synthetic-catalog-session"), expires_at: new Date("2030-01-01"), revoked_at: null }).execute();
+    db = createDatabase(runtimeDatabaseUrlForTesting(url));
+  }, 120000);
+  afterAll(async () => { await db?.destroy(); await owner?.destroy(); });
+
+  it("rejects any buildingOrder field on the first statistics write, even in a matching forged preview", async () => {
+    const before = await readRoomCatalog(db, demo.propertyId);
+    expect(before.version).toBe(0);
+    const draft = await preview({ action: "SET_OPERATING_STATISTICS", assetIds: [before.rooms[0]!.assetId], included: false });
+    expect((draft.preview.effect as unknown as RoomCatalogEffect).after).not.toHaveProperty("buildingOrder");
+    for (const buildingOrder of [null, [], ["injected-building"], before.buildingOrder]) {
+      const effect = structuredClone(draft.preview.effect) as unknown as RoomCatalogEffect;
+      (effect.after as unknown as Record<string, unknown>).buildingOrder = buildingOrder;
+      await expect(owner.transaction().execute(async trx => {
+        const source = await trx.selectFrom("command_previews").selectAll().where("id", "=", draft.preview.previewId).executeTakeFirstOrThrow();
+        await trx.insertInto("command_previews").values({ ...source, id: `forged_initial_statistics_${++sequence}`,
+          effect: effect as unknown as Record<string, unknown> }).execute();
+        await sql`set local role qintopia_runtime`.execute(trx);
+        const id = `bad_initial_statistics_${++sequence}`;
+        await trx.insertInto("command_executions").values({ id, subject_id: admin.subjectId, credential_id: admin.credentialId,
+          property_id: demo.propertyId, command_type: "MANAGE_ROOM_CATALOG", idempotency_key: id,
+          request_hash: sha256(id), correlation_id: id, state: "EXECUTING", completed_at: null }).execute();
+        await sql`select qintopia_apply_room_catalog(${id}, ${JSON.stringify(effect)}::jsonb, 'initial statistics boundary probe')`.execute(trx);
+      })).rejects.toMatchObject({ code: "23514", message: "operating statistics must initialize the unchanged catalog baseline" });
+    }
+    expect(await owner.selectFrom("room_catalog_state").selectAll().where("property_id", "=", demo.propertyId).execute()).toEqual([]);
+    expect(await owner.selectFrom("room_operating_statistics").selectAll().where("property_id", "=", demo.propertyId).execute()).toEqual([]);
+    expect((await readRoomCatalog(db, demo.propertyId)).buildingOrder).toEqual(before.buildingOrder);
+  });
+
+  it("initializes a version-zero catalog without changing its types, rates, inventory or prices", async () => {
+    const before = await readRoomCatalog(db, demo.propertyId);
+    expect(before.version).toBe(0);
+    expect(before.rooms.every(room => room.includedInOperatingStatistics)).toBe(true);
+    const room = before.rooms.find(room => room.code === "A01")!;
+    const inventory = await owner.selectFrom("inventory_units").selectAll().orderBy("id").execute();
+    const policies = await owner.selectFrom("pricing_policy_versions").selectAll().orderBy("id").execute();
+    const draft = await preview({ action: "SET_OPERATING_STATISTICS", assetIds: [room.assetId], included: false });
+    expect(draft.preview.effect).toMatchObject({ retireUnitIds: [], insertUnits: [], policies: [], roomLink: null });
+    const key = metadata(), receipt = await commit(draft, key);
+    expect((await commit(draft, key)).receiptId).toBe(receipt.receiptId);
+    const after = await readRoomCatalog(db, demo.propertyId);
+    expect(after.version).toBe(1);
+    const state = await owner.selectFrom("room_catalog_state").select("snapshot").where("property_id", "=", demo.propertyId).executeTakeFirstOrThrow();
+    expect(state.snapshot).not.toHaveProperty("buildingOrder");
+    expect(after.buildingOrder).toEqual(before.buildingOrder);
+    expect(after.types).toEqual(before.types);
+    expect(after.rates).toEqual(before.rates);
+    expect(after.rooms.find(item => item.assetId === room.assetId)?.includedInOperatingStatistics).toBe(false);
+    expect(await owner.selectFrom("inventory_units").selectAll().orderBy("id").execute()).toEqual(inventory);
+    expect(await owner.selectFrom("pricing_policy_versions").selectAll().orderBy("id").execute()).toEqual(policies);
+    expect(await databaseReady(db, { staffProfileManifestName: "demo" })).toBe(true);
+  });
+
+  it("inherits exclusion through rename, replacement versions and their child beds", async () => {
+    const { loadOperatingStatisticsScope } = await import("../../packages/db/src/operating-statistics.ts");
+    const old = (await readRoomCatalog(db, demo.propertyId)).rooms.find(room => room.code === "A01")!;
+    await change({ action: "RENAME_ROOM", roomId: old.unitId, code: "A统计" });
+    await change({ action: "SAVE_ROOM", roomId: old.unitId, code: "A统计", buildingCode: old.buildingCode,
+      typeCode: "shared_bath_double", bedCount: 2, capacity: 2 });
+    const latest = (await readRoomCatalog(db, demo.propertyId)).rooms.find(room => room.assetId === old.assetId)!;
+    expect(latest.unitId).not.toBe(old.unitId);
+    expect(latest.includedInOperatingStatistics).toBe(false);
+    const scope = await loadOperatingStatisticsScope(db, demo.propertyId);
+    expect(scope.classifyUnit(old.unitId)).toBe(false);
+    expect(scope.classifyUnit(latest.unitId)).toBe(false);
+    expect(latest.beds).toHaveLength(2);
+    expect(latest.beds.every(bed => !scope.includesUnit(bed.id))).toBe(true);
+    await change({ action: "SET_OPERATING_STATISTICS", assetIds: [old.assetId], included: true });
+    const enabled = await loadOperatingStatisticsScope(db, demo.propertyId);
+    expect([old.unitId, latest.unitId, ...latest.beds.map(bed => bed.id)].every(enabled.includesUnit)).toBe(true);
+  });
+
+  it("applies an entire building atomically, rejects duplicate/foreign assets, and invalidates stale previews", async () => {
+    const catalog = await readRoomCatalog(db, demo.propertyId);
+    const assets = catalog.rooms.filter(room => room.buildingCode === "A").map(room => room.assetId);
+    expect(assets.length).toBeGreaterThan(1);
+    const stale = await preview({ action: "SET_OPERATING_STATISTICS", assetIds: [assets[0]!], included: false });
+    await change({ action: "SET_OPERATING_STATISTICS", assetIds: assets, included: false });
+    const receipt = await confirmCommandPreview(db, admin, stale.preview.previewId, { propertyId: demo.propertyId,
+      commandType: "MANAGE_ROOM_CATALOG", expectedEffectHash: stale.preview.effectHash, confirmation: true,
+      reason: { code: "ROOM_CATALOG_CHANGE", note: "旧核对不能覆盖批量设置" } }, metadata());
+    expect(receipt.businessCommitted).toBe(false);
+    expect((await readRoomCatalog(db, demo.propertyId)).rooms.filter(room => assets.includes(room.assetId)).every(room => !room.includedInOperatingStatistics)).toBe(true);
+    for (const assetIds of [[assets[0]!, assets[0]!], [assets[0]!, "foreign"], []]) {
+      await expect(preview({ action: "SET_OPERATING_STATISTICS", assetIds, included: true })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    }
+    await change({ action: "SET_OPERATING_STATISTICS", assetIds: assets, included: true });
+  });
+
+  it("enforces the same narrow mutation at the SQL boundary even with a forged matching preview", async () => {
+    const room = (await readRoomCatalog(db, demo.propertyId)).rooms[0]!;
+    const draft = await preview({ action: "SET_OPERATING_STATISTICS", assetIds: [room.assetId], included: false });
+    const mutations: Array<(effect: RoomCatalogEffect) => void> = [
+      effect => { effect.operatingStatisticsChange!.assetIds = ["foreign"]; },
+      effect => { effect.operatingStatisticsChange!.assetIds = [room.assetId, room.assetId]; },
+      effect => { effect.after.types[0]!.name = "hidden type edit"; },
+      effect => { effect.retireUnitIds = [room.unitId]; },
+      effect => { effect.action = "SET_BUILDING_ORDER"; },
+      effect => { (effect.operatingStatisticsChange as unknown as Record<string, unknown>).included = "false"; },
+      () => { /* A valid write without a matching receipt/audit must roll back the settings too. */ }
+    ];
+    for (const mutate of mutations) {
+      const effect = structuredClone(draft.preview.effect) as unknown as RoomCatalogEffect;
+      mutate(effect);
+      await expect(owner.transaction().execute(async trx => {
+        const source = await trx.selectFrom("command_previews").selectAll().where("id", "=", draft.preview.previewId).executeTakeFirstOrThrow();
+        await trx.insertInto("command_previews").values({ ...source, id: `forged_statistics_${++sequence}`, effect: effect as unknown as Record<string, unknown> }).execute();
+        await sql`set local role qintopia_runtime`.execute(trx);
+        const id = `bad_statistics_${++sequence}`;
+        await trx.insertInto("command_executions").values({ id, subject_id: admin.subjectId, credential_id: admin.credentialId,
+          property_id: demo.propertyId, command_type: "MANAGE_ROOM_CATALOG", idempotency_key: id,
+          request_hash: sha256(id), correlation_id: id, state: "EXECUTING", completed_at: null }).execute();
+        await sql`select qintopia_apply_room_catalog(${id}, ${JSON.stringify(effect)}::jsonb, 'statistics boundary probe')`.execute(trx);
+      })).rejects.toMatchObject({ code: "23514" });
+    }
+    expect((await readRoomCatalog(db, demo.propertyId)).rooms.find(item => item.assetId === room.assetId)?.includedInOperatingStatistics).toBe(true);
+    await expect(sql`update room_operating_statistics set included=false`.execute(db)).rejects.toMatchObject({ code: "42501" });
+    await owner.transaction().execute(async trx => {
+      await sql`grant update on room_operating_statistics to qintopia_runtime`.execute(trx);
+      expect(await databaseReady(trx as unknown as Kysely<Database>, { staffProfileManifestName: "demo" })).toBe(false);
+      await sql`revoke update on room_operating_statistics from qintopia_runtime`.execute(trx);
+    });
+    expect(await databaseReady(db, { staffProfileManifestName: "demo" })).toBe(true);
+  });
+
+  it("filters current/future lodging while preserving orders, claims, collections, debts and operating sales", async () => {
+    const { getDashboard, getDashboardDetails } = await import("../../packages/db/src/dashboard.ts");
+    async function business(commandType: CommandType, input: Record<string, unknown>) {
+      const draft = await createCommandPreview(db, admin, { commandType, input: { propertyId: demo.propertyId, ...input } }, metadata());
+      const result = await confirmCommandPreview(db, admin, draft.preview.previewId, { propertyId: demo.propertyId,
+        commandType, expectedEffectHash: draft.preview.effectHash, confirmation: true,
+        reason: { code: commandType === "CREATE_ORDER" ? "CREATE_STANDARD_ORDER" : "ACCEPTANCE", note: commandType === "CREATE_ORDER" ? "" : "统计不改变财务" } }, metadata());
+      expect(result.businessCommitted, JSON.stringify(result.error)).toBe(true);
+      return result;
+    }
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const room = (await readRoomCatalog(db, demo.propertyId)).rooms.find(item => item.code === "A02")!;
+    const quote = await createQuoteForTesting(db, { propertyId: demo.propertyId, inventoryUnitId: room.unitId,
+      arrivalDate: today, departureDate: addDays(today, 2), pricingPolicyVersionId: (await resolveCatalogPolicyId(db, demo.propertyId, today))! });
+    const created = await business("CREATE_ORDER", { quoteId: quote.quoteId, primaryGuest: { fullName: "统计财务验收", nickname: "统计财务验收" }, bookingChannelCode: "WECOM" });
+    const orderId = String(created.result!.orderId);
+    await business("RECORD_COLLECTION", { orderId, amountMinor: 100, method: "BANK_TRANSFER", transactionReference: "STATISTICS-FINANCE", note: "真实合成收款" });
+    await business("CHECK_IN", { orderId });
+    const before = await getDashboard(db, demo.propertyId, {});
+    const facts = await owner.selectFrom("collection_facts").selectAll().orderBy("fact_id").execute();
+    const claims = await owner.selectFrom("inventory_claims").selectAll().orderBy("id").execute();
+    const view = await getOrderView(db, orderId);
+    const financialMetrics = ["TODAY_ORDERS", "TODAY_COLLECTIONS", "DEBT", "RETAINED", "MONEY"] as const;
+    const detailsBefore = await Promise.all(financialMetrics.map(metric => getDashboardDetails(db, demo.propertyId, { metric })));
+    expect(before.current.paidGuests).toBe(1);
+    expect(before.current.todayOrders).toBe(1);
+    expect(before.current.todayCollections[0]?.amountMinor).toBe("100");
+    await change({ action: "SET_OPERATING_STATISTICS", assetIds: [room.assetId], included: false });
+    const after = await getDashboard(db, demo.propertyId, {});
+    expect(after.current.paidGuests).toBe(0);
+    expect(after.community.current.total).toBe(0);
+    expect(after.future[0]!.capacity).toBe(before.future[0]!.capacity - 1);
+    expect(after.future[0]!.paid).toBe(before.future[0]!.paid - 1);
+    expect(after.current.todayOrders).toBe(before.current.todayOrders);
+    expect(after.current.todayCollections).toEqual(before.current.todayCollections);
+    expect(after.current.todaySales).toEqual(before.current.todaySales);
+    expect(after.current.debts).toEqual(before.current.debts);
+    expect(after.current.retained).toEqual(before.current.retained);
+    expect(after.sales).toEqual(before.sales);
+    expect(after.money).toEqual(before.money);
+    for (const [index, metric] of financialMetrics.entries()) {
+      expect((await getDashboardDetails(db, demo.propertyId, { metric })).items).toEqual(detailsBefore[index]!.items);
+    }
+    expect(await owner.selectFrom("collection_facts").selectAll().orderBy("fact_id").execute()).toEqual(facts);
+    expect(await owner.selectFrom("inventory_claims").selectAll().orderBy("id").execute()).toEqual(claims);
+    expect((await getOrderView(db, orderId)).order).toEqual(view.order);
+    await change({ action: "SET_OPERATING_STATISTICS", assetIds: [room.assetId], included: true });
+    expect((await getDashboard(db, demo.propertyId, {})).current.paidGuests).toBe(1);
+  });
+
+  it("seeds only existing F assets in prop_qintopia, never the demo/other property, and never overwrites an explicit choice", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { loadOperatingStatisticsScope } = await import("../../packages/db/src/operating-statistics.ts");
+    const source = await owner.selectFrom("inventory_units").selectAll().where("kind", "=", "ROOM").where("code", "=", "A02").executeTakeFirstOrThrow();
+    await owner.insertInto("inventory_units").values({ ...source, id: "demo_f", code: "F-demo", building_code: "F" }).execute();
+    for (const propertyId of ["prop_qintopia", "prop_other"]) {
+      await owner.insertInto("properties").values({ id: propertyId, code: propertyId, name: "合成统计物业", timezone: "Asia/Shanghai", currency: "CNY" }).execute();
+      await owner.insertInto("inventory_units").values({ ...source, id: `${propertyId}_f`, property_id: propertyId, building_code: "F" }).execute();
+    }
+    const migration = await readFile("packages/db/src/migrations/075_room_operating_statistics.sql", "utf8");
+    const seed = migration.slice(migration.indexOf("WITH initialized AS"), migration.indexOf("DO $migration$"));
+    await sql.raw(seed).execute(owner);
+    const revision = await owner.selectFrom("room_status_revisions").select("revision").where("property_id", "=", "prop_qintopia").executeTakeFirstOrThrow();
+    expect(String(revision.revision)).toBe("1");
+    expect((await loadOperatingStatisticsScope(db, "prop_qintopia")).classifyUnit("prop_qintopia_f")).toBe(false);
+    expect((await loadOperatingStatisticsScope(db, "prop_other")).classifyUnit("prop_other_f")).toBe(true);
+    expect((await loadOperatingStatisticsScope(db, demo.propertyId)).classifyUnit("demo_f")).toBe(true);
+    await owner.updateTable("room_operating_statistics").set({ included: true }).where("property_id", "=", "prop_qintopia").execute();
+    await sql.raw(seed).execute(owner);
+    expect((await loadOperatingStatisticsScope(db, "prop_qintopia")).classifyUnit("prop_qintopia_f")).toBe(true);
+    expect(await owner.selectFrom("room_status_revisions").select("revision").where("property_id", "=", "prop_qintopia").executeTakeFirstOrThrow()).toEqual(revision);
+    await owner.insertInto("inventory_units").values({ ...source, id: "formal_new_f", property_id: "prop_qintopia", code: "F-new", building_code: "F" }).execute();
+    expect((await loadOperatingStatisticsScope(db, "prop_qintopia")).classifyUnit("formal_new_f")).toBe(true);
+  });
 });

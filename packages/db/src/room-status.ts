@@ -1,5 +1,6 @@
 import { confirmedInventoryAvailability } from "./confirmed-inventory-availability.ts";
 import { dailySalesCapacity } from "./daily-sales-capacity.ts";
+import { loadOperatingStatisticsScope } from "./operating-statistics.ts";
 import { externalChannelCodes, nullLodgingSourceFields, roomStatusOrderSourceFields,
   roomStatusSourceMetadataDamageReason, ordinaryStayMoneyAttention,
   type LodgingSourceProjectionRow, type LodgingSourceFields } from "./lodging-integrity.ts";
@@ -634,7 +635,7 @@ function buildIntervals(
       status: builder.event.status,
       attention: builder.event.attention,
       operationalAttention: builder.event.operationalAttention,
-      available: !builder.event.blocking,
+      available: builder.event.status !== "UNKNOWN" && !builder.event.blocking,
       blocking: builder.event.blocking,
       sourceKind: builder.event.sourceKind,
       sourceCategory: (builder.event.sourceKind === "ORDER" || builder.event.sourceKind === "FREE_STAY") && builder.event.status !== "UNKNOWN"
@@ -903,10 +904,12 @@ function buildAvailabilitySummary(
   dates: string[],
   intervalsByUnit: Map<string, RoomStatusIntervalDto[]>,
   businessDate: string,
-  capacity: ReturnType<typeof dailySalesCapacity>
+  capacity: ReturnType<typeof dailySalesCapacity>,
+  includesUnit: (unitId: string) => boolean
 ): RoomStatusAvailabilitySummaryDto[] {
   let totalSellableUnits = 0;
   for (const room of rooms) {
+    if (!includesUnit(room.id)) continue;
     if (!room.active) continue;
     if (room.salesMode === "WHOLE_ROOM") {
       totalSellableUnits += 1;
@@ -922,6 +925,7 @@ function buildAvailabilitySummary(
     const paidOccupiedSources = new Map<string, number>();
     const occupantIds = new Set<string>();
     for (const room of rooms) {
+      if (!includesUnit(room.id)) continue;
       if (room.salesMode === "WHOLE_ROOM") {
         if (unitAvailableOnDate(room, serviceDate, intervalsByUnit, businessDate)) availableRooms += 1;
         continue;
@@ -934,6 +938,7 @@ function buildAvailabilitySummary(
     }
     for (const intervals of intervalsByUnit.values()) {
       for (const interval of intervals) {
+        if (!includesUnit(interval.actualInventoryUnitId)) continue;
         if (interval.startDate > serviceDate || serviceDate >= interval.endDate) continue;
         if (interval.sourceKind !== "ORDER") continue;
         if (interval.status !== "IN_HOUSE"
@@ -1091,6 +1096,22 @@ export async function bumpRoomStatusRevision(trx: RoomStatusTransaction, propert
   return String(row.revision);
 }
 
+/** A cheap change check; never rebuild the entire board merely to check its revision. */
+export async function getRoomStatusSync(db: Kysely<Database>, propertyId: string) {
+  const property = await db.selectFrom("properties as property")
+    .leftJoin("room_status_revisions as revision", "revision.property_id", "property.id")
+    .select(["property.id", "property.timezone", "revision.revision", sql<Date>`clock_timestamp()`.as("as_of")])
+    .where("property.id", "=", propertyId)
+    .executeTakeFirst();
+  if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
+  return {
+    propertyId,
+    asOf: iso(property.as_of),
+    businessDate: propertyLocalClockAt(property.timezone, new Date(property.as_of)).date,
+    revision: String(property.revision ?? "0")
+  };
+}
+
 export async function getRoomStatusBoard(db: Kysely<Database>, options: {
   propertyId: string;
   arrivalDate: string;
@@ -1098,6 +1119,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
   accessLevel: AccessLevel;
   commandGrants: ReadonlySet<CommandCapability | string>;
   requestingSubjectId: string;
+  authorizationKey?: string;
   page?: number;
   pageSize?: number;
   search?: string;
@@ -1764,7 +1786,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
             arrival_date: row.arrival_date,
             departure_date: row.departure_date,
             current_revision_id: row.current_revision_id,
-            version: row.version
+            version: row.version,
+            booking_channel_code: row.booking_channel_code
           },
           stay: { id: row.stay_id, status: row.stay_status },
           businessDate,
@@ -1955,7 +1978,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
             arrival_date: row.arrival_date,
             departure_date: row.departure_date,
             current_revision_id: row.current_revision_id,
-            version: row.version
+            version: row.version,
+            booking_channel_code: row.booking_channel_code
           },
           stay: { id: row.stay_id, status: row.stay_status },
           businessDate,
@@ -2608,8 +2632,9 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .map((roomRow) => displayUnitsById.get(roomRow.id)!);
     const statusesByUnit = buildUnitStatuses(displayUnitsById, dates, builtIntervals.byUnit, businessDate);
     const capacityChanges = await trx.selectFrom("room_catalog_changes").select(["created_at", "effect"]).where("property_id", "=", options.propertyId).execute();
-    const dailyCapacity = dailySalesCapacity(inventoryRows, capacityChanges, date => propertyLocalClockAt(property.timezone, date).date, confirmedInventoryAvailability(options.propertyId));
-    const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit, businessDate, dailyCapacity);
+    const statistics = await loadOperatingStatisticsScope(trx, options.propertyId, inventoryRows);
+    const dailyCapacity = dailySalesCapacity(inventoryRows, capacityChanges, date => propertyLocalClockAt(property.timezone, date).date, confirmedInventoryAvailability(options.propertyId), statistics.includesUnit);
+    const availabilitySummary = buildAvailabilitySummary(baseRooms, displayUnitsById, dates, builtIntervals.byUnit, businessDate, dailyCapacity, statistics.includesUnit);
     const filterOptions = roomStatusFilterOptions(baseRooms, displayUnitsById, statusesByUnit);
     const filteredRooms = filterRoomSelections(baseRooms, displayUnitsById, filters, statusesByUnit);
     const totalRooms = filteredRooms.length;
@@ -2644,6 +2669,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       asOf,
       freshUntil,
       revision: String(property.revision ?? "0"),
+      ...(options.authorizationKey ? { authorizationKey: options.authorizationKey } : {}),
       accessLevel: options.accessLevel,
       projectionState: partial ? "PARTIAL" : "READY",
       filterOptions,

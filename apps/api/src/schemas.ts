@@ -2703,6 +2703,14 @@ export const RoomStatusUnitSchema = strictObject({
   kind: Type.Literal("ROOM"),
   children: Type.Array(RoomStatusBedUnitSchema)
 });
+export const RoomStatusSyncSchema = strictObject({
+  propertyId: Id,
+  businessDate: LocalDate,
+  asOf: DateTime,
+  revision: Type.String({ minLength: 1, maxLength: 80, pattern: "^\\d+$" }),
+  accessLevel: AccessLevelSchema,
+  authorizationKey: Type.String({ pattern: "^[a-f0-9]{64}$" })
+});
 export const RoomStatusBoardSchema = strictObject({
   propertyId: Id,
   businessDate: LocalDate,
@@ -2710,6 +2718,7 @@ export const RoomStatusBoardSchema = strictObject({
   dates: Type.Array(LocalDate, { maxItems: ROOM_STATUS_MAX_QUERY_NIGHTS }),
   asOf: DateTime,
   freshUntil: DateTime,
+  authorizationKey: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
   revision: Type.String({ minLength: 1, maxLength: 80, pattern: "^\\d+$" }),
   accessLevel: AccessLevelSchema,
   projectionState: Type.Union([Type.Literal("READY"), Type.Literal("PARTIAL")]),

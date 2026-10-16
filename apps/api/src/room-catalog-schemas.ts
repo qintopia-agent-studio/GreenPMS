@@ -23,9 +23,11 @@ export const RoomCatalogEffectSchema = obj({ operation: Type.Literal("MANAGE_ROO
   description: Type.Array(Type.String()), beforeVersion: Type.Integer({ minimum: 0 }), after: snapshot,
   retireUnitIds: Type.Array(id), insertUnits: Type.Array(unit),
   roomLink: Type.Union([obj({ assetId: id, oldUnitId: nullable(id), newUnitId: id }), Type.Null()]),
+  operatingStatisticsChange: Type.Optional(obj({ assetIds: Type.Array(id, { minItems: 1, uniqueItems: true }), included: Type.Boolean() })),
   roomRename: Type.Optional(obj({ roomId: id, beforeCode: name, afterCode: name })),
   policies: Type.Array(obj({ id, effectiveFrom: date, anchors: Type.Record(Type.String(), RoomRateAnchorsSchema) })) });
 export const RoomCatalogInputSchema = Type.Unsafe({ type: "object", discriminator: { propertyName: "action" }, oneOf: [
+  obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_OPERATING_STATISTICS"), assetIds: Type.Array(id, { minItems: 1, uniqueItems: true }), included: Type.Boolean() }),
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_BUILDING_ORDER"), buildingOrder }),
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SAVE_TYPE"), typeCode: Type.Optional(id),
     name, bathroom, saleMode: mode, bedCount: count, capacity: count }),
@@ -40,7 +42,7 @@ export const RoomCatalogInputSchema = Type.Unsafe({ type: "object", discriminato
 ] });
 export const RoomCatalogResultSchema = obj({ ...RoomCatalogEffectSchema.properties, changeId: id });
 export const RoomCatalogViewSchema = obj({ ...snapshot.properties, propertyId: id, businessDate: date,
-  rooms: Type.Array(obj({ assetId: id, unitId: id, code: name, buildingCode: Type.String(), typeCode: Type.String(), bedCount: count, capacity: count,
+  rooms: Type.Array(obj({ includedInOperatingStatistics: Type.Boolean(), assetId: id, unitId: id, code: name, buildingCode: Type.String(), typeCode: Type.String(), bedCount: count, capacity: count,
     active: Type.Boolean(), beds: Type.Array(obj({ id, code: name, active: Type.Boolean() })) })),
   prices: Type.Array(obj({ typeCode: id, effectiveFrom: date, anchors: RoomRateAnchorsSchema })),
   history: Type.Array(obj({ id, action, title: name, description: Type.Array(Type.String()), operator: Type.String(), createdAt: Type.String(), reason: Type.String() })) });

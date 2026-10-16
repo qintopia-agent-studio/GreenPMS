@@ -8,7 +8,7 @@ export interface CapacityUnit {
 export interface CapacityChange { created_at: Date; effect: unknown }
 type Selection = { building?: string; roomType?: string };
 /** Replay inventory lifecycle, never infer a historical opening date from today's active flag. */
-export function dailySalesCapacity(units: readonly CapacityUnit[], changes: readonly CapacityChange[], localDate: (date: Date) => string, confirmations: readonly ConfirmedInventoryAvailability[] = []) {
+export function dailySalesCapacity(units: readonly CapacityUnit[], changes: readonly CapacityChange[], localDate: (date: Date) => string, confirmations: readonly ConfirmedInventoryAvailability[] = [], includesUnit: (unitId: string) => boolean = () => true) {
   const start = new Map<string, string>(), end = new Map<string, string>();
   const unsupported = new Set<string>();
   const knownIds = new Set(units.map(unit => unit.id));
@@ -46,7 +46,7 @@ export function dailySalesCapacity(units: readonly CapacityUnit[], changes: read
     && (end.has(unit.id) ? date < end.get(unit.id)! : unit.active);
   function matches(unit: CapacityUnit, selection: Selection) {
     const room = unit.kind === "ROOM" ? unit : byId.get(unit.parent_room_id!);
-    return (!selection.building || (room?.building_code ?? "未分配") === selection.building)
+    return includesUnit(unit.id) && (!selection.building || (room?.building_code ?? "未分配") === selection.building)
       && (!selection.roomType || (unit.room_type_code ?? room?.room_type_code ?? "未分配") === selection.roomType);
   }
   function on(date: string, selection: Selection = {}) {
@@ -66,6 +66,7 @@ export function dailySalesCapacity(units: readonly CapacityUnit[], changes: read
   function weight(id: string, date: string) {
     const unit = byId.get(id);
     if (!unit) return null;
+    if (!includesUnit(id)) return 0;
     if ((start.has(id) && date < start.get(id)!) || (end.has(id) && date >= end.get(id)!)) return null;
     // A validated order interval proves use of an independent room/bed even when imported later.
     // It does not prove the whole property's opening capacity or historical split-bed weight.

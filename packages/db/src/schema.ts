@@ -14,6 +14,7 @@ export interface Database {
   retained_funds: { id: string; property_id: string; source_order_id: string; source_fact_id: string; bill_id: string; owner_name: string; owner_contact: string; confirmation_note: string; amount_minor: number; command_id: string; created_at: GeneratedTimestamp };
   retained_fund_entries: { id: string; retained_fund_id: string; kind: "USE" | "REFUND" | "RELEASE"; amount_minor: number; target_order_id: NullableInsert<string>; source_out_fact_id: NullableInsert<string>; target_in_fact_id: NullableInsert<string>; refund_fact_id: NullableInsert<string>; authorization_note: string; command_id: string; created_at: GeneratedTimestamp };
   ai_model_settings: { scope_id: string; management_property_id: string; version: number; enabled: boolean; base_url: string; model: string; encrypted_key: string; updated_by: string; updated_at: GeneratedTimestamp };
+  room_operating_statistics: { property_id: string; asset_id: string; included: boolean };
   room_catalog_state: { property_id: string; version: number; snapshot: Json };
   room_catalog_links: { unit_id: string; asset_id: string; version: number };
   room_catalog_heads: { property_id: string; effective_from: string; policy_id: string };

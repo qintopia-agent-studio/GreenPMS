@@ -16,7 +16,7 @@ describe("当前社区人数包含今日入住，不随历史筛选变化", () =
       const q:any={innerJoin:()=>q,select:()=>q,selectAll:()=>q,where:()=>q,orderBy:()=>q,execute:async()=>tables[table]??[]};return q;
     }} as unknown as Transaction<Database>;
     // Simulate the actual exclusive SQL arrival-date upper bound, not a fixed successful result.
-    loadStays.mockImplementation(async (_trx,_property,_date,_range,until:string)=>({arrangements:new Map(orders.filter(o=>o.arrival_date<until).map(o=>[o.id,[{inventoryUnitId:"unit",arrivalDate:o.arrival_date,departureDate:o.departure_date}]]))}));
+    loadStays.mockImplementation(async (_trx,_property,_date,_range,until:string)=>({statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements:new Map(orders.filter(o=>o.arrival_date<until).map(o=>[o.id,[{inventoryUnitId:"unit",arrivalDate:o.arrival_date,departureDate:o.departure_date}]]))}));
     const result=await loadDashboardCommunity(trx,"property_test",range,today,"Asia/Shanghai");
     expect(result.current.registered).toMatchObject({total:31,paid:26,volunteer:5});
     expect(result.current.total).toBeNull(); // no fabricated cross-order identities

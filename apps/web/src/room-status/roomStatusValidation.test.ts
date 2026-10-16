@@ -885,6 +885,26 @@ describe("assertRoomStatusBoard", () => {
     expect(() => assertRoomStatusBoard(splitBed, expected)).toThrow(/不能超过实际库存单元住宿容量 1/);
   });
 
+  it("reads unresolved released historical lodging without reopening availability or inventing a claim", () => {
+    const historical = boardWithWholeRoomLodging();
+    historical.businessDate = "2028-01-03";
+    historical.projectionState = "PARTIAL";
+    const room = historical.rooms[0]!;
+    Object.assign(room.intervals[0]!, {
+      status: "UNKNOWN", blocking: false, available: false, sourceCategory: null,
+      primaryOccupantLabel: null, occupants: [], occupantCount: 0, claimIds: [], conflicts: [], allowedActions: []
+    });
+    Object.assign(room.days[0]!, { status: "UNKNOWN", available: false, conflicts: [] });
+    room.allowedActions = [];
+    room.conflicts = [];
+    expect(() => assertRoomStatusBoard(historical, expected)).not.toThrow();
+    room.intervals[0]!.available = true;
+    expect(() => assertRoomStatusBoard(historical, expected)).toThrow();
+    room.intervals[0]!.available = false;
+    historical.businessDate = "2028-01-01";
+    expect(() => assertRoomStatusBoard(historical, expected)).toThrow();
+  });
+
   it("rejects fail-open unknown, blocking, and mismatched row facts", () => {
     const unknownDay = validBoard();
     unknownDay.rooms[0]!.days[0] = {

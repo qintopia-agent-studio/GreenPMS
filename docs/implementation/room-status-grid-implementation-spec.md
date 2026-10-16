@@ -11,6 +11,9 @@ context:
   - 'design-system/qintopia-pms/MASTER.md'
 ---
 
+> 2026-10-16 已确认修订：房态显示快照的5秒提示不再作为整页办理门禁。前台默认15秒读取轻量revision、营业日和授权摘要，变化时刷新；具体写入仍需Preview/Confirm。日期切换失败保留导航，确定性数据错误不自动无限重试；历史已释放但资料待核对的住宿可非阻断、不可写只读展示，不新增Claim。当前/未来未知库存、权限、未决命令保护不变。详细验收以 `spec-room-status-reliability-and-dorm-stats.md` 为准，以下早期实施记录保留，不作为新刷新频率要求。
+
+
 <frozen-after-approval reason="human-owned intent - do not modify unless human renegotiates">
 
 ## Intent

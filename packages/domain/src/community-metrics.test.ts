@@ -137,3 +137,89 @@ describe("registration evidence boundaries",()=>{
   expect(c.current.total).toBe(1);expect(c.current.registered?.total).toBe(2);
  });
 });
+
+
+describe("optional complete continuity for scoped operating contributions", () => {
+  const period = { from: "2026-10-01", to: "2026-10-09" };
+  const a = stay({ arrival: "2026-10-01", departure: "2026-10-03" });
+  const dorm = stay({ arrival: "2026-10-03", departure: "2026-10-06" });
+  const b = stay({ arrival: "2026-10-06", departure: "2026-10-10", current: true });
+  it("keeps the default unchanged and classifies events using supplied complete evidence", () => {
+    const legacy = communityMetrics([a, b], [], period, "2026-10-07");
+    expect(legacy.counts.RETURN).toBe(1);
+    const scoped = communityMetrics([a, b], [], period, "2026-10-07", [], [], {
+      stays: [a, dorm, b], planned: [], includesEvent: () => true
+    });
+    expect(scoped.counts.RETURN).toBe(0);
+    expect(scoped.counts.NEW).toBe(1);
+    expect(scoped.current).toEqual(legacy.current);
+    expect(scoped.trend).toEqual(legacy.trend);
+    expect(scoped.visitors).toEqual(legacy.visitors);
+    expect(scoped.duration).toEqual([{ nights: 3, current: 1, all: 1 }]);
+  });
+  it("uses excluded planned continuity before deciding that a resident is due", () => {
+    const current = stay({ arrival: "2026-10-01", departure: "2026-10-08", current: true });
+    const next = stay({ orderId: "dorm-reservation", arrival: "2026-10-08", departure: "2026-11-01" });
+    const scoped = communityMetrics([current], [], period, "2026-10-07", [], [], {
+      stays: [current], planned: [next], includesEvent: () => true
+    });
+    expect(scoped.counts.DUE).toBe(0);
+    expect(scoped.current.total).toBe(1);
+  });
+});
+
+
+describe("operating duration within complete residence chains", () => {
+  const period = { from: "2026-10-01", to: "2026-10-09" };
+  const a = stay({ arrival: "2026-10-01", departure: "2026-10-03" });
+  const dorm = stay({ arrival: "2026-10-03", departure: "2026-10-06" });
+  const b = stay({ arrival: "2026-10-06", departure: "2026-10-10", current: true });
+  const project = (included: CommunityStay[], complete: CommunityStay[], today = "2026-10-07", selected = period) =>
+    communityMetrics(included, [], selected, today, [], [], { stays: complete, planned: [], includesEvent: () => true });
+
+  it("counts A two nights plus B one night as one continuous residence on October 7", () => {
+    const result = project([a, b], [a, dorm, b]);
+    expect(result.duration).toEqual([{ nights: 3, current: 1, all: 1 }]);
+    expect(result.current.total).toBe(1);
+    expect(result.counts.RETURN).toBe(0);
+  });
+  it("counts the two historical A nights once and no current residence while in F on October 5", () => {
+    const futureB = { ...b, current: false };
+    const result = project([a, futureB], [a, { ...dorm, current: true }, futureB], "2026-10-05");
+    expect(result.duration).toEqual([{ nights: 2, current: 0, all: 1 }]);
+    expect(result.current.total).toBe(0);
+    expect(result.counts.RETURN).toBe(0);
+  });
+  it("unions repeated and overlapping included dates across registrations/orders of one identity", () => {
+    const overlapping = { ...b, orderId: "parallel-order", departure: "2026-10-09" };
+    const result = project([a, { ...a }, b, overlapping], [a, dorm, b, overlapping]);
+    expect(result.duration).toEqual([{ nights: 3, current: 1, all: 1 }]);
+  });
+  it("retains separate visits after an actual empty-night gap", () => {
+    const result = project([a, b], [a, b]);
+    expect(result.duration).toEqual([{ nights: 1, current: 1, all: 1 }, { nights: 2, current: 0, all: 1 }]);
+    expect(result.counts.RETURN).toBe(1);
+  });
+  it("counts no operating residence when the selected historical window only overlaps dorm nights", () => {
+    const result = project([a, b], [a, dorm, b], "2026-10-07", { from: "2026-10-03", to: "2026-10-05" });
+    expect(result.duration).toEqual([{ nights: 3, current: 1, all: 0 }]);
+  });
+  it("retains cumulative earlier operating nights when a later window intersects the same residence", () => {
+    const result = project([a, b], [a, dorm, b], "2026-10-07", { from: "2026-10-06", to: "2026-10-09" });
+    expect(result.duration).toEqual([{ nights: 3, current: 1, all: 1 }]);
+  });
+  it("keeps an entirely excluded chain out of the distribution", () => {
+    expect(project([], [a, dorm, b]).duration).toEqual([]);
+  });
+  it("preserves registration-local continuity without inventing a cross-order identity", () => {
+    const local = [a, dorm, b].map(stay => ({ ...stay, personKey: null, registrationKey: "registration-one" }));
+    const result = project([local[0]!, local[2]!], local);
+    expect(result.duration).toEqual([{ nights: 3, current: 1, all: 1 }]);
+    expect(result.counts.NEW).toBe(0);
+    expect(result.counts.RETURN).toBe(0);
+  });
+  it("keeps the unscoped default distribution unchanged when continuity is omitted", () => {
+    expect(communityMetrics([a, b], [], period, "2026-10-07").duration)
+      .toEqual([{ nights: 1, current: 1, all: 1 }, { nights: 2, current: 0, all: 1 }]);
+  });
+});

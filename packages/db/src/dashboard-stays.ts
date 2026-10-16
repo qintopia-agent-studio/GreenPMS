@@ -1,3 +1,4 @@
+import { loadOperatingStatisticsScope, type OperatingStatisticsScope } from "./operating-statistics.ts";
 import { confirmedInventoryAvailability } from "./confirmed-inventory-availability.ts";
 import { dailySalesCapacity } from "./daily-sales-capacity.ts";
 import { sql, type Transaction } from "kysely";
@@ -13,13 +14,14 @@ export function groupDashboardRows<T>(rows: readonly T[], key: (row: T) => strin
   for (const row of rows) { const id = key(row); const items = result.get(id) ?? []; items.push(row); result.set(id, items); }
   return result;
 }
-export async function loadDashboardStays(trx: Transaction<Database>, propertyId: string, businessDate: string, range: DashboardRange, futureUntil: string, timezone: string) {
+export async function loadDashboardStays(trx: Transaction<Database>, propertyId: string, businessDate: string, range: DashboardRange, futureUntil: string, timezone: string, scope?: OperatingStatisticsScope) {
   const localDate = (value: Date) => propertyLocalClockAt(timezone, value).date;
   const units = await trx.selectFrom("inventory_units").select(["id", "kind", "parent_room_id", "code", "active", "building_code", "room_type_code", "created_at"]).where("property_id", "=", propertyId).execute();
+  const statistics = scope ?? await loadOperatingStatisticsScope(trx, propertyId, units);
   const unitsById = new Map(units.map(unit => [unit.id, unit]));
   const children = groupDashboardRows(units.filter(unit => unit.parent_room_id), unit => unit.parent_room_id!);
   const changes = await trx.selectFrom("room_catalog_changes").select(["created_at", "effect"]).where("property_id", "=", propertyId).execute();
-  const capacity = dailySalesCapacity(units, changes, localDate, confirmedInventoryAvailability(propertyId));
+  const capacity = dailySalesCapacity(units, changes, localDate, confirmedInventoryAvailability(propertyId), statistics.includesUnit);
   const orders = await trx.selectFrom("orders as o").innerJoin("stays as s", "s.order_id", "o.id")
     .select(["o.id", "o.status", "o.stay_type", "o.arrival_date", "o.departure_date", "o.current_revision_id", "o.version", "o.member_id", "o.member_contract_id", "o.booking_channel_code", "s.id as stay_id", "s.status as stay_status"])
     .where("o.property_id", "=", propertyId).where("o.status", "in", ["CHECKED_IN", "CHECKED_OUT", "RESERVED"])
@@ -62,6 +64,7 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
         if (!unit) throw new Error("历史房源不可核对");
         const room = unit.kind === "ROOM" ? unit : unitsById.get(unit.parent_room_id!);
         if (!room) throw new Error("父房不可核对");
+        if (!statistics.includesUnit(unit.id)) continue;
         const from = interval.arrivalDate > range.from ? interval.arrivalDate : range.from;
         const until = interval.departureDate < businessDate ? interval.departureDate : businessDate;
         if (from >= until) continue;
@@ -85,13 +88,13 @@ export async function loadDashboardStays(trx: Transaction<Database>, propertyId:
       }
     }
   }
-  const atomicUnits = units.filter(unit => unit.active && (unit.kind === "BED" ? unitsById.get(unit.parent_room_id!)?.active : !(children.get(unit.id) ?? []).some(bed => bed.active)));
+  const atomicUnits = units.filter(unit => statistics.includesUnit(unit.id) && unit.active && (unit.kind === "BED" ? unitsById.get(unit.parent_room_id!)?.active : !(children.get(unit.id) ?? []).some(bed => bed.active)));
   function matchingUnit(unit: typeof units[number], query: DashboardQuery) {
     const room = unit.kind === "ROOM" ? unit : unitsById.get(unit.parent_room_id!);
-    return (!query.building || (room?.building_code ?? "未分配") === query.building) && (!query.roomType || (unit.room_type_code ?? room?.room_type_code ?? "未分配") === query.roomType);
+    return statistics.includesUnit(unit.id) && (!query.building || (room?.building_code ?? "未分配") === query.building) && (!query.roomType || (unit.room_type_code ?? room?.room_type_code ?? "未分配") === query.roomType);
   }
   function capacityFor(from: string, days: number, query: DashboardQuery): { value: number | null; reason: string } {
     return capacity.period(from, dashboardDate(from, days), query);
   }
-  return { units, atomicUnits, matchingUnit, capacityFor, nights, reviews, orders, validOrderIds, invalidFutureDates, futureReviews, arrangements };
+  return { statistics, units, atomicUnits, matchingUnit, capacityFor, nights, reviews, orders, validOrderIds, invalidFutureDates, futureReviews, arrangements };
 }

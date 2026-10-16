@@ -1,9 +1,9 @@
 import { loadDashboardToday } from "./dashboard-today.ts";
 import { sql, type Transaction } from "kysely";
 import type { DashboardBalance, DashboardDetail, DashboardFutureDay, DashboardResponse } from "@qintopia/contracts";
-import { enumerateServiceDates } from "@qintopia/domain";
+import { dashboardDate, enumerateServiceDates } from "@qintopia/domain";
 import { listAvailability } from "./inventory.ts";
-import type { loadDashboardStays } from "./dashboard-stays.ts";
+import { loadDashboardStays } from "./dashboard-stays.ts";
 import type { Database } from "./schema.ts";
 
 type Lodging = Awaited<ReturnType<typeof loadDashboardStays>>;
@@ -13,7 +13,7 @@ function balances(items: DashboardDetail[], currency: string): DashboardBalance[
   for (const item of items) { const code = item.currency!; const value = grouped.get(code) ?? { amount: 0n, count: 0 }; value.amount += BigInt(item.amountMinor!); value.count++; grouped.set(code, value); }
   return [...grouped].map(([code, value]) => ({ currency: code, amountMinor: String(value.amount), count: value.count }));
 }
-export async function loadDashboardCurrent(trx: Transaction<Database>, propertyId: string, businessDate: string, currency: string, timezone: string) {
+export async function loadDashboardCurrent(trx: Transaction<Database>, propertyId: string, businessDate: string, currency: string, timezone: string, lodging?: Lodging) {
   const debtRows = (await sql<{ id: string; currency: string; amount: string }>`SELECT o.id, p.currency,
     (p.current_contract_amount_minor - COALESCE((SELECT SUM(f.net_effect_minor) FROM collection_facts f WHERE f.order_id=o.id),0))::text AS amount
     FROM orders o JOIN pricing_revisions p ON p.id=o.current_revision_id
@@ -33,7 +33,21 @@ export async function loadDashboardCurrent(trx: Transaction<Database>, propertyI
   const { details: todayDetails, ...today } = await loadDashboardToday(trx, propertyId, businessDate, timezone, currency);
   const current: DashboardResponse["current"] = { ...today, paidGuests: 0, freeGuests: 0, guestReviewOrders: 0, arrivals: 0, departures: 0, overdue: 0, debts: balances(debts, currency), retained: balances(retained, currency) };
   const details: DashboardDetail[] = [...todayDetails, ...debts, ...retained];
+  const currentLodging = rows.length && (!lodging || rows.some(row => !lodging.arrangements.has(row.id)))
+    ? await loadDashboardStays(trx, propertyId, businessDate,
+      { from: rows.reduce((date, row) => row.arrival_date < date ? row.arrival_date : date, businessDate), to: businessDate },
+      dashboardDate(businessDate, 1), timezone, lodging?.statistics) : lodging;
   for (const row of rows) {
+    const intervals = currentLodging?.arrangements.get(row.id);
+    const actual = intervals?.find(interval => interval.arrivalDate <= businessDate && businessDate < interval.departureDate)
+      ?? (intervals?.at(-1)?.departureDate && intervals.at(-1)!.departureDate <= businessDate ? intervals.at(-1) : undefined);
+    if (actual && currentLodging!.statistics.classifyUnit(actual.inventoryUnitId) === false) continue;
+    if (!actual || currentLodging!.statistics.classifyUnit(actual.inventoryUnitId) === null) {
+      current.guestReviewOrders++;
+      details.push({ ...newDashboardDetail(`current-review:${row.id}`, businessDate), orderId: row.id,
+        label: "当前经营住宿范围待核对", reason: "缺少可核对的实际住宿分段，未推算经营人数。" });
+      continue;
+    }
     const base = { ...newDashboardDetail(`current:${row.id}`, businessDate), orderId: row.id };
     if (row.status === "CHECKED_IN") {
       const guests = Number(row.guests);

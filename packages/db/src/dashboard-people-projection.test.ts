@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Transaction } from "kysely";
 import type { Database } from "./schema";
 import { loadDashboardCommunity, communityEvents } from "./dashboard-community";
-vi.mock("./dashboard-stays.ts", () => ({ loadDashboardStays: async () => ({ arrangements: new Map([["order", [{ inventoryUnitId: "room", arrivalDate: "2026-10-01", departureDate: "2026-11-01" }]]]) }) }));
+vi.mock("./dashboard-stays.ts", () => ({ loadDashboardStays: async () => ({ statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements: new Map([["order", [{ inventoryUnitId: "room", arrivalDate: "2026-10-01", departureDate: "2026-11-01" }]]]) }) }));
 const primary = { id: "primary", order_id: "order", ordinal: 1, role: "PRIMARY", document_number: "ID-A", full_name: "样本", nickname: "样本", phone: null, created_by_command_id: "create", created_at: new Date("2026-10-01") };
 const companion = { ...primary, id: "companion", ordinal: 2, role: "ADDITIONAL", document_number: "ID-B" };
 const order = { id: "order", arrival_date: "2026-10-01", departure_date: "2026-11-01", status: "CHECKED_IN", stay_type: "NORMAL", free_stay_category_code: null, member_id: "not-the-guest" };

@@ -574,7 +574,14 @@ function assertInterval(
     sourceKind,
     typedReferences
   ));
-  if (available !== !blocking || (typedConflicts.length > 0 && available)) fail(`${path}.available`, "必须与阻断区间和冲突事实一致");
+  // Released historical lodging can need review without recreating an active claim.
+  // Its source stays unknown and read-only; this exception never applies to current/future inventory.
+  const historicalUnknown = status === "UNKNOWN" && !blocking
+    && Boolean(businessDate && sourceEndDate <= businessDate)
+    && lodgingSource(sourceKind)
+    && typedReferences.some((reference) => reference.type === "ORDER")
+    && typedReferences.some((reference) => reference.type === "STAY");
+  if (available !== (historicalUnknown ? false : !blocking) || (typedConflicts.length > 0 && available)) fail(`${path}.available`, "必须与阻断区间和冲突事实一致");
   if ((status === "UNKNOWN" || status === "STALE" || status === "UNAVAILABLE")
     && (available || typedActions.length > 0)) {
     fail(path, "未知、陈旧或不可售区间必须 fail closed");

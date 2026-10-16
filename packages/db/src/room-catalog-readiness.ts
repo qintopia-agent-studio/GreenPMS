@@ -5,7 +5,7 @@ import type { Database } from "./schema.ts";
 export async function roomCatalogReady(db: Kysely<Database>): Promise<boolean> {
   const result = await sql<{ ready: boolean }>`
     WITH expected(signature, body_hash, definer) AS (VALUES
-      ('qintopia_apply_room_catalog(text,jsonb,text)', 'accc9f55576e4252b823b4341138224b6757bbc2372f6379e85b8e24685a75eb', true),
+      ('qintopia_apply_room_catalog(text,jsonb,text)', '807c241b0ae02dc56d8a8d572d835884adff965942bb78470bfb1570693bd400', true),
       ('qintopia_catalog_claim_guard()', '1033b51a86b2c9b4e0993d4beff320b52673fb0024586e31e6884117d37abc4c', false),
       ('qintopia_catalog_commit_guard()', 'e6c37d102859981effd43d6fde238fe864c9826f50982fc34f3c6320bdb7af46', false)
     ) SELECT NOT EXISTS (
@@ -16,7 +16,7 @@ export async function roomCatalogReady(db: Kysely<Database>): Promise<boolean> {
         OR proowner <> (SELECT datdba FROM pg_database WHERE datname = current_database())
         OR has_function_privilege('public', pg_proc.oid, 'EXECUTE')
     ) AND NOT EXISTS (
-      SELECT 1 FROM (VALUES ('room_catalog_state'), ('room_catalog_links'), ('room_catalog_heads'), ('room_catalog_changes')) AS tables(name)
+      SELECT 1 FROM (VALUES ('room_operating_statistics'), ('room_catalog_state'), ('room_catalog_links'), ('room_catalog_heads'), ('room_catalog_changes')) AS tables(name)
       WHERE NOT has_table_privilege('qintopia_runtime', name, 'SELECT')
         OR has_table_privilege('qintopia_runtime', name, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
     ) AND has_function_privilege('qintopia_runtime', 'qintopia_apply_room_catalog(text,jsonb,text)', 'EXECUTE')

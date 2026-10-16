@@ -1,7 +1,7 @@
 import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList } from "@qintopia/contracts";
 import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
 import { readAssistantStream } from "./assistant/stream";
-import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
+import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusSyncDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
 import type {
   AvailabilityDto,
   ClientCommandMetadata,
@@ -215,6 +215,9 @@ export const api = {
     return request<unknown>(`/api/v1/properties/${encodeURIComponent(propertyId)}/availability?${query.toString()}`)
       .then((value) => parseAvailability(value, { propertyId, arrivalDate, departureDate, ...(unitKind ? { unitKind } : {}) }));
   },
+  roomStatusSync: (propertyId: string, signal?: AbortSignal) => request<RoomStatusSyncDto>(
+    `/api/v1/properties/${encodeURIComponent(propertyId)}/room-status/sync`, signal ? { signal } : {}
+  ),
   roomStatus: (
     propertyId: string,
     input: RoomStatusBoardQueryDto,

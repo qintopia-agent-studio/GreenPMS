@@ -49,6 +49,7 @@ import {
   type OrderListQuery,
   getReceipt,
   getRoomStatusBoard,
+  getRoomStatusSync,
   listAvailability,
   listMemberPage,
   loadReferenceCatalog,
@@ -104,6 +105,7 @@ import {
   HistoricalReceiptReadSchema,
   HistoricalRecoverableCommandTypeSchema,
   RoomStatusBoardSchema,
+  RoomStatusSyncSchema,
   RoomStatusQuerySchema,
   ResolveCommandResultSchema,
   HistoricalStoredPreviewResponseSchema,
@@ -710,6 +712,31 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
     };
   });
 
+  const roomStatusAuthorizationKey = (principal: AuthPrincipal, propertyId: string) => stableHash({
+    accessLevel: principal.propertyAccess.get(propertyId),
+    allowedActions: [...effectiveAllowedCommands(principal, propertyId)].sort(),
+    features: currentReleaseFeatures
+  });
+
+  app.get("/api/v1/properties/:id/room-status/sync", {
+    schema: {
+      tags: ["queries"],
+      summary: "Check room status revision, business date and current authorization",
+      params: IdParams,
+      response: { 200: RoomStatusSyncSchema, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, ...InternalErrorResponses }
+    }
+  }, async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    const { id } = request.params as { id: string };
+    const principal = await requirePrincipal(db, request);
+    requirePropertyAccess(principal, id, "READ");
+    return {
+      ...await getRoomStatusSync(db, id),
+      accessLevel: principal.propertyAccess.get(id)!,
+      authorizationKey: roomStatusAuthorizationKey(principal, id)
+    };
+  });
+
   app.get("/api/v1/properties/:id/room-status", {
     schema: {
       tags: ["queries"],
@@ -726,7 +753,8 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
         ...InternalErrorResponses
       }
     }
-  }, async (request) => {
+  }, async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
     const { id } = request.params as { id: string };
     const query = request.query as RoomStatusBoardQueryDto;
     const principal = await requirePrincipal(db, request);
@@ -738,6 +766,7 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
       accessLevel: principal.propertyAccess.get(id)!,
       commandGrants: new Set(effectiveAllowedCommands(principal, id)),
       requestingSubjectId: principal.subjectId,
+      authorizationKey: roomStatusAuthorizationKey(principal, id),
       ...(query.page !== undefined ? { page: query.page } : {}),
       ...(query.pageSize !== undefined ? { pageSize: query.pageSize } : {}),
       ...(query.search !== undefined ? { search: query.search } : {}),

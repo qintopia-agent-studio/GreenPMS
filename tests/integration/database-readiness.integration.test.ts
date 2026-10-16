@@ -133,7 +133,8 @@ describe.sequential("authoritative database readiness", () => {
       "048_runtime_isolation_guards.sql",
       "049_historical_stay_arrangement_corrections.sql",
       "050_admin_membership_corrections.sql",
-      "051_runtime_role_command_compatibility.sql"
+      "051_runtime_role_command_compatibility.sql",
+      "075_room_operating_statistics.sql"
     ]) {
       await expectReadinessFailure(migrationName, async (trx) => {
         await trx.deleteFrom("schema_migrations").where("name", "=", migrationName).execute();

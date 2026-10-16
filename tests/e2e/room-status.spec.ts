@@ -1,13 +1,11 @@
 import { expect, test, type Locator, type Page, type Request, type TestInfo } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { hashPassword, todayInTimeZone } from "@qintopia/domain";
-import type { AuthPrincipal, CommandEnvelope, RoomStatusBoardDto } from "@qintopia/contracts";
-import { confirmCommandPreview, createCommandPreview, executeQuoteCommand } from "../../packages/db/src/commands/service.ts";
+import type { RoomStatusBoardDto } from "@qintopia/contracts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createDatabase } from "../../packages/db/src/database.ts";
-import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
-import { authScope, commandGrantsForProfile } from "../helpers/auth-principals.ts";
+import { commandGrantsForProfile } from "../helpers/auth-principals.ts";
 
 const e2eDatabaseUrl = process.env.E2E_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_e2e";
@@ -23,13 +21,6 @@ const ordinaryLodgingIntervalSelector = [
   ".room-status-interval-arrears"
 ].join(", ");
 const operator = { username: "operator", password: "demo-pass-2026" };
-const longStayFixturePrincipal: AuthPrincipal = {
-  subjectId: agentSubjectId,
-  credentialId: "token_demo_write",
-  credentialType: "TOKEN",
-  displayName: "Long-stay E2E fixture writer",
-  ...authScope({ propertyId })
-};
 const readOnlyOperator = {
   id: "subject_e2e_room_status_reader",
   username: "room-status-reader",
@@ -79,107 +70,50 @@ function quoteResponse(page: Page, expected: { inventoryUnitId: string; arrivalD
   }, { timeout: 30_000 });
 }
 
-async function createReservedOrderFixture(options: {
-  unitId: string;
-  arrivalDate: string;
-  departureDate: string;
-  guest: string;
-  nickname: string;
-  keyPrefix: string;
+async function lodgingFixtureInNode(mode: "reserved" | "completed", options: {
+  unitId: string; arrivalDate: string; departureDate: string; guest: string; nickname: string; keyPrefix: string; collected?: boolean;
 }): Promise<string> {
-  const db = createDatabase(e2eDatabaseUrl);
-  const key = `${options.keyPrefix}-${crypto.randomUUID()}`;
-  try {
-    const quoted = await executeQuoteCommand(db, longStayFixturePrincipal, {
-        propertyId,
-        inventoryUnitId: options.unitId,
-        arrivalDate: options.arrivalDate,
-        departureDate: options.departureDate,
-        pricingPolicyVersionId: publicPricingPolicyId
-    }, { idempotencyKey: `${key}-quote`, correlationId: `${key}-quote` });
-    const preview = await createCommandPreview(db, longStayFixturePrincipal, {
-      commandType: "CREATE_ORDER",
-      input: {
-        propertyId,
-        quoteId: quoted.quote.quoteId,
-        primaryGuest: { fullName: options.guest, nickname: options.nickname },
-        bookingChannelCode: "WECOM",
-        channelOrderReference: null,
-        targetCurrentContractAmountMinor: quoted.quote.currentContractAmount.minorUnits
-      }
-    } as CommandEnvelope, { idempotencyKey: `${key}-preview`, correlationId: `${key}-preview` });
-    const receipt = await confirmCommandPreview(db, longStayFixturePrincipal, preview.preview.previewId, {
-      propertyId,
-      commandType: "CREATE_ORDER",
-      confirmation: true,
-      expectedEffectHash: preview.preview.effectHash,
-      reason: { code: "CREATE_STANDARD_ORDER", note: "" }
-    }, { idempotencyKey: `${key}-confirm`, correlationId: `${key}-confirm` });
-    if (receipt.executionStatus !== "EXECUTED" || !receipt.businessCommitted) {
-      throw new Error(`Failed to prepare reserved order fixture: ${receipt.error?.message ?? receipt.executionStatus}`);
-    }
-    const orderId = receipt.result?.orderId;
-    if (typeof orderId !== "string") throw new Error("Reserved order fixture did not return an order id");
-    return orderId;
-  } finally {
-    await db.destroy();
-  }
+  // Command-backed fixtures use the application TS runtime. Playwright's test
+  // transform cannot safely load the dynamic ESM modules of maintained catalogs.
+  const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { createDatabase } from "./packages/db/src/database.ts";
+    import { createQuoteForTesting } from "./packages/db/src/pricing-service.ts";
+    import { executeQuoteCommand, createCommandPreview, confirmCommandPreview } from "./packages/db/src/commands/service.ts";
+    import * as authModule from "./tests/helpers/auth-principals.ts";
+    const { authScope } = authModule.default ?? authModule;
+    const { mode, options, propertyId, policyId } = JSON.parse(process.argv[1]);
+    const principal = { subjectId: "subject_demo_agent", credentialId: "token_demo_write", credentialType: "TOKEN", displayName: "Room status fixture", ...authScope() };
+    const db = createDatabase(process.env.E2E_DATABASE_URL);
+    const key = options.keyPrefix + "-" + crypto.randomUUID();
+    try {
+      const input = { propertyId, inventoryUnitId: options.unitId, arrivalDate: options.arrivalDate,
+        departureDate: options.departureDate, pricingPolicyVersionId: policyId };
+      const quote = mode === "completed" ? await createQuoteForTesting(db, { ...input, stayType: "TRANSIENT" })
+        : (await executeQuoteCommand(db, principal, input, { idempotencyKey: key+"-quote", correlationId: key+"-quote" })).quote;
+      const prepared = await createCommandPreview(db, principal, { commandType: "CREATE_ORDER", input: {
+        propertyId, quoteId: quote.quoteId, primaryGuest: { fullName: options.guest, nickname: options.nickname },
+        bookingChannelCode: "WECOM", channelOrderReference: null, targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits,
+        ...(mode === "completed" ? { backfill: true, backfillReason: "房态历史床位图标回归",
+          ...(options.collected ? { backfillCollection: { amountMinor: quote.currentContractAmount.minorUnits, method: "WECOM", transactionReference: "WX-"+key, note: "房态历史床位图标回归" } } : {}) } : {})
+      } }, { idempotencyKey: key+"-preview", correlationId: key+"-preview" });
+      const receipt = await confirmCommandPreview(db, principal, prepared.preview.previewId, {
+        propertyId, commandType: "CREATE_ORDER", confirmation: true, expectedEffectHash: prepared.preview.effectHash,
+        reason: mode === "completed" ? { code: "BACKFILL_STAY", note: "房态历史床位图标回归" } : { code: "CREATE_STANDARD_ORDER", note: "" }
+      }, { idempotencyKey: key+"-confirm", correlationId: key+"-confirm" });
+      if (!receipt.businessCommitted) throw new Error(JSON.stringify(receipt.error));
+      process.stdout.write(JSON.stringify(receipt.result.orderId));
+    } finally { await db.destroy(); }
+  `, JSON.stringify({ mode, options, propertyId, policyId: publicPricingPolicyId })], {
+    cwd: process.cwd(), env: { ...process.env, E2E_DATABASE_URL: e2eDatabaseUrl }, timeout: 60_000
+  });
+  return JSON.parse(stdout) as string;
 }
 
-async function createCompletedBackfillFixture(options: {
-  unitId: string;
-  arrivalDate: string;
-  departureDate: string;
-  guest: string;
-  nickname: string;
-  collected: boolean;
-  keyPrefix: string;
-}): Promise<void> {
-  const db = createDatabase(e2eDatabaseUrl);
-  const key = `${options.keyPrefix}-${crypto.randomUUID()}`;
-  try {
-    const quote = await createQuoteForTesting(db, {
-      propertyId,
-      inventoryUnitId: options.unitId,
-      stayType: "TRANSIENT",
-      arrivalDate: options.arrivalDate,
-      departureDate: options.departureDate,
-      pricingPolicyVersionId: publicPricingPolicyId
-    });
-    const preview = await createCommandPreview(db, longStayFixturePrincipal, {
-      commandType: "CREATE_ORDER",
-      input: {
-        propertyId,
-        quoteId: quote.quoteId,
-        primaryGuest: { fullName: options.guest, nickname: options.nickname },
-        bookingChannelCode: "WECOM",
-        channelOrderReference: null,
-        targetCurrentContractAmountMinor: quote.currentContractAmount.minorUnits,
-        backfill: true,
-        backfillReason: "房态历史床位图标回归",
-        ...(options.collected ? {
-          backfillCollection: {
-            amountMinor: quote.currentContractAmount.minorUnits,
-            method: "WECOM",
-            transactionReference: `WX-${key}`,
-            note: "房态历史床位图标回归"
-          }
-        } : {})
-      }
-    } as CommandEnvelope, { idempotencyKey: `${key}-preview`, correlationId: `${key}-preview` });
-    const receipt = await confirmCommandPreview(db, longStayFixturePrincipal, preview.preview.previewId, {
-      propertyId,
-      commandType: "CREATE_ORDER",
-      confirmation: true,
-      expectedEffectHash: preview.preview.effectHash,
-      reason: { code: "BACKFILL_STAY", note: "房态历史床位图标回归" }
-    }, { idempotencyKey: `${key}-confirm`, correlationId: `${key}-confirm` });
-    if (receipt.executionStatus !== "EXECUTED" || !receipt.businessCommitted) {
-      throw new Error(`Failed to prepare completed backfill fixture: ${receipt.error?.message ?? receipt.executionStatus}`);
-    }
-  } finally {
-    await db.destroy();
-  }
+async function createReservedOrderFixture(options: Parameters<typeof lodgingFixtureInNode>[1]): Promise<string> {
+  return lodgingFixtureInNode("reserved", options);
+}
+async function createCompletedBackfillFixture(options: Parameters<typeof lodgingFixtureInNode>[1]): Promise<void> {
+  await lodgingFixtureInNode("completed", options);
 }
 
 async function createRemoteLongStayConflict(page: Page, unitId: string, arrivalDate: string, departureDate: string): Promise<void> {
@@ -215,27 +149,21 @@ async function createRemoteLongStayConflict(page: Page, unitId: string, arrivalD
   expect(receipt).toMatchObject({ executionStatus: "EXECUTED", businessCommitted: true });
 }
 
-async function checkInOrderFixture(orderId: string): Promise<void> {
-  const db = createDatabase(e2eDatabaseUrl);
+async function checkInOrderFixture(page: Page, orderId: string): Promise<void> {
   const key = `e2e-room-status-check-in-${crypto.randomUUID()}`;
-  try {
-    const preview = await createCommandPreview(db, longStayFixturePrincipal, {
-      commandType: "CHECK_IN",
-      input: { propertyId, orderId }
-    } as CommandEnvelope, { idempotencyKey: `${key}-preview`, correlationId: `${key}-preview` });
-    const receipt = await confirmCommandPreview(db, longStayFixturePrincipal, preview.preview.previewId, {
-      propertyId,
-      commandType: "CHECK_IN",
-      confirmation: true,
-      expectedEffectHash: preview.preview.effectHash,
-      reason: { code: "CHECKED_IN", note: "Room-status mixed presentation fixture" }
-    }, { idempotencyKey: `${key}-confirm`, correlationId: `${key}-confirm` });
-    if (receipt.executionStatus !== "EXECUTED" || !receipt.businessCommitted) {
-      throw new Error(`Failed to check in room-status fixture: ${receipt.error?.message ?? receipt.executionStatus}`);
-    }
-  } finally {
-    await db.destroy();
-  }
+  const response = await page.request.post("/api/v1/command-previews", {
+    headers: { "Idempotency-Key": `${key}-preview`, "X-Correlation-ID": `${key}-preview` },
+    data: { commandType: "CHECK_IN", input: { propertyId, orderId } }
+  });
+  expect(response.ok(), await response.text()).toBe(true);
+  const { preview } = await response.json();
+  const confirmed = await page.request.post(`/api/v1/command-previews/${preview.previewId}/confirm`, {
+    headers: { "Idempotency-Key": `${key}-confirm`, "X-Correlation-ID": `${key}-confirm` },
+    data: { propertyId, commandType: "CHECK_IN", confirmation: true, expectedEffectHash: preview.effectHash,
+      reason: { code: "CHECKED_IN", note: "Room-status mixed presentation fixture" } }
+  });
+  expect(confirmed.ok(), await confirmed.text()).toBe(true);
+  expect((await confirmed.json()).businessCommitted).toBe(true);
 }
 
 async function propertyOrderCount(): Promise<number> {
@@ -864,7 +792,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(roomRow(observerPage, bedAId)).toBeVisible();
 
   const bedAStart = roomCell(page, bedAId, arrivalDate);
-  await expect(bedAStart).toHaveAccessibleName(/104.*床位 A.*可售.*可以安排/);
+  // Unmaintained reference catalogs and maintained operational names both identify the same bed.
+  await expect(bedAStart).toHaveAccessibleName(/104(?:-A| 床位 A).*可售.*可以安排/);
   await bedAStart.focus();
   await page.keyboard.press("Shift+ArrowRight");
   await expect(page.locator("[data-room-status-cell='true']:focus")).toHaveAttribute("data-service-date", addDays(arrivalDate, 1));
@@ -890,7 +819,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await page.keyboard.press("Enter");
   let propagatedResponse: ReturnType<Page["waitForResponse"]> | undefined;
   const receipt = await keyboardPreviewAndConfirm(page, [
-    "104-A",
+    bedA!.name,
     businessReason
   ], () => {
     propagatedResponse = observerPage.waitForResponse(async (response) => {
@@ -904,6 +833,9 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   expect(receipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
   expect(propagatedResponse).toBeDefined();
   const propagationStartedAt = performance.now();
+  await observerPage.bringToFront();
+  // Headless pages may all remain visible; explicitly exercise the foreground signal.
+  await observerPage.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   const observerResponse = await propagatedResponse!;
   expect(observerResponse.status()).toBe(200);
   expect(performance.now() - propagationStartedAt, "second workbench projection propagation").toBeLessThanOrEqual(5_000);
@@ -916,6 +848,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await renderedResponse;
   const observerParentInterval = roomRow(observerPage, roomId).locator(".room-status-interval-maintenance");
   await expect(observerParentInterval).toHaveCount(0);
+  await page.bringToFront();
   const bedAInterval = roomRow(page, bedAId).locator(".room-status-interval-maintenance");
   const parentInterval = roomRow(page, roomId).locator(".room-status-interval-maintenance");
   await expect(bedAInterval, "the committing workbench refreshes after the command closes").toBeVisible();
@@ -946,8 +879,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedAInterval.click();
-  await rangePopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "选中对象上下文" })).toBeVisible();
   const sourceSection = page.locator("section.room-status-context-section").filter({
     has: page.getByRole("heading", { name: "住宿或锁房记录" })
   });
@@ -971,7 +903,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await page.getByLabel("维修原因").fill(siblingReason);
   await page.getByRole("button", { name: "继续核对", exact: true }).click();
   const siblingReceipt = await previewAndConfirm(page, [
-    "104-B",
+    bedB!.name,
     siblingReason
   ]);
   expect(siblingReceipt.resourceRefs).toEqual([expect.stringMatching(/^maint_/)]);
@@ -999,8 +931,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedBInterval.click();
-  await rangePopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "选中对象上下文" })).toBeVisible();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
   const siblingReleaseReceipt = await previewAndConfirm(page, [
     "完整释放这条维修锁房"
@@ -1011,8 +942,7 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
 
   await page.getByRole("dialog", { name: "选中对象上下文" }).locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
   await bedAInterval.click();
-  await rangePopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
-  await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "选中对象上下文" })).toBeVisible();
   await actionRegion.getByRole("button", { name: "释放维修锁房", exact: true }).click();
   const releaseReceipt = await previewAndConfirm(page, [
     "完整释放这条维修锁房"
@@ -1031,6 +961,8 @@ test("desktop room-status matrix drives a typed Block journey and restores the w
   await expect(roomRow(page, roomId)).toBeVisible();
   await expect(roomRow(page, "unit_room_101")).toHaveCount(0);
   await roomCell(page, bedBId, arrivalDate).click();
+  // Clicking opens the drawer directly; close it before navigating away while retaining the selection.
+  await page.getByRole("dialog").locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
 
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await expect(page.getByRole("heading", { name: "订单", exact: true })).toBeVisible();
@@ -1166,7 +1098,7 @@ test("split-bed parent shows debt, status slots, ratio, and nicknames without ov
     arrivalDate: serviceDate,
     departureDate
   });
-  await checkInOrderFixture(inHouseOrderId);
+  await checkInOrderFixture(page, inHouseOrderId);
   await createReservedOrderFixture({
     unitId: reservedBed.id,
     arrivalDate: serviceDate,
@@ -1443,11 +1375,18 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
   expect(await truncatedNickname.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
   expect(await completeNickname.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(false);
   await truncatedNickname.hover();
-  await expect(page.getByRole("tooltip")).toHaveText(occupants[0]!.nickname);
+  // Pointer hover now uses the accepted quick preview; keyboard focus still has its tooltip.
+  const hoverPreview = page.getByTestId("room-status-quick-popover");
+  const fullNickname = hoverPreview.getByText(occupants[0]!.nickname, { exact: true });
+  await expect(fullNickname).toBeVisible();
+  await expect(fullNickname).toHaveText(occupants[0]!.nickname);
+  expect(await fullNickname.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   await page.mouse.move(1, 1);
-  await expect(page.getByRole("tooltip")).toBeHidden();
+  await expect(hoverPreview).toBeHidden();
   await completeNickname.hover();
   await expect(page.getByRole("tooltip"), "a complete nickname must not open redundant help text").toHaveCount(0);
+  await page.mouse.move(1, 1);
+  await expect(hoverPreview).toBeHidden();
   await truncatedNickname.focus();
   await expect(page.getByRole("tooltip")).toHaveText(occupants[0]!.nickname);
   await page.keyboard.press("Escape");
@@ -1512,13 +1451,14 @@ test("split-bed parent cells show occupied-to-total ratio and every guest nickna
     })).toHaveCount(0);
   }
   await truncatedNickname.hover();
-  await expect(page.getByRole("tooltip")).toHaveText(occupants[0]!.nickname);
+  await expect(hoverPreview.getByText(occupants[0]!.nickname, { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("room-status-bed-occupancy-nicknames.png") });
   await assertNoA11yViolations(page);
   await assertNoPageOverflow(page);
 
   const collapseBeds = roomRow(page, room!.id).locator(".room-status-expand-button[aria-expanded='true']");
-  await collapseBeds.evaluate((button: HTMLButtonElement) => button.click());
+  await collapseBeds.click();
+  await expect(hoverPreview).toBeHidden();
   await expect(page.getByRole("tooltip")).toBeHidden();
 
   await page.setViewportSize({ width: 375, height: 812 });
@@ -1606,7 +1546,8 @@ test("desktop delays the range-loading notice without delaying write blocking", 
     });
     await toolbarArrival.fill(requestedArrival);
     await requestSeen;
-    await expect(page.locator(".room-status-workspace")).toHaveAttribute("inert", "");
+    await expect(page.getByRole("button", { name: "新建住宿", exact: true })).toBeDisabled();
+    await expect(page.locator(".room-status-workspace")).not.toHaveAttribute("inert", "");
     expect(
       await page.getByTestId("room-status-range-loading").count(),
       "write blocking must start before the delayed loading notice is presented"
@@ -1796,7 +1737,8 @@ test("desktop range selection, fixed 30-night start-date navigation, filtered-em
     await requestSeen;
     await expect(page.getByTestId("room-status-range-loading")).toBeVisible();
     await expect(committedRange).toHaveAttribute("data-range-departure", board.range.departureDate);
-    await expect(page.locator(".room-status-workspace")).toHaveAttribute("inert", "");
+    await expect(page.getByRole("button", { name: "新建住宿", exact: true })).toBeDisabled();
+    await expect(page.locator(".room-status-workspace")).not.toHaveAttribute("inert", "");
     await expect(page.locator(".room-status-context-actions").getByRole("button", { name: /创建|放置|释放|完成清洁/ })).toHaveCount(0);
     await page.waitForTimeout(4_250);
     expect(targetRequestCount, "the 4-second poll must coalesce behind an in-flight range query").toBe(1);
@@ -1925,575 +1867,243 @@ test("desktop long stays stay actionable beyond the 30-night board and fail visi
   expect(await propertyOrderCount()).toBe(ordersBeforeFailedTargetQuote);
 });
 
-test("desktop write draft stays stable across three room-status freshness windows", async ({ page }, testInfo: TestInfo) => {
-  test.skip(!isProject(testInfo, "desktop"), "desktop room-status freshness stability coverage");
-  test.setTimeout(150_000);
-  await page.setViewportSize({ width: 1440, height: 720 });
-  const { board } = await login(page);
-  await expectDesktopGrid(page);
-
-  const candidate = board.rooms
-    .flatMap((room) => room.days.map((day) => ({ room, day })))
-    .find(({ room, day }) => room.kind === "ROOM"
-      && day.available
-      && day.conflicts.length === 0
-      && room.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled));
-  expect(candidate, "an available room is required for the freshness stability draft").toBeTruthy();
-
+async function openStableRefreshDraft(page: Page, board: RoomStatusBoardDto) {
+  const candidate = board.rooms.flatMap(room => room.days.map(day => ({ room, day })))
+    .find(({ room, day }) => room.kind === "ROOM" && day.available && day.conflicts.length === 0
+      && room.allowedActions.some(action => action.code === "CREATE_ORDER" && action.enabled));
+  expect(candidate).toBeTruthy();
   const drawer = await openRoomStatusWriteDrawer(page, candidate!.room.id, candidate!.day.serviceDate, "创建订单");
   await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
   await expect(drawer.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
-  await drawer.getByTestId("primary-guest-name").fill("房态静默续期验证住客");
+  await drawer.getByTestId("primary-guest-name").fill("刷新稳定性验证住客");
   const nickname = drawer.getByTestId("primary-guest-nickname");
-  await nickname.fill("静默续期草稿");
+  await nickname.fill("保留填写内容");
   await drawer.getByTestId("booking-channel-code").selectOption("WECOM");
   const createButton = drawer.getByTestId("create-order");
   await expect(createButton).toBeEnabled();
-  const drawerBody = drawer.locator(".modal-body");
-  const initialScrollTop = await drawerBody.evaluate((element) => {
-    element.scrollTop = Math.min(40, Math.max(0, element.scrollHeight - element.clientHeight));
-    return element.scrollTop;
-  });
   await nickname.focus();
+  return { drawer, nickname, createButton };
+}
 
-  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
-  const delayedRefreshes: Array<{ startedAt: number; fulfilledAt: number }> = [];
-  const delayedResponseMs = 1_500;
-  await page.route(roomStatusRoutePattern, async (route) => {
-    const startedAt = Date.now();
-    // Fetching first keeps this a real API response; only its delivery is delayed.
-    const response = await route.fetch();
-    await new Promise<void>((resolve) => setTimeout(resolve, delayedResponseMs));
-    await route.fulfill({ response });
-    delayedRefreshes.push({ startedAt, fulfilledAt: Date.now() });
+test("desktop light synchronization leaves an unchanged board and open draft stable", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop draft coverage");
+  const { board } = await login(page);
+  const { nickname, createButton } = await openStableRefreshDraft(page, board);
+  let fullReads = 0, syncReads = 0;
+  page.on("request", request => {
+    const path = new URL(request.url()).pathname;
+    if (path === `/api/v1/properties/${propertyId}/room-status`) fullReads += 1;
+    if (path === `/api/v1/properties/${propertyId}/room-status/sync`) syncReads += 1;
   });
-  let stability: {
-    disabledStates: boolean[];
-    focusLost: boolean;
-    value: string;
-    scrollTop: number;
-    drawerConnected: boolean;
-  };
-  try {
-    stability = await page.evaluate(async ({ durationMs }) => {
-      const button = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
-      const input = document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']");
-      const body = document.querySelector<HTMLElement>("dialog.room-status-write-drawer .modal-body");
-      if (!button || !input || !body) throw new Error("write draft controls are unavailable");
-      const disabledStates = [button.disabled];
-      let focusLost = document.activeElement !== input;
-      const observeButtonState = () => disabledStates.push(button.disabled);
-      const observer = new MutationObserver(observeButtonState);
-      observer.observe(button, { attributes: true, attributeFilter: ["disabled"] });
-      const focusProbe = window.setInterval(() => {
-        if (document.activeElement !== input) focusLost = true;
-        observeButtonState();
-      }, 40);
-      await new Promise<void>((resolve) => window.setTimeout(resolve, durationMs));
-      window.clearInterval(focusProbe);
-      observer.disconnect();
-      return {
-        disabledStates,
-        focusLost,
-        value: input.value,
-        scrollTop: body.scrollTop,
-        drawerConnected: body.isConnected
-      };
-    }, { durationMs: 18_000 });
-  } finally {
-    await page.unrouteAll({ behavior: "wait" });
-  }
-
-  expect(delayedRefreshes.length, "the open draft must cross at least three five-second freshness windows")
-    .toBeGreaterThanOrEqual(3);
-  expect(delayedRefreshes.length, "a 1.5-second response delay must not turn renewal into a tight refresh loop")
-    .toBeLessThanOrEqual(10);
-  expect(delayedRefreshes.every((renewal) => renewal.fulfilledAt - renewal.startedAt >= delayedResponseMs - 100)).toBe(true);
-  const renewalGapsAfterDelivery = delayedRefreshes.slice(1)
-    .map((renewal, index) => renewal.startedAt - delayedRefreshes[index]!.fulfilledAt);
-  expect(renewalGapsAfterDelivery, "each delayed renewal after the first must be measured")
-    .toHaveLength(delayedRefreshes.length - 1);
-  expect(
-    renewalGapsAfterDelivery.every((gap) => gap >= 250),
-    `renewals must not immediately loop after delivery; observed gaps: ${renewalGapsAfterDelivery.join(", ")}ms`
-  )
-    .toBe(true);
-  expect(stability.disabledStates.every((disabled) => !disabled)).toBe(true);
+  const stability = await page.evaluate(async () => {
+    const input = document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']")!;
+    const button = document.querySelector<HTMLButtonElement>("[data-testid='create-order']")!;
+    const states: boolean[] = [];
+    let focusLost = false;
+    const timer = setInterval(() => { states.push(button.disabled); focusLost ||= document.activeElement !== input; }, 50);
+    await new Promise(resolve => setTimeout(resolve, 16_000));
+    clearInterval(timer);
+    return { states, focusLost };
+  });
+  expect(syncReads).toBeGreaterThanOrEqual(1);
+  expect(fullReads).toBe(0);
+  expect(stability.states.every(disabled => !disabled)).toBe(true);
   expect(stability.focusLost).toBe(false);
-  expect(stability.value).toBe("静默续期草稿");
-  expect(stability.scrollTop).toBe(initialScrollTop);
-  expect(stability.drawerConnected).toBe(true);
-  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
-  await expect(page.getByRole("alert").filter({ hasText: /房态.*失败|房态.*过期/ })).toHaveCount(0);
+  await expect(nickname).toHaveValue("保留填写内容");
+  await expect(nickname).toBeFocused();
   await expect(createButton).toBeEnabled();
 });
 
-test("desktop keeps room status writable when the client clock is ahead of the server", async ({ page }, testInfo: TestInfo) => {
-  test.skip(!isProject(testInfo, "desktop"), "desktop room-status clock-skew coverage");
+test("desktop accepts slow successful reads and recovery without a shorter write window", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop slow-network coverage");
+  test.setTimeout(90_000);
+  let delay = 2_200;
+  const pattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  await page.route(pattern, async route => {
+    const response = await route.fetch();
+    await new Promise(resolve => setTimeout(resolve, delay));
+    await route.fulfill({ response });
+  });
+  const { board } = await login(page);
+  const { nickname, createButton } = await openStableRefreshDraft(page, board);
+  for (const nextDelay of [3_000, 1_200]) {
+    delay = nextDelay;
+    const read = roomStatusResponse(page);
+    await page.getByRole("button", { name: "刷新房态", exact: true }).evaluate((button: HTMLButtonElement) => button.click());
+    await page.waitForTimeout(1_000);
+    await expect(createButton).toBeEnabled();
+    await read;
+    await expect(createButton).toBeEnabled();
+    await expect(nickname).toHaveValue("保留填写内容");
+    await expect(nickname).toBeFocused();
+  }
+  await page.unroute(pattern);
+});
+
+test("desktop terminal projection failure keeps date navigation and explicit retry available", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop failed-range coverage");
+  const { board } = await login(page);
+  const past = addDays(board.range.arrivalDate, -30);
+  let failedReads = 0;
+  const pattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  await page.route(pattern, async route => {
+    const response = await route.fetch();
+    if (new URL(route.request().url()).searchParams.get("arrivalDate") !== past) return route.fulfill({ response });
+    failedReads += 1;
+    // HTTP 200 cannot make a response from an incorrect property trustworthy.
+    const payload = await response.json();
+    await route.fulfill({ response, json: { ...payload, propertyId: "wrong_property" } });
+  });
+  await page.getByTestId("arrival-date").fill(past);
+  await expect(page.getByTestId("room-status-range-loading")).toContainText("所选日期的房态加载失败");
+  await expect(page.getByTestId("room-status-board-range")).toHaveAttribute("data-range-arrival", board.range.arrivalDate);
+  await expect(page.getByRole("button", { name: "重试所选日期", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "新建住宿", exact: true })).toBeDisabled();
+  await expect(page.locator(".room-status-workspace")).not.toHaveAttribute("inert", "");
+  await page.waitForTimeout(16_000);
+  expect(failedReads).toBe(1);
+  await page.getByRole("button", { name: "重试所选日期", exact: true }).click();
+  await expect.poll(() => failedReads).toBe(2);
+  await expect(page.getByRole("button", { name: "重试所选日期", exact: true })).toBeEnabled();
+  const restored = roomStatusResponse(page);
+  await page.getByRole("button", { name: "今天", exact: true }).click();
+  await restored;
+  await expect(page.getByTestId("room-status-range-loading")).toBeHidden();
+  await expect(page.getByRole("button", { name: "新建住宿", exact: true })).toBeEnabled();
+  await page.unroute(pattern);
+});
+
+test("desktop incomplete data stays readable with an accurate review notice instead of a refresh spinner", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop partial-data presentation");
+  let partial = true;
+  const pattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  await page.route(pattern, async route => {
+    const response = await route.fetch();
+    if (!partial) return route.fulfill({ response });
+    await route.fulfill({ response, json: { ...await response.json(), projectionState: "PARTIAL" } });
+  });
+  const { board } = await login(page);
+  await expect(page.getByTestId("room-status-stale-notice")).toContainText("部分房态资料待核对");
+  await expect(page.getByRole("button", { name: "新建住宿", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "刷新房态", exact: true })).toBeEnabled();
+  await expect(page.getByTestId("arrival-date")).toBeEditable();
+  partial = false;
+  const read = roomStatusResponse(page);
+  await page.getByTestId("arrival-date").fill(addDays(board.range.arrivalDate, -30));
+  await read;
+  await expect(page.getByTestId("room-status-stale-notice")).toBeHidden();
+  await expect(page.getByTestId("room-status-range-loading")).toBeHidden();
+  await page.unroute(pattern);
+});
+
+test("desktop transport failure preserves the draft and recovers through bounded retry", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop transient failure coverage");
+  const { board } = await login(page);
+  const { nickname, createButton } = await openStableRefreshDraft(page, board);
+  let attempts = 0;
+  const pattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  await page.route(pattern, async route => {
+    attempts += 1;
+    if (attempts === 1) return route.fulfill({ status: 503, json: { code: "UNAVAILABLE", message: "temporary test failure" } });
+    return route.continue();
+  });
+  await page.getByRole("button", { name: "刷新房态", exact: true }).evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.getByTestId("room-status-stale-notice")).toContainText("可以继续查看和填写");
+  await expect(createButton).toBeEnabled();
+  await expect.poll(() => attempts).toBeGreaterThanOrEqual(2);
+  await expect(page.getByTestId("room-status-stale-notice")).toBeHidden();
+  await expect(nickname).toHaveValue("保留填写内容");
+  await expect(nickname).toBeFocused();
+  await expect(createButton).toBeEnabled();
+  await page.unroute(pattern);
+});
+
+test("desktop wall-clock changes do not expire a valid displayed board", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop clock skew coverage");
   await page.addInitScript(() => {
     const systemNow = Date.now.bind(Date);
     Date.now = () => systemNow() + 60_000;
   });
-  await page.setViewportSize({ width: 1440, height: 720 });
-  let roomStatusResponses = 0;
-  page.on("response", (response) => {
-    const url = new URL(response.url());
-    if (response.request().method() === "GET"
-      && url.pathname === `/api/v1/properties/${propertyId}/room-status`
-      && response.status() === 200) roomStatusResponses += 1;
-  });
-
   const { board } = await login(page);
-  await expectDesktopGrid(page);
-  const cell = firstAvailableRoomStatusCell(page, board);
-  const popover = await openDayPopover(page, cell);
-  await expect(popover.getByRole("button", { name: "预订", exact: true })).toBeEnabled();
-  await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeEnabled();
-  const responsesBeforeRenewal = roomStatusResponses;
-
+  const popover = await openDayPopover(page, firstAvailableRoomStatusCell(page, board));
   await page.waitForTimeout(7_000);
-
-  expect(roomStatusResponses).toBeGreaterThan(responsesBeforeRenewal);
-  await expect(popover).toBeVisible();
   await expect(popover.getByRole("button", { name: "预订", exact: true })).toBeEnabled();
-  await expect(popover.getByRole("button", { name: "维修锁房", exact: true })).toBeEnabled();
-  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
+  await page.evaluate(() => { Date.now = () => 0; });
+  await page.waitForTimeout(1_000);
+  await expect(popover.getByRole("button", { name: "预订", exact: true })).toBeEnabled();
 });
 
-test("desktop rejects a slow room-status renewal across wall-clock rollback without a write-gate loop", async ({ page }, testInfo: TestInfo) => {
-  test.skip(!isProject(testInfo, "desktop"), "desktop room-status slow-renewal boundary coverage");
-  test.setTimeout(120_000);
-  await page.addInitScript(() => {
-    const systemNow = Date.now.bind(Date);
-    let offsetMs = 0;
-    (window as unknown as { setRoomStatusClockOffset: (value: number) => void }).setRoomStatusClockOffset = (value) => {
-      offsetMs = value;
-    };
-    Date.now = () => systemNow() + offsetMs;
-  });
-  await page.setViewportSize({ width: 1440, height: 720 });
-  const { board } = await login(page);
-  await expectDesktopGrid(page);
-
-  const candidate = board.rooms
-    .flatMap((room) => room.days.map((day) => ({ room, day })))
-    .find(({ room, day }) => room.kind === "ROOM"
-      && day.available
-      && day.conflicts.length === 0
-      && room.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled));
-  expect(candidate, "an available room is required for the slow-renewal draft").toBeTruthy();
-
-  const drawer = await openRoomStatusWriteDrawer(page, candidate!.room.id, candidate!.day.serviceDate, "创建订单");
-  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
-  await expect(drawer.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
-  await drawer.getByTestId("primary-guest-name").fill("房态慢响应验证住客");
-  const nickname = drawer.getByTestId("primary-guest-nickname");
-  await nickname.fill("慢响应草稿");
-  await drawer.getByTestId("booking-channel-code").selectOption("WECOM");
-  const createButton = drawer.getByTestId("create-order");
-  await expect(createButton).toBeEnabled();
-  const drawerBody = drawer.locator(".modal-body");
-  const initialScrollTop = await drawerBody.evaluate((element) => {
-    element.scrollTop = Math.min(40, Math.max(0, element.scrollHeight - element.clientHeight));
-    return element.scrollTop;
-  });
-  await nickname.focus();
-
-  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
-  const delayedResponseMs = 2_500;
-  let delayedRenewalStarted!: () => void;
-  let delayedRenewalFulfilled!: () => void;
-  const delayedRenewalStartedPromise = new Promise<void>((resolve) => { delayedRenewalStarted = resolve; });
-  const delayedRenewalFulfilledPromise = new Promise<void>((resolve) => { delayedRenewalFulfilled = resolve; });
-  let delayedRenewalCount = 0;
-  await page.route(roomStatusRoutePattern, async (route) => {
-    // Keep the response real. The local request budget makes this delay cross
-    // the three-second install headroom independently of machine clock skew.
-    const response = await route.fetch();
-    delayedRenewalCount += 1;
-    delayedRenewalStarted();
-    await new Promise<void>((resolve) => setTimeout(resolve, delayedResponseMs));
-    await route.fulfill({ response });
-    delayedRenewalFulfilled();
-  });
-
-  await delayedRenewalStartedPromise;
-  await page.evaluate(() => {
-    (window as unknown as { setRoomStatusClockOffset: (value: number) => void })
-      .setRoomStatusClockOffset(-60_000);
-  });
-  const slowRenewalStability = await page.evaluate(async ({ durationMs }) => {
-    const button = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
-    const body = document.querySelector<HTMLElement>("dialog.room-status-write-drawer .modal-body");
-    if (!button || !body) throw new Error("slow-renewal draft controls are unavailable");
-    const disabledStates = [button.disabled];
-    let focusLost = false;
-    const sample = () => {
-      const currentButton = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
-      const currentInput = document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']");
-      if (!currentButton || !currentInput) throw new Error("slow-renewal draft controls were removed");
-      disabledStates.push(currentButton.disabled);
-      if (document.activeElement !== currentInput) focusLost = true;
-    };
-    const timer = window.setInterval(sample, 40);
-    await new Promise<void>((resolve) => window.setTimeout(resolve, durationMs));
-    window.clearInterval(timer);
-    sample();
-    return {
-      disabledStates,
-      focusLost,
-      value: document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']")?.value,
-      scrollTop: body.scrollTop,
-      drawerConnected: body.isConnected
-    };
-  }, { durationMs: delayedResponseMs + 300 });
-
-  try {
-    await delayedRenewalFulfilledPromise;
-    expect(delayedRenewalCount, "the slow boundary must cover at least one rejected renewal before recovery")
-      .toBeGreaterThanOrEqual(1);
-    expect(delayedRenewalCount, "the slow boundary must not start a tight refresh loop before recovery")
-      .toBeLessThanOrEqual(2);
-    await expect(createButton).toBeDisabled();
-    await expect(page.locator(".room-status-stale-notice")).toHaveCount(1);
-    await expect(page.locator(".room-status-stale-notice")).toContainText("响应到达时剩余有效时间不足，仅供查看");
-    await expect(page.locator(".room-status-quick-gate")).toHaveCount(0);
-
-    const transitions = slowRenewalStability.disabledStates
-      .filter((state, index, states) => index === 0 || state !== states[index - 1]);
-    expect(transitions, "a rejected renewal may close writes once, but must not reopen them before recovery")
-      .toEqual([false, true]);
-    expect(slowRenewalStability.focusLost).toBe(false);
-    expect(slowRenewalStability.value).toBe("慢响应草稿");
-    expect(slowRenewalStability.scrollTop).toBe(initialScrollTop);
-    expect(slowRenewalStability.drawerConnected).toBe(true);
-  } finally {
-    await page.unroute(roomStatusRoutePattern);
-  }
-
-  await expect(createButton, "after network recovery, the client must renew without a manual refresh").toBeEnabled({ timeout: 15_000 });
-  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
-  await expect(nickname).toHaveValue("慢响应草稿");
-  await expect(nickname).toBeFocused();
-  expect(await drawerBody.evaluate((element) => element.scrollTop)).toBe(initialScrollTop);
+test("mobile light synchronization does not lock creation after the snapshot hint expires", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "mobile"), "mobile synchronization coverage");
+  await login(page);
+  await page.waitForTimeout(7_000);
+  await expect(page.getByTestId("room-status-stale-notice")).toBeHidden();
+  await expect(page.getByRole("button", { name: "新建住宿或锁房", exact: true })).toBeEnabled();
 });
 
-test("desktop stops repeated low-freshness renewals and requires one manual retry", async ({ page }, testInfo: TestInfo) => {
-  test.skip(!isProject(testInfo, "desktop"), "desktop room-status repeated low-freshness failure coverage");
-  test.setTimeout(150_000);
-  await page.setViewportSize({ width: 1440, height: 720 });
-  const { board } = await login(page);
-  await expectDesktopGrid(page);
-
-  const candidate = board.rooms
-    .flatMap((room) => room.days.map((day) => ({ room, day })))
-    .find(({ room, day }) => room.kind === "ROOM"
-      && day.available
-      && day.conflicts.length === 0
-      && room.allowedActions.some((action) => action.code === "CREATE_ORDER" && action.enabled));
-  expect(candidate, "an available room is required for the repeated low-freshness draft").toBeTruthy();
-
-  const drawer = await openRoomStatusWriteDrawer(page, candidate!.room.id, candidate!.day.serviceDate, "创建订单");
-  await drawer.getByRole("button", { name: "创建正常住宿订单", exact: true }).click();
-  await expect(drawer.getByTestId("quote-result")).toBeVisible({ timeout: 15_000 });
-  await drawer.getByTestId("primary-guest-name").fill("房态连续慢响应验证住客");
-  const nickname = drawer.getByTestId("primary-guest-nickname");
-  await nickname.fill("连续慢响应草稿");
-  await drawer.getByTestId("booking-channel-code").selectOption("WECOM");
-  const createButton = drawer.getByTestId("create-order");
-  await expect(createButton).toBeEnabled();
-  const drawerBody = drawer.locator(".modal-body");
-  const initialScrollTop = await drawerBody.evaluate((element) => {
-    element.scrollTop = Math.min(40, Math.max(0, element.scrollHeight - element.clientHeight));
-    return element.scrollTop;
-  });
-  await nickname.focus();
-
-  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
-  const delayedResponseMs = 3_250;
-  let firstDelayedRenewalStarted!: () => void;
-  const firstDelayedRenewalStartedPromise = new Promise<void>((resolve) => { firstDelayedRenewalStarted = resolve; });
-  let delayedRenewalCount = 0;
-  await page.route(roomStatusRoutePattern, async (route) => {
-    // The real five-second response is delivered after the local request has
-    // consumed enough of its budget that every attempt must be rejected.
-    const response = await route.fetch();
-    delayedRenewalCount += 1;
-    const renewalNumber = delayedRenewalCount;
-    if (renewalNumber === 1) firstDelayedRenewalStarted();
-    await new Promise<void>((resolve) => setTimeout(resolve, delayedResponseMs));
-    await route.fulfill({ response });
-  });
-
-  // Trigger the first delayed response explicitly. Waiting for whichever
-  // background timer happens to survive quote setup makes this boundary flaky.
-  await page.getByRole("button", { name: "刷新房态", exact: true })
-    .evaluate((element: HTMLButtonElement) => element.click());
-  await firstDelayedRenewalStartedPromise;
-  const stability = await page.evaluate(async ({ durationMs }) => {
-    const body = document.querySelector<HTMLElement>("dialog.room-status-write-drawer .modal-body");
-    if (!body) throw new Error("repeated low-freshness drawer is unavailable");
-    const disabledStates: boolean[] = [];
-    let focusLost = false;
-    const sample = () => {
-      const button = document.querySelector<HTMLButtonElement>("[data-testid='create-order']");
-      const input = document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']");
-      if (!button || !input) throw new Error("repeated low-freshness draft controls were removed");
-      disabledStates.push(button.disabled);
-      if (document.activeElement !== input) focusLost = true;
-    };
-    sample();
-    const timer = window.setInterval(sample, 40);
-    await new Promise<void>((resolve) => window.setTimeout(resolve, durationMs));
-    window.clearInterval(timer);
-    sample();
-    return {
-      disabledStates,
-      focusLost,
-      value: document.querySelector<HTMLInputElement>("[data-testid='primary-guest-nickname']")?.value,
-      scrollTop: body.scrollTop,
-      drawerConnected: body.isConnected
-    };
-  }, { durationMs: 13_000 });
-
+test("sync permission denial cannot be downgraded by a subsequent transport failure", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop permission composition coverage");
+  await ensureRevocationPrincipal();
+  const fullPattern = `**/api/v1/properties/${propertyId}/room-status?*`;
   try {
-    const failureNotice = page.locator(".room-status-stale-notice");
-    await expect(failureNotice).toContainText(
-      "响应到达时剩余有效时间不足，仅供查看",
-      { timeout: 15_000 }
-    );
-    await expect(failureNotice).toHaveAttribute("role", "alert");
-    await expect(failureNotice.getByRole("button", { name: "重试刷新", exact: true })).toHaveCount(1);
-    await expect(createButton).toBeDisabled();
-    await expect(page.locator(".room-status-quick-gate")).toHaveCount(0);
-    const stoppedRenewalCount = delayedRenewalCount;
-    expect(stoppedRenewalCount, "manual retry must require at least three delivered low-freshness attempts")
-      .toBeGreaterThanOrEqual(3);
-    await page.waitForTimeout(1_000);
-    expect(delayedRenewalCount, "the final failure state must stop background retries")
-      .toBe(stoppedRenewalCount);
-
-    const transitions = stability.disabledStates
-      .filter((state, index, states) => index === 0 || state !== states[index - 1]);
-    expect(transitions, "writes may close once but must not reopen while low-freshness retries fail")
-      .toEqual([false, true]);
-    expect(stability.focusLost).toBe(false);
-    expect(stability.value).toBe("连续慢响应草稿");
-    expect(stability.scrollTop).toBe(initialScrollTop);
-    expect(stability.drawerConnected).toBe(true);
+    const { board } = await login(page, revocationOperator);
+    const date = board.dates[5]!;
+    const unit = board.rooms.find(room => room.days.some(day => day.serviceDate === date && day.available)
+      && room.allowedActions.some(action => action.code === "LOCK_MAINTENANCE" && action.enabled))!;
+    const drawer = await openRoomStatusWriteDrawer(page, unit.id, date, "维修锁房");
+    await drawer.getByLabel("维修原因").fill("撤权不能被网络失败覆盖");
+    await drawer.getByRole("button", { name: "继续核对", exact: true }).click();
+    await expect(page.getByTestId("command-effect")).toBeVisible();
+    await page.route(fullPattern, route => route.fulfill({ status: 503, json: { code: "UNAVAILABLE", message: "temporary transport failure" } }));
+    await setPrincipalPropertyAccess(revocationOperator.username, null);
+    const denied = page.waitForResponse(response => new URL(response.url()).pathname.endsWith("/room-status/sync") && response.status() === 403);
+    await page.waitForTimeout(1_100);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await denied;
+    await expect(page.getByRole("alert").filter({ hasText: "无权查看当前物业房态" })).toBeVisible();
+    await expect(page.getByTestId("command-effect")).toHaveCount(0);
+    await expect(page.getByTestId("room-status-board-range")).toHaveCount(0);
+    await page.waitForTimeout(2_500);
+    await expect(page.getByTestId("confirm-command")).toHaveCount(0);
+    await expect(page.getByTestId("room-status-board-range")).toHaveCount(0);
   } finally {
-    await page.unroute(roomStatusRoutePattern);
-  }
-
-  const refreshed = roomStatusResponse(page);
-  await page.locator(".room-status-stale-notice")
-    .getByRole("button", { name: "重试刷新", exact: true })
-    .click({ timeout: 5_000 });
-  await refreshed;
-  await expect(createButton).toBeEnabled({ timeout: 15_000 });
-  await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
-  await expect(nickname).toHaveValue("连续慢响应草稿");
-  await expect(nickname).toBeFocused();
-  expect(await drawerBody.evaluate((element) => element.scrollTop)).toBe(initialScrollTop);
-});
-
-test("desktop cancels a low-freshness retry when a replacement range query fails", async ({ page }, testInfo: TestInfo) => {
-  test.skip(!isProject(testInfo, "desktop"), "desktop room-status retry-scope coverage");
-  test.setTimeout(120_000);
-  await page.setViewportSize({ width: 1440, height: 720 });
-  const { board } = await login(page);
-  await expectDesktopGrid(page);
-
-  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
-  const initialArrivalDate = board.range.arrivalDate;
-  const replacementArrivalDate = addDays(initialArrivalDate, roomStatusTimelineDays);
-  let requestCount = 0;
-  let secondLowFreshnessDelivered!: () => void;
-  let replacementFailed!: () => void;
-  const secondLowFreshnessDeliveredPromise = new Promise<void>((resolve) => {
-    secondLowFreshnessDelivered = resolve;
-  });
-  const replacementFailedPromise = new Promise<void>((resolve) => {
-    replacementFailed = resolve;
-  });
-  await page.route(roomStatusRoutePattern, async (route) => {
-    requestCount += 1;
-    const url = new URL(route.request().url());
-    if (url.searchParams.get("arrivalDate") === replacementArrivalDate) {
-      await route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ code: "ROOM_STATUS_TEST_FAILURE", message: "replacement query failed" })
-      });
-      replacementFailed();
-      return;
-    }
-    const response = await route.fetch();
-    await new Promise<void>((resolve) => setTimeout(resolve, 3_250));
-    await route.fulfill({ response });
-    if (requestCount === 2) secondLowFreshnessDelivered();
-  });
-
-  try {
-    await page.getByRole("button", { name: "刷新房态", exact: true })
-      .evaluate((element: HTMLButtonElement) => element.click());
-    await secondLowFreshnessDeliveredPromise;
-    await page.waitForTimeout(100);
-    await page.getByRole("button", { name: "查看后 30 夜", exact: true }).click();
-    await replacementFailedPromise;
-    const failureNotice = page.locator(".room-status-stale-notice");
-    await expect(failureNotice).toContainText(
-      "房态刷新失败，当前仍显示上次成功结果。刷新成功前不能发起补录或其他写入。"
-    );
-    await expect(failureNotice).toHaveAttribute("role", "alert");
-    const stoppedRequestCount = requestCount;
-    await page.waitForTimeout(1_500);
-    expect(requestCount, "a retry from the previous range must not wake after the replacement query fails")
-      .toBe(stoppedRequestCount);
-  } finally {
-    await page.unroute(roomStatusRoutePattern);
+    await page.unroute(fullPattern);
+    await setPrincipalPropertyAccess(revocationOperator.username, "WRITE");
   }
 });
 
-test("desktop stale and unknown states fail closed without mocked room-status data", async ({ page }, testInfo: TestInfo) => {
-  test.skip(!isProject(testInfo, "desktop"), "desktop room-status network-state coverage");
+test("unchanged sync releases the post-commit refresh wait after full-read failure", async ({ page }, testInfo) => {
+  test.skip(!isProject(testInfo, "desktop"), "desktop post-commit recovery coverage");
   const { board } = await login(page);
-  await expectDesktopGrid(page);
-
-  const preservedCell = firstAvailableRoomStatusCell(page, board);
-  const preservedAccessibleName = await preservedCell.getAttribute("aria-label");
-  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
-  let releaseRefresh!: () => void;
-  let markRefreshIntercepted!: () => void;
-  let markRefreshFulfilled!: () => void;
-  const heldRefresh = new Promise<void>((resolve) => { releaseRefresh = resolve; });
-  const refreshIntercepted = new Promise<void>((resolve) => { markRefreshIntercepted = resolve; });
-  const refreshFulfilled = new Promise<void>((resolve) => { markRefreshFulfilled = resolve; });
-  let holdNextRefresh = true;
-  await page.route(roomStatusRoutePattern, async (route) => {
-    if (!holdNextRefresh) {
-      await route.continue();
-      return;
-    }
-    holdNextRefresh = false;
-    const response = await route.fetch();
-    markRefreshIntercepted();
-    await heldRefresh;
-    await route.fulfill({ response });
-    markRefreshFulfilled();
+  const date = board.dates[8]!;
+  const unit = board.rooms.find(room => room.days.some(day => day.serviceDate === date && day.available)
+    && room.allowedActions.some(action => action.code === "LOCK_MAINTENANCE" && action.enabled))!;
+  const drawer = await openRoomStatusWriteDrawer(page, unit.id, date, "维修锁房");
+  await drawer.getByLabel("维修原因").fill(`提交后同步验证-${crypto.randomUUID()}`);
+  await drawer.getByRole("button", { name: "继续核对", exact: true }).click();
+  await expect(page.getByTestId("command-effect")).toBeVisible();
+  const fullPattern = `**/api/v1/properties/${propertyId}/room-status?*`;
+  let fullReads = 0, failures = 0;
+  await page.route(fullPattern, route => {
+    fullReads += 1;
+    if (fullReads === 1) return route.continue();
+    failures += 1;
+    return route.fulfill({ status: 503, json: { code: "UNAVAILABLE", message: "temporary follow-up read failure" } });
   });
-  try {
-    await page.getByRole("button", { name: "刷新房态", exact: true }).click();
-    await refreshIntercepted;
-    await expect(page.getByRole("button", { name: "刷新房态", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "正在刷新", exact: true })).toHaveCount(0);
-    await page.waitForTimeout(Math.max(0, Date.parse(board.freshUntil) - Date.now() + 200));
-
-    await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
-    await expect(page.getByTestId("room-status-sync-indicator")).toContainText("同步中");
-    await expect(page.locator(".room-status-stale-notice")).toHaveCount(0);
-    await expect(page.locator(".room-status-stale-notice")).toHaveCount(1, { timeout: 5_000 });
-    await expect(page.locator(".room-status-stale-notice")).toContainText("房态正在更新");
-    await expect(preservedCell).toHaveAttribute("aria-label", preservedAccessibleName!);
-    const refreshingPopover = await openDayPopover(page, preservedCell);
-    await expect(refreshingPopover).toContainText("可售");
-    await expect(refreshingPopover.getByRole("button", { name: "预订", exact: true })).toBeDisabled();
-    await expect(refreshingPopover.getByRole("button", { name: "维修锁房", exact: true })).toBeDisabled();
-    await expect(refreshingPopover.locator(".room-status-quick-gate"))
-      .toContainText("正在更新房态，更新完成前暂不能写入");
-    await page.keyboard.press("Escape");
-  } finally {
-    releaseRefresh();
-    await refreshFulfilled;
-    await page.unroute(roomStatusRoutePattern);
-  }
-  await expect(page.getByRole("button", { name: "刷新房态", exact: true })).toBeVisible();
-
-  const quickPopover = await openDayPopover(page, preservedCell);
-  await quickPopover.getByRole("button", { name: "预订", exact: true }).click();
-  await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeVisible();
-
-  try {
-    await page.context().setOffline(true);
-    await page.getByRole("button", { name: "刷新房态", exact: true })
-      .evaluate((element: HTMLButtonElement) => element.click());
-    const failedNotice = page.getByRole("dialog", { name: "创建订单", exact: true })
-      .getByRole("status").filter({ hasText: "房态暂时未更新" });
-    await expect(failedNotice).toContainText("正在自动重试，恢复前不能发起写入");
-    await expect(page.locator(".room-status-mark-stale, .room-status-day-stale, .room-status-interval-stale")).toHaveCount(0);
-    await expect(page.getByRole("dialog", { name: "创建订单", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "创建正常住宿订单", exact: true })).toBeDisabled();
-
-    await page.context().setOffline(false);
-    const refreshed = roomStatusResponse(page);
-    await page.getByRole("button", { name: "刷新房态", exact: true })
-      .evaluate((element: HTMLButtonElement) => element.click());
-    await refreshed;
-    await expect(failedNotice).toBeHidden();
-    const restoredContext = page.getByRole("dialog", { name: "创建订单", exact: true });
-    await restoredContext.locator(".modal-footer").getByRole("button", { name: "关闭", exact: true }).click();
-    await expect(restoredContext).toBeHidden();
-
-    await page.getByRole("link", { name: "订单", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "订单", exact: true })).toBeVisible();
-    await page.context().setOffline(true);
-    await page.getByRole("link", { name: "房态", exact: true }).click();
-    await expect(page.getByText("状态未知，未显示为可售", { exact: true })).toBeVisible();
-    await expect(page.getByRole("grid")).toHaveCount(0);
-
-    await page.context().setOffline(false);
-    const recovered = roomStatusResponse(page);
-    await page.getByRole("button", { name: "重试查询", exact: true }).click();
-    await recovered;
-    await expectDesktopGrid(page);
-    await expect(page.getByText("状态未知，未显示为可售", { exact: true })).toBeHidden();
-  } finally {
-    await page.context().setOffline(false);
-  }
-});
-
-test("mobile keeps brief room-status renewal in the header before showing a delayed warning", async ({ page }, testInfo: TestInfo) => {
-  test.skip(!isProject(testInfo, "mobile"), "mobile room-status sync feedback coverage");
-  const { board } = await login(page);
-  await expect(page.locator(".room-status-mobile")).toBeVisible();
-
-  const roomStatusRoutePattern = `**/api/v1/properties/${propertyId}/room-status?*`;
-  let releaseRefresh!: () => void;
-  let markRefreshIntercepted!: () => void;
-  let markRefreshFulfilled!: () => void;
-  const heldRefresh = new Promise<void>((resolve) => { releaseRefresh = resolve; });
-  const refreshIntercepted = new Promise<void>((resolve) => { markRefreshIntercepted = resolve; });
-  const refreshFulfilled = new Promise<void>((resolve) => { markRefreshFulfilled = resolve; });
-  let holdNextRefresh = true;
-  await page.route(roomStatusRoutePattern, async (route) => {
-    if (!holdNextRefresh) {
-      await route.continue();
-      return;
-    }
-    holdNextRefresh = false;
-    const response = await route.fetch();
-    markRefreshIntercepted();
-    await heldRefresh;
-    await route.fulfill({ response });
-    markRefreshFulfilled();
-  });
-  try {
-    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await refreshIntercepted;
-    await page.waitForTimeout(Math.max(0, Date.parse(board.freshUntil) - Date.now() + 200));
-
-    await expect(page.getByTestId("room-status-mobile-sync")).toHaveText("同步中…");
-    await expect(page.getByTestId("room-status-stale-notice")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "新建住宿或锁房" })).toHaveCount(0);
-    await expect(page.getByTestId("room-status-stale-notice")).toBeVisible({ timeout: 5_000 });
-    await expect(page.getByTestId("room-status-stale-notice")).toContainText("更新完成前不能发起写入");
-  } finally {
-    releaseRefresh();
-    await refreshFulfilled;
-    await page.unroute(roomStatusRoutePattern);
-  }
-  await expect(page.getByTestId("room-status-stale-notice")).toHaveCount(0, { timeout: 15_000 });
-  await expect(page.getByTestId("room-status-mobile-sync")).toHaveCount(0);
+  const firstRead = roomStatusResponse(page);
+  await page.getByTestId("confirm-command").click();
+  await firstRead;
+  await expect(page.locator("dialog.modal-wide")).toBeHidden();
+  await expect.poll(() => failures).toBeGreaterThanOrEqual(1);
+  // The already installed post-commit board has the same version as the server.
+  // A successful light check must release the wait even while full reads fail.
+  await page.waitForTimeout(1_100);
+  const synchronized = page.waitForResponse(response => new URL(response.url()).pathname.endsWith("/room-status/sync") && response.status() === 200);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await synchronized;
+  await expect(page.getByRole("button", { name: "新建住宿", exact: true })).toBeEnabled();
+  await expect(page.getByTestId("room-status-stale-notice")).toBeHidden();
+  await page.unroute(fullPattern);
 });
 
 test("a real delayed 403 clears the board, command draft, restoration and stable references", async ({ page }, testInfo: TestInfo) => {
@@ -2519,11 +2129,11 @@ test("a real delayed 403 clears the board, command draft, restoration and stable
 
     const deniedResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
-      return url.pathname === `/api/v1/properties/${propertyId}/room-status` && response.status() === 403;
+      return url.pathname === `/api/v1/properties/${propertyId}/room-status/sync` && response.status() === 403;
     });
     let roomStatusRequestCount = 0;
     countRoomStatusRequest = (request) => {
-      if (new URL(request.url()).pathname === `/api/v1/properties/${propertyId}/room-status`) roomStatusRequestCount += 1;
+      if (new URL(request.url()).pathname.startsWith(`/api/v1/properties/${propertyId}/room-status`)) roomStatusRequestCount += 1;
     };
     page.on("request", countRoomStatusRequest);
     await setPrincipalPropertyAccess(revocationOperator.username, null);
@@ -3096,7 +2706,8 @@ test("same-day turnover keeps nightly inventory writable and exposes the departu
     import { createQuoteForTesting } from "./packages/db/src/pricing-service.ts";
     import { createCommandPreview, confirmCommandPreview } from "./packages/db/src/commands/service.ts";
     import { withPropertyClockForTesting } from "./packages/db/src/members.ts";
-    import { authScope } from "./tests/helpers/auth-principals.ts";
+    import * as authModule from "./tests/helpers/auth-principals.ts";
+    const { authScope } = authModule.default ?? authModule;
     const db = createDatabase(process.env.E2E_DATABASE_URL);
     const propertyId = "prop_qintopia_demo";
     const principal = { subjectId: "subject_demo_agent", credentialId: "token_demo_write", credentialType: "TOKEN", displayName: "Turnover fixture", ...authScope() };
