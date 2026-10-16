@@ -66,13 +66,14 @@ class WorkflowContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.ci = read(".github/workflows/ci.yml")
+        cls.pr_format = read(".github/workflows/pr-format.yml")
         cls.release_please = read(".github/workflows/release-please.yml")
         cls.release_please_config = json.loads(read(".release-please-config.json"))
         cls.release_please_manifest = json.loads(read(".release-please-manifest.json"))
         cls.release = read(".github/workflows/release.yml")
         cls.retention = read(".github/workflows/retention.yml")
         cls.rollback = read(".github/workflows/rollback.yml")
-        cls.workflows = cls.ci + cls.release + cls.retention + cls.rollback
+        cls.workflows = cls.ci + cls.pr_format + cls.release + cls.retention + cls.rollback
 
     def test_release_please_prepares_version_pr_and_tag(self) -> None:
         for fragment in (
@@ -109,10 +110,6 @@ class WorkflowContractTests(unittest.TestCase):
         for fragment in (
             "pull_request:",
             "branches: [main]",
-            "name: PR format",
-            "if: github.event_name == 'pull_request'",
-            "node --test scripts/check-pr-tests.mjs",
-            "node scripts/check-pr.mjs",
             "name: Node and release checks",
             "node-version: 22.x",
             "run: npm ci",
@@ -126,6 +123,33 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("environment: production", self.ci)
         self.assertNotIn("COS_", self.ci)
         self.assertNotIn("DEPLOY_", self.ci)
+
+    def test_metadata_edits_cannot_cancel_or_replace_required_code_checks(self) -> None:
+        self.assertIn("types: [opened, synchronize, reopened, ready_for_review]", self.ci)
+        self.assertNotIn("edited", self.ci)
+        self.assertNotIn("name: PR format", self.ci)
+        self.assertNotIn("if:", self.ci)
+        self.assertIn("group: greenpms-ci-${{ github.ref }}", self.ci)
+        self.assertIn("cancel-in-progress: true", self.ci)
+        self.assertIn("types: [opened, edited, synchronize, reopened, ready_for_review]", self.pr_format)
+        self.assertIn("group: greenpms-pr-format-${{ github.ref }}", self.pr_format)
+        self.assertIn("cancel-in-progress: false", self.pr_format)
+        self.assertNotIn("name: Node and release checks", self.pr_format)
+        protection = json.loads(read(".github/main-protection.json"))
+        self.assertEqual({item["context"] for item in protection["required_status_checks"]["checks"]},
+                         {"PR format", "Node and release checks"})
+
+    def test_pr_format_checks_current_metadata_without_write_permissions(self) -> None:
+        for fragment in (
+            "name: PR format", "branches: [main]", "contents: read", "pull-requests: read",
+            "node --test scripts/check-pr-tests.mjs",
+            'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"',
+            "--jq '{pull_request: .}'",
+            'GITHUB_EVENT_PATH="$RUNNER_TEMP/pr-metadata.json" node scripts/check-pr.mjs',
+        ):
+            self.assertIn(fragment, self.pr_format)
+        for fragment in ("pull_request_target", ": write", "secrets.", "environment: production"):
+            self.assertNotIn(fragment, self.pr_format)
 
     def test_release_is_tagged_immutable_and_main_reachable(self) -> None:
         for fragment in (
