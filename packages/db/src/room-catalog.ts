@@ -219,8 +219,8 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
       "仅修改当前展示房号，保留原房间、床位、订单、占用和价格；历史操作记录不变",
       ...(children.length ? [`关联床位同步显示：${children.map((unit) => changes[unit.id]).join("、")}`] : [])];
   } else if (input.action === "SET_OPERATING_STATISTICS") {
-    if (!Array.isArray(input.assetIds) || !input.assetIds.length || input.assetIds.some(id => typeof id !== "string")
-      || new Set(input.assetIds).size !== input.assetIds.length) throw new DomainError("VALIDATION_ERROR", "请选择不重复的实体房间");
+    if (!Array.isArray(input.assetIds) || input.assetIds.length !== 1 || input.assetIds.some(id => typeof id !== "string")
+      || new Set(input.assetIds).size !== input.assetIds.length) throw new DomainError("VALIDATION_ERROR", "每次请选择一个房间修改分类");
     const included = flag(input.included);
     const selected = input.assetIds.map(id => basis.rooms.find(room => room.assetId === id));
     if (selected.some(room => !room)) throw new DomainError("VALIDATION_ERROR", "统计设置包含不属于本门店的实体房间");

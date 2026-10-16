@@ -28,7 +28,7 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
-    { question: "F栋宿舍象征性收费还计入经营入住率吗？", ids: ["dashboard", "catalog"], facts: ["经营单元", "非经营单元", "批量设置分类", "填写原因并确认才会保存", "跨房住宿按实际房间和日期分段", "房态、订单与真实收退款仍保留", "现有经营销售额不随住宿统计开关删减"] },
+    { question: "F栋宿舍象征性收费还计入经营入住率吗？", ids: ["dashboard", "catalog"], facts: ["经营单元", "非经营单元", "分类下拉框选择后直接保存", "不用填写理由", "不提供整栋批量设置", "跨房住宿按实际房间和日期分段", "房态、订单与真实收退款仍保留", "现有经营销售额不随住宿统计开关删减"] },
     { question: "房态慢、翻上个月一直刷新怎么办？", ids: ["room-status"], facts: ["后台约15秒", "不会无限自动重试", "可以返回今天", "办理仍需服务端重新核对", "结果未知应查询原回执"] },
     { question: "企微补录本单387.5能填吗，实收能选为什么本单不行？", ids: ["booking", "pricing"], facts: ["包括企微直订及住宿补录", "387.50元", "本单金额与实际收款是两个字段", "不要取整或改渠道绕过", "政策基础价仍按原规则计算"] },
     { question: "企微已收到1000元，只匹配300元，算哪天多少收入？", ids: ["operating-sales"], facts: ["本次实际匹配份额", "匹配完成的PMS日期", "只收到钱不计住宿销售额", "不能重复认定历史已计收入"] },

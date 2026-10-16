@@ -27,7 +27,7 @@ export const RoomCatalogEffectSchema = obj({ operation: Type.Literal("MANAGE_ROO
   roomRename: Type.Optional(obj({ roomId: id, beforeCode: name, afterCode: name })),
   policies: Type.Array(obj({ id, effectiveFrom: date, anchors: Type.Record(Type.String(), RoomRateAnchorsSchema) })) });
 export const RoomCatalogInputSchema = Type.Unsafe({ type: "object", discriminator: { propertyName: "action" }, oneOf: [
-  obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_OPERATING_STATISTICS"), assetIds: Type.Array(id, { minItems: 1, uniqueItems: true }), included: Type.Boolean() }),
+  obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_OPERATING_STATISTICS"), assetIds: Type.Array(id, { minItems: 1, maxItems: 1, uniqueItems: true }), included: Type.Boolean() }),
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SET_BUILDING_ORDER"), buildingOrder }),
   obj({ propertyId: id, expectedVersion: Type.Integer({ minimum: 0 }), action: Type.Literal("SAVE_TYPE"), typeCode: Type.Optional(id),
     name, bathroom, saleMode: mode, bedCount: count, capacity: count }),

@@ -61,6 +61,7 @@ export interface RoomCatalogInput {
   code?: string;
   buildingCode?: string;
   buildingOrder?: string[];
+  /** New category changes accept exactly one room; array shape retained for historical records. */
   assetIds?: string[];
   included?: boolean;
   effectiveFrom?: string;

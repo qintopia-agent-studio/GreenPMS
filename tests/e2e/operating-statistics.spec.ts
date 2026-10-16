@@ -37,38 +37,11 @@ async function openRoomSettings(page: Page) {
   await expect(page.getByRole("heading", { name: "实际房间与床位", exact: true })).toBeVisible();
 }
 
-async function openBatchCategory(page: Page, building: string, included: boolean) {
-  await page.getByRole("button", { name: "批量设置分类", exact: true }).click();
-  await page.getByRole("combobox", { name: "选择楼栋", exact: true }).selectOption(building);
-  await page.getByRole("radio", { name: included ? /^经营单元/ : /^非经营单元/ }).check();
-  await page.getByRole("button", { name: "下一步：核对修改", exact: true }).click();
-}
-
-async function confirmStatistics(page: Page, expectedTitle: string, reason: string) {
-  const effect = page.getByTestId("command-effect");
-  await expect(effect).toContainText(expectedTitle);
-  await expect(effect).toContainText("过去和今后的经营入住率");
-  await expect(effect).toContainText("房间内的床位一并调整");
-  await expect(effect).toContainText("入住记录、订单、收付款、经营销售额和今日新增订单数照常保留");
-  const note = page.getByTestId("reason-note");
-  const confirm = page.getByTestId("confirm-command");
-  await expect(note).toHaveValue("");
-  await expect(confirm).toBeDisabled();
-  await note.fill("   ");
-  await expect(confirm).toBeDisabled();
-  await note.fill(reason);
-  await expect(confirm).toBeEnabled();
-  const confirmation = page.waitForResponse(response => /\/command-previews\/[^/]+\/confirm$/.test(new URL(response.url()).pathname)
-    && response.request().method() === "POST");
-  await confirm.click();
-  const response = await confirmation;
-  expect(response.ok(), await response.text()).toBe(true);
-  expect((await response.json()).businessCommitted).toBe(true);
-  await expect(page.getByRole("status").filter({ hasText: "房间分类已保存" })).toBeVisible({ timeout: 30_000 });
-  await expect(confirm).toBeHidden();
-  const done = page.getByRole("dialog").getByRole("button", { name: "完成", exact: true });
-  if (await done.isVisible()) await done.click();
-  await expect(page.getByRole("dialog")).toBeHidden();
+async function chooseCategory(page: Page, roomCode: string, included: boolean) {
+  await page.getByRole("combobox", { name: `${roomCode} 分类`, exact: true }).selectOption(included ? "OPERATING" : "OTHER");
+  await expect(page.getByRole("status").filter({ hasText: `${roomCode} 已设为${included ? "经营单元" : "非经营单元"}` })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByTestId("reason-note")).toHaveCount(0);
 }
 
 function nextDate(date: string) {
@@ -77,7 +50,7 @@ function nextDate(date: string) {
   return value.toISOString().slice(0, 10);
 }
 
-test("桌面管理员单房及整栋调整经营统计：原因必填、保存可读回、房态订单保留", async ({ page, isMobile }, testInfo) => {
+test("桌面管理员单房下拉直接保存：无需理由、可读回、房态订单保留", async ({ page, isMobile }, testInfo) => {
   test.skip(isMobile, "本切片的桌面验收旅程");
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -99,7 +72,6 @@ test("桌面管理员单房及整栋调整经营统计：原因必填、保存�
   const building = occupied.buildingCode;
   const rooms = initial.rooms.filter(room => room.active && room.buildingCode === building);
   const empty = rooms.find(room => room.assetId !== occupied.assetId)!;
-  const codes = rooms.map(room => room.code);
   expect(rooms.every(room => room.includedInOperatingStatistics)).toBe(true);
   const arrivalDate = "2034-06-10";
   const departureDate = nextDate(arrivalDate);
@@ -133,40 +105,17 @@ test("桌面管理员单房及整栋调整经营统计：原因必填、保存�
 
   try {
 
-  await test.step("单房进入核对，空白原因不能确认，保存后仍可读回", async () => {
+  await test.step("单房下拉直接保存，不弹窗、不填理由，其他房间不受影响", async () => {
     await openRoomSettings(page);
-    await page.getByRole("button", { name: `${occupied.code} 分类：经营单元，点击修改`, exact: true }).click();
-    await page.getByRole("radio", { name: "非经营单元", exact: false }).check();
-    await page.getByRole("button", { name: "下一步：核对修改", exact: true }).click();
-    await expect(page.getByTestId("command-effect")).toContainText(`${building}栋 ${occupied.code}`);
-    // 核对本身不写设置。
-    expect((await catalog(page)).rooms.find(room => room.assetId === occupied.assetId)!.includedInOperatingStatistics).toBe(true);
-    await confirmStatistics(page, "设为非经营单元：1 间", "宿舍单房不纳入经营住宿统计");
+    await expect(page.getByRole("button", { name: "批量设置分类", exact: true })).toHaveCount(0);
+    await chooseCategory(page, occupied.code, false);
     await page.reload();
-    await page.getByRole("button", { name: "房间与床位", exact: true }).click();
-    await expect(page.getByRole("button", { name: `${occupied.code} 分类：非经营单元，点击修改`, exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: `${empty.code} 分类：经营单元，点击修改`, exact: true })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: `${occupied.code} 分类`, exact: true })).toHaveValue("OTHER");
+    await expect(page.getByRole("combobox", { name: `${empty.code} 分类`, exact: true })).toHaveValue("OPERATING");
     const saved = await catalog(page);
     expect(saved.rooms.find(room => room.assetId === occupied.assetId)!.includedInOperatingStatistics).toBe(false);
     expect(saved.rooms.find(room => room.assetId === empty.assetId)!.includedInOperatingStatistics).toBe(true);
-  });
-
-  await test.step("混合设置整栋排除，核对展示全部实体房及保留财务的说明", async () => {
-    await page.getByRole("combobox", { name: "楼栋", exact: true }).selectOption(building);
-    await expect(page.getByRole("navigation", { name: "按经营分类筛选" }).getByRole("button", { name: /^经营单元/ })).toHaveText(`经营单元${rooms.length - 1}`);
-    await openBatchCategory(page, building, false);
-    for (const code of codes) await expect(page.getByTestId("command-effect")).toContainText(code);
-    await confirmStatistics(page, `设为非经营单元：${rooms.length} 间`, "整栋宿舍统一排除，真实资金和订单继续保留");
-    await page.reload();
-    await page.getByRole("button", { name: "房间与床位", exact: true }).click();
-    expect((await catalog(page)).rooms.filter(room => room.buildingCode === building).every(room => !room.includedInOperatingStatistics)).toBe(true);
-    await page.getByRole("combobox", { name: "楼栋", exact: true }).selectOption(building);
-    await expect(page.getByRole("navigation", { name: "按经营分类筛选" }).getByRole("button", { name: /^非经营单元/ })).toHaveText(`非经营单元${rooms.length}`);
-    await page.getByRole("button", { name: "批量设置分类", exact: true }).click();
-    await page.getByRole("combobox", { name: "选择楼栋", exact: true }).selectOption(building);
-    await expect(page.getByRole("button", { name: "下一步：核对修改", exact: true })).toBeDisabled();
-    await page.getByRole("button", { name: "取消", exact: true }).click();
-    await page.screenshot({ path: testInfo.outputPath("operating-statistics-building-excluded.png"), fullPage: true });
+    expect(saved.history.some(change => change.reason === `${occupied.code}：经营单元改为非经营单元`)).toBe(true);
   });
 
   await test.step("排除经营统计后，房态仍显示房间与预订订单，订单详情可打开", async () => {
@@ -188,25 +137,20 @@ test("桌面管理员单房及整栋调整经营统计：原因必填、保存�
     await expect(page.getByRole("main")).toContainText(guest);
   });
 
-  await test.step("整栋重新计入仍需原因，重载后设置均恢复", async () => {
+  await test.step("单房重新计入，刷新后设置恢复", async () => {
     await openRoomSettings(page);
-    await openBatchCategory(page, building, true);
-    await confirmStatistics(page, `设为经营单元：${rooms.length} 间`, "验收完成，恢复该合成楼栋经营统计");
+    await chooseCategory(page, occupied.code, true);
     await page.reload();
-    await page.getByRole("button", { name: "房间与床位", exact: true }).click();
-    await page.getByRole("combobox", { name: "楼栋", exact: true }).selectOption(building);
-    await expect(page.getByRole("navigation", { name: "按经营分类筛选" }).getByRole("button", { name: /^经营单元/ })).toHaveText(`经营单元${rooms.length}`);
-    const saved = await catalog(page);
-    expect(saved.rooms.filter(room => room.buildingCode === building).every(room => room.includedInOperatingStatistics)).toBe(true);
-    expect(saved.history.some(change => change.reason === "整栋宿舍统一排除，真实资金和订单继续保留")).toBe(true);
+    await expect(page.getByRole("combobox", { name: `${occupied.code} 分类`, exact: true })).toHaveValue("OPERATING");
+    expect((await catalog(page)).rooms.find(room => room.assetId === occupied.assetId)!.includedInOperatingStatistics).toBe(true);
   });
   expect(errors).toEqual([]);
   } finally {
     const current = await catalog(page);
     const reset = current.rooms.filter(room => rooms.some(original => original.assetId === room.assetId)
       && !room.includedInOperatingStatistics).map(room => room.assetId);
-    if (reset.length) await command(page, "MANAGE_ROOM_CATALOG", { expectedVersion: current.version,
-      action: "SET_OPERATING_STATISTICS", assetIds: reset, included: true });
+    for (const assetId of reset) await command(page, "MANAGE_ROOM_CATALOG", { expectedVersion: (await catalog(page)).version,
+      action: "SET_OPERATING_STATISTICS", assetIds: [assetId], included: true });
     await command(page, "CANCEL_ORDER", { orderId });
   }
 });
@@ -226,8 +170,7 @@ test("房源分类筛选与滚动：查看分类不改数据，表格中央可�
   await filters.getByRole("button", { name: /^经营单元/ }).click();
   await expect(page.locator(".catalog-room-table tbody tr")).toHaveCount(active.filter(room => room.includedInOperatingStatistics).length);
   await filters.getByRole("button", { name: /^全部/ }).click();
-  await page.getByRole("button", { name: "批量设置分类", exact: true }).click();
-  await page.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(page.getByRole("button", { name: "批量设置分类", exact: true })).toHaveCount(0);
   expect((await catalog(page)).version).toBe(before.version);
   if (!isMobile) {
     const viewport = page.viewportSize()!;
@@ -244,5 +187,57 @@ test("房源分类筛选与滚动：查看分类不改数据，表格中央可�
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width);
     const table = page.locator(".catalog-room-table");
     expect(await table.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+  }
+});
+
+test("分类直接保存的失败恢复：拒绝时恢复旧值，响应丢失只查询原结果", async ({ page }) => {
+  await page.goto("/settings/rooms?tab=rooms");
+  await page.getByTestId("login-username").fill("admin");
+  await page.getByTestId("login-password").fill("demo-pass-2026");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByRole("heading", { name: "实际房间与床位", exact: true })).toBeVisible();
+  const initial = await catalog(page);
+  const room = initial.rooms.find(room => room.active && room.includedInOperatingStatistics)!;
+  const select = page.getByRole("combobox", { name: `${room.code} 分类`, exact: true });
+  let confirms = 0;
+  await page.route("**/api/v1/command-previews", route => route.fulfill({ status: 403, contentType: "application/json",
+    body: JSON.stringify({ code: "FORBIDDEN", message: "无权修改分类", retryable: false }) }));
+  await select.selectOption("OTHER");
+  await expect(page.getByText("分类未完成保存", { exact: true })).toBeVisible();
+  await expect(select).toBeEnabled();
+  await expect(select).toHaveValue("OPERATING");
+  expect((await catalog(page)).version).toBe(initial.version);
+  await page.unroute("**/api/v1/command-previews");
+  await page.route("**/api/v1/command-previews/*/confirm", async route => {
+    confirms += 1;
+    const response = await route.fetch();
+    expect(response.ok()).toBe(true);
+    expect((await response.json()).businessCommitted).toBe(true);
+    await route.fulfill({ status: 503, contentType: "application/json",
+      body: JSON.stringify({ code: "SERVICE_UNAVAILABLE", message: "模拟保存后响应丢失", retryable: true }) });
+  });
+  try {
+    await select.selectOption("OTHER");
+    await expect(page.getByTestId("command-recovery")).toBeVisible();
+    await expect(select).toBeDisabled();
+    await page.reload();
+    await expect(page.getByTestId("command-recovery")).toBeVisible();
+    await expect(select).toBeDisabled();
+    await page.getByTestId("command-recovery-open").click();
+    await page.getByRole("button", { name: "查询原操作结果", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+    await expect(select).toBeEnabled();
+    await expect(select).toHaveValue("OTHER");
+    expect(confirms).toBe(1);
+    const saved = await catalog(page);
+    expect(saved.version).toBe(initial.version + 1);
+    expect(saved.rooms.find(item => item.assetId === room.assetId)!.includedInOperatingStatistics).toBe(false);
+  } finally {
+    await page.unroute("**/api/v1/command-previews/*/confirm");
+    const saved = await catalog(page);
+    if (!saved.rooms.find(item => item.assetId === room.assetId)!.includedInOperatingStatistics) {
+      await command(page, "MANAGE_ROOM_CATALOG", { expectedVersion: saved.version,
+        action: "SET_OPERATING_STATISTICS", assetIds: [room.assetId], included: true });
+    }
   }
 });
