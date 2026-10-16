@@ -25,6 +25,30 @@ from common import (ARCHIVE, FILES, HEX, ReleaseError, image_tag, json_bytes,
                     release_prefix, require, sha256_file, utcnow,
                     validate_bundle, validate_identity, validate_migrations)
 
+# Executed with the verified target image and its existing runtime configuration.
+# No migration/owner credentials, application startup, or raw database errors.
+DATABASE_PREFLIGHT_SCRIPT = r"""
+import { createDatabase, databaseReady, currentMigrationNames } from './packages/db/src/database.js';
+import { sql } from 'kysely';
+const db = createDatabase(undefined, { max: 1, connectionTimeoutMillis: 10000, statement_timeout: 30000 });
+try {
+  const result = await db.transaction().execute(async trx => {
+    await sql`SET TRANSACTION READ ONLY`.execute(trx);
+    const mode = await sql`SHOW transaction_read_only`.execute(trx);
+    const applied = (await trx.selectFrom('schema_migrations').select('name').orderBy('name').execute()).map(row => row.name);
+    const expected = [...currentMigrationNames].sort();
+    const same = applied.length === expected.length && applied.every((name, index) => name === expected[index]);
+    return { required: expected, applied, readOnly: mode.rows[0].transaction_read_only === 'on',
+      ready: same && await databaseReady(trx) };
+  });
+  console.log(JSON.stringify(result));
+} catch {
+  process.exitCode = 1;
+} finally {
+  await db.destroy();
+}
+"""
+
 ROOT_CONFIG = Path("/etc/greenpms/deploy.json")
 MANAGED_REPOSITORIES = {"greenpms", "green-pms-app", "qintopia-pms"}
 
@@ -134,6 +158,42 @@ class Docker:
                  "--env-file", self.config["envFile"], "up", "--detach", "--no-build", "--pull", "never", "--force-recreate",
                  "app", "wecom-worker"],
                 env=environment, timeout=180, failure_code="COMPOSE_START_FAILED")
+
+    def database_preflight(self, release):
+        try:
+            output = command(["docker", "run", "--rm", "--read-only", "--cap-drop=ALL",
+                              "--security-opt=no-new-privileges", "--network", "host",
+                              "--env-file", self.config["envFile"], "--workdir", "/app",
+                              "--entrypoint", "node", runtime_image_id(release),
+                              "--input-type=module", "-e", DATABASE_PREFLIGHT_SCRIPT], timeout=90)
+        except ReleaseError:
+            raise DeploymentDiagnosticError("DATABASE_PREFLIGHT_UNAVAILABLE",
+                "database preflight unavailable; existing service was not switched") from None
+        try:
+            result = json.loads(output)
+            require(isinstance(result, dict) and set(result) == {"required", "applied", "readOnly", "ready"}, "invalid result")
+            for field in ("required", "applied"):
+                names = result[field]
+                require(isinstance(names, list) and all(isinstance(name, str) and re.fullmatch(r"[0-9]{3}_[a-z0-9_]+\.sql", name) for name in names)
+                        and len(set(names)) == len(names), "invalid migration list")
+            require(result["readOnly"] is True and type(result["ready"]) is bool, "invalid read-only result")
+        except (ValueError, TypeError, ReleaseError):
+            raise DeploymentDiagnosticError("DATABASE_PREFLIGHT_INVALID_RESPONSE",
+                "database preflight response could not be verified; existing service was not switched") from None
+        expected = sorted(item["name"] for item in release["manifest"]["requiredMigrations"])
+        if sorted(result["required"]) != expected:
+            raise DeploymentDiagnosticError("DATABASE_PREFLIGHT_IMAGE_MISMATCH",
+                "target image and manifest require different migrations; existing service was not switched")
+        missing = sorted(set(expected) - set(result["applied"]))
+        unexpected = sorted(set(result["applied"]) - set(expected))
+        if missing or unexpected:
+            raise DeploymentDiagnosticError("DATABASE_MIGRATIONS_NOT_READY",
+                "database migrations not ready; missing: " + (", ".join(missing) or "none")
+                + "; unexpected: " + (", ".join(unexpected) or "none") + "; existing service was not switched",
+                details={"missingMigrations": missing, "unexpectedMigrations": unexpected})
+        if not result["ready"]:
+            raise DeploymentDiagnosticError("DATABASE_PREFLIGHT_NOT_READY",
+                "target database integrity check failed; existing service was not switched")
 
     def images(self):
         ids = sorted(set(command(["docker", "image", "ls", "-aq", "--no-trunc"]).split()))
@@ -417,6 +477,13 @@ class Deployer:
 
     def promote(self, before, target, *, rollback=False):
         self.observe(before)
+        if not rollback:
+            try:
+                self.docker.database_preflight(target)
+            except DeploymentDiagnosticError as error:
+                self.failure_evidence("preflight-blocked", version=target["manifest"]["version"],
+                                      stage="database-preflight", diagnosticCode=error.code, **error.details)
+                raise
         atomic_json(self.journal, {"before": before, "target": target, "startedAt": utcnow()})
         stage = "compose-start"
         try:

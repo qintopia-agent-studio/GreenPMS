@@ -129,6 +129,8 @@ class FakeDocker:
         self.load_calls: list[Path] = []
         self.remove_calls: list[str] = []
         self.volumes = ["greenpms-data", "other-project-data"]
+        self.preflight_calls = []
+        self.preflight_error = None
 
     def add_image(
         self,
@@ -180,6 +182,11 @@ class FakeDocker:
 
     def load(self, archive: Path) -> None:
         self.load_calls.append(archive)
+
+    def database_preflight(self, release):
+        self.preflight_calls.append(release)
+        if self.preflight_error:
+            raise self.preflight_error
 
     def switch(self, release: dict[str, object]) -> None:
         manifest = release["manifest"]
