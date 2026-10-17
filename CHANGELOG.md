@@ -2,6 +2,24 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.15.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.14.1...v1.15.0) (2026-10-17)
+
+
+### Features
+
+* **members:** 展示会员权益概要并默认展开详情 ([#92](https://github.com/qintopia-agent-studio/GreenPMS/issues/92)) ([c39aba8](https://github.com/qintopia-agent-studio/GreenPMS/commit/c39aba8c2e094a21f585c18ffa0c8729fa24bba4))
+
+
+### Bug Fixes
+
+* **release:** 切换容器前核验真实数据库迁移和完整性 ([#90](https://github.com/qintopia-agent-studio/GreenPMS/issues/90)) ([bb4d864](https://github.com/qintopia-agent-studio/GreenPMS/commit/bb4d864e2a2eedfa636f27bde0f95b166382f130))
+* **room-status:** keep order details closed on navigation return ([#91](https://github.com/qintopia-agent-studio/GreenPMS/issues/91)) ([5655213](https://github.com/qintopia-agent-studio/GreenPMS/commit/5655213eef3646a925ba950416bc5188b006c1c5))
+
+
+### CI / Deployment
+
+* 分离 PR 格式检查避免编辑说明取消代码验证 ([#88](https://github.com/qintopia-agent-studio/GreenPMS/issues/88)) ([c08157f](https://github.com/qintopia-agent-studio/GreenPMS/commit/c08157f501d629d41af2eb8abfe344ab8e02ce44))
+
 ## [1.14.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.14.0...v1.14.1) (2026-10-16)
 
 
