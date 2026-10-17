@@ -4211,7 +4211,9 @@ export function InventoryPage() {
     setSelectedDayDate(restoredSelection.arrivalDate);
     setSelectedIntervalId(identity.intervalId);
     setSelectedOrderIdentity(identity);
-    setPendingOrderContextIdentity(roomStatusOrderIdentityKey(identity));
+    // Restoring a browsing position is not a request to reopen order details.
+    // Explicit order clicks and order-detail returns schedule their own opening.
+    setPendingOrderContextIdentity(undefined);
     setOrderContextOpen(false);
     setDesktopContextCollapsed(true);
     setFocusRequestToken((value) => value + 1);
