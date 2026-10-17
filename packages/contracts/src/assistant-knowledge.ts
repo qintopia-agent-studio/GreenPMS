@@ -45,9 +45,9 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "room-status", title: "房态查询与同日退房交接", commands: [],
-    sources: ["docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "packages/db/src/departure-day-stays.ts"],
+    sources: ["docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "apps/web/src/pages/InventoryPage.tsx", "packages/db/src/departure-day-stays.ts"],
     content: `后台约15秒检查房态变化，成功办理后及时更新；后台同步不应清空已填写内容。暂时网络失败时可查看旧画面并继续填写，办理仍需服务端重新核对；所选新日期未载入时，旧日期仅供查看，不能当作新日期办理。翻月数据校验失败不会无限自动重试，可以返回今天、其他日期或主动重试。确有历史资料待核对时只读展示，不把“未知”当成可售或已结清。权限失效或上一笔操作结果未知时仍须先处理，不能绕过；结果未知应查询原回执，不重复提交。
-在房态页选择日期，按房型、房号等筛选，点击住宿记录查看订单；空闲位置选择日期后安排住宿。长住宿可跨显示区间，不把日历当前窗口当作住宿最长天数。助手自己的可用性工具一次最多查31晚，这是工具限制，不是系统预订上限。
+在房态页选择日期，按房型、房号等筛选，点击住宿记录查看订单；空闲位置选择日期后安排住宿。从工作台等页面通过导航回到房态时保留浏览位置，不自动打开订单详情；主动打开订单，或在完整订单页点击“返回房态”，才展开对应订单。长住宿可跨显示区间，不把日历当前窗口当作住宿最长天数。助手自己的可用性工具一次最多查31晚，这是工具限制，不是系统预订上限。
 住宿夜占用包含入住日、不含离店日。前客当天应退但尚未实际退房时，当晚可被后客预订，不代表后客现在可以入住；必须先让前客正式办理退房，再给后客办理入住。不要为了后客预订而强行延长前客库存或撤销真实入住。
 未知、部分加载、请求失败不能解释成空房、零欠款或已结清；刷新并查看异常提示。维修、整房与床位互斥、真实在住交接都可能阻止操作，以服务端核对为准。`
   },
