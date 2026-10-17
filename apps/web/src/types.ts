@@ -399,6 +399,18 @@ export interface MembershipVoidReconversionDto extends MemberCorrectionAuditDto 
 
 export interface MemberSummaryDto {
   member: MemberDto;
+  directory?: {
+    joinedAt: string;
+    asOfDate: string;
+    entitlements: Array<{
+      orderId: string;
+      productName: string;
+      status: "ACTIVE" | "EXPIRED" | "PENDING" | "VOIDED" | "CANCELLED";
+      unitKind: "ROOM_NIGHT" | "BED_NIGHT";
+      availableUnits: number | null;
+      expiresOn: string | null;
+    }>;
+  };
 }
 
 export interface MetaDto {

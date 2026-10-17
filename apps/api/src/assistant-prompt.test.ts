@@ -28,6 +28,7 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "会员列表怎么排序，剩余权益和到期日怎么看？", ids: ["member-profile"], facts: ["最近加入本店", "右侧默认展开首位会员详情", "每份会员权益", "不混加不同权益", "已扣除冻结占用", "保留搜索、分页和浏览位置"] },
     { question: "F栋宿舍象征性收费还计入经营入住率吗？", ids: ["dashboard", "catalog"], facts: ["经营单元", "非经营单元", "分类下拉框选择后直接保存", "不用填写理由", "不提供整栋批量设置", "跨房住宿按实际房间和日期分段", "房态、订单与真实收退款仍保留", "现有经营销售额不随住宿统计开关删减"] },
     { question: "房态慢、翻上个月一直刷新怎么办？", ids: ["room-status"], facts: ["后台约15秒", "不会无限自动重试", "可以返回今天", "办理仍需服务端重新核对", "结果未知应查询原回执"] },
     { question: "从工作台回房态会自动打开上次订单吗？", ids: ["room-status"], facts: ["保留浏览位置", "不自动打开订单详情", "完整订单页点击“返回房态”"] },

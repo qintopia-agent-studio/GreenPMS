@@ -3495,7 +3495,16 @@ const MembershipVoidReconversionRowSchema = strictObject({
   actor: MemberCorrectionActorSchema
 });
 const MemberSummarySchema = strictObject({
-  member: MemberRowSchema
+  member: MemberRowSchema,
+  directory: Type.Optional(strictObject({
+    joinedAt: DateTime, asOfDate: LocalDate,
+    entitlements: Type.Array(strictObject({
+      orderId: Id, productName: Type.String(),
+      status: Type.Union([Type.Literal("ACTIVE"), Type.Literal("EXPIRED"), Type.Literal("PENDING"), Type.Literal("VOIDED"), Type.Literal("CANCELLED")]),
+      unitKind: Type.Union([Type.Literal("ROOM_NIGHT"), Type.Literal("BED_NIGHT")]),
+      availableUnits: nullable(Type.Integer({ minimum: 0 })), expiresOn: nullable(LocalDate)
+    }))
+  }))
 });
 export const MembersQuerySchema = strictObject({
   propertyId: Id,
@@ -3504,7 +3513,8 @@ export const MembersQuerySchema = strictObject({
   pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
   memberId: Type.Optional(Id),
   phone: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-  hasContract: Type.Optional(Type.Boolean())
+  hasContract: Type.Optional(Type.Boolean()),
+  directory: Type.Optional(Type.Boolean())
 });
 export const MembersListResponseSchema = strictObject({ members: Type.Array(MemberSummarySchema), nextCursor: nullable(Id) });
 export const EntitlementLedgerRowSchema = strictObject({

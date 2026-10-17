@@ -839,7 +839,7 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   });
 
   app.get("/api/v1/members", { schema: { tags: ["queries"], querystring: MembersQuerySchema, response: { 200: MembersListResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
-    const query = request.query as { propertyId: string; query?: string; beforeId?: string; pageSize?: number; memberId?: string; phone?: string; hasContract?: boolean };
+    const query = request.query as { propertyId: string; query?: string; beforeId?: string; pageSize?: number; memberId?: string; phone?: string; hasContract?: boolean; directory?: boolean };
     const principal = await requirePrincipal(db, request);
     requirePropertyAccess(principal, query.propertyId, "READ");
     return listMemberPage(db, query.propertyId, query.query, query);

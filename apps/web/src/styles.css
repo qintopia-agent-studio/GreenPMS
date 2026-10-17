@@ -4845,11 +4845,13 @@ pre {
 
 .member-stay-continuation {
   display: flex;
+  justify-content: flex-end;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 16px;
 }
-.member-stay-continuation .muted { font-size: 13px; line-height: 1.6; }
+.member-stay-continuation .info-hint { margin-left: 0; }
+.member-stay-continuation .info-hint-bubble { left: auto; right: 0; top: calc(100% + 8px); transform: none; max-width: min(260px, 50vw); }
 
 .list-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; }
 .list-pagination .muted { font-size: 13px; }
@@ -5122,4 +5124,10 @@ pre {
   .retained-funds-source,
   .retained-funds-note,
   .retained-funds-actions { grid-column: 1 / -1; }
+}
+
+.member-list-sort { color: var(--muted); font-size: 12px; }
+.member-list-item .member-list-benefit { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin-top: 4px; font-size: 12px; }
+@media (max-width: 767px) {
+  .member-directory { grid-template-columns: minmax(0, 1fr); }
 }

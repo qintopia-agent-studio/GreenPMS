@@ -141,8 +141,9 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
   },
   {
     id: "member-profile", title: "会员档案、查重与误建删除", commands: ["CREATE_MEMBER", "CORRECT_MEMBER_PROFILE"], accountActions: ["DELETE_MEMBER"],
-    sources: ["docs/implementation/spec-step-2a-member-directory.md", "待开发项/QinTopia-PMS-会员资料字段调整-实施规格.md", "待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md", "apps/web/src/pages/MembersPage.tsx"],
-    content: `在会员页按姓名、昵称或手机号搜索，确认不是已有会员再新建。手机号需要查重，证件号可选；相同姓名不代表同一人。新建档案本身不产生可住宿权益。
+    sources: ["docs/implementation/member-directory-overview.md", "docs/implementation/spec-step-2a-member-directory.md", "待开发项/QinTopia-PMS-会员资料字段调整-实施规格.md", "待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md", "apps/web/src/pages/MembersPage.tsx"],
+    content: `会员列表按最近加入本店排序，依据加入当前门店的时间，不是买卡或最近消费时间。左侧名单直接显示每份会员权益的状态、剩余间夜或床夜及对应到期日，不混加不同权益。待生效尚未发放显示—，已到期或作废权益不可用，无会员订单显示未购买。列表余额已扣除冻结占用；办理仍以服务端实时核对为准。桌面进入时右侧默认展开首位会员详情，点击左侧会员直接切换详情办理业务，搜索和分页保持可见；手机进入详情后可返回名单，保留搜索、分页和浏览位置。
+在会员页按姓名、昵称、手机号或微信号搜索，确认不是已有会员再新建。手机号需要查重，证件号可选；相同姓名不代表同一人。新建档案本身不产生可住宿权益。
 打开会员档案查看合同、余额、收款及关联住宿。资料错误通过有权限的“修改会员记录”办理，填写原因并核对；不要为改资料另建重复会员。管理员可删除无业务记录或已办卡但从未核销的误建会员；先取消关联预订，存在误录收款时必须额外确认其为误录，系统追加冲销并作废未用权益，保留历史而不是实际退款。有历史核销、住宿转会员或其他禁止关联时不能删除；真正收过的钱需要退回时，不用误建删除冒充退款。`
   },
   {

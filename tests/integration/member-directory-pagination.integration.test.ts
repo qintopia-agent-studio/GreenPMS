@@ -10,7 +10,7 @@ import { runtimeDatabaseUrlForTesting } from "../helpers/runtime-database.ts";
 import { authScope } from "../helpers/auth-principals.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 
-const databaseUrl = "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_journey_member_directory_test";
+const databaseUrl = process.env.TEST_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_journey_member_directory_test";
 let db: Kysely<Database>;
 beforeEach(async () => { db = await resetDatabase(databaseUrl); });
 afterEach(async () => { await db?.destroy(); });

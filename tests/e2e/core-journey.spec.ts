@@ -967,7 +967,7 @@ test("member directory creates a five-field profile without identity, searches c
   if (testInfo.project.name === "mobile") await page.getByRole("button", { name: "返回会员列表", exact: true }).click();
   await searchInput.fill("fail-closed-member-query");
   await memberSearch.getByRole("button", { name: "搜索" }).click();
-  await expect(page.getByRole("alert")).toContainText("服务暂时不可用");
+  await expect(page.getByRole("alert")).toContainText("无法载入会员档案");
   await expect(page.getByTestId("member-list-item")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: memberProfile.fullName })).toHaveCount(0);
 
