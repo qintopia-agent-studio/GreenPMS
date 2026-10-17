@@ -479,13 +479,14 @@ function MemberList({ members, selectedMemberId, onSelect }: {
   selectedMemberId: string;
   onSelect: (memberId: string) => void;
 }) {
+  const labels = { ACTIVE: "有效", EXPIRED: "已到期", PENDING: "待生效", VOIDED: "已作废", CANCELLED: "已取消" };
   return <section className="member-list-panel" aria-labelledby="member-list-heading">
     <div className="section-title-row">
       <h2 id="member-list-heading">会员列表</h2>
-      <span>{members.length} 位</span>
+      <span className="member-list-sort">最近加入本店 · {members.length} 位</span>
     </div>
     <ul className="member-list">
-      {members.map(({ member }) => <li key={member.id}>
+      {members.map(({ member, directory }) => <li key={member.id}>
         <button
           type="button"
           className="member-list-item"
@@ -497,6 +498,11 @@ function MemberList({ members, selectedMemberId, onSelect }: {
           <strong>{member.nickname}</strong>
           <span>{member.phone}</span>
           <small>姓名：{member.full_name}</small>
+          {directory?.entitlements.length ? directory.entitlements.map((entitlement) => <small className="member-list-benefit" key={entitlement.orderId}>
+            <span>{entitlement.productName} · {labels[entitlement.status]}</span>
+            <span>{entitlement.availableUnits === null ? "剩余 —" : `剩余 ${entitlement.availableUnits} ${entitlement.unitKind === "ROOM_NIGHT" ? "间夜" : "床夜"}`}</span>
+            {entitlement.expiresOn ? <span>到期 {formatDate(entitlement.expiresOn)}</span> : null}
+          </small>) : <small>{directory ? "未购买权益" : "权益暂未载入"}</small>}
         </button>
       </li>)}
     </ul>
@@ -1196,7 +1202,7 @@ export function MembersPage() {
   const memberPropertyRef = useRef(propertyId);
   const memberListReturnRef = useRef<{ id: string; scrollY: number } | undefined>(undefined);
   useEffect(() => {
-    if (selectedMemberId || !memberListReturnRef.current) return;
+    if (selectedMemberId || !memberListReturnRef.current || window.matchMedia("(min-width: 768px)").matches) return;
     const target = memberListReturnRef.current;
     const frame = requestAnimationFrame(() => {
       document.querySelector<HTMLButtonElement>(`[data-member-id="${CSS.escape(target.id)}"]`)?.focus({ preventScroll: true });
@@ -1271,7 +1277,7 @@ export function MembersPage() {
     setMember(undefined);
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(new Error("会员列表读取超时，请重试")), 12_000);
-    api.members(propertyId, searchQuery || undefined, { ...(pageBeforeId ? { beforeId: pageBeforeId } : {}), signal: controller.signal })
+    api.members(propertyId, searchQuery || undefined, { directory: true, ...(pageBeforeId ? { beforeId: pageBeforeId } : {}), signal: controller.signal })
       .then((response) => {
         if (current) {
           setMembers(response.members);
@@ -1288,7 +1294,7 @@ export function MembersPage() {
     return () => { current = false; controller.abort(); window.clearTimeout(timeout); };
   }, [propertyId, searchQuery, pageBeforeId, refreshToken]);
 
-  const currentMemberId = !memberParams.get("propertyId") || memberParams.get("propertyId") === propertyId ? selectedMemberId : "";
+  const currentMemberId = !memberParams.get("propertyId") || memberParams.get("propertyId") === propertyId ? selectedMemberId || (!loadingList && window.matchMedia("(min-width: 768px)").matches ? members[0]?.member.id ?? "" : "") : "";
   useEffect(() => {
     if (member?.member.id === currentMemberId && window.matchMedia("(max-width: 767px)").matches) document.getElementById("member-profile-heading")?.focus();
   }, [member?.member.id, currentMemberId]);
@@ -1515,17 +1521,17 @@ export function MembersPage() {
     {error ? <button type="button" className="button button-secondary" onClick={refresh}>重新载入</button> : null}
     <div className={`member-directory${currentMemberId ? " member-directory-detail-open" : ""}`}>
       <div className="member-directory-list">
-        {loadingList ? <LoadingBlock label="正在载入会员列表" /> : !members.length ? <EmptyState title="未找到会员" detail="可更换搜索条件，或新建一位会员。" /> : <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />}
-        <nav className="list-pagination" aria-label="会员分页">
+        {loadingList ? <LoadingBlock label="正在载入会员列表" /> : error && !members.length ? null : !members.length ? <EmptyState title="未找到会员" detail="可更换搜索条件，或新建一位会员。" /> : <MemberList members={members} selectedMemberId={currentMemberId} onSelect={selectMember} />}
+        {pageBeforeId || nextCursor ? <nav className="list-pagination" aria-label="会员分页">
           <button type="button" className="button button-secondary" disabled={loadingList || !pageBeforeId} onClick={() => changeMemberUrl({ before: previousPages.at(-1), memberId: undefined }, previousPages.slice(0, -1))}>上一页</button>
           <span>本页 {members.length} 位会员</span>
           <button type="button" className="button button-secondary" disabled={loadingList || !nextCursor} onClick={() => changeMemberUrl({ before: nextCursor ?? undefined, memberId: undefined }, [...previousPages, pageBeforeId])}>下一页</button>
-        </nav>
+        </nav> : null}
       </div>
       {currentMemberId ? <button type="button" className="button button-secondary member-list-return" onClick={() => { setSelectedMemberId(""); changeMemberUrl({ memberId: undefined }); }}>返回会员列表</button> : null}
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
         <MemberProfile member={member} canCorrect={canCorrectMemberRecords} disabled={commandsBlocked} onCorrect={openMemberCorrections} deletionControl={canCorrectMemberRecords && principal.credentialType === "SESSION" ? <MemberDeletionButton key={`${propertyId}:${member.member.id}`} propertyId={propertyId} memberId={member.member.id} disabled={commandsBlocked} onDeleted={() => { setSelectedMemberId(""); setMember(undefined); setCommandNotice("会员已删除，原档案与删除记录已保留。"); refresh(); }} /> : undefined} />
-        {principalCan(principal, propertyId, "CREATE_ORDER") ? <div className="member-stay-continuation"><button type="button" className="button button-primary" disabled={commandsBlocked} onClick={() => navigate(memberStayHref(propertyId, member.member.id))} data-testid="arrange-member-stay"><CalendarClock aria-hidden="true" size={17} />安排住宿</button><span className="muted">前往房态选择日期与房间，自动带入当前会员。</span></div> : null}
+        {principalCan(principal, propertyId, "CREATE_ORDER") ? <div className="member-stay-continuation"><InfoHint label="安排住宿说明" text="前往房态选择日期与房间，自动带入当前会员。" /><button type="button" className="button button-primary" disabled={commandsBlocked} onClick={() => navigate(memberStayHref(propertyId, member.member.id))} data-testid="arrange-member-stay"><CalendarClock aria-hidden="true" size={17} />安排住宿</button></div> : null}
         <MemberEntitlementsPanel view={member} disabled={commandsBlocked} canCorrect={canCorrectEntitlementBalance} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
         <MembershipOrdersPanel
           view={member}

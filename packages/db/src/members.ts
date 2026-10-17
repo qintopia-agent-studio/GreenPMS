@@ -349,6 +349,7 @@ export interface MemberDirectoryOptions {
   memberId?: string;
   phone?: string;
   hasContract?: boolean;
+  directory?: boolean;
 }
 
 export async function listMemberSummaries(db: DbExecutor, propertyId: string, query?: string, options: MemberDirectoryOptions = {}) {
@@ -368,7 +369,19 @@ export async function listMemberPage(db: DbExecutor, propertyId: string, query?:
       .whereRef("member_contracts.member_id", "=", "members.id").where("property_id", "=", propertyId)
   ));
   // ID ordering is immutable under profile corrections and keeps cursors usable after deletion.
-  if (options.beforeId) selection = selection.where("members.id", ">", options.beforeId);
+  if (options.directory) {
+    if (options.beforeId) {
+      // Keep timestamp precision in PostgreSQL and retain soft-deleted anchors.
+      const anchor = db.selectFrom("member_property_links").select("created_at")
+        .where("property_id", "=", propertyId).where("member_id", "=", options.beforeId);
+      if (!await anchor.executeTakeFirst()) throw new DomainError("CURSOR_EXPIRED", "会员分页位置已失效，请返回第一页", 400);
+      selection = selection.where(({ or, and, eb }) => or([
+        eb("member_property_links.created_at", "<", anchor),
+        and([eb("member_property_links.created_at", "=", anchor), eb("members.id", ">", options.beforeId!)])
+      ]));
+    }
+    selection = selection.orderBy("member_property_links.created_at", "desc");
+  } else if (options.beforeId) selection = selection.where("members.id", ">", options.beforeId);
   const pageSize = Math.min(100, Math.max(1, options.pageSize ?? 50));
   const normalizedQuery = query?.trim();
   if (normalizedQuery) {
@@ -380,8 +393,58 @@ export async function listMemberPage(db: DbExecutor, propertyId: string, query?:
       OR members.wechat ILIKE ${pattern} ESCAPE '\\'
     )`);
   }
-  const rows = await selection.orderBy("members.id").limit(pageSize + 1).execute();
-  const members = rows.slice(0, pageSize).map((member) => ({ member }));
+  const rows = await selection.select("member_property_links.created_at as joined_at")
+    .orderBy("members.id").limit(pageSize + 1).execute();
+  const page = rows.slice(0, pageSize);
+  const directory = options.directory && page.length
+    ? await memberDirectoryEntitlements(db, propertyId, page.map(member => member.id)) : undefined;
+  const members = page.map(({ joined_at, ...member }) => ({ member,
+    ...(directory ? { directory: { joinedAt: joined_at, asOfDate: directory.asOfDate,
+      entitlements: directory.byMember.get(member.id) ?? [] } } : {})
+  }));
   return { members, nextCursor: rows.length > pageSize ? members.at(-1)!.member.id : null };
 
+}
+
+
+async function memberDirectoryEntitlements(db: DbExecutor, propertyId: string, memberIds: string[]) {
+  const asOfDate = await propertyLocalToday(db, propertyId);
+  const rows = await db.selectFrom("membership_orders as o")
+    .leftJoin("member_contracts as c", "c.id", "o.contract_id")
+    .leftJoin("entitlement_lots as l", "l.id", "o.entitlement_lot_id")
+    .select(["o.id", "o.member_id", "o.product_name", "o.status as order_status",
+      "o.entitlement_unit_kind", "o.contract_id", "o.entitlement_lot_id",
+      "c.member_id as contract_member_id", "c.property_id as contract_property_id",
+      "c.membership_order_id", "c.status as contract_status", "c.valid_from", "c.valid_until",
+      "l.id as lot_id", "l.contract_id as lot_contract_id", "l.status as lot_status",
+      "l.unit_kind", "l.total_units", "l.expires_on"])
+    .select(sql<string>`coalesce((select sum(quantity_delta) from entitlement_ledger where lot_id = l.id), 0)::text`.as("ledger_delta"))
+    .where("o.property_id", "=", propertyId).where("o.member_id", "in", memberIds)
+    .orderBy("l.expires_on", "asc").orderBy("o.created_at", "desc").orderBy("o.id").execute();
+  type Entitlement = { orderId: string; productName: string; status: "ACTIVE" | "EXPIRED" | "PENDING" | "VOIDED" | "CANCELLED";
+    unitKind: "ROOM_NIGHT" | "BED_NIGHT"; availableUnits: number | null; expiresOn: string | null };
+  const byMember = new Map<string, Entitlement[]>();
+  for (const row of rows) {
+    const hasLot = row.entitlement_lot_id !== null;
+    if ((row.order_status === "ACTIVE" || hasLot) && (!row.lot_id || row.lot_contract_id !== row.contract_id
+      || row.contract_member_id !== row.member_id || row.contract_property_id !== propertyId
+      || row.membership_order_id !== row.id || !row.valid_from || !row.valid_until
+      || !row.expires_on || row.total_units === null || row.unit_kind !== row.entitlement_unit_kind)) {
+      throw new DomainError("INTERNAL_ERROR", "会员权益资料不完整，请重新载入或核对会员详情", 500);
+    }
+    const expiresOn = row.expires_on && row.valid_until
+      ? (row.expires_on < row.valid_until ? row.expires_on : row.valid_until) : null;
+    const status: Entitlement["status"] = row.order_status === "VOIDED" || row.contract_status === "VOIDED" || row.lot_status === "VOIDED"
+      ? (hasLot ? "VOIDED" : "CANCELLED") : row.order_status === "DRAFT" ? "PENDING"
+        : row.contract_status === "EXPIRED" || (expiresOn !== null && expiresOn < asOfDate) ? "EXPIRED"
+          : row.valid_from! > asOfDate ? "PENDING" : "ACTIVE";
+    const availableUnits = !hasLot ? null : status !== "ACTIVE" ? 0
+      : entitlementAvailableBalance(row.total_units!, row.ledger_delta);
+    const item: Entitlement = { orderId: row.id, productName: row.product_name, status,
+      unitKind: row.entitlement_unit_kind, availableUnits, expiresOn };
+    const items = byMember.get(row.member_id) ?? [];
+    items.push(item);
+    byMember.set(row.member_id, items);
+  }
+  return { asOfDate, byMember };
 }

@@ -30,7 +30,7 @@ test("member directory keeps search and page while opening details, retrying, an
   if (testInfo.project.name === "mobile") {
     await expect(page.getByTestId("member-list-item").first()).not.toBeVisible();
     await page.getByRole("button", { name: "返回会员列表", exact: true }).click();
-  }
+  } else await expect(page.getByTestId("member-list-item").first()).toBeVisible();
   await expect(page.getByTestId("member-search-query")).toHaveValue("目录分页");
   await expect(page.getByTestId("member-list-item")).toHaveCount(3);
   failNext = true;

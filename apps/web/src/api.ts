@@ -274,10 +274,10 @@ export const api = {
     `/api/v1/orders/${encodeURIComponent(orderId)}`,
     signal ? { signal } : {}
   ).then(async (value) => (await import("./orderViewValidation")).parseOrderView(value)),
-  members: (propertyId: string, memberQuery?: string, options: { beforeId?: string; pageSize?: number; memberId?: string; phone?: string; hasContract?: boolean; signal?: AbortSignal } = {}) => {
+  members: (propertyId: string, memberQuery?: string, options: { beforeId?: string; pageSize?: number; memberId?: string; phone?: string; hasContract?: boolean; directory?: boolean; signal?: AbortSignal } = {}) => {
     const query = new URLSearchParams({ propertyId });
     if (memberQuery?.trim()) query.set("query", memberQuery.trim());
-    for (const key of ["beforeId", "pageSize", "memberId", "phone", "hasContract"] as const) {
+    for (const key of ["beforeId", "pageSize", "memberId", "phone", "hasContract", "directory"] as const) {
       if (options[key] !== undefined) query.set(key, String(options[key]));
     }
     return request<{ members: MemberSummaryDto[]; nextCursor: string | null }>(`/api/v1/members?${query.toString()}`, options.signal ? { signal: options.signal } : {});
