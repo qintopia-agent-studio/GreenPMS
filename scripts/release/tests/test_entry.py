@@ -1,5 +1,6 @@
 """Exercise the actual command boundary without sshd, sudo, Docker or COS."""
 import contextlib
+import fnmatch
 import io
 import os
 from pathlib import Path
@@ -65,6 +66,30 @@ class EntryTests(unittest.TestCase):
             with self.subTest(request=request):
                 calls = self.run_entry(request)
                 self.assertEqual(len(calls), 1)
+
+    def test_every_ssh_operation_has_a_matching_restricted_sudo_grant(self):
+        # Exercise the actual SSH command boundary, then check the sudo policy
+        # it reaches. Mocking sudo alone missed prepare-database's absent grant.
+        policy = (ROOT / "deploy/greenpms-deploy.sudoers").read_text()
+        grants = [line.split("NOPASSWD:", 1)[1].strip() for line in policy.splitlines()
+                  if line.startswith("greenpms-deploy ALL=(root) NOPASSWD:")]
+        self.assertEqual(len(grants), 1)
+        patterns = [grant.strip() for grant in grants[0].split(",")]
+        revision, digest = "a" * 40, "b" * 64
+        key = f"greenpms/releases/v1.2.4/{revision}/"
+        for operation in ("deploy", "prepare-database", "rollback", "maintenance"):
+            request = operation if operation == "maintenance" else f"{operation} v1.2.4 {revision} {key} {digest}"
+            with self.subTest(operation=operation):
+                calls = self.run_entry(request)
+                self.assertEqual(len(calls), 1)
+                command_line = " ".join(calls[0].args[0][2:])
+                self.assertTrue(any(fnmatch.fnmatchcase(command_line, grant) for grant in patterns),
+                                f"sudoers does not allow the accepted SSH operation: {operation}")
+        for forbidden in ("/bin/sh", "/usr/bin/docker ps", "/usr/local/sbin/greenpms-deploy recover",
+                          "/usr/local/sbin/greenpms-deploy configure-ai", "/usr/local/sbin/greenpms-deploy rollback-local",
+                          "/usr/local/sbin/greenpms-deploy adopt arbitrary"):
+            with self.subTest(forbidden=forbidden):
+                self.assertFalse(any(fnmatch.fnmatchcase(forbidden, grant) for grant in patterns))
 
     def test_entry_mode_arguments_are_rejected_before_sudo(self):
         for entry_arguments in (("--maintenance-only",), ("--bad-flag",)):

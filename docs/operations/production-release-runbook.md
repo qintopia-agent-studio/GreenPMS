@@ -380,6 +380,8 @@ rtk proxy ssh "$ADMIN_ALIAS" \
 
 本节是下一次经授权安装窗口的指南；本次 PR 不自动安装生产入口或发布新版本。管理员从审核通过的 main 打包 harness（包括 `database_upgrade.py` 与 `database-upgrade.mjs`）。安装器检测已有文件差异会拒绝覆盖：先在维护窗口保留现有 root-owned harness/入口副本，逐项核对差异，再替换已审核文件；不得从服务器当前目录构建应用。保持恢复 timer、部署锁和强制 SSH 命令受控，禁止同时运行旧新入口。升级后仅管理员执行本地配置核对，不把 owner 凭据传至 Actions。
 
+升级既有服务器时，必须同步更新 `deploy/greenpms-deploy.sudoers` 中的 `prepare-database *` 固定命令授权；只更新 SSH parser 和 root wrapper 仍会被 sudo 拒绝。先用 `visudo -cf` 验证候选文件，保留旧文件，再以 root:root 0440 原子替换并执行 `visudo -c`。保留 `!setenv` 和固定 wrapper 路径，不授予任意 shell、Docker 或管理员恢复入口。完成后使用真实 `greenpms-deploy` 用户验证当前已部署版本的 `prepare-database` 无迁移路径，并提供 ACK；该验证会下载校验产物及写工具审计，但不迁移数据库或切换应用。
+
 在 `/etc/greenpms/deploy.json` 增加：
 
 ```json
