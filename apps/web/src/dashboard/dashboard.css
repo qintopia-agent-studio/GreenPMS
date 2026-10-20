@@ -195,6 +195,13 @@
 .resource-section { padding-top: 6px; }
 .dashboard-current-balances { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 14px; }
 .dashboard-current-balances .dashboard-current-card > span { display: flex; align-items: center; gap: 8px; }
+.dashboard-current-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+.dashboard-current-primary .dashboard-current-card > span { display: flex; align-items: center; gap: 7px; }
+.dashboard-current-followups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.dashboard-current-followups button { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); color: var(--muted); text-align: left; }
+.dashboard-current-followups button:hover { border-color: var(--brand); background: var(--brand-soft); }
+.dashboard-current-followups span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-size: 11px; }
+.dashboard-current-followups strong { margin-left: auto; color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .dashboard-source-panel { margin-top: 24px; }
 .resource-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 9px; background: var(--surface); padding: 21px 0; margin-bottom: 18px; }
 .resource-summary > div, .resource-summary > button { padding: 0 22px; border: 0; border-right: 1px solid var(--border); background: none; display: flex; flex-direction: column; gap: 10px; text-align: left; color: var(--text); min-width: 0; }
@@ -237,6 +244,8 @@
 .dashboard-hint > button { min-width: 22px; min-height: 22px; align-items: center; justify-content: center; }
 @media (max-width: 1100px) {
   .dashboard-current-balances { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-current-primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-current-followups { grid-template-columns: minmax(0, 1fr); }
   .community-history-grid { grid-template-columns: minmax(0, 1.3fr) minmax(265px, 1fr); gap: 16px; }
   .community-total, .community-composition { padding: 22px; }
   .community-today { padding: 0 18px; }
@@ -260,6 +269,7 @@
   .dashboard { gap: 20px; }
   .dashboard-heading { gap: 12px; }
   .dashboard-current-balances { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .dashboard-current-primary { grid-template-columns: minmax(0, 1fr); }
   .dashboard-heading h1 { font-size: 23px; }
   .dashboard-heading .dashboard-muted { font-size: 11px; }
   .dashboard-refresh .button { min-height: 36px; padding: 6px 10px; font-size: 11px; }
