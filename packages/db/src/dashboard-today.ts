@@ -10,9 +10,9 @@ interface TodayOrder { id: string; date: string; registeredAt: string }
 export function summarizeDashboardToday(date: string, currency: string, orders: TodayOrder[], facts: LoadedDashboardMoney[]) {
   const todayOrders = [...new Map(orders.filter(order => order.date === date).map(order => [order.id, order])).values()];
   const todayFacts = [...new Map(facts.filter(fact => fact.date === date).map(fact => [`${fact.family}:${fact.id}`, fact])).values()];
-  const collections = todayFacts.filter(fact => classifyDashboardMoney(fact) === "COLLECTION");
+  const registeredFinancialFacts = todayFacts.filter(fact => ["COLLECTION", "REFUND", "CORRECTION"].includes(classifyDashboardMoney(fact)));
   const grouped = new Map<string, DashboardBalance>([[currency, { currency, amountMinor: "0", count: 0 }]]);
-  for (const fact of collections) {
+  for (const fact of registeredFinancialFacts) {
     const row = grouped.get(fact.currency) ?? { currency: fact.currency, amountMinor: "0", count: 0 };
     row.amountMinor = String(BigInt(row.amountMinor) + BigInt(fact.netMinor));
     row.count++;
@@ -23,9 +23,9 @@ export function summarizeDashboardToday(date: string, currency: string, orders: 
       label: "今日新增住宿订单", orderId: order.id, memberId: null, unitId: null, units: 1, amountMinor: null, currency: null,
       registeredAt: order.registeredAt, businessDate: null,
       reason: "按门店当天创建的住宿订单计数，包含补录；后来取消不会删除新增记录，不等于今天入住订单数" })),
-    ...collections.map(fact => ({ ...dashboardMoneyDetail(fact), id: `today-collection:${fact.id}`, metric: "TODAY_COLLECTIONS" as const,
-      label: fact.family === "MEMBER" ? "今日登记会员收款" : "今日登记住宿收款",
-      reason: "按PMS登记日统计已确认收款，未扣退款和更正；不计内部资金归属转换，不将渠道应结金额视作实际收款" }))
+    ...registeredFinancialFacts.map(fact => ({ ...dashboardMoneyDetail(fact), id: `today-collection:${fact.id}`, metric: "TODAY_COLLECTIONS" as const,
+      label: fact.kind === "REFUND" ? "今日登记退款" : fact.kind === "REVERSAL" || fact.correctsFact || fact.deletionCorrection ? "今日登记更正" : fact.family === "MEMBER" ? "今日登记会员收款" : "今日登记住宿收款",
+      reason: "按PMS登记日统计收款、退款和更正；金额保留正负方向，内部资金归属转换不计入" }))
   ];
   return { todayOrders: todayOrders.length, todayCollections: [...grouped.values()],
     todayCollectionReviewCount: todayFacts.filter(fact => classifyDashboardMoney(fact) === "REVIEW").length, details };

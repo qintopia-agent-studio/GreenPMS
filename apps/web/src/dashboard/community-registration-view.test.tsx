@@ -25,7 +25,7 @@ it("今日指标与31人登记总数均可见，不将其标成跨单去重人�
  data.community.current={date:data.businessDate,total:null,paid:0,volunteer:0,reception:0,otherFree:0,unlinked:31,registered:{total:31,paid:26,volunteer:5,reception:0,otherFree:0}};
  data.current.todayOrders=3;data.current.todayCollections=[{currency:"CNY",amountMinor:"27720",count:1}];
  const html=renderToStaticMarkup(<MemoryRouter><CurrentScene data={data} onDetail={()=>{}}/></MemoryRouter>);
- expect(html).toContain("今日新增订单");expect(html).toContain("今日登记收款");expect(html).toContain("¥277.20");
+ expect(html).toContain("今日新增订单");expect(html).toContain("今日登记金额");expect(html).toContain("¥277.20");
  expect(html).toMatch(/31/);expect(html).toContain("登记在住人数");expect(html).toContain("尚未跨单去重");
  expect(data.community.current.total).toBeNull();
 });

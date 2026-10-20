@@ -198,8 +198,8 @@
 .dashboard-current-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
 .dashboard-current-primary .dashboard-current-card > span { display: flex; align-items: center; gap: 7px; }
 .dashboard-current-followups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
-.dashboard-current-followups button { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); color: var(--muted); text-align: left; }
-.dashboard-current-followups button:hover { border-color: var(--brand); background: var(--brand-soft); }
+.dashboard-current-followups > button { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); color: var(--muted); text-align: left; }
+.dashboard-current-followups > button:hover { border-color: var(--brand); background: var(--brand-soft); }
 .dashboard-current-followups span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-size: 11px; }
 .dashboard-current-followups strong { margin-left: auto; color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .dashboard-source-panel { margin-top: 24px; }
