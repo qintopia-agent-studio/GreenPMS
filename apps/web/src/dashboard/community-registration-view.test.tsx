@@ -10,11 +10,11 @@ describe("production-shaped registrations render without documents",()=>{
   data.community.current={date:data.businessDate,total:null,paid:0,volunteer:0,reception:0,otherFree:0,unlinked:36,registered:{total:36,paid:31,volunteer:5,reception:0,otherFree:0}};
   data.community.trend=[{...data.community.current,date:data.range.to}];
   data.community.dailyAverage=null;data.community.visitors=null;
-  const scene=renderToStaticMarkup(<MemoryRouter><CommunitySnapshot data={data} onDetail={()=>{}}/></MemoryRouter>);
+  const scene=renderToStaticMarkup(<MemoryRouter><CurrentScene data={data} onDetail={()=>{}}/></MemoryRouter>);
   const trend=renderToStaticMarkup(<MemoryRouter><CommunityPanels data={data}/></MemoryRouter>);
   expect(scene).toContain('36');expect(scene).toContain('31');expect(scene).toContain('登记在住人数');expect(scene).toContain('尚未跨单去重');
   expect(trend).toContain('日均登记在住');expect(trend).toContain('本期去重接待');expect(trend).toContain('尚不完整');
-  expect(trend).toContain('当日居民数');
+  expect(scene).toContain('当日居民数');expect(scene).toContain('在住会员');
   expect(data.community.current.total).toBeNull();expect(data.community.visitors).toBeNull();
  });
 });

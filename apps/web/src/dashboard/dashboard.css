@@ -122,12 +122,12 @@
 .community-composition-track i:first-child { background: var(--brand); }
 .community-composition-track i:last-child { background: #a7c7b5; }
 .community-composition p { font-size: 10px; color: var(--muted); margin-top: 10px; }
-.community-resident-summary { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; margin: 18px 0 4px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); }
-.community-resident-summary > div { min-width: 0; }
-.community-resident-summary span { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
-.community-resident-summary strong { display: block; margin-top: 6px; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.community-resident-summary strong small { margin-left: 5px; font-size: 11px; font-weight: 400; color: var(--muted); }
-.community-resident-summary p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.community-resident-current { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 14px 0; padding: 14px 18px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); }
+.community-resident-current > div { min-width: 0; }
+.community-resident-current span { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
+.community-resident-current strong { display: block; margin-top: 6px; font-size: 23px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.community-resident-current strong small { margin-left: 5px; font-size: 11px; font-weight: 400; color: var(--muted); }
+.community-resident-current p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .community-today { margin: 26px 0; padding: 0 24px; border-left: 1px solid var(--border); display: flex; flex-direction: column; justify-content: center; gap: 14px; }
 .community-today > div { display: flex; flex-direction: column; gap: 14px; }
 .community-today button { display: flex; align-items: center; gap: 9px; border: 0; background: none; color: var(--muted); padding: 0; text-align: left; font-size: 12px; }
@@ -275,8 +275,8 @@
   .community-composition-values span { font-size: 10px; flex-wrap: wrap; gap: 4px; }
   .community-composition strong { font-size: 25px; }
   .community-composition p { font-size: 9px; line-height: 1.6; }
-  .community-resident-summary { grid-template-columns: 1fr; gap: 12px; }
-  .community-resident-summary strong { font-size: 22px; }
+  .community-resident-current { grid-template-columns: 1fr; gap: 12px; }
+  .community-resident-current strong { font-size: 22px; }
   .community-today { flex-direction: column; align-items: stretch; gap: 10px; }
   .community-today > .dashboard-muted { font-size: 10px; }
   .dashboard-period { gap: 12px; }

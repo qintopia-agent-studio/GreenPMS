@@ -17,6 +17,7 @@ export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDe
   return <section className="dashboard-current-scene" aria-labelledby="current-scene-title">
     <div className="dashboard-section-heading"><h2 id="current-scene-title">当前现场</h2><span className="dashboard-muted">{data.businessDate} · 不随历史日期变化</span></div>
     <CommunitySnapshot data={data} onDetail={onDetail} />
+    {data.community.residentCurrent ? <CurrentResidentSummary data={data} /> : null}
     <div className="dashboard-current-balances">
       <button type="button" className="dashboard-current-card" onClick={() => onDetail("TODAY_ORDERS")}><span>今日新增订单 <ArrowRight size={13} aria-hidden="true" /></span><strong>{data.current.todayOrders}<small> 单</small></strong><small>今天新建的住宿订单 · 含补录</small></button>
       {data.current.todaySales ? <button type="button" className="dashboard-current-card" onClick={()=>onDetail("TODAY_SALES")}><span>今日经营销售额 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.todaySales.enabled&&data.current.todaySales.complete?data.current.todaySales.totals.map(row=><strong key={row.currency}>{money(row.netMinor,row.currency)}</strong>):<strong>—</strong>}<small>{data.current.todaySales.complete?"已关联业务 · 扣退款后":data.current.todaySales.reason}</small></button>:null}
@@ -27,6 +28,11 @@ export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDe
       <button type="button" className="dashboard-current-card" onClick={() => onDetail("RETAINED")}><span>客户留存待用 <ArrowRight size={13} aria-hidden="true" /></span>{data.current.retained.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 笔</small></strong>)}<small>客户资金归属 · 不计新增收款</small></button>
     </div>
   </section>;
+}
+
+function CurrentResidentSummary({ data }: { data: DashboardResponse }) {
+  const resident = data.community.residentCurrent!;
+  return <section className="community-resident-current" aria-label="当前居民与在住会员"><div><span>当日居民数 <DashboardHint text="实际在住，且满足连续已住满7晚或明确会员入住；同一人只计一次。会员短住也可以计入。" /></span><strong>{resident.total === null ? "待核对" : resident.total}<small>{resident.total === null ? "" : "人"}</small></strong><p>长住 {resident.longStay}</p></div><div><span>在住会员 <DashboardHint text="当天实际在住且与会员身份有明确绑定；只有订单会员主体、没有住客绑定时显示待核对。" /></span><strong>{resident.member === null ? "待核对" : resident.member}<small>{resident.member === null ? "" : "人"}</small></strong><p>{resident.memberReview ? `${resident.memberReview} 条关系待绑定` : "会员关系已核对"}</p></div></section>;
 }
 
 export function CommunitySnapshot({ data, onDetail }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void }) {
@@ -46,16 +52,17 @@ export function CommunityPanels({ data }: { data: DashboardResponse }) {
   const display = displayedCommunityTrend(c.trend);
   const dailyRows = [...display.rows].sort((a, b) => b.date.localeCompare(a.date));
   const residentTrend = c.residentTrend ?? [];
-  const resident = c.residentCurrent;
   const registrationBasis = display.registrationBasis;
   const day = display.rows.find(row => row.date === selected) ?? display.rows.at(-1);
-  const rows = display.rows.map(row => ({ ...row, free: freeCount(row), residentLongStay: residentTrend.find(item => item.date === row.date)?.longStay ?? null }));
+  const rows = display.rows.map(row => ({ ...row, free: freeCount(row), residentTotal: residentTrend.find(item => item.date === row.date)?.total ?? null }));
+  const residentAverage = residentTrend.length && residentTrend.every(row => row.total !== null)
+    ? residentTrend.reduce((sum, row) => sum + row.total!, 0) / residentTrend.length : null;
   const reason = "部分日期缺少住客身份或实际进出日期，完整人数尚不能计算；已核对分类仍保留。请查看下方统计依据核对订单。";
   return <section className="dashboard-panel community-trend" aria-labelledby="people-trend-title">
     <div className="dashboard-section-heading"><div><p className="section-kicker">01 / 社区人数</p><h2 id="people-trend-title">每天，有多少人在这里</h2></div><span className="dashboard-tag">历史区间 · 全店</span></div>
     {c.identityApproximate ? <p className="dashboard-muted">人数与去重接待按昵称优先、姓名辅助自动识别，属于近似统计。</p> : null}
-    <div className="community-trend-stats"><div><span>{registrationBasis ? "日均登记在住（总在住，含短住）" : "日均总在住（含短住）"} <DashboardHint text={registrationBasis ? registrationExplanation + "包含短住；日均值为每日登记在住人数合计除以天数。" : "包含短住、长住、会员、免费和付费的实际在住人数；不含未来预订。"} /></span><strong><Count value={registrationBasis ? display.dailyAverage : c.dailyAverage} reason={reason} /></strong></div><div><span>本期去重接待 <DashboardHint text="在历史区间实际住过的去重住客；同一人多次入住只计一人。缺少跨单身份依据时不输出完整总数。" /></span><strong><Count value={c.visitors} reason={reason} /></strong></div><button className="dashboard-text-button" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "收起免费分类" : "展开免费分类"}</button></div>
-    <div className="community-resident-summary"><div><span>当日居民数 <DashboardHint text="实际在住，且满足连续已住满7晚或明确会员入住；同一人只计一次。当前订单只有会员权益主体、没有住客与会员明确绑定时，会员部分显示待核对。" /></span><strong>{resident?.total === null ? "待核对" : resident?.total ?? "—"}<small>{resident?.total === null ? "" : "人"}</small></strong><p>长住 {resident?.longStay ?? "—"}</p></div><div><span>在住会员 <DashboardHint text="当天实际在住且与会员身份有明确绑定；会员短住也计入。只有订单会员主体、没有住客绑定时显示待核对。" /></span><strong>{resident?.member === null ? "待核对" : resident?.member ?? "—"}<small>{resident?.member === null ? "" : "人"}</small></strong><p>{resident?.memberReview ? `${resident.memberReview} 条关系待绑定` : "会员关系已核对"}</p></div></div>
+    <div className="community-trend-stats"><div><span>{registrationBasis ? "日均登记在住（总在住，含短住）" : "日均总在住（含短住）"} <DashboardHint text={registrationBasis ? registrationExplanation + "包含短住；日均值为每日登记在住人数合计除以天数。" : "包含短住、长住、会员、免费和付费的实际在住人数；不含未来预订。"} /></span><strong><Count value={registrationBasis ? display.dailyAverage : c.dailyAverage} reason={reason} /></strong></div><div><span>日均居民数 <DashboardHint text="历史区间内居民数（长住或明确会员入住）的日均值；居民属于总在住人数的子集。" /></span><strong><Count value={residentAverage} reason="历史会员关系存在待绑定记录，居民历史总数暂不能完整计算。" /></strong></div><div><span>本期去重接待 <DashboardHint text="在历史区间实际住过的去重住客；同一人多次入住只计一人。缺少跨单身份依据时不输出完整总数。" /></span><strong><Count value={c.visitors} reason={reason} /></strong></div><button className="dashboard-text-button" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "收起免费分类" : "展开免费分类"}</button></div>
+
     {registrationBasis ? <p className="dashboard-muted">本区间按住宿登记展示人数与分类；跨单身份尚不完整，续住、复购和去重接待不据此推算。<DashboardHint text={registrationExplanation}/></p> : null}<div className="community-legend"><span><i className="legend-dot total" />{registrationBasis ? "登记人数" : "总人数"}</span><span><i className="legend-dot paid" />付费</span>{expanded ? <><span><i className="legend-dot free" />义工</span><span><i className="legend-dot reception" />接待</span><span>其他免费</span></> : <span><i className="legend-dot free" />免费</span>}</div>
     {rows.length ? <div className="dashboard-chart" aria-label="每日在住人数堆叠趋势；可点击日期或用下方日期选择查看当日">
       <ResponsiveContainer width="100%" height="100%"><ComposedChart data={rows} margin={{ top: 14, right: 8, left: -26, bottom: 4 }} accessibilityLayer onClick={state => { if (state.activeLabel) setSelected(String(state.activeLabel)); }}>
@@ -63,7 +70,7 @@ export function CommunityPanels({ data }: { data: DashboardResponse }) {
         <Area dataKey="paid" name="付费（已核对）" stackId="people" stroke="var(--brand)" fill="var(--brand)" fillOpacity={0.14} isAnimationActive={false} />
         {expanded ? <><Area dataKey="volunteer" name="义工" stackId="people" stroke="#80a99a" fill="#bfd6ca" isAnimationActive={false} /><Area dataKey="reception" name="接待" stackId="people" stroke="#ab925b" fill="#e6dbc1" isAnimationActive={false} /><Area dataKey="otherFree" name="其他免费" stackId="people" stroke="#969d98" fill="#d9dfda" isAnimationActive={false} /></> : <Area dataKey="free" name="免费（已核对）" stackId="people" stroke="#92b4a4" fill="#d4e4d9" isAnimationActive={false} />}
         <Line dataKey="total" name={registrationBasis ? "登记人数（含短住）" : "总人数（含短住）"} stroke="var(--brand)" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={false} />
-        <Line dataKey="residentLongStay" name="长住（≥7晚）" stroke="#ab925b" strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />
+        <Line dataKey="residentTotal" name="居民数" stroke="#ab925b" strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />
         {day ? <ReferenceLine x={day.date} stroke="var(--muted)" strokeDasharray="3 4" /> : null}
       </ComposedChart></ResponsiveContainer>
     </div> : <p className="dashboard-empty">本区间没有逐日人数资料，不能将没有数据视为零。</p>}
