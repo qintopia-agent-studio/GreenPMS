@@ -2,6 +2,18 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.17.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.16.0...v1.17.0) (2026-10-20)
+
+
+### Features
+
+* **release:** 将数据库升级纳入受控发布 ([#95](https://github.com/qintopia-agent-studio/GreenPMS/issues/95)) ([c86687a](https://github.com/qintopia-agent-studio/GreenPMS/commit/c86687ad2dc6d76afef9c74877da73388a79e5a8))
+
+
+### Bug Fixes
+
+* **release:** 补齐数据库准备命令的sudo授权 ([#97](https://github.com/qintopia-agent-studio/GreenPMS/issues/97)) ([6b253ed](https://github.com/qintopia-agent-studio/GreenPMS/commit/6b253ed4dd126c92ce2f5c1b48783735cdc779b0))
+
 ## [1.16.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.15.0...v1.16.0) (2026-10-20)
 
 
