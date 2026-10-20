@@ -93,10 +93,14 @@ export function membershipProductAllowsTemporaryUpgrade(
   product: MembershipProductDto, view: OrderViewDto, unitMap: ReadonlyMap<string, InventoryUnitDto>
 ): boolean {
   const unitIds = [...new Set(view.effectiveArrangement.intervals.map((interval) => interval.inventoryUnitId))];
-  return view.order.status === "CHECKED_IN" && unitIds.length === 1
-    && unitMap.get(unitIds[0]!)?.kind === "ROOM"
+  const units = unitIds.map((unitId) => unitMap.get(unitId)).filter((unit): unit is InventoryUnitDto => Boolean(unit));
+  const allRooms = units.length === unitIds.length && units.every((unit) => unit.kind === "ROOM");
+  const targetRoomTypePresent = units.some((unit) => unit.room_type_code === product.allowed_room_type_code);
+  return view.order.status === "CHECKED_IN" && unitIds.length > 0
+    && allRooms
     && product.allowed_inventory_kind === "ROOM" && product.entitlement_unit_kind === "ROOM_NIGHT"
-    && !membershipProductMatchesCurrentStay(product, view, unitMap);
+    && !membershipProductMatchesCurrentStay(product, view, unitMap)
+    && (unitIds.length === 1 || targetRoomTypePresent);
 }
 
 function transferableCollectionFactIds(view: OrderViewDto): string[] {

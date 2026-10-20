@@ -3086,6 +3086,41 @@ describe("stay collection upgrade membership evidence", () => {
     }
   });
 
+  it("requires a continuous room sequence for a multi-room cross-room upgrade", () => {
+    const crossRoomUpgrade = {
+      kind: "TEMPORARY_ROOM_SEQUENCE_UPGRADE",
+      reason: "换房后按会员房型办理",
+      originalRoomTypeCode: previewEffect.product.allowedRoomTypeCode,
+      actualInventoryUnitId: "unit_a02",
+      actualRoomTypeCode: "PRIVATE_BATH_STANDARD",
+      arrivalDate: "2026-07-26",
+      departureDate: "2026-08-02",
+      segments: [
+        { inventoryUnitId: "unit_a02", roomTypeCode: "PRIVATE_BATH_STANDARD", arrivalDate: "2026-07-26", departureDate: "2026-07-30" },
+        { inventoryUnitId: "unit_d01", roomTypeCode: previewEffect.product.allowedRoomTypeCode, arrivalDate: "2026-07-30", departureDate: "2026-08-02" }
+      ]
+    };
+    const reviewedInput = { ...input, temporaryOtherRoomReason: crossRoomUpgrade.reason };
+    expect(conversionPreviewHasEvidence({ ...previewEffect, crossRoomUpgrade }, reviewedInput)).toBe(true);
+    expect(conversionPreviewHasEvidence({ ...previewEffect, crossRoomUpgrade: {
+      ...crossRoomUpgrade,
+      actualInventoryUnitId: "unit_d01",
+      actualRoomTypeCode: previewEffect.product.allowedRoomTypeCode,
+      segments: [
+        { ...crossRoomUpgrade.segments[1], arrivalDate: "2026-07-26", departureDate: "2026-07-30" },
+        { ...crossRoomUpgrade.segments[0], arrivalDate: "2026-07-30", departureDate: "2026-08-02" }
+      ]
+    } }, reviewedInput)).toBe(true);
+    expect(conversionPreviewHasEvidence({ ...previewEffect, crossRoomUpgrade: {
+      ...crossRoomUpgrade,
+      segments: [crossRoomUpgrade.segments[0], { ...crossRoomUpgrade.segments[1], arrivalDate: "2026-07-31" }]
+    } }, reviewedInput)).toBe(false);
+    expect(conversionPreviewHasEvidence({ ...previewEffect, crossRoomUpgrade: {
+      ...crossRoomUpgrade,
+      segments: [{ ...crossRoomUpgrade.segments[0], roomTypeCode: previewEffect.product.allowedRoomTypeCode }, crossRoomUpgrade.segments[1]]
+    } }, reviewedInput)).toBe(false);
+  });
+
   it("accepts only coherent Preview and committed Receipt evidence through both command-shell entry points", () => {
     expect(conversionPreviewHasEvidence(previewEffect, input)).toBe(true);
     expect(u1PreviewHasBusinessEvidence("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", previewEffect, input)).toBe(true);

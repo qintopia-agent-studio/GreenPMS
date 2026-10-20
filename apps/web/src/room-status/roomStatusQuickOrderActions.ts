@@ -152,7 +152,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 export function roomStatusQuickOrderNotices(view: OrderViewDto): string[] {
   const crossRoom = view.amendments.some((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
-    && record(record(amendment.payload)?.crossRoomUpgrade)?.kind === "TEMPORARY_OTHER_ROOM_UPGRADE");
+    && ["TEMPORARY_OTHER_ROOM_UPGRADE", "TEMPORARY_ROOM_SEQUENCE_UPGRADE"].includes(String(record(record(amendment.payload)?.crossRoomUpgrade)?.kind)));
   const temporaryRoom = view.amendments.some((amendment) => amendment.amendment_type === "CREATE_ORDER"
     && amendment.reason_code === "TEMPORARY_OTHER_ROOM"
     && temporaryOtherRoomArrangementPresentation(record(amendment.payload)?.temporaryOtherRoomArrangement));

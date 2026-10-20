@@ -1417,13 +1417,19 @@ export const CommandEffectSchema = Type.Union([
   strictObject({
     operation: Type.Literal("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"),
     crossRoomUpgrade: Type.Optional(strictObject({
-      kind: Type.Literal("TEMPORARY_OTHER_ROOM_UPGRADE"),
+      kind: Type.Union([Type.Literal("TEMPORARY_OTHER_ROOM_UPGRADE"), Type.Literal("TEMPORARY_ROOM_SEQUENCE_UPGRADE")]),
       reason: Type.String({ minLength: 1, maxLength: 200 }),
       originalRoomTypeCode: ShortText,
       actualInventoryUnitId: Id,
       actualRoomTypeCode: ShortText,
       arrivalDate: LocalDate,
-      departureDate: LocalDate
+      departureDate: LocalDate,
+      segments: Type.Optional(Type.Array(strictObject({
+        inventoryUnitId: Id,
+        roomTypeCode: ShortText,
+        arrivalDate: LocalDate,
+        departureDate: LocalDate
+      })))
     })),
     orderId: Id,
     stayId: Id,

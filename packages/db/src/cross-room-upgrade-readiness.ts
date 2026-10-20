@@ -4,8 +4,8 @@ import type { Database } from "./schema.ts";
 export async function crossRoomUpgradeReady(db: Kysely<Database>): Promise<boolean> {
   const result = await sql<{ ready: boolean }>`
     WITH expected(signature, body_hash, volatility, language) AS (VALUES
-      ('qintopia_cross_room_upgrade_matches(text,text,text,date)', 'e36279b8612cdca0468975eb9c30c5b0606414e31109c974ce96a4735550a186', 's', 'sql'),
-      ('qintopia_guard_cross_room_upgrade()', 'be8f99775246ceb56758807722a57dfe242ea57dbc9d1f389dd3dc75793a36fa', 'v', 'plpgsql')
+      ('qintopia_cross_room_upgrade_matches(text,text,text,date)', '4b365a2a000b4cc2794c9805de1ea6374e319016b57c0062bb8484664eee40b2', 's', 'sql'),
+      ('qintopia_guard_cross_room_upgrade()', 'f0ae1592de3e9177cb416b6a69799bcff528ce2786eda39bc0a2d3b77658ea3b', 'v', 'plpgsql')
     )
     SELECT NOT EXISTS (
       SELECT 1 FROM expected LEFT JOIN pg_proc p ON p.oid = to_regprocedure(expected.signature)
