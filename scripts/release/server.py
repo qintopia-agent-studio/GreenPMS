@@ -97,13 +97,14 @@ def command(args, *, env=None, timeout=180, failure_code=None):
     try:
         result = subprocess.run(args, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as error:
         if failure_code:
-            raise DeploymentDiagnosticError(failure_code + "_UNAVAILABLE", "external command unavailable or timed out") from None
+            raise DeploymentDiagnosticError(failure_code + "_UNAVAILABLE", "external command unavailable or timed out",
+                                            details={"timedOut": isinstance(error, subprocess.TimeoutExpired)}) from None
         raise ReleaseError("external command unavailable or timed out") from None
     if result.returncode != 0:
         if failure_code:
-            raise DeploymentDiagnosticError(failure_code, "external command failed; consult restricted local diagnostics")
+            raise DeploymentDiagnosticError(failure_code, "external command failed; consult restricted local diagnostics", details={"exitCode": result.returncode, "timedOut": False})
         raise ReleaseError("external command failed; consult restricted local diagnostics")
     return result.stdout.decode()
 
@@ -145,7 +146,7 @@ class Docker:
     def load(self, archive):
         command(["docker", "load", "--input", str(archive)], timeout=600)
 
-    def switch(self, release):
+    def switch(self, release, *, maintenance=False):
         manifest = release["manifest"]
         # Legacy adoption restores by exact ID; latest is never a recovery input.
         identity = manifest["imageId"] if release.get("legacy") else manifest["imageTag"]
@@ -154,10 +155,38 @@ class Docker:
         if not release.get("legacy"):
             verify_image(image, manifest)
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GREENPMS_IMAGE": identity}
-        command(["docker", "compose", "--project-name", "green-pms", "--file", self.config["composeFile"],
+        files = ["--file", self.config["composeFile"]]
+        if maintenance:
+            override = Path(self.config["stateDir"]) / "maintenance-compose.json"
+            atomic_json(override, {"services": {name: {"restart": "no"} for name in ("app", "wecom-worker")}})
+            files += ["--file", str(override)]
+        command(["docker", "compose", "--project-name", "green-pms", *files,
                  "--env-file", self.config["envFile"], "up", "--detach", "--no-build", "--pull", "never", "--force-recreate",
                  "app", "wecom-worker"],
                 env=environment, timeout=180, failure_code="COMPOSE_START_FAILED")
+
+    def restore_restart_policy(self, release):
+        identity = release["manifest"]["imageId"] if release.get("legacy") else release["manifest"]["imageTag"]
+        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GREENPMS_IMAGE": identity}
+        # Resolve the approved original Compose declarations without recreating
+        # already checked containers or printing its secret-bearing configuration.
+        resolved = json.loads(command(["docker", "compose", "--project-name", "green-pms", "--file", self.config["composeFile"],
+            "--env-file", self.config["envFile"], "config", "--format", "json"], env=environment))
+        for service, lookup in (("app", self.current), ("wecom-worker", self.worker)):
+            policy = resolved["services"][service].get("restart", "no")
+            require(isinstance(policy, str) and re.fullmatch(r"no|always|unless-stopped|on-failure(?::[1-9][0-9]*)?", policy),
+                    "DATABASE_RESTART_POLICY_INVALID")
+            item = lookup()
+            require(item["imageId"] == runtime_image_id(release) and item["running"], "DATABASE_RESTART_TARGET_MISMATCH")
+            command(["docker", "update", "--restart=" + policy, item["id"]], failure_code="DATABASE_RESTART_RESTORE_FAILED")
+
+    def stop_container(self, identity):
+        # Persist maintenance across daemon/host restart. Compose recreates the
+        # approved services with their configured restart policy on safe resume.
+        try:
+            command(["docker", "update", "--restart=no", identity], timeout=30, failure_code="DATABASE_RESTART_FENCE_FAILED")
+        finally:
+            command(["docker", "stop", "--time", "30", identity], timeout=45, failure_code="DATABASE_STOP_FAILED")
 
     def database_preflight(self, release):
         try:
@@ -392,6 +421,15 @@ class Deployer:
                 **{key: state.get(key) for key in ("current", "previous", "rollbackFrom")}}
 
     def recover(self):
+        preparation = self.directory / "database-preparing.json"
+        if preparation.exists():
+            from database_upgrade import adapter_from_transaction
+            record = json.loads(preparation.read_bytes())
+            adapter = adapter_from_transaction(self, {"database": record}, cleanup=True)
+            adapter.remove_owned(adapter.job)
+            adapter.remove_owned(adapter.clone)
+            adapter.remove_owned(adapter.cancel_job)
+            preparation.unlink()
         if not self.journal.exists():
             return
         transaction = json.loads(self.journal.read_bytes())
@@ -399,6 +437,9 @@ class Deployer:
             from ai_config import recover
             recover(self, transaction)
             return
+        if transaction.get("kind") == "database-upgrade":
+            from database_upgrade import recover
+            return recover(self, transaction)
         old = transaction["before"]
         require(old["configurationSha256"] == self.config_hash(), "recovery configuration changed; administrator intervention required")
         # If state commit completed, restore that committed current instead of undoing success.
@@ -433,11 +474,27 @@ class Deployer:
         self.audit("adopted", version=version, imageId=image_id)
         return self.receipt(state)
 
-    def deploy(self, version, revision, key, manifest_sha, *, rollback=False, dry_run=False):
+    def deploy(self, version, revision, key, manifest_sha, *, rollback=False, dry_run=False, prepare_database=False):
         validate_identity(version, revision)
         require(key == release_prefix("greenpms/releases/", version, revision), "invalid COS release key")
         require(HEX.fullmatch(manifest_sha), "invalid manifest checksum")
-        require(not self.journal.exists(), "unfinished deployment requires recovery")
+        if self.journal.exists():
+            transaction = json.loads(self.journal.read_bytes())
+            if transaction.get("kind") == "database-upgrade":
+                from database_upgrade import recover, identity
+                requested = {"prefix": key, "manifestSha256": manifest_sha}
+                require(not rollback and identity(transaction["target"]) == requested,
+                        "DATABASE_RELEASE_CONFLICT: unfinished upgrade belongs to another release")
+                # A repeated Actions run prepares first. It must not repeat backup/SQL
+                # against a possibly changed database; explicit deploy does readiness recovery.
+                if prepare_database:
+                    return {"application": "greenpms", "status": "database-resume-required", **requested}
+                recovered = recover(self, transaction, retry_target=transaction["target"])
+                if recovered is not None:
+                    return recovered
+            else:
+                raise ReleaseError("unfinished deployment requires recovery")
+        require(not (self.directory / "database-preparing.json").exists(), "unfinished database preparation requires recovery")
         before = self.state()
         self.observe(before)
         require(rollback or tuple(map(int, version[1:].split("."))) >= tuple(map(int, before["current"]["manifest"]["version"][1:].split("."))), "older version requires explicit rollback")
@@ -466,6 +523,8 @@ class Deployer:
                 require(image["Id"] == runtime_image_id(before["current"]), "image identity changed before retry")
                 self.health(before["current"])
                 self.audit("idempotent", version=version)
+                if prepare_database:
+                    return {"application": "greenpms", "status": "database-not-required", "prefix": key, "manifestSha256": manifest_sha}
                 return self.receipt(before)
             self.decompress(path / ARCHIVE, path / "image.tar")
             archive_details = self.scanner(path / "image.tar", m)
@@ -473,10 +532,20 @@ class Deployer:
             loaded = self.docker.inspect_image(m["imageTag"])
             verify_loaded_image(loaded, m, archive_details)
             target["runtimeImageId"] = loaded["Id"]
+            if prepare_database:
+                if before["current"]["manifest"]["requiredMigrations"] == m["requiredMigrations"]:
+                    self.docker.database_preflight(target)
+                    return {"application": "greenpms", "status": "database-not-required", "prefix": key, "manifestSha256": manifest_sha}
+                from database_upgrade import prepare
+                return prepare(self, before, target)
+            if not rollback and before["current"]["manifest"]["requiredMigrations"] != m["requiredMigrations"]:
+                from database_upgrade import upgrade
+                return upgrade(self, before, target)
             return self.promote(before, target, rollback=rollback)
 
-    def promote(self, before, target, *, rollback=False):
-        self.observe(before)
+    def promote(self, before, target, *, rollback=False, database_transaction=None):
+        if database_transaction is None:
+            self.observe(before)
         if not rollback:
             try:
                 self.docker.database_preflight(target)
@@ -484,20 +553,45 @@ class Deployer:
                 self.failure_evidence("preflight-blocked", version=target["manifest"]["version"],
                                       stage="database-preflight", diagnosticCode=error.code, **error.details)
                 raise
-        atomic_json(self.journal, {"before": before, "target": target, "startedAt": utcnow()})
+        if database_transaction is None:
+            atomic_json(self.journal, {"before": before, "target": target, "startedAt": utcnow()})
+        else:
+            database_transaction["phase"] = "opening"
+            atomic_json(self.journal, database_transaction)
         stage = "compose-start"
         try:
-            self.docker.switch(target)
+            if database_transaction is None:
+                self.docker.switch(target)
+            else:
+                self.docker.switch(target, maintenance=True)
             stage = "health-gate"
             self.health(target)
             after = {**before, "current": target, "previous": before["current"],
                      "rollbackFrom": before["current"] if rollback else None, "deployedAt": utcnow()}
+            stage = "state-commit"
             atomic_json(self.state_file, after)
+            if database_transaction is not None:
+                database_transaction["phase"] = "committed"
+                atomic_json(self.journal, database_transaction)
+                stage = "restart-policy"
+                self.docker.restore_restart_policy(target)
         except BaseException as error:
             code = error.code if isinstance(error, DeploymentDiagnosticError) else "UNEXPECTED_" + stage.upper().replace("-", "_")
             details = error.details if isinstance(error, DeploymentDiagnosticError) else {}
             self.failure_evidence("failed", version=target["manifest"]["version"], stage=stage,
                                   diagnosticCode=code, **details)
+            if database_transaction is not None:
+                from database_upgrade import stop, adapter_from_transaction, best_effort_record
+                if database_transaction["phase"] == "committed":
+                    best_effort_record(self.journal, database_transaction)
+                    raise ReleaseError("DATABASE_COMMITTED_FINALIZATION_FAILED: healthy target retained; retry same release to restore restart policy") from None
+                database_transaction["phase"] = "blocked"
+                best_effort_record(self.journal, database_transaction)
+                try:
+                    stop(self)
+                finally:
+                    adapter_from_transaction(self, database_transaction, cleanup=True).cancel(target)
+                raise ReleaseError("DATABASE_TARGET_HEALTH_FAILED: writes stopped; same-release recovery required; old image rollback prohibited") from None
             try:
                 self.docker.switch(before["current"])
                 self.health(before["current"])
@@ -508,9 +602,11 @@ class Deployer:
                 raise ReleaseError("deployment failed and recovery is incomplete; journal retained; no retention allowed") from None
             self.failure_evidence("restored", imageId=runtime_image_id(before["current"]))
             raise ReleaseError("deployment failed; previous container restored; no success marker or retention") from None
-        self.journal.unlink()
+        if database_transaction is not None:
+            (self.directory / "database-prepared.json").unlink(missing_ok=True)
         self.audit("healthy", version=target["manifest"]["version"], imageId=target["manifest"]["imageId"],
                    runtimeImageId=runtime_image_id(target))
+        self.journal.unlink()
         return self.receipt(after)
 
 
@@ -547,11 +643,11 @@ def signal_failure(_signum, _frame):
 
 def serve(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["deploy", "rollback", "maintenance", "recover", "adopt", "rollback-local", "configure-ai"])
+    parser.add_argument("operation", choices=["deploy", "prepare-database", "rollback", "maintenance", "recover", "adopt", "rollback-local", "configure-ai"])
     parser.add_argument("args", nargs="*")
     arguments = parser.parse_args(argv)
     operation, args = arguments.operation, arguments.args
-    if operation in ("deploy", "rollback"):
+    if operation in ("deploy", "prepare-database", "rollback"):
         require(len(args) == 4, "expected version revision COS key manifest SHA")
         validate_identity(args[0], args[1])
         require(args[2] == release_prefix("greenpms/releases/", args[0], args[1]) and HEX.fullmatch(args[3]), "invalid deploy request")
@@ -604,7 +700,7 @@ def serve(argv=None):
             result = deployer.receipt(state)
             result["localImagePlan"] = cleanup_images(docker, state, dry_run=True)
         else:
-            result = deployer.deploy(*args, rollback=operation == "rollback")
+            result = deployer.deploy(*args, rollback=operation == "rollback", prepare_database=operation == "prepare-database")
         print(json.dumps(result, separators=(",", ":")), flush=True)
         if operation in ("adopt", "recover", "rollback-local", "configure-ai"):
             return
@@ -619,7 +715,7 @@ def serve(argv=None):
         if acknowledgement["result"] != "dry-run":
             deployer.audit("orchestration", result=acknowledgement["result"])
         require(acknowledgement["result"] != "failed", "COS finalization failed; running version retained; retry required")
-        if acknowledgement["result"] == "complete":
+        if acknowledgement["result"] == "complete" and operation != "prepare-database":
             try:
                 decisions = cleanup_images(docker, deployer.state())
                 deployer.audit("local-cleanup", decisions=decisions)

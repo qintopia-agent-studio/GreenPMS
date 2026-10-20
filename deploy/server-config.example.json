@@ -10,5 +10,12 @@
   "cos": {
     "bucket": "REPLACE_WITH_PRIVATE_BUCKET_APPID",
     "region": "REPLACE_WITH_COS_REGION"
+  },
+  "databaseUpgrade": {
+    "ownerEnvFile": "/etc/greenpms/migration.env",
+    "backupDir": "/var/lib/greenpms-database-backups",
+    "postgresImage": "sha256:REPLACE_WITH_VERIFIED_POSTGRES_IMAGE_ID",
+    "postgresMajor": 18,
+    "timeoutSeconds": 900
   }
 }

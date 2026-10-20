@@ -3,7 +3,7 @@
 import os
 import sys
 
-if os.environ.get("SUDO_USER") == "greenpms-deploy" and sys.argv[1:2] not in (["deploy"], ["rollback"], ["maintenance"]):
+if os.environ.get("SUDO_USER") == "greenpms-deploy" and sys.argv[1:2] not in (["deploy"], ["prepare-database"], ["rollback"], ["maintenance"]):
     sys.exit("administrator operation is not allowed to deployment identity")
 
 os.execve("/opt/greenpms-release/venv/bin/python3",

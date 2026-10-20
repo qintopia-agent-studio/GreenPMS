@@ -33,6 +33,7 @@ class InstallerTests(unittest.TestCase):
             else:
                 body += "exit 0\n"
             self.write_executable(directory, name, body)
+        (directory / "python3").symlink_to(sys.executable)
         python_dir = str(Path(sys.executable).parent)
         return os.pathsep.join((str(directory), python_dir, "/usr/bin", "/bin"))
 
@@ -118,7 +119,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("maintenance-public-key", result.stdout)
 
         source = INSTALLER.read_text(encoding="utf-8")
-        self.assertIn('RUNTIME_SOURCES=("$SOURCE_ROOT"/scripts/release/*.py)', source)
+        self.assertIn('RUNTIME_SOURCES=("$SOURCE_ROOT"/scripts/release/*.py "$SOURCE_ROOT"/scripts/release/database-upgrade.mjs)', source)
         self.assertIn('"$SOURCE_ROOT/deploy/entry.py"', source)
         self.assertIn('docker compose version', source)
         self.assertIn('printf \'%s\\n\' \\', source)

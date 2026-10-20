@@ -1,20 +1,22 @@
 # GreenPMS 生产发布快速开始
 
-这套流程已经写入仓库，但当前文档不代表真实 COS 或生产已经配置完成。首次接入尚未执行，本文也没有生产发布或生产验收记录。下文命令是待执行指南；不在终端、日志或归档中输出凭据。
+本文说明发布操作，不作为当前生产状态证据；新增数据库准备能力须先完成服务器入口升级与配置后生效。下文命令是操作指南，不在终端、日志或发布归档中输出凭据。
 
 ## 日常发布
 
 日常发布不需要登录服务器，也不需要手工上传镜像：
 
 1. 合并业务 PR 到 `main`。`GreenPMS Release Please` 会自动创建或更新版本 PR；它自动更新 `package.json`、`package-lock.json`、`CHANGELOG.md`、`deploy/release-policy.json` 的版本字段。无需本地执行版本命令或 Git tag 命令。
-2. 检查自动版本 PR 的版本和 `CHANGELOG.md`。本次若有数据库迁移或回退不兼容变化，在这个 PR 中修改 `deploy/release-policy.json` 的 `rollbackCompatibility`；没有迁移时保持 `same-migrations-only`。有新增迁移时，先按维护方案备份、隔离副本演练并执行正式迁移；代码或镜像包含迁移文件不等于生产已经执行。合并版本 PR。
+2. 检查自动版本 PR 的版本和 `CHANGELOG.md`。本次若有数据库迁移或回退不兼容变化，在这个 PR 中修改 `deploy/release-policy.json` 的 `rollbackCompatibility`；没有迁移时保持 `same-migrations-only`。有新增迁移时标记 `forward-only`，确认迁移内容和停写窗口；服务器必须先安装数据库升级配置。Publish 同时批准本版本的数据库升级与应用上线。合并版本 PR。
 3. Release Please 自动创建不可变的 `vX.Y.Z` tag 和 Draft GitHub Release。确认说明和上线时机后，打开 GitHub Releases，点击 **Publish release**。
 4. `release.published` 自动启动 **GreenPMS Release**。它会验证 tag 指向 `main` 历史中的提交，运行测试和构建，生成 linux/amd64 镜像、archive、checksum、SBOM，上传并回读 COS，然后通过受限 SSH 自动更新服务器上的 app 和企业微信同步 worker。
 5. 不需要再点击 Environment 审批。GitHub Release 的 **Publish release**（`release.published`）就是本次生产发布的唯一批准点；只使用一个 `production` Environment，且不设置 reviewer 或 wait timer。
 
-部署会在切换旧容器之前用目标版本只读核对真实数据库。缺少迁移时会列出文件名并保留旧服务；必须完成受控迁移后重新发布，不能靠重试补齐。
+部署先校验目标镜像。迁移清单相同时仍走原只读预检和切换路径，不访问 owner 凭据、不停写或备份。有追加迁移时，Actions 的数据库准备步骤先备份并在无外网副本恢复、执行正式迁移和完整 readiness；随后单次持锁部署记录 journal、停止 app/worker、再次备份并完整恢复演练、执行目标镜像的 `migrate.js`，再通过数据库预检和应用健康检查。准备回执会显示 `database-prepared`、`database-not-required` 或未完成升级的 `database-resume-required`。
 
-成功条件是 Release workflow 绿色、`/health/ready` 和 `/api/v1/version` 通过，COS 版本目录出现 `deployed.json`。下载/校验、Compose 启动或健康检查失败时，服务器不写成功标记，启动或健康失败会尽力恢复部署前容器，也不执行成功版本 retention；如果健康检查已经通过而 marker、retention 或本地清理失败，新版本保持运行，marker 可能已经创建，workflow 报错后可重试，不自动回退。
+备份和演练失败保持或恢复旧服务。一旦生产迁移可能开始，任何超时、部分提交、SSH 中断或后续健康失败都保持停写，保留 journal 和独立备份，禁止自动切回旧镜像。重跑只能是同一不可变发布身份：会重新核对目标完整 readiness，绝不自动重放未知结果的 SQL；未完全就绪时需要管理员依据备份和诊断制定前向修复/恢复方案。
+
+成功条件是 Release workflow 绿色、`/health/ready` 和 `/api/v1/version` 通过，COS 版本目录出现 `deployed.json`。下载/校验、Compose 启动或健康检查失败时，服务器不写成功标记，未执行数据库升级时，启动或健康失败会尽力恢复部署前容器，也不执行成功版本 retention；如果健康检查已经通过而 marker、retention 或本地清理失败，新版本保持运行，marker 可能已经创建，workflow 报错后可重试，不自动回退。
 
 同一 Release 重放时，Actions 从受保护的 `main` 解析并固定一个发布 harness commit，再把目标 tag checkout 到独立目录。应用源码和版本身份始终来自不可变 tag；所有 job 的打包、COS 和 SSH 工具来自同一个 harness commit，所以修复发布工具后可以重放旧 tag。Actions 随后查找该版本的完整且已校验 bundle，并复用不可变产物，不重新构建。若 COS 前缀只有部分文件或内容校验失败，流程会拒绝重建和覆盖；等待候选按 7 天策略清理，或使用新的版本/tag。
 
@@ -28,7 +30,7 @@
 2. `version` 填要回退到的版本，例如 `v1.2.4`；只有同一版本存在多个成功 revision 时才填写完整 40 位 `revision`。
 3. 运行 workflow。它只接受 COS 中同时具备完整产物、有效 manifest、匹配 checksum 和有效 `deployed.json` 的成功版本，再执行已有迁移兼容性、镜像身份和健康检查。
 
-这个 workflow 使用同一个 `production` Environment 和同一把部署 SSH key，没有第二次审批。向前部署要求服务器已核对的迁移基线与目标 manifest 完全相同；`forward-only` 会禁止从该版本直接回退，不会阻止基线相同的向前镜像切换。服务器上已有 `previous` 时可直接复用本地镜像，更早版本会从 COS 下载并校验。
+这个 workflow 使用同一个 `production` Environment 和同一把部署 SSH key，没有第二次审批。向前部署要求迁移基线相同，或目标为 `forward-only` 且仅追加迁移并完成数据库升级流程；`forward-only` 会禁止从该版本直接回退，不会阻止基线相同的向前镜像切换。服务器上已有 `previous` 时可直接复用本地镜像，更早版本会从 COS 下载并校验。
 
 ## 一次性配置
 
@@ -100,7 +102,7 @@ rtk proxy python3 scripts/release/setup.py \
 
 ### 5. 首次接入窗口和检查
 
-首次接入可以由一个明确授权的初始化窗口一次覆盖 COS/CAM/GitHub 配置、服务器入口和外部配置、当前版本 adoption、首个干净镜像替换及现场清理；任何凭据轮换、生产镜像替换和数据库/业务数据变更都必须明确包含在该窗口内，本流程不会自动修改数据库。若发现凭据需要轮换或镜像来源不明，按组织流程暂停使用、轮换凭据，并从干净 checkout 重新构建和核验镜像。
+首次接入可以由一个明确授权的初始化窗口一次覆盖 COS/CAM/GitHub 配置、服务器入口和外部配置、当前版本 adoption、首个干净镜像替换及现场清理；任何凭据轮换、生产镜像替换和数据库/业务数据变更都必须明确包含在该窗口内，安装器不会修改数据库；后续含新增迁移的发布由本流程按已批准版本执行数据库升级。若发现凭据需要轮换或镜像来源不明，按组织流程暂停使用、轮换凭据，并从干净 checkout 重新构建和核验镜像。
 
 先运行本地 fake harness，不连接真实 COS、SSH 或生产 Docker：
 
@@ -116,3 +118,9 @@ rtk npm run release:check
 一次性配置需要管理员介入；每次普通发布只需要推 tag、发布 GitHub Release，并观察 workflow。回退只需在 Actions 填版本并运行 workflow。服务器 SSH 仅用于首次安装、首次 adoption 或自动流程失败后的人工作业；日常更新、失败恢复、COS 成功标记、5 版本 retention 和本地镜像清理均自动完成。
 
 详细的状态语义、失败处理、迁移限制、清理算法和一次性服务器命令见 [生产发布 runbook](production-release-runbook.md)。
+
+## 数据库升级的一次性启用
+
+管理员在单独批准的安装窗口，按 [runbook 数据库升级配置](production-release-runbook.md#数据库升级配置与恢复) 安装新 harness 和受限 SSH 入口，配置 root-owned `migration.env`、独立 0700 备份目录和固定 PostgreSQL image ID。owner 凭据不上传 GitHub。旧服务器未配置时，含新增迁移版本明确失败；无新增迁移的版本继续走原路径。
+
+本次代码交付不代表新入口已安装生产，也不代表未来含迁移版本已完成现场验收。现场验收需检查准备回执、实际停写窗口、最终备份恢复记录、迁移后真实 readiness、应用公网健康、COS marker，以及中断后保留停写/恢复状态。

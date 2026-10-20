@@ -15,6 +15,10 @@
 
 用户在确认 Release Please 的 `synchronize` / `edited` 重复触发及互相取消原因后，明确要求优化。本次允许将 PR 格式检查移到 `.github/workflows/pr-format.yml`，独立排队并读取当前 PR 元数据；`.github/workflows/ci.yml` 不再因纯 PR 编辑重复执行代码检查。完整代码检查的步骤、固定 Action 版本、必需检查名称和 main 保护保持不变。此限定调整优先于上面的逐字基准约束，不授权改动其他发布流程或继续扩大 CI 变更。
 
+### 2026-10-20 已授权的数据库发布调整
+
+用户已确认本对话方案并明确授权按计划优化发布流程，具体实施规格见 `docs/implementation/spec-release-database-preparation.md`：允许修改 `release.yml`、受限服务器入口及对应实现，将镜像准备、数据库备份/隔离恢复演练、停写/最终备份复验/正式迁移和应用健康检查纳入同一次受控发布。`ci.yml`、`pr-format.yml`、`rollback.yml`、`retention.yml`、固定 Action 版本、既有检查范围和 main 保护保持不变。本授权仅交付实现、验证、部署配置说明与 PR；不包含合并、安装生产入口或发布新版本。
+
 ## Worktree 使用与收尾
 
 - 默认复用项目根目录或已有的合适工作目录，在功能分支上开发；新任务、创建分支或提交 PR 本身不构成新建 worktree 的理由。
