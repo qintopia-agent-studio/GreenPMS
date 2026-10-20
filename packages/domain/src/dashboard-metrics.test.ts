@@ -25,6 +25,17 @@ describe("dashboard definitions", () => {
     expect(classifyDashboardMoney(fact("orphan", "100", { transferSource: true }))).toBe("REVIEW");
     expect(aggregateDashboardMoney([fact("known", "100"), fact("unknown", "400", { commandType: null })], "CNY")[0]).toMatchObject({ collectedMinor: "100", netMinor: null, reviewCount: 1, reviewMinor: "400" });
   });
+  it("classifies channel settlement facts by their signed operating effect", () => {
+    expect(classifyDashboardMoney(fact("channel-sale", "30000", { family: "CHANNEL", kind: "SALE", commandType: null }))).toBe("COLLECTION");
+    expect(classifyDashboardMoney(fact("channel-refund", "-4000", { family: "CHANNEL", kind: "REFUND", commandType: null }))).toBe("REFUND");
+    expect(classifyDashboardMoney(fact("channel-correction", "-100", { family: "CHANNEL", kind: "CORRECTION", commandType: null }))).toBe("CORRECTION");
+    expect(classifyDashboardMoney(fact("channel-reversal", "4000", { family: "CHANNEL", kind: "REVERSAL", commandType: null }))).toBe("CORRECTION");
+    expect(aggregateDashboardMoney([
+      fact("channel-sale", "30000", { family: "CHANNEL", kind: "SALE", commandType: null }),
+      fact("channel-refund", "-4000", { family: "CHANNEL", kind: "REFUND", commandType: null }),
+      fact("channel-correction", "-100", { family: "CHANNEL", kind: "CORRECTION", commandType: null })
+    ], "CNY")[0]).toMatchObject({ collectedMinor: "30000", refundedMinor: "4000", correctedMinor: "-100", netMinor: "25900" });
+  });
   it("uses unbounded integer money and isolates currencies", () => {
     expect(aggregateDashboardMoney([fact("a", "9007199254740993"), fact("b", "9007199254740993"), fact("c", "200", { currency: "USD" })], "CNY").map(row => row.netMinor)).toEqual(["18014398509481986", "200"]);
   });

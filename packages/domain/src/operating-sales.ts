@@ -1,5 +1,5 @@
-import type { OperatingSalesAmount, OperatingSalesSource, OperatingSalesSummary } from "@qintopia/contracts";
-export interface OperatingSaleEvent { id:string;source:OperatingSalesSource;date:string;currency:string;kind:"SALE"|"REFUND"|"CORRECTION"|"BASELINE";amountMinor:string;orderId:string|null;memberId:string|null;registeredAt:string|null;reason:string }
+import type { DashboardDetailEvidenceStatus, DashboardDetailSyncStatus, OperatingSalesAmount, OperatingSalesSource, OperatingSalesSummary } from "@qintopia/contracts";
+export interface OperatingSaleEvent { id:string;source:OperatingSalesSource;date:string;currency:string;kind:"SALE"|"REFUND"|"CORRECTION"|"BASELINE";amountMinor:string;orderId:string|null;memberId:string|null;registeredAt:string|null;reason:string;sourceFactId?:string|null;referencesFactId?:string|null;reversesFactId?:string|null;correctsFactId?:string|null;syncStatus?:DashboardDetailSyncStatus;evidenceStatus?:DashboardDetailEvidenceStatus }
 export interface MatchedSaleFact {id:string;source:"DIRECT"|"MEMBERSHIP";date:string;currency:string;amountMinor:string;registeredAt:string;orderId:string|null;memberId:string|null;billId:string|null;billAmountMinor:string|null;verified:boolean;reversed:boolean;reversedAt?:string|null;refund:boolean;sourceKey:string}
 export interface SalesOpening {key:string;amountMinor:string}
 export interface SalesBaseline {month:string;currency:string;amountMinor:string;recognitionFrom:string;note?:string}

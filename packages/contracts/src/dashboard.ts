@@ -1,10 +1,22 @@
 import type { OperatingSalesSummary } from "./operating-sales.ts";
-export const dashboardDefinitionVersion = "2026-10-15.1";
+export const dashboardDefinitionVersion = "2026-10-20.1";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
 export const dashboardMetrics = ["PAID", "FREE", "MONEY", "REVIEW", "DEBT", "RETAINED", "IN_HOUSE", "ARRIVAL", "DEPARTURE", "OVERDUE", "TODAY_ORDERS", "TODAY_COLLECTIONS", "SALES", "TODAY_SALES"] as const;
 export type DashboardMetric = typeof dashboardMetrics[number];
+/** 明细事实的来源类别；用于给外部财务智能体保留可追溯的来源边界。 */
+export const dashboardDetailSources = ["LODGING", "MEMBERSHIP", "CHANNEL", "INVENTORY", "ORDER", "UNKNOWN"] as const;
+export type DashboardDetailSource = typeof dashboardDetailSources[number];
+/** 事实是否已经被业务对象认领，INTERNAL 表示内部归属转换，不是新增收退款。 */
+export const dashboardDetailClaimStatuses = ["CONFIRMED", "PENDING_REVIEW", "UNCLAIMED", "INTERNAL"] as const;
+export type DashboardDetailClaimStatus = typeof dashboardDetailClaimStatuses[number];
+/** 登记事实的写入来源；worker 同步状态与业务认领状态分开表达。 */
+export const dashboardDetailSyncStatuses = ["WORKER_SYNCED", "MANUAL_ENTRY", "NOT_APPLICABLE", "UNKNOWN"] as const;
+export type DashboardDetailSyncStatus = typeof dashboardDetailSyncStatuses[number];
+/** 凭据或关联链的完整程度，避免外部智能体把缺证据的金额当作完整事实。 */
+export const dashboardDetailEvidenceStatuses = ["COMPLETE", "PARTIAL", "MISSING"] as const;
+export type DashboardDetailEvidenceStatus = typeof dashboardDetailEvidenceStatuses[number];
 export interface DashboardQuery {
   from?: string;
   to?: string;
@@ -58,6 +70,15 @@ export interface DashboardDetail {
   registeredAt: string | null;
   businessDate: string | null;
   reason: string;
+  /** 以下字段为可选扩展，旧明细和非资金事实无需回填即可继续通过契约。 */
+  sourceType?: DashboardDetailSource;
+  claimStatus?: DashboardDetailClaimStatus;
+  sourceFactId?: string | null;
+  referencesFactId?: string | null;
+  reversesFactId?: string | null;
+  correctsFactId?: string | null;
+  syncStatus?: DashboardDetailSyncStatus;
+  evidenceStatus?: DashboardDetailEvidenceStatus;
 }
 export interface DashboardResponse {
   propertyId: string;
@@ -82,6 +103,7 @@ export interface DashboardResponse {
     todaySales?: OperatingSalesSummary;
     todayOrders: number;
     todayCollections: DashboardBalance[];
+    todayCollectionBreakdown?: Array<{ currency: string; source: "STAY" | "MEMBER" | "CHANNEL"; amountMinor: string; count: number }>;
     todayCollectionReviewCount: number;
     paidGuests: number;
     freeGuests: number;

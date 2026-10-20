@@ -23,7 +23,8 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const { range, previousRange, nights: periodDays } = dashboardRange(query, businessDate);
   const futureUntil = dashboardDate(businessDate, query.futureDays ?? 14);
   const lodging = await loadDashboardStays(trx, propertyId, businessDate, { from: previousRange.from, to: range.to }, futureUntil, property.timezone);
-  const moneyFacts = await loadDashboardMoney(trx, propertyId, property.timezone, previousRange.from, dashboardDate(range.to, 1));
+  // 渠道应结不是现金到账，但它是系统记录的经营财务事实；历史区间与当天登记金额必须使用同一登记事实边界。
+  const moneyFacts = await loadDashboardMoney(trx, propertyId, property.timezone, previousRange.from, dashboardDate(range.to, 1), { includeChannel: true });
   const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency, property.timezone, lodging);
   const community = await loadDashboardCommunity(trx, propertyId, range, businessDate, property.timezone, lodging.statistics);
   const sales = await loadOperatingSales(trx,propertyId,property.timezone,property.currency,range,businessDate);

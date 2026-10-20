@@ -19,8 +19,8 @@ export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDe
     <CommunitySnapshot data={data} onDetail={onDetail} />
     {data.community.residentCurrent ? <CurrentResidentSummary data={data} /> : null}
     <div className="dashboard-current-primary">
-      <button type="button" className="dashboard-current-card" onClick={() => onDetail("TODAY_SALES")}><span>今日经营销售额 <DashboardHint text="按业务确认日统计：已关联住宿、会员或渠道业务，扣已确认退款和更正；不等于今日登记金额。" /><ArrowRight size={13} aria-hidden="true" /></span>{data.current.todaySales?.enabled&&data.current.todaySales.complete?data.current.todaySales.totals.map(row=><strong key={row.currency}>{money(row.netMinor,row.currency)}</strong>):<strong>待核对</strong>}<small>{data.current.todaySales?.complete?"已关联业务 · 扣退款后":"尚无完整经营销售依据"}</small></button>
-      <button type="button" className="dashboard-current-card" onClick={() => onDetail("TODAY_COLLECTIONS")}><span>今日登记金额 <DashboardHint text="按PMS登记日统计收款、退款和更正；退款按负项扣减，更正按正负方向调整。" /><ArrowRight size={13} aria-hidden="true" /></span>{data.current.todayCollections.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 条</small></strong>)}<small>收款、退款、更正登记净变动{data.current.todayCollectionReviewCount ? ` · 另有${data.current.todayCollectionReviewCount}条待核对` : ""}</small></button>
+      <button type="button" className="dashboard-current-card" onClick={() => onDetail("TODAY_SALES")}><span>今日经营销售额 <DashboardHint text="按业务确认日统计：已关联住宿、会员或渠道业务，扣已确认退款和更正；不等于今日登记金额。" /><ArrowRight size={13} aria-hidden="true" /></span>{data.current.todaySales?.enabled&&data.current.todaySales.complete?data.current.todaySales.totals.map(row=><strong key={row.currency}>{money(row.netMinor,row.currency)}</strong>):<strong>待核对</strong>}{data.current.todaySales?.complete&&data.current.todaySales.breakdown.length?<small className="dashboard-card-breakdown">{data.current.todaySales.breakdown.map(row => `${salesSourceLabel(row.source)} ${money(row.netMinor,row.currency)}`).join(" · ")}</small>:null}<small>{data.current.todaySales?.complete?"已关联业务 · 扣退款后":"尚无完整经营销售依据"}</small></button>
+      <button type="button" className="dashboard-current-card" onClick={() => onDetail("TODAY_COLLECTIONS")}><span>今日登记金额 <DashboardHint text="按PMS登记日统计企微收款、会员收款、渠道应结、退款和更正；退款按负项扣减，更正按正负方向调整。渠道应结不是现金到账，在明细中单独标注。" /><ArrowRight size={13} aria-hidden="true" /></span>{data.current.todayCollections.map(row => <strong key={row.currency}>{money(row.amountMinor, row.currency)}<small> / {row.count} 条</small></strong>)}{data.current.todayCollectionBreakdown?.length?<small className="dashboard-card-breakdown">{data.current.todayCollectionBreakdown.map(row => `${registrationSourceLabel(row.source)} ${money(row.amountMinor,row.currency)}`).join(" · ")}</small>:null}<small>收款、渠道应结、退款、更正登记净变动{data.current.todayCollectionReviewCount ? ` · 另有${data.current.todayCollectionReviewCount}条待核对` : ""}</small></button>
     </div>
     <div className="dashboard-current-followups" aria-label="当前待跟进">
       <button type="button" onClick={() => onDetail("TODAY_ORDERS")}><span>今日新增订单 <DashboardHint text="按门店当天创建的住宿订单计数，含补录；不等于今天入住订单数。" /></span><strong>{data.current.todayOrders} 单</strong><ArrowRight size={14} /></button>
@@ -29,6 +29,9 @@ export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDe
     </div>
   </section>;
 }
+
+const salesSourceLabel = (source: "DIRECT" | "MEMBERSHIP" | "CHANNEL" | "BASELINE") => ({ DIRECT: "住宿", MEMBERSHIP: "会员", CHANNEL: "渠道", BASELINE: "封账" }[source]);
+const registrationSourceLabel = (source: "STAY" | "MEMBER" | "CHANNEL") => ({ STAY: "住宿", MEMBER: "会员", CHANNEL: "渠道应结" }[source]);
 
 function CurrentResidentSummary({ data }: { data: DashboardResponse }) {
   const resident = data.community.residentCurrent!;
