@@ -7,6 +7,7 @@ LIB_DIR=$INSTALL_ROOT/lib
 VENV_DIR=$INSTALL_ROOT/venv
 CONFIG_DIR=/etc/greenpms
 STATE_DIR=/var/lib/greenpms-release
+BACKUP_DIR=/var/lib/greenpms-database-backups
 HOME_DIR=/home/greenpms-deploy
 DEPLOY_USER=greenpms-deploy
 KEY_DIR=$HOME_DIR/.ssh
@@ -57,7 +58,7 @@ for required in \
     [[ -f "$required" && ! -L "$required" ]] || die "reviewed archive is incomplete: $required"
 done
 shopt -s nullglob
-RUNTIME_SOURCES=("$SOURCE_ROOT"/scripts/release/*.py)
+RUNTIME_SOURCES=("$SOURCE_ROOT"/scripts/release/*.py "$SOURCE_ROOT"/scripts/release/database-upgrade.mjs)
 (( ${#RUNTIME_SOURCES[@]} )) || die "reviewed archive has no release runtime scripts"
 
 normalize_public_key() {
@@ -131,6 +132,7 @@ ensure_dir "$INSTALL_ROOT" 0755 "release root"
 ensure_dir "$LIB_DIR" 0755 "release library"
 ensure_dir "$CONFIG_DIR" 0700 "application configuration directory"
 ensure_dir "$STATE_DIR" 0700 "release state directory"
+ensure_dir "$BACKUP_DIR" 0700 "independent database backup directory"
 ensure_dir "$HOME_DIR" 0755 "deployment home"
 ensure_dir "$KEY_DIR" 0755 "deployment SSH directory"
 ensure_dir /usr/local/sbin 0755 "system wrapper directory"

@@ -721,7 +721,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(fixture.docker.switches, [])
             self.assertEqual(fixture.store.markers, {})
 
-    def test_forward_migration_extension_allows_switch(self) -> None:
+    def test_forward_migration_extension_requires_upgrade_configuration(self) -> None:
         with DeployerFixture() as fixture:
             current_migrations = list(fixture.old_manifest["requiredMigrations"])
             target_migrations = current_migrations + [migration("061_room_catalog_management.sql")]
@@ -731,10 +731,10 @@ class DeploymentTests(unittest.TestCase):
             )
             manifest_sha = digest(fixture.store.objects[key + "manifest.json"])
 
-            result = fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
-
-            self.assertEqual(result["status"], "healthy")
-            self.assertEqual(fixture.docker.current_image_id, fixture.new_image_id)
+            with self.assertRaisesRegex(ReleaseError, "DATABASE_UPGRADE_NOT_CONFIGURED"):
+                fixture.deployer.deploy(fixture.new_version, fixture.new_revision, key, manifest_sha)
+            self.assertEqual(fixture.docker.switches, [])
+            self.assertFalse(fixture.deployer.journal.exists())
 
     def test_forward_only_release_allows_forward_switch_but_refuses_rollback(self) -> None:
         with DeployerFixture() as fixture:

@@ -319,7 +319,7 @@ jobs:
     name: Deploy approved release
     needs: [validate, package-upload]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     environment: production
     env:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
@@ -359,6 +359,25 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$DEPLOY_SSH_KEY_FILE"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$DEPLOY_KNOWN_HOSTS_FILE"
           chmod 600 "$DEPLOY_SSH_KEY_FILE" "$DEPLOY_KNOWN_HOSTS_FILE"
+
+      - name: Prepare database backup and isolated restore rehearsal
+        env:
+          DEPLOY_SSH_KEY_FILE: ${{ runner.temp }}/greenpms-deploy-key
+          DEPLOY_KNOWN_HOSTS_FILE: ${{ runner.temp }}/greenpms-deploy-known-hosts
+          RELEASE_VERSION: ${{ needs.package-upload.outputs.version }}
+          RELEASE_REVISION: ${{ needs.package-upload.outputs.revision }}
+          RELEASE_KEY: ${{ needs.package-upload.outputs.key }}
+          RELEASE_MANIFEST_SHA: ${{ needs.package-upload.outputs.manifest_sha }}
+        run: |
+          set -eu
+          set -o pipefail
+          python3 harness/scripts/release/orchestrate.py prepare-database \
+            --version "$RELEASE_VERSION" \
+            --revision "$RELEASE_REVISION" \
+            --key "$RELEASE_KEY" \
+            --manifest-sha "$RELEASE_MANIFEST_SHA" | tee "$RUNNER_TEMP/greenpms-database-result.json"
+          printf '### Database preparation\n\n' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/greenpms-database-result.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy through the restricted server entry point
         env:

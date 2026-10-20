@@ -9,7 +9,7 @@ const runtimeTrees = [
   ["packages/domain/src", "packages/domain/src"],
   ["packages/db/src", "packages/db/src"]
 ];
-const excludedRuntimeFiles = new Set(["migrate.ts", "ready.ts", "reset.ts", "seed.ts"]);
+const excludedRuntimeFiles = new Set(["ready.ts", "reset.ts", "seed.ts"]);
 const sourceFilePattern = /\.(?:ts|tsx)$/u;
 const testFilePattern = /(?:\.test|\.spec)\.(?:ts|tsx)$/u;
 

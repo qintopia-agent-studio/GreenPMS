@@ -16,14 +16,15 @@
   -> 干净 checkout 构建 linux/amd64 镜像并扫描
   -> Docker archive + zstd + manifest + SHA256SUMS + SPDX SBOM
   -> COS 不可覆盖上传并回读校验
-  -> 受限 SSH -> 服务器临时下载、校验、docker load、Compose 切换
+  -> 受限 prepare-database SSH -> 校验/载入镜像；有新增迁移则备份和隔离恢复演练
+  -> 受限 deploy SSH -> 同一锁内停写、最终备份恢复复验、正式迁移、最终数据库预检、Compose 切换
   -> Docker health + 本地 ready/version + 公网 ready/version
   -> state.json 提交 current/previous/rollbackFrom，返回健康回执
   -> Actions 使用 upload credentials 写 deployed.json
   -> retention 保留最近 5 个成功版本，服务器清理旧 image ID
 ```
 
-GitHub Release 的 **Publish release** 是批准动作。只有一个 `production` Environment，允许 `main` 和 `v*`，不配置 reviewer 或 wait timer，因此 workflow 不会再暂停等待第二次批准。release、rollback 和定时 retention 共用 `greenpms-production` concurrency，避免上传、切换和清理并行破坏状态。
+GitHub Release 的 **Publish release** 是批准动作，同时批准该不可变版本的数据库升级和应用上线。只有一个 `production` Environment，允许 `main` 和 `v*`，不配置 reviewer 或 wait timer，因此 workflow 不会再暂停等待第二次批准。release、rollback 和定时 retention 共用 `greenpms-production` concurrency，避免上传、切换和清理并行破坏状态。
 
 Release job 使用两个独立 checkout：`validate` 从受保护 `main` 解析并固定一个 harness commit，目标 tag 提供不可变应用源码。版本、构建上下文和 OCI revision 都从 tag 目录校验；后续 job 的打包、COS 和 SSH 编排脚本都 checkout 同一个 harness commit。这样修复发布基础设施后可以重放旧 tag，而不会修改旧 tag、读取运行中变化的 `main`，或把 `main` 的应用代码混入旧版本镜像。打包前会一次检查 COS、retention 和受限 SSH 的必需 Variables/Secrets，只输出缺少的配置名称，不输出任何值。
 
@@ -101,7 +102,7 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 
 ## 5. 服务器切换和状态
 
-服务器受限入口只接受已验证的版本、40 位 revision、固定 `greenpms/releases/` key 和 manifest SHA。SSH key 使用 `restrict`，固定 known_hosts，禁止 TTY、转发、任意 shell 和任意 Docker 命令。root-owned sudo wrapper 只允许 deploy、rollback 和 maintenance 固定入口；adopt、recover、`rollback-local` 和 `configure-ai` 只可由管理员本地执行。
+服务器受限入口只接受已验证的版本、40 位 revision、固定 `greenpms/releases/` key 和 manifest SHA。SSH key 使用 `restrict`，固定 known_hosts，禁止 TTY、转发、任意 shell 和任意 Docker 命令。root-owned sudo wrapper 只允许 prepare-database、deploy、rollback 和 maintenance 固定入口；adopt、recover、`rollback-local` 和 `configure-ai` 只可由管理员本地执行。
 
 一次部署持有 flock，并按以下顺序执行：
 
@@ -130,9 +131,15 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 
 ## 7. 迁移兼容性
 
-本流程不会自动执行数据库迁移。外部数据库是 TencentDB，不是部署清理对象。服务 readiness 要求完整迁移文件集合和哈希与当前基线匹配；manifest 的 `requiredMigrations` 和 `rollbackCompatibility` 也会参与门禁。
+外部数据库是 TencentDB，不是部署清理对象。迁移 baseline 相同的版本保留原只读预检路径，不访问 owner 凭据、不备份或停写。目标清单只能在已核验旧清单后追加文件，并标记 `forward-only`；缺失旧文件、额外文件、哈希改写或非前缀变更在停写前拒绝。
 
-向前部署先核对旧/新 manifest：清单相同，或目标为 `forward-only` 且只追加迁移，才允许继续。清单兼容不代表生产已完成迁移。镜像身份验证后、写切换 journal 和停止旧容器之前，必须用目标镜像的现有 runtime 账号，在只读事务中核对真实数据库迁移清单并运行目标版本完整 readiness；缺失/额外迁移、连接失败或完整性不通过时，输出 `DATABASE_*` 诊断并保留旧服务，不进入切换。直接回退还要求当前和目标镜像都是 `same-migrations-only`；任一侧是 `forward-only` 就拒绝回退。缺失 baseline、既有迁移文件哈希被改写、非追加的清单变更或外部配置 hash 变化，都必须在切换前拒绝。保留旧镜像不等于数据库可以回退；需要前向修复、停写、备份恢复或数据库 owner 操作时，另开经过授权的迁移/恢复方案，不能把 owner credentials 给 GitHub Actions。
+新增 `prepare-database` 固定 SSH 操作接收与 deploy 相同的 tag/revision/key/manifest SHA。它在部署锁内校验镜像，读取真实生产迁移历史，备份并恢复到 `network=none` 的 PostgreSQL，按源库角色、成员关系、数据库 ACL、角色/数据库设置、时区与约束元数据恢复，再用旧镜像验证完整 readiness、用目标镜像内正式 `packages/db/src/migrate.js` 演练并验证目标 readiness。owner URL 仅来自服务器 root-owned 配置，禁止密码轮换。不向 SSH 接收 SQL、路径或任意 env。
+
+正式 deploy 重新核对准备记录绑定的发布身份、旧 state、应用配置和 owner 配置哈希。持久 journal 在任何停服务动作之前写入并 fsync；先禁止 app/worker 的 Docker 自动重启，再停止两个写服务。最终备份独立恢复并再次通过迁移演练后，持久写入 `sql-started`，才允许目标镜像正式迁移。完成后仍执行最终只读数据库预检、Docker/local/public 健康门禁，然后提交 current、返回健康 receipt，由 Actions 写 COS marker。
+
+准备和最终备份失败时尚未写生产 SQL，旧服务保持或恢复。正式迁移每个文件单独提交，尾部员工对账也可能失败；退出非零、超时或丢失回执均不能推断未提交。`sql-started` 后保持停写并取消确定属于本事务的容器/数据库后端，禁止通用旧镜像恢复。恢复 timer 对未提交升级只停写，不重放 SQL；若 state 已提交目标且目标数据库/应用健康，则保留新版本并完成 journal 收尾。同身份显式重试只在完整目标 ledger/readiness 通过时继续目标部署；部分结果拒绝自动续跑 SQL。不同发布身份在 journal 未完成时被拒绝。
+
+直接回退仍要求当前和目标都是 `same-migrations-only` 且 baseline 相同；保留 previous 镜像不代表数据库可回退。未知/部分提交需由管理员依据最终备份和实际数据库状态制定前向修复或恢复方案，不能编辑 state 或删除 journal 绕过门禁。
 
 首次接管时必须先核对旧容器的精确 image ID、tag/revision、API 版本和容器内迁移文件哈希，使用附录 B 的 `migration-baseline.mjs` 只读生成 baseline。不能用 `latest`、缺失 labels 或仓库当前版本猜测旧镜像身份。
 
@@ -142,9 +149,11 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 | --- | --- |
 | tag、版本资料、测试或 build 失败 | 不上传、不连接生产、不部署 |
 | COS 上传或回读失败 | workflow 失败，不启动服务器部署 |
-| 真实数据库预检失败 | 不切换旧容器、不写切换 journal 或成功标记；审计记录 `preflight-blocked`，仅显示固定诊断码及迁移文件名 |
+| 无迁移路径数据库预检失败 | 不切换旧容器、不写切换 journal 或成功标记；记录固定诊断码 |
+| 数据库准备/最终备份恢复失败 | 尚未写生产 SQL；旧服务保持或恢复；保留独立备份和安全诊断 |
+| 正式迁移开始后失败/回执丢失 | 保持停写，终止确定归属的任务及数据库后端；保留 journal/备份；不切旧镜像 |
 | 下载、checksum、manifest、platform、SBOM 或 image identity 失败 | 不执行 `docker load`，删除临时文件，旧容器不变 |
-| Compose 启动或健康检查失败 | 尽力恢复部署前容器；不写 `deployed.json`，不执行成功 retention |
+| Compose 启动或健康检查失败 | 无数据库升级时尽力恢复旧容器；本次已尝试数据库升级时停止写服务、保留 journal；不写成功 marker |
 | 恢复也失败 | 保留 journal 和故障证据，停止清理，管理员运行 recover |
 | Actions 在健康 receipt 后失败 | 新容器保持健康；marker/retention 可通过重跑或 maintenance 幂等恢复 |
 | COS 删除部分失败 | 新容器保持运行，报告删除失败，不强制回退 |
@@ -366,3 +375,31 @@ rtk proxy ssh "$ADMIN_ALIAS" \
 ## AI 密钥保护初始化
 
 既有实例缺少 AI 加密配置时，使用管理员 `configure-ai` 事务入口，操作和恢复见 [AI 助手部署说明](ai-assistant.md#既有生产实例补齐密钥保护)。该入口只处理 AI 密钥初始化，不接受任意配置覆盖或密钥轮换；现有配置 hash 防护仍生效。
+
+## 数据库升级配置与恢复
+
+本节是下一次经授权安装窗口的指南；本次 PR 不自动安装生产入口或发布新版本。管理员从审核通过的 main 打包 harness（包括 `database_upgrade.py` 与 `database-upgrade.mjs`）。安装器检测已有文件差异会拒绝覆盖：先在维护窗口保留现有 root-owned harness/入口副本，逐项核对差异，再替换已审核文件；不得从服务器当前目录构建应用。保持恢复 timer、部署锁和强制 SSH 命令受控，禁止同时运行旧新入口。升级后仅管理员执行本地配置核对，不把 owner 凭据传至 Actions。
+
+在 `/etc/greenpms/deploy.json` 增加：
+
+```json
+"databaseUpgrade": {
+  "ownerEnvFile": "/etc/greenpms/migration.env",
+  "backupDir": "/var/lib/greenpms-database-backups",
+  "postgresImage": "sha256:<预先核验并安装的64位PostgreSQL镜像ID>",
+  "postgresMajor": 18,
+  "timeoutSeconds": 900
+}
+```
+
+`migration.env` 必须 root-owned 0600，只允许 `MIGRATION_DATABASE_URL` 或完整 `MIGRATION_PGHOST/PORT/DATABASE/USER/PASSWORD`。使用数据库直接 owner，与 runtime 用户不同且指向同一实例/库；不得设置 `RUNTIME_DATABASE_PASSWORD`。数据库/应用 env 支持无换行的 Docker env-file 值。仅支持不依赖外部文件的 TLS 连接配置；`sslcert`、`sslkey`、`sslrootcert`、`sslcrl`、`sslcrldir` 及对应 `PGSSL*` 文件环境项在建立连接前以 `DATABASE_TLS_FILES_UNSUPPORTED` 拒绝，不扩大挂载权限或降级 TLS。支持的 `sslmode` 等无文件参数会随备份连接保留。会话 `options` 只接受 `-c` 形式的 TimeZone、search_path、lock_timeout、statement_timeout（支持反斜杠转义空白）；其他项准备阶段拒绝。正式迁移保留原配置并在末尾追加固定 lock/statement timeout，同时绑定本任务 `application_name`，强制超时不能被原值覆盖。恢复副本分别重现 owner/runtime 有效 TimeZone 和 search_path，不把 owner 当前时区误设为数据库全局默认。
+
+备份目录必须独立于 state/download 树，root-owned 0700；安装器创建默认目录但不填入凭据。配置要求 PostgreSQL 16+，当前生产基线按 18 验证；固定镜像必须与源库 major 相同，支持源库 libc locale、默认 tablespace。非受支持配置在停写前失败，不降级成无角色/无 ACL 的恢复。PostgreSQL 镜像需提前核验、装入本机，配置精确 image ID；不能使用浮动 tag。一次准备和一次最终恢复都会创建独立无外网 PostgreSQL。只有本任务 UUID、精确容器名和 ownership label 三者匹配的容器/匿名卷会清理；不执行全局 prune。
+
+每次准备的 UUID 目录保留 custom-format dump、SHA256、源角色/ACL/约束元数据、生成的受限连接文件和 `*-verified.json`。每个 dump 还保留独立 `<备份名>-metadata/`，包含当次恢复文件与 SHA256 清单；对应 `*-verified.json` 同时绑定 dump SHA 和该元数据清单 SHA。后续最终备份更新操作目录不会覆盖旧备份的恢复资料。恢复文件采用原子写、文件和目录 fsync；新目录的父目录、最终 dump 和元数据均持久化完成后，才允许写入 `sql-started`。这些资料含数据库数据及敏感连接配置，必须始终保持 0700/0600；不加入仓库、COS release prefix 或 GitHub 产物。`adapter-status.json` 记录固定步骤，`adapter-failure.json` 保留失败步骤，`helper-failure.json` 按本次动作清除旧状态，仅记录已知诊断码/SQLSTATE，不保留原始 PG 错误、数据或凭据。`production-migration.json` 记录实际 ledger 中允许的迁移文件名、首个待迁移文件、SQLSTATE 和退出/超时状态；失败或失联统一标记 outcome=unknown，即使 ledger 文件数已齐也不能据此宣称尾部对账成功。固定受限 wrapper 动态导入目标镜像原正式 migrate.js，仅过滤输出、采集安全回执，不改事务语义。备份不会随 release retention 或下载清理删除，容量和后续保留策略由管理员在另行授权的备份管理流程处理。
+
+准备中断由 `database-preparing.json` 跟踪，timer 清理确定归属的演练任务。停写后的 `transaction.json` 阶段包括 inspecting/stopping/final-backup、sql-started/sql-complete/opening/committed；不得手工删 journal。应用停写时 restart policy 为 `no`；数据库事务的 opening 阶段也通过固定 Compose override 以 `restart:no` 启动目标服务，直到健康通过且 state 已提交后，才按原 Compose 声明恢复重启策略。提交后的策略恢复失败保留健康目标与 journal，由恢复入口重试善后。SIGKILL 不保证瞬间停止运行中的进程；持久 journal 和 timer 接管后执行停写/取消，跨主机重启期间不会提前自动拉起未提交目标。迁移容器与取消容器使用独立 UUID 派生的固定名称及相同归属 label，迁移容器删除失败仍会尝试取消活动数据库后端；取消阶段记录或错误 journal 更新遇到 ENOSPC 不能阻断停写/取消，保留此前有效 journal。恢复 timer 不承担数据库备份还原，不会自动执行任意补偿 SQL。
+
+若未知迁移结果：确认 app/worker 均停止，保留所有证据，查看固定阶段诊断，使用管理员受控只读检查确定 ledger 和 readiness；只有相同版本、revision、manifest SHA 的重试可继续，且不重放生产 SQL。目标 readiness 不通过时，先在独立恢复副本复现并形成前向修复或备份恢复方案。任何生产恢复/修改需要对应授权；不能把备份存在等同于恢复已验证。
+
+本地真实适配器验证入口为 `scripts/release/verify_database_adapter.py`，显式传入三个已验证本地 image ID 和输出目录。它使用全新合成数据库，运行两次真实 dump/restore、源/目标 readiness 和正式 migrate.js，结束后只删除自己的源库与演练容器；它不替代生产规模下的停写时间、TLS/CAM/SSH、真实数据或现场人工验收。

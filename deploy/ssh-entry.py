@@ -10,7 +10,7 @@ entry_mode = sys.argv[1:]
 if entry_mode:
     sys.exit("invalid GreenPMS SSH entry mode")
 version = r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
-deploy = re.fullmatch(rf"(deploy|rollback) ({version}) ([0-9a-f]{{40}}) (greenpms/releases/{version}/[0-9a-f]{{40}}/) ([0-9a-f]{{64}})", original)
+deploy = re.fullmatch(rf"(deploy|prepare-database|rollback) ({version}) ([0-9a-f]{{40}}) (greenpms/releases/{version}/[0-9a-f]{{40}}/) ([0-9a-f]{{64}})", original)
 if deploy:
     operation, tag, revision, key, checksum = deploy.groups()
     if key != f"greenpms/releases/{tag}/{revision}/":

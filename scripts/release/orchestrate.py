@@ -458,7 +458,7 @@ class LockedSSH:
             raise ReleaseError("deployment SSH identity is invalid")
         if not Path(identity).is_file() or not Path(known_hosts).is_file():
             raise ReleaseError("deployment SSH key or known_hosts file is unavailable")
-        if operation in {"deploy", "rollback"}:
+        if operation in {"deploy", "prepare-database", "rollback"}:
             validate_identity(version, revision)
             if not isinstance(key, str) or key != release_prefix(ROOT_PREFIX, version, revision):
                 raise ReleaseError("invalid remote release key")
@@ -573,6 +573,18 @@ def _stores(store: CosStore | None, marker_store: CosStore | None, retention_sto
     return marker, retention
 
 
+def prepare_database(version: str, revision: str, key: str, manifest_sha: str, *, ssh_factory=None):
+    def prepared(receipt):
+        expected = {"application": "greenpms", "prefix": key, "manifestSha256": manifest_sha}
+        if (not isinstance(receipt, dict) or set(receipt) != {*expected, "status"}
+                or any(receipt.get(k) != v for k, v in expected.items())
+                or receipt.get("status") not in {"database-prepared", "database-not-required", "database-resume-required"}):
+            raise ReleaseError("invalid database preparation receipt")
+        return "complete", receipt
+    return _session("prepare-database", prepared, version=version, revision=revision,
+                    key=key, manifest_sha=manifest_sha, ssh_factory=ssh_factory)
+
+
 def deploy(version: str, revision: str, key: str, manifest_sha: str, *, dry_run: bool = False,
            store: CosStore | None = None, marker_store: CosStore | None = None,
            retention_store: CosStore | None = None, ssh_factory: Callable[[list[str]], Any] | None = None,
@@ -684,13 +696,14 @@ def maintenance(*, dry_run: bool = False, store: CosStore | None = None,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="GreenPMS locked production orchestration")
     subparsers = parser.add_subparsers(dest="operation", required=True)
-    for name in ("deploy", "rollback"):
+    for name in ("deploy", "prepare-database", "rollback"):
         command = subparsers.add_parser(name)
         command.add_argument("--version", required=True)
         command.add_argument("--revision", required=True)
         command.add_argument("--key", required=True)
         command.add_argument("--manifest-sha", required=True)
-        command.add_argument("--dry-run", action="store_true")
+        if name != "prepare-database":
+            command.add_argument("--dry-run", action="store_true")
     maintenance_parser = subparsers.add_parser("maintenance")
     maintenance_parser.add_argument("--dry-run", action="store_true")
     rollback_parser = subparsers.add_parser("rollback-release")
@@ -698,7 +711,9 @@ def main(argv: list[str] | None = None) -> int:
     rollback_parser.add_argument("--revision")
     rollback_parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    if args.operation == "deploy":
+    if args.operation == "prepare-database":
+        result = prepare_database(args.version, args.revision, args.key, args.manifest_sha)
+    elif args.operation == "deploy":
         result = deploy(args.version, args.revision, args.key, args.manifest_sha, dry_run=args.dry_run)
     elif args.operation == "rollback":
         result = rollback(args.version, args.revision, args.key, args.manifest_sha, dry_run=args.dry_run)
