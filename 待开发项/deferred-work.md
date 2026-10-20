@@ -1,3 +1,7 @@
+- source_spec: 用户 2026-10-20 追加截图反馈：逐日资金数据也按最新日期在最上方排列。
+  summary: B 级排序调整已实现，待反馈；逐日资金表按登记日倒序，同日币种分行保留；员工助手同步说明。
+  evidence: 类型检查及 44 项既有图表、预览数据和助手知识测试通过；ego-browser 合成预览确认 30 行按日期倒序。截图位于 .local-workspace/dashboard-daily-newest-first/ego-money-preview.png；未发布。
+
 - source_spec: 用户 2026-10-20 截图反馈：逐日住宿数据按日期倒排，并解释“质量 / 完整”。
   summary: B 级排序调整已实现，待反馈；逐日住宿表最新日期在最上方，趋势图继续按时间正序；员工助手同步排序和质量含义。质量仅反映住宿记录的待核对状态，容量依据单独判断。
   evidence: 类型检查、生产构建及 56 项现有住宿图表、预览数据、领域统计和助手知识回归通过；合成浏览器确认近 30 天和近 7 天的逐日住宿表均倒序，独立只读审阅未发现此次引入的问题。截图位于 .local-workspace/dashboard-daily-newest-first/daily-stays.jpg，预览 http://127.0.0.1:4216/community-preview.html 。本次不修改统计逻辑或业务事实，未发布。

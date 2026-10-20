@@ -7,6 +7,7 @@ const axis = { tick: { fill: "var(--muted)", fontSize: 11 }, axisLine: false, ti
 const tooltip = { contentStyle: { border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", background: "var(--surface)" } };
 export function DashboardCharts({ data }: { data: DashboardResponse }) {
   const dailyStayRows = [...data.stayTrend].sort((a, b) => b.date.localeCompare(a.date));
+  const dailyMoneyRows = [...data.moneyTrend].sort((a, b) => b.date.localeCompare(a.date));
   const moneyRows = data.moneyTrend.map(row => {
     const entry = row.money.find(item => item.currency === data.currency);
     const safe = (value: string) => { const n = Number(value); return Number.isSafeInteger(n) ? n / 100 : null; };
@@ -34,7 +35,7 @@ export function DashboardCharts({ data }: { data: DashboardResponse }) {
           <Tooltip {...tooltip} formatter={(value, name) => typeof value === "number" ? `${(name === "退款" ? Math.abs(value) : value).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元` : "—"} /><Legend iconType="square" /><Bar dataKey="collection" name="收款" fill="var(--brand)" radius={[2, 2, 0, 0]} isAnimationActive={false} /><Bar dataKey="refund" name="退款" fill="var(--warning)" radius={[0, 0, 2, 2]} isAnimationActive={false} /><Bar dataKey="correction" name="更正" fill="var(--accent)" radius={[2, 2, 0, 0]} isAnimationActive={false} />
         </BarChart></ResponsiveContainer>
       </div>
-      <section className="dashboard-data-table"><h4>逐日资金数据（元）</h4><div className="dashboard-table-scroll"><table><thead><tr><th>登记日</th><th>币种</th><th>收款</th><th>退款</th><th>更正</th><th>净额</th></tr></thead><tbody>{data.moneyTrend.flatMap(row => row.money.map(item => <tr key={`${row.date}-${item.currency}`}><td>{row.date}</td><td>{item.currency}</td><td>{money(item.collectedMinor, item.currency)}</td><td>{money(item.refundedMinor, item.currency)}</td><td>{money(item.correctedMinor, item.currency)}</td><td>{item.netMinor === null ? "待核对" : money(item.netMinor, item.currency)}</td></tr>))}</tbody></table></div></section>
+      <section className="dashboard-data-table"><h4>逐日资金数据（元）</h4><div className="dashboard-table-scroll"><table><thead><tr><th>登记日</th><th>币种</th><th>收款</th><th>退款</th><th>更正</th><th>净额</th></tr></thead><tbody>{dailyMoneyRows.flatMap(row => row.money.map(item => <tr key={`${row.date}-${item.currency}`}><td>{row.date}</td><td>{item.currency}</td><td>{money(item.collectedMinor, item.currency)}</td><td>{money(item.refundedMinor, item.currency)}</td><td>{money(item.correctedMinor, item.currency)}</td><td>{item.netMinor === null ? "待核对" : money(item.netMinor, item.currency)}</td></tr>))}</tbody></table></div></section>
     </section>
   </div>;
 }
