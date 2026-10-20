@@ -44,6 +44,7 @@ export function CommunityPanels({ data }: { data: DashboardResponse }) {
   const [selected, setSelected] = useState(c.trend.at(-1)?.date ?? "");
   const [expanded, setExpanded] = useState(false);
   const display = displayedCommunityTrend(c.trend);
+  const dailyRows = [...display.rows].sort((a, b) => b.date.localeCompare(a.date));
   const registrationBasis = display.registrationBasis;
   const day = display.rows.find(row => row.date === selected) ?? display.rows.at(-1);
   const rows = display.rows.map(row => ({ ...row, free: freeCount(row) }));
@@ -63,6 +64,6 @@ export function CommunityPanels({ data }: { data: DashboardResponse }) {
       </ComposedChart></ResponsiveContainer>
     </div> : <p className="dashboard-empty">本区间没有逐日人数资料，不能将没有数据视为零。</p>}
     {day ? <div className="community-day-readout"><label><span className="sr-only">查看当日人数</span><select value={day.date} onChange={e => setSelected(e.target.value)}>{c.trend.map(row => <option key={row.date}>{row.date}</option>)}</select></label><span>{registrationBasis ? "登记在住" : "在住"} <b>{day.total ?? "—"}</b> 人</span><span>付费 <b>{day.paid}</b> · 免费 <b>{freeCount(day)}</b></span>{day.total === null || day.unclassified ? <DashboardHint text={registrationBasis ? `${day.date}：已按住宿登记统计；跨单身份尚未完整关联。${registrationExplanation}` : `${day.date}：${day.unlinked} 条登记关系缺少身份/日期依据，${day.unclassified ?? 0} 人的付费/免费分类冲突。已知分类保留；到原订单核对住宿人和来源。`} /> : null}</div> : null}
-    <section className="dashboard-data-table" aria-labelledby="daily-people-evidence-title"><h3 id="daily-people-evidence-title">逐日人数与统计依据{c.reasons.length ? ` · ${c.reasons.length} 项待核对` : ""}</h3><div className="dashboard-table-scroll"><table><thead><tr><th>日期</th><th>{registrationBasis ? "登记人数" : "总人数"}</th><th>付费</th><th>义工</th><th>接待</th><th>其他免费</th></tr></thead><tbody>{display.rows.map(row => <tr key={row.date}><td>{row.date}</td><td>{row.total ?? <Count value={null} reason={`${row.date} 有 ${row.unlinked} 条登记关系待核对；${reason}`} unit="" />}</td><td>{row.paid}</td><td>{row.volunteer}</td><td>{row.reception}</td><td>{row.otherFree}</td></tr>)}</tbody></table></div>{c.reasons.map((text, i) => <p key={i}>{text}</p>)}<Link to="/orders">到订单核对实际住宿人 <ArrowRight size={13} /></Link></section>
+    <section className="dashboard-data-table" aria-labelledby="daily-people-evidence-title"><h3 id="daily-people-evidence-title">逐日人数与统计依据{c.reasons.length ? ` · ${c.reasons.length} 项待核对` : ""}</h3><div className="dashboard-table-scroll"><table><thead><tr><th>日期</th><th>{registrationBasis ? "登记人数" : "总人数"}</th><th>付费</th><th>义工</th><th>接待</th><th>其他免费</th></tr></thead><tbody>{dailyRows.map(row => <tr key={row.date}><td>{row.date}</td><td>{row.total ?? <Count value={null} reason={`${row.date} 有 ${row.unlinked} 条登记关系待核对；${reason}`} unit="" />}</td><td>{row.paid}</td><td>{row.volunteer}</td><td>{row.reception}</td><td>{row.otherFree}</td></tr>)}</tbody></table></div>{c.reasons.map((text, i) => <p key={i}>{text}</p>)}<Link to="/orders">到订单核对实际住宿人 <ArrowRight size={13} /></Link></section>
   </section>;
 }

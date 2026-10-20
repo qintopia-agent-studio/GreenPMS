@@ -1,3 +1,7 @@
+- source_spec: 用户 2026-10-20 反馈：未来已订和楼栋房型表列间距均匀、美观，逐日人数也按最新日期在上排列。
+  summary: B 级展示调整已实现，待反馈；两张七列表采用等宽列、统一居中和留白，窄屏表内横向滚动；逐日人数表按日期倒序展示，员工知识和界面规格同步更新。
+  evidence: 类型检查及 49 项社区展示、合成数据和助手知识回归通过；ego-browser 在 1440px、390px 下核对两表等宽、对齐和页面无横向溢出，人数明细 30 行倒序。截图位于 .local-workspace/dashboard-daily-newest-first/ 下的 future-equal-columns-*、breakdown-equal-columns-*、people-newest-first.png；未发布。
+
 - source_spec: 用户 2026-10-20 确认去掉付费住宿量占比的绿色条，仅保留百分比。
   summary: B 级展示调整已实现，待反馈；移除占比装饰条及无用样式，保留居中百分比、合计和资料缺项说明，员工知识及界面规格同步更新。
   evidence: 类型检查、36 项助手知识回归通过；ego-browser 确认四行百分比与 100% 合计保留且居中，绿色条数量为零。截图位于 .local-workspace/dashboard-daily-newest-first/shares-without-bars.png；未发布。
