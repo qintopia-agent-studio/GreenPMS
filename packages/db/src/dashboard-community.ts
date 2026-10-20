@@ -11,7 +11,7 @@ import { loadDashboardStays } from "./dashboard-stays.ts";
 
 export async function loadDashboardCommunity(trx: Transaction<Database>, propertyId: string, range: DashboardRange, today: string, timezone: string, scope?: OperatingStatisticsScope) {
   const orders = await trx.selectFrom("orders as o").innerJoin("stays as s","s.order_id","o.id")
-    .select(["o.id","o.arrival_date","o.departure_date","o.status","o.stay_type","o.free_stay_category_code","o.member_id"])
+    .select(["o.id","o.arrival_date","o.departure_date","o.status","o.stay_type","o.free_stay_category_code","o.member_id","o.member_contract_id"])
     .where("o.property_id","=",propertyId).where("o.status","in",["CHECKED_IN","CHECKED_OUT","RESERVED"]).execute();
   if(!orders.length)return communityMetrics([],[],range,today);
   const ids=orders.map(o=>o.id);
@@ -81,7 +81,8 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
       }
       continue;
     }
-    const missingPerson = (durationReviewReason: string) => addStay({durationReviewReason,orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null});
+    const memberStatus = order.member_id || order.member_contract_id ? "UNKNOWN" as const : "NOT_MEMBER" as const;
+    const missingPerson = (durationReviewReason: string) => addStay({durationReviewReason,orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null,memberStatus});
     if(!intervals?.length){evidenceIssues.push(`订单 ${order.id} 的有效住宿时间线缺失，未推算人数或居住时长`);missingPerson("有效住宿时间线缺失，连续入住起点与人数待核对。");continue;}
     const people = peopleByOrder.get(order.id) ?? [];
     if (!people.length) { if (!whollyExcluded) evidenceIssues.push(`订单 ${order.id} 未登记实际住宿人`); missingPerson("实际住宿人名单缺失，人数与连续时长待核对。"); continue; }
@@ -89,7 +90,7 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
       const raw = rawById.get(person.id)!;
       const removed = removedByPerson.get(person.id);
       const later = person.role !== "PRIMARY" && raw.created_by_command_id && raw.created_by_command_id !== initialCommands.get(order.id) && local(raw.created_at) > order.arrival_date;
-      const common = { identityApproximate: identities.get(person.id)?.approximate ?? false, ...(later ? { durationReviewReason: "入住后追加住宿登记，缺少该住客实际入住日期，不能沿用订单起点。" } : {}), orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null };
+      const common = { identityApproximate: identities.get(person.id)?.approximate ?? false, ...(later ? { durationReviewReason: "入住后追加住宿登记，缺少该住客实际入住日期，不能沿用订单起点。" } : {}), orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null, memberStatus };
       // Registration withdrawal is not an actual departure event; it cannot supply a guest checkout date.
       if (removed) {
         if (removed > order.arrival_date) {

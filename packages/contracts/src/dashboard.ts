@@ -114,6 +114,13 @@ export interface CommunityDay {
   unclassified?: number;
   registered?: { total: number | null; paid: number; volunteer: number; reception: number; otherFree: number };
 }
+export interface CommunityResidentDay {
+  date: string;
+  total: number | null;
+  longStay: number;
+  member: number | null;
+  memberReview: number;
+}
 export interface CommunityRecord {
   orderId: string; date: string; nights: number; reason: string;
   people?: number | null;
@@ -139,4 +146,6 @@ export interface DashboardCommunity {
   records: CommunityRecord[];
   counts: Record<CommunityRecord["kind"], number>;
   reasons: string[];
+  residentCurrent?: CommunityResidentDay;
+  residentTrend?: CommunityResidentDay[];
 }
