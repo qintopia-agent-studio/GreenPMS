@@ -1,4 +1,4 @@
-import type { CommunityDay, CommunityRecord, DashboardCommunity, DashboardRange } from "@qintopia/contracts";
+import type { CommunityDay, CommunityRecord, CommunityResidentDay, DashboardCommunity, DashboardRange } from "@qintopia/contracts";
 import { dashboardDate } from "./dashboard-metrics.ts";
 import { enumerateServiceDates } from "./dates.ts";
 
@@ -14,6 +14,7 @@ export interface CommunityStay {
   historical?: boolean;
   durationReviewReason?: string;
   identityApproximate?: boolean;
+  memberStatus?: "CONFIRMED" | "UNKNOWN" | "NOT_MEMBER";
 }
 export interface CommunityEvent { orderId: string; date: string; nights: number; reason: string; kind: "RENEWAL" | "EARLY" }
 /** Complete evidence defines residence/event boundaries; operating contributions still come from `stays`. */
@@ -221,6 +222,57 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     ? communityMetrics(continuity.stays, events, range, today, [], continuity.planned).records.filter(continuity.includesEvent)
     : scopedRecords;
   const trend = enumerateServiceDates(range.from, dashboardDate(range.to, 1)).map(day);
+  const residentDates = [...new Set([...trend.map(row => row.date), today])];
+  const longStayByDate = new Map<string, Set<string>>();
+  const memberByDate = new Map<string, Set<string>>();
+  const memberReviewByDate = new Map<string, Set<string>>();
+  const ensure = (map: Map<string, Set<string>>, date: string) => {
+    const existing = map.get(date);
+    if (existing) return existing;
+    const created = new Set<string>(); map.set(date, created); return created;
+  };
+  for (const [key, chainInput] of durationPeople) {
+    const chain = [...chainInput].sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
+    const operating = residencePeople.get(key) ?? [];
+    let start = "", until = "";
+    const flush = () => {
+      if (!start || !until) return;
+      for (const date of residentDates) {
+        const active = date === today
+          ? operating.some(stay => stay.current && stay.arrival <= date)
+          : operating.some(stay => stay.arrival <= date && date < stay.departure);
+        if (active && nights(start, date) >= 7) ensure(longStayByDate, date).add(key);
+      }
+    };
+    for (const stay of chain) {
+      if (start && stay.arrival > until) { flush(); start = ""; until = ""; }
+      if (!start) start = stay.arrival;
+      if (stay.departure > until) until = stay.departure;
+    }
+    flush();
+  }
+  for (const date of residentDates) {
+    for (const stay of stays) {
+      if (!relevant(stay, date)) continue;
+      const key = residenceKey(stay) ?? `order:${stay.orderId}:${stay.registrationKey ?? "unknown"}`;
+      if (stay.memberStatus === "CONFIRMED") ensure(memberByDate, date).add(key);
+      if (stay.memberStatus === "UNKNOWN") ensure(memberReviewByDate, date).add(key);
+    }
+  }
+  const residentDay = (date: string): CommunityResidentDay => {
+    const longStay = longStayByDate.get(date) ?? new Set<string>();
+    const member = memberByDate.get(date) ?? new Set<string>();
+    const review = memberReviewByDate.get(date) ?? new Set<string>();
+    return {
+      date,
+      longStay: longStay.size,
+      member: review.size ? null : member.size,
+      total: review.size ? null : new Set([...longStay, ...member]).size,
+      memberReview: review.size
+    };
+  };
+  const residentTrend = trend.map(row => residentDay(row.date));
+  const residentCurrent = residentDay(today);
   const unknown = trend.some(row => row.unlinked > 0);
   const current = day(today);
   const reasons = [...evidenceIssues];
@@ -234,6 +286,8 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     duration: [...distribution.values()].sort((a, b) => a.nights - b.nights),
     durationCoverage: { current: durationCoverage("current"), all: durationCoverage("all") }, records: resultRecords,
     counts: { NEW: resultRecords.filter(row => row.kind === "NEW").length, RETURN: resultRecords.filter(row => row.kind === "RETURN").length, RENEWAL: resultRecords.filter(row => row.kind === "RENEWAL").length, DUE: resultRecords.filter(row => row.kind === "DUE").length, EARLY: resultRecords.filter(row => row.kind === "EARLY").length },
-    reasons
+    reasons,
+    residentCurrent,
+    residentTrend
   };
 }
