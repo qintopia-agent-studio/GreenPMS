@@ -1,3 +1,23 @@
+- source_spec: 用户 2026-10-20 反馈：未来已订和楼栋房型表列间距均匀、美观，逐日人数也按最新日期在上排列。
+  summary: B 级展示调整已实现，待反馈；两张七列表采用等宽列、统一居中和留白，窄屏表内横向滚动；逐日人数表按日期倒序展示，员工知识和界面规格同步更新。
+  evidence: 类型检查及 49 项社区展示、合成数据和助手知识回归通过；ego-browser 在 1440px、390px 下核对两表等宽、对齐和页面无横向溢出，人数明细 30 行倒序。截图位于 .local-workspace/dashboard-daily-newest-first/ 下的 future-equal-columns-*、breakdown-equal-columns-*、people-newest-first.png；未发布。
+
+- source_spec: 用户 2026-10-20 确认去掉付费住宿量占比的绿色条，仅保留百分比。
+  summary: B 级展示调整已实现，待反馈；移除占比装饰条及无用样式，保留居中百分比、合计和资料缺项说明，员工知识及界面规格同步更新。
+  evidence: 类型检查、36 项助手知识回归通过；ego-browser 确认四行百分比与 100% 合计保留且居中，绿色条数量为零。截图位于 .local-workspace/dashboard-daily-newest-first/shares-without-bars.png；未发布。
+
+- source_spec: 用户 2026-10-20 反馈：逐日表和楼栋房型表的数字与上方标题对齐。
+  summary: B 级展示调整已实现，待反馈；逐日住宿和逐日资金表的列标题、对应单元格统一居中；楼栋房型表的数字列标题、明细和底部合计居中，名称列左对齐。员工助手与既有界面规格同步说明。
+  evidence: ego-browser 检查两张逐日表 330 个单元格、楼栋房型表 20 个明细数字和 5 个合计与标题的水平中心，最大偏差小于 0.01px；36 项助手知识回归通过。截图位于 .local-workspace/dashboard-daily-newest-first/ego-tables-aligned.png 和 ego-breakdown-aligned.png；未发布。
+
+- source_spec: 用户 2026-10-20 追加截图反馈：逐日资金数据也按最新日期在最上方排列。
+  summary: B 级排序调整已实现，待反馈；逐日资金表按登记日倒序，同日币种分行保留；员工助手同步说明。
+  evidence: 类型检查及 44 项既有图表、预览数据和助手知识测试通过；ego-browser 合成预览确认 30 行按日期倒序。截图位于 .local-workspace/dashboard-daily-newest-first/ego-money-preview.png；未发布。
+
+- source_spec: 用户 2026-10-20 截图反馈：逐日住宿数据按日期倒排，并解释“质量 / 完整”。
+  summary: B 级排序调整已实现，待反馈；逐日住宿表最新日期在最上方，趋势图继续按时间正序；员工助手同步排序和质量含义。质量仅反映住宿记录的待核对状态，容量依据单独判断。
+  evidence: 类型检查、生产构建及 56 项现有住宿图表、预览数据、领域统计和助手知识回归通过；合成浏览器确认近 30 天和近 7 天的逐日住宿表均倒序，独立只读审阅未发现此次引入的问题。截图位于 .local-workspace/dashboard-daily-newest-first/daily-stays.jpg，预览 http://127.0.0.1:4216/community-preview.html 。本次不修改统计逻辑或业务事实，未发布。
+
 - source_spec: 用户反馈居住详情返回入口不明显，“当前已住”和“本期已结束”难以理解。
   summary: B级展示改动已实现，待反馈；返回改为带左箭头、边框及底色的“返回居住概览”，最小点击高度44px；标签改为“现在还在住”和“所选日期内已离店”，显示人数/次数、实际时长与具体截止日期/离店日期范围，解释连续续住和换房累计规则。仅调整展示，不修改统计、履约或业务规则。助手知识、问答用例及既有浏览器验收脚本同步更新。
   evidence: 50项相关测试、TypeScript、8项PR格式测试、验收脚本语法和差异检查通过；937×602深色宿主预览两次均被Unauthorized权限页拦截，未降低保护；视觉、点击与中文字体现场验收未完成，未部署生产。
