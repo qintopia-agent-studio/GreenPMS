@@ -2014,8 +2014,8 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     if (serviceDates.length > product.entitlement_units) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "本次住宿夜数超过所选会员产品权益数量", 409);
     }
-    const timelineUnits = await Promise.all([...new Set(stayTimeline.map((item) => item.inventoryUnitId))]
-      .map((unitId) => loadInventoryUnit(db, propertyId, unitId)));
+    const timelineUnitIds = [...new Set(stayTimeline.map((item) => item.inventoryUnitId))];
+    const timelineUnits = await Promise.all(timelineUnitIds.map((unitId) => loadInventoryUnit(db, propertyId, unitId)));
     const unitMismatch = timelineUnits.some((unit) => (
       unit.kind !== product.allowed_inventory_kind
       || unit.roomTypeCode !== product.allowed_room_type_code
@@ -2028,23 +2028,37 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     if (!unitMismatch && crossRoomReason) {
       throw new DomainError("VALIDATION_ERROR", "当前房型已匹配会员产品，不需要临时安排");
     }
-    const actualUnit = timelineUnits[0]!;
+    const allTimelineRooms = timelineUnits.every((unit) => unit.kind === "ROOM");
+    const targetRoomTypePresent = timelineUnits.some((unit) => unit.roomTypeCode === product.allowed_room_type_code);
     const crossRoomEligible = context.order.status === "CHECKED_IN" && context.stay.status === "IN_HOUSE"
-      && timelineUnits.length === 1 && actualUnit.kind === "ROOM"
+      && allTimelineRooms
       && product.allowed_inventory_kind === "ROOM" && product.entitlement_unit_kind === "ROOM_NIGHT";
-    if (unitMismatch && (!crossRoomEligible || !crossRoomReason)) {
+    const sequenceCrossRoomEligible = crossRoomEligible && timelineUnitIds.length > 1 && targetRoomTypePresent;
+    const singleCrossRoomEligible = crossRoomEligible && timelineUnitIds.length === 1;
+    if (unitMismatch && (!singleCrossRoomEligible && !sequenceCrossRoomEligible || !crossRoomReason)) {
       throw new DomainError("ENTITLEMENT_CONFLICT", crossRoomEligible
-        ? "所选会员产品不适用于本次住宿房型；请确认本次临时安排其他整房并填写原因"
-        : "所选会员产品不适用于本次住宿房型；仅同一整房的在住订单可临时跨房型升级整房会员", 409);
+        ? targetRoomTypePresent
+          ? "所选会员产品不适用于全部住宿房段；请确认本次临时安排其他整房并填写原因"
+          : "目标会员产品房型未出现在住宿时间线中，不能确认本次临时安置"
+        : "所选会员产品不适用于本次住宿房型；仅整房在住订单可临时跨房型升级整房会员", 409);
     }
+    const runs = timelineRuns(stayTimeline);
     const crossRoomUpgrade = unitMismatch ? {
-      kind: "TEMPORARY_OTHER_ROOM_UPGRADE",
+      kind: runs.length > 1 ? "TEMPORARY_ROOM_SEQUENCE_UPGRADE" : "TEMPORARY_OTHER_ROOM_UPGRADE",
       reason: crossRoomReason!,
       originalRoomTypeCode: product.allowed_room_type_code,
-      actualInventoryUnitId: actualUnit.id,
-      actualRoomTypeCode: actualUnit.roomTypeCode,
+      actualInventoryUnitId: timelineUnits[0]!.id,
+      actualRoomTypeCode: timelineUnits[0]!.roomTypeCode,
       arrivalDate: context.order.arrival_date,
-      departureDate: context.order.departure_date
+      departureDate: context.order.departure_date,
+      ...(runs.length > 1 ? {
+        segments: runs.map((run) => ({
+          inventoryUnitId: run.inventoryUnitId,
+          roomTypeCode: timelineUnits.find((unit) => unit.id === run.inventoryUnitId)!.roomTypeCode,
+          arrivalDate: run.arrivalDate,
+          departureDate: run.departureDate
+        }))
+      } : {})
     } : undefined;
 
     const [allOrderFunds, existingTransfers] = await Promise.all([

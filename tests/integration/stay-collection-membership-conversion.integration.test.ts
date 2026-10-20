@@ -3154,6 +3154,74 @@ describe("cross-room membership upgrade", () => {
     await assertConversionCommandStillValid(converted.receipt.commandId);
   });
 
+  it("accepts a continuous multi-room timeline after a pre-conversion room change", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftDate(businessDate, -6);
+    const departureDate = shiftDate(businessDate, 1);
+    const sourceUnit = await db.selectFrom("inventory_units").select(["id", "room_type_code"])
+      .where("code", "=", "A02").executeTakeFirstOrThrow();
+    // The private-single product must appear in one timeline segment; B01 is the
+    // current reference-catalog room for that product (D01 is shared-bath single).
+    const targetUnit = await db.selectFrom("inventory_units").select(["id", "room_type_code"])
+      .where("code", "=", "B01").where("active", "=", true).executeTakeFirstOrThrow();
+    const prefix = "cross-room-sequence";
+    const memberId = await createMember(`STAGE86-${prefix.toUpperCase()}-ID`, prefix);
+    const stay = await createCheckedOutStay({
+      prefix,
+      documentNumber: `STAGE86-${prefix.toUpperCase()}-ID`,
+      skipCheckOut: true,
+      unitId: sourceUnit.id,
+      arrivalDate,
+      departureDate,
+      collectionAmountMinor: 72_000,
+      transactionReference: "WX-STAGE86-CROSS-ROOM-SEQUENCE-SOURCE"
+    });
+    const beforeMove = await writableOrderView(stay.orderId);
+    const move = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => execute({
+      commandType: "MOVE_UNIT",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: stay.orderId,
+        newInventoryUnitId: targetUnit.id,
+        effectiveDate: businessDate,
+        targetCurrentContractAmountMinor: beforeMove.amounts.currentContractAmount.minorUnits,
+        manualPriceAdjustmentReason: "房型变更后保留原住宿成交价"
+      }
+    }, `${prefix}-move`));
+    expect(move.businessCommitted).toBe(true);
+
+    const envelope = conversionEnvelope({
+      orderId: stay.orderId,
+      memberId,
+      collectionFactId: stay.collectionFactId,
+      membershipProductId: products.privateSingle,
+      agreedPriceMinor: 216_000,
+      remainingPaymentTransactionReference: "WX-STAGE86-CROSS-ROOM-SEQUENCE-REMAINING"
+    });
+    envelope.input.temporaryOtherRoomReason = "房型变更后按目标会员产品覆盖完整住宿时间线";
+    const prepared = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () =>
+      preview(envelope, `${prefix}-conversion`));
+    const upgrade = prepared.preview.effect.crossRoomUpgrade as Record<string, unknown>;
+    expect(upgrade.kind).toBe("TEMPORARY_ROOM_SEQUENCE_UPGRADE");
+    expect(upgrade.segments).toEqual([
+      { inventoryUnitId: sourceUnit.id, roomTypeCode: sourceUnit.room_type_code, arrivalDate, departureDate: businessDate },
+      { inventoryUnitId: targetUnit.id, roomTypeCode: targetUnit.room_type_code, arrivalDate: businessDate, departureDate }
+    ]);
+    const receipt = await withPropertyClockForTesting(new Date(`${businessDate}T12:00:00.000Z`), () => confirmPrepared(envelope, prepared, `${prefix}-conversion`));
+    expect(receipt.businessCommitted).toBe(true);
+    expect(receipt.result).toMatchObject({ convertedUnits: 7, remainingUnits: 23, transferredAmount: { minorUnits: 72_000 } });
+    expect(await conversionEntitlementBalance(receipt.result!.entitlementLotId as string)).toBe(23);
+    const claims = await db.selectFrom("inventory_claims as c").innerJoin("stay_segments as s", "s.id", "c.source_id")
+      .select(["c.inventory_unit_id", "c.service_date"]).where("s.stay_id", "=", stay.stayId).where("c.active", "=", true)
+      .orderBy("c.service_date").execute();
+    expect(claims).toHaveLength(7);
+    expect(claims.slice(0, 6).every((claim) => claim.inventory_unit_id === sourceUnit.id)).toBe(true);
+    expect(claims[6]?.inventory_unit_id).toBe(targetUnit.id);
+    const amendment = await db.selectFrom("amendments").select("payload").where("command_id", "=", receipt.commandId).executeTakeFirstOrThrow();
+    expect((amendment.payload as Record<string, unknown>).crossRoomUpgrade).toEqual(upgrade);
+    await assertConversionCommandStillValid(receipt.commandId);
+  });
+
   it("rejects missing consent, blank or excessive reasons, bed products, and fake exceptions on matching rooms", async () => {
     const memberId = await createMember("CROSS-REJECT", "cross-reject");
     const unit = await db.selectFrom("inventory_units").select("id").where("code", "=", "A02").executeTakeFirstOrThrow();

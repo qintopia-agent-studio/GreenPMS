@@ -55,7 +55,7 @@ describe("versioned employee operating knowledge", () => {
     { question: "冲销后是不是就可以重新分配？", ids: ["reverse-facts"], facts: ["普通冲销不会自动释放", "不能直接撤销", "不改变实际收退款"] },
     { question: "怎么把这笔拆分资金升级成会员？", ids: ["membership-conversion"], facts: ["拆分收款或内部划转来源禁止转会员", "不是再次收款"] },
     { question: "撤销入住会恢复预订吗？", ids: ["revoke-fulfillment"], facts: ["未被实际使用", "不是恢复为原预订", "管理员受控纠错"] },
-    { question: "跨房型升级会员后还能换房续住吗？", ids: ["membership-conversion"], facts: ["保留实际房间", "不是要求先换房", "跨房型升级后延长、换房和历史房间安排纠错被阻止"] },
+    { question: "跨房型升级会员后还能换房续住吗？", ids: ["membership-conversion"], facts: ["保留实际房间", "不是要求先换房", "连续的整房时间线", "发生过房型变更", "前期临时安置", "目标会员房型至少出现一段", "不能自动套用普通会员续住说明", "跨房型升级后延长、换房和历史房间安排纠错被阻止"] },
     { question: "清洁按钮怎么用？", ids: ["maintenance"], facts: ["清洁工作流关闭", "内部占用也不是当前可办理能力"] },
     { question: "如何改房型价格、工作人员权限和外部密钥？", ids: ["catalog", "accounts-tokens"], facts: ["设置→房型与价格", "设置→账号管理", "设置→智能体与外部访问", "不能因新增功能自动给旧Token增加能力"] }
   ];

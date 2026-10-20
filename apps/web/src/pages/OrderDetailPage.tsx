@@ -182,11 +182,13 @@ export function completeStayCorrectionRecords(amendments: readonly AmendmentDto[
 }
 
 export interface TemporaryOtherRoomOrderRecord {
+  kind: "TEMPORARY_OTHER_ROOM_UPGRADE" | "TEMPORARY_ROOM_SEQUENCE_UPGRADE";
   originalRoomTypeCode: string;
   actualInventoryUnitId: string;
   actualRoomTypeCode: string;
   arrivalDate: string;
   departureDate: string;
+  segments?: Array<{ inventoryUnitId: string; roomTypeCode: string; arrivalDate: string; departureDate: string }>;
   reasonNote: string;
   actor: NonNullable<AmendmentDto["actor"]>;
   recordedAt: string;
@@ -202,13 +204,25 @@ export function temporaryOtherRoomOrderRecord(amendments: readonly AmendmentDto[
   const upgradeArrangement = upgrade && (upgrade.payload as Record<string, unknown>).crossRoomUpgrade;
   if (upgrade?.actor && upgradeArrangement && typeof upgradeArrangement === "object" && !Array.isArray(upgradeArrangement)) {
     const value = upgradeArrangement as Record<string, unknown>;
-    if (value.kind === "TEMPORARY_OTHER_ROOM_UPGRADE"
+    if ((value.kind === "TEMPORARY_OTHER_ROOM_UPGRADE" || value.kind === "TEMPORARY_ROOM_SEQUENCE_UPGRADE")
       && ["originalRoomTypeCode", "actualInventoryUnitId", "actualRoomTypeCode", "arrivalDate", "departureDate", "reason"].every(key => typeof value[key] === "string" && String(value[key]).trim())
       && String(value.reason).length <= 200 && value.originalRoomTypeCode !== value.actualRoomTypeCode
       && validRecordedAt(upgrade.created_at)) {
+      const rawSegments = value.segments;
+      const segments = rawSegments === undefined ? undefined : Array.isArray(rawSegments) && rawSegments.length >= 2
+        ? rawSegments.map((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+          const segment = item as Record<string, unknown>;
+          return ["inventoryUnitId", "roomTypeCode", "arrivalDate", "departureDate"].every(key => typeof segment[key] === "string" && String(segment[key]).trim())
+            ? { inventoryUnitId: String(segment.inventoryUnitId), roomTypeCode: String(segment.roomTypeCode), arrivalDate: String(segment.arrivalDate), departureDate: String(segment.departureDate) }
+            : undefined;
+        }) : undefined;
+      if (rawSegments !== undefined && (!segments || segments.some((segment) => !segment))) return undefined;
       return {
+        kind: value.kind,
         originalRoomTypeCode: String(value.originalRoomTypeCode), actualInventoryUnitId: String(value.actualInventoryUnitId),
         actualRoomTypeCode: String(value.actualRoomTypeCode), arrivalDate: String(value.arrivalDate), departureDate: String(value.departureDate),
+        ...(segments ? { segments: segments as Array<{ inventoryUnitId: string; roomTypeCode: string; arrivalDate: string; departureDate: string }> } : {}),
         reasonNote: String(value.reason), actor: upgrade.actor, recordedAt: upgrade.created_at
       };
     }
@@ -231,6 +245,7 @@ export function temporaryOtherRoomOrderRecord(amendments: readonly AmendmentDto[
   );
   if (!arrangement) return undefined;
   return {
+    kind: "TEMPORARY_OTHER_ROOM_UPGRADE",
     ...arrangement,
     reasonNote: creation.reason_note.trim(),
     actor: creation.actor,
@@ -818,7 +833,8 @@ export function TemporaryOtherRoomArrangementHistory({ view, inventoryUnits }: {
     <dl className="detail-list">
       <div><dt>原适用房型</dt><dd>{roomStatusRoomTypeLabel(record.originalRoomTypeCode)}</dd></div>
       <div><dt>实际房型</dt><dd>{roomStatusRoomTypeLabel(record.actualRoomTypeCode)}</dd></div>
-      <div><dt>实际安排房间</dt><dd>{actualRoom}</dd></div>
+      {record.segments?.length ? <div><dt>房间时间线</dt><dd>{record.segments.map((segment) => `${temporaryOtherRoomActualUnitLabel(inventoryUnits.find((unit) => unit.id === segment.inventoryUnitId)) ?? segment.inventoryUnitId}（${formatDate(segment.arrivalDate)} 至 ${formatDate(segment.departureDate)}）`).join("、")}</dd></div>
+        : <div><dt>实际安排房间</dt><dd>{actualRoom}</dd></div>}
       <div><dt>住宿日期</dt><dd>{formatDate(record.arrivalDate)} 至 {formatDate(record.departureDate)}</dd></div>
       <div><dt>安排原因</dt><dd>{record.reasonNote}</dd></div>
       <div><dt>操作人</dt><dd>{record.actor.displayName}</dd></div>
@@ -1103,6 +1119,7 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
     : [];
   const eligibleProducts = membershipProducts.filter((product) => membershipProductMatchesCurrentStay(product, view, unitMap)
     || membershipProductAllowsTemporaryUpgrade(product, view, unitMap));
+  const multipleRoomSegments = new Set(view.effectiveArrangement.intervals.map((interval) => interval.inventoryUnitId)).size > 1;
   const fundsState = stayConversionFundsState(
     view.collectionFacts,
     view.amounts.netRecordedCollection.minorUnits,
@@ -1228,12 +1245,12 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
         </label>
         <label className="span-two">会员产品
           <select value={productId} onChange={(event) => { setProductId(event.target.value); setTemporaryRoomConfirmed(false); setTemporaryRoomReason(""); setValidationError(undefined); }} disabled={Boolean(disabledReason) || eligibleProducts.length === 0} required>
-            {eligibleProducts.map((product) => <option key={product.id} value={product.id}>{membershipProductOptionLabel(product)}{membershipProductAllowsTemporaryUpgrade(product, view, unitMap) ? " · 需确认本次临时安排" : ""}</option>)}
+            {eligibleProducts.map((product) => <option key={product.id} value={product.id}>{membershipProductOptionLabel(product)}{membershipProductAllowsTemporaryUpgrade(product, view, unitMap) ? ` · 需确认${multipleRoomSegments ? "前期临时安置" : "本次临时安排"}` : ""}</option>)}
           </select>
         </label>
         {needsTemporaryRoom ? <div className="span-two form-field-note">
-          <label className="check-row"><input type="checkbox" checked={temporaryRoomConfirmed} onChange={(event) => { setTemporaryRoomConfirmed(event.target.checked); setValidationError(undefined); }} /><span>本次临时安排其他整房</span></label>
-          <span>保留当前房间，本次全部住宿夜数计入会员权益；以后仍按会员产品适用房型使用。本单续住或换房需另建订单。</span>
+          <label className="check-row"><input type="checkbox" checked={temporaryRoomConfirmed} onChange={(event) => { setTemporaryRoomConfirmed(event.target.checked); setValidationError(undefined); }} /><span>{multipleRoomSegments ? "确认前期其他房间属于临时安置" : "本次临时安排其他整房"}</span></label>
+          <span>{multipleRoomSegments ? "系统将按所选目标会员产品覆盖完整房间时间线，保留实际房间历史；以后仍按会员产品适用房型使用。本单续住或换房需另建订单。" : "保留当前房间，本次全部住宿夜数计入会员权益；以后仍按会员产品适用房型使用。本单续住或换房需另建订单。"}</span>
           <label>临时安排原因<input value={temporaryRoomReason} onChange={(event) => { setTemporaryRoomReason(event.target.value); setValidationError(undefined); }} maxLength={200} required /></label>
         </div> : null}
         <div className="span-two conversion-transfer-card">

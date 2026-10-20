@@ -96,7 +96,8 @@ export const currentMigrationNames = [
   "072_channel_operating_facts.sql",
   "073_direct_stay_amount_precision.sql",
   "074_cancel_empty_membership_order.sql",
-  "075_room_operating_statistics.sql"
+  "075_room_operating_statistics.sql",
+  "076_multi_room_sequence_membership_upgrade.sql"
 ] as const;
 
 export function databaseUrl(): string {
