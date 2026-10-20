@@ -1,3 +1,7 @@
+- source_spec: 用户 2026-10-20 反馈：逐日表和楼栋房型表的数字与上方标题对齐。
+  summary: B 级展示调整已实现，待反馈；逐日住宿和逐日资金表的列标题、对应单元格统一居中；楼栋房型表的数字列标题、明细和底部合计居中，名称列左对齐。员工助手与既有界面规格同步说明。
+  evidence: ego-browser 检查两张逐日表 330 个单元格、楼栋房型表 20 个明细数字和 5 个合计与标题的水平中心，最大偏差小于 0.01px；36 项助手知识回归通过。截图位于 .local-workspace/dashboard-daily-newest-first/ego-tables-aligned.png 和 ego-breakdown-aligned.png；未发布。
+
 - source_spec: 用户 2026-10-20 追加截图反馈：逐日资金数据也按最新日期在最上方排列。
   summary: B 级排序调整已实现，待反馈；逐日资金表按登记日倒序，同日币种分行保留；员工助手同步说明。
   evidence: 类型检查及 44 项既有图表、预览数据和助手知识测试通过；ego-browser 合成预览确认 30 行按日期倒序。截图位于 .local-workspace/dashboard-daily-newest-first/ego-money-preview.png；未发布。
