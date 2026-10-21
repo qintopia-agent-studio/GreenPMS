@@ -19,7 +19,13 @@ class RuntimeTests(unittest.TestCase):
             # Use the actual formal migration source, including all real import paths.
             for name in ('migrate.ts','database.ts','staff-profile-manifest.ts','seed.ts','reset.ts','ready.ts'):
                 (root/'packages/db/src'/name).write_bytes((ROOT/'packages/db/src'/name).read_bytes())
-            subprocess.run(['node',str(ROOT/'scripts/build-runtime.mjs'),'--source-root',str(root),'--output',str(out)],check=True,capture_output=True)
+            # Release validation checks out the harness beside the immutable source checkout.
+            # Resolve build dependencies from source when that split exists; CI checks use the
+            # current checkout, where the dependency is available at the harness root.
+            dependency_root = ROOT.parent/'source'
+            if not (dependency_root/'node_modules/esbuild').is_dir():
+                dependency_root = ROOT
+            subprocess.run(['node',str(ROOT/'scripts/build-runtime.mjs'),'--source-root',str(root),'--dependency-root',str(dependency_root),'--output',str(out)],check=True,capture_output=True)
             entry=out/'packages/db/src/migrate.js'
             self.assertTrue(entry.is_file())
             self.assertIn('"./database.js"',entry.read_text())
