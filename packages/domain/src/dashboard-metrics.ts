@@ -28,7 +28,7 @@ export interface DashboardMoneyFact {
   netMinor: string;
   kind: string;
   commandType: string | null;
-  family: "STAY" | "MEMBER";
+  family: "STAY" | "MEMBER" | "CHANNEL";
   linkedTransfer: boolean;
   transferSource: boolean;
   reclassifiedReversal: boolean;
@@ -38,6 +38,16 @@ export interface DashboardMoneyFact {
 }
 export type DashboardMoneyClass = "COLLECTION" | "REFUND" | "CORRECTION" | "INTERNAL" | "REVIEW";
 export function classifyDashboardMoney(fact: DashboardMoneyFact): DashboardMoneyClass {
+  // External-channel settlement facts are registered operating facts rather
+  // than PMS cash receipts. Their signed amount is already the financial
+  // effect: sales are positive, refunds are negative, and corrections (which
+  // also include a refund reversal) preserve their own sign.
+  if (fact.family === "CHANNEL") {
+    if (fact.kind === "SALE" && BigInt(fact.netMinor) > 0n) return "COLLECTION";
+    if (fact.kind === "REFUND" && BigInt(fact.netMinor) < 0n) return "REFUND";
+    if (fact.kind === "CORRECTION" || fact.kind === "REVERSAL") return "CORRECTION";
+    return "REVIEW";
+  }
   if (fact.linkedTransfer) return "INTERNAL";
   if (fact.kind === "REALLOCATION_IN" || fact.kind === "REALLOCATION_OUT") return "INTERNAL";
   if (fact.transferSource) return "REVIEW";

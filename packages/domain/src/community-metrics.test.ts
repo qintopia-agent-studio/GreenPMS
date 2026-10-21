@@ -223,3 +223,20 @@ describe("operating duration within complete residence chains", () => {
       .toEqual([{ nights: 1, current: 1, all: 1 }, { nights: 2, current: 0, all: 1 }]);
   });
 });
+
+describe("resident metric", () => {
+  const residentRange = { from: "2026-10-01", to: "2026-10-08" };
+  it("enters the long-stay population only after seven completed nights", () => {
+    const result = communityMetrics([stay({ arrival: "2026-10-01", departure: "2026-10-12", current: true })], [], residentRange, "2026-10-09");
+    expect(result.residentTrend?.find(row => row.date === "2026-10-07")?.longStay).toBe(0);
+    expect(result.residentTrend?.find(row => row.date === "2026-10-08")?.longStay).toBe(1);
+  });
+  it("counts a confirmed member after one night and deduplicates overlap", () => {
+    const result = communityMetrics([stay({ arrival: "2026-10-01", departure: "2026-10-12", current: true, memberStatus: "CONFIRMED" })], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: 1, longStay: 1, member: 1, memberReview: 0 });
+  });
+  it("keeps an unbound member order out of the person count and marks the gap", () => {
+    const result = communityMetrics([stay({ arrival: "2026-10-08", departure: "2026-10-12", current: true, memberStatus: "UNKNOWN" })], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: null, longStay: 0, member: null, memberReview: 1 });
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dashboardAvailability, dashboardDetailLabel, dashboardDurationBands, dashboardRoomTypeLabel } from "./dashboard-presentation";
+import { dashboardAvailability, dashboardDetailEvidence, dashboardDetailLabel, dashboardDurationBands, dashboardRoomTypeLabel } from "./dashboard-presentation";
 
 describe("经营概览展示", () => {
   it.each([[0, 0], [6, 0], [7, 1], [13, 1], [14, 2], [20, 2], [21, 3], [30, 3], [31, 4], [60, 4], [61, 5], [366, 5]])("实际 %i 晚只归入第 %i 档", (nights, index) => {
@@ -32,6 +32,12 @@ describe("经营概览展示", () => {
     expect(dashboardDetailLabel({ metric: "PAID", label: "1 / shared_bath_double" })).toBe("1 / 两人间（公卫）");
     expect(dashboardDetailLabel({ metric: "FREE", label: "2 / shared_bath_quad" })).toBe("2 / 四人间（公卫）");
     expect(dashboardDetailLabel({ metric: "REVIEW", label: "住宿时间线待核对" })).toBe("住宿时间线待核对");
+  });
+  it("明细追踪字段使用统一的来源、认领、凭据和关联标签", () => {
+    expect(dashboardDetailEvidence({ sourceType: "MEMBERSHIP", claimStatus: "CONFIRMED", sourceFactId: "member_fact_1", referencesFactId: "stay_fact_1", reversesFactId: null, correctsFactId: null, syncStatus: "WORKER_SYNCED", evidenceStatus: "COMPLETE" })).toEqual([
+      "来源：会员事实", "认领：已认领", "同步：worker 已同步", "凭据：凭据完整", "事实：member_fact_1", "引用：stay_fact_1"
+    ]);
+    expect(dashboardDetailEvidence({})).toEqual([]);
   });
   it("区分真实零库存、已知库存与未知库存，不把部分已知数量显示成总可售", () => {
     expect(dashboardAvailability({ availableRooms: 0, availableBeds: 0 })).toEqual({ unknown: false, total: "0", breakdown: "0间 / 0床" });

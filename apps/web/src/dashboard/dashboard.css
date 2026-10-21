@@ -12,6 +12,7 @@
 .dashboard-current-card { background: var(--surface); border: 1px solid var(--border); border-radius: 7px; padding: 18px; text-align: left; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; min-width: 0; color: var(--text); }
 .dashboard-current-card > span, .dashboard-current-card > small { font-size: 11px; color: var(--muted); }
 .dashboard-current-card > strong { font-size: 23px; font-weight: 650; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.dashboard-current-card > .dashboard-card-breakdown { line-height: 1.55; }
 .dashboard-current-card strong small { font-size: 11px; font-weight: 400; }
 .dashboard-today { display: flex; width: 100%; gap: 24px; }
 .dashboard-today button { border: 0; background: none; text-align: left; color: var(--text); padding: 0; display: flex; align-items: baseline; gap: 8px; }
@@ -83,6 +84,7 @@
 .dashboard-notice p { flex-basis: 100%; }
 .dashboard-details { scroll-margin-top: 22px; }
 .dashboard-details td { overflow-wrap: anywhere; }
+.dashboard-details .dashboard-detail-meta { display: block; color: var(--muted); font-size: 10px; line-height: 1.6; word-break: break-all; }
 .dashboard-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 16px; font-size: 12px; margin-top: 18px; }
 .dashboard-footer { font-size: 10px; text-align: center; padding-bottom: 8px; }
 @media (max-width: 1199px) { .dashboard-current-grid, .dashboard-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dashboard-chart-grid { grid-template-columns: minmax(0, 1fr); } .dashboard-attention { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dashboard-future-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
@@ -122,6 +124,12 @@
 .community-composition-track i:first-child { background: var(--brand); }
 .community-composition-track i:last-child { background: #a7c7b5; }
 .community-composition p { font-size: 10px; color: var(--muted); margin-top: 10px; }
+.community-resident-current { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 14px 0; padding: 14px 18px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); }
+.community-resident-current > div { min-width: 0; }
+.community-resident-current span { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
+.community-resident-current strong { display: block; margin-top: 6px; font-size: 23px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.community-resident-current strong small { margin-left: 5px; font-size: 11px; font-weight: 400; color: var(--muted); }
+.community-resident-current p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .community-today { margin: 26px 0; padding: 0 24px; border-left: 1px solid var(--border); display: flex; flex-direction: column; justify-content: center; gap: 14px; }
 .community-today > div { display: flex; flex-direction: column; gap: 14px; }
 .community-today button { display: flex; align-items: center; gap: 9px; border: 0; background: none; color: var(--muted); padding: 0; text-align: left; font-size: 12px; }
@@ -189,6 +197,13 @@
 .resource-section { padding-top: 6px; }
 .dashboard-current-balances { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 14px; }
 .dashboard-current-balances .dashboard-current-card > span { display: flex; align-items: center; gap: 8px; }
+.dashboard-current-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+.dashboard-current-primary .dashboard-current-card > span { display: flex; align-items: center; gap: 7px; }
+.dashboard-current-followups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.dashboard-current-followups > button { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); color: var(--muted); text-align: left; }
+.dashboard-current-followups > button:hover { border-color: var(--brand); background: var(--brand-soft); }
+.dashboard-current-followups span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-size: 11px; }
+.dashboard-current-followups strong { margin-left: auto; color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .dashboard-source-panel { margin-top: 24px; }
 .resource-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 9px; background: var(--surface); padding: 21px 0; margin-bottom: 18px; }
 .resource-summary > div, .resource-summary > button { padding: 0 22px; border: 0; border-right: 1px solid var(--border); background: none; display: flex; flex-direction: column; gap: 10px; text-align: left; color: var(--text); min-width: 0; }
@@ -231,6 +246,8 @@
 .dashboard-hint > button { min-width: 22px; min-height: 22px; align-items: center; justify-content: center; }
 @media (max-width: 1100px) {
   .dashboard-current-balances { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-current-primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-current-followups { grid-template-columns: minmax(0, 1fr); }
   .community-history-grid { grid-template-columns: minmax(0, 1.3fr) minmax(265px, 1fr); gap: 16px; }
   .community-total, .community-composition { padding: 22px; }
   .community-today { padding: 0 18px; }
@@ -254,6 +271,7 @@
   .dashboard { gap: 20px; }
   .dashboard-heading { gap: 12px; }
   .dashboard-current-balances { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .dashboard-current-primary { grid-template-columns: minmax(0, 1fr); }
   .dashboard-heading h1 { font-size: 23px; }
   .dashboard-heading .dashboard-muted { font-size: 11px; }
   .dashboard-refresh .button { min-height: 36px; padding: 6px 10px; font-size: 11px; }
@@ -269,6 +287,8 @@
   .community-composition-values span { font-size: 10px; flex-wrap: wrap; gap: 4px; }
   .community-composition strong { font-size: 25px; }
   .community-composition p { font-size: 9px; line-height: 1.6; }
+  .community-resident-current { grid-template-columns: 1fr; gap: 12px; }
+  .community-resident-current strong { font-size: 22px; }
   .community-today { flex-direction: column; align-items: stretch; gap: 10px; }
   .community-today > .dashboard-muted { font-size: 10px; }
   .dashboard-period { gap: 12px; }

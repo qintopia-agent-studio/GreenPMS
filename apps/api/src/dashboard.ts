@@ -1,7 +1,7 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
-import { dashboardMetrics, dashboardSources, type DashboardQuery, type DashboardMetric } from "@qintopia/contracts";
+import { dashboardDetailClaimStatuses, dashboardDetailEvidenceStatuses, dashboardDetailSources, dashboardDetailSyncStatuses, dashboardMetrics, dashboardSources, type DashboardQuery, type DashboardMetric } from "@qintopia/contracts";
 import type { Database } from "@qintopia/db";
 import { getDashboard, getDashboardDetails } from "../../../packages/db/src/dashboard.ts";
 import { requirePrincipal, requirePropertyAccess } from "./auth.ts";
@@ -17,13 +17,18 @@ const money = Type.Object({ currency: Type.String(), collectedMinor: amount, ref
 const balance = Type.Object({ currency: Type.String(), amountMinor: amount, count });
 const source = Type.Union(dashboardSources.map(value => Type.Literal(value)));
 const metric = Type.Union(dashboardMetrics.map(value => Type.Literal(value)));
+const detailSource = Type.Union(dashboardDetailSources.map(value => Type.Literal(value)));
+const detailClaimStatus = Type.Union(dashboardDetailClaimStatuses.map(value => Type.Literal(value)));
+const detailSyncStatus = Type.Union(dashboardDetailSyncStatuses.map(value => Type.Literal(value)));
+const detailEvidenceStatus = Type.Union(dashboardDetailEvidenceStatuses.map(value => Type.Literal(value)));
 const queryProperties = { from: Type.Optional(LocalDate), to: Type.Optional(LocalDate), futureDays: Type.Optional(Type.Union([Type.Literal(14), Type.Literal(30)])), building: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })), roomType: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })), source: Type.Optional(source) };
 const communityDay = Type.Object({ date: LocalDate, total: nullable(count), paid: count, volunteer: count, reception: count, otherFree: count, unlinked: count, unclassified: Type.Optional(count), registered: Type.Optional(Type.Object({total: nullable(count), paid: count, volunteer: count, reception: count, otherFree: count})) });
+const residentDay = Type.Object({ date: LocalDate, total: nullable(count), longStay: count, member: nullable(count), memberReview: count });
 const durationCoverage = Type.Object({
   registrationBased: Type.Optional(count), pendingRegistrations: count, pendingOrders: count,
   issues: Type.Array(Type.Object({ orderId: Id, reason: Type.String() }))
 });
-const community = Type.Object({ identityApproximate: Type.Optional(Type.Boolean()), current: communityDay, trend: Type.Array(communityDay), visitors: nullable(count), dailyAverage: nullable(Type.Number({minimum:0})), duration: Type.Array(Type.Object({nights: count,current:count,all:count})), durationCoverage: Type.Optional(Type.Object({current: durationCoverage, all: durationCoverage})), records: Type.Array(Type.Object({orderId: Id,date:LocalDate,nights:count,reason:Type.String(),people:Type.Optional(nullable(count)),kind:Type.Union(["NEW","RETURN","RENEWAL","DUE","EARLY"].map(v=>Type.Literal(v)))})), counts:Type.Object({NEW:count,RETURN:count,RENEWAL:count,DUE:count,EARLY:count}),reasons:Type.Array(Type.String()) });
+const community = Type.Object({ identityApproximate: Type.Optional(Type.Boolean()), current: communityDay, trend: Type.Array(communityDay), visitors: nullable(count), dailyAverage: nullable(Type.Number({minimum:0})), duration: Type.Array(Type.Object({nights: count,current:count,all:count})), durationCoverage: Type.Optional(Type.Object({current: durationCoverage, all: durationCoverage})), records: Type.Array(Type.Object({orderId: Id,date:LocalDate,nights:count,reason:Type.String(),people:Type.Optional(nullable(count)),kind:Type.Union(["NEW","RETURN","RENEWAL","DUE","EARLY"].map(v=>Type.Literal(v)))})), counts:Type.Object({NEW:count,RETURN:count,RENEWAL:count,DUE:count,EARLY:count}),reasons:Type.Array(Type.String()), residentCurrent: Type.Optional(residentDay), residentTrend: Type.Optional(Type.Array(residentDay)) });
 const salesAmount=Type.Object({currency:Type.String(),salesMinor:nullable(amount),refundsMinor:nullable(amount),correctedMinor:amount,netMinor:amount});
 const salesSummary=Type.Object({enabled:Type.Boolean(),complete:Type.Boolean(),reason:Type.String(),reviewCount:count,totals:Type.Array(salesAmount),breakdown:Type.Array(Type.Intersect([salesAmount,Type.Object({source:Type.Union(["DIRECT","MEMBERSHIP","CHANNEL","BASELINE"].map(v=>Type.Literal(v)))})])),trend:Type.Array(Type.Object({date:LocalDate,totals:Type.Array(salesAmount)})),sealedMonths:Type.Array(Type.String())});
 export const DashboardResponseSchema = Type.Object({ propertyId: Id, asOf: Type.String({ format: "date-time" }), businessDate: LocalDate, timezone: Type.String(), currency: Type.String(), definitionVersion: Type.String(), range, previousRange: range,
@@ -31,13 +36,14 @@ export const DashboardResponseSchema = Type.Object({ propertyId: Id, asOf: Type.
   stayTrend: Type.Array(Type.Object({ date: LocalDate, paid: count, free: count, capacity: nullable(count), quality })),
   breakdown: Type.Array(Type.Object({ building: Type.String(), roomType: Type.String(), ...totals })), sources: Type.Array(Type.Object({ source, unitNights: count })),
   sales: Type.Optional(salesSummary), money: Type.Array(money), previousMoney: Type.Array(money), moneyTrend: Type.Array(Type.Object({ date: LocalDate, money: Type.Array(money) })),
-  current: Type.Object({ todaySales:Type.Optional(salesSummary), todayOrders: count, todayCollections: Type.Array(balance), todayCollectionReviewCount: count, paidGuests: count, freeGuests: count, guestReviewOrders: count, arrivals: count, departures: count, overdue: count, debts: Type.Array(balance), retained: Type.Array(balance) }),
+  current: Type.Object({ todaySales:Type.Optional(salesSummary), todayOrders: count, todayCollections: Type.Array(balance), todayCollectionBreakdown:Type.Optional(Type.Array(Type.Object({currency:Type.String(),source:Type.Union([Type.Literal("STAY"),Type.Literal("MEMBER"),Type.Literal("CHANNEL")]),amountMinor:amount,count}))), todayCollectionReviewCount: count, paidGuests: count, freeGuests: count, guestReviewOrders: count, arrivals: count, departures: count, overdue: count, debts: Type.Array(balance), retained: Type.Array(balance) }),
   community,
   futureReviewCount: count,
   future: Type.Array(Type.Object({ date: LocalDate, paid: count, free: count, maintenance: count, review: count, availableRooms: nullable(count), availableBeds: nullable(count), capacity: count, quality })),
   filters: Type.Object({ buildings: Type.Array(Type.String()), roomTypes: Type.Array(Type.String()), roomTypeLabels: Type.Optional(Type.Record(Type.String(), Type.String())) }), warnings: Type.Array(Type.String()) });
 export const DashboardDetailsResponseSchema = Type.Object({ asOf: Type.String({ format: "date-time" }), definitionVersion: Type.String(), range, changedSinceSummary: Type.Boolean(), page: count, pageSize: count, total: count,
-  items: Type.Array(Type.Object({ id: Type.String(), date: LocalDate, metric, label: Type.String(), orderId: nullable(Id), memberId: nullable(Id), unitId: nullable(Id), units: nullable(count), amountMinor: nullable(amount), currency: nullable(Type.String()), registeredAt: nullable(Type.String({ format: "date-time" })), businessDate: nullable(LocalDate), reason: Type.String() })) });
+  items: Type.Array(Type.Object({ id: Type.String(), date: LocalDate, metric, label: Type.String(), orderId: nullable(Id), memberId: nullable(Id), unitId: nullable(Id), units: nullable(count), amountMinor: nullable(amount), currency: nullable(Type.String()), registeredAt: nullable(Type.String({ format: "date-time" })), businessDate: nullable(LocalDate), reason: Type.String(),
+    sourceType: Type.Optional(detailSource), claimStatus: Type.Optional(detailClaimStatus), sourceFactId: Type.Optional(nullable(Id)), referencesFactId: Type.Optional(nullable(Id)), reversesFactId: Type.Optional(nullable(Id)), correctsFactId: Type.Optional(nullable(Id)), syncStatus: Type.Optional(detailSyncStatus), evidenceStatus: Type.Optional(detailEvidenceStatus) })) });
 const errors = { 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, 500: ErrorResponse };
 export function registerDashboard(app: FastifyInstance, db: Kysely<Database>) {
   app.get("/api/v1/properties/:id/dashboard", { schema: { tags: ["queries"], params: Type.Object({ id: Id }), querystring: Type.Object(queryProperties, { additionalProperties: false }), response: { 200: DashboardResponseSchema, ...errors } } }, async (request, reply) => {

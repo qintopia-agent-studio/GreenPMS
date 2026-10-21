@@ -19,13 +19,24 @@ describe("dashboard future review response contract", () => {
     expect(Value.Check(DashboardResponseSchema, { ...summary, futureReviewCount: -1 })).toBe(false);
     const { futureReviewCount: _, ...missing } = summary;
     expect(Value.Check(DashboardResponseSchema, missing)).toBe(false);
-    expect(Value.Check(DashboardDetailsResponseSchema, {
+    const detail = {
       asOf: summary.asOf, definitionVersion: summary.definitionVersion, range: summary.range,
       changedSinceSummary: false, total: 1, page: 0, pageSize: 50,
       items: [{ id: "future-review:order_1", date: "2026-10-12", metric: "REVIEW", label: "未来库存待核对",
         orderId: "order_1", memberId: null, unitId: null, units: null, amountMinor: null, currency: null,
         registeredAt: null, businessDate: null, reason: "订单住宿时间线或履约证据不完整；影响2026-10-12至2026-10-14" }]
+    };
+    expect(Value.Check(DashboardDetailsResponseSchema, detail)).toBe(true);
+    expect(Value.Check(DashboardDetailsResponseSchema, {
+      ...detail,
+      items: [{ ...detail.items[0], sourceType: "MEMBERSHIP", claimStatus: "CONFIRMED", sourceFactId: "membership_fact_1",
+        referencesFactId: "collection_fact_1", reversesFactId: null, correctsFactId: null,
+        syncStatus: "WORKER_SYNCED", evidenceStatus: "COMPLETE" }]
     })).toBe(true);
+    expect(Value.Check(DashboardDetailsResponseSchema, {
+      ...detail,
+      items: [{ ...detail.items[0], sourceType: "NOT_A_SOURCE" }]
+    })).toBe(false);
   });
 });
 
