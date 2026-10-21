@@ -110,3 +110,9 @@ it("explains cancellation of an empty duplicate membership without deleting the 
   for (const rule of ["从未有任何收款记录", "收款已冲销为零也不属于空白订单", "不影响其他正常订单及核销", "不能用删除会员"]) expect(topic.content).toContain(rule);
   expect(buildAssistantSystemPrompt(context)).toContain("取消订单");
 });
+
+
+it("当前现场解释已确认人数、待认领与真实零值的区别", () => {
+ const content=assistantKnowledgeTopics.find(topic=>topic.id==="dashboard")!.content;
+ for(const text of ["实际住客证件与同店会员档案证件唯一一致", "普通住宿单也可识别在住会员", "不能继承旧长住资格", "查看记录", "今日暂无已确认业务", "今日暂无金额登记", "尚未认领的余额", "首次同步时间", "未认领和待核对金额不计入已确认合计"]) expect(content).toContain(text);
+});

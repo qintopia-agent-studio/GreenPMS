@@ -3,14 +3,17 @@ import type { DashboardBalance, DashboardDetail } from "@qintopia/contracts";
 import { classifyDashboardMoney, dashboardDate } from "@qintopia/domain";
 import { dashboardMoneyDetail, loadDashboardMoney, type LoadedDashboardMoney } from "./dashboard-money.ts";
 import type { Database } from "./schema.ts";
+import { loadDashboardPaymentSync, loadDashboardUnclaimedPayments, summarizeUnclaimedPayments } from "./dashboard-unclaimed-payments.ts";
 
 interface TodayOrder { id: string; date: string; registeredAt: string }
 
 /** 当前经营登记指标独立于历史筛选；复用既有资金事实分类，内部归属转换不算新增收款。 */
-export function summarizeDashboardToday(date: string, currency: string, orders: TodayOrder[], facts: LoadedDashboardMoney[]) {
+export function summarizeDashboardToday(date: string, currency: string, orders: TodayOrder[], facts: LoadedDashboardMoney[], unclaimed: DashboardDetail[] = []) {
   const todayOrders = [...new Map(orders.filter(order => order.date === date).map(order => [order.id, order])).values()];
   const todayFacts = [...new Map(facts.filter(fact => fact.date === date).map(fact => [`${fact.family}:${fact.id}`, fact])).values()];
   const registeredFinancialFacts = todayFacts.filter(fact => ["COLLECTION", "REFUND", "CORRECTION"].includes(classifyDashboardMoney(fact)));
+  const reviewFacts = todayFacts.filter(fact => classifyDashboardMoney(fact) === "REVIEW");
+  const unclaimedToday = [...new Map(unclaimed.filter(fact => fact.date === date).map(fact => [fact.id, fact])).values()];
   const grouped = new Map<string, DashboardBalance>([[currency, { currency, amountMinor: "0", count: 0 }]]);
   const sourceGrouped = new Map<string, { currency: string; source: "STAY" | "MEMBER" | "CHANNEL"; amountMinor: bigint; count: number }>();
   for (const fact of registeredFinancialFacts) {
@@ -30,15 +33,18 @@ export function summarizeDashboardToday(date: string, currency: string, orders: 
       label: "今日新增住宿订单", orderId: order.id, memberId: null, unitId: null, units: 1, amountMinor: null, currency: null,
       registeredAt: order.registeredAt, businessDate: null,
       reason: "按门店当天创建的住宿订单计数，包含补录；后来取消不会删除新增记录，不等于今天入住订单数" })),
-    ...registeredFinancialFacts.map(fact => ({ ...dashboardMoneyDetail(fact), id: `today-collection:${fact.id}`, metric: "TODAY_COLLECTIONS" as const,
+    ...registeredFinancialFacts.map(fact => ({ ...dashboardMoneyDetail(fact), id: `today-collection:${fact.family}:${fact.id}`, metric: "TODAY_COLLECTIONS" as const,
       label: fact.family === "CHANNEL" ? (fact.kind === "REFUND" ? "渠道登记退款" : fact.kind === "REVERSAL" || fact.kind === "CORRECTION" ? "渠道登记更正" : "渠道应结登记")
         : fact.kind === "REFUND" ? "今日登记退款" : fact.kind === "REVERSAL" || fact.correctsFact || fact.deletionCorrection ? "今日登记更正" : fact.family === "MEMBER" ? "今日登记会员收款" : "今日登记住宿收款",
       reason: fact.family === "CHANNEL"
         ? "按PMS登记日统计渠道应结、渠道退款和渠道更正；金额保留正负方向，不代表现金到账"
-        : "按PMS登记日统计收款、退款和更正；金额保留正负方向，内部资金归属转换不计入" }))
+        : "按PMS登记日统计收款、退款和更正；金额保留正负方向，内部资金归属转换不计入" })),
+    ...reviewFacts.map(fact => ({ ...dashboardMoneyDetail(fact), id: `today-review:${fact.family}:${fact.id}`, metric: "TODAY_COLLECTIONS" as const })),
+    ...unclaimedToday.map(fact => ({ ...fact, metric: "TODAY_COLLECTIONS" as const }))
   ];
   return { todayOrders: todayOrders.length, todayCollections: [...grouped.values()], todayCollectionBreakdown: [...sourceGrouped.values()].map(row => ({ ...row, amountMinor: String(row.amountMinor) })),
-    todayCollectionReviewCount: todayFacts.filter(fact => classifyDashboardMoney(fact) === "REVIEW").length, details };
+    todayCollectionReviewCount: reviewFacts.length + unclaimedToday.filter(fact => fact.claimStatus === "PENDING_REVIEW").length,
+    todayUnclaimed: summarizeUnclaimedPayments(unclaimedToday, currency), details };
 }
 
 export async function loadDashboardToday(trx: Transaction<Database>, propertyId: string, date: string, timezone: string, currency: string) {
@@ -48,6 +54,10 @@ export async function loadDashboardToday(trx: Transaction<Database>, propertyId:
     AND created_at >= (${date}::date::timestamp AT TIME ZONE ${timezone})
     AND created_at < (${until}::date::timestamp AT TIME ZONE ${timezone}) ORDER BY created_at,id`.execute(trx)).rows
     .map(order => ({ ...order, registeredAt: new Date(order.registeredAt).toISOString() }));
-  const facts = await loadDashboardMoney(trx, propertyId, timezone, date, until, { includeChannel: true });
-  return summarizeDashboardToday(date, currency, orders, facts);
+  const [facts, unclaimed, paymentSync] = await Promise.all([
+    loadDashboardMoney(trx, propertyId, timezone, date, until, { includeChannel: true }),
+    loadDashboardUnclaimedPayments(trx, propertyId, timezone, date, until),
+    loadDashboardPaymentSync(trx, propertyId)
+  ]);
+  return { ...summarizeDashboardToday(date, currency, orders, facts, unclaimed), paymentSync };
 }

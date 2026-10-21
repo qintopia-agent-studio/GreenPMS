@@ -35,7 +35,7 @@ describe("经营概览展示", () => {
   });
   it("明细追踪字段使用统一的来源、认领、凭据和关联标签", () => {
     expect(dashboardDetailEvidence({ sourceType: "MEMBERSHIP", claimStatus: "CONFIRMED", sourceFactId: "member_fact_1", referencesFactId: "stay_fact_1", reversesFactId: null, correctsFactId: null, syncStatus: "WORKER_SYNCED", evidenceStatus: "COMPLETE" })).toEqual([
-      "来源：会员事实", "认领：已认领", "同步：worker 已同步", "凭据：凭据完整", "事实：member_fact_1", "引用：stay_fact_1"
+      "来源：会员事实", "认领：已认领", "同步：企微已同步", "凭据：凭据完整", "事实：member_fact_1", "引用：stay_fact_1"
     ]);
     expect(dashboardDetailEvidence({})).toEqual([]);
   });

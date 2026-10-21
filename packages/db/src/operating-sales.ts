@@ -2,7 +2,24 @@ import { sql, type Transaction } from "kysely";
 import { aggregateOperatingSales, classifyDashboardMoney, dashboardDate, recognizedMatchedSales, type MatchedSaleFact, type OperatingSaleEvent, type SalesBaseline, type SalesOpening } from "@qintopia/domain";
 import type { DashboardDetail, DashboardRange } from "@qintopia/contracts";
 import type { Database } from "./schema.ts";
-import { dashboardMoneyDetail, loadDashboardMoney } from "./dashboard-money.ts";
+import { dashboardMoneyDetail, loadDashboardMoney, type LoadedDashboardMoney } from "./dashboard-money.ts";
+
+export function operatingSaleDetail(e: OperatingSaleEvent, metric: 'SALES' | 'TODAY_SALES', idPrefix: string, sourceFact?: LoadedDashboardMoney,
+ channel?: { channelCode: string | null; channelOrderReference: string | null }): DashboardDetail {
+ const base=sourceFact?dashboardMoneyDetail(sourceFact):null;
+ const trace:Partial<DashboardDetail>={sourceFactId:e.source==='BASELINE'?null:base?.sourceFactId??e.sourceFactId??e.id};
+ for(const key of ['referencesFactId','reversesFactId','correctsFactId','syncStatus','evidenceStatus'] as const){
+  const value=base?.[key]!==undefined?base[key]:e[key];
+  if(value!==undefined)Object.assign(trace,{[key]:value});
+ }
+ return {...(base??{}),id:`${idPrefix}:${e.id}`,date:e.date,metric,
+  label:e.source==='BASELINE'?'已确认封账合计':e.source==='CHANNEL'?'渠道应结业务':e.source==='MEMBERSHIP'?'会员售卡收款':'已匹配住宿收款',
+  orderId:e.orderId,memberId:e.memberId,unitId:null,units:null,amountMinor:e.amountMinor,currency:e.currency,registeredAt:e.registeredAt,businessDate:e.date,
+  sourceType:e.source==='BASELINE'?'BASELINE':base?.sourceType??(e.source==='CHANNEL'?'CHANNEL':e.source==='MEMBERSHIP'?'MEMBERSHIP':'LODGING'),
+  claimStatus:base?.claimStatus??'CONFIRMED',...trace,
+  ...(channel?{...channel,paymentMethod:'CHANNEL_SETTLEMENT',financialKind:e.kind}:{}),
+  ...(e.source==='BASELINE'?{financialKind:'BASELINE',syncStatus:'NOT_APPLICABLE' as const}:{}),reason:e.reason};
+}
 
 interface Proof { id:string;channel_order:boolean;method:string;reversed:boolean;reversed_at:Date|null;bill_id:string|null;bill_amount:string|null;bill_count:number;verified:boolean;original_date:string|null }
 export async function loadOperatingSales(trx:Transaction<Database>,propertyId:string,timezone:string,currency:string,range:DashboardRange,today:string) {
@@ -46,7 +63,7 @@ export async function loadOperatingSales(trx:Transaction<Database>,propertyId:st
  const proofs=new Map([...stayProof.map(p=>[`STAY:${p.id}`,p] as const),...memberProof.map(p=>[`MEMBER:${p.id}`,p] as const)]);
  const facts:MatchedSaleFact[]=[];
  const uncertain:DashboardDetail[]=[];
- const review=(f:typeof money[number],reason:string):DashboardDetail=>({...dashboardMoneyDetail(f),id:`sales-review:${f.family}:${f.id}`,metric:'REVIEW',label:'经营来源待核实',amountMinor:null,units:null,reason});
+ const review=(f:typeof money[number],reason:string):DashboardDetail=>({...dashboardMoneyDetail(f),id:`sales-review:${f.family}:${f.id}`,metric:'REVIEW',label:'经营来源待核实',claimStatus:'PENDING_REVIEW',evidenceStatus:'PARTIAL',amountMinor:null,units:null,reason});
  for(const f of money){
   const p=proofs.get(`${f.family}:${f.id}`);
   // 同一渠道订单的到账不是第二次销售；历史普通退款需要核对渠道事实，不能自动双扣。
@@ -66,30 +83,15 @@ export async function loadOperatingSales(trx:Transaction<Database>,propertyId:st
    return p?.bill_id&&p.bill_count===1&&p.verified?[{sourceKey:`${f.family==='STAY'?'STAY_FACT':'MEMBER_FACT'}:${f.id}`,billId:p.bill_id,reversedAt:p.reversed_at?new Date(p.reversed_at).toISOString():null}]:[];
  });
  const matched=recognizedMatchedSales(facts,opening,baselines[0]!.recognitionFrom,sourceLinks);
- const channel=(await sql<{id:string;order_id:string;kind:string;amount:string;currency:string;business_date:string;created_at:Date;note:string;references_fact_id:string|null}>`SELECT id,order_id,kind,amount_minor::text AS amount,currency,business_date::text,created_at,note,references_fact_id FROM channel_operating_facts WHERE property_id=${propertyId} ORDER BY created_at,id`.execute(trx)).rows;
+ const channel=(await sql<{id:string;order_id:string;kind:string;amount:string;currency:string;business_date:string;created_at:Date;note:string;references_fact_id:string|null;channelCode:string|null;channelOrderReference:string|null}>`SELECT f.id,f.order_id,f.kind,f.amount_minor::text AS amount,f.currency,f.business_date::text,f.created_at,f.note,f.references_fact_id,
+   o.booking_channel_code AS "channelCode",o.channel_order_reference AS "channelOrderReference"
+   FROM channel_operating_facts f JOIN orders o ON o.id=f.order_id WHERE f.property_id=${propertyId} ORDER BY f.created_at,f.id`.execute(trx)).rows;
  const reversedChannelRefunds=new Set(channel.filter(f=>f.kind==='REVERSAL').map(f=>f.references_fact_id));
  const channelEvents:OperatingSaleEvent[]=channel.filter(f=>f.kind!=='REVERSAL'&&!reversedChannelRefunds.has(f.id)).map(f=>({id:f.id,source:'CHANNEL',date:f.business_date,currency:f.currency,kind:f.kind==='SALE'?'SALE':f.kind==='REFUND'?'REFUND':'CORRECTION',amountMinor:f.amount,orderId:f.order_id,memberId:null,registeredAt:new Date(f.created_at).toISOString(),reason:f.note,sourceFactId:f.id,referencesFactId:f.kind==='REFUND'?f.references_fact_id:null,syncStatus:'MANUAL_ENTRY',evidenceStatus:'COMPLETE'}));
  const result=aggregateOperatingSales({from:range.from,to:range.to,currency,events:[...matched.events,...channelEvents],reviews:[...matched.reviews,...uncertain],baselines});
  const todayResult=aggregateOperatingSales({from:today,to:today,currency,events:[...matched.events,...channelEvents],reviews:[...matched.reviews,...uncertain],baselines});
- const detailFor=(e:OperatingSaleEvent,metric:'SALES'|'TODAY_SALES',idPrefix:string):DashboardDetail=>{
-  const sourceFact=money.find(f=>`${f.family}:${f.id}`===e.id);
-  const base=sourceFact?dashboardMoneyDetail(sourceFact):null;
-  const sourceFactId=base?.sourceFactId??e.sourceFactId??e.id;
-  const referencesFactId=base?.referencesFactId!==undefined?base.referencesFactId:e.referencesFactId;
-  const reversesFactId=base?.reversesFactId!==undefined?base.reversesFactId:e.reversesFactId;
-  const correctsFactId=base?.correctsFactId!==undefined?base.correctsFactId:e.correctsFactId;
-  const syncStatus=base?.syncStatus!==undefined?base.syncStatus:e.syncStatus;
-  const evidenceStatus=base?.evidenceStatus!==undefined?base.evidenceStatus:e.evidenceStatus;
-  const trace={
-    sourceFactId,
-    ...(referencesFactId!==undefined ? {referencesFactId} : {}),
-    ...(reversesFactId!==undefined ? {reversesFactId} : {}),
-    ...(correctsFactId!==undefined ? {correctsFactId} : {}),
-    ...(syncStatus!==undefined ? {syncStatus} : {}),
-    ...(evidenceStatus!==undefined ? {evidenceStatus} : {})
-  };
-  return {...(base??{}),id:`${idPrefix}:${e.id}`,date:e.date,metric,label:e.source==='BASELINE'?'已确认封账合计':e.source==='CHANNEL'?'渠道应结业务':e.source==='MEMBERSHIP'?'会员售卡收款':'已匹配住宿收款',orderId:e.orderId,memberId:e.memberId,unitId:null,units:null,amountMinor:e.amountMinor,currency:e.currency,registeredAt:e.registeredAt,businessDate:e.date,sourceType:base?.sourceType??(e.source==='CHANNEL'?'CHANNEL':e.source==='MEMBERSHIP'?'MEMBERSHIP':'LODGING'),claimStatus:base?.claimStatus??'CONFIRMED',...trace,reason:e.reason};
- };
+ const detailFor=(e:OperatingSaleEvent,metric:'SALES'|'TODAY_SALES',idPrefix:string):DashboardDetail=>operatingSaleDetail(e,metric,idPrefix,
+   money.find(f=>`${f.family}:${f.id}`===e.id),e.source==='CHANNEL'?channel.find(f=>f.id===e.id):undefined);
  const details:DashboardDetail[]=result.events.map(e=>detailFor(e,'SALES','sales'));
  const sourceReviews:DashboardDetail[]=[...uncertain,...matched.reviews.map(f=>{
   const sourceFact=money.find(item=>`${item.family}:${item.id}`===f.id);

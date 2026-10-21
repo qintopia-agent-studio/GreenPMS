@@ -1,5 +1,5 @@
 import type { OperatingStatisticsScope } from "./operating-statistics.ts";
-import { dashboardDate } from "@qintopia/domain";
+import { dashboardDate, enumerateServiceDates } from "@qintopia/domain";
 import type { Transaction, Selectable } from "kysely";
 import type { DashboardRange } from "@qintopia/contracts";
 import type { Database } from "./schema.ts";
@@ -8,6 +8,7 @@ import { resolveCommunityIdentities } from "../../domain/src/community-identity.
 import { propertyLocalClockAt } from "./members.ts";
 import { projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import { loadDashboardStays } from "./dashboard-stays.ts";
+import { loadDashboardMembership } from "./dashboard-membership.ts";
 
 export async function loadDashboardCommunity(trx: Transaction<Database>, propertyId: string, range: DashboardRange, today: string, timezone: string, scope?: OperatingStatisticsScope) {
   const orders = await trx.selectFrom("orders as o").innerJoin("stays as s","s.order_id","o.id")
@@ -22,6 +23,8 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
     trx.selectFrom("order_occupant_removals").selectAll().where("order_id","in",ids).execute()
   ]);
   const projected=projectCurrentOrderOccupants(occupants,corrections);
+  const membership = await loadDashboardMembership(trx, propertyId,
+    [...new Set([...enumerateServiceDates(range.from, dashboardDate(range.to, 1)), today])], today);
   const local=(date:Date|string)=>propertyLocalClockAt(timezone,new Date(date)).date;
   const evidenceIssues:string[]=[];
   const removedByPerson = new Map(removals.map(row => [row.occupant_id, local(row.created_at)]));
@@ -66,7 +69,7 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
       evidenceIssues.push(`订单 ${order.id} 的住宿资产无法定位，经营统计范围待核对`);
       stays.push({ orderId: order.id, personKey: null, arrival: interval.arrivalDate, departure: interval.departureDate,
         current: order.status === "CHECKED_IN" && interval === currentInterval, free: order.stay_type === "FREE",
-        category: order.free_stay_category_code ?? null, durationReviewReason: "住宿资产无法定位，经营统计范围待核对。" });
+        category: order.free_stay_category_code ?? null, attendanceConfirmed: false, durationReviewReason: "住宿资产无法定位，经营统计范围待核对。" });
     }
     if(order.status==="RESERVED") {
       for (const person of peopleByOrder.get(order.id) ?? []) {
@@ -81,8 +84,7 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
       }
       continue;
     }
-    const memberStatus = order.member_id || order.member_contract_id ? "UNKNOWN" as const : "NOT_MEMBER" as const;
-    const missingPerson = (durationReviewReason: string) => addStay({durationReviewReason,orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null,memberStatus});
+    const missingPerson = (durationReviewReason: string) => addStay({durationReviewReason,attendanceConfirmed:false,orderId:order.id,personKey:null,arrival:order.arrival_date,departure:order.departure_date,current:order.status==="CHECKED_IN",free:order.stay_type==="FREE",category:order.free_stay_category_code??null,membershipByDate:membership(null, order)});
     if(!intervals?.length){evidenceIssues.push(`订单 ${order.id} 的有效住宿时间线缺失，未推算人数或居住时长`);missingPerson("有效住宿时间线缺失，连续入住起点与人数待核对。");continue;}
     const people = peopleByOrder.get(order.id) ?? [];
     if (!people.length) { if (!whollyExcluded) evidenceIssues.push(`订单 ${order.id} 未登记实际住宿人`); missingPerson("实际住宿人名单缺失，人数与连续时长待核对。"); continue; }
@@ -90,12 +92,12 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
       const raw = rawById.get(person.id)!;
       const removed = removedByPerson.get(person.id);
       const later = person.role !== "PRIMARY" && raw.created_by_command_id && raw.created_by_command_id !== initialCommands.get(order.id) && local(raw.created_at) > order.arrival_date;
-      const common = { identityApproximate: identities.get(person.id)?.approximate ?? false, ...(later ? { durationReviewReason: "入住后追加住宿登记，缺少该住客实际入住日期，不能沿用订单起点。" } : {}), orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null, memberStatus };
+      const common = { attendanceConfirmed: true, identityApproximate: identities.get(person.id)?.approximate ?? false, ...(later ? { durationReviewReason: "入住后追加住宿登记，缺少该住客实际入住日期，不能沿用订单起点。" } : {}), orderId: order.id, registrationKey: person.id, free: order.stay_type === "FREE", category: order.free_stay_category_code ?? null, membershipByDate: membership(person, order) };
       // Registration withdrawal is not an actual departure event; it cannot supply a guest checkout date.
       if (removed) {
         if (removed > order.arrival_date) {
           if (!whollyExcluded) evidenceIssues.push(`订单 ${order.id}：第 ${person.ordinal} 位住宿人于 ${removed} 撤销登记，之前的实际住宿日期待核对；未影响同单其他住客或当前名单`);
-          addStay({ ...common, personKey: null, arrival: order.arrival_date, departure: removed < order.departure_date ? removed : order.departure_date, current: false, durationReviewReason: "住宿登记已撤销，撤销时间不是实际离店日期，历史住宿时长待核对。" });
+          addStay({ ...common, attendanceConfirmed: false, personKey: null, arrival: order.arrival_date, departure: removed < order.departure_date ? removed : order.departure_date, current: false, durationReviewReason: "住宿登记已撤销，撤销时间不是实际离店日期，历史住宿时长待核对。" });
         }
         continue;
       }
@@ -104,7 +106,7 @@ export async function loadDashboardCommunity(trx: Transaction<Database>, propert
       const personKey = identities.get(person.id)?.personKey ?? null;
       if (later) {
         if (!whollyExcluded) evidenceIssues.push(`订单 ${order.id}：第 ${person.ordinal} 位住宿人于 ${local(raw.created_at)} 追加登记，未记录独立入住日期；历史人数待核对，当前登记仍保留`);
-        addStay({ ...common, personKey: null, arrival: order.arrival_date, departure: order.departure_date < today ? order.departure_date : today, current: false });
+        addStay({ ...common, attendanceConfirmed: false, personKey: null, arrival: order.arrival_date, departure: order.departure_date < today ? order.departure_date : today, current: false });
         if (order.status === "CHECKED_IN") addStay({ ...common, personKey, arrival: order.arrival_date, departure: order.departure_date, current: true, historical: false });
         continue;
       }

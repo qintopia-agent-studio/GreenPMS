@@ -3,7 +3,7 @@ import { resolveCommunityIdentities } from "../../../../../packages/domain/src/c
 import { communityMetrics, type CommunityStay } from "../../../../../packages/domain/src/community-metrics";
 import { shiftDate } from "../dashboard-state";
 
-export type Scenario = "complete" | "partial" | "unlinked" | "nickname" | "zero" | "empty" | "error";
+export type Scenario = "complete" | "partial" | "unlinked" | "nickname" | "zero" | "empty" | "error" | "facts";
 const today = "2026-10-12";
 const currency = "CNY";
 const base = (i: number, arrival: string, departure: string, current: boolean): CommunityStay => ({ orderId: `sample-order-${i}`, personKey: `sample-person-${i}`, arrival, departure, current, free: false, category: null });
@@ -66,6 +66,15 @@ export function sampleDashboard(propertyId: string, query: string, scenario: Sce
     future: Array.from({ length: Number(params.get("futureDays") ?? 14) }, (_, i) => ({ date: shiftDate(today, i), paid: zero ? 0 : Math.max(15, 53 - Math.floor(i / 3) * 3 + i % 3), free: zero ? 0 : i < 14 ? 8 : 6, maintenance: i < 5 ? 2 : 0, review: scenario === "partial" && i < 3 ? 1 : 0, availableRooms: 4 + Math.floor(i / 3), availableBeds: 8 + Math.floor(i / 2), capacity: 72, quality: scenario === "partial" && i < 3 ? "PARTIAL" : "COMPLETE" })),
     futureReviewCount: scenario === "partial" ? 1 : 0, filters: { buildings: ["A栋", "B栋"], roomTypes: ["shared_bath_double", "ensuite_double"], roomTypeLabels: { shared_bath_double: "公卫双人间", ensuite_double: "独卫双人间" } }, warnings: []
   };
+  if (scenario === "facts") {
+    result.community.current = {date:today,total:34,paid:28,volunteer:5,reception:1,otherFree:0,unlinked:0};
+    result.community.residentCurrent = {date:today,total:null,longStay:25,member:null,memberReview:2,knownTotal:25,knownMember:1,residentReview:1,reviewItems:[{orderId:"sample-identity-1",memberId:"sample-member-1",reason:"合成样本：未记录住客与会员的明确身份依据；单人订单同名不能代替身份核对。"},{orderId:"sample-identity-2",memberId:"sample-member-2",reason:"合成样本：会员短住只有付款主体，实际住客身份待核对。"}]};
+    result.current.todaySales = {enabled:true,complete:true,reason:"合成样本",reviewCount:0,totals:[{currency,salesMinor:"0",refundsMinor:"0",correctedMinor:"0",netMinor:"0"}],breakdown:[],trend:[],sealedMonths:[]};
+    result.current.todayCollections = [{currency,amountMinor:"27720",count:1}];
+    result.current.todayCollectionBreakdown = [{currency,source:"STAY",amountMinor:"27720",count:1}];
+    result.current.todayUnclaimed = [{currency,amountMinor:"-12500",count:1}];
+    result.current.paymentSync = {enabled:true,lastSyncedAt:`${today}T01:40:00Z`,hasError:false};
+  }
   if (scenario === "empty") { delete result.community.durationCoverage; result.community.trend = []; result.community.duration = []; result.community.records = []; result.community.counts = { NEW: 0, RETURN: 0, RENEWAL: 0, DUE: 0, EARLY: 0 }; result.community.current = { date: today, total: null, paid: 0, volunteer: 0, reception: 0, otherFree: 0, unlinked: 1 }; result.community.dailyAverage = null; result.community.visitors = null; result.community.reasons = ["样本场景：未返回住客名单与逐日资料，不代表实际人数为零。"]; result.future = []; }
   return result;
 }
@@ -91,6 +100,10 @@ function sampleFunds(range: DashboardResponse["range"], zero: boolean) {
 export function sampleDetails(propertyId: string, query: string, scenario: Scenario): DashboardDetailsResponse {
   const params = new URLSearchParams(query);
   const data = sampleDashboard(propertyId, query, scenario);
+  if (scenario === "facts" && params.get("metric") === "TODAY_COLLECTIONS") return {asOf:data.asOf,definitionVersion:data.definitionVersion,range:data.range,changedSinceSummary:false,page:0,pageSize:50,total:2,items:[
+    {id:"sample-confirmed",date:today,metric:"TODAY_COLLECTIONS",label:"已确认住宿收款",orderId:"sample-order-confirmed",memberId:null,unitId:null,units:null,amountMinor:"27720",currency,registeredAt:`${today}T01:30:00Z`,businessDate:today,reason:"合成已确认事实",sourceType:"LODGING",claimStatus:"CONFIRMED",externalBillId:"sample-bill-confirmed",transactionReference:"sample-collection-reference",sourceOccurredAt:`${today}T01:20:00Z`,sourceDiscoveredAt:`${today}T01:21:00Z`,syncStatus:"WORKER_SYNCED",evidenceStatus:"COMPLETE"},
+    {id:"sample-unclaimed",date:today,metric:"TODAY_COLLECTIONS",label:"企微退款待认领",orderId:null,memberId:null,unitId:null,units:null,amountMinor:"-12500",currency,registeredAt:`${today}T01:40:00Z`,businessDate:null,reason:"合成未认领退款，不计入已确认净额",sourceType:"WECOM",claimStatus:"UNCLAIMED",externalBillId:"sample-bill-refund",refundReference:"sample-refund-reference",originalTransactionReference:"sample-collection-reference",sourceOccurredAt:`${today}T01:35:00Z`,sourceDiscoveredAt:`${today}T01:40:00Z`,syncStatus:"WORKER_SYNCED",evidenceStatus:"COMPLETE"}
+  ]};
   const page = Number(params.get("page") ?? 0), total = scenario === "zero" ? 0 : 56;
   return { asOf: data.asOf, definitionVersion: data.definitionVersion, range: data.range, changedSinceSummary: false, page, pageSize: 50, total, items: Array.from({ length: Math.min(50, Math.max(0, total - page * 50)) }, (_, i) => ({ id: `sample-fact-${page * 50 + i}`, date: shiftDate(data.range.from, (page * 50 + i) % 7), metric: "PAID", label: `合成住宿事实 ${page * 50 + i + 1}`, orderId: `sample-order-${page * 50 + i}`, memberId: null, unitId: null, units: 1, amountMinor: null, currency: null, registeredAt: null, businessDate: null, reason: "合成验收样本，仅验证明细分页与返回；不代表真实业务成功。" })) };
 }

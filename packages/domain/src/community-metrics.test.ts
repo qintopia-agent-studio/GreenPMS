@@ -239,4 +239,80 @@ describe("resident metric", () => {
     const result = communityMetrics([stay({ arrival: "2026-10-08", departure: "2026-10-12", current: true, memberStatus: "UNKNOWN" })], [], residentRange, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ total: null, longStay: 0, member: null, memberReview: 1 });
   });
+  it("does not inherit seven-night qualification from a previous visit after an empty night", () => {
+    const result = communityMetrics([
+      stay({ arrival: "2026-09-01", departure: "2026-09-20" }),
+      stay({ orderId: "return", arrival: "2026-10-20", departure: "2026-10-30", current: true })
+    ], [], { from: "2026-10-20", to: "2026-10-20" }, "2026-10-21");
+    expect(result.residentCurrent).toMatchObject({ total: 0, longStay: 0 });
+    expect(result.residentTrend?.[0]).toMatchObject({ total: 0, longStay: 0 });
+  });
+  it("keeps uninterrupted room moves and overdue current stays qualified", () => {
+    const result = communityMetrics([
+      stay({ arrival: "2026-10-01", departure: "2026-10-05" }),
+      stay({ orderId: "move", arrival: "2026-10-05", departure: "2026-10-08", current: true })
+    ], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: 1, longStay: 1 });
+  });
+  it("preserves the resident union when every unknown member already qualifies as long-stay", () => {
+    const result = communityMetrics([stay({ arrival: "2026-10-01", departure: "2026-10-12", current: true, memberStatus: "UNKNOWN" })], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: 1, knownTotal: 1, longStay: 1, member: null, knownMember: 0, memberReview: 1, residentReview: 0 });
+  });
+  it("preserves known residents and member counts alongside only unresolved additions", () => {
+    const result = communityMetrics([
+      stay({ personKey: "long", arrival: "2026-10-01", departure: "2026-10-12", current: true, memberStatus: "UNKNOWN" }),
+      stay({ personKey: "member", orderId: "ordinary", arrival: "2026-10-09", departure: "2026-10-12", current: true,
+        membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "exact-member" } } }),
+      stay({ personKey: "short", orderId: "short", arrival: "2026-10-09", departure: "2026-10-12", current: true,
+        membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "payer", reason: "缺少实际住客的证件依据" } } })
+    ], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: null, knownTotal: 2, knownMember: 1, member: null, residentReview: 1, memberReview: 2 });
+    expect(result.residentCurrent?.reviewItems).toContainEqual({ orderId: "short", memberId: "payer", reason: "缺少实际住客的证件依据" });
+  });
+  it("uses membership evidence for each day without passing it through an approximate person grouping", () => {
+    const result = communityMetrics([
+      stay({ arrival: "2026-10-01", departure: "2026-10-02", membershipByDate: { "2026-10-01": { status: "CONFIRMED", memberId: "exact-member" } } }),
+      stay({ orderId: "name-only-return", arrival: "2026-10-09", departure: "2026-10-12", current: true,
+        membershipByDate: { "2026-10-09": { status: "NOT_MEMBER", memberId: null } } })
+    ], [], residentRange, "2026-10-09");
+    expect(result.residentTrend?.[0]).toMatchObject({ member: 1, total: 1 });
+    expect(result.residentCurrent).toMatchObject({ member: 0, total: 0 });
+  });
+  it("does not let a confirmed member resolve a different uncertain registration through approximate names", () => {
+    const result = communityMetrics([
+      stay({ orderId: "verified", registrationKey: "verified-guest", arrival: "2026-10-09", departure: "2026-10-12", current: true,
+        membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "exact-member" } } }),
+      stay({ orderId: "approximate", registrationKey: "approximate-guest", arrival: "2026-10-09", departure: "2026-10-12", current: true,
+        membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "exact-member", reason: "住客证件缺失" } } })
+    ], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: null, knownTotal: 1, knownMember: 1, residentReview: 1, memberReview: 1 });
+  });
+  it("does not publish a complete resident count for a late-added guest without actual arrival evidence", () => {
+    const result = communityMetrics([stay({ registrationKey: "added", historical: false, durationReviewReason: "追加住宿人实际入住日期待核对", arrival: "2026-10-01", departure: "2026-10-12", current: true })], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: null, knownTotal: 0, residentReview: 1 });
+    expect(result.residentCurrent?.reviewItems).toContainEqual({ orderId: "one", memberId: null, reason: "追加住宿人实际入住日期待核对" });
+  });
+  it("requires confirmed attendance in addition to exact membership, without relying on reason text", () => {
+    const membershipByDate = Object.fromEntries(["2026-10-01", "2026-10-08", "2026-10-09"].map(date => [date, { status: "CONFIRMED" as const, memberId: "member-one" }]));
+    const result = communityMetrics([
+      stay({ registrationKey: "appended", arrival: "2026-10-01", departure: "2026-10-09", attendanceConfirmed: false, membershipByDate }),
+      stay({ registrationKey: "appended", arrival: "2026-10-01", departure: "2026-10-12", current: true, historical: false, attendanceConfirmed: true,
+        durationReviewReason: "Independent arrival has not been recorded", membershipByDate })
+    ], [], residentRange, "2026-10-09");
+    for (const date of ["2026-10-01", "2026-10-08"]) {
+      expect(result.residentTrend?.find(row => row.date === date)).toMatchObject({ total: null, member: null, knownTotal: 0, knownMember: 0, longStay: 0, memberReview: 1, residentReview: 1 });
+    }
+    expect(result.residentCurrent).toMatchObject({ total: 1, member: 1, knownTotal: 1, knownMember: 1, longStay: 0, memberReview: 0, residentReview: 0 });
+  });
+  it("keeps a withdrawn member registration's unproven historical dates unresolved", () => {
+    const result = communityMetrics([stay({ registrationKey: "withdrawn", arrival: "2026-10-01", departure: "2026-10-08", attendanceConfirmed: false,
+      durationReviewReason: "Withdrawal is not proof of arrival or departure", membershipByDate: { "2026-10-01": { status: "CONFIRMED", memberId: "member-one" } } })], [], residentRange, "2026-10-09");
+    expect(result.residentTrend?.[0]).toMatchObject({ total: null, member: null, knownTotal: 0, knownMember: 0, memberReview: 1, residentReview: 1 });
+    expect(result.residentCurrent).toMatchObject({ total: 0, member: 0, memberReview: 0 });
+  });
+  it("does not turn proven nonmembership into a membership gap when only attendance is unconfirmed", () => {
+    const result = communityMetrics([stay({ registrationKey: "unconfirmed", arrival: "2026-10-01", departure: "2026-10-12", attendanceConfirmed: false,
+      membershipByDate: { "2026-10-01": { status: "NOT_MEMBER", memberId: "expired-member" } } })], [], residentRange, "2026-10-09");
+    expect(result.residentTrend?.[0]).toMatchObject({ total: null, knownTotal: 0, longStay: 0, residentReview: 1, member: 0, knownMember: 0, memberReview: 0 });
+  });
 });
