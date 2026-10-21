@@ -13,6 +13,16 @@
 .dashboard-current-card > span, .dashboard-current-card > small { font-size: 11px; color: var(--muted); }
 .dashboard-current-card > strong { font-size: 23px; font-weight: 650; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .dashboard-current-card > .dashboard-card-breakdown { line-height: 1.55; }
+.dashboard-current-card-heading { display: flex; align-items: center; gap: 4px; width: 100%; }
+.dashboard-current-card .dashboard-card-detail { margin-left: auto; padding: 4px; border: 0; background: transparent; color: var(--muted); display: inline-flex; cursor: pointer; }
+.dashboard-current-card .dashboard-card-value { display: flex; flex-direction: column; align-items: flex-start; padding: 0; border: 0; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.dashboard-card-value strong { font-size: 23px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.dashboard-card-value strong small { font-size: 11px; font-weight: 400; color: var(--muted); }
+.dashboard-current-card .dashboard-financial-pending { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; border: 0; padding: 0; color: var(--brand); background: none; font-size: 11px; cursor: pointer; }
+.dashboard-resident-review { padding: 4px 18px 14px; margin: -8px 0 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+.dashboard-resident-review > div { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 10px 0; font-size: 12px; }
+.dashboard-resident-review > div + div { border-top: 1px solid var(--border); }
+.community-resident-current .dashboard-text-button { padding: 0 0 0 6px; font-size: 11px; }
 .dashboard-current-card strong small { font-size: 11px; font-weight: 400; }
 .dashboard-today { display: flex; width: 100%; gap: 24px; }
 .dashboard-today button { border: 0; background: none; text-align: left; color: var(--text); padding: 0; display: flex; align-items: baseline; gap: 8px; }
@@ -155,6 +165,7 @@
 .legend-dot { display: inline-block; width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
 .legend-dot.paid { background: var(--brand); }
 .legend-dot.total { height: 2px; width: 12px; background: var(--brand); }
+.legend-dot.resident { height: 2px; width: 12px; background: #ab925b; }
 .legend-dot.free { background: #a7c7b5; }
 .legend-dot.reception { background: #b39965; }
 .community-trend .dashboard-chart { height: 205px; }
@@ -200,8 +211,8 @@
 .dashboard-current-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
 .dashboard-current-primary .dashboard-current-card > span { display: flex; align-items: center; gap: 7px; }
 .dashboard-current-followups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
-.dashboard-current-followups > button { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); color: var(--muted); text-align: left; }
-.dashboard-current-followups > button:hover { border-color: var(--brand); background: var(--brand-soft); }
+.dashboard-current-followups > div { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); color: var(--muted); text-align: left; }
+.dashboard-current-followups > div:hover { border-color: var(--brand); background: var(--brand-soft); }
 .dashboard-current-followups span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-size: 11px; }
 .dashboard-current-followups strong { margin-left: auto; color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .dashboard-source-panel { margin-top: 24px; }
@@ -320,3 +331,5 @@
 .duration-review ul { padding-left: 20px; }
 .duration-review li { margin-top: 10px; }
 .duration-bars b { flex-shrink: 0; }
+
+.dashboard-current-followups > div > button { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }

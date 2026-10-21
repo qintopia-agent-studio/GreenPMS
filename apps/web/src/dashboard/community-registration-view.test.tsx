@@ -39,3 +39,21 @@ it("labels approximate nickname-based headcounts and keeps return records explic
  expect(html).toContain("续住与回访为近似统计");
  expect(html).toContain("再次入住记录 · 按条计");
 });
+
+it("会员缺项保留已确认人数和核对入口，不用待核对替代全部居民", () => {
+ const data=sampleDashboard("sample-a","","zero");
+ data.community.residentCurrent={date:data.businessDate,total:null,longStay:25,member:null,memberReview:2,knownTotal:25,knownMember:1,residentReview:1,reviewItems:[{orderId:"sample-identity-review",memberId:"sample-member",reason:"住客身份缺少明确依据"}]};
+ const html=renderToStaticMarkup(<MemoryRouter><CurrentScene data={data} onDetail={()=>{}}/></MemoryRouter>);
+ expect(html).toContain('25<small>人 · 已确认');
+ expect(html).toContain('1<small>人 · 已确认');
+ expect(html).toContain('另 1 条待核对');
+ expect(html).toContain('查看记录');
+});
+
+it("非会员追加住客缺实际日期时，也能打开居民核对记录", () => {
+ const data=sampleDashboard("sample-a","","zero");
+ data.community.residentCurrent={date:data.businessDate,total:null,longStay:1,member:0,memberReview:0,knownTotal:1,knownMember:0,residentReview:1,reviewItems:[{orderId:"sample-dates-review",memberId:null,reason:"追加住客缺少实际入住日期"}]};
+ const html=renderToStaticMarkup(<MemoryRouter><CurrentScene data={data} onDetail={()=>{}}/></MemoryRouter>);
+ expect(html).toContain("核对居住日期");
+ expect(html).toContain("另 1 条待核对");
+});

@@ -18,7 +18,8 @@ describe("今日订单与登记金额",()=>{
   expect(result.todayOrders).toBe(1);
   expect(result.todayCollections).toEqual([{currency:"CNY",amountMinor:"37601",count:4}]);
   expect(result.todayCollectionReviewCount).toBe(1);
-  expect(result.details.filter(row=>row.metric==="TODAY_COLLECTIONS")).toHaveLength(4);
+  expect(result.details.filter(row=>row.metric==="TODAY_COLLECTIONS")).toHaveLength(5);
+  expect(result.details.find(row=>row.claimStatus==="PENDING_REVIEW")).toMatchObject({sourceFactId:"review",amountMinor:"27720"});
  });
  it("把渠道应结、渠道退款和更正按登记日纳入，并保留业务日期追溯",()=>{
   const result=summarizeDashboardToday(date,"CNY",[],[
@@ -30,10 +31,10 @@ describe("今日订单与登记金额",()=>{
   expect(result.todayCollections).toEqual([{currency:"CNY",amountMinor:"29900",count:4}]);
   expect(result.todayCollectionBreakdown).toEqual([{currency:"CNY",source:"CHANNEL",amountMinor:"29900",count:4}]);
   expect(result.details.filter(row=>row.metric==="TODAY_COLLECTIONS").map(row=>({id:row.id,amount:row.amountMinor,businessDate:row.businessDate,label:row.label}))).toEqual([
-   {id:"today-collection:channel-sale",amount:"30000",businessDate:"2026-10-12",label:"渠道应结登记"},
-   {id:"today-collection:channel-refund",amount:"-4000",businessDate:"2026-10-13",label:"渠道登记退款"},
-   {id:"today-collection:channel-correction",amount:"-100",businessDate:"2026-10-01",label:"渠道登记更正"},
-   {id:"today-collection:channel-reversal",amount:"4000",businessDate:"2026-10-13",label:"渠道登记更正"}
+   {id:"today-collection:CHANNEL:channel-sale",amount:"30000",businessDate:"2026-10-12",label:"渠道应结登记"},
+   {id:"today-collection:CHANNEL:channel-refund",amount:"-4000",businessDate:"2026-10-13",label:"渠道登记退款"},
+   {id:"today-collection:CHANNEL:channel-correction",amount:"-100",businessDate:"2026-10-01",label:"渠道登记更正"},
+   {id:"today-collection:CHANNEL:channel-reversal",amount:"4000",businessDate:"2026-10-13",label:"渠道登记更正"}
   ]);
  });
  it("币种分开、零值明确且重复事实不重复计数",()=>{

@@ -1,12 +1,12 @@
 import type { OperatingSalesSummary } from "./operating-sales.ts";
-export const dashboardDefinitionVersion = "2026-10-20.1";
+export const dashboardDefinitionVersion = "2026-10-21.1";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
 export const dashboardMetrics = ["PAID", "FREE", "MONEY", "REVIEW", "DEBT", "RETAINED", "IN_HOUSE", "ARRIVAL", "DEPARTURE", "OVERDUE", "TODAY_ORDERS", "TODAY_COLLECTIONS", "SALES", "TODAY_SALES"] as const;
 export type DashboardMetric = typeof dashboardMetrics[number];
 /** 明细事实的来源类别；用于给外部财务智能体保留可追溯的来源边界。 */
-export const dashboardDetailSources = ["LODGING", "MEMBERSHIP", "CHANNEL", "INVENTORY", "ORDER", "UNKNOWN"] as const;
+export const dashboardDetailSources = ["LODGING", "MEMBERSHIP", "CHANNEL", "WECOM", "BASELINE", "INVENTORY", "ORDER", "UNKNOWN"] as const;
 export type DashboardDetailSource = typeof dashboardDetailSources[number];
 /** 事实是否已经被业务对象认领，INTERNAL 表示内部归属转换，不是新增收退款。 */
 export const dashboardDetailClaimStatuses = ["CONFIRMED", "PENDING_REVIEW", "UNCLAIMED", "INTERNAL"] as const;
@@ -79,6 +79,18 @@ export interface DashboardDetail {
   correctsFactId?: string | null;
   syncStatus?: DashboardDetailSyncStatus;
   evidenceStatus?: DashboardDetailEvidenceStatus;
+  externalBillId?: string | null;
+  transactionReference?: string | null;
+  refundReference?: string | null;
+  originalTransactionReference?: string | null;
+  sourceOccurredAt?: string | null;
+  sourceDiscoveredAt?: string | null;
+  sourceUpdatedAt?: string | null;
+  membershipOrderId?: string | null;
+  channelCode?: string | null;
+  channelOrderReference?: string | null;
+  paymentMethod?: string | null;
+  financialKind?: string | null;
 }
 export interface DashboardResponse {
   propertyId: string;
@@ -105,6 +117,8 @@ export interface DashboardResponse {
     todayCollections: DashboardBalance[];
     todayCollectionBreakdown?: Array<{ currency: string; source: "STAY" | "MEMBER" | "CHANNEL"; amountMinor: string; count: number }>;
     todayCollectionReviewCount: number;
+    todayUnclaimed?: DashboardBalance[];
+    paymentSync?: { enabled: boolean; lastSyncedAt: string | null; hasError: boolean };
     paidGuests: number;
     freeGuests: number;
     guestReviewOrders: number;
@@ -142,6 +156,11 @@ export interface CommunityResidentDay {
   longStay: number;
   member: number | null;
   memberReview: number;
+  /** 已确认集合大小；完整总数缺项时仍可展示，不能当作完整总数。 */
+  knownTotal?: number;
+  knownMember?: number;
+  residentReview?: number;
+  reviewItems?: Array<{ orderId: string; memberId: string | null; reason: string }>;
 }
 export interface CommunityRecord {
   orderId: string; date: string; nights: number; reason: string;

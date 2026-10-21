@@ -5,6 +5,7 @@ import { dashboardDefinitionVersion, dashboardSources, DomainError, type Dashboa
 import { aggregateDashboardMoney, aggregateDashboardStays, dashboardDate, dashboardRange, dashboardSource, enumerateServiceDates, inDashboardRange, type DashboardStayNight } from "@qintopia/domain";
 import { propertyLocalClockAt } from "./members.ts";
 import { loadDashboardMoney, dashboardMoneyDetail } from "./dashboard-money.ts";
+import { loadDashboardUnclaimedPayments } from "./dashboard-unclaimed-payments.ts";
 import { loadDashboardStays } from "./dashboard-stays.ts";
 import { loadDashboardCurrent, loadDashboardFuture, newDashboardDetail } from "./dashboard-current.ts";
 import type { Database } from "./schema.ts";
@@ -25,6 +26,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const lodging = await loadDashboardStays(trx, propertyId, businessDate, { from: previousRange.from, to: range.to }, futureUntil, property.timezone);
   // 渠道应结不是现金到账，但它是系统记录的经营财务事实；历史区间与当天登记金额必须使用同一登记事实边界。
   const moneyFacts = await loadDashboardMoney(trx, propertyId, property.timezone, previousRange.from, dashboardDate(range.to, 1), { includeChannel: true });
+  const unclaimedPayments = await loadDashboardUnclaimedPayments(trx, propertyId, property.timezone, range.from, dashboardDate(range.to, 1));
   const { current, details: currentDetails } = await loadDashboardCurrent(trx, propertyId, businessDate, property.currency, property.timezone, lodging);
   const community = await loadDashboardCommunity(trx, propertyId, range, businessDate, property.timezone, lodging.statistics);
   const sales = await loadOperatingSales(trx,propertyId,property.timezone,property.currency,range,businessDate);
@@ -80,7 +82,10 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const stayDetails: DashboardDetail[] = currentNights.map(night => ({ ...newDashboardDetail(`night:${night.orderId}:${night.unitId}:${night.date}`, night.date),
     metric: night.source === "FREE" ? "FREE" : "PAID", label: `${night.building} / ${night.roomType}`, orderId: night.orderId, unitId: night.unitId, units: night.units,
     reason: `${night.source === "FREE" ? "免费占用" : "已履约付费住宿"}；按有效住宿安排逐日归属` }));
-  const details = [...lodging.futureReviews, ...stayDetails, ...relevantReviews(range).map(review => ({ ...review, date: review.date < range.from ? range.from : review.date })), ...moneyFacts.filter(fact => inDashboardRange(fact.date, range)).map(dashboardMoneyDetail), ...currentDetails];
+  const moneyDetails = moneyFacts.filter(fact => inDashboardRange(fact.date, range)).map(dashboardMoneyDetail);
+  const details = [...lodging.futureReviews, ...stayDetails, ...relevantReviews(range).map(review => ({ ...review, date: review.date < range.from ? range.from : review.date })),
+    ...moneyDetails, ...moneyDetails.filter(fact => fact.metric === "REVIEW").map(fact => ({ ...fact, id: `money-review:${fact.id}`, metric: "MONEY" as const })),
+    ...unclaimedPayments, ...currentDetails];
   return { response, details: [...details, ...sales.details] };
 }
 export async function getDashboard(db: Kysely<Database>, propertyId: string, query: DashboardQuery): Promise<DashboardResponse> {

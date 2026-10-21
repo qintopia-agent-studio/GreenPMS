@@ -3,8 +3,26 @@ import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { DashboardResponseSchema, DashboardDetailsResponseSchema } from "./dashboard";
 import { dashboardFixture } from "../../../tests/helpers/dashboard-ui-fixture";
+import buildSerializer from "fast-json-stringify";
 
 FormatRegistry.Set("date-time", value => Number.isFinite(Date.parse(value)));
+
+it("实际响应序列化保留居民已确认值、核对入口、待认领金额及同步状态", () => {
+  const summary = dashboardFixture(new URL("http://localhost/api/v1/properties/demo/dashboard"));
+  summary.community.residentCurrent = {date:summary.businessDate,total:null,longStay:25,member:null,memberReview:2,knownTotal:25,knownMember:1,residentReview:1,reviewItems:[{orderId:"order_review",memberId:"member_review",reason:"缺少明确身份依据"}]};
+  summary.current.todayUnclaimed = [{currency:"CNY",amountMinor:"-12500",count:1}];
+  summary.current.paymentSync = {enabled:true,lastSyncedAt:"2026-10-09T03:30:00Z",hasError:false};
+  const response = JSON.parse(buildSerializer(DashboardResponseSchema)(summary));
+  expect(response.community.residentCurrent).toEqual(summary.community.residentCurrent);
+  expect(response.current.todayUnclaimed).toEqual(summary.current.todayUnclaimed);
+  expect(response.current.paymentSync).toEqual(summary.current.paymentSync);
+  expect(Value.Check(DashboardResponseSchema,{...summary,community:{...summary.community,residentCurrent:{...summary.community.residentCurrent,knownMember:-1}}})).toBe(false);
+});
+
+it("财务序列化保留原流水、发生和同步日期，未认领仍为独立状态", () => {
+  const detail = {asOf:"2026-10-09T04:00:00Z",definitionVersion:"2026-10-21.1",range:{from:"2026-09-09",to:"2026-10-08"},changedSinceSummary:false,page:0,pageSize:50,total:1,items:[{id:"bill:1",date:"2026-10-09",metric:"TODAY_COLLECTIONS",label:"企微退款待认领",orderId:null,memberId:null,unitId:null,units:null,amountMinor:"-12500",currency:"CNY",registeredAt:"2026-10-09T03:35:00Z",businessDate:null,reason:"未计入已确认合计",sourceType:"WECOM",claimStatus:"UNCLAIMED",externalBillId:"bill_1",refundReference:"refund-test",originalTransactionReference:"collect-test",sourceOccurredAt:"2026-10-08T23:00:00Z",sourceDiscoveredAt:"2026-10-09T03:35:00Z",sourceUpdatedAt:"2026-10-09T03:40:00Z"}]};
+  expect(JSON.parse(buildSerializer(DashboardDetailsResponseSchema)(detail)).items).toEqual(detail.items);
+});
 
 describe("dashboard future review response contract", () => {
   it("requires a non-negative future review count and permits linked future facts outside history", () => {

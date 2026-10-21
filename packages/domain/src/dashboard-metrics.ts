@@ -35,6 +35,8 @@ export interface DashboardMoneyFact {
   replacementCollection: boolean;
   correctsFact: boolean;
   deletionCorrection: boolean;
+  /** 外部凭据尚不能核实；业务登记与真实支付来源分开判断。 */
+  registrationReview?: boolean;
 }
 export type DashboardMoneyClass = "COLLECTION" | "REFUND" | "CORRECTION" | "INTERNAL" | "REVIEW";
 export function classifyDashboardMoney(fact: DashboardMoneyFact): DashboardMoneyClass {
@@ -50,6 +52,7 @@ export function classifyDashboardMoney(fact: DashboardMoneyFact): DashboardMoney
   }
   if (fact.linkedTransfer) return "INTERNAL";
   if (fact.kind === "REALLOCATION_IN" || fact.kind === "REALLOCATION_OUT") return "INTERNAL";
+  if (fact.registrationReview) return "REVIEW";
   if (fact.transferSource) return "REVIEW";
   if (fact.reclassifiedReversal && fact.kind === "REVERSAL") return "CORRECTION";
   if (fact.replacementCollection && fact.kind === "COLLECTION") return "COLLECTION";
