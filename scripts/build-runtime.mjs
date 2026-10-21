@@ -1,7 +1,7 @@
+import { createRequire } from "node:module";
 import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { transform } from "esbuild";
 
 const runtimeTrees = [
   ["apps/api/src", "apps/api/src"],
@@ -17,13 +17,15 @@ function parseOptions() {
   const { values } = parseArgs({
     options: {
       output: { type: "string", default: "runtime" },
-      "source-root": { type: "string", default: process.cwd() }
+      "source-root": { type: "string", default: process.cwd() },
+      "dependency-root": { type: "string" }
     },
     allowPositionals: false
   });
   return {
     root: resolve(values["source-root"]),
-    output: resolve(values.output)
+    output: resolve(values.output),
+    dependencyRoot: resolve(values["dependency-root"] ?? values["source-root"] ?? process.cwd())
   };
 }
 
@@ -73,7 +75,7 @@ async function writeRuntimePackageJson(root, output, relativePath) {
   await writeFile(target, runtimePackageJson(await readFile(source, "utf8"), relativePath));
 }
 
-async function transformTree(root, output, sourceRelative, outputRelative, packageVersion) {
+async function transformTree(root, output, sourceRelative, outputRelative, packageVersion, transform) {
   const sourceDirectory = resolve(root, sourceRelative);
   const outputDirectory = resolve(output, outputRelative);
 
@@ -106,14 +108,16 @@ async function transformTree(root, output, sourceRelative, outputRelative, packa
 }
 
 async function main() {
-  const { root, output } = parseOptions();
+  const { root, output, dependencyRoot } = parseOptions();
+  const requireFromDependencyRoot = createRequire(resolve(dependencyRoot, "package.json"));
+  const { transform } = requireFromDependencyRoot("esbuild");
   assertOutputIsSeparate(root, output);
   await rm(output, { recursive: true, force: true });
   await mkdir(output, { recursive: true });
   const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 
   for (const [sourceRelative, outputRelative] of runtimeTrees) {
-    await transformTree(root, output, sourceRelative, outputRelative, packageJson.version);
+    await transformTree(root, output, sourceRelative, outputRelative, packageJson.version, transform);
   }
 
   await cp(resolve(root, "packages/db/src/migrations"), resolve(output, "packages/db/src/migrations"), { recursive: true });
