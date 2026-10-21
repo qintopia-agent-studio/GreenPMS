@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.17.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.0...v1.17.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **dashboard:** 优化看板逐日排序与表格展示 ([#98](https://github.com/qintopia-agent-studio/GreenPMS/issues/98)) ([4173789](https://github.com/qintopia-agent-studio/GreenPMS/commit/4173789a52e826447ddc49976320e25100c2a158))
+* **dashboard:** 统一居民与财务登记口径 ([#100](https://github.com/qintopia-agent-studio/GreenPMS/issues/100)) ([c4c1a53](https://github.com/qintopia-agent-studio/GreenPMS/commit/c4c1a5345de76681f5f7d83a0c98f64c5e12769f))
+
 ## [1.17.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.16.0...v1.17.0) (2026-10-20)
 
 
