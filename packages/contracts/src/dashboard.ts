@@ -1,5 +1,5 @@
 import type { OperatingSalesSummary } from "./operating-sales.ts";
-export const dashboardDefinitionVersion = "2026-10-22.2";
+export const dashboardDefinitionVersion = "2026-10-22.3";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];

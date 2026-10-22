@@ -51,6 +51,10 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   // A stable occupant registration already identifies the resident within their stay.
   // Document identity only adds cross-order linking; it is not a duration prerequisite.
   const residencePeople = new Map<string, CommunityStay[]>();
+  // Resident qualification is based on paid accommodation only. Keep this separate
+  // from `residencePeople`, which still powers total visitors and operating duration
+  // metrics for both paid and free stays.
+  const residentResidencePeople = new Map<string, CommunityStay[]>();
   const byOrder = new Map<string, CommunityStay[]>();
   for (const stay of stays) {
     const order = byOrder.get(stay.orderId) ?? [];
@@ -59,6 +63,10 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     if (key && stay.historical !== false && stay.attendanceConfirmed !== false && !stay.durationReviewReason) {
       const list = residencePeople.get(key) ?? [];
       list.push(stay); residencePeople.set(key, list);
+      if (!stay.free) {
+        const residentList = residentResidencePeople.get(key) ?? [];
+        residentList.push(stay); residentResidencePeople.set(key, residentList);
+      }
     }
     if (stay.personKey && stay.historical !== false && stay.attendanceConfirmed !== false && !stay.durationReviewReason) {
       const list = byPerson.get(stay.personKey) ?? [];
@@ -162,6 +170,17 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     const list = durationPeople.get(key) ?? [];
     list.push(stay); durationPeople.set(key, list);
   }
+  // The complete continuity input may include free rooms that bridge or overlap
+  // paid rooms. They remain part of general residence history, but cannot create
+  // paid seven-night resident eligibility or contribute paid nights themselves.
+  const residentDurationPeople = continuity ? new Map<string, CommunityStay[]>() : residentResidencePeople;
+  if (continuity) for (const stay of continuity.stays) {
+    if (stay.free) continue;
+    const key = residenceKey(stay);
+    if (!key || stay.historical === false || stay.attendanceConfirmed === false || stay.durationReviewReason) continue;
+    const list = residentDurationPeople.get(key) ?? [];
+    list.push(stay); residentDurationPeople.set(key, list);
+  }
   for (const [key, list] of durationPeople) {
     const personKey = list[0]!.personKey;
     list.sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
@@ -259,9 +278,9 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     if (existing) return existing;
     const created = new Set<string>(); map.set(date, created); return created;
   };
-  for (const [key, chainInput] of durationPeople) {
+  for (const [key, chainInput] of residentDurationPeople) {
     const chain = [...chainInput].sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
-    const operating = residencePeople.get(key) ?? [];
+    const operating = residentResidencePeople.get(key) ?? [];
     let start = "", until = "";
     const flush = () => {
       if (!start || !until) return;
@@ -285,12 +304,14 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   for (const date of residentDates) {
     const representatives = new Map<string, Set<string>>();
     for (const stay of stays) {
-      if (!relevant(stay, date) || (stay.membershipByDate?.[date]?.status ?? stay.memberStatus) !== "CONFIRMED") continue;
+      if (stay.free || !relevant(stay, date) || (stay.membershipByDate?.[date]?.status ?? stay.memberStatus) !== "CONFIRMED") continue;
       const ids = representatives.get(stay.orderId) ?? new Set<string>();
       ids.add(stay.registrationKey ?? stay.personKey ?? "unknown"); representatives.set(stay.orderId, ids);
     }
     for (const stay of stays) {
-      if (!relevant(stay, date)) continue;
+      // A free stay still contributes to current headcount and free categories,
+      // but never to the paid resident population or its membership union.
+      if (stay.free || !relevant(stay, date)) continue;
       const key = residenceKey(stay) ?? `order:${stay.orderId}:${stay.registrationKey ?? "unknown"}`;
       const registration = `${stay.orderId}:${stay.registrationKey ?? stay.personKey ?? "unknown"}`;
       const evidence = stay.membershipByDate?.[date];
