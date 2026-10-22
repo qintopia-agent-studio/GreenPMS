@@ -19,9 +19,24 @@
 .dashboard-card-value strong { font-size: 23px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .dashboard-card-value strong small { font-size: 11px; font-weight: 400; color: var(--muted); }
 .dashboard-current-card .dashboard-financial-pending { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; border: 0; padding: 0; color: var(--brand); background: none; font-size: 11px; cursor: pointer; }
-.dashboard-resident-review { padding: 4px 18px 14px; margin: -8px 0 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
-.dashboard-resident-review > div { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 10px 0; font-size: 12px; }
-.dashboard-resident-review > div + div { border-top: 1px solid var(--border); }
+.dashboard-resident-people { margin: -5px 0 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.dashboard-resident-group + .dashboard-resident-group { border-top: 1px solid var(--border); }
+.dashboard-resident-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px 10px; }
+.dashboard-resident-group-heading h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.dashboard-resident-group-heading > span { color: var(--muted); font-size: 11px; }
+.dashboard-resident-table { width: 100%; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: 12px; }
+.dashboard-resident-table th, .dashboard-resident-table td { width: 25%; padding: 12px 20px; vertical-align: top; overflow-wrap: anywhere; }
+.dashboard-resident-table th { color: var(--muted); font-size: 11px; font-weight: 400; border-bottom: 1px solid var(--border); }
+.dashboard-resident-table tbody tr + tr { border-top: 1px solid var(--border); }
+.dashboard-resident-table td strong { display: block; font-size: 12px; font-weight: 550; line-height: 1.6; }
+.dashboard-resident-table td small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.dashboard-resident-link, .dashboard-resident-member { display: inline-flex; align-items: center; gap: 6px; color: var(--brand); text-decoration: none; line-height: 1.6; }
+.dashboard-resident-link { margin-top: 4px; font-size: 11px; }
+.dashboard-resident-link:hover, .dashboard-resident-member:hover { text-decoration: underline; }
+.dashboard-resident-link svg, .dashboard-resident-member svg { flex: none; }
+.dashboard-resident-reason, .dashboard-resident-confirmed { line-height: 1.7; }
+.dashboard-resident-reason .dashboard-hint, .dashboard-resident-confirmed .dashboard-hint { margin-left: 5px; vertical-align: middle; }
+.dashboard-resident-confirmed { color: var(--brand); }
 .community-resident-current .dashboard-text-button { padding: 0 0 0 6px; font-size: 11px; }
 .dashboard-current-card strong small { font-size: 11px; font-weight: 400; }
 .dashboard-today { display: flex; width: 100%; gap: 24px; }
@@ -299,6 +314,12 @@
   .community-composition strong { font-size: 25px; }
   .community-composition p { font-size: 9px; line-height: 1.6; }
   .community-resident-current { grid-template-columns: 1fr; gap: 12px; }
+  .dashboard-resident-group-heading { padding: 14px 16px 6px; }
+  .dashboard-resident-table thead { display: none; }
+  .dashboard-resident-table, .dashboard-resident-table tbody { display: block; width: 100%; }
+  .dashboard-resident-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; padding: 12px 16px 16px; }
+  .dashboard-resident-table td { display: block; width: auto; min-width: 0; padding: 0; }
+  .dashboard-resident-table td::before { content: attr(data-label); display: block; margin-bottom: 4px; color: var(--muted); font-size: 10px; }
   .community-resident-current strong { font-size: 22px; }
   .community-today { flex-direction: column; align-items: stretch; gap: 10px; }
   .community-today > .dashboard-muted { font-size: 10px; }

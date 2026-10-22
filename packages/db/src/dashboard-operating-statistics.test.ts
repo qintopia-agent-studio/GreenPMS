@@ -83,9 +83,13 @@ describe("跨房住宿的经营人数按实际分段过滤", () => {
     expect(result.visitors).toBe(1);
     expect((await load("2026-10-07")).current.total).toBe(1);
   });
-  it("keeps overdue residents excluded when their last actual room is a dorm", async () => {
+  it("excludes overdue stays from current counts regardless of their last room's operating scope", async () => {
     expect((await load("2026-10-12", {}, segments.slice(0, 2))).current.total).toBe(0);
-    expect((await load("2026-10-12")).current.total).toBe(1);
+    const result = await load("2026-10-12");
+    expect(result.current.total).toBe(0);
+    expect(result.residentCurrent).toMatchObject({ total: 0, member: 0, longStay: 0 });
+    expect(result.duration.every(row => row.current === 0)).toBe(true);
+    expect(result.trend.map(day => day.total)).toEqual([1, 1, 0, 0, 0, 1, 1, 1, 1]);
   });
   it("clips late registration uncertainty to included segments and preserves current registration", async () => {
     const late = { ...person, role: "ADDITIONAL", created_at: new Date("2026-10-04"), created_by_command_id: "append" };

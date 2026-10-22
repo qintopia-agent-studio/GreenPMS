@@ -1,4 +1,4 @@
-import type { CommunityDay, CommunityRecord, CommunityResidentDay, DashboardCommunity, DashboardRange } from "@qintopia/contracts";
+import type { CommunityDay, CommunityRecord, CommunityResidentDay, CommunityResidentMemberItem, CommunityResidentReviewItem, DashboardCommunity, DashboardRange } from "@qintopia/contracts";
 import { dashboardDate } from "./dashboard-metrics.ts";
 import { enumerateServiceDates } from "./dates.ts";
 
@@ -11,19 +11,27 @@ export interface CommunityStay {
   free: boolean;
   category: string | null;
   registrationKey?: string;
+  occupantName?: string;
+  roomCode?: string;
+  /** Dates of the effective room arrangement, not an inferred guest arrival. */
+  arrivalDate?: string;
+  departureDate?: string;
   historical?: boolean;
   /** False for an interval retained only as an attendance gap, not proven occupancy. */
   attendanceConfirmed?: boolean;
   durationReviewReason?: string;
   identityApproximate?: boolean;
   memberStatus?: "CONFIRMED" | "UNKNOWN" | "NOT_MEMBER";
-  /** Exact guest/member evidence, resolved independently for each reporting date. */
+  /** Actual membership-benefit usage, projected onto the order's sole primary guest. */
   membershipByDate?: Readonly<Record<string, CommunityMembershipEvidence>>;
 }
 export interface CommunityMembershipEvidence {
   status: "CONFIRMED" | "UNKNOWN" | "NOT_MEMBER";
   memberId: string | null;
+  memberName?: string;
   reason?: string;
+  reasonLabel?: string;
+  basis?: "MEMBER_ENTITLEMENT";
 }
 export interface CommunityEvent { orderId: string; date: string; nights: number; reason: string; kind: "RENEWAL" | "EARLY" }
 /** Complete evidence defines residence/event boundaries; operating contributions still come from `stays`. */
@@ -36,7 +44,7 @@ const residenceKey = (stay: CommunityStay) => stay.personKey ? `identity:${stay.
   : stay.registrationKey ? `registration:${stay.orderId}:${stay.registrationKey}` : null;
 const nights = (from: string, until: string) => Math.max(0, Math.round((Date.parse(until) - Date.parse(from)) / 86400000));
 
-/** Identity keys stay inside the server projection; responses contain counts and order links only. */
+/** Identity keys stay inside the server projection; only current lists include safe display fields. */
 export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[], range: DashboardRange, today: string, evidenceIssues: string[] = [], planned: CommunityStay[] = [], continuity?: CommunityContinuity): DashboardCommunity {
   const byPerson = new Map<string, CommunityStay[]>();
   const plannedByPerson = new Map<string, CommunityStay[]>();
@@ -62,11 +70,12 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     list.push(stay); plannedByPerson.set(stay.personKey, list);
   }
   const relevant = (stay: CommunityStay, date: string) => date === today
-    ? stay.current && stay.arrival <= date
+    ? stay.current && stay.arrival <= date && date < stay.departure
     : stay.historical !== false && stay.arrival <= date && date < stay.departure;
   function day(date: string): CommunityDay {
     const active = stays.filter(stay => relevant(stay, date));
-    const unlinked = new Set(active.filter(stay => !stay.personKey).map((stay, i) => stay.registrationKey ?? `${stay.orderId}:${i}`)).size;
+    const unlinked = new Set(active.filter(stay => stay.attendanceConfirmed === false || !stay.personKey)
+      .map((stay, i) => `${stay.orderId}:${stay.registrationKey ?? i}`)).size;
     const registrations = new Map<string, Set<string>>();
     let missingRegistration = false;
     for (const stay of active) {
@@ -86,10 +95,12 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
       else registered.otherFree++;
     }
     const grouped = new Map<string, Set<string>>();
-    for (const stay of active) if (stay.personKey) {
-      const categories = grouped.get(stay.personKey) ?? new Set<string>();
+    for (const stay of active) {
+      const identity = stay.attendanceConfirmed === false ? null : stay.personKey;
+      if (!identity) continue;
+      const categories = grouped.get(identity) ?? new Set<string>();
       categories.add(stay.free ? (stay.category ?? "OTHER") : "PAID");
-      grouped.set(stay.personKey, categories);
+      grouped.set(identity, categories);
     }
     let paid = 0, volunteer = 0, reception = 0, otherFree = 0, unclassified = 0;
     for (const categories of grouped.values()) {
@@ -119,7 +130,7 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     const orders = new Set<string>();
     const issues = new Map<string, Set<string>>();
     for (const stay of stays) {
-      const occupiedUntil = stay.current ? dashboardDate(today, 1) : stay.departure;
+      const occupiedUntil = stay.current && stay.departure > today ? dashboardDate(today, 1) : stay.departure;
       const included = perspective === "current" ? relevant(stay, today)
         : range.from <= cutoff && stay.arrival <= cutoff && occupiedUntil > range.from;
       if (!included) continue;
@@ -158,18 +169,18 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
     function finish() {
       if (!chain.length) return;
       const start = chain[0]!.arrival;
-      const live = chain.some(stay => stay.current && stay.arrival <= today);
+      const live = chain.some(stay => relevant(stay, today));
       const observedEnd = live || until > today ? today : until;
       const duration = nights(start, observedEnd);
       if (continuity) {
         const contributions = (residencePeople.get(key) ?? []).filter(stay => stay.arrival < until
-          && (stay.current ? dashboardDate(today, 1) : stay.departure) > start);
+          && (stay.current && stay.departure > today ? dashboardDate(today, 1) : stay.departure) > start);
         // Union included service dates inside this complete residence chain. An excluded
         // room bridges continuity, but contributes no nights and cannot make it current.
         const operatingNightsThrough = (through: string) => {
           const intervals = contributions.map(stay => ({
             from: stay.arrival > start ? stay.arrival : start,
-            to: stay.current || stay.departure > through ? through : stay.departure
+            to: stay.departure > through ? through : stay.departure
           })).filter(interval => interval.from < interval.to).sort((a, b) => a.from.localeCompare(b.from));
           let total = 0, countedUntil = start;
           for (const interval of intervals) {
@@ -181,7 +192,7 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
         };
         if (contributions.some(stay => relevant(stay, today))) countDuration(operatingNightsThrough(today), "current");
         if (range.from <= cutoff && contributions.some(stay => stay.arrival <= cutoff
-          && (stay.current ? dashboardDate(today, 1) : stay.departure) > range.from)) {
+          && (stay.current && stay.departure > today ? dashboardDate(today, 1) : stay.departure) > range.from)) {
           countDuration(operatingNightsThrough(observedEnd < cutoff ? observedEnd : cutoff), "all");
         }
       } else {
@@ -234,10 +245,15 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   const residentDates = [...new Set([...trend.map(row => row.date), today])];
   const longStayByDate = new Map<string, Set<string>>();
   const memberByDate = new Map<string, Set<string>>();
-  const memberResidentByDate = new Map<string, Set<string>>();
+  const residentPeopleByDate = new Map<string, Map<string, { residenceKey: string; longStayEligible: boolean }>>();
   const memberReviewByDate = new Map<string, Set<string>>();
-  const residentReviewByDate = new Map<string, Set<string>>();
-  const reviewItemsByDate = new Map<string, Map<string, { orderId: string; memberId: string | null; reason: string }>>();
+  const residentReviewByDate = new Map<string, Map<string, string>>();
+  const reviewItemsByDate = new Map<string, Map<string, { item: CommunityResidentReviewItem; reasons: Set<string>; labels: Set<string> }>>();
+  const currentMemberItems = new Map<string, CommunityResidentMemberItem>();
+  const markResidentReview = (date: string, registration: string, identity: string) => {
+    const items = residentReviewByDate.get(date) ?? new Map<string, string>();
+    items.set(registration, identity); residentReviewByDate.set(date, items);
+  };
   const ensure = (map: Map<string, Set<string>>, date: string) => {
     const existing = map.get(date);
     if (existing) return existing;
@@ -246,88 +262,125 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   for (const [key, chainInput] of durationPeople) {
     const chain = [...chainInput].sort((a, b) => a.arrival.localeCompare(b.arrival) || a.departure.localeCompare(b.departure));
     const operating = residencePeople.get(key) ?? [];
-    let start = "", until = "", segment: CommunityStay[] = [];
+    let start = "", until = "";
     const flush = () => {
       if (!start || !until) return;
       for (const date of residentDates) {
         // Only this uninterrupted chain can establish its own seven-night start.
         // A prior visit must not qualify a later one after an empty night.
-        if (date < start || (date >= until && !(date === today && segment.some(stay => relevant(stay, date))))) continue;
+        if (date < start || date >= until) continue;
         const active = date === today
-          ? operating.some(stay => stay.current && stay.arrival <= date && stay.arrival < until && stay.departure > start)
+          ? operating.some(stay => relevant(stay, date) && stay.arrival < until && stay.departure > start)
           : operating.some(stay => stay.arrival <= date && date < stay.departure && stay.arrival < until && stay.departure > start);
         if (active && nights(start, date) >= 7) ensure(longStayByDate, date).add(key);
       }
     };
     for (const stay of chain) {
-      if (start && stay.arrival > until) { flush(); start = ""; until = ""; segment = []; }
+      if (start && stay.arrival > until) { flush(); start = ""; until = ""; }
       if (!start) start = stay.arrival;
       if (stay.departure > until) until = stay.departure;
-      segment.push(stay);
     }
     flush();
   }
   for (const date of residentDates) {
+    const representatives = new Map<string, Set<string>>();
+    for (const stay of stays) {
+      if (!relevant(stay, date) || (stay.membershipByDate?.[date]?.status ?? stay.memberStatus) !== "CONFIRMED") continue;
+      const ids = representatives.get(stay.orderId) ?? new Set<string>();
+      ids.add(stay.registrationKey ?? stay.personKey ?? "unknown"); representatives.set(stay.orderId, ids);
+    }
     for (const stay of stays) {
       if (!relevant(stay, date)) continue;
       const key = residenceKey(stay) ?? `order:${stay.orderId}:${stay.registrationKey ?? "unknown"}`;
+      const registration = `${stay.orderId}:${stay.registrationKey ?? stay.personKey ?? "unknown"}`;
       const evidence = stay.membershipByDate?.[date];
-      // Identity proves who a member is, not whether they occupied this date.
-      // Historical placeholders must stay unresolved even with a matching ID.
+      const display = {
+        orderId: stay.orderId, memberId: evidence?.memberId ?? null,
+        ...(stay.registrationKey ? { occupantId: stay.registrationKey } : {}),
+        ...(date === today ? {
+          occupantName: stay.occupantName ?? (stay.registrationKey ? "住客姓名未填写" : "未登记实际住客"),
+          ...(evidence?.memberName ? { memberName: evidence.memberName } : {}),
+          ...(stay.roomCode ? { roomCode: stay.roomCode } : {}),
+          ...(stay.arrivalDate ? { arrivalDate: stay.arrivalDate } : {}),
+          ...(stay.departureDate ? { departureDate: stay.departureDate } : {})
+        } : {})
+      };
+      // Benefit usage does not prove attendance on dates with missing occupancy evidence.
       const attendanceUnknown = stay.attendanceConfirmed === false;
       const identityStatus = evidence?.status ?? stay.memberStatus;
-      const status = attendanceUnknown && identityStatus !== "NOT_MEMBER" ? "UNKNOWN" : identityStatus;
+      const ambiguousRepresentative = identityStatus === "CONFIRMED" && (representatives.get(stay.orderId)?.size ?? 0) > 1;
+      const status = (attendanceUnknown && identityStatus !== "NOT_MEMBER") || ambiguousRepresentative ? "UNKNOWN" : identityStatus;
+      const memberKey = status === "CONFIRMED" ? key : null;
+      const people = residentPeopleByDate.get(date) ?? new Map();
+      people.set(registration, { residenceKey: key,
+        longStayEligible: !attendanceUnknown && stay.historical !== false && !stay.durationReviewReason });
+      residentPeopleByDate.set(date, people);
       if (status === "CONFIRMED") {
-        // Count membership by its exact identity; the approximate name grouping
-        // remains only the existing operating-person estimate for the union.
-        ensure(memberByDate, date).add(evidence?.memberId ? `member:${evidence.memberId}` : key);
-        ensure(memberResidentByDate, date).add(key);
+        // One primary registration represents the order's usage. Count its existing
+        // guest identity, never the member account that supplied the benefits.
+        ensure(memberByDate, date).add(memberKey!);
+        if (date === today) currentMemberItems.set(registration, { ...display,
+          ...(evidence?.basis ? { basis: evidence.basis } : {}) });
       }
       const reasons: string[] = [];
+      const labels: string[] = [];
       if (status === "UNKNOWN") {
-        ensure(memberReviewByDate, date).add(key);
-        ensure(residentReviewByDate, date).add(key);
-        reasons.push(attendanceUnknown
-          ? stay.durationReviewReason ?? "实际在住日期与人数依据待核对，不能仅凭会员身份认定当天在住。"
-          : evidence?.reason ?? "订单会员主体尚未与实际住客身份核对。");
+        ensure(memberReviewByDate, date).add(registration);
+        markResidentReview(date, registration, key);
+        reasons.push(ambiguousRepresentative ? "同一订单存在多位权益统计代表，不能重复计数或随机选取。" : attendanceUnknown
+          ? stay.durationReviewReason ?? "实际在住日期与人数依据待核对，不能仅凭权益使用认定当天在住。"
+          : evidence?.reason ?? "订单当天会员权益使用依据待核对。");
+        labels.push(ambiguousRepresentative ? "主要住客登记不唯一" : attendanceUnknown ? "实际在住日期待核对" : evidence?.reasonLabel ?? "会员权益使用待核对");
       }
       if (attendanceUnknown || stay.durationReviewReason || (!residenceKey(stay) && status !== "CONFIRMED")) {
-        if (status !== "CONFIRMED") ensure(residentReviewByDate, date).add(key);
+        if (status !== "CONFIRMED") markResidentReview(date, registration, key);
         reasons.push(stay.durationReviewReason ?? "实际住客身份与连续住宿日期待核对。");
+        labels.push(attendanceUnknown || stay.durationReviewReason ? "实际在住日期待核对" : "实际住客资料待补充");
       }
       if (reasons.length) {
         const items = reviewItemsByDate.get(date) ?? new Map();
-        for (const reason of reasons) {
-          const item = { orderId: stay.orderId, memberId: evidence?.memberId ?? null, reason };
-          items.set(`${item.orderId}:${item.memberId}:${reason}`, item);
-        }
+        const existing = items.get(registration);
+        const mergedReasons = new Set([...(existing?.reasons ?? []), ...reasons]);
+        const mergedLabels = new Set([...(existing?.labels ?? []), ...labels]);
+        items.set(registration, { item: { ...display, reason: [...mergedReasons].join("；"),
+          ...(date === today ? { reasonLabel: [...mergedLabels].join("；") } : {}) }, reasons: mergedReasons, labels: mergedLabels });
         reviewItemsByDate.set(date, items);
       }
     }
   }
-  const residentDay = (date: string): CommunityResidentDay => {
+  const residentDay = (date: string, includeMembers = false): CommunityResidentDay => {
     const longStay = longStayByDate.get(date) ?? new Set<string>();
     const member = memberByDate.get(date) ?? new Set<string>();
     const review = memberReviewByDate.get(date) ?? new Set<string>();
-    const known = new Set([...longStay, ...(memberResidentByDate.get(date) ?? [])]);
-    // A fuzzy person grouping with a confirmed member must not resolve another
-    // registration's uncertain membership. Independently qualifying long-stay
-    // evidence does make that uncertainty irrelevant to the resident union.
-    const residentReview = [...(residentReviewByDate.get(date) ?? [])].filter(key => !longStay.has(key)).length;
+    const longStayPeople = new Set<string>();
+    const longStayRegistrations = new Set<string>();
+    for (const [registration, person] of residentPeopleByDate.get(date) ?? []) {
+      if (!person.longStayEligible || !longStay.has(person.residenceKey)) continue;
+      longStayPeople.add(person.residenceKey);
+      longStayRegistrations.add(registration);
+    }
+    const known = new Set([...longStayPeople, ...member]);
+    // A different guest's confirmed usage must not resolve this registration.
+    // Its own qualifying long-stay evidence can already establish residency.
+    const residentReview = [...(residentReviewByDate.get(date)?.keys() ?? [])].filter(registration => !longStayRegistrations.has(registration)).length;
     return {
       date,
-      longStay: longStay.size,
+      longStay: longStayPeople.size,
       member: review.size ? null : member.size,
       total: residentReview ? null : known.size,
       memberReview: review.size,
       knownTotal: known.size,
       knownMember: member.size,
       residentReview,
-      reviewItems: [...(reviewItemsByDate.get(date)?.values() ?? [])]
+      reviewItems: [...(reviewItemsByDate.get(date)?.values() ?? [])].map(({ item }) => includeMembers ? item : {
+        orderId: item.orderId, memberId: item.memberId, reason: item.reason,
+        ...(item.occupantId ? { occupantId: item.occupantId } : {})
+      }),
+      ...(includeMembers ? { memberItems: [...currentMemberItems.values()] } : {})
     };
   };
   const residentTrend = trend.map(row => residentDay(row.date));
-  const residentCurrent = residentDay(today);
+  const residentCurrent = residentDay(today, true);
   const unknown = trend.some(row => row.unlinked > 0);
   const current = day(today);
   const reasons = [...evidenceIssues];
@@ -336,7 +389,7 @@ export function communityMetrics(stays: CommunityStay[], events: CommunityEvent[
   return {
     current, trend,
     identityApproximate: stays.some(stay => stay.identityApproximate) || planned.some(stay => stay.identityApproximate),
-    visitors: unknown ? null : [...byPerson.values()].filter(list => list.some(stay => stay.arrival <= range.to && stay.departure > range.from)).length,
+    visitors: unknown ? null : [...residencePeople.values()].filter(list => list.some(stay => stay.arrival <= range.to && stay.departure > range.from)).length,
     dailyAverage: unknown ? null : trend.reduce((sum, row) => sum + row.total!, 0) / Math.max(trend.length, 1),
     duration: [...distribution.values()].sort((a, b) => a.nights - b.nights),
     durationCoverage: { current: durationCoverage("current"), all: durationCoverage("all") }, records: resultRecords,

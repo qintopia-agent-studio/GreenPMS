@@ -114,5 +114,13 @@ it("explains cancellation of an empty duplicate membership without deleting the 
 
 it("当前现场解释已确认人数、待认领与真实零值的区别", () => {
  const content=assistantKnowledgeTopics.find(topic=>topic.id==="dashboard")!.content;
- for(const text of ["实际住客证件与同店会员档案证件唯一一致", "普通住宿单也可识别在住会员", "不能继承旧长住资格", "查看记录", "今日暂无已确认业务", "今日暂无金额登记", "尚未认领的余额", "首次同步时间", "未认领和待核对金额不计入已确认合计"]) expect(content).toContain(text);
+ for(const text of ["退房日期当天不计入", "每笔订单每日最多计1人", "不能继承旧长住资格", "查看在住名单", "今日暂无已确认业务", "今日暂无金额登记", "尚未认领的余额", "首次同步时间", "未认领和待核对金额不计入已确认合计"]) expect(content).toContain(text);
+});
+
+
+it("社区人数按退房日排除并按权益使用统计会员，不要求本人核验", () => {
+ const content=assistantKnowledgeTopics.find(topic=>topic.id==="dashboard")!.content;
+ for(const text of ["退房日期当天不计入", "不要求确认住客是会员本人", "每笔订单每日最多计1人", "不要求为看板补证件", "会员ID只表示权益来源", "已核销权益扣除返还", "不能继承旧长住资格"]) expect(content).toContain(text);
+ for(const text of ["本人在住转会员", "证件身份一致", "点击“查看记录”"]) expect(content).not.toContain(text);
+ expect(buildAssistantSystemPrompt(context)).toContain("查看在住名单");
 });

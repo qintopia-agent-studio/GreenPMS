@@ -14,7 +14,7 @@ const person = (o: ReturnType<typeof order>, id: string, nickname = "Cathy", ful
 });
 async function load(orders: ReturnType<typeof order>[], occupants: ReturnType<typeof person>[], from = "2026-10-01", to = "2026-10-13") {
   const tables: Record<string, unknown[]> = { "orders as o": orders, order_occupants: occupants, order_occupant_corrections: [], amendments: [], order_occupant_removals: [] };
-  const trx = { selectFrom(table: string) { const q: any = { innerJoin: () => q, select: () => q, selectAll: () => q, where: () => q, orderBy: () => q, execute: async () => tables[table] ?? [] }; return q; } } as unknown as Transaction<Database>;
+  const trx = { selectFrom(table: string) { const q: any = { innerJoin: () => q, leftJoin: () => q, select: () => q, selectAll: () => q, where: () => q, orderBy: () => q, execute: async () => tables[table] ?? [] }; return q; } } as unknown as Transaction<Database>;
   loadStays.mockResolvedValue({ statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements: new Map(orders.map(o => [o.id, [{ inventoryUnitId: "unit", arrivalDate: o.arrival_date, departureDate: o.departure_date }]])) });
   return loadDashboardCommunity(trx, "property-one", {from,to}, "2026-10-14", "Asia/Shanghai");
 }

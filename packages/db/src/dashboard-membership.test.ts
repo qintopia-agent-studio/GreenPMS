@@ -1,77 +1,103 @@
 import { describe, expect, it } from "vitest";
-import { dashboardMembershipProjection, type DashboardMembershipData } from "./dashboard-membership.ts";
+import type { Transaction } from "kysely";
+import type { Database } from "./schema.ts";
+import { dashboardMembershipProjection, loadDashboardMembership, type DashboardMembershipData } from "./dashboard-membership.ts";
 
-const today = "2026-10-21";
-const dates = ["2026-10-01", "2026-10-10", today];
-const member = { id: "member-one", identity_card_number: "DOC-ONE" };
-const contract = { id: "contract-one", member_id: member.id, membership_order_id: "membership-one", status: "ACTIVE" as const, valid_from: "2026-10-01", valid_until: "2027-09-30" };
-const lot = { id: "lot-one", contract_id: contract.id, status: "ACTIVE" as const, expires_on: contract.valid_until };
-const membershipOrder = { id: "membership-one", member_id: member.id, contract_id: contract.id, entitlement_lot_id: lot.id, status: "ACTIVE" as const };
-const data = (overrides: Partial<DashboardMembershipData> = {}): DashboardMembershipData => ({ members: [member], contracts: [contract], lots: [lot], membershipOrders: [membershipOrder], ...overrides });
-const guest = { documentNumber: " doc-one " };
+const date = "2026-10-22", dates = ["2026-10-21", date], propertyId = "property-one";
+const primary = { id: "guest-one", role: "PRIMARY", documentNumber: null };
+const booking = { id: "order-one", member_id: "member-one", member_contract_id: "contract-one" };
+function data(patch: Partial<DashboardMembershipData> = {}): DashboardMembershipData {
+  return {
+    members: [{ id: "member-one", full_name: "权益持有人", nickname: "小甲" }],
+    contracts: [{ id: "contract-one", member_id: "member-one", membership_order_id: "membership-one", status: "ACTIVE" }],
+    lots: [{ id: "lot-one", contract_id: "contract-one", status: "ACTIVE" }],
+    membershipOrders: [{ id: "membership-one", member_id: "member-one", contract_id: "contract-one", entitlement_lot_id: "lot-one", status: "ACTIVE", created_by_command_id: "membership-create", activated_by_command_id: "membership-activate" }],
+    orders: [booking],
+    coverage: [{ id: "coverage-one", order_id: "order-one", contract_id: "contract-one", lot_id: "lot-one", service_date: date, status: "CONSUMED" }],
+    ledger: [{ fact_id: "consume-one", order_id: "order-one", lot_id: "lot-one", service_date: date, coverage_id: "coverage-one", entry_type: "CONSUME", quantity_delta: 0, command_id: "check-in" }],
+    ...patch
+  };
+}
 
-describe("dashboard exact guest membership evidence", () => {
-  it("recognizes a member in an ordinary lodging order by exact document alone", () => {
-    const evidence = dashboardMembershipProjection(data(), dates, today)(guest, {});
-    expect(evidence[today]).toEqual({ status: "CONFIRMED", memberId: member.id });
+describe("社区会员权益在住统计", () => {
+  it("当日确实使用权益的订单计PRIMARY一个份额，不要求证件或会员本人", () => {
+    const read = dashboardMembershipProjection(data(), dates, date);
+    expect(read(primary, booking)[date]).toEqual({ status: "CONFIRMED", memberId: "member-one", memberName: "小甲（权益持有人）", basis: "MEMBER_ENTITLEMENT" });
+    expect(read({ ...primary, documentNumber: "OTHER-PERSON" }, booking)[date]).toEqual(read(primary, booking)[date]);
+    expect(read({ ...primary, id: "companion", role: "ADDITIONAL" }, booking)[date]).toEqual({ status: "NOT_MEMBER", memberId: null });
+    expect(read(primary, booking)["2026-10-21"]?.status).toBe("NOT_MEMBER");
+    expect(JSON.stringify(read(primary, booking))).not.toContain("OTHER-PERSON");
   });
-  it("does not treat an order payer as its undocumented guest", () => {
-    const evidence = dashboardMembershipProjection(data(), dates, today)({ documentNumber: null }, { member_id: member.id });
-    expect(evidence[today]).toMatchObject({ status: "UNKNOWN", memberId: member.id });
-    expect(evidence[today]?.reason).toContain("不能用订单会员主体");
+  it("有会员档案或订单member_id但未使用权益，不计会员权益在住", () => {
+    const read = dashboardMembershipProjection(data({ coverage: [], ledger: [] }), dates, date);
+    expect(read(primary, booking)[date]).toEqual({ status: "NOT_MEMBER", memberId: null });
+    expect(read({ ...primary, documentNumber: "MEMBER-DOCUMENT" }, { id: "ordinary-order" })[date]?.status).toBe("NOT_MEMBER");
   });
-  it("does not count a documented roommate with a different identity as the order member", () => {
-    const evidence = dashboardMembershipProjection(data(), dates, today)({ documentNumber: "DOC-ROOMMATE" }, { member_id: member.id });
-    expect(evidence[today]).toEqual({ status: "NOT_MEMBER", memberId: null });
+  it.each(["HELD", "RELEASED"] as const)("%s覆盖不算已经实际使用", status => {
+    const fixture = data(); fixture.coverage = [{ ...fixture.coverage[0]!, status }];
+    expect(dashboardMembershipProjection(fixture, dates, date)(primary, booking)[date]?.status).toBe("NOT_MEMBER");
   });
-  it("keeps a missing member document unresolved even if the guest has a document", () => {
-    const evidence = dashboardMembershipProjection(data({ members: [{ ...member, identity_card_number: null }] }), dates, today)(guest, { member_id: member.id });
-    expect(evidence[today]).toMatchObject({ status: "UNKNOWN", memberId: member.id });
+  it("已返还核销不计，且不以今天合同过期抹去真实历史使用", () => {
+    const fixture = data();
+    fixture.contracts = [{ ...fixture.contracts[0]!, status: "EXPIRED" }];
+    expect(dashboardMembershipProjection(fixture, dates, date)(primary, booking)[date]?.status).toBe("CONFIRMED");
+    fixture.ledger = [...fixture.ledger, { ...fixture.ledger[0]!, fact_id: "restore-one", entry_type: "RESTORE", quantity_delta: 1 }];
+    expect(dashboardMembershipProjection(fixture, dates, date)(primary, booking)[date]?.status).toBe("NOT_MEMBER");
   });
-  it("refuses ambiguous document matches", () => {
-    const evidence = dashboardMembershipProjection(data({ members: [member, { id: "duplicate", identity_card_number: member.identity_card_number }] }), dates, today)(guest, {});
-    expect(evidence[today]).toMatchObject({ status: "UNKNOWN", memberId: null });
+  it("相同会员可供两笔住宿使用，不把两单代表认成同一个实际住客", () => {
+    const fixture = data();
+    fixture.orders = [...fixture.orders, { ...booking, id: "order-two" }];
+    fixture.coverage = [...fixture.coverage, { ...fixture.coverage[0]!, id: "coverage-two", order_id: "order-two" }];
+    fixture.ledger = [...fixture.ledger, { ...fixture.ledger[0]!, fact_id: "consume-two", order_id: "order-two", coverage_id: "coverage-two" }];
+    const read = dashboardMembershipProjection(fixture, dates, date);
+    expect(read(primary, booking)[date]?.status).toBe("CONFIRMED");
+    expect(read({ id: "guest-two", role: "PRIMARY" }, { ...booking, id: "order-two" })[date]?.status).toBe("CONFIRMED");
+    expect(read(primary, booking)[date]).not.toHaveProperty("identityBasis");
   });
-  it("counts the guest's own active membership when another member is the payer", () => {
-    const evidence = dashboardMembershipProjection(data({ members: [member, { id: "payer", identity_card_number: "DOC-PAYER" }] }), dates, today)(guest, { member_id: "payer" });
-    expect(evidence[today]).toEqual({ status: "CONFIRMED", memberId: member.id });
+  it("使用权益但没有实际PRIMARY登记，保留具体缺项", () => {
+    const read = dashboardMembershipProjection(data(), dates, date);
+    expect(read(null, booking)[date]).toMatchObject({ status: "UNKNOWN", reasonLabel: "缺少唯一主要住客" });
+    expect(read({ id: "unknown-role" }, booking)[date]).toMatchObject({ status: "UNKNOWN" });
   });
-  it("checks activation and the earlier of contract and lot expiry on every statistical day", () => {
-    const evidence = dashboardMembershipProjection(data({ contracts: [{ ...contract, valid_from: "2026-10-10" }], lots: [{ ...lot, expires_on: "2026-10-10" }] }), dates, today)(guest, {});
-    expect(evidence["2026-10-01"]?.status).toBe("NOT_MEMBER");
-    expect(evidence["2026-10-10"]?.status).toBe("CONFIRMED");
-    expect(evidence[today]?.status).toBe("NOT_MEMBER");
+  it("旧合同无会员档案时仍确认一个权益份额并保留合同显示名", () => {
+    const fixture = data({ members: [], membershipOrders: [] });
+    fixture.contracts = [{ ...fixture.contracts[0]!, member_id: null, membership_order_id: null, member_name: "历史权益来源" }];
+    fixture.orders = [{ ...booking, member_id: null }];
+    expect(dashboardMembershipProjection(fixture, dates, date)(primary, fixture.orders[0]!)[date])
+      .toEqual({ status: "CONFIRMED", memberId: null, memberName: "历史权益来源", basis: "MEMBER_ENTITLEMENT" });
   });
-  it("keeps valid historical membership after the contract has expired", () => {
-    const evidence = dashboardMembershipProjection(data({ contracts: [{ ...contract, status: "EXPIRED", valid_until: "2026-10-10" }] }), dates, today)(guest, {});
-    expect(evidence["2026-10-01"]?.status).toBe("CONFIRMED");
-    expect(evidence["2026-10-10"]?.status).toBe("CONFIRMED");
-    expect(evidence[today]?.status).toBe("NOT_MEMBER");
+  it("换房区间调用及重复返回的同一事实不增加份额", () => {
+    const fixture = data(); fixture.coverage = [...fixture.coverage, fixture.coverage[0]!]; fixture.ledger = [...fixture.ledger, fixture.ledger[0]!];
+    const read = dashboardMembershipProjection(fixture, dates, date);
+    expect(read(primary, booking)[date]).toMatchObject({ status: "CONFIRMED", basis: "MEMBER_ENTITLEMENT" });
+    expect(read(primary, booking)).toEqual(read(primary, booking));
   });
-  it.each(["contract", "lot", "order"] as const)("keeps historical %s voids unresolved instead of erasing past membership", kind => {
-    const evidence = dashboardMembershipProjection(data({
-      ...(kind === "contract" ? { contracts: [{ ...contract, status: "VOIDED" as const }] } : {}),
-      ...(kind === "lot" ? { lots: [{ ...lot, status: "VOIDED" as const }] } : {}),
-      ...(kind === "order" ? { membershipOrders: [{ ...membershipOrder, status: "VOIDED" as const }] } : {})
-    }), dates, today)(guest, {});
-    expect(evidence["2026-10-10"]?.status).toBe("UNKNOWN");
-    expect(evidence[today]?.status).toBe("NOT_MEMBER");
+  it.each(["CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"])("兼容%s无coverage历史追溯核销，不查当时PRIMARY身份快照", command_type => {
+    const fixture = data(); fixture.coverage = [];
+    fixture.orders = [{ ...booking, member_id: null, member_contract_id: null }];
+    fixture.membershipOrders = [{ ...fixture.membershipOrders[0]!, created_by_command_id: "convert", activated_by_command_id: "convert" }];
+    fixture.ledger = [{ ...fixture.ledger[0]!, coverage_id: null, service_date: "2026-10-21", entry_type: "CONVERSION_CONSUME", quantity_delta: -1, command_id: "convert", command_type, command_state: "APPLIED" }];
+    expect(dashboardMembershipProjection(fixture, dates, date)(primary, fixture.orders[0]!)["2026-10-21"]).toMatchObject({ status: "CONFIRMED", basis: "MEMBER_ENTITLEMENT" });
   });
-  it("allows another verified valid contract to establish membership despite a voided old contract", () => {
-    const evidence = dashboardMembershipProjection(data({ contracts: [{ ...contract, id: "void-old", status: "VOIDED", membership_order_id: null }, contract] }), dates, today)(guest, {});
-    expect(evidence["2026-10-10"]?.status).toBe("CONFIRMED");
-  });
-  it("does not confirm a contract with missing or mismatched entitlement evidence", () => {
-    for (const fixture of [data({ lots: [] }), data({ membershipOrders: [] }), data({ membershipOrders: [{ ...membershipOrder, entitlement_lot_id: "wrong-lot" }] })]) {
-      expect(dashboardMembershipProjection(fixture, dates, today)(guest, {})[today]?.status).toBe("UNKNOWN");
-    }
-  });
-  it("does not report a missing associated member as a verified zero", () => {
-    const evidence = dashboardMembershipProjection(data({ members: [] }), dates, today)(guest, { member_id: "missing" });
-    expect(evidence[today]).toMatchObject({ status: "UNKNOWN", memberId: "missing" });
-  });
-  it("can resolve a contract-only booking reference without treating it as guest identity", () => {
-    const evidence = dashboardMembershipProjection(data(), dates, today)({ documentNumber: null }, { member_contract_id: contract.id });
-    expect(evidence[today]).toMatchObject({ status: "UNKNOWN", memberId: member.id });
+  it("真实loader按门店和服务日读取权益，不读取住客或会员的证件电话", async () => {
+    const fixture = data();
+    const tables: Record<string, readonly unknown[]> = {
+      "members as m": fixture.members, member_contracts: fixture.contracts, membership_orders: fixture.membershipOrders,
+      entitlement_lots: fixture.lots, orders: fixture.orders, "coverage_items as c": fixture.coverage, "entitlement_ledger as l": fixture.ledger
+    };
+    const selections: unknown[] = [], filters: unknown[][] = [], tablesRead: string[] = [];
+    const trx = { selectFrom(table: string) {
+      tablesRead.push(table);
+      const q: any = { innerJoin: () => q, leftJoin: () => q, selectAll: () => q,
+        select: (value: unknown) => { selections.push(value); return q; }, where: (...args: unknown[]) => { filters.push([table, ...args]); return q; }, execute: async () => tables[table] ?? [] };
+      return q;
+    } } as unknown as Transaction<Database>;
+    const read = await loadDashboardMembership(trx, propertyId, dates, date);
+    expect(read(primary, booking)[date]?.status).toBe("CONFIRMED");
+    expect(filters).toContainEqual(["coverage_items as c", "o.property_id", "=", propertyId]);
+    expect(filters).toContainEqual(["entitlement_ledger as l", "l.service_date", "in", dates]);
+    expect(JSON.stringify(selections)).not.toMatch(/phone|identity_card_number|document_number/);
+    expect(tablesRead).not.toContain("order_occupants");
+    expect(tablesRead).not.toContain("amendments as a");
   });
 });

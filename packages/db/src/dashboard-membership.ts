@@ -1,127 +1,51 @@
-import type { Selectable, Transaction } from "kysely";
+import type { Transaction } from "kysely";
 import type { CommunityMembershipEvidence } from "../../domain/src/community-metrics.ts";
 import type { Database } from "./schema.ts";
+import { dashboardMemberUsage, usageKey, type DashboardMemberUsageData } from "./dashboard-member-usage.ts";
 
-type Member = Pick<Selectable<Database["members"]>, "id" | "identity_card_number">;
-type Contract = Pick<Selectable<Database["member_contracts"]>, "id" | "member_id" | "status" | "valid_from" | "valid_until" | "membership_order_id">;
-type Lot = Pick<Selectable<Database["entitlement_lots"]>, "id" | "contract_id" | "status" | "expires_on">;
-type MembershipOrder = Pick<Selectable<Database["membership_orders"]>, "id" | "member_id" | "status" | "contract_id" | "entitlement_lot_id">;
-export interface DashboardMembershipData {
-  members: readonly Member[];
-  contracts: readonly Contract[];
-  lots: readonly Lot[];
-  membershipOrders: readonly MembershipOrder[];
-}
-type Guest = { documentNumber: string | null };
-type Booking = { member_id?: string | null; member_contract_id?: string | null };
-const document = (value: string | null | undefined) => (value ?? "").trim().toUpperCase();
+export type DashboardMembershipData = DashboardMemberUsageData;
+type Guest = { id?: string; role?: string; documentNumber?: string | null };
+type Booking = { id?: string; member_id?: string | null; member_contract_id?: string | null };
+const displayName = (member: DashboardMembershipData["members"][number] | undefined) => {
+  const nickname = member?.nickname?.trim(), name = member?.full_name?.trim();
+  return nickname && name && nickname !== name ? `${nickname}（${name}）` : nickname || name;
+};
 
-/** This projection never matches names or shared phones, or writes a guest/member link. */
-export function dashboardMembershipProjection(data: DashboardMembershipData, dates: readonly string[], today: string) {
+/** 每笔实际使用权益的住宿由PRIMARY承接一个统计份额，不识别会员本人。 */
+export function dashboardMembershipProjection(data: DashboardMembershipData, dates: readonly string[], _today: string) {
+  const usage = dashboardMemberUsage(data);
   const members = new Map(data.members.map(member => [member.id, member]));
-  const byDocument = new Map<string, Member[]>();
-  for (const member of data.members) {
-    const key = document(member.identity_card_number);
-    if (key) byDocument.set(key, [...(byDocument.get(key) ?? []), member]);
-  }
-  const contractsByMember = new Map<string, Contract[]>();
-  const contractsById = new Map(data.contracts.map(contract => [contract.id, contract]));
-  for (const contract of data.contracts) if (contract.member_id) {
-    contractsByMember.set(contract.member_id, [...(contractsByMember.get(contract.member_id) ?? []), contract]);
-  }
-  const lotsByContract = new Map<string, Lot[]>();
-  for (const lot of data.lots) lotsByContract.set(lot.contract_id, [...(lotsByContract.get(lot.contract_id) ?? []), lot]);
-  const membershipOrders = new Map(data.membershipOrders.map(order => [order.id, order]));
-  const validityCache = new Map<string, CommunityMembershipEvidence>();
-  const notMember = (memberId: string | null): CommunityMembershipEvidence => ({ status: "NOT_MEMBER", memberId });
-  const unknown = (memberId: string | null, reason: string): CommunityMembershipEvidence => ({ status: "UNKNOWN", memberId, reason });
-  function validity(memberId: string, date: string): CommunityMembershipEvidence {
-    const cacheKey = `${memberId}:${date}`;
-    const cached = validityCache.get(cacheKey);
-    if (cached) return cached;
-    let result = notMember(memberId);
-    for (const contract of contractsByMember.get(memberId) ?? []) {
-      if (date < contract.valid_from || date > contract.valid_until) continue;
-      const lots = lotsByContract.get(contract.id) ?? [];
-      const order = contract.membership_order_id ? membershipOrders.get(contract.membership_order_id) : undefined;
-      const voided = contract.status === "VOIDED" || order?.status === "VOIDED";
-      if (voided) {
-        if (date < today) result = unknown(memberId, "会员已作废，但缺少可明确适用于统计日的作废依据，历史会员资格待核对。");
-        continue;
-      }
-      if (contract.membership_order_id && (!order || order.member_id !== memberId || order.contract_id !== contract.id)) {
-        result = unknown(memberId, "会员合同与售卡记录的关联不完整，会员有效性待核对。");
-        continue;
-      }
-      if (order?.status === "DRAFT") continue;
-      if (!lots.length) {
-        result = unknown(memberId, "会员合同缺少权益有效期依据，会员有效性待核对。");
-        continue;
-      }
-      if (order && !lots.some(lot => lot.id === order.entitlement_lot_id)) {
-        result = unknown(memberId, "会员售卡记录与权益批次的关联不完整，会员有效性待核对。");
-        continue;
-      }
-      for (const lot of lots) {
-        if (order && lot.id !== order.entitlement_lot_id) continue;
-        if (date > lot.expires_on) continue;
-        if (lot.status === "VOIDED") {
-          if (date < today) result = unknown(memberId, "会员权益已作废，但缺少可明确适用于统计日的作废依据，历史会员资格待核对。");
-          continue;
-        }
-        // EXPIRED today must not erase membership on its earlier valid dates.
-        if (date === today && contract.status === "EXPIRED") continue;
-        result = { status: "CONFIRMED", memberId };
-        validityCache.set(cacheKey, result);
-        return result;
-      }
+  return (guest: Guest | null, booking: Booking): Readonly<Record<string, CommunityMembershipEvidence>> => Object.fromEntries(dates.map(date => {
+    let evidence: CommunityMembershipEvidence = { status: "NOT_MEMBER", memberId: null };
+    const source = booking.id ? usage.get(usageKey(booking.id, date)) : undefined;
+    if (source && guest?.role !== "ADDITIONAL") {
+      evidence = guest?.id && guest.role === "PRIMARY" ? source : { status: "UNKNOWN", memberId: source.memberId,
+        reasonLabel: "缺少唯一主要住客", reason: "当天有会员权益使用，但缺少可承接这一统计份额的唯一主要住客登记。" };
+      const memberName = displayName(evidence.memberId ? members.get(evidence.memberId) : undefined) ?? source.memberName;
+      if (memberName) evidence = { ...evidence, memberName };
     }
-    validityCache.set(cacheKey, result);
-    return result;
-  }
-  return (guest: Guest | null, booking: Booking): Readonly<Record<string, CommunityMembershipEvidence>> => {
-    const key = document(guest?.documentNumber);
-    const matches = key ? byDocument.get(key) ?? [] : [];
-    const linkedContract = booking.member_contract_id ? contractsById.get(booking.member_contract_id) : undefined;
-    const linkedId = booking.member_id ?? linkedContract?.member_id ?? null;
-    return Object.fromEntries(dates.map(date => {
-      let evidence: CommunityMembershipEvidence;
-      if (matches.length === 1) {
-        // An ordinary lodging booking can contain a member, regardless of payer.
-        evidence = validity(matches[0]!.id, date);
-      } else if (matches.length > 1) {
-        evidence = unknown(null, "同一证件对应多份会员档案，实际会员身份待核对。");
-      } else if (linkedId || booking.member_contract_id) {
-        const linkedMember = linkedId ? members.get(linkedId) : undefined;
-        const linkedValidity = linkedId && linkedMember ? validity(linkedId, date) : null;
-        if (linkedValidity?.status === "NOT_MEMBER") evidence = linkedValidity;
-        else if (key && linkedMember && document(linkedMember.identity_card_number)) {
-          // A different verified document disproves this payer/guest identity.
-          evidence = notMember(null);
-        } else {
-          evidence = unknown(linkedId, linkedValidity?.status === "UNKNOWN" ? linkedValidity.reason!
-            : !guest ? "订单缺少实际住宿人，无法核对订单会员主体是否在住。"
-              : !linkedMember ? "订单关联的会员资料缺失，实际住客会员身份待核对。"
-                : "实际住客或会员档案缺少证件依据，不能用订单会员主体、同名或手机号代替身份核对。");
-        }
-      } else evidence = notMember(null);
-      return [date, evidence];
-    }));
-  };
+    return [date, evidence];
+  }));
 }
 
 export async function loadDashboardMembership(trx: Transaction<Database>, propertyId: string, dates: readonly string[], today: string) {
-  // Member corrections update the canonical members row; guest corrections are
-  // applied by projectCurrentOrderOccupants before this projection is called.
-  const members = await trx.selectFrom("members as m")
-    .innerJoin("member_property_links as mpl", "mpl.member_id", "m.id")
-    .select(["m.id", "m.identity_card_number"])
-    .where("mpl.property_id", "=", propertyId).where("m.deleted_at", "is", null).execute();
-  const ids = members.map(member => member.id);
-  const [contracts, membershipOrders] = ids.length ? await Promise.all([
-    trx.selectFrom("member_contracts").selectAll().where("property_id", "=", propertyId).where("member_id", "in", ids).execute(),
-    trx.selectFrom("membership_orders").selectAll().where("property_id", "=", propertyId).where("member_id", "in", ids).execute()
-  ]) : [[], []];
+  const members = await trx.selectFrom("members as m").innerJoin("member_property_links as mpl", "mpl.member_id", "m.id")
+    .select(["m.id", "m.full_name", "m.nickname"]).where("mpl.property_id", "=", propertyId).where("m.deleted_at", "is", null).execute();
+  const [contracts, membershipOrders, orders] = await Promise.all([
+    trx.selectFrom("member_contracts").selectAll().where("property_id", "=", propertyId).execute(),
+    trx.selectFrom("membership_orders").selectAll().where("property_id", "=", propertyId).execute(),
+    trx.selectFrom("orders").select(["id", "member_id", "member_contract_id"]).where("property_id", "=", propertyId).execute()
+  ]);
   const lots = contracts.length ? await trx.selectFrom("entitlement_lots").selectAll().where("contract_id", "in", contracts.map(contract => contract.id)).execute() : [];
-  return dashboardMembershipProjection({ members, contracts, lots, membershipOrders }, dates, today);
+  const uniqueDates = [...new Set(dates)];
+  const [coverage, ledger] = uniqueDates.length ? await Promise.all([
+    trx.selectFrom("coverage_items as c").innerJoin("orders as o", "o.id", "c.order_id")
+      .selectAll("c").where("o.property_id", "=", propertyId).where("c.service_date", "in", uniqueDates).execute(),
+    trx.selectFrom("entitlement_ledger as l").innerJoin("orders as o", "o.id", "l.order_id")
+      .leftJoin("command_executions as e", join => join.onRef("e.id", "=", "l.command_id").on("e.property_id", "=", propertyId))
+      .selectAll("l").select(["e.command_type", "e.state as command_state"])
+      .where("o.property_id", "=", propertyId).where("l.service_date", "in", uniqueDates)
+      .where("l.entry_type", "in", ["HOLD", "CONSUME", "CONVERSION_CONSUME", "RESTORE"]).execute()
+  ]) : [[], []];
+  return dashboardMembershipProjection({ members, contracts, lots, membershipOrders, orders, coverage, ledger }, dates, today);
 }

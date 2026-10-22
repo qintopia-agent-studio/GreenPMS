@@ -1,5 +1,5 @@
 import type { OperatingSalesSummary } from "./operating-sales.ts";
-export const dashboardDefinitionVersion = "2026-10-21.1";
+export const dashboardDefinitionVersion = "2026-10-22.2";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
@@ -150,6 +150,23 @@ export interface CommunityDay {
   unclassified?: number;
   registered?: { total: number | null; paid: number; volunteer: number; reception: number; otherFree: number };
 }
+export interface CommunityResidentPerson {
+  orderId: string;
+  memberId: string | null;
+  occupantId?: string | null;
+  occupantName?: string;
+  memberName?: string;
+  roomCode?: string;
+  arrivalDate?: string;
+  departureDate?: string;
+}
+export interface CommunityResidentReviewItem extends CommunityResidentPerson {
+  reason: string;
+  reasonLabel?: string;
+}
+export interface CommunityResidentMemberItem extends CommunityResidentPerson {
+  basis?: "MEMBER_ENTITLEMENT";
+}
 export interface CommunityResidentDay {
   date: string;
   total: number | null;
@@ -160,7 +177,9 @@ export interface CommunityResidentDay {
   knownTotal?: number;
   knownMember?: number;
   residentReview?: number;
-  reviewItems?: Array<{ orderId: string; memberId: string | null; reason: string }>;
+  reviewItems?: CommunityResidentReviewItem[];
+  /** 会员权益住宿的主要住客登记名单；会员ID只表示权益来源，不作为人员身份。 */
+  memberItems?: CommunityResidentMemberItem[];
 }
 export interface CommunityRecord {
   orderId: string; date: string; nights: number; reason: string;
