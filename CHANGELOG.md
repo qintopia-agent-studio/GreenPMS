@@ -2,6 +2,13 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.17.4](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.3...v1.17.4) (2026-10-22)
+
+
+### Bug Fixes
+
+* **dashboard:** 统一社区退房日与会员权益统计口径 ([#105](https://github.com/qintopia-agent-studio/GreenPMS/issues/105)) ([2c1c4e9](https://github.com/qintopia-agent-studio/GreenPMS/commit/2c1c4e91bcd7c1171e3a2429e3ffc2f0d9a14c82))
+
 ## [1.17.3](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.2...v1.17.3) (2026-10-21)
 
 
