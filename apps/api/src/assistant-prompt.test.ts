@@ -124,3 +124,8 @@ it("社区人数按退房日排除并按权益使用统计会员，不要求本�
  for(const text of ["本人在住转会员", "证件身份一致", "点击“查看记录”"]) expect(content).not.toContain(text);
  expect(buildAssistantSystemPrompt(context)).toContain("查看在住名单");
 });
+
+it("居民不包含免费住宿", () => {
+ const content=assistantKnowledgeTopics.find(topic=>topic.id==="dashboard")!.content;
+ for(const text of ["有效付费住宿区间", "免费住宿不计入居民", "使用付费会员权益"]) expect(content).toContain(text);
+});

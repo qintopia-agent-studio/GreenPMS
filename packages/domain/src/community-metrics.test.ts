@@ -235,6 +235,23 @@ describe("resident metric", () => {
     const result = communityMetrics([stay({ arrival: "2026-10-01", departure: "2026-10-12", current: true, memberStatus: "CONFIRMED" })], [], residentRange, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ total: 1, longStay: 1, member: 1, memberReview: 0 });
   });
+  it("excludes free long stays from residents while retaining them in community totals", () => {
+    const result = communityMetrics([stay({ arrival: "2026-10-01", departure: "2026-10-12", current: true, free: true, category: "VOLUNTEER" })], [], residentRange, "2026-10-09");
+    expect(result.current).toMatchObject({ total: 1, paid: 0, volunteer: 1 });
+    expect(result.residentCurrent).toMatchObject({ total: 0, longStay: 0, member: 0, memberReview: 0 });
+  });
+  it("counts paid long stays as residents while excluding a free long stay", () => {
+    const result = communityMetrics([
+      stay({ orderId: "paid", arrival: "2026-10-01", departure: "2026-10-12", current: true }),
+      stay({ orderId: "free", personKey: "free-person", arrival: "2026-10-01", departure: "2026-10-12", current: true, free: true, category: "RECEPTION" })
+    ], [], residentRange, "2026-10-09");
+    expect(result.current).toMatchObject({ total: 2, paid: 1, reception: 1 });
+    expect(result.residentCurrent).toMatchObject({ total: 1, longStay: 1, member: 0 });
+  });
+  it("does not count a free stay's member evidence as a resident membership share", () => {
+    const result = communityMetrics([stay({ arrival: "2026-10-01", departure: "2026-10-12", current: true, free: true, category: "VOLUNTEER", membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member", basis: "MEMBER_ENTITLEMENT" } } })], [], residentRange, "2026-10-09");
+    expect(result.residentCurrent).toMatchObject({ total: 0, longStay: 0, member: 0, memberReview: 0 });
+  });
   it("keeps an unbound member order out of the person count and marks the gap", () => {
     const result = communityMetrics([stay({ arrival: "2026-10-08", departure: "2026-10-12", current: true, memberStatus: "UNKNOWN" })], [], residentRange, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ total: null, longStay: 0, member: null, memberReview: 1 });

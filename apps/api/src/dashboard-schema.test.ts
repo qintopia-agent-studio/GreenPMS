@@ -39,7 +39,7 @@ it("实际序列化保留逐住客名单与权益使用依据，不输出证件�
 });
 
 it("财务序列化保留原流水、发生和同步日期，未认领仍为独立状态", () => {
-  const detail = {asOf:"2026-10-09T04:00:00Z",definitionVersion:"2026-10-22.2",range:{from:"2026-09-09",to:"2026-10-08"},changedSinceSummary:false,page:0,pageSize:50,total:1,items:[{id:"bill:1",date:"2026-10-09",metric:"TODAY_COLLECTIONS",label:"企微退款待认领",orderId:null,memberId:null,unitId:null,units:null,amountMinor:"-12500",currency:"CNY",registeredAt:"2026-10-09T03:35:00Z",businessDate:null,reason:"未计入已确认合计",sourceType:"WECOM",claimStatus:"UNCLAIMED",externalBillId:"bill_1",refundReference:"refund-test",originalTransactionReference:"collect-test",sourceOccurredAt:"2026-10-08T23:00:00Z",sourceDiscoveredAt:"2026-10-09T03:35:00Z",sourceUpdatedAt:"2026-10-09T03:40:00Z"}]};
+  const detail = {asOf:"2026-10-09T04:00:00Z",definitionVersion:"2026-10-22.3",range:{from:"2026-09-09",to:"2026-10-08"},changedSinceSummary:false,page:0,pageSize:50,total:1,items:[{id:"bill:1",date:"2026-10-09",metric:"TODAY_COLLECTIONS",label:"企微退款待认领",orderId:null,memberId:null,unitId:null,units:null,amountMinor:"-12500",currency:"CNY",registeredAt:"2026-10-09T03:35:00Z",businessDate:null,reason:"未计入已确认合计",sourceType:"WECOM",claimStatus:"UNCLAIMED",externalBillId:"bill_1",refundReference:"refund-test",originalTransactionReference:"collect-test",sourceOccurredAt:"2026-10-08T23:00:00Z",sourceDiscoveredAt:"2026-10-09T03:35:00Z",sourceUpdatedAt:"2026-10-09T03:40:00Z"}]};
   expect(JSON.parse(buildSerializer(DashboardDetailsResponseSchema)(detail)).items).toEqual(detail.items);
 });
 
