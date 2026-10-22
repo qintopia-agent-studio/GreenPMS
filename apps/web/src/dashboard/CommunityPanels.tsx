@@ -1,9 +1,9 @@
 import { displayedCommunityDay, displayedCommunityTrend, registrationExplanation } from "./community-display";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, Users, LogIn, LogOut } from "lucide-react";
 import { Area, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { CommunityDay, DashboardMetric, DashboardResponse } from "@qintopia/contracts";
+import type { CommunityDay, CommunityResidentDay, CommunityResidentMemberItem, CommunityResidentReviewItem, DashboardMetric, DashboardResponse } from "@qintopia/contracts";
 import { DashboardHint } from "./DashboardHint";
 import { money } from "./dashboard-state";
 import { CurrentMoneyCards } from "./CurrentMoneyCards";
@@ -31,16 +31,47 @@ export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDe
 function CurrentResidentSummary({ data }: { data: DashboardResponse }) {
   const resident = data.community.residentCurrent!;
   const [showReview, setShowReview] = useState(false);
+  const listId = useId();
   const knownResidents = resident.total ?? resident.knownTotal;
   const knownMembers = resident.member ?? resident.knownMember;
   const issues = resident.reviewItems ?? [];
+  const hasList = issues.length > 0 || Boolean(resident.memberItems?.length);
   return <>
     <section className="community-resident-current" aria-label="当前居民与在住会员">
-      <div><span>当日居民数 <DashboardHint text="实际在住且连续已住满7晚，或能确认当天有效会员身份；取并集，同一人只计一次。有空夜后重新累计。已确认人数不包括尚不能判断的短住会员。" /></span><strong>{knownResidents ?? "待核对"}<small>{knownResidents === undefined ? "" : resident.total === null ? "人 · 已确认" : "人"}</small></strong><p>长住 {resident.longStay}{resident.total === null && resident.residentReview ? ` · 另 ${resident.residentReview} 条待核对` : ""}{!resident.memberReview && issues.length ? <button type="button" className="dashboard-text-button" aria-expanded={showReview} onClick={() => setShowReview(!showReview)}>{showReview ? "收起" : "核对居住日期"}<ArrowRight size={12} /></button> : null}</p></div>
-      <div><span>在住会员 <DashboardHint text="依据实际住客与会员的明确身份关联，按当天有效合同及权益区间判断。会员短住也计入；订单会员主体、同名、同昵称或共用电话不能单独代替实际住客身份。" /></span><strong>{knownMembers ?? "待核对"}<small>{knownMembers === undefined ? "" : resident.member === null ? "人 · 已确认" : "人"}</small></strong><p>{resident.memberReview ? <>{resident.memberReview} 条身份待核对 {issues.length ? <button type="button" className="dashboard-text-button" aria-expanded={showReview} onClick={() => setShowReview(!showReview)}>{showReview ? "收起" : "查看记录"}<ArrowRight size={12} /></button> : null}</> : "会员关系已核对"}</p></div>
+      <div><span>当日居民数 <DashboardHint text="实际在住且连续已住满7晚，或能确认当天有效会员身份；取并集，同一人只计一次。有空夜后重新累计。已确认人数不包括尚不能判断的短住会员。" /></span><strong>{knownResidents ?? "待核对"}<small>{knownResidents === undefined ? "" : resident.total === null ? "人 · 已确认" : "人"}</small></strong><p>长住 {resident.longStay}{resident.total === null && resident.residentReview ? ` · 另 ${resident.residentReview} 条待核对` : ""}{!resident.memberReview && issues.length ? <button type="button" className="dashboard-text-button" aria-expanded={showReview} aria-controls={listId} onClick={() => setShowReview(!showReview)}>{showReview ? "收起名单" : "核对居住日期"}<ArrowRight size={12} /></button> : null}</p></div>
+      <div><span>在住会员 <DashboardHint text="依据实际住客的唯一证件匹配，或经核实的本人在住转会员事实，按当天有效合同及权益区间判断。会员短住也计入；普通订单会员主体、同名、同昵称或共用电话不能单独代替实际住客身份。待核对按住宿登记逐条列出。" /></span><strong>{knownMembers ?? "待核对"}<small>{knownMembers === undefined ? "" : resident.member === null ? "人 · 已确认" : "人"}</small></strong><p>{resident.memberReview ? `${resident.memberReview} 条身份待核对` : "会员关系已核对"}{hasList ? <button type="button" className="dashboard-text-button" aria-expanded={showReview} aria-controls={listId} onClick={() => setShowReview(!showReview)}>{showReview ? "收起名单" : "查看在住名单"}<ArrowRight size={12} /></button> : null}</p></div>
     </section>
-    {showReview ? <div className="dashboard-resident-review" aria-label="在住会员待核对记录">{issues.map((item, index) => <div key={`${item.orderId}:${item.memberId}:${index}`}><span>待核对记录 {index + 1} <DashboardHint text={item.reason} /></span><Link to={`/orders/${encodeURIComponent(item.orderId)}`}>核对住客 <ArrowRight size={12}/></Link>{item.memberId ? <Link to={`/members?memberId=${encodeURIComponent(item.memberId)}`}>会员资料 <ArrowRight size={12}/></Link> : null}</div>)}</div> : null}
+    {showReview ? <div id={listId}><ResidentPeopleList resident={resident} /></div> : null}
   </>;
+}
+
+export function ResidentPeopleList({ resident }: { resident: CommunityResidentDay }) {
+  const members = resident.memberItems ?? [];
+  const reviews = resident.reviewItems ?? [];
+  const groups: Array<{ title: string; review: boolean; items: Array<CommunityResidentMemberItem | CommunityResidentReviewItem> }> = [
+    { title: "已确认在住会员", review: false, items: members },
+    { title: "待核对登记", review: true, items: reviews }
+  ];
+  return <div className="dashboard-resident-people" aria-label="在住会员与待核对住客名单">
+    {groups.filter(group => group.items.length).map(group => <section className="dashboard-resident-group" key={group.title} aria-label={group.title}>
+      <div className="dashboard-resident-group-heading"><h3>{group.title}</h3><span>{group.items.length} 条登记</span></div>
+      <table className="dashboard-resident-table">
+        <thead><tr><th>在住住客</th><th>本房间住期 <DashboardHint label="房间日期说明" text="日期来自该房间的有效住宿安排，不代表追加住客已核实的独立入住日期；日期缺项在核对事项中说明。" /></th><th>{group.review ? "关联会员" : "对应会员"}</th><th>{group.review ? "核对事项" : "确认依据"}</th></tr></thead>
+        <tbody>{group.items.map((item, index) => {
+          const review = "reason" in item ? item : null;
+          const basis = "identityBasis" in item ? item.identityBasis : undefined;
+          const basisLabel = basis === "DOCUMENT" ? "证件身份一致" : basis === "STAY_CONVERSION" ? "本人在住转会员" : "会员身份已确认";
+          const basisExplanation = basis === "DOCUMENT" ? "实际住客证件与同店会员证件唯一一致，且当天合同与权益有效。" : basis === "STAY_CONVERSION" ? "已核实成功在住转会员事件、原始主住客与会员权益链，且当天会员资格有效。" : "已确认实际住客的有效会员身份。";
+          return <tr key={`${item.orderId}:${item.occupantId ?? index}`}>
+            <td data-label="在住住客"><strong>{item.occupantName || "住客姓名待补充"}</strong><Link className="dashboard-resident-link" to={`/orders/${encodeURIComponent(item.orderId)}`}>{group.review ? "核对住客" : "住宿订单"}<ArrowRight size={12} aria-hidden="true" /></Link></td>
+            <td data-label="本房间住期"><strong>{item.roomCode || "房间待核对"}</strong><small>{item.arrivalDate && item.departureDate ? `${item.arrivalDate} 至 ${item.departureDate}` : "住宿日期待核对"}</small></td>
+            <td data-label={group.review ? "关联会员" : "对应会员"}>{item.memberId ? <Link className="dashboard-resident-member" to={`/members?memberId=${encodeURIComponent(item.memberId)}`}>{item.memberName || "会员姓名待补充"}<ArrowRight size={12} aria-hidden="true" /></Link> : <span className="dashboard-muted">{group.review ? "会员关联待核对" : "会员资料待补充"}</span>}</td>
+            <td data-label={group.review ? "核对事项" : "确认依据"}><span className={group.review ? "dashboard-resident-reason" : "dashboard-resident-confirmed"}>{review ? review.reasonLabel || review.reason : basisLabel}<DashboardHint label={group.review ? "核对原因说明" : "会员确认依据"} text={review ? review.reason : basisExplanation} /></span></td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </section>)}
+  </div>;
 }
 
 export function CommunitySnapshot({ data, onDetail }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void }) {

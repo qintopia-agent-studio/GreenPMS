@@ -9,7 +9,7 @@ const today = "2026-10-21";
 const range = { from: "2026-10-01", to: "2026-10-20" };
 const booking = { id: "ordinary", arrival_date: "2026-10-21", departure_date: "2026-10-25", status: "CHECKED_IN", stay_type: "TRANSIENT", free_stay_category_code: null, member_id: null, member_contract_id: null };
 const occupant = { id: "actual-guest", order_id: booking.id, ordinal: 1, role: "PRIMARY", full_name: "示例住客", nickname: "Example", phone: null, document_number: "DOC-ONE", created_at: new Date("2026-10-21T01:00:00Z"), created_by_command_id: null };
-const member = { id: "member-one", identity_card_number: "DOC-ONE" };
+const member = { id: "member-one", identity_card_number: "DOC-ONE", nickname: "会员昵称", full_name: "会员姓名" };
 const contract = { id: "contract-one", member_id: member.id, membership_order_id: "membership-one", status: "ACTIVE", valid_from: "2026-10-01", valid_until: "2027-09-30" };
 const lot = { id: "lot-one", contract_id: contract.id, status: "ACTIVE", expires_on: contract.valid_until };
 const membershipOrder = { id: "membership-one", member_id: member.id, contract_id: contract.id, entitlement_lot_id: lot.id, status: "ACTIVE" };
@@ -33,8 +33,33 @@ describe("community loader exact current membership", () => {
     expect(JSON.stringify(result)).not.toContain("DOC-ONE");
   });
   it("uses the latest corrected guest document without changing the registration facts", async () => {
-    const { trx } = database({ order_occupants: [{ ...occupant, document_number: "OLD-DOCUMENT" }], order_occupant_corrections: [{ occupant_id: occupant.id, sequence: 1, corrected_document_number: "DOC-ONE", corrected_full_name: occupant.full_name, corrected_nickname: occupant.nickname, corrected_phone: null }] });
-    expect((await loadDashboardCommunity(trx, "property-one", range, today, "Asia/Shanghai")).residentCurrent?.member).toBe(1);
+    const { trx } = database({ order_occupants: [{ ...occupant, document_number: "OLD-DOCUMENT" }], order_occupant_corrections: [{ occupant_id: occupant.id, sequence: 1, corrected_document_number: "DOC-ONE", corrected_full_name: occupant.full_name, corrected_nickname: "更正昵称", corrected_phone: null }] });
+    const current = (await loadDashboardCommunity(trx, "property-one", range, today, "Asia/Shanghai")).residentCurrent;
+    expect(current?.member).toBe(1);
+    expect(current?.memberItems).toEqual([expect.objectContaining({ occupantId: occupant.id, occupantName: "更正昵称（示例住客）" })]);
+  });
+  it("shows the current room's effective dates after a move, rather than the original booking start", async () => {
+    const ongoing = { ...booking, arrival_date: "2026-10-01" };
+    loadStays.mockResolvedValue({ units: [{ id: "old-room", code: "101" }, { id: "room", code: "202" }], statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements: new Map([[ongoing.id, [
+      { inventoryUnitId: "old-room", arrivalDate: "2026-10-01", departureDate: "2026-10-17" },
+      { inventoryUnitId: "room", arrivalDate: "2026-10-17", departureDate: ongoing.departure_date }
+    ]]]) });
+    const { trx } = database({ "orders as o": [ongoing] });
+    const result = await loadDashboardCommunity(trx, "property-one", range, today, "Asia/Shanghai");
+    expect(result.residentCurrent?.memberItems).toEqual([expect.objectContaining({ occupantId: occupant.id, occupantName: "Example（示例住客）", roomCode: "202", arrivalDate: "2026-10-17", departureDate: "2026-10-25" })]);
+    expect(JSON.stringify(result.residentTrend)).not.toContain("Example");
+  });
+  it("keeps two unnamed membership relations on the same order attached to their exact guest names", async () => {
+    const linked = { ...booking, member_id: member.id };
+    const one = { ...occupant, nickname: "住客甲", document_number: null };
+    const two = { ...one, id: "guest-two", ordinal: 2, role: "ADDITIONAL", nickname: "住客乙" };
+    const { trx } = database({ "orders as o": [linked], order_occupants: [one, two] });
+    const current = (await loadDashboardCommunity(trx, "property-one", range, today, "Asia/Shanghai")).residentCurrent;
+    expect(current).toMatchObject({ memberReview: 2, residentReview: 2 });
+    expect(current?.reviewItems).toEqual([
+      expect.objectContaining({ occupantId: one.id, occupantName: "住客甲（示例住客）", memberId: member.id }),
+      expect.objectContaining({ occupantId: two.id, occupantName: "住客乙（示例住客）", memberId: member.id })
+    ]);
   });
   it("keeps confirmed members visible alongside unresolved order membership and supplies a review link target", async () => {
     const other = { ...booking, id: "unresolved", member_id: member.id };

@@ -36,11 +36,32 @@ describe("community duration loader", () => {
     expect(c.current.registered?.total).toBe(1);
     expect(JSON.stringify(c.durationCoverage)).not.toMatch(/shared-phone|合成住客|payer-member/);
   });
-  it("reports missing arrangements as unresolved orders, not one invented person", async () => {
+  it("keeps a known guest registration actionable when its effective timeline is missing, without inventing attendance or duration", async () => {
     loadStays.mockResolvedValue({ statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements: new Map() });
     const c = await loadDashboardCommunity(database(), "property", range, today, "Asia/Shanghai");
-    expect(c.durationCoverage?.current).toMatchObject({ pendingRegistrations: 0, pendingOrders: 1 });
+    expect(c.durationCoverage?.current).toMatchObject({ pendingRegistrations: 1, pendingOrders: 0 });
+    expect(c.durationCoverage?.all).toMatchObject({ pendingRegistrations: 1, pendingOrders: 0 });
     expect(c.durationCoverage?.current.issues[0]?.reason).toContain("时间线");
+    expect(c.current.total).toBeNull();
+    expect(c.current.registered?.total).toBe(1);
+    expect(c.duration).toEqual([]);
+    expect(c.visitors).toBeNull();
+    expect(c.residentCurrent).toMatchObject({ total: null, knownTotal: 0, longStay: 0 });
+    expect(c.residentCurrent?.reviewItems).toEqual([expect.objectContaining({ orderId: order.id, occupantId: occupant.id, occupantName: "合成住客" })]);
+    expect(c.residentCurrent?.reviewItems?.[0]?.arrivalDate).toBeUndefined();
+    expect(c.residentCurrent?.reviewItems?.[0]?.roomCode).toBeUndefined();
+    expect(c.trend.every(day => day.total === null)).toBe(true);
+    expect(c.residentTrend?.every(day => day.knownTotal === 0 && day.longStay === 0)).toBe(true);
+  });
+  it.each(["missing", "valid"])("keeps an order with no actual guest roster unresolved when its timeline is %s", async timeline => {
+    if (timeline === "missing") loadStays.mockResolvedValue({ statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements: new Map() });
+    const c = await loadDashboardCommunity(database({ order_occupants: [] }), "property", range, today, "Asia/Shanghai");
+    expect(c.durationCoverage?.current).toMatchObject({ pendingRegistrations: 0, pendingOrders: 1 });
+    expect(c.current.total).toBeNull(); expect(c.current.registered?.total).toBeNull();
+    expect(c.duration).toEqual([]);
+    expect(c.residentCurrent).toMatchObject({ total: null, knownTotal: 0, knownMember: 0, longStay: 0 });
+    expect(c.residentCurrent?.reviewItems?.[0]).toMatchObject({ orderId: order.id, occupantName: "未登记实际住客" });
+    expect(c.residentCurrent?.reviewItems?.[0]?.occupantId).toBeUndefined();
   });
   it("preserves current registrations but refuses to backdate late-added guests", async () => {
     const c = await loadDashboardCommunity(database({ order_occupants: [{ ...occupant, role: "ADDITIONAL", created_at: new Date("2026-10-10T01:00:00Z"), created_by_command_id: "add-person" }] }), "property", range, today, "Asia/Shanghai");

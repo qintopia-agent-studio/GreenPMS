@@ -13,7 +13,7 @@ const guest = { documentNumber: " doc-one " };
 describe("dashboard exact guest membership evidence", () => {
   it("recognizes a member in an ordinary lodging order by exact document alone", () => {
     const evidence = dashboardMembershipProjection(data(), dates, today)(guest, {});
-    expect(evidence[today]).toEqual({ status: "CONFIRMED", memberId: member.id });
+    expect(evidence[today]).toEqual({ status: "CONFIRMED", memberId: member.id, identityBasis: "DOCUMENT" });
   });
   it("does not treat an order payer as its undocumented guest", () => {
     const evidence = dashboardMembershipProjection(data(), dates, today)({ documentNumber: null }, { member_id: member.id });
@@ -34,7 +34,7 @@ describe("dashboard exact guest membership evidence", () => {
   });
   it("counts the guest's own active membership when another member is the payer", () => {
     const evidence = dashboardMembershipProjection(data({ members: [member, { id: "payer", identity_card_number: "DOC-PAYER" }] }), dates, today)(guest, { member_id: "payer" });
-    expect(evidence[today]).toEqual({ status: "CONFIRMED", memberId: member.id });
+    expect(evidence[today]).toEqual({ status: "CONFIRMED", memberId: member.id, identityBasis: "DOCUMENT" });
   });
   it("checks activation and the earlier of contract and lot expiry on every statistical day", () => {
     const evidence = dashboardMembershipProjection(data({ contracts: [{ ...contract, valid_from: "2026-10-10" }], lots: [{ ...lot, expires_on: "2026-10-10" }] }), dates, today)(guest, {});
@@ -73,5 +73,16 @@ describe("dashboard exact guest membership evidence", () => {
   it("can resolve a contract-only booking reference without treating it as guest identity", () => {
     const evidence = dashboardMembershipProjection(data(), dates, today)({ documentNumber: null }, { member_contract_id: contract.id });
     expect(evidence[today]).toMatchObject({ status: "UNKNOWN", memberId: member.id });
+  });
+  it.each(["CONFIRMED", "NOT_MEMBER", "UNKNOWN"] as const)("keeps verified person identity independent of %s membership eligibility", status => {
+    const facts = data({
+      ...(status === "NOT_MEMBER" ? { contracts: [{ ...contract, status: "EXPIRED", valid_until: "2026-10-10" }] } : {}),
+      ...(status === "UNKNOWN" ? { lots: [] } : {}),
+      conversionBindings: new Map([["primary-one", { orderId: "order-one", occupantId: "primary-one", memberId: member.id, verified: true }]])
+    });
+    const read = dashboardMembershipProjection(facts, dates, today);
+    expect(read(guest, {})[today]).toMatchObject({ status, memberId: member.id, identityBasis: "DOCUMENT" });
+    expect(read({ id: "primary-one", role: "PRIMARY", documentNumber: null }, { id: "order-one", member_id: member.id })[today])
+      .toMatchObject({ status, memberId: member.id, identityBasis: "STAY_CONVERSION" });
   });
 });
