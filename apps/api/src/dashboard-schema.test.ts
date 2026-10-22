@@ -9,7 +9,7 @@ FormatRegistry.Set("date-time", value => Number.isFinite(Date.parse(value)));
 
 it("实际响应序列化保留居民已确认值、核对入口、待认领金额及同步状态", () => {
   const summary = dashboardFixture(new URL("http://localhost/api/v1/properties/demo/dashboard"));
-  summary.community.residentCurrent = {date:summary.businessDate,total:null,longStay:25,member:null,memberReview:2,knownTotal:25,knownMember:1,residentReview:1,reviewItems:[{orderId:"order_review",memberId:"member_review",reason:"缺少明确身份依据"}]};
+  summary.community.residentCurrent = {date:summary.businessDate,total:null,longStay:25,member:null,memberReview:2,knownTotal:25,knownMember:1,residentReview:1,reviewItems:[{orderId:"order_review",memberId:"member_review",reason:"权益核销记录不完整"}]};
   summary.current.todayUnclaimed = [{currency:"CNY",amountMinor:"-12500",count:1}];
   summary.current.paymentSync = {enabled:true,lastSyncedAt:"2026-10-09T03:30:00Z",hasError:false};
   const response = JSON.parse(buildSerializer(DashboardResponseSchema)(summary));
@@ -19,27 +19,27 @@ it("实际响应序列化保留居民已确认值、核对入口、待认领金�
   expect(Value.Check(DashboardResponseSchema,{...summary,community:{...summary.community,residentCurrent:{...summary.community.residentCurrent,knownMember:-1}}})).toBe(false);
 });
 
-it("实际序列化保留逐住客名单与本人依据，不输出证件、电话或内部匹配键", () => {
+it("实际序列化保留逐住客名单与权益使用依据，不输出证件、电话或内部匹配键", () => {
   const summary = dashboardFixture(new URL("http://localhost/api/v1/properties/demo/dashboard"));
   const safePerson = { orderId: "order_one", memberId: "member_one", occupantId: "occupant_one", occupantName: "阿青（青女士）", memberName: "阿青（青女士）", roomCode: "201", arrivalDate: "2026-10-17", departureDate: "2026-10-25" };
   const unsafePerson = { ...safePerson, documentNumber: "PRIVATE-DOCUMENT", phone: "PRIVATE-PHONE", personKey: "PRIVATE-IDENTITY" };
   summary.community.residentCurrent = { date: summary.businessDate, total: null, longStay: 1, member: null, memberReview: 1,
     knownTotal: 1, knownMember: 1, residentReview: 1,
-    memberItems: [{ ...unsafePerson, identityBasis: "STAY_CONVERSION" }],
-    reviewItems: [{ ...unsafePerson, occupantId: "occupant_two", occupantName: "住客乙", reasonLabel: "未记录本人入住关系", reason: "订单关联会员并不代表该位住客本人入住。" }] };
+    memberItems: [{ ...unsafePerson, basis: "MEMBER_ENTITLEMENT" }],
+    reviewItems: [{ ...unsafePerson, occupantId: "occupant_two", occupantName: "住客乙", reasonLabel: "权益使用记录待核对", reason: "已记录权益覆盖，但缺少对应的核销事实。" }] };
   const serialized = buildSerializer(DashboardResponseSchema)(summary);
   const response = JSON.parse(serialized);
-  expect(response.community.residentCurrent.memberItems).toEqual([{ ...safePerson, identityBasis: "STAY_CONVERSION" }]);
-  expect(response.community.residentCurrent.reviewItems[0]).toMatchObject({ occupantId: "occupant_two", occupantName: "住客乙", memberName: "阿青（青女士）", reasonLabel: "未记录本人入住关系" });
+  expect(response.community.residentCurrent.memberItems).toEqual([{ ...safePerson, basis: "MEMBER_ENTITLEMENT" }]);
+  expect(response.community.residentCurrent.reviewItems[0]).toMatchObject({ occupantId: "occupant_two", occupantName: "住客乙", memberName: "阿青（青女士）", reasonLabel: "权益使用记录待核对" });
   expect(serialized).not.toContain("PRIVATE-");
   expect(serialized).not.toContain("personKey");
   expect(Value.Check(DashboardResponseSchema, { ...summary, community: { ...summary.community, residentCurrent: {
-    ...summary.community.residentCurrent, memberItems: [{ ...safePerson, identityBasis: "SAME_NAME" }]
+    ...summary.community.residentCurrent, memberItems: [{ ...safePerson, basis: "SAME_NAME" }]
   } } })).toBe(false);
 });
 
 it("财务序列化保留原流水、发生和同步日期，未认领仍为独立状态", () => {
-  const detail = {asOf:"2026-10-09T04:00:00Z",definitionVersion:"2026-10-22.1",range:{from:"2026-09-09",to:"2026-10-08"},changedSinceSummary:false,page:0,pageSize:50,total:1,items:[{id:"bill:1",date:"2026-10-09",metric:"TODAY_COLLECTIONS",label:"企微退款待认领",orderId:null,memberId:null,unitId:null,units:null,amountMinor:"-12500",currency:"CNY",registeredAt:"2026-10-09T03:35:00Z",businessDate:null,reason:"未计入已确认合计",sourceType:"WECOM",claimStatus:"UNCLAIMED",externalBillId:"bill_1",refundReference:"refund-test",originalTransactionReference:"collect-test",sourceOccurredAt:"2026-10-08T23:00:00Z",sourceDiscoveredAt:"2026-10-09T03:35:00Z",sourceUpdatedAt:"2026-10-09T03:40:00Z"}]};
+  const detail = {asOf:"2026-10-09T04:00:00Z",definitionVersion:"2026-10-22.2",range:{from:"2026-09-09",to:"2026-10-08"},changedSinceSummary:false,page:0,pageSize:50,total:1,items:[{id:"bill:1",date:"2026-10-09",metric:"TODAY_COLLECTIONS",label:"企微退款待认领",orderId:null,memberId:null,unitId:null,units:null,amountMinor:"-12500",currency:"CNY",registeredAt:"2026-10-09T03:35:00Z",businessDate:null,reason:"未计入已确认合计",sourceType:"WECOM",claimStatus:"UNCLAIMED",externalBillId:"bill_1",refundReference:"refund-test",originalTransactionReference:"collect-test",sourceOccurredAt:"2026-10-08T23:00:00Z",sourceDiscoveredAt:"2026-10-09T03:35:00Z",sourceUpdatedAt:"2026-10-09T03:40:00Z"}]};
   expect(JSON.parse(buildSerializer(DashboardDetailsResponseSchema)(detail)).items).toEqual(detail.items);
 });
 

@@ -17,8 +17,12 @@ describe("community confirmed acceptance boundaries", () => {
     const result = communityMetrics([stay({ current: true, departure: "2026-01-05" })], [], range, "2026-01-03", [], [stay({ orderId: "reserved", arrival: "2026-01-05", departure: "2026-01-08" })]);
     expect(result.records.find(row => row.kind === "DUE")).toMatchObject({ date: "2026-01-08", orderId: "reserved", nights: 2 });
   });
-  it("uses completed nights for an overdue current stay rather than freezing on the planned departure", () => {
-    expect(communityMetrics([stay({ current: true, departure: "2026-01-05" })], [], range, "2026-01-08").duration).toEqual([{ nights: 7, current: 1, all: 1 }]);
+  it("excludes an overdue unclosed stay from current counts and stops its history at the effective departure", () => {
+    const result = communityMetrics([stay({ current: true, departure: "2026-01-05" })], [], range, "2026-01-08");
+    expect(result.duration).toEqual([{ nights: 4, current: 0, all: 1 }]);
+    expect(result.current.total).toBe(0);
+    expect(result.residentCurrent).toMatchObject({ total: 0, longStay: 0, member: 0 });
+    expect(result.trend.slice(0, 5).map(day => day.total)).toEqual([1, 1, 1, 1, 0]);
   });
   it("does not spread unknown identities to dates outside their stay", () => {
     const result = communityMetrics([stay(), stay({ personKey: null, orderId: "missing", arrival: "2026-01-05", departure: "2026-01-07" })], [], range, "2026-02-11");

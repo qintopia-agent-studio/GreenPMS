@@ -247,10 +247,10 @@ describe("resident metric", () => {
     expect(result.residentCurrent).toMatchObject({ total: 0, longStay: 0 });
     expect(result.residentTrend?.[0]).toMatchObject({ total: 0, longStay: 0 });
   });
-  it("keeps uninterrupted room moves and overdue current stays qualified", () => {
+  it("keeps uninterrupted room moves qualified only before the final departure date", () => {
     const result = communityMetrics([
       stay({ arrival: "2026-10-01", departure: "2026-10-05" }),
-      stay({ orderId: "move", arrival: "2026-10-05", departure: "2026-10-08", current: true })
+      stay({ orderId: "move", arrival: "2026-10-05", departure: "2026-10-12", current: true })
     ], [], residentRange, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ total: 1, longStay: 1 });
   });
@@ -264,12 +264,12 @@ describe("resident metric", () => {
       stay({ personKey: "member", orderId: "ordinary", arrival: "2026-10-09", departure: "2026-10-12", current: true,
         membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "exact-member" } } }),
       stay({ personKey: "short", orderId: "short", arrival: "2026-10-09", departure: "2026-10-12", current: true,
-        membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "payer", reason: "缺少实际住客的证件依据" } } })
+        membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "payer", reason: "缺少有效权益核销依据" } } })
     ], [], residentRange, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ total: null, knownTotal: 2, knownMember: 1, member: null, residentReview: 1, memberReview: 2 });
-    expect(result.residentCurrent?.reviewItems).toContainEqual(expect.objectContaining({ orderId: "short", memberId: "payer", reason: "缺少实际住客的证件依据" }));
+    expect(result.residentCurrent?.reviewItems).toContainEqual(expect.objectContaining({ orderId: "short", memberId: "payer", reason: "缺少有效权益核销依据" }));
   });
-  it("uses membership evidence for each day without passing it through an approximate person grouping", () => {
+  it("uses daily benefit facts without passing usage between different registrations", () => {
     const result = communityMetrics([
       stay({ arrival: "2026-10-01", departure: "2026-10-02", membershipByDate: { "2026-10-01": { status: "CONFIRMED", memberId: "exact-member" } } }),
       stay({ orderId: "name-only-return", arrival: "2026-10-09", departure: "2026-10-12", current: true,
@@ -283,7 +283,7 @@ describe("resident metric", () => {
       stay({ orderId: "verified", registrationKey: "verified-guest", arrival: "2026-10-09", departure: "2026-10-12", current: true,
         membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "exact-member" } } }),
       stay({ orderId: "approximate", registrationKey: "approximate-guest", arrival: "2026-10-09", departure: "2026-10-12", current: true,
-        membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "exact-member", reason: "住客证件缺失" } } })
+        membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "exact-member", reason: "权益核销依据缺失" } } })
     ], [], residentRange, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ total: null, knownTotal: 1, knownMember: 1, residentReview: 1, memberReview: 1 });
   });
@@ -292,7 +292,7 @@ describe("resident metric", () => {
     expect(result.residentCurrent).toMatchObject({ total: null, knownTotal: 0, residentReview: 1 });
     expect(result.residentCurrent?.reviewItems).toContainEqual(expect.objectContaining({ orderId: "one", memberId: null, reason: "追加住宿人实际入住日期待核对" }));
   });
-  it("requires confirmed attendance in addition to exact membership, without relying on reason text", () => {
+  it("requires confirmed attendance in addition to benefit usage, without relying on reason text", () => {
     const membershipByDate = Object.fromEntries(["2026-10-01", "2026-10-08", "2026-10-09"].map(date => [date, { status: "CONFIRMED" as const, memberId: "member-one" }]));
     const result = communityMetrics([
       stay({ registrationKey: "appended", arrival: "2026-10-01", departure: "2026-10-09", attendanceConfirmed: false, membershipByDate }),
@@ -318,108 +318,76 @@ describe("resident metric", () => {
   it("keeps every actual registration in review even when names, payer and reasons are shared", () => {
     const shared = stay({ arrival: "2026-10-09", departure: "2026-10-12", current: true, personKey: "same-approximate-name",
       roomCode: "201", arrivalDate: "2026-10-09", departureDate: "2026-10-12",
-      membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "payer", memberName: "会员甲", reason: "未记录实际住客与会员的本人关系。", reasonLabel: "未记录本人入住关系" } } });
+      membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "payer", memberName: "会员甲", reason: "会员权益核销链不完整。", reasonLabel: "权益使用记录待核对" } } });
     const a = { ...shared, registrationKey: "guest-a", occupantName: "住客甲" };
     const b = { ...shared, registrationKey: "guest-b", occupantName: "住客乙" };
     const result = communityMetrics([a, a, b], [], residentRange, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ memberReview: 2, residentReview: 2, knownMember: 0 });
     expect(result.residentCurrent?.reviewItems).toHaveLength(2);
     expect(result.residentCurrent?.reviewItems).toEqual([
-      expect.objectContaining({ occupantId: "guest-a", occupantName: "住客甲", memberName: "会员甲", roomCode: "201", arrivalDate: "2026-10-09", reasonLabel: "未记录本人入住关系" }),
+      expect.objectContaining({ occupantId: "guest-a", occupantName: "住客甲", memberName: "会员甲", roomCode: "201", arrivalDate: "2026-10-09", reasonLabel: "权益使用记录待核对" }),
       expect.objectContaining({ occupantId: "guest-b", occupantName: "住客乙" })
     ]);
   });
   it("merges independent review reasons for one registration without merging roommates", () => {
     const value = stay({ registrationKey: "late-guest", arrival: "2026-10-09", departure: "2026-10-12", current: true,
-      durationReviewReason: "追加住客缺少实际入住日期。", membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "payer", reason: "本人关系未记录。", reasonLabel: "未记录本人入住关系" } } });
+      durationReviewReason: "追加住客缺少实际入住日期。", membershipByDate: { "2026-10-09": { status: "UNKNOWN", memberId: "payer", reason: "权益核销依据未记录。", reasonLabel: "权益使用记录待核对" } } });
     const current = communityMetrics([value, value], [], residentRange, "2026-10-09").residentCurrent!;
     expect(current.memberReview).toBe(1); expect(current.residentReview).toBe(1);
     expect(current.reviewItems).toHaveLength(1);
-    expect(current.reviewItems?.[0]?.reason).toBe("本人关系未记录。；追加住客缺少实际入住日期。");
+    expect(current.reviewItems?.[0]?.reason).toBe("权益核销依据未记录。；追加住客缺少实际入住日期。");
   });
-  it("preserves all current order links for one confirmed member without multiplying the member count", () => {
+  it("preserves each order link while counting the same actual guest only once", () => {
     const value = stay({ registrationKey: "guest-a", arrival: "2026-10-09", departure: "2026-10-12", current: true,
       occupantName: "阿青（青女士）", roomCode: "201", arrivalDate: "2026-10-09", departureDate: "2026-10-12",
-      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member", memberName: "阿青（青女士）", identityBasis: "STAY_CONVERSION" } } });
+      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member", memberName: "阿青（青女士）", basis: "MEMBER_ENTITLEMENT" } } });
     const result = communityMetrics([value, value, { ...value, orderId: "another", registrationKey: "guest-b" }], [], { from: "2026-10-09", to: "2026-10-09" }, "2026-10-09");
     expect(result.residentCurrent).toMatchObject({ member: 1, knownMember: 1, memberReview: 0 });
     expect(result.residentCurrent?.memberItems).toHaveLength(2);
-    expect(result.residentCurrent?.memberItems?.[0]).toMatchObject({ occupantId: "guest-a", occupantName: "阿青（青女士）", memberName: "阿青（青女士）", roomCode: "201", identityBasis: "STAY_CONVERSION" });
+    expect(result.residentCurrent?.memberItems?.[0]).toMatchObject({ occupantId: "guest-a", occupantName: "阿青（青女士）", memberName: "阿青（青女士）", roomCode: "201", basis: "MEMBER_ENTITLEMENT" });
     expect(result.residentTrend?.[0]?.memberItems).toBeUndefined();
     expect(JSON.stringify(result.residentTrend)).not.toContain("阿青");
     expect(JSON.stringify(result.residentCurrent)).not.toContain("personKey");
   });
-  it("deduplicates the resident union by exact membership across different nickname identities and long-stay overlap", () => {
-    const member = { "2026-10-09": { status: "CONFIRMED" as const, memberId: "member-one", identityBasis: "STAY_CONVERSION" as const } };
-    const long = stay({ personKey: "first-nickname", orderId: "long", registrationKey: "long-guest", arrival: "2026-10-01", departure: "2026-10-12", current: true, membershipByDate: member });
-    const short = stay({ personKey: "second-nickname", orderId: "short", registrationKey: "short-guest", arrival: "2026-10-09", departure: "2026-10-12", current: true, membershipByDate: member });
-    const result = communityMetrics([long, short], [], residentRange, "2026-10-09");
-    expect(result.residentCurrent).toMatchObject({ total: 1, knownTotal: 1, member: 1, longStay: 1 });
-    expect(result.current).toMatchObject({ total: 1, paid: 1 });
-    expect(communityMetrics([long, { ...short, arrival: "2026-10-01" }], [], residentRange, "2026-10-09").residentCurrent).toMatchObject({ total: 1, member: 1, longStay: 1 });
+  it("counts different actual guests using the same member account separately, without splitting one guest across orders", () => {
+    const usage = { "2026-10-09": { status: "CONFIRMED" as const, memberId: "shared-account", basis: "MEMBER_ENTITLEMENT" as const } };
+    const first = stay({ personKey: "guest-a", orderId: "first", registrationKey: "first-primary", arrival: "2026-10-09", departure: "2026-10-12", current: true, membershipByDate: usage });
+    const second = { ...first, orderId: "second", registrationKey: "second-primary", personKey: "guest-b" };
+    const different = communityMetrics([first, second], [], residentRange, "2026-10-09");
+    expect(different.current.total).toBe(2); expect(different.residentCurrent).toMatchObject({ member: 2, total: 2 });
+    const same = communityMetrics([first, { ...second, personKey: "guest-a" }], [], residentRange, "2026-10-09");
+    expect(same.current.total).toBe(1); expect(same.residentCurrent).toMatchObject({ member: 1, total: 1 });
+    expect(same.residentCurrent?.memberItems).toHaveLength(2);
   });
-  it("does not collapse different confirmed members that share a fuzzy person grouping", () => {
-    const first = stay({ personKey: "same-fuzzy-name", orderId: "first", registrationKey: "first-guest", arrival: "2026-10-01", departure: "2026-10-12", current: true,
-      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member-one" } } });
-    const second = { ...first, orderId: "second", registrationKey: "second-guest", membershipByDate: { "2026-10-09": { status: "CONFIRMED" as const, memberId: "member-two" } } };
-    const result = communityMetrics([first, second], [], residentRange, "2026-10-09");
-    expect(result.residentCurrent).toMatchObject({ total: 2, knownTotal: 2, member: 2, longStay: 2 });
-    expect(result.current).toMatchObject({ total: 2, paid: 2 });
+  it("never joins different guests' long-stay chains merely because they use the same member account", () => {
+    const usage = { "2026-10-09": { status: "CONFIRMED" as const, memberId: "shared", basis: "MEMBER_ENTITLEMENT" as const } };
+    const old = stay({ personKey: "guest-old", orderId: "old", registrationKey: "old-primary", arrival: "2026-10-01", departure: "2026-10-07", membershipByDate: usage });
+    const recent = stay({ personKey: "guest-new", orderId: "new", registrationKey: "new-primary", arrival: "2026-10-07", departure: "2026-10-12", current: true, membershipByDate: usage });
+    expect(communityMetrics([old, recent], [], residentRange, "2026-10-09").residentCurrent).toMatchObject({ member: 1, total: 1, longStay: 0 });
   });
-  it("keeps a short unknown registration unresolved beside a confirmed member with the same fuzzy name", () => {
-    const first = stay({ personKey: "shared-name", orderId: "first", registrationKey: "first-guest", arrival: "2026-10-09", departure: "2026-10-12", current: true,
-      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member-one" } } });
-    const unknown = { ...first, orderId: "second", registrationKey: "second-guest", membershipByDate: { "2026-10-09": { status: "UNKNOWN" as const, memberId: "member-one", reason: "未记录本人关系" } } };
-    const result = communityMetrics([first, unknown], [], residentRange, "2026-10-09");
-    expect(result.current.total).toBe(2);
-    expect(result.residentCurrent).toMatchObject({ total: null, knownTotal: 1, knownMember: 1, memberReview: 1, residentReview: 1 });
-    expect(result.residentCurrent?.memberItems).toHaveLength(1); expect(result.residentCurrent?.reviewItems?.[0]?.occupantId).toBe("second-guest");
+  it.each(["2026-10-09", "2026-10-08"])("excludes departure %s from current people, residents, member lists and duration even without checkout", departure => {
+    const value = stay({ registrationKey: "primary", arrival: "2026-10-01", departure, current: true,
+      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: null, memberName: "历史会员权益", basis: "MEMBER_ENTITLEMENT" } } });
+    const result = communityMetrics([value], [], residentRange, "2026-10-09");
+    expect(result.current).toMatchObject({ total: 0, paid: 0, unlinked: 0 });
+    expect(result.residentCurrent).toMatchObject({ total: 0, longStay: 0, member: 0, memberReview: 0, memberItems: [], reviewItems: [] });
+    expect(result.duration.every(row => row.current === 0)).toBe(true);
+    expect(result.durationCoverage?.current).toMatchObject({ pendingRegistrations: 0, pendingOrders: 0 });
   });
-  it("never lets a short-stay member borrow another member's long-stay chain through a shared nickname", () => {
-    const first = stay({ personKey: "shared-nickname", orderId: "long", registrationKey: "guest-long", arrival: "2026-09-25", departure: "2026-10-12", current: true,
-      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member-long", identityBasis: "STAY_CONVERSION" } } });
-    const second = stay({ personKey: "shared-nickname", orderId: "short", registrationKey: "guest-short", arrival: "2026-10-07", departure: "2026-10-12", current: true,
-      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member-short", identityBasis: "DOCUMENT" } } });
-    const result = communityMetrics([first, second], [], residentRange, "2026-10-09");
-    expect(result.current.total).toBe(2);
-    expect(result.residentCurrent).toMatchObject({ total: 2, member: 2, longStay: 1 });
+  it("keeps the new room and same-day renewed order active without an empty night", () => {
+    const old = stay({ orderId: "old", registrationKey: "old-primary", arrival: "2026-10-01", departure: "2026-10-09", current: true });
+    const next = stay({ orderId: "renewed", registrationKey: "next-primary", arrival: "2026-10-09", departure: "2026-10-12", current: true,
+      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "account", basis: "MEMBER_ENTITLEMENT" } } });
+    const result = communityMetrics([old, next], [], residentRange, "2026-10-09");
+    expect(result.current.total).toBe(1); expect(result.residentCurrent).toMatchObject({ total: 1, longStay: 1, member: 1 });
+    expect(result.residentCurrent?.memberItems?.map(item => item.orderId)).toEqual(["renewed"]);
+    expect(result.duration).toContainEqual({ nights: 8, current: 1, all: 0 });
   });
-  it.each(["2026-10-01", "2026-10-09"])("keeps exact person totals stable after membership expires for arrival %s", arrival => {
-    const membershipByDate = {
-      "2026-10-09": { status: "CONFIRMED" as const, memberId: "member", identityBasis: "STAY_CONVERSION" as const },
-      "2026-10-10": { status: "NOT_MEMBER" as const, memberId: "member", identityBasis: "STAY_CONVERSION" as const }
-    };
-    const first = stay({ personKey: "first-nickname", orderId: "first", registrationKey: "guest-first", arrival, departure: "2026-10-15", current: true, membershipByDate });
-    const second = { ...first, personKey: "second-nickname", orderId: "second", registrationKey: "guest-second" };
-    const result = communityMetrics([first, second], [], { from: "2026-10-09", to: "2026-10-10" }, "2026-10-10");
-    expect(result.trend.map(row => row.total)).toEqual([1, 1]);
-    expect(result.current).toMatchObject({ total: 1, paid: 1 });
-    expect(result.visitors).toBe(1);
-    expect(result.residentCurrent).toMatchObject({ total: arrival === "2026-10-01" ? 1 : 0, member: 0, longStay: arrival === "2026-10-01" ? 1 : 0 });
-    expect(result.residentTrend?.[0]?.member).toBe(1);
-  });
-  it("does not join an uncertain old nickname to a different proven member's continuous stay", () => {
-    const old = stay({ personKey: "same-nickname", orderId: "old", registrationKey: "old-guest", arrival: "2026-10-01", departure: "2026-10-06" });
-    const current = stay({ personKey: "same-nickname", orderId: "current", registrationKey: "current-guest", arrival: "2026-10-06", departure: "2026-10-12", current: true,
-      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: "member", identityBasis: "DOCUMENT" } } });
-    expect(communityMetrics([old, current], [], residentRange, "2026-10-09").residentCurrent).toMatchObject({ total: 1, member: 1, longStay: 0 });
-  });
-  it("counts a proven person in visitors even without a nickname grouping, but keeps historical attendance gaps unknown", () => {
-    const membershipByDate = { "2026-10-09": { status: "CONFIRMED" as const, memberId: "member", identityBasis: "DOCUMENT" as const } };
-    const actual = stay({ personKey: null, registrationKey: "guest", arrival: "2026-10-09", departure: "2026-10-12", current: true, membershipByDate });
-    const result = communityMetrics([actual], [], { from: "2026-10-09", to: "2026-10-09" }, "2026-10-09");
-    expect(result.current).toMatchObject({ total: 1, unlinked: 0 }); expect(result.visitors).toBe(1);
-    const gap = communityMetrics([{ ...actual, attendanceConfirmed: false }], [], { from: "2026-10-09", to: "2026-10-09" }, "2026-10-09");
-    expect(gap.current).toMatchObject({ total: null, unlinked: 1 }); expect(gap.visitors).toBeNull();
-    expect(gap.residentCurrent).toMatchObject({ knownTotal: 0, knownMember: 0, memberReview: 1 });
-    expect(gap.residentCurrent?.memberItems).toEqual([]);
-  });
-  it("keeps category conflicts visible when exact identity joins different nickname registrations", () => {
-    const membershipByDate = { "2026-10-09": { status: "NOT_MEMBER" as const, memberId: "member", identityBasis: "DOCUMENT" as const } };
-    const first = stay({ personKey: "paid-name", registrationKey: "paid-guest", arrival: "2026-10-01", departure: "2026-10-12", current: true, membershipByDate });
-    const second = { ...first, personKey: "free-name", registrationKey: "free-guest", orderId: "free", free: true, category: "VOLUNTEER" };
-    const result = communityMetrics([first, second], [], residentRange, "2026-10-09");
-    expect(result.current).toMatchObject({ total: 1, paid: 0, volunteer: 0, unclassified: 1 });
-    expect(result.residentCurrent).toMatchObject({ total: 1, member: 0, longStay: 1 });
+  it("keeps duplicate interval usage to one primary and rejects multiple confirmed representatives on one order", () => {
+    const primary = stay({ orderId: "shared", registrationKey: "one", arrival: "2026-10-09", departure: "2026-10-12", current: true,
+      membershipByDate: { "2026-10-09": { status: "CONFIRMED", memberId: null, basis: "MEMBER_ENTITLEMENT" } } });
+    expect(communityMetrics([primary, primary], [], residentRange, "2026-10-09").residentCurrent).toMatchObject({ total: 1, member: 1 });
+    const invalid = communityMetrics([primary, { ...primary, registrationKey: "two", personKey: "other" }], [], residentRange, "2026-10-09").residentCurrent;
+    expect(invalid).toMatchObject({ total: null, knownTotal: 0, knownMember: 0, memberReview: 2, memberItems: [] });
   });
 });

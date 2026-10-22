@@ -13,7 +13,7 @@ describe("当前社区人数包含今日入住，不随历史筛选变化", () =
     const occupants=orders.map(o=>({id:`guest_${o.id}`,order_id:o.id,ordinal:1,role:"PRIMARY",full_name:"测试",nickname:"测试",phone:null,document_number:null,created_at:new Date(`${o.arrival_date}T01:00:00Z`),created_by_command_id:null}));
     const tables:Record<string,unknown[]>={"orders as o":orders,order_occupants:occupants,order_occupant_corrections:[],amendments:[],order_occupant_removals:[]};
     const trx={selectFrom:(table:string)=>{
-      const q:any={innerJoin:()=>q,select:()=>q,selectAll:()=>q,where:()=>q,orderBy:()=>q,execute:async()=>tables[table]??[]};return q;
+      const q:any={innerJoin:()=>q,leftJoin:()=>q,select:()=>q,selectAll:()=>q,where:()=>q,orderBy:()=>q,execute:async()=>tables[table]??[]};return q;
     }} as unknown as Transaction<Database>;
     // Simulate the actual exclusive SQL arrival-date upper bound, not a fixed successful result.
     loadStays.mockImplementation(async (_trx,_property,_date,_range,until:string)=>({statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements:new Map(orders.filter(o=>o.arrival_date<until).map(o=>[o.id,[{inventoryUnitId:"unit",arrivalDate:o.arrival_date,departureDate:o.departure_date}]]))}));

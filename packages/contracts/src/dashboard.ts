@@ -1,5 +1,5 @@
 import type { OperatingSalesSummary } from "./operating-sales.ts";
-export const dashboardDefinitionVersion = "2026-10-22.1";
+export const dashboardDefinitionVersion = "2026-10-22.2";
 export type DashboardQuality = "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBER", "FREE", "UNKNOWN"] as const;
 export type DashboardSource = typeof dashboardSources[number];
@@ -165,7 +165,7 @@ export interface CommunityResidentReviewItem extends CommunityResidentPerson {
   reasonLabel?: string;
 }
 export interface CommunityResidentMemberItem extends CommunityResidentPerson {
-  identityBasis?: "DOCUMENT" | "STAY_CONVERSION";
+  basis?: "MEMBER_ENTITLEMENT";
 }
 export interface CommunityResidentDay {
   date: string;
@@ -178,7 +178,7 @@ export interface CommunityResidentDay {
   knownMember?: number;
   residentReview?: number;
   reviewItems?: CommunityResidentReviewItem[];
-  /** 当前在住登记名单；人数按明确会员身份去重，多个登记保留各自订单入口。 */
+  /** 会员权益住宿的主要住客登记名单；会员ID只表示权益来源，不作为人员身份。 */
   memberItems?: CommunityResidentMemberItem[];
 }
 export interface CommunityRecord {

@@ -13,7 +13,7 @@ const interval = (arrivalDate: string, departureDate: string) => ({ inventoryUni
 function database(overrides: Record<string, unknown[]> = {}) {
   const tables: Record<string, unknown[]> = { "orders as o": [order], order_occupants: [occupant], order_occupant_corrections: [], amendments: [], order_occupant_removals: [], ...overrides };
   return { selectFrom: (table: string) => {
-    const q: any = { innerJoin: () => q, select: () => q, selectAll: () => q, where: () => q, orderBy: () => q, execute: async () => tables[table] ?? [] }; return q;
+    const q: any = { innerJoin: () => q, leftJoin: () => q, select: () => q, selectAll: () => q, where: () => q, orderBy: () => q, execute: async () => tables[table] ?? [] }; return q;
   } } as unknown as Transaction<Database>;
 }
 beforeEach(() => loadStays.mockResolvedValue({ statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements: new Map([[order.id, [interval(order.arrival_date, order.departure_date)]]]) }));
@@ -78,9 +78,11 @@ describe("community duration loader", () => {
     expect(c.durationCoverage?.all.pendingRegistrations).toBe(1);
     expect(c.durationCoverage?.all.issues[0]?.reason).toContain("不是实际离店日期");
   });
-  it("continues to count an overdue checked-in guest until actual checkout", async () => {
+  it("excludes an overdue checked-in guest from current duration without changing historical nights", async () => {
     loadStays.mockResolvedValue({ statistics: { includesUnit: () => true, classifyUnit: () => true }, arrangements: new Map([[order.id, [interval("2026-09-01", "2026-10-13")]]]) });
     const c = await loadDashboardCommunity(database({ "orders as o": [{ ...order, departure_date: "2026-10-13" }] }), "property", range, today, "Asia/Shanghai");
-    expect(c.duration).toContainEqual({ nights: 43, current: 1, all: 0 });
+    expect(c.duration.every(row => row.current === 0)).toBe(true);
+    expect(c.current.total).toBe(0);
+    expect(c.duration).toContainEqual({ nights: 29, current: 0, all: 1 });
   });
 });

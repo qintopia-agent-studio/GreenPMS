@@ -28,7 +28,7 @@ const residentPerson = { orderId: Id, memberId: nullable(Id), occupantId: Type.O
   arrivalDate: Type.Optional(LocalDate), departureDate: Type.Optional(LocalDate) };
 const residentDay = Type.Object({ date: LocalDate, total: nullable(count), longStay: count, member: nullable(count), memberReview: count, knownTotal:Type.Optional(count), knownMember:Type.Optional(count), residentReview:Type.Optional(count),
   reviewItems:Type.Optional(Type.Array(Type.Object({ ...residentPerson, reason:Type.String(), reasonLabel: Type.Optional(Type.String()) }))),
-  memberItems: Type.Optional(Type.Array(Type.Object({ ...residentPerson, identityBasis: Type.Optional(Type.Union([Type.Literal("DOCUMENT"), Type.Literal("STAY_CONVERSION")])) }))) });
+  memberItems: Type.Optional(Type.Array(Type.Object({ ...residentPerson, basis: Type.Optional(Type.Literal("MEMBER_ENTITLEMENT")) }))) });
 const durationCoverage = Type.Object({
   registrationBased: Type.Optional(count), pendingRegistrations: count, pendingOrders: count,
   issues: Type.Array(Type.Object({ orderId: Id, reason: Type.String() }))
