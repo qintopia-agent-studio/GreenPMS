@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.17.6](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.5...v1.17.6) (2026-10-23)
+
+
+### Bug Fixes
+
+* **dashboard:** 就地展开待到店与待离店明细 ([#109](https://github.com/qintopia-agent-studio/GreenPMS/issues/109)) ([63ebb35](https://github.com/qintopia-agent-studio/GreenPMS/commit/63ebb356a0175c402cb38b37372f6a3e84812d8d))
+* **dashboard:** 就地展开新增订单欠款与留存明细 ([#111](https://github.com/qintopia-agent-studio/GreenPMS/issues/111)) ([2bfa56f](https://github.com/qintopia-agent-studio/GreenPMS/commit/2bfa56f2ea00e243a0db4ff0dba7c56f0cba4d8f))
+
 ## [1.17.5](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.4...v1.17.5) (2026-10-22)
 
 
