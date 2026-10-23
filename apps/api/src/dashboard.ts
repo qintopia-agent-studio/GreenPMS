@@ -1,7 +1,7 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import type { Kysely } from "kysely";
-import { dashboardDetailClaimStatuses, dashboardDetailEvidenceStatuses, dashboardDetailSources, dashboardDetailSyncStatuses, dashboardMetrics, dashboardSources, type DashboardQuery, type DashboardMetric } from "@qintopia/contracts";
+import { dashboardDetailClaimStatuses, dashboardDetailEvidenceStatuses, dashboardDetailSources, dashboardDetailSyncStatuses, dashboardMetrics, dashboardOrderStatuses, dashboardSources, type DashboardQuery, type DashboardMetric } from "@qintopia/contracts";
 import type { Database } from "@qintopia/db";
 import { getDashboard, getDashboardDetails } from "../../../packages/db/src/dashboard.ts";
 import { requirePrincipal, requirePropertyAccess } from "./auth.ts";
@@ -49,6 +49,8 @@ export const DashboardResponseSchema = Type.Object({ propertyId: Id, asOf: Type.
 export const DashboardDetailsResponseSchema = Type.Object({ asOf: Type.String({ format: "date-time" }), definitionVersion: Type.String(), range, changedSinceSummary: Type.Boolean(), page: count, pageSize: count, total: count,
   items: Type.Array(Type.Object({ id: Type.String(), date: LocalDate, metric, label: Type.String(), orderId: nullable(Id), memberId: nullable(Id), unitId: nullable(Id), units: nullable(count), amountMinor: nullable(amount), currency: nullable(Type.String()), registeredAt: nullable(Type.String({ format: "date-time" })), businessDate: nullable(LocalDate), reason: Type.String(),
     reception: Type.Optional(Type.Object({ occupants: Type.Array(Type.Object({ name: Type.String(), isPrimary: Type.Boolean() })), roomCode: nullable(Type.String()), buildingCode: nullable(Type.String()), arrivalDate: LocalDate, departureDate: LocalDate, status: Type.Union([Type.Literal("RESERVED"), Type.Literal("CHECKED_IN")]) })),
+    orderSummary: Type.Optional(Type.Object({ occupants: Type.Array(Type.Object({ name: Type.String(), isPrimary: Type.Boolean() })), rooms: Type.Array(Type.Object({ roomCode: Type.String(), buildingCode: nullable(Type.String()) })), arrivalDate: LocalDate, departureDate: LocalDate, status: Type.Union(dashboardOrderStatuses.map(value => Type.Literal(value))) })),
+    retainedOwnerName: Type.Optional(nullable(Type.String())),
     sourceType: Type.Optional(detailSource), claimStatus: Type.Optional(detailClaimStatus), sourceFactId: Type.Optional(nullable(Id)), referencesFactId: Type.Optional(nullable(Id)), reversesFactId: Type.Optional(nullable(Id)), correctsFactId: Type.Optional(nullable(Id)), syncStatus: Type.Optional(detailSyncStatus), evidenceStatus: Type.Optional(detailEvidenceStatus),
     ...Object.fromEntries(["externalBillId","transactionReference","refundReference","originalTransactionReference","membershipOrderId","channelCode","channelOrderReference","paymentMethod","financialKind"].map(key=>[key,Type.Optional(nullable(Type.String()))])),
     ...Object.fromEntries(["sourceOccurredAt","sourceDiscoveredAt","sourceUpdatedAt"].map(key=>[key,Type.Optional(nullable(Type.String({format:"date-time"})))])) })) });

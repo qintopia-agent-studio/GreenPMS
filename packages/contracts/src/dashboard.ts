@@ -5,6 +5,7 @@ export const dashboardSources = ["WECOM", "YOUMUDAO", "CTRIP", "MEITUAN", "MEMBE
 export type DashboardSource = typeof dashboardSources[number];
 export const dashboardMetrics = ["PAID", "FREE", "MONEY", "REVIEW", "DEBT", "RETAINED", "IN_HOUSE", "ARRIVAL", "DEPARTURE", "OVERDUE", "TODAY_ORDERS", "TODAY_COLLECTIONS", "SALES", "TODAY_SALES"] as const;
 export type DashboardMetric = typeof dashboardMetrics[number];
+export const dashboardOrderStatuses = ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"] as const;
 /** 明细事实的来源类别；用于给外部财务智能体保留可追溯的来源边界。 */
 export const dashboardDetailSources = ["LODGING", "MEMBERSHIP", "CHANNEL", "WECOM", "BASELINE", "INVENTORY", "ORDER", "UNKNOWN"] as const;
 export type DashboardDetailSource = typeof dashboardDetailSources[number];
@@ -79,6 +80,16 @@ export interface DashboardDetail {
     departureDate: string;
     status: "RESERVED" | "CHECKED_IN";
   };
+  /** 经营跟进明细；住客来自有效登记，房床来自订单有效住宿安排，缺少可核对安排时为空。 */
+  orderSummary?: {
+    occupants: Array<{ name: string; isPrimary: boolean }>;
+    rooms: Array<{ roomCode: string; buildingCode: string | null }>;
+    arrivalDate: string;
+    departureDate: string;
+    status: typeof dashboardOrderStatuses[number];
+  };
+  /** 留存登记的资金归属客户；与来源订单住客分别展示，不以住客代替。 */
+  retainedOwnerName?: string | null;
   /** 以下字段为可选扩展，旧明细和非资金事实无需回填即可继续通过契约。 */
   sourceType?: DashboardDetailSource;
   claimStatus?: DashboardDetailClaimStatus;

@@ -8,6 +8,7 @@ import { loadDashboardMoney, dashboardMoneyDetail } from "./dashboard-money.ts";
 import { loadDashboardUnclaimedPayments } from "./dashboard-unclaimed-payments.ts";
 import { loadDashboardStays } from "./dashboard-stays.ts";
 import { loadDashboardCurrent, loadDashboardFuture, newDashboardDetail } from "./dashboard-current.ts";
+import { enrichDashboardOrderDetails } from "./dashboard-order-details.ts";
 import type { Database } from "./schema.ts";
 
 async function readDashboard(trx: Transaction<Database>, propertyId: string, query: DashboardQuery) {
@@ -86,7 +87,7 @@ async function readDashboard(trx: Transaction<Database>, propertyId: string, que
   const details = [...lodging.futureReviews, ...stayDetails, ...relevantReviews(range).map(review => ({ ...review, date: review.date < range.from ? range.from : review.date })),
     ...moneyDetails, ...moneyDetails.filter(fact => fact.metric === "REVIEW").map(fact => ({ ...fact, id: `money-review:${fact.id}`, metric: "MONEY" as const })),
     ...unclaimedPayments, ...currentDetails];
-  return { response, details: [...details, ...sales.details] };
+  return { response, details: [...details, ...sales.details], lodging };
 }
 export async function getDashboard(db: Kysely<Database>, propertyId: string, query: DashboardQuery): Promise<DashboardResponse> {
   return db.transaction().setIsolationLevel("repeatable read").execute(async trx => {
@@ -97,9 +98,10 @@ export async function getDashboard(db: Kysely<Database>, propertyId: string, que
 export async function getDashboardDetails(db: Kysely<Database>, propertyId: string, query: DashboardQuery & { metric: DashboardMetric; page?: number; asOf?: string }): Promise<DashboardDetailsResponse> {
   return db.transaction().setIsolationLevel("repeatable read").execute(async trx => {
     await sql`set transaction read only`.execute(trx);
-    const { response, details } = await readDashboard(trx, propertyId, query);
+    const { response, details, lodging } = await readDashboard(trx, propertyId, query);
     const page = query.page ?? 0, pageSize = 50;
     const items = details.filter(item => item.metric === query.metric).sort((a, b) => b.date.localeCompare(a.date) || a.id.localeCompare(b.id));
-    return { asOf: response.asOf, definitionVersion: response.definitionVersion, range: response.range, changedSinceSummary: Boolean(query.asOf && query.asOf !== response.asOf), items: items.slice(page * pageSize, (page + 1) * pageSize), total: items.length, page, pageSize };
+    const pageItems = await enrichDashboardOrderDetails(trx, propertyId, response.businessDate, items.slice(page * pageSize, (page + 1) * pageSize), lodging);
+    return { asOf: response.asOf, definitionVersion: response.definitionVersion, range: response.range, changedSinceSummary: Boolean(query.asOf && query.asOf !== response.asOf), items: pageItems, total: items.length, page, pageSize };
   });
 }

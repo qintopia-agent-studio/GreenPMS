@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { ReceptionPeopleTable } from "./ReceptionDetails";
+import { ReceptionPeopleTable } from "./InlineDashboardDetails";
 import { sampleDetails } from "./preview/sample";
 
 it("接待名单展示全部住宿人、房床、订单日期与正确原单入口", () => {

@@ -1,27 +1,42 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, ChevronUp } from "lucide-react";
-import type { DashboardDetail } from "@qintopia/contracts";
+import type { DashboardDetail, DashboardMetric } from "@qintopia/contracts";
 import { api } from "../api";
 import { errorMessage, LoadingBlock } from "../uiBasic";
 import { useDashboardRead } from "./dashboard-state";
+import { FollowupPeopleTable } from "./FollowupPeopleTable";
 
-export function ReceptionDetails({ propertyId, query, metric, businessDate, asOf, onClose, read = api.dashboardDetails }: {
-  propertyId: string; query: string; metric: "ARRIVAL" | "DEPARTURE"; businessDate: string; asOf: string;
+const inlineDetails = {
+  ARRIVAL: { title: "待到店明细", empty: "今天暂无待到店订单。" },
+  DEPARTURE: { title: "待离店明细", empty: "今天暂无待离店订单。" },
+  TODAY_ORDERS: { title: "今日新增订单明细", empty: "今天暂无新增住宿订单。" },
+  DEBT: { title: "住宿欠款明细", empty: "当前没有住宿欠款记录。" },
+  RETAINED: { title: "客户留存待用明细", empty: "当前没有可用的客户留存。" }
+};
+export type InlineDashboardMetric = keyof typeof inlineDetails;
+export function isInlineDashboardMetric(metric: DashboardMetric | null): metric is InlineDashboardMetric {
+  return metric !== null && metric in inlineDetails;
+}
+
+export function InlineDashboardDetails({ propertyId, query, metric, businessDate, timezone, asOf, onClose, read = api.dashboardDetails }: {
+  propertyId: string; query: string; metric: InlineDashboardMetric; businessDate: string; timezone: string; asOf: string;
   onClose: () => void; read?: typeof api.dashboardDetails;
 }) {
   const [page, setPage] = useState(0);
-  const title = metric === "ARRIVAL" ? "待到店明细" : "待离店明细";
+  const { title, empty } = inlineDetails[metric];
+  const reception = metric === "ARRIVAL" || metric === "DEPARTURE";
+  const retained = metric === "RETAINED";
   const parameters = new URLSearchParams(query);
   parameters.set("metric", metric); parameters.set("page", String(page)); parameters.set("asOf", asOf);
   const { data, error, isLoading, mutate } = useDashboardRead(`dashboard-details:${propertyId}:${parameters}`, signal => read(propertyId, parameters.toString(), signal));
-  return <section className="dashboard-resident-people dashboard-reception-details" aria-label={title} aria-busy={isLoading}>
-    <div className="dashboard-resident-group-heading"><div><h3>{title}</h3><p className="dashboard-muted">{businessDate}{data ? ` · ${data.total} 单` : ""} · 按订单展示</p></div><button type="button" className="dashboard-text-button" onClick={onClose}><ChevronUp size={14} aria-hidden="true" />收起明细</button></div>
+  return <section className={`dashboard-resident-people dashboard-inline-details ${reception ? "dashboard-reception-details" : "dashboard-followup-details"}`} aria-label={title} aria-busy={isLoading}>
+    <div className="dashboard-resident-group-heading"><div><h3>{title}</h3><p className="dashboard-muted">{businessDate}{data ? ` · ${data.total} ${retained ? "笔" : "单"}` : ""} · {retained ? "按留存记录展示" : "按订单展示"}</p></div><button type="button" className="dashboard-text-button" onClick={onClose}><ChevronUp size={14} aria-hidden="true" />收起明细</button></div>
     {error ? <div role="alert" className="dashboard-notice">{errorMessage(error)} <button type="button" className="button button-secondary" onClick={() => void mutate()}>重试</button></div> : null}
-    {isLoading ? <LoadingBlock label="正在读取接待明细" /> : null}
+    {isLoading ? <LoadingBlock label={`正在读取${title}`} /> : null}
     {data ? <>
-      {data.changedSinceSummary ? <p className="dashboard-reception-note" role="status">明细已更新，可能与上方数量不同；可刷新数据核对。</p> : null}
-      {data.items.length ? <ReceptionPeopleTable items={data.items} /> : <p className="dashboard-empty" role="status">{page === 0 ? `今天暂无${metric === "ARRIVAL" ? "待到店" : "待离店"}订单。` : "本页已无符合条件的订单，请返回上一页。"}</p>}
+      {data.changedSinceSummary ? <p className="dashboard-reception-note" role="status">明细已更新，可能与上方数量或金额不同；可刷新数据核对。</p> : null}
+      {data.items.length ? (reception ? <ReceptionPeopleTable items={data.items} /> : <FollowupPeopleTable items={data.items} metric={metric} timezone={timezone} />) : <p className="dashboard-empty" role="status">{page === 0 ? empty : "本页已无符合条件的记录，请返回上一页。"}</p>}
       {data.total > data.pageSize || page > 0 ? <div className="dashboard-pagination"><button className="button button-secondary" type="button" disabled={page === 0} onClick={() => setPage(page - 1)}>上一页</button><span>第 {page + 1} 页</span><button className="button button-secondary" type="button" disabled={(page + 1) * data.pageSize >= data.total} onClick={() => setPage(page + 1)}>下一页</button></div> : null}
     </> : null}
   </section>;
