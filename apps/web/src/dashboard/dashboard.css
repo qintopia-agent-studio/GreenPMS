@@ -37,6 +37,15 @@
 .dashboard-resident-reason, .dashboard-resident-confirmed { line-height: 1.7; }
 .dashboard-resident-reason .dashboard-hint, .dashboard-resident-confirmed .dashboard-hint { margin-left: 5px; vertical-align: middle; }
 .dashboard-resident-confirmed { color: var(--brand); }
+.dashboard-reception-details { margin: 12px 0 18px; }
+.dashboard-reception-details .dashboard-resident-group-heading { align-items: flex-start; }
+.dashboard-reception-details .dashboard-resident-group-heading p { margin: 5px 0 0; }
+.dashboard-reception-details .dashboard-pagination { padding: 0 20px 16px; }
+.dashboard-reception-note, .dashboard-reception-details > .dashboard-notice { margin: 8px 20px 12px; }
+.dashboard-reception-note { color: var(--muted); font-size: 12px; }
+.dashboard-reception-guest + .dashboard-reception-guest { margin-top: 8px; }
+.dashboard-reception-table td:last-child > span { display: block; }
+.dashboard-reception-table td:nth-child(3) > span { font-size: 10px; color: var(--muted); line-height: 1.6; font-variant-numeric: tabular-nums; }
 .community-resident-current .dashboard-text-button { padding: 0 0 0 6px; font-size: 11px; }
 .dashboard-current-card strong small { font-size: 11px; font-weight: 400; }
 .dashboard-today { display: flex; width: 100%; gap: 24px; }
@@ -159,6 +168,8 @@
 .community-today > div { display: flex; flex-direction: column; gap: 14px; }
 .community-today button { display: flex; align-items: center; gap: 9px; border: 0; background: none; color: var(--muted); padding: 0; text-align: left; font-size: 12px; }
 .community-today strong { margin-left: auto; font-size: 20px; font-weight: 550; color: var(--text); }
+.community-today button[aria-expanded=true] { color: var(--brand); }
+.community-today button[aria-expanded=true] > svg:last-child { transform: rotate(90deg); }
 .dashboard-period { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 14px; align-items: center; padding-top: 4px; }
 .dashboard-period-label { display: flex; align-items: center; gap: 10px; color: var(--muted); }
 .dashboard-period-label strong { font-size: 12px; color: var(--text); font-weight: 550; }

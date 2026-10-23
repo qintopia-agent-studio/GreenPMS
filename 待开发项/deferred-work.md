@@ -1,3 +1,7 @@
+- source_spec: 用户 2026-10-23 反馈：待到店、待离店点击后跳至页底；确认参照在住会员，在原卡下方显示住客、房床、住期、状态和订单入口。
+  summary: B 级展示调整已实现，待反馈；接待明细在快照卡紧接下方展开，同项收起、异项切换，保留分页和失败重试；显示有效住宿人及姓名纠正、主住客/同行人、有效房床及改名后的运营编号、订单住期、状态和查看订单。按订单计数及原经营范围、权限、履约规则保持不变，助手知识 2026-10-23.1 同步交付。
+  evidence: 类型检查、252 项看板与助手知识回归、Web 构建、PR 格式检查通过；4 项桌面/手机合成 API 浏览器回归覆盖就近展开且滚动不变、切换/收起、焦点返回、分页、失败重试和空名单。ego-browser 核对桌面及 390px 手机布局无横向溢出，面板距快照卡 12px，查看订单进入对应样本记录。截图位于 .local-workspace/reception-details-20261023/departures-desktop.png 与 departures-mobile.png，合成预览 http://127.0.0.1:4223/community-preview.html；真实业务数据和真实助手问答未验收，未合并或发布。
+
 - source_spec: 用户 2026-10-20 反馈：未来已订和楼栋房型表列间距均匀、美观，逐日人数也按最新日期在上排列。
   summary: B 级展示调整已实现，待反馈；两张七列表采用等宽列、统一居中和留白，窄屏表内横向滚动；逐日人数表按日期倒序展示，员工知识和界面规格同步更新。
   evidence: 类型检查及 49 项社区展示、合成数据和助手知识回归通过；ego-browser 在 1440px、390px 下核对两表等宽、对齐和页面无横向溢出，人数明细 30 行倒序。截图位于 .local-workspace/dashboard-daily-newest-first/ 下的 future-equal-columns-*、breakdown-equal-columns-*、people-newest-first.png；未发布。

@@ -1,9 +1,10 @@
 import { loadDashboardToday } from "./dashboard-today.ts";
 import { sql, type Transaction } from "kysely";
-import type { DashboardBalance, DashboardDetail, DashboardFutureDay, DashboardResponse } from "@qintopia/contracts";
+import type { DashboardBalance, DashboardDetail, DashboardFutureDay, DashboardResponse, RoomCatalogSnapshot } from "@qintopia/contracts";
 import { dashboardDate, enumerateServiceDates } from "@qintopia/domain";
 import { listAvailability } from "./inventory.ts";
 import { loadDashboardStays } from "./dashboard-stays.ts";
+import { projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import type { Database } from "./schema.ts";
 
 type Lodging = Awaited<ReturnType<typeof loadDashboardStays>>;
@@ -37,6 +38,23 @@ export async function loadDashboardCurrent(trx: Transaction<Database>, propertyI
     ? await loadDashboardStays(trx, propertyId, businessDate,
       { from: rows.reduce((date, row) => row.arrival_date < date ? row.arrival_date : date, businessDate), to: businessDate },
       dashboardDate(businessDate, 1), timezone, lodging?.statistics) : lodging;
+  const receptionOrderIds = rows.filter(row => (row.status === "RESERVED" && row.arrival_date === businessDate)
+    || (row.status === "CHECKED_IN" && row.departure_date === businessDate)).map(row => row.id);
+  const [occupants, corrections, catalog] = receptionOrderIds.length ? await Promise.all([
+    trx.selectFrom("active_order_occupants").selectAll().where("order_id", "in", receptionOrderIds).orderBy("ordinal").execute(),
+    trx.selectFrom("order_occupant_corrections").selectAll().where("order_id", "in", receptionOrderIds).execute(),
+    trx.selectFrom("room_catalog_state").select("snapshot").where("property_id", "=", propertyId).executeTakeFirst()
+  ]) : [[], [], undefined];
+  const unitCodes = (catalog?.snapshot as unknown as RoomCatalogSnapshot | undefined)?.unitCodes ?? {};
+  const peopleByOrder = new Map<string, NonNullable<DashboardDetail["reception"]>["occupants"]>();
+  for (const person of projectCurrentOrderOccupants(occupants, corrections)) {
+    const nickname = person.nickname?.trim(), fullName = person.fullName?.trim();
+    const name = nickname && fullName && nickname !== fullName ? `${nickname}（${fullName}）` : nickname || fullName || `第 ${person.ordinal} 位住客`;
+    const people = peopleByOrder.get(person.orderId) ?? [];
+    people.push({ name, isPrimary: person.role === "PRIMARY" });
+    peopleByOrder.set(person.orderId, people);
+  }
+  const unitsById = new Map((currentLodging?.units ?? []).map(unit => [unit.id, unit]));
   for (const row of rows) {
     const intervals = currentLodging?.arrangements.get(row.id);
     const actual = intervals?.find(interval => interval.arrivalDate <= businessDate && businessDate < interval.departureDate)
@@ -49,14 +67,21 @@ export async function loadDashboardCurrent(trx: Transaction<Database>, propertyI
       continue;
     }
     const base = { ...newDashboardDetail(`current:${row.id}`, businessDate), orderId: row.id };
+    const unit = unitsById.get(actual.inventoryUnitId);
+    const room = unit?.kind === "BED" ? unitsById.get(unit.parent_room_id!) : unit;
+    const roomCode = unit ? (unit.active ? unitCodes[unit.id] ?? unit.code : unit.code) : null;
+    const reception = (status: "RESERVED" | "CHECKED_IN"): NonNullable<DashboardDetail["reception"]> => ({
+      occupants: peopleByOrder.get(row.id) ?? [], roomCode, buildingCode: room?.building_code ?? null,
+      arrivalDate: row.arrival_date, departureDate: row.departure_date, status
+    });
     if (row.status === "CHECKED_IN") {
       const guests = Number(row.guests);
       if (!guests) current.guestReviewOrders++;
       if (row.stay_type === "FREE") current.freeGuests += guests; else current.paidGuests += guests;
       details.push({ ...base, metric: "IN_HOUSE", label: row.stay_type === "FREE" ? "免费在住" : "付费在住", units: guests || null, reason: guests ? "按订单内有效住宿人关系去重，不代表跨订单独立访客数" : "缺少登记住宿人，不以默认1人代替" });
     }
-    if (row.status === "RESERVED" && row.arrival_date === businessDate) { current.arrivals++; details.push({ ...base, id: `arrival:${row.id}`, metric: "ARRIVAL", label: "今日待到", units: 1, reason: "有效预订，尚未办理入住" }); }
-    if (row.status === "CHECKED_IN" && row.departure_date === businessDate) { current.departures++; details.push({ ...base, id: `departure:${row.id}`, metric: "DEPARTURE", label: "今日待离", units: 1, reason: "计划今日离店，不自动视为已退房" }); }
+    if (row.status === "RESERVED" && row.arrival_date === businessDate) { current.arrivals++; details.push({ ...base, id: `arrival:${row.id}`, metric: "ARRIVAL", label: "今日待到", units: 1, reason: "有效预订，尚未办理入住", reception: reception("RESERVED") }); }
+    if (row.status === "CHECKED_IN" && row.departure_date === businessDate) { current.departures++; details.push({ ...base, id: `departure:${row.id}`, metric: "DEPARTURE", label: "今日待离", units: 1, reason: "计划今日离店，不自动视为已退房", reception: reception("CHECKED_IN") }); }
     if ((row.status === "RESERVED" && row.arrival_date < businessDate) || (row.status === "CHECKED_IN" && row.departure_date < businessDate)) { current.overdue++; details.push({ ...base, id: `overdue:${row.id}`, metric: "OVERDUE", label: row.status === "RESERVED" ? "逾期到店" : "逾期在住", units: 1, reason: "需到原订单核对履约，不自动延长库存或办理退房" }); }
   }
   return { current, details };
