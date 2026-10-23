@@ -101,6 +101,20 @@ export function sampleDetails(propertyId: string, query: string, scenario: Scena
   const params = new URLSearchParams(query);
   const data = sampleDashboard(propertyId, query, scenario);
   const metric = params.get("metric");
+  if (metric === "TODAY_ORDERS" || metric === "DEBT" || metric === "RETAINED") {
+    const page = Number(params.get("page") ?? 0);
+    const total = metric === "TODAY_ORDERS" ? data.current.todayOrders : (metric === "DEBT" ? data.current.debts : data.current.retained).reduce((sum, row) => sum + row.count, 0);
+    return { asOf: data.asOf, definitionVersion: data.definitionVersion, range: data.range, changedSinceSummary: false, page, pageSize: 50, total,
+      items: Array.from({ length: Math.min(50, Math.max(0, total - page * 50)) }, (_, index) => ({
+        id: `sample-${metric}-${index}`, date: today, metric, label: "合成经营跟进记录", orderId: `sample-${metric}-order-${index}`, memberId: null, unitId: null, units: metric === "TODAY_ORDERS" ? 1 : null,
+        amountMinor: metric === "DEBT" ? ["160000", "128000", "80000"][index]! : metric === "RETAINED" ? ["90000", "30000"][index]! : null, currency: metric === "TODAY_ORDERS" ? null : currency,
+        registeredAt: metric === "TODAY_ORDERS" ? `${today}T0${index + 1}:30:00Z` : null, businessDate: null, reason: "合成样本，仅供展示验收。",
+        orderSummary: { occupants: scenario === "partial" && index === 0 ? [] : [{ name: ["小溪（林女士）", "阿青（青女士）", "山竹"][index]!, isPrimary: true }, ...(index === 0 ? [{ name: "小叶", isPrimary: false }] : [])],
+          rooms: scenario === "partial" && index === 0 ? [] : [{ roomCode: index === 1 ? "202-1床" : `20${index + 1}`, buildingCode: "一号楼" }],
+          arrivalDate: metric === "TODAY_ORDERS" ? "2026-10-15" : "2026-09-25", departureDate: metric === "TODAY_ORDERS" ? "2026-10-22" : "2026-10-12", status: metric === "TODAY_ORDERS" ? (index === 2 ? "CANCELLED" : "RESERVED") : metric === "DEBT" ? "CHECKED_IN" : "CHECKED_OUT" },
+        ...(metric === "RETAINED" ? { retainedOwnerName: scenario === "partial" && index === 0 ? null : ["大树（王先生）", "小麦"][index]! } : {})
+      })) };
+  }
   if (metric === "ARRIVAL" || metric === "DEPARTURE") {
     const page = Number(params.get("page") ?? 0);
     const total = metric === "ARRIVAL" ? data.current.arrivals : data.current.departures;

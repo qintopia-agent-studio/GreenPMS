@@ -14,19 +14,21 @@ const freeCount = (day: CommunityDay) => day.volunteer + day.reception + day.oth
 export function Count({ value, reason, unit = "人" }: { value: number | null; reason: string; unit?: string }) {
   return <>{value === null ? <>— <DashboardHint label="查看缺项原因" text={reason} /></> : value.toLocaleString("zh-CN", { maximumFractionDigits: 1 })}<small>{unit}</small></>;
 }
-export function CurrentScene({ data, onDetail, activeReception = null, receptionDetails }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void; activeReception?: DashboardMetric | null; receptionDetails?: ReactNode }) {
-  const receptionId = useId();
+export function CurrentScene({ data, onDetail, activeDetail = null, detailPanel }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void; activeDetail?: DashboardMetric | null; detailPanel?: ReactNode }) {
+  const detailId = useId();
+  const reception = activeDetail === "ARRIVAL" || activeDetail === "DEPARTURE";
   return <section className="dashboard-current-scene" aria-labelledby="current-scene-title">
     <div className="dashboard-section-heading"><h2 id="current-scene-title">当前现场</h2><span className="dashboard-muted">{data.businessDate} · 不随历史日期变化</span></div>
-    <CommunitySnapshot data={data} onDetail={onDetail} activeReception={activeReception} receptionId={receptionId} />
-    {receptionDetails ? <div id={receptionId}>{receptionDetails}</div> : null}
+    <CommunitySnapshot data={data} onDetail={onDetail} activeReception={reception ? activeDetail : null} receptionId={detailId} />
+    {reception && detailPanel ? <div id={detailId}>{detailPanel}</div> : null}
     {data.community.residentCurrent ? <CurrentResidentSummary data={data} /> : null}
     <CurrentMoneyCards data={data} onDetail={onDetail} />
     <div className="dashboard-current-followups" aria-label="当前待跟进">
-      <div><span>今日新增订单 <DashboardHint text="按门店当天创建的住宿订单计数，含补录；不等于今天入住订单数。" /></span><button type="button" aria-label="查看今日新增订单" onClick={() => onDetail("TODAY_ORDERS")}><strong>{data.current.todayOrders} 单</strong><ArrowRight size={14} /></button></div>
-      <div><span>住宿欠款余额 <DashboardHint text="逐单合同金额减已登记净资金的正差额，不用另一单多收抵销。" /></span><button type="button" aria-label="查看住宿欠款" onClick={() => onDetail("DEBT")}><strong>{data.current.debts.map(row => money(row.amountMinor, row.currency)).join("、") || "—"}</strong><ArrowRight size={14} /></button></div>
-      <div><span>客户留存待用 <DashboardHint text="客户资金归属，不计新增收款；余额按留存事实减使用、退款和解除。" /></span><button type="button" aria-label="查看客户留存" onClick={() => onDetail("RETAINED")}><strong>{data.current.retained.map(row => money(row.amountMinor, row.currency)).join("、") || "—"}</strong><ArrowRight size={14} /></button></div>
+      <div><span>今日新增订单 <DashboardHint text="按门店当天创建的住宿订单计数，含补录；不等于今天入住订单数。" /></span><button type="button" aria-label="查看今日新增订单" aria-expanded={activeDetail === "TODAY_ORDERS"} aria-controls={activeDetail === "TODAY_ORDERS" ? detailId : undefined} onClick={() => onDetail("TODAY_ORDERS")}><strong>{data.current.todayOrders} 单</strong><ArrowRight size={14} /></button></div>
+      <div><span>住宿欠款余额 <DashboardHint text="逐单合同金额减已登记净资金的正差额，不用另一单多收抵销。" /></span><button type="button" aria-label="查看住宿欠款" aria-expanded={activeDetail === "DEBT"} aria-controls={activeDetail === "DEBT" ? detailId : undefined} onClick={() => onDetail("DEBT")}><strong>{data.current.debts.map(row => money(row.amountMinor, row.currency)).join("、") || "—"}</strong><ArrowRight size={14} /></button></div>
+      <div><span>客户留存待用 <DashboardHint text="客户资金归属，不计新增收款；余额按留存事实减使用、退款和解除。" /></span><button type="button" aria-label="查看客户留存" aria-expanded={activeDetail === "RETAINED"} aria-controls={activeDetail === "RETAINED" ? detailId : undefined} onClick={() => onDetail("RETAINED")}><strong>{data.current.retained.map(row => money(row.amountMinor, row.currency)).join("、") || "—"}</strong><ArrowRight size={14} /></button></div>
     </div>
+    {!reception && detailPanel ? <div id={detailId}>{detailPanel}</div> : null}
   </section>;
 }
 

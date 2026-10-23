@@ -57,6 +57,21 @@ it("接待明细保留有效住客、房间和订单日期，并过滤身份及�
   expect(Value.Check(DashboardDetailsResponseSchema, { ...detail, items: [{ ...detail.items[0], reception: { ...safeReception, status: "CHECKED_OUT" } }] })).toBe(false);
 });
 
+it("经营跟进序列化保留独立资金归属、订单全状态和多房床，过滤证件及联系方式", () => {
+  const orderSummary = { occupants: [{ name: "来源住客", isPrimary: true }], rooms: [{ roomCode: "F01", buildingCode: "F" }, { roomCode: "F05-2", buildingCode: "F" }], arrivalDate: "2026-10-01", departureDate: "2026-10-23", status: "CANCELLED" };
+  const detail = { asOf: "2026-10-23T04:00:00Z", definitionVersion: "2026-10-22.3", range: { from: "2026-09-23", to: "2026-10-22" }, changedSinceSummary: false, page: 0, pageSize: 50, total: 1, items: [{
+    id: "retained:lot", date: "2026-10-23", metric: "RETAINED", label: "留存待用", orderId: "order", memberId: null, unitId: null, units: null, amountMinor: "12000", currency: "CNY", registeredAt: null, businessDate: null, reason: "当前可用留存",
+    retainedOwnerName: "代订客户", retainedOwnerContact: "PRIVATE-CONTACT", orderSummary: { ...orderSummary, occupants: [{ ...orderSummary.occupants[0], phone: "PRIVATE-PHONE", documentNumber: "PRIVATE-DOCUMENT" }] }
+  }] };
+  const serialized = buildSerializer(DashboardDetailsResponseSchema)(detail);
+  expect(JSON.parse(serialized).items[0]).toMatchObject({ retainedOwnerName: "代订客户", orderSummary, amountMinor: "12000" });
+  expect(serialized).not.toContain("PRIVATE-");
+  for (const status of ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"]) {
+    expect(Value.Check(DashboardDetailsResponseSchema, { ...detail, items: [{ ...detail.items[0], orderSummary: { ...orderSummary, status } }] })).toBe(true);
+  }
+  expect(Value.Check(DashboardDetailsResponseSchema, { ...detail, items: [{ ...detail.items[0], orderSummary: { ...orderSummary, status: "DRAFT" } }] })).toBe(false);
+});
+
 describe("dashboard future review response contract", () => {
   it("requires a non-negative future review count and permits linked future facts outside history", () => {
     const summary = { ...dashboardFixture(new URL("http://localhost/api/v1/properties/demo/dashboard")), futureReviewCount: 1 };
