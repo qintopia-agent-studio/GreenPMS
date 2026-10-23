@@ -1,5 +1,5 @@
 import { displayedCommunityDay, displayedCommunityTrend, registrationExplanation } from "./community-display";
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, Users, LogIn, LogOut } from "lucide-react";
 import { Area, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -14,10 +14,12 @@ const freeCount = (day: CommunityDay) => day.volunteer + day.reception + day.oth
 export function Count({ value, reason, unit = "人" }: { value: number | null; reason: string; unit?: string }) {
   return <>{value === null ? <>— <DashboardHint label="查看缺项原因" text={reason} /></> : value.toLocaleString("zh-CN", { maximumFractionDigits: 1 })}<small>{unit}</small></>;
 }
-export function CurrentScene({ data, onDetail }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void }) {
+export function CurrentScene({ data, onDetail, activeReception = null, receptionDetails }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void; activeReception?: DashboardMetric | null; receptionDetails?: ReactNode }) {
+  const receptionId = useId();
   return <section className="dashboard-current-scene" aria-labelledby="current-scene-title">
     <div className="dashboard-section-heading"><h2 id="current-scene-title">当前现场</h2><span className="dashboard-muted">{data.businessDate} · 不随历史日期变化</span></div>
-    <CommunitySnapshot data={data} onDetail={onDetail} />
+    <CommunitySnapshot data={data} onDetail={onDetail} activeReception={activeReception} receptionId={receptionId} />
+    {receptionDetails ? <div id={receptionId}>{receptionDetails}</div> : null}
     {data.community.residentCurrent ? <CurrentResidentSummary data={data} /> : null}
     <CurrentMoneyCards data={data} onDetail={onDetail} />
     <div className="dashboard-current-followups" aria-label="当前待跟进">
@@ -73,13 +75,13 @@ export function ResidentPeopleList({ resident }: { resident: CommunityResidentDa
   </div>;
 }
 
-export function CommunitySnapshot({ data, onDetail }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void }) {
+export function CommunitySnapshot({ data, onDetail, activeReception, receptionId }: { data: DashboardResponse; onDetail: (metric: DashboardMetric) => void; activeReception?: DashboardMetric | null; receptionId?: string }) {
   const registrationBasis = data.community.current.total === null && data.community.current.registered !== undefined;
   const day = displayedCommunityDay(data.community.current, registrationBasis);
   return <section className="community-snapshot" aria-labelledby="community-title">
     <div className="community-total"><div className="community-total-title"><Users size={18} aria-hidden="true" /><h2 id="community-title">社区里的人</h2><span className="community-live">当前</span></div><div className="community-total-value"><Count value={day.total} reason={data.community.reasons.join("；") || "有住客缺少跨单关联依据，请核对当前住宿人登记。"} /></div><p>{data.businessDate} · {registrationBasis ? <>登记在住人数（总在住，含短住） <DashboardHint text={registrationExplanation}/></> : data.community.identityApproximate ? "总在住人数 · 昵称/姓名近似去重人数" : "总在住人数 · 含短住"}</p></div>
     <div className="community-composition"><div className="community-composition-values"><div><span><i className="legend-dot paid" />付费在住 <DashboardHint text="正常应收费的实际住宿人，包含会员权益和欠款、尚未收款订单；不是收款人数。" /></span><strong>{day.paid}<small>人</small></strong></div><div><span><i className="legend-dot free" />免费在住 <DashboardHint text={`沿用免费住宿分类：义工 ${day.volunteer} 人、接待 ${day.reception} 人、其他 ${day.otherFree} 人。免费住宿同样占用房源。`} /></span><strong>{freeCount(day)}<small>人</small></strong></div></div><div className="community-composition-track" aria-hidden="true"><i style={{ flex: day.paid }} /><i style={{ flex: freeCount(day) }} /></div><p>{registrationBasis ? "按住宿登记分类 · 尚未跨单去重" : day.unlinked || day.unclassified ? "分类为已核对部分 · 缺项见说明" : data.community.identityApproximate ? "按昵称/姓名近似去重 · 不是订单数" : "同店同日跨单去重 · 不是订单数"}</p></div>
-    <div className="community-today"><span className="dashboard-muted">今天的接待安排 · 订单</span><div><button onClick={() => onDetail("ARRIVAL")}><LogIn size={17} aria-hidden="true" /><span>待到店</span><strong>{data.current.arrivals}</strong><ArrowRight size={14} aria-hidden="true" /></button><button onClick={() => onDetail("DEPARTURE")}><LogOut size={17} aria-hidden="true" /><span>待离店</span><strong>{data.current.departures}</strong><ArrowRight size={14} aria-hidden="true" /></button></div></div>
+    <div className="community-today"><span className="dashboard-muted">今天的接待安排 · 订单</span><div><button type="button" aria-expanded={activeReception === "ARRIVAL"} aria-controls={activeReception === "ARRIVAL" ? receptionId : undefined} onClick={() => onDetail("ARRIVAL")}><LogIn size={17} aria-hidden="true" /><span>待到店</span><strong>{data.current.arrivals}</strong><ArrowRight size={14} aria-hidden="true" /></button><button type="button" aria-expanded={activeReception === "DEPARTURE"} aria-controls={activeReception === "DEPARTURE" ? receptionId : undefined} onClick={() => onDetail("DEPARTURE")}><LogOut size={17} aria-hidden="true" /><span>待离店</span><strong>{data.current.departures}</strong><ArrowRight size={14} aria-hidden="true" /></button></div></div>
   </section>;
 }
 

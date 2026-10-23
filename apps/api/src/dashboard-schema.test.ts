@@ -43,6 +43,20 @@ it("财务序列化保留原流水、发生和同步日期，未认领仍为独�
   expect(JSON.parse(buildSerializer(DashboardDetailsResponseSchema)(detail)).items).toEqual(detail.items);
 });
 
+it("接待明细保留有效住客、房间和订单日期，并过滤身份及联系方式", () => {
+  const safeReception = { occupants: [{ name: "小青（青女士）", isPrimary: true }, { name: "同行人", isPrimary: false }], roomCode: "F05-2", buildingCode: "F", arrivalDate: "2026-10-01", departureDate: "2026-10-23", status: "CHECKED_IN" };
+  const detail = { asOf: "2026-10-23T04:00:00Z", definitionVersion: "2026-10-22.3", range: { from: "2026-09-23", to: "2026-10-22" }, changedSinceSummary: false, page: 0, pageSize: 50, total: 1, items: [{
+    id: "departure:order", date: "2026-10-23", metric: "DEPARTURE", label: "今日待离", orderId: "order", memberId: null, unitId: null, units: 1, amountMinor: null, currency: null, registeredAt: null, businessDate: null, reason: "计划今日离店，不自动视为已退房",
+    reception: { ...safeReception, phone: "PRIVATE-PHONE", occupants: safeReception.occupants.map(person => ({ ...person, documentNumber: "PRIVATE-DOCUMENT" })) }
+  }] };
+  const serialized = buildSerializer(DashboardDetailsResponseSchema)(detail);
+  expect(JSON.parse(serialized).items[0].reception).toEqual(safeReception);
+  expect(serialized).not.toContain("PRIVATE-");
+  expect(Value.Check(DashboardDetailsResponseSchema, detail)).toBe(true);
+  expect(Value.Check(DashboardDetailsResponseSchema, { ...detail, items: [{ ...detail.items[0], reception: { ...safeReception, occupants: [], roomCode: null, buildingCode: null, status: "RESERVED" } }] })).toBe(true);
+  expect(Value.Check(DashboardDetailsResponseSchema, { ...detail, items: [{ ...detail.items[0], reception: { ...safeReception, status: "CHECKED_OUT" } }] })).toBe(false);
+});
+
 describe("dashboard future review response contract", () => {
   it("requires a non-negative future review count and permits linked future facts outside history", () => {
     const summary = { ...dashboardFixture(new URL("http://localhost/api/v1/properties/demo/dashboard")), futureReviewCount: 1 };

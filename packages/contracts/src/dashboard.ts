@@ -70,6 +70,15 @@ export interface DashboardDetail {
   registeredAt: string | null;
   businessDate: string | null;
   reason: string;
+  /** 今日接待安排；住客来自当前有效登记，房间来自有效住宿分段，日期为订单住期。 */
+  reception?: {
+    occupants: Array<{ name: string; isPrimary: boolean }>;
+    roomCode: string | null;
+    buildingCode: string | null;
+    arrivalDate: string;
+    departureDate: string;
+    status: "RESERVED" | "CHECKED_IN";
+  };
   /** 以下字段为可选扩展，旧明细和非资金事实无需回填即可继续通过契约。 */
   sourceType?: DashboardDetailSource;
   claimStatus?: DashboardDetailClaimStatus;

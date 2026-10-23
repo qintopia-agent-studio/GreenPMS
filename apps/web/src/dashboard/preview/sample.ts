@@ -100,6 +100,16 @@ function sampleFunds(range: DashboardResponse["range"], zero: boolean) {
 export function sampleDetails(propertyId: string, query: string, scenario: Scenario): DashboardDetailsResponse {
   const params = new URLSearchParams(query);
   const data = sampleDashboard(propertyId, query, scenario);
+  const metric = params.get("metric");
+  if (metric === "ARRIVAL" || metric === "DEPARTURE") {
+    const page = Number(params.get("page") ?? 0);
+    const total = metric === "ARRIVAL" ? data.current.arrivals : data.current.departures;
+    return { asOf: data.asOf, definitionVersion: data.definitionVersion, range: data.range, changedSinceSummary: false, page, pageSize: 50, total,
+      items: Array.from({ length: Math.min(50, Math.max(0, total - page * 50)) }, (_, index) => ({
+        id: `sample-${metric}-${index}`, date: today, metric, label: metric === "ARRIVAL" ? "今日待到" : "今日待离", orderId: `sample-${metric}-order-${index}`, memberId: null, unitId: `sample-room-${index}`, units: 1, amountMinor: null, currency: null, registeredAt: null, businessDate: null, reason: "合成接待安排，仅供界面验收。",
+        reception: { occupants: scenario === "partial" && index === 0 ? [] : [{ name: ["小溪（林女士）", "阿青（青女士）", "山竹", "小麦"][index % 4]!, isPrimary: true }, ...(index === 0 ? [{ name: "小叶（叶先生）", isPrimary: false }] : [])], roomCode: index === 1 ? "202-1床" : `20${index + 1}`, buildingCode: "一号楼", arrivalDate: metric === "ARRIVAL" ? today : "2026-09-25", departureDate: metric === "DEPARTURE" ? today : "2026-10-19", status: metric === "ARRIVAL" ? "RESERVED" : "CHECKED_IN" }
+      })) };
+  }
   if (scenario === "facts" && params.get("metric") === "TODAY_COLLECTIONS") return {asOf:data.asOf,definitionVersion:data.definitionVersion,range:data.range,changedSinceSummary:false,page:0,pageSize:50,total:2,items:[
     {id:"sample-confirmed",date:today,metric:"TODAY_COLLECTIONS",label:"已确认住宿收款",orderId:"sample-order-confirmed",memberId:null,unitId:null,units:null,amountMinor:"27720",currency,registeredAt:`${today}T01:30:00Z`,businessDate:today,reason:"合成已确认事实",sourceType:"LODGING",claimStatus:"CONFIRMED",externalBillId:"sample-bill-confirmed",transactionReference:"sample-collection-reference",sourceOccurredAt:`${today}T01:20:00Z`,sourceDiscoveredAt:`${today}T01:21:00Z`,syncStatus:"WORKER_SYNCED",evidenceStatus:"COMPLETE"},
     {id:"sample-unclaimed",date:today,metric:"TODAY_COLLECTIONS",label:"企微退款待认领",orderId:null,memberId:null,unitId:null,units:null,amountMinor:"-12500",currency,registeredAt:`${today}T01:40:00Z`,businessDate:null,reason:"合成未认领退款，不计入已确认净额",sourceType:"WECOM",claimStatus:"UNCLAIMED",externalBillId:"sample-bill-refund",refundReference:"sample-refund-reference",originalTransactionReference:"sample-collection-reference",sourceOccurredAt:`${today}T01:35:00Z`,sourceDiscoveredAt:`${today}T01:40:00Z`,syncStatus:"WORKER_SYNCED",evidenceStatus:"COMPLETE"}
