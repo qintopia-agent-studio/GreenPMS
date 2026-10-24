@@ -75,16 +75,12 @@ export async function listOrders(db: Kysely<Database>, query: OrderListQuery) {
     if (query.orderIds?.length) selection = selection.where("orders.id", "in", query.orderIds);
     if (query.status) selection = selection.where("orders.status", "=", query.status);
     if (query.workDate) {
-      // Superset of the existing daily buckets: all current in-house stays,
-      // arrivals on the browsing date, overdue planned arrivals, and terminal
-      // exceptions whose stay spans the current business day. Historical checkout
-      // and unrelated cancelled rows never enter the browser payload.
+      // Daily fulfillment candidates only. Actionable exceptions (including
+      // cross-date funds and terminal inconsistencies) use the workbench query.
       selection = selection.where((eb) => eb.or([
         eb.and([eb("orders.status", "=", "CHECKED_IN"), eb("stays.status", "=", "IN_HOUSE")]),
         eb.and([eb("orders.status", "=", "RESERVED"), eb("stays.status", "=", "PLANNED"),
-          eb.or([eb("orders.arrival_date", "=", query.workDate!), eb("orders.arrival_date", "<", businessDate)])]),
-        eb.and([eb("orders.status", "in", ["CANCELLED", "NO_SHOW"]),
-          eb("orders.arrival_date", "<=", businessDate), eb("orders.departure_date", ">=", businessDate)])
+          eb.or([eb("orders.arrival_date", "=", query.workDate!), eb("orders.arrival_date", "<", businessDate)])])
       ]));
     }
     if (query.funds) {
