@@ -4157,9 +4157,74 @@ pre {
   font-size: 12px;
 }
 
-.queue-primary .queue-exception-reason {
+.queue-exceptions-context,
+.queue-exceptions-feedback,
+.queue-exceptions-pagination {
+  padding: 14px;
+}
+
+.queue-exceptions-context {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.queue-exceptions-context p,
+.queue-exceptions-feedback p {
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.queue-exceptions-context small {
+  color: var(--muted);
+}
+
+.queue-exception-reasons {
+  grid-column: 1 / -1;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 5px;
+}
+
+.queue-exception-reasons li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 12px;
+}
+
+.queue-primary .queue-exception-reasons span,
+.queue-exception-reasons strong {
   color: var(--warning);
-  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.queue-exception-reasons strong {
+  white-space: nowrap;
+}
+
+.queue-exceptions-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.queue-exceptions-pagination > div {
+  display: flex;
+  gap: 8px;
+}
+
+.queue-exceptions-feedback > button + button {
+  margin-left: 8px;
 }
 
 .queue-actions {

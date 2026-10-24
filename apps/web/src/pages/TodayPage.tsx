@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CalendarDays, ChevronRight, DoorOpen, LogIn, LogOut, RefreshCw } from "lucide-react";
+import { CalendarDays, ChevronRight, DoorOpen, LogIn, LogOut, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { CommandType } from "@qintopia/contracts";
 import { api } from "../api";
 import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
 import type { CommandCapability, CommandRequest, OrderRowDto } from "../types";
 import { localDateInTimeZone } from "../dates";
+import { useWorkbenchExceptions, WorkbenchExceptionsQueue } from "../workbenchExceptions";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -34,63 +35,14 @@ const tabs: Array<{ id: TodayTab; label: string }> = [
   { id: "EXCEPTIONS", label: "异常" }
 ];
 
-export interface TodayExceptionPresentation {
-  title: "逾期在住，需确认实际状态";
-  detail: string;
-  actionLabel: "核对逾期在住";
-}
-
-export function todayExceptionPresentation(
-  order: Pick<OrderRowDto, "status" | "stay_status" | "departure_date">,
-  businessDate: string
-): TodayExceptionPresentation | undefined {
-  if (order.status !== "CHECKED_IN" || order.stay_status !== "IN_HOUSE" || order.departure_date >= businessDate) return undefined;
-  return {
-    title: "逾期在住，需确认实际状态",
-    detail: `计划离店日 ${order.departure_date} 已早于营业日 ${businessDate}`,
-    actionLabel: "核对逾期在住"
-  };
-}
-
-export function TodayExceptionReason({ order, businessDate }: {
-  order: Pick<OrderRowDto, "status" | "stay_status" | "departure_date">;
-  businessDate: string;
-}) {
-  const presentation = todayExceptionPresentation(order, businessDate);
-  return presentation ? <span className="queue-exception-reason">{presentation.detail}</span> : null;
-}
-
-export function TodayExceptionAction({ order, businessDate }: {
-  order: Pick<OrderRowDto, "id" | "status" | "stay_status" | "departure_date" | "primary_guest_snapshot" | "current_primary_guest">;
-  businessDate: string;
-}) {
-  const presentation = todayExceptionPresentation(order, businessDate);
-  if (!presentation) return null;
-  return <Link className="button button-secondary" to={`/orders/${encodeURIComponent(order.id)}`} aria-label={`${presentation.actionLabel}：${guestName((order.current_primary_guest ?? order.primary_guest_snapshot))}`}>{presentation.actionLabel}<ChevronRight aria-hidden="true" size={16} /></Link>;
-}
-
 export function buildTodayBuckets(
   orders: readonly OrderRowDto[],
-  browsingDate: string,
-  currentBusinessDate = browsingDate
-): Record<TodayTab, OrderRowDto[]> {
+  browsingDate: string
+): Record<Exclude<TodayTab, "EXCEPTIONS">, OrderRowDto[]> {
   return {
     ARRIVALS: orders.filter((order) => order.arrival_date === browsingDate && order.status === "RESERVED"),
     IN_HOUSE: orders.filter((order) => order.status === "CHECKED_IN" && order.stay_status === "IN_HOUSE"),
-    DEPARTURES: orders.filter((order) => order.departure_date === browsingDate && order.status === "CHECKED_IN" && order.stay_status === "IN_HOUSE"),
-    EXCEPTIONS: orders.filter((order) => {
-      const overdueArrival = order.status === "RESERVED"
-        && order.stay_status === "PLANNED"
-        && order.arrival_date < currentBusinessDate
-        && currentBusinessDate <= order.departure_date;
-      const overdueDeparture = order.departure_date < currentBusinessDate
-        && (order.status === "RESERVED" && order.stay_status === "PLANNED"
-          || order.status === "CHECKED_IN" && order.stay_status === "IN_HOUSE");
-      const terminalStayNeedsReview = (order.status === "NO_SHOW" || order.status === "CANCELLED")
-        && order.arrival_date <= currentBusinessDate
-        && currentBusinessDate <= order.departure_date;
-      return overdueArrival || overdueDeparture || terminalStayNeedsReview;
-    })
+    DEPARTURES: orders.filter((order) => order.departure_date === browsingDate && order.status === "CHECKED_IN" && order.stay_status === "IN_HOUSE")
   };
 }
 
@@ -133,6 +85,7 @@ export function TodayPage() {
   const [error, setError] = useState<unknown>();
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [refreshToken, setRefreshToken] = useState(0);
+  const exceptions = useWorkbenchExceptions(propertyId, refreshToken);
   const [command, setCommand] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [commandNotice, setCommandNotice] = useState<string>();
@@ -178,10 +131,7 @@ export function TodayPage() {
     return () => { current = false; controller.abort(); window.clearTimeout(timeout); };
   }, [propertyId, browsingDate, refreshToken]);
 
-  const buckets = useMemo<Record<TodayTab, OrderRowDto[]>>(
-    () => buildTodayBuckets(orders, browsingDate, currentBusinessDate),
-    [browsingDate, currentBusinessDate, orders]
-  );
+  const buckets = useMemo(() => buildTodayBuckets(orders, browsingDate), [browsingDate, orders]);
 
   function directCommand(order: OrderRowDto, commandType: CommandType, title: string) {
     if (!principalCan(principal, propertyId, commandType as CommandCapability)) return;
@@ -216,13 +166,13 @@ export function TodayPage() {
     if (refreshAfterClose) setRefreshToken((value) => value + 1);
   }
 
-  const visible = buckets[tab];
+  const visible = tab === "EXCEPTIONS" ? [] : buckets[tab];
 
   return (
     <div className="today-page">
       <header className="page-heading page-heading-actions">
         <div><p className="eyebrow">前台日常</p><h1>工作台</h1></div>
-        <div className="today-date"><CalendarDays aria-hidden="true" size={17} /><label><span className="sr-only">营业日期</span><input type="date" value={browsingDate} onChange={(event) => { if (event.target.value) { dateEdited.current = true; setBrowsingDate(event.target.value); } }} /></label><button className="button button-secondary button-small" type="button" onClick={() => { dateEdited.current = false; setBrowsingDate(currentBusinessDate); }}>今天</button><button className="icon-button" type="button" onClick={() => setRefreshToken((value) => value + 1)} aria-label="刷新工作台" title="刷新"><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" size={18} /></button></div>
+        <div className="today-date"><CalendarDays aria-hidden="true" size={17} /><label><span className="sr-only">营业日期</span><input type="date" value={browsingDate} onChange={(event) => { if (event.target.value) { dateEdited.current = true; setBrowsingDate(event.target.value); } }} /></label><button className="button button-secondary button-small" type="button" onClick={() => { dateEdited.current = false; setBrowsingDate(currentBusinessDate); }}>今天</button><button className="icon-button" type="button" onClick={() => setRefreshToken((value) => value + 1)} aria-label="刷新工作台" title="刷新"><RefreshCw className={loading || exceptions.state.loading ? "spin" : ""} aria-hidden="true" size={18} /></button></div>
       </header>
       <InlineError error={recoveryError} title="恢复记录未收口" />
       {commandRecovery.canDiscardCorrupt
@@ -233,18 +183,17 @@ export function TodayPage() {
       {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
       {commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="today-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；只读查看不受影响。</p></div></section> : null}
       <div className="today-tabs" role="tablist" aria-label="工作台分类">
-          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong>{loading || error ? "—" : buckets[item.id].length}</strong></button>)}
+          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong>{item.id === "EXCEPTIONS" ? exceptions.state.loading || exceptions.state.error ? "—" : exceptions.state.data?.totalOrders ?? "—" : loading || error ? "—" : buckets[item.id].length}</strong></button>)}
       </div>
-      <InlineError context="read" error={error} title="无法载入工作台" />
-      {error ? <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)}>重新载入工作台</button> : null}
+      {tab !== "EXCEPTIONS" ? <InlineError context="read" error={error} title="无法载入工作台" /> : null}
+      {tab !== "EXCEPTIONS" && error ? <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)}>重新载入工作台</button> : null}
       <section id="today-tabpanel" className="today-queue" role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>
-        {loading ? <LoadingBlock label="正在载入待办事项" /> : error ? null : visible.length === 0 ? <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" /> : visible.map((order) => (
+        {tab === "EXCEPTIONS" ? <WorkbenchExceptionsQueue {...exceptions} /> : loading ? <LoadingBlock label="正在载入待办事项" /> : error ? null : visible.length === 0 ? <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" /> : visible.map((order) => (
           <article className="queue-row" key={order.id}>
-            <div className="queue-icon" aria-hidden="true">{tab === "EXCEPTIONS" ? <AlertTriangle size={19} /> : tab === "DEPARTURES" ? <LogOut size={19} /> : tab === "ARRIVALS" ? <LogIn size={19} /> : <DoorOpen size={19} />}</div>
+            <div className="queue-icon" aria-hidden="true">{tab === "DEPARTURES" ? <LogOut size={19} /> : tab === "ARRIVALS" ? <LogIn size={19} /> : <DoorOpen size={19} />}</div>
             <div className="queue-primary">
               <strong>{guestName((order.current_primary_guest ?? order.primary_guest_snapshot))}</strong>
               <span>{formatDate(order.arrival_date)} 至 {formatDate(order.departure_date)}</span>
-              {tab === "EXCEPTIONS" ? <TodayExceptionReason order={order} businessDate={currentBusinessDate} /> : null}
             </div>
             <StatusBadge value={order.status} label={todayQueueStatusLabel(tab, order, currentBusinessDate)} />
             <div className="queue-actions">
@@ -252,10 +201,6 @@ export function TodayPage() {
               {tab === "ARRIVALS" && canCheckIn && !todayArrivalActionAllowed(order, browsingDate, currentBusinessDate) ? <span className="queue-action-hint">营业日当天可办理入住</span> : null}
               {tab === "DEPARTURES" && canCheckOut ? <button className="button button-primary" type="button" onClick={() => directCommand(order, "CHECK_OUT", "办理退房")} disabled={commandsBlocked}><LogOut aria-hidden="true" size={17} />退房</button> : null}
               {tab === "IN_HOUSE" && canCheckOut ? <Link className="button button-primary" to={`/orders/${encodeURIComponent(order.id)}?action=CHECK_OUT`}><LogOut aria-hidden="true" size={17} />退房</Link> : null}
-              {tab === "EXCEPTIONS" ? <TodayExceptionAction order={order} businessDate={currentBusinessDate} /> : null}
-              {tab === "EXCEPTIONS" && order.status === "RESERVED" && order.stay_status === "PLANNED" && order.arrival_date < currentBusinessDate
-                ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(order.id)}`}>处理逾期到店<ChevronRight aria-hidden="true" size={17} /></Link>
-                : null}
               <Link className="icon-button" to={`/orders/${encodeURIComponent(order.id)}`} aria-label={`查看${guestName((order.current_primary_guest ?? order.primary_guest_snapshot))}的订单`} title="查看订单"><ChevronRight aria-hidden="true" size={19} /></Link>
             </div>
           </article>

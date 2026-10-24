@@ -28,6 +28,10 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "已取消和已标记未到为什么不一定是异常，今天退房算逾期吗？", ids: ["workbench-exceptions"], facts: ["具体未完成事项", "正常取消/已标记未到不因状态或原住期纳入", "超过到店日仍预订", "超过离店日仍在住", "当天待离店不算逾期"] },
+    { question: "取消后还收着600元，其中200留存，原住期过了还要处理吗？", ids: ["workbench-exceptions", "retained-refund-release"], facts: ["应收不足为欠款", "已确认登记的有效剩余留存除外", "剩余留存200元，应退400元", "已用/已退/已解除不再抵扣", "不代表退钱给客户", "资金和资料异常跨日期持续", "负净额或留存超额待核对"] },
+    { question: "渠道没普通收款就是欠款吗，全额退款登记能证明平台到账吗？", ids: ["workbench-exceptions"], facts: ["普通收款为0不等于欠款", "全额退款净额为0不报", "资料缺失待核对", "不证明平台实际到账", "会员权益抵扣不当现金欠款"] },
+    { question: "你能查全店异常吗，第一页2条是不是只有2笔？", ids: ["workbench-exceptions"], facts: ["同单多原因只计1笔", "原因金额不相加", "页面与外部API同源", "需门店READ", "总数不是当前页条数", "失败/未加载不等于零", "没有异常实时查询工具", "外部客房智能体接入另行验证"] },
     { question: "会员列表怎么排序，剩余权益和到期日怎么看？", ids: ["member-profile"], facts: ["最近加入本店", "右侧默认展开首位会员详情", "每份会员权益", "不混加不同权益", "已扣除冻结占用", "保留搜索、分页和浏览位置"] },
     { question: "F栋宿舍象征性收费还计入经营入住率吗？", ids: ["dashboard", "catalog"], facts: ["经营单元", "非经营单元", "分类下拉框选择后直接保存", "不用填写理由", "不提供整栋批量设置", "跨房住宿按实际房间和日期分段", "房态、订单与财务事实仍保留", "现有经营销售额不随住宿统计开关删减"] },
     { question: "房态慢、翻上个月一直刷新怎么办？", ids: ["room-status"], facts: ["后台约15秒", "不会无限自动重试", "可以返回今天", "办理仍需服务端重新核对", "结果未知应查询原回执"] },

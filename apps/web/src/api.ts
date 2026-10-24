@@ -1,4 +1,4 @@
-import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList } from "@qintopia/contracts";
+import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList, WorkbenchExceptionsQuery, WorkbenchExceptionsResponse } from "@qintopia/contracts";
 import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
 import { readAssistantStream } from "./assistant/stream";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusSyncDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
@@ -169,6 +169,12 @@ function normalizeCommandResult(
 }
 
 export const api = {
+  workbenchExceptions: (query: WorkbenchExceptionsQuery, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ propertyId: query.propertyId });
+    if (query.afterId) params.set("afterId", query.afterId);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    return request<WorkbenchExceptionsResponse>(`/api/v1/workbench/exceptions?${params}`, signal ? { signal } : {});
+  },
   dashboard: (propertyId: string, query: string, signal: AbortSignal) => request<DashboardResponse>(`/api/v1/properties/${encodeURIComponent(propertyId)}/dashboard?${query}`, { signal }),
   dashboardDetails: (propertyId: string, query: string, signal: AbortSignal) => request<DashboardDetailsResponse>(`/api/v1/properties/${encodeURIComponent(propertyId)}/dashboard/details?${query}`, { signal }),
   assistantSettings: (propertyId: string) => request<AssistantSettings>(`/api/v1/assistant/settings?propertyId=${encodeURIComponent(propertyId)}`),
