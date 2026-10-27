@@ -32,7 +32,7 @@
 | `topic` | 本地关键词初步分类，见下文；不是模型对用户真实意图的确认 |
 | `application_version` | PMS 应用版本，用于比较改版前后 |
 | `outcome` | `PENDING` 处理中；`ANSWERED` 回答通过服务端校验；`FAILED` 请求失败；`INTERRUPTED` 超过 10 分钟仍未记录完成 |
-| `error_code` | 固定错误代码，无供应商错误正文；如 `ASSISTANT_DISABLED`、`VALIDATION_ERROR`、`RATE_LIMITED`、`AUTHENTICATION_REQUIRED`、`REQUEST_INTERRUPTED` |
+| `error_code` | 固定错误代码，无供应商错误正文；如 `ASSISTANT_DISABLED`、`VALIDATION_ERROR`、`RATE_LIMITED`、`AUTHENTICATION_REQUIRED`、`REQUEST_INTERRUPTED`、`AI_INVALID_RESPONSE_FINISH_*` |
 | `tools_used`, `duration_ms` | 已尝试的白名单工具名称、服务端处理耗时；不含工具参数、查询结果或模型回答 |
 | `feedback` | `UNKNOWN` 未反馈，`RESOLVED` 用户点“已解决”，`UNRESOLVED` 用户点“未解决”；可更改，不重复累计 |
 

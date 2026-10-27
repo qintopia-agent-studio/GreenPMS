@@ -67,18 +67,25 @@ export async function resolvePublicEndpoint(baseUrl: string, signal?: AbortSigna
     throw aiError("无法解析模型服务地址，请检查 Base URL。");
   } finally { clearTimeout(timer); }
 }
-export type ModelMessage = { role: "system" | "user" | "assistant" | "tool"; content: string | null; tool_calls?: ModelToolCall[]; tool_call_id?: string };
+export type ModelMessage = { role: "system" | "user" | "assistant" | "tool"; content: string | null; reasoning_content?: string; tool_calls?: ModelToolCall[]; tool_call_id?: string };
 export type ModelToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 export type ModelTool = { type: "function"; function: { name: string; description: string; parameters: object } };
 export interface ModelInput { baseUrl: string; apiKey: string; model: string; messages: ModelMessage[]; tools: ModelTool[]; toolChoice?: string; signal?: AbortSignal; onDelta?: (text: string) => Promise<void> }
-export type ModelTransport = (input: ModelInput) => Promise<{ content: string | null; tool_calls?: ModelToolCall[] }>;
+export type ModelResponse = { content: string | null; reasoning_content?: string; tool_calls?: ModelToolCall[]; finishReason?: string };
+export type ModelTransport = (input: ModelInput) => Promise<ModelResponse>;
 
-const invalidResponse = () => new AssistantFailure("AI_INVALID_RESPONSE", "模型返回了不完整或不兼容的内容，请确认服务支持流式 Chat Completions 和工具调用。");
-function validateMessage(message: { content: string | null; tool_calls?: ModelToolCall[] }, finish: unknown) {
-  if (!["stop", "tool_calls"].includes(String(finish))) throw invalidResponse();
+const MAX_MODEL_TEXT = 12000;
+function diagnosticPart(value: unknown): string {
+  const safe = String(value).replace(/[^a-z0-9_]+/gi, "_").toUpperCase().replace(/^_+|_+$/g, "").slice(0, 48);
+  return safe || "UNKNOWN";
+}
+const invalidResponse = (reason?: string) => new AssistantFailure(reason ? `AI_INVALID_RESPONSE_${diagnosticPart(reason)}` : "AI_INVALID_RESPONSE", "模型返回了不完整或不兼容的内容，请确认服务支持流式 Chat Completions 和工具调用。");
+function validateMessage(message: { content: string | null; reasoning_content?: unknown; tool_calls?: ModelToolCall[] }, finish: unknown): ModelResponse {
+  if (!["stop", "tool_calls"].includes(String(finish))) throw invalidResponse(`FINISH_${String(finish)}`);
   if (message.content !== null && typeof message.content !== "string") throw invalidResponse();
+  if (message.reasoning_content !== undefined && message.reasoning_content !== null && typeof message.reasoning_content !== "string") throw invalidResponse("REASONING_CONTENT");
   if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) throw invalidResponse();
-  if ((message.content?.length ?? 0) > 12000 || (message.tool_calls?.length ?? 0) > 6) throw invalidResponse();
+  if ((message.content?.length ?? 0) > MAX_MODEL_TEXT || (message.reasoning_content?.length ?? 0) > MAX_MODEL_TEXT || (message.tool_calls?.length ?? 0) > 6) throw invalidResponse();
   const ids = new Set<string>();
   for (const tool of message.tool_calls ?? []) {
     if (!tool || tool.type !== "function" || typeof tool.id !== "string" || !tool.id || tool.id.length > 200 || typeof tool.function?.name !== "string" || !tool.function.name || tool.function.name.length > 200
@@ -87,13 +94,14 @@ function validateMessage(message: { content: string | null; tool_calls?: ModelTo
     ids.add(tool.id);
   }
   if (!message.content?.trim() && !message.tool_calls?.length) throw invalidResponse();
-  return message;
+  return { content: message.content, ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}), ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}), finishReason: String(finish) };
 }
 
 /** Only assembled, bounded function calls can leave the provider boundary. */
 export class ModelStreamDecoder {
   private frames = new SseDecoder();
   private content = "";
+  private reasoning = "";
   private tools = new Map<number, ModelToolCall>();
   private finish: unknown;
   private done = false;
@@ -110,10 +118,15 @@ export class ModelStreamDecoder {
       const choice = parsed.choices[0];
       if (parsed.choices.length !== 1 || !choice || choice.index !== 0 || this.finish || !choice.delta || typeof choice.delta !== "object" || Array.isArray(choice.delta)) throw invalidResponse();
       const part = choice.delta;
+      if (part.reasoning_content != null) {
+        if (typeof part.reasoning_content !== "string") throw invalidResponse("REASONING_CONTENT");
+        this.reasoning += part.reasoning_content;
+        if (this.reasoning.length > MAX_MODEL_TEXT) throw invalidResponse("REASONING_CONTENT");
+      }
       if (part.content != null) {
         if (typeof part.content !== "string") throw invalidResponse();
         this.content += part.content; delta += part.content;
-        if (this.content.length > 12000) throw invalidResponse();
+        if (this.content.length > MAX_MODEL_TEXT) throw invalidResponse();
       }
       if (part.tool_calls !== undefined) {
         if (!Array.isArray(part.tool_calls) || part.tool_calls.length > 6) throw invalidResponse();
@@ -129,7 +142,7 @@ export class ModelStreamDecoder {
         }
       }
       if (choice.finish_reason != null) {
-        if (!["stop", "tool_calls"].includes(choice.finish_reason)) throw invalidResponse();
+        if (!["stop", "tool_calls"].includes(choice.finish_reason)) throw invalidResponse(`FINISH_${choice.finish_reason}`);
         this.finish = choice.finish_reason;
       }
     }
@@ -138,7 +151,7 @@ export class ModelStreamDecoder {
   result() {
     if (!this.done) throw invalidResponse();
     const tool_calls = [...this.tools.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
-    return validateMessage({ content: this.content || null, ...(tool_calls.length ? { tool_calls } : {}) }, this.finish);
+    return validateMessage({ content: this.content || null, ...(this.reasoning ? { reasoning_content: this.reasoning } : {}), ...(tool_calls.length ? { tool_calls } : {}) }, this.finish);
   }
 }
 
