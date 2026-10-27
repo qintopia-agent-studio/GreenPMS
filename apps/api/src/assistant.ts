@@ -242,7 +242,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
               await freshPrincipal();
               await lifetime.emit({ type: "delta", text, round: round + 1 });
             } } : {}) }));
-          request.log.info({ code: "AI_MODEL_COMPLETED", round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs }, "Assistant model request completed");
+          request.log.info({ code: "AI_MODEL_COMPLETED", round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs, finishReason: response.finishReason }, "Assistant model request completed");
         } catch (error) {
           request.log.warn({ code: error instanceof AssistantFailure ? error.diagnostic : "AI_MODEL_FAILED", round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs }, "Assistant model request failed");
           throw error;
@@ -257,7 +257,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
           recordedOutcome = "ANSWERED";
           return lifetime.streaming ? reply : result;
         }
-        messages.push({ role: "assistant", content: response.content, tool_calls: response.tool_calls });
+        messages.push({ role: "assistant", content: response.content, ...(response.reasoning_content ? { reasoning_content: response.reasoning_content } : {}), tool_calls: response.tool_calls });
         for (const tool of response.tool_calls) {
           if (++calls > 6) throw aiError("本轮查询步骤过多，请把需求拆成更具体的问题。");
           const args = toolArgs(tool.function.name, tool.function.arguments);
