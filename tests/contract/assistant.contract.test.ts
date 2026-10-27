@@ -36,7 +36,7 @@ const transport: ModelTransport = async input => {
   if (last?.role === "tool") { await input.onDelta?.("已找到操作入口，"); await input.onDelta?.("请在正式页面核对并操作。"); return { content: "已找到操作入口，请在正式页面核对并操作。" }; }
   const name = mode === "members" ? "search_members" : mode === "cross" ? "order_details" : "open_entry";
   const args = mode === "members" ? { query: "Demo" } : mode === "cross" ? { orderId: "foreign-order-id" } : { page: "members" };
-  return { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: JSON.stringify(args) } }] };
+  return { content: null, reasoning_content: "合成思考内容", tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: JSON.stringify(args) } }] };
 };
 const cookies = (value: string) => ({ qintopia_session: value });
 const settingsBody = (extra: object = {}) => ({ propertyId: demo.propertyId, expectedVersion: 0, enabled: true, baseUrl: "https://model.example.com/v1", model: "synthetic-model", apiKey: "synthetic-provider-key", ...extra });
@@ -84,7 +84,7 @@ describe.sequential("AI assistant authenticated contract", () => {
   it("opens a whitelisted entry through a real tool loop without writing business commands", async () => {
     mode = "guide"; calls.length = 0;
     const before = await owner.selectFrom("command_executions").selectAll().execute();
-    const response = await chat(); expect(response.statusCode, response.body).toBe(200); expect(response.json().entries[0].page).toBe("members"); expect(calls).toHaveLength(2); expect(calls[1]!.messages.some(m => m.role === "tool")).toBe(true);
+    const response = await chat(); expect(response.statusCode, response.body).toBe(200); expect(response.json().entries[0].page).toBe("members"); expect(calls).toHaveLength(2); expect(calls[1]!.messages.some(m => m.role === "tool")).toBe(true); expect(calls[1]!.messages.find(m => m.role === "assistant")?.reasoning_content).toBe("合成思考内容");
     expect(await owner.selectFrom("command_executions").selectAll().execute()).toHaveLength(before.length);
     const foreignConversation = await chat(admin, { conversationId: response.json().conversationId }); expect(foreignConversation.statusCode).toBe(400);
   });
@@ -133,6 +133,7 @@ describe.sequential("AI assistant authenticated contract", () => {
     expect(JSON.stringify(events.slice(0, -1))).not.toMatch(/entries|arguments|synthetic-provider-key/);
     expect(calls).toHaveLength(2);
     await vi.waitFor(async () => expect((await rows()).find(r => r.id === events.at(-1).result.questionId)?.outcome).toBe("ANSWERED"));
+    expect(response.body).not.toContain("合成思考内容");
   });
   it("sends versioned knowledge on every turn with the live allocation flag and does not submit business", async () => {
     mode = "stream-text"; calls.length = 0;

@@ -28,7 +28,7 @@
 - 只允许 HTTPS 公网目标，不允许内网/本机/云元数据地址、URL 内嵌凭证或重定向。私有模型应通过经批准的公网 HTTPS 网关接入，本版不开放内网地址白名单。
 - DNS 最多5秒，每次模型 HTTP 请求最多60秒，收到响应后的连续静默最多25秒，一次问答（含工具）总预算120秒，浏览器等待上限150秒。响应最多1MB，模型正文最多12000字符，每次问答最多4次模型请求/6个工具。失败不自动重试或重新发起非流式付费请求，错误不转发供应商正文。
 - 浏览器以同一 POST `/api/v1/assistant/chat` 请求 SSE，显示思考/查询/回答阶段；“停止生成”、换工作区或退出会取消连接。仅收到最终成功事件才显示反馈、保存会话回答和打开入口；中断时清除不完整草稿。旧 JSON 客户端保留同一请求的兼容返回。
-- `AI_MODEL_COMPLETED` 记录轮次、模型耗时和首段文字耗时，`AI_TOOL_COMPLETED` 记录工具名/耗时，`AI_QUESTION_FINISHED` 记录总耗时与结果。按请求日志 ID 关联；失败细分 `AI_MODEL_TIMEOUT`、`AI_MODEL_IDLE_TIMEOUT`、`AI_TOTAL_TIMEOUT`、`AI_CANCELLED`、`AI_HTTP_*`、`AI_INVALID_RESPONSE` 和安全连接错误码。日志不含凭证、供应商正文或业务查询结果；无文字的工具轮可以没有首段文字耗时。
+- `AI_MODEL_COMPLETED` 记录轮次、模型耗时、首段文字耗时和供应商 `finishReason`，`AI_TOOL_COMPLETED` 记录工具名/耗时，`AI_QUESTION_FINISHED` 记录总耗时与结果。按请求日志 ID 关联；失败细分 `AI_MODEL_TIMEOUT`、`AI_MODEL_IDLE_TIMEOUT`、`AI_TOTAL_TIMEOUT`、`AI_CANCELLED`、`AI_HTTP_*`、`AI_INVALID_RESPONSE`、`AI_INVALID_RESPONSE_FINISH_*` 和安全连接错误码。日志不含凭证、供应商正文或业务查询结果；无文字的工具轮可以没有首段文字耗时。
 - 浏览器对话仅保存在当前页面内存；服务器会话最多15分钟、12条历史消息，绑定用户/登录会话/门店/配置版本。换店、退出或服务重启后重新开始。多个 API 实例需要 sticky session；本版沿用单实例部署，未实现共享会话。
 - 查询只发送完成问题所需的最小字段到配置的模型服务；不发送完整证件号、完整手机号、外部交易号、供应商凭证或 PMS 登录凭证。回复支持段落、强调、列表和表格排版；忽略原始 HTML，不生成模型提供的链接、图片或表单。页面跳转仍只通过经过校验的操作入口。
 
