@@ -1,5 +1,5 @@
 import { ChannelOperatingHistory } from "../components/ChannelRefundForm";
-import { parseStayFinalYuanToMinor, supportsDecimalStayFinalAmount } from "../channel-amount";
+import { isOrdinaryWecomStay, ordinaryWecomAmountError, parsePositiveStayFinalYuanToMinor, parseStayFinalYuanToMinor, supportsDecimalStayFinalAmount } from "../channel-amount";
 import { RetainedFundsPanel } from "../components/RetainedFunds";
 import { useAssistantOrderEntry } from "../assistant/context";
 import { createReadPoller } from "../readPoller";
@@ -280,6 +280,7 @@ export function initialRepriceTargetYuan(currentContractAmountMinor: number, dra
 }
 
 export function repriceTargetAmountMinor(order: OrderViewDto["order"], value: string): number | undefined {
+  if (isOrdinaryWecomStay(order)) return parsePositiveStayFinalYuanToMinor(value);
   return supportsDecimalStayFinalAmount(order) ? parseStayFinalYuanToMinor(value) : wholeYuanAmountMinor(value);
 }
 
@@ -1523,7 +1524,7 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
     if (action === "REPRICE_ORDER") {
       const targetCurrentContractAmountMinor = repriceTargetAmountMinor(view.order, targetContractYuan);
       if (targetCurrentContractAmountMinor === undefined) {
-        setValidationError(new Error(supportsDecimalStayFinalAmount(view.order) ? "指定最终总价必须在支持范围内且为非负金额，最多两位小数" : "指定最终总价必须是大于或等于零的整元金额"));
+        setValidationError(new Error(isOrdinaryWecomStay(view.order) ? ordinaryWecomAmountError : supportsDecimalStayFinalAmount(view.order) ? "指定最终总价必须在支持范围内且为非负金额，最多两位小数" : "指定最终总价必须是大于或等于零的整元金额"));
         return;
       }
       if (!repriceReason.trim()) {
@@ -1570,7 +1571,7 @@ function OtherActionFormDialog({ action, view, initialFactId, draft, writeBlocke
         ) : null}
         {action === "REPRICE_ORDER" ? (
           <div className="form-grid">
-            <label>指定最终总价（元）<input type="number" min="0" step={supportsDecimalStayFinalAmount(view.order) ? "0.01" : "1"} value={targetContractYuan} onChange={(event) => { setTargetContractYuan(event.target.value); setValidationError(undefined); }} required inputMode={supportsDecimalStayFinalAmount(view.order) ? "decimal" : "numeric"} data-testid="reprice-target-yuan" /></label>
+            <label>指定最终总价（元）<input type="number" min={isOrdinaryWecomStay(view.order) ? "0.01" : "0"} step={supportsDecimalStayFinalAmount(view.order) ? "0.01" : "1"} value={targetContractYuan} onChange={(event) => { setTargetContractYuan(event.target.value); setValidationError(undefined); }} required inputMode={supportsDecimalStayFinalAmount(view.order) ? "decimal" : "numeric"} data-testid="reprice-target-yuan" /></label>
             <label>金额更正原因<textarea value={repriceReason} onChange={(event) => { setRepriceReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} rows={3} data-testid="reprice-reason" /></label>
           </div>
         ) : null}

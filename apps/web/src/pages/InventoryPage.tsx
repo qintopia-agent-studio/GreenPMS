@@ -1,4 +1,4 @@
-import { parseStayFinalYuanToMinor } from "../channel-amount";
+import { ordinaryWecomAmountError, parsePositiveStayFinalYuanToMinor, parseStayFinalYuanToMinor } from "../channel-amount";
 import { useMemberChoices } from "../useMemberChoices";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react";
 import { AlertTriangle, FilePlus2, PanelRightOpen, RefreshCw, Trash2, UserPlus, X } from "lucide-react";
@@ -296,6 +296,8 @@ export function backfillReviewValidationError(input: BackfillReviewDetails): str
     return undefined;
   }
   if (!input.bookingChannelCode) return "请选择订单来源渠道";
+  if (input.bookingChannelCode === "WECOM" && (input.contractAmountMinor === 0
+    || (input.contractAmountMinor === undefined && input.targetAmountYuan.trim()))) return ordinaryWecomAmountError;
   if (input.contractAmountMinor === undefined) return input.targetAmountYuan.trim()
     ? "本单金额格式不正确，请填写不超过两位小数的非负金额"
     : "请填写本单金额";
@@ -431,7 +433,9 @@ export function createOrderPricingDraft(input: {
   manualPriceAdjustmentReason: string;
 }) {
   const externalChannel = input.bookingChannelCode !== "" && input.bookingChannelCode !== "WECOM";
-  const targetCurrentContractAmountMinor = parseYuanAmountToMinor(input.targetAmountYuan);
+  const targetCurrentContractAmountMinor = input.bookingChannelCode === "WECOM"
+    ? parsePositiveStayFinalYuanToMinor(input.targetAmountYuan)
+    : parseYuanAmountToMinor(input.targetAmountYuan);
   const differenceFromPolicyMinor = targetCurrentContractAmountMinor === undefined
     ? undefined
     : targetCurrentContractAmountMinor - input.policyBaseAmountMinor;
@@ -2417,12 +2421,13 @@ function QuoteWorkbench({
                         value={targetContractAmountYuan}
                         onChange={(event) => setTargetContractAmountYuan(event.target.value)}
                         inputMode="decimal"
-                        placeholder={bookingChannelCode === "WECOM" ? "0" : "例如 277.20"}
-                        min={bookingChannelCode === "WECOM" ? 0 : 0.01}
+                        placeholder="例如 277.20"
+                        min={0.01}
                         pattern={"[0-9]+(?:\\.[0-9]{1,2})?"}
                         required
                         data-testid="target-contract-amount"
                       />
+                      {bookingChannelCode === "WECOM" ? <small>金额至少为0.01元；合付款请按各订单真实金额分配。</small> : null}
                     </label>
                     {paidPricingDraft?.differenceFromPolicyMinor !== undefined ? <div className="span-two inline-summary" data-testid="create-order-price-difference">
                       <span>政策基础金额 {formatMoney(quote.currentContractAmount)}</span>

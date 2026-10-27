@@ -423,6 +423,8 @@ describe("普通WECOM日期调整保留387.5元最终金额", () => {
     const draft = {...stayDateChangeInitialDraft(action,current),newDepartureDate:action === "SHORTEN_STAY" ? "2026-08-03" : "2026-08-05",reason:"调整住宿安排",manuallyAdjustWecomPrice:true,targetContractYuan:"387.5",manualPriceAdjustmentReason:"核对最终成交价"};
     const request=buildStayDateChangeRequest(action,current,draft);
     expect(request.input).toMatchObject({targetCurrentContractAmountMinor:38750,manualPriceAdjustmentReason:"核对最终成交价"});
+    expect(() => buildStayDateChangeRequest(action,current,{...draft,targetContractYuan:"0"})).toThrow("合付款请按各订单真实金额分配");
+    expect(buildStayDateChangeRequest(action,current,{...draft,targetContractYuan:"0.01"}).input.targetCurrentContractAmountMinor).toBe(1);
     expect(stayDateChangeInitialDraft(action,current,request)).toMatchObject({targetContractYuan:"387.5",manuallyAdjustWecomPrice:true,manualPriceAdjustmentReason:"核对最终成交价"});
     expect(buildStayDateChangeRequest(action,current,{...draft,manuallyAdjustWecomPrice:false}).input).not.toHaveProperty("targetCurrentContractAmountMinor");
     expect(()=>buildStayDateChangeRequest(action,current,{...draft,manualPriceAdjustmentReason:" "})).toThrow("人工调价原因");

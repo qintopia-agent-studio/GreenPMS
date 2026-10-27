@@ -604,7 +604,9 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(backfillReviewValidationError({ ...paid, bookingChannelCode: "", collectionAmountYuan: "", collectionAmountMinor: undefined }))
       .toBe("请选择订单来源渠道");
     expect(backfillReviewValidationError({ ...paid, targetAmountYuan: "100.5", contractAmountMinor: undefined }))
-      .toBe("本单金额格式不正确，请填写不超过两位小数的非负金额");
+      .toContain("合付款请按各订单真实金额分配");
+    expect(backfillReviewValidationError({ ...paid, targetAmountYuan: "0", contractAmountMinor: 0 }))
+      .toContain("至少为0.01元");
     expect(backfillReviewValidationError({ ...paid, bookingChannelCode: "CTRIP", channelOrderReference: "" }))
       .toBe("请填写渠道订单号");
     expect(backfillReviewValidationError({ ...paid, manualReasonRequired: true, manualPriceAdjustmentReason: "" }))
@@ -750,6 +752,12 @@ describe("CREATE_QUOTE request lifecycle", () => {
     expect(createOrderPricingDraft({ ...base, targetAmountYuan: "1000.00" })).toMatchObject({ manualReasonRequired: false, complete: true });
     expect(createOrderPricingDraft({ ...base, targetAmountYuan: "950.00" })).toMatchObject({ manualReasonRequired: true, complete: false });
     expect(createOrderPricingDraft({ ...base, targetAmountYuan: "950.00", manualPriceAdjustmentReason: "协议优惠" })).toMatchObject({ manualReasonRequired: true, complete: true });
+    for (const targetAmountYuan of ["0", "0.00"]) {
+      expect(createOrderPricingDraft({ ...base, targetAmountYuan, manualPriceAdjustmentReason: "合付款在另一单" }))
+        .toMatchObject({ targetCurrentContractAmountMinor: undefined, complete: false });
+    }
+    expect(createOrderPricingDraft({ ...base, targetAmountYuan: "0.01", manualPriceAdjustmentReason: "真实成交金额" }))
+      .toMatchObject({ targetCurrentContractAmountMinor: 1, complete: true });
   });
 
   it("only keeps a selected member while it remains visible in the current property", () => {

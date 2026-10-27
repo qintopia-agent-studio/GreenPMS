@@ -135,6 +135,25 @@ describe.sequential("channel order amount and atomic CREATE_ORDER on PostgreSQL"
       message: expect.stringMatching(/普通非会员 WECOM 订单金额必须大于0/)
     });
     expect(await businessCounts()).toEqual(before);
+
+    const validQuote = await transientQuote(8);
+    const created = (await confirm(await preview(createInput(validQuote.quoteId, {
+      channel: "WECOM",
+      reference: null
+    }), "wecom-zero-reprice-seed"), "wecom-zero-reprice-seed")).receipt;
+    const beforeReprice = await businessCounts();
+    await expect(preview({
+      commandType: "REPRICE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.result!.orderId,
+        targetCurrentContractAmountMinor: 0
+      }
+    }, "wecom-zero-reprice")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: expect.stringMatching(/普通非会员 WECOM 订单金额必须大于0/)
+    });
+    expect(await businessCounts()).toEqual(beforeReprice);
   });
 
   it.each([

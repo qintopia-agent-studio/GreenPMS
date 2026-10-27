@@ -64,6 +64,9 @@ export function validateOrderTargetAmount(channel: BookingChannelCode | null, va
   if (amount > postgresWholeYuanMaximumMinor) {
     throw new DomainError("VALIDATION_ERROR", "targetCurrentContractAmountMinor exceeds supported amount range");
   }
+  if (channel === "WECOM" && amount === 0) {
+    throw new DomainError("VALIDATION_ERROR", "普通非会员 WECOM 订单金额必须大于0；合付款请按真实金额分配");
+  }
   return amount;
 }
 

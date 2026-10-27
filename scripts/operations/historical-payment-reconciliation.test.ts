@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   HISTORICAL_RECONCILIATION_PLAN_ID,
   calculatePlanSha256,
+  requireApprovedPlan,
   validateFixedPlan,
   type HistoricalPaymentPlan
 } from "./historical-payment-reconciliation.ts";
@@ -25,6 +26,17 @@ function plan(): HistoricalPaymentPlan {
 }
 
 describe("fixed historical payment reconciliation plan", () => {
+  it("rejects redirected records even when the changed plan is self-consistently rehashed", () => {
+    const approved = plan();
+    const changed = plan();
+    changed.orders[0]!.orderId = "different-order";
+    const { planSha256: _sha, ...body } = changed;
+    changed.planSha256 = calculatePlanSha256(body);
+    expect(() => requireApprovedPlan(changed, approved.planSha256)).toThrow(/已审阅/);
+    expect(() => requireApprovedPlan(approved, undefined)).toThrow(/已审阅/);
+    expect(() => requireApprovedPlan(approved, approved.planSha256)).not.toThrow();
+  });
+
   it("accepts the four fixed targets and conserves both bills", () => {
     expect(() => validateFixedPlan(plan())).not.toThrow();
   });
@@ -36,6 +48,14 @@ describe("fixed historical payment reconciliation plan", () => {
     const split = plan();
     split.bills[1]!.allocations[1]!.amountMinor = 12000;
     expect(() => validateFixedPlan(split)).toThrow(/分配/);
+  });
+
+  it("rejects fixed target changes even when an altered plan is rehashed", () => {
+    const altered = plan();
+    altered.orders[3]!.targetCurrentContractAmountMinor = 12000 as 13000;
+    const { planSha256: _planSha256, ...withoutSha } = altered;
+    altered.planSha256 = calculatePlanSha256(withoutSha);
+    expect(() => validateFixedPlan(altered)).toThrow(/目标金额/);
   });
 
   it("requires an explicit historical fact for every old attribution", () => {

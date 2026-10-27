@@ -148,7 +148,7 @@ describe("payment allocation through real Preview/Confirm", () => {
     const splitOrder = await order(3, 60000);
     await sync([bill("historical-whole")]);
     const source = await payment("historical-whole");
-    const original = await execute(collect(originalOrder, source.id, 100000));
+    const original = await execute({ ...collect(originalOrder, source.id, 100000), input: { ...collect(originalOrder, source.id, 100000).input, transactionReference: "historical-whole" } });
     const originalFactId = original.factRefs[0]!;
     await execute({ commandType: "REVERSE_FACT", input: {
       propertyId: demo.propertyId, orderId: originalOrder, reversesFactId: originalFactId,
