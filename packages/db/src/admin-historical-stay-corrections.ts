@@ -117,6 +117,9 @@ interface HistoricalCorrectionEffectItem {
     departureDate: string;
     nights: number;
     stayTimeline: StayTimelineItem[];
+    pricing?: {
+      currentContractAmount: { currency: string; minorUnits: number };
+    };
   };
   unchanged: {
     orderStatus: "CHECKED_OUT";
@@ -762,7 +765,19 @@ function effectCorrections(effect: Record<string, unknown>): HistoricalCorrectio
             })
           : (() => {
               throw new DomainError("INTERNAL_ERROR", "Historical stay correction after timeline is invalid", 500);
+            })(),
+        ...(after.pricing ? {
+          pricing: {
+            currentContractAmount: (() => {
+              const pricing = requireRecord(after.pricing, "after.pricing");
+              const amount = requireRecord(pricing.currentContractAmount, "after.pricing.currentContractAmount");
+              return {
+                currency: requireStringField(amount, "currency"),
+                minorUnits: requireIntegerField(amount, "minorUnits", 0)
+              };
             })()
+          }
+        } : {})
       },
       unchanged: {
         orderStatus: requireStringField(unchanged, "orderStatus") as "CHECKED_OUT",
@@ -810,6 +825,7 @@ async function insertCopiedPricingRevision(trx: Transaction<Database>, options: 
   priorRevisionId: string;
   arrivalDate: string;
   departureDate: string;
+  targetCurrentContractAmountMinor?: number;
 }): Promise<string> {
   const prior = await trx.selectFrom("pricing_revisions")
     .selectAll()
@@ -828,9 +844,15 @@ async function insertCopiedPricingRevision(trx: Transaction<Database>, options: 
     coverage_set: JSON.stringify(prior.coverage_set),
     cash_lines: JSON.stringify(prior.cash_lines),
     policy_base_amount_minor: prior.policy_base_amount_minor,
-    pricing_basis: prior.pricing_basis,
-    manual_adjustment_minor: prior.manual_adjustment_minor,
-    current_contract_amount_minor: prior.current_contract_amount_minor,
+    pricing_basis: options.targetCurrentContractAmountMinor === undefined
+      ? prior.pricing_basis
+      : options.targetCurrentContractAmountMinor === prior.policy_base_amount_minor
+        ? "POLICY"
+        : prior.pricing_basis,
+    manual_adjustment_minor: options.targetCurrentContractAmountMinor === undefined
+      ? prior.manual_adjustment_minor
+      : options.targetCurrentContractAmountMinor - prior.policy_base_amount_minor,
+    current_contract_amount_minor: options.targetCurrentContractAmountMinor ?? prior.current_contract_amount_minor,
     currency: prior.currency
   }).execute();
   return id;
@@ -900,7 +922,7 @@ export async function applyHistoricalStayArrangementCorrection(
         pricing: {
           coverageSet: priorPricing.coverage_set,
           cashLines: priorPricing.cash_lines,
-          currentContractAmount: money(correction.unchanged.currency, correction.unchanged.currentContractAmountMinor)
+          currentContractAmount: correction.after.pricing?.currentContractAmount ?? money(correction.unchanged.currency, correction.unchanged.currentContractAmountMinor)
         }
       },
       unchanged: correction.unchanged
@@ -944,7 +966,8 @@ export async function applyHistoricalStayArrangementCorrection(
       amendmentId,
       priorRevisionId: correction.unchanged.currentRevisionId,
       arrivalDate: correction.after.arrivalDate,
-      departureDate: correction.after.departureDate
+      departureDate: correction.after.departureDate,
+      ...(correction.after.pricing ? { targetCurrentContractAmountMinor: correction.after.pricing.currentContractAmount.minorUnits } : {})
     });
 
     const claimIds = await createInventoryClaims(trx, {

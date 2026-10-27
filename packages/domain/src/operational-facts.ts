@@ -131,6 +131,9 @@ export function createOrderPricingDecision(input: {
   );
 
   if (input.bookingChannelCode === "WECOM") {
+    if (currentContractAmountMinor === 0) {
+      throw new DomainError("VALIDATION_ERROR", "普通非会员 WECOM 订单金额必须大于0；合付款请按真实金额分配");
+    }
     if (channelPriceDifferenceReason) {
       throw new DomainError("VALIDATION_ERROR", "channelPriceDifferenceReason is not allowed for WECOM orders");
     }

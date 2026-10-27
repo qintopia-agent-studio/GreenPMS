@@ -143,6 +143,28 @@ describe("payment allocation through real Preview/Confirm", () => {
     expect(await facts()).toHaveLength(1);
     expect((await payment("parent")).allocations).toHaveLength(1);
   });
+  it("releases a historical whole-bill attribution before allocating the same bill to two orders", async () => {
+    const originalOrder = await order(1, 100000);
+    const splitOrder = await order(3, 60000);
+    await sync([bill("historical-whole")]);
+    const source = await payment("historical-whole");
+    const original = await execute(collect(originalOrder, source.id, 100000));
+    const originalFactId = original.factRefs[0]!;
+    await execute({ commandType: "REVERSE_FACT", input: {
+      propertyId: demo.propertyId, orderId: originalOrder, reversesFactId: originalFactId,
+      releaseExternalPaymentAllocation: true, note: "历史整笔归属更正"
+    } });
+    expect(await payment("historical-whole")).toMatchObject({ allocatedMinor: 0, remainingMinor: 100000 });
+    await execute({ ...collect(originalOrder, source.id, 40000), input: { ...collect(originalOrder, source.id, 40000).input, transactionReference: "historical-whole" } });
+    await execute({ ...collect(splitOrder, source.id, 60000), input: { ...collect(splitOrder, source.id, 60000).input, transactionReference: "historical-whole" } });
+    const settled = await payment("historical-whole");
+    expect(settled).toMatchObject({ allocatedMinor: 100000, remainingMinor: 0 });
+    expect(settled.allocations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ orderId: originalOrder, amountMinor: 40000, released: false }),
+      expect.objectContaining({ orderId: splitOrder, amountMinor: 60000, released: false })
+    ]));
+    expect((await facts()).reduce((sum, fact) => sum + fact.net_effect_minor, 0)).toBe(100000);
+  });
   it("rejects stale previews after another order spends the source balance", async () => {
     const a = await order(1, 60000), b = await order(3, 60000); await sync([bill("parent")]);
     const p = await payment("parent"), staleCommand = collect(b, p.id, 60000), stale = await prepare(staleCommand);

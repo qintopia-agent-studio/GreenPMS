@@ -102,6 +102,14 @@ describe("operational fact identifiers", () => {
       stayType: "TRANSIENT",
       memberStay: false,
       policyBaseAmountMinor: 100_000,
+      targetCurrentContractAmountMinor: 0,
+      manualPriceAdjustmentReason: "合付款已记在另一订单"
+    })).toThrow(/金额必须大于0/);
+    expect(() => createOrderPricingDecision({
+      bookingChannelCode: "WECOM",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 100_000,
       targetCurrentContractAmountMinor: 95_000
     })).toThrow(/manualPriceAdjustmentReason is required/);
     expect(createOrderPricingDecision({
@@ -308,6 +316,27 @@ describe("operational fact identifiers", () => {
       policyBaseAmountMinor: 12_000,
       targetCurrentContractAmountMinor: 12_000
     })).toThrow(/must not be submitted for FREE or member stays/);
+  });
+
+  it("keeps zero cash pricing legal for FREE and member stays while rejecting ordinary WECOM zero pricing", () => {
+    expect(createOrderPricingDecision({
+      bookingChannelCode: null,
+      stayType: "FREE",
+      memberStay: false,
+      policyBaseAmountMinor: 0
+    })).toMatchObject({ pricingBasis: "FREE", currentContractAmountMinor: 0 });
+    expect(createOrderPricingDecision({
+      bookingChannelCode: null,
+      stayType: "TRANSIENT",
+      memberStay: true,
+      policyBaseAmountMinor: 0
+    })).toMatchObject({ pricingBasis: "MEMBER_ENTITLEMENT", currentContractAmountMinor: 0 });
+    expect(() => createOrderPricingDecision({
+      bookingChannelCode: "WECOM",
+      stayType: "TRANSIENT",
+      memberStay: false,
+      policyBaseAmountMinor: 0
+    })).toThrow(/金额必须大于0/);
   });
 
   it("normalizes and requires a real transaction reference", () => {
