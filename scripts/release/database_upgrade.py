@@ -52,6 +52,17 @@ def missing_external_role_placeholders(cluster_sql):
     return sorted(granted_roles - created_roles)
 
 
+def isolated_cluster_restore_sql(cluster_sql):
+    """Sanitize provider-only GRANTs that PostgreSQL reserves (for example pg_*)."""
+    missing = missing_external_role_placeholders(cluster_sql)
+    reserved = [role for role in missing if role.startswith("pg_")]
+    sanitized = cluster_sql
+    for role in reserved:
+        pattern = rf'^GRANT "{re.escape(role)}" TO [^;]*;\n?'
+        sanitized = re.sub(pattern, "", sanitized, flags=re.MULTILINE)
+    return sanitized, [role for role in missing if role not in reserved]
+
+
 def config(deployer):
     from server import root_owned
     value = deployer.config.get("databaseUpgrade")
@@ -246,14 +257,17 @@ class Adapter:
             # backup; create only missing NOLOGIN placeholders in the throwaway
             # clone, never in the target database.
             cluster_sql = (self.directory / "cluster.sql").read_text(encoding="utf-8")
-            managed_roles = missing_external_role_placeholders(cluster_sql)
+            restore_sql, managed_roles = isolated_cluster_restore_sql(cluster_sql)
+            restore_sql_path = self.directory / "cluster-restore.sql"
+            restore_sql_path.write_text(restore_sql, encoding="utf-8")
+            os.chmod(restore_sql_path, 0o600)
             if managed_roles:
                 statements = ";".join(
                     "CREATE ROLE " + '"' + role.replace('"', '""') + '" NOLOGIN'
                     for role in managed_roles
                 ) + ";"
                 self.command(["docker", "exec", self.clone, "psql", "-U", "greenpms_restore", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", statements])
-            self.command(["docker", "exec", self.clone, "psql", "-U", "greenpms_restore", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", "/work/cluster.sql"])
+            self.command(["docker", "exec", self.clone, "psql", "-U", "greenpms_restore", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", "/work/cluster-restore.sql"])
             metadata = json.loads((self.directory / "metadata.json").read_text())
             self.command(["docker", "exec", self.clone, "pg_restore", "--username=greenpms_restore", "--exit-on-error",
                           "--dbname=" + metadata["database"], "/work/" + dump.name])
