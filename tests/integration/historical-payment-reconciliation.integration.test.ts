@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import pg from "pg";
+import fastJsonStringify from "fast-json-stringify";
+import { OrderDetailResponseSchema } from "../../apps/api/src/schemas.ts";
+import { parseOrderView } from "../../apps/web/src/orderViewValidation.ts";
 import { sql, type Kysely } from "kysely";
 import type { AuthPrincipal, CommandEnvelope } from "@qintopia/contracts";
 import { confirmCommandPreview, createCommandPreview, createDatabase, getOrderView, withPropertyClockForTesting, type Database } from "@qintopia/db";
@@ -282,6 +285,15 @@ describe.sequential("fixed historical payment runner on PostgreSQL", () => {
       const view = await getOrderView(db, item.orderId);
       expect(view.amounts.currentContractAmount.minorUnits).toBe(item.targetCurrentContractAmountMinor);
       expect(view.amounts.netRecordedCollection.minorUnits).toBe(item.targetCurrentContractAmountMinor);
+      const response = JSON.parse(fastJsonStringify(OrderDetailResponseSchema)(view));
+      expect(parseOrderView(response).order.id).toBe(item.orderId);
+      const ownerAmendment = view.amendments.find(amendment =>
+        amendment.reason_code === "HISTORICAL_PAYMENT_RECONCILIATION");
+      if (item.key === "D04") {
+        expect(ownerAmendment).toBeDefined();
+        expect(response.amendments.find((amendment: { id: string }) => amendment.id === ownerAmendment!.id).payload)
+          .toEqual(ownerAmendment!.payload);
+      }
     }
     const revisions = await db.selectFrom("pricing_revisions").selectAll().where("order_id", "=", d04.orderId).orderBy("revision_no").execute();
     expect(revisions.slice(0, -1)).toEqual(oldRevisions);
@@ -306,6 +318,8 @@ describe.sequential("fixed historical payment runner on PostgreSQL", () => {
     try {
       const runtimeView = await getOrderView(runtime, d04.orderId);
       expect(runtimeView.amounts.currentContractAmount.minorUnits).toBe(13000);
+      expect(parseOrderView(JSON.parse(fastJsonStringify(OrderDetailResponseSchema)(runtimeView)))
+        .amounts.currentContractAmount.minorUnits).toBe(13000);
       const exceptions = await getWorkbenchExceptions(runtime, { propertyId: demo.propertyId, limit: 100 });
       expect(exceptions.items.filter(item => orderIds.includes(item.orderId))
         .flatMap(item => item.reasons.filter(reason => reason.code === "BALANCE_DUE" || reason.code === "OVERPAYMENT"))).toEqual([]);
