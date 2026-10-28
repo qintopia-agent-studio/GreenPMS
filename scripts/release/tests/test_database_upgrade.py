@@ -79,6 +79,15 @@ class UpgradeFixture(DeployerFixture):
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_restore_rehearsal_detects_provider_managed_roles_missing_from_cluster_dump(self):
+        cluster_sql = '''
+CREATE ROLE "qintopia" NOSUPERUSER;
+CREATE ROLE "qintopia_runtime" NOSUPERUSER;
+GRANT "pg_tencentdb_superuser" TO "qintopia";
+GRANT "qintopia_runtime" TO "qintopia";
+'''
+        self.assertEqual(upgrade.missing_external_role_placeholders(cluster_sql), ["pg_tencentdb_superuser"])
+
     def test_no_new_migrations_uses_no_owner_or_backup(self):
         with DeployerFixture() as f, patch("database_upgrade.config", side_effect=AssertionError("owner accessed")):
             _, key=f.add_new_release()
