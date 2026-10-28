@@ -405,3 +405,11 @@ rtk proxy ssh "$ADMIN_ALIAS" \
 若未知迁移结果：确认 app/worker 均停止，保留所有证据，查看固定阶段诊断，使用管理员受控只读检查确定 ledger 和 readiness；只有相同版本、revision、manifest SHA 的重试可继续，且不重放生产 SQL。目标 readiness 不通过时，先在独立恢复副本复现并形成前向修复或备份恢复方案。任何生产恢复/修改需要对应授权；不能把备份存在等同于恢复已验证。
 
 本地真实适配器验证入口为 `scripts/release/verify_database_adapter.py`，显式传入三个已验证本地 image ID 和输出目录。它使用全新合成数据库，运行两次真实 dump/restore、源/目标 readiness 和正式 migrate.js，结束后只删除自己的源库与演练容器；它不替代生产规模下的停写时间、TLS/CAM/SSH、真实数据或现场人工验收。
+
+### 托管数据库的隔离恢复兼容
+
+源角色清单不包含 PostgreSQL 的 `pg_*` 内置角色，不能据此过滤所有 `pg_*` 授权。恢复适配器查询克隆实际角色目录并保留内置授权；仅当准确的 `pg_tencentdb_superuser` 在克隆中缺失、源完整成员图证明 runtime 无任何可达路径时，允许记录并省略该厂商专属父角色授权。未知缺失角色或成员关系不一致失败关闭。恢复后逐项比对 `parent/child/admin/inherit/set`，每份备份的 `*-role-restore.json` 记录源图、实际图与唯一允许的差异，并由 `*-verified.json` 绑定 SHA256。
+
+若源 owner/runtime 会话明确使用 `PRC`，而固定演练镜像只有 `Asia/Shanghai`，适配器仅在无网络临时克隆补建缺失的 `PRC` 别名；已有文件或链接不覆盖，源连接配置和生产时区不改，后续仍逐字核对会话时区。别名处理也记录在恢复证据中。
+
+修改服务器端 `database_upgrade.py` 不会因 GitHub main 合并自动安装。修复经 PR 检查后，管理员须在无未完成发布事务时持部署锁，核对旧文件 SHA、备份原文件并安装准确审核版本，再用同一已发布 tag 的 `workflow_dispatch` 重跑；不得以跳过恢复门禁替代服务器入口更新。
