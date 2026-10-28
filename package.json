@@ -1,6 +1,6 @@
 {
   "name": "qintopia-pms",
-  "version": "1.17.8",
+  "version": "1.17.9",
   "private": true,
   "workspaces": [
     "apps/*",

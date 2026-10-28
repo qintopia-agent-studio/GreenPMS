@@ -2,6 +2,16 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.17.9](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.8...v1.17.9) (2026-10-28)
+
+
+### Bug Fixes
+
+* **api:** serialize audited historical payment repricing ([#122](https://github.com/qintopia-agent-studio/GreenPMS/issues/122)) ([3be5191](https://github.com/qintopia-agent-studio/GreenPMS/commit/3be51915994b6184cee46b7e9bb10982aff4c721))
+* **release:** model provider roles in isolated restore ([#117](https://github.com/qintopia-agent-studio/GreenPMS/issues/117)) ([09c49a1](https://github.com/qintopia-agent-studio/GreenPMS/commit/09c49a1f62f5cc4b037eb9fedaaea6e14be1816d))
+* **release:** model provider roles in isolated restore ([#120](https://github.com/qintopia-agent-studio/GreenPMS/issues/120)) ([8c17a04](https://github.com/qintopia-agent-studio/GreenPMS/commit/8c17a0478eee424fc86f0ffd6e8669752b1456d0))
+* **release:** preserve restore permissions and source time zone ([#121](https://github.com/qintopia-agent-studio/GreenPMS/issues/121)) ([f57b1ca](https://github.com/qintopia-agent-studio/GreenPMS/commit/f57b1ca8ceef3fbc115275bfac5afbfaa00646fc))
+
 ## [1.17.8](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.7...v1.17.8) (2026-10-28)
 
 
