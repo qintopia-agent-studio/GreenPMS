@@ -45,22 +45,102 @@ def identity(target):
     return {"prefix": target["prefix"], "manifestSha256": target["manifestSha256"]}
 
 
-def missing_external_role_placeholders(cluster_sql):
-    """Return provider-managed roles referenced by GRANT but absent from dump."""
-    created_roles = set(re.findall(r'^CREATE ROLE "([^"]+)"[^;]*;', cluster_sql, flags=re.MULTILINE))
-    granted_roles = set(re.findall(r'^GRANT "([^"]+)" TO ', cluster_sql, flags=re.MULTILINE))
-    return sorted(granted_roles - created_roles)
+PROVIDER_ROLE = "pg_tencentdb_superuser"
+SQL_IDENTIFIER = r'"(?:[^"\x00]|"")+"'
+SQL_LITERAL = r"'(?:[^'\x00]|'')*'"
+MEMBERSHIP_FIELDS = ("parent", "child", "admin", "inherit", "set")
 
 
-def isolated_cluster_restore_sql(cluster_sql):
-    """Sanitize provider-only GRANTs that PostgreSQL reserves (for example pg_*)."""
-    missing = missing_external_role_placeholders(cluster_sql)
-    reserved = [role for role in missing if role.startswith("pg_")]
-    sanitized = cluster_sql
-    for role in reserved:
-        pattern = rf'^GRANT "{re.escape(role)}" TO [^;]*;\n?'
-        sanitized = re.sub(pattern, "", sanitized, flags=re.MULTILINE)
-    return sanitized, [role for role in missing if role not in reserved]
+def cluster_statements(source):
+    """Split only the quoted SQL emitted by the installed inspect helper."""
+    require("\x00" not in source, "DATABASE_CLUSTER_SQL_UNSUPPORTED")
+    start, index, quote = 0, 0, None
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(source) and source[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+        elif char in ('"', "'"):
+            quote = char
+        elif char == ";":
+            yield source[start:index + 1]
+            start = index + 1
+        index += 1
+    require(quote is None and not source[start:].strip(), "DATABASE_CLUSTER_SQL_UNSUPPORTED")
+
+
+def membership_rows(rows):
+    require(isinstance(rows, list), "DATABASE_ROLE_MEMBERSHIPS_INVALID")
+    for row in rows:
+        require(isinstance(row, dict) and set(row) == set(MEMBERSHIP_FIELDS)
+                and all(isinstance(row[key], str) and row[key] for key in ("parent", "child"))
+                and all(type(row[key]) is bool for key in ("admin", "inherit", "set")),
+                "DATABASE_ROLE_MEMBERSHIPS_INVALID")
+    require(len({(row["parent"], row["child"]) for row in rows}) == len(rows),
+            "DATABASE_ROLE_MEMBERSHIPS_AMBIGUOUS")
+    return sorted(rows, key=lambda row: (row["parent"], row["child"]))
+
+
+def assert_membership_fidelity(expected, actual):
+    require(membership_rows(expected) == membership_rows(actual), "DATABASE_ROLE_MEMBERSHIPS_MISMATCH")
+
+
+def isolated_cluster_restore_sql(cluster_sql, clone_roles, runtime_role, source_memberships):
+    """Keep builtins; omit only a missing known provider role, never guess roles."""
+    require(isinstance(clone_roles, list) and all(isinstance(role, str) and role for role in clone_roles)
+            and len(set(clone_roles)) == len(clone_roles), "DATABASE_CLONE_ROLES_INVALID")
+    created, grants, statements = set(), [], []
+    ident = SQL_IDENTIFIER
+    unquote = lambda value: value[1:-1].replace('""', '"')
+    role_pattern = (rf'CREATE ROLE ({ident}) (?:NO)?SUPERUSER (?:NO)?INHERIT (?:NO)?CREATEROLE '
+                    rf'(?:NO)?CREATEDB (?:NO)?LOGIN (?:NO)?REPLICATION (?:NO)?BYPASSRLS CONNECTION LIMIT -?\d+;')
+    database_pattern = (rf'CREATE DATABASE {ident} OWNER {ident} TEMPLATE template0 ENCODING {SQL_LITERAL} '
+                        rf'LC_COLLATE {SQL_LITERAL} LC_CTYPE {SQL_LITERAL} LOCALE_PROVIDER libc;')
+    setting_pattern = rf'ALTER (?:ROLE {ident}(?: IN DATABASE {ident})?|DATABASE {ident}) SET {ident} TO {SQL_LITERAL};'
+    grant_pattern = rf'GRANT ({ident}) TO ({ident}) WITH ADMIN (true|false), INHERIT (true|false), SET (true|false);'
+    for original in cluster_statements(cluster_sql):
+        statement = original.strip()
+        role = re.fullmatch(role_pattern, statement)
+        grant = re.fullmatch(grant_pattern, statement)
+        if role:
+            name = unquote(role[1])
+            require(name not in created and name not in clone_roles, "DATABASE_REHEARSAL_ROLE_COLLISION")
+            created.add(name)
+        elif grant:
+            row = dict(zip(MEMBERSHIP_FIELDS, [unquote(grant[1]), unquote(grant[2]),
+                                               *[grant[n] == "true" for n in (3, 4, 5)]]))
+            grants.append(row)
+        else:
+            require(re.fullmatch(database_pattern, statement) or re.fullmatch(setting_pattern, statement),
+                    "DATABASE_CLUSTER_SQL_UNSUPPORTED")
+        statements.append((original, grant and row))
+    require(isinstance(runtime_role, str) and runtime_role in created, "DATABASE_RUNTIME_ROLE_MISSING")
+    grants = membership_rows(grants)
+    source_memberships = membership_rows(source_memberships)
+    assert_membership_fidelity(grants, [row for row in source_memberships if not row["child"].startswith("pg_")])
+    # Conservatively traverse every direct membership, including NOINHERIT/NOSET.
+    # This also covers mixed SET/inheritance chains and future option changes.
+    reached = {runtime_role}
+    while True:
+        expanded = reached | {row["parent"] for row in source_memberships if row["child"] in reached}
+        if expanded == reached:
+            break
+        reached = expanded
+    require(PROVIDER_ROLE not in reached, "DATABASE_RUNTIME_PROVIDER_ROLE_REACHABLE")
+    available = created | set(clone_roles)
+    missing = {row[key] for row in source_memberships for key in ("parent", "child")} - available
+    require(missing <= {PROVIDER_ROLE}, "DATABASE_UNKNOWN_EXTERNAL_ROLE")
+    require(all(row["child"] in available for row in source_memberships), "DATABASE_UNKNOWN_EXTERNAL_ROLE")
+    omitted = [row for row in source_memberships if row["parent"] == PROVIDER_ROLE and PROVIDER_ROLE in missing]
+    expected = [row for row in source_memberships if row not in omitted]
+    restored = "".join(original for original, row in statements if row not in omitted)
+    restored += cluster_sql[len(cluster_sql.rstrip()):]
+    return restored, {"runtimeRole": runtime_role, "omittedMemberships": omitted,
+                      "sourceMemberships": source_memberships,
+                      "expectedMemberships": expected, "runtimeProviderReachable": False}
 
 
 def config(deployer):
@@ -222,6 +302,46 @@ class Adapter:
             require(sha256_file(snapshot / filename) == checksum and sha256_file(self.directory / filename) == checksum,
                     "DATABASE_BACKUP_METADATA_CHANGED")
 
+    def role_catalog(self, *, clone):
+        query = ("SELECT json_build_object('roles',"
+                 "(SELECT COALESCE(json_agg(rolname ORDER BY rolname),'[]'::json) FROM pg_roles),"
+                 "'memberships',(SELECT COALESCE(json_agg(membership ORDER BY parent,child),'[]'::json) "
+                 "FROM (SELECT parent.rolname AS parent,child.rolname AS child,"
+                 'm.admin_option AS admin,m.inherit_option AS inherit,m.set_option AS "set" '
+                 "FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid "
+                 "JOIN pg_roles child ON child.oid=m.member) membership));")
+        arguments = ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1"]
+        if clone:
+            output = self.command(["docker", "exec", self.clone, *arguments,
+                                   "-U", "greenpms_restore", "-d", "postgres", "-c", query])
+        else:
+            output = self.run(self.settings["postgresImage"], [*arguments, "-c", query],
+                              network="host", env_files=[self.directory / "pg.env"])
+        try:
+            result = json.loads(output)
+        except (ValueError, TypeError):
+            raise ReleaseError("DATABASE_CLONE_ROLE_CATALOG_INVALID") from None
+        require(isinstance(result, dict) and set(result) == {"roles", "memberships"},
+                "DATABASE_CLONE_ROLE_CATALOG_INVALID")
+        membership_rows(result["memberships"])
+        return result
+
+    def clone_timezone_aliases(self, metadata):
+        requested_by = [name for name in ("owner", "runtime")
+                        if metadata.get("sessions", {}).get(name, {}).get("timezone") == "PRC"]
+        if not requested_by:
+            return []
+        # Fixed paths in the already network-isolated, disposable clone only.
+        # Never replace an existing file or even a dangling symlink.
+        script = ("set -eu; test -f /usr/share/zoneinfo/Asia/Shanghai; "
+                  "if test -e /usr/share/zoneinfo/PRC || test -L /usr/share/zoneinfo/PRC; "
+                  "then printf existing; else "
+                  "ln -s Asia/Shanghai /usr/share/zoneinfo/PRC; printf created; fi")
+        status = self.command(["docker", "exec", "--user", "0", self.clone, "sh", "-c", script]).strip()
+        require(status in {"existing", "created"}, "DATABASE_CLONE_TIMEZONE_ALIAS_INVALID")
+        return [{"scope": "isolated-clone", "alias": "PRC", "requestedTarget": "Asia/Shanghai",
+                 "path": "/usr/share/zoneinfo/PRC", "status": status, "requestedBy": requested_by}]
+
     def backup_rehearse(self, before, target, name):
         from server import atomic_json, DATABASE_PREFLIGHT_SCRIPT, runtime_image_id
         # Metadata and source baseline are rechecked for each independently restored backup.
@@ -251,35 +371,46 @@ class Adapter:
                           "i=0; until pg_isready -h 127.0.0.1 -U greenpms_restore >/dev/null 2>&1; do i=$((i+1)); [ $i -lt 60 ] || exit 1; sleep 1; done"], timeout=70)
             network = self.command(["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", self.clone]).strip()
             require(network == "none", "DATABASE_REHEARSAL_NETWORK_INVALID")
-            # TencentDB's pg_dumpall may emit GRANTs for provider-managed roles
-            # without emitting CREATE ROLE statements. The isolated rehearsal must
-            # model those role names so pg_restore can validate the application
-            # backup; create only missing NOLOGIN placeholders in the throwaway
-            # clone, never in the target database.
-            cluster_sql = (self.directory / "cluster.sql").read_text(encoding="utf-8")
-            restore_sql, managed_roles = isolated_cluster_restore_sql(cluster_sql)
+            # Inspect helper excludes pg_* CREATE statements, including real builtins.
+            # Consult the isolated server before allowing one explicit provider delta.
+            cluster_sql = (self.directory / "cluster.sql").read_bytes().decode("utf-8")
+            metadata = json.loads((self.directory / "metadata.json").read_text())
+            timezone_aliases = self.clone_timezone_aliases(metadata)
+            initial_catalog = self.role_catalog(clone=True)
+            source_catalog = self.role_catalog(clone=False)
+            restore_sql, role_restore = isolated_cluster_restore_sql(
+                cluster_sql, initial_catalog["roles"], metadata["sessions"]["runtime"]["role"],
+                source_catalog["memberships"])
             restore_sql_path = self.directory / "cluster-restore.sql"
             restore_sql_path.write_text(restore_sql, encoding="utf-8")
             os.chmod(restore_sql_path, 0o600)
-            if managed_roles:
-                statements = ";".join(
-                    "CREATE ROLE " + '"' + role.replace('"', '""') + '" NOLOGIN'
-                    for role in managed_roles
-                ) + ";"
-                self.command(["docker", "exec", self.clone, "psql", "-U", "greenpms_restore", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", statements])
-            self.command(["docker", "exec", self.clone, "psql", "-U", "greenpms_restore", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", "/work/cluster-restore.sql"])
-            metadata = json.loads((self.directory / "metadata.json").read_text())
+            self.command(["docker", "exec", self.clone, "psql", "-X", "-U", "greenpms_restore", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", "/work/cluster-restore.sql"])
             self.command(["docker", "exec", self.clone, "pg_restore", "--username=greenpms_restore", "--exit-on-error",
                           "--dbname=" + metadata["database"], "/work/" + dump.name])
             self.stage_record("RESTORE_METADATA")
             self.helper(target, "normalize", clone=True)
             self.helper(target, "verify-sessions", clone=True)
+            actual_catalog = self.role_catalog(clone=True)
+            assert_membership_fidelity(role_restore["expectedMemberships"], actual_catalog["memberships"])
+            role_restore.update({"schemaVersion": 1, "sourceClusterSha256": hashlib.sha256(cluster_sql.encode("utf-8")).hexdigest(),
+                                 "restoredClusterSha256": sha256_file(restore_sql_path),
+                                 "initialCloneRoles": initial_catalog["roles"],
+                                 "initialCloneMemberships": initial_catalog["memberships"],
+                                 "timezoneAliases": timezone_aliases,
+                                 "actualMemberships": membership_rows(actual_catalog["memberships"])})
+            role_restore_path = self.directory / (name + "-role-restore.json")
+            atomic_json(role_restore_path, role_restore)
+            role_restore_sha = sha256_file(role_restore_path)
             self.ready(before["current"], clone=True)
             self.migrate(target, clone=True)
             self.ready(target, clone=True)
             require(sha256_file(dump) == digest, "DATABASE_BACKUP_CHANGED")
             self.verify_metadata_snapshot(metadata_record, digest)
-            atomic_json(self.directory / (name + "-verified.json"), {"sha256": digest, **metadata_record, "verifiedAt": utcnow()})
+            require(sha256_file(role_restore_path) == role_restore_sha
+                    and sha256_file(restore_sql_path) == role_restore["restoredClusterSha256"],
+                    "DATABASE_ROLE_RESTORE_EVIDENCE_CHANGED")
+            atomic_json(self.directory / (name + "-verified.json"), {"sha256": digest, **metadata_record,
+                        "roleRestore": {"file": role_restore_path.name, "sha256": role_restore_sha}, "verifiedAt": utcnow()})
             fsync_directory(self.directory)
             fsync_directory(self.directory.parent)
         finally:

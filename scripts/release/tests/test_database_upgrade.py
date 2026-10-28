@@ -79,21 +79,223 @@ class UpgradeFixture(DeployerFixture):
 
 
 class UpgradeTests(unittest.TestCase):
-    def test_restore_rehearsal_detects_provider_managed_roles_missing_from_cluster_dump(self):
-        cluster_sql = '''
-CREATE ROLE "qintopia" NOSUPERUSER;
-CREATE ROLE "qintopia_runtime" NOSUPERUSER;
-GRANT "pg_tencentdb_superuser" TO "qintopia";
-GRANT "qintopia_runtime" TO "qintopia";
-'''
-        self.assertEqual(upgrade.missing_external_role_placeholders(cluster_sql), ["pg_tencentdb_superuser"])
+    @staticmethod
+    def role_sql(name):
+        name = '"' + name.replace('"', '""') + '"'
+        return f'CREATE ROLE {name} NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1;\n'
 
-    def test_restore_rehearsal_skips_reserved_provider_grants_in_clone_only(self):
-        cluster_sql = 'GRANT "pg_tencentdb_superuser" TO "qintopia";\nGRANT "external_role" TO "qintopia";\n'
-        sanitized, placeholders = upgrade.isolated_cluster_restore_sql(cluster_sql)
-        self.assertNotIn('GRANT "pg_tencentdb_superuser"', sanitized)
-        self.assertIn('GRANT "external_role"', sanitized)
-        self.assertEqual(placeholders, ["external_role"])
+    @staticmethod
+    def membership(parent, child, admin=False, inherit=True, set_role=True):
+        return {"parent": parent, "child": child, "admin": admin, "inherit": inherit, "set": set_role}
+
+    @staticmethod
+    def grant_sql(row):
+        q = lambda value: '"' + value.replace('"', '""') + '"'
+        return (f'GRANT {q(row["parent"])} TO {q(row["child"])} WITH ADMIN {str(row["admin"]).lower()}, '
+                f'INHERIT {str(row["inherit"]).lower()}, SET {str(row["set"]).lower()};\n')
+
+    def role_fixture(self, grants, names=("qintopia", "qintopia_runtime", "tencentdb_admin_test")):
+        return "".join(map(self.role_sql, names)) + "".join(map(self.grant_sql, grants))
+
+    def test_role_restore_preserves_builtin_grants_and_only_omits_missing_provider(self):
+        rows = [self.membership("pg_monitor", "qintopia", True, False, True),
+                self.membership("pg_read_all_data", "qintopia_runtime", False, True, False),
+                self.membership(upgrade.PROVIDER_ROLE, "qintopia"),
+                self.membership(upgrade.PROVIDER_ROLE, "tencentdb_admin_test")]
+        source = self.role_fixture(rows)
+        restored, proof = upgrade.isolated_cluster_restore_sql(source, ["pg_monitor", "pg_read_all_data"], "qintopia_runtime", rows)
+        self.assertIn(self.grant_sql(rows[0]), restored)
+        self.assertIn(self.grant_sql(rows[1]), restored)
+        self.assertNotIn(upgrade.PROVIDER_ROLE, restored)
+        self.assertEqual(proof["omittedMemberships"], rows[2:])
+        upgrade.assert_membership_fidelity(rows[:2], proof["expectedMemberships"])
+
+    def test_existing_provider_is_not_removed(self):
+        rows = [self.membership(upgrade.PROVIDER_ROLE, "qintopia")]
+        source = self.role_fixture(rows)
+        restored, proof = upgrade.isolated_cluster_restore_sql(source, [upgrade.PROVIDER_ROLE], "qintopia_runtime", rows)
+        self.assertEqual(restored, source)
+        self.assertEqual(proof["omittedMemberships"], [])
+
+    def test_runtime_provider_reachability_rejects_direct_inherit_set_and_mixed_paths(self):
+        for inherit, set_role in [(True, False), (False, True), (False, False)]:
+            for intermediate in [False, True]:
+                with self.subTest(inherit=inherit, set_role=set_role, intermediate=intermediate):
+                    rows = [self.membership(upgrade.PROVIDER_ROLE, "qintopia" if intermediate else "qintopia_runtime",
+                                            inherit=inherit, set_role=set_role)]
+                    if intermediate:
+                        rows.append(self.membership("qintopia", "qintopia_runtime", inherit=False, set_role=True))
+                    with self.assertRaisesRegex(ReleaseError, "RUNTIME_PROVIDER_ROLE_REACHABLE"):
+                        upgrade.isolated_cluster_restore_sql(self.role_fixture(rows), [], "qintopia_runtime", rows)
+
+    def test_runtime_provider_path_through_builtin_omitted_by_inspect_is_rejected(self):
+        exported = [self.membership("pg_monitor", "qintopia_runtime")]
+        full_graph = exported + [self.membership(upgrade.PROVIDER_ROLE, "pg_monitor")]
+        with self.assertRaisesRegex(ReleaseError, "RUNTIME_PROVIDER_ROLE_REACHABLE"):
+            upgrade.isolated_cluster_restore_sql(self.role_fixture(exported), ["pg_monitor"], "qintopia_runtime", full_graph)
+
+    def test_unknown_missing_roles_fail_closed_without_placeholders(self):
+        for role in ["pg_unknown_provider", "missing_external", "pg_monitor"]:
+            rows = [self.membership(role, "qintopia")]
+            with self.subTest(role=role), self.assertRaisesRegex(ReleaseError, "UNKNOWN_EXTERNAL_ROLE"):
+                upgrade.isolated_cluster_restore_sql(self.role_fixture(rows), [], "qintopia_runtime", rows)
+
+    def test_quoted_identifiers_and_embedded_semicolons_round_trip(self):
+        runtime = 'run"time;\nrole'
+        rows = [self.membership("pg_monitor", runtime)]
+        source = self.role_fixture(rows, ("qintopia", runtime))
+        restored, proof = upgrade.isolated_cluster_restore_sql(source, ["pg_monitor"], runtime, rows)
+        self.assertEqual(restored, source)
+        self.assertEqual(proof["expectedMemberships"], rows)
+
+    def test_generated_database_and_settings_are_preserved_byte_for_byte(self):
+        source = self.role_fixture([]) + (
+            'CREATE DATABASE "pms" OWNER "qintopia" TEMPLATE template0 ENCODING \'UTF8\' '
+            "LC_COLLATE 'C' LC_CTYPE 'C' LOCALE_PROVIDER libc;\n"
+            'ALTER ROLE "qintopia" IN DATABASE "pms" SET "search_path" TO \'"a;b", public\';\n'
+            'ALTER DATABASE "pms" SET "application_name" TO \'it\'\'s; quoted\';\n')
+        restored, _ = upgrade.isolated_cluster_restore_sql(source, [], "qintopia_runtime", [])
+        self.assertEqual(restored, source)
+
+    def test_unknown_or_malformed_generated_sql_fails_closed(self):
+        source = self.role_fixture([])
+        for extra in ['GRANT "pg_monitor" TO "qintopia";\n', 'SELECT 1;\n', '-- comment\n',
+                      'GRANT "pg_monitor" TO "qintopia" WITH ADMIN false, INHERIT true, SET true',
+                      'ALTER ROLE "qintopia" SUPERUSER;\n']:
+            with self.subTest(extra=extra), self.assertRaisesRegex(ReleaseError, "CLUSTER_SQL_UNSUPPORTED"):
+                upgrade.isolated_cluster_restore_sql(source + extra, ["pg_monitor"], "qintopia_runtime", [])
+
+    def test_membership_fidelity_rejects_missing_extra_and_changed_options(self):
+        expected = [self.membership("pg_monitor", "qintopia", admin=True)]
+        for actual in [[], expected + [self.membership("pg_read_all_data", "qintopia_runtime")],
+                       [{**expected[0], "admin": False}], [{**expected[0], "inherit": False}],
+                       [{**expected[0], "set": False}]]:
+            with self.subTest(actual=actual), self.assertRaisesRegex(ReleaseError, "MEMBERSHIPS_MISMATCH"):
+                upgrade.assert_membership_fidelity(expected, actual)
+        upgrade.assert_membership_fidelity(expected, list(reversed(expected)))
+
+    def test_source_membership_drift_fails_closed(self):
+        rows = [self.membership("pg_monitor", "qintopia")]
+        with self.assertRaisesRegex(ReleaseError, "MEMBERSHIPS_MISMATCH"):
+            upgrade.isolated_cluster_restore_sql(self.role_fixture(rows), ["pg_monitor"], "qintopia_runtime", [])
+
+    def test_backup_verification_binds_role_evidence_and_keeps_all_restore_gates(self):
+        rows = [self.membership("pg_monitor", "qintopia"),
+                self.membership("pg_read_all_data", "qintopia_runtime"),
+                self.membership(upgrade.PROVIDER_ROLE, "tencentdb_admin_test")]
+        source = self.role_fixture(rows)
+        for mismatch in [False, True]:
+            with self.subTest(mismatch=mismatch), UpgradeFixture() as f:
+                directory = f.state_dir / "rehearsal"
+                directory.mkdir()
+                adapter = upgrade.Adapter(f.deployer, f.settings, directory, "a" * 32)
+                before, target = {"current": {"name": "old"}}, {"name": "new"}
+                events = []
+                def inspect(*_):
+                    for filename in ("request.json", "pg.env", "clone.env", "migration.env"):
+                        (directory / filename).write_text("{}")
+                    (directory / "cluster.sql").write_text(source)
+                    (directory / "metadata.json").write_text(json.dumps({
+                        "database": "pms", "sessions": {"owner": {"timezone": "PRC"},
+                        "runtime": {"role": "qintopia_runtime", "timezone": "PRC"}}}))
+                def run(_image, arguments, **kwargs):
+                    events.append(arguments[0])
+                    if arguments[0] == "pg_dump":
+                        filename = next(arg.split("/work/")[1] for arg in arguments if arg.startswith("--file="))
+                        (directory / filename).write_bytes(b"real-journal-test-dump")
+                    return ""
+                def command(arguments, **kwargs):
+                    if arguments[:2] == ["docker", "inspect"]:
+                        events.append("network:none")
+                        return "none"
+                    if arguments[-1].startswith("set -eu; test -f /usr/share/zoneinfo/Asia/Shanghai"):
+                        events.append("timezone-alias")
+                        return "created"
+                    if "-f" in arguments:
+                        events.append("cluster-restore")
+                    if "pg_restore" in arguments:
+                        self.assertIn("--exit-on-error", arguments)
+                        events.append("full-restore")
+                    return ""
+                catalog_calls = 0
+                def catalog(*, clone):
+                    nonlocal catalog_calls
+                    catalog_calls += 1
+                    return {"roles": ["greenpms_restore", "pg_monitor", "pg_read_all_data"],
+                            "memberships": rows if not clone else
+                            ([] if catalog_calls % 3 == 1 else rows[:1] if mismatch else rows[:2])}
+                with patch.object(adapter, "inspect", side_effect=inspect), patch.object(adapter, "run", side_effect=run), \
+                     patch.object(adapter, "command", side_effect=command), patch.object(adapter, "remove_owned"), \
+                     patch.object(adapter, "role_catalog", side_effect=catalog), \
+                     patch.object(adapter, "helper", side_effect=lambda _target, action, **_: events.append(action)), \
+                     patch.object(adapter, "ready", side_effect=lambda value, **_: events.append("ready:" + value["name"])), \
+                     patch.object(adapter, "migrate", side_effect=lambda *_args, **_: events.append("migrate")):
+                    if mismatch:
+                        with self.assertRaisesRegex(ReleaseError, "MEMBERSHIPS_MISMATCH"):
+                            adapter.backup_rehearse(before, target, "preparation")
+                        self.assertFalse((directory / "preparation-verified.json").exists())
+                        self.assertNotIn("migrate", events)
+                        continue
+                    for name in ("preparation", "final"):
+                        adapter.backup_rehearse(before, target, name)
+                        verified = json.loads((directory / (name + "-verified.json")).read_text())
+                        evidence = directory / verified["roleRestore"]["file"]
+                        self.assertEqual(upgrade.sha256_file(evidence), verified["roleRestore"]["sha256"])
+                        proof = json.loads(evidence.read_text())
+                        self.assertEqual(proof["sourceClusterSha256"], digest(source.encode()))
+                        self.assertEqual(proof["omittedMemberships"], rows[2:])
+                        self.assertEqual(proof["timezoneAliases"], [{"scope": "isolated-clone", "alias": "PRC",
+                            "requestedTarget": "Asia/Shanghai", "path": "/usr/share/zoneinfo/PRC",
+                            "status": "created", "requestedBy": ["owner", "runtime"]}])
+                        upgrade.assert_membership_fidelity(rows[:2], proof["actualMemberships"])
+                        self.assertEqual((directory / "cluster.sql").read_text(), source)
+                self.assertEqual(events, ["pg_dump", "pg_restore", "network:none", "timezone-alias", "cluster-restore", "full-restore", "normalize", "verify-sessions",
+                                          "ready:old", "migrate", "ready:new"] * 2)
+
+    def test_clone_prc_alias_is_only_requested_for_exact_source_session_timezone(self):
+        with DeployerFixture() as f:
+            adapter = upgrade.Adapter(f.deployer, {"timeoutSeconds": 30}, f.state_dir, "a" * 32)
+            with patch.object(adapter, "command") as command:
+                for zone in ["Asia/Shanghai", "UTC", "prc", "PRC ", None]:
+                    self.assertEqual(adapter.clone_timezone_aliases({"sessions": {"owner": {"timezone": zone}}}), [])
+                command.assert_not_called()
+
+    def test_clone_prc_alias_creates_relative_symlink_without_overwriting_existing_paths(self):
+        for existing in [None, "file", "symlink", "dangling"]:
+            with self.subTest(existing=existing), DeployerFixture() as f:
+                adapter = upgrade.Adapter(f.deployer, {"timeoutSeconds": 30}, f.state_dir, "a" * 32)
+                zoneinfo = f.state_dir / "zoneinfo"
+                (zoneinfo / "Asia").mkdir(parents=True)
+                (zoneinfo / "Asia" / "Shanghai").write_bytes(b"trusted-zone-data")
+                alias = zoneinfo / "PRC"
+                if existing == "file":
+                    alias.write_bytes(b"existing-zone-data")
+                elif existing in {"symlink", "dangling"}:
+                    alias.symlink_to("Asia/Shanghai" if existing == "symlink" else "absent")
+                def command(arguments):
+                    self.assertEqual(arguments[:7], ["docker", "exec", "--user", "0", adapter.clone, "sh", "-c"])
+                    return subprocess.run(["sh", "-c", arguments[-1].replace("/usr/share/zoneinfo", str(zoneinfo))],
+                                          check=True, capture_output=True, text=True).stdout
+                with patch.object(adapter, "command", side_effect=command):
+                    evidence = adapter.clone_timezone_aliases({"sessions": {"runtime": {"timezone": "PRC"}}})
+                self.assertEqual(evidence[0]["status"], "created" if existing is None else "existing")
+                self.assertEqual(evidence[0]["requestedBy"], ["runtime"])
+                if existing == "file":
+                    self.assertEqual(alias.read_bytes(), b"existing-zone-data")
+                else:
+                    self.assertEqual(os.readlink(alias), "absent" if existing == "dangling" else "Asia/Shanghai")
+
+    def test_clone_prc_alias_requires_shanghai_zone_file(self):
+        with DeployerFixture() as f:
+            adapter = upgrade.Adapter(f.deployer, {"timeoutSeconds": 30}, f.state_dir, "a" * 32)
+            zoneinfo = f.state_dir / "zoneinfo"
+            zoneinfo.mkdir()
+            def command(arguments):
+                return subprocess.run(["sh", "-c", arguments[-1].replace("/usr/share/zoneinfo", str(zoneinfo))],
+                                      check=True, capture_output=True, text=True).stdout
+            with patch.object(adapter, "command", side_effect=command), self.assertRaises(subprocess.CalledProcessError):
+                adapter.clone_timezone_aliases({"sessions": {"owner": {"timezone": "PRC"}}})
+            self.assertFalse((zoneinfo / "PRC").exists())
 
     def test_no_new_migrations_uses_no_owner_or_backup(self):
         with DeployerFixture() as f, patch("database_upgrade.config", side_effect=AssertionError("owner accessed")):
