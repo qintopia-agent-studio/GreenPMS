@@ -88,6 +88,13 @@ GRANT "qintopia_runtime" TO "qintopia";
 '''
         self.assertEqual(upgrade.missing_external_role_placeholders(cluster_sql), ["pg_tencentdb_superuser"])
 
+    def test_restore_rehearsal_skips_reserved_provider_grants_in_clone_only(self):
+        cluster_sql = 'GRANT "pg_tencentdb_superuser" TO "qintopia";\nGRANT "external_role" TO "qintopia";\n'
+        sanitized, placeholders = upgrade.isolated_cluster_restore_sql(cluster_sql)
+        self.assertNotIn('GRANT "pg_tencentdb_superuser"', sanitized)
+        self.assertIn('GRANT "external_role"', sanitized)
+        self.assertEqual(placeholders, ["external_role"])
+
     def test_no_new_migrations_uses_no_owner_or_backup(self):
         with DeployerFixture() as f, patch("database_upgrade.config", side_effect=AssertionError("owner accessed")):
             _, key=f.add_new_release()
