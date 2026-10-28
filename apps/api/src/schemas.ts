@@ -3036,6 +3036,28 @@ const CurrentAmendmentRowSchema = strictObject({
   amendment_type: CommandTypeSchema,
   payload: Type.Union([CreateOrderAmendmentPayloadSchema, CommandEffectSchema])
 });
+// Read-only representation of the immutable owner maintenance fact from migration 077.
+// This is intentionally absent from CommandEffectSchema and employee write contracts.
+export const OwnerHistoricalPaymentRepriceAmendmentRowSchema = strictObject({
+  ...AmendmentRowBase,
+  amendment_type: Type.Literal("REPRICE_ORDER"),
+  reason_code: Type.Literal("HISTORICAL_PAYMENT_RECONCILIATION"),
+  command_id: Id,
+  payload: strictObject({
+    orderId: Id,
+    before: strictObject({
+      currentContractAmount: strictObject({ currency: Type.Literal("CNY"), minorUnits: Type.Literal(0) })
+    }),
+    policyBaseAmount: strictObject({ currency: Type.Literal("CNY"), minorUnits: Type.Literal(13000) }),
+    targetCurrentContractAmount: strictObject({ currency: Type.Literal("CNY"), minorUnits: Type.Literal(13000) }),
+    manualAdjustmentMinor: Type.Literal(0),
+    maintenance: strictObject({
+      planId: Type.Literal("historical-payment-reconciliation-2026-10-27"),
+      planSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+      orderKey: Type.Literal("D04")
+    })
+  })
+});
 const HistoricalStayArrangementCorrectionAmendmentRowSchema = strictObject({
   ...AmendmentRowBase,
   amendment_type: Type.Literal("CORRECT_HISTORICAL_STAY_ARRANGEMENT"),
@@ -3123,6 +3145,7 @@ const AmendmentRowSchema = Type.Union([
   BackfillCheckInAmendmentRowSchema,
   BackfillCheckOutAmendmentRowSchema,
   CurrentAmendmentRowSchema,
+  OwnerHistoricalPaymentRepriceAmendmentRowSchema,
   HistoricalStayArrangementCorrectionAmendmentRowSchema,
   LegacyStayChangeAmendmentRowSchema,
   LegacyShortenAmendmentRowSchema,
