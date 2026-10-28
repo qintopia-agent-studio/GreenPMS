@@ -97,7 +97,8 @@ export const currentMigrationNames = [
   "073_direct_stay_amount_precision.sql",
   "074_cancel_empty_membership_order.sql",
   "075_room_operating_statistics.sql",
-  "076_multi_room_sequence_membership_upgrade.sql"
+  "076_multi_room_sequence_membership_upgrade.sql",
+  "077_owner_historical_payment_reprice.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -1969,6 +1970,26 @@ export async function databaseReady(
         ) AS function_bodies_ready
       FROM pg_trigger AS trigger
     `.execute(db);
+    const ownerHistoricalPaymentRepriceObjects = await sql<{ ready: boolean }>`
+      SELECT
+        has_table_privilege('qintopia_runtime', 'owner_historical_payment_reprices', 'SELECT')
+        AND NOT has_table_privilege('qintopia_runtime', 'owner_historical_payment_reprices', 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
+        AND NOT has_function_privilege('qintopia_runtime', 'qintopia_reprice_fixed_historical_d04(text,text,integer,text,text,text,text,text,text,text,text)', 'EXECUTE')
+        AND NOT EXISTS(SELECT 1 FROM pg_proc p,
+          LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) grant_row
+          WHERE p.oid='qintopia_reprice_fixed_historical_d04(text,text,integer,text,text,text,text,text,text,text,text)'::regprocedure
+            AND grant_row.grantee=0 AND grant_row.privilege_type='EXECUTE')
+        AND (SELECT count(*) = 3 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+          WHERE n.nspname='public' AND p.proname IN ('qintopia_reprice_fixed_historical_d04','qintopia_validate_owner_historical_payment_reprice','qintopia_validate_new_wecom_positive_pricing')
+            AND NOT p.prosecdef AND p.proowner=(SELECT datdba FROM pg_database WHERE datname=current_database()))
+        AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='pricing_revisions'::regclass
+          AND tgname='pricing_revisions_validate_wecom_positive' AND tgenabled IN ('O','A')
+          AND tgfoid='qintopia_validate_new_wecom_positive_pricing()'::regprocedure)
+        AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='owner_historical_payment_reprices'::regclass
+          AND tgname='owner_historical_payment_reprices_validate' AND tgenabled IN ('O','A') AND tgdeferrable AND tginitdeferred)
+        AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='owner_historical_payment_reprices'::regclass
+          AND tgname='owner_historical_payment_reprices_append_only' AND tgenabled IN ('O','A')) AS ready
+    `.execute(db);
     const historicalStayArrangementCorrectionObjects = await sql<{
       table_count: string;
       function_count: string;
@@ -3169,6 +3190,7 @@ export async function databaseReady(
       && stage13Objects.rows[0]?.membership_order_wrapper_body_ready === true
       && stage13Objects.rows[0]?.trigger_bindings_ready === true
       && stage13Objects.rows[0]?.function_bodies_ready === true
+      && ownerHistoricalPaymentRepriceObjects.rows[0]?.ready === true
       && historicalStayArrangementCorrectionObjects.rows[0]?.table_count === "1"
       && historicalStayArrangementCorrectionObjects.rows[0]?.function_count === "4"
       && historicalStayArrangementCorrectionObjects.rows[0]?.function_bodies_ready === true

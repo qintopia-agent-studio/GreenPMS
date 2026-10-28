@@ -797,6 +797,7 @@ interface LifecycleAmendmentRow extends FulfillmentAmendmentRow {
   new_version: number;
   command_id?: string | null;
   protocolVersion?: HistoricalAmendmentProtocol;
+  owner_historical_payment_reprice?: boolean;
 }
 
 interface LifecycleRevisionRow {
@@ -1344,7 +1345,8 @@ function validateLifecycleStatus(
       && (amendmentType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
         || amendmentType === "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"
         || amendmentType === "CORRECT_HISTORICAL_STAY_ARRANGEMENT"
-        || (amendmentType === "REPRICE_ORDER" && externalChannelCodes.has(bookingChannelCode??"")));
+        || (amendmentType === "REPRICE_ORDER" && (externalChannelCodes.has(bookingChannelCode??"")
+          || (bookingChannelCode === "WECOM" && amendment.owner_historical_payment_reprice === true))));
     const terminalChannelFundsAllowed = externalChannelCodes.has(bookingChannelCode??"") && channelFundsAmendment(amendment);
     if (amendmentType !== "CORRECT_ORDER_OCCUPANT"
       && !terminalPricingOnlyAllowed
@@ -1782,6 +1784,12 @@ export async function getOrderViewSnapshot(
       .leftJoin("command_executions", "command_executions.id", "amendments.command_id")
       .leftJoin("subjects", "subjects.id", "command_executions.subject_id")
       .selectAll("amendments")
+      .select(sql<boolean>`EXISTS (
+        SELECT 1 FROM owner_historical_payment_reprices maintenance
+        WHERE maintenance.amendment_id = amendments.id
+          AND maintenance.command_id = amendments.command_id
+          AND maintenance.order_id = amendments.order_id
+      )`.as("owner_historical_payment_reprice"))
       .select([
         "command_executions.subject_id as actor_subject_id",
         "subjects.display_name as actor_display_name"

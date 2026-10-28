@@ -475,6 +475,8 @@ describe("普通WECOM换房387.5元精度", () => {
     const draft={...moveUnitInitialDraft(current,units),newInventoryUnitId:"bed_1",reason:"换房核对",manuallyAdjustWecomPrice:true,targetContractYuan:"387.5",manualPriceAdjustmentReason:"核对最终成交价"};
     const request=buildMoveUnitRequest(current,draft);
     expect(request.input).toMatchObject({targetCurrentContractAmountMinor:38750,manualPriceAdjustmentReason:"核对最终成交价"});
+    expect(() => buildMoveUnitRequest(current,{...draft,targetContractYuan:"0.00"})).toThrow("合付款请按各订单真实金额分配");
+    expect(buildMoveUnitRequest(current,{...draft,targetContractYuan:"0.01"}).input.targetCurrentContractAmountMinor).toBe(1);
     expect(moveUnitInitialDraft(current,units,request)).toMatchObject({targetContractYuan:"387.5",manuallyAdjustWecomPrice:true,manualPriceAdjustmentReason:"核对最终成交价"});
     expect(()=>buildMoveUnitRequest(current,{...draft,manualPriceAdjustmentReason:" "})).toThrow("人工调价原因");
     expect(buildMoveUnitRequest(current,{...draft,manuallyAdjustWecomPrice:false}).input).not.toHaveProperty("targetCurrentContractAmountMinor");

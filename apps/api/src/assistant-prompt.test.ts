@@ -28,6 +28,8 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "普通企微订单能调成0吗，免费和会员权益现金为0还合法吗？", ids: ["booking"], facts: ["普通非会员 WECOM 新建及更正金额必须大于0", "正式免费住宿、会员权益覆盖的合法零现金除外", "有会员档案不等于使用权益"] },
+    { question: "两张订单合付款已整笔记在另一单，这单能调0消除欠款吗？", ids: ["payment-allocation"], facts: ["保留各单真实合同金额", "按真实份额分配", "款记在另一单不能调0或改免费/权益绕过", "历史归属及已退房零价错误交管理员核对", "助手不承诺已修复"] },
     { question: "已取消和已标记未到为什么不一定是异常，今天退房算逾期吗？", ids: ["workbench-exceptions"], facts: ["具体未完成事项", "正常取消/已标记未到不因状态或原住期纳入", "超过到店日仍预订", "超过离店日仍在住", "当天待离店不算逾期"] },
     { question: "取消后还收着600元，其中200留存，原住期过了还要处理吗？", ids: ["workbench-exceptions", "retained-refund-release"], facts: ["应收不足为欠款", "已确认登记的有效剩余留存除外", "剩余留存200元，应退400元", "已用/已退/已解除不再抵扣", "不代表退钱给客户", "资金和资料异常跨日期持续", "负净额或留存超额待核对"] },
     { question: "渠道没普通收款就是欠款吗，全额退款登记能证明平台到账吗？", ids: ["workbench-exceptions"], facts: ["普通收款为0不等于欠款", "全额退款净额为0不报", "资料缺失待核对", "不证明平台实际到账", "会员权益抵扣不当现金欠款"] },

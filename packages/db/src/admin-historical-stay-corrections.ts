@@ -28,6 +28,21 @@ import type { Database } from "./schema.ts";
 export const HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND = "CORRECT_HISTORICAL_STAY_ARRANGEMENTS";
 export const HISTORICAL_STAY_ARRANGEMENT_CORRECTION_AMENDMENT = "CORRECT_HISTORICAL_STAY_ARRANGEMENT";
 
+/** Maintenance-only fixed D04 repricing; the SQL entry point verifies the direct owner identity. */
+export async function applyOwnerHistoricalPaymentReprice(
+  trx: Transaction<Database>,
+  input: { propertyId: string; orderId: string; expectedVersion: number; planSha256: string; subjectId: string; credentialId: string }
+): Promise<{ commandId: string; amendmentId: string; pricingRevisionId: string; resourceRefs: string[]; factRefs: string[] }> {
+  const row = await sql<{ result: { commandId: string; amendmentId: string; pricingRevisionId: string; resourceRefs: string[]; factRefs: string[] } }>`
+    SELECT qintopia_reprice_fixed_historical_d04(
+      ${input.propertyId}, ${input.orderId}, ${input.expectedVersion}, ${input.planSha256},
+      ${input.subjectId}, ${input.credentialId}, ${newId("command")}, ${newId("amend")},
+      ${newId("revision")}, ${newId("receipt")}, ${newId("audit")}
+    ) AS result
+  `.execute(trx);
+  return row.rows[0]!.result;
+}
+
 interface NormalizedHistoricalCorrectionItem {
   orderId: string;
   expectedVersion: number;

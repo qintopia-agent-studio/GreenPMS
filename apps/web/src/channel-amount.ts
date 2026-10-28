@@ -6,6 +6,20 @@ export function parseStayFinalYuanToMinor(value: string): number | undefined {
   return minor <= 2_147_483_600n ? Number(minor) : undefined;
 }
 
+export const ordinaryWecomAmountError = "普通非会员 WECOM 订单金额须至少为0.01元，且最多两位小数；合付款请按各订单真实金额分配";
+
+export function parsePositiveStayFinalYuanToMinor(value: string): number | undefined {
+  const amount = parseStayFinalYuanToMinor(value);
+  return amount !== undefined && amount > 0 ? amount : undefined;
+}
+
+export function isOrdinaryWecomStay(order: {
+  booking_channel_code: unknown; stay_type?: unknown; member_id?: unknown; member_contract_id?: unknown;
+}): boolean {
+  return order.booking_channel_code === "WECOM" && order.stay_type !== "FREE"
+    && !order.member_id && !order.member_contract_id;
+}
+
 export function isExternalBookingChannel(value: unknown): boolean {
   return value === "YOUMUDAO" || value === "CTRIP" || value === "MEITUAN";
 }

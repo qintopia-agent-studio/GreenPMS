@@ -122,6 +122,40 @@ describe.sequential("channel order amount and atomic CREATE_ORDER on PostgreSQL"
     expect(await businessCounts()).toEqual(before);
   });
 
+  it("rejects a zero-priced ordinary WECOM order before any business write", async () => {
+    const quote = await transientQuote(7);
+    const before = await businessCounts();
+    await expect(preview(createInput(quote.quoteId, {
+      channel: "WECOM",
+      reference: null,
+      target: 0,
+      manualReason: "合付款已记在另一订单"
+    }), "wecom-zero-target")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: expect.stringMatching(/普通非会员 WECOM 订单金额必须大于0/)
+    });
+    expect(await businessCounts()).toEqual(before);
+
+    const validQuote = await transientQuote(8);
+    const created = (await confirm(await preview(createInput(validQuote.quoteId, {
+      channel: "WECOM",
+      reference: null
+    }), "wecom-zero-reprice-seed"), "wecom-zero-reprice-seed")).receipt;
+    const beforeReprice = await businessCounts();
+    await expect(preview({
+      commandType: "REPRICE_ORDER",
+      input: {
+        propertyId: demo.propertyId,
+        orderId: created.result!.orderId,
+        targetCurrentContractAmountMinor: 0
+      }
+    }, "wecom-zero-reprice")).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: expect.stringMatching(/普通非会员 WECOM 订单金额必须大于0/)
+    });
+    expect(await businessCounts()).toEqual(beforeReprice);
+  });
+
   it.each([
     [10_200, -1_800],
     [13_800, 1_800]

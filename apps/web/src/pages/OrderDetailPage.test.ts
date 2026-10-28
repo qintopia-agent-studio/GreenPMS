@@ -2507,12 +2507,16 @@ it("普通WECOM与渠道更正草稿恢复到分", () => {
 it("普通WECOM调价387.5及草稿不截断，会员和免费保持原精度", () => {
   const order={booking_channel_code:"WECOM",stay_type:"TRANSIENT",member_id:null,member_contract_id:null} as OrderViewDto["order"];
   expect(repriceTargetAmountMinor(order,"387.5")).toBe(38750);
+  expect(repriceTargetAmountMinor(order,"0")).toBeUndefined();
+  expect(repriceTargetAmountMinor(order,"0.00")).toBeUndefined();
+  expect(repriceTargetAmountMinor(order,"0.01")).toBe(1);
   expect(initialRepriceTargetYuan(40000,38750,"WECOM")).toBe("387.5");
   for(const value of ["387.501","-0.01","1e2","Infinity","21474836.01",""])expect(repriceTargetAmountMinor(order,value)).toBeUndefined();
   for(const restricted of [{...order,stay_type:"FREE" as const},{...order,member_id:"member"},{...order,member_contract_id:"contract"}]) {
     expect(repriceTargetAmountMinor(restricted,"387.5")).toBeUndefined();
     expect(initialRepriceTargetYuan(40000,38750,restricted.booking_channel_code,supportsDecimalStayFinalAmount(restricted))).toBe("400");
     expect(repriceTargetAmountMinor(restricted,"387")).toBe(38700);
+    expect(repriceTargetAmountMinor(restricted,"0")).toBe(0);
   }
   expect(initialRepriceTargetYuan(40000,38750,"WECOM",false)).toBe("400");
   expect(formalMembershipAgreedPriceMinor("387.5")).toBeUndefined();
