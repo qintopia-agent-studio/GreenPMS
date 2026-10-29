@@ -1940,6 +1940,68 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       .orderBy("created_at")
       .orderBy("fact_id")
       .execute();
+    // 仅对当前零应结候选批量补查退款依据；普通历史房态不增加逐单查询。
+    const zeroRevisionIds = new Set(completedRevisions
+      .filter((revision) => revision.current_contract_amount_minor === 0)
+      .map((revision) => revision.id));
+    const zeroChannelOrderIds = completedOrderContexts
+      .filter((order) => externalChannelCodes.has(order.booking_channel_code ?? "")
+        && zeroRevisionIds.has(order.current_revision_id ?? ""))
+      .map((order) => order.id);
+    const refundedZeroOrderIds = new Set(zeroChannelOrderIds.length === 0 ? [] : (await sql<{ order_id: string }>`
+      SELECT DISTINCT o.id AS order_id
+      FROM orders o
+      JOIN pricing_revisions current_revision ON current_revision.id = o.current_revision_id AND current_revision.order_id = o.id
+      JOIN pricing_revisions revision ON revision.order_id = o.id AND revision.revision_no <= current_revision.revision_no
+      JOIN amendments amendment ON amendment.id = revision.amendment_id AND amendment.order_id = o.id
+      JOIN channel_operating_facts refund ON refund.command_id = amendment.command_id
+        AND refund.order_id = o.id AND refund.property_id = o.property_id AND refund.kind = 'REFUND'
+      JOIN channel_operating_facts sale ON sale.id = refund.references_fact_id
+        AND sale.order_id = o.id AND sale.property_id = o.property_id AND sale.kind = 'SALE'
+      JOIN command_executions command ON command.id = refund.command_id AND command.property_id = o.property_id
+      JOIN command_receipts receipt ON receipt.command_id = command.id
+      WHERE o.property_id = ${options.propertyId} AND o.id IN (${sql.join(zeroChannelOrderIds)})
+        AND amendment.amendment_type = 'RECORD_REFUND'
+        AND current_revision.pricing_basis = 'CHANNEL_CONTRACT' AND current_revision.current_contract_amount_minor = 0
+        AND revision.pricing_basis = 'CHANNEL_CONTRACT' AND revision.current_contract_amount_minor = 0
+        AND revision.currency = current_revision.currency
+        AND NOT EXISTS (SELECT 1 FROM pricing_revisions later
+          WHERE later.order_id = o.id AND later.revision_no > revision.revision_no
+            AND later.revision_no <= current_revision.revision_no
+            AND (later.currency <> revision.currency OR later.pricing_basis <> 'CHANNEL_CONTRACT'))
+        AND refund.amount_minor < 0 AND sale.amount_minor > 0
+        AND refund.currency = revision.currency AND sale.currency = revision.currency
+        AND sale.created_at <= refund.created_at AND nullif(btrim(refund.refund_reference), '') IS NOT NULL
+        AND sale.business_date <= refund.business_date AND refund.business_date <= ${businessDate}::date
+        AND refund.created_at = revision.created_at AND amendment.created_at <= revision.created_at
+        AND amendment.payload->>'channelOperating' = 'true'
+        AND amendment.payload->>'method' = 'CHANNEL'
+        AND amendment.payload->>'orderId' = o.id
+        AND amendment.payload->>'currency' = revision.currency
+        AND amendment.payload->>'businessDate' = refund.business_date::text
+        AND amendment.payload->>'note' = refund.note
+        AND amendment.payload->>'referencesFactId' = sale.id
+        AND amendment.payload->>'refundReference' = refund.refund_reference
+        AND amendment.payload->'amountMinor' = to_jsonb(-refund.amount_minor)
+        AND amendment.payload->'contractTargetMinor' = '0'::jsonb
+        AND amendment.payload->'contractBeforeMinor' = to_jsonb(-refund.contract_effect_minor)
+        AND command.command_type = 'RECORD_REFUND' AND command.state = 'APPLIED'
+        AND receipt.execution_status = 'EXECUTED' AND receipt.business_committed
+        AND receipt.result->>'orderId' = o.id AND receipt.result->>'factId' = refund.id
+        AND receipt.result->>'netEffectMinor' = refund.amount_minor::text
+        AND NOT EXISTS (SELECT 1 FROM channel_operating_facts reversal
+          WHERE reversal.references_fact_id = refund.id AND reversal.kind = 'REVERSAL')
+        AND NOT EXISTS (SELECT 1 FROM channel_operating_facts f
+          WHERE f.order_id = o.id AND (f.property_id <> o.property_id OR f.currency <> revision.currency))
+        AND NOT EXISTS (SELECT 1 FROM operating_sales_opening opening
+          WHERE opening.property_id = o.property_id AND opening.source_kind = 'CHANNEL_REFUND'
+            AND opening.source_id = o.id AND opening.currency <> revision.currency)
+        AND (SELECT coalesce(sum(f.amount_minor), 0) FROM channel_operating_facts f
+          WHERE f.property_id = o.property_id AND f.order_id = o.id)
+          - coalesce((SELECT opening.amount_minor FROM operating_sales_opening opening
+            WHERE opening.property_id = o.property_id AND opening.source_kind = 'CHANNEL_REFUND'
+              AND opening.source_id = o.id), 0) = 0
+    `.execute(trx)).rows.map((row) => row.order_id));
     const completedSegmentsByStay = new Map<string, typeof completedSegments>();
     for (const segment of completedSegments) {
       const rows = completedSegmentsByStay.get(segment.stay_id) ?? [];
@@ -2005,7 +2067,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         const externalUnknown = external && (!row.channel_order_reference?.trim()
           || revision?.pricing_basis !== "CHANNEL_CONTRACT"
           || !revision
-          || revision.current_contract_amount_minor <= 0);
+          || revision.current_contract_amount_minor < 0
+          || revision.current_contract_amount_minor === 0 && !refundedZeroOrderIds.has(row.id));
         const pricingUnknown = Boolean(sourceMetadataDamageReason)
           || row.stay_type !== "FREE" && (!revision || externalUnknown);
         const arrears = !pricingUnknown

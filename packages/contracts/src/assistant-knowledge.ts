@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-10-28.1";
+export const assistantKnowledgeRevision = "2026-10-29.1";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -49,11 +49,12 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "room-status", title: "房态查询与同日退房交接", commands: [],
-    sources: ["docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "apps/web/src/pages/InventoryPage.tsx", "packages/db/src/departure-day-stays.ts"],
-    content: `后台约15秒检查房态变化，成功办理后及时更新；后台同步不应清空已填写内容。暂时网络失败时可查看旧画面并继续填写，办理仍需服务端重新核对；所选新日期未载入时，旧日期仅供查看，不能当作新日期办理。翻月数据校验失败不会无限自动重试，可以返回今天、其他日期或主动重试。确有历史资料待核对时只读展示，不把“未知”当成可售或已结清。权限失效或上一笔操作结果未知时仍须先处理，不能绕过；结果未知应查询原回执，不重复提交。
-在房态页选择日期，按房型、房号等筛选，点击住宿记录查看订单；空闲位置选择日期后安排住宿。从工作台等页面通过导航回到房态时保留浏览位置，不自动打开订单详情；主动打开订单，或在完整订单页点击“返回房态”，才展开对应订单。长住宿可跨显示区间，不把日历当前窗口当作住宿最长天数。助手自己的可用性工具一次最多查31晚，这是工具限制，不是系统预订上限。
-住宿夜占用包含入住日、不含离店日。前客当天应退但尚未实际退房时，当晚可被后客预订，不代表后客现在可以入住；必须先让前客正式办理退房，再给后客办理入住。不要为了后客预订而强行延长前客库存或撤销真实入住。
-未知、部分加载、请求失败不能解释成空房、零欠款或已结清；刷新并查看异常提示。维修、整房与床位互斥、真实在住交接都可能阻止操作，以服务端核对为准。`
+    sources: ["docs/implementation/channel-refund-readback.md", "docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "apps/web/src/pages/InventoryPage.tsx", "packages/db/src/departure-day-stays.ts"],
+    content: `后台约15秒检查房态，办理后及时更新，不清空填写内容。网络暂时失败可查看旧画面、继续填写，办理仍需服务端重新核对；新日期未载入时，旧画面不能用于新日期办理。翻月校验失败不会无限自动重试，可以返回今天、其他日期或主动重试。历史资料待核对时只读；权限失效不能绕过，结果未知应查询原回执，不重复提交。
+房态页按日期、房型和房号筛选，点击住宿看订单，选择空闲日期安排住宿。从工作台等页面回房态保留浏览位置，不自动打开订单详情；主动打开或在完整订单页点击“返回房态”才展开对应订单。长住宿可跨日历显示区间；助手可用性工具一次最多查31晚，不是系统预订上限。
+住宿夜含入住日、不含离店日。前客当天应退未退，当晚可被后客预订，不代表后客现在可以入住；必须先让前客正式办理退房，再办理后客入住。不得为预订延长前客库存或撤销真实入住。
+未知、部分加载、失败不代表空房、零欠款或已结清，应刷新核对异常。维修、整房床位互斥、在住交接仍以服务端核对为准。
+渠道全退应结为0，完整退款与计价依据可核对的已退房住宿仍显示已结单，不因合法全退禁用其他订单；缺失或矛盾资料仍须核对。`
   },
   {
     id: "booking", title: "新建预订、渠道、免费住宿与报价", commands: ["CREATE_ORDER"],
@@ -118,8 +119,9 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "refunds", title: "部分退款、合并退款与真实退款登记", commands: ["RECORD_REFUND"],
-    sources: ["docs/implementation/october-sales-recognition.md", "apps/web/src/components/ChannelRefundForm.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md", "apps/web/src/components/OrderFundsFormDialog.tsx"],
+    sources: ["docs/implementation/channel-refund-readback.md", "docs/implementation/october-sales-recognition.md", "apps/web/src/components/ChannelRefundForm.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md", "apps/web/src/components/OrderFundsFormDialog.tsx"],
     content: `外部渠道订单也使用原订单的退款入口：填写已发生的平台退款单号、本次应结减少金额、退款业务日期和说明；日期默认门店今天，已封账月份不能重复补登记。即使订单取消后合同为0，只要原渠道成交还有可退余额，仍可登记退款；不发起平台退款，不改变住宿或库存。误录可在渠道成交与退款记录中撤销并填写原因；有后续金额变化时先核对后续记录，不能无痕删除。
+渠道退款可以使应结归零；部分退款、全额退款及撤销后的订单详情应保留原成交、退款和计价历史。退款形成的零应结不等于允许普通企微新建或改价填0，也不证明平台实际到账。
 直订在需要退款的订单打开记录退款，选择该订单可退的原收款份额，核对实际退款方式、金额和原因。企微退款须选择已成功且关联正确原始交易的真实退款流水；先有外部实际退款，再在PMS登记。PMS不发起支付平台退款。
 启用分配后，同一笔合并退款可以按各订单对应的收款份额逐单登记；不得超过退款流水剩余可分配额或对应原收款的可退额度。退款不会恢复原收款流水的可分配余额，不能将退给客户的钱再次分配出去。
 例如A400+B600来自同一1000元收款，B取消并真实退600元后登记B退款，A仍400元，现金净额400元，原收款不能再拿600元去给C订单使用。
